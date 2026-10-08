@@ -1647,6 +1647,52 @@ describe('scion-page-admin-server-config', () => {
 
   // ── Cross-project messaging (D1) ──
 
+  describe('File mode server sections keep omitted fields (ptone/scion#2938)', () => {
+    // The file-mode PUT deep-merges each server section, so an omitted
+    // field keeps its stored value; a field the form shows must be sent as
+    // an explicit empty value to be cleared.
+    it('buildFilePayload sends cleared server fields as explicit empties', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.logLevel = '';
+      el.hubPort = 0;
+      el.hubHost = '';
+      el.hubPublicUrl = '';
+      el.brokerHost = '';
+      el.brokerPort = 0;
+      el.dbDriver = '';
+      el.dbUrl = '';
+      el.authDevToken = '';
+      el.storageBucket = '';
+      el.secretsBackend = '';
+      el.secretsGCPProjectId = '';
+
+      const server = (el.buildFilePayload() as Record<string, any>).server;
+      expect(server.log_level).toBe('');
+      expect(server.hub).toMatchObject({ port: 0, host: '', public_url: '' });
+      expect(server.broker).toMatchObject({ port: 0, host: '' });
+      expect(server.database).toEqual({ driver: '', url: '' });
+      expect(server.auth).toHaveProperty('dev_token', '');
+      expect(server.storage).toHaveProperty('bucket', '');
+      expect(server.secrets).toMatchObject({ backend: '', gcp_project_id: '' });
+    });
+
+    it('buildFilePayload leaves out masked credentials so the stored values are kept', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.dbUrl = '********';
+      el.authDevToken = '********';
+
+      const server = (el.buildFilePayload() as Record<string, any>).server;
+      expect(server.database).not.toHaveProperty('url');
+      expect(server.auth).not.toHaveProperty('dev_token');
+    });
+  });
+
   describe('Cross-project messaging section', () => {
     it('renders cross-project messaging section in hub server tab', async () => {
       element = await createComponent(

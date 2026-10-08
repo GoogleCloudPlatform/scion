@@ -134,6 +134,22 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 	}
 }
 
+// heartbeatHealthReport returns the broker's health for the heartbeat,
+// from the same computation as /healthz (GetHealthInfo): a degraded
+// default runtime is reported as status "degraded" with check runtime
+// "unavailable", and NFS mount health as nfs_mounts. The report is
+// normalised to fixed values (api.NormalizeBrokerHealthReport): the
+// per-share detail /healthz shows (share IDs, mount errors) is not sent,
+// so nfs_mounts is "healthy" or "unhealthy". The hub stores it for display
+// only; it never changes the broker's online/offline status.
+func (s *Server) heartbeatHealthReport(ctx context.Context) *api.BrokerHealthReport {
+	info := s.GetHealthInfo(ctx)
+	if info == nil {
+		return nil
+	}
+	return api.NormalizeBrokerHealthReport(&api.BrokerHealthReport{Status: info.Status, Checks: info.Checks})
+}
+
 // degradeHealthStatus lowers a healthy status to degraded. Any other
 // status (already degraded, or worse) is returned unchanged, so a
 // degrading check never raises a worse status back to degraded.

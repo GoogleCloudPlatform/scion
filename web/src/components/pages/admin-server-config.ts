@@ -2415,21 +2415,23 @@ export class ScionPageAdminServerConfig extends LitElement {
       if (said !== undefined) payload.default_gcp_identity_service_account_id = said;
     }
 
-    // Server
+    // Server — file mode deep-merges each server section, so an omitted
+    // field keeps its stored value. Send every shown field, a cleared one
+    // as "" / 0 / [] (explicit empties delete the key), so clearing a field
+    // in the form still clears it in settings.yaml (ptone/scion#2938).
+    // Masked secrets still showing "********" are left out to keep them.
     const server: Record<string, unknown> = {};
-    if (ok('server.mode')) server.mode = this.serverMode || undefined;
-    if (ok('server.log_level')) server.log_level = this.logLevel || undefined;
-    if (ok('server.log_format')) server.log_format = this.logFormat || undefined;
+    if (ok('server.mode')) server.mode = this.serverMode || '';
+    if (ok('server.log_level')) server.log_level = this.logLevel || '';
+    if (ok('server.log_format')) server.log_format = this.logFormat || '';
 
     // Hub server
     const hub: Record<string, unknown> = {};
-    if (ok('server.hub.port') && this.hubPort) hub.port = this.hubPort;
-    if (ok('server.hub.host') && this.hubHost) hub.host = this.hubHost;
-    if (ok('server.hub.public_url') && this.hubPublicUrl) hub.public_url = this.hubPublicUrl;
-    if (ok('server.hub.read_timeout') && this.hubReadTimeout)
-      hub.read_timeout = this.hubReadTimeout;
-    if (ok('server.hub.write_timeout') && this.hubWriteTimeout)
-      hub.write_timeout = this.hubWriteTimeout;
+    if (ok('server.hub.port')) hub.port = this.hubPort || 0;
+    if (ok('server.hub.host')) hub.host = this.hubHost || '';
+    if (ok('server.hub.public_url')) hub.public_url = this.hubPublicUrl || '';
+    if (ok('server.hub.read_timeout')) hub.read_timeout = this.hubReadTimeout || '';
+    if (ok('server.hub.write_timeout')) hub.write_timeout = this.hubWriteTimeout || '';
     if (ok('server.hub.admin_emails')) {
       hub.admin_emails = this.hubAdminEmails
         ? this.hubAdminEmails
@@ -2438,8 +2440,8 @@ export class ScionPageAdminServerConfig extends LitElement {
             .filter(Boolean)
         : [];
     }
-    if (ok('server.hub.soft_delete_retention') && this.hubSoftDeleteRetention)
-      hub.soft_delete_retention = this.hubSoftDeleteRetention;
+    if (ok('server.hub.soft_delete_retention'))
+      hub.soft_delete_retention = this.hubSoftDeleteRetention || '';
     if (ok('server.hub.soft_delete_retain_files'))
       hub.soft_delete_retain_files = this.hubSoftDeleteRetainFiles;
     if (ok('server.hub.auto_suspend_stalled'))
@@ -2453,58 +2455,55 @@ export class ScionPageAdminServerConfig extends LitElement {
     // Broker
     const broker: Record<string, unknown> = {};
     if (ok('server.broker.enabled')) broker.enabled = this.brokerEnabled;
-    if (ok('server.broker.port') && this.brokerPort) broker.port = this.brokerPort;
-    if (ok('server.broker.host') && this.brokerHost) broker.host = this.brokerHost;
-    if (ok('server.broker.hub_endpoint') && this.brokerHubEndpoint)
-      broker.hub_endpoint = this.brokerHubEndpoint;
-    if (ok('server.broker.container_hub_endpoint') && this.brokerContainerHubEndpoint)
-      broker.container_hub_endpoint = this.brokerContainerHubEndpoint;
-    if (ok('server.broker.name') && this.brokerName) broker.broker_name = this.brokerName;
-    if (ok('server.broker.nickname') && this.brokerNickname)
-      broker.broker_nickname = this.brokerNickname;
+    if (ok('server.broker.port')) broker.port = this.brokerPort || 0;
+    if (ok('server.broker.host')) broker.host = this.brokerHost || '';
+    if (ok('server.broker.hub_endpoint')) broker.hub_endpoint = this.brokerHubEndpoint || '';
+    if (ok('server.broker.container_hub_endpoint'))
+      broker.container_hub_endpoint = this.brokerContainerHubEndpoint || '';
+    if (ok('server.broker.name')) broker.broker_name = this.brokerName || '';
+    if (ok('server.broker.nickname')) broker.broker_nickname = this.brokerNickname || '';
     if (ok('server.broker.auto_provide')) broker.auto_provide = this.brokerAutoProvide;
     server.broker = broker;
 
     // Database
     const database: Record<string, unknown> = {};
-    if (ok('server.database.driver') && this.dbDriver) database.driver = this.dbDriver;
-    if (ok('server.database.url') && this.dbUrl && this.dbUrl !== '********')
-      database.url = this.dbUrl;
+    if (ok('server.database.driver')) database.driver = this.dbDriver || '';
+    if (ok('server.database.url') && this.dbUrl !== '********') database.url = this.dbUrl || '';
     server.database = database;
 
     // Auth
     const auth: Record<string, unknown> = {};
     if (ok('server.auth.dev_mode')) auth.dev_mode = this.authDevMode;
-    if (ok('server.auth.dev_token') && this.authDevToken && this.authDevToken !== '********')
-      auth.dev_token = this.authDevToken;
-    if (ok('server.auth.authorized_domains') && this.authAuthorizedDomains) {
+    if (ok('server.auth.dev_token') && this.authDevToken !== '********')
+      auth.dev_token = this.authDevToken || '';
+    if (ok('server.auth.authorized_domains')) {
       auth.authorized_domains = this.authAuthorizedDomains
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
+        ? this.authAuthorizedDomains
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : [];
     }
-    if (ok('server.auth.user_access_mode') && this.authUserAccessMode) {
-      auth.user_access_mode = this.authUserAccessMode;
+    if (ok('server.auth.user_access_mode')) {
+      auth.user_access_mode = this.authUserAccessMode || '';
     }
-    if (ok('server.auth.default_user_role') && this.authDefaultUserRole) {
-      auth.default_user_role = this.authDefaultUserRole;
+    if (ok('server.auth.default_user_role')) {
+      auth.default_user_role = this.authDefaultUserRole || '';
     }
     server.auth = auth;
 
     // Storage
     const storage: Record<string, unknown> = {};
-    if (ok('server.storage.provider') && this.storageProvider)
-      storage.provider = this.storageProvider;
-    if (ok('server.storage.bucket') && this.storageBucket) storage.bucket = this.storageBucket;
-    if (ok('server.storage.local_path') && this.storageLocalPath)
-      storage.local_path = this.storageLocalPath;
+    if (ok('server.storage.provider')) storage.provider = this.storageProvider || '';
+    if (ok('server.storage.bucket')) storage.bucket = this.storageBucket || '';
+    if (ok('server.storage.local_path')) storage.local_path = this.storageLocalPath || '';
     server.storage = storage;
 
     // Secrets
     const secrets: Record<string, unknown> = {};
-    if (ok('server.secrets.backend') && this.secretsBackend) secrets.backend = this.secretsBackend;
-    if (ok('server.secrets.gcp_project_id') && this.secretsGCPProjectId)
-      secrets.gcp_project_id = this.secretsGCPProjectId;
+    if (ok('server.secrets.backend')) secrets.backend = this.secretsBackend || '';
+    if (ok('server.secrets.gcp_project_id'))
+      secrets.gcp_project_id = this.secretsGCPProjectId || '';
     if (ok('server.secrets.gcp_replication_locations')) {
       secrets.gcp_replication_locations = this.secretsGCPReplicationLocations
         ? this.secretsGCPReplicationLocations
@@ -2519,7 +2518,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.message_broker.enabled')) {
       server.message_broker = {
         enabled: this.messageBrokerEnabled,
-        type: ok('server.message_broker.type') ? this.messageBrokerType || undefined : undefined,
+        type: ok('server.message_broker.type') ? this.messageBrokerType || '' : undefined,
       };
     }
 

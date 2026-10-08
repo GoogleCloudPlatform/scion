@@ -25,6 +25,9 @@ import { resolve } from 'node:path';
 import {
   ScionHealthBrokerTable,
   agentsCell,
+  brokerHasProblem,
+  healthCauses,
+  healthCell,
   sortBrokers,
   storageCell,
   type HealthSummaryBroker,
@@ -207,6 +210,108 @@ describe('scion-health-broker-table neutral values', () => {
   });
 });
 
+describe('scion-health-broker-table health', () => {
+  it('shows a failing default runtime as degraded with its cause, while online', async () => {
+    const root = await mount(
+      list([broker({ health: { status: 'degraded', checks: { runtime: 'unavailable' } } })])
+    );
+    const r = rows(root)[0]!;
+    expect(cell(r, 'health')).toBe('degraded: runtime unavailable');
+    expect(r.querySelector('td.health .tone-warn')).not.toBeNull();
+    expect(cell(r, 'status')).toBe('online');
+    expect(r.querySelector('td.health')?.getAttribute('title')).toBe('runtime: unavailable');
+  });
+
+  it('shows not reported for an older broker, never healthy', async () => {
+    for (const health of [null, undefined]) {
+      const root = await mount(list([broker({ health })]));
+      const r = rows(root)[0]!;
+      expect(cell(r, 'health')).toBe('not reported');
+      expect(r.querySelector('td.health .muted')).not.toBeNull();
+      expect(r.querySelector('td.health .pill')).toBeNull();
+      expect(r.querySelector('td.health')?.hasAttribute('title')).toBe(false);
+    }
+  });
+
+  it('shows a healthy broker as healthy', async () => {
+    const root = await mount(
+      list([broker({ health: { status: 'healthy', checks: { docker: 'available' } } })])
+    );
+    const r = rows(root)[0]!;
+    expect(cell(r, 'health')).toBe('healthy');
+    expect(r.querySelector('td.health .tone-ok')).not.toBeNull();
+  });
+
+  it("greys an offline broker's health as last reported", async () => {
+    const root = await mount(
+      list([
+        broker({
+          status: 'offline',
+          health: { status: 'degraded', checks: { runtime: 'unavailable' } },
+        }),
+      ])
+    );
+    const r = rows(root)[0]!;
+    expect(cell(r, 'health')).toBe('last reported: degraded: runtime unavailable');
+    expect(r.querySelector('td.health .muted.stale')).not.toBeNull();
+    expect(r.querySelector('td.health .pill')).toBeNull();
+  });
+
+  it('marks an unhealthy report and lists every failing check by name', () => {
+    const c = healthCell(
+      broker({
+        health: {
+          status: 'unhealthy',
+          checks: {
+            runtime: 'unavailable',
+            nfs_mounts: 'unhealthy',
+            docker: 'available',
+          },
+        },
+      })
+    );
+    expect(c.text).toBe('unhealthy: nfs_mounts unhealthy, runtime unavailable');
+    expect(c.tone).toBe('bad');
+    expect(c.title).toBe('docker: available\nnfs_mounts: unhealthy\nruntime: unavailable');
+  });
+
+  it('shows a degraded report without failing checks as its status alone', () => {
+    expect(healthCell(broker({ health: { status: 'degraded' } })).text).toBe('degraded');
+    expect(healthCauses({ status: 'healthy', checks: { nfs_mounts: 'healthy' } })).toEqual([]);
+  });
+
+  it('counts a degraded or unhealthy report as a problem, not a missing one', () => {
+    expect(brokerHasProblem(broker({ health: { status: 'degraded' } }))).toBe(true);
+    expect(brokerHasProblem(broker({ health: { status: 'unhealthy' } }))).toBe(true);
+    expect(brokerHasProblem(broker({ health: { status: 'healthy' } }))).toBe(false);
+    expect(brokerHasProblem(broker({ health: null }))).toBe(false);
+    const sorted = sortBrokers([
+      broker({ id: '1', name: 'alpha' }),
+      broker({
+        id: '2',
+        name: 'zulu',
+        health: { status: 'degraded', checks: { runtime: 'unavailable' } },
+      }),
+    ]);
+    expect(sorted.map((b) => b.name)).toEqual(['zulu', 'alpha']);
+  });
+
+  it('places the Health column between Runtime and Workspace storage', async () => {
+    const root = await mount(list([broker()]));
+    const heads = [...root.querySelectorAll('thead th')].map((th) => th.textContent?.trim());
+    expect(heads).toEqual([
+      'Name',
+      'Status',
+      'Runtime',
+      'Health',
+      'Workspace storage',
+      'Agents',
+      'Version',
+      'Last heartbeat',
+    ]);
+  });
+});
+
 describe('scion-health-broker-table ordering and truncation', () => {
   it('sorts problems first, then by name', () => {
     const sorted = sortBrokers([
@@ -244,7 +349,7 @@ describe('scion-health-broker-table layout', () => {
       const root = await mount(list(items));
       expect(root.querySelectorAll('table')).toHaveLength(1);
       expect(rows(root)).toHaveLength(n);
-      for (const r of rows(root)) expect(r.querySelectorAll('td')).toHaveLength(7);
+      for (const r of rows(root)) expect(r.querySelectorAll('td')).toHaveLength(8);
       // No per-broker card that could grow to fill the row on its own.
       expect(root.querySelector('.broker-card, .broker-grid')).toBeNull();
     });
