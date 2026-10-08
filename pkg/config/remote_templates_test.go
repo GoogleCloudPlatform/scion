@@ -15,15 +15,20 @@
 package config
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 
@@ -508,34 +513,192 @@ func TestGenerateCacheKey(t *testing.T) {
 	assert.Len(t, key1, 16) // 8 bytes = 16 hex chars
 }
 
-func TestFetchGitHubTarball_AuthToken(t *testing.T) {
-	var receivedAuth string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedAuth = r.Header.Get("Authorization")
-		w.WriteHeader(http.StatusNotFound)
+// githubTarballFixture builds a gzipped tarball shaped like a GitHub archive
+// download: a leading pax global header followed by entries under a single
+// "<repo>-<ref>/" root directory.
+func githubTarballFixture(t *testing.T, root string, files map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	require.NoError(t, tw.WriteHeader(&tar.Header{
+		Typeflag:   tar.TypeXGlobalHeader,
+		Name:       "pax_global_header",
+		PAXRecords: map[string]string{"comment": "0123456789abcdef"},
 	}))
-	defer srv.Close()
+	require.NoError(t, tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: root + "/", Mode: 0o755}))
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	dirs := map[string]bool{}
+	for _, name := range names {
+		for d := filepath.Dir(name); d != "."; d = filepath.Dir(d) {
+			if !dirs[d] {
+				dirs[d] = true
+				require.NoError(t, tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: root + "/" + d + "/", Mode: 0o755}))
+			}
+		}
+		body := files[name]
+		require.NoError(t, tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: root + "/" + name, Mode: 0o644, Size: int64(len(body))}))
+		_, err := tw.Write([]byte(body))
+		require.NoError(t, err)
+	}
+	require.NoError(t, tw.Close())
+	require.NoError(t, gz.Close())
+	return buf.Bytes()
+}
 
-	// Override the tarball URL by using the test server URL parts.
-	// fetchGitHubTarball constructs the URL from parts, but we can't redirect it
-	// to our test server. Instead, test the variadic signature and that the
-	// function accepts tokens without panicking.
+// readTree returns every regular file under dir keyed by slash-separated
+// relative path.
+func readTree(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	got := map[string]string{}
+	require.NoError(t, filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		got[filepath.ToSlash(rel)] = string(b)
+		return nil
+	}))
+	return got
+}
 
-	t.Run("no token is backward compatible", func(t *testing.T) {
-		parts := &GitHubURLParts{Owner: "test", Repo: "repo", Branch: "main"}
-		dest := t.TempDir()
-		// Will fail (can't reach github.com in test), but should not panic
-		_ = fetchGitHubTarball(context.Background(), parts, dest, "")
+// TestFetchGitHubTarball pins the GitHub archive download without network
+// access (ptone/scion#3812): http.DefaultClient's transport is replaced so the
+// request aimed at github.com is served by a local httptest server. It asserts
+// the request that was sent (method, host, archive path for the ref, auth
+// header) and the outcome (extracted files, sub-path selection, and errors for
+// non-200 responses and missing sub-paths).
+func TestFetchGitHubTarball(t *testing.T) {
+	type seenRequest struct {
+		method, scheme, host, path, auth string
+	}
+	var seen []seenRequest
+	var status int
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen[len(seen)-1].host = r.Host
+		seen[len(seen)-1].path = r.URL.Path
+		seen[len(seen)-1].auth = r.Header.Get("Authorization")
+		w.WriteHeader(status)
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	srvURL, err := url.Parse(srv.URL)
+	require.NoError(t, err)
+
+	oldTransport := http.DefaultClient.Transport
+	t.Cleanup(func() { http.DefaultClient.Transport = oldTransport })
+	http.DefaultClient.Transport = remoteTemplatesRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		seen = append(seen, seenRequest{method: r.Method, scheme: r.URL.Scheme})
+		// Redirect to the local server; r.Host stays "github.com", so the
+		// server still sees the host the production code targeted.
+		out := r.Clone(r.Context())
+		out.URL.Scheme = srvURL.Scheme
+		out.URL.Host = srvURL.Host
+		return srv.Client().Transport.RoundTrip(out)
 	})
 
-	t.Run("token is accepted", func(t *testing.T) {
-		parts := &GitHubURLParts{Owner: "test", Repo: "repo", Branch: "main"}
-		dest := t.TempDir()
-		_ = fetchGitHubTarball(context.Background(), parts, dest, "ghs_test_token_123")
-	})
+	files := map[string]string{
+		"README.md":                      "# repo\n",
+		"templates/foo/scion-agent.yaml": "schema_version: \"1\"\n",
+		"templates/foo/home/.bashrc":     "export FOO=1\n",
+		"templates/bar/scion-agent.yaml": "schema_version: \"2\"\n",
+	}
 
-	_ = srv
-	_ = receivedAuth
+	tests := []struct {
+		name      string
+		parts     GitHubURLParts
+		token     string
+		status    int
+		root      string
+		wantPath  string
+		wantAuth  string
+		wantFiles map[string]string
+		wantErr   string
+	}{
+		{
+			name:      "no token, default branch, whole repo",
+			parts:     GitHubURLParts{Owner: "acme", Repo: "repo"},
+			status:    http.StatusOK,
+			root:      "repo-main",
+			wantPath:  "/acme/repo/archive/refs/heads/main.tar.gz",
+			wantFiles: files,
+		},
+		{
+			name:     "token, explicit branch, sub-path",
+			parts:    GitHubURLParts{Owner: "acme", Repo: "repo", Branch: "dev", Path: "templates/foo/"},
+			token:    "ghs_test_token_123",
+			status:   http.StatusOK,
+			root:     "repo-dev",
+			wantPath: "/acme/repo/archive/refs/heads/dev.tar.gz",
+			wantAuth: "Bearer ghs_test_token_123",
+			wantFiles: map[string]string{
+				"scion-agent.yaml": "schema_version: \"1\"\n",
+				"home/.bashrc":     "export FOO=1\n",
+			},
+		},
+		{
+			name:     "non-200 response is an error",
+			parts:    GitHubURLParts{Owner: "acme", Repo: "private", Branch: "main"},
+			token:    "ghs_test_token_123",
+			status:   http.StatusNotFound,
+			root:     "private-main",
+			wantPath: "/acme/private/archive/refs/heads/main.tar.gz",
+			wantAuth: "Bearer ghs_test_token_123",
+			wantErr:  "tarball download failed: HTTP 404",
+		},
+		{
+			name:     "missing sub-path is an error",
+			parts:    GitHubURLParts{Owner: "acme", Repo: "repo", Branch: "main", Path: "templates/missing"},
+			status:   http.StatusOK,
+			root:     "repo-main",
+			wantPath: "/acme/repo/archive/refs/heads/main.tar.gz",
+			wantErr:  "path templates/missing not found in repository",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			seen = nil
+			status = tt.status
+			body = githubTarballFixture(t, tt.root, files)
+			if tt.status != http.StatusOK {
+				body = []byte("Not Found")
+			}
+			dest := t.TempDir()
+			parts := tt.parts
+
+			err := fetchGitHubTarball(context.Background(), &parts, dest, tt.token)
+
+			require.Len(t, seen, 1, "exactly one HTTP request")
+			assert.Equal(t, seenRequest{
+				method: http.MethodGet,
+				scheme: "https",
+				host:   "github.com",
+				path:   tt.wantPath,
+				auth:   tt.wantAuth,
+			}, seen[0])
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				assert.Empty(t, readTree(t, dest), "nothing is extracted on error")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantFiles, readTree(t, dest))
+		})
+	}
 }
 
 // installFakeGit puts a fake `git` first (and only) on PATH for the rest of
