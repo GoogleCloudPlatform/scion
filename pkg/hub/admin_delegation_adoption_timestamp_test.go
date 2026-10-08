@@ -49,7 +49,7 @@ func TestDelegationAdoptionCommitAdoptsNonCanonicalUpdatedText(t *testing.T) {
 			require.NoError(t, err)
 			var raw string
 			require.NoError(t, dbs.DB().QueryRowContext(context.Background(),
-				"SELECT updated FROM delegation_edges WHERE id = ?", original.ID).Scan(&raw))
+				"SELECT CAST(updated AS TEXT) FROM delegation_edges WHERE id = ?", original.ID).Scan(&raw))
 			require.Equal(t, text, raw)
 
 			body := adoptBody(f.legacy.ID)

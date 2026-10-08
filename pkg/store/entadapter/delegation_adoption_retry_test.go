@@ -50,7 +50,7 @@ func (w *adoptionWorld) setUpdatedText(edgeID, text string) {
 func (w *adoptionWorld) updatedText(edgeID string) string {
 	w.t.Helper()
 	var raw string
-	require.NoError(w.t, w.cs.DB().QueryRowContext(w.ctx, "SELECT updated FROM delegation_edges WHERE id = ?", edgeID).Scan(&raw))
+	require.NoError(w.t, w.cs.DB().QueryRowContext(w.ctx, "SELECT CAST(updated AS TEXT) FROM delegation_edges WHERE id = ?", edgeID).Scan(&raw))
 	return raw
 }
 
