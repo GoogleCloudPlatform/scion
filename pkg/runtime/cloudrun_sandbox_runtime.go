@@ -254,9 +254,51 @@ func (s *sandboxStateStore) load() {
 	s.entries = entries
 }
 
-// reconcile checks each entry for liveness and removes confirmed-dead
-// entries. Called once at startup. If the file is stale from a previous
-// Instance, all entries are dead and will be pruned.
+// sandboxReconcileProbeTimeout bounds each start-up liveness probe. A
+// variable so tests can shorten it.
+var sandboxReconcileProbeTimeout = 5 * time.Second
+
+// sandboxGoneOutputs are the output fragments (lower case) that make a
+// failed probe a definitive "this sandbox does not exist" answer.
+//
+// UNVERIFIED: the sandbox CLI's wording for an unknown sandbox is not
+// documented and these fragments have not been checked against the real
+// binary. They err on the side of keeping entries: a dead sandbox whose
+// output matches none of them keeps its entry, which Delete still removes,
+// whereas a dropped entry of a live sandbox cannot be recovered.
+var sandboxGoneOutputs = []string{"not found", "no such", "does not exist"}
+
+// sandboxProbeSaysGone reports whether a failed `sandbox exec <name> --
+// /bin/true` probe (out, err, run under probeCtx) shows that the sandbox
+// is gone. Only a CLI that exited non-zero on its own, before the probe's
+// deadline, with not-found output qualifies. A timeout, a cancelled
+// context, a CLI killed by a signal or one that could not start, and any
+// other output are ambiguous: a slow but live sandbox can produce them.
+func sandboxProbeSaysGone(probeCtx context.Context, out string, err error) bool {
+	if err == nil || probeCtx.Err() != nil {
+		return false
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || !exitErr.Exited() {
+		return false
+	}
+	lower := strings.ToLower(out)
+	for _, frag := range sandboxGoneOutputs {
+		if strings.Contains(lower, frag) {
+			return true
+		}
+	}
+	return false
+}
+
+// reconcile checks each entry for liveness and removes entries whose
+// sandbox is confirmed gone. Called once at startup. Stopped entries are
+// removed. A running entry is removed only when its probe gives a
+// definitive not-found answer (sandboxProbeSaysGone); on a timeout or any
+// other failure the entry is kept and a warning logged. List reads only
+// the state and the sandbox CLI has no list command, so dropping the entry
+// of a slow but live sandbox would leave it running with no way to stop or
+// delete it through scion (ptone/scion#3738).
 func (s *sandboxStateStore) reconcile(bin string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -272,16 +314,21 @@ func (s *sandboxStateStore) reconcile(bin string) {
 			continue
 		}
 		// Probe liveness: try to exec 'true' in the sandbox.
-		// If it fails, the sandbox is dead.
 		// R1: absolute path required — the sandbox launcher resolves argv[0]
 		// before the sandbox environment (including PATH) is in effect.
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, err := runSimpleCommand(ctx, bin, "exec", name, "--", "/bin/true")
+		ctx, cancel := context.WithTimeout(context.Background(), sandboxReconcileProbeTimeout)
+		out, err := runSimpleCommand(ctx, bin, "exec", name, "--", "/bin/true")
+		gone := sandboxProbeSaysGone(ctx, out, err)
 		cancel()
-		if err != nil {
-			runtimeLog.Info("sandbox state reconcile: sandbox not alive, removing",
+		switch {
+		case err == nil:
+		case gone:
+			runtimeLog.Info("sandbox state reconcile: sandbox not found, removing",
 				"name", name, "agentID", entry.AgentID)
 			toRemove = append(toRemove, name)
+		default:
+			runtimeLog.Warn("sandbox state reconcile: liveness probe failed without a not-found answer; keeping the entry",
+				"name", name, "agentID", entry.AgentID, "error", err)
 		}
 	}
 
@@ -865,6 +912,53 @@ func applySecretEnvOverrides(env map[string]string, cfgEnv []string, secretKeys 
 	}
 }
 
+// sandboxNameLocks serializes Run per sandbox name (ptone/scion#3738). The
+// sandbox name is derived from the agent name and reused across runs, and
+// the sandbox CLI keeps no labels, so two overlapping Runs of one agent
+// could otherwise interleave: an older Run's dead-on-arrival cleanup
+// deleting the newer Run's sandbox by name, or an older Run's probe passing
+// on the newer sandbox and recording it as its own. Holding the name's lock
+// from the launch through the probe and the state record or cleanup closes
+// that window.
+//
+// The lock is package-level, so same-name Runs are serialized within one
+// process across every CloudRunSandboxRuntime (the factory builds one per
+// call). A second process on the same host is NOT fenced: neither this lock
+// nor the per-instance state Run reads covers it (ptone/scion#3951).
+var sandboxNameLocks sync.Map // sandbox name -> *sync.Mutex
+
+// lockSandboxName takes the Run lock for a sandbox name and returns its
+// unlock.
+func lockSandboxName(name string) func() {
+	v, _ := sandboxNameLocks.LoadOrStore(name, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
+// sandboxHeldByOtherRun returns the run ID of a live (not stopped) state
+// entry for name that belongs to a run other than runID, or "" if there is
+// none. An entry with no run label, or a Run with no run ID, never
+// conflicts (the legacy rule sandboxRunCheck applies).
+func (r *CloudRunSandboxRuntime) sandboxHeldByOtherRun(name, runID string) string {
+	if runID == "" {
+		return ""
+	}
+	entry := r.state.get(name)
+	if entry == nil || entry.Stopped {
+		return ""
+	}
+	if run := entry.Labels[api.LabelRunID]; run != "" && run != runID {
+		return run
+	}
+	return ""
+}
+
+// sandboxAfterLaunchHook, if set, runs after `sandbox run` returns and
+// before the liveness probe. Nil in production; tests use it to model a
+// concurrent start inside that window.
+var sandboxAfterLaunchHook func(name string)
+
 func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
 	// Fold resolved secrets into cfg.Env before anything is created and
 	// before envFor reads it, so they reach the sandbox as --env values and
@@ -876,6 +970,28 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	}
 
 	slug := sanitizeSandboxName(cfg.Name)
+	runID := cfg.Labels[api.LabelRunID]
+
+	// Serialize same-name Runs from launch to state record or cleanup
+	// (sandboxNameLocks).
+	unlock := lockSandboxName(slug)
+	defer unlock()
+
+	// The sandbox name is held by a live sandbox of another run: reusing
+	// the name would take that sandbox over (its probe passes and this
+	// run's entry replaces the other's), so refuse, as the Cloud Run and
+	// Kubernetes runtimes do. Start's pre-clean normally removes it
+	// first; this is reached after a failed listing. It only sees an
+	// entry already in this instance's state when the check runs: r.state
+	// is loaded from disk when the instance is built (one per factory
+	// call), so a Run whose instance predates another Run's record misses
+	// that entry. Re-loading the state under the lock is left for
+	// ptone/scion#3951.
+	if other := r.sandboxHeldByOtherRun(slug, runID); other != "" {
+		runtimeLog.Info("Sandbox of another run holds the agent's sandbox name; not reusing it",
+			"sandbox", slug, "run_id", runID, "sandbox_run_id", other)
+		return "", fmt.Errorf("cloudrun-sandbox: sandbox %s belongs to run %q, not %q: %w", slug, other, runID, ErrRunConflict)
+	}
 
 	// OQ-14 (§11.12) proved that Vertex AI and gcloud-adc auth modes work
 	// on this runtime via the metadata emulator. The emulator runs INSIDE
@@ -1027,6 +1143,10 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 		// rebuilding this error from a string would sever that chain silently.
 		safeOut := redactEnvValues(out, externalEnvValues(cfg, env))
 		return "", fmt.Errorf("cloudrun-sandbox: run failed: %w (output: %s)", err, safeOut)
+	}
+
+	if sandboxAfterLaunchHook != nil {
+		sandboxAfterLaunchHook(slug)
 	}
 
 	// Post-run liveness probe: `sandbox run --detach` returns rc=0 even for
