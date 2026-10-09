@@ -3790,12 +3790,13 @@ func (s *Server) SetGEExchangeMetrics(m GEExchangeMetricsRecorder) {
 
 // SetLocalImageChecker wires a local container runtime into the image
 // checker so it can verify images via the local Docker/Podman daemon.
+// imagecheck.Checker.SetLocal is itself safe to call while checks run.
 func (s *Server) SetLocalImageChecker(l imagecheck.LocalImageExister) {
 	s.imageChecker.SetLocal(l)
 	if mgr, ok := l.(imageManager); ok {
 		// Under s.mu: this also runs after serving has started (broker
-		// startup and the runtime reload func), while handlers read the
-		// field through getImageManager.
+		// startup, the system-runtime PUT handler and the runtime reload
+		// func), while handlers read the field through getImageManager.
 		s.mu.Lock()
 		s.imageManager = mgr
 		s.mu.Unlock()
@@ -3923,9 +3924,6 @@ func (s *Server) SetCommandBus(cb CommandBus) {
 		})
 	}
 }
-
-// CommandBus returns the configured command bus, or nil.
-func (s *Server) CommandBus() CommandBus { return s.commandBus }
 
 // StartNotificationDispatcher creates and starts the notification dispatcher
 // if a subscription-capable EventPublisher is available. It uses a lazy getter for the
