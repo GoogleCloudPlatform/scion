@@ -270,6 +270,7 @@ type Store interface {
 
 	// Delegation Edge operations (Permissions Foundation Phase 1G)
 	DelegationEdgeStore
+	AgentServiceAccountAssignmentStore
 
 	// Delegation-provenance adoption records
 	DelegationAdoptionStore
@@ -2927,6 +2928,33 @@ type RoleStore interface {
 // =============================================================================
 // Delegation Edge Store (Permissions Foundation Phase 1G)
 // =============================================================================
+
+// AgentServiceAccountAssignmentStore persists the provenance of agent
+// service-account assignments. Every method runs in the caller's
+// transaction when called on a transaction-bound store.
+type AgentServiceAccountAssignmentStore interface {
+	// ReplaceAgentServiceAccountAssignment deactivates any active row for
+	// a.AgentID (cause sa_replaced, a fresh operation ID) and inserts a as
+	// the agent's active row. A conflicting active row surfaces as
+	// ErrAlreadyExists.
+	ReplaceAgentServiceAccountAssignment(ctx context.Context, a *AgentServiceAccountAssignment) error
+
+	// GetActiveAgentServiceAccountAssignments returns the agent's active
+	// rows, oldest first. More than one row is a defect that readers treat
+	// as ambiguous.
+	GetActiveAgentServiceAccountAssignments(ctx context.Context, agentID string) ([]AgentServiceAccountAssignment, error)
+
+	// DeactivateAgentServiceAccountAssignments deactivates every active row
+	// of the agent and records d. d.Cause must satisfy
+	// ValidAssignmentDeactivationCause and d.OpID must be set.
+	DeactivateAgentServiceAccountAssignments(ctx context.Context, agentID string, d Deactivation) (int, error)
+
+	// ReactivateAgentServiceAccountAssignments reactivates exactly the
+	// agent's rows deactivated with cause under opID and clears their
+	// deactivation record. A conflict with an active row surfaces as
+	// ErrAlreadyExists.
+	ReactivateAgentServiceAccountAssignments(ctx context.Context, agentID string, cause EdgeDeactivationCause, opID string) (int, error)
+}
 
 // DelegationEdgeStore defines delegation edge persistence operations.
 // Delegation edges record every authority-delegating relationship and are
