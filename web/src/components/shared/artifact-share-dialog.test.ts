@@ -30,6 +30,7 @@ import {
   splitPrincipal,
   type ScionArtifactShareDialog,
 } from './artifact-share-dialog.js';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 const ID = '00000000-0000-4000-8000-000000000001';
 const BASE = `/api/v1/artifacts/${ID}`;
@@ -114,7 +115,7 @@ function mockServer(init: Partial<Server> = {}): Server {
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, opts?: RequestInit) => {
-      const url = String(input);
+      const url = requestUrl(input);
       const method = opts?.method ?? 'GET';
       const body = typeof opts?.body === 'string' ? JSON.parse(opts.body) : undefined;
       s.calls.push({ method, url, body });
@@ -214,7 +215,7 @@ function button(el: ScionArtifactShareDialog, text: string, root?: HTMLElement):
 /** Whether the token appears anywhere in the dialog: markup or a field's value. */
 function showsToken(el: ScionArtifactShareDialog): boolean {
   const inputs = Array.from(el.shadowRoot!.querySelectorAll('sl-input')) as Array<
-    HTMLElement & { value: unknown }
+    HTMLElement & { value: string | null | undefined }
   >;
   return (
     el.shadowRoot!.innerHTML.includes('TOKEN123') ||

@@ -409,16 +409,16 @@ func TestSectionKeyKoanfPath(t *testing.T) {
 	}
 }
 
-// sectionRaceStore simulates another replica writing a section row
+// mergeSectionsRaceStore simulates another replica writing a section row
 // between the PUT's read of it and its write.
-type sectionRaceStore struct {
+type mergeSectionsRaceStore struct {
 	*fakeHubSettingStore
 	section string
 	other   json.RawMessage
 	once    sync.Once
 }
 
-func (c *sectionRaceStore) GetHubSetting(ctx context.Context, section string) (*store.HubSetting, error) {
+func (c *mergeSectionsRaceStore) GetHubSetting(ctx context.Context, section string) (*store.HubSetting, error) {
 	row, err := c.fakeHubSettingStore.GetHubSetting(ctx, section)
 	if section != c.section || err != nil {
 		return row, err
@@ -444,7 +444,7 @@ func TestPutServerConfigDB_TelemetryAndAgentDefaultsMerge_ConcurrentWrite409(t *
 			t.Setenv("HOME", t.TempDir())
 			fake := newFakeHubSettingStore()
 			fake.seedWithOrigin(tc.section, json.RawMessage(tc.stored), "managed")
-			race := &sectionRaceStore{fakeHubSettingStore: fake, section: tc.section, other: json.RawMessage(tc.other)}
+			race := &mergeSectionsRaceStore{fakeHubSettingStore: fake, section: tc.section, other: json.RawMessage(tc.other)}
 			ops := NewOperationalSettings(race, emptyKoanf(), emptyKoanf())
 			srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
 			srv.SetOperationalSettings(ops)

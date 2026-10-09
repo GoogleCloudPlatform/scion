@@ -405,7 +405,9 @@ func TestDispatchCompensationDeleteFailureKeepsRowAndEdge(t *testing.T) {
 }
 
 // A second compensation of the same create changes nothing and writes no
-// second audit record.
+// second audit record. The row is gone, so the conditional row delete
+// (createRowHeldCheck) reports it as owned by a delete
+// (errCreateRowDeleteHeld) rather than succeeding.
 func TestCompensateAgentCreateIsIdempotent(t *testing.T) {
 	f := newUATCreateFixture(t, "comp-twice")
 	f.srv.SetDispatcher(nil)
@@ -416,7 +418,8 @@ func TestCompensateAgentCreateIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	c := createCompensation{Agent: agent, OriginalAuditID: created[0].ID, Stage: createStageDispatch, Cause: errors.New("broker unavailable")}
 	require.NoError(t, f.srv.compensateAgentCreate(ctx, c))
-	require.NoError(t, f.srv.compensateAgentCreate(ctx, c))
+	require.ErrorIs(t, f.srv.compensateAgentCreate(ctx, c), errCreateRowDeleteHeld,
+		"a second compensation finds the row gone and writes nothing")
 
 	sum := assertCompensated(t, f.store, agent.ID)
 	assert.Equal(t, createStageDispatch, sum.Stage)
