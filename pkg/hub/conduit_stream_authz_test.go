@@ -514,6 +514,24 @@ func TestConduitStreamAuthz_IntervalRecheckAtDeadline(t *testing.T) {
 	assert.Empty(t, c.list())
 }
 
+// TestConduitStreamAuthz_ZeroAdmittedRecorded: a stream tracked without
+// an admission time gets the clock's current time as its Admitted, and its
+// deadline is that time plus the interval.
+func TestConduitStreamAuthz_ZeroAdmittedRecorded(t *testing.T) {
+	f := newDeadlineFixture(t, -1, time.Hour)
+	f.clk.Advance(5 * time.Minute)
+	now := f.clk.Now()
+	st := &conduitUserStream{
+		Kind: grant.StreamKindPTY, Identity: NewAuthenticatedUser("u1", "u1@x", "u1", "member", "api"),
+		UserID: "u1", AgentID: "agent-x", ProjectID: "p1", SessionID: "sess-1", StreamID: 1,
+		Close: (&closeRecorder{}).close, Renew: (&renewRecorder{}).renew,
+	}
+	untrack := f.a.Track(st)
+	t.Cleanup(untrack)
+	assert.Equal(t, now, st.Admitted)
+	assert.Equal(t, now.Add(time.Hour), st.Deadline())
+}
+
 // TestConduitStreamAuthz_RevocationBeforeDeadlineCloses (revocation): a
 // revocation before the deadline still closes the stream on the 2.7 path
 // (trigger notify), and the closed stream's deadline never fires.

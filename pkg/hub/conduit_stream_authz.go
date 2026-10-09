@@ -360,19 +360,19 @@ func (a *conduitStreamAuthz) runSweep() {
 
 // Track registers st until the returned function is called (when the
 // stream ends for any reason), and arms its authorization deadline:
-// st.Admitted (now if unset) plus the user stream interval.
+// st.Admitted plus the user stream interval. An unset st.Admitted is
+// recorded as now.
 func (a *conduitStreamAuthz) Track(st *conduitUserStream) (untrack func()) {
 	a.mu.Lock()
 	a.streams[st] = struct{}{}
 	a.mu.Unlock()
 	if d := a.cfg.UserStreamAuthzMax; d > 0 {
-		admitted := st.Admitted
-		if admitted.IsZero() {
-			admitted = a.cfg.Clock.Now()
-		}
 		st.dmu.Lock()
+		if st.Admitted.IsZero() {
+			st.Admitted = a.cfg.Clock.Now()
+		}
 		st.interval = d
-		st.deadline = admitted.Add(d)
+		st.deadline = st.Admitted.Add(d)
 		a.armDeadlineLocked(st)
 		st.dmu.Unlock()
 	}
