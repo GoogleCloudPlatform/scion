@@ -55,7 +55,6 @@ web/*.json
 web/*.ts
 web/*.html
 web/.env*
-web/.eslintrc*
 web/eslint.config.*
 web/.prettierrc*
 web/.screenshots/
