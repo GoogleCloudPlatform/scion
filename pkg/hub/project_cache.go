@@ -127,7 +127,8 @@ func (s *Server) handleProjectCacheRefresh(w http.ResponseWriter, r *http.Reques
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return
 		}
-		RuntimeError(w, "Cache refresh failed: "+err.Error())
+		s.workspaceLog.Error("project cache refresh failed", "project_id", project.ID, "broker_id", brokerID, "error", err)
+		RuntimeError(w, "Cache refresh failed")
 		return
 	}
 
@@ -216,7 +217,8 @@ func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request
 
 	storagePath := storage.ProjectWorkspaceStoragePath(s.HubID(), project.ID)
 	if err := s.syncHubWorkspaceFromGCS(ctx, stor.Bucket(), storagePath+"/files", cachePath); err != nil {
-		RuntimeError(w, "Failed to download workspace from GCS: "+err.Error())
+		s.workspaceLog.Error("failed to download workspace from GCS into cache", "project_id", project.ID, "error", err)
+		RuntimeError(w, "Failed to download workspace from GCS")
 		return
 	}
 
@@ -347,7 +349,9 @@ func (s *Server) isLinkedProject(ctx context.Context, project *store.Project) bo
 }
 
 // findConnectedProvider finds a connected provider broker for a project.
-// It prefers the default runtime broker, then falls back to any connected provider.
+// It prefers the default runtime broker when it is a provider of the
+// project, then falls back to any connected provider. A broker that is not
+// a provider of the project is never chosen.
 func (s *Server) findConnectedProvider(ctx context.Context, project *store.Project) (string, error) {
 	cc := s.GetControlChannelManager()
 	if cc == nil {
@@ -363,9 +367,13 @@ func (s *Server) findConnectedProvider(ctx context.Context, project *store.Proje
 		return "", fmt.Errorf("project has no provider brokers")
 	}
 
-	// Prefer the default runtime broker if connected
+	// Prefer the default runtime broker if it is a provider and connected
 	if project.DefaultRuntimeBrokerID != "" && cc.IsConnected(project.DefaultRuntimeBrokerID) {
-		return project.DefaultRuntimeBrokerID, nil
+		for _, p := range providers {
+			if p.BrokerID == project.DefaultRuntimeBrokerID {
+				return p.BrokerID, nil
+			}
+		}
 	}
 
 	// Fall back to any connected provider with a local path

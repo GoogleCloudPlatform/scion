@@ -17,6 +17,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accesspolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentcredential"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentrecovery"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
@@ -33,7 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitsession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionaudit"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationadoption"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entitlementbinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
@@ -54,6 +55,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/limitdefinition"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperationrun"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/membershiplosscheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/messageaddressee"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/mutationaudit"
@@ -147,6 +149,7 @@ func checkColumn(t, c string) error {
 			accesspolicy.Table:             accesspolicy.ValidColumn,
 			agent.Table:                    agent.ValidColumn,
 			agentcredential.Table:          agentcredential.ValidColumn,
+			agenthold.Table:                agenthold.ValidColumn,
 			agentidentitykey.Table:         agentidentitykey.ValidColumn,
 			agentrecovery.Table:            agentrecovery.ValidColumn,
 			agentreincarnation.Table:       agentreincarnation.ValidColumn,
@@ -163,7 +166,7 @@ func checkColumn(t, c string) error {
 			conduitsession.Table:           conduitsession.ValidColumn,
 			conversation.Table:             conversation.ValidColumn,
 			conversationparticipant.Table:  conversationparticipant.ValidColumn,
-			decisionaudit.Table:            decisionaudit.ValidColumn,
+			delegationadoption.Table:       delegationadoption.ValidColumn,
 			delegationedge.Table:           delegationedge.ValidColumn,
 			entitlementbinding.Table:       entitlementbinding.ValidColumn,
 			envvar.Table:                   envvar.ValidColumn,
@@ -184,6 +187,7 @@ func checkColumn(t, c string) error {
 			limitdefinition.Table:          limitdefinition.ValidColumn,
 			maintenanceoperation.Table:     maintenanceoperation.ValidColumn,
 			maintenanceoperationrun.Table:  maintenanceoperationrun.ValidColumn,
+			membershiplosscheck.Table:      membershiplosscheck.ValidColumn,
 			message.Table:                  message.ValidColumn,
 			messageaddressee.Table:         messageaddressee.ValidColumn,
 			mutationaudit.Table:            mutationaudit.ValidColumn,

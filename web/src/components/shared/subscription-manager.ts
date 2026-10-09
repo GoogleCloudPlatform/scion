@@ -113,7 +113,7 @@ export class ScionSubscriptionManager extends LitElement {
       } else if (Array.isArray(data)) {
         this.subscriptions = data;
       } else {
-        this.subscriptions = (data as { subscriptions?: Subscription[] }).subscriptions || [];
+        this.subscriptions = data.subscriptions || [];
       }
     } catch (err) {
       console.error('Failed to load subscriptions:', err);
@@ -585,7 +585,7 @@ export class ScionSubscriptionManager extends LitElement {
       case 'COMPLETED':
         return 'Agent finished its task.';
       case 'WAITING_FOR_INPUT':
-        return 'Agent needs human input to continue.';
+        return 'Agent is waiting on its parent to continue.';
       case 'LIMITS_EXCEEDED':
         return 'Agent exceeded turn or model call limits.';
       case 'STALLED':

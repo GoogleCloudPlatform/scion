@@ -28,6 +28,7 @@
 import { SSEClient } from './sse-client.js';
 import type { SSEUpdateEvent } from './sse-client.js';
 import { shouldApplyAcceptedDeletion } from '../shared/agent-deletion.js';
+import { resetReadinessMarks } from './readiness-marks.js';
 import type {
   Agent,
   AgentActivity,
@@ -212,7 +213,7 @@ function mergeAgentDelta(
     delta = promoteDetailFields(delta);
   }
   // Ensure id is always set
-  const updated = { ...base, ...delta, id: agentId } as Agent;
+  const updated = { ...base, ...delta, id: agentId };
   // Preserve _capabilities from existing state when the delta doesn't
   // provide valid capabilities (SSE status deltas typically omit them).
   if (!delta._capabilities && base._capabilities) {
@@ -407,7 +408,7 @@ export interface AppState {
   connected: boolean;
   scope: ViewScope | null;
   /**
-   * Scope-level capabilities from the SSR-prefetched list response, keyed by
+   * Scope-level capabilities from the list page's REST response, keyed by
    * the resource they were computed for.
    *
    * Keyed rather than a single slot because agent-scope and project-scope
@@ -441,6 +442,7 @@ export type StateEventType =
   | 'chat-message-edited'
   | 'chat-message-deleted'
   | 'chat-dm-promoted'
+  | 'chat-scheduled-updated'
   | 'agent-created';
 
 /**
@@ -613,45 +615,6 @@ export class StateManager extends EventTarget {
     });
   }
 
-  /**
-   * Initialize state from server-rendered data.
-   * Called once on page load with the __SCION_DATA__ payload.
-   *
-   * @param initialData - Agents and/or projects from the prefetched API response.
-   * @param scopeCapabilities - Scope-level capabilities from the API response's
-   *   top-level `_capabilities` field (if present). The payload is prefetched
-   *   for one page, so these belong to whichever list it carries; they are
-   *   attributed to that resource. When the payload carries both lists the
-   *   owner is ambiguous, so they are dropped rather than guessed — the page
-   *   then fetches its own, which is correct if slower.
-   */
-  hydrate(
-    initialData: { agents?: Agent[]; projects?: Project[] },
-    scopeCapabilities?: import('../shared/types.js').Capabilities
-  ): void {
-    if (initialData.agents) {
-      for (const agent of initialData.agents) {
-        this.state.agents.set(agent.id, agent);
-      }
-    }
-
-    if (initialData.projects) {
-      for (const project of initialData.projects) {
-        this.state.projects.set(project.id, project);
-      }
-    }
-
-    if (scopeCapabilities) {
-      const hasAgents = Array.isArray(initialData.agents);
-      const hasProjects = Array.isArray(initialData.projects);
-      if (hasAgents && !hasProjects) {
-        this.state.scopeCapabilities.set('agent', scopeCapabilities);
-      } else if (hasProjects && !hasAgents) {
-        this.state.scopeCapabilities.set('project', scopeCapabilities);
-      }
-    }
-  }
-
   /** The signed-in user's id, or '' before it is known. */
   getCurrentUserId(): string {
     return this.currentUserId;
@@ -689,6 +652,8 @@ export class StateManager extends EventTarget {
     }
 
     this.state.scope = scope;
+    // A scope change starts a new load for the readiness marks.
+    resetReadinessMarks();
 
     // Clear state from previous scope
     this.state.agents.clear();
@@ -833,12 +798,15 @@ export class StateManager extends EventTarget {
       return;
     }
 
-    // User-scoped chat events: user.{userId}.chat.{dm|typing|message.edited|message.deleted}
+    // User-scoped chat events: user.{userId}.chat.{dm|typing|scheduled|message.edited|message.deleted}
     if (parts[0] === 'user' && parts.length >= 4 && parts[2] === 'chat') {
       // Human-to-human DMs have no project, so their typing events arrive on
       // the user-scoped subject rather than project.{id}.chat.typing.
       if (parts[3] === 'dm' && parts.length >= 5 && parts[4] === 'promoted') {
         this.notifyWithData('chat-dm-promoted', data);
+      } else if (parts[3] === 'scheduled') {
+        // The user's own scheduled messages (sender-only; never a message).
+        this.notifyWithData('chat-scheduled-updated', data);
       } else if (parts[3] === 'typing') {
         this.notifyWithData('chat-typing-received', data);
       } else if (parts[3] === 'read-state') {
@@ -938,6 +906,12 @@ export class StateManager extends EventTarget {
   }
 
   private handleAgentEvent(agentId: string, eventType: string, data: unknown): void {
+    // `agent.{id}.message` carries a chat message payload, not an agent
+    // delta. Message views read the agent messages stream instead.
+    if (eventType === 'message') {
+      return;
+    }
+
     if (eventType === 'deleted') {
       this.state.agents.delete(agentId);
       this.state.deletedAgentIds.add(agentId);
@@ -1154,7 +1128,7 @@ export class StateManager extends EventTarget {
     const existing = this.dirty.unknown.get(agentId) ?? {};
     const next: UnknownAgentDelta = { ...existing };
     if (delta.phase !== undefined) next.phase = delta.phase;
-    if (delta.activity !== undefined) next.activity = delta.activity as string;
+    if (delta.activity !== undefined) next.activity = delta.activity;
     if (delta.lastActivityEvent !== undefined) next.lastActivityEvent = delta.lastActivityEvent;
     this.dirty.unknown.set(agentId, next);
   }
@@ -1222,7 +1196,7 @@ export class StateManager extends EventTarget {
       if (!summaryData._capabilities && existing._capabilities) {
         updated._capabilities = existing._capabilities;
       }
-      this.state.projects.set(id, updated as Project);
+      this.state.projects.set(id, updated);
     } else {
       // Project lifecycle events: created, updated
       const projectData = data as Partial<Project> & { projectId?: string };
@@ -1232,7 +1206,7 @@ export class StateManager extends EventTarget {
       if (!projectData._capabilities && existing._capabilities) {
         updated._capabilities = existing._capabilities;
       }
-      this.state.projects.set(id, updated as Project);
+      this.state.projects.set(id, updated);
     }
     this.notify('projects-updated');
   }
@@ -1247,7 +1221,7 @@ export class StateManager extends EventTarget {
       // Map brokerId field from event payload to id
       const id = ((delta as Record<string, unknown>).brokerId as string) || brokerId;
       const updated = { ...existing, ...delta, id };
-      this.state.brokers.set(id, updated as RuntimeBroker);
+      this.state.brokers.set(id, updated);
     }
     this.notify('brokers-updated');
   }
@@ -1385,7 +1359,7 @@ export class StateManager extends EventTarget {
       let toStore: Agent = agent;
       if (partial) {
         const existing = this.state.agents.get(agent.id);
-        toStore = existing ? ({ ...existing, ...agent, id: agent.id } as Agent) : agent;
+        toStore = existing ? { ...existing, ...agent, id: agent.id } : agent;
       }
       const recorded = recordedDeltas?.get(agent.id);
       if (recorded) {

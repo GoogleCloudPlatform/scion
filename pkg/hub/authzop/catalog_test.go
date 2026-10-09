@@ -53,12 +53,13 @@ func TestCatalogNoDuplicateIDs(t *testing.T) {
 }
 
 // TestCatalogNoDuplicateEntryPoints ensures no two operations claim the same
-// entry point.
+// entry point. Entry points that share a kind, method and pattern are
+// distinct only when their Variant differs.
 func TestCatalogNoDuplicateEntryPoints(t *testing.T) {
 	seen := make(map[string]OperationID)
 	for _, spec := range Catalog {
 		for _, ep := range spec.EntryPoints {
-			key := string(ep.Kind) + ":" + ep.Method + ":" + ep.Pattern
+			key := string(ep.Kind) + ":" + ep.Method + ":" + ep.Pattern + "#" + ep.Variant
 			if owner, ok := seen[key]; ok {
 				t.Errorf("entry point %s claimed by both %q and %q", key, owner, spec.ID)
 			}
@@ -254,19 +255,18 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"broker.update":   "Broker-HMAC only, not user-facing",
 		"broker.delete":   "Broker-HMAC only, not user-facing",
 		"broker.dispatch": "Broker-HMAC dispatch, not user-facing",
+		// Checked in the broker registration handler when a request turns
+		// auto-provide on; no route declares it.
+		"broker.auto_provide": "Broker registration handler check, no route declaration",
 
 		// Hub admin permissions — NonRouteUse only (no route declaration)
-		"hub.settings.read":           "NonRouteUse only, no route declaration",
-		"hub.settings.update":         "NonRouteUse only, no route declaration",
-		"hub.admin_mode.read":         "NonRouteUse only, no route declaration",
-		"hub.integrations.update":     "NonRouteUse only, no route declaration",
-		"hub.lifecycle_hooks.update":  "NonRouteUse only, no route declaration",
-		"hub.allow_list.read":         "NonRouteUse only, no route declaration",
-		"hub.project_defaults.update": "NonRouteUse only, no route declaration",
-		"hub.scheduler.update":        "NonRouteUse only, no route declaration",
-		"hub.federation.read":         "NonRouteUse only, no route declaration",
-		"hub.federation.update":       "NonRouteUse only, no route declaration",
-		"hub.teams_manifest.update":   "NonRouteUse only, no route declaration",
+		"hub.settings.read":         "NonRouteUse only, no route declaration",
+		"hub.admin_mode.read":       "NonRouteUse only, no route declaration",
+		"hub.allow_list.read":       "NonRouteUse only, no route declaration",
+		"hub.scheduler.update":      "NonRouteUse only, no route declaration",
+		"hub.federation.read":       "NonRouteUse only, no route declaration",
+		"hub.federation.update":     "NonRouteUse only, no route declaration",
+		"hub.teams_manifest.update": "NonRouteUse only, no route declaration",
 		// hub.github_app.read and hub.github_app.update: now route-enforced via route_metadata.go
 		"hub.audit.read": "Super-admin audit explain, NonRouteUse only",
 
@@ -290,11 +290,12 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"agent.port_forward":   "Agent token scope, not route-enforced",
 		"agent.identity_token": "Agent token scope, not route-enforced",
 
-		// Artifact service: read and create are cataloged (P1); update,
-		// delete and manage have no handler behaviour yet.
-		"artifact.update": "Artifact service: new versions land with the two-step publish (ptone/scion#3215)",
-		"artifact.delete": "Artifact service: deletion lands with grants and retention (ptone/scion#3231)",
-		"artifact.manage": "Artifact service: grants and share links land in ptone/scion#3231",
+		// Artifact service: read and create are cataloged (P1). update and
+		// delete are Reserved registry rows (nothing checks them yet);
+		// manage is checked inline by the artifact service.
+		"artifact.update": "Reserved in the permission registry: no artifact route checks it",
+		"artifact.delete": "Reserved in the permission registry: no artifact route checks it",
+		"artifact.manage": "Inline check in pkg/artifacts canAdminister (grants, share links, PATCH), no catalog operation",
 
 		// Material delivery and runtime-use permissions — NonRouteUse only
 		// (ptone/scion#2129)
@@ -306,8 +307,6 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 
 		// Self-scoped permissions — checked by Server.authorizeSelfScoped;
 		// their operations are catalogued by the batches that admit them.
-		"inbox.read":                  "Self-scoped, checked by authorizeSelfScoped; no route uses it yet",
-		"inbox.write":                 "Self-scoped, checked by authorizeSelfScoped; no route uses it yet",
 		"user_skill_injection.update": "Self-scoped, checked by authorizeSelfScoped; no route uses it yet",
 	}
 
@@ -1255,8 +1254,9 @@ var domainResourceCompatibility = map[string][]string{
 	"quota":              {"ResourceQuota"},
 	"schedule":           {"ResourceScheduledEvent"},
 	"chat":               {"ResourceProject"},
-	"env":                {"ResourceProject"},
+	"env":                {"ResourceProject", "ResourceHub"},
 	"artifact":           {"ResourceArtifact"},
+	"inbox":              {"ResourceInbox"},
 }
 
 // TestCatalogBasePermissionSemanticsAssertive validates that each operation's

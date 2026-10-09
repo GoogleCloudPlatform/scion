@@ -205,6 +205,9 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	// pinned placement columns (ComputeAgentPinnedRuntimeTarget), filled
 	// only by agent enrichment; it is not stored and not an authz input.
 	"PinnedRuntimeTarget": true,
+	// Suspension is computed by the hub at response time from the agent's
+	// active holds (ptone/scion#3433); it is not stored.
+	"Suspension": true,
 	// Start claim columns are written only through the start-claim store
 	// methods (never by CreateAgent/UpdateAgent).
 	"StartClaimID": true, "StartClaimKind": true, "StartClaimState": true,

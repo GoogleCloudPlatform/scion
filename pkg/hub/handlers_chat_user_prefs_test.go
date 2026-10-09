@@ -17,7 +17,6 @@
 package hub
 
 import (
-	"database/sql"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -30,11 +29,7 @@ import (
 func TestChatV2_UserPrefs_ResponseUsesRequestFieldNames(t *testing.T) {
 	srv, _ := testServer(t)
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	defer func() { _ = db.Close() }()
+	db := openTestMemorySQLite(t, "sqlite3")
 	wcs := NewWebChatStore(db, "sqlite3")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)

@@ -9,8 +9,8 @@ This harness makes **no changes to hub or web source**. It is pure tooling,
 so it captures a BASELINE against unmodified `origin/main` before any of
 #2367's other workstreams land.
 
-Do **not** point any of this at the live hub
-(`community.projects.scion-ai.dev`). Everything here runs against a hub
+Do **not** point any of this at a shared or production hub.
+Everything here runs against a hub
 subprocess you start locally against a throwaway SQLite file, in an
 environment isolated from your own agent/shell (see "Isolate the hub
 environment" below) -- the hub must not inherit your ambient cloud
@@ -187,9 +187,8 @@ against the real instance metadata service.
 
 1. Check the hub's own log for the storage-backend line -- it should say
    `/tmp/scion-bench/home/.scion/storage`, not your real home directory.
-2. Confirm neither of these appears anywhere in the hub's log: the real
-   service-account email (`scion-my-grove@...` or similar), or the real GCP
-   project ID (`deploy-demo-test` or similar). The GCP-subsystem log lines
+2. Confirm neither of these appears anywhere in the hub's log: your real
+   service-account email or your real GCP project ID. The GCP-subsystem log lines
    themselves (`GCP token generator configured`, `Policy Troubleshooter: no
    GCP project ID available`, ...) still appear with
    `GCE_METADATA_HOST`/`GCE_METADATA_IP` set -- that is expected, since the
@@ -413,10 +412,21 @@ the per-size timeout values in effect if they were raised above the
 defaults shown in `EffectiveSettings`. A blank `notes` field in a raw
 report is a gap for whoever reads it later, not a neutral default.
 
-When run against a hub built from the `perf/2392-agent-list-instrumentation`
-branch (not yet merged) with `SCION_HUB_PERF_TRACE=1` set in the hub's
-environment, add `--want-perf-trace` to additionally capture phase-timing/
-store-call-count data from the response headers. On a baseline run against
+When the hub runs with request performance tracing on (add
+`SCION_SERVER_HUB_PERFTRACE=true` to the isolated launch's `env -i` list, or
+set `server.hub.perf_trace: true`), add `--want-perf-trace` to additionally
+capture the `X-Scion-Perf-*` response headers per attempt: endpoint class,
+phase times (microseconds) and counts, authorization store calls and times,
+decision-audit counts, and DB pool waits. The hub sends those headers only
+to unscoped local platform admins, so for the seeded member caller also
+pass `--hub-perf-log <hub log file>` (redirect the hub's output to a file):
+after the run, apibench joins each attempt to the hub's `perf_trace` log
+line by request ID and stores the same fields, plus the `serialize` phase,
+with `perfTraceSource: "hub-log"`. See `pkg/hub/perftrace.go` for the phase
+definitions, and the developer guide on the docs site
+(`docs-site/src/content/docs/contributing/perf-tracing.md`) for the log
+line format, joining by request ID, and using the counts as regression
+budgets. On a baseline run against
 unmodified `main`, or if the flag was passed but no trace headers actually
 came back, the report's `perfTraceAvailable` field is `false` for that
 scenario, not silently omitted or wrongly true.
@@ -482,6 +492,57 @@ total wall-clock time. The report is written incrementally (after every
 scenario and every burst run), so a Chromium crash mid-benchmark loses at
 most the in-flight run, not the whole report.
 
+**The project grid and list are paged.** `project-grid` and `project-list`
+render one page of agents at a time (the pager's page size, 25 by default),
+so for them `populated` means *the first page rendered*: `min(pageSize,
+total)` cards or rows, with the pager idle. The page size and total are read
+from the rendered `<scion-agent-pager>`, not assumed; with no pager the view
+is treated as unpaged and every agent is expected, as before.
+`expectedCount` is that first-page count, and each run adds `agentCount`,
+`pageSize`, `pageTotal` and `pageCount`. A populated run then clicks Next up
+to `--page-changes` times (default 3; fewer when the view has fewer pages)
+and times each change from the click until the pager shows the next page,
+idle, with its `rowsOnPage` rendered and a different first item
+(`pageChanges`: `toPageIndex`, `ok`, `ms`, `rows`). `pageChangesStopReason`
+says how the run's walk ended: `completed` (all requested changes timed),
+`none-requested` (`--page-changes 0`), `no-next-page` (the last page was
+reached), `next-unavailable-before-last-page` (Next disabled although the
+pager's own total says more pages exist: the walk ended early, a product
+behaviour; also reported when every requested change completed but the last
+one landed on such a page), `next-disabled`, `pager-busy`, `timed-out`,
+`no-pager` or `not-populated`; `pageChangesStopPager` records the pager at
+that point. The scenario summary adds `paged`, `pageSize`, `pageCount`,
+`pageChangeAttemptCount`, `pageChangeSuccessCount`,
+`pageChangeFailureCount`, `pageWalkEarlyStopCount` (runs that ended with
+`next-unavailable-before-last-page`; the console paged line prints it) and
+median/min/max/stddev of `pageChangeMs` over completed changes of populated
+runs; the report top level adds `pageChangesPerRun`. The network fields
+(`networkStatus`, `networkFailed`, `networkObservedAtMs`) still describe the
+first load only: the watch is detached before any page change. For grid and
+list, `expectedCount`, `populated` and `navToPopulatedMs` now refer to the
+first page; every other field keeps its meaning. A seed with no agents
+renders the project's empty state instead of a pager; such a run counts as
+populated once that empty state is on screen. Before this, these two
+scenarios waited for one card per agent, which a paged view never renders
+above one page, so at 100 and 500 agents they always ended
+`loaded-not-rendered`.
+
+**Readiness marks.** Every populated run also reads the web client's
+readiness marks (`scion:ready:agents-data`, `scion:ready:rows-grid`,
+`scion:ready:rows-list`, `scion:ready:graph`), which the client writes
+only while the hub's `profiling.readiness_marks` setting is on (turn it on
+with `PUT /api/v1/admin/profiling` as an admin; see the perf tracing
+guide's "Readiness marks" section). Each run adds `readinessMarks` (name to
+ms since navigation start), `readinessMarksMissing` and
+`readinessMarksUnexpected`. Each scenario adds `readinessMarks` (per mark:
+`count`, `medianMs`, `minMs`, `maxMs`, `medianMsCold`, `medianMsWarm`),
+`readinessMarksMissingRunCount` and `readinessMarksUnexpectedRunCount`, and
+the report top level adds `expectReadinessMarks`. Pass
+`--expect-readiness-marks` when the setting is on: each run then waits up
+to 3 seconds for its scenario's data mark and view mark, and a run still
+lacking one is counted as missing. Without the flag the setting is expected
+off, and a run that finds any readiness mark is counted as unexpected.
+
 For the two graph scenarios, a populated run also performs a short
 pan/zoom/hover interaction sequence (hover over up to 5 nodes, wheel-zoom
 in and out, drag-pan) and reports the long-task cost specifically
@@ -499,6 +560,11 @@ long-task delta (`graphInteraction.longTasks`), not `interactionMs`,** as
 the measurement of actual UI cost -- it is the field that scales with agent
 count (near-zero at 25 agents, up to ~733ms at 500 for
 `standalone-graph`) and the one `measurements.md` bases its conclusions on.
+
+The burst scenario below likewise waits only for the grid's first page,
+and picks its target agents from the cards on that page (an agent on
+another page has no badge to observe), so `--burst-count` is effectively
+capped at the number of non-suspended cards on that first page.
 
 It then runs the SSE burst-update scenario `--burst-runs` times (default:
 same as `--runs`; pass `--burst-only` to skip the four view scenarios above
@@ -651,7 +717,7 @@ baseline section).
 ## Choosing regression budgets
 
 Not implemented by this harness, and deliberately not guessed at: this
-container (`scion-community-broker-01`) is a shared host with 16 CPUs and a
+container is a shared 16-CPU development host with a
 load average observed to swing from roughly 47 to 450 depending on what
 else is running. Repeated apibench reruns under otherwise identical
 isolated conditions varied by more than 2x run to run purely from this --
@@ -680,13 +746,6 @@ derive budgets from directly.
 
 Tracked here rather than silently dropped:
 
-- **In-app readiness marks** (data arrival / visible rows / graph ready)
-  -- infeasible without web source changes: there are currently no such
-  marks anywhere in the app (confirmed by grepping for
-  `performance.mark`/custom ready events), so exposing them requires
-  instrumenting `web/src/components/pages/project-detail.ts` and
-  `agent-tree-view.ts` themselves. This harness only measures from the
-  outside, per the brief's "no hub or web source changes" constraint.
 - **Large-file-list dataset** -- infeasible in this PR: `perf/bench/seed`
   only seeds agents/projects/users, not file-browser data sources. Adding
   realistic file trees is a separate, non-trivial seeding surface.
@@ -729,7 +788,7 @@ constraints.
   a harness bug -- re-run `perf/bench/seed` for a fresh, undrifted DB if you
   need the exact seeded counts to hold.
 - All measurements in this repo's `measurements.md` were taken on a shared
-  host (`scion-community-broker-01`, 16 CPUs, widely variable load -- not a
+  16-CPU development host (widely variable load -- not a
   single CPU), with (for the 100/500-agent cases) up to three hub
   subprocesses co-resident. Treat absolute numbers as this-machine,
   this-run numbers; treat the *shape* (order-of-magnitude growth from 25 to

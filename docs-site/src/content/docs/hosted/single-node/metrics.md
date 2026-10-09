@@ -154,7 +154,16 @@ Ensure the environment where the agent container runs (GKE Pod, Cloud Run, etc.)
 
 ### 4. GCP Credentials for Agent Containers (Non-ADC Environments)
 
-When agents run outside of GKE or Cloud Run — where [Application Default Credentials (ADC)](https://cloud.google.com/docs/authentication/application-default-credentials) are not automatically available — you must supply a GCP service account key file. Scion uses a **well-known secret** to provision this credential into every agent container automatically.
+GCP-native export authenticates with the key file named by `SCION_OTEL_GCP_CREDENTIALS` when one is present, and otherwise with [Application Default Credentials (ADC)](https://cloud.google.com/docs/authentication/application-default-credentials). Inside an agent container, ADC asks the metadata server for a token, and the agent's GCP identity mode decides the answer. When an agent has no GCP identity configured, the broker uses mode `block` on every runtime except Kubernetes (where the default is `passthrough`). In `block` mode the `sciontool` metadata server refuses token requests, so ADC cannot authenticate and export to GCP fails.
+
+On those runtimes, GCP export needs one of:
+
+- **A registered service account assigned to the agent.** Register it with `scion project service-accounts add <email> --gcp-project <id>` (or `mint`), check it with `scion project service-accounts verify <id>`, and start the agent with `--service-account <id>`. This sets mode `assign`, and the metadata server returns tokens for that account. The account needs the roles in [IAM Permissions](#3-iam-permissions). See [`scion project service-accounts`](/scion/reference/cli/) in the CLI reference.
+- **The telemetry credentials secret**, a GCP service account key file, described below.
+
+To check which one an agent has, run `echo $SCION_METADATA_MODE` and `echo $SCION_OTEL_GCP_CREDENTIALS` inside the agent. `assign` means a service account is assigned; `block` with an empty `SCION_OTEL_GCP_CREDENTIALS` and no key file at `~/.scion/telemetry-gcp-credentials.json` means export to GCP has no credentials. `sciontool metadata status` inside the agent also reports the mode and, in `assign` mode, the account and whether its token endpoint returns `200`.
+
+Scion uses a **well-known secret** to provision the key file into every agent container automatically.
 
 | Property | Value |
 |----------|-------|
@@ -330,6 +339,8 @@ For every significant lifecycle event (session start/end, tool use, model call),
 ## Hub Infrastructure Metrics
 
 The Scion Hub maintains internal operational metrics for infrastructure monitoring. These are available via the `/api/v1/admin/metrics` endpoint (requires `hub-admin` role) and can be exported to standard monitoring tools.
+
+When `server.hub.gcp_project_id` is set, the Hub also exports its database pool, dispatch, notification and launch reaper metrics to Cloud Monitoring. To chart them per Hub instance, import the ready-made [Hub Monitoring Dashboard](/scion/hosted/single-node/hub-monitoring-dashboard/).
 
 ### GCP Token Metrics
 

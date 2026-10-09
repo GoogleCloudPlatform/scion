@@ -438,6 +438,8 @@ func (s *Server) handleTemplateByIDV2(w http.ResponseWriter, r *http.Request) {
 		s.handleTemplateClone(w, r, templateID)
 	case "validate":
 		s.handleTemplateValidate(w, r, templateID)
+	case "reimport":
+		s.handleTemplateReimport(w, r, templateID)
 	case "files":
 		s.handleTemplateFiles(w, r, templateID, "")
 	default:

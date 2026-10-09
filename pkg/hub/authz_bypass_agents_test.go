@@ -93,7 +93,7 @@ type bypassAgentsFixture struct {
 // reach a handler.
 func bypassAgentsServer(t *testing.T) (*Server, store.Store) {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Skipf("skipping: test store unavailable (%v)", err)
 	}
@@ -109,10 +109,9 @@ func bypassAgentsServer(t *testing.T) (*Server, store.Store) {
 		Email:       "dev@localhost",
 	}
 	cfg.BrokerAuthConfig = DefaultBrokerAuthConfig()
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	require.NoError(t, err)
 	srv.SetHubID("test-hub-id")
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	waitUserScopedDataSweep(t, srv)
 	return srv, s
 }
@@ -1336,7 +1335,7 @@ func TestBypassAgents_CheckBrokerDispatchAccess(t *testing.T) {
 	// wrote, because "denied" here means both false and a 403 on the wire.
 	check := func(f *bypassAgentsFixture, ctx context.Context, brokerID string) (bool, *httptest.ResponseRecorder) {
 		rec := httptest.NewRecorder()
-		return f.srv.checkBrokerDispatchAccess(ctx, rec, brokerID), rec
+		return f.srv.checkBrokerDispatchAccess(ctx, rec, brokerID, f.proj), rec
 	}
 
 	t.Run("agent may not dispatch to a broker serving another project", func(t *testing.T) {
@@ -1423,6 +1422,38 @@ func TestBypassAgents_CheckBrokerDispatchAccess(t *testing.T) {
 		ok, rec := check(f, strangerCtx, b.ID)
 		assert.False(t, ok, "an unrelated user must not dispatch to someone else's broker")
 		assert.Equal(t, http.StatusForbidden, rec.Code)
+	})
+
+	t.Run("user may use a broker its owner associated with the project", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		b := newRestrictedBroker(t, f, "")
+		require.NoError(t, f.store.AddProjectProvider(context.Background(), &store.ProjectProvider{
+			ProjectID:  f.proj.ID,
+			BrokerID:   b.ID,
+			BrokerName: b.Name,
+			Status:     store.BrokerStatusOnline,
+			LinkedBy:   f.owner.ID,
+		}))
+		member := &store.User{
+			ID:          tid("dispatch-consent-member"),
+			Email:       "dispatch-consent-member@example.com",
+			DisplayName: "Member",
+			Role:        store.UserRoleMember,
+			Status:      "active",
+		}
+		require.NoError(t, f.store.CreateUser(context.Background(), member))
+		memberCtx := contextWithIdentity(context.Background(),
+			NewAuthenticatedUser(member.ID, member.Email, member.DisplayName, string(member.Role), "cli"))
+
+		ok, _ := check(f, memberCtx, b.ID)
+		assert.True(t, ok, "an owner-linked provider is usable for agents in its project")
+
+		rec := httptest.NewRecorder()
+		assert.False(t, f.srv.checkBrokerDispatchAccess(memberCtx, rec, b.ID, f.other),
+			"the association covers only its own project")
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+		assert.False(t, f.srv.canDispatchToBroker(memberCtx, b),
+			"without a project, the user still needs broker.dispatch")
 	})
 
 	t.Run("unknown broker is an error, not an allow", func(t *testing.T) {

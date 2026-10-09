@@ -71,4 +71,19 @@ describe('scion-git-remote-display workspace mode', () => {
       'Clone per agent'
     );
   });
+
+  it.each([
+    [undefined, 'Clone per agent'],
+    [{ 'scion.dev/workspace-mode': 'shared' }, 'Shared workspace'],
+    [{ 'scion.dev/workspace-mode': 'something-new' }, 'Clone per agent'],
+    [{ 'scion.dev/workspace-mode': 'empty-per-agent' }, 'Clone per agent'],
+    [{ 'scion.dev/workspace-mode': 'clone-per-agent' }, 'Clone per agent'],
+    [{ 'scion.dev/workspace-mode': 'worktree-per-agent' }, 'Worktree per agent'],
+  ] as [Record<string, string> | undefined, string][])(
+    'shows the hub-resolved decorator for a git project labelled %j',
+    async (labels, tooltip) => {
+      const el = await mount({ gitRemote: 'https://github.com/acme/widgets.git', labels });
+      expect(el.shadowRoot?.querySelector('sl-tooltip')?.getAttribute('content')).toBe(tooltip);
+    }
+  );
 });

@@ -36,7 +36,7 @@ function stubCoordinator(
   pendingCount: number,
   last: TerminalOpenResult['status'] | Error,
   { supported = true, isOwner = true } = {}
-): PaletteOpenCoordinator & { open: Mock<PaletteOpenCoordinator['open']> } {
+): Omit<PaletteOpenCoordinator, 'open'> & { open: Mock<PaletteOpenCoordinator['open']> } {
   let calls = 0;
   return {
     supported,

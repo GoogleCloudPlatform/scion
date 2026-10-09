@@ -66,6 +66,13 @@
 #                                 marker and images already match VERSION.
 #   admin_email                  Granted super-admin on first login. Empty =
 #                                 active gcloud account.
+#   hub_sa_minting               true (the default) or false. When true,
+#                                 the hub VM's service account is granted
+#                                 roles/iam.serviceAccountAdmin on the
+#                                 project so the hub can mint service
+#                                 accounts for agents. false skips the
+#                                 grant (and does not revoke an earlier
+#                                 one).
 #   update_policy                auto, notify, or disabled. Requires the
 #                                 binary auto-update feature.
 #   release_channel              stable, preview, or nightly. Defaults to
@@ -1167,6 +1174,16 @@ if [[ "$CLI_REBUILD_IMAGES" == "true" ]]; then
   CFG_FORCE_REBUILD="true"
 fi
 
+# --- Hub service account minting ---
+# On by default: the hub VM's SA is granted roles/iam.serviceAccountAdmin
+# (Phase 2) so the hub can mint service accounts for agents. Set
+# hub_sa_minting: false to skip that grant.
+HUB_SA_MINTING="$(config_get 'hub_sa_minting' 'true')"
+case "$HUB_SA_MINTING" in
+  true|false) ;;
+  *) err "Invalid hub_sa_minting in config: '${HUB_SA_MINTING}' (expected: true or false)"; exit 1 ;;
+esac
+
 # --- Admin email ---
 ADMIN_EMAIL="$(config_get 'admin_email' '')"
 if [[ -z "$ADMIN_EMAIL" ]]; then
@@ -1420,6 +1437,7 @@ REQUIRED_APIS=(
   artifactregistry.googleapis.com
   aiplatform.googleapis.com
   iam.googleapis.com
+  iamcredentials.googleapis.com
 )
 if [[ "$HYBRID_ENABLED" == "true" ]]; then
   REQUIRED_APIS+=(container.googleapis.com)
@@ -1778,7 +1796,7 @@ if [[ "$HYBRID_ENABLED" == "true" ]]; then
   hybrid_ensure_transport_sa "${HUB_NAME}" "${PROJECT_ID}"
   hybrid_grant_transport_token_creator "${HYBRID_TRANSPORT_SA_EMAIL}" "${SA_EMAIL}" "${PROJECT_ID}"
   # Rendered once, here, and spliced into both settings.yaml writes below
-  # (dev mode in Phase 3, proxy mode in Phase 5), the same pattern
+  # (Phase 3 bootstrap, proxy mode in Phase 5), the same pattern
   # HYBRID_SHARED_DIR_STORAGE_YAML uses. IAM changes (the grants above,
   # and the Cloud Run accessor grant in Phase 4) can take on the order of
   # a minute to propagate; the first agent dispatched immediately after
@@ -1795,8 +1813,17 @@ fi
 # Bind minimal IAM roles (idempotent)
 # artifactregistry.writer lets the VM build and push the Cloud Run IAP proxy
 # image directly to Artifact Registry (see Phase 4).
+# iam.serviceAccountAdmin lets the hub mint service accounts for agents: the
+# hub calls the IAM API with this SA's credentials to create the account,
+# read and set IAM policy on it, and delete it if a follow-up grant fails.
+# serviceAccountCreator alone is not enough for that flow. Skipped when
+# hub_sa_minting is false.
+HUB_SA_ROLES=(roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtrace.agent roles/artifactregistry.writer roles/aiplatform.user)
+if [[ "$HUB_SA_MINTING" == "true" ]]; then
+  HUB_SA_ROLES+=(roles/iam.serviceAccountAdmin)
+fi
 info "Binding IAM roles..."
-for ROLE in roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtrace.agent roles/artifactregistry.writer roles/aiplatform.user; do
+for ROLE in "${HUB_SA_ROLES[@]}"; do
   if ! BIND_ERR="$(gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${SA_EMAIL}" \
     --role="${ROLE}" \
@@ -1807,7 +1834,14 @@ for ROLE in roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtra
     exit 1
   fi
 done
-echo "  Roles bound: logging.logWriter, monitoring.metricWriter, cloudtrace.agent, artifactregistry.writer, aiplatform.user"
+if [[ "$HUB_SA_MINTING" == "true" ]]; then
+  echo "  Roles bound: logging.logWriter, monitoring.metricWriter, cloudtrace.agent, artifactregistry.writer, aiplatform.user, iam.serviceAccountAdmin"
+else
+  echo "  Roles bound: logging.logWriter, monitoring.metricWriter, cloudtrace.agent, artifactregistry.writer, aiplatform.user"
+  echo "  Skipped iam.serviceAccountAdmin (hub_sa_minting is false): the hub cannot mint service accounts."
+  echo "  A binding granted by an earlier deploy is not removed; remove it with:"
+  echo "    gcloud projects remove-iam-policy-binding ${PROJECT_ID} --member=serviceAccount:${SA_EMAIL} --role=roles/iam.serviceAccountAdmin --condition=None"
+fi
 
 # --- Proxy service account ---
 # A separate, minimally-privileged identity for the Cloud Run IAP proxy
@@ -2239,7 +2273,7 @@ fi
 
 # --- Hybrid tier: settings.yaml shared_dir_storage block ---
 # Rendered once, here, and spliced into both settings.yaml writes below
-# (dev mode in Phase 3, proxy mode in Phase 5) so they stay in sync.
+# (Phase 3 bootstrap, proxy mode in Phase 5) so they stay in sync.
 # Empty when the tier is off, so both writes render byte-identical to
 # before this existed.
 HYBRID_SHARED_DIR_STORAGE_YAML=""
@@ -2458,9 +2492,12 @@ else
     "
 fi
 
-# --- Write settings.yaml (dev mode for initial startup) ---
+# --- Write settings.yaml (bootstrap config for initial startup) ---
+# auth.mode: dev here does not enable dev auth (that needs --dev-auth or
+# server.auth.dev_mode, and the server refuses dev auth on a non-loopback
+# bind). Until Phase 5, only the unauthenticated /healthz check is used.
 # Phase 5 will overwrite this with proxy auth config once IAP is ready.
-info "Writing settings.yaml (dev mode)..."
+info "Writing settings.yaml (bootstrap config)..."
 gcloud compute ssh "${INSTANCE_NAME}" \
   --zone="${ZONE}" --project="${PROJECT_ID}" \
   --command="
@@ -2482,7 +2519,7 @@ ${HYBRID_GCP_IDENTITY_YAML:-"# Hub-wide default GCP identity mode for new agents
 default_gcp_identity_mode: passthrough
 "}server:
   hub:
-    name: \"${HUB_NAME}\"
+    hub_name: \"${HUB_NAME}\"
 ${ADMIN_EMAIL:+    admin_emails:
       - \"${ADMIN_EMAIL}\"}
   maintenance:
@@ -2498,7 +2535,7 @@ ${ADMIN_EMAIL:+    admin_emails:
 ${HYBRID_AUTH_TRANSPORT_YAML:+${HYBRID_AUTH_TRANSPORT_YAML}
 }${HYBRID_USER_ACCESS_YAML:+${HYBRID_USER_ACCESS_YAML}
 }${HYBRID_SHARED_DIR_STORAGE_YAML:+${HYBRID_SHARED_DIR_STORAGE_YAML}
-}  listen_port: 8080
+}  # Listen port: set by --web-port in scion-hub.service, not here.
 SETTINGSEOF
   "
 
@@ -3079,7 +3116,7 @@ ${HYBRID_GCP_IDENTITY_YAML:-"# Hub-wide default GCP identity mode for new agents
 default_gcp_identity_mode: passthrough
 "}server:
   hub:
-    name: \"${HUB_NAME}\"
+    hub_name: \"${HUB_NAME}\"
 ${ADMIN_EMAIL:+    admin_emails:
       - \"${ADMIN_EMAIL}\"}
   maintenance:
@@ -3099,7 +3136,7 @@ ${ADMIN_EMAIL:+    admin_emails:
 ${HYBRID_AUTH_TRANSPORT_YAML:+${HYBRID_AUTH_TRANSPORT_YAML}
 }${HYBRID_USER_ACCESS_YAML:+${HYBRID_USER_ACCESS_YAML}
 }${HYBRID_SHARED_DIR_STORAGE_YAML:+${HYBRID_SHARED_DIR_STORAGE_YAML}
-}  listen_port: 8080
+}  # Listen port: set by --web-port in scion-hub.service, not here.
 SETTINGSEOF
   "
 echo "  settings.yaml updated (auth mode: proxy, provider: iap)."

@@ -35,10 +35,9 @@ import (
 )
 
 // insertTestAgentCredential records an active credential for agentID under
-// jti, the same way production's storeCredentialRecorder does on a real
-// mint. Tests use it to seed a credential outside the dispatch path under
-// test (e.g. a sibling agent's credential that must survive the test's
-// revoke call).
+// jti, the way a production mint records it. Tests use it to seed a
+// credential outside the dispatch path under test (e.g. a sibling agent's
+// credential that must survive the test's revoke call).
 func insertTestAgentCredential(t *testing.T, s store.AgentCredentialStore, agentID, projectID, jti string) {
 	t.Helper()
 	now := time.Now()
@@ -67,10 +66,11 @@ func getTestAgentCredential(t *testing.T, s store.AgentCredentialStore, jti stri
 }
 
 // fakeMintingTokenGenerator implements AgentTokenGenerator for dispatcher
-// tests. Each call mints a fake credential and records it to the store
-// exactly as production's AgentTokenService + storeCredentialRecorder do on
-// a real GenerateAgentToken call, and remembers every jti it issued (in
-// call order) so a test can look up what it minted afterward.
+// tests. SignAgentToken mints a fake token and returns its credential for
+// the caller to record, as production's AgentTokenService does, and
+// remembers every jti it issued (in call order) so a test can look up what
+// it minted afterward. GenerateAgentToken records the credential itself.
+// failWith fails AuthorizeAgentToken and GenerateAgentToken.
 type fakeMintingTokenGenerator struct {
 	store    store.AgentCredentialStore
 	jtis     []string
@@ -81,26 +81,37 @@ func (f *fakeMintingTokenGenerator) GenerateAgentToken(agentID, projectID string
 	if f.failWith != nil {
 		return "", f.failWith
 	}
-	jti := fmt.Sprintf("test-jti-%s-%d", agentID, len(f.jtis)+1)
-	f.jtis = append(f.jtis, jti)
-	now := time.Now()
-	cred := &store.AgentCredential{
-		AgentID:      agentID,
-		ProjectID:    projectID,
-		TokenJTIHash: hashJTI(jti),
-		IssuedAt:     now,
-		ExpiresAt:    now.Add(10 * time.Hour),
+	token, cred, err := f.SignAgentToken(AgentTokenGrant{AgentID: agentID, ProjectID: projectID, Ancestry: ancestry}, "")
+	if err != nil {
+		return "", err
 	}
 	if err := f.store.CreateAgentCredential(context.Background(), cred); err != nil {
 		return "", err
 	}
-	return "fake-agent-jwt-" + jti, nil
+	return token, nil
 }
 
-// GenerateAgentTokenForAgent is the entry point every dispatcher mint site
-// calls; it records and fails exactly as GenerateAgentToken does.
-func (f *fakeMintingTokenGenerator) GenerateAgentTokenForAgent(_ context.Context, agent *store.Agent) (string, error) {
-	return f.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, AgentRole(""), nil)
+// AuthorizeAgentToken is the entry point every dispatcher mint site calls.
+func (f *fakeMintingTokenGenerator) AuthorizeAgentToken(_ context.Context, agent *store.Agent) (AgentTokenGrant, error) {
+	if f.failWith != nil {
+		return AgentTokenGrant{}, f.failWith
+	}
+	return AgentTokenGrant{AgentID: agent.ID, ProjectID: agent.ProjectID, Ancestry: agent.Ancestry}, nil
+}
+
+func (f *fakeMintingTokenGenerator) SignAgentToken(grant AgentTokenGrant, runID string) (string, *store.AgentCredential, error) {
+	jti := fmt.Sprintf("test-jti-%s-%d", grant.AgentID, len(f.jtis)+1)
+	f.jtis = append(f.jtis, jti)
+	now := time.Now()
+	cred := &store.AgentCredential{
+		AgentID:      grant.AgentID,
+		ProjectID:    grant.ProjectID,
+		TokenJTIHash: hashJTI(jti),
+		RunID:        runID,
+		IssuedAt:     now,
+		ExpiresAt:    now.Add(10 * time.Hour),
+	}
+	return "fake-agent-jwt-" + jti, cred, nil
 }
 
 // lastJTI returns the most recently minted jti, for a test that only expects

@@ -192,14 +192,13 @@ func suspendAllAgents() error {
 
 	var (
 		mu      sync.Mutex
-		wg      sync.WaitGroup
 		results []agentResult
 	)
 
-	for _, ra := range running {
-		wg.Add(1)
-		go func(name string) {
-			defer wg.Done()
+	// ptone/scion#3602: at most maxFanOutConcurrency agents in flight at once.
+	boundedFanOut(context.Background(), len(running), maxFanOutConcurrency, lifecycleFanOutQueuedHook,
+		func(i int) {
+			name := running[i].Name
 
 			res := agentResult{Name: name, Status: "success"}
 
@@ -229,14 +228,14 @@ func suspendAllAgents() error {
 			mu.Lock()
 			results = append(results, res)
 			mu.Unlock()
-		}(ra.Name)
-	}
-
-	wg.Wait()
+		}, func(int) {})
 
 	if isJSONOutput() {
 		jsonResults := make([]map[string]interface{}, len(results))
 		hasErrors := false
+		// failed matches the text-mode exit: skipped agents mark the
+		// document "partial" but, as in text mode, do not fail the command.
+		failed := false
 		for i, r := range results {
 			entry := map[string]interface{}{
 				"agent":  r.Name,
@@ -246,17 +245,20 @@ func suspendAllAgents() error {
 				entry["error"] = r.Error
 				hasErrors = true
 			}
+			if r.Status == "error" {
+				failed = true
+			}
 			jsonResults[i] = entry
 		}
 		overallStatus := "success"
 		if hasErrors {
 			overallStatus = "partial"
 		}
-		return outputJSON(map[string]interface{}{
+		return outputJSONResult(map[string]interface{}{
 			"status":  overallStatus,
 			"command": "suspend",
 			"results": jsonResults,
-		})
+		}, failed, "failed to suspend some agents")
 	}
 
 	var errs []string
@@ -323,14 +325,13 @@ func suspendAllAgentsViaHub(hubCtx *HubContext) error {
 
 	var (
 		mu      sync.Mutex
-		wg      sync.WaitGroup
 		results []agentResult
 	)
 
-	for _, a := range running {
-		wg.Add(1)
-		go func(ag hubclient.Agent) {
-			defer wg.Done()
+	// ptone/scion#3602: at most maxFanOutConcurrency agents in flight at once.
+	boundedFanOut(context.Background(), len(running), maxFanOutConcurrency, lifecycleFanOutQueuedHook,
+		func(i int) {
+			ag := running[i]
 
 			res := agentResult{Name: ag.Name, Status: "success"}
 
@@ -349,10 +350,7 @@ func suspendAllAgentsViaHub(hubCtx *HubContext) error {
 			mu.Lock()
 			results = append(results, res)
 			mu.Unlock()
-		}(a)
-	}
-
-	wg.Wait()
+		}, func(int) {})
 
 	if isJSONOutput() {
 		jsonResults := make([]map[string]interface{}, len(results))
@@ -372,11 +370,11 @@ func suspendAllAgentsViaHub(hubCtx *HubContext) error {
 		if hasErrors {
 			overallStatus = "partial"
 		}
-		return outputJSON(map[string]interface{}{
+		return outputJSONResult(map[string]interface{}{
 			"status":  overallStatus,
 			"command": "suspend",
 			"results": jsonResults,
-		})
+		}, hasErrors, "failed to suspend some agents via Hub")
 	}
 
 	var errs []string

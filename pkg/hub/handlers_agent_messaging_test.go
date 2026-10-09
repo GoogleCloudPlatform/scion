@@ -19,7 +19,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1680,8 +1679,9 @@ func TestDEF49_NonMembership_DirectConversation(t *testing.T) {
 			},
 		})
 
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("DEF-49 facet (a): expected 403 Forbidden for non-member "+
+	// Answered exactly as an unknown conversation_id.
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "caller-supplied conversation_id does not exist") {
+		t.Errorf("DEF-49 facet (a): expected the unknown-conversation answer (400) for non-member "+
 			"direct conversation attribution, got %d: %s",
 			rec.Code, rec.Body.String())
 	}
@@ -1771,9 +1771,10 @@ func TestDEF49_CrossProject_GroupConversation(t *testing.T) {
 			},
 		})
 
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("DEF-49 facet (c): expected 403 Forbidden for cross-project "+
-			"group conversation attribution, got %d: %s",
+	// Answered exactly as an unknown conversation_id.
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "caller-supplied conversation_id does not exist") {
+		t.Errorf("DEF-49 facet (c): expected the unknown-conversation answer (400) for a group "+
+			"conversation of another project, got %d: %s",
 			rec.Code, rec.Body.String())
 	}
 }
@@ -1885,8 +1886,8 @@ func TestDEF49_GroupConversation_UnsetProjectID(t *testing.T) {
 					},
 				})
 
-			if rec.Code != http.StatusForbidden {
-				t.Errorf("expected 403 for conversation with unset project ID (%s), got %d: %s",
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "caller-supplied conversation_id does not exist") {
+				t.Errorf("expected the unknown-conversation answer (400) for conversation with unset project ID (%s), got %d: %s",
 					tc.name, rec.Code, rec.Body.String())
 			}
 		})
@@ -2137,18 +2138,11 @@ func TestHandleAgentOutboundMessage_DMSyncBackfill(t *testing.T) {
 	ctx := context.Background()
 
 	// Set up a WebChatStore so registerDMParticipants can write webchat_dm rows.
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	// Limit to a single connection so all goroutines share the same in-memory
-	// database (each `:memory:` connection gets its own empty DB otherwise).
-	db.SetMaxOpenConns(1)
-	// Use t.Cleanup instead of defer so that db.Close runs after the W6
-	// notification goroutine (go cn.NotifyDMReceived) has finished — the
-	// backfill now populates req.ThreadID, which makes the non-broker
-	// notification path fire.
-	t.Cleanup(func() { _ = db.Close() })
+	// openTestMemorySQLite closes db in t.Cleanup, not defer, so db.Close
+	// runs after the W6 notification goroutine (go cn.NotifyDMReceived) has
+	// finished — the backfill now populates req.ThreadID, which makes the
+	// non-broker notification path fire.
+	db := openTestMemorySQLite(t, "sqlite3")
 	wcs := NewWebChatStore(db, "sqlite3")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init WebChatStore: %v", err)
@@ -2264,15 +2258,11 @@ func TestHandleAgentOutboundMessage_DMSyncBrokerPath(t *testing.T) {
 	ctx := context.Background()
 
 	// Set up a WebChatStore.
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	// Register db.Close as a t.Cleanup BEFORE proxy.Stop so that LIFO
-	// ordering guarantees proxy.Stop runs first — draining in-flight
-	// deliverToUser callbacks (including TouchDMActivity) before the
-	// database handle is closed.
-	t.Cleanup(func() { _ = db.Close() })
+	// openTestMemorySQLite registers db.Close as a t.Cleanup BEFORE
+	// proxy.Stop, so LIFO ordering guarantees proxy.Stop runs first —
+	// draining in-flight deliverToUser callbacks (including TouchDMActivity)
+	// before the database handle is closed.
+	db := openTestMemorySQLite(t, "sqlite3")
 	wcs := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)

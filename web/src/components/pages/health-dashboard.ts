@@ -17,12 +17,15 @@
 /**
  * Health Dashboard page component
  *
- * Displays a centralized health view of the Scion system including:
- * - Hub status and version
- * - Database pool health
- * - Broker status (per-broker cards)
- * - Agent health summary
- * - Dispatch pipeline status
+ * Owns fetching, polling and state for GET /api/v1/admin/health/summary,
+ * and lays out the section modules (design 5.1, 5.7):
+ * - Header: overall status pill, "as of" time, the serving hub instance
+ * - Needs attention (health-attention.ts), full width and first
+ * - Hub (health-hub-card.ts, database and the service account check
+ *   diagnostic folded in) | Dispatch (health-dispatch-card.ts)
+ * - Runtime brokers (compact table, health-broker-table.ts)
+ * - Integrations (chat plugins, health-integrations.ts)
+ * - Agents (phase counts and problem groups, health-agents-card.ts)
  *
  * Auto-refreshes every 30 seconds via polling.
  */
@@ -31,51 +34,59 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
-import { formatRelative } from '../../utils/time.js';
+import { formatInstant, formatInstantWithZone } from '../../utils/time.js';
+import type { HealthAttentionItem } from './health-attention.js';
+import './health-attention.js';
+import type {
+  HealthSummaryHub,
+  HealthSummaryDatabase,
+  HealthSummaryServiceAccountCheck,
+} from './health-hub-card.js';
+import './health-hub-card.js';
+import type { HealthSummaryBrokerList } from './health-broker-table.js';
+import './health-broker-table.js';
+import type { HealthSummaryAgents } from './health-agents-card.js';
+import './health-agents-card.js';
+import type {
+  HealthSummaryIntegration,
+  HealthSummaryIntegrationCounts,
+} from './health-integrations.js';
+import { integrationsSectionVisible } from './health-integrations.js';
+import type { HealthSummaryDispatch } from './health-dispatch-card.js';
+import './health-dispatch-card.js';
+import { healthPillStyles, healthTone } from './health-status.js';
 
-interface HealthSummary {
+export { formatHeartbeatAge } from './health-broker-table.js';
+export type { HealthAttentionItem } from './health-attention.js';
+export type { HealthSummaryIntegrationCounts } from './health-integrations.js';
+export type { HealthSummaryServiceAccountCheck } from './health-hub-card.js';
+
+export interface HealthSummary {
   status: string;
-  hub: {
-    status: string;
-    version: string;
-    uptime: string;
-    connected_brokers: number;
-    active_agents: number;
-    projects: number;
-    /** The hub's /healthz check map. */
-    checks?: Record<string, string>;
-    /** Non-healthy checks as "key: value" — the cause of a degraded/unhealthy hub. */
-    unhealthy_checks?: string[];
-  };
-  database: {
-    status: string;
-    pool_active: number;
-    pool_max: number;
-    pool_wait_count_total: number;
-    pool_idle: number;
-  };
-  brokers: Array<{
-    id: string;
-    name: string;
-    status: string;
-    runtime: string;
-    runtime_available: boolean;
-    agent_count: number;
-    agent_healthy: number;
-    /** Null or the Go zero time (`0001-01-01T00:00:00Z`) when never reported. */
-    last_heartbeat: string | null;
-  }>;
-  agents: {
-    total: number;
-    by_phase: Record<string, number>;
-    stalled: string[];
-    crashed: string[];
-    errored: string[];
-  };
-  dispatch: {
-    stuck_messages: number;
-    failed_1h: number;
-  } | null;
+  /** When the serving hub instance built the summary (RFC 3339). */
+  generated_at: string;
+  /** Ranked attention items; see deriveHealthSummaryStatus on the server. */
+  attention: HealthAttentionItem[];
+  hub: HealthSummaryHub;
+  database: HealthSummaryDatabase;
+  runtime_brokers: HealthSummaryBrokerList;
+  /**
+   * Chat and messaging plugins; empty when none are configured, or when the
+   * caller lacks hub.integrations.read (integrations_detail false).
+   */
+  integrations: HealthSummaryIntegration[];
+  /** True when integrations and integration attention items carry identity. */
+  integrations_detail: boolean;
+  integration_counts: HealthSummaryIntegrationCounts;
+  /** Null when the hub could not aggregate agents (not reported). */
+  agents: HealthSummaryAgents | null;
+  /** Null when the hub could not count dispatch health (not reported). */
+  dispatch: HealthSummaryDispatch | null;
+  /**
+   * Present only while the service account assignment check cannot run
+   * because the hub's identity lacks the access it needs.
+   */
+  service_account_check?: HealthSummaryServiceAccountCheck;
 }
 
 @customElement('scion-page-health-dashboard')
@@ -144,251 +155,121 @@ export class ScionPageHealthDashboard extends LitElement {
     }
   }
 
-  private statusIcon(status: string): string {
-    switch (status) {
-      case 'healthy':
-      case 'online':
-      case 'pass':
-        return '●'; // filled circle
-      case 'degraded':
-      case 'warn':
-        return '●';
-      case 'unhealthy':
-      case 'offline':
-      case 'fail':
-      case 'error':
-        return '●';
-      default:
-        return '○'; // empty circle
-    }
-  }
-
-  private statusColor(status: string): string {
-    switch (status) {
-      case 'healthy':
-      case 'online':
-      case 'pass':
-        return 'var(--scion-success, #22c55e)';
-      case 'degraded':
-      case 'warn':
-        return 'var(--scion-warning, #f59e0b)';
-      case 'unhealthy':
-      case 'offline':
-      case 'fail':
-      case 'error':
-        return 'var(--scion-error, #ef4444)';
-      default:
-        return 'var(--scion-text-muted, #94a3b8)';
-    }
-  }
-
-  static override styles = css`
-    :host {
-      display: block;
-    }
-
-    .header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 2rem;
-    }
-
-    .header-left {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-    }
-
-    .header h1 {
-      font-size: 1.5rem;
-      font-weight: 700;
-      color: var(--scion-text, #1e293b);
-      margin: 0;
-    }
-
-    .header-right {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      font-size: 0.8125rem;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .refresh-btn {
-      background: none;
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.375rem;
-      padding: 0.25rem 0.5rem;
-      font-size: 0.75rem;
-      cursor: pointer;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .refresh-btn:hover {
-      background: var(--scion-surface-hover, #f1f5f9);
-    }
-
-    .toggle-label {
-      display: flex;
-      align-items: center;
-      gap: 0.375rem;
-      cursor: pointer;
-      font-size: 0.8125rem;
-    }
-
-    .grid-2 {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 1rem;
-      margin-bottom: 1rem;
-    }
-
-    .grid-full {
-      margin-bottom: 1rem;
-    }
-
-    .card {
-      background: var(--scion-surface, #ffffff);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius-lg, 0.75rem);
-      padding: 1.25rem;
-    }
-
-    .card-title {
-      font-size: 0.875rem;
-      font-weight: 600;
-      color: var(--scion-text-muted, #64748b);
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      margin: 0 0 0.75rem 0;
-    }
-
-    .status-line {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      font-size: 1rem;
-      font-weight: 600;
-      margin-bottom: 0.5rem;
-    }
-
-    .stat-row {
-      display: flex;
-      justify-content: space-between;
-      font-size: 0.875rem;
-      padding: 0.25rem 0;
-      color: var(--scion-text, #1e293b);
-    }
-
-    .stat-row .label {
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .check-problem {
-      font-size: 0.8125rem;
-      padding: 0.125rem 0 0.25rem;
-      word-break: break-word;
-    }
-
-    .broker-grid {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 1rem;
-    }
-
-    .broker-card {
-      background: var(--scion-bg-subtle, #f1f5f9);
-      color: var(--scion-text, #1e293b);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.5rem;
-      padding: 1rem;
-      min-width: 200px;
-      flex: 1;
-    }
-
-    .broker-name {
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      margin-bottom: 0.5rem;
-    }
-
-    .broker-stat {
-      font-size: 0.8125rem;
-      color: var(--scion-text-muted, #64748b);
-      padding: 0.125rem 0;
-    }
-
-    .agent-summary {
-      display: flex;
-      gap: 1.5rem;
-      flex-wrap: wrap;
-      margin-bottom: 0.75rem;
-      font-size: 0.9375rem;
-    }
-
-    .agent-summary .stat {
-      font-weight: 600;
-    }
-
-    .agent-alert {
-      display: flex;
-      align-items: center;
-      gap: 0.375rem;
-      font-size: 0.875rem;
-      padding: 0.25rem 0;
-    }
-
-    .alert-warn {
-      color: var(--scion-warning, #f59e0b);
-    }
-
-    .alert-error {
-      color: var(--scion-error, #ef4444);
-    }
-
-    .loading,
-    .error-msg {
-      text-align: center;
-      padding: 3rem 1rem;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .error-msg {
-      color: var(--scion-error, #ef4444);
-    }
-
-    .overall-status {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.375rem;
-      padding: 0.25rem 0.75rem;
-      border-radius: 9999px;
-      font-size: 0.8125rem;
-      font-weight: 600;
-    }
-
-    .overall-status.healthy {
-      background: #dcfce7;
-      color: #166534;
-    }
-
-    .overall-status.degraded {
-      background: #fef3c7;
-      color: #92400e;
-    }
-
-    .overall-status.unhealthy {
-      background: #fecaca;
-      color: #991b1b;
-    }
-
-    @media (max-width: 768px) {
-      .grid-2 {
-        grid-template-columns: 1fr;
+  static override styles = [
+    healthPillStyles,
+    css`
+      :host {
+        display: block;
       }
-    }
-  `;
+
+      .header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        margin-bottom: 1.5rem;
+      }
+
+      .header-left {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+      }
+
+      .header h1 {
+        font-size: 1.5rem;
+        font-weight: 700;
+        color: var(--scion-text);
+        margin: 0;
+      }
+
+      .overall-status {
+        padding: 0.25rem 0.75rem;
+        font-size: 0.8125rem;
+      }
+
+      .dot {
+        width: 0.5rem;
+        height: 0.5rem;
+        border-radius: 9999px;
+        background: currentColor;
+      }
+
+      .meta {
+        font-size: 0.75rem;
+        color: var(--scion-text-muted);
+      }
+
+      .header-right {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted);
+      }
+
+      .refresh-btn {
+        background: none;
+        border: 1px solid var(--scion-border);
+        border-radius: 0.375rem;
+        padding: 0.25rem 0.5rem;
+        font-size: 0.75rem;
+        cursor: pointer;
+        color: var(--scion-text-muted);
+      }
+
+      .refresh-btn:hover {
+        background: var(--scion-bg-subtle);
+      }
+
+      .toggle-label {
+        display: flex;
+        align-items: center;
+        gap: 0.375rem;
+        cursor: pointer;
+        font-size: 0.8125rem;
+      }
+
+      .grid-2 {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1rem;
+        margin-bottom: 1rem;
+      }
+
+      .grid-full {
+        margin-bottom: 1rem;
+      }
+
+      .loading,
+      .error-msg {
+        text-align: center;
+        padding: 3rem 1rem;
+        color: var(--scion-text-muted);
+      }
+
+      .error-msg {
+        color: var(--scion-badge-danger-text);
+      }
+
+      .error-banner {
+        margin-bottom: 1rem;
+        padding: 0.75rem;
+        border-radius: 0.375rem;
+        font-size: 0.875rem;
+        background: var(--scion-badge-danger-bg);
+        color: var(--scion-badge-danger-text);
+      }
+
+      @media (max-width: 768px) {
+        .grid-2 {
+          grid-template-columns: 1fr;
+        }
+      }
+    `,
+  ];
 
   override render() {
     if (this.loading) {
@@ -406,13 +287,75 @@ export class ScionPageHealthDashboard extends LitElement {
     const d = this.data;
 
     return html`
+      ${this.renderHeader(d)}
+      ${this.error ? html`<div class="error-banner" role="alert">${this.error}</div>` : nothing}
+
+      <div class="grid-full">
+        <scion-health-attention
+          .items=${d.attention ?? null}
+          .integrationsDetail=${d.integrations_detail === true}
+        ></scion-health-attention>
+      </div>
+
+      <div class="grid-2" data-role="hub-dispatch">
+        <scion-health-hub-card
+          .hub=${d.hub ?? null}
+          .database=${d.database ?? null}
+          .serviceAccountCheck=${d.service_account_check ?? null}
+        ></scion-health-hub-card>
+        <scion-health-dispatch-card .dispatch=${d.dispatch ?? null}></scion-health-dispatch-card>
+      </div>
+
+      <div class="grid-full">
+        <scion-health-broker-table .brokers=${d.runtime_brokers}></scion-health-broker-table>
+      </div>
+
+      ${integrationsSectionVisible(
+        d.integrations_detail === true,
+        d.integrations,
+        d.integration_counts
+      )
+        ? html`<div class="grid-full">
+            <scion-health-integrations
+              .integrations=${d.integrations ?? []}
+              .detail=${d.integrations_detail === true}
+              .counts=${d.integration_counts ?? null}
+            ></scion-health-integrations>
+          </div>`
+        : nothing}
+
+      <div class="grid-full">
+        <scion-health-agents-card .agents=${d.agents ?? null}></scion-health-agents-card>
+      </div>
+    `;
+  }
+
+  private renderHeader(d: HealthSummary) {
+    const asOf = d.generated_at ? formatInstant(d.generated_at, 'time-seconds') : '';
+    const instance = d.hub?.instance_id ?? '';
+    return html`
       <div class="header">
         <div class="header-left">
           <h1>Health Dashboard</h1>
-          <span class="overall-status ${d.status}">
-            <span style="color: ${this.statusColor(d.status)}">${this.statusIcon(d.status)}</span>
-            ${d.status}
+          <span class="pill overall-status tone-${healthTone(d.status)}" data-role="overall-status">
+            <span class="dot" aria-hidden="true"></span>${d.status || 'unknown'}
           </span>
+          ${asOf
+            ? html`<span
+                class="meta"
+                data-role="as-of"
+                title=${formatInstantWithZone(d.generated_at, 'datetime-full')}
+                >as of ${asOf}</span
+              >`
+            : nothing}
+          ${instance
+            ? html`<span
+                class="meta"
+                data-role="instance"
+                title="The hub instance that served this summary"
+                >this instance: ${instance}</span
+              >`
+            : nothing}
         </div>
         <div class="header-right">
           <label class="toggle-label">
@@ -426,226 +369,6 @@ export class ScionPageHealthDashboard extends LitElement {
           <button class="refresh-btn" @click=${() => void this.fetchData()}>Refresh</button>
         </div>
       </div>
-
-      ${this.error
-        ? html`<div
-            class="error-msg"
-            style="margin-bottom:1rem;text-align:left;padding:0.75rem;background:#fef2f2;border-radius:0.375rem;font-size:0.875rem"
-          >
-            ${this.error}
-          </div>`
-        : nothing}
-
-      <!-- Hub & Database -->
-      <div class="grid-2">${this.renderHubCard(d)} ${this.renderDatabaseCard(d)}</div>
-
-      <!-- Brokers -->
-      ${this.renderBrokersCard(d)}
-
-      <!-- Agents -->
-      ${this.renderAgentsCard(d)}
-
-      <!-- Dispatch -->
-      <div class="grid-full">${this.renderDispatchCard(d)}</div>
     `;
   }
-
-  private renderHubCard(d: HealthSummary) {
-    return html`
-      <div class="card">
-        <div class="card-title">Hub Status</div>
-        <div class="status-line">
-          <span style="color: ${this.statusColor(d.hub.status)}"
-            >${this.statusIcon(d.hub.status)}</span
-          >
-          ${d.hub.status}
-        </div>
-        ${(d.hub.unhealthy_checks ?? []).map(
-          (c) =>
-            html`<div class="check-problem" style="color: ${this.statusColor(d.hub.status)}">
-              ${c}
-            </div>`
-        )}
-        <div class="stat-row"><span class="label">Uptime</span><span>${d.hub.uptime}</span></div>
-        <div class="stat-row"><span class="label">Version</span><span>${d.hub.version}</span></div>
-        <div class="stat-row">
-          <span class="label">Connected Brokers</span><span>${d.hub.connected_brokers}</span>
-        </div>
-        <div class="stat-row">
-          <span class="label">Active Agents</span><span>${d.hub.active_agents}</span>
-        </div>
-        <div class="stat-row">
-          <span class="label">Projects</span><span>${d.hub.projects}</span>
-        </div>
-      </div>
-    `;
-  }
-
-  private renderDatabaseCard(d: HealthSummary) {
-    const poolUtil =
-      d.database.pool_max > 0
-        ? Math.round((d.database.pool_active / d.database.pool_max) * 100)
-        : 0;
-    return html`
-      <div class="card">
-        <div class="card-title">Database</div>
-        <div class="status-line">
-          <span style="color: ${this.statusColor(d.database.status)}"
-            >${this.statusIcon(d.database.status)}</span
-          >
-          ${d.database.status}
-        </div>
-        <div class="stat-row">
-          <span class="label">Pool</span
-          ><span>${d.database.pool_active}/${d.database.pool_max} active (${poolUtil}%)</span>
-        </div>
-        <div class="stat-row">
-          <span class="label">Idle</span><span>${d.database.pool_idle}</span>
-        </div>
-        <div class="stat-row">
-          <span class="label">Wait Count (Total)</span
-          ><span>${d.database.pool_wait_count_total}</span>
-        </div>
-      </div>
-    `;
-  }
-
-  private renderBrokersCard(d: HealthSummary) {
-    if (d.brokers.length === 0) {
-      return html`
-        <div class="grid-full">
-          <div class="card">
-            <div class="card-title">Brokers</div>
-            <div style="font-size:0.875rem;color:var(--scion-text-muted,#64748b)">
-              No brokers registered
-            </div>
-          </div>
-        </div>
-      `;
-    }
-
-    return html`
-      <div class="grid-full">
-        <div class="card">
-          <div class="card-title">Brokers</div>
-          <div class="broker-grid">
-            ${d.brokers.map(
-              (b) => html`
-                <div class="broker-card">
-                  <div class="broker-name">${b.name || b.id}</div>
-                  <div class="status-line" style="font-size:0.875rem">
-                    <span style="color: ${this.statusColor(b.status)}"
-                      >${this.statusIcon(b.status)}</span
-                    >
-                    ${b.status}
-                  </div>
-                  <div class="broker-stat">Agents: ${b.agent_healthy}/${b.agent_count} healthy</div>
-                  <div class="broker-stat">
-                    Runtime: ${b.runtime} ${b.runtime_available ? '✓' : '✗'}
-                  </div>
-                  <div class="broker-stat" style="color:var(--scion-text-muted,#64748b)">
-                    NFS: not reported
-                  </div>
-                  <div class="broker-stat">Heartbeat: ${formatHeartbeatAge(b.last_heartbeat)}</div>
-                </div>
-              `
-            )}
-          </div>
-        </div>
-      </div>
-    `;
-  }
-
-  private renderAgentsCard(d: HealthSummary) {
-    return html`
-      <div class="grid-full">
-        <div class="card">
-          <div class="card-title">Agents</div>
-          <div class="agent-summary">
-            <div><span class="stat">${d.agents.total}</span> Total</div>
-            ${Object.entries(d.agents.by_phase).map(
-              ([phase, count]) => html`<div><span class="stat">${count}</span> ${phase}</div>`
-            )}
-          </div>
-          ${d.agents.stalled.length > 0
-            ? html`
-                <div class="agent-alert alert-warn">
-                  ⚠ ${d.agents.stalled.length} stalled: ${d.agents.stalled.join(', ')}
-                </div>
-              `
-            : nothing}
-          ${d.agents.crashed.length > 0
-            ? html`
-                <div class="agent-alert alert-error">
-                  ✗ ${d.agents.crashed.length} crashed: ${d.agents.crashed.join(', ')}
-                </div>
-              `
-            : nothing}
-          ${d.agents.errored.length > 0
-            ? html`
-                <div class="agent-alert alert-error">
-                  ✗ ${d.agents.errored.length} errored: ${d.agents.errored.join(', ')}
-                </div>
-              `
-            : nothing}
-          ${d.agents.stalled.length === 0 &&
-          d.agents.crashed.length === 0 &&
-          d.agents.errored.length === 0
-            ? html`<div style="font-size:0.875rem;color:var(--scion-success,#22c55e)">
-                All agents healthy
-              </div>`
-            : nothing}
-        </div>
-      </div>
-    `;
-  }
-
-  private renderDispatchCard(d: HealthSummary) {
-    if (!d.dispatch) {
-      return html`
-        <div class="card">
-          <div class="card-title">Dispatch Pipeline</div>
-          <div style="font-size:0.875rem;color:var(--scion-text-muted,#64748b)">
-            Dispatch metrics not yet available. A future update will expose dispatch pipeline stats
-            via the health summary API.
-          </div>
-        </div>
-      `;
-    }
-    return html`
-      <div class="card">
-        <div class="card-title">Dispatch Pipeline</div>
-        <div class="stat-row">
-          <span class="label">Stuck Messages</span>
-          <span
-            style="color: ${d.dispatch.stuck_messages > 0
-              ? 'var(--scion-error,#ef4444)'
-              : 'inherit'}; font-weight: ${d.dispatch.stuck_messages > 0 ? '600' : 'normal'}"
-          >
-            ${d.dispatch.stuck_messages}
-          </span>
-        </div>
-        <div class="stat-row">
-          <span class="label">Failed (1h)</span><span>${d.dispatch.failed_1h}</span>
-        </div>
-      </div>
-    `;
-  }
-}
-
-/**
- * Formats a broker heartbeat as a relative age. A null, undefined or
- * empty value, the Go zero time (`0001-01-01T00:00:00Z`), or any other
- * non-positive instant (the Unix epoch itself or any earlier time) means
- * the heartbeat was never reported and renders as "never". An unparsable
- * value renders as "unknown" and a future instant as "just now".
- */
-export function formatHeartbeatAge(isoDate: string | null | undefined): string {
-  if (!isoDate) return 'never';
-  const ms = new Date(isoDate).getTime();
-  if (Number.isNaN(ms)) return 'unknown';
-  if (ms <= 0) return 'never';
-  // A future instant is clock skew between hub and browser.
-  if (ms > Date.now()) return 'just now';
-  return formatRelative(isoDate, { style: 'narrow' });
 }

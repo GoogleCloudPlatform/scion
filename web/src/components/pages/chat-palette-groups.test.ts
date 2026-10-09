@@ -36,7 +36,7 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { apiFetch } from '../../client/api.js';
 import { navigateTo, pushRoute } from '../../client/main.js';
-import type { PaletteCandidate, PaletteTarget } from '../../client/chat-palette-types.js';
+import type { PaletteCandidate, PaletteTarget } from '../../client/palette-types.js';
 import {
   AGENT_DMS_CACHE_MS,
   AGENTS_IDLE_TIMEOUT_MS,
@@ -62,15 +62,16 @@ const fakeState = vi.hoisted(() => {
   t.seedAgents = (list: any[]) => list.forEach((a: any) => t.agents.set(a.id, a));
   t.removeAgent = (id: string) => t.agents.delete(id);
   t.setScope = () => {};
+  t.getAgent = (id: string) => t.agents.get(id);
+  // Seed epochs record nothing here.
+  t.scopeGeneration = 0;
+  t.beginSeedEpoch = () => Symbol('seed-epoch');
+  t.endSeedEpoch = () => {};
   return t;
 });
 
-vi.mock('../../client/main.js', () => ({
-  navigateTo: vi.fn(),
-  pushRoute: vi.fn((path: string) => {
-    window.history.pushState({}, '', path);
-    return Promise.resolve();
-  }),
+vi.mock('../../client/main.js', async () => ({
+  ...(await import('../../client/__fixtures__/main-stub.js')),
   replaceRoute: vi.fn((path: string) => {
     window.history.replaceState(window.history.state, '', path);
     return Promise.resolve();

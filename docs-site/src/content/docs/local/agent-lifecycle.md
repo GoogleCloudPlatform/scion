@@ -115,12 +115,17 @@ non-zero container exit reported in the broker heartbeat — which covers cases
 where the container died before `sciontool` could report.
 
 A third path covers a container that vanishes without reporting an exit (for
-example, removed outside Scion). In Hub-connected setups, a `running` agent
-that is missing from its online Runtime Broker's complete runtime inventory for longer
-than `missing_agent_grace` (default **3 minutes**, see
+example, removed outside Scion). In Hub-connected setups, a `running` agent (or
+a `stopping` agent whose final stop report never arrived) that is missing from
+its online Runtime Broker's complete runtime inventory for longer than
+`missing_agent_grace` (default **3 minutes**, see
 [server configuration](/scion/reference/server-config/)) moves to `error` with
 exit reason `container_missing`, instead of staying `running` while messages
 to it are buffered. It can then be restarted like any other `error`-phase agent.
+
+On Kubernetes, a preempted or evicted agent pod leaves `running` without
+waiting for that grace period; see
+[Preempted and evicted status](/scion/hosted/ha/kubernetes/#preempted-and-evicted-status).
 
 :::note
 A normal `scion stop` sends `SIGTERM`, which harnesses like Claude Code handle
@@ -147,6 +152,8 @@ scion resume <agent-name> --force
 Using `scion resume --force` on an agent in the `error` phase permits an in-place restart, passing the harness-specific resume/continue flag so that the interrupted conversation is preserved.
 
 In Hub-connected setups, the same recovery is available in the web UI as a **Resume (best effort)** action on an `error`-phase agent, which asks you to confirm first. It calls the agent's `start` action with `forceResume` set (see the [API reference](/scion/reference/api/#agents-apiv1agents)). The resume is best effort: if the harness session cannot be continued, the agent may still start fresh or fail again.
+
+In Hub mode only one start of an agent runs at a time. If you start, resume, or restart an agent while another start of it is still in progress (for example, automatic recovery or a reincarnation), the Hub refuses with `409 start_in_progress` and tells you who holds the start and when it will finish or be released; run `scion stop` to cancel it. A restart whose stop step fails is aborted with a retryable `503` instead of starting a second instance.
 
 #### Reincarnating an Agent
 
@@ -213,7 +220,7 @@ Always start by running `scion look <agent-name>` to inspect the active screen s
 
 `scion delete <agent-name> --non-interactive` immediately reclaims container resources. Since an agent's true deliverable is its **artifact** (pushed commits, opened PRs, files written to a shared volume), **deleting a completed agent is the default, recommended clean-up path.**
 
-In Hub mode, teardown on the Runtime Broker can outlast the request. If it does, `scion delete` waits up to three minutes for the Hub to confirm the delete, and only then removes the local worktree. If the delete fails, the worktree is kept. If the Runtime Broker teardown is still unresolved, the agent also can't be started, restarted or woken (`409 delete_in_progress`) until you run `scion delete` again. See [`scion delete`](/scion/reference/cli/#scion-delete-or-rm) and [`DELETE /agents/:id`](/scion/reference/api/).
+In Hub mode, teardown on the Runtime Broker can outlast the request. If it does, `scion delete` waits up to three minutes for the Hub to confirm the delete, and only then removes the local worktree. If the delete fails, the worktree is kept. If the Runtime Broker teardown is still unresolved, the agent also can't be started, restarted or woken (`409 delete_in_progress`) until you run `scion delete` again. If the Runtime Broker holds a different run of the agent than the Hub recorded, it deletes nothing and the Hub refuses the delete with `409 conflict` and keeps the agent, even with `--force`. See [`scion delete`](/scion/reference/cli/#scion-delete-or-rm) and [`DELETE /agents/:id`](/scion/reference/api/).
 
 However, to prevent premature deletion of agents with active or pending tasks, strict teardown guidelines must be followed.
 

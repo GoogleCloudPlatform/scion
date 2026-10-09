@@ -528,6 +528,7 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 					slog.Warn("failed to sync hub role grants on token refresh",
 						"email", claims.Email, "user_id", user.ID, "role", role, "error", err)
 				}
+				s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID})
 			}
 		}
 	}
@@ -958,6 +959,7 @@ func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request, id st
 		NotFound(w, "access token")
 		return
 	}
+	s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID()})
 
 	// Audit is now atomic inside the service (B3/G4).
 	w.WriteHeader(http.StatusNoContent)
@@ -981,6 +983,7 @@ func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request, id st
 		NotFound(w, "access token")
 		return
 	}
+	s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID()})
 
 	// Audit is now atomic inside the service (B3/G4).
 	w.WriteHeader(http.StatusNoContent)
@@ -2278,6 +2281,12 @@ func deleteSuperAdminRoleBinding(ctx context.Context, st store.Store, userID str
 			} else {
 				slog.Info("deleted super-admin binding at login-time demotion",
 					"user_id", userID, "binding_id", b.ID)
+				// The user's system authority ended: re-evaluate the user's
+				// project standing (ptone/scion#3433). Best-effort like the
+				// delete; the full sweep covers a failure.
+				if err := enqueueMembershipLossTx(ctx, st, userID, "", store.MembershipLossTriggerSystemScopeChange, auditActorFromContext(ctx)); err != nil {
+					slog.Warn("deleteSuperAdminBinding: membership standing re-evaluation not enqueued", "user_id", userID, "error", err)
+				}
 			}
 		}
 	}

@@ -572,7 +572,8 @@ func TestTranslateContainerPath_ScionVolumes(t *testing.T) {
 	slug := "my-proj"
 	projectID := "aabbccdd-1122-3344-5566-778899aabbcc"
 
-	got := translateContainerPath("/scion-volumes/scratchpad/foo/bar.md", slug, projectID)
+	got, err := translateContainerPath("/scion-volumes/scratchpad/foo/bar.md", slug, projectID)
+	require.NoError(t, err)
 
 	expected := filepath.Join(fakeHome, ".scion", "project-configs",
 		"my-proj__aabbccdd", "shared-dirs", "scratchpad", "foo", "bar.md")
@@ -587,7 +588,8 @@ func TestTranslateContainerPath_ScionVolumesNoRemainder(t *testing.T) {
 	slug := "my-proj"
 	projectID := "aabbccdd-1122-3344-5566-778899aabbcc"
 
-	got := translateContainerPath("/scion-volumes/scratchpad", slug, projectID)
+	got, err := translateContainerPath("/scion-volumes/scratchpad", slug, projectID)
+	require.NoError(t, err)
 
 	expected := filepath.Join(fakeHome, ".scion", "project-configs",
 		"my-proj__aabbccdd", "shared-dirs", "scratchpad")
@@ -602,7 +604,8 @@ func TestTranslateContainerPath_WorkspaceScionVolumes(t *testing.T) {
 	slug := "my-proj"
 	projectID := "aabbccdd-1122-3344-5566-778899aabbcc"
 
-	got := translateContainerPath("/workspace/.scion-volumes/scratchpad/foo.md", slug, projectID)
+	got, err := translateContainerPath("/workspace/.scion-volumes/scratchpad/foo.md", slug, projectID)
+	require.NoError(t, err)
 
 	expected := filepath.Join(fakeHome, ".scion", "project-configs",
 		"my-proj__aabbccdd", "shared-dirs", "scratchpad", "foo.md")
@@ -610,24 +613,28 @@ func TestTranslateContainerPath_WorkspaceScionVolumes(t *testing.T) {
 }
 
 func TestTranslateContainerPath_NonContainerPathUnchanged(t *testing.T) {
-	got := translateContainerPath("/home/scion/something", "slug", "id")
+	got, err := translateContainerPath("/home/scion/something", "slug", "id")
+	require.NoError(t, err)
 	assert.Equal(t, "/home/scion/something", got)
 }
 
 func TestTranslateContainerPath_PartialQueryUnchanged(t *testing.T) {
-	got := translateContainerPath("report.txt", "slug", "id")
+	got, err := translateContainerPath("report.txt", "slug", "id")
+	require.NoError(t, err)
 	assert.Equal(t, "report.txt", got)
 }
 
 func TestTranslateContainerPath_BarePrefix(t *testing.T) {
 	// "/scion-volumes" with no shared dir name — can't translate.
-	got := translateContainerPath("/scion-volumes", "slug", "id")
+	got, err := translateContainerPath("/scion-volumes", "slug", "id")
+	require.NoError(t, err)
 	assert.Equal(t, "/scion-volumes", got)
 }
 
 func TestTranslateContainerPath_TrailingSlashOnly(t *testing.T) {
 	// "/scion-volumes/" with no shared dir name — can't translate.
-	got := translateContainerPath("/scion-volumes/", "slug", "id")
+	got, err := translateContainerPath("/scion-volumes/", "slug", "id")
+	require.NoError(t, err)
 	assert.Equal(t, "/scion-volumes/", got)
 }
 

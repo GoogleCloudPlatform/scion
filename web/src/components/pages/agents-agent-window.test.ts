@@ -143,10 +143,15 @@ function setView(el: TestEl, view: string): void {
     ?.dispatchEvent(new CustomEvent('view-change', { detail: { view } }));
 }
 
-function pager(el: TestEl): HTMLElement & { showChip: boolean; chipText: string } {
+function pager(el: TestEl): HTMLElement & {
+  showChip: boolean;
+  chipText: string;
+  updateComplete: Promise<unknown>;
+} {
   return el.shadowRoot?.querySelector('scion-agent-pager') as HTMLElement & {
     showChip: boolean;
     chipText: string;
+    updateComplete: Promise<unknown>;
   };
 }
 
@@ -206,8 +211,14 @@ function reconnect(): void {
   sse.dispatchEvent(new CustomEvent('connected'));
 }
 
+/**
+ * Fetch fakes are stubbed as plain functions, not vi.fn(): Vitest keeps
+ * every vi.fn() and its implementation until the file ends, and a fake's
+ * recorded requests hold abort signals that reach the page that sent
+ * them, so each test's page and agents would stay on the heap.
+ */
 function stubFake(fake: Fake): void {
-  vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
+  vi.stubGlobal('fetch', fakeFetch(fake));
 }
 
 function hasStopAll(el: TestEl): boolean {
@@ -234,6 +245,10 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
 
   afterEach(() => {
     document.body.querySelectorAll('scion-page-agents').forEach((n) => n.remove());
+    // Vitest keeps every vi.fn() and spy, with its recorded calls, until
+    // the file ends. Clear the calls so they do not keep removed pages and
+    // their agents reachable.
+    vi.clearAllMocks();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     localStorage.clear();
@@ -310,7 +325,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         for (const k of ['sort', 'dir', 'fit', 'stats', 'limit', 'phase']) u.searchParams.delete(k);
         return fakeFetch(fake)(u.pathname + (u.search || ''), init);
       };
-      vi.stubGlobal('fetch', vi.fn(legacy));
+      vi.stubGlobal('fetch', legacy);
       const el = await mount();
       // The drain continues from the legacy first page and its cursor:
       // the first request plus pages 2 and 3, with no refetch of page 1.
@@ -331,7 +346,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         return fakeFetch(fake)(u.pathname + (u.search || ''), init);
       };
       const h = holdable(legacy, isGlobalAgentsList);
-      vi.stubGlobal('fetch', vi.fn(h.fn));
+      vi.stubGlobal('fetch', h.fn);
       return h;
     }
 
@@ -418,7 +433,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         agents: Array.from({ length: 1600 }, (_, i) => makeAgent(i)),
         requests: [],
       };
-      vi.stubGlobal('fetch', vi.fn(limitHonouringLegacy(fake)));
+      vi.stubGlobal('fetch', limitHonouringLegacy(fake));
       const el = await mount();
       expect(query(fake.requests[0]).get('limit')).toBe('25');
       // The 25-row answer, then four drain pages of 500 from the start.
@@ -459,7 +474,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
           headers: { 'Content-Type': 'application/json' },
         });
       };
-      vi.stubGlobal('fetch', vi.fn(withGoneRow));
+      vi.stubGlobal('fetch', withGoneRow);
       const el = await mount();
       expect(fake.requests).toHaveLength(5);
       expect(internals(el).agentWindow.state).toBe('held');
@@ -474,7 +489,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         agents: Array.from({ length: 2100 }, (_, i) => makeAgent(i)),
         requests: [],
       };
-      vi.stubGlobal('fetch', vi.fn(limitHonouringLegacy(fake)));
+      vi.stubGlobal('fetch', limitHonouringLegacy(fake));
       const el = await mount();
       expect(fake.requests).toHaveLength(5);
       expect(fake.requests.slice(1).map((r) => query(r).get('cursor'))).toEqual([
@@ -512,7 +527,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         const target = phase === 'stopped' ? stopped : full;
         return fakeFetch(target)(u.pathname + (u.search || ''), init);
       };
-      vi.stubGlobal('fetch', vi.fn(legacy));
+      vi.stubGlobal('fetch', legacy);
       localStorage.setItem('scion-filter-agents-phase', 'stopped');
       const el = await mount();
       // The phased first request, then three unphased legacy pages.
@@ -544,7 +559,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         const target = phase === 'stopped' ? stopped : full;
         return fakeFetch(target)(u.pathname + (u.search || ''), init);
       };
-      vi.stubGlobal('fetch', vi.fn(legacy));
+      vi.stubGlobal('fetch', legacy);
       localStorage.setItem('scion-filter-agents-phase', 'stopped');
       const el = await mount();
       // The phased first request, then four unphased drain pages from the start.
@@ -568,25 +583,22 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         requests: [],
       };
       const inner = fakeFetch(fake);
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-          const raw =
-            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-          const u = new URL(raw, 'http://localhost');
-          if (isGlobalAgentsList(u) && !u.searchParams.has('sort')) {
-            fake.requests.push(raw);
-            if (!u.searchParams.has('cursor')) {
-              return new Response(
-                JSON.stringify({ agents: [], nextCursor: '500', _capabilities: SCOPE_CAPS }),
-                { status: 200, headers: { 'Content-Type': 'application/json' } }
-              );
-            }
-            return new Response('{}', { status: 502 });
+      vi.stubGlobal('fetch', async (input: string | URL | Request, init?: RequestInit) => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const u = new URL(raw, 'http://localhost');
+        if (isGlobalAgentsList(u) && !u.searchParams.has('sort')) {
+          fake.requests.push(raw);
+          if (!u.searchParams.has('cursor')) {
+            return new Response(
+              JSON.stringify({ agents: [], nextCursor: '500', _capabilities: SCOPE_CAPS }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } }
+            );
           }
-          return inner(input, init);
-        })
-      );
+          return new Response('{}', { status: 502 });
+        }
+        return inner(input, init);
+      });
       localStorage.setItem('scion-filter-agents-mode', 'project');
       const el = await mount();
       expect(internals(el).error).toBeNull();
@@ -631,7 +643,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         const fake: Fake = { agents: phased(1200), requests: [] };
         const h = holdable(fakeFetch(fake), isGlobalAgentsList);
         h.hold();
-        vi.stubGlobal('fetch', vi.fn(h.fn));
+        vi.stubGlobal('fetch', h.fn);
         const el = await mountUnsettled();
         await vi.waitFor(() => expect(h.sent).toHaveLength(1));
         if (change === 'phase') internals(el).setPhaseFilter('stopped');
@@ -659,7 +671,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
     it('A to B to A while paged: the B request is aborted and the A page stays, with no request', async () => {
       const fake: Fake = { agents: phased(1200), requests: [] };
       const h = holdable(fakeFetch(fake), isGlobalAgentsList);
-      vi.stubGlobal('fetch', vi.fn(h.fn));
+      vi.stubGlobal('fetch', h.fn);
       const el = await mount();
       const win = internals(el).agentWindow;
       expect(win.state).toBe('paged');
@@ -682,7 +694,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       const fake: Fake = { agents: phased(1200), requests: [] };
       const h = holdable(fakeFetch(fake), isGlobalAgentsList);
       h.hold();
-      vi.stubGlobal('fetch', vi.fn(h.fn));
+      vi.stubGlobal('fetch', h.fn);
       const el = await mountUnsettled();
       await vi.waitFor(() => expect(h.sent).toHaveLength(1));
       internals(el).toggleSort('name');
@@ -712,13 +724,14 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         requests: [],
       };
       const h = holdable(fakeFetch(fake), isGlobalAgentsList);
-      vi.stubGlobal('fetch', vi.fn(h.fn));
+      vi.stubGlobal('fetch', h.fn);
       const el = await mount();
       expect(internals(el).agentWindow.state).toBe('paged');
       h.hold();
       void internals(el).agentWindow.next();
       await vi.waitFor(() => expect(h.sent).toHaveLength(2));
-      expect(query(h.sent[1].url).get('cursor')).toBe('25');
+      // Next asks for the next slice of the walk order frozen from page 0.
+      expect(query(h.sent[1].url).get('ids')?.split(',')).toHaveLength(25);
       expect(h.sent[1].signal?.aborted).toBe(false);
       return { el, h, fake };
     }
@@ -768,7 +781,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       };
       const h = holdable(failing, isGlobalAgentsList);
       h.hold();
-      vi.stubGlobal('fetch', vi.fn(h.fn));
+      vi.stubGlobal('fetch', h.fn);
       localStorage.setItem('scion-view-agents', 'graph');
       const el = await mountUnsettled();
       await vi.waitFor(() => expect(h.sent).toHaveLength(1));
@@ -1026,26 +1039,23 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         };
         const inner = fakeFetch(fake);
         let armed = false;
-        vi.stubGlobal(
-          'fetch',
-          vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-            const raw =
-              typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-            const u = new URL(raw, 'http://localhost');
-            if (armed && isGlobalAgentsList(u) && !u.searchParams.has('sort')) {
-              // The first legacy page of the drain: a create lands and is
-              // flushed before the page replies.
-              armed = false;
-              handleUpdate('agent.new-7.created', {
-                ...makeAgent(5001),
-                id: 'new-7',
-                agentId: 'new-7',
-              });
-              (stateManager as unknown as { flush(): void }).flush();
-            }
-            return inner(input, init);
-          })
-        );
+        vi.stubGlobal('fetch', async (input: string | URL | Request, init?: RequestInit) => {
+          const raw =
+            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          const u = new URL(raw, 'http://localhost');
+          if (armed && isGlobalAgentsList(u) && !u.searchParams.has('sort')) {
+            // The first legacy page of the drain: a create lands and is
+            // flushed before the page replies.
+            armed = false;
+            handleUpdate('agent.new-7.created', {
+              ...makeAgent(5001),
+              id: 'new-7',
+              agentId: 'new-7',
+            });
+            (stateManager as unknown as { flush(): void }).flush();
+          }
+          return inner(input, init);
+        });
         localStorage.setItem('scion-view-agents', 'graph');
         const el = await mount();
         expect(internals(el).agentWindow.state).toBe('held');
@@ -1073,7 +1083,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       };
       const h = holdable(fakeFetch(fake), isGlobalAgentsList);
       h.hold();
-      vi.stubGlobal('fetch', vi.fn(h.fn));
+      vi.stubGlobal('fetch', h.fn);
       localStorage.setItem('scion-view-agents', 'graph');
       const run = vi.spyOn(AgentDrainRunner.prototype, 'run');
       const el = await mountUnsettled();
@@ -1108,7 +1118,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         requests: [],
       };
       const h = holdable(fakeFetch(fake), isGlobalAgentsList);
-      vi.stubGlobal('fetch', vi.fn(h.fn));
+      vi.stubGlobal('fetch', h.fn);
       return { fake, h };
     }
 
@@ -1156,7 +1166,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       h.hold();
       void win.next();
       await vi.waitFor(() => expect(h.heldCount).toBe(1));
-      expect(query(h.sent.at(-1)!.url).get('cursor')).toBe('25');
+      expect(query(h.sent.at(-1)!.url).get('ids')?.split(',')).toHaveLength(25);
       // Page 1 holds g-01174 down to g-01150; this activity time sorts inside it.
       handleUpdate('agent.g-00010.status', {
         agentId: 'g-00010',
@@ -1184,6 +1194,28 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       expect(win.memberIndex.countOnly).toBe(true);
       expect(text(el)).toContain('2,002 agents · 2,002 running, as of last refresh');
       expect(pager(el).showChip).toBe(true);
+    });
+
+    it('count-only: approximate counts and pager total show as lower bounds (ptone/scion#3426)', async () => {
+      const { fake } = heldFake(2002);
+      fake.approximate = true;
+      const el = await mount();
+      const win = internals(el).agentWindow;
+      expect(win.memberIndex.countOnly).toBe(true);
+      expect(win.totalApproximate).toBe(true);
+      expect(text(el)).toContain('2,002+ agents · 2,002+ running, as of last refresh');
+      await pager(el).updateComplete;
+      expect(pager(el).shadowRoot?.textContent).toContain('of 2002+');
+    });
+
+    it('count-only: exact counts and pager total have no marker', async () => {
+      heldFake(2002);
+      const el = await mount();
+      expect(internals(el).agentWindow.totalApproximate).toBe(false);
+      expect(text(el)).toContain('2,002 agents · 2,002 running, as of last refresh');
+      await pager(el).updateComplete;
+      expect(pager(el).shadowRoot?.textContent).toContain('of 2002');
+      expect(pager(el).shadowRoot?.textContent).not.toContain('of 2002+');
     });
 
     it('count-only: with no live change the chip stays hidden', async () => {
@@ -1238,7 +1270,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         return fakeFetch(fake)(u.pathname + (u.search || ''), init);
       };
       const h = holdable(serve, isGlobalAgentsList);
-      vi.stubGlobal('fetch', vi.fn(h.fn));
+      vi.stubGlobal('fetch', h.fn);
       return h;
     }
 
@@ -1386,6 +1418,13 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         el = await row.start(h);
       });
 
+      // The hooks of every row live until the file ends; drop this row's
+      // page and fake so they do not stay on the heap after its tests.
+      afterEach(() => {
+        el = undefined as unknown as TestEl;
+        h = undefined as unknown as ReturnType<typeof holdable>;
+      });
+
       const done = async (): Promise<void> => {
         await flushLive(el);
         h.release();
@@ -1509,7 +1548,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         requests: [],
       };
       const h = holdable(fakeFetch(fake), isGlobalAgentsList);
-      vi.stubGlobal('fetch', vi.fn(h.fn));
+      vi.stubGlobal('fetch', h.fn);
       const el = await mount();
       expect(internals(el).agentWindow.state).toBe('small');
       h.hold();
@@ -2086,7 +2125,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         requests: [],
       };
       const h = holdable(fakeFetch(fake), isGlobalAgentsList);
-      vi.stubGlobal('fetch', vi.fn(h.fn));
+      vi.stubGlobal('fetch', h.fn);
       const el = await mount();
       const win = internals(el).agentWindow;
       expect(win.state).toBe('paged');
@@ -2121,7 +2160,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         requests: [],
       };
       const h = holdable(fakeFetch(fake), isGlobalAgentsList);
-      vi.stubGlobal('fetch', vi.fn(h.fn));
+      vi.stubGlobal('fetch', h.fn);
       const el = await mount();
       const win = internals(el).agentWindow;
       expect(win.state).toBe('paged');
@@ -2166,7 +2205,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
           requests: [],
         };
         const h = holdable(fakeFetch(fake), isGlobalAgentsList);
-        vi.stubGlobal('fetch', vi.fn(h.fn));
+        vi.stubGlobal('fetch', h.fn);
         const el = await mount();
         const win = internals(el).agentWindow;
         expect(win.state).toBe('paged');
@@ -2411,7 +2450,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         deletion: deletingView(),
       };
       const h = holdable(fakeFetch(fake), isGlobalAgentsList);
-      vi.stubGlobal('fetch', vi.fn(h.fn));
+      vi.stubGlobal('fetch', h.fn);
       const el = await mount();
       const win = internals(el).agentWindow;
       expect(win.state).toBe('paged');
@@ -2452,7 +2491,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         deletion: deletingView(),
       };
       const h = holdable(fakeFetch(fake), isGlobalAgentsList);
-      vi.stubGlobal('fetch', vi.fn(h.fn));
+      vi.stubGlobal('fetch', h.fn);
       localStorage.setItem('scion-filter-agents-mode', 'project');
       const el = await mount();
       const win = internals(el).agentWindow;

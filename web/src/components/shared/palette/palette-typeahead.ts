@@ -28,12 +28,24 @@
  * would have typed, for the palette to apply as its query once its input
  * has focus.
  *
+ * On a touch-primary device, starting a capture also focuses a hidden text
+ * field (see {@link PaletteTypeaheadOptions.holdsKeyboard}). iOS Safari
+ * shows the on-screen keyboard only for a text field focused synchronously
+ * inside the tap that asked for it, and the palette's query input can only
+ * take focus later: after the module loads, the element renders and
+ * Shoelace's dialog shows. Focus moved from one text field to another keeps
+ * the keyboard up, so the query input inherits it from the hidden field
+ * when it takes focus. Hosts therefore start capturing from the open
+ * request itself, after reading the element to refocus on close.
+ *
  * Kept in its own small module, with no Lit or Shoelace imports, so a host
  * can start capturing synchronously from its open request without pulling
  * the palette component into its bundle.
  */
 
 import { isMacPlatform } from '../../../utils/platform.js';
+import { TOUCH_PRIMARY_QUERY } from '../../../utils/input-modality.js';
+import { deepActiveElement } from '../deep-active-element.js';
 
 /**
  * How long a capture lasts at most after its latest
@@ -42,6 +54,15 @@ import { isMacPlatform } from '../../../utils/platform.js';
  * good; the text typed so far is kept for a late {@link PaletteTypeahead.take}.
  */
 export const PALETTE_TYPEAHEAD_MAX_MS = 5000;
+
+/**
+ * How long the hidden text field holding the on-screen keyboard lasts at
+ * most after the latest {@link PaletteTypeahead.start}. It outlives the
+ * capture's own time limit, since a first open over a slow network can take
+ * longer than that to show, and keys typed into it meanwhile still become
+ * the query; this only bounds a field that no open ever settles or cancels.
+ */
+export const PALETTE_KEYBOARD_PROXY_MAX_MS = 30_000;
 
 /** Editing and navigation keys swallowed, so they act on neither the old focus nor the query. */
 const SWALLOWED_KEYS = new Set([
@@ -65,16 +86,73 @@ export interface PaletteTypeaheadOptions {
    * shortcut. Defaults to {@link isMacPlatform}.
    */
   mac?: boolean;
+  /**
+   * Whether a capture should hold the on-screen keyboard: focus a hidden
+   * text field from {@link PaletteTypeahead.start} until the capture ends.
+   * Read at each start. Defaults to whether the primary pointer is touch
+   * ({@link TOUCH_PRIMARY_QUERY}); elsewhere focus stays where it was until
+   * the query input takes it.
+   */
+  holdsKeyboard?: () => boolean;
+}
+
+function primaryPointerIsTouch(): boolean {
+  return typeof window.matchMedia === 'function' && window.matchMedia(TOUCH_PRIMARY_QUERY).matches;
+}
+
+/**
+ * A text field that holds focus, and with it the on-screen keyboard, until
+ * the palette's query input can take it. Fixed at the top left, transparent
+ * and 16px, so focusing it neither scrolls nor zooms the page and nothing
+ * shows; it takes no pointer events and is out of the tab order.
+ */
+function createKeyboardProxy(): HTMLInputElement {
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.tabIndex = -1;
+  input.autocomplete = 'off';
+  input.setAttribute('autocapitalize', 'off');
+  input.setAttribute('autocorrect', 'off');
+  input.spellcheck = false;
+  input.setAttribute('aria-label', 'Search');
+  input.dataset.paletteKeyboardProxy = '';
+  Object.assign(input.style, {
+    position: 'fixed',
+    top: '0',
+    left: '0',
+    width: '1px',
+    height: '1px',
+    margin: '0',
+    padding: '0',
+    border: '0',
+    opacity: '0',
+    fontSize: '16px',
+    pointerEvents: 'none',
+  });
+  return input;
 }
 
 export class PaletteTypeahead {
   private readonly mac: boolean;
+  private readonly holdsKeyboard: () => boolean;
   private text = '';
   private capturing = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
+  /** Drops {@link proxy} at {@link PALETTE_KEYBOARD_PROXY_MAX_MS}. */
+  private proxyTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The hidden text field holding the on-screen keyboard, while a capture holds it. */
+  private proxy: HTMLInputElement | null = null;
+  /** What had focus when {@link proxy} took it, given focus back if the proxy still has it at the end. */
+  private proxyReturnFocus: HTMLElement | null = null;
 
   constructor(options: PaletteTypeaheadOptions = {}) {
     this.mac = options.mac ?? isMacPlatform();
+    this.holdsKeyboard = options.holdsKeyboard ?? primaryPointerIsTouch;
+  }
+
+  /** The hidden text field holding the on-screen keyboard, if a capture holds it. */
+  get keyboardProxy(): HTMLInputElement | null {
+    return this.proxy;
   }
 
   /** Whether keys are being captured. */
@@ -91,35 +169,114 @@ export class PaletteTypeahead {
    * Starts capturing keys, and restarts the time limit. A fresh capture
    * starts with no text; a start while capturing keeps the text captured so
    * far, so an open that runs a queued open request carries its keys.
+   *
+   * Where {@link PaletteTypeaheadOptions.holdsKeyboard} holds, also moves
+   * focus to a hidden text field, synchronously, so a start from a tap
+   * shows the on-screen keyboard. A host reads the element to refocus on
+   * close before it starts. The field outlives the capture's time limit,
+   * up to {@link PALETTE_KEYBOARD_PROXY_MAX_MS}: it lasts until
+   * {@link take} or {@link stop}, so a slow open still shows with the
+   * keyboard up, and keys typed into it after the limit still become the
+   * query.
    */
   start(): void {
     clearTimeout(this.timer);
     this.timer = setTimeout(() => this.release(), PALETTE_TYPEAHEAD_MAX_MS);
-    if (this.capturing) return;
-    this.text = '';
-    this.capturing = true;
-    window.addEventListener('keydown', this.handleKeydown, true);
+    if (!this.capturing) {
+      this.text = '';
+      if (this.proxy) this.proxy.value = '';
+      this.capturing = true;
+      window.addEventListener('keydown', this.handleKeydown, true);
+    }
+    if (!this.proxy && this.holdsKeyboard()) this.holdKeyboard();
+    if (this.proxy) {
+      clearTimeout(this.proxyTimer);
+      this.proxyTimer = setTimeout(() => this.dropKeyboardProxy(), PALETTE_KEYBOARD_PROXY_MAX_MS);
+    }
   }
 
-  /** Stops capturing and returns the captured text, clearing it. */
+  /**
+   * Stops capturing and returns the captured text, clearing it. Drops the
+   * hidden text field, whose text (IME input, dictation, or keys after the
+   * capture's time limit, all typed after the captured text) ends the
+   * returned text.
+   */
   take(): string {
     this.release();
+    this.dropKeyboardProxy();
     const text = this.text;
     this.text = '';
     return text;
   }
 
-  /** Stops capturing and discards the captured text. */
-  stop(): void {
-    this.take();
+  /**
+   * Stops capturing and discards the captured text. A hidden text field
+   * that still has focus gives it back to what had it before, as the query
+   * input never took it, unless `restoreFocus` is false: for a host whose
+   * surface is going off screen, and focus with it.
+   */
+  stop(options: { restoreFocus?: boolean } = {}): void {
+    this.release();
+    this.dropKeyboardProxy(options.restoreFocus ?? true);
+    this.text = '';
   }
 
+  /** Stops capturing keys, keeping the text captured so far and the hidden text field. */
   private release(): void {
     clearTimeout(this.timer);
     this.timer = undefined;
     if (!this.capturing) return;
     this.capturing = false;
     window.removeEventListener('keydown', this.handleKeydown, true);
+  }
+
+  private holdKeyboard(): void {
+    if (!document.body) return;
+    const active = deepActiveElement();
+    const proxy = createKeyboardProxy();
+    document.body.append(proxy);
+    this.proxy = proxy;
+    this.proxyReturnFocus = active instanceof HTMLElement ? active : null;
+    proxy.focus({ preventScroll: true });
+  }
+
+  /**
+   * Moves the hidden field's text to the end of the captured text. Run just
+   * before the capture adds or deletes captured text, so the field only ever
+   * holds text typed after all the captured text, and the text the field
+   * took itself (an IME composition, dictation, a predictive suggestion)
+   * keeps its place among captured keys. Nothing else moves it: no input or
+   * composition event, whose order differs between engines (WebKit fires
+   * compositionend before inserting the confirmed text), and nothing after
+   * the capture's time limit, so the field's own editing, Backspace
+   * included, applies to what it holds.
+   */
+  private flushProxy(): void {
+    const proxy = this.proxy;
+    if (!proxy || !proxy.value) return;
+    this.text += proxy.value;
+    proxy.value = '';
+  }
+
+  /**
+   * Removes the hidden text field, adding its text to the end of the
+   * captured text, after which it was typed (see {@link flushProxy}). A
+   * field that still has focus gives it back to what had it before, unless
+   * `restoreFocus` is false.
+   */
+  private dropKeyboardProxy(restoreFocus = true): void {
+    clearTimeout(this.proxyTimer);
+    this.proxyTimer = undefined;
+    const proxy = this.proxy;
+    if (!proxy) return;
+    this.flushProxy();
+    const returnFocus = this.proxyReturnFocus;
+    this.proxy = null;
+    this.proxyReturnFocus = null;
+    const focused = document.activeElement === proxy;
+    proxy.remove();
+    if (restoreFocus && focused && returnFocus?.isConnected)
+      returnFocus.focus({ preventScroll: true });
   }
 
   /**
@@ -138,10 +295,17 @@ export class PaletteTypeahead {
    * Backspace edits the captured text close to how the same chord edits a
    * text field on the platform (see {@link deleteBackward}); Delete has no
    * text after the caret to remove.
+   *
+   * While the hidden field holds the keyboard, a key an IME processed is
+   * the field's (see {@link isImeKeyForField}).
    */
   private readonly handleKeydown = (e: KeyboardEvent): void => {
     if (e.isComposing) return;
+    const imeKey = this.isImeKeyForField(e);
     if (e.key === 'Backspace' || e.key === 'Delete') {
+      // A Backspace with nothing left in the field deletes captured text.
+      if (imeKey && (e.key === 'Delete' || this.proxy?.value)) return;
+      this.flushProxy();
       if (e.key === 'Backspace') this.text = deleteBackward(this.text, e, this.mac);
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -152,14 +316,33 @@ export class PaletteTypeahead {
     const altGraph = printable && e.getModifierState('AltGraph');
     const optionText = printable && this.mac && e.altKey && !e.ctrlKey;
     if (!altGraph && !optionText && (e.ctrlKey || e.altKey)) return;
-    if (printable) {
-      this.text += e.key;
-    } else if (!SWALLOWED_KEYS.has(e.key)) {
-      return;
-    }
+    if (!printable && !SWALLOWED_KEYS.has(e.key)) return;
+    if (imeKey && printable) return;
+    if (!imeKey) this.flushProxy();
+    if (printable) this.text += e.key;
     e.preventDefault();
     e.stopImmediatePropagation();
   };
+
+  /**
+   * Whether `e` is a key an IME processed (keyCode 229) while the hidden
+   * field holds the keyboard and has focus. Such a key belongs to the field,
+   * and leaves the captured text, which the field's text follows, alone:
+   *
+   * - A character or Delete passes through to the field. The field inserts
+   *   the character after its text; Delete, at the end of the field and of
+   *   the captured text, removes nothing either way.
+   * - A Backspace passes through while the field holds text, which the
+   *   field deletes natively. With the field empty it deletes captured
+   *   text, as the field has nothing to delete.
+   * - Enter, Tab or a navigation key is swallowed without moving the field's
+   *   text, since it can arrive between WebKit's compositionend and its
+   *   insertion of the confirmed text, when the field still holds the text
+   *   being replaced.
+   */
+  private isImeKeyForField(e: KeyboardEvent): boolean {
+    return e.keyCode === 229 && this.proxy !== null && document.activeElement === this.proxy;
+  }
 }
 
 /**

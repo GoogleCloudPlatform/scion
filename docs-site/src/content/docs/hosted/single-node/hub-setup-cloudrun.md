@@ -121,7 +121,7 @@ Grant the minimum roles the Instance needs:
 | Role | Why |
 |------|-----|
 | `roles/storage.admin` | Read/write workspace storage backends |
-| `roles/iam.serviceAccountAdmin` | Manage hub-minted service accounts for agents |
+| `roles/iam.serviceAccountAdmin` | Manage hub-minted service accounts for agents (see the note below) |
 | `roles/iam.serviceAccountTokenCreator` | Mint short-lived tokens for agent GCP identity (assign mode) |
 | `roles/aiplatform.user` | Vertex AI inference (if using Gemini-based agents) |
 
@@ -133,6 +133,16 @@ for ROLE in roles/storage.admin roles/iam.serviceAccountAdmin \
     --role="${ROLE}"
 done
 ```
+
+`roles/iam.serviceAccountAdmin` applies to every service account in the
+project, not only the ones the Hub mints. In a project shared with other
+workloads or other hubs, the Instance service account can therefore change IAM
+policy on those accounts too. Granting it this way assumes one hub per GCP
+project, in a project that holds no other privileged service accounts. If you
+run more than one hub in the same project, leave the role out and grant
+minting access separately, for example from a dedicated project; without it
+the Hub cannot mint service accounts. For the HA tier, see
+`scripts/cloudrun/README.md`.
 
 Pass the service account to the deploy command with `--service-account $SA_EMAIL`
 (see [Section 1](#1-deploy)).

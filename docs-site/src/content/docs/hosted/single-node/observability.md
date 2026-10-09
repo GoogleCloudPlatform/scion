@@ -452,7 +452,7 @@ Server maintenance operations (like `rebuild-server`, `rebuild-web`, and `pull-i
 ### Logs Not Appearing in GCP
 
 1.  **Verify Endpoints**: Ensure `SCION_OTEL_ENDPOINT` is set to `monitoring.googleapis.com:443`.
-2.  **Check Credentials**: Outside of GKE/Cloud Run (where ADC is automatic), agents need a GCP service account key file. Verify the `scion-telemetry-gcp-credentials` secret is registered with target `~/.scion/telemetry-gcp-credentials.json`. Inside the agent, check `echo $SCION_OTEL_GCP_CREDENTIALS` — it should point to the file. See [GCP Credentials for Agent Containers](/scion/hosted/single-node/metrics/#4-gcp-credentials-for-agent-containers-non-adc-environments) for setup.
+2.  **Check Credentials**: Outside Kubernetes, an agent with no GCP identity configured runs in metadata mode `block`, where ADC gets no token. Such agents need either a service account assigned with `--service-account` (`echo $SCION_METADATA_MODE` inside the agent prints `assign`) or a GCP service account key file. For the key file, verify the `scion-telemetry-gcp-credentials` secret is registered with target `~/.scion/telemetry-gcp-credentials.json`. Inside the agent, check `echo $SCION_OTEL_GCP_CREDENTIALS` — it should point to the file. See [GCP Credentials for Agent Containers](/scion/hosted/single-node/metrics/#4-gcp-credentials-for-agent-containers-non-adc-environments) for setup.
 3.  **Check Permissions**: Verify the Workload Identity or Service Account has `roles/logging.logWriter`.
 4.  **Inspect Agent Init**: View the agent container logs (stderr) to see if `sciontool` reported a telemetry startup failure:
     ```
@@ -536,5 +536,6 @@ The response returns process uptime and real-time divergence counters, along wit
 ## Related Guides
 
 - [Metrics & OpenTelemetry](/scion/hosted/single-node/metrics/) - Detailed telemetry configuration
+- [Hub Monitoring Dashboard](/scion/hosted/single-node/hub-monitoring-dashboard/) - Cloud Monitoring dashboard for Hub metrics
 - [Hub Server](/scion/hosted/single-node/hub-server/) - Hub integration for hosted mode
 - [Runtime Broker](/scion/hosted/ha/runtime-broker/) - Broker setup and configuration

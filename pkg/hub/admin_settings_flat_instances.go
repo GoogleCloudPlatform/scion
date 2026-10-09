@@ -74,9 +74,9 @@ func storedBrokerInstances(raw map[string]interface{}) interface{} {
 	return broker["instances"]
 }
 
-// carryOverBrokerInstances runs after applySettingsUpdates. When the body did
-// not carry server.broker.instances it restores the stored value (the
-// one-level server merge replaces the whole broker map). When it did, an
+// carryOverBrokerInstances runs after applySettingsUpdatesFromBody. When the
+// body did not carry server.broker.instances it restores the stored value (a
+// server merge that rewrites the broker map must not drop it). When it did, an
 // empty or null value removes the key and a list sets it.
 func carryOverBrokerInstances(raw map[string]interface{}, stored interface{}, present bool, instances []config.V1RuntimeBrokerInstanceConfig) {
 	server, _ := raw["server"].(map[string]interface{})

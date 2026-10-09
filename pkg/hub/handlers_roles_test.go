@@ -387,7 +387,7 @@ func TestRolesAPI_CreateRoleBinding_ProjectScopeMissingScopeID(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
 		RoleDefinitionID: role.ID,
 		PrincipalType:    "user",
-		PrincipalID:      "u1",
+		PrincipalID:      "00000000-0000-0000-0000-0000000000a1",
 		ScopeType:        "project",
 		ScopeID:          "",
 	})
@@ -401,10 +401,11 @@ func TestRolesAPI_CreateRoleBinding_InvalidScopeType(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
 		RoleDefinitionID: "some-id",
 		PrincipalType:    "user",
-		PrincipalID:      "u1",
+		PrincipalID:      "00000000-0000-0000-0000-0000000000a1",
 		ScopeType:        "invalid",
 	})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "scopeType must be")
 }
 
 func TestRolesAPI_CreateRoleBinding_SuperAdmin_Blocked(t *testing.T) {
@@ -418,7 +419,7 @@ func TestRolesAPI_CreateRoleBinding_SuperAdmin_Blocked(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
 		RoleDefinitionID: rd.ID,
 		PrincipalType:    "user",
-		PrincipalID:      "some-user",
+		PrincipalID:      "00000000-0000-0000-0000-0000000000a1",
 		ScopeType:        "system",
 	})
 	assert.Equal(t, http.StatusForbidden, rec.Code)
@@ -1206,7 +1207,7 @@ func TestRolesAPI_CreateRoleBinding_ProjectScope_UnknownSlug(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
 		RoleDefinitionID: role.ID,
 		PrincipalType:    "user",
-		PrincipalID:      "some-user",
+		PrincipalID:      "00000000-0000-0000-0000-0000000000a1",
 		ScopeType:        "project",
 		ScopeID:          "nonexistent-project-slug",
 	})
@@ -3433,4 +3434,98 @@ func TestSanitizeFilename(t *testing.T) {
 			assert.NotContains(t, got, "\\")
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: reserved permissions are rejected in custom roles
+// ---------------------------------------------------------------------------
+
+// reservedTestPermission returns a Reserved registry permission ID, failing
+// the test if the registry has none.
+func reservedTestPermission(t *testing.T) string {
+	t.Helper()
+	ids := permissions.ReservedIDs()
+	if len(ids) == 0 {
+		t.Fatal("the permission registry has no Reserved row")
+	}
+	return ids[0]
+}
+
+func TestRolesAPI_CreateRoleDefinition_RejectsReservedPermission(t *testing.T) {
+	srv, _ := testServer(t)
+	reserved := reservedTestPermission(t)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/roles", createRoleDefinitionRequest{
+		Name:        "reserved-create",
+		ScopeType:   "project",
+		Permissions: []string{"agent.read", reserved},
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "permission "+reserved+" is reserved: nothing checks it yet")
+}
+
+func TestRolesAPI_UpdateRoleDefinition_RejectsReservedPermission(t *testing.T) {
+	srv, _ := testServer(t)
+	reserved := reservedTestPermission(t)
+
+	created := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "reserved-update",
+		ScopeType:   "project",
+		Permissions: []string{"agent.read"},
+	})
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/roles/"+created.ID, updateRoleDefinitionRequest{
+		Name:        "reserved-update",
+		Permissions: []string{"agent.read", reserved},
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "permission "+reserved+" is reserved")
+}
+
+// TestRolesAPI_DuplicateRoleDefinition_RejectsReservedPermission: a custom
+// role stored before its permission was reserved cannot be copied.
+func TestRolesAPI_DuplicateRoleDefinition_RejectsReservedPermission(t *testing.T) {
+	srv, s := testServer(t)
+	reserved := reservedTestPermission(t)
+
+	source, err := s.CreateRoleDefinition(context.Background(), &store.RoleDefinition{
+		Name: "reserved-dup-source", ScopeType: store.RoleScopeProject, Permissions: []string{"agent.read", reserved},
+	})
+	require.NoError(t, err)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/roles/"+source.ID+"/duplicate", duplicateRoleDefinitionRequest{
+		Name: "reserved-dup-target",
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "permission "+reserved+" is reserved")
+}
+
+func TestRolesAPI_ImportRoles_RejectsReservedPermission(t *testing.T) {
+	srv, _ := testServer(t)
+	reserved := reservedTestPermission(t)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/roles/import", roleImportRequest{
+		Version: "1",
+		Roles: []exportedRole{
+			{Name: "reserved-import", ScopeType: "project", Permissions: []string{"agent.read", reserved}},
+			{Name: "plain-import", ScopeType: "project", Permissions: []string{"agent.read"}},
+		},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var resp roleImportResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, 1, resp.Created)
+	assert.Equal(t, 1, resp.Errors)
+	require.Len(t, resp.Items, 2)
+	assert.Equal(t, "error", resp.Items[0].Status)
+	assert.Contains(t, resp.Items[0].Reason, "permission "+reserved+" is reserved")
+	assert.Equal(t, "created", resp.Items[1].Status)
+}
+
+func TestValidateRolePermissionIDs_ReservedRejectedConstraintsUnaffected(t *testing.T) {
+	reserved := reservedTestPermission(t)
+	require.NoError(t, validateRolePermissionIDs([]string{"agent.read"}))
+	require.ErrorContains(t, validateRolePermissionIDs([]string{"agent.read", reserved}), "is reserved")
+	require.ErrorContains(t, validateRolePermissionIDs([]string{"fake.perm"}), "invalid permission IDs")
+	// Access constraint ceilings restrict rather than grant, so they may
+	// still list a reserved permission.
+	require.NoError(t, validatePermissionIDs([]string{reserved}))
 }

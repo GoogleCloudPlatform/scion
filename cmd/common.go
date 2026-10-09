@@ -320,12 +320,21 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 
 	opts := hubsync.EnsureHubReadyOptions{
 		AutoConfirm:      autoConfirm,
+		NonInteractive:   nonInteractive,
 		NoHub:            noHub,
 		EndpointOverride: hubEndpoint,
 		SkipSync:         skipSync,
 		TargetAgent:      targetAgent,
 		ExcludedAgents:   excludedAgents,
 		ExplicitProject:  explicitProjectTargetFor(projectPath),
+	}
+
+	// A hub project reference needs hub mode: offer to enable it (when
+	// logged in, interactively) or name 'scion hub enable' (#3533).
+	if !noHub && projectPath != "" && hubsync.IsHubProjectRef(projectPath) {
+		if err := ensureHubModeForHubProjectRefForInvocation(projectPath); err != nil {
+			return nil, err
+		}
 	}
 
 	hubCtx, err := hubsync.EnsureHubReady(projectPath, opts)
@@ -421,6 +430,11 @@ func PrintUsingHub(endpoint string) {
 // is a plausible remedy (the hub is unreachable or failing).
 const localOnlyHint = "\n\nTo use local-only mode, run: scion hub disable"
 
+// emptyResponseNote replaces localOnlyHint when the hub answered a call that
+// needs a body with an empty response (apiclient.ErrNoContent). The hub was
+// reachable, so suggesting local-only mode would be misleading.
+const emptyResponseNote = "\n\nThe hub returned an empty response where a result was expected."
+
 // hubError marks an error that has been through wrapHubError. Error() is the
 // fully rendered message (including any hint); Unwrap exposes the original
 // cause so callers can still use errors.Is / errors.As on it. Execute uses the
@@ -460,13 +474,17 @@ func isHubFailure(err error) bool {
 //
 //   - 401: replaced with a "login with scion hub auth login" hint (or, inside a
 //     hub-managed agent, a credentials-rejected message that keeps the cause).
-//   - Connectivity failures (anything that is not an *apiclient.APIError, e.g.
-//     a transport error or timeout) and 5xx responses: the "scion hub disable"
-//     local-only hint is appended, since the hub being down is the case where
-//     falling back to local mode can help.
+//   - Connectivity failures (anything that is not an *apiclient.APIError,
+//     other than the empty-response case below, e.g. a transport error or
+//     timeout) and 5xx responses: the "scion hub disable" local-only hint is
+//     appended, since the hub being down is the case where falling back to
+//     local mode can help.
 //   - Other API errors (4xx such as 400/403/404/409/422): returned as-is. The
 //     hub answered and the message is about the request, so suggesting that
 //     the user disable the hub would be misleading noise.
+//   - An empty response from a call that needs a body (an error wrapping
+//     apiclient.ErrNoContent): the hub answered, so it gets a note saying so
+//     instead of the local-only hint.
 //
 // Inside a hub-managed agent the local-only hint is never added, because
 // disabling the Hub would break orchestration connectivity.
@@ -479,6 +497,9 @@ func wrapHubError(err error) error {
 		// Already annotated further down the call chain; don't add a
 		// second hint.
 		return err
+	}
+	if errors.Is(err, apiclient.ErrNoContent) {
+		return &hubError{msg: err.Error() + emptyResponseNote, err: err}
 	}
 	if apiclient.IsUnauthorizedError(err) {
 		// `scion hub` is filtered out of the command tree in agent mode, so a
@@ -685,6 +706,14 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	}
 
 	if err := validateHarnessAuthFlag(harnessAuthFlag); err != nil {
+		return asUsageError(err)
+	}
+
+	if err := validateTaskFileStdin(); err != nil {
+		return err
+	}
+	task, err := applyTaskFile(task, taskFilePath, os.Stdin)
+	if err != nil {
 		return asUsageError(err)
 	}
 
@@ -1300,7 +1329,7 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 				util.Debugf("[workspace-scan] non-git project detected at %s, collecting files...", projectDir)
 			}
 			scanStart := time.Now()
-			files, err := transfer.CollectFiles(projectDir, transfer.DefaultExcludePatterns)
+			files, err := collectWorkspaceFiles(projectDir, nil)
 			if debugMode {
 				util.Debugf("[workspace-scan] collected %d files in %s", len(files), time.Since(scanStart))
 			}
@@ -1520,6 +1549,18 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 	}
 
 	finalAgent := resp.Agent
+	// notFollowed is set when the Hub accepted the launch but the wait could
+	// not follow it to running (status not readable, or still launching at
+	// the wait deadline). The start is then reported as accepted and exits
+	// 0, so a caller does not retry a launch that is going on. --attach
+	// needs a running agent, so it keeps the error.
+	notFollowed := ""
+	// launchReportable is false when finalAgent's launch is not the start
+	// being reported (the create answer predates a workspace finalize).
+	launchReportable := true
+	// statusRead is false when the wait never read the agent, so only the
+	// create answer is known.
+	statusRead := true
 	if needWait {
 		statusf("Waiting for agent '%s' to start...\n", agentName)
 		var progress io.Writer
@@ -1532,29 +1573,53 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 		if workspaceFinalized {
 			budgetFrom = nil
 		}
+		// The start was accepted when the create answer shows an active
+		// launch or a finalize dispatched it. Only the former names the
+		// launch: the create answer predates a finalize's start, and an
+		// ended launch is an earlier one.
+		launchID := ""
+		if launchActive(resp.Agent) && !workspaceFinalized {
+			launchID = resp.Agent.Launch.ID
+		}
 		// Ctrl-C (or SIGTERM) stops waiting only; the launch continues on
 		// the Hub.
+		accepted := launchActive(resp.Agent) || workspaceFinalized
 		waited, err := waitForAgentLaunchWithSignals(launchWaitOptions{
 			AgentName:  agentName,
 			BudgetFrom: budgetFrom,
+			Accepted:   accepted,
+			LaunchID:   launchID,
 			Get: func(ctx context.Context) (*hubclient.Agent, error) {
 				return hubCtx.Client.ProjectAgents(projectID).Get(ctx, agentName)
 			},
 			Timeout:  startWaitTimeout,
 			Progress: progress,
 		})
-		if err != nil {
+		note, ok := acceptedLaunchNotFollowed(err)
+		switch {
+		case err == nil:
+			finalAgent = waited
+		case ok && accepted && !attach:
+			notFollowed = note
+			if waited != nil {
+				finalAgent = waited
+			} else {
+				statusRead = false
+				launchReportable = !workspaceFinalized
+			}
+		default:
 			for _, w := range textWarnings {
 				fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
 			}
 			return err
 		}
-		finalAgent = waited
 	}
 
+	// A status that was never read leaves only the create answer, whose
+	// phase predates the launch.
+	phaseKnown := statusRead
 	// After a finalize without waiting, the create answer predates the
 	// dispatched start; report the agent's current state instead.
-	phaseKnown := true
 	if workspaceFinalized && !needWait {
 		getCtx, getCancel := context.WithTimeout(context.Background(), launchFetchTimeout)
 		current, getErr := hubCtx.Client.ProjectAgents(projectID).Get(getCtx, agentName)
@@ -1575,6 +1640,9 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 	}
 	launching := !needWait && launchActive(finalAgent)
 	if workspaceFinalized && !needWait && !agentIsRunning(finalAgent, phaseKnown) {
+		launching = true
+	}
+	if notFollowed != "" {
 		launching = true
 	}
 	message := fmt.Sprintf("Agent '%s' %s via Hub.", agentName, displayStatus)
@@ -1605,7 +1673,10 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 			if finalAgent.RuntimeBrokerID != "" {
 				result.Details["runtimeBrokerId"] = finalAgent.RuntimeBrokerID
 			}
-			if launching && finalAgent.Launch != nil {
+			if notFollowed != "" {
+				result.Details["launchNote"] = notFollowed
+			}
+			if launching && launchReportable && finalAgent.Launch != nil {
 				result.Details["launchId"] = finalAgent.Launch.ID
 				if finalAgent.Launch.Deadline != nil {
 					result.Details["launchDeadline"] = finalAgent.Launch.Deadline.UTC().Format(time.RFC3339)
@@ -1623,7 +1694,11 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 			statusf("Phase: %s\n", phase)
 		}
 	}
-	if launching {
+	switch {
+	case notFollowed != "":
+		statusf("%s\n", notFollowed)
+		statusf("Check its status with: scion list\n")
+	case launching:
 		statusf("Follow the launch with: scion start %s (waits until it is running)\n", agentName)
 	}
 	for _, w := range textWarnings {
@@ -1640,17 +1715,14 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 		agentID = resp.Agent.ID
 	}
 	// agentID keeps the create response's ID unless the fetch returned a
-	// non-empty one. Runtime, broker and profile always take the fetched
-	// value, even if empty: "" is itself a meaningful attach-is-supported
-	// value to attachUnsupportedErr.
-	var agentRuntime, agentBrokerID, agentProfile string
+	// non-empty one. The runtime always takes the fetched value (it feeds
+	// managedAttachErr); the Hub preflight decides the rest.
+	var agentRuntime string
 	if finalAgent != nil {
 		if finalAgent.ID != "" {
 			agentID = finalAgent.ID
 		}
 		agentRuntime = finalAgent.Runtime
-		agentBrokerID = finalAgent.RuntimeBrokerID
-		agentProfile = agentProfileName(finalAgent)
 	}
 	if agentID == "" {
 		agentID = agentName
@@ -1659,11 +1731,9 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 	attachCtx, attachCancel := context.WithTimeout(context.Background(), launchFetchTimeout)
 	defer attachCancel()
 	return attachHubSession(attachCtx, hubCtx, hubAttachTarget{
-		Name:     agentName,
-		ID:       agentID,
-		Runtime:  agentRuntime,
-		BrokerID: agentBrokerID,
-		Profile:  agentProfile,
+		Name:    agentName,
+		ID:      agentID,
+		Runtime: agentRuntime,
 	})
 }
 
@@ -1707,8 +1777,10 @@ func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, pr
 			return nil, err
 		}
 
-		// Only prompt if interactive and not auto-confirm
-		if autoConfirm || !util.IsTerminal() {
+		// Only prompt if interactive and not auto-confirm. Without a
+		// terminal, stdin is never read (an idle open stdin would hang);
+		// the error names --broker so the caller can pick one.
+		if autoConfirm || !isInteractiveTerminal() {
 			return nil, &hubError{msg: nonInteractiveBrokerMessage(apiErr.Message, availableBrokers), err: apiErr}
 		}
 
@@ -1725,7 +1797,7 @@ func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, pr
 			if isDefault {
 				defaultLabel = " (default)"
 			}
-			fmt.Printf("\nUse runtime broker %s (%s)%s? [y/N]: ", name, status, defaultLabel)
+			fmt.Fprintf(os.Stderr, "\nUse runtime broker %s (%s)%s? [y/N]: ", name, status, defaultLabel)
 			input, err := reader.ReadString('\n')
 			if err != nil {
 				return nil, fmt.Errorf("failed to read input: %w", err)
@@ -1737,7 +1809,7 @@ func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, pr
 			req.RuntimeBrokerID, _ = brokerMap["id"].(string)
 		} else {
 			// Multiple brokers - selection prompt
-			fmt.Printf("\nMultiple runtime brokers available for project:\n")
+			fmt.Fprintf(os.Stderr, "\nMultiple runtime brokers available for project:\n")
 			for i, h := range availableBrokers {
 				brokerMap, _ := h.(map[string]interface{})
 				name, _ := brokerMap["name"].(string)
@@ -1747,12 +1819,12 @@ func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, pr
 				if isDefault {
 					defaultLabel = " (default)"
 				}
-				fmt.Printf("  [%d] %s (%s)%s\n", i+1, name, status, defaultLabel)
+				fmt.Fprintf(os.Stderr, "  [%d] %s (%s)%s\n", i+1, name, status, defaultLabel)
 			}
-			fmt.Println()
+			fmt.Fprintln(os.Stderr)
 
 			for {
-				fmt.Print("Select a broker (or 'c' to cancel): ")
+				fmt.Fprint(os.Stderr, "Select a broker (or 'c' to cancel): ")
 				input, err := reader.ReadString('\n')
 				if err != nil {
 					return nil, fmt.Errorf("failed to read input: %w", err)
@@ -1765,7 +1837,7 @@ func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, pr
 
 				var choice int
 				if _, err := fmt.Sscanf(input, "%d", &choice); err != nil || choice < 1 || choice > len(availableBrokers) {
-					fmt.Printf("Invalid choice. Please enter 1-%d.\n", len(availableBrokers))
+					fmt.Fprintf(os.Stderr, "Invalid choice. Please enter 1-%d.\n", len(availableBrokers))
 					continue
 				}
 

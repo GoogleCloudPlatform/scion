@@ -202,6 +202,8 @@ func (e *AgentStateDirError) Is(target error) bool {
 // shared-workspace agent, an undeterminable external root is an
 // *AgentStateDirError, and so is a missing agent dir when mustExist (a
 // restart) is set.
+// See effectiveSharedWorkspace for the exception to that detection when the
+// external root is the project's own agents root.
 func ProvisionedProfile(projectPath, agentName string, sharedWorkspace bool, hubProjectID string, mustExist bool) (profile string, ok bool, err error) {
 	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {

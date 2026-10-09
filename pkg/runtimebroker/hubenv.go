@@ -94,10 +94,13 @@ type hubEndpointInputs struct {
 	ContainerHubEndpoint string
 	// ColocatedPublicHubEndpoint is the hub's public URL when colocated
 	// containers cannot reach it (see ServerConfig.ColocatedPublicHubEndpoint).
-	// A resolved endpoint equal to it is replaced by ContainerHubEndpoint.
+	// A resolved endpoint equal to it is replaced by the dispatch runtime's
+	// ColocatedRuntimeHubEndpoints entry.
 	ColocatedPublicHubEndpoint string
-	RuntimeName                string
-	HubListenPort              int
+	// ColocatedRuntimeHubEndpoints is ServerConfig.ColocatedRuntimeHubEndpoints.
+	ColocatedRuntimeHubEndpoints map[string]string
+	RuntimeName                  string
+	HubListenPort                int
 }
 
 // resolveEffectiveHubEndpoint resolves the hub endpoint to stamp into a
@@ -122,7 +125,10 @@ func resolveEffectiveHubEndpoint(ctx context.Context, in hubEndpointInputs) (end
 			in.ResolvedEnv,
 			in.ProjectPath,
 			in.ContainerHubEndpoint,
-			in.ColocatedPublicHubEndpoint,
+			colocatedRewrite{
+				PublicHubEndpoint:   in.ColocatedPublicHubEndpoint,
+				RuntimeHubEndpoints: in.ColocatedRuntimeHubEndpoints,
+			},
 			in.RuntimeName,
 		)
 	default:
@@ -181,7 +187,7 @@ func resolveEffectiveHubEndpoint(ctx context.Context, in hubEndpointInputs) (end
 // another operator-derived value (the connection endpoint or a rewrite of
 // the broker's own bridge address), so neither one can turn a trusted
 // result into an untrusted one or vice versa.
-func resolveHubEndpointForCreate(reqHubEndpoint, connectionHubEndpoint, brokerHubEndpoint string, resolvedEnv map[string]string, projectPath, containerHubEndpoint, colocatedPublicHubEndpoint, runtimeName string) (endpoint string, trusted bool) {
+func resolveHubEndpointForCreate(reqHubEndpoint, connectionHubEndpoint, brokerHubEndpoint string, resolvedEnv map[string]string, projectPath, containerHubEndpoint string, colocated colocatedRewrite, runtimeName string) (endpoint string, trusted bool) {
 	hubEndpoint := reqHubEndpoint
 	trusted = hubEndpoint != ""
 	if hubEndpoint == "" {
@@ -218,7 +224,7 @@ func resolveHubEndpointForCreate(reqHubEndpoint, connectionHubEndpoint, brokerHu
 		hubEndpoint = connectionHubEndpoint
 		trusted = true
 	}
-	return applyContainerBridgeOverride(hubEndpoint, containerHubEndpoint, colocatedPublicHubEndpoint, runtimeName), trusted
+	return applyContainerBridgeOverride(hubEndpoint, containerHubEndpoint, colocated, runtimeName), trusted
 }
 
 func hubEndpointFromResolvedEnv(resolvedEnv map[string]string) string {
@@ -247,23 +253,47 @@ func hubEndpointFromProjectSettings(projectPath string) string {
 // host's gateway. When the ContainerHubEndpoint uses one of these, the localhost
 // endpoint's port must be grafted onto it; a real public domain is used as-is.
 var bridgeHostnames = map[string]struct{}{
-	"host.docker.internal":     {},
-	"host.containers.internal": {},
+	"host.docker.internal": {},
+	podmanHostAlias:        {},
 }
 
-// applyContainerBridgeOverride replaces endpoint with the container-reachable
-// containerHubEndpoint when a non-Kubernetes container cannot reach endpoint
-// itself: when endpoint is a loopback URL, or, on the docker and podman
-// runtimes only, when it equals colocatedPublicHubEndpoint, the colocated
-// hub's public URL that this host does not serve (e.g. an IAP-fronted Cloud
-// Run URL). Other runtimes (cloudrun, Apple container) keep the public URL:
-// they do not run on this host's Docker bridge.
-func applyContainerBridgeOverride(endpoint, containerHubEndpoint, colocatedPublicHubEndpoint, runtimeName string) string {
-	if containerHubEndpoint == "" || isKubernetesRuntimeName(runtimeName) {
+// podmanHostAlias is the hostname Podman maps to the host in every
+// container's /etc/hosts.
+const podmanHostAlias = "host.containers.internal"
+
+// colocatedRewrite is the colocated hub's public URL that this host does not
+// serve (e.g. an IAP-fronted Cloud Run URL), with the URL each local
+// container runtime reaches the hub at instead.
+type colocatedRewrite struct {
+	// PublicHubEndpoint is ServerConfig.ColocatedPublicHubEndpoint.
+	PublicHubEndpoint string
+	// RuntimeHubEndpoints is ServerConfig.ColocatedRuntimeHubEndpoints.
+	RuntimeHubEndpoints map[string]string
+}
+
+// applyContainerBridgeOverride replaces endpoint with a container-reachable
+// URL when a non-Kubernetes container cannot reach endpoint itself:
+//   - on the docker and podman runtimes only, when endpoint equals
+//     colocated.PublicHubEndpoint, it is replaced wholesale by the dispatch
+//     runtime's colocated.RuntimeHubEndpoints entry (kept when there is
+//     none). This does not depend on containerHubEndpoint, which follows
+//     the broker's default runtime.
+//   - when endpoint is a loopback URL, it is replaced by
+//     containerHubEndpoint.
+//
+// Other runtimes (cloudrun, Apple container) keep the public URL: they do
+// not run on this host's Docker bridge.
+func applyContainerBridgeOverride(endpoint, containerHubEndpoint string, colocated colocatedRewrite, runtimeName string) string {
+	if isKubernetesRuntimeName(runtimeName) {
 		return endpoint
 	}
-	rewritePublic := isBridgeContainerRuntimeName(runtimeName) && sameEndpoint(endpoint, colocatedPublicHubEndpoint)
-	if !isLocalhostEndpoint(endpoint) && !rewritePublic {
+	if isBridgeContainerRuntimeName(runtimeName) && sameEndpoint(endpoint, colocated.PublicHubEndpoint) {
+		if target := colocated.RuntimeHubEndpoints[runtimeName]; target != "" {
+			return target
+		}
+		return endpoint
+	}
+	if containerHubEndpoint == "" || !isLocalhostEndpoint(endpoint) {
 		return endpoint
 	}
 	bridgeURL, err := url.Parse(containerHubEndpoint)
@@ -316,7 +346,8 @@ func sameEndpoint(a, b string) bool {
 // colocatedExtraHosts returns --add-host entries needed when the hub and
 // broker are co-located on the same machine. Docker bridge containers cannot
 // reach the host's own public domain via hairpin NAT (e.g. on GCE), so we
-// map the domain to host-gateway to route through the Docker bridge.
+// map the domain to host-gateway to route through the Docker bridge. Podman's
+// native host.containers.internal gets no entry.
 func colocatedExtraHosts(hubEndpoint string, isColocated bool, runtimeName string) []string {
 	if !isColocated || isKubernetesRuntimeName(runtimeName) || hubEndpoint == "" || isLocalhostEndpoint(hubEndpoint) {
 		return nil
@@ -327,6 +358,12 @@ func colocatedExtraHosts(hubEndpoint string, isColocated bool, runtimeName strin
 	}
 	host := u.Hostname()
 	if host == "" || net.ParseIP(host) != nil {
+		return nil
+	}
+	// Podman maps host.containers.internal to the host itself, so it needs
+	// no --add-host flag on any Podman version (host-gateway arrived in
+	// Podman 4.7; older versions reject it).
+	if runtimeName == "podman" && host == podmanHostAlias {
 		return nil
 	}
 	return []string{host + ":host-gateway"}

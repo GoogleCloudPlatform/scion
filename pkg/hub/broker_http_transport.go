@@ -364,8 +364,11 @@ func (t *brokerHTTPTransport) DeleteAgent(ctx context.Context, brokerID, brokerE
 		return fmt.Errorf("failed to send request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotFound {
-		return brokerHTTPError(resp)
+	if resp.StatusCode >= 400 {
+		// A 404 is an idempotent success unless the broker refused a
+		// run-scoped delete because another run holds the name
+		// (deleteAgentError, ptone/scion#3080).
+		return deleteAgentError(brokerHTTPError(resp), opts.RunID)
 	}
 	return nil
 }

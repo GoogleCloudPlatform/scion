@@ -98,6 +98,9 @@ const SCHEMA_RESPONSE = {
     agent_secrets: {
       koanf_paths: ['agent_secrets.user_scope_only'],
     },
+    gcp_iam: {
+      koanf_paths: ['server.hub.gcp_iam_check_mode', 'server.hub.gcp_iam_deny_unknown_policy'],
+    },
   },
 };
 
@@ -730,11 +733,86 @@ describe('scion-page-admin-server-config', () => {
       expect(server.native_chat).toEqual({ enabled: false });
     });
 
-    it('a hosted save never sends the file-only gcp_iam keys', async () => {
-      const payload = await capturePut(makeBaseConfig({ settings_tier: 'db' }), () => {});
+    it('a hosted save leaves out unchanged gcp_iam keys', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db' }) as any;
+      base.server.hub.gcp_iam_check_mode = 'enforce';
+      base.server.hub.gcp_iam_deny_unknown_policy = 'fail-closed';
+      const payload = await capturePut(base, () => {});
       const hub = (payload.server as Record<string, Record<string, unknown>> | undefined)?.hub;
       expect(hub ?? {}).not.toHaveProperty('gcp_iam_check_mode');
       expect(hub ?? {}).not.toHaveProperty('gcp_iam_deny_unknown_policy');
+    });
+
+    it('a hosted save sends a changed gcp_iam key in the Layer-1 payload', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db' }) as any;
+      base.server.hub.gcp_iam_check_mode = 'enforce';
+      const payload = await capturePut(base, (el) => {
+        el.hubGcpIamDenyUnknownPolicy = 'fail-closed';
+      });
+      const hub = (payload.server as Record<string, Record<string, unknown>>).hub;
+      expect(hub.gcp_iam_deny_unknown_policy).toBe('fail-closed');
+      expect(hub).not.toHaveProperty('gcp_iam_check_mode');
+    });
+
+    it('gcp_iam selects show the reported value and an env badge when env-pinned', async () => {
+      const base = makeBaseConfig({
+        settings_tier: 'db',
+        env_overrides: ['server.hub.gcp_iam_check_mode'],
+      }) as any;
+      base.server.hub.gcp_iam_check_mode = 'enforce';
+      element = await createComponent(createFetchHandler(base));
+      const label = queryAll(element, 'label').find(
+        (l) => l.textContent?.trim() === 'IAM Check Mode'
+      );
+      const field = label!.closest('.form-field')!;
+      expect(field.querySelector('sl-select')?.getAttribute('value')).toBe('enforce');
+      expect(field.querySelector('.env-badge')).not.toBeNull();
+    });
+
+    it('gcp_iam selects are read-only on a hosted hub without the gcp_iam section', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db' }) as any;
+      base.server.hub.gcp_iam_check_mode = 'enforce';
+      const schema = JSON.parse(JSON.stringify(SCHEMA_RESPONSE));
+      delete schema.sections.gcp_iam;
+      element = await createComponent(createFetchHandler(base, { schemaResponse: schema }));
+      const labels = queryAll(element, 'label').filter((l) =>
+        ['IAM Check Mode', 'Deny Policy Fallback'].includes(l.textContent?.trim() ?? '')
+      );
+      expect(labels).toHaveLength(2);
+      for (const label of labels) {
+        const field = label.closest('.form-field')!;
+        expect(field.querySelector('sl-select')).toBeNull();
+        expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+          'deployment configuration'
+        );
+      }
+    });
+
+    it('GCP replication locations are read-only on a hosted hub', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db' }) as any;
+      base.server.secrets = { backend: 'gcpsm', gcp_replication_locations: ['us-east1'] };
+      element = await createComponent(createFetchHandler(base));
+      const label = queryAll(element, 'label').find(
+        (l) => l.textContent?.trim() === 'GCP Replication Locations'
+      );
+      expect(label).toBeDefined();
+      const field = label!.closest('.form-field')!;
+      expect(field.querySelector('sl-input')).toBeNull();
+      expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+        'deployment configuration'
+      );
+      expect(field.querySelector('.read-only-value')?.textContent).toContain('us-east1');
+    });
+
+    it('GCP replication locations stay editable on a workstation hub', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db', layer0_editable: true }) as any;
+      base.server.secrets = { backend: 'gcpsm', gcp_replication_locations: ['us-east1'] };
+      element = await createComponent(createFetchHandler(base));
+      const label = queryAll(element, 'label').find(
+        (l) => l.textContent?.trim() === 'GCP Replication Locations'
+      );
+      const field = label!.closest('.form-field')!;
+      expect(field.querySelector('sl-input')).not.toBeNull();
     });
 
     it('flag-managed workstation fields are read-only and not sent', async () => {
@@ -1567,7 +1645,123 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
+  describe('unset values are sent as null (ptone/scion#3898)', () => {
+    // A DB-backed save keeps the stored value of a key the body leaves
+    // out, so an unset value must be sent as an explicit null to clear it.
+    const KEYS = [
+      'default_thinking_level',
+      'default_resources',
+      'telemetry.enabled',
+      'telemetry.cloud.enabled',
+    ];
+
+    it('buildLayer1Payload sends null for an unset thinking level, never 0', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set(KEYS);
+      el.defaultThinkingLevel = null;
+      expect(el.buildLayer1Payload()).toHaveProperty('default_thinking_level', null);
+
+      el.defaultThinkingLevel = 30;
+      expect(el.buildLayer1Payload()).toHaveProperty('default_thinking_level', 30);
+    });
+
+    it('treats a loaded thinking level of 0 as unset', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'db', default_thinking_level: 0 }))
+      );
+      const el = element as any;
+      el.layer1Keys = new Set(KEYS);
+      expect(el.defaultThinkingLevel).toBeNull();
+      expect(el.buildLayer1Payload()).toHaveProperty('default_thinking_level', null);
+    });
+
+    it('buildFilePayload sends null for an unset thinking level, never 0', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.defaultThinkingLevel = null;
+      expect(el.buildFilePayload()).toHaveProperty('default_thinking_level', null);
+    });
+
+    it('buildLayer1Payload sends null default_resources when every resource field is empty', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set(KEYS);
+      el.defaultResCpuReq = '';
+      el.defaultResMemReq = '';
+      el.defaultResCpuLim = '';
+      el.defaultResMemLim = '';
+      el.defaultResDisk = '';
+      expect(el.buildLayer1Payload()).toHaveProperty('default_resources', null);
+
+      el.defaultResCpuReq = '500m';
+      expect(el.buildLayer1Payload().default_resources).toEqual({
+        requests: { cpu: '500m', memory: undefined },
+      });
+    });
+
+    it('buildLayer1Payload sends null for an empty telemetry cloud GCP project ID', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set(KEYS);
+      el.telemetryCloudGcpProjectId = '';
+      const cloud = (el.buildLayer1Payload().telemetry as Record<string, unknown>).cloud as Record<
+        string,
+        unknown
+      >;
+      expect(cloud).toHaveProperty('gcp_project_id', null);
+    });
+  });
+
   // ── Cross-project messaging (D1) ──
+
+  describe('File mode server sections keep omitted fields (ptone/scion#2938)', () => {
+    // The file-mode PUT deep-merges each server section, so an omitted
+    // field keeps its stored value; a field the form shows must be sent as
+    // an explicit empty value to be cleared.
+    it('buildFilePayload sends cleared server fields as explicit empties', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.logLevel = '';
+      el.hubPort = 0;
+      el.hubHost = '';
+      el.hubPublicUrl = '';
+      el.brokerHost = '';
+      el.brokerPort = 0;
+      el.dbDriver = '';
+      el.dbUrl = '';
+      el.authDevToken = '';
+      el.storageBucket = '';
+      el.secretsBackend = '';
+      el.secretsGCPProjectId = '';
+
+      const server = (el.buildFilePayload() as Record<string, any>).server;
+      expect(server.log_level).toBe('');
+      expect(server.hub).toMatchObject({ port: 0, host: '', public_url: '' });
+      expect(server.broker).toMatchObject({ port: 0, host: '' });
+      expect(server.database).toEqual({ driver: '', url: '' });
+      expect(server.auth).toHaveProperty('dev_token', '');
+      expect(server.storage).toHaveProperty('bucket', '');
+      expect(server.secrets).toMatchObject({ backend: '', gcp_project_id: '' });
+    });
+
+    it('buildFilePayload leaves out masked credentials so the stored values are kept', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.dbUrl = '********';
+      el.authDevToken = '********';
+
+      const server = (el.buildFilePayload() as Record<string, any>).server;
+      expect(server.database).not.toHaveProperty('url');
+      expect(server.auth).not.toHaveProperty('dev_token');
+    });
+  });
 
   describe('Cross-project messaging section', () => {
     it('renders cross-project messaging section in hub server tab', async () => {
@@ -1807,6 +2001,65 @@ describe('scion-page-admin-server-config', () => {
 
       // The switch itself must not render while the field is env-pinned.
       expect(agentSecretsSwitch(element)).toBeUndefined();
+    });
+  });
+
+  // ── Per-field env badges on map sections and the GCP IAM tab (ptone/scion#389) ──
+
+  describe('env badges on runtimes, profiles and GCP IAM fields', () => {
+    function envBadgeCount(el: HTMLElement): number {
+      return queryAll(el, '.env-badge').length;
+    }
+
+    it('renders no env badge when nothing is overridden', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      expect(envBadgeCount(element)).toBe(0);
+    });
+
+    it('badges the runtimes and profiles sections from leaf env keys under them', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            env_overrides: ['runtimes.docker.host', 'profiles.local.runtime'],
+          })
+        )
+      );
+      expect(envBadgeCount(element)).toBe(2);
+    });
+
+    it('does not badge a section from a key that only shares its name prefix', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({ settings_tier: 'db', env_overrides: ['profilesx.local.runtime'] })
+        )
+      );
+      expect(envBadgeCount(element)).toBe(0);
+    });
+
+    const gcpIamEnv = ['server.hub.gcp_iam_check_mode', 'server.hub.gcp_iam_deny_unknown_policy'];
+
+    it('badges the GCP IAM check mode and deny policy fields on a hosted DB hub', async () => {
+      // gcp_iam is Layer-1, so the selects stay editable and carry the env badge.
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'db', env_overrides: gcpIamEnv }))
+      );
+      const panel = query(element, 'sl-tab-panel[name="gcp-identity"]');
+      expect(panel?.querySelectorAll('.env-badge').length).toBe(2);
+      // The selects stay editable: both render, and neither is env-pinned.
+      expect(panel?.querySelectorAll('sl-select').length).toBe(2);
+      expect(panel?.querySelectorAll('.read-only-badge').length).toBe(0);
+    });
+
+    it('shows the GCP IAM fields as env-pinned on a file-tier hub', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ env_overrides: gcpIamEnv }))
+      );
+      const panel = query(element, 'sl-tab-panel[name="gcp-identity"]');
+      const pinned = Array.from(panel?.querySelectorAll('.read-only-badge') ?? []).filter((b) =>
+        (b.textContent ?? '').includes('environment variable')
+      );
+      expect(pinned.length).toBe(2);
     });
   });
 

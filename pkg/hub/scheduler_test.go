@@ -15,7 +15,9 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -336,6 +338,35 @@ type mockScheduledEventStore struct {
 	users           map[string]*store.User
 	roleBindings    []*store.RoleBinding
 	roleDefinitions map[string]*store.RoleDefinition
+	audits          []*store.MutationAuditRecord
+	schedules       map[string]*store.Schedule
+	notifications   []*store.Notification
+	getUserErr      error  // when set, GetUser fails with it
+	getUserErrID    string // when set, getUserErr applies to this ID only
+}
+
+func (m *mockScheduledEventStore) GetSchedule(_ context.Context, id string) (*store.Schedule, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if sc, ok := m.schedules[id]; ok {
+		cp := *sc
+		return &cp, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (m *mockScheduledEventStore) CreateNotification(_ context.Context, n *store.Notification) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cp := *n
+	m.notifications = append(m.notifications, &cp)
+	return nil
+}
+
+func (m *mockScheduledEventStore) getNotifications() []*store.Notification {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]*store.Notification(nil), m.notifications...)
 }
 
 func newMockStore() *mockScheduledEventStore {
@@ -350,12 +381,31 @@ func newMockStore() *mockScheduledEventStore {
 
 func seedFullRoleDispatchCreator(ms *mockScheduledEventStore, projectID string) string {
 	creatorID := "creator-agent"
+	// The creator is owned by an active project member, so it is in good
+	// standing (ptone/scion#3433).
+	ownerID := "creator-owner"
+	ms.users[ownerID] = &store.User{ID: ownerID, Email: "creator-owner@test.example", Role: store.UserRoleMember, Status: store.UserStatusActive}
+	ms.roleDefinitions["rd-creator-member"] = &store.RoleDefinition{
+		ID: "rd-creator-member", Name: store.ProjectRoleMember, ScopeType: store.RoleScopeProject,
+		Permissions: []string{"agent.read"},
+	}
+	ms.roleBindings = append(ms.roleBindings, &store.RoleBinding{
+		ID: "rb-creator-member", RoleDefinitionID: "rd-creator-member",
+		PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: ownerID,
+		ScopeType: store.RoleScopeProject, ScopeID: projectID,
+	})
 	ms.agents[creatorID] = &store.Agent{
 		ID:            creatorID,
 		ProjectID:     projectID,
+		OwnerID:       ownerID,
 		AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
 	}
 	return creatorID
+}
+
+// HasActiveAgentHold reports no holds: the mock records none.
+func (m *mockScheduledEventStore) HasActiveAgentHold(_ context.Context, _ string) (bool, error) {
+	return false, nil
 }
 
 func (m *mockScheduledEventStore) CreateScheduledEvent(_ context.Context, event *store.ScheduledEvent) error {
@@ -467,6 +517,9 @@ func (m *mockScheduledEventStore) GetAgent(_ context.Context, id string) (*store
 func (m *mockScheduledEventStore) GetUser(_ context.Context, id string) (*store.User, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.getUserErr != nil && (m.getUserErrID == "" || m.getUserErrID == id) {
+		return nil, m.getUserErr
+	}
 	if u, ok := m.users[id]; ok {
 		cp := *u
 		return &cp, nil
@@ -512,7 +565,7 @@ func (m *mockScheduledEventStore) CreateAgent(_ context.Context, agent *store.Ag
 // WithTx runs fn directly against m: this mock has no real transactions, and
 // none of the tests that use it exercise rollback behavior. Needed because
 // the scheduler's create path now writes the agent row and its identity-key
-// row inside WithTx (createAgentWithIdentityKey); without this override that
+// row inside WithTx (commitAgentCreate); without this override that
 // call panics on the embedded nil store.Store, same as any other unhandled
 // method here.
 func (m *mockScheduledEventStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
@@ -530,6 +583,15 @@ func (m *mockScheduledEventStore) ReplaceAgentIdentityKeys(_ context.Context, _,
 
 func (m *mockScheduledEventStore) CreateDelegationEdge(_ context.Context, _ *store.DelegationEdge) error {
 	return nil // no-op for mock
+}
+
+// CreateMutationAudit records the audit row a scheduled create writes in
+// its transaction.
+func (m *mockScheduledEventStore) CreateMutationAudit(_ context.Context, r *store.MutationAuditRecord) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.audits = append(m.audits, r)
+	return nil
 }
 
 func (m *mockScheduledEventStore) GetTemplate(_ context.Context, _ string) (*store.Template, error) {
@@ -1258,6 +1320,24 @@ func TestExpiredEventsFromDowntimeStillFire(t *testing.T) {
 	s.Stop()
 }
 
+// seedEventHandlerMessageUser stores an active user bound to a project role
+// carrying agent.message in projectID and returns its ID, for a scheduled
+// message revision that passes resolveScheduledAuthority.
+func seedEventHandlerMessageUser(ms *mockScheduledEventStore, projectID string) string {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	const userID = "event-handler-user"
+	ms.users[userID] = &store.User{ID: userID, Email: "eh@test.com", Status: store.UserStatusActive, Role: "member"}
+	ms.roleDefinitions["eh-message-role"] = &store.RoleDefinition{
+		ID: "eh-message-role", Name: "Message", Permissions: []string{"agent.message"}, ScopeType: "project",
+	}
+	ms.roleBindings = append(ms.roleBindings, &store.RoleBinding{
+		ID: "eh-binding-" + projectID, RoleDefinitionID: "eh-message-role",
+		PrincipalType: "user", PrincipalID: userID, ScopeType: "project", ScopeID: projectID,
+	})
+	return userID
+}
+
 func TestMessageEventHandler_AgentNotFound(t *testing.T) {
 	// When a message event fires for an agent that has been deleted,
 	// the handler returns an error so the enclosing scheduler wrapper
@@ -1274,6 +1354,7 @@ func TestMessageEventHandler_AgentNotFound(t *testing.T) {
 		Payload:   `{"agentName":"deleted-agent","message":"hello?"}`,
 		Status:    store.ScheduledEventPending,
 	}
+	evt = withSessionRevision(evt, seedEventHandlerMessageUser(ms, "project-1"))
 	_ = ms.CreateScheduledEvent(ctx, &evt)
 
 	// Create a Server with the mock store — no agents registered
@@ -1302,6 +1383,7 @@ func TestMessageEventHandler_AgentNotFoundByID(t *testing.T) {
 		Payload:   `{"agentId":"nonexistent-id","message":"hello?"}`,
 		Status:    store.ScheduledEventPending,
 	}
+	evt = withSessionRevision(evt, seedEventHandlerMessageUser(ms, "project-1"))
 	_ = ms.CreateScheduledEvent(ctx, &evt)
 
 	srv := newEventHandlerTestServer(ms)
@@ -1419,13 +1501,13 @@ func TestDispatchAgentEventHandler_ProjectNotFound(t *testing.T) {
 	handler := srv.dispatchAgentEventHandler()
 
 	ctx := context.Background()
-	evt := store.ScheduledEvent{
+	evt := withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-noproject-1",
 		ProjectID: "nonexistent-project",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"worker-1"}`,
 		CreatedBy: creatorID,
-	}
+	}, creatorID)
 
 	err := handler(ctx, evt)
 	if err == nil {
@@ -1440,6 +1522,11 @@ func TestDispatchAgentEventHandler_AgentAlreadyExists(t *testing.T) {
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
 	creatorID := seedFullRoleDispatchCreator(ms, "project-1")
+	// The creator has an owning user, so a notification on this path would
+	// have a recipient and be visible below.
+	ms.users["user-owner"] = &store.User{ID: "user-owner"}
+	ms.agents[creatorID].Ancestry = []string{"user-owner", creatorID}
+	ms.schedules = map[string]*store.Schedule{"sched-1": {ID: "sched-1", Name: "nightly", ProjectID: "project-1"}}
 	ms.agents["existing-1"] = &store.Agent{
 		ID:        "existing-1",
 		Slug:      "worker-1",
@@ -1452,13 +1539,16 @@ func TestDispatchAgentEventHandler_AgentAlreadyExists(t *testing.T) {
 	handler := srv.dispatchAgentEventHandler()
 
 	ctx := context.Background()
-	evt := store.ScheduledEvent{
+	evt := withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-exists-1",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"worker-1"}`,
 		CreatedBy: creatorID,
-	}
+		// A recurring fire, so the one-shot guard cannot hide a stray
+		// notification.
+		ScheduleID: "sched-1",
+	}, creatorID)
 
 	err := handler(ctx, evt)
 	if err == nil {
@@ -1467,28 +1557,240 @@ func TestDispatchAgentEventHandler_AgentAlreadyExists(t *testing.T) {
 	if !strings.Contains(err.Error(), "already exists") {
 		t.Errorf("expected 'already exists' in error, got: %s", err)
 	}
+	// A live row is not the errored-row case (ptone/scion#3701): today's
+	// error, and no notification.
+	if strings.Contains(err.Error(), "phase error") || strings.Contains(err.Error(), "delete the agent") {
+		t.Errorf("live row got the errored-row error: %s", err)
+	}
+	if n := ms.getNotifications(); len(n) != 0 {
+		t.Errorf("live row created %d notifications, want 0", len(n))
+	}
+}
+
+// blockedFireFixture is a dispatch_agent fire whose name is held by an
+// errored row left by a refused create-failure cleanup (ptone/scion#3701).
+type blockedFireFixture struct {
+	ms      *mockScheduledEventStore
+	srv     *Server
+	pub     *ChannelEventPublisher
+	all     <-chan Event
+	evt     store.ScheduledEvent
+	refused string
+}
+
+func newBlockedFireFixture(t *testing.T, createdBy string) *blockedFireFixture {
+	t.Helper()
+	ms := newMockStore()
+	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
+	creatorID := seedFullRoleDispatchCreator(ms, "project-1")
+	ms.users["user-owner"] = &store.User{ID: "user-owner", Email: "owner@example.com"}
+	ms.schedules = map[string]*store.Schedule{"sched-1": {ID: "sched-1", Name: "nightly", ProjectID: "project-1"}}
+	refused := createCleanupRefusedMessage(&DeleteRunMismatchError{RequestedRunID: "run-hub", CurrentRunID: "run-broker"})
+	ms.agents["errored-1"] = &store.Agent{
+		ID: "errored-1", Slug: "worker-1", Name: "worker-1", ProjectID: "project-1",
+		Phase: "error", Message: refused,
+	}
+	srv := newEventHandlerTestServer(ms)
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	all, unsub := pub.Subscribe(">")
+	t.Cleanup(unsub)
+	srv.events = pub
+	if createdBy == "" {
+		createdBy = creatorID
+	}
+	evt := withMockAgentRevision(store.ScheduledEvent{
+		ID: "dispatch-blocked-1", ProjectID: "project-1", EventType: "dispatch_agent",
+		Payload: `{"agentName":"worker-1"}`, CreatedBy: createdBy, ScheduleID: "sched-1",
+	}, creatorID)
+	return &blockedFireFixture{ms: ms, srv: srv, pub: pub, all: all, evt: evt, refused: refused}
+}
+
+func (f *blockedFireFixture) fire() error {
+	return f.srv.dispatchAgentEventHandler()(context.Background(), f.evt)
+}
+
+// published drains every event published so far.
+func (f *blockedFireFixture) published() []Event {
+	var out []Event
+	for {
+		select {
+		case e := <-f.all:
+			out = append(out, e)
+		default:
+			return out
+		}
+	}
+}
+
+// A fire blocked by a refused-cleanup row fails with an actionable error
+// quoting the row, and notifies the schedule's user owner exactly once, on
+// that user's subject only.
+func TestDispatchAgentEventHandler_ErroredRowBlocksAndNotifiesOwner(t *testing.T) {
+	f := newBlockedFireFixture(t, "user-owner")
+	err := f.fire()
+	if err == nil {
+		t.Fatal("expected error for errored row")
+	}
+	for _, want := range []string{`agent "worker-1" already exists in project in phase error`, f.refused, "delete the agent to resume this schedule"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing %q", err, want)
+		}
+	}
+	notifs := f.ms.getNotifications()
+	if len(notifs) != 1 {
+		t.Fatalf("got %d notifications, want 1", len(notifs))
+	}
+	n := notifs[0]
+	if n.SubscriberType != store.SubscriberTypeUser || n.SubscriberID != "user-owner" {
+		t.Errorf("recipient = %s/%s, want user/user-owner", n.SubscriberType, n.SubscriberID)
+	}
+	if n.Status != NotificationScheduleBlocked || n.AgentID != "errored-1" || n.ProjectID != "project-1" {
+		t.Errorf("notification = %+v", n)
+	}
+	if !strings.Contains(n.Message, `Schedule "nightly" is blocked`) || !strings.Contains(n.Message, "Delete the agent to resume this schedule") {
+		t.Errorf("notification message = %q", n.Message)
+	}
+	evts := f.published()
+	if len(evts) != 1 || evts[0].Subject != "user.user-owner.notification" {
+		subjects := []string{}
+		for _, e := range evts {
+			subjects = append(subjects, e.Subject)
+		}
+		t.Fatalf("published on %v, want only user.user-owner.notification", subjects)
+	}
+}
+
+// An errored row without the refused-cleanup marker still blocks with the
+// actionable error, without quoting its message.
+func TestDispatchAgentEventHandler_ErroredRowWithoutMarker(t *testing.T) {
+	f := newBlockedFireFixture(t, "user-owner")
+	f.ms.agents["errored-1"].Message = "container exited"
+	err := f.fire()
+	if err == nil || !strings.Contains(err.Error(), "in phase error; delete the agent to resume this schedule") {
+		t.Fatalf("error = %v", err)
+	}
+	if strings.Contains(err.Error(), "container exited") {
+		t.Errorf("unmarked row message quoted: %s", err)
+	}
+	if n := f.ms.getNotifications(); len(n) != 1 {
+		t.Errorf("got %d notifications, want 1", len(n))
+	}
+}
+
+// A one-shot event (no schedule) records the actionable error and creates no
+// notification (lead ruling on ptone/scion#3701).
+func TestDispatchAgentEventHandler_ErroredRowOneShot(t *testing.T) {
+	f := newBlockedFireFixture(t, "user-owner")
+	f.evt.ScheduleID = ""
+	err := f.fire()
+	if err == nil || !strings.Contains(err.Error(), `agent "worker-1" already exists in project in phase error`) {
+		t.Fatalf("error = %v", err)
+	}
+	if n := f.ms.getNotifications(); len(n) != 0 {
+		t.Fatalf("one-shot fire created %d notifications, want 0", len(n))
+	}
+	if evts := f.published(); len(evts) != 0 {
+		t.Fatalf("one-shot fire published %d events, want 0", len(evts))
+	}
+}
+
+// An agent creator's notification goes to its owning user (ancestry root);
+// one with no owning user is logged and skipped, and the fire still fails
+// with the actionable error.
+func TestDispatchAgentEventHandler_ErroredRowAgentCreatorFallback(t *testing.T) {
+	f := newBlockedFireFixture(t, "")
+	f.ms.agents["creator-agent"].Ancestry = []string{"user-owner", "creator-agent"}
+	if err := f.fire(); err == nil || !strings.Contains(err.Error(), "phase error") {
+		t.Fatalf("error = %v", err)
+	}
+	notifs := f.ms.getNotifications()
+	if len(notifs) != 1 || notifs[0].SubscriberID != "user-owner" {
+		t.Fatalf("notifications = %+v, want one to user-owner", notifs)
+	}
+	if evts := f.published(); len(evts) != 1 || evts[0].Subject != "user.user-owner.notification" {
+		t.Fatalf("published = %+v", evts)
+	}
+
+	// The creator is owned by another agent in the project, so it has no
+	// owning user row; that agent's owner keeps it in good standing (an
+	// agent with no resolvable owner is refused at fire time).
+	g := newBlockedFireFixture(t, "")
+	g.ms.agents["parent-agent"] = &store.Agent{ID: "parent-agent", ProjectID: "project-1", OwnerID: "creator-owner"}
+	g.ms.agents["creator-agent"].OwnerID = "parent-agent"
+	if err := g.fire(); err == nil || !strings.Contains(err.Error(), "delete the agent to resume this schedule") {
+		t.Fatalf("error = %v", err)
+	}
+	if n := g.ms.getNotifications(); len(n) != 0 {
+		t.Errorf("agent creator with no owning user created %d notifications, want 0", len(n))
+	}
+	if evts := g.published(); len(evts) != 0 {
+		t.Errorf("published %d events, want 0", len(evts))
+	}
+
+	// No ancestry: the agent's owner, when it is a user, is the recipient.
+	h := newBlockedFireFixture(t, "")
+	h.ms.agents["creator-agent"].OwnerID = "user-owner"
+	// user-owner is an active project member, so the creator it owns is in
+	// good standing.
+	h.ms.users["user-owner"].Role = store.UserRoleMember
+	h.ms.users["user-owner"].Status = store.UserStatusActive
+	h.ms.roleBindings = append(h.ms.roleBindings, &store.RoleBinding{
+		ID: "rb-user-owner-member", RoleDefinitionID: "rd-creator-member",
+		PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: "user-owner",
+		ScopeType: store.RoleScopeProject, ScopeID: "project-1",
+	})
+	if err := h.fire(); err == nil || !strings.Contains(err.Error(), "phase error") {
+		t.Fatalf("error = %v", err)
+	}
+	notifs = h.ms.getNotifications()
+	if len(notifs) != 1 || notifs[0].SubscriberID != "user-owner" {
+		t.Fatalf("notifications = %+v, want one to user-owner via OwnerID", notifs)
+	}
+}
+
+// A store failure looking up the creator is logged with its error, then the
+// notification is skipped as for no owning user; the fire's error is
+// unchanged.
+func TestDispatchAgentEventHandler_ErroredRowRecipientLookupErrorLogged(t *testing.T) {
+	f := newBlockedFireFixture(t, "user-owner")
+	// Local capture: authzHelperCaptureLogs is behind !no_sqlite.
+	logs := &bytes.Buffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	// Only the recipient lookup fails: the authoring agent's standing check
+	// reads its owner (creator-owner), not user-owner.
+	f.ms.getUserErr = errors.New("store unavailable")
+	f.ms.getUserErrID = "user-owner"
+	if err := f.fire(); err == nil || !strings.Contains(err.Error(), "delete the agent to resume this schedule") {
+		t.Fatalf("error = %v", err)
+	}
+	if n := f.ms.getNotifications(); len(n) != 0 {
+		t.Errorf("got %d notifications, want 0", len(n))
+	}
+	out := logs.String()
+	if !strings.Contains(out, "looking up the schedule creator as a user failed") || !strings.Contains(out, "store unavailable") {
+		t.Errorf("lookup error not logged:\n%s", out)
+	}
 }
 
 func TestDispatchAgentEventHandler_CreatesAgentNoDispatcher(t *testing.T) {
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
-	ms.agents["creator-agent"] = &store.Agent{
-		ID:            "creator-agent",
-		ProjectID:     "project-1",
-		AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
-	}
+	seedFullRoleDispatchCreator(ms, "project-1")
 
 	srv := newEventHandlerTestServer(ms)
 	handler := srv.dispatchAgentEventHandler()
 
 	ctx := context.Background()
-	evt := store.ScheduledEvent{
+	evt := withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-ok-1",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"new-worker","template":"my-tmpl","task":"Do the thing"}`,
 		CreatedBy: "creator-agent",
-	}
+	}, "creator-agent")
 
 	// Should succeed — agent is created but not dispatched (no dispatcher)
 	err := handler(ctx, evt)
@@ -1530,13 +1832,13 @@ func TestDispatchAgentEventHandler_FireRequiresAgentCreateScope(t *testing.T) {
 	srv := newEventHandlerTestServer(ms)
 	handler := srv.dispatchAgentEventHandler()
 
-	err := handler(context.Background(), store.ScheduledEvent{
+	err := handler(context.Background(), withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-readonly-creator",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"new-worker"}`,
 		CreatedBy: "readonly-creator",
-	})
+	}, "readonly-creator"))
 	if err == nil {
 		t.Fatal("expected readonly creator to be denied at fire time")
 	}
@@ -1579,17 +1881,17 @@ func TestAuthorizeScheduledAgentCreate_UserSuccessReturnsAllowed(t *testing.T) {
 	srv := newEventHandlerTestServer(ms)
 	srv.authzService = NewAuthzService(ms, slog.Default())
 
-	allowed, err := srv.authorizeScheduledAgentCreate(context.Background(), store.ScheduledEvent{
+	allowed, err := srv.authorizeScheduledAgentCreate(context.Background(), withSessionRevision(store.ScheduledEvent{
 		ID:        "dispatch-admin-user",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		CreatedBy: "admin-user",
-	})
+	}, "admin-user"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !allowed {
-		t.Fatal("expected user authorization success to return allowed=true")
+	if allowed.Authority.PrincipalID != "admin-user" || allowed.Identity == nil {
+		t.Fatalf("expected the revision principal as the scheduled creator, got %+v", allowed.Authority)
 	}
 }
 
@@ -1608,18 +1910,18 @@ func TestDispatchAgentEventHandler_SuspendedUserCreatorDenied(t *testing.T) {
 	srv.authzService = NewAuthzService(ms, slog.Default())
 	handler := srv.dispatchAgentEventHandler()
 
-	err := handler(context.Background(), store.ScheduledEvent{
+	err := handler(context.Background(), withSessionRevision(store.ScheduledEvent{
 		ID:        "dispatch-suspended-user",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"new-worker"}`,
 		CreatedBy: "admin-user",
-	})
+	}, "admin-user"))
 	if err == nil {
 		t.Fatal("expected suspended user creator to be denied at fire time")
 	}
-	if !strings.Contains(err.Error(), "status suspended") {
-		t.Fatalf("expected suspended status error, got: %v", err)
+	if !strings.Contains(err.Error(), reasonPrincipalInactive) {
+		t.Fatalf("expected inactive principal error, got: %v", err)
 	}
 	if _, err := ms.GetAgentBySlug(context.Background(), "project-1", "new-worker"); err == nil {
 		t.Fatal("suspended user creator must not create a scheduled agent")
@@ -1642,8 +1944,8 @@ func TestDispatchAgentEventHandler_EmptyCreatorDenied(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected empty creator to be denied at fire time")
 	}
-	if !strings.Contains(err.Error(), "no creator") {
-		t.Fatalf("expected no creator error, got: %v", err)
+	if !errors.Is(err, errScheduledAuthorityUnrecorded) {
+		t.Fatalf("expected unrecorded schedule authority error, got: %v", err)
 	}
 	if _, err := ms.GetAgentBySlug(context.Background(), "project-1", "new-worker"); err == nil {
 		t.Fatal("empty creator must not create a scheduled agent")
@@ -1711,13 +2013,13 @@ func TestDispatchAgentEventHandler_ResolvableTemplateDoesNotPanic(t *testing.T) 
 	srv := newEventHandlerTestServer(&resolvingTemplateStore{ms})
 	handler := srv.dispatchAgentEventHandler()
 
-	evt := store.ScheduledEvent{
+	evt := withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-resolvable-1",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"tmpl-worker","template":"my-tmpl","task":"Do the thing"}`,
 		CreatedBy: creatorID,
-	}
+	}, creatorID)
 
 	err := handler(context.Background(), evt)
 	if err != nil {
@@ -2404,21 +2706,17 @@ func TestSchedulerNoLaunchReaperRegistered(t *testing.T) {
 func TestDispatchAgentEventHandler_AgentCreatorSetsCreatorName(t *testing.T) {
 	ms := newMockStore()
 	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
-	ms.agents["creator-agent"] = &store.Agent{
-		ID:            "creator-agent",
-		Name:          "lead-agent",
-		ProjectID:     "project-1",
-		AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
-	}
+	seedFullRoleDispatchCreator(ms, "project-1")
+	ms.agents["creator-agent"].Name = "lead-agent"
 
 	srv := newEventHandlerTestServer(ms)
-	if err := srv.dispatchAgentEventHandler()(context.Background(), store.ScheduledEvent{
+	if err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-creator-name",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"sched-child"}`,
 		CreatedBy: "creator-agent",
-	}); err != nil {
+	}, "creator-agent")); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 

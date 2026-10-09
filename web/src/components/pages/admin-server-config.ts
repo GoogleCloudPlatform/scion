@@ -304,7 +304,7 @@ function setCloudRunKey<B extends 'cloudrun' | 'cloudrun_instances'>(
     delete next[key as string];
   }
   if (Object.keys(next).length > 0) {
-    rt[block] = next as V1RuntimeConfig[B];
+    rt[block] = next;
   } else {
     delete rt[block];
   }
@@ -550,13 +550,8 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   harness_configs: 'Harness Configs',
 };
 
-// server.hub.gcp_iam_* have labels but are file-only on the server (not
-// Layer-1), so they are not in the fallback Layer-1 list.
-const STATIC_LAYER1_KEYS: Set<string> = new Set(
-  Object.keys(KOANF_KEY_LABELS).filter(
-    (k) => k !== 'server.hub.gcp_iam_check_mode' && k !== 'server.hub.gcp_iam_deny_unknown_policy'
-  )
-);
+/** Fallback Layer-1 key list, used until the schema endpoint answers. */
+const STATIC_LAYER1_KEYS: Set<string> = new Set(Object.keys(KOANF_KEY_LABELS));
 
 /** Why a field is read-only: hosted Layer-0, env-pinned, or workstation flag-managed. */
 type ReadOnlyReason = 'bootstrap' | 'env' | 'flag';
@@ -686,6 +681,9 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private hubStalledThreshold = '';
   @state() private hubGcpIamCheckMode = 'off';
   @state() private hubGcpIamDenyUnknownPolicy = 'fail-open';
+  /** The GCP permission-check values as loaded, so a save sends only a changed key. */
+  private loadedGcpIamCheckMode = 'off';
+  private loadedGcpIamDenyUnknownPolicy = 'fail-open';
 
   // Runtime Broker
   @state() private brokerEnabled = false;
@@ -1718,7 +1716,9 @@ export class ScionPageAdminServerConfig extends LitElement {
       this.defaultModelSelection = '';
       this.defaultCustomModelId = '';
     }
-    this.defaultThinkingLevel = data.default_thinking_level ?? null;
+    // A stored 0 is not a valid level (the server rejects it); show it as
+    // unset so a save sends null instead of failing (ptone/scion#3898).
+    this.defaultThinkingLevel = data.default_thinking_level || null;
     this.defaultMaxAgentRole = data.default_max_agent_role || '';
     this.defaultAgentRole = data.default_agent_role || '';
     this.defaultRuntimeBroker = data.default_runtime_broker || '';
@@ -1748,6 +1748,8 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.hubStalledThreshold = srv.hub.stalled_threshold || '';
         this.hubGcpIamCheckMode = srv.hub.gcp_iam_check_mode || 'off';
         this.hubGcpIamDenyUnknownPolicy = srv.hub.gcp_iam_deny_unknown_policy || 'fail-open';
+        this.loadedGcpIamCheckMode = this.hubGcpIamCheckMode;
+        this.loadedGcpIamDenyUnknownPolicy = this.hubGcpIamDenyUnknownPolicy;
       }
 
       // Broker
@@ -2070,6 +2072,10 @@ export class ScionPageAdminServerConfig extends LitElement {
       }
       if (this.defaultResDisk) defaultResources.disk = this.defaultResDisk;
       payload.default_resources = defaultResources;
+    } else if (ok('default_resources')) {
+      // The server keeps an omitted key, so all-empty resources are sent
+      // as null to clear the stored value (ptone/scion#3719).
+      payload.default_resources = null;
     }
 
     // Default model settings
@@ -2080,8 +2086,10 @@ export class ScionPageAdminServerConfig extends LitElement {
           : this.defaultModelSelection;
       payload.default_model = resolvedModel || '';
     }
+    // An unset level is sent as null, which clears it; the server rejects
+    // 0 rather than treating it as a clear (ptone/scion#3898).
     if (ok('default_thinking_level')) {
-      payload.default_thinking_level = this.defaultThinkingLevel ?? 0;
+      payload.default_thinking_level = this.defaultThinkingLevel ?? null;
     }
     if (ok('default_runtime_broker')) {
       payload.default_runtime_broker = this.defaultRuntimeBroker || '';
@@ -2117,7 +2125,18 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.hub.auto_suspend_stalled'))
       hub.auto_suspend_stalled = this.hubAutoSuspendStalled;
     if (ok('server.hub.stalled_threshold')) hub.stalled_threshold = this.hubStalledThreshold;
-    // server.hub.gcp_iam_* are file-only, sent by buildLayer0Payload.
+    // The GCP permission-check keys are sent only when changed: each change
+    // is checked and recorded by the server.
+    if (
+      ok('server.hub.gcp_iam_check_mode') &&
+      this.hubGcpIamCheckMode !== this.loadedGcpIamCheckMode
+    )
+      hub.gcp_iam_check_mode = this.hubGcpIamCheckMode;
+    if (
+      ok('server.hub.gcp_iam_deny_unknown_policy') &&
+      this.hubGcpIamDenyUnknownPolicy !== this.loadedGcpIamDenyUnknownPolicy
+    )
+      hub.gcp_iam_deny_unknown_policy = this.hubGcpIamDenyUnknownPolicy;
     if (Object.keys(hub).length > 0) server.hub = hub;
 
     // Auth — only Layer-1 auth fields
@@ -2167,7 +2186,9 @@ export class ScionPageAdminServerConfig extends LitElement {
           endpoint: this.telemetryCloudEndpoint,
           protocol: this.telemetryCloudProtocol,
           provider: this.telemetryCloudProvider,
-          gcp_project_id: this.telemetryCloudGcpProjectId || undefined,
+          // null clears a stored project ID; an omitted key would keep it,
+          // because telemetry is merged key by key (ptone/scion#3717).
+          gcp_project_id: this.telemetryCloudGcpProjectId || null,
           cloud_logging: this.telemetryCloudCloudLogging,
         };
       }
@@ -2270,9 +2291,6 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.hub.host')) hub.host = this.hubHost || '';
     if (ok('server.hub.read_timeout')) hub.read_timeout = this.hubReadTimeout || '';
     if (ok('server.hub.write_timeout')) hub.write_timeout = this.hubWriteTimeout || '';
-    if (ok('server.hub.gcp_iam_check_mode')) hub.gcp_iam_check_mode = this.hubGcpIamCheckMode || '';
-    if (ok('server.hub.gcp_iam_deny_unknown_policy'))
-      hub.gcp_iam_deny_unknown_policy = this.hubGcpIamDenyUnknownPolicy || '';
     if (Object.keys(hub).length > 0) server.hub = hub;
 
     const broker: Record<string, unknown> = {};
@@ -2382,8 +2400,10 @@ export class ScionPageAdminServerConfig extends LitElement {
           : this.defaultModelSelection;
       payload.default_model = resolvedModel || '';
     }
+    // An unset level is sent as null, which clears it; the server rejects
+    // 0 rather than treating it as a clear (ptone/scion#3898).
     if (ok('default_thinking_level')) {
-      payload.default_thinking_level = this.defaultThinkingLevel ?? 0;
+      payload.default_thinking_level = this.defaultThinkingLevel ?? null;
     }
     if (ok('default_runtime_broker')) {
       payload.default_runtime_broker = this.defaultRuntimeBroker || '';
@@ -2407,21 +2427,23 @@ export class ScionPageAdminServerConfig extends LitElement {
       if (said !== undefined) payload.default_gcp_identity_service_account_id = said;
     }
 
-    // Server
+    // Server — file mode deep-merges each server section, so an omitted
+    // field keeps its stored value. Send every shown field, a cleared one
+    // as "" / 0 / [] (explicit empties delete the key), so clearing a field
+    // in the form still clears it in settings.yaml (ptone/scion#2938).
+    // Masked secrets still showing "********" are left out to keep them.
     const server: Record<string, unknown> = {};
-    if (ok('server.mode')) server.mode = this.serverMode || undefined;
-    if (ok('server.log_level')) server.log_level = this.logLevel || undefined;
-    if (ok('server.log_format')) server.log_format = this.logFormat || undefined;
+    if (ok('server.mode')) server.mode = this.serverMode || '';
+    if (ok('server.log_level')) server.log_level = this.logLevel || '';
+    if (ok('server.log_format')) server.log_format = this.logFormat || '';
 
     // Hub server
     const hub: Record<string, unknown> = {};
-    if (ok('server.hub.port') && this.hubPort) hub.port = this.hubPort;
-    if (ok('server.hub.host') && this.hubHost) hub.host = this.hubHost;
-    if (ok('server.hub.public_url') && this.hubPublicUrl) hub.public_url = this.hubPublicUrl;
-    if (ok('server.hub.read_timeout') && this.hubReadTimeout)
-      hub.read_timeout = this.hubReadTimeout;
-    if (ok('server.hub.write_timeout') && this.hubWriteTimeout)
-      hub.write_timeout = this.hubWriteTimeout;
+    if (ok('server.hub.port')) hub.port = this.hubPort || 0;
+    if (ok('server.hub.host')) hub.host = this.hubHost || '';
+    if (ok('server.hub.public_url')) hub.public_url = this.hubPublicUrl || '';
+    if (ok('server.hub.read_timeout')) hub.read_timeout = this.hubReadTimeout || '';
+    if (ok('server.hub.write_timeout')) hub.write_timeout = this.hubWriteTimeout || '';
     if (ok('server.hub.admin_emails')) {
       hub.admin_emails = this.hubAdminEmails
         ? this.hubAdminEmails
@@ -2430,8 +2452,8 @@ export class ScionPageAdminServerConfig extends LitElement {
             .filter(Boolean)
         : [];
     }
-    if (ok('server.hub.soft_delete_retention') && this.hubSoftDeleteRetention)
-      hub.soft_delete_retention = this.hubSoftDeleteRetention;
+    if (ok('server.hub.soft_delete_retention'))
+      hub.soft_delete_retention = this.hubSoftDeleteRetention || '';
     if (ok('server.hub.soft_delete_retain_files'))
       hub.soft_delete_retain_files = this.hubSoftDeleteRetainFiles;
     if (ok('server.hub.auto_suspend_stalled'))
@@ -2445,58 +2467,55 @@ export class ScionPageAdminServerConfig extends LitElement {
     // Broker
     const broker: Record<string, unknown> = {};
     if (ok('server.broker.enabled')) broker.enabled = this.brokerEnabled;
-    if (ok('server.broker.port') && this.brokerPort) broker.port = this.brokerPort;
-    if (ok('server.broker.host') && this.brokerHost) broker.host = this.brokerHost;
-    if (ok('server.broker.hub_endpoint') && this.brokerHubEndpoint)
-      broker.hub_endpoint = this.brokerHubEndpoint;
-    if (ok('server.broker.container_hub_endpoint') && this.brokerContainerHubEndpoint)
-      broker.container_hub_endpoint = this.brokerContainerHubEndpoint;
-    if (ok('server.broker.name') && this.brokerName) broker.broker_name = this.brokerName;
-    if (ok('server.broker.nickname') && this.brokerNickname)
-      broker.broker_nickname = this.brokerNickname;
+    if (ok('server.broker.port')) broker.port = this.brokerPort || 0;
+    if (ok('server.broker.host')) broker.host = this.brokerHost || '';
+    if (ok('server.broker.hub_endpoint')) broker.hub_endpoint = this.brokerHubEndpoint || '';
+    if (ok('server.broker.container_hub_endpoint'))
+      broker.container_hub_endpoint = this.brokerContainerHubEndpoint || '';
+    if (ok('server.broker.name')) broker.broker_name = this.brokerName || '';
+    if (ok('server.broker.nickname')) broker.broker_nickname = this.brokerNickname || '';
     if (ok('server.broker.auto_provide')) broker.auto_provide = this.brokerAutoProvide;
     server.broker = broker;
 
     // Database
     const database: Record<string, unknown> = {};
-    if (ok('server.database.driver') && this.dbDriver) database.driver = this.dbDriver;
-    if (ok('server.database.url') && this.dbUrl && this.dbUrl !== '********')
-      database.url = this.dbUrl;
+    if (ok('server.database.driver')) database.driver = this.dbDriver || '';
+    if (ok('server.database.url') && this.dbUrl !== '********') database.url = this.dbUrl || '';
     server.database = database;
 
     // Auth
     const auth: Record<string, unknown> = {};
     if (ok('server.auth.dev_mode')) auth.dev_mode = this.authDevMode;
-    if (ok('server.auth.dev_token') && this.authDevToken && this.authDevToken !== '********')
-      auth.dev_token = this.authDevToken;
-    if (ok('server.auth.authorized_domains') && this.authAuthorizedDomains) {
+    if (ok('server.auth.dev_token') && this.authDevToken !== '********')
+      auth.dev_token = this.authDevToken || '';
+    if (ok('server.auth.authorized_domains')) {
       auth.authorized_domains = this.authAuthorizedDomains
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
+        ? this.authAuthorizedDomains
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : [];
     }
-    if (ok('server.auth.user_access_mode') && this.authUserAccessMode) {
-      auth.user_access_mode = this.authUserAccessMode;
+    if (ok('server.auth.user_access_mode')) {
+      auth.user_access_mode = this.authUserAccessMode || '';
     }
-    if (ok('server.auth.default_user_role') && this.authDefaultUserRole) {
-      auth.default_user_role = this.authDefaultUserRole;
+    if (ok('server.auth.default_user_role')) {
+      auth.default_user_role = this.authDefaultUserRole || '';
     }
     server.auth = auth;
 
     // Storage
     const storage: Record<string, unknown> = {};
-    if (ok('server.storage.provider') && this.storageProvider)
-      storage.provider = this.storageProvider;
-    if (ok('server.storage.bucket') && this.storageBucket) storage.bucket = this.storageBucket;
-    if (ok('server.storage.local_path') && this.storageLocalPath)
-      storage.local_path = this.storageLocalPath;
+    if (ok('server.storage.provider')) storage.provider = this.storageProvider || '';
+    if (ok('server.storage.bucket')) storage.bucket = this.storageBucket || '';
+    if (ok('server.storage.local_path')) storage.local_path = this.storageLocalPath || '';
     server.storage = storage;
 
     // Secrets
     const secrets: Record<string, unknown> = {};
-    if (ok('server.secrets.backend') && this.secretsBackend) secrets.backend = this.secretsBackend;
-    if (ok('server.secrets.gcp_project_id') && this.secretsGCPProjectId)
-      secrets.gcp_project_id = this.secretsGCPProjectId;
+    if (ok('server.secrets.backend')) secrets.backend = this.secretsBackend || '';
+    if (ok('server.secrets.gcp_project_id'))
+      secrets.gcp_project_id = this.secretsGCPProjectId || '';
     if (ok('server.secrets.gcp_replication_locations')) {
       secrets.gcp_replication_locations = this.secretsGCPReplicationLocations
         ? this.secretsGCPReplicationLocations
@@ -2511,7 +2530,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.message_broker.enabled')) {
       server.message_broker = {
         enabled: this.messageBrokerEnabled,
-        type: ok('server.message_broker.type') ? this.messageBrokerType || undefined : undefined,
+        type: ok('server.message_broker.type') ? this.messageBrokerType || '' : undefined,
       };
     }
 
@@ -2796,13 +2815,27 @@ export class ScionPageAdminServerConfig extends LitElement {
    */
   private renderEnvBadge(...koanfKeys: string[]): typeof nothing | ReturnType<typeof html> {
     const overridden = koanfKeys.some((k) => this.envOverrides.includes(k));
-    if (!overridden) return nothing;
+    return overridden ? this.envBadgeTemplate() : nothing;
+  }
+
+  /** The env-override badge shared by renderEnvBadge and renderEnvBadgeUnder. */
+  private envBadgeTemplate(): ReturnType<typeof html> {
     return html`
       <span class="env-badge">
         <sl-icon name="exclamation-triangle"></sl-icon>
         Overridden by environment on this node
       </span>
     `;
+  }
+
+  /**
+   * Renders the env-override badge for a map-valued section (runtimes,
+   * profiles) whose env_overrides entries are leaf keys under the section
+   * (e.g. profiles.local.runtime from SCION_SERVER_PROFILES_LOCAL_RUNTIME).
+   */
+  private renderEnvBadgeUnder(prefix: string): typeof nothing | ReturnType<typeof html> {
+    const overridden = this.envOverrides.some((k) => k === prefix || k.startsWith(`${prefix}.`));
+    return overridden ? this.envBadgeTemplate() : nothing;
   }
 
   /**
@@ -3055,7 +3088,7 @@ export class ScionPageAdminServerConfig extends LitElement {
             <div class="validation-errors-section">
               <div class="validation-errors-section-name">${section}</div>
               <ul class="validation-errors-list">
-                ${(errors as ValidationErrorDetail[]).map(
+                ${errors.map(
                   (err) => html`
                     <li>
                       ${err.field ? html`<code>${err.field}</code>` : nothing} ${err.message || err}
@@ -4330,6 +4363,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       <div class="section">
         ${this.renderSectionHeader('Runtimes', 'runtimes')} ${this.renderSectionMeta('runtimes')}
         ${runtimeReadOnly ? html`${this.renderReadOnlyBadge(runtimeReadOnly)}` : nothing}
+        ${this.renderEnvBadgeUnder('runtimes')}
         ${runtimeNames.length === 0
           ? html`<p class="hint">No runtimes configured.</p>`
           : runtimeNames.map((name) => this.renderRuntimeEntry(name, !!runtimeReadOnly))}
@@ -4766,6 +4800,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       <div class="section">
         ${this.renderSectionHeader('Profiles', 'profiles')} ${this.renderSectionMeta('profiles')}
         ${profileReadOnly ? html`${this.renderReadOnlyBadge(profileReadOnly)}` : nothing}
+        ${this.renderEnvBadgeUnder('profiles')}
         ${profileNames.length === 0
           ? html`<p class="hint">No profiles configured.</p>`
           : profileNames.map((name) =>
@@ -4846,7 +4881,7 @@ export class ScionPageAdminServerConfig extends LitElement {
               class="shared-dir-storage-backend"
               placeholder="Runtime or server setting"
               clearable
-              value=${(profile.shared_dir_storage_backend as string) || ''}
+              value=${profile.shared_dir_storage_backend || ''}
               ?disabled=${readOnly}
               @sl-change=${(e: Event) => {
                 this.updateProfileField(
@@ -4870,7 +4905,7 @@ export class ScionPageAdminServerConfig extends LitElement {
               class="home-storage-backend"
               placeholder="Runtime or server setting"
               clearable
-              value=${(profile.home_storage_backend as string) || ''}
+              value=${profile.home_storage_backend || ''}
               ?disabled=${readOnly}
               @sl-change=${(e: Event) => {
                 this.updateProfileField(
@@ -4894,7 +4929,7 @@ export class ScionPageAdminServerConfig extends LitElement {
               class="home-storage-leaf"
               placeholder="Runtime or server setting"
               clearable
-              value=${(profile.home_storage_leaf as string) || ''}
+              value=${profile.home_storage_leaf || ''}
               ?disabled=${readOnly}
               @sl-change=${(e: Event) => {
                 this.updateProfileField(
@@ -5526,13 +5561,17 @@ export class ScionPageAdminServerConfig extends LitElement {
                   automatic (global) replication. Required when org policy
                   constraints/gcp.resourceLocations restricts global resources.</span
                 >
-                <sl-input
-                  value=${this.secretsGCPReplicationLocations}
-                  placeholder="e.g. northamerica-northeast1, us-east1"
-                  @sl-input=${(e: Event) => {
-                    this.secretsGCPReplicationLocations = (e.target as HTMLInputElement).value;
-                  }}
-                ></sl-input>
+                ${this.renderFieldValue(
+                  'server.secrets.gcp_replication_locations',
+                  this.secretsGCPReplicationLocations,
+                  html`${this.renderEnvBadge('server.secrets.gcp_replication_locations')}<sl-input
+                      value=${this.secretsGCPReplicationLocations}
+                      placeholder="e.g. northamerica-northeast1, us-east1"
+                      @sl-input=${(e: Event) => {
+                        this.secretsGCPReplicationLocations = (e.target as HTMLInputElement).value;
+                      }}
+                    ></sl-input>`
+                )}
               </div>`
             : ''}
         </div>
@@ -5907,15 +5946,19 @@ export class ScionPageAdminServerConfig extends LitElement {
         <div class="form-grid">
           <div class="form-field">
             <label>IAM Check Mode</label>
-            <sl-select
-              value=${this.hubGcpIamCheckMode}
-              @sl-change=${(e: Event) => {
-                this.hubGcpIamCheckMode = (e.target as HTMLSelectElement).value;
-              }}
-            >
-              <sl-option value="off">Off (policy-only gating)</sl-option>
-              <sl-option value="enforce">Enforce (IAM actAs check required)</sl-option>
-            </sl-select>
+            ${this.renderFieldValue(
+              'server.hub.gcp_iam_check_mode',
+              this.hubGcpIamCheckMode,
+              html`${this.renderEnvBadge('server.hub.gcp_iam_check_mode')}<sl-select
+                  value=${this.hubGcpIamCheckMode}
+                  @sl-change=${(e: Event) => {
+                    this.hubGcpIamCheckMode = (e.target as HTMLSelectElement).value;
+                  }}
+                >
+                  <sl-option value="off">Off (policy-only gating)</sl-option>
+                  <sl-option value="enforce">Enforce (IAM actAs check required)</sl-option>
+                </sl-select>`
+            )}
             <div class="help-text">
               Controls whether GCP IAM actAs permission is verified when assigning a service account
               to an agent. When "off", assignment is gated by Hub policy only. When "enforce", the
@@ -5924,15 +5967,19 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field">
             <label>Deny Policy Fallback</label>
-            <sl-select
-              value=${this.hubGcpIamDenyUnknownPolicy}
-              @sl-change=${(e: Event) => {
-                this.hubGcpIamDenyUnknownPolicy = (e.target as HTMLSelectElement).value;
-              }}
-            >
-              <sl-option value="fail-open">Fail Open (recommended)</sl-option>
-              <sl-option value="fail-closed">Fail Closed</sl-option>
-            </sl-select>
+            ${this.renderFieldValue(
+              'server.hub.gcp_iam_deny_unknown_policy',
+              this.hubGcpIamDenyUnknownPolicy,
+              html`${this.renderEnvBadge('server.hub.gcp_iam_deny_unknown_policy')}<sl-select
+                  value=${this.hubGcpIamDenyUnknownPolicy}
+                  @sl-change=${(e: Event) => {
+                    this.hubGcpIamDenyUnknownPolicy = (e.target as HTMLSelectElement).value;
+                  }}
+                >
+                  <sl-option value="fail-open">Fail Open (recommended)</sl-option>
+                  <sl-option value="fail-closed">Fail Closed</sl-option>
+                </sl-select>`
+            )}
             <div class="help-text">
               Controls behavior when IAM deny policies cannot be fully evaluated (e.g., the Hub
               service account lacks org-level permissions to read deny policies). "Fail open" treats

@@ -65,7 +65,7 @@ func (s *Server) listReadableAgents(
 			}
 			return authorizedCandidatePage[store.Agent]{Items: page.Items, NextCursor: page.NextCursor}, nil
 		},
-		agentResource, cursorFor, s.authzService.AuthorizeListReadBatch)
+		agentResource, cursorFor, s.authorizeListReadTimed)
 }
 
 // listAgentsLegacyPage returns one legacy-order (created DESC, id DESC)
@@ -73,6 +73,7 @@ func (s *Server) listReadableAgents(
 // caller; otherwise it is the store page unchanged.
 func (s *Server) listAgentsLegacyPage(ctx context.Context, identity Identity, filter store.AgentFilter, cursor, binding string, limit int) (authorizedListResult[store.Agent], error) {
 	fetch := func(ctx context.Context, cursor string, limit int, skipTotal bool) (*store.ListResult[store.Agent], error) {
+		defer perfPhaseStart(ctx, perfPhaseListDBRead)()
 		return s.store.ListAgents(ctx, filter, store.ListOptions{
 			Limit: limit, Cursor: cursor, CursorBinding: binding, SkipTotalCount: skipTotal,
 		})
@@ -106,6 +107,7 @@ func (s *Server) listAgentsSortedPage(ctx context.Context, identity Identity, fi
 			}
 			opts.SortCursor = &cur
 		}
+		defer perfPhaseStart(ctx, perfPhaseListDBRead)()
 		return s.store.ListAgents(ctx, filter, opts)
 	}
 	if !agentListAppliesReadRule(ctx) {
@@ -131,7 +133,7 @@ func (s *Server) readableAgentRows(ctx context.Context, identity Identity, items
 	if !agentListAppliesReadRule(ctx) {
 		return items, nil
 	}
-	allowed, err := s.authzService.AuthorizeListReadBatch(ctx, identity, agentResources(items))
+	allowed, err := s.authorizeListReadTimed(ctx, identity, agentResources(items))
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +155,7 @@ func (s *Server) readableAgentMembers(ctx context.Context, identity Identity, me
 	for i, m := range members {
 		resources[i] = memberResource(m)
 	}
-	allowed, err := s.authzService.AuthorizeListReadBatch(ctx, identity, resources)
+	allowed, err := s.authorizeListReadTimed(ctx, identity, resources)
 	if err != nil {
 		return nil, err
 	}
@@ -173,4 +175,14 @@ func agentResources(items []store.Agent) []Resource {
 		resources[i] = agentResource(&items[i])
 	}
 	return resources
+}
+
+// authorizeListReadTimed is AuthorizeListReadBatch timed as the
+// list_read_authz phase of the request's perf trace. With tracing off the
+// timer is the shared no-op; arguments, results and errors pass through
+// unchanged either way.
+func (s *Server) authorizeListReadTimed(ctx context.Context, identity Identity, resources []Resource) ([]bool, error) {
+	done := perfPhaseStart(ctx, perfPhaseListReadAuthz)
+	defer done()
+	return s.authzService.AuthorizeListReadBatch(ctx, identity, resources)
 }

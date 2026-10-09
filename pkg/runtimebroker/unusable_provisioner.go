@@ -18,6 +18,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 )
 
@@ -25,7 +26,7 @@ import (
 // code) for a harness-config whose provisioner cannot run
 // (harness.ErrUnusableProvisioner, ptone/scion#611). It is a configuration
 // error the caller must fix; retrying does not help.
-const ErrCodeHarnessConfigUnusable = "harness_config_unusable"
+const ErrCodeHarnessConfigUnusable = api.BrokerErrCodeHarnessConfigUnusable
 
 // unusableProvisionerFrom reports whether err is (or wraps) an
 // *harness.UnusableProvisionerError.

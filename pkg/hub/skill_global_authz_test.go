@@ -227,9 +227,8 @@ func TestGlobalSkillCreate_SuperAdminHasCreateGlobal(t *testing.T) {
 // gains the permission.
 func TestSeedReconcile_GlobalCatalogAuthorAppearsOnUpgrade(t *testing.T) {
 	// Create a raw store — no testServer, so no automatic seeding.
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = s.Close() })
 	require.NoError(t, s.Migrate(context.Background()))
 	ctx := context.Background()
 
@@ -293,9 +292,19 @@ func TestSeedReconcile_GlobalCatalogAuthorAppearsOnUpgrade(t *testing.T) {
 	assert.True(t, hasCreateGlobal,
 		"hub-admin should have skill.create_global after revision 3 → 4 upgrade")
 
-	// Verify the revision marker was updated.
+	// Verify the revision marker was updated to the code-declared
+	// revision (4 when skill.create_global was added; later revisions add
+	// further permissions).
+	codeRevision := 0
+	for _, role := range BuiltInRoles() {
+		if role.Name == store.SystemRoleHubAdmin {
+			codeRevision = role.Revision
+		}
+	}
+	require.GreaterOrEqual(t, codeRevision, 4)
 	marker := getAppliedBuiltInRoleMarker(ctx, s, store.SystemRoleHubAdmin)
-	assert.Equal(t, 4, marker.Revision, "hub-admin revision marker should be 4 after upgrade")
+	assert.Equal(t, codeRevision, marker.Revision,
+		"hub-admin revision marker should match the code revision after upgrade")
 }
 
 // TestSeedReconcile_OperatorOverrideRespected verifies that when an operator

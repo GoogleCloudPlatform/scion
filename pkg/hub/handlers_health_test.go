@@ -198,3 +198,31 @@ func TestHealthz_StatusIsFirstField(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.True(t, strings.HasPrefix(rec.Body.String(), `{"status":"unhealthy"`), "got %s", rec.Body.String())
 }
+
+func TestDecisionAuditHealth_CriticalWarningIndependentOfSink(t *testing.T) {
+	f := newAuditFixture(t, auditFixtureError)
+	f.requireAdmission(t)
+	f.observe(1, 1, true)
+	f.emit()
+	checks := map[string]string{"database": "healthy"}
+	f.router.server.checkDecisionAuditHealth(checks)
+	assert.Equal(t, decisionAuditFaultWarning, checks[decisionAuditNewHealthKey])
+	assert.NotContains(t, checks, decisionAuditLegacyHealthKey)
+	assert.Equal(t, HealthStatusDegraded, deriveHealthStatus(checks))
+	assert.False(t, criticalHealthChecks[decisionAuditNewHealthKey])
+	assert.False(t, criticalHealthChecks[decisionAuditLegacyHealthKey])
+	f.observe(2, 1, true)
+	f.router.server.checkDecisionAuditHealth(checks)
+	assert.Equal(t, decisionAuditFaultWarning, checks[decisionAuditNewHealthKey], "flag/refresh cannot clear fault")
+	assert.Equal(t, 1, f.handler.calls, "reading health must not invoke failed sink")
+	checks["database"] = "unhealthy"
+	assert.Equal(t, HealthStatusUnhealthy, deriveHealthStatus(checks))
+}
+
+func TestDecisionAuditHealth_LegacyWriterCheckRemoved(t *testing.T) {
+	f := newAuditFixture(t, auditFixtureAccept)
+	checks := map[string]string{"database": "healthy"}
+	f.router.server.checkDecisionAuditHealth(checks)
+	assert.NotContains(t, checks, decisionAuditLegacyHealthKey)
+	assert.Equal(t, HealthStatusHealthy, deriveHealthStatus(checks))
+}

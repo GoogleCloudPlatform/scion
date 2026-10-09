@@ -212,9 +212,11 @@ type CreateBrokerRegistrationRequest struct {
 	// that broker's record unchanged (AutoProvide, labels and GCP host
 	// fields) and only issues a new join token. For a new broker it creates
 	// the record with AutoProvide off and no GCP host fields, whatever the
-	// request says; only Labels are applied. It changes nothing about
-	// authorization: the caller must still hold broker.create and own the
-	// matched broker.
+	// request says; only Labels are applied. It skips only the
+	// broker.auto_provide check, because AutoProvide is never stored: the
+	// caller must still hold broker.create, and for a matched broker must be
+	// its creator or a super-admin presenting an interactive session or dev
+	// credential.
 	PreserveSettings bool `json:"preserveSettings,omitempty"`
 }
 
@@ -346,12 +348,30 @@ func (s *BrokerAuthService) FindExistingBroker(ctx context.Context, name, broker
 	return existingBroker, nil
 }
 
+// brokerRegistrationLookupKey marks the context of the existing-broker
+// lookup that createBrokerRegistration performs itself, so a store wrapper
+// can tell it apart from the caller's authorization-time lookup.
+type brokerRegistrationLookupKey struct{}
+
+func withBrokerRegistrationLookup(ctx context.Context) context.Context {
+	return context.WithValue(ctx, brokerRegistrationLookupKey{}, true)
+}
+
+// isBrokerRegistrationLookup reports whether ctx belongs to the lookup that
+// createBrokerRegistration performs before it mutates the broker.
+func isBrokerRegistrationLookup(ctx context.Context) bool {
+	v, _ := ctx.Value(brokerRegistrationLookupKey{}).(bool)
+	return v
+}
+
 // ErrBrokerRegistrationAuthorizationStale is returned by
 // CreateBrokerRegistrationForAuthorizedMatch and
 // CreateBrokerRegistrationForAuthorizedNew when the existing-broker lookup
 // performed during the mutation no longer matches what the caller was
 // authorized against: the authorization decision and this call must agree
-// on whether an existing broker is being reused, and on which one.
+// on whether an existing broker is being reused, and on which one, and a
+// re-registration that keeps auto-provide on without the broker.auto_provide
+// check requires the re-read broker to still have it on.
 var ErrBrokerRegistrationAuthorizationStale = errors.New("broker registration authorization is stale; retry")
 
 // ErrJoinTokenTTLOutOfRange is returned when
@@ -362,7 +382,7 @@ var ErrJoinTokenTTLOutOfRange = fmt.Errorf("joinTokenTtlSeconds must be between 
 // CreateBrokerRegistration creates a new broker with a join token.
 // Requires admin authentication.
 func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string) (*CreateBrokerRegistrationResponse, error) {
-	return s.createBrokerRegistration(ctx, req, createdBy, "", false)
+	return s.createBrokerRegistration(ctx, req, createdBy, "", false, true)
 }
 
 // CreateBrokerRegistrationForAuthorizedMatch is CreateBrokerRegistration for
@@ -372,11 +392,18 @@ func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req Cr
 // broker, or no longer finds a match at all, the registration is refused
 // (ErrBrokerRegistrationAuthorizationStale) rather than mutating a record
 // the caller was not authorized against.
-func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedMatch(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy, expectedExistingBrokerID string) (*CreateBrokerRegistrationResponse, error) {
+//
+// autoProvideAuthorized reports whether the caller passed the
+// broker.auto_provide check. When it is false and req.AutoProvide is true,
+// the caller was admitted only to keep an auto-provide setting that was
+// already on, so the broker re-read here must still have auto-provide on;
+// otherwise the registration is refused with
+// ErrBrokerRegistrationAuthorizationStale.
+func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedMatch(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy, expectedExistingBrokerID string, autoProvideAuthorized bool) (*CreateBrokerRegistrationResponse, error) {
 	if expectedExistingBrokerID == "" {
 		return nil, errors.New("expectedExistingBrokerID is required")
 	}
-	return s.createBrokerRegistration(ctx, req, createdBy, expectedExistingBrokerID, false)
+	return s.createBrokerRegistration(ctx, req, createdBy, expectedExistingBrokerID, false, autoProvideAuthorized)
 }
 
 // CreateBrokerRegistrationForAuthorizedNew is CreateBrokerRegistration for a
@@ -389,7 +416,7 @@ func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedMatch(ctx conte
 // implicit re-registration of a broker the caller was never authorized
 // against.
 func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedNew(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string) (*CreateBrokerRegistrationResponse, error) {
-	return s.createBrokerRegistration(ctx, req, createdBy, "", true)
+	return s.createBrokerRegistration(ctx, req, createdBy, "", true, true)
 }
 
 // createBrokerRegistration implements CreateBrokerRegistration,
@@ -404,7 +431,14 @@ func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedNew(ctx context
 //     exact broker.
 //   - expectNoExistingMatch true: the lookup below must resolve to no
 //     broker at all.
-func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy, expectedExistingBrokerID string, expectNoExistingMatch bool) (*CreateBrokerRegistrationResponse, error) {
+//
+// autoProvideAuthorized false with req.AutoProvide true means the caller was
+// admitted only to keep auto-provide on for the matched broker, so the
+// broker re-read below must still have it on. A first-time registration
+// always passes true: its caller checks broker.auto_provide whenever
+// req.AutoProvide is set, except for a PreserveSettings request, whose
+// AutoProvide is forced off below and by the HTTP handler.
+func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy, expectedExistingBrokerID string, expectNoExistingMatch, autoProvideAuthorized bool) (*CreateBrokerRegistrationResponse, error) {
 	if req.Name == "" {
 		return nil, errors.New("name is required")
 	}
@@ -441,7 +475,7 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 		return nil, errors.New("flat Runtime Broker registrations are handled by the Hub's flat registration path")
 	}
 
-	existingBroker, err := s.FindExistingBroker(ctx, req.Name, req.BrokerID, nil)
+	existingBroker, err := s.FindExistingBroker(withBrokerRegistrationLookup(ctx), req.Name, req.BrokerID, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -450,6 +484,9 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 		return nil, ErrBrokerRegistrationAuthorizationStale
 	}
 	if expectNoExistingMatch && existingBroker != nil {
+		return nil, ErrBrokerRegistrationAuthorizationStale
+	}
+	if existingBroker != nil && req.AutoProvide && !autoProvideAuthorized && !existingBroker.AutoProvide {
 		return nil, ErrBrokerRegistrationAuthorizationStale
 	}
 

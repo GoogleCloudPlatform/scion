@@ -48,6 +48,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       single_node_vm: ${{ steps.diff.outputs.single_node_vm }}
+      web: ${{ steps.diff.outputs.web }}
     steps:
       - name: Checkout code
         if: github.event_name == 'pull_request'
@@ -69,6 +70,7 @@ jobs:
           if [ "$EVENT_NAME" != "pull_request" ]; then
             echo "Event is ${EVENT_NAME}, not pull_request: running every gated job."
             echo "single_node_vm=true" >> "$GITHUB_OUTPUT"
+            echo "web=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           # --no-renames: list both sides of a rename, so a file moved out of
@@ -76,6 +78,7 @@ jobs:
           if ! changed=$(git diff --name-only --no-renames "${BASE_SHA}...${HEAD_SHA}"); then
             echo "::warning title=Path detection failed::git diff ${BASE_SHA}...${HEAD_SHA} failed; running every gated job."
             echo "single_node_vm=true" >> "$GITHUB_OUTPUT"
+            echo "web=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "Changed files:"
@@ -86,6 +89,11 @@ jobs:
             echo "single_node_vm=true" >> "$GITHUB_OUTPUT"
           else
             echo "single_node_vm=false" >> "$GITHUB_OUTPUT"
+          fi
+          if grep -qE '^(web/|\.github/workflows/ci\.yml$)' <<<"$changed"; then
+            echo "web=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "web=false" >> "$GITHUB_OUTPUT"
           fi
 
   build-and-test:
@@ -205,6 +213,26 @@ jobs:
 
       - name: Check Conversation Upsert Guard
         run: ./hack/check-conversation-upsert-guard.sh
+
+      - name: Check Hub Store Reassignment Guard
+        run: |
+          set +e
+          ./hack/check-hub-store-reassign.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=Hub store reassignment NOT checked::check-hub-store-reassign --self-test failed (exit $rc) — the guard itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
+          ./hack/check-hub-store-reassign.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 1 ]; then
+            echo "::error title=Hub store reassignment::pkg/hub test srv.store reassignments do not match hack/hub-store-reassign-baseline.txt (ptone/scion#3435). For a new reassignment, use installStoreFault / testServerWithStoreFault from pkg/hub/store_fault_helpers_test.go; if call sites were removed, lower the baseline. Details are in the step log."
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error title=Hub store reassignment NOT checked::check-hub-store-reassign could not run (exit $rc) — nothing was analysed."
+          fi
+          exit "$rc"
 
       - name: Check Harness Coverage in Cloud Build Configs
         run: |
@@ -492,7 +520,7 @@ jobs:
   hub-sqlite-tests:
     name: pkg/hub SQLite Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 70
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -516,23 +544,23 @@ jobs:
       # make test-hub-sqlite. pkg/conduit's relay/router tests run against
       # the SQLite-backed conduit registry store and are included too.
       #
-      # It is scoped to pkg/hub, perf/bench/seed, pkg/conduit and
-      # pkg/store/entadapter (not the whole module) and runs as its own
-      # parallel job so it doesn't add to the wall-clock time of Build &
-      # Test. Clean CI runs range from ~770s to ~1480s, close to the old 25m
-      # (1500s) go test timeout (ptone/scion#2732;
-      # GoogleCloudPlatform/scion#2031 hit the earlier 15m limit). The 40m go
-      # test timeout / 50m job timeout give headroom above that, with the job
-      # limit kept far enough above the go test timeout (~3m of build and
-      # setup overhead) that a real hang still produces go's goroutine dump
-      # instead of a bare job kill. The
+      # It is scoped to pkg/hub, perf/bench/seed, pkg/conduit,
+      # pkg/store/entadapter and pkg/artifacts (not the whole module) and
+      # runs as its own parallel job so it doesn't add to the wall-clock
+      # time of Build & Test. The pkg/hub test binary alone took
+      # ~2360-2390s on green main runs in October 2026 and had grown by
+      # roughly 200s a day over the previous three days, so it reached the
+      # old 40m (2400s) go test timeout and main went intermittently red
+      # with "test timed out after 40m0s" in unrelated tests
+      # (ptone/scion#2732 raised the limit from 25m to 40m;
+      # GoogleCloudPlatform/scion#2031 hit the 15m limit before that). The
+      # 60m go test timeout gives ~50% headroom over that. The 70m job
+      # timeout stays far enough above it (the step runs ~4-5m longer than
+      # the pkg/hub binary, mostly compile and link, and setup plus the
+      # fixture coverage step add under a minute) that a real hang still
+      # produces go's goroutine dump instead of a bare job kill. The
       # longer-term fix is splitting pkg/hub into smaller suites
       # (ptone/scion#1847).
-      #
-      # Four tests are skipped: they have known, pre-existing failures
-      # unrelated to this job (ptone/scion#1847) that already reproduce on
-      # main today under `go test ./pkg/hub/...`. They are not new failures
-      # caused by newly-compiled tests. Remove the -skip once #1847 is fixed.
       - name: Run SQLite-enabled tests (make test-hub-sqlite)
         run: make test-hub-sqlite
 
@@ -550,7 +578,14 @@ jobs:
   launch-store-postgres-tests:
     name: T1 Launch Store PostgreSQL Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 90m: the job took ~29-39m on main, but ~57m on a runner 2-3x slower
+    # than usual (GoogleCloudPlatform/scion#2855), where pkg/store/entadapter
+    # hit its old 40m go test timeout. make test-launch-store-postgres now
+    # gives entadapter 60m. The rest of that slow job took ~15m (plus the
+    # storetest and pkg/hub runs the timeout skipped), so 90m keeps the job
+    # limit above the go test limit and a real hang still produces go's
+    # goroutine dump instead of a bare job kill (ptone/scion#3945).
+    timeout-minutes: 90
     services:
       postgres:
         image: postgres:16
@@ -600,6 +635,15 @@ jobs:
         env:
           SCION_TEST_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
         run: make test-webchat-postgres
+
+      # Conduit user-stream re-check across two hub nodes on one database
+      # (LISTEN/NOTIFY, resync after a dropped listener). Each test uses its
+      # own schema. See the Makefile target's comment.
+      - name: Run conduit stream re-check tests (Postgres)
+        if: ${{ !cancelled() }}
+        env:
+          SCION_TEST_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
+        run: make test-conduit-authz-postgres
 
       # The pkg/artifacts store is likewise not an Ent store (it creates its
       # own artifact_* tables at Init), so it has its own Postgres SQL. Its
@@ -705,14 +749,28 @@ jobs:
             exit 1
           fi
 
+      # The step above lints check-cloud-init.sh as a file but never runs it,
+      # so the cloud-init runcmd body (which executes under /bin/sh, not bash)
+      # went unchecked (ptone/scion#1769). Running the script extracts runcmd
+      # and lints it with `shellcheck -s sh`; a bash-only construct such as
+      # `&>` (SC3020) in runcmd fails this step.
+      - name: Check cloud-init runcmd is POSIX sh
+        if: ${{ !cancelled() }}
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update && sudo apt-get install -y python3-yaml; }
+          ./scripts/single-node-vm/check-cloud-init.sh
+
       - name: Check for bare MethodNotAllowed calls
         # Blocking (ptone/scion#2421). Formerly the reporting-only "Lint 405
         # Allow header (reporting only)" job, folded in here to save a runner
         # spin-up (ptone/scion#2845); the logic now lives in
         # hack/check-method-not-allowed.sh and covers pkg/hub and
-        # pkg/runtimebroker. It is a step, not a separate check, so it adds no
-        # check name. !cancelled() runs it even when Run shellcheck above
-        # failed, so both results show on one run.
+        # pkg/runtimebroker (bare helper calls) plus pkg/sciontool,
+        # extras/docs-agent and extras/scion-telegram (direct
+        # StatusMethodNotAllowed writes without Allow, ptone/scion#2858).
+        # It is a step, not a separate check, so it adds no check name.
+        # !cancelled() runs it even when Run shellcheck above failed, so
+        # both results show on one run.
         #
         # Invoked directly rather than via `make check-method-not-allowed`,
         # for the same reason as Check Authorization Guards in Build & Test:
@@ -744,7 +802,7 @@ jobs:
           set -e
           case "$rc" in
             0) ;;
-            1) echo "::error title=405 Allow header::Bare MethodNotAllowed(w) calls found: a 405 must carry an Allow header (RFC 9110 15.5.6). Pass the accepted methods, e.g. MethodNotAllowed(w, http.MethodGet). The file:line list is in the step log above." ;;
+            1) echo "::error title=405 Allow header::405 responses without an Allow header found (RFC 9110 15.5.6): pass the accepted methods to MethodNotAllowed, e.g. MethodNotAllowed(w, http.MethodGet), or set w.Header().Set(\"Allow\", ...) before writing StatusMethodNotAllowed. The file:line list is in the step log above." ;;
             *) echo "::error title=405 Allow header NOT checked::check-method-not-allowed could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure, not a statement about the codebase." ;;
           esac
           exit "$rc"
@@ -805,3 +863,102 @@ jobs:
       # scripts/single-node-vm/tests/README.md for what this covers.
       - name: Run scripts/single-node-vm/tests/run.sh
         run: ./scripts/single-node-vm/tests/run.sh
+
+  # Mobile-emulation Playwright suite for the web chat (web/e2e/chat-mobile).
+  # Fully mocked with page.route: no hub, no credentials, no secrets. Runs
+  # only when web/** or this workflow changed, and always on push to main.
+  # Fails open: if the changes job did not succeed, the suite runs anyway.
+  #
+  # Sharded in two with Playwright's --shard: the config pins workers: 1
+  # (the CDP touch-gesture tests are timing sensitive), and the full
+  # four-project pass takes ~20 minutes in one job. --shard=N/2 splits it
+  # ~9.5m / ~11m of test time today, and new tests and projects join a
+  # shard automatically. Two shards cost less runner time than one job per
+  # project (each job pays ~2m of setup; desktop-1440 alone is ~1m of tests).
+  chat-mobile-e2e:
+    name: Chat mobile E2E (shard ${{ matrix.shard }}/2)
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.web == 'true') }}
+    runs-on: ubuntu-latest
+    # Above the config's CI globalTimeout (20m) plus setup (~2-4m), so a
+    # slow or hung run stops inside Playwright, writes its report, and the
+    # upload step still runs (a job-level timeout cancels the job and skips
+    # it).
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24' # Node.js 24 (LTS)
+          cache: 'npm'
+          cache-dependency-path: 'web/package-lock.json'
+
+      - name: Install web dependencies
+        working-directory: ./web
+        run: npm ci
+
+      # Playwright's own Chromium (CHROMIUM_EXECUTABLE stays unset in CI).
+      # --only-shell: the suite runs headless, which uses only the headless
+      # shell, so the full Chromium download is skipped. WebKit is
+      # deliberately not installed (the optional WebKit project is off).
+      - name: Install Playwright Chromium
+        working-directory: ./web
+        run: npx playwright install --with-deps --only-shell chromium
+
+      - name: Run chat-mobile suite
+        working-directory: ./web
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: npm run test:e2e:chat-mobile -- --shard="${SHARD}/2"
+
+      # Whenever the suite ran, not only on failure: with one CI retry, a
+      # flaky test passes the shard, and its retry trace is only in here.
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: chat-mobile-e2e-shard-${{ matrix.shard }}
+          path: |
+            web/playwright-report/chat-mobile/
+            web/test-results/chat-mobile/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # The single, stable check name to mark as required. A matrix job that is
+  # skipped reports one check under its unexpanded name, so the per-shard
+  # names above are not usable as required checks. This job is never
+  # skipped (always()), so it always reports a real conclusion: success when
+  # path detection succeeded and web/ is unchanged; otherwise success only
+  # if every shard succeeded, so a failed, timed-out, cancelled or skipped
+  # shard fails the check. A skipped required check would read as passing.
+  chat-mobile-e2e-result:
+    name: Chat mobile E2E
+    needs: [changes, chat-mobile-e2e]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check shard results
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          WEB: ${{ needs.changes.outputs.web }}
+          RESULT: ${{ needs.chat-mobile-e2e.result }}
+        run: |
+          echo "changes: ${CHANGES}, web: ${WEB}, chat-mobile-e2e shards: ${RESULT}"
+          if [ "$CHANGES" = "success" ] && [ "$WEB" != "true" ]; then
+            echo "web/ unchanged: nothing to check."
+            exit 0
+          fi
+          if [ "$RESULT" != "success" ]; then
+            echo "::error title=Chat mobile E2E failed::One or more chat-mobile shards did not succeed (result: ${RESULT})."
+            exit 1
+          fi

@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -137,8 +138,11 @@ func TestServerHubManagedProjectPath_NFSHungMountReturnsError(t *testing.T) {
 	assert.Empty(t, path)
 	nfsPath := filepath.Join(mountRoot, "share1", "hub-projects", f.slug)
 	assert.NotContains(t, err.Error(), mountRoot, "the error text must not carry the path (it can be stored, e.g. ScheduledEvent.Error)")
-	assert.Contains(t, logs.String(), "Workspace storage did not respond")
-	assert.Contains(t, logs.String(), "path="+nfsPath)
+	// The log line carries the timeout and a fixed error class only. No
+	// project ID is in scope when resolving by slug.
+	assertSingleLogLine(t, logs, "Workspace storage did not respond",
+		map[string]string{"error_class": fsErrorClassTimeout, "timeout": workspaceContentTimeout.String()},
+		f.slug, nfsPath, mountRoot, f.tmpHome, errWorkspaceContentTimeout.Error(), "slug=", "path=", "error=")
 }
 
 // N2: durable NFS path empty, legacy local path hangs. The project might
@@ -149,12 +153,16 @@ func TestServerHubManagedProjectPath_NFSEmptyLocalHungReturnsError(t *testing.T)
 	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share1", "hub-projects", f.slug), 0755))
 	hangReadDirFor(t, f.localDir)
 
+	logs := captureSlog(t) // before testServer: the projects logger snapshots slog.Default()
 	srv, _ := testServer(t)
 	srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
 
 	path, err := srv.hubManagedProjectPath(f.slug)
 	require.ErrorIs(t, err, errWorkspaceContentTimeout)
 	assert.Empty(t, path)
+	assertSingleLogLine(t, logs, "Workspace storage did not respond",
+		map[string]string{"error_class": fsErrorClassTimeout},
+		f.slug, f.localDir, f.tmpHome, errWorkspaceContentTimeout.Error(), "slug=", "path=", "error=")
 }
 
 // NFS has content: the local path is never probed, so a hung local path
@@ -478,7 +486,9 @@ func TestCreateAgent_CallerWorkspace_HungStorageReturns503NoAgentNoDispatch(t *t
 	ctx := context.Background()
 	disp := &mockDispatcher{}
 	srv.SetDispatcher(disp)
-	srv.SetStorage(newMockStorage("hung-storage-bucket"))
+	hungStor := newMockStorage("hung-storage-bucket")
+	hungStor.provider = storage.ProviderGCS
+	srv.SetStorage(hungStor)
 
 	broker := &store.RuntimeBroker{
 		ID: tid("broker-hung-caller-ws"), Slug: "hung-caller-ws-broker",
@@ -490,6 +500,45 @@ func TestCreateAgent_CallerWorkspace_HungStorageReturns503NoAgentNoDispatch(t *t
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", map[string]interface{}{
 		"name":            "hung-caller-ws-agent",
+		"projectId":       project.ID,
+		"runtimeBrokerId": broker.ID,
+		"workspace":       "subdir",
+	})
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), mountRoot, "response must not leak the path")
+	assert.Contains(t, rec.Body.String(), "Workspace storage is not responding")
+
+	agents, err := s.ListAgents(ctx, store.AgentFilter{ProjectID: project.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, agents.Items, "the agent row must be cleaned up")
+	assert.Empty(t, disp.dispatchedAgents, "nothing may be dispatched")
+}
+
+// ptone/scion#3765: a shared-workspace project with a git remote on a hub
+// whose storage is not GCS skips only the workspace sync, not the probe
+// before it, so hung workspace storage still fails the create with 503.
+func TestCreateAgent_SharedGitNonGCS_HungStorageReturns503NoAgentNoDispatch(t *testing.T) {
+	srv, s, mountRoot := hungStorageServer(t)
+	ctx := context.Background()
+	disp := &mockDispatcher{}
+	srv.SetDispatcher(disp)
+	srv.SetStorage(newMockStorage("local"))
+
+	broker := &store.RuntimeBroker{
+		ID: tid("broker-hung-shared-git"), Slug: "hung-shared-git-broker",
+		Name: "Hung Shared Git Broker", Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	project := &store.Project{
+		ID: tid("project-hung-shared-git"), Slug: "hung-shared-git", Name: "Hung Shared Git Project",
+		GitRemote: "github.com/example/repo",
+		Labels:    map[string]string{store.LabelWorkspaceMode: store.WorkspaceModeShared},
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	require.True(t, project.IsSharedWorkspace(), "fixture check: shared-workspace project")
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", map[string]interface{}{
+		"name":            "hung-shared-git-agent",
 		"projectId":       project.ID,
 		"runtimeBrokerId": broker.ID,
 		"workspace":       "subdir",

@@ -795,6 +795,7 @@ func entBrokerToStore(b *ent.RuntimeBroker) *store.RuntimeBroker {
 	unmarshalRawJSON(b.Runtimes, &sb.Profiles)
 	sb.DefaultProfile = b.DefaultProfile
 	unmarshalRawJSON(b.WorkspaceStorage, &sb.WorkspaceStorage)
+	unmarshalRawJSON(b.Health, &sb.Health)
 	sb.Labels = b.Labels
 	if sb.Labels == nil {
 		sb.Labels = make(map[string]string)
@@ -835,6 +836,7 @@ func (s *ProjectStore) CreateRuntimeBroker(ctx context.Context, b *store.Runtime
 		SetRuntimes(marshalRawJSON(profiles)).
 		SetDefaultProfile(defaultProfile).
 		SetWorkspaceStorage(marshalRawJSON(b.WorkspaceStorage)).
+		SetHealth(marshalRawJSON(b.Health)).
 		SetLabels(b.Labels).
 		SetAnnotations(b.Annotations)
 	if b.IsFlat() {
@@ -955,6 +957,7 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 			SetRuntimes(marshalRawJSON(profiles)).
 			SetDefaultProfile(defaultProfile).
 			SetWorkspaceStorage(marshalRawJSON(b.WorkspaceStorage)).
+			SetHealth(marshalRawJSON(b.Health)).
 			SetLabels(b.Labels).
 			SetAnnotations(b.Annotations).
 			SetEndpoint(b.Endpoint).

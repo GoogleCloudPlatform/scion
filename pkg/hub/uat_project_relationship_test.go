@@ -1032,7 +1032,7 @@ func TestProjectUAT_AttachRecheckedOnEachHandshake(t *testing.T) {
 func TestProjectRoles_AttachAndPortAccessLockIn(t *testing.T) {
 	// R6/R6/R5 added artifact.read and artifact.create.
 	revisions := map[string]int{
-		store.ProjectRoleOwner:  6,
+		store.ProjectRoleOwner:  7,
 		store.ProjectRoleAdmin:  6,
 		store.ProjectRoleMember: 5,
 	}

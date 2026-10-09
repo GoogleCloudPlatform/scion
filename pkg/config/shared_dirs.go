@@ -155,10 +155,12 @@ func GetSharedDirInfos(projectDir string, dirs []api.SharedDir) ([]SharedDirInfo
 
 // SharedDirHostPath computes the host-side directory path for a shared
 // directory given the user's home directory, the project slug, project ID,
-// and shared dir name.  This is used by host-process plugins (Telegram,
-// Discord) that receive container-internal paths (/scion-volumes/<name>)
-// and need to translate them to host-side paths without requiring access to
-// the project's .scion marker file.
+// and shared dir name, without requiring access to the project's .scion
+// marker file.
+//
+// This is the local-backend layout only. Host-process plugins (Telegram,
+// Discord) must use runtime.ResolveSharedDirHostPath instead, which picks
+// the nfs mount path when the shared dir uses the nfs backend.
 //
 // The returned path is under ~/.scion/project-configs/<slug>__<shortUUID>/shared-dirs/<name>.
 func SharedDirHostPath(home, slug, projectID, sharedDirName string) string {

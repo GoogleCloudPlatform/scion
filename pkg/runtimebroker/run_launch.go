@@ -559,7 +559,7 @@ func classifyStartError(ctx context.Context, err error, templateSlug string) (co
 		// paths: a wrapped error can carry runtime detail (container name,
 		// backend message) the client has no entitlement to see.
 		return "name_in_use", agent.ErrContainerNameInUse.Error()
-	case errors.Is(err, scionrt.ErrRunConflict):
+	case isRunNameConflict(err):
 		// Another live run holds the agent name, and the runtime deleted
 		// nothing of it (ptone/scion#2550). Fixed text: the wrapped error
 		// names the namespace, object and the other run's ID.

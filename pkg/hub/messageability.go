@@ -97,6 +97,7 @@ func (s *Server) ComputeMessageability(
 	viewerIdentity Identity,
 	targetAgent *store.Agent,
 ) *AgentMessageability {
+	defer perfPhaseStart(ctx, perfPhaseMessageability)()
 	if viewerIdentity == nil || targetAgent == nil {
 		return &AgentMessageability{}
 	}

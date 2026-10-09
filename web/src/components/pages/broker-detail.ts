@@ -39,6 +39,7 @@ import { brokerTypeBadgeStyles } from '../shared/resource-styles.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { showToast } from '../../utils/toast.js';
 import '../shared/status-badge.js';
+import '../shared/detail-header.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
@@ -117,60 +118,6 @@ export class ScionPageBrokerDetail extends LitElement {
 
       .back-link:hover {
         color: var(--scion-primary, #3b82f6);
-      }
-
-      .header {
-        display: flex;
-        align-items: flex-start;
-        justify-content: space-between;
-        margin-bottom: 1.5rem;
-        gap: 1rem;
-      }
-
-      .header-info {
-        flex: 1;
-      }
-
-      .header-title {
-        display: flex;
-        align-items: flex-start;
-        gap: 0.75rem;
-        margin-bottom: 0.5rem;
-      }
-
-      .header-title > sl-icon {
-        flex-shrink: 0;
-        color: var(--scion-primary, #3b82f6);
-        font-size: 1.5rem;
-        /* Centre the icon on the first line of the name: (1.95rem h1 line box
-           - 1.5rem icon) / 2. */
-        margin-top: 0.225rem;
-      }
-      /* A long name wraps on its own line; the badges then follow on the next
-         line instead of floating beside a multi-line name. */
-      .header-title-text {
-        display: flex;
-        flex-wrap: wrap;
-        align-items: center;
-        gap: 0.5rem 0.75rem;
-        min-width: 0;
-      }
-
-      .header h1 {
-        font-size: 1.5rem;
-        font-weight: 700;
-        line-height: 1.3;
-        color: var(--scion-text, #1e293b);
-        margin: 0;
-        min-width: 0;
-        overflow-wrap: anywhere;
-      }
-
-      .header-actions {
-        display: flex;
-        align-items: flex-start;
-        gap: 0.5rem;
-        flex-shrink: 0;
       }
 
       .header-subtitle {
@@ -518,17 +465,14 @@ export class ScionPageBrokerDetail extends LitElement {
       stateManager.setScope({ type: 'broker-detail', brokerId: this.brokerId });
     }
 
-    stateManager.addEventListener('brokers-updated', this.boundOnBrokersUpdated as EventListener);
+    stateManager.addEventListener('brokers-updated', this.boundOnBrokersUpdated);
 
     this.relativeTimeInterval = setInterval(() => this.requestUpdate(), 15_000);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    stateManager.removeEventListener(
-      'brokers-updated',
-      this.boundOnBrokersUpdated as EventListener
-    );
+    stateManager.removeEventListener('brokers-updated', this.boundOnBrokersUpdated);
     if (this.relativeTimeInterval) {
       clearInterval(this.relativeTimeInterval);
       this.relativeTimeInterval = null;
@@ -701,27 +645,20 @@ export class ScionPageBrokerDetail extends LitElement {
         Back to Brokers
       </a>
 
-      <div class="header">
-        <div class="header-info">
-          <div class="header-title">
-            <sl-icon name="hdd-rack"></sl-icon>
-            <div class="header-title-text">
-              <h1>${this.broker.name}</h1>
-              ${this.renderBrokerTypeBadge()}
-              <scion-status-badge
-                status=${this.getBrokerStatusVariant(this.broker.status)}
-                label=${this.broker.status}
-                size="small"
-              ></scion-status-badge>
-            </div>
-          </div>
-          ${subtitleParts.length > 0
-            ? html`<div class="header-subtitle">${subtitleParts.join(' · ')}</div>`
-            : ''}
-        </div>
+      <scion-detail-header heading=${this.broker.name}>
+        <sl-icon slot="icon" name="hdd-rack"></sl-icon>
+        ${this.renderBrokerTypeBadge()}
+        <scion-status-badge
+          status=${this.getBrokerStatusVariant(this.broker.status)}
+          label=${this.broker.status}
+          size="small"
+        ></scion-status-badge>
+        ${subtitleParts.length > 0
+          ? html`<div slot="meta" class="header-subtitle">${subtitleParts.join(' · ')}</div>`
+          : ''}
         ${this.isAdmin
           ? html`
-              <div class="header-actions">
+              <div slot="actions" class="header-actions">
                 <sl-button
                   variant="danger"
                   size="small"
@@ -735,7 +672,7 @@ export class ScionPageBrokerDetail extends LitElement {
               </div>
             `
           : ''}
-      </div>
+      </scion-detail-header>
 
       <div class="stats-row">
         <div class="stat">

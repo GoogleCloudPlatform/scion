@@ -21,6 +21,7 @@ import (
 	"maps"
 	"net/http"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -111,8 +112,8 @@ func mergePatchWorkspaceModeLabel(stored, updates map[string]string) (map[string
 // stays per-agent; with a git-remote override it becomes git per-agent
 // (clone-per-agent). A legacy raw canonical "empty-per-agent" label is
 // normalised to "per-agent" only on a non-git source, where
-// Project.IsEmptyPerAgent honours it; on a git source it resolved to
-// shared-plain, so it is dropped rather than promoted to clone-per-agent.
+// Project.IsEmptyPerAgent honours it; on a git source it never meant
+// empty-per-agent, so it is dropped rather than carried as "per-agent".
 // Unknown values are dropped defensively.
 func deriveCloneWorkspaceMode(srcLabel string, srcIsGit, cloneIsGit bool) string {
 	if srcLabel == string(store.SharingModeEmptyPerAgent) {
@@ -134,10 +135,13 @@ func deriveCloneWorkspaceMode(srcLabel string, srcIsGit, cloneIsGit bool) string
 // same mode as project.SharingMode() on the hub (design #2703 §2.3):
 //   - empty-per-agent sends the canonical value, never the bare "per-agent"
 //     label, which the broker would map to clone-per-agent;
-//   - a stored label that does not fit the project's git-ness (e.g. a legacy
-//     raw "empty-per-agent" on a git project, or "worktree-per-agent" on a
-//     non-git one) is dropped, so the broker sees an unlabelled project,
-//     matching the hub's shared-plain resolution;
+//   - a git project with no label, or a label that does not resolve to its
+//     mode (an unknown value, or a legacy raw "empty-per-agent"), sends the
+//     canonical "clone-per-agent", matching the per-agent clone agent create
+//     gives it; the broker would map an empty value to shared-plain;
+//   - a non-git project whose stored label does not fit (e.g.
+//     "worktree-per-agent") sends "", so the broker sees an unlabelled
+//     project, matching the hub's shared-plain resolution;
 //   - any other label is forwarded unchanged, as before.
 //
 // A nil project yields "": there is no mode to assert. This matches the
@@ -154,7 +158,10 @@ func dispatchWorkspaceMode(project *store.Project) string {
 	}
 	label := project.Labels[store.LabelWorkspaceMode]
 	if store.ResolveWorkspaceSharingMode(label) != mode {
-		return ""
+		if mode == store.SharingModeSharedPlain {
+			return ""
+		}
+		return string(mode)
 	}
 	return label
 }
@@ -261,4 +268,15 @@ func (s *Server) requireEmptyPerAgentBrokerCapabilityForAgent(ctx context.Contex
 		return false
 	}
 	return s.requireEmptyPerAgentBrokerCapability(ctx, w, project, agent.RuntimeBrokerID)
+}
+
+// remoteBrokerNeedsGCSMessage is the create error for an agent dispatched to
+// a remote broker with no local path for the project, on a hub whose storage
+// provider cannot carry the workspace upload (ptone/scion#3765). It is used
+// only for projects without a git remote: a project with a git remote is
+// dispatched without the upload instead.
+func remoteBrokerNeedsGCSMessage(provider storage.Provider) string {
+	return fmt.Sprintf("cannot send the project workspace to a remote runtime broker: "+
+		"hub storage is %q; use GCS hub storage, add a git remote to the project, "+
+		"or link the project at a local path on that broker", provider)
 }

@@ -16,12 +16,14 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -45,6 +47,20 @@ func (s *Server) BootstrapHarnessConfigsFromDir(ctx context.Context, harnessConf
 	if err != nil {
 		return err
 	}
+
+	// Seeded-built-ins ledger (ptone/scion#3544): a deleted built-in stays
+	// deleted even though UpdateDefaultTemplates re-materializes it on disk.
+	// If the ledger cannot be loaded, fail closed for built-ins only: no
+	// missing built-in is created, but user dirs are still imported and
+	// existing rows still synced. The load error is returned at the end.
+	ledger, loadErr := s.loadBuiltinSeedLedger(ctx)
+	if loadErr != nil {
+		loadErr = fmt.Errorf("harness config bootstrap: %w", loadErr)
+		s.resourceLog.Error("harness config bootstrap: cannot load built-in seed ledger; not creating missing built-ins this run",
+			"error", loadErr)
+		ledger = newFailClosedBuiltinSeedLedger()
+	}
+	const kind = storage.ResourceKindHarnessConfig
 
 	imported, updated := 0, 0
 	for _, entry := range entries {
@@ -71,14 +87,28 @@ func (s *Server) BootstrapHarnessConfigsFromDir(ctx context.Context, harnessConf
 			continue
 		}
 
+		builtin := isBuiltinName(kind, slug)
 		if existing == nil {
+			if builtin && ledger.Seen(kind, slug) {
+				s.resourceLog.Info("harness config bootstrap: built-in previously deleted; not re-seeding",
+					"config", name)
+				continue
+			}
 			if err := s.bootstrapSingleHarnessConfig(ctx, name, dirPath, hcDir, store.HarnessConfigScopeGlobal, ""); err != nil {
 				s.resourceLog.Warn("harness config bootstrap: failed to import config, skipping",
 					"config", name, "error", err)
 				continue
 			}
+			if builtin {
+				ledger.Mark(kind, slug)
+			}
 			imported++
 		} else {
+			// A row exists, so the name counts as seeded even if the
+			// sync below fails (same rule as the hosted path).
+			if builtin {
+				ledger.Mark(kind, slug)
+			}
 			oldHash := existing.ContentHash
 			changed, err := s.syncExistingHarnessConfig(ctx, existing, dirPath, hcDir, false)
 			if err != nil {
@@ -99,7 +129,10 @@ func (s *Server) BootstrapHarnessConfigsFromDir(ctx context.Context, harnessConf
 			"imported", imported, "updated", updated)
 	}
 
-	return nil
+	if loadErr != nil {
+		return loadErr
+	}
+	return s.saveBuiltinSeedLedger(ctx, ledger)
 }
 
 // bootstrapSingleHarnessConfig imports one local harness config directory into

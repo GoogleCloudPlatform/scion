@@ -32,9 +32,8 @@ import (
 // a fresh hub seeds max_agents_per_broker at 100, matching ptone's ruling
 // (design.md §4.1, 2026-09-29) that the global default stays 100 for now.
 func TestSeedLimitDefinitions_FreshDBSeedsMaxAgentsPerBrokerAt100(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
-	defer func() { _ = s.Close() }()
 
 	ctx := context.Background()
 	seedLimitDefinitions(ctx, s)
@@ -52,9 +51,8 @@ func TestSeedLimitDefinitions_FreshDBSeedsMaxAgentsPerBrokerAt100(t *testing.T) 
 func TestSeedLimitDefinitions_ExistingRowUntouchedByReseed(t *testing.T) {
 	for _, existing := range []int64{12, 30} {
 		t.Run(fmt.Sprintf("existing_%d", existing), func(t *testing.T) {
-			s, err := newTestStore(":memory:")
+			s, err := newTestStore(t, ":memory:")
 			require.NoError(t, err)
-			defer func() { _ = s.Close() }()
 
 			ctx := context.Background()
 

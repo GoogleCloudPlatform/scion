@@ -50,10 +50,11 @@ updateStrategy:
   #
   # MEASURED on the rendered deployment: two volumes are mounted, scion-home (an
   # emptyDir, at /home/scion/.scion) and settings (the read-only Secret). And the
-  # hub does not need a --db to have a database - pkg/config/hub_config.go:691
-  # defaults an empty server.database.url to filepath.Join(globalDir, "hub.db"),
-  # which for this chart's home directory is /home/scion/.scion/hub.db. The
-  # default install therefore keeps a SQLite file inside an emptyDir.
+  # hub does not need a --db to have a database - loadGlobalConfigFromSettings
+  # (pkg/config/hub_config.go) defaults an empty server.database.url to
+  # filepath.Join(globalDir, "hub.db"), which for this chart's home directory
+  # is /home/scion/.scion/hub.db. The default install therefore keeps a SQLite
+  # file inside an emptyDir.
   #
   # WHAT FOLLOWS FROM THAT. An emptyDir is per-pod and dies with the pod, so the
   # hub's state does not survive a restart under either strategy - that is a
@@ -77,7 +78,7 @@ updateStrategy:
   # replica count", which was true at Phase 0 and is false now: the preflight
   # keys off configuration, not replica count, and a rendered
   # server.database.driver of postgres turns it on at one replica
-  # (cmd/server_foreground.go:931). It is still not a data-safety question - the
+  # (isHADeployment, cmd/server_foreground.go). It is still not a data-safety question - the
   # preflight refuses to start, it does not corrupt anything - but "it does not
   # run" was doing work here that it can no longer do. When it runs, the
   # chart supplies every gate it reads from settings.yaml (see database.driver
@@ -193,6 +194,15 @@ hub:
   # ends in a credential word - SESSION_SECRET, ADMIN_TOKEN, DB_PASSWORD. The
   # rule is on the trailing word, so TOKEN_TTL_SECONDS and MAX_TOKENS are fine.
   # Use valueFrom.secretKeyRef, which neither check touches.
+  #
+  # POD_NAME is set by the chart from the pod's own name. An entry named
+  # POD_NAME here replaces the chart's instead of being refused, so releases
+  # that already set it this way keep upgrading. If you set it, the value must
+  # be unique per pod: use valueFrom.fieldRef.fieldPath: metadata.name rather
+  # than a literal "value". The hub treats POD_NAME as the pod's identity. With
+  # one static value shared by several replicas, a restart of one replica
+  # demotes the other replicas' live start claims, and all replicas share one
+  # conduit relay id, each taking it over from the others.
   extraEnv: []
 
   # Extra arguments appended to the hub command. The chart always renders
@@ -347,7 +357,7 @@ agents:
 # and no unknown-variable warning, so a variable that does not bind produces no
 # error, no log line and no way to tell it did nothing.
 # Whether a name binds at all depends on a lookup table (camelCaseFields,
-# pkg/config/hub_config.go:919), so SCION_SERVER_DATABASE_URL works and
+# pkg/config/hub_config.go), so SCION_SERVER_DATABASE_URL works and
 # SCION_SERVER_DATABASE_MAX_OPEN_CONNS does not, and neither of them says which.
 # The ones that bind are applied on top of settings.yaml and win, which puts the
 # hub's real configuration out of reach of everything this chart can check. So
@@ -703,14 +713,15 @@ auth:
   # the chart delivers by environment variable rather than in settings.yaml.
   #
   # 🛑 [HISTORY 2026-08-17] THIS COMMENT PREVIOUSLY READ "auth.mode is itself a
-  # preflight gate: cmd/server_foreground.go:980 requires proxy, so the oauth
-  # permutation is refused by one gate MORE than the proxy one." That was true
-  # when written and 1b3c9418 deleted the gate it named, inverting the
-  # direction. The line number did not go stale in the way that announces
-  # itself - :980 still resolves, to the storage.provider gate, so a reader
-  # checking it lands on a real line about something else and comes away
-  # reassured. That is why source references in this chart are cut as quoted
-  # strings now.
+  # preflight gate: [a line number in validateHostedHAPreflight,
+  # cmd/server_foreground.go] requires proxy, so the oauth permutation is
+  # refused by one gate MORE than the proxy one." That was true when written
+  # and 1b3c9418 deleted the gate it named, inverting the direction. The line
+  # number did not go stale in the way that announces itself - it still
+  # resolved, to the storage.provider gate, so a reader checking it landed on a
+  # real line about something else and came away reassured. That is why source
+  # references in this chart are cut as quoted strings or symbol names now,
+  # never line numbers.
   #
   # The claim that survives unchanged is the narrow one about the Block-1
   # five, which is what the paired ci fixtures actually diff.
@@ -799,7 +810,7 @@ auth:
   #
   # This one value backs BOTH the session cookie encryption key AND the hub's
   # shared JWT signing keys (resolveSessionSecret,
-  # cmd/server_foreground.go:1452-1463), so every replica must see the same
+  # cmd/server_foreground.go), so every replica must see the same
   # bytes or they reject each other's tokens.
   #
   # WHY THE CHART REFUSES RATHER THAN DEFAULTING OR GENERATING. The hub does not
@@ -958,9 +969,9 @@ auth:
   # MIND THE SPELLING IF YOU GO THROUGH config.extra. These chart values are
   # camelCase and the chart renders them into settings.yaml as client_id and
   # client_secret, because that is what the settings schema binds
-  # (V1OAuthProviderConfig, pkg/config/settings_v1.go:635). The env-var mapper
+  # (V1OAuthProviderConfig, pkg/config/settings_v1.go). The env-var mapper
   # for the same values uses the OTHER spelling, clientId/clientSecret
-  # (pkg/config/hub_config.go:334) - so a clientId written into settings.yaml
+  # (OAuthProviderConfig, pkg/config/hub_config.go) - so a clientId written into settings.yaml
   # by hand binds nothing, silently. The chart refuses the camelCase spelling
   # under server.oauth rather than letting it through.
   oauth:
@@ -981,13 +992,14 @@ auth:
   # history matters because the reason was never "the protection is unwanted":
   # it was that nothing in the release could satisfy it. The hub resolves a
   # stable key from, in order, a pre-configured key, SharedSigningSecret, a
-  # secret backend, then the store (pkg/hub/server.go:1445). SharedSigningSecret
-  # is resolveSessionSecret() (cmd/server_foreground.go:1452-1463), which reads
-  # only --session-secret, SCION_SERVER_SESSION_SECRET and bare SESSION_SECRET -
-  # it has no settings-file source at all - and the chart rendered none of the
-  # three. On a first boot the store is empty too. So true meant no key to find:
-  # pkg/hub/server.go:1634 errors, pkg/hub/server.go:1008 makes it fatal, and
-  # cmd/server_foreground.go:259 turns it into log.Fatalf.
+  # secret backend, then the store (Server.ensureSigningKey, pkg/hub/server.go).
+  # SharedSigningSecret is resolveSessionSecret() (cmd/server_foreground.go),
+  # which reads only --session-secret, SCION_SERVER_SESSION_SECRET and bare
+  # SESSION_SECRET - it has no settings-file source at all - and the chart
+  # rendered none of the three. On a first boot the store is empty too. So true meant no key to find:
+  # Server.ensureSigningKey refuses under RequireStableSigningKey, hub.New
+  # (pkg/hub/server.go) returns that error, and runServerStart
+  # (cmd/server_foreground.go) turns it into log.Fatalf via initHubServer.
   #
   # MEASURED through the real hub.New, not read, at both ends. Before:
   # ServerConfig{RequireStableSigningKey: true} refuses with "refusing to

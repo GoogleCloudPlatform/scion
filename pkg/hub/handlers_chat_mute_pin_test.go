@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -45,11 +44,7 @@ func setupMutePinTest(t *testing.T) (*Server, store.Store, WebChatStore, *store.
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	db := openTestMemorySQLite(t, "sqlite3")
 	wcs := NewWebChatStore(db, "sqlite3")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -77,11 +72,7 @@ func setupChatAuthzTest(t *testing.T) (*Server, store.Store, WebChatStore, *stor
 	t.Helper()
 	srv, s, _, _, project := setupDemoPolicyTest(t)
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	db := openTestMemorySQLite(t, "sqlite3")
 	wcs := NewWebChatStore(db, "sqlite3")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -179,7 +170,7 @@ func TestChatV2_Mute_RejectsBadRequests(t *testing.T) {
 		{
 			"DM the caller is not part of", http.MethodPut,
 			"dm:user:" + tid("stranger-a") + ":user:" + tid("stranger-b"),
-			map[string]bool{"muted": true}, nil, http.StatusForbidden,
+			map[string]bool{"muted": true}, nil, http.StatusNotFound,
 		},
 	}
 
@@ -210,9 +201,8 @@ func TestChatV2_Mute_Unauthenticated(t *testing.T) {
 }
 
 // A user with no read access to the topic's project must not be able to mute
-// it — muting a conversation you cannot read would leak its existence and let
-// a stranger write to another user's read-state row.
-func TestChatV2_MutePin_ForbiddenForNonMember(t *testing.T) {
+// it, and gets the same answer as for a topic that does not exist.
+func TestChatV2_MutePin_NonMemberMatchesMissing(t *testing.T) {
 	srv, s, wcs, project := setupChatAuthzTest(t)
 	ctx := context.Background()
 
@@ -227,9 +217,7 @@ func TestChatV2_MutePin_ForbiddenForNonMember(t *testing.T) {
 		t.Fatalf("CreateTopic: %v", err)
 	}
 
-	// Deliberately not a hub member: the seeded hub-member-read-all policy
-	// grants project read to every hub member, so an outsider is the user the
-	// project's read authorization actually turns away.
+	// A user with no role in the project.
 	outsider := &store.User{
 		ID:          tid("chat-outsider"),
 		Email:       "outsider@test.com",
@@ -252,8 +240,11 @@ func TestChatV2_MutePin_ForbiddenForNonMember(t *testing.T) {
 		t.Run(action.route, func(t *testing.T) {
 			rec := doRequestAsUser(t, srv, outsider, http.MethodPut,
 				"/api/v1/chat/conversations/"+topicID+"/"+action.route, action.body)
-			if rec.Code != http.StatusForbidden {
-				t.Fatalf("expected 403 for non-member, got %d: %s", rec.Code, rec.Body.String())
+			missing := doRequestAsUser(t, srv, outsider, http.MethodPut,
+				"/api/v1/chat/conversations/"+tid("authz-topic-missing")+"/"+action.route, action.body)
+			if rec.Code != http.StatusNotFound || rec.Code != missing.Code || rec.Body.String() != missing.Body.String() {
+				t.Fatalf("non-member must get the missing-topic answer: got %d %s, missing %d %s",
+					rec.Code, rec.Body.String(), missing.Code, missing.Body.String())
 			}
 		})
 	}
@@ -336,7 +327,7 @@ func TestChatV2_Pin_RejectsBadRequests(t *testing.T) {
 		{
 			"DM the caller is not part of", http.MethodPut,
 			"dm:user:" + tid("stranger-c") + ":user:" + tid("stranger-d"),
-			map[string]bool{"pinned": true}, nil, http.StatusForbidden,
+			map[string]bool{"pinned": true}, nil, http.StatusNotFound,
 		},
 	}
 

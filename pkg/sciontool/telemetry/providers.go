@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"go.opentelemetry.io/otel/attribute"
@@ -20,6 +21,9 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/encoding"
 )
 
 // Providers holds SDK TracerProvider, LoggerProvider, and MeterProvider for OTel export.
@@ -47,7 +51,91 @@ func NewProviders(ctx context.Context, config *Config, batch bool) (*Providers, 
 		return nil, err
 	}
 
-	return newLoopbackProviders(ctx, config, res, batch)
+	return newLoopbackProviders(ctx, config, res, batch, loopbackExportBounds{})
+}
+
+// Bounds for the per-invocation `sciontool hook` providers.
+//
+// A hook runs synchronously inside the harness's tool loop, and some harnesses
+// kill a hook (and fail the tool call) after a short timeout: antigravity uses
+// 10s, grok-build 5s. The hook exports only to the loopback receiver in the
+// same container, which answers a healthy export in a few milliseconds, so the
+// OTLP defaults (10s per export, retries on Unavailable) only matter when the
+// receiver is missing or wedged. In that case the export cannot succeed and
+// waiting just stalls the harness. These bounds keep a hook with no receiver
+// well under one second end to end while leaving a wide margin for a live
+// receiver on a loaded host.
+const (
+	// HookExportTimeout bounds a single OTLP export (one span, one log
+	// record, or the final metric collection). About 50x a typical loopback
+	// round trip, including the first connection's HTTP/2 handshake.
+	HookExportTimeout = 250 * time.Millisecond
+
+	// HookShutdownTimeout bounds the provider shutdown that flushes the hook's
+	// metrics. A hook performs at most a span export and a log export before
+	// shutdown, so with a receiver that accepts connections but never answers
+	// the worst case is about 2*HookExportTimeout + HookShutdownTimeout
+	// (0.75s). With nothing listening the exports fail immediately because
+	// retries are disabled.
+	HookShutdownTimeout = 250 * time.Millisecond
+)
+
+// NewHookProviders creates synchronous loopback providers for a short-lived
+// `sciontool hook` invocation. They behave like NewProviders(ctx, config,
+// false), except that every exporter uses HookExportTimeout and does not
+// retry, so a missing receiver costs milliseconds instead of the OTLP default
+// 10s per export. Callers should shut the providers down with a context bounded
+// by HookShutdownTimeout. A failed export is reported to the OTel global error
+// handler only; it is never retried.
+func NewHookProviders(ctx context.Context, config *Config) (*Providers, error) {
+	if config == nil || !config.Enabled {
+		return nil, nil
+	}
+
+	res, err := buildResource(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return newLoopbackProviders(ctx, config, res, false, loopbackExportBounds{
+		timeout:      HookExportTimeout,
+		disableRetry: true,
+	})
+}
+
+// LoopbackExportTimeout bounds a single OTLP export from the long-lived and
+// non-hook loopback providers. It equals the OTLP default, but it is set
+// explicitly so OTEL_EXPORTER_OTLP_*TIMEOUT in sciontool's environment cannot
+// change it (ptone/scion#2992).
+const LoopbackExportTimeout = 10 * time.Second
+
+// loopbackExportBounds overrides the OTLP exporter timeout and retry
+// behaviour. The zero value keeps LoopbackExportTimeout and the OTLP retry
+// default.
+type loopbackExportBounds struct {
+	timeout      time.Duration
+	disableRetry bool
+}
+
+func (b loopbackExportBounds) exportTimeout() time.Duration {
+	if b.timeout > 0 {
+		return b.timeout
+	}
+	return LoopbackExportTimeout
+}
+
+// loopbackCompressionDialOption sends every loopback export uncompressed.
+//
+// The OTLP exporters read OTEL_EXPORTER_OTLP_*COMPRESSION from the
+// environment. The trace and metric exporters only accept "gzip" through
+// WithCompressor and report any other value to the OTel error handler, so
+// there is no clean option for "no compression". The exporter applies gzip
+// as a default call option; a per-call option appended here is applied after
+// the defaults and wins.
+func loopbackCompressionDialOption() grpc.DialOption {
+	return grpc.WithChainUnaryInterceptor(func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		return invoker(ctx, method, req, reply, cc, append(opts, grpc.UseCompressor(encoding.Identity))...)
+	})
 }
 
 // buildResource creates the OTel resource with service name and agent identifiers.
@@ -98,13 +186,35 @@ func buildResource(ctx context.Context) (*resource.Resource, error) {
 }
 
 // newLoopbackProviders creates standard OTLP gRPC exporters fixed to loopback.
-func newLoopbackProviders(ctx context.Context, config *Config, res *resource.Resource, batch bool) (*Providers, error) {
+//
+// Every exporter setting that the OTLP SDK would otherwise read from
+// OTEL_EXPORTER_OTLP_* in sciontool's environment is pinned here: endpoint,
+// resource (ptone/scion#2249), headers, compression, timeout and transport
+// credentials (ptone/scion#2992). A harness's OTEL environment is meant for
+// the harness, not for sciontool's loopback export.
+//
+// The credentials are passed with WithTLSCredentials rather than
+// WithInsecure: the exporters turn OTEL_EXPORTER_OTLP_*CERTIFICATE and
+// *CLIENT_CERTIFICATE/*CLIENT_KEY into TLS credentials, and those take
+// priority over WithInsecure. An explicit credentials option is applied
+// after the environment and has the highest priority, so the loopback
+// connection always uses plaintext gRPC.
+func newLoopbackProviders(ctx context.Context, config *Config, res *resource.Resource, batch bool, bounds loopbackExportBounds) (*Providers, error) {
 	endpoint := loopbackEndpoint(config)
 	pinResource := loopbackResourceDialOption(res)
+	pinCompression := loopbackCompressionDialOption()
+	loopbackCredentials := insecure.NewCredentials()
+	noHeaders := map[string]string{}
+	timeout := bounds.exportTimeout()
 	traceOpts := []otlptracegrpc.Option{
 		otlptracegrpc.WithEndpoint(endpoint),
-		otlptracegrpc.WithInsecure(),
-		otlptracegrpc.WithDialOption(pinResource),
+		otlptracegrpc.WithTLSCredentials(loopbackCredentials),
+		otlptracegrpc.WithDialOption(pinResource, pinCompression),
+		otlptracegrpc.WithHeaders(noHeaders),
+		otlptracegrpc.WithTimeout(timeout),
+	}
+	if bounds.disableRetry {
+		traceOpts = append(traceOpts, otlptracegrpc.WithRetry(otlptracegrpc.RetryConfig{Enabled: false}))
 	}
 	traceExporter, err := otlptracegrpc.New(ctx, traceOpts...)
 	if err != nil {
@@ -114,8 +224,13 @@ func newLoopbackProviders(ctx context.Context, config *Config, res *resource.Res
 	// Create log exporter (gRPC)
 	logOpts := []otlploggrpc.Option{
 		otlploggrpc.WithEndpoint(endpoint),
-		otlploggrpc.WithInsecure(),
-		otlploggrpc.WithDialOption(pinResource),
+		otlploggrpc.WithTLSCredentials(loopbackCredentials),
+		otlploggrpc.WithDialOption(pinResource, pinCompression),
+		otlploggrpc.WithHeaders(noHeaders),
+		otlploggrpc.WithTimeout(timeout),
+	}
+	if bounds.disableRetry {
+		logOpts = append(logOpts, otlploggrpc.WithRetry(otlploggrpc.RetryConfig{Enabled: false}))
 	}
 	logExporter, err := otlploggrpc.New(ctx, logOpts...)
 	if err != nil {
@@ -126,8 +241,13 @@ func newLoopbackProviders(ctx context.Context, config *Config, res *resource.Res
 	// Create metric exporter (gRPC)
 	metricOpts := []otlpmetricgrpc.Option{
 		otlpmetricgrpc.WithEndpoint(endpoint),
-		otlpmetricgrpc.WithInsecure(),
-		otlpmetricgrpc.WithDialOption(pinResource),
+		otlpmetricgrpc.WithTLSCredentials(loopbackCredentials),
+		otlpmetricgrpc.WithDialOption(pinResource, pinCompression),
+		otlpmetricgrpc.WithHeaders(noHeaders),
+		otlpmetricgrpc.WithTimeout(timeout),
+	}
+	if bounds.disableRetry {
+		metricOpts = append(metricOpts, otlpmetricgrpc.WithRetry(otlpmetricgrpc.RetryConfig{Enabled: false}))
 	}
 	// Hook commands are short lived independent writers. Export their counter
 	// additions as deltas so the receiver can accumulate them once.

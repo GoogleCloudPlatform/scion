@@ -51,8 +51,9 @@ type startContext struct {
 	Manager      agent.Manager
 
 	// RuntimeType is the runtime type this dispatch resolved to through
-	// resolveManagerForOpts (dispatchRuntimeType), which can differ from the
-	// broker's default runtime. The create path reports it to the hub.
+	// resolveExistingAgentManager (dispatchRuntimeType; pinned to the
+	// found-on runtime on restart), which can differ from the broker's
+	// default runtime. The create path reports it to the hub.
 	RuntimeType string
 
 	// EnvClassifications is the merged provenance map: what the hub sent,
@@ -172,6 +173,12 @@ type startContextInputs struct {
 	// bundle or container exists. Hub-managed project path initialization
 	// and hydration precede it, since resolution reads their results.
 	PolicyPreflight bool
+
+	// PinnedRuntime is the runtime a restart found the agent's container
+	// on. With no saved or provisioned profile, the runtime selection uses
+	// it instead of the project's active profile, so the start lands on
+	// the runtime the stop acts on. Zero value: no pin.
+	PinnedRuntime pinnedRuntime
 
 	// Prehydrated carries hydration results createAgent's preflights
 	// already obtained, so launch provisions the same bundle they evaluated
@@ -401,9 +408,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// the broker's default: a broker can register more than one profile
 	// (e.g. both a "docker" and a "kubernetes" profile), and a dispatch's
 	// profile selects which one it runs on. mgr and dispatchRuntimeType are
-	// resolved exactly once here, via resolveManagerForOptsStrict (handlers.go) —
-	// the same function that ultimately selects the manager this function
-	// returns — and reused below instead of re-resolving, so within this one
+	// resolved exactly once here, via resolveExistingAgentManager
+	// (handlers.go; pinned to the found-on runtime on restart) — the same
+	// function that ultimately selects the manager this function returns — and reused below instead of re-resolving, so within this one
 	// buildStartContext call the GCP check and the manager it returns cannot
 	// disagree, and settings are loaded only once per call. (start/restart
 	// perform their own, later, second resolution after this function
@@ -462,11 +469,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// 503 as start/restart's own later resolution, rather than classifying
 	// the dispatch against the default runtime first (ptone/scion#2709).
 	// Create and a start without a saved profile stay non-strict.
-	mgr, dispatchRuntimeType, err := s.resolveManagerForOptsStrict(api.StartOptions{
+	mgr, dispatchRuntimeType, err := s.resolveExistingAgentManager(api.StartOptions{
 		Name:        in.Name,
 		ProjectPath: in.ProjectPath,
 		Profile:     gcpIdentityProfile,
-	}, profileMode, slog.LevelWarn)
+	}, profileMode, slog.LevelWarn, in.PinnedRuntime)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
@@ -621,16 +628,17 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 
 	hubEndpoint, hubEndpointTrusted, err := resolveEffectiveHubEndpoint(ctx, hubEndpointInputs{
-		Op:                         in.Operation,
-		ReqHubEndpoint:             in.HubEndpoint,
-		ConnectionHubEndpoint:      connectionHubEndpoint,
-		BrokerHubEndpoint:          s.config.HubEndpoint,
-		ResolvedEnv:                in.ResolvedEnv,
-		ProjectPath:                in.ProjectPath,
-		ContainerHubEndpoint:       s.config.ContainerHubEndpoint,
-		ColocatedPublicHubEndpoint: s.config.ColocatedPublicHubEndpoint,
-		RuntimeName:                runtimeName,
-		HubListenPort:              s.config.HubListenPort,
+		Op:                           in.Operation,
+		ReqHubEndpoint:               in.HubEndpoint,
+		ConnectionHubEndpoint:        connectionHubEndpoint,
+		BrokerHubEndpoint:            s.config.HubEndpoint,
+		ResolvedEnv:                  in.ResolvedEnv,
+		ProjectPath:                  in.ProjectPath,
+		ContainerHubEndpoint:         s.config.ContainerHubEndpoint,
+		ColocatedPublicHubEndpoint:   s.config.ColocatedPublicHubEndpoint,
+		ColocatedRuntimeHubEndpoints: s.config.ColocatedRuntimeHubEndpoints,
+		RuntimeName:                  runtimeName,
+		HubListenPort:                s.config.HubListenPort,
 	})
 	if err != nil {
 		return nil, &startContextError{

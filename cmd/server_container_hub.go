@@ -53,8 +53,11 @@ type containerHubEndpointInputs struct {
 	// ForceHostNetwork is true when SCION_FORCE_HOST_NETWORK is set.
 	ForceHostNetwork bool
 	// HostGatewaySupported reports whether the Docker daemon supports
-	// host-gateway. It is called at most once, only for a Docker runtime
-	// that is not already forced onto host networking. Nil means supported.
+	// host-gateway. It is called at most once, and only when host
+	// networking is not already forced and the answer matters: for a docker
+	// default runtime, or, for any default runtime, to pick the docker
+	// target of an IAP-derived public URL (colocatedRuntimeHubEndpoints).
+	// Nil means supported.
 	HostGatewaySupported func() bool
 }
 
@@ -64,8 +67,14 @@ type containerHubEndpointResult struct {
 	Endpoint string
 	// ColocatedPublicHubEndpoint becomes
 	// runtimebroker.ServerConfig.ColocatedPublicHubEndpoint: the public URL
-	// the broker rewrites to Endpoint for non-Kubernetes agents.
+	// the broker rewrites for docker and podman agents.
 	ColocatedPublicHubEndpoint string
+	// ColocatedRuntimeHubEndpoints becomes
+	// runtimebroker.ServerConfig.ColocatedRuntimeHubEndpoints: the URL, per
+	// dispatch runtime, that replaces ColocatedPublicHubEndpoint. It is
+	// computed for docker and podman whatever the default runtime is, since
+	// a broker can dispatch to either through a runtime profile.
+	ColocatedRuntimeHubEndpoints map[string]string
 	// HubListenPort becomes runtimebroker.ServerConfig.HubListenPort.
 	HubListenPort int
 }
@@ -75,6 +84,7 @@ type containerHubEndpointResult struct {
 func (r containerHubEndpointResult) applyTo(cfg *runtimebroker.ServerConfig) {
 	cfg.ContainerHubEndpoint = r.Endpoint
 	cfg.ColocatedPublicHubEndpoint = r.ColocatedPublicHubEndpoint
+	cfg.ColocatedRuntimeHubEndpoints = r.ColocatedRuntimeHubEndpoints
 	cfg.HubListenPort = r.HubListenPort
 }
 
@@ -126,8 +136,8 @@ func brokerContainerHubConfig(cfg *config.GlobalConfig, p brokerContainerHubPara
 //   - When the public URL was only derived from the IAP audience, this host
 //     does not serve it (the single-node VM serves the hub on its listen
 //     port, and the URL is a Cloud Run IAP front end agents cannot pass).
-//     Agents get http://<colocatedHubHostAlias>:<listen port> and the broker
-//     rewrites the public URL to it.
+//     The broker rewrites the public URL per dispatch runtime (see
+//     colocatedRuntimeHubEndpoints), whatever the default runtime is.
 //   - Otherwise agents fall back to the legacy host.docker.internal path
 //     (host networking).
 //
@@ -143,16 +153,30 @@ func computeContainerHubEndpoint(in containerHubEndpointInputs, logf func(format
 		return containerHubEndpointResult{Endpoint: in.Configured, HubListenPort: in.HubListenPort}
 	}
 
-	isDocker := in.RuntimeName == "docker"
-	if isDocker && !in.ForceHostNetwork && in.HostGatewaySupported != nil && !in.HostGatewaySupported() {
-		logf("WARNING: Docker daemon lacks host-gateway support; colocated agents will use host networking (re-introduces metadata-server port contention for concurrent agents). Upgrade Docker Engine to >= 20.10 to enable per-agent bridge networking.")
-		in.ForceHostNetwork = true
-	}
 	publicDomain := ""
 	if in.PublicHubEndpoint != "" && !isLocalhostURL(in.PublicHubEndpoint) {
 		publicDomain = strings.TrimRight(in.PublicHubEndpoint, "/")
 	}
 	iapDerived := publicDomain != "" && in.PublicHubEndpointSource == hubEndpointSourceIAPAudience
+
+	isDocker := in.RuntimeName == "docker"
+	// The Docker host-gateway answer matters for a docker default runtime,
+	// and for the docker rewrite target of an IAP-derived public URL (any
+	// default runtime, since a docker profile may be dispatched). It is
+	// asked at most once.
+	needsProbe := isDocker || (iapDerived && in.HubListenPort > 0)
+	if !in.ForceHostNetwork && needsProbe && in.HostGatewaySupported != nil && !in.HostGatewaySupported() {
+		// The probe reads `docker version`. With the podman-docker shim
+		// that reports Podman's version, so on a non-docker default this is
+		// expected and only affects agents dispatched through a docker
+		// profile: log it at info level there.
+		level := "INFO"
+		if isDocker {
+			level = "WARNING"
+		}
+		logf("%s: host-gateway support not detected via docker (requires Docker Engine >= 20.10); colocated docker agents fall back to host networking, which re-introduces metadata-server port contention for concurrent agents.", level)
+		in.ForceHostNetwork = true
+	}
 
 	res := containerHubEndpointResult{HubListenPort: in.HubListenPort}
 	switch {
@@ -174,10 +198,56 @@ func computeContainerHubEndpoint(in containerHubEndpointInputs, logf func(format
 		}
 	}
 
-	// An IAP-derived public URL is unreachable from colocated Docker agents
-	// whichever route they get, so the broker must rewrite it too.
-	if isDocker && iapDerived && res.Endpoint != "" {
-		res.ColocatedPublicHubEndpoint = publicDomain
+	// An IAP-derived public URL is unreachable from colocated docker and
+	// podman agents whichever route they get, so the broker must rewrite it
+	// for each of them, including runtimes reached only through a profile.
+	if iapDerived {
+		if targets := colocatedRuntimeHubEndpoints(in); len(targets) > 0 {
+			res.ColocatedRuntimeHubEndpoints = targets
+			res.ColocatedPublicHubEndpoint = publicDomain
+			logf("Colocated agents rewrite the IAP-derived public hub URL %s per runtime: docker=%q podman=%q", publicDomain, targets["docker"], targets["podman"])
+		}
 	}
 	return res
+}
+
+// colocatedRuntimeHubEndpoints returns, per local container runtime, the
+// URL that replaces an IAP-derived public hub URL for agents dispatched to
+// it. in.ForceHostNetwork already reflects the host-gateway probe.
+//   - docker: http://<colocatedHubHostAlias>:<listen port> on bridge
+//     networking (colocatedExtraHosts maps the alias to host-gateway), or
+//     host.docker.internal (host networking) when host networking is forced.
+//   - podman: host.containers.internal, which Podman maps to the host
+//     itself, so it needs no --add-host flag on any Podman version
+//     (host-gateway in --add-host arrived in Podman 4.7).
+//
+// Both use the hub listen port, so a non-localhost
+// runtime_broker.hub_endpoint does not drop them. Only when the listen port
+// is unknown do they fall back to the port of the broker's localhost hub
+// endpoint.
+//
+// Apple container and remote runtimes get no entry: they keep the public URL.
+func colocatedRuntimeHubEndpoints(in containerHubEndpointInputs) map[string]string {
+	// bridgeTarget is http://<bridge host>:<listen port>, or the broker's
+	// localhost hub endpoint rewritten to the bridge host when the listen
+	// port is unknown.
+	bridgeTarget := func(runtimeName string) string {
+		if in.HubListenPort > 0 {
+			return containerBridgeEndpoint(fmt.Sprintf("http://localhost:%d", in.HubListenPort), runtimeName)
+		}
+		return containerBridgeEndpoint(in.BrokerHubEndpoint, runtimeName)
+	}
+	targets := map[string]string{}
+	if !in.ForceHostNetwork && in.HubListenPort > 0 {
+		targets["docker"] = fmt.Sprintf("http://%s:%d", colocatedHubHostAlias, in.HubListenPort)
+	} else if ep := bridgeTarget("docker"); ep != "" {
+		targets["docker"] = ep
+	}
+	if ep := bridgeTarget("podman"); ep != "" {
+		targets["podman"] = ep
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	return targets
 }

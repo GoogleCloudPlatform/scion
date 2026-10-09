@@ -192,10 +192,24 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 		task = args.Task
 		resume = args.Resume
 	}
+	ctx, warns := withDispatchWarnings(ctx)
 	if err := dispatcher.DispatchAgentStart(ctx, agent, task, resume); err != nil {
 		return "", fmt.Errorf("dispatch start: %w", err)
 	}
-	return "", nil
+	return s.lifecycleDispatchResult(ctx, agent.ID, warns), nil
+}
+
+// lifecycleDispatchResult is the result a completed start or restart row
+// carries back to the requesting node (ptone/scion#3456): the dispatch
+// warnings collected on this node, which a requester's response would
+// otherwise never see, and whether a delete won after the broker start
+// landed. The requester answers 409 delete_in_progress from its own re-read;
+// DeleteWon only ends its wait for a success phase that will not come.
+func (s *Server) lifecycleDispatchResult(ctx context.Context, agentID string, warns *dispatchWarnings) string {
+	return marshalLifecycleResult(LifecycleDispatchResult{
+		Warnings:  warns.Warnings(),
+		DeleteWon: s.deleteWonAfterLanding(ctx, agentID),
+	})
 }
 
 // stopSupersededResult is the result recorded on a queued stop row that was
@@ -322,14 +336,30 @@ func (s *Server) execDispatchRestart(ctx context.Context, d store.BrokerDispatch
 	if dispatcher == nil {
 		return "", fmt.Errorf("no dispatcher available")
 	}
+	ctx, warns := withDispatchWarnings(ctx)
 	if err := dispatcher.DispatchAgentRestart(ctx, agent); err != nil {
 		return "", fmt.Errorf("dispatch restart: %w", err)
 	}
-	return "", nil
+	return s.lifecycleDispatchResult(ctx, agent.ID, warns), nil
 }
 
 func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch) (string, error) {
+	var args *DeleteDispatchArgs
+	if d.Args != "" {
+		var err error
+		if args, err = UnmarshalDeleteArgs(d.Args); err != nil {
+			return "", fmt.Errorf("unmarshal delete args: %w", err)
+		}
+	}
 	agent, err := s.resolveDispatchAgent(ctx, d)
+	if errors.Is(err, store.ErrNotFound) {
+		// The row is gone, as after a project delete. A claimless intent
+		// that records its target is still sent from the intent alone
+		// (ptone/scion#3665); any other intent fails, as before.
+		if target, ok := deleteIntentTargetAgent(d, args); ok {
+			agent, err = target, nil
+		}
+	}
 	if err != nil {
 		return "", err
 	}
@@ -338,21 +368,16 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 		return "", fmt.Errorf("no dispatcher available")
 	}
 	var deleteFiles, removeBranch, softDelete bool
-	var deletedAt time.Time
+	var deletedAt, intentNotAfter time.Time
 	var claim int64
-	if d.Args != "" {
-		args, err := UnmarshalDeleteArgs(d.Args)
-		if err != nil {
-			return "", fmt.Errorf("unmarshal delete args: %w", err)
-		}
+	if args != nil {
 		deleteFiles = args.DeleteFiles
 		removeBranch = args.RemoveBranch
 		softDelete = args.SoftDelete
 		deletedAt = args.DeletedAt
 		claim = args.Claim
-		if len(args.PreviousRunIDs) > 0 {
-			agent.PreviousRunIDs = args.PreviousRunIDs
-		}
+		intentNotAfter = args.NotAfter
+		applyDeleteIntentRuns(agent, args)
 	}
 	// A delete engine's intent applies only while the claim it was created
 	// under is still the row's current claim, live or failed in_doubt (see
@@ -363,11 +388,11 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 	// that ran. The deadline sent to the broker is computed now, not when
 	// the intent was written.
 	//
-	// An intent records no run ID of its own until ptone/scion#2550 P5; the
-	// broker gets the re-read row's run ID. The intent's previous runs
-	// (ptone/scion#3097) are deleted by the same DispatchAgentDelete call
-	// under this fence, so each previous-run delete carries the same
-	// notAfter and a stale intent deletes none of them.
+	// The broker gets the intent's run ID (applyDeleteIntentRuns), not the
+	// re-read row's. The intent's previous runs (ptone/scion#3097) are
+	// deleted by the same DispatchAgentDelete call under this fence, so
+	// each previous-run delete carries the same notAfter and a stale intent
+	// deletes none of them.
 	if claim != 0 {
 		notAfter, ok := deferredDeleteDeadline(ctx, agent, claim, deleteClock())
 		if !ok {
@@ -377,8 +402,21 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 			return "", fmt.Errorf("%w (intent claim %d, row claim %d)", errStaleDeleteDispatch, claim, agent.DeletionClaim)
 		}
 		ctx = withDeleteDispatchFence(ctx, deleteDispatchFence{claim: claim, notAfter: notAfter})
+	} else if !intentNotAfter.IsZero() {
+		// A claimless intent carries the notAfter fixed when it was
+		// written (ptone/scion#3674). Past it, the intent is dropped
+		// without dispatching; before it, the broker gets it and refuses
+		// the delete if it arrives late.
+		if deleteClock().After(intentNotAfter) {
+			s.logStaleClaimlessDelete(d, agent, intentNotAfter, "hub")
+			return "", fmt.Errorf("%w (intent notAfter %s passed)", errStaleDeleteDispatch, intentNotAfter.UTC().Format(time.RFC3339))
+		}
+		ctx = withDeleteDispatchFence(ctx, deleteDispatchFence{notAfter: intentNotAfter})
 	}
 	if err := dispatcher.DispatchAgentDelete(ctx, agent, deleteFiles, removeBranch, softDelete, deletedAt); err != nil {
+		if claim == 0 && !intentNotAfter.IsZero() && isStaleDeleteDispatch(err) {
+			s.logStaleClaimlessDelete(d, agent, intentNotAfter, "broker")
+		}
 		if isStaleDeleteDispatch(err) && !errors.Is(err, errStaleDeleteDispatch) {
 			// Keep the marker in the row's error text for the originating node.
 			return "", fmt.Errorf("dispatch delete: %w: %w", errStaleDeleteDispatch, err)
@@ -386,6 +424,62 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 		return "", fmt.Errorf("dispatch delete: %w", err)
 	}
 	return "", nil
+}
+
+// deleteIntentTargetAgent builds the agent a delete intent names from the
+// intent alone, for when its row is gone (ptone/scion#3665). Only a
+// claimless intent that records its target qualifies: an engine's intent
+// needs the row to check its claim, and an intent without a target
+// (written by an older hub) has nothing to send. The target's broker
+// must be the one whose queue is being drained (d.BrokerID), so an intent
+// is never sent to a different broker. The delete path reads only the
+// fields set here (the ID for logging, the broker, the recorded runtime,
+// the project and slug) and the runs applyDeleteIntentRuns sets; a lookup
+// of the project's path finds nothing, as for a direct delete after the
+// project is gone.
+func deleteIntentTargetAgent(d store.BrokerDispatch, args *DeleteDispatchArgs) (*store.Agent, bool) {
+	if args == nil || args.Claim != 0 || args.Target == nil || args.Target.BrokerID == "" || args.Target.Slug == "" {
+		return nil, false
+	}
+	if args.Target.BrokerID != d.BrokerID {
+		return nil, false
+	}
+	return &store.Agent{
+		ID:              d.AgentID,
+		Slug:            args.Target.Slug,
+		ProjectID:       args.Target.ProjectID,
+		RuntimeBrokerID: args.Target.BrokerID,
+		Runtime:         args.Target.Runtime,
+	}, true
+}
+
+// logStaleClaimlessDelete records a claimless delete intent that was not
+// acted on because its notAfter passed (ptone/scion#3674), found stale by
+// the executing hub or by the broker. Its runtime entries stay on the
+// broker, so it is a warning.
+func (s *Server) logStaleClaimlessDelete(d store.BrokerDispatch, agent *store.Agent, notAfter time.Time, by string) {
+	s.agentLifecycleLog.Warn("reconcile: claimless deferred delete intent was stale; nothing was deleted",
+		"id", d.ID, "agent_id", agent.ID, "agent", agent.Slug, "broker", agent.RuntimeBrokerID,
+		"not_after", notAfter, "refused_by", by)
+}
+
+// applyDeleteIntentRuns points agent (execDispatchDelete's own copy of the
+// row) at the runs a delete intent was written for (ptone/scion#2550): an
+// intent that records its run ID deletes exactly that run and the previous
+// runs it lists, even none, whatever the row records now, so an intent
+// written for run A never deletes a run B started since. An intent with no
+// run ID (written by an older hub, or for an agent with no run ID) keeps
+// the row's run, and the row's previous runs unless it lists its own, as
+// before.
+func applyDeleteIntentRuns(agent *store.Agent, args *DeleteDispatchArgs) {
+	if args.RunID != "" {
+		agent.RunID = args.RunID
+		agent.PreviousRunIDs = append([]string(nil), args.PreviousRunIDs...)
+		return
+	}
+	if len(args.PreviousRunIDs) > 0 {
+		agent.PreviousRunIDs = args.PreviousRunIDs
+	}
 }
 
 func (s *Server) execDispatchCheckPrompt(ctx context.Context, d store.BrokerDispatch) (string, error) {
@@ -425,11 +519,12 @@ func (s *Server) execDispatchFinalizeEnv(ctx context.Context, d store.BrokerDisp
 		}
 		env = args.Env
 	}
+	ctx, warns := withDispatchWarnings(ctx)
 	finalized, err := dispatcher.DispatchFinalizeEnv(ctx, agent, env)
 	if err != nil {
 		return "", fmt.Errorf("dispatch finalize_env: %w", err)
 	}
-	result, err := json.Marshal(FinalizeEnvResult{Success: true, Launch: finalized.AcceptedLaunch()})
+	result, err := json.Marshal(FinalizeEnvResult{Success: true, Launch: finalized.AcceptedLaunch(), Warnings: warns.Warnings()})
 	if err != nil {
 		return "", fmt.Errorf("marshal finalize_env result: %w", err)
 	}
@@ -445,11 +540,12 @@ func (s *Server) execDispatchCreate(ctx context.Context, d store.BrokerDispatch)
 	if dispatcher == nil {
 		return "", fmt.Errorf("no dispatcher available")
 	}
+	ctx, warns := withDispatchWarnings(ctx)
 	created, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
 	if err != nil {
 		return "", fmt.Errorf("dispatch create: %w", err)
 	}
-	cr := CreateWithGatherResult{EnvRequirements: created.EnvRequirements(), Launch: created.AcceptedLaunch()}
+	cr := CreateWithGatherResult{EnvRequirements: created.EnvRequirements(), Launch: created.AcceptedLaunch(), Warnings: warns.Warnings()}
 	result, err := json.Marshal(cr)
 	if err != nil {
 		return "", fmt.Errorf("marshal create result: %w", err)
@@ -485,6 +581,13 @@ func (s *Server) deliverMessage(ctx context.Context, m *store.Message) error {
 	}
 	if agent.RuntimeBrokerID == "" {
 		return fmt.Errorf("agent %s has no runtime broker", m.AgentID)
+	}
+	// A held agent (ptone/scion#3433) is never delivered to; the message
+	// stays stored. A lookup fault does not deliver either.
+	if held, err := s.agentHeld(ctx, agent.ID); err != nil {
+		return fmt.Errorf("agent %s hold lookup: %w", agent.ID, err)
+	} else if held {
+		return fmt.Errorf("agent %s is suspended", agent.ID)
 	}
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {

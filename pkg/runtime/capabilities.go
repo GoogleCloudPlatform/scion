@@ -155,10 +155,18 @@ func HasEmptyPerAgentSupport(rt Runtime) bool {
 // objects of an agent whose container still exists. A projectID of ""
 // is a no-op: without a project there is no safe scope.
 //
-// Known limitation: there is no incarnation check. A start of the same
-// agent still in progress (its objects created, its container not yet)
-// could lose its objects; the worst case is that start failing. The broker
-// cancels local launches of the agent before a delete resolves.
+// runID is the run the delete names (ptone/scion#2550). When it is set,
+// implementations must select only that run's objects (the scion.run_id
+// label equal to runID) and legacy objects carrying no run label, never an
+// object labelled with another run: a delete naming an older run must not
+// remove the objects a newer run's start has created before its container
+// exists. An empty runID (a delete naming no run) selects by name and
+// project, as before run IDs existed.
+//
+// Known limitation: without a runID there is no incarnation check. A start
+// of the same agent still in progress (its objects created, its container
+// not yet) could lose its objects; the worst case is that start failing.
+// The broker cancels local launches of the agent before a delete resolves.
 type AgentResourceCleaner interface {
-	CleanupAgentResources(ctx context.Context, agentName, projectID string) error
+	CleanupAgentResources(ctx context.Context, agentName, projectID, runID string) error
 }

@@ -35,8 +35,9 @@ import (
 // sends a deadline, notAfter = min(its lease expiry, now + its dispatch
 // budget) less deleteNotAfterMargin, and the broker refuses a delete that arrives after it with 409
 // stale_dispatch and no side effects. notAfter is a wire field only: nothing
-// stores it. A delete from any other caller carries none, and the broker
-// then does not check.
+// stores it, except in a claimless deferred intent (below). A direct
+// delete from any other caller carries none, and the broker then does not
+// check.
 //
 // The margin points toward refusal: the hub allows a start as soon as the
 // lease expires, and the broker accepts up to deleteNotAfterMargin past
@@ -54,10 +55,18 @@ import (
 // outstanding (deleteBlocksStart), so the re-check mostly drops superseded
 // or abandoned intents; the deadline it adds closes the remaining gap, where
 // the intent fails on a timeout while the broker is still working.
+//
+// A deferred delete from any other caller (a project delete, a cross-node
+// create-failure cleanup) has no claim to re-check, so its intent records
+// a notAfter fixed when it is written (claimlessDeleteNotAfter,
+// ptone/scion#3674). The executing node drops the intent once that has
+// passed and otherwise sends it, so the broker refuses it if it arrives
+// late.
 
 // errStaleDeleteDispatch is the error for a delete that was not acted on
 // because it was stale: the broker answered 409 stale_dispatch, or a
-// deferred intent was dropped because its claim was no longer live.
+// deferred intent was dropped because its claim was no longer live or its
+// recorded notAfter passed.
 var errStaleDeleteDispatch = errors.New(staleDeleteDispatchPrefix + " delete dispatch was stale; nothing was done")
 
 // staleDeleteDispatchPrefix starts the error text of a stale delete, so a
@@ -104,6 +113,14 @@ func deleteNotAfter(now, leaseUntil time.Time) time.Time {
 		end = leaseUntil
 	}
 	return notAfterFromEnd(end)
+}
+
+// claimlessDeleteNotAfter is the notAfter recorded in a deferred delete
+// intent written at now without an engine claim (ptone/scion#3674): the
+// end of the delete dispatch budget, less deleteNotAfterMargin, as
+// deleteNotAfter computes it with no lease bound.
+func claimlessDeleteNotAfter(now time.Time) time.Time {
+	return deleteNotAfter(now, time.Time{})
 }
 
 // notAfterFromEnd is the notAfter for a delete that must not act after end:

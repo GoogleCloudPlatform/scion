@@ -42,6 +42,8 @@ const (
 	FieldDefaultProfile = "default_profile"
 	// FieldWorkspaceStorage holds the string denoting the workspace_storage field in the database.
 	FieldWorkspaceStorage = "workspace_storage"
+	// FieldHealth holds the string denoting the health field in the database.
+	FieldHealth = "health"
 	// FieldLabels holds the string denoting the labels field in the database.
 	FieldLabels = "labels"
 	// FieldAnnotations holds the string denoting the annotations field in the database.
@@ -93,6 +95,7 @@ var Columns = []string{
 	FieldRuntimes,
 	FieldDefaultProfile,
 	FieldWorkspaceStorage,
+	FieldHealth,
 	FieldLabels,
 	FieldAnnotations,
 	FieldEndpoint,
@@ -225,6 +228,11 @@ func ByDefaultProfile(opts ...sql.OrderTermOption) OrderOption {
 // ByWorkspaceStorage orders the results by the workspace_storage field.
 func ByWorkspaceStorage(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldWorkspaceStorage, opts...).ToFunc()
+}
+
+// ByHealth orders the results by the health field.
+func ByHealth(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldHealth, opts...).ToFunc()
 }
 
 // ByEndpoint orders the results by the endpoint field.

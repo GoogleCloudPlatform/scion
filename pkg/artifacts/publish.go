@@ -74,6 +74,10 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "name must be a plain file name")
 		return
 	}
+	if isReservedPath(name) {
+		writeError(w, http.StatusBadRequest, "bad_request", "names under "+RemotePrefix+" are reserved")
+		return
+	}
 	title := strings.TrimSpace(q.Get(paramTitle))
 	if title == "" {
 		title = name
@@ -93,6 +97,9 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 
 	kind, ref, home, ok := s.host.Principal(ctx)
 	if !ok {
+		if s.writeMissingScope(w, r) {
+			return
+		}
 		writeError(w, http.StatusUnauthorized, "unauthorized", "authentication required")
 		return
 	}
@@ -104,7 +111,11 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "scope is required")
 		return
 	}
-	if !s.host.Permits(ctx, scope, PermissionCreate) || !s.host.Authorize(ctx, scope, PermissionCreate) {
+	permitted := s.host.Permits(ctx, scope, PermissionCreate)
+	if !permitted && s.writeMissingScope(w, r) {
+		return
+	}
+	if !permitted || !s.host.Authorize(ctx, scope, PermissionCreate) {
 		writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish artifacts in this scope")
 		return
 	}
@@ -143,49 +154,139 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().UTC()
+	versionID := uuid.NewString()
+	f := File{VersionID: versionID, Path: name, Size: spool.size, SHA256: spool.digest, MediaType: mediaType}
+	files := []File{f}
+	totalBytes := spool.size
+	var warnings []string
+	if mediaType == mediaTypeMarkdown {
+		// Remote images are fetched now, once, so opening the artifact
+		// never makes the hub fetch anything.
+		window, truncated, err := spool.window()
+		if err != nil {
+			slog.ErrorContext(ctx, "artifacts: read spooled markdown failed", "error", err)
+		}
+		remote, warn := s.remoteImages(ctx, w, b, versionID, window, truncated, versionUsage{files: 1, bytes: spool.size})
+		warnings = warn
+		for _, rf := range remote {
+			files = append(files, rf)
+			totalBytes += rf.Size
+		}
+	}
+	if mediaType == mediaTypeHTML {
+		if window, _, err := spool.window(); err == nil && htmlHasRemoteImages(window) {
+			warnings = append(warnings, WarnHTMLRemoteImages)
+		}
+	}
 	a := &Artifact{
 		ID: uuid.NewString(), ScopeKind: ScopeKindProject, ScopeRef: scope,
 		OwnerKind: kind, OwnerRef: ref, Title: title, CurrentSeq: 1,
-		CreatedAt: now, UpdatedAt: now,
+		CreatedAt: now, UpdatedAt: now, ExpiresAt: retentionExpiry(b.currentLimits(ctx), now),
 	}
 	v := &Version{
-		ID: uuid.NewString(), ArtifactID: a.ID, Seq: 1, Kind: VersionKindPublish, EntryPath: name,
-		TotalBytes: spool.size, FileCount: 1, CreatedByKind: kind, CreatedByRef: ref,
+		ID: versionID, ArtifactID: a.ID, Seq: 1, Kind: VersionKindPublish, EntryPath: name,
+		TotalBytes: totalBytes, FileCount: len(files), CreatedByKind: kind, CreatedByRef: ref,
 		CreatedAt: now, State: VersionStateReady,
 	}
-	f := File{VersionID: v.ID, Path: name, Size: spool.size, SHA256: spool.digest, MediaType: mediaType}
 	g := Grant{
 		ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectScope, SubjectRef: scope,
 		Permission: GrantRead, CreatedByRef: PrincipalRef(kind, ref), CreatedAt: now,
 	}
 	// A failure here can leave an unreferenced blob behind; blobs are
 	// content-addressed, so a retry reuses it and the blob sweep reclaims it.
-	if err := b.store.CreatePublished(ctx, a, v, []File{f}, []Grant{g}); err != nil {
+	if err := b.store.CreatePublished(ctx, a, v, files, []Grant{g}); err != nil {
 		slog.ErrorContext(ctx, "artifacts: publish failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not record the artifact")
 		return
 	}
-	writeJSON(w, http.StatusCreated, ArtifactResponse{Artifact: artifactInfo(a), Version: versionInfo(v, []File{f})})
+	writeJSON(w, http.StatusCreated, ArtifactResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files), Warnings: warnings})
 }
 
-// putBlob stores the spooled body at its content address unless a blob
-// with that digest already exists.
+// CodeMissingScope is the error code of a 403 answered to a publish whose
+// credential lacks a scope publishing needs. The error's details carry the
+// scope's name under "scope".
+const CodeMissingScope = "missing_scope"
+
+// writeMissingScope answers 403 missing_scope when the host reports that
+// the caller's credential lacks a scope for publishing. It reports whether
+// it wrote the response. Only the publish path calls it: publishing names
+// no existing artifact, so the answer describes the caller's own
+// credential and nothing else.
+func (s *Service) writeMissingScope(w http.ResponseWriter, r *http.Request) bool {
+	ex, ok := s.host.(ScopeExplainer)
+	if !ok {
+		return false
+	}
+	scope := ex.MissingScope(r.Context(), PermissionCreate)
+	if scope == "" {
+		return false
+	}
+	writeJSON(w, http.StatusForbidden, errorResponse{Error: errorBody{
+		Code:    CodeMissingScope,
+		Message: "the credential does not carry the " + scope + " scope needed to publish artifacts",
+		Details: map[string]any{"scope": scope},
+	}})
+	return true
+}
+
+// putBlob stores the spooled body at its content address (see storeBlob).
 func (s *Service) putBlob(ctx context.Context, b backend, sp *spooled, mediaType string) error {
-	p := BlobPath(b.hubID, sp.digest)
-	exists, err := b.blobs.Exists(ctx, p)
-	if err != nil {
-		return fmt.Errorf("check blob: %w", err)
+	return storeBlob(ctx, b, sp.digest, mediaType, func() (io.Reader, error) {
+		if _, err := sp.file.Seek(0, io.SeekStart); err != nil {
+			return nil, fmt.Errorf("rewind spool: %w", err)
+		}
+		return sp.file, nil
+	})
+}
+
+// blobClock is the time blob touches are recorded at. A variable so tests
+// can run publishes and sweeps on one simulated clock.
+var blobClock = time.Now
+
+// Blob write retries: a blob write is idempotent (the object always gets
+// the same bytes), so a failed write is retried, at most blobWriteAttempts
+// times in all and within blobWriteDeadline, with a growing pause; the
+// last error is returned. Variables so tests can shorten them.
+var (
+	blobWriteAttempts = 5
+	blobWriteDeadline = 60 * time.Second
+	blobWriteBackoff  = 200 * time.Millisecond
+)
+
+// storeBlob stores the bytes open yields at digest's content address. It
+// is the only way bytes are written. It touches the blob first (waiting
+// for a sweep that holds the blob's state, and keeping the sweep off the
+// blob for the grace period), then always uploads, overwriting any object
+// already there: the write never relies on an object that is already
+// there, so a delete the sweep issued earlier (which names the generation
+// it saw) can never remove the bytes this write stores. There is still
+// one object per digest. open is called again for each attempt.
+func storeBlob(ctx context.Context, b backend, digest, mediaType string, open func() (io.Reader, error)) error {
+	if err := b.store.TouchBlob(ctx, digest, blobClock()); err != nil {
+		return err
 	}
-	if exists {
-		return nil
+	ctx, cancel := context.WithTimeout(ctx, blobWriteDeadline)
+	defer cancel()
+	pause := blobWriteBackoff
+	var err error
+	for attempt := 1; attempt <= blobWriteAttempts; attempt++ {
+		if attempt > 1 {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("upload blob: %w (after %d attempts)", err, attempt-1)
+			case <-time.After(pause):
+			}
+			pause *= 2
+		}
+		var body io.Reader
+		if body, err = open(); err != nil {
+			return err
+		}
+		if _, err = b.blobs.Upload(ctx, BlobPath(b.hubID, digest), body, storage.UploadOptions{ContentType: mediaType, Idempotent: true}); err == nil {
+			return nil
+		}
 	}
-	if _, err := sp.file.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("rewind spool: %w", err)
-	}
-	if _, err := b.blobs.Upload(ctx, p, sp.file, storage.UploadOptions{ContentType: mediaType}); err != nil {
-		return fmt.Errorf("upload blob: %w", err)
-	}
-	return nil
+	return fmt.Errorf("upload blob: %w (after %d attempts)", err, blobWriteAttempts)
 }
 
 func writeTooLarge(w http.ResponseWriter, limit int64) {
@@ -202,6 +303,25 @@ type spooled struct {
 	size   int64
 	digest string
 	head   []byte
+}
+
+// window returns the spooled body's first imageScanWindow bytes and
+// whether the body is longer.
+func (s *spooled) window() (string, bool, error) {
+	if _, err := s.file.Seek(0, io.SeekStart); err != nil {
+		return "", false, err
+	}
+	text, err := readWindow(s.file, s.size)
+	return text, s.size > imageScanWindow, err
+}
+
+// readWindow reads at most imageScanWindow bytes of r, a body of size
+// bytes, into one string.
+func readWindow(r io.Reader, size int64) (string, error) {
+	var b strings.Builder
+	b.Grow(int(min(max(size, 0), imageScanWindow)))
+	_, err := io.Copy(&b, io.LimitReader(r, imageScanWindow))
+	return b.String(), err
 }
 
 func (s *spooled) Close() {

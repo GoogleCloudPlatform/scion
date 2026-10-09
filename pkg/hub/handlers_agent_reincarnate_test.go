@@ -174,7 +174,7 @@ func (d *reincarnateTestDispatcher) DispatchAgentStart(ctx context.Context, agen
 	d.mu.Lock()
 	if d.runStore != nil {
 		runID := fmt.Sprintf("run-%s-%d", agent.RuntimeBrokerID, len(d.startBrokers)+1)
-		if _, err := d.runStore.SetAgentRunID(ctx, agent.ID, runID); err == nil {
+		if _, err := d.runStore.SetAgentRunID(ctx, agent.ID, runID, nil); err == nil {
 			agent.RunID = runID
 		}
 		if d.startPlacement != "" {
@@ -343,6 +343,9 @@ func tidSlugSafe(name string) string {
 func newReincarnateTestAgent(t *testing.T, s store.Store, project *store.Project, broker *store.RuntimeBroker, mutate func(a *store.Agent)) *store.Agent {
 	t.Helper()
 	ctx := context.Background()
+	// The agent's creator is a live project member, so the agent is in good
+	// standing (ptone/scion#3433).
+	ensureStandingRoot(t, s, project.ID, tid("user-creator"))
 
 	a := &store.Agent{
 		ID:              tid("reincarnate-agent-" + t.Name()),
@@ -389,8 +392,8 @@ func agentIdentityFor(agentID, projectID string, scopes ...AgentTokenScope) Agen
 
 // delegatingRequesterFor returns an agent identity for requesterID that may
 // reincarnate a baseline agent in projectID: the lifecycle scope plus every
-// scope of the baseline role, which re-recording the target's authority
-// under the requester requires (CanDelegate).
+// scope of the baseline role, which a requester other than the agent must
+// hold to delegate the role (CanDelegate).
 func delegatingRequesterFor(requesterID, projectID string) AgentIdentity {
 	return agentIdentityFor(requesterID, projectID, append(ScopesForRole(AgentRoleBaseline), ScopeAgentLifecycle)...)
 }
@@ -5609,13 +5612,13 @@ func TestDispatchAgentEventHandler_SetsCreateInputs(t *testing.T) {
 	creatorID := seedFullRoleDispatchCreator(ms, "project-1")
 	srv := newEventHandlerTestServer(&resolvingTemplateStore{ms})
 
-	err := srv.dispatchAgentEventHandler()(context.Background(), store.ScheduledEvent{
+	err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-createinputs-1",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"sched-createinputs","task":"Do the thing","branch":"sched-branch"}`,
 		CreatedBy: creatorID,
-	})
+	}, creatorID))
 	require.NoError(t, err)
 
 	created := findMockAgent(ms, "sched-createinputs")

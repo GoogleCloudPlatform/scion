@@ -63,6 +63,7 @@ func TestDisplayAgents_ProvisionedOnlyLabel(t *testing.T) {
 	out := captureStdout(t, func() { err = displayAgents(agents, false, true) })
 	require.NoError(t, err)
 	lines := strings.Split(strings.TrimSpace(out), "\n")
+	// Header and three rows; the start hint goes to stderr.
 	require.Len(t, lines, 4, out)
 	for _, l := range lines[1:] {
 		if strings.HasPrefix(l, "po-agent") {
@@ -71,4 +72,58 @@ func TestDisplayAgents_ProvisionedOnlyLabel(t *testing.T) {
 			assert.NotContains(t, l, "not started")
 		}
 	}
+}
+
+// scion list ends with a hint to start provision-only agents
+// (ptone/scion#2875).
+func TestProvisionedOnlyListHint(t *testing.T) {
+	po := func(project, name string) api.AgentInfo {
+		return api.AgentInfo{Name: name, Project: project, Phase: "created", ProvisionedOnly: true}
+	}
+	var many []api.AgentInfo
+	for _, n := range []string{"a", "b", "c", "d", "e", "f", "g"} {
+		many = append(many, po("p", n))
+	}
+	for _, tc := range []struct {
+		name   string
+		agents []api.AgentInfo
+		all    bool
+		want   string
+	}{
+		{"none", []api.AgentInfo{{Name: "a", Phase: "running"}}, false, ""},
+		{"stale flag after leaving created", []api.AgentInfo{{Name: "a", Phase: "running", ProvisionedOnly: true}}, false, ""},
+		{"one", []api.AgentInfo{{Name: "b", Phase: "running"}, po("p", "a")}, false,
+			"Agent 'a' is provisioned but not started. Run 'scion start a' to start it."},
+		{"one with --all", []api.AgentInfo{po("p", "a")}, true,
+			"Agent 'p/a' is provisioned but not started. Run 'scion start a' in project p to start it."},
+		{"several", []api.AgentInfo{po("p", "a"), po("p", "b")}, false,
+			"2 agents are provisioned but not started (a, b). Run 'scion start NAME' to start one."},
+		{"several with --all", []api.AgentInfo{po("p", "a"), po("q", "b")}, true,
+			"2 agents are provisioned but not started (p/a, q/b). Run 'scion start NAME' to start one."},
+		{"capped", many, false,
+			"7 agents are provisioned but not started (a, b, c, d, e and 2 more). Run 'scion start NAME' to start one."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, provisionedOnlyListHint(tc.agents, tc.all))
+		})
+	}
+}
+
+func TestDisplayAgents_ProvisionedOnlyHint(t *testing.T) {
+	prev := outputFormat
+	outputFormat = ""
+	t.Cleanup(func() { outputFormat = prev })
+
+	agents := []api.AgentInfo{{Name: "po-agent", Phase: "created", ProvisionedOnly: true}}
+	var err error
+	stdout, stderr := captureStdoutStderr(t, func() { err = displayAgents(agents, false, false) })
+	require.NoError(t, err)
+	assert.Contains(t, stdout, "created (not started)")
+	assert.NotContains(t, stdout, "scion start")
+	assert.Equal(t, "Agent 'po-agent' is provisioned but not started. Run 'scion start po-agent' to start it.", strings.TrimSpace(stderr))
+
+	outputFormat = "json"
+	stdout, stderr = captureStdoutStderr(t, func() { err = displayAgents(agents, false, false) })
+	require.NoError(t, err)
+	assert.NotContains(t, stdout+stderr, "scion start")
 }

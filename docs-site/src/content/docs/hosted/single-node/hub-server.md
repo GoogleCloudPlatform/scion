@@ -114,6 +114,17 @@ The Scion Hub can manage and provision Google Cloud Platform (GCP) Service Accou
 
 To enable GCP identity management, the Hub itself must run with a GCP identity (e.g., attached to its GCE instance or GKE pod) that has the `iam.serviceAccounts.getAccessToken` permission for the target Service Accounts.
 
+Minting new Service Accounts needs more than that. The Hub creates each account with its own identity, sets IAM policy on it, and deletes it again if a follow-up grant fails, so the Hub's identity needs `roles/iam.serviceAccountAdmin` on the Hub's GCP project (`roles/iam.serviceAccountCreator` alone is not enough). The Hub also needs `iamcredentials.googleapis.com` enabled to issue tokens for the accounts it mints. The single-node VM deploy script (`scripts/single-node-vm/deploy.sh`) enables the API, and grants the role to the hub VM's service account by default (config key `hub_sa_minting`). On other deployments, grant them yourself:
+
+```bash
+gcloud projects add-iam-policy-binding PROJECT_ID \
+  --member="serviceAccount:HUB_SA_EMAIL" \
+  --role="roles/iam.serviceAccountAdmin" --condition=None
+gcloud services enable iamcredentials.googleapis.com --project=PROJECT_ID
+```
+
+`roles/iam.serviceAccountAdmin` applies to every Service Account in the project. Agents in `passthrough` GCP identity mode use the same credentials as a co-located Hub, so they hold this role too. Use `passthrough` for getting started only, and `assign` or `block` beyond that.
+
 Administrators can configure Service Accounts via the Web Dashboard:
 1. Navigate to the **Service Accounts** section in the Admin dashboard.
 2. View the service account quota dashboard and configure minting capability controls.
@@ -249,6 +260,10 @@ The Hub stores agent templates and other artifacts.
 
 - **Local File System**: Default. Stores files in `~/.scion/storage`.
 - **Google Cloud Storage (GCS)**: Recommended for cloud deployments. Set the `SCION_SERVER_STORAGE_BUCKET` environment variable.
+
+For Hub-managed workspaces, the Hub uploads the workspace to its GCS bucket and sends that bucket name to the Runtime Broker in the agent create request, so the Runtime Broker downloads from the same bucket (the bucket is also kept across reincarnation). A Runtime Broker that receives no bucket falls back to its own GCS storage bucket setting. With neither, the create request fails up front with `422 workspace_storage_unconfigured` instead of a generic gateway error.
+
+This upload works only with GCS Hub storage. On any other storage provider, a Hub-managed project that has a git remote still works on a remote Runtime Broker, because the Runtime Broker builds the workspace from the remote. A project with no git remote does not. Creating an agent for it on a remote Runtime Broker that has no local path for the project fails up front with `412 unsupported_capability`. Use GCS Hub storage, add a git remote to the project, or link the project at a local path on that Runtime Broker.
 
 ## Deployment
 

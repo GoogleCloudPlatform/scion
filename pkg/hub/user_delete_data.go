@@ -143,7 +143,8 @@ func checkUserOwnsNoAgentsTx(ctx context.Context, tx store.Store, userID string)
 
 // errAgentOwnerUserMissing is returned when the guard principal of an agent
 // (the user the delete guard counts it for: its owner, its ancestry root or
-// the creator of its schedule, see lockAgentGuardUserTx) no longer exists
+// the principal of its schedule's latest revision, the revision principal;
+// see lockAgentGuardUserTx) no longer exists
 // (see lockUserPrincipalTx). That is normally a deleted user, but it can be
 // a legacy root agent that has since been purged, because a missing root
 // cannot be told apart from a deleted user; hence the neutral text.
@@ -243,6 +244,10 @@ const userScopedDataCleanupTimeout = 30 * time.Second
 // fails the request. Anything left behind is retried by the startup sweep
 // (sweepOrphanedUserScopedData). It reports whether everything was removed.
 func (s *Server) removeUserScopedData(ctx context.Context, userID string) bool {
+	// The user's scheduled chat messages go too, on their own bounded
+	// context (best effort; one left behind fails at fire time and is
+	// purged later).
+	defer s.deleteScheduledMessagesOfSender(ctx, userID)
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), userScopedDataCleanupTimeout)
 	defer cancel()
 	return s.removeUserScopedDataCtx(ctx, userID)

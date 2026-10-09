@@ -483,6 +483,12 @@ type ScionConfig struct {
 	Hub           *AgentHubConfig            `json:"hub,omitempty" yaml:"hub,omitempty"`
 	Telemetry     *TelemetryConfig           `json:"telemetry,omitempty" yaml:"telemetry,omitempty"`
 
+	// CloneDepth sets the git clone depth for a clone-per-agent
+	// workspace: "full" or a positive integer. It overrides a profile's
+	// clone_depth. Empty keeps the profile value, else the default
+	// shallow clone of depth 1.
+	CloneDepth CloneDepth `json:"clone_depth,omitempty" yaml:"clone_depth,omitempty"`
+
 	Secrets []RequiredSecret `json:"secrets,omitempty" yaml:"secrets,omitempty"`
 
 	// Skills declares skill references to resolve at provision time.
@@ -614,8 +620,16 @@ type AgentInfo struct {
 	HarnessAuth         string `json:"harnessAuth,omitempty"` // Resolved harness auth method (api-key, oauth-token, auth-file, vertex-ai)
 
 	// Project association
-	Project     string `json:"project"`               // Project name (standard field)
-	ProjectID   string `json:"projectId,omitempty"`   // Hosted format: <uuid>__<name>
+	Project string `json:"project"` // Project name (standard field)
+	// ProjectID depends on where the AgentInfo came from. In agent-info.json
+	// (written at provision time) it is the local project-id marker read
+	// from the project directory. The Docker, Podman, Apple and Kubernetes
+	// List fill it from the container's scion.project_id label, which
+	// carries the Hub project ID; Cloud Run Sandbox List fills it from its
+	// state entry, which records the same value. Cloud Run List leaves it
+	// empty. The two sources can differ; callers that need the Hub project
+	// ID should read the scion.project_id label (ptone/scion#3020).
+	ProjectID   string `json:"projectId,omitempty"`
 	ProjectPath string `json:"projectPath,omitempty"` // Filesystem path (solo mode)
 
 	// Metadata
@@ -684,8 +698,9 @@ type AgentInfo struct {
 	HubEndpoint       string `json:"hubEndpoint,omitempty"`       // Scion Hub URL if connected
 	WebPTYEnabled     bool   `json:"webPtyEnabled,omitempty"`     // Whether web terminal access is available
 	TaskSummary       string `json:"taskSummary,omitempty"`       // Current task description (for dashboard)
-	// ProvisionedOnly: the Hub reports the agent provisioned but not
-	// started (ptone/scion#2929). No omitempty: an explicit false lets a
+	// ProvisionedOnly: the agent was provisioned but not started. The Hub
+	// computes it (ptone/scion#2929); local List sets it for a
+	// container-less agent in phase "created" (ptone/scion#2875). No omitempty: an explicit false lets a
 	// client that merges responses clear a previously seen true.
 	ProvisionedOnly bool `json:"provisionedOnly"`
 
@@ -1256,7 +1271,16 @@ type StartOptions struct {
 	TelemetryOverride *bool        // Explicit telemetry override from CLI flags (--enable-telemetry / --disable-telemetry)
 	InlineConfig      *ScionConfig // Inline config from --config flag, merged over template config
 	SharedDirs        []SharedDir  // Project-level shared directories (from Hub, merged with settings)
-	ExtraHosts        []string     // Extra --add-host entries for container networking (e.g. "example.com:host-gateway")
+	// SharedDirBackendChanges asks a Reprovision to change the recorded
+	// shared-dir storage backend of the named shared dirs (dir name to
+	// backend, "nfs" or "local"). Only the agent's record changes;
+	// no data is copied, moved or deleted. Ignored outside Reprovision.
+	SharedDirBackendChanges map[string]string
+	// AllowEmptySharedDir, with SharedDirBackendChanges, skips the start
+	// check that refuses an empty directory on the new backend while the
+	// dir's directory on its previous backend is not empty.
+	AllowEmptySharedDir bool
+	ExtraHosts          []string // Extra --add-host entries for container networking (e.g. "example.com:host-gateway")
 
 	// EmptyPerAgentWorkspace gives the agent a private, initially empty,
 	// non-git workspace at <projectDir>/agents/<slug>/workspace (design
@@ -1345,11 +1369,14 @@ const (
 	BrokerErrorDetailCurrentRunID = "currentRunId"
 )
 
-// BrokerErrorCodeRunMismatch is the broker error code of the 404 a stop
-// naming a run gets when another run holds the agent's name
+// BrokerErrorCodeRunMismatch is the broker error code of the 404 a stop or
+// delete naming a run gets when another run holds the agent's name
 // (ptone/scion#2550). Its details carry BrokerErrorDetailRunID (the run the
-// stop named) and, when known, BrokerErrorDetailCurrentRunID (the run that
-// holds the name: the runtime entry's, or an in-flight launch's).
+// stop or delete named) and, when known, BrokerErrorDetailCurrentRunID (the
+// run that holds the name: the runtime entry's, or an in-flight launch's).
+// On a delete, a non-empty currentRunId that differs from runId means the
+// hub must not finalize the agent's row: that run is still on the broker
+// (ptone/scion#3080). Without one, the delete's 404 is "not found" as before.
 const BrokerErrorCodeRunMismatch = "run_mismatch"
 
 // ResourceHandle.Kind values.

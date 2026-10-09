@@ -67,12 +67,19 @@ const (
 	ActionClone          Action = "clone"
 	ActionExecute        Action = "execute"
 	ActionSetMessageMode Action = "set_message_mode"
+	// ActionSetMessagingPolicy covers changing a project's cross-project
+	// inbound messaging policy (project.set_messaging_policy).
+	ActionSetMessagingPolicy Action = "set_messaging_policy"
 
 	// Global-catalog write actions — see design doc §3.1.
 	// These distinguish hub-catalog mutation from project-scoped CRUD,
 	// so a system-scoped binding carrying only these IDs does not
 	// silently grant project-level authority.
 	ActionCreateGlobal Action = "create_global"
+
+	// ActionAutoProvide gates turning on a broker's auto-provide setting
+	// (broker.auto_provide).
+	ActionAutoProvide Action = "auto_provide"
 
 	// ActionDeliver and ActionUse distinguish launch-time material delivery
 	// from an agent's own runtime retrieval or token-mint request. Neither
@@ -377,10 +384,27 @@ type Decision struct {
 	// at its zero value.
 	DenyCause DenyCause `json:"denyCause,omitempty"`
 
+	// adoptionRemediable is set with a ceiling_unrecorded DenyCause when the
+	// denying hop is an unrecorded row that delegation-provenance adoption
+	// can address (not a hop with an unsupported provenance version). It
+	// only selects the additive response details; see adoptionDetailsCause.
+	adoptionRemediable bool
+
 	// Provenance contains the full decision provenance when Explain=true.
 	// For non-explain requests, this is populated with minimal data
 	// (matched grant and deny reason).
 	Provenance *DecisionProvenance `json:"provenance,omitempty"`
+}
+
+// adoptionDetailsCause returns the cause that selects the
+// delegation-provenance adoption response details: ceiling_unrecorded when
+// adoption can address the denying hop, and "" otherwise, including a hop
+// denied only because its provenance version is not understood.
+func (d Decision) adoptionDetailsCause() DenyCause {
+	if d.DenyCause == DenyCauseCeilingUnrecorded && d.adoptionRemediable {
+		return d.DenyCause
+	}
+	return ""
 }
 
 // DeniedBy is the stable identifier of the stage that denied a decision.
@@ -426,7 +450,10 @@ const (
 	// failure (Step 7c, detected after Step 9 because the failure there
 	// is folded into a deny-all restriction rather than an early return).
 	// The bearer gate (evaluateBearerGate) also sets it when the live
-	// project access lookup for a user access token fails on a store fault.
+	// project access lookup for a user access token fails on a store fault,
+	// and the delegation-ceiling walk sets it when the project-access stage
+	// on a user delegator's relationship authority (the ceiling hop) cannot
+	// evaluate the delegator's admission.
 	DenyCauseResolutionError DenyCause = "resolution_error"
 
 	// DenyCauseCeilingUnrecorded marks a deny where the source credential's
@@ -455,8 +482,9 @@ const (
 // resolution fault on the tagged paths, rather than a policy fact — the
 // access check could not be decided. Tagged: principal, role-binding,
 // role-definition and access-constraint resolution in decide(), the
-// user-access-token live project access lookup (evaluateBearerGate), and
-// the delegation-ceiling error. Not yet tagged: relationship-fact and
+// user-access-token live project access lookup (evaluateBearerGate), the
+// project-access lookup on the delegation-ceiling user hop, and the
+// delegation-ceiling error. Not yet tagged: relationship-fact and
 // source-active lookup failures (isCurrentHubMember, relationshipSourceActive,
 // progenySourceFor). A false result for those candidates does not prove a
 // policy deny.
@@ -1152,7 +1180,8 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 			// reached from the relationship candidates in step 9, which
 			// already run with both memo keys masked) and any future caller
 			// get the same guarantee without relying on this call site.
-			ceilingAllowed, ceilingReason, ceilingErr := a.checkDelegationCeiling(maskAuthzInputs(ctx), ceilingReq, permissionID, agent.ID(), nil, &ceilingCause)
+			var hopNote unrecordedHopNote
+			ceilingAllowed, ceilingReason, ceilingErr := a.checkDelegationCeiling(maskAuthzInputs(ctx), ceilingReq, permissionID, agent.ID(), nil, &ceilingCause, &hopNote)
 			if ceilingErr != nil {
 				decision.Allowed = false
 				decision.Reason = "delegation ceiling check failed (fail-closed): " + ceilingErr.Error()
@@ -1163,6 +1192,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 				decision.Reason = ceilingReason
 				decision.DeniedBy = DeniedByDelegationCeiling
 				decision.DenyCause = ceilingCause
+				decision.adoptionRemediable = ceilingCause == DenyCauseCeilingUnrecorded && hopNote.adoptable
 			}
 		}
 	}

@@ -54,20 +54,49 @@ type StopDispatchArgs struct {
 }
 
 // DeleteDispatchArgs carries the parameters for a cross-node agent delete.
-// PreviousRunIDs are the agent's previous runs the delete also names
-// (ptone/scion#3097), from the requesting node's copy of the agent (the
-// delete engine's claim snapshot); the owning node uses them instead of
-// its own read of the row.
+// RunID is the run the delete was dispatched for, and PreviousRunIDs are
+// the agent's previous runs the delete also names (ptone/scion#3097), both
+// from the requesting node's copy of the agent (the delete engine's claim
+// snapshot) when the intent is written (ptone/scion#2550). The owning node
+// sends exactly these, never its own later read of the row, so an intent
+// written for run A never deletes a run B started since. An intent with no
+// RunID (written by an older hub, or for an agent with no run ID) uses the
+// re-read row's run and, when the intent lists none, its previous runs, as
+// before.
 // Claim, when non-zero, is the delete engine's deletion claim: the executing
 // node sends the delete (the current run's and each previous run's) only
 // while that claim is still the row's current, live one (ptone/scion#2906).
+//
+// Target identifies the agent on its broker, so a claimless intent can
+// still be executed after the agent row is gone, as it is after a project
+// delete (ptone/scion#3665). An intent without it (written by an older
+// hub) needs the row, as before.
+//
+// NotAfter, set only on a claimless intent, is the deadline its delete
+// must reach the broker by, fixed when the intent is written
+// (ptone/scion#3674). The executing node drops the intent once it has
+// passed, and otherwise sends it, so the broker refuses a late delete with
+// 409 stale_dispatch. An engine's intent carries its Claim instead, and the
+// executing node computes the deadline from the claim.
 type DeleteDispatchArgs struct {
-	DeleteFiles    bool      `json:"deleteFiles,omitempty"`
-	RemoveBranch   bool      `json:"removeBranch,omitempty"`
-	SoftDelete     bool      `json:"softDelete,omitempty"`
-	DeletedAt      time.Time `json:"deletedAt,omitempty"`
-	PreviousRunIDs []string  `json:"previousRunIds,omitempty"`
-	Claim          int64     `json:"claim,omitempty"`
+	DeleteFiles    bool                `json:"deleteFiles,omitempty"`
+	RemoveBranch   bool                `json:"removeBranch,omitempty"`
+	SoftDelete     bool                `json:"softDelete,omitempty"`
+	DeletedAt      time.Time           `json:"deletedAt,omitempty"`
+	RunID          string              `json:"runId,omitempty"`
+	PreviousRunIDs []string            `json:"previousRunIds,omitempty"`
+	Claim          int64               `json:"claim,omitempty"`
+	Target         *DeleteIntentTarget `json:"target,omitempty"`
+	NotAfter       time.Time           `json:"notAfter,omitzero"`
+}
+
+// DeleteIntentTarget is what a delete intent records about its agent so
+// it can be executed without the agent row (ptone/scion#3665).
+type DeleteIntentTarget struct {
+	BrokerID  string `json:"brokerId"`
+	ProjectID string `json:"projectId,omitempty"`
+	Slug      string `json:"slug"`
+	Runtime   string `json:"runtime,omitempty"`
 }
 
 // CheckPromptDispatchArgs is intentionally empty — the agent slug/ID in the
@@ -94,6 +123,10 @@ type FinalizeEnvResult struct {
 	// Launch is set when the owner's send was accepted for asynchronous
 	// launch.
 	Launch *LaunchAccepted `json:"launch,omitempty"`
+	// Warnings are the owner's dispatch warnings, such as the outcome of
+	// the compensating delete of a run that landed after a delete won
+	// (ptone/scion#3456). The requester adds them to its own collector.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // CreateWithGatherResult is serialized into broker_dispatch.result by the owner.
@@ -102,6 +135,46 @@ type CreateWithGatherResult struct {
 	// Launch is set when the owner's send was accepted for asynchronous
 	// launch.
 	Launch *LaunchAccepted `json:"launch,omitempty"`
+	// Warnings are the owner's dispatch warnings (see FinalizeEnvResult).
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// LifecycleDispatchResult is serialized into broker_dispatch.result by the
+// owner of a completed start or restart (ptone/scion#3456). Rows written by
+// owners that predate it carry an empty result, which decodes to the zero
+// value.
+type LifecycleDispatchResult struct {
+	// Warnings are the owner's dispatch warnings, such as the outcome of
+	// the compensating delete of a run that landed after a delete won.
+	Warnings []string `json:"warnings,omitempty"`
+	// DeleteWon reports that the broker start landed but a delete won
+	// while it was in flight (deleteWonAfterLanding on the owner). The
+	// agent never reaches the start's success phase then, so the requester
+	// stops waiting for it once the row is done.
+	DeleteWon bool `json:"deleteWon,omitempty"`
+}
+
+// marshalLifecycleResult returns the result for a completed start or restart
+// row: "" when there is nothing to carry, as before.
+func marshalLifecycleResult(r LifecycleDispatchResult) string {
+	if len(r.Warnings) == 0 && !r.DeleteWon {
+		return ""
+	}
+	b, err := json.Marshal(r)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// decodeLifecycleResult decodes a completed start or restart row's result;
+// an empty or unreadable result is the zero value.
+func decodeLifecycleResult(result string) LifecycleDispatchResult {
+	var r LifecycleDispatchResult
+	if result != "" {
+		_ = json.Unmarshal([]byte(result), &r)
+	}
+	return r
 }
 
 // MarshalDispatchArgs serializes a dispatch args struct to JSON for storage in

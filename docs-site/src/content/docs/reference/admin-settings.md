@@ -15,6 +15,12 @@ coded defaults → SCION_SEED_* → settings.yaml → SCION_SERVER_*
 
 Each layer overrides the one before it. The final merged result is the **bootstrap configuration** — the starting point for a hub instance.
 
+`settings.yaml` is the global `~/.scion/settings.yaml`. With `scion server start --config <path>`, the merge picks its settings file with the same rule the server uses to load its configuration at startup:
+
+- If the global file has a `server` key, it is used and the `--config` `settings.yaml` is not read.
+- If the global file has no `server` key and the `--config` `settings.yaml` has one, the `server` block and the top-level hub sections (`telemetry`, `quotas`, `agent_secrets`, `project_defaults`, `default_harness_config`, `default_timezone` and `default_gcp_identity_*`) come only from the `--config` file. Other keys it does not set, such as `image_registry`, `runtimes` and `profiles`, still come from the global file.
+- If neither file has a `server` key, the `--config` `settings.yaml` is used only when there is no global `settings.yaml`, and the legacy `server.yaml` in the `--config` location, or the named file, is layered as at startup.
+
 ### Layer-0 vs Layer-1 Keys
 
 Settings are classified into two layers:
@@ -22,7 +28,9 @@ Settings are classified into two layers:
 | Layer | Examples | Behavior |
 |-------|----------|----------|
 | **Layer-0** (bootstrap) | `server.mode`, `server.database.*`, `server.storage.*`, `server.secrets.*`, `server.hub.port`, `server.auth.dev_mode` | Always resolved from bootstrap configuration (`settings.yaml` and environment). Editable through the admin UI only on workstation Hubs; see [Layer-0 edits by deployment mode](#layer-0-edits-by-deployment-mode). |
-| **Layer-1** (operational) | `server.hub.admin_emails`, `server.auth.user_access_mode`, `server.auth.default_user_role`, `telemetry.*`, `agent_defaults.*`, `server.github_app.*`, `server.notification_channels`, `server.federation.*`, `runtimes`, `profiles`, `harness_configs`, `quotas.enforce_broker_quotas`, `agent_secrets.user_scope_only` | Stored in the Hub database on every driver and editable via the admin UI. Bootstrap values serve as initial defaults. |
+| **Layer-1** (operational) | `server.hub.admin_emails`, `server.auth.user_access_mode`, `server.auth.default_user_role`, `server.hub.public_url`, `server.hub.hub_name`, `image_registry`, `telemetry.*`, the agent defaults (top-level `default_*` keys such as `default_template` and `default_timezone`), `server.github_app.*`, `server.notification_channels`, `server.federation.*`, `runtimes`, `profiles`, `harness_configs`, `auto_expose_ports.enabled`, `quotas.enforce_broker_quotas`, `agent_secrets.user_scope_only`, `project_defaults.default_scratchpad` | Stored in the Hub database on every driver and editable via the admin UI. Bootstrap values serve as initial defaults. |
+
+For the full key lists by section, see [Layer 0](/scion/reference/server-config/#layer-0--bootstrap-file--env-only) and [Layer 1](/scion/reference/server-config/#layer-1--operational-hub_settings-table) in the server configuration reference.
 
 ### Resolution
 
@@ -34,6 +42,13 @@ Bootstrap only (for Layer-0 keys)
 ```
 
 The database always wins for Layer-1 keys. Bootstrap values are used as initial seeds and as fallback when no database row exists. Editing a Layer-1 key in `settings.yaml` therefore only changes the seed: once an admin has saved that section through the API, the database value wins, on SQLite exactly as on Postgres.
+
+This applies to `SCION_SERVER_*` too. On a Layer-1 key it is only the top of the bootstrap merge: it changes the seed (which a seeded section re-syncs from at restart) and the fallback, and it never overrides a value an admin has saved. The admin UI marks such keys (see [Visual Indicators](#visual-indicators)), and the variable is deprecated for Layer-1 keys (see [`SCION_SERVER_*` Deprecation for Layer-1](#scion_server_-deprecation-for-layer-1)).
+
+### Hot reload vs restart
+
+- **Layer-1:** a save applies without a restart. The serving node applies it immediately, and other replicas pick it up through the settings event (within about 2 seconds), with a 60-second poll as a backstop.
+- **Layer-0:** changes take effect only when the Hub restarts. On a workstation Hub, a save that changes a Layer-0 key in `settings.yaml` lists it in the response's `reload.requires_restart`. `log_level` is the exception and applies immediately.
 
 ### Layer-0 edits by deployment mode
 
@@ -58,7 +73,7 @@ On a workstation Hub the file edit follows the request body field by field:
 
 Some workstation fields are overridden at every start by the workstation defaults and `scion server start` flags, so a value in `settings.yaml` has no effect: `server.broker.enabled` and `server.broker.host` (`--enable-runtime-broker`, `--host`), `server.hub.host` (`--host`), `server.auth.dev_mode` (`--dev-auth`), `server.storage.provider` (`--storage-bucket`) and `server.secrets.backend`. The admin UI shows them read-only with a "Set by workstation startup defaults / server flags" badge.
 
-A workstation save that touches both destinations is checked as a whole first. Any validation failure, for either part, writes nothing. The Hub then takes its settings-file lock and prepares the new `settings.yaml` in memory, writes the database sections, and writes the file last, atomically, before releasing the lock. These writers in the same server process take the same lock for their whole read-modify-write, so neither of two concurrent changes is lost: broker registration writing its ID and token, the identity, workstation-settings, runtime and image-registry endpoints, and the hub-sync cleanup of project settings. Not covered yet: the plugin-registration writes made by the integrations API, and writers in other processes, such as a `scion` CLI command running while the server runs (ptone/scion#3047). If a database write fails (for example `409 revision_conflict`), `settings.yaml` is left unchanged. Database sections written before the failure stay written, as for any save that touches several sections, and are listed in `applied`. Only if the final file write fails are the database changes saved without the file changes; the `500` response lists them.
+A workstation save that touches both destinations is checked as a whole first. Any validation failure, for either part, writes nothing. The Hub then takes its settings-file lock and prepares the new `settings.yaml` in memory, writes the database sections, and writes the file last, atomically, before releasing the lock. These writers in the same server process take the same lock for their whole read-modify-write, so neither of two concurrent changes is lost: broker registration writing its ID and token, the identity and workstation-settings endpoints, and the hub-sync cleanup of project settings. The loopback runtime and image-registry endpoints (`PUT /api/v1/system/runtime` and `PUT /api/v1/system/registry`) write the database `profiles` and `endpoints` sections, because those are Layer-1 keys. Not covered yet: the plugin-registration writes made by the integrations API, and writers in other processes, such as a `scion` CLI command running while the server runs (ptone/scion#3047). If a database write fails (for example `409 revision_conflict`), `settings.yaml` is left unchanged. Database sections written before the failure stay written, as for any save that touches several sections, and are listed in `applied`. Only if the final file write fails are the database changes saved without the file changes; the `500` response lists them.
 
 On every Hub, a key the API cannot store anywhere (an unknown or misspelled key, or a field with no settings home) is rejected with `422 unpersisted_keys_rejected`, unless its value is unchanged from what `GET` returns. A save never answers `200` for a key it dropped. An empty body is a `400`.
 
@@ -170,6 +185,19 @@ While a break-glass is active, a save from the maintenance page updates the stor
 
 `admin_mode: true` in `settings.yaml` can only be cleared by editing the file: the admin API stores maintenance in the database, not in `settings.yaml`.
 
+## Profiling
+
+The `profiling` section holds operational switches for in-app profiling. It is stored only in the Hub database: it has no `settings.yaml` key and no environment variable, and it is not seeded. A change applies to every replica through the usual settings propagation.
+
+| Key | Type | Default | Effect |
+|-----|------|---------|--------|
+| `readiness_marks` | boolean | `false` | The web client writes readiness marks (User Timing marks for agent data arrival, first visible rows and graph ready). See [readiness marks](/scion/contributing/perf-tracing/#readiness-marks). |
+
+- **Changing it:** `PUT /api/v1/admin/profiling` with `{"readiness_marks": true}` (or `false`, or `null` to reset). It needs a hub administrator on an interactive session; user access tokens are refused. There is no admin UI card. `GET /api/v1/admin/profiling` returns the current value and the section revision.
+- **Reading it:** `GET /api/v1/profiling` returns `{"readinessMarks": true|false}` to any signed-in caller.
+- **In the web client:** while it is on, the page shell's initial data carries `"readinessMarks": true` for a signed-in user, the same value that user reads from `GET /api/v1/profiling`. Signed-out pages, and every page while it is off, are served exactly as without the setting. The client reads the value once per page load, so a change applies on the next full load.
+- Off, the client makes no `performance.mark` calls and the server adds nothing to the shell.
+
 ## HA Bootstrap Guidance
 
 For high-availability deployments with multiple hub replicas:
@@ -234,6 +262,8 @@ Furthermore, these database-backed settings are wired directly into the runtime 
 |-----------|---------|
 | 🔒 *Managed via deployment configuration* | Layer-0 field on a hosted Hub — not editable |
 | 🔒 *Set via environment variable* | Field pinned by `SCION_SERVER_*` on a workstation Hub |
+| ⚠ *Overridden by environment on this node* | Badge on a field, or on the section for the `runtimes` and `profiles` maps: a `SCION_SERVER_*` variable sets this key on the node that served the page (listed in `env_overrides`). On a Layer-1 key the variable only changes the bootstrap seed and fallback, not a saved database value. |
+| ⚠ *Some settings are overridden by environment variables on this node* | Banner listing every key in `env_overrides` |
 | 🔒 *Set by workstation startup defaults / server flags* | Workstation field that `scion server start` overrides at every start |
 | *Tracking deployment configuration* | Seeded section — re-syncs on restart |
 | ⓘ *Superseded by database value* | Deployment config differs from the admin-set value |

@@ -533,9 +533,26 @@ func (s *Server) recordHubWorkspace(project *store.Project) (recorded bool, err 
 	return true, nil
 }
 
-// syncFromGCSIntoHubWorkspace downloads a workspace upload into a hub
-// workspace. A variable so tests can stand in for GCS.
-var syncFromGCSIntoHubWorkspace = gcp.SyncFromGCS
+// setHubWorkspaceDownloader replaces the download of a workspace upload into
+// a hub workspace. nil restores the default (gcp.SyncFromGCS). This is
+// useful for testing.
+func (s *Server) setHubWorkspaceDownloader(fn func(ctx context.Context, bucket, prefix, localPath string) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hubWorkspaceDownload = fn
+}
+
+// hubWorkspaceDownloader returns the function that downloads a workspace
+// upload into a hub workspace: the one set by setHubWorkspaceDownloader
+// (tests), otherwise gcp.SyncFromGCS.
+func (s *Server) hubWorkspaceDownloader() func(ctx context.Context, bucket, prefix, localPath string) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.hubWorkspaceDownload != nil {
+		return s.hubWorkspaceDownload
+	}
+	return gcp.SyncFromGCS
+}
 
 // Errors returned by syncHubWorkspaceFromGCS. They carry no paths; details
 // are logged by project-neutral step, operation and errno.
@@ -559,7 +576,7 @@ func (s *Server) syncHubWorkspaceFromGCS(ctx context.Context, bucket, prefix, wo
 			alignErrorAttrs(alignFailed("read hub workspace identity", err))...)
 		return errHubIdentityUnreadable
 	}
-	syncErr := syncFromGCSIntoHubWorkspace(ctx, bucket, prefix, workspacePath)
+	syncErr := s.hubWorkspaceDownloader()(ctx, bucket, prefix, workspacePath)
 	if err := saved.restore(); err != nil {
 		s.workspaceLog.Warn("hub workspace identity could not be kept after workspace download",
 			alignErrorAttrs(alignFailed("keep hub workspace identity", err))...)

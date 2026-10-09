@@ -23,6 +23,9 @@ COPY pkg/ pkg/
 COPY cmd/ cmd/
 COPY web/ web/
 COPY internal/ internal/
+COPY resources/ resources/
+COPY harnesses/ harnesses/
+COPY third_party/ third_party/
 
 # Copy the extras module
 COPY extras/scion-chat-app/ extras/scion-chat-app/

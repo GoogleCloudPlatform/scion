@@ -89,7 +89,7 @@ func (s *allowListService) List(ctx context.Context, cursor string) (*AllowListR
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[AllowListResponse](resp)
+	return apiclient.DecodeRequired[AllowListResponse](resp)
 }
 
 func (s *allowListService) Add(ctx context.Context, email, note string) (*AllowListEntry, error) {
@@ -98,7 +98,7 @@ func (s *allowListService) Add(ctx context.Context, email, note string) (*AllowL
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[AllowListEntry](resp)
+	return apiclient.DecodeRequired[AllowListEntry](resp)
 }
 
 func (s *allowListService) Remove(ctx context.Context, email string) error {
@@ -115,7 +115,7 @@ func (s *allowListService) BulkAdd(ctx context.Context, emails []AllowListAddReq
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[AllowListBulkAddResponse](resp)
+	return apiclient.DecodeRequired[AllowListBulkAddResponse](resp)
 }
 
 func (s *allowListService) ListDomains(ctx context.Context) ([]string, error) {
@@ -123,7 +123,7 @@ func (s *allowListService) ListDomains(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	result, err := apiclient.DecodeResponse[AllowListDomainsResponse](resp)
+	result, err := apiclient.DecodeRequired[AllowListDomainsResponse](resp)
 	if err != nil {
 		return nil, err
 	}

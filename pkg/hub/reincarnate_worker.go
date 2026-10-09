@@ -203,6 +203,17 @@ func copyBrokerEcho(dst, src *store.AgentAppliedConfig, includeImage bool) {
 	}
 }
 
+// clearSharedDirBackendChange drops a config's one-shot shared dir backend
+// change (SharedDirBackendChanges and AllowEmptySharedDir), so a
+// reprovision built from it does not send the change again.
+func clearSharedDirBackendChange(cfg *store.AgentAppliedConfig) {
+	if cfg == nil {
+		return
+	}
+	cfg.SharedDirBackendChanges = nil
+	cfg.AllowEmptySharedDir = false
+}
+
 // reincarnateStrPtr is a small helper for populating
 // reincarnationStepUpdate.activity and .message, both of which distinguish
 // "leave untouched" (nil) from "set to this value, including empty string"
@@ -698,6 +709,14 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// broker's started-but-not-listed fallback, an empty response body, a
 	// deferred start), the qualified image stays too.
 	copyBrokerEcho(fresh, agent.AppliedConfig, false)
+	// The reprovision succeeded, so the broker confirmed any shared dir
+	// backend change it carried (dispatchProvision fails otherwise). The
+	// change is one-shot: the starting step's write drops it, so no later
+	// re-render of this config repeats it (ptone/scion#3685). This clear
+	// and the one in rerenderPreviousConfig back each other up, so each is
+	// pinned by its own test: this one by
+	// TestReincarnateAgent_SharedDirBackends_ConfirmedChangeNotStored.
+	clearSharedDirBackendChange(fresh)
 
 	startingNow, ok, err := s.tryAdvanceReincarnation(ctx, reincarnationID, store.AgentReincarnationStateProvisioning, store.AgentReincarnationStateStarting, reincarnationStepMaxAttempts, nil)
 	if err != nil {
@@ -936,6 +955,14 @@ func reincarnationStartLeftNoContainer(err error) bool {
 // may still be running when the re-render arrives. Nothing on the broker
 // serialises the two, so a successful re-render can still leave mixed
 // N/N+1 files.
+//
+// The copy of previous dispatched here has its shared dir backend change
+// cleared (clearSharedDirBackendChange). The worker drops the change from
+// the stored config at its starting-step write. When that write, or the
+// advance to starting, fails and the re-render also fails, the row keeps a
+// config that still carries the change. That is harmless: the only other
+// reprovision built from a stored config is this re-render, which strips
+// it, and a later reincarnation's fresh config never carries it.
 func (s *Server) rerenderPreviousConfig(ctx context.Context, dispatcher AgentDispatcher, agentID, reincarnationID, fromState, cause string, previous *store.AgentAppliedConfig) bool {
 	if dispatcher == nil || previous == nil {
 		return false
@@ -949,6 +976,11 @@ func (s *Server) rerenderPreviousConfig(ctx context.Context, dispatcher AgentDis
 		return false
 	}
 	cfg := *previous
+	// previous's own shared dir backend change, if any, was confirmed when
+	// that generation was reprovisioned; a re-render must not repeat it.
+	// Pinned by TestReincarnateAgent_SharedDirBackends_RerenderStripsStoredChange
+	// (the worker's post-reprovision clear backs this one up).
+	clearSharedDirBackendChange(&cfg)
 	agent.AppliedConfig = &cfg
 	if err := dispatcher.DispatchAgentReprovision(rctx, agent); err != nil {
 		s.agentLifecycleLog.Warn("reincarnation failed: best-effort re-render of the previous config failed; the on-disk agent config may be partly the new generation",

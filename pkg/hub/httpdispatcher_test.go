@@ -43,7 +43,7 @@ import (
 // createTestStore creates an in-memory SQLite store for testing.
 func createTestStore(t *testing.T) store.Store {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -5278,9 +5278,21 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_InjectsWorkspaceMode(t *testing.
 			wantGit:            true,
 		},
 		{
-			// When no workspace mode label is set, the hub does not inject
-			// SCION_WORKSPACE_MODE. The broker applies the shared-plain default
-			// in buildStartContext when the key is absent from resolvedEnv.
+			// An unlabelled git project gets a per-agent clone, so the hub
+			// sends the canonical clone-per-agent (ptone/scion#3998).
+			name:               "git, empty label: clone-per-agent",
+			workspaceModeLabel: "",
+			gitRemote:          "https://github.com/example/repo.git",
+			appliedGitClone:    &api.GitCloneConfig{URL: "https://github.com/example/repo.git"},
+			wantMode:           "clone-per-agent",
+			wantGit:            true,
+		},
+		{
+			// A non-git project with no workspace mode label: the hub does
+			// not inject SCION_WORKSPACE_MODE (an unlabelled git project gets
+			// clone-per-agent, see the case above). The broker applies the
+			// shared-plain default in buildStartContext when the key is
+			// absent from resolvedEnv.
 			name:               "empty label: hub does not inject mode",
 			workspaceModeLabel: "",
 			wantMode:           "", // absent from hub-injected resolvedEnv

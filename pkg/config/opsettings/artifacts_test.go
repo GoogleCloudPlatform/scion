@@ -32,6 +32,13 @@ func TestArtifactsResolve_AbsentFieldsTakeDefaults(t *testing.T) {
 		DefaultRetentionDays: 0,
 		LinkDefaultTTLHours:  168,
 		LinkMaxTTLHours:      720,
+		GCGraceHours:         168,
+
+		RemoteImagesEnabled:      true,
+		RemoteImageMaxCount:      32,
+		RemoteImageMaxBytes:      5 << 20,
+		RemoteImageFetchTimeoutS: 10,
+		RemoteImageTotalBudgetS:  30,
 	}
 	if got != want {
 		t.Fatalf("Resolve() = %+v, want %+v", got, want)
@@ -43,8 +50,8 @@ func TestArtifactsResolve_AbsentFieldsTakeDefaults(t *testing.T) {
 
 func TestParseArtifactsDoc(t *testing.T) {
 	malformed := MalformedArtifactsConfig()
-	if malformed.Enabled || !malformed.Malformed {
-		t.Fatalf("MalformedArtifactsConfig() = %+v, want disabled and malformed", malformed)
+	if malformed.Enabled || malformed.RemoteImagesEnabled || !malformed.Malformed {
+		t.Fatalf("MalformedArtifactsConfig() = %+v, want disabled (remote images too) and malformed", malformed)
 	}
 
 	tests := []struct {
@@ -56,15 +63,36 @@ func TestParseArtifactsDoc(t *testing.T) {
 		{name: "empty object", raw: `{}`, want: DefaultArtifactsConfig()},
 		{
 			name: "every field set",
-			raw:  `{"enabled":false,"max_file_bytes":1024,"max_bundle_bytes":4096,"max_files":3,"default_retention_days":30,"link_default_ttl_hours":24,"link_max_ttl_hours":48}`,
-			want: ArtifactsConfig{Enabled: false, MaxFileBytes: 1024, MaxBundleBytes: 4096, MaxFiles: 3, DefaultRetentionDays: 30, LinkDefaultTTLHours: 24, LinkMaxTTLHours: 48},
+			raw:  `{"enabled":false,"max_file_bytes":1024,"max_bundle_bytes":4096,"max_files":3,"default_retention_days":30,"link_default_ttl_hours":24,"link_max_ttl_hours":48,"gc_grace_hours":72,"remote_images_enabled":false,"remote_image_max_count":3,"remote_image_max_bytes":512,"remote_image_fetch_timeout_s":3,"remote_image_total_budget_s":9}`,
+			want: ArtifactsConfig{Enabled: false, MaxFileBytes: 1024, MaxBundleBytes: 4096, MaxFiles: 3, DefaultRetentionDays: 30, LinkDefaultTTLHours: 24, LinkMaxTTLHours: 48, GCGraceHours: 72,
+				RemoteImagesEnabled: false, RemoteImageMaxCount: 3, RemoteImageMaxBytes: 512, RemoteImageFetchTimeoutS: 3, RemoteImageTotalBudgetS: 9},
 		},
 		{
 			name: "file limit equal to bundle limit",
 			raw:  `{"max_file_bytes":4096,"max_bundle_bytes":4096}`,
 			want: func() ArtifactsConfig {
 				c := DefaultArtifactsConfig()
-				c.MaxFileBytes, c.MaxBundleBytes = 4096, 4096
+				c.MaxFileBytes, c.MaxBundleBytes, c.RemoteImageMaxBytes = 4096, 4096, 4096
+				return c
+			}(),
+		},
+		{
+			// A document written before remote images existed stays valid:
+			// the omitted remote caps follow the lower file limits.
+			name: "lower file count clamps the remote image count",
+			raw:  `{"max_files":10}`,
+			want: func() ArtifactsConfig {
+				c := DefaultArtifactsConfig()
+				c.MaxFiles, c.RemoteImageMaxCount = 10, 10
+				return c
+			}(),
+		},
+		{
+			name: "lower file size clamps the remote image size",
+			raw:  `{"max_file_bytes":1048576}`,
+			want: func() ArtifactsConfig {
+				c := DefaultArtifactsConfig()
+				c.MaxFileBytes, c.RemoteImageMaxBytes = 1048576, 1048576
 				return c
 			}(),
 		},
@@ -80,6 +108,7 @@ func TestParseArtifactsDoc(t *testing.T) {
 		{name: "zero max link TTL", raw: `{"link_max_ttl_hours":0}`, want: malformed, wantErr: true},
 		{name: "file limit above bundle limit", raw: `{"max_file_bytes":2048,"max_bundle_bytes":1024}`, want: malformed, wantErr: true},
 		{name: "default TTL above max TTL", raw: `{"link_default_ttl_hours":800}`, want: malformed, wantErr: true},
+		{name: "remote images enabled wrong type", raw: `{"remote_images_enabled":"yes"}`, want: malformed, wantErr: true},
 		{name: "malformed doc with enabled true stays disabled", raw: `{"enabled":true,"max_files":-5}`, want: malformed, wantErr: true},
 	}
 	for _, tt := range tests {
@@ -111,12 +140,83 @@ func TestArtifactsSchema(t *testing.T) {
 		`{"default_retention_days":-1}`,
 		`{"link_max_ttl_hours":0}`,
 		`{"enabled":"yes"}`,
+		`{"remote_image_max_count":0}`,
+		`{"remote_image_max_bytes":0}`,
+		`{"remote_images_enabled":1}`,
+		`{"remote_image_total_budget_s":61}`,
+		`{"remote_image_fetch_timeout_s":61}`,
 		`{"max_files":1.5}`,
 		`{"unknown":1}`,
 	}
 	for _, doc := range invalid {
 		if errs := Validate("artifacts", json.RawMessage(doc)); len(errs) == 0 {
 			t.Errorf("Validate(%s) = no errors, want a rejection", doc)
+		}
+	}
+}
+
+// TestParseArtifactsDocRemoteImageValues: an invalid remote image value
+// turns remote images off and names the problem; the service stays on.
+func TestParseArtifactsDocRemoteImageValues(t *testing.T) {
+	for _, tc := range []struct{ name, raw string }{
+		{"zero remote image count", `{"remote_image_max_count":0}`},
+		{"zero remote image bytes", `{"remote_image_max_bytes":0}`},
+		{"zero remote fetch timeout", `{"remote_image_fetch_timeout_s":0}`},
+		{"negative remote budget", `{"remote_image_total_budget_s":-1}`},
+		{"remote image larger than a file", `{"max_file_bytes":1024,"max_bundle_bytes":4096,"remote_image_max_bytes":2048}`},
+		{"more remote images than files", `{"max_files":10,"remote_image_max_count":11}`},
+		{"remote budget below one fetch timeout", `{"remote_image_fetch_timeout_s":20,"remote_image_total_budget_s":10}`},
+		{"remote budget above the cap", `{"remote_image_total_budget_s":61}`},
+	} {
+		got, err := ParseArtifactsDoc(json.RawMessage(tc.raw))
+		if err != nil || got.Malformed || !got.Enabled {
+			t.Errorf("%s: service disabled: %+v, %v", tc.name, got, err)
+		}
+		if got.RemoteImagesEnabled || got.RemoteImagesInvalid == "" {
+			t.Errorf("%s: remote images still on: %+v", tc.name, got)
+		}
+	}
+	// Explicit values within the limits keep remote images on.
+	got, err := ParseArtifactsDoc(json.RawMessage(`{"max_files":10,"remote_image_max_count":10}`))
+	if err != nil || !got.RemoteImagesEnabled || got.RemoteImagesInvalid != "" {
+		t.Errorf("valid explicit values: %+v, %v", got, err)
+	}
+}
+
+// TestValidateArtifactsCrossField: a write is refused when the document
+// would turn remote images off or make the section unusable, rules the
+// schema cannot express.
+func TestValidateArtifactsCrossField(t *testing.T) {
+	for _, raw := range []string{
+		`{"max_file_bytes":1024,"max_bundle_bytes":4096,"remote_image_max_bytes":2048}`,
+		`{"max_files":10,"remote_image_max_count":11}`,
+		`{"remote_image_fetch_timeout_s":20,"remote_image_total_budget_s":10}`,
+		`{"max_file_bytes":2048,"max_bundle_bytes":1024}`,
+		`{"link_default_ttl_hours":800}`,
+	} {
+		if errs := Validate("artifacts", json.RawMessage(raw)); len(errs) == 0 {
+			t.Errorf("Validate(%s) accepted", raw)
+		}
+	}
+	for _, raw := range []string{`{}`, `{"max_files":10}`, `{"max_file_bytes":1048576}`, `{"remote_images_enabled":false}`} {
+		if errs := Validate("artifacts", json.RawMessage(raw)); len(errs) != 0 {
+			t.Errorf("Validate(%s) = %v", raw, errs)
+		}
+	}
+}
+
+// TestArtifactsGCGrace: gc_grace_hours defaults to 168 and may not go
+// below 24.
+func TestArtifactsGCGrace(t *testing.T) {
+	for raw, want := range map[string]int{`{}`: 168, `{"gc_grace_hours": 24}`: 24, `{"gc_grace_hours": 500}`: 500} {
+		c, err := ParseArtifactsDoc([]byte(raw))
+		if err != nil || c.GCGraceHours != want {
+			t.Errorf("%s: %d %v, want %d", raw, c.GCGraceHours, err, want)
+		}
+	}
+	for _, raw := range []string{`{"gc_grace_hours": 23}`, `{"gc_grace_hours": 0}`, `{"gc_grace_hours": -5}`} {
+		if c, err := ParseArtifactsDoc([]byte(raw)); err == nil || !c.Malformed {
+			t.Errorf("%s accepted: %+v", raw, c)
 		}
 	}
 }

@@ -701,13 +701,13 @@ func runDispatchAgentEvent(t *testing.T, srv *Server, s store.Store, projectID, 
 	require.NoError(t, err)
 
 	handler := srv.dispatchAgentEventHandler()
-	require.NoError(t, handler(ctx, store.ScheduledEvent{
+	require.NoError(t, handler(ctx, withSessionRevision(store.ScheduledEvent{
 		ID:        tid("sched-" + agentName + "-" + t.Name()),
 		ProjectID: projectID,
 		EventType: "dispatch_agent",
 		Payload:   string(payload),
 		CreatedBy: DevUserID,
-	}))
+	}, DevUserID)))
 
 	agent, err := s.GetAgentBySlug(ctx, projectID, agentName)
 	require.NoError(t, err)

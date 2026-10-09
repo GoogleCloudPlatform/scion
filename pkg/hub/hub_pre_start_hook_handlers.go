@@ -36,18 +36,26 @@ const hubPreStartHookBasePath = "/api/v1/pre-start-hooks/"
 //     an agent has no reason to enumerate hub-wide hook policy. Non-admin
 //     callers get the hook metadata with the script body stripped from read
 //     responses (hub scripts can carry infrastructure secrets).
-//   - Mutations (POST, PUT, DELETE, POST .../activate): hub admin only, and
-//     never via a project-scoped User Access Token. A hub hook runs as root on
-//     every agent whose project has no project-scoped hook, so changing it is a
-//     hub-admin concern. See requireHubAdmin.
+//   - Mutations (POST, PUT, DELETE, POST .../activate): hub.lifecycle_hooks.update
+//     on the hub. A hub hook runs as root on every agent whose project has no
+//     project-scoped hook, so changing it is a hub-admin concern. A user
+//     access token is admitted only on the hub boundary with the
+//     hub_lifecycle_hooks:update selector and live hub authority. See
+//     requireHubAdmin.
+//   - Script bodies in read responses: only an interactive session or dev
+//     credential with hub.lifecycle_hooks.read sees them; every other
+//     credential, a user access token included, gets the redacted form. See
+//     isHubAdminIdentity.
 //
 // Request/response shapes are shared with the project-scoped handlers
 // (CreateProjectPreStartHookRequest, UpdateProjectPreStartHookRequest,
 // ListProjectPreStartHooksResponse) — the payloads are identical.
 
-// requireHubAdmin authorizes a hub-wide mutation. Hub hooks execute as root in
-// every agent container, so this requires an unscoped local platform admin;
-// scoped UATs and federated users must not affect hub-wide policy.
+// requireHubAdmin authorizes a hub-wide mutation through
+// hub.lifecycle_hooks.update on the hub. Hub hooks execute as root in every
+// agent container, so the permission is held by hub administrators. A user
+// access token passes only with the hub_lifecycle_hooks:update selector, on
+// the hub boundary, while its holder keeps that live authority.
 func (s *Server) requireHubAdmin(w http.ResponseWriter, r *http.Request) (UserIdentity, bool) {
 	identity := GetUserIdentityFromContext(r.Context())
 	if identity == nil {
@@ -82,8 +90,14 @@ func (s *Server) requireHubHookReader(w http.ResponseWriter, r *http.Request) (U
 }
 
 // isHubAdminIdentity reports whether the identity may see hub hook script
-// bodies in read responses.
+// bodies in read responses: an interactive session or dev credential
+// (sessionCredentialAllowed) whose holder has hub.lifecycle_hooks.read.
+// Every other credential, a user access token or an unknown or missing
+// kind included, gets the redacted form.
 func (s *Server) isHubAdminIdentity(ctx context.Context, identity UserIdentity) bool {
+	if !sessionCredentialAllowed(ctx) {
+		return false
+	}
 	return s.authzService.Decide(ctx, AuthzRequest{
 		Principal:  principalContextForIdentity(identity),
 		Credential: credentialContextForIdentity(identity),

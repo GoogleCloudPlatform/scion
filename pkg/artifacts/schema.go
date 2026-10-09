@@ -232,3 +232,80 @@ ALTER TABLE artifact_file ADD COLUMN IF NOT EXISTS fetch_status TEXT;
 ALTER TABLE artifact_file ADD COLUMN IF NOT EXISTS fetch_error TEXT;
 ALTER TABLE artifact_file ALTER COLUMN sha256 DROP NOT NULL;
 `
+
+// migrationVersionUploads supports the two-step publish: a file row of a
+// pending version records whether its bytes have arrived, and pending
+// versions can be found by age so abandoned ones are reaped.
+const migrationVersionUploads = "0003_version_uploads"
+
+const sqliteVersionUploads = `
+ALTER TABLE artifact_file ADD COLUMN received INTEGER NOT NULL DEFAULT 1;
+CREATE INDEX IF NOT EXISTS idx_artifact_version_state
+    ON artifact_version (state, created_at);
+`
+
+const postgresVersionUploads = `
+ALTER TABLE artifact_file ADD COLUMN IF NOT EXISTS received BOOLEAN NOT NULL DEFAULT TRUE;
+CREATE INDEX IF NOT EXISTS idx_artifact_version_state
+    ON artifact_version (state, created_at);
+`
+
+// migrationFinalizeClaims records when a finalize request claimed a
+// version, so a claim left behind by a stopped hub can be taken over.
+const migrationFinalizeClaims = "0004_finalize_claims"
+
+const sqliteFinalizeClaims = `
+ALTER TABLE artifact_version ADD COLUMN claimed_at TEXT;
+`
+
+const postgresFinalizeClaims = `
+ALTER TABLE artifact_version ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
+`
+
+// migrationLinkTokens makes a share link token hash name at most one link
+// grant across the hub, so resolving a token finds one row or none.
+const migrationLinkTokens = "0005_link_tokens"
+
+const sqliteLinkTokens = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_artifact_grant_link
+    ON artifact_grant (subject_ref) WHERE subject_kind = 'link';
+`
+
+const postgresLinkTokens = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_artifact_grant_link
+    ON artifact_grant (subject_ref) WHERE subject_kind = 'link';
+`
+
+// migrationBlobGC adds the table the blob sweep keeps its state in: for
+// each blob digest, when a publish last touched it (writers record this
+// before they check whether the blob exists) and since when no live
+// artifact references it, with the object generation the sweep saw when
+// it marked it; and the index the expiry sweep finds expired
+// artifacts by.
+const migrationBlobGC = "0006_blob_gc"
+
+const sqliteBlobGC = `
+CREATE TABLE IF NOT EXISTS artifact_blob (
+    sha256             TEXT PRIMARY KEY,
+    touched_at         TEXT,
+    unreferenced_since TEXT,
+    generation         INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_blob_unreferenced
+    ON artifact_blob (unreferenced_since);
+CREATE INDEX IF NOT EXISTS idx_artifact_expires
+    ON artifact (expires_at) WHERE deleted_at IS NULL AND expires_at IS NOT NULL;
+`
+
+const postgresBlobGC = `
+CREATE TABLE IF NOT EXISTS artifact_blob (
+    sha256             TEXT PRIMARY KEY,
+    touched_at         TIMESTAMPTZ,
+    unreferenced_since TIMESTAMPTZ,
+    generation         BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_blob_unreferenced
+    ON artifact_blob (unreferenced_since);
+CREATE INDEX IF NOT EXISTS idx_artifact_expires
+    ON artifact (expires_at) WHERE deleted_at IS NULL AND expires_at IS NOT NULL;
+`

@@ -168,12 +168,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if opts.RunID == "" {
 		opts.RunID = uuid.NewString()
 	}
-	ctx = api.ContextWithRunID(ctx, opts.RunID)
 
 	// 0. Check if container already exists (scoped to this project)
 	slug := api.Slugify(opts.Name)
-	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
-	if err == nil {
+	agents, listErr := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
+	if listErr == nil {
 		for _, a := range agents {
 			// Skip agents from a different project
 			if !matchAgentProject(a, projectName, projectID) {
@@ -207,16 +206,27 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		}
 	}
 
-	// Record this run as the owner of an already provisioned agent's files
-	// (provision-only, a restart, a resume) as soon as the previous run's
-	// container is gone (ptone/scion#2675). From here on the hub keeps this
-	// run even if the start fails, so the files must name it too, or a
-	// delete for this run would leave them behind. A fresh provision below
-	// records it as it writes agent-info.json; without agent-info.json this
-	// is a no-op.
-	if err := SetSavedRunID(opts.Name, opts.ProjectPath, opts.RunID); err != nil {
-		slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",
-			"agent", opts.Name, "run_id", opts.RunID, "error", err)
+	// List OK: every entry of the name in this project is gone, so record
+	// this run as the owner of the agent's files now (ptone/scion#2675). The
+	// hub keeps this run even if the start fails, so the files must name it
+	// too, or a delete for this run would leave them behind. A fresh
+	// provision records the run carried by ctx in agent-info.json.
+	//
+	// List failed: no pre-clean ran and a previous run's container may hold
+	// the name (ptone/scion#3242). If the create then collides, the hub may
+	// settle on that previous run, so keep the recorded owner (and record
+	// none on a fresh provision) and record this run only after a
+	// successful create, which proves the name was free.
+	recordAfterCreate := listErr != nil
+	if listErr == nil {
+		ctx = api.ContextWithRunID(ctx, opts.RunID)
+		if err := SetSavedRunID(opts.Name, opts.ProjectPath, opts.RunID); err != nil {
+			slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",
+				"agent", opts.Name, "run_id", opts.RunID, "error", err)
+		}
+	} else {
+		slog.Warn("Start: could not list existing runtime entries; leaving the recorded owner of the agent's files unchanged until the create succeeds",
+			"agent", opts.Name, "run_id", opts.RunID, "error", listErr)
 	}
 
 	// If resuming, verify the agent exists before proceeding. Probe both
@@ -233,6 +243,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		ctx = api.ContextWithBrokerMode(ctx)
 	}
 	if opts.GitClone != nil {
+		// Presence only: clone_depth is applied to opts.GitClone below, so
+		// do not read Depth from the ctx copy.
 		ctx = api.ContextWithGitClone(ctx, opts.GitClone)
 	}
 	if opts.FreshProvision {
@@ -272,6 +284,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	agentDir, agentHome, agentWorkspace, finalScionCfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "", opts.Branch, opts.Workspace, startInlineConfig)
 	if err != nil {
 		return nil, err
+	}
+	if opts.FreshProvision {
+		recordNFSAgentDir(agentDir, opts.Name)
 	}
 	// Empty-per-agent (design #2703): the request's mode, or the mode
 	// persisted at provision, so a start that lost it (e.g. a dropped or
@@ -535,6 +550,33 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if finalScionCfg != nil && finalScionCfg.User != "" {
 		unixUsername = finalScionCfg.User
 		util.Debugf("user resolution: from ScionConfig user=%s", unixUsername)
+	}
+
+	// clone_depth for a clone-per-agent start: the template/agent value,
+	// else the profile's (the one named for this start, else the one the
+	// agent was created with, else the active profile). Unset keeps the
+	// depth sent with the request.
+	if opts.GitClone != nil {
+		cdProfile := opts.Profile
+		if cdProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
+			cdProfile = finalScionCfg.Info.Profile
+		}
+		var cdIn cloneDepthInput
+		if finalScionCfg != nil {
+			cdIn.Template = finalScionCfg.CloneDepth
+		}
+		cdIn.Profile, cdIn.ProfileSource = settings.ResolveCloneDepthWithSource(cdProfile)
+		if opts.Env == nil {
+			opts.Env = make(map[string]string)
+		}
+		gc, err := applyCloneDepth(opts.GitClone, opts.Env, cdIn)
+		if err != nil {
+			return nil, err
+		}
+		if gc != opts.GitClone && gc.Depth != nil {
+			slog.Debug("Start: resolved clone_depth", "agent", opts.Name, "depth", *gc.Depth)
+		}
+		opts.GitClone = gc
 	}
 
 	var warnings []string
@@ -1555,12 +1597,7 @@ authDone:
 	containerWorkspace := runtime.ResolveContainerWorkspace(repoRoot, effectiveWorkspace, opts.GitClone)
 
 	// Inject shared directory volumes from project settings or opts (hub-dispatched)
-	var effectiveSharedDirs []api.SharedDir
-	if settings != nil && len(settings.SharedDirs) > 0 {
-		effectiveSharedDirs = settings.SharedDirs
-	} else if len(opts.SharedDirs) > 0 {
-		effectiveSharedDirs = opts.SharedDirs
-	}
+	effectiveSharedDirs := agentSharedDirs(settings, opts)
 	// server.shared_dir_storage is global-only (design §3.2.1, AC5): read it
 	// via config.LoadGlobalSettingsWithOverlay() (the global file plus the
 	// co-located hub's DB overlay for runtimes and profiles, which can
@@ -1688,11 +1725,34 @@ authDone:
 	// become NFS subPaths via the k8s runtime's nfsSharedDirs path.
 	nfsWorkspaceBackend := settings != nil && settings.Server != nil &&
 		settings.Server.WorkspaceStorage != nil && settings.Server.WorkspaceStorage.Backend == "nfs"
-	sharedDirVolumes, sharedDirStorage, err := resolveSharedDirsPerDir(
+	sharedDirVolumes, sharedDirStorage, sharedDirVolumesByName, err := resolveSharedDirsPerDir(
 		sharedDirStorageCfg, sharedDirBackendOverrides, projectDir, hubDispatchedProjectID, m.Runtime.Name(), effectiveSharedDirs, containerWorkspace, nfsWorkspaceBackend)
 	if err != nil {
 		return nil, err
 	}
+	// After an explicit backend change, refuse an empty directory on the
+	// new backend while the directory on the previous backend is not
+	// empty. Dirs that pass are not checked again. Dirs changed back to
+	// local whose storage is a runtime claim are checked against the run
+	// config, just before the runtime starts the agent.
+	sdCheck := sharedDirCheckInput{
+		rec:         sharedDirRecord,
+		dirs:        effectiveSharedDirs,
+		realization: sharedDirStorage,
+		volumes:     sharedDirVolumesByName,
+		projectDir:  projectDir,
+		runtimeName: m.Runtime.Name(),
+		gs:          startGlobalSettings,
+		projectID:   hubDispatchedProjectID,
+	}
+	if checker, ok := m.Runtime.(runtime.SharedDirClaimChecker); ok {
+		sdCheck.claims = checker
+	}
+	passedSharedDirs, deferredSharedDirs, err := checkChangedSharedDirs(ctx, sdCheck)
+	if err != nil {
+		return nil, err
+	}
+	sharedDirRecord = dropCheckedSharedDirs(agentDir, sharedDirRecord, passedSharedDirs, opts.Name)
 	if len(effectiveSharedDirs) > 0 && sharedDirRecord == nil && sharedDirStorageResolved {
 		// Record the backends the agent's shared dirs were set up with, so
 		// later starts keep using them even if settings change.
@@ -1842,6 +1902,16 @@ authDone:
 					claimSharedDirNames = append(claimSharedDirNames, name)
 				}
 			}
+			if agentDirName != "" && mount.PVClaimName != "" {
+				if keep, reason := nfsKeepSharedCheckout(opts.FreshProvision, agentDir, resolvedWorkspace, agentDirName); keep {
+					// The agent keeps the layout and mode it had before
+					// ptone/scion#3998, so its work stays where it is.
+					slog.Info("workspace_storage nfs: "+reason, "agent", opts.Name)
+					agentDirName, agentBranch = "", ""
+					opts.Env["SCION_WORKSPACE_MODE"] = string(store.SharingModeSharedPlain)
+					agentEnv = withEnvValue(agentEnv, "SCION_WORKSPACE_MODE", string(store.SharingModeSharedPlain))
+				}
+			}
 			if emptyAgentDirName != "" {
 				// Empty-per-agent: only the agent's own directory is ever
 				// mounted, never the project's workspace path resolved
@@ -1862,6 +1932,9 @@ authDone:
 			}
 			if err != nil {
 				return nil, err
+			}
+			if nfsAgentDirName != "" && !nfsAgentDirEmpty {
+				recordNFSAgentDir(agentDir, opts.Name)
 			}
 			if worktreeName != "" && mount.PVClaimName != "" {
 				worktreePreCreated, err := ensureNFSWorktreeLeaf(m.Runtime.Name(), resolvedWorkspace, mount.PVClaimName, worktreeName)
@@ -2021,6 +2094,13 @@ authDone:
 	// container's env and label cannot disagree. Any value from the
 	// request or template env is replaced.
 	agentEnv = withLaunchIDEnv(agentEnv, runID)
+
+	// Write the full task to the agent home, and pass a short pointer to
+	// it instead when the task is too large to pass inline.
+	task, err = deliverTaskFile(agentHome, task)
+	if err != nil {
+		return nil, err
+	}
 
 	runCfg := runtime.RunConfig{
 		Name:                 containerName(projectName, opts.Name),
@@ -2237,6 +2317,17 @@ authDone:
 	}
 	slog.Info("agent start: pre-runtime provisioning complete", "agent", opts.Name,
 		"elapsed_ms", time.Since(startEntry).Milliseconds())
+	if len(deferredSharedDirs) > 0 {
+		// A refusal here comes after the home storage and nfs workspace
+		// directories above are prepared; those steps are idempotent and
+		// are redone when the start is retried.
+		passed, err := checkSharedDirClaims(ctx, sdCheck, deferredSharedDirs, runCfg)
+		if err != nil {
+			return nil, err
+		}
+		// dropCheckedSharedDirs saves the record; nothing reads it after this.
+		_ = dropCheckedSharedDirs(agentDir, sharedDirRecord, passed, opts.Name)
+	}
 	id, err := m.Runtime.Run(ctx, runCfg)
 	if err != nil {
 		// Provisioning writes agent-info.json in "created" state before the
@@ -2250,6 +2341,12 @@ authDone:
 	}
 	slog.Info("agent start: runtime.Run complete", "agent", opts.Name,
 		"total_elapsed_ms", time.Since(startEntry).Milliseconds())
+	if recordAfterCreate {
+		if err := SetSavedRunID(opts.Name, opts.ProjectPath, runID); err != nil {
+			slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",
+				"agent", opts.Name, "run_id", runID, "error", err)
+		}
+	}
 
 	// Phase is always "running" here, for both a fresh start and a resume:
 	// state.Phase has no "resumed" value, and a non-standard phase string

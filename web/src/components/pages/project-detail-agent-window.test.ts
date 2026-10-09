@@ -28,7 +28,10 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 import type { Agent, Capabilities, DeletionInfo, PageData } from '../../shared/types.js';
 import { resetHubProjectCapabilitiesCache } from '../../client/hub-capabilities.js';
 import { stateManager } from '../../client/state.js';
-import { PROJECT_AGENTS_FIT_THRESHOLD } from '../../client/agent-list-window.js';
+import {
+  PROJECT_AGENTS_FIT_THRESHOLD,
+  type AgentListWindow,
+} from '../../client/agent-list-window.js';
 import { AgentDrainRunner } from '../../client/agent-drain.js';
 import { holdable } from './__fixtures__/global-agents-endpoint.js';
 
@@ -86,18 +89,15 @@ function jsonResponse(body: unknown, status = 200): Response {
  * `agents` field; every other request still reaches `inner`.
  */
 function stubSortedAgentsWithoutList(projectId: string, inner: typeof fetch): void {
-  vi.stubGlobal(
-    'fetch',
-    vi.fn((input: string | URL | Request, init?: RequestInit) => {
-      const rawUrl =
-        typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-      const u = new URL(rawUrl, 'http://localhost');
-      if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
-        return Promise.resolve(jsonResponse({ totalCount: 0, complete: true }));
-      }
-      return inner(input, init);
-    })
-  );
+  stubFetch((input: string | URL | Request, init?: RequestInit) => {
+    const rawUrl =
+      typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    const u = new URL(rawUrl, 'http://localhost');
+    if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
+      return Promise.resolve(jsonResponse({ totalCount: 0, complete: true }));
+    }
+    return inner(input, init);
+  });
 }
 
 function makeAgent(i: number, overrides: Partial<Agent> = {}): Agent {
@@ -222,19 +222,37 @@ type TestEl = HTMLElement & {
   projectId: string;
 };
 
+/** The URL a fetch call asked for. */
+function requestUrl(input: string | URL | Request): string {
+  return typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+}
+
+/**
+ * URLs of the requests sent through stubFetch in the current test, kept as
+ * plain strings and cleared after each test.
+ */
+const sentUrls: string[] = [];
+
+/**
+ * Stubs fetch with a plain function, not vi.fn(): Vitest keeps every
+ * vi.fn() and its recorded calls until the file ends, and a recorded
+ * request's abort signal reaches the page that sent it, so each test's
+ * page and agents would stay on the heap. Only the URL is recorded.
+ */
+function stubFetch(
+  handler: (input: string | URL | Request, init?: RequestInit) => Promise<Response>
+): void {
+  vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
+    sentUrls.push(requestUrl(input));
+    return handler(input, init);
+  });
+}
+
 /** Whether the stubbed fetch has been asked for this project's agents list. */
 function agentsListRequested(projectId: string): boolean {
-  const mock = globalThis.fetch as unknown;
-  if (!vi.isMockFunction(mock)) return true;
-  return mock.mock.calls.some(([input]) => {
-    const raw =
-      typeof input === 'string'
-        ? input
-        : input instanceof URL
-          ? input.href
-          : (input as Request).url;
-    return new URL(raw, 'http://localhost').pathname === `/api/v1/projects/${projectId}/agents`;
-  });
+  return sentUrls.some(
+    (raw) => new URL(raw, 'http://localhost').pathname === `/api/v1/projects/${projectId}/agents`
+  );
 }
 
 /**
@@ -293,6 +311,10 @@ interface Internals {
     items: Agent[];
     display: Agent[];
     pageIndex: number;
+    hasNext: boolean;
+    hasPrev: boolean;
+    memberIndex: AgentListWindow['memberIndex'];
+    planRequest: AgentListWindow['planRequest'];
     updatesAvailable: boolean;
     error: string | null;
     loading: boolean;
@@ -438,6 +460,22 @@ function createRealisticFetchHandler(opts: {
         // complete response is always the whole unphased set.
         const phased = phase ? sorted.filter((a) => a.phase === phase) : sorted;
 
+        // ids= (a page of the window's frozen walk order): exactly the named
+        // agents that still match, with the other filters applied.
+        const idsParam = u.searchParams.get('ids');
+        if (idsParam !== null) {
+          const wanted = new Set(idsParam.split(','));
+          const page = phased.filter((a) => wanted.has(a.id));
+          return Promise.resolve(
+            jsonResponse({
+              agents: page,
+              totalCount: page.length,
+              complete: false,
+              stats: u.searchParams.get('stats') ? statsOf(page) : undefined,
+            })
+          );
+        }
+
         if (cursor !== null) {
           const startIdx = Number(cursor);
           const page = phased.slice(startIdx, startIdx + limit);
@@ -556,6 +594,11 @@ describe('project-detail — agent list window', () => {
 
   afterEach(() => {
     document.body.querySelectorAll('scion-page-project-detail').forEach((n) => n.remove());
+    sentUrls.length = 0;
+    // Vitest keeps every vi.fn() and spy, with its recorded calls, until
+    // the file ends. Clear the calls so they do not keep removed pages and
+    // their agents reachable.
+    vi.clearAllMocks();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     localStorage.clear();
@@ -569,9 +612,8 @@ describe('project-detail — agent list window', () => {
       makeAgent(2, { projectId, phase: 'created' }),
     ];
     const requests: AgentsRequest[] = [];
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(createFetchHandler({ projectId, projectCaps: { actions: ['read'] }, agents, requests }))
+    stubFetch(
+      createFetchHandler({ projectId, projectCaps: { actions: ['read'] }, agents, requests })
     );
     const el = await createComponent(projectId);
     const badges = () =>
@@ -602,11 +644,8 @@ describe('project-detail — agent list window', () => {
         makeAgent(i, { projectId })
       );
       const requests: AgentsRequest[] = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(
-          createFetchHandler({ projectId, projectCaps: { actions: ['read'] }, agents, requests })
-        )
+      stubFetch(
+        createFetchHandler({ projectId, projectCaps: { actions: ['read'] }, agents, requests })
       );
 
       const el = await createComponent(projectId);
@@ -675,11 +714,8 @@ describe('project-detail — agent list window', () => {
       localStorage.setItem('scion-view-project-agents', 'grid');
       const agents = Array.from({ length: 100 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(
-          createFetchHandler({ projectId, projectCaps: { actions: ['read'] }, agents, requests })
-        )
+      stubFetch(
+        createFetchHandler({ projectId, projectCaps: { actions: ['read'] }, agents, requests })
       );
 
       const el = await createComponent(projectId);
@@ -709,16 +745,13 @@ describe('project-detail — agent list window', () => {
         makeAgent(i, { projectId, labels: { env: 'prod' } })
       );
       const requests: AgentsRequest[] = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(
-          createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-          })
-        )
+      stubFetch(
+        createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        })
       );
       const el = await createComponent(projectId);
       return { el, requests };
@@ -741,7 +774,9 @@ describe('project-detail — agent list window', () => {
       let n = requests.length;
       await internals(el).agentWindow.next();
       expect(requests.length - n).toBe(1);
-      expect(requests[requests.length - 1].url).toContain('cursor=');
+      // Next asks for the next slice of the walk order frozen from page 0.
+      expect(requests[requests.length - 1].url).toContain('ids=');
+      expect(requests[requests.length - 1].url).not.toContain('cursor=');
 
       n = requests.length;
       await internals(el).agentWindow.prev();
@@ -863,17 +898,14 @@ describe('project-detail — agent list window', () => {
         makeAgent(i, { projectId, labels: { env: 'prod' } })
       );
       const requests: AgentsRequest[] = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(
-          createFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-            refuseSortedForLabel: '', // the initial unlabelled load is refused
-          })
-        )
+      stubFetch(
+        createFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+          refuseSortedForLabel: '', // the initial unlabelled load is refused
+        })
       );
 
       const el = await createComponent(projectId);
@@ -913,23 +945,20 @@ describe('project-detail — agent list window', () => {
       const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
       let failNext = false;
-      vi.stubGlobal(
-        'fetch',
-        vi.fn((input: string | URL | Request, init?: RequestInit) => {
-          const rawUrl =
-            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-          if (rawUrl.includes(`/api/v1/projects/${projectId}/agents?label=`) && failNext) {
-            requests.push({ url: rawUrl });
-            return Promise.resolve(jsonResponse({ error: { message: 'bad label' } }, 400));
-          }
-          return createFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-          })(input, init);
-        })
-      );
+      stubFetch((input: string | URL | Request, init?: RequestInit) => {
+        const rawUrl =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (rawUrl.includes(`/api/v1/projects/${projectId}/agents?label=`) && failNext) {
+          requests.push({ url: rawUrl });
+          return Promise.resolve(jsonResponse({ error: { message: 'bad label' } }, 400));
+        }
+        return createFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        })(input, init);
+      });
 
       const el = await createComponent(projectId);
       const before = (el as unknown as { agents: Agent[] }).agents;
@@ -958,25 +987,22 @@ describe('project-detail — agent list window', () => {
       requests: AgentsRequest[]
     ): Promise<TestEl> {
       localStorage.setItem('scion-view-project-agents', 'list');
-      vi.stubGlobal(
-        'fetch',
-        vi.fn((input: string | URL | Request, init?: RequestInit) => {
-          const rawUrl =
-            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-          const u = new URL(rawUrl, 'http://localhost');
-          if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
-            // `fit=0` forces the candidate count to always exceed it, so the
-            // first response is paged regardless of how small the fixture is.
-            u.searchParams.set('fit', '0');
-          }
-          return createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-          })(u.toString(), init);
-        })
-      );
+      stubFetch((input: string | URL | Request, init?: RequestInit) => {
+        const rawUrl =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const u = new URL(rawUrl, 'http://localhost');
+        if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
+          // `fit=0` forces the candidate count to always exceed it, so the
+          // first response is paged regardless of how small the fixture is.
+          u.searchParams.set('fit', '0');
+        }
+        return createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        })(u.toString(), init);
+      });
       return createComponent(projectId);
     }
 
@@ -1211,23 +1237,20 @@ describe('project-detail — agent list window', () => {
       const agents = [...members, nonMember];
       const requests: AgentsRequest[] = [];
       localStorage.setItem('scion-view-project-agents', 'list');
-      vi.stubGlobal(
-        'fetch',
-        vi.fn((input: string | URL | Request, init?: RequestInit) => {
-          const rawUrl =
-            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-          const u = new URL(rawUrl, 'http://localhost');
-          if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
-            u.searchParams.set('fit', '0');
-          }
-          return createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-          })(u.toString(), init);
-        })
-      );
+      stubFetch((input: string | URL | Request, init?: RequestInit) => {
+        const rawUrl =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const u = new URL(rawUrl, 'http://localhost');
+        if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
+          u.searchParams.set('fit', '0');
+        }
+        return createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        })(u.toString(), init);
+      });
 
       const el = await createComponent(projectId);
       internals(el).committedLabel = 'env=prod'; // simulate having committed this label (bypasses UI for brevity)
@@ -1373,7 +1396,7 @@ describe('project-detail — agent list window', () => {
           ) => Promise<Response>,
           (u) => u.pathname === `/api/v1/projects/${projectId}/agents`
         );
-        vi.stubGlobal('fetch', vi.fn(h.fn));
+        stubFetch(h.fn);
 
         h.hold();
         const refreshed = win.refresh();
@@ -1415,7 +1438,7 @@ describe('project-detail — agent list window', () => {
           ) => Promise<Response>,
           (u) => u.pathname === `/api/v1/projects/${projectId}/agents`
         );
-        vi.stubGlobal('fetch', vi.fn(h.fn));
+        stubFetch(h.fn);
 
         h.hold();
         const refreshed = win.refresh();
@@ -1465,11 +1488,8 @@ describe('project-detail — agent list window', () => {
       );
       const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(
-          createFetchHandler({ projectId, projectCaps: { actions: ['read'] }, agents, requests })
-        )
+      stubFetch(
+        createFetchHandler({ projectId, projectCaps: { actions: ['read'] }, agents, requests })
       );
 
       const el = await createComponent(projectId);
@@ -1530,11 +1550,8 @@ describe('project-detail — agent list window', () => {
       );
       const agents = Array.from({ length: 3 }, (_, i) => makeAgent(i));
       const requests: AgentsRequest[] = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(
-          createFetchHandler({ projectId, projectCaps: { actions: ['read'] }, agents, requests })
-        )
+      stubFetch(
+        createFetchHandler({ projectId, projectCaps: { actions: ['read'] }, agents, requests })
       );
 
       const el = await createComponent(projectId);
@@ -1576,11 +1593,8 @@ describe('project-detail — agent list window', () => {
       );
       const agents = Array.from({ length: 2 }, (_, i) => makeAgent(i));
       const requests: AgentsRequest[] = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(
-          createFetchHandler({ projectId, projectCaps: { actions: ['read'] }, agents, requests })
-        )
+      stubFetch(
+        createFetchHandler({ projectId, projectCaps: { actions: ['read'] }, agents, requests })
       );
 
       const el = await createComponent(projectId);
@@ -1635,11 +1649,8 @@ describe('project-detail — agent list window', () => {
       );
       const agents = Array.from({ length: 3 }, (_, i) => makeAgent(i));
       const requests: AgentsRequest[] = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(
-          createFetchHandler({ projectId, projectCaps: { actions: ['read'] }, agents, requests })
-        )
+      stubFetch(
+        createFetchHandler({ projectId, projectCaps: { actions: ['read'] }, agents, requests })
       );
 
       const el = await createComponent(projectId);
@@ -1675,11 +1686,8 @@ describe('project-detail — agent list window', () => {
       const projectId = 'p-legacy-tombstone';
       const agents = Array.from({ length: 3 }, (_, i) => makeAgent(i));
       const requests: AgentsRequest[] = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(
-          createFetchHandler({ projectId, projectCaps: { actions: ['read'] }, agents, requests })
-        )
+      stubFetch(
+        createFetchHandler({ projectId, projectCaps: { actions: ['read'] }, agents, requests })
       );
 
       const el = await createComponent(projectId);
@@ -1710,11 +1718,8 @@ describe('project-detail — agent list window', () => {
       );
       const agents = Array.from({ length: 3 }, (_, i) => makeAgent(i));
       const requests: AgentsRequest[] = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(
-          createFetchHandler({ projectId, projectCaps: { actions: ['read'] }, agents, requests })
-        )
+      stubFetch(
+        createFetchHandler({ projectId, projectCaps: { actions: ['read'] }, agents, requests })
       );
 
       const el = await createComponent(projectId);
@@ -1743,23 +1748,20 @@ describe('project-detail — agent list window', () => {
 
   describe('view changes that need the complete set drain it once, then cost nothing', () => {
     function stubAlwaysPaged(projectId: string, agents: Agent[], requests: AgentsRequest[]) {
-      vi.stubGlobal(
-        'fetch',
-        vi.fn((input: string | URL | Request, init?: RequestInit) => {
-          const rawUrl =
-            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-          const u = new URL(rawUrl, 'http://localhost');
-          if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
-            u.searchParams.set('fit', '0'); // every sorted request in this test stays paged
-          }
-          return createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-          })(u.toString(), init);
-        })
-      );
+      stubFetch((input: string | URL | Request, init?: RequestInit) => {
+        const rawUrl =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const u = new URL(rawUrl, 'http://localhost');
+        if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
+          u.searchParams.set('fit', '0'); // every sorted request in this test stays paged
+        }
+        return createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        })(u.toString(), init);
+      });
     }
 
     it('sort -> name while paged drains once into the local set; later sort, dir and phase changes cost zero', async () => {
@@ -1839,7 +1841,7 @@ describe('project-detail — agent list window', () => {
         agents,
         requests,
       });
-      const fetchSpy = vi.fn((input: string | URL | Request, init?: RequestInit) => {
+      stubFetch((input: string | URL | Request, init?: RequestInit) => {
         if ((init?.method ?? 'GET').toUpperCase() === 'POST') {
           // Lifecycle actions hang, so only the optimistic update can change a row.
           const d = deferred<Response>();
@@ -1848,12 +1850,9 @@ describe('project-detail — agent list window', () => {
         }
         return inner(input, init);
       });
-      vi.stubGlobal('fetch', fetchSpy);
       const el = await createComponent(projectId);
       const agentGets = () =>
-        fetchSpy.mock.calls.filter(([input]) =>
-          String(input).includes(`/api/v1/projects/${projectId}/agents`)
-        ).length;
+        sentUrls.filter((url) => url.includes(`/api/v1/projects/${projectId}/agents`)).length;
       return { el, requests, agentGets, posts };
     };
 
@@ -2152,17 +2151,14 @@ describe('project-detail — agent list window', () => {
           localStorage.setItem('scion-view-project-agents', 'list');
           const agents = mixedAgents(c.count, projectId);
           const requests: AgentsRequest[] = [];
-          vi.stubGlobal(
-            'fetch',
-            vi.fn(
-              createRealisticFetchHandler({
-                projectId,
-                projectCaps: { actions: ['read', 'stop_all'] },
-                agents,
-                requests,
-                refuseSortedAbove: 2000,
-              })
-            )
+          stubFetch(
+            createRealisticFetchHandler({
+              projectId,
+              projectCaps: { actions: ['read', 'stop_all'] },
+              agents,
+              requests,
+              refuseSortedAbove: 2000,
+            })
           );
           const el = await createComponent(projectId);
           await settle(el);
@@ -2216,17 +2212,14 @@ describe('project-detail — agent list window', () => {
       );
       const agents = Array.from({ length: 100 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(
-          createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-            legacyTruncated: true, // 20 per page: four pages leave more behind
-          })
-        )
+      stubFetch(
+        createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+          legacyTruncated: true, // 20 per page: four pages leave more behind
+        })
       );
       const el = await createComponent(projectId);
       await vi.waitFor(() => expect(internals(el).agentWindow.state).toBe('capped'));
@@ -2282,17 +2275,14 @@ describe('project-detail — agent list window', () => {
         makeAgent(i, { projectId, labels: { env: 'prod' } })
       );
       const requests: AgentsRequest[] = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(
-          createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-            legacyTruncated: true,
-          })
-        )
+      stubFetch(
+        createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+          legacyTruncated: true,
+        })
       );
       const el = await createComponent(projectId);
       return { el, requests };
@@ -2373,23 +2363,20 @@ describe('project-detail — agent list window', () => {
       });
       let armed = true;
       let held: { url: string; gate: ReturnType<typeof deferred<void>> } | null = null;
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-          const url =
-            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-          const res = await inner(input, init);
-          const isAgentsGet =
-            new URL(url, 'http://localhost').pathname === `/api/v1/projects/${projectId}/agents`;
-          if (armed && isAgentsGet) {
-            armed = false;
-            const gate = deferred<void>();
-            held = { url, gate };
-            await gate.promise;
-          }
-          return res;
-        })
-      );
+      stubFetch(async (input: string | URL | Request, init?: RequestInit) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const res = await inner(input, init);
+        const isAgentsGet =
+          new URL(url, 'http://localhost').pathname === `/api/v1/projects/${projectId}/agents`;
+        if (armed && isAgentsGet) {
+          armed = false;
+          const gate = deferred<void>();
+          held = { url, gate };
+          await gate.promise;
+        }
+        return res;
+      });
       const el = await createComponent(projectId, { holdsFirstLoad: true });
       const waitHeld = async (): Promise<string> => {
         await vi.waitFor(() => expect(held).not.toBeNull());
@@ -2660,7 +2647,7 @@ describe('project-detail — agent list window', () => {
           }),
           (u) => u.pathname === `/api/v1/projects/${projectId}/agents`
         );
-        vi.stubGlobal('fetch', vi.fn(h.fn));
+        stubFetch(h.fn);
         if (row.fetchPage) {
           el = await createComponent(projectId);
           expect(win().state).toBe('paged');
@@ -2671,6 +2658,13 @@ describe('project-detail — agent list window', () => {
           el = await createComponent(projectId, { holdsFirstLoad: true });
         }
         await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      });
+
+      // The hooks of every row live until the file ends; drop this row's
+      // page and fake so they do not stay on the heap after its tests.
+      afterEach(() => {
+        el = undefined as unknown as TestEl;
+        h = undefined as unknown as ReturnType<typeof holdable>;
       });
 
       const done = async (): Promise<void> => {
@@ -2786,23 +2780,20 @@ describe('project-detail — agent list window', () => {
         makeAgent(i, { projectId, ...(i % 5 === 0 ? { labels: { env: 'prod' } } : {}) })
       );
       const requests: AgentsRequest[] = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn((input: string | URL | Request, init?: RequestInit) => {
-          const rawUrl =
-            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-          const u = new URL(rawUrl, 'http://localhost');
-          if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
-            u.searchParams.set('fit', '0');
-          }
-          return createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-          })(u.toString(), init);
-        })
-      );
+      stubFetch((input: string | URL | Request, init?: RequestInit) => {
+        const rawUrl =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const u = new URL(rawUrl, 'http://localhost');
+        if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
+          u.searchParams.set('fit', '0');
+        }
+        return createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        })(u.toString(), init);
+      });
 
       const el = await createComponent(projectId);
       expect(internals(el).agentWindow.state).toBe('paged');
@@ -2845,25 +2836,22 @@ describe('project-detail — agent list window', () => {
       agents: Agent[],
       requests: AgentsRequest[]
     ) {
-      vi.stubGlobal(
-        'fetch',
-        vi.fn((input: string | URL | Request, init?: RequestInit) => {
-          const rawUrl =
-            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-          const u = new URL(rawUrl, 'http://localhost');
-          if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
-            // Only the unlabelled candidate set (60) is forced paged; the
-            // env=prod subset (10) fits and comes back complete.
-            if (!u.searchParams.get('label')) u.searchParams.set('fit', '0');
-          }
-          return createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-          })(u.toString(), init);
-        })
-      );
+      stubFetch((input: string | URL | Request, init?: RequestInit) => {
+        const rawUrl =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const u = new URL(rawUrl, 'http://localhost');
+        if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
+          // Only the unlabelled candidate set (60) is forced paged; the
+          // env=prod subset (10) fits and comes back complete.
+          if (!u.searchParams.get('label')) u.searchParams.set('fit', '0');
+        }
+        return createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        })(u.toString(), init);
+      });
     }
 
     it('a k=v label commit whose set fits (paged -> small via the fit path) lands on page 0', async () => {
@@ -2925,16 +2913,13 @@ describe('project-detail — agent list window', () => {
       localStorage.setItem('scion-pagesize-project-agents', '50');
       const agents = Array.from({ length: 80 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(
-          createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-          })
-        )
+      stubFetch(
+        createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        })
       );
 
       const el = await createComponent(projectId);
@@ -2951,16 +2936,13 @@ describe('project-detail — agent list window', () => {
       localStorage.setItem('scion-pagesize-project-agents', '17');
       const agents = Array.from({ length: 10 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(
-          createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-          })
-        )
+      stubFetch(
+        createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        })
       );
       const el = await createComponent(projectId);
       expect(internals(el).pagerPageSize).toBe(25);
@@ -2979,40 +2961,37 @@ describe('project-detail — agent list window', () => {
 
       let sortedCallCount = 0;
       const pending: Array<{ resolve: (r: Response) => void }> = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn((input: string | URL | Request, init?: RequestInit) => {
-          const rawUrl =
-            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-          const u = new URL(rawUrl, 'http://localhost');
-          if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
-            sortedCallCount++;
-            const call = sortedCallCount;
-            if (call === 1) {
-              // The mount's own load resolves immediately, as normal.
-              return createRealisticFetchHandler({
-                projectId,
-                projectCaps: { actions: ['read'] },
-                agents: mountAgents,
-                requests,
-              })(input, init);
-            }
-            // Calls 2 and 3 (the two manual triggers below) are held open
-            // until the test resolves them explicitly, out of order, with
-            // the response body supplied by the test at resolve time.
-            requests.push({ url: rawUrl });
-            const { promise, resolve } = deferred<Response>();
-            pending[call] = { resolve };
-            return promise;
+      stubFetch((input: string | URL | Request, init?: RequestInit) => {
+        const rawUrl =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const u = new URL(rawUrl, 'http://localhost');
+        if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
+          sortedCallCount++;
+          const call = sortedCallCount;
+          if (call === 1) {
+            // The mount's own load resolves immediately, as normal.
+            return createRealisticFetchHandler({
+              projectId,
+              projectCaps: { actions: ['read'] },
+              agents: mountAgents,
+              requests,
+            })(input, init);
           }
-          return createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents: mountAgents,
-            requests,
-          })(input, init);
-        })
-      );
+          // Calls 2 and 3 (the two manual triggers below) are held open
+          // until the test resolves them explicitly, out of order, with
+          // the response body supplied by the test at resolve time.
+          requests.push({ url: rawUrl });
+          const { promise, resolve } = deferred<Response>();
+          pending[call] = { resolve };
+          return promise;
+        }
+        return createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents: mountAgents,
+          requests,
+        })(input, init);
+      });
 
       const el = await createComponent(projectId);
       expect((el as unknown as { agents: Agent[] }).agents.map((a) => a.name)).toEqual(['mount']);
@@ -3086,30 +3065,27 @@ describe('project-detail — agent list window', () => {
       const requests: AgentsRequest[] = [];
       let holdNextPageZeroFit = false;
       let heldResolve: ((r: Response) => void) | null = null;
-      vi.stubGlobal(
-        'fetch',
-        vi.fn((input: string | URL | Request, init?: RequestInit) => {
-          const rawUrl =
-            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-          const u = new URL(rawUrl, 'http://localhost');
-          if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
-            u.searchParams.set('fit', '0'); // always paged
-            if (holdNextPageZeroFit && !u.searchParams.has('cursor')) {
-              holdNextPageZeroFit = false;
-              requests.push({ url: rawUrl });
-              return new Promise<Response>((resolve) => {
-                heldResolve = resolve;
-              });
-            }
+      stubFetch((input: string | URL | Request, init?: RequestInit) => {
+        const rawUrl =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const u = new URL(rawUrl, 'http://localhost');
+        if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
+          u.searchParams.set('fit', '0'); // always paged
+          if (holdNextPageZeroFit && !u.searchParams.has('cursor')) {
+            holdNextPageZeroFit = false;
+            requests.push({ url: rawUrl });
+            return new Promise<Response>((resolve) => {
+              heldResolve = resolve;
+            });
           }
-          return createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-          })(u.toString(), init);
-        })
-      );
+        }
+        return createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        })(u.toString(), init);
+      });
 
       const el = await createComponent(projectId);
       expect(internals(el).agentWindow.state).toBe('paged');
@@ -3165,29 +3141,26 @@ describe('project-detail — agent list window', () => {
       const requests: AgentsRequest[] = [];
       let holdNextSorted = false;
       let heldResolve: ((r: Response) => void) | null = null;
-      vi.stubGlobal(
-        'fetch',
-        vi.fn((input: string | URL | Request, init?: RequestInit) => {
-          const rawUrl =
-            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-          const u = new URL(rawUrl, 'http://localhost');
-          if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
-            if (holdNextSorted) {
-              holdNextSorted = false;
-              requests.push({ url: rawUrl });
-              return new Promise<Response>((resolve) => {
-                heldResolve = resolve;
-              });
-            }
+      stubFetch((input: string | URL | Request, init?: RequestInit) => {
+        const rawUrl =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const u = new URL(rawUrl, 'http://localhost');
+        if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
+          if (holdNextSorted) {
+            holdNextSorted = false;
+            requests.push({ url: rawUrl });
+            return new Promise<Response>((resolve) => {
+              heldResolve = resolve;
+            });
           }
-          return createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-          })(u.toString(), init);
-        })
-      );
+        }
+        return createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        })(u.toString(), init);
+      });
 
       const el = await createComponent(projectId);
       expect(internals(el).agentWindow.state).toBe('small'); // 30 agents is below the fit threshold
@@ -3247,33 +3220,27 @@ describe('project-detail — agent list window', () => {
         const requests: AgentsRequest[] = [];
         let holdNextPageZeroFit = false;
         let heldResolve: ((r: Response) => void) | null = null;
-        vi.stubGlobal(
-          'fetch',
-          vi.fn((input: string | URL | Request, init?: RequestInit) => {
-            const rawUrl =
-              typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-            const u = new URL(rawUrl, 'http://localhost');
-            if (
-              u.pathname === `/api/v1/projects/${projectId}/agents` &&
-              u.searchParams.get('sort')
-            ) {
-              u.searchParams.set('fit', '0'); // always paged
-              if (holdNextPageZeroFit && !u.searchParams.has('cursor')) {
-                holdNextPageZeroFit = false;
-                requests.push({ url: rawUrl });
-                return new Promise<Response>((resolve) => {
-                  heldResolve = resolve;
-                });
-              }
+        stubFetch((input: string | URL | Request, init?: RequestInit) => {
+          const rawUrl =
+            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          const u = new URL(rawUrl, 'http://localhost');
+          if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
+            u.searchParams.set('fit', '0'); // always paged
+            if (holdNextPageZeroFit && !u.searchParams.has('cursor')) {
+              holdNextPageZeroFit = false;
+              requests.push({ url: rawUrl });
+              return new Promise<Response>((resolve) => {
+                heldResolve = resolve;
+              });
             }
-            return createRealisticFetchHandler({
-              projectId,
-              projectCaps: { actions: ['read'] },
-              agents,
-              requests,
-            })(u.toString(), init);
-          })
-        );
+          }
+          return createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+          })(u.toString(), init);
+        });
 
         const el = await createComponent(projectId);
         expect(internals(el).agentWindow.state).toBe('paged');
@@ -3326,28 +3293,25 @@ describe('project-detail — agent list window', () => {
       );
       const requests: AgentsRequest[] = [];
       let failNextSorted = false;
-      vi.stubGlobal(
-        'fetch',
-        vi.fn((input: string | URL | Request, init?: RequestInit) => {
-          const rawUrl =
-            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-          const u = new URL(rawUrl, 'http://localhost');
-          if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
-            u.searchParams.set('fit', '0'); // always paged
-            if (failNextSorted && !u.searchParams.has('cursor')) {
-              failNextSorted = false;
-              requests.push({ url: rawUrl });
-              return Promise.resolve(jsonResponse({ error: { message: 'boom' } }, 500));
-            }
+      stubFetch((input: string | URL | Request, init?: RequestInit) => {
+        const rawUrl =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const u = new URL(rawUrl, 'http://localhost');
+        if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
+          u.searchParams.set('fit', '0'); // always paged
+          if (failNextSorted && !u.searchParams.has('cursor')) {
+            failNextSorted = false;
+            requests.push({ url: rawUrl });
+            return Promise.resolve(jsonResponse({ error: { message: 'boom' } }, 500));
           }
-          return createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-          })(u.toString(), init);
-        })
-      );
+        }
+        return createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        })(u.toString(), init);
+      });
 
       const el = await createComponent(projectId);
       expect(internals(el).agentWindow.state).toBe('paged');
@@ -3396,28 +3360,25 @@ describe('project-detail — agent list window', () => {
       );
       const requests: AgentsRequest[] = [];
       let failNextSorted = false;
-      vi.stubGlobal(
-        'fetch',
-        vi.fn((input: string | URL | Request, init?: RequestInit) => {
-          const rawUrl =
-            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-          const u = new URL(rawUrl, 'http://localhost');
-          if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
-            u.searchParams.set('fit', '0'); // always paged
-            if (failNextSorted && !u.searchParams.has('cursor')) {
-              failNextSorted = false;
-              requests.push({ url: rawUrl });
-              return Promise.reject(new TypeError('Failed to fetch'));
-            }
+      stubFetch((input: string | URL | Request, init?: RequestInit) => {
+        const rawUrl =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const u = new URL(rawUrl, 'http://localhost');
+        if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
+          u.searchParams.set('fit', '0'); // always paged
+          if (failNextSorted && !u.searchParams.has('cursor')) {
+            failNextSorted = false;
+            requests.push({ url: rawUrl });
+            return Promise.reject(new TypeError('Failed to fetch'));
           }
-          return createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-          })(u.toString(), init);
-        })
-      );
+        }
+        return createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        })(u.toString(), init);
+      });
 
       const el = await createComponent(projectId);
       expect(internals(el).agentWindow.state).toBe('paged');
@@ -3454,32 +3415,29 @@ describe('project-detail — agent list window', () => {
       );
       const requests: AgentsRequest[] = [];
       let failNextSorted = false;
-      vi.stubGlobal(
-        'fetch',
-        vi.fn((input: string | URL | Request, init?: RequestInit) => {
-          const rawUrl =
-            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-          const u = new URL(rawUrl, 'http://localhost');
-          if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
-            u.searchParams.set('fit', '0'); // always paged
-            if (failNextSorted && !u.searchParams.has('cursor')) {
-              failNextSorted = false;
-              requests.push({ url: rawUrl });
-              // ok: true, but the body is not valid JSON — response.json()
-              // rejects even though the request itself succeeded (the bug
-              // this test proves is fixed: that rejection used to be
-              // unhandled, since response.json() ran outside a try/catch).
-              return Promise.resolve(new Response('not json', { status: 200 }));
-            }
+      stubFetch((input: string | URL | Request, init?: RequestInit) => {
+        const rawUrl =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const u = new URL(rawUrl, 'http://localhost');
+        if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
+          u.searchParams.set('fit', '0'); // always paged
+          if (failNextSorted && !u.searchParams.has('cursor')) {
+            failNextSorted = false;
+            requests.push({ url: rawUrl });
+            // ok: true, but the body is not valid JSON — response.json()
+            // rejects even though the request itself succeeded (the bug
+            // this test proves is fixed: that rejection used to be
+            // unhandled, since response.json() ran outside a try/catch).
+            return Promise.resolve(new Response('not json', { status: 200 }));
           }
-          return createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-          })(u.toString(), init);
-        })
-      );
+        }
+        return createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        })(u.toString(), init);
+      });
 
       const el = await createComponent(projectId);
       expect(internals(el).agentWindow.state).toBe('paged');
@@ -3529,35 +3487,32 @@ describe('project-detail — agent list window', () => {
       const requests: AgentsRequest[] = [];
       let fail422NextSorted = false;
       let failLegacy = false;
-      vi.stubGlobal(
-        'fetch',
-        vi.fn((input: string | URL | Request, init?: RequestInit) => {
-          const rawUrl =
-            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-          const u = new URL(rawUrl, 'http://localhost');
-          if (u.pathname === `/api/v1/projects/${projectId}/agents`) {
-            if (u.searchParams.get('sort')) {
-              u.searchParams.set('fit', '0'); // always paged when sorted
-              if (fail422NextSorted && !u.searchParams.has('cursor')) {
-                fail422NextSorted = false;
-                requests.push({ url: rawUrl });
-                return Promise.resolve(
-                  jsonResponse({ error: { code: 'sorted_view_unavailable' } }, 422)
-                );
-              }
-            } else if (failLegacy) {
+      stubFetch((input: string | URL | Request, init?: RequestInit) => {
+        const rawUrl =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const u = new URL(rawUrl, 'http://localhost');
+        if (u.pathname === `/api/v1/projects/${projectId}/agents`) {
+          if (u.searchParams.get('sort')) {
+            u.searchParams.set('fit', '0'); // always paged when sorted
+            if (fail422NextSorted && !u.searchParams.has('cursor')) {
+              fail422NextSorted = false;
               requests.push({ url: rawUrl });
-              return Promise.resolve(jsonResponse({ error: { message: 'boom' } }, 500));
+              return Promise.resolve(
+                jsonResponse({ error: { code: 'sorted_view_unavailable' } }, 422)
+              );
             }
+          } else if (failLegacy) {
+            requests.push({ url: rawUrl });
+            return Promise.resolve(jsonResponse({ error: { message: 'boom' } }, 500));
           }
-          return createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-          })(u.toString(), init);
-        })
-      );
+        }
+        return createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        })(u.toString(), init);
+      });
 
       const el = await createComponent(projectId);
       expect(internals(el).agentWindow.state).toBe('paged');
@@ -3600,35 +3555,32 @@ describe('project-detail — agent list window', () => {
       const requests: AgentsRequest[] = [];
       let fail422NextSorted = false;
       let failLegacy = false;
-      vi.stubGlobal(
-        'fetch',
-        vi.fn((input: string | URL | Request, init?: RequestInit) => {
-          const rawUrl =
-            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-          const u = new URL(rawUrl, 'http://localhost');
-          if (u.pathname === `/api/v1/projects/${projectId}/agents`) {
-            if (u.searchParams.get('sort')) {
-              u.searchParams.set('fit', '0'); // always paged when sorted
-              if (fail422NextSorted && !u.searchParams.has('cursor')) {
-                fail422NextSorted = false;
-                requests.push({ url: rawUrl });
-                return Promise.resolve(
-                  jsonResponse({ error: { code: 'sorted_view_unavailable' } }, 422)
-                );
-              }
-            } else if (failLegacy) {
+      stubFetch((input: string | URL | Request, init?: RequestInit) => {
+        const rawUrl =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const u = new URL(rawUrl, 'http://localhost');
+        if (u.pathname === `/api/v1/projects/${projectId}/agents`) {
+          if (u.searchParams.get('sort')) {
+            u.searchParams.set('fit', '0'); // always paged when sorted
+            if (fail422NextSorted && !u.searchParams.has('cursor')) {
+              fail422NextSorted = false;
               requests.push({ url: rawUrl });
-              return Promise.reject(new TypeError('Failed to fetch'));
+              return Promise.resolve(
+                jsonResponse({ error: { code: 'sorted_view_unavailable' } }, 422)
+              );
             }
+          } else if (failLegacy) {
+            requests.push({ url: rawUrl });
+            return Promise.reject(new TypeError('Failed to fetch'));
           }
-          return createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-          })(u.toString(), init);
-        })
-      );
+        }
+        return createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        })(u.toString(), init);
+      });
 
       const el = await createComponent(projectId);
       expect(internals(el).agentWindow.state).toBe('paged');
@@ -3670,28 +3622,25 @@ describe('project-detail — agent list window', () => {
       );
       const requests: AgentsRequest[] = [];
       let failNextSorted = false;
-      vi.stubGlobal(
-        'fetch',
-        vi.fn((input: string | URL | Request, init?: RequestInit) => {
-          const rawUrl =
-            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-          const u = new URL(rawUrl, 'http://localhost');
-          if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
-            u.searchParams.set('fit', '0'); // always paged
-            if (failNextSorted && !u.searchParams.has('cursor')) {
-              failNextSorted = false;
-              requests.push({ url: rawUrl });
-              return Promise.reject(new TypeError('Failed to fetch'));
-            }
+      stubFetch((input: string | URL | Request, init?: RequestInit) => {
+        const rawUrl =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const u = new URL(rawUrl, 'http://localhost');
+        if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
+          u.searchParams.set('fit', '0'); // always paged
+          if (failNextSorted && !u.searchParams.has('cursor')) {
+            failNextSorted = false;
+            requests.push({ url: rawUrl });
+            return Promise.reject(new TypeError('Failed to fetch'));
           }
-          return createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-          })(u.toString(), init);
-        })
-      );
+        }
+        return createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        })(u.toString(), init);
+      });
 
       const el = await createComponent(projectId);
       expect(internals(el).agentWindow.state).toBe('paged');
@@ -3742,32 +3691,29 @@ describe('project-detail — agent list window', () => {
       );
       const requests: AgentsRequest[] = [];
       let failLegacy = false;
-      vi.stubGlobal(
-        'fetch',
-        vi.fn((input: string | URL | Request, init?: RequestInit) => {
-          const rawUrl =
-            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-          const u = new URL(rawUrl, 'http://localhost');
-          if (
-            failLegacy &&
-            u.pathname === `/api/v1/projects/${projectId}/agents` &&
-            !u.searchParams.get('sort')
-          ) {
-            requests.push({ url: rawUrl });
-            // ok: true, but the body is not valid JSON — response.json()
-            // rejects even though the request itself succeeded (the bug
-            // this test proves is fixed: that rejection used to be
-            // unhandled, since response.json() ran outside a try/catch).
-            return Promise.resolve(new Response('not json', { status: 200 }));
-          }
-          return createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-          })(u.toString(), init);
-        })
-      );
+      stubFetch((input: string | URL | Request, init?: RequestInit) => {
+        const rawUrl =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const u = new URL(rawUrl, 'http://localhost');
+        if (
+          failLegacy &&
+          u.pathname === `/api/v1/projects/${projectId}/agents` &&
+          !u.searchParams.get('sort')
+        ) {
+          requests.push({ url: rawUrl });
+          // ok: true, but the body is not valid JSON — response.json()
+          // rejects even though the request itself succeeded (the bug
+          // this test proves is fixed: that rejection used to be
+          // unhandled, since response.json() ran outside a try/catch).
+          return Promise.resolve(new Response('not json', { status: 200 }));
+        }
+        return createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        })(u.toString(), init);
+      });
 
       const el = await createComponent(projectId);
       expect(internals(el).agentWindow.state).toBe('small'); // sorted-eligible, complete (5 is below the fit threshold)
@@ -3808,29 +3754,26 @@ describe('project-detail — agent list window', () => {
       const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
       let failLabelOnFitPath = false;
-      vi.stubGlobal(
-        'fetch',
-        vi.fn((input: string | URL | Request, init?: RequestInit) => {
-          const rawUrl =
-            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-          const u = new URL(rawUrl, 'http://localhost');
-          if (
-            failLabelOnFitPath &&
-            u.pathname === `/api/v1/projects/${projectId}/agents` &&
-            u.searchParams.get('sort') &&
-            u.searchParams.get('label') === 'env=prod'
-          ) {
-            requests.push({ url: rawUrl });
-            return Promise.resolve(jsonResponse({ error: { message: 'bad label' } }, 400));
-          }
-          return createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-          })(u.toString(), init);
-        })
-      );
+      stubFetch((input: string | URL | Request, init?: RequestInit) => {
+        const rawUrl =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const u = new URL(rawUrl, 'http://localhost');
+        if (
+          failLabelOnFitPath &&
+          u.pathname === `/api/v1/projects/${projectId}/agents` &&
+          u.searchParams.get('sort') &&
+          u.searchParams.get('label') === 'env=prod'
+        ) {
+          requests.push({ url: rawUrl });
+          return Promise.resolve(jsonResponse({ error: { message: 'bad label' } }, 400));
+        }
+        return createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        })(u.toString(), init);
+      });
 
       const el = await createComponent(projectId);
       expect(internals(el).agentWindow.state).toBe('small'); // sorted-eligible, complete (5 is below the fit threshold)
@@ -3863,33 +3806,30 @@ describe('project-detail — agent list window', () => {
       const requests: AgentsRequest[] = [];
       let holdLegacy = false;
       let heldResolve: ((r: Response) => void) | null = null;
-      vi.stubGlobal(
-        'fetch',
-        vi.fn((input: string | URL | Request, init?: RequestInit) => {
-          const rawUrl =
-            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-          const u = new URL(rawUrl, 'http://localhost');
-          if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
-            u.searchParams.set('fit', '0'); // always paged at mount
-          } else if (
-            holdLegacy &&
-            u.pathname === `/api/v1/projects/${projectId}/agents` &&
-            !u.searchParams.get('sort')
-          ) {
-            holdLegacy = false;
-            requests.push({ url: rawUrl });
-            return new Promise<Response>((resolve) => {
-              heldResolve = resolve;
-            });
-          }
-          return createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-          })(u.toString(), init);
-        })
-      );
+      stubFetch((input: string | URL | Request, init?: RequestInit) => {
+        const rawUrl =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const u = new URL(rawUrl, 'http://localhost');
+        if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
+          u.searchParams.set('fit', '0'); // always paged at mount
+        } else if (
+          holdLegacy &&
+          u.pathname === `/api/v1/projects/${projectId}/agents` &&
+          !u.searchParams.get('sort')
+        ) {
+          holdLegacy = false;
+          requests.push({ url: rawUrl });
+          return new Promise<Response>((resolve) => {
+            heldResolve = resolve;
+          });
+        }
+        return createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        })(u.toString(), init);
+      });
 
       const el = await createComponent(projectId);
       expect(internals(el).agentWindow.state).toBe('paged');
@@ -3925,30 +3865,27 @@ describe('project-detail — agent list window', () => {
       const requests: AgentsRequest[] = [];
       let holdNext = false;
       let heldResolve: ((r: Response) => void) | null = null;
-      vi.stubGlobal(
-        'fetch',
-        vi.fn((input: string | URL | Request, init?: RequestInit) => {
-          const rawUrl =
-            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-          if (
-            holdNext &&
-            rawUrl.includes(`/api/v1/projects/${projectId}/agents`) &&
-            !rawUrl.includes('sort=')
-          ) {
-            holdNext = false;
-            requests.push({ url: rawUrl });
-            return new Promise<Response>((resolve) => {
-              heldResolve = resolve;
-            });
-          }
-          return createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-          })(input, init);
-        })
-      );
+      stubFetch((input: string | URL | Request, init?: RequestInit) => {
+        const rawUrl =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (
+          holdNext &&
+          rawUrl.includes(`/api/v1/projects/${projectId}/agents`) &&
+          !rawUrl.includes('sort=')
+        ) {
+          holdNext = false;
+          requests.push({ url: rawUrl });
+          return new Promise<Response>((resolve) => {
+            heldResolve = resolve;
+          });
+        }
+        return createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        })(input, init);
+      });
 
       const el = await createComponent(projectId);
       expect((el as unknown as { agents: Agent[] }).agents.length).toBe(5); // this.agents already holds data
@@ -4000,7 +3937,7 @@ describe('project-detail — agent list window', () => {
         }),
         isProjectAgents(projectId)
       );
-      vi.stubGlobal('fetch', vi.fn(h.fn));
+      stubFetch(h.fn);
       return { agents, h };
     }
 
@@ -4112,7 +4049,8 @@ describe('project-detail — agent list window', () => {
       h.hold();
       void win.next();
       await vi.waitFor(() => expect(h.sent).toHaveLength(2));
-      expect(new URL(h.sent[1].url, 'http://x').searchParams.has('cursor')).toBe(true);
+      // Next asks for the next slice of the walk order frozen from page 0.
+      expect(new URL(h.sent[1].url, 'http://x').searchParams.has('ids')).toBe(true);
       internals(el).toggleSort('updated'); // desc to asc: a new sorted request
       await vi.waitFor(() => expect(h.sent).toHaveLength(3));
       expect(h.sent[1].signal?.aborted).toBe(true);
@@ -4163,20 +4101,17 @@ describe('project-detail — agent list window', () => {
         requests,
       });
       const legacy: Array<{ url: string; signal: AbortSignal | undefined }> = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn((input: string | URL | Request, init?: RequestInit) => {
-          const raw =
-            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-          const u = new URL(raw, 'http://localhost');
-          if (u.pathname === `/api/v1/projects/${projectId}/agents`) {
-            legacy.push({ url: raw, signal: init?.signal ?? undefined });
-            // The page is navigated away while page 2 is in flight.
-            if (legacy.length === 2) stateManager.setScope({ type: 'brokers-list' });
-          }
-          return inner(input, init);
-        })
-      );
+      stubFetch((input: string | URL | Request, init?: RequestInit) => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const u = new URL(raw, 'http://localhost');
+        if (u.pathname === `/api/v1/projects/${projectId}/agents`) {
+          legacy.push({ url: raw, signal: init?.signal ?? undefined });
+          // The page is navigated away while page 2 is in flight.
+          if (legacy.length === 2) stateManager.setScope({ type: 'brokers-list' });
+        }
+        return inner(input, init);
+      });
       const el = await createComponent(projectId);
       await vi.waitFor(() => expect(internals(el).agentsLoading).toBe(false));
       await settle(el);
@@ -4194,16 +4129,13 @@ describe('project-detail — agent list window', () => {
         makeAgent(i, { projectId, phase: i % 2 === 0 ? 'running' : 'stopped' })
       );
       const requests: AgentsRequest[] = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(
-          createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-          })
-        )
+      stubFetch(
+        createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        })
       );
       const el = await createComponent(projectId);
       await vi.waitFor(() => expect(internals(el).agentWindow.state).toBe('capped'));
@@ -4220,16 +4152,13 @@ describe('project-detail — agent list window', () => {
       localStorage.setItem('scion-view-project-agents', 'graph');
       const agents = Array.from({ length: 1200 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(
-          createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-          })
-        )
+      stubFetch(
+        createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        })
       );
       const el = await createComponent(projectId);
       await vi.waitFor(() => expect(internals(el).agentWindow.state).toBe('held'));
@@ -4251,16 +4180,13 @@ describe('project-detail — agent list window', () => {
         makeAgent(i, { projectId, taskSummary: 'old task' })
       );
       const requests: AgentsRequest[] = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn((input: string | URL | Request, init?: RequestInit) =>
-          createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-          })(input, init)
-        )
+      stubFetch((input: string | URL | Request, init?: RequestInit) =>
+        createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        })(input, init)
       );
       const el = await createComponent(projectId);
       const win = internals(el).agentWindow;
@@ -4300,23 +4226,20 @@ describe('project-detail — agent list window', () => {
           agents,
           requests,
         });
-        vi.stubGlobal(
-          'fetch',
-          vi.fn((input: string | URL | Request, init?: RequestInit) => {
-            const raw =
-              typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-            const u = new URL(raw, 'http://localhost');
-            if (
-              refuse &&
-              u.pathname === `/api/v1/projects/${projectId}/agents` &&
-              u.searchParams.get('label') === 'env=prod'
-            ) {
-              requests.push({ url: raw });
-              return Promise.resolve(jsonResponse({ error: { message: 'bad label' } }, 400));
-            }
-            return inner(input, init);
-          })
-        );
+        stubFetch((input: string | URL | Request, init?: RequestInit) => {
+          const raw =
+            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          const u = new URL(raw, 'http://localhost');
+          if (
+            refuse &&
+            u.pathname === `/api/v1/projects/${projectId}/agents` &&
+            u.searchParams.get('label') === 'env=prod'
+          ) {
+            requests.push({ url: raw });
+            return Promise.resolve(jsonResponse({ error: { message: 'bad label' } }, 400));
+          }
+          return inner(input, init);
+        });
         const el = await createComponent(projectId);
         await settle(el);
         expect(internals(el).agentWindow.state).toBe('small');
@@ -4366,17 +4289,14 @@ describe('project-detail — agent list window', () => {
         localStorage.setItem('scion-view-project-agents', c.view);
         const agents = Array.from({ length: c.count }, (_, i) => makeAgent(i, { projectId }));
         const requests: AgentsRequest[] = [];
-        vi.stubGlobal(
-          'fetch',
-          vi.fn(
-            createRealisticFetchHandler({
-              projectId,
-              projectCaps: { actions: ['read'] },
-              agents,
-              requests,
-              legacyTruncated: c.state === 'capped',
-            })
-          )
+        stubFetch(
+          createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+            legacyTruncated: c.state === 'capped',
+          })
         );
         const el = await createComponent(projectId);
         await settle(el);
@@ -4405,17 +4325,14 @@ describe('project-detail — agent list window', () => {
       );
       const agents = Array.from({ length: 600 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(
-          createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-            failLegacyCursor: '500',
-          })
-        )
+      stubFetch(
+        createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+          failLegacyCursor: '500',
+        })
       );
       const el = await createComponent(projectId);
       await settle(el);
@@ -4439,17 +4356,14 @@ describe('project-detail — agent list window', () => {
       localStorage.setItem('scion-view-project-agents', 'graph');
       const agents = Array.from({ length: 2001 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(
-          createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-            readable: (a) => Number(a.id.slice(2)) % 20 < 7,
-          })
-        )
+      stubFetch(
+        createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+          readable: (a) => Number(a.id.slice(2)) % 20 < 7,
+        })
       );
       const el = await createComponent(projectId);
       await settle(el);
@@ -4472,17 +4386,14 @@ describe('project-detail — agent list window', () => {
       );
       const agents = Array.from({ length: 100 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(
-          createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-            legacyTruncated: true,
-          })
-        )
+      stubFetch(
+        createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+          legacyTruncated: true,
+        })
       );
       const el = await createComponent(projectId);
       await settle(el);
@@ -4505,18 +4416,15 @@ describe('project-detail — agent list window', () => {
         makeAgent(i, { projectId, labels: { env: 'prod' } })
       );
       const requests: AgentsRequest[] = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(
-          createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-            legacyTruncated: true,
-            refuseSortedAbove: 50,
-          })
-        )
+      stubFetch(
+        createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+          legacyTruncated: true,
+          refuseSortedAbove: 50,
+        })
       );
       const el = await createComponent(projectId);
       await settle(el);
@@ -4552,16 +4460,13 @@ describe('project-detail — agent list window', () => {
       localStorage.setItem('scion-view-project-agents', 'list');
       const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(
-          createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-          })
-        )
+      stubFetch(
+        createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        })
       );
       const el = await createComponent(projectId);
       await settle(el);
@@ -4602,16 +4507,13 @@ describe('project-detail — agent list window', () => {
         makeAgent(i, { projectId, labels: { env: i % 2 === 0 ? 'prod' : 'dev' } })
       );
       const requests: AgentsRequest[] = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(
-          createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-          })
-        )
+      stubFetch(
+        createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        })
       );
       const el = await createComponent(projectId);
       await settle(el);
@@ -4671,41 +4573,38 @@ describe('project-detail — agent list window', () => {
           for (const open of gates.splice(0)) open();
         },
       };
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-          const raw =
-            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-          const u = new URL(raw, 'http://localhost');
-          const signal = init?.signal ?? undefined;
-          if (u.pathname === `/api/v1/projects/${projectId}` && ctl.failProjectOnce) {
-            ctl.failProjectOnce = false;
-            return jsonResponse({ error: { message: 'project boom' } }, 500);
+      stubFetch(async (input: string | URL | Request, init?: RequestInit) => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const u = new URL(raw, 'http://localhost');
+        const signal = init?.signal ?? undefined;
+        if (u.pathname === `/api/v1/projects/${projectId}` && ctl.failProjectOnce) {
+          ctl.failProjectOnce = false;
+          return jsonResponse({ error: { message: 'project boom' } }, 500);
+        }
+        if (u.pathname === `/api/v1/projects/${projectId}/agents`) {
+          sent.push({ url: raw, signal });
+          // The response is computed now, so it predates any live event
+          // the test emits while it is held.
+          const res = ctl.failAgents
+            ? (requests.push({ url: raw }), jsonResponse({ error: { message: 'boom' } }, 500))
+            : await inner(input, init);
+          if (ctl.toHold > 0) {
+            ctl.toHold--;
+            await new Promise<void>((resolve, reject) => {
+              gates.push(resolve);
+              signal?.addEventListener(
+                'abort',
+                () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })),
+                { once: true }
+              );
+            });
           }
-          if (u.pathname === `/api/v1/projects/${projectId}/agents`) {
-            sent.push({ url: raw, signal });
-            // The response is computed now, so it predates any live event
-            // the test emits while it is held.
-            const res = ctl.failAgents
-              ? (requests.push({ url: raw }), jsonResponse({ error: { message: 'boom' } }, 500))
-              : await inner(input, init);
-            if (ctl.toHold > 0) {
-              ctl.toHold--;
-              await new Promise<void>((resolve, reject) => {
-                gates.push(resolve);
-                signal?.addEventListener(
-                  'abort',
-                  () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })),
-                  { once: true }
-                );
-              });
-            }
-            if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
-            return res;
-          }
-          return inner(input, init);
-        })
-      );
+          if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+          return res;
+        }
+        return inner(input, init);
+      });
       return ctl;
     }
 
@@ -4851,15 +4750,12 @@ describe('project-detail — agent list window', () => {
         startedAt: new Date().toISOString(),
         leaseExpiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
       };
-      vi.stubGlobal(
-        'fetch',
-        vi.fn((input: string | URL | Request, init?: RequestInit) => {
-          if (init?.method === 'DELETE') {
-            return Promise.resolve(jsonResponse({ agentId: 'a-1', deletion }, 202));
-          }
-          return inner(input, init);
-        })
-      );
+      stubFetch((input: string | URL | Request, init?: RequestInit) => {
+        if (init?.method === 'DELETE') {
+          return Promise.resolve(jsonResponse({ agentId: 'a-1', deletion }, 202));
+        }
+        return inner(input, init);
+      });
 
       const el = await createComponent(projectId);
       const trashButtons = (): number =>
@@ -4939,16 +4835,13 @@ describe('project-detail — agent list window', () => {
       const agents = [0, 1, 2].map((i) =>
         makeAgent(i, { projectId, _capabilities: lifecycleCaps })
       );
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(
-          createFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests: [],
-          })
-        )
+      stubFetch(
+        createFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests: [],
+        })
       );
       const el = await createComponent(projectId);
       let st = await rowState(el);
@@ -4982,16 +4875,13 @@ describe('project-detail — agent list window', () => {
       const agents = Array.from({ length: PROJECT_AGENTS_FIT_THRESHOLD + 1 }, (_, i) =>
         makeAgent(i, { projectId, _capabilities: lifecycleCaps })
       );
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(
-          createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests: [],
-          })
-        )
+      stubFetch(
+        createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests: [],
+        })
       );
       const el = await createComponent(projectId);
       expect(internals(el).agentWindow.state).toBe('paged');
@@ -5072,17 +4962,14 @@ describe('project-detail — agent list window', () => {
         agents,
         requests: [],
       });
-      vi.stubGlobal(
-        'fetch',
-        vi.fn((input: string | URL | Request, init?: RequestInit) => {
-          const url = typeof input === 'string' ? input : input.toString();
-          if (init?.method && init.method !== 'GET') {
-            mutations.push(`${init.method} ${url}`);
-            return Promise.resolve(onMutate(url));
-          }
-          return inner(input, init);
-        })
-      );
+      stubFetch((input: string | URL | Request, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (init?.method && init.method !== 'GET') {
+          mutations.push(`${init.method} ${url}`);
+          return Promise.resolve(onMutate(url));
+        }
+        return inner(input, init);
+      });
       const el = await createComponent(projectId);
       return { el, mutations };
     }
@@ -5352,16 +5239,13 @@ describe('project-detail — agent list window', () => {
           requests,
         });
         const deletes: string[] = [];
-        vi.stubGlobal(
-          'fetch',
-          vi.fn((input: string | URL | Request, init?: RequestInit) => {
-            if (init?.method === 'DELETE') {
-              deletes.push(String(input));
-              return Promise.resolve(jsonResponse({ deletion: deletingView() }, 202));
-            }
-            return inner(input, init);
-          })
-        );
+        stubFetch((input: string | URL | Request, init?: RequestInit) => {
+          if (init?.method === 'DELETE') {
+            deletes.push(String(input));
+            return Promise.resolve(jsonResponse({ deletion: deletingView() }, 202));
+          }
+          return inner(input, init);
+        });
         const el = await createComponent(projectId);
         if (viaTree) {
           await vi.waitFor(() => expect(internals(el).agentWindow.state).toBe(state));

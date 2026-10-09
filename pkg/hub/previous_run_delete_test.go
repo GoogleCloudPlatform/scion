@@ -335,9 +335,9 @@ func TestPreviousRunDelete_DeferredCarriesPreviousRuns(t *testing.T) {
 	setDeleteWaitTimeout(t, func(context.Context) time.Duration { return 100 * time.Millisecond })
 	df := newDeferredDeleteFixture(t, "prevdefer", nil)
 	ctx := context.Background()
-	_, err := df.store.SetAgentRunID(ctx, df.agent.ID, "run-1")
+	_, err := df.store.SetAgentRunID(ctx, df.agent.ID, "run-1", nil)
 	require.NoError(t, err)
-	_, err = df.store.SetAgentRunID(ctx, df.agent.ID, "run-2")
+	_, err = df.store.SetAgentRunID(ctx, df.agent.ID, "run-2", nil)
 	require.NoError(t, err)
 
 	requireInDoubt(t, df, df.del(t, ""))
@@ -475,7 +475,7 @@ func TestPreviousRunDelete_MidLoopDeferral_HandsOffRemainingRuns(t *testing.T) {
 	df.srv.SetDispatcher(d)
 	ctx := context.Background()
 	for _, r := range []string{"run-1", "run-2", "run-3"} {
-		_, err := df.store.SetAgentRunID(ctx, df.agent.ID, r)
+		_, err := df.store.SetAgentRunID(ctx, df.agent.ID, r, nil)
 		require.NoError(t, err)
 	}
 

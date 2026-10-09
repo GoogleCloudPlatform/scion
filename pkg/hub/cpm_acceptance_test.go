@@ -1176,8 +1176,9 @@ func TestCPMAcceptance_AC5_UnauthorizedConversation_NoPersistence(t *testing.T) 
 	rr := httptest.NewRecorder()
 	f.srv.handleAgentOutboundMessage(rr, req, f.hubAgentB.ID)
 
-	assert.Equal(t, http.StatusForbidden, rr.Code,
-		"conversation hijack should be denied: %s", rr.Body.String())
+	assert.Equal(t, http.StatusBadRequest, rr.Code,
+		"conversation hijack should be answered as an unknown conversation_id: %s", rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "caller-supplied conversation_id does not exist")
 }
 
 // =============================================================================
@@ -1317,6 +1318,10 @@ func TestCPMAcceptance_Scheduler_CrossProjectDenied(t *testing.T) {
 		FireAt:    time.Now(),
 		Status:    store.ScheduledEventPending,
 	}
+	// The revision principal is admitted to the event's project, so the
+	// fire reaches the cross-project target check.
+	grantContainmentMessageRole(ms, "creator-user", "project-a")
+	evt = withSessionRevision(evt, "creator-user")
 	ms.events[evt.ID] = &evt
 
 	handler := srv.messageEventHandler()
@@ -1344,6 +1349,7 @@ func TestCPMAcceptance_Scheduler_SameProjectAllowed(t *testing.T) {
 		FireAt:    time.Now(),
 		Status:    store.ScheduledEventPending,
 	}
+	evt = withSessionRevision(evt, f.ownerA.ID)
 
 	handler := f.srv.messageEventHandler()
 	err := handler(context.Background(), evt)

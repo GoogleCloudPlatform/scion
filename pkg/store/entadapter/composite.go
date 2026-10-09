@@ -111,9 +111,11 @@ type CompositeStore struct {
 	*ConversationStore
 	*RoleStore
 	*DelegationEdgeStore
+	*DelegationAdoptionStore
+	*AgentHoldStore
+	*MembershipLossCheckStore
 	*AgentCredentialStore
 	*AgentIdentityKeyStore
-	*DecisionAuditStore
 	*MutationAuditStore
 	*QuotaStore
 	*AccessConstraintStore
@@ -140,6 +142,21 @@ type CompositeStore struct {
 	// of invalid rows. Nil means slog.Default(). Tests set it per instance
 	// to capture the report without replacing the process-wide logger.
 	uatBoundaryLogger *slog.Logger
+
+	// adoptionLogger receives AdoptLegacyDelegationProvenance's summary.
+	// Nil means slog.Default().
+	adoptionLogger *slog.Logger
+
+	// adoptionHopHook, when set, runs before each pending hop of
+	// AdoptLegacyDelegationProvenance; a non-nil error stops the loop as a
+	// write failure would. Tests use it to inject failures and concurrent
+	// changes.
+	adoptionHopHook func(i int, rec *store.DelegationAdoption) error
+
+	// adoptionTxHook, when set, runs inside each hop's transaction after the
+	// adoption writes and before the record update; a non-nil error rolls
+	// the hop back. Tests use it to inject a write failure mid-hop.
+	adoptionTxHook func(tx store.Store, rec *store.DelegationAdoption) error
 }
 
 // Compile-time assertion that CompositeStore satisfies the full store.Store
@@ -182,7 +199,10 @@ func (c *CompositeStore) WithTx(ctx context.Context, fn func(tx store.Store) err
 func newTxCompositeStore(tx *ent.Tx) *CompositeStore {
 	txStore := NewCompositeStore(tx.Client())
 	txStore.inTx = true
+	txStore.AgentStore.inTx = true
 	txStore.AccessConstraintStore.inTx = true
+	txStore.MembershipLossCheckStore.inTx = true
+	txStore.AgentHoldStore.inTx = true
 	return txStore
 }
 
@@ -217,9 +237,11 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		ConversationStore:          NewConversationStore(client),
 		RoleStore:                  NewRoleStore(client),
 		DelegationEdgeStore:        NewDelegationEdgeStore(client),
+		DelegationAdoptionStore:    NewDelegationAdoptionStore(client),
+		AgentHoldStore:             NewAgentHoldStore(client),
+		MembershipLossCheckStore:   NewMembershipLossCheckStore(client),
 		AgentCredentialStore:       NewAgentCredentialStore(client),
 		AgentIdentityKeyStore:      NewAgentIdentityKeyStore(client),
-		DecisionAuditStore:         NewDecisionAuditStore(client),
 		MutationAuditStore:         NewMutationAuditStore(client),
 		QuotaStore:                 NewQuotaStore(client),
 		AccessConstraintStore:      NewAccessConstraintStore(client),
@@ -425,15 +447,15 @@ var purgeDeletedAgentsBatchSize = 500
 var purgeDeletedAgentsTestHook func(tx *ent.Tx, batchCandidateIDs []uuid.UUID)
 
 // PurgeDeletedAgents permanently removes soft-deleted agents older than
-// cutoff, and their identity-key rows, in one transaction. This overrides
-// the embedded AgentStore's implementation, which bulk-deletes agent rows
-// directly with no re-applied eligibility check and no transaction --
-// splitting the original single-predicate DELETE into a separate select and
-// delete reopened a window where an agent restored in between the two would
-// be hard-deleted anyway, taking its keys with it. That is closed here two
-// ways: the whole purge runs in one transaction, and the eligibility
-// predicate (deleted_at IS NOT NULL AND deleted_at < cutoff) is re-applied
-// directly on the agent delete itself, not just the initial candidate query
+// cutoff, and their identity-key rows, in one transaction. It exists only
+// here: the embedded AgentStore has no purge of its own, because a bare bulk
+// delete of agent rows would skip this cascade. Splitting the original
+// single-predicate DELETE into a separate select and delete reopened a
+// window where an agent restored in between the two would be hard-deleted
+// anyway, taking its keys with it. That is closed here two ways: the whole
+// purge runs in one transaction, and the eligibility predicate
+// (deleted_at IS NOT NULL AND deleted_at < cutoff) is re-applied directly
+// on the agent delete itself, not just the initial candidate query
 // -- a candidate restored in between no longer matches it at delete time and
 // is excluded, regardless of how stale the candidate list has become.
 // Because a bulk delete reports only a count, not which rows it removed,
@@ -447,10 +469,7 @@ var purgeDeletedAgentsTestHook func(tx *ent.Tx, batchCandidateIDs []uuid.UUID)
 // own slug -- stay reserved forever, blocking any later agent from taking
 // them.
 func (c *CompositeStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error) {
-	// Resolved before the transaction opens: the first call probes the
-	// dialect through the non-tx client, which would block behind this
-	// transaction on a single-connection SQLite pool.
-	useLock := c.AgentStore.usesRowLocks(ctx)
+	useLock := c.AgentStore.usesRowLocks()
 	tx, err := c.client.Tx(ctx)
 	if err != nil {
 		return 0, err
@@ -647,6 +666,19 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 	if err := c.BackfillDelegationEdges(ctx); err != nil {
 		return fmt.Errorf("delegation edge backfill: %w", err)
 	}
+	// After BackfillDelegationEdges, so edges that backfill writes on a very
+	// old database are planned too. Its own marker gates it; the backfill
+	// marker does not. A failure is not fatal: unadopted hops keep their
+	// current denial and the next boot retries.
+	//
+	// Deferred snapshot: when planning or the snapshot write fails on the
+	// first boot, the hub serves requests with no snapshot, and the next
+	// boot's snapshot includes rows written in between. Every path rule
+	// applies to those rows, and the admin status view reports
+	// snapshotTaken=false until a snapshot exists.
+	if err := c.AdoptLegacyDelegationProvenance(ctx); err != nil {
+		c.adoptionLog().Error("delegation provenance adoption failed (non-fatal); retried on next boot", "error", err)
+	}
 	if err := c.BackfillProjectMembersGroupMarkers(ctx); err != nil {
 		return fmt.Errorf("project members group marker backfill: %w", err)
 	}
@@ -829,7 +861,7 @@ func (c *CompositeStore) BackfillDelegationEdges(ctx context.Context) error {
 			// edges, which is a security gap.
 			_, err := c.client.DelegationEdge.Create().
 				SetDelegatorType(delegationedge.DelegatorType(delegatorType)).
-				SetDelegatorID(delegatorID).
+				SetDelegatorID(canonicalPrincipalID(delegatorID)).
 				SetDelegateType(delegationedge.DelegateTypeAgent).
 				SetDelegateID(a.ID.String()).
 				SetScopeType(delegationedge.ScopeTypeProject).

@@ -17,8 +17,11 @@ package messaging
 import (
 	"context"
 	"log/slog"
+	"strconv"
+	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -84,7 +87,7 @@ func RenderDeliveryText(in RenderDeliveryInput) string {
 
 	// Transport flag: plain messages deliver body text only.
 	if in.Msg.Plain {
-		return in.Msg.Msg
+		return AppendArtifactFetchHints(in.Msg.Msg, in.Msg.Metadata)
 	}
 
 	// Pass the real persisted identity into MapLegacyEnvelope so the
@@ -99,6 +102,10 @@ func RenderDeliveryText(in RenderDeliveryInput) string {
 		// MapLegacyEnvelope only fails on nil input, which we checked.
 		return in.Msg.Msg
 	}
+
+	// Artifact fetch hints (ptone/scion#3223) go in the delivered body only;
+	// in.Msg and the persisted row keep the body as sent.
+	msg.Body = AppendArtifactFetchHints(msg.Body, in.Msg.Metadata)
 
 	// Override timestamp if we have a real one from the persisted row.
 	if !in.CreatedAt.IsZero() {
@@ -128,6 +135,37 @@ func RenderDeliveryText(in RenderDeliveryInput) string {
 		Plain: in.Msg.Plain,
 	}
 	return FormatNewDelivery(msg, addrs, convInfo, opts, in.IsMention, in.ReplyToID != "")
+}
+
+// AppendArtifactFetchHints appends one line per artifact reference in md to
+// body, so the recipient's path to the bytes is one command:
+//
+//	Artifact: v2 - scion artifact get scion://artifact/<id>@2
+//	Artifact: current - scion artifact get scion://artifact/<id>
+//
+// The lines are built from the reference alone. They carry no title and
+// involve no lookup: whether the recipient may read the artifact is decided
+// when it runs the command. body is returned unchanged when md has no
+// well-formed references.
+func AppendArtifactFetchHints(body string, md map[string]string) string {
+	refs, _ := artifacts.ParseMessageRefs(md[artifacts.MessageMetadataKey])
+	if len(refs) == 0 {
+		return body
+	}
+	var b strings.Builder
+	b.WriteString(body)
+	b.WriteString("\n")
+	for _, r := range refs {
+		b.WriteString("\nArtifact: ")
+		if r.Seq > 0 {
+			b.WriteString("v" + strconv.Itoa(r.Seq))
+		} else {
+			b.WriteString("current")
+		}
+		b.WriteString(" - scion artifact get ")
+		b.WriteString(r.String())
+	}
+	return b.String()
 }
 
 // ConversationGetter is the minimal interface for looking up a conversation

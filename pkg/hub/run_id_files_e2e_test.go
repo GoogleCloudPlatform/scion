@@ -198,8 +198,17 @@ func TestRunID_E2E_LateGhostDeleteSparesRecreatedAgentFiles(t *testing.T) {
 			}
 
 			// The late delete for ghost A, with files and branch: a 404 on
-			// the broker, which the hub treats as an idempotent success.
-			if err := d.DispatchAgentDelete(ctx, agentA, true, true, false, time.Time{}); err != nil {
+			// the broker. With B's container running, the broker names run
+			// B as the run holding the name, and the hub reports the
+			// refusal (ErrDeleteRunMismatch, ptone/scion#3080); with B's
+			// files only, it is the plain idempotent success.
+			err := d.DispatchAgentDelete(ctx, agentA, true, true, false, time.Time{})
+			if tc.bStarted {
+				var refused *DeleteRunMismatchError
+				if !errors.As(err, &refused) || refused.RequestedRunID != runA || refused.CurrentRunID != runB {
+					t.Fatalf("late delete for run A: err = %v, want the refusal naming run B", err)
+				}
+			} else if err != nil {
 				t.Fatalf("late delete for run A: %v", err)
 			}
 			if data, err := os.ReadFile(workFile); err != nil || string(data) != "B's work" {

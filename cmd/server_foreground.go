@@ -209,12 +209,12 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if projectDir, ok := config.FindProjectRoot(); ok {
 		if projectDir != globalDir {
 			parentDir := filepath.Dir(projectDir)
-			fmt.Fprintf(os.Stderr, "\n%s%s WARNING: Server is running from a project directory context (%s)%s\n",
-				util.Bold, util.Yellow, parentDir, util.Reset)
-			fmt.Fprintf(os.Stderr, "%s%s          The runtime broker will use this project's templates and settings.%s\n",
-				util.Bold, util.Yellow, util.Reset)
-			fmt.Fprintf(os.Stderr, "%s%s          For machine-wide operation, run the server from outside any project directory.%s\n\n",
-				util.Bold, util.Yellow, util.Reset)
+			fmt.Fprint(os.Stderr, util.ColorFor(os.Stderr, fmt.Sprintf("\n%s%s WARNING: Server is running from a project directory context (%s)%s\n",
+				util.Bold, util.Yellow, parentDir, util.Reset)))
+			fmt.Fprint(os.Stderr, util.ColorFor(os.Stderr, fmt.Sprintf("%s%s          The runtime broker will use this project's templates and settings.%s\n",
+				util.Bold, util.Yellow, util.Reset)))
+			fmt.Fprint(os.Stderr, util.ColorFor(os.Stderr, fmt.Sprintf("%s%s          For machine-wide operation, run the server from outside any project directory.%s\n\n",
+				util.Bold, util.Yellow, util.Reset)))
 		}
 	}
 
@@ -361,19 +361,8 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			log.Fatalf("Hub server failed to start: %v", hubInitErr)
 		}
 
-		// The Hub handler may be served by two listeners (its own and the
-		// WebServer's), so neither listener's Shutdown closes the decision
-		// audit writer; exit.run does, before the store closer deferred
-		// above and before the OTel providers registered below flush, so
-		// the drain's drops and write latencies are exported. On SIGINT
-		// (Ctrl-C, `scion server stop`) it runs after wg.Wait, once both
-		// listeners have drained, so records from requests served during
-		// the drain are written. On an error or early return there is no
-		// wg.Wait: a listener may still be serving or draining, and
-		// records from requests that finish after the close are counted
-		// as shutdown drops.
-		hubSrv.DeferDecisionAuditClose()
-		exit := &hubExitSequence{closeDecisionAudit: hubSrv.CloseDecisionAudit}
+		// Flush telemetry providers before the store closes on exit.
+		exit := &hubExitSequence{}
 		defer exit.run()
 
 		// The co-located broker registers (startRuntimeBroker, step 13)
@@ -385,12 +374,12 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			hubSrv.ExpectEmbeddedBroker()
 		}
 
+		// Metrics and traces share one resolved identity.
+		telemetryID := newHubTelemetryIdentity(hubSrv, cfg.Hub.ResolveHubName())
+
 		// Wire hub OTel tracing export to Cloud Trace.
 		if parseBoolEnv("SCION_TRACING_ENABLED") && cfg.Hub.GCPProjectID != "" {
-			tp, tpErr := hubtracing.NewTracerProvider(ctx, cfg.Hub.GCPProjectID,
-				hubtracing.WithHubID(hubSrv.HubID()),
-				hubtracing.WithHubName(cfg.Hub.ResolveHubName()),
-			)
+			tp, tpErr := hubtracing.NewTracerProvider(ctx, cfg.Hub.GCPProjectID, telemetryID.tracingOptions()...)
 			if tpErr != nil {
 				log.Printf("WARNING: hub tracing export disabled: %v", tpErr)
 			} else {
@@ -401,10 +390,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 
 		// Wire hub OTel metrics export to Cloud Monitoring.
 		if cfg.Hub.GCPProjectID != "" {
-			mp, mpErr := hubmetrics.NewMeterProvider(ctx, cfg.Hub.GCPProjectID,
-				hubmetrics.WithHubID(hubSrv.HubID()),
-				hubmetrics.WithHubName(cfg.Hub.ResolveHubName()),
-			)
+			mp, mpErr := hubmetrics.NewMeterProvider(ctx, cfg.Hub.GCPProjectID, telemetryID.metricsOptions()...)
 			if mpErr != nil {
 				log.Printf("WARNING: hub metrics export disabled: %v", mpErr)
 			} else {
@@ -1120,9 +1106,11 @@ func isHADeployment(cfg *config.GlobalConfig) bool {
 }
 
 // validateHostedBasic runs lightweight checks that apply to all --hosted
-// deployments (both single-instance VMs and Cloud Run HA).
+// deployments (both single-instance VMs and Cloud Run HA). The session
+// secret backs hub JWT signing and web sessions only, so a broker-only
+// process (runtime-broker start) does not warn about it (#3605).
 func validateHostedBasic(cfg *config.GlobalConfig) {
-	if !hostedMode || cfg == nil {
+	if !hostedMode || cfg == nil || (!enableHub && !enableWeb) {
 		return
 	}
 	if strings.TrimSpace(resolveSessionSecret()) == "" {
@@ -1248,7 +1236,21 @@ func validateServerPreflight(cfg *config.GlobalConfig) error {
 	if err := cfg.Hub.Conduit.Validate(); err != nil {
 		return err
 	}
+	if _, err := hub.ParseAgentRunScope(cfg.Auth.AgentRunScope, cfg.Auth.AgentRunScopeLegacyUntil); err != nil {
+		return err
+	}
 	return nil
+}
+
+// agentRunScopeSetting returns the parsed agent run-scope setting.
+// validateServerPreflight has already rejected an invalid value, so an
+// error here falls back to the default (off).
+func agentRunScopeSetting(cfg *config.GlobalConfig) hub.AgentRunScope {
+	s, err := hub.ParseAgentRunScope(cfg.Auth.AgentRunScope, cfg.Auth.AgentRunScopeLegacyUntil)
+	if err != nil {
+		return hub.AgentRunScope{}
+	}
+	return s
 }
 
 // isSupportedIAPAudience returns true when audience is a recognised IAP
@@ -1919,10 +1921,14 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		SoftDeleteRetention:          cfg.Hub.SoftDeleteRetention,
 		SoftDeleteRetainFiles:        cfg.Hub.SoftDeleteRetainFiles,
 		AsyncAgentLaunch:             cfg.Hub.AsyncAgentLaunch,
+		PerfTrace:                    cfg.Hub.PerfTrace,
 		LaunchTimeout:                cfg.Hub.LaunchTimeout,
 		LaunchKeepaliveSeconds:       cfg.Hub.LaunchKeepaliveSeconds,
 		ConduitTCPAllowedPorts:       append([]int(nil), cfg.Hub.Conduit.TCPAllowedPorts...),
 		ConduitGrantKeyActivation:    conduitGrantKeyActivationSetting(cfg),
+		ConduitAuthzRecheckInterval:  conduitAuthzRecheckIntervalSetting(cfg),
+		ConduitUserStreamAuthzMax:    conduitUserStreamAuthzMaxSetting(cfg),
+		AgentRunScope:                agentRunScopeSetting(cfg),
 		AdminMode:                    adminMode,
 		MaintenanceMessage:           maintenanceMessage,
 		SchedulerIntervalSeconds:     cfg.Scheduler.IntervalSeconds,
@@ -2058,11 +2064,17 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		hubSrv.SetReaperMetrics(reaperRec)
 	}
 
-	auditRec, auditErr := hub.NewOTelDecisionAuditMetrics(mp, hubSrv.DecisionAuditQueueDepth)
-	if auditErr != nil {
-		log.Printf("WARNING: hub decision audit metrics disabled: %v", auditErr)
+	if authzRec, err := hub.NewOTelConduitStreamAuthzMetrics(mp); err != nil {
+		log.Printf("WARNING: hub conduit stream authz metrics disabled: %v", err)
 	} else {
-		hubSrv.SetDecisionAuditMetrics(auditRec)
+		hubSrv.SetConduitStreamAuthzMetrics(authzRec)
+	}
+
+	runScopeRec, runScopeErr := hub.NewOTelAgentRunScopeMetrics(mp)
+	if runScopeErr != nil {
+		log.Printf("WARNING: hub agent run-scope metrics disabled: %v", runScopeErr)
+	} else {
+		hubSrv.SetAgentRunScopeMetrics(runScopeRec)
 	}
 
 	return hubDBRec
@@ -2249,6 +2261,11 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 				hubSAEmail = gcpGen.ServiceAccountEmail()
 			}
 			checker := hub.NewPolicyTroubleshooterChecker(ptClient, hubSAEmail, hubSrv.DenyUnknownFailOpen())
+			// Follow reloads of the deny-unknown fallback policy.
+			checker.SetDenyUnknownPolicySource(hubSrv.DenyUnknownFailOpen)
+			// Report real API calls, not cached results, to the admin
+			// diagnostic for the assignment check.
+			checker.SetCallObserver(hubSrv.NoteSAAssignCheckCall)
 			cached := hub.NewCachedCallerPermissionChecker(checker,
 				60*time.Second, // allowTTL
 				10*time.Second, // denyTTL
@@ -2391,7 +2408,7 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 
 	// Build koanf instances.
 	envKoanf := config.LoadEnvKoanf()
-	bootstrapKoanf := config.LoadBootstrapKoanf()
+	bootstrapKoanf := config.LoadBootstrapKoanfWithConfigPath(serverConfigPath)
 	// Seed material never carries the removed key, so the every-boot sync
 	// cannot write it back into a seeded profiles row.
 	config.DeleteLegacyProfileTimezones(bootstrapKoanf, tzScan.ProfileTimezones)
@@ -2773,6 +2790,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		ProxyAuthenticator:   webProxyAuth,
 		PlatformAuthSA:       webPlatformAuthSA,
 		SlowRequestThreshold: cfg.SlowRequestThreshold,
+		PerfTrace:            cfg.Hub.PerfTrace,
 	}
 	if enableTestLogin {
 		slog.Warn("Test login endpoint is enabled (--enable-test-login). This allows bypass of authentication and MUST NOT be used in production!")
@@ -2792,6 +2810,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		hubSrv.SetEventPublisher(eventPub)
 		startSettingsPropagation(ctx, hubSrv, eventPub)
 		webSrv.SetAccessSettingsProvider(hubSrv)
+		webSrv.SetProfilingSettingsProvider(hubSrv)
 		webSrv.SetOAuthService(hubSrv.GetOAuthService())
 		webSrv.SetStore(hubSrv.GetStore())
 		webSrv.SetUserTokenService(hubSrv.GetUserTokenService())
@@ -3994,14 +4013,9 @@ func telemetryGCPProjectFromSecret(ctx context.Context, sb secret.SecretBackend,
 	return gcputil.ParseProjectID([]byte(sw.Value))
 }
 
-// hubExitSequence is the Hub's exit work in runServerStart, deferred as
-// one call so its order is fixed and tested: drain and close the decision
-// audit writer first, then flush the OTel providers in reverse order of
-// registration (as separate defers would), so the drain's drops and write
-// latencies reach the final export.
+// hubExitSequence flushes telemetry providers in reverse registration order.
 type hubExitSequence struct {
-	closeDecisionAudit func(context.Context)
-	flushes            []func(context.Context) error
+	flushes []func(context.Context) error
 }
 
 func (h *hubExitSequence) addFlush(f func(context.Context) error) {
@@ -4009,7 +4023,6 @@ func (h *hubExitSequence) addFlush(f func(context.Context) error) {
 }
 
 func (h *hubExitSequence) run() {
-	h.closeDecisionAudit(context.Background())
 	for i := len(h.flushes) - 1; i >= 0; i-- {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := h.flushes[i](ctx); err != nil {

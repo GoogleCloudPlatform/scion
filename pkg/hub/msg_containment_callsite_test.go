@@ -118,6 +118,14 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "messagebroker.go", function: "publishDeliveryDeferred", symbol: "DispatchAgentMessage",
 		class: "exempt", reason: "derivative: delivery-deferred notice to original sender"},
 
+	// artifacts_review.go: deliverArtifactReview — derivative notice
+	// (ptone/scion#3229). Sent after the artifact service finalized a review
+	// version for a request-authenticated reviewer who could write the
+	// artifact; it goes to the artifact's owning agent, as "system", with
+	// a body built from the reference alone.
+	{file: "artifacts_review.go", function: "deliverArtifactReview", symbol: "dispatchWithBrokerRetry",
+		class: "exempt", reason: "derivative: review notice to the artifact's owning agent after an authorized finalize"},
+
 	// notifications.go: dispatchToAgent — UNGUARDED notification fan-out.
 	// Subscription-only authorization; revocation not re-evaluated.
 	{file: "notifications.go", function: "dispatchToAgent", symbol: "dispatchWithBrokerRetry",

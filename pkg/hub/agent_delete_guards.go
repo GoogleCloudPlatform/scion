@@ -157,6 +157,10 @@ func (r *startRefusal) dmError() *AgentDMError {
 //  1. deleteBlocksStart → 409 delete_in_progress (this design);
 //     1b. soft-deleted, on start, restart and wake → 409 "agent is
 //     deleted; restore it first";
+//     1c. not in good standing (agentStanding: held, held or deleted
+//     chain agent, root user inactive or not admitted to the project),
+//     on every entry but restore → 409 "This agent is suspended. A
+//     hub admin can lift the hold."; a lookup fault → 500;
 //  2. IsIncompleteCreate → 409 agent_create_incomplete (T1 P1b-3);
 //  3. IsInFlight, before the launch deadline → 409 agent_launching with
 //     InFlight set (T1 P1b-3). Start, restart and create-existing answer
@@ -170,6 +174,13 @@ func (r *startRefusal) dmError() *AgentDMError {
 func (s *Server) startGate(ctx context.Context, a *store.Agent, entry startEntry) *startRefusal {
 	// Step 1: delete in progress.
 	blocked, err := s.deleteBlocksStart(ctx, a)
+	if err != nil && requestEnded(ctx, err) {
+		// The caller's own request ended (cancelled, or its time budget ran
+		// out): an ordinary outcome, not a store failure.
+		s.agentLifecycleLog.Info("start gate: the request ended before the delete check",
+			"agent_id", a.ID, "entry", string(entry), "error", err)
+		return requestEndedRefusal()
+	}
 	if err != nil {
 		// Fail closed: without the dispatch table we cannot rule out an
 		// outstanding cross-node delete intent.
@@ -194,6 +205,30 @@ func (s *Server) startGate(ctx context.Context, a *store.Agent, entry startEntry
 		return agentDeletedRefusal(a.ID)
 	}
 
+	// Step 1c: the agent must be in good standing (ptone/scion#3433): not
+	// held, its upward chain live and not held, and its root user active
+	// and admitted to the project. Restore is a soft-delete reversal and
+	// is not refused here; a start that follows it is. Lookup faults
+	// refuse.
+	if entry != startEntryRestore {
+		allowDeleted := entry == startEntryReincarnate || entry == startEntryCreateExisting
+		if err := s.evaluateStoredAgentStanding(ctx, a.ID, allowDeleted); err != nil {
+			if !errors.Is(err, errAgentNotInStanding) && requestEnded(ctx, err) {
+				s.agentLifecycleLog.Info("start gate: the request ended before the standing check",
+					"agent_id", a.ID, "entry", string(entry), "error", err)
+				return requestEndedRefusal()
+			}
+			if !errors.Is(err, errAgentNotInStanding) {
+				s.agentLifecycleLog.Error("start gate: standing check failed",
+					"agent_id", a.ID, "entry", string(entry), "error", err)
+			} else {
+				s.agentLifecycleLog.Info("start gate: agent not in good standing",
+					"agent_id", a.ID, "entry", string(entry), "reason", standingReason(err))
+			}
+			return standingStartRefusal(a.ID, err)
+		}
+	}
+
 	// Steps 2-3: incomplete create, then in flight.
 	return launchStartRefusal(a, time.Now())
 }
@@ -208,6 +243,23 @@ func agentDeletedRefusal(agentID string) *startRefusal {
 		Details: map[string]interface{}{
 			"agentId": agentID,
 		},
+	}
+}
+
+// requestEnded reports whether err is ctx's own end: ctx was cancelled or
+// its deadline passed, and err carries that cause.
+func requestEnded(ctx context.Context, err error) bool {
+	return ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
+}
+
+// requestEndedRefusal is the answer to a start whose request ended
+// (cancelled, or its time budget ran out) before the start began. Nothing
+// was claimed, dispatched or written.
+func requestEndedRefusal() *startRefusal {
+	return &startRefusal{
+		HTTPStatus: http.StatusServiceUnavailable,
+		Code:       ErrCodeRuntimeError,
+		Message:    "not started: the request ended or its time budget ran out before the start",
 	}
 }
 
@@ -281,15 +333,26 @@ func deleteClaimedDuringDispatch(err error, agentID string) *startRefusal {
 // whose lease expired, leaves the agent live, so it reports false too.
 func (s *Server) deleteWonAfterLanding(ctx context.Context, agentID string) bool {
 	fresh, err := s.store.GetAgent(ctx, agentID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		s.agentLifecycleLog.Warn("failed to re-read agent after the broker started it; cannot check for a delete",
+			"agent_id", agentID, "error", err)
+	}
+	return deleteWonOnRead(fresh, err)
+}
+
+// deleteWonOnRead is deleteWonAfterLanding's rule applied to the result of
+// a read of the agent's row: the row is gone (store.ErrNotFound), or it is
+// deletedOrDeleteHeld. Any other read error reports false, so the caller
+// answers as before. A failed delete, or a deleting row whose lease
+// expired, leaves the agent live and reports false.
+func deleteWonOnRead(a *store.Agent, err error) bool {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		return true
 	case err != nil:
-		s.agentLifecycleLog.Warn("failed to re-read agent after the broker started it; cannot check for a delete",
-			"agent_id", agentID, "error", err)
 		return false
 	default:
-		return deletedOrDeleteHeld(fresh)
+		return deletedOrDeleteHeld(a)
 	}
 }
 
@@ -393,16 +456,16 @@ func (s *Server) clearFailedDeletionAtClaim(ctx context.Context, a *store.Agent,
 // Only the columns the in-tx guard and the clear can change are carried over
 // from the re-read; in-memory fields the dispatch set are kept. If the re-read
 // fails, a falls back to the requested phase (the pre-guard behaviour) and
-// reloaded is false.
-func (s *Server) settleLifecycleWrite(ctx context.Context, a *store.Agent, newPhase string) (reloaded bool) {
+// the re-read's error is returned (nil when the re-read succeeded).
+func (s *Server) settleLifecycleWrite(ctx context.Context, a *store.Agent, newPhase string) (reloadErr error) {
 	a.Phase = newPhase
 	s.clearFailedDeletion(ctx, a)
 	if err := s.reloadGuardedColumns(ctx, a); err != nil {
 		s.agentLifecycleLog.Warn("failed to re-read agent after lifecycle write",
 			"agent_id", a.ID, "error", err)
-		return false
+		return err
 	}
-	return true
+	return nil
 }
 
 // reloadGuardedColumns re-reads a's row and copies the columns a concurrent

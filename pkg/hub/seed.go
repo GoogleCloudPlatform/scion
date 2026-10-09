@@ -93,14 +93,14 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleSuperAdmin,
 			Description: "Full platform administrator with all permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    1,
+			Revision:    3, // R3: drop Reserved permissions (ptone/scion#3652); R2: add broker.auto_provide (ptone/scion#2104)
 			Permissions: allPermissionIDs(),
 		},
 		{
 			Name:        store.SystemRoleHubAdmin,
 			Description: "Hub administrator with scopeable admin permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    4,
+			Revision:    5, // R5: hub.env_vars.read
 			Permissions: hubAdminPermissionIDs(),
 		},
 		{
@@ -143,7 +143,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.ProjectRoleOwner,
 			Description: "Project owner with full project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    6, // R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    7, // R7: project.set_messaging_policy; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectOwnerPermissionIDs(),
 		},
 		{
@@ -181,14 +181,14 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.AgentRoleDefBaseline,
 			Description: "Baseline agent permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    2, // R2: artifact.create, artifact.update via project:artifact:write
+			Revision:    3, // R3: drop artifact.update (Reserved, ptone/scion#3652); R2: artifact.create, artifact.update via project:artifact:write
 			Permissions: agentRolePermissionIDs(AgentRoleBaseline),
 		},
 		{
 			Name:        store.AgentRoleDefFull,
 			Description: "Full agent permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    2, // R2: artifact.create, artifact.update via project:artifact:write
+			Revision:    3, // R3: drop artifact.update (Reserved, ptone/scion#3652); R2: artifact.create, artifact.update via project:artifact:write
 			Permissions: agentRolePermissionIDs(AgentRoleFull),
 		},
 	}
@@ -341,6 +341,9 @@ func projectOwnerPermissionIDs() []string {
 		"project.manage",
 		"project.read",
 		"project.secret_read",
+		// Project owners hold project.set_messaging_policy; the messaging
+		// policy handler also applies the direct-owner rule.
+		"project.set_messaging_policy",
 		"project.update",
 		// Scheduled event management
 		"scheduled_event.create",
@@ -734,11 +737,15 @@ func recordBuiltInRoleMarker(ctx context.Context, s store.Store, roleName string
 	}
 }
 
-// allPermissionIDs returns IDs for all permissions in the registry.
+// allPermissionIDs returns IDs for all permissions in the registry except
+// the Reserved rows, which no role may hold (see Permission.Reserved).
 func allPermissionIDs() []string {
-	ids := make([]string, len(permissions.Registry))
-	for i, p := range permissions.Registry {
-		ids[i] = p.ID
+	ids := make([]string, 0, len(permissions.Registry))
+	for _, p := range permissions.Registry {
+		if p.IsReserved() {
+			continue
+		}
+		ids = append(ids, p.ID)
 	}
 	return ids
 }
@@ -794,6 +801,9 @@ func hubAdminPermissionIDs() []string {
 		"hub.github_app.update":     true,
 		"hub.metrics.read":          true,
 		"hub.validate.execute":      true,
+		// Hub-level environment variables: list only. Writes and every
+		// secret surface stay with the legacy admin check.
+		"hub.env_vars.read": true,
 		// Quota management
 		"quota.read":   true,
 		"quota.create": true,
@@ -1979,6 +1989,13 @@ func removeHubMembershipTx(ctx context.Context, tx store.Store, userID string) e
 	err = tx.RemoveGroupMember(ctx, group.ID, store.GroupMemberTypeUser, userID)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return fmt.Errorf("remove user from hub-members group: %w", err)
+	}
+	if err == nil {
+		// A hub-scope change: re-evaluate the user's project standing in
+		// the caller's transaction (ptone/scion#3433).
+		if err := enqueueMembershipLossTx(ctx, tx, userID, "", store.MembershipLossTriggerSystemScopeChange, auditActorFromContext(ctx)); err != nil {
+			return err
+		}
 	}
 	return nil
 }

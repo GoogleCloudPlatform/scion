@@ -43,10 +43,24 @@ import { guard } from 'lit/directives/guard.js';
 import { repeat } from 'lit/directives/repeat.js';
 import { apiFetch, extractApiError } from '../../../client/api.js';
 import type { Agent, Message } from '../../../shared/types.js';
-import type { ChatSendDetail } from './chat-composer.js';
+import type { ChatScheduleDetail, ChatSendDetail, ScionChatComposer } from './chat-composer.js';
+import {
+  conversationSupportsScheduledSend,
+  createScheduledMessage,
+  scheduledSendEnabled,
+} from '../../../client/chat-scheduled.js';
+import type { ScheduledRestoreDetail, ScionChatScheduledList } from './chat-scheduled-list.js';
+import './chat-scheduled-list.js';
 import { navigateTo, stateManager } from '../../../client/main.js';
+import { agentIndexOf, agentStore } from '../../../client/agent-store.js';
 import { openTerminal, agentGraphHref } from '../../../client/open-terminal.js';
 import { showToast } from '../../../utils/toast.js';
+import { isFeatureEnabled } from '../../../utils/feature-flags.js';
+import {
+  ARTIFACTS_FLAG,
+  ARTIFACTS_METADATA_KEY,
+  type MessageArtifactRef,
+} from '../../../client/artifacts.js';
 import { playChimeThrottled } from '../../../utils/audio.js';
 import type { ChatAgentMember } from './chat-members.js';
 import {
@@ -118,6 +132,7 @@ const HISTORY_PAGE_SIZE = 50;
 
 const EMPTY_ATTACHMENTS: NonNullable<Message['attachments']> = [];
 const EMPTY_ATTACHMENT_REFS: import('./chat-message.js').AttachmentRefInfo[] = [];
+const EMPTY_ARTIFACT_REFS: MessageArtifactRef[] = [];
 
 /** Threshold in pixels from top to trigger upward scroll loading. */
 const SCROLL_TOP_THRESHOLD = 100;
@@ -395,6 +410,15 @@ const PATH_LINK_NO_PROJECT_ERROR =
 // lives in utils/chat-file-links.ts so the recorder can share it.
 export { parseContainerPath, buildFileApiUrl, type PathLinkTarget };
 
+/** Detail of `peer-agent-resolved`: the agent DM peer, read for the open conversation. */
+export interface PeerAgentResolvedDetail {
+  conversationKey: string;
+  agentId: string;
+  /** The agent's name, or its slug; empty when the row carries neither. */
+  name: string;
+  projectId: string;
+}
+
 @customElement('scion-chat-thread')
 export class ScionChatThread extends LitElement {
   /**
@@ -605,6 +629,13 @@ export class ScionChatThread extends LitElement {
   /** W7: Attachment refs keyed by message ID (from history endpoint + send response). */
   private v2AttachmentMap = new Map<string, import('./chat-message.js').AttachmentRefInfo[]>();
 
+  /**
+   * Artifact refs keyed by message ID, resolved by the hub for this viewer
+   * (history `messageArtifacts`, send response `artifacts`;
+   * ptone/scion#3224). Not @state(): writers call requestUpdate().
+   */
+  private v2ArtifactMap = new Map<string, MessageArtifactRef[]>();
+
   // ---- Phase-3 state ----
 
   /** Current user's last-read message ID (for unread divider). */
@@ -799,6 +830,20 @@ export class ScionChatThread extends LitElement {
 
   /** Last time we sent a typing event (for client-side throttle). */
   private _lastTypingSent = 0;
+
+  /**
+   * This conversation's single-agent read of the DM peer, in flight or done
+   * (see {@link resolvePeerAgentProject}). Kept for one conversation: a read
+   * for another conversation key is not used.
+   */
+  private _peerAgentProject: {
+    conversationKey: string;
+    projectId: string;
+    /** The peer's name (or slug) from the read, for reporting it again. */
+    name: string;
+    /** Whether the read has answered; until then it reports on its own. */
+    done: boolean;
+  } | null = null;
 
   /** Current user ID, cached from the stateManager scope once it exists. */
   private _currentUserId = '';
@@ -1556,6 +1601,22 @@ export class ScionChatThread extends LitElement {
     return this.v2AttachmentMap.get(messageId) ?? EMPTY_ATTACHMENT_REFS;
   }
 
+  /** Artifact refs for a message, as the hub resolved them for this viewer. */
+  private getMessageArtifactRefs(messageId: string): MessageArtifactRef[] {
+    return this.v2ArtifactMap.get(messageId) ?? EMPTY_ARTIFACT_REFS;
+  }
+
+  /** Merge a history page's messageArtifacts into the map; re-render when anything changed. */
+  private mergeMessageArtifacts(map: Record<string, MessageArtifactRef[]> | undefined): void {
+    if (!map) return;
+    let changed = false;
+    for (const [msgId, refs] of Object.entries(map)) {
+      this.v2ArtifactMap.set(msgId, refs);
+      changed = true;
+    }
+    if (changed) this.requestUpdate();
+  }
+
   /** Check if a message sender is an agent (v2 multi-sender). */
   private isSenderAgent(msg: Message): boolean {
     // Agent messages have sender like "agent:slug" or recipient patterns
@@ -1798,6 +1859,7 @@ export class ScionChatThread extends LitElement {
       // Fetch inter-agent exchanges for agent DMs (non-blocking).
       if (this.isAgentDM) {
         void this.fetchInteragentExchanges();
+        void this.resolvePeerAgentProject();
       }
       // Human DMs show a read receipt — seed it so "Seen" survives a reload
       // instead of waiting for the peer's next watermark advance.
@@ -1902,6 +1964,7 @@ export class ScionChatThread extends LitElement {
         messages?: Message[];
         nextCursor?: string;
         messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
+        messageArtifacts?: Record<string, MessageArtifactRef[]>;
         messageExtensions?: Record<
           string,
           { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
@@ -1915,6 +1978,8 @@ export class ScionChatThread extends LitElement {
       if (!shouldMerge()) return true;
 
       const items = data?.items ?? data?.messages ?? [];
+
+      this.mergeMessageArtifacts(data?.messageArtifacts);
 
       // W7: Merge attachment refs from history response.
       if (data?.messageAttachments) {
@@ -2122,6 +2187,16 @@ export class ScionChatThread extends LitElement {
         playChimeThrottled(this.projectId || msg.projectId || '');
       }
 
+      // Artifact refs are resolved per viewer, so they never ride the
+      // broadcast event: fetch them with the latest page when the body
+      // names one.
+      if (
+        isFeatureEnabled(ARTIFACTS_FLAG) &&
+        (msg.msg ?? '').toLowerCase().includes('scion://artifact/')
+      ) {
+        void this.backfillV2();
+      }
+
       this.scrollToBottomAfterRender();
       this.maybeAdvanceReadWatermark();
       return;
@@ -2232,6 +2307,7 @@ export class ScionChatThread extends LitElement {
       items?: Message[];
       messages?: Message[];
       messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
+      messageArtifacts?: Record<string, MessageArtifactRef[]>;
       messageExtensions?: Record<
         string,
         { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
@@ -2241,6 +2317,8 @@ export class ScionChatThread extends LitElement {
     // See fetchHistoryV2: re-checked once the body has been read.
     if (currentId !== this.fetchId) return;
     const items = data?.items ?? data?.messages ?? [];
+
+    this.mergeMessageArtifacts(data?.messageArtifacts);
 
     // W7: Merge attachment refs from history response.
     if (data?.messageAttachments) {
@@ -2512,8 +2590,11 @@ export class ScionChatThread extends LitElement {
 
   /** Send a message in v2 mode. */
   private async handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void> {
-    const { text, attachmentIds, onSuccess, onError } = e.detail;
-    const hasContent = text.length > 0 || (attachmentIds && attachmentIds.length > 0);
+    const { text, attachmentIds, artifactRefs, onSuccess, onError } = e.detail;
+    const hasContent =
+      text.length > 0 ||
+      (attachmentIds && attachmentIds.length > 0) ||
+      (artifactRefs && artifactRefs.length > 0);
     if (!hasContent) return;
     // One send at a time per conversation. The guard is per conversation,
     // not per thread element: chat.ts reuses one element across
@@ -2536,6 +2617,63 @@ export class ScionChatThread extends LitElement {
   }
 
   /**
+   * Whether scheduled send is offered in this conversation: the experiment
+   * is on and the conversation supports it (topics and DMs).
+   */
+  private get scheduleSendAvailable(): boolean {
+    return conversationSupportsScheduledSend(this.conversationKey) && scheduledSendEnabled();
+  }
+
+  /**
+   * Schedule the composer's message (chat-schedule). Only the sender sees
+   * the pending message, in the scheduled list at the bottom of the thread.
+   * On failure the composer gets its draft (and reply) back.
+   */
+  private readonly handleChatScheduleV2 = async (
+    e: CustomEvent<ChatScheduleDetail>
+  ): Promise<void> => {
+    const { text, fireAt, replyToId, onSuccess, onError } = e.detail;
+    const key = this.conversationKey;
+    const savedReplyTo = this.composerReplyTo;
+    this.composerReplyTo = null;
+    try {
+      const scheduled = await createScheduledMessage(key, {
+        content: text,
+        fireAt,
+        idempotencyKey: crypto.randomUUID(),
+        ...(replyToId ? { replyToId } : {}),
+      });
+      this.renderRoot
+        .querySelector<ScionChatScheduledList>('scion-chat-scheduled-list')
+        ?.add(scheduled);
+      onSuccess();
+    } catch (err) {
+      if (key === this.conversationKey) this.composerReplyTo = savedReplyTo;
+      const msg = err instanceof Error ? err.message : 'Failed to schedule message';
+      onError?.(msg);
+      showToast(msg, 'danger');
+    }
+  };
+
+  /**
+   * Put a scheduled message's text into the composer: after Cancel (only
+   * into an empty composer) or Copy to composer.
+   */
+  private readonly handleScheduledRestore = (e: CustomEvent<ScheduledRestoreDetail>): void => {
+    const composer = this.renderRoot.querySelector<ScionChatComposer>('scion-chat-composer');
+    if (!composer) return;
+    const placed = composer.restoreText(e.detail.text, { onlyIfEmpty: e.detail.onlyIfEmpty });
+    if (!placed && !e.detail.onlyIfEmpty) {
+      showToast(
+        composer.editMessage
+          ? 'Finish the message being edited first'
+          : 'The message could not be copied into the composer',
+        'warning'
+      );
+    }
+  };
+
+  /**
    * POST one v2 send. With `wake` false the request carries `offer_wake`, so
    * a suspended primary the user may wake answers with a wake offer instead
    * of a failed row; the user is then asked, and a confirmed wake resends the
@@ -2548,6 +2686,7 @@ export class ScionChatThread extends LitElement {
       interrupt,
       mentions,
       attachmentIds,
+      artifactRefs,
       replyToId,
       replyToContent,
       onSuccess,
@@ -2661,6 +2800,14 @@ export class ScionChatThread extends LitElement {
         };
         body.metadata = metadata;
       }
+      // ptone/scion#3224: artifact references picked in the composer. The
+      // hub keeps only those the sender can read.
+      if (artifactRefs && artifactRefs.length > 0) {
+        body.metadata = {
+          ...(body.metadata ?? {}),
+          [ARTIFACTS_METADATA_KEY]: JSON.stringify(artifactRefs),
+        };
+      }
 
       const res = await this.postChatSend(
         `/api/v1/chat/conversations/${encodeURIComponent(sendConversationKey)}/messages`,
@@ -2704,12 +2851,21 @@ export class ScionChatThread extends LitElement {
         const resData = (await res.json().catch(() => null)) as {
           id?: string;
           attachments?: import('./chat-message.js').AttachmentRefInfo[];
+          artifacts?: MessageArtifactRef[];
+          artifactWarning?: string;
           dispatchState?: string;
           dispatchFailureReason?: string;
           dispatchFailureCode?: string;
         } | null;
         if (resData?.id && resData?.attachments && resData.attachments.length > 0) {
           this.v2AttachmentMap.set(resData.id, resData.attachments);
+        }
+        if (resData?.id && resData?.artifacts && resData.artifacts.length > 0) {
+          this.v2ArtifactMap.set(resData.id, resData.artifacts);
+          this.requestUpdate();
+        }
+        if (resData?.artifactWarning) {
+          showToast(resData.artifactWarning, 'warning');
         }
         // nc-delivery-unreachable: the backend now reports the real dispatch
         // outcome instead of always being "dispatched" on any HTTP 2xx.
@@ -3334,11 +3490,15 @@ export class ScionChatThread extends LitElement {
 
   private async loadOlderMessagesV2(scrollEl: HTMLElement): Promise<void> {
     const loadId = this.fetchId;
+    const jumpSeq = this._jumpSeq;
+    // A jump that started after this load replaced the view with the page
+    // around its target: this older page is not contiguous with it.
+    const jumpedSince = (): boolean => jumpSeq !== this._jumpSeq;
     this.loadingOlder = true;
     const prevScrollHeight = scrollEl.scrollHeight;
 
     try {
-      await this.fetchHistoryV2(this.nextCursor || undefined);
+      await this.fetchHistoryV2(this.nextCursor || undefined, () => !jumpedSince());
     } catch {
       // Silently fail for older messages
     } finally {
@@ -3347,8 +3507,13 @@ export class ScionChatThread extends LitElement {
       if (loadId === this.fetchId) {
         this.loadingOlder = false;
         await this.updateComplete;
-        const newScrollHeight = scrollEl.scrollHeight;
-        scrollEl.scrollTop += newScrollHeight - prevScrollHeight;
+        // No scroll correction after a jump took over the view, or while a
+        // jump's smooth scroll is still settling: a scrollTop write would
+        // cancel that scroll, and its settle check corrects the landing.
+        if (!jumpedSince() && this._jumpScrollCleanup === null) {
+          const newScrollHeight = scrollEl.scrollHeight;
+          scrollEl.scrollTop += newScrollHeight - prevScrollHeight;
+        }
       }
     }
   }
@@ -3564,6 +3729,7 @@ export class ScionChatThread extends LitElement {
       this.messageMap.clear();
       this.messages = [];
       this.v2AttachmentMap.clear();
+      this.v2ArtifactMap.clear();
       this.v2MessageExtMap.clear();
       this.v2ReplyPreviewMap.clear();
       this.nextCursor = null;
@@ -3920,6 +4086,7 @@ export class ScionChatThread extends LitElement {
         messages?: Message[];
         nextCursor?: string;
         messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
+        messageArtifacts?: Record<string, MessageArtifactRef[]>;
         messageExtensions?: Record<
           string,
           { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
@@ -3937,6 +4104,8 @@ export class ScionChatThread extends LitElement {
       for (const [msgId, refs] of Object.entries(data.messageAttachments ?? {})) {
         this.v2AttachmentMap.set(msgId, refs);
       }
+      this.v2ArtifactMap.clear();
+      this.mergeMessageArtifacts(data.messageArtifacts);
       for (const [msgId, ext] of Object.entries(data.messageExtensions ?? {})) {
         this.v2MessageExtMap.set(msgId, ext);
       }
@@ -4452,10 +4621,9 @@ export class ScionChatThread extends LitElement {
    *      sets `senderProjectId`; also the hub's user-to-agent send path
    *      stamps this from the peer agent's project, so a persisted or
    *      SSE-delivered message in an agent DM always carries it).
-   *   2. The DM peer agent's project, read from the shared agent cache
-   *      (`stateManager`, for the current view scope — cleared on every
-   *      `setScope()` and re-seeded by the chat page's member list — no
-   *      extra fetch). This only fills a narrow, real gap: the client's
+   *   2. The DM peer agent's project (see {@link peerAgentProjectId}: the
+   *      global agent map, the agent store's hub list, or one read of the
+   *      peer per conversation). This only fills a narrow, real gap: the client's
    *      own optimistic message (`optimisticMsg.projectId = ''` above) has
    *      no project yet because it hasn't round-tripped the server. The
    *      peer agent is not an unrelated project — it is who the DM is with.
@@ -4540,15 +4708,111 @@ export class ScionChatThread extends LitElement {
     }
   }
 
+  /** The DM peer agent's id; empty when this isn't an agent DM. */
+  private peerAgentId(): string {
+    if (!this.isAgentDM) return '';
+    return this.conversationKey.split(':')[2] || '';
+  }
+
   /**
-   * The DM peer agent's project id, from the shared in-memory agent cache
-   * (no network call). Empty when this isn't an agent DM or the peer agent
-   * isn't in the cache.
+   * The DM peer agent's project id, with no network call. Looked up, in
+   * order, in the global agent map (the current view's own full rows, such
+   * as the agent detail page's seed of its agent), in the agent store's hub
+   * list, and in this conversation's single-agent read (see
+   * {@link resolvePeerAgentProject}). Empty when this isn't an agent DM or
+   * none of them has the peer.
    */
   private peerAgentProjectId(): string {
-    if (!this.isAgentDM) return '';
-    const peerAgentId = this.conversationKey.split(':')[2] || '';
-    return (peerAgentId && stateManager.getAgent(peerAgentId)?.projectId) || '';
+    const peerAgentId = this.peerAgentId();
+    if (!peerAgentId) return '';
+    const known = this.knownPeerAgentProjectId(peerAgentId);
+    if (known) return known;
+    const read = this._peerAgentProject;
+    return read?.conversationKey === this.conversationKey ? read.projectId : '';
+  }
+
+  /** The peer's project from the global agent map, then the store's hub list. */
+  private knownPeerAgentProjectId(peerAgentId: string): string {
+    return this.knownPeerAgent(peerAgentId)?.projectId || '';
+  }
+
+  /**
+   * The peer's row that carries a project: the global agent map's, then the
+   * store's hub list's. Undefined when neither has one.
+   */
+  private knownPeerAgent(peerAgentId: string): Agent | undefined {
+    const fromView = stateManager.getAgent(peerAgentId);
+    if (fromView?.projectId) return fromView;
+    const hub = agentStore.peek({ scope: 'hub' });
+    const fromHub = hub ? agentIndexOf(hub).get(peerAgentId) : undefined;
+    return fromHub?.projectId ? fromHub : undefined;
+  }
+
+  /**
+   * Tell the page who the open agent DM's peer is. The page names the peer
+   * and fills the members sidebar from it when it had no row for the agent
+   * of its own when the DM opened (a DM opened by URL).
+   */
+  private reportPeerAgent(
+    conversationKey: string,
+    agentId: string,
+    agent: Partial<Agent>,
+    projectId: string
+  ): void {
+    this.dispatchEvent(
+      new CustomEvent<PeerAgentResolvedDetail>('peer-agent-resolved', {
+        detail: { conversationKey, agentId, name: agent.name || agent.slug || '', projectId },
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
+  /**
+   * Read the DM peer agent once per conversation (`GET /api/v1/agents/{id}`)
+   * when neither the global agent map nor the store's hub list has it — the
+   * thread opened directly, say, with no hub list loaded. The hub list is
+   * not loaded for this: on a large hub that would walk every agent for one
+   * id. A failed read is not cached, so the next open of the conversation
+   * reads again. Either way the peer is reported to the page: from the row
+   * already held, with no request, or from the read.
+   */
+  private async resolvePeerAgentProject(): Promise<void> {
+    const conversationKey = this.conversationKey;
+    const peerAgentId = this.peerAgentId();
+    if (!peerAgentId) return;
+    const known = this.knownPeerAgent(peerAgentId);
+    if (known) {
+      this.reportPeerAgent(conversationKey, peerAgentId, known, known.projectId || '');
+      return;
+    }
+    const cached = this._peerAgentProject;
+    if (cached?.conversationKey === conversationKey) {
+      // Back on a conversation already read (after a switch away, say): the
+      // page that asked may be showing it again, so report it again.
+      if (cached.done) {
+        this.reportPeerAgent(conversationKey, peerAgentId, { name: cached.name }, cached.projectId);
+      }
+      return;
+    }
+    const read = { conversationKey, projectId: '', name: '', done: false };
+    this._peerAgentProject = read;
+    try {
+      const res = await apiFetch(`/api/v1/agents/${encodeURIComponent(peerAgentId)}`, {
+        suppressAccessDeniedToast: true,
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const agent = (await res.json()) as Partial<Agent>;
+      read.projectId = agent.projectId || '';
+      read.name = agent.name || agent.slug || '';
+      read.done = true;
+      if (this._peerAgentProject === read && this.conversationKey === conversationKey) {
+        this.reportPeerAgent(conversationKey, peerAgentId, agent, read.projectId);
+      }
+    } catch {
+      // Non-critical: path links in this DM fall back to the message's own project.
+      if (this._peerAgentProject === read) this._peerAgentProject = null;
+    }
   }
 
   /**
@@ -4870,7 +5134,7 @@ export class ScionChatThread extends LitElement {
     if (composer) {
       const slTextarea = (composer as LitElement).shadowRoot?.querySelector('sl-textarea');
       if (slTextarea) {
-        focusElement(slTextarea as HTMLElement);
+        focusElement(slTextarea);
       }
     }
   }
@@ -5037,7 +5301,13 @@ export class ScionChatThread extends LitElement {
   private renderV2() {
     return html`
       <div class="thread-container">
-        ${this.renderInteragentToggle()} ${this.renderContentAndTyping()} ${this.renderSendError()}
+        ${this.renderInteragentToggle()} ${this.renderContentAndTyping()}
+        <scion-chat-scheduled-list
+          .conversationKey=${this.conversationKey}
+          ?enabled=${this.scheduleSendAvailable}
+          @chat-scheduled-restore=${this.handleScheduledRestore}
+        ></scion-chat-scheduled-list>
+        ${this.renderSendError()}
         <scion-chat-composer
           .agents=${this.agents}
           .members=${this.members}
@@ -5048,11 +5318,13 @@ export class ScionChatThread extends LitElement {
           .conversationKey=${this.conversationKey}
           .replyTo=${this.composerReplyTo}
           .editMessage=${this.composerEditMessage}
+          ?scheduleSendEnabled=${this.scheduleSendAvailable}
           ?disabled=${this.wakingConversationKey !== '' &&
           this.wakingConversationKey === this.conversationKey}
           @chat-cancel-reply=${this.handleComposerCancelReply}
           @chat-cancel-edit=${this.handleComposerCancelEdit}
           @chat-send=${this.handleChatSendV2}
+          @chat-schedule=${this.handleChatScheduleV2}
           @chat-edit=${this.handleChatEditV2}
           @chat-typing=${() => this.sendTypingEvent()}
           @default-agent-change=${this.handleDefaultAgentChange}
@@ -5342,7 +5614,7 @@ export class ScionChatThread extends LitElement {
             <scion-chat-system-line
               message=${msg.msg}
               timestamp=${msg.createdAt}
-              category=${(msg.metadata?.['system_category'] as string) || ''}
+              category=${msg.metadata?.['system_category'] || ''}
             ></scion-chat-system-line>
           `,
         });
@@ -5410,6 +5682,7 @@ export class ScionChatThread extends LitElement {
             dispatchFailureCode=${msg.dispatchFailureCode || ''}
             .attachments=${msg.attachments || EMPTY_ATTACHMENTS}
             .attachmentRefs=${this.getMessageAttachmentRefs(msg.id)}
+            .artifactRefs=${this.getMessageArtifactRefs(msg.id)}
             routedTo=${msgRoutedTo}
             .replyPreview=${replyPreview}
             editedAt=${ext?.editedAt || ''}

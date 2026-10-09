@@ -130,7 +130,7 @@ func (s *workspaceService) SyncFrom(ctx context.Context, agentID string, opts *S
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[SyncFromResponse](resp)
+	return apiclient.DecodeRequired[SyncFromResponse](resp)
 }
 
 // SyncTo initiates upload of workspace to an agent.
@@ -145,7 +145,7 @@ func (s *workspaceService) SyncTo(ctx context.Context, agentID string, files []t
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[SyncToResponse](resp)
+	return apiclient.DecodeRequired[SyncToResponse](resp)
 }
 
 // FinalizeSyncTo completes the sync-to operation after files are uploaded.
@@ -160,6 +160,7 @@ func (s *workspaceService) FinalizeSyncTo(ctx context.Context, agentID string, m
 	if err != nil {
 		return nil, err
 	}
+	// No body is valid here: callers treat a missing finalize body as empty.
 	return apiclient.DecodeResponse[SyncToFinalizeResponse](resp)
 }
 
@@ -169,7 +170,7 @@ func (s *workspaceService) GetStatus(ctx context.Context, agentID string) (*Work
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[WorkspaceStatusResponse](resp)
+	return apiclient.DecodeRequired[WorkspaceStatusResponse](resp)
 }
 
 // getTransferClient returns the transfer client, creating one if necessary.

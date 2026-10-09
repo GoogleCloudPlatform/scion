@@ -311,11 +311,11 @@ func TestReplyRecipient_DeletedSender_Unreachable(t *testing.T) {
 	}
 }
 
-// TestReplyRecipient_CrossConversationReplyToID_Ignored: a reply_to_id
-// pointing at a message from a different conversation must not be honored —
-// routing falls back to the current thread's ordinary rules (its default
-// agent here).
-func TestReplyRecipient_CrossConversationReplyToID_Ignored(t *testing.T) {
+// TestReplyRecipient_CrossConversationReplyToID_Refused: a reply_to_id
+// pointing at a message from a different conversation is refused with the
+// same validation answer as an unknown message, and nothing is dispatched
+// (neither to that message's sender nor to the thread default).
+func TestReplyRecipient_CrossConversationReplyToID_Refused(t *testing.T) {
 	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := t.Context()
 	dispatcher := &brokerMockDispatcher{}
@@ -348,17 +348,18 @@ func TestReplyRecipient_CrossConversationReplyToID_Ignored(t *testing.T) {
 
 	body := map[string]string{"content": "replying with a foreign reply_to_id", "reply_to_id": foreignMsgID}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages", body)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	unknown := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages",
+		map[string]string{"content": "replying with a foreign reply_to_id", "reply_to_id": tid("reply-cross-unknown")})
+	if unknown.Code != rec.Code || unknown.Body.String() != rec.Body.String() {
+		t.Fatalf("a message of another conversation must be answered like an unknown one:\n  other: %d %s\n  unknown: %d %s",
+			rec.Code, rec.Body.String(), unknown.Code, unknown.Body.String())
 	}
 
-	dispatched := dispatcher.getMessages()
-	if len(dispatched) != 1 {
-		t.Fatalf("expected 1 dispatch, got %d", len(dispatched))
-	}
-	if dispatched[0].agentSlug != defaultAgent.Slug {
-		t.Fatalf("dispatched to %q, want thread default %q (cross-conversation reply_to_id must be ignored, not routed to %q)",
-			dispatched[0].agentSlug, defaultAgent.Slug, otherAgent.Slug)
+	if n := len(dispatcher.getMessages()); n != 0 {
+		t.Fatalf("expected no dispatch for a refused reply, got %d (other conversation's sender %q)", n, otherAgent.Slug)
 	}
 }
 
@@ -503,7 +504,7 @@ func TestReplyRecipient_EmptyProjectID_ForeignAgent_NotDispatched(t *testing.T) 
 
 	// A user-user DM key: resolveProjectFromDMKey returns "" for this shape
 	// (it only resolves a project for the dm:agent:... shape).
-	peerID := tid("reply-empty-proj-peer")
+	peerID := mustCreateActiveUser(t, s, "reply-empty-proj-peer")
 	dmKey, err := messages.DMConversationKey("user", DevUserID, "user", peerID)
 	if err != nil {
 		t.Fatalf("DMConversationKey: %v", err)
@@ -641,7 +642,7 @@ func TestReplyRecipient_EmptyProjectID_SoftDeletedForeignSender_NotDispatched(t 
 
 	// A user-user DM key: resolveProjectFromDMKey returns "" for this shape
 	// (it only resolves a project for the dm:agent:... shape).
-	peerID := tid("reply-empty-sd-peer")
+	peerID := mustCreateActiveUser(t, s, "reply-empty-sd-peer")
 	dmKey, err := messages.DMConversationKey("user", DevUserID, "user", peerID)
 	if err != nil {
 		t.Fatalf("DMConversationKey: %v", err)

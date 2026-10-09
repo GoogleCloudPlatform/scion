@@ -756,7 +756,15 @@ func TestHandleProjectImportResources_UsesKindSpecificAuthorization(t *testing.T
 		return doRequestAsUser(t, srv, user, http.MethodPost, "/api/v1/projects/"+project.ID+"/"+path, body)
 	}
 
+	// agent.create does not authorize a template import: the import
+	// creates templates, so it needs template.create.
 	rec := doImport("import-templates", ImportTemplatesRequest{
+		SourceURL: "https://github.com/acme/repo/tree/main/templates",
+	}, mockTemplateTarball)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	grantUserActionOnResource(t, s, user.ID, "template", project.ID, ActionCreate)
+	rec = doImport("import-templates", ImportTemplatesRequest{
 		SourceURL: "https://github.com/acme/repo/tree/main/templates",
 	}, mockTemplateTarball)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())

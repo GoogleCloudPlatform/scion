@@ -661,7 +661,8 @@ export class ScionPageAdminQuotas extends LitElement {
       return;
     }
     if (this.limitForm.defaultValue === null) {
-      this.limitDialogError = 'Default Value is required and must be a non-negative integer (0 = unlimited)';
+      this.limitDialogError =
+        'Default Value is required and must be a non-negative integer (0 = unlimited)';
       return;
     }
 

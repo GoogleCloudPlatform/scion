@@ -20,16 +20,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/knadh/koanf/v2"
@@ -192,6 +198,11 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	// hub_name: the effective value (DB, else bootstrap), so a client that
 	// echoes this body back sends an unchanged hub_name (ptone/scion#2073).
 	resp.Server.Hub.HubName = effectiveHubName(ops)
+	// GCP permission-check settings: the values this hub applies, which
+	// differ from the stored or file value when that value cannot be used.
+	iam := s.currentGCPIAMSettings()
+	resp.Server.Hub.GCPIAMCheckMode = iam.CheckMode
+	resp.Server.Hub.GCPIAMDenyUnknownPolicy = iam.denyUnknownPolicy()
 
 	// Build section metadata from the cache.
 	resp.SectionMeta = s.buildSectionMetadata(ctx, ops)
@@ -657,6 +668,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
 		return
 	}
+	if rejectRepeatedJSONMembers(w, rawBody) {
+		return
+	}
 	var req ServerConfigUpdateDBRequest
 	if err := json.Unmarshal(rawBody, &req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
@@ -669,6 +683,17 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// The typed decode above silently drops a removed profiles.<name>.timezone
 	// key, so check the raw body before anything is written.
 	if rejectRemovedProfileTimezone(w, rawBody) {
+		return
+	}
+	// A user access token writes configuration keys only.
+	if writeTokenRefusedSettingsKeys(w, r.Context(), tokenRefusedServerConfigKeys(rawBody)) {
+		return
+	}
+	// GCP permission-check keys: a sent key must carry a recognised value.
+	if !validateGCPIAMRequest(w, rawBody) {
+		return
+	}
+	if rejectInvalidThinkingLevel(w, req.DefaultThinkingLevel) {
 		return
 	}
 
@@ -824,6 +849,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
+	// Top-level presence of the body; nil (omitted semantics) on a parse
+	// error, which the typed decode above has already ruled out.
+	topFP, _ := parseFieldPresence(rawBody)
+
 	// Build per-section documents from the request.
 	sectionDocs, err := buildSectionDocsFromRequest(&req.ServerConfigUpdateRequest, layer1BySec, rawBody)
 	if err != nil {
@@ -883,6 +912,88 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 		sectionDocs["lifecycle"] = merged
 		lifecycleBaseRev = rev
+	}
+
+	// Sections merged on the current row by mergeSectionOnCurrent: only the
+	// keys the body sends change, and the row revision read is the CAS base
+	// (ptone/scion#3718).
+	mergedBaseRevs := map[string]int64{}
+	if doc, ok := sectionDocs["github_app"]; ok {
+		merged, rev, err := mergeSectionOnCurrent(r.Context(), ops, "github_app", doc, githubAppPresence(rawBody))
+		if err != nil {
+			slog.Error("PUT server-config: failed to build github_app document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		sectionDocs["github_app"] = merged
+		mergedBaseRevs["github_app"] = rev
+	}
+	// telemetry is deep-merged: a nested key the body omits (cloud.headers,
+	// filter, resource, ...) keeps its stored value (ptone/scion#3717).
+	if doc, ok := sectionDocs["telemetry"]; ok {
+		merged, rev, err := mergeSectionOnCurrent(r.Context(), ops, "telemetry", doc, telemetryPresence(rawBody))
+		if err != nil {
+			slog.Error("PUT server-config: failed to build telemetry document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		sectionDocs["telemetry"] = merged
+		mergedBaseRevs["telemetry"] = rev
+	}
+	// agent_defaults: only the keys the body sends change, so env-pinned
+	// fields the page leaves out, and the read-only role keys, are kept
+	// (ptone/scion#3719). This runs before the gcp_iam check, which reads
+	// the default GCP identity mode from the merged doc.
+	if doc, ok := sectionDocs["agent_defaults"]; ok {
+		merged, rev, err := mergeSectionOnCurrent(r.Context(), ops, "agent_defaults", doc, agentDefaultsPresence(topFP))
+		if err != nil {
+			slog.Error("PUT server-config: failed to build agent_defaults document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		sectionDocs["agent_defaults"] = merged
+		mergedBaseRevs["agent_defaults"] = rev
+	}
+
+	// GCP permission-check section: carry an omitted key forward from the
+	// current row, skip the write when the applied values would not
+	// change, and refuse a change the transition rules do not allow.
+	gcpIAMBaseRev := int64(-1)
+	var gcpIAMCur, gcpIAMNext gcpIAMSettings
+	if _, ok := sectionDocs[gcpIAMSection]; ok {
+		doc, rev, err := buildGCPIAMDoc(r.Context(), ops, &req.ServerConfigUpdateRequest, rawBody)
+		if err != nil {
+			slog.Error("PUT server-config: failed to build gcp_iam document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		gcpIAMCur = s.currentGCPIAMSettings()
+		gcpIAMNext = s.gcpIAMEffectiveFor(&doc)
+		if gcpIAMNext == gcpIAMCur {
+			delete(sectionDocs, gcpIAMSection)
+		} else {
+			if !requireGCPIAMHubAdmin(w, r.Context()) {
+				return
+			}
+			pendingAssign := false
+			if adDoc, ok := sectionDocs["agent_defaults"]; ok {
+				var ad opsettings.AgentDefaultsSettings
+				if json.Unmarshal(adDoc, &ad) == nil && ad.DefaultGCPIdentityMode == store.GCPMetadataModeAssign {
+					pendingAssign = true
+				}
+			}
+			if err := s.checkGCPIAMTransition(r.Context(), gcpIAMCur, gcpIAMNext, pendingAssign); err != nil {
+				writeGCPIAMTransitionError(w, err)
+				return
+			}
+			b, err := json.Marshal(doc)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+				return
+			}
+			sectionDocs[gcpIAMSection] = b
+			gcpIAMBaseRev = rev
+		}
 	}
 
 	// Validate federation semantics (beyond JSON schema).
@@ -981,17 +1092,25 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	}
 	// Validate hub-level default_timezone (IANA name check; rejects "Local",
 	// same rule as the file-mode handler and as the per-user display
-	// preference — design §3 A (d)).
+	// preference — design §3 A (d)) and the default GCP identity. The doc
+	// is merged on the current row, so each check runs only when the body
+	// sends one of its keys: a stored value the body leaves out is not
+	// re-checked on an unrelated save (ptone/scion#2720).
 	if doc, ok := sectionDocs["agent_defaults"]; ok {
 		var agentDefaults opsettings.AgentDefaultsSettings
 		if err := json.Unmarshal(doc, &agentDefaults); err == nil {
-			if err := validateDefaultTimezone(agentDefaults.DefaultTimezone); err != nil {
-				writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-					fmt.Sprintf("invalid default_timezone %q: %v", agentDefaults.DefaultTimezone, err), nil)
-				return
+			adSent := applySectionPatch("agent_defaults", map[string]json.RawMessage{}, nil, agentDefaultsPresence(topFP))
+			if adSent["default_timezone"] {
+				if err := validateDefaultTimezone(agentDefaults.DefaultTimezone); err != nil {
+					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+						fmt.Sprintf("invalid default_timezone %q: %v", agentDefaults.DefaultTimezone, err), nil)
+					return
+				}
 			}
-			if !s.validateHubDefaultGCPIdentity(w, r.Context(), agentDefaults) {
-				return
+			if adSent["default_gcp_identity_mode"] || adSent["default_gcp_identity_service_account_id"] {
+				if !s.validateHubDefaultGCPIdentity(w, r.Context(), agentDefaults) {
+					return
+				}
 			}
 		}
 	}
@@ -1085,9 +1204,33 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			expectedRev = endpointsBaseRev
 		} else if secName == "lifecycle" && lifecycleBaseRev >= 0 {
 			expectedRev = lifecycleBaseRev
+		} else if secName == gcpIAMSection && gcpIAMBaseRev >= 0 {
+			expectedRev = gcpIAMBaseRev
+		} else if rev, ok := mergedBaseRevs[secName]; ok {
+			expectedRev = rev
+		}
+
+		// A GCP permission-check change is recorded before it is written;
+		// if the record cannot be written, the change is not made.
+		if secName == gcpIAMSection {
+			if err := s.auditGCPIAMChange(r.Context(), gcpIAMSurfaceSave, gcpIAMCur, gcpIAMNext); err != nil {
+				slog.Error("PUT server-config: failed to record GCP permission-check change", "error", err)
+				fileTxn.abort()
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					fmt.Sprintf("Failed to update section %q", secName), map[string]interface{}{"applied": applied})
+				return
+			}
+			s.approveGCPIAMTransition(gcpIAMTransition{From: gcpIAMCur, To: gcpIAMNext})
 		}
 
 		newRev, err := ops.Update(r.Context(), secName, doc, updatedBy, expectedRev, "managed")
+		if secName == gcpIAMSection {
+			// The approval covers only this write's own self-apply.
+			s.clearGCPIAMApproval()
+			if err != nil {
+				s.auditGCPIAMNotApplied(r.Context(), gcpIAMCur, gcpIAMNext, err)
+			}
+		}
 		if err != nil {
 			if errors.Is(err, store.ErrRevisionConflict) {
 				// Report the conflict with current revision.
@@ -1406,6 +1549,12 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			if hub.StartClaimLeaseTTL != "" {
 				keys = append(keys, "server.hub.start_claim_lease_ttl")
 			}
+			if hub.GCPIAMCheckMode != "" {
+				keys = append(keys, gcpIAMCheckModeKey)
+			}
+			if hub.GCPIAMDenyUnknownPolicy != "" {
+				keys = append(keys, gcpIAMDenyUnknownKey)
+			}
 			if hub.StartMaxDuration != "" {
 				keys = append(keys, "server.hub.start_max_duration")
 			}
@@ -1432,6 +1581,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			}
 			if hub.AsyncAgentLaunch != nil {
 				keys = append(keys, "server.hub.async_agent_launch")
+			}
+			if hub.PerfTrace != nil {
+				keys = append(keys, "server.hub.perf_trace")
 			}
 			if hub.LaunchTimeout != "" {
 				keys = append(keys, "server.hub.launch_timeout")
@@ -1616,6 +1768,17 @@ func appendPresenceAwareKeys(keys []string, rawBody []byte) []string {
 		keys = append(keys, "server.hub.hub_name")
 	}
 
+	// agent_defaults keys: any sent agent_defaults key (including an
+	// explicit null) → add the key, so a lone explicit clear builds the
+	// agent_defaults doc and clears the key instead of being kept by the
+	// merge (ptone/scion#3719). Keys already present are deduplicated.
+	for k := range agentDefaultsPresence(fp).sentKeys() {
+		if key, ok := modelledSectionKey("agent_defaults", k); ok && !keySet[key] {
+			keySet[key] = true
+			keys = append(keys, key)
+		}
+	}
+
 	// Map-of-objects sections: present as null or {} → add the key to clear.
 	if !keySet["runtimes"] && fp.has("runtimes") {
 		keys = append(keys, "runtimes")
@@ -1781,24 +1944,46 @@ func dropEnvOverriddenAccessFields(base *opsettings.AccessSettings, envKeys []st
 }
 
 // buildSingleSectionDoc extracts the fields for a single section from the
-// update request and marshals them into a section document.
+// update request and marshals them into a section document. The document
+// holds the request's values only; how it is written is decided by the
+// DB-backed PUT (handlePutServerConfigDB).
 //
-// N6/N7 presence-aware clearing (DB-backed path only):
+// Target contract for a DB-backed save (ptone/scion#3718), met today only
+// by the sections listed below: a save changes only the keys the request
+// body sends.
+//   - OMITTED key → keeps its stored value.
+//   - Sent key → replaces the stored value, or clears it when the field's
+//     encoding in this doc leaves the sent value out: an explicit null, and
+//     for omitempty fields their zero value. A *bool field such as
+//     github_app webhooks_enabled carries an explicit false as a value, so
+//     false is stored, not cleared. A cleared key is removed from the
+//     stored row; because a section with a stored row owns all of its
+//     keys, the key is then unset (bootstrap values from settings.yaml or
+//     env are not re-applied).
+//   - The write is a CAS against the row revision the merge read, so a
+//     concurrent write to the section yields a 409, not a lost update.
 //
-// The fp (fieldPresence) parameter carries the raw JSON structure so we can
-// distinguish OMITTED fields from EXPLICITLY-SENT empty values:
-//   - OMITTED → field not in raw JSON → do NOT include in section doc.
-//     The write replaces the whole row, so for most sections an omitted
-//     field is dropped from the DB. The access, endpoints and lifecycle
-//     sections are the exception: handlePutServerConfigDB rebuilds them on
-//     the current row (buildAccessDocOnCurrent, buildEndpointsDocOnCurrent,
-//     carryForwardLifecycleSettings), so their omitted fields are kept.
-//   - EXPLICIT empty ("", [], null) → field IS in raw JSON → include the
-//     zero value in the section doc, which CLEARS it in the DB
+// Sections that meet it:
+//   - github_app, telemetry and agent_defaults, through the shared helper
+//     mergeSectionOnCurrent, which also keeps or drops (with a warning)
+//     stored keys the request does not send; see its doc comment. New
+//     sections should use it. telemetry is deep-merged: its nested objects
+//     are merged key by key, while maps and arrays are replaced whole
+//     (deepMergeSections; ptone/scion#3717). agent_defaults applies only
+//     the keys the PUT writes (agentDefaultsRequestKeys), so the read-only
+//     role keys are never cleared (ptone/scion#3719).
+//   - access, endpoints and lifecycle, through their own carry-forward
+//     builders (buildAccessDocOnCurrent, buildEndpointsDocOnCurrent,
+//     carryForwardLifecycleSettings), and gcp_iam through buildGCPIAMDoc.
+//     Their clear rules are field by field; see each builder.
 //
-// This applies to: admin_emails, user_access_mode, default_user_role,
-// notification_channels, public_url. The file-mode handler (hub without
-// OperationalSettings) does not use this.
+// Every other section still replaces the whole row with this doc, so an
+// omitted field is dropped from the DB. For those, fp (the raw JSON
+// presence; N6/N7) only decides whether an explicitly sent empty value is
+// written as the zero value to clear it.
+//
+// The file-mode handler (hub without OperationalSettings) does not use
+// this.
 func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *fieldPresence) (json.RawMessage, error) {
 	var doc interface{}
 
@@ -1814,6 +1999,16 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 		// doc on top of the current row via buildAccessDocOnCurrent.
 		d := &opsettings.AccessSettings{}
 		overlayAccessRequest(d, req, fp)
+		doc = d
+
+	case gcpIAMSection:
+		// handlePutServerConfigDB rebuilds this doc on the current row
+		// (buildGCPIAMDoc).
+		d := &opsettings.GCPIAMSettings{}
+		if req.Server != nil && req.Server.Hub != nil {
+			d.CheckMode = req.Server.Hub.GCPIAMCheckMode
+			d.DenyUnknownPolicy = req.Server.Hub.GCPIAMDenyUnknownPolicy
+		}
 		doc = d
 
 	case "lifecycle":
@@ -1864,12 +2059,10 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 		if req.DefaultModel != nil {
 			d.DefaultModel = *req.DefaultModel
 		}
+		// An explicit null (a nil pointer) clears the level. 0 is not a
+		// clear: the PUT handlers reject it (rejectInvalidThinkingLevel).
 		if req.DefaultThinkingLevel != nil {
-			if *req.DefaultThinkingLevel > 0 {
-				d.DefaultThinkingLevel = req.DefaultThinkingLevel
-			} else {
-				d.DefaultThinkingLevel = nil
-			}
+			d.DefaultThinkingLevel = req.DefaultThinkingLevel
 		}
 		if req.DefaultRuntimeBroker != nil {
 			d.DefaultRuntimeBroker = *req.DefaultRuntimeBroker
@@ -1902,9 +2095,13 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 			d.AppID = ga.AppID
 			d.APIBaseURL = ga.APIBaseURL
 			// #391: webhooks_enabled is a plain bool in the request; use
-			// fieldPresence to distinguish explicit false from omitted.
-			githubFP := serverFP.nestedPresence("github_app")
-			if ga.WebhooksEnabled || githubFP.has("webhooks_enabled") {
+			// the raw body to tell an explicit false (stored as false)
+			// from an omitted key or an explicit null (left out, so the
+			// merge keeps or clears it). The member is resolved with the
+			// decode's case-insensitive rule, as mergeSectionOnCurrent
+			// resolves it.
+			v, sent := githubAppPresenceFromTop(fp).sentFold("webhooks_enabled")
+			if ga.WebhooksEnabled || (sent && !isJSONNull(v)) {
 				d.WebhooksEnabled = &ga.WebhooksEnabled
 			}
 			d.InstallationURL = ga.InstallationURL
@@ -2197,6 +2394,120 @@ func readRawBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// repeatedJSONMember reports the first object member name that rawBody
+// repeats within one object, at any depth. Names compare under the same
+// case folding encoding/json uses to match struct fields, so "server" and
+// "Server" in one object are a repeat; the comparison applies to every
+// object, including the keys of map-valued objects such as profiles, so
+// "Foo" and "foo" there are a repeat too. A body that is not exactly one
+// JSON value (empty, malformed, or followed by anything other than
+// whitespace) returns an error: it is never reported as having no repeat.
+func repeatedJSONMember(rawBody []byte) (string, bool, error) {
+	type frame struct {
+		object    bool
+		expectKey bool
+		names     map[string]bool
+	}
+	var stack []*frame
+	valueDone := func() {
+		if n := len(stack); n > 0 && stack[n-1].object {
+			stack[n-1].expectKey = true
+		}
+	}
+	dec := json.NewDecoder(bytes.NewReader(rawBody))
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return "", false, fmt.Errorf("request body is not one JSON value: %w", err)
+		}
+		if n := len(stack); n > 0 && stack[n-1].object && stack[n-1].expectKey {
+			top := stack[n-1]
+			if d, ok := tok.(json.Delim); ok && d == '}' {
+				stack = stack[:n-1]
+				valueDone()
+			} else if key, ok := tok.(string); ok {
+				folded := foldJSONMemberName(key)
+				if top.names[folded] {
+					return key, true, nil
+				}
+				top.names[folded] = true
+				top.expectKey = false
+			}
+		} else {
+			switch tok {
+			case json.Delim('{'):
+				stack = append(stack, &frame{object: true, expectKey: true, names: map[string]bool{}})
+			case json.Delim('['):
+				stack = append(stack, &frame{})
+			case json.Delim(']'):
+				// A closing bracket must close an open array.
+				// json.Decoder already refuses an unmatched closer;
+				// the guard keeps the stack pop from underflowing.
+				if len(stack) == 0 {
+					return "", false, errors.New("request body is not one JSON value: unmatched ']'")
+				}
+				stack = stack[:len(stack)-1]
+				valueDone()
+			default:
+				valueDone()
+			}
+		}
+		if len(stack) == 0 {
+			// The first top-level value is complete; only whitespace may
+			// follow it.
+			if _, err := dec.Token(); err != io.EOF {
+				return "", false, errors.New("request body has data after the first JSON value")
+			}
+			return "", false, nil
+		}
+	}
+}
+
+// foldJSONMemberName folds a member name the way encoding/json does when it
+// matches a name to a struct field: ASCII letters to upper case, and every
+// other rune to the smallest rune of its simple fold set.
+func foldJSONMemberName(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		if r < utf8.RuneSelf {
+			if 'a' <= r && r <= 'z' {
+				r -= 'a' - 'A'
+			}
+			b.WriteRune(r)
+			continue
+		}
+		for {
+			r2 := unicode.SimpleFold(r)
+			if r2 <= r {
+				r = r2
+				break
+			}
+			r = r2
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// rejectRepeatedJSONMembers answers 400 and returns true when a hub
+// configuration write body is not exactly one JSON value, or repeats an
+// object member name at any depth. The key classification and the typed
+// write decode must read the same members, so a body they could read
+// differently is refused for every credential before either runs.
+func rejectRepeatedJSONMembers(w http.ResponseWriter, rawBody []byte) bool {
+	name, repeated, err := repeatedJSONMember(rawBody)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body: "+err.Error(), nil)
+		return true
+	}
+	if !repeated {
+		return false
+	}
+	writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+		"request body repeats the member name "+strconv.Quote(name)+" in one object", nil)
+	return true
+}
+
 // fieldPresence extracts which JSON fields are explicitly present (including
 // when set to "", [], null) in the raw request body by walking nested
 // map[string]json.RawMessage paths. This powers N6/N7: presence-aware
@@ -2252,4 +2563,207 @@ func maintenanceMessageOrDefault(msg string) string {
 		return defaultMaintenanceMessage
 	}
 	return msg
+}
+
+// Settings keys a user access token may write.
+//
+// The server-config and project-defaults writes admit a user access token
+// that carries the operation's selector, but only for keys classified as
+// configuration below. A key is refused for every credential other than an
+// interactive session or a dev credential (a user access token, or an
+// unknown or missing credential kind) when writing it confers authority
+// (who is an administrator, who may sign in, which external issuers are
+// trusted), decides the origin users and agents reach the hub on, or
+// selects the code, images, runtimes or credentials agents run with. A
+// refused key is refused whenever it is present in the body, including a
+// value equal to the stored one or an explicit clear. A key the tables do
+// not classify is refused too, so a new settings key reaches tokens only
+// after it is classified here.
+
+// settingsTokenClass classifies a settings section or key for writes by a
+// user access token.
+type settingsTokenClass int
+
+const (
+	// settingsTokenRefused refuses every user access token.
+	settingsTokenRefused settingsTokenClass = iota + 1
+	// settingsTokenConfiguration admits a token that holds the operation's
+	// selector and live authority.
+	settingsTokenConfiguration
+	// settingsTokenPerKey classifies each key of the section through
+	// serverConfigTokenKeys.
+	settingsTokenPerKey
+)
+
+// serverConfigTokenSections classifies every Layer-1 operational settings
+// section for token writes through PUT /api/v1/admin/server-config and for
+// token resets through DELETE /api/v1/admin/server-config/sections/{name}.
+// A section that contains a refused key cannot be reset by a token.
+var serverConfigTokenSections = map[string]settingsTokenClass{
+	"access":            settingsTokenRefused,       // administrators, sign-in mode, default user role, sign-in domains
+	"federation":        settingsTokenRefused,       // trusted external issuers
+	"github_app":        settingsTokenRefused,       // the hub's GitHub App credential
+	"agent_secrets":     settingsTokenRefused,       // which secret scopes agents may write
+	"auto_expose_ports": settingsTokenRefused,       // whether agent ports are reachable
+	"runtimes":          settingsTokenRefused,       // where and how agents run
+	"profiles":          settingsTokenRefused,       // runtime, image and environment agents run with
+	"harness_configs":   settingsTokenRefused,       // harness code and images agents run with
+	"maintenance":       settingsTokenRefused,       // admin mode, a session-only host operation
+	"messaging":         settingsTokenRefused,       // written through PUT /api/v1/admin/messaging
+	"experiments":       settingsTokenRefused,       // written through /api/v1/admin/experiments
+	"profiling":         settingsTokenRefused,       // written through PUT /api/v1/admin/profiling
+	"agent_defaults":    settingsTokenPerKey,        // see serverConfigTokenKeys
+	"endpoints":         settingsTokenPerKey,        // see serverConfigTokenKeys
+	"lifecycle":         settingsTokenConfiguration, // stall, retention and start timing
+	"telemetry":         settingsTokenConfiguration, // telemetry export
+	"quotas":            settingsTokenConfiguration, // broker quota enforcement switch
+	"gcp_iam":           settingsTokenRefused,       // service account permission check
+	"notifications":     settingsTokenConfiguration, // notification channels
+	"project_defaults":  settingsTokenConfiguration, // see projectDefaultsTokenKeys
+	"artifacts":         settingsTokenConfiguration, // artifact limits
+}
+
+// serverConfigTokenKeys classifies each key of a settingsTokenPerKey
+// section, by koanf path.
+var serverConfigTokenKeys = map[string]settingsTokenClass{
+	// agent_defaults
+	"default_max_agent_role":                  settingsTokenRefused, // authority granted to agents
+	"default_agent_role":                      settingsTokenRefused, // authority granted to agents
+	"default_gcp_identity_mode":               settingsTokenRefused, // cloud identity agents run with
+	"default_gcp_identity_service_account_id": settingsTokenRefused, // cloud identity agents run with
+	"default_template":                        settingsTokenRefused, // code agents run with
+	"default_harness_config":                  settingsTokenRefused, // harness code and image agents run with
+	"default_runtime_broker":                  settingsTokenRefused, // broker and credentials agents run with
+	"default_max_turns":                       settingsTokenConfiguration,
+	"default_max_model_calls":                 settingsTokenConfiguration,
+	"default_max_duration":                    settingsTokenConfiguration,
+	"default_resources":                       settingsTokenConfiguration,
+	"default_model":                           settingsTokenConfiguration,
+	"default_thinking_level":                  settingsTokenConfiguration,
+	"default_timezone":                        settingsTokenConfiguration,
+	// endpoints
+	"server.hub.public_url": settingsTokenRefused, // the origin users and agents reach the hub on
+	"image_registry":        settingsTokenRefused, // the registry agent images come from
+	"server.hub.hub_name":   settingsTokenConfiguration,
+}
+
+// projectDefaultsTokenKeys classifies each key of the project_defaults
+// section, by JSON field name, for token writes through
+// PUT /api/v1/admin/project-defaults.
+var projectDefaultsTokenKeys = map[string]settingsTokenClass{
+	"default_scratchpad": settingsTokenConfiguration,
+}
+
+// serverConfigKeyTokenClass returns the token class of a Layer-1 koanf key.
+// A key outside every Layer-1 section, or not classified, is refused. That
+// covers the file-only keys (dbFileOnlyRequestPaths), among them
+// server.hub.agent_endpoint, which decides the origin agents reach the hub
+// on.
+func serverConfigKeyTokenClass(koanfKey string) settingsTokenClass {
+	section := opsettings.OwningSection(koanfKey)
+	switch serverConfigTokenSections[section] {
+	case settingsTokenConfiguration:
+		return settingsTokenConfiguration
+	case settingsTokenPerKey:
+		if serverConfigTokenKeys[koanfKey] == settingsTokenConfiguration {
+			return settingsTokenConfiguration
+		}
+	}
+	return settingsTokenRefused
+}
+
+// serverConfigSectionTokenResettable reports whether a token may reset the
+// named section: only a configuration section, never one that contains a
+// refused key.
+func serverConfigSectionTokenResettable(section string) bool {
+	return serverConfigTokenSections[section] == settingsTokenConfiguration
+}
+
+// serverConfigBodyKoanfKey maps a server-config request body path to its
+// koanf key. The request carries federation at the top level; its koanf
+// keys live under server.federation.
+func serverConfigBodyKoanfKey(path []string) string {
+	key := strings.Join(path, ".")
+	if len(path) > 0 && path[0] == "federation" {
+		key = "server." + key
+	}
+	return key
+}
+
+// unparsedBodyKey is the refused key a classifier reports for a body it
+// cannot parse as one JSON object: an unparsed body is refused, never read
+// as carrying no refused key.
+const unparsedBodyKey = "<body>"
+
+// tokenRefusedServerConfigKeys returns, sorted, the body keys of a
+// server-config write that a user access token may not write. Every
+// present leaf counts, null and empty values included. expected_revisions
+// carries compare-and-set revisions, not settings, and is not classified.
+func tokenRefusedServerConfigKeys(rawBody []byte) []string {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(rawBody, &top); err != nil {
+		return []string{unparsedBodyKey}
+	}
+	refused := map[string]bool{}
+	for _, l := range presentBodyLeaves(top, reflect.TypeOf(ServerConfigUpdateDBRequest{}), nil, nil) {
+		if len(l.path) > 0 && l.path[0] == "expected_revisions" {
+			continue
+		}
+		if serverConfigKeyTokenClass(serverConfigBodyKoanfKey(l.path)) != settingsTokenConfiguration {
+			refused[strings.Join(l.path, ".")] = true
+		}
+	}
+	return sortedSettingsKeys(refused)
+}
+
+// tokenRefusedProjectDefaultsKeys returns, sorted, the body keys of a
+// project-defaults write that a user access token may not write: every
+// top-level key that is not a configuration key of projectDefaultsTokenKeys.
+// JSON field names match case-insensitively, as the decoder matches them.
+func tokenRefusedProjectDefaultsKeys(rawBody []byte) []string {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(rawBody, &top); err != nil {
+		return []string{unparsedBodyKey}
+	}
+	refused := map[string]bool{}
+	for key := range top {
+		allowed := false
+		for name, class := range projectDefaultsTokenKeys {
+			if strings.EqualFold(key, name) && class == settingsTokenConfiguration {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			refused[key] = true
+		}
+	}
+	return sortedSettingsKeys(refused)
+}
+
+func sortedSettingsKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// writeTokenRefusedSettingsKeys refuses a hub configuration write that
+// carries refused keys (settings keys, or a lifecycle hook's execution
+// identity) from any credential other than an interactive session or a
+// dev credential (sessionCredentialAllowed): 403 with the session-only
+// details (reason GOV_PENDING) and details.keys listing the refused keys.
+// An unknown or missing credential kind is refused too. It writes nothing
+// and returns false for a session or dev credential, or when keys is empty.
+func writeTokenRefusedSettingsKeys(w http.ResponseWriter, ctx context.Context, keys []string) bool {
+	if sessionCredentialAllowed(ctx) || len(keys) == 0 {
+		return false
+	}
+	details := sessionOnlyDenialDetails(authzop.ReasonGovernancePending)
+	details["keys"] = keys
+	writeError(w, http.StatusForbidden, ErrCodeForbidden,
+		"these keys require an interactive session", details)
+	return true
 }
