@@ -3187,19 +3187,23 @@ func TestConfigureSharedWorkspaceGit_NeverConsultsPATHForGit(t *testing.T) {
 // (pkg/sciontool/services) guards against for the services manager: the
 // reaper's generic wait4(-1, ...) can steal the git child's exit status
 // from cmd.Wait() before CombinedOutput() gets to it, surfacing as an
-// ECHILD-shaped "wait: no child processes" error that makes runGitConfig
-// silently drop that config key (it only logs, it has no error to return).
+// ECHILD-shaped "waitid: no child processes" error that makes runGitConfig
+// log and move on (it has no error to return). git usually writes the key
+// before it exits, so the .gitconfig contents alone cannot show the
+// failure; the test therefore also records every runGitConfig failure
+// through gitConfigFailureHook and fails if any occurred.
 //
 // A real, live procreap reaper must run for this to be a faithful
 // reproduction — a fake or absent reaper can't race anything (same
 // requirement TestManagedService_StartSurvivesReaperRace documents).
 //
 // Positive control: this test is not vacuously green. Reverting
-// runGitConfig's call back to a raw cmd.CombinedOutput() makes this test
-// fail under `go test -race -count=5 -run
+// runGitConfig's call back to a raw cmd.CombinedOutput() makes it fail
+// (the reaper takes the exit status of some git children, and cmd.Wait
+// reports "waitid: no child processes"), which `go test -count=10 -run
 // TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD
-// ./cmd/sciontool/commands/`; with procreap.CombinedOutputManaged in place
-// it passes reliably.
+// ./cmd/sciontool/commands/` shows on every run; with
+// procreap.CombinedOutputManaged in place it passes on every run.
 //
 // The reaper runs until its process exits and reaps every child that is not
 // started through procreap, so this test runs in a child copy of the test
@@ -3219,6 +3223,20 @@ func TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD(t *testi
 
 	// log.Init() runs first because the logger's lazy initialization is not concurrency-safe.
 	log.Init()
+
+	// runGitConfig only logs a failed git config call, so record failures
+	// through the hook. The hook is set before any goroutine starts and
+	// this test runs alone in its child process.
+	var (
+		hookMu      sync.Mutex
+		gitFailures []string
+	)
+	gitConfigFailureHook = func(args []string, err error) {
+		hookMu.Lock()
+		defer hookMu.Unlock()
+		gitFailures = append(gitFailures, fmt.Sprintf("git config %v: %v", args, err))
+	}
+	t.Cleanup(func() { gitConfigFailureHook = nil })
 
 	const iterations = 50
 	// Pre-create every agentHome serially: t.TempDir() and t.Fatal are not
@@ -3270,6 +3288,9 @@ func TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD(t *testi
 		if !strings.Contains(got, wantLine) {
 			t.Errorf("iteration %d: gitconfig content = %q, want it to contain %q (a managed-exec regression would race the reaper and leave this key unset)", i, got, wantLine)
 		}
+	}
+	if len(gitFailures) > 0 {
+		t.Errorf("runGitConfig reported %d failed git config call(s), want 0 (a raw exec under the active reaper fails cmd.Wait with ECHILD); first: %s", len(gitFailures), gitFailures[0])
 	}
 }
 

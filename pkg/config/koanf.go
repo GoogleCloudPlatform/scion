@@ -368,7 +368,7 @@ func loadVersionedSettingsFileOnly(dir string) (*VersionedSettings, error) {
 		HarnessConfigs: make(map[string]HarnessConfigEntry),
 		Profiles:       make(map[string]V1ProfileConfig),
 	}
-	if err := k.Unmarshal("", settings); err != nil {
+	if err := unmarshalVersionedSettings(k, settings); err != nil {
 		return nil, err
 	}
 	return settings, nil

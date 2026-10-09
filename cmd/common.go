@@ -709,6 +709,14 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		return asUsageError(err)
 	}
 
+	if err := validateTaskFileStdin(); err != nil {
+		return err
+	}
+	task, err := applyTaskFile(task, taskFilePath, os.Stdin)
+	if err != nil {
+		return asUsageError(err)
+	}
+
 	// Pre-flight: verify .scion/agents/ is gitignored (once, before any provisioning).
 	if err := CheckAgentsGitignore(projectPath); err != nil {
 		return err
@@ -1707,17 +1715,14 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 		agentID = resp.Agent.ID
 	}
 	// agentID keeps the create response's ID unless the fetch returned a
-	// non-empty one. Runtime, broker and profile always take the fetched
-	// value, even if empty: "" is itself a meaningful attach-is-supported
-	// value to attachUnsupportedErr.
-	var agentRuntime, agentBrokerID, agentProfile string
+	// non-empty one. The runtime always takes the fetched value (it feeds
+	// managedAttachErr); the Hub preflight decides the rest.
+	var agentRuntime string
 	if finalAgent != nil {
 		if finalAgent.ID != "" {
 			agentID = finalAgent.ID
 		}
 		agentRuntime = finalAgent.Runtime
-		agentBrokerID = finalAgent.RuntimeBrokerID
-		agentProfile = agentProfileName(finalAgent)
 	}
 	if agentID == "" {
 		agentID = agentName
@@ -1726,11 +1731,9 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 	attachCtx, attachCancel := context.WithTimeout(context.Background(), launchFetchTimeout)
 	defer attachCancel()
 	return attachHubSession(attachCtx, hubCtx, hubAttachTarget{
-		Name:     agentName,
-		ID:       agentID,
-		Runtime:  agentRuntime,
-		BrokerID: agentBrokerID,
-		Profile:  agentProfile,
+		Name:    agentName,
+		ID:      agentID,
+		Runtime: agentRuntime,
 	})
 }
 
