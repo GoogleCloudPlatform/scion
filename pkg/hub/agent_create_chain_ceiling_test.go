@@ -614,7 +614,7 @@ func (f *legacyFixture) assertGateUnrecorded(t *testing.T, token, surface string
 
 	rec := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPatch, "/api/v1/agents/"+identity.ID(), nil).WithContext(ctx)
-	require.False(t, f.srv.authorizeSAAssignment(rec, r, f.sa, surface))
+	require.False(t, f.srv.authorizeSAAssignment(rec, r, f.sa, f.sa.ScopeID, surface))
 	assertSAGateUnrecordedDenied(t, rec)
 }
 

@@ -1698,7 +1698,7 @@ func (s *Server) createAgentInProject(
 		// The whole gate lives in authorizeSAAssignment, including the ordering of
 		// the two layers, so the create and PATCH paths cannot drift apart on the
 		// part that matters. Read it there before changing either call.
-		if !s.authorizeSAAssignment(w, r, sa, SurfaceAgentCreate) {
+		if !s.authorizeSAAssignment(w, r, sa, projectID, SurfaceAgentCreate) {
 			return
 		}
 
@@ -4105,7 +4105,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			// PATCH is the surface that most needs it: reassigning an existing
 			// agent's identity is the cheapest way to acquire a service account
 			// you could not have been given at create time.
-			if !s.authorizeSAAssignment(w, r, sa, SurfaceAgentPatch) {
+			if !s.authorizeSAAssignment(w, r, sa, agent.ProjectID, SurfaceAgentPatch) {
 				return
 			}
 			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{

@@ -43,8 +43,7 @@ type gateTableOutcome struct {
 // gateTableEvaluate is the single call site of the gate in this table, so a
 // signature change touches one line here and no expectation.
 func gateTableEvaluate(srv *Server, ctx context.Context, sa *store.GCPServiceAccount, projectID string) *saAssignDenial {
-	_ = projectID
-	return srv.evaluateSAAssignment(ctx, nil, sa, SurfaceAgentCreate)
+	return srv.evaluateSAAssignment(ctx, nil, sa, projectID, SurfaceAgentCreate)
 }
 
 // TestSAAssignGate_BeforeAfterTable pins every observable outcome of the
@@ -102,13 +101,13 @@ func TestSAAssignGate_BeforeAfterTable(t *testing.T) {
 	}
 
 	rows := []struct {
-		name      string
-		sa        *store.GCPServiceAccount
-		mode      string
-		identity  Identity
-		actAs     string
-		nilAuthz  bool
-		want      gateTableOutcome
+		name     string
+		sa       *store.GCPServiceAccount
+		mode     string
+		identity Identity
+		actAs    string
+		nilAuthz bool
+		want     gateTableOutcome
 	}{
 		{name: "01 project SA, mode off, member", sa: projectSA, mode: modeOff, identity: member,
 			want: gateTableOutcome{Allowed: true}},
@@ -238,4 +237,50 @@ func TestSAAssignGate_DefaultLadderBeforeAfterTable(t *testing.T) {
 		SurfaceProjectDefault, defaultTierProject)
 	require.NoError(t, err)
 	assert.Equal(t, store.GCPMetadataModeAssign, cfg.MetadataMode)
+}
+
+// TestSAAssignPolicyPreconditions_Table covers the shared service-account
+// rules on their own: reachability (another project's account, a user-scoped
+// account), verification, and the hub-scope mode rule, in that order.
+func TestSAAssignPolicyPreconditions_Table(t *testing.T) {
+	verified := func(scope, scopeID string) *store.GCPServiceAccount {
+		return &store.GCPServiceAccount{Scope: scope, ScopeID: scopeID, Verified: true,
+			VerificationStatus: store.GCPVerificationVerified}
+	}
+	unverified := verified(store.ScopeProject, "p1")
+	unverified.Verified = false
+	unverifiedOther := verified(store.ScopeProject, "p2")
+	unverifiedOther.VerificationStatus = store.GCPVerificationUnverified
+	unverifiedHub := verified(store.ScopeHub, "hub")
+	unverifiedHub.Verified = false
+
+	cases := []struct {
+		name string
+		sa   *store.GCPServiceAccount
+		mode string
+		want saAssignPreconditionKind // "" = no refusal
+	}{
+		{"nil account", nil, SAAssignCheckEnforce, saAssignPreconditionUnreachable},
+		{"own project, off", verified(store.ScopeProject, "p1"), SAAssignCheckOff, ""},
+		{"own project, enforce", verified(store.ScopeProject, "p1"), SAAssignCheckEnforce, ""},
+		{"other project", verified(store.ScopeProject, "p2"), SAAssignCheckEnforce, saAssignPreconditionUnreachable},
+		{"other project and unverified", unverifiedOther, SAAssignCheckEnforce, saAssignPreconditionUnreachable},
+		{"user scoped", verified(store.ScopeUser, "u1"), SAAssignCheckEnforce, saAssignPreconditionUnreachable},
+		{"unverified", unverified, SAAssignCheckEnforce, saAssignPreconditionUnverified},
+		{"hub, enforce", verified(store.ScopeHub, "hub"), SAAssignCheckEnforce, ""},
+		{"hub, off", verified(store.ScopeHub, "hub"), SAAssignCheckOff, saAssignPreconditionHubMode},
+		{"hub, empty mode", verified(store.ScopeHub, "hub"), "", saAssignPreconditionHubMode},
+		{"hub, unverified, off", unverifiedHub, SAAssignCheckOff, saAssignPreconditionUnverified},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := saAssignPolicyPreconditions(tc.sa, "p1", tc.mode)
+			if tc.want == "" {
+				assert.Nil(t, got)
+				return
+			}
+			require.NotNil(t, got)
+			assert.Equal(t, tc.want, got.Kind)
+		})
+	}
 }
