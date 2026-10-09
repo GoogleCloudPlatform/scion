@@ -28,8 +28,8 @@ To allow the Hub to dispatch agents to your machine, you must start a Runtime Br
 ### 0. Prerequisites
 
 - Sign in to the Hub: `scion hub auth login --hub-url https://hub.example.com`.
-- Configure the Hub endpoint in your global settings **before** starting the broker, for example with `scion -g global config set --global hub.endpoint https://hub.example.com`, or set the `SCION_HUB_ENDPOINT` environment variable. A broker started without a Hub endpoint does not connect after a later `register`; stop and start it again.
-- Configure an image registry (`scion -g global config set --global image_registry <registry>`): `scion runtime-broker start` refuses to start without one.
+- Configure the Hub endpoint in your global settings **before** starting the broker, for example with `scion config set --global hub.endpoint https://hub.example.com`, or set the `SCION_HUB_ENDPOINT` environment variable. A broker started without a Hub endpoint does not connect after a later `register`; stop and start it again.
+- Configure an image registry (`scion config set --global image_registry <registry>`): `scion runtime-broker start` refuses to start without one.
 - Outside a project directory, pass `--global` to `scion runtime-broker start` and `register`.
 
 ### 1. Start the Broker
