@@ -549,10 +549,10 @@ func parseExpiryAt(s string, now time.Time) (time.Time, error) {
 	case 'd':
 		step = 24 * time.Hour
 	case 'y':
-		// A year is a fixed 365 days (the hub's maximum token lifetime),
-		// not a calendar year, so 1y always fits that maximum even when
-		// the following year contains 29 February.
-		step = store.UATMaxExpiry
+		// A year is a fixed 365 days, not a calendar year, so 1y always
+		// fits the hub's 365-day maximum token lifetime even when the
+		// following year contains 29 February.
+		step = 365 * 24 * time.Hour
 	default:
 		return time.Time{}, invalid
 	}

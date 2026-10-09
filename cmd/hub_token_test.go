@@ -247,11 +247,11 @@ func TestParseExpiryAt_YearIs365Days(t *testing.T) {
 			if lifetime := got.Sub(tt.now); lifetime > store.UATMaxExpiry {
 				t.Errorf("1y lifetime %v exceeds the hub maximum %v", lifetime, store.UATMaxExpiry)
 			}
+			// 2y stays over the limit at every reference time.
+			if _, err := parseExpiryAt("2y", tt.now); err == nil {
+				t.Error("parseExpiryAt(2y): expected an over-limit error, got nil")
+			}
 		})
-	}
-	// 2y stays over the limit regardless of the reference time.
-	if _, err := parseExpiryAt("2y", tests[0].now); err == nil {
-		t.Error("parseExpiryAt(2y): expected an over-limit error, got nil")
 	}
 }
 
