@@ -1640,7 +1640,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent's files belong to another run",
 					"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name,
 					"run_id", opts.RunID, "files_run_id", owner)
-			} else if _, cleanupErr := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); cleanupErr != nil {
+			} else if _, cleanupErr := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); cleanupErr != nil && !errors.Is(cleanupErr, agent.ErrAgentProjectUnresolved) {
 				s.agentLifecycleLog.Warn("Failed to clean up agent files after start failure",
 					"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name, "error", cleanupErr)
 			} else {
