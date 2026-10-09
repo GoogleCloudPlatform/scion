@@ -241,7 +241,9 @@ func TestSlowHubWorkspaceUpload_BudgetExpiredAfterWriteTimeout_GetsResponse(t *t
 		Name: "slow-upload", ProjectID: project.ID, Task: "work",
 	}, slowPathDelay)
 	require.True(t, uploadCalled, "fixture check: the upload branch must be reached")
-	assert.Equal(t, http.StatusInternalServerError, code, string(body))
+	// The hub's own answer (RuntimeError, 502 with a JSON body), not an
+	// empty response from a dropped connection.
+	assert.Equal(t, http.StatusBadGateway, code, string(body))
 	assert.Contains(t, string(body), "Timed out uploading the project workspace")
 }
 
