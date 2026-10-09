@@ -210,6 +210,19 @@ export default defineConfig([
     },
   },
 
+  // Lit components: Lit binds `@event=${this.handler}` template listeners
+  // to the host element (the `host` render option), so passing an unbound
+  // method there is correct and unbound-method only reports false
+  // positives. Test files have their own settings above. The rule stays
+  // on for src/client and every other source directory (ptone/scion#4070).
+  {
+    files: ['src/components/**/*.ts'],
+    ignores: ['src/components/**/*.test.ts'],
+    rules: {
+      '@typescript-eslint/unbound-method': 'off',
+    },
+  },
+
   // e2e-perf/*.mjs (the large-project performance harness's browser
   // benchmark) isn't part of the tsconfig.json TS program, so it is
   // parsed without type information and gets the non-type-checked

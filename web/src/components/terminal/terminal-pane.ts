@@ -1554,7 +1554,7 @@ export class ScionTerminalPane extends LitElement {
   }
 
   private _quoteForShell(path: string): string {
-    if (/^[A-Za-z0-9._\/-]+$/.test(path)) return path;
+    if (/^[A-Za-z0-9._/-]+$/.test(path)) return path;
     return "'" + path.replace(/'/g, "'\\''") + "'";
   }
 
