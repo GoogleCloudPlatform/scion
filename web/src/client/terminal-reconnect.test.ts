@@ -252,6 +252,138 @@ describe('error classification (#1659 AC3)', () => {
     }
   );
 
+  it('preflight 503 runtime_attach_unsupported (no PTY path) is terminal: message, no retry', async () => {
+    const f = fixture();
+    const noPath = {
+      error: {
+        code: 'runtime_attach_unsupported',
+        message:
+          "The agent's runtime does not support attach, and the agent has no conduit session that serves PTY",
+        details: { reason: 'agent_pty_unavailable', path: 'none' },
+      },
+    };
+    f.fetcher.mockResolvedValueOnce(json(agent)).mockResolvedValueOnce(json(noPath, 503));
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+
+    expect(session.state.connection).toBe('disconnected');
+    expect(session.state.disconnectReason).toBe('attach-unsupported');
+    expect(session.state.error).toContain('does not support attach');
+    expect(FakeSocket.instances).toHaveLength(0);
+
+    // Not armed: becoming frontmost does not try again.
+    const fetches = f.fetcher.mock.calls.length;
+    session.setFrontmost(false);
+    session.setFrontmost(true);
+    expect(session.reconnecting).toBe(false);
+    expect(f.fetcher.mock.calls.length).toBe(fetches);
+  });
+
+  it.each([
+    ['no-path 503 is final', true],
+    ['other 503 stays retriable', false],
+  ] as const)(
+    'connected pane drops (1006), auto-attempts, preflight answers: %s',
+    async (_name, noPathCase) => {
+      vi.useFakeTimers();
+      try {
+        const f = fixture();
+        const session = f.registry.open(agentId, f.initialize);
+        await session.connect();
+        FakeSocket.instances[0].open();
+        FakeSocket.instances[0].data();
+        session.setFrontmost(true);
+        expect(session.state.connection).toBe('connected');
+
+        const refusal = noPathCase
+          ? {
+              error: {
+                code: 'runtime_attach_unsupported',
+                message: 'No path to the terminal',
+                details: { reason: 'agent_pty_unavailable' },
+              },
+            }
+          : {
+              error: {
+                code: 'runtime_broker_unavailable',
+                message: 'Runtime broker not connected',
+              },
+            };
+        f.fetcher.mockResolvedValueOnce(json(agent)).mockResolvedValueOnce(json(refusal, 503));
+
+        FakeSocket.instances[0].readyState = 3;
+        FakeSocket.instances[0].onclose?.({ code: 1006 }); // frontmost: one immediate attempt
+        expect(session.reconnecting).toBe(true);
+        await session.connect(); // joins the in-flight automatic attempt
+        expect(FakeSocket.instances).toHaveLength(1);
+
+        if (noPathCase) {
+          expect(session.state.disconnectReason).toBe('attach-unsupported');
+          expect(session.state.error).toBe('No path to the terminal');
+          // Final: not shown as a failed reconnect, and never retried.
+          expect(session.state.reconnectFailed).toBe(false);
+          const fetches = f.fetcher.mock.calls.length;
+          session.setFrontmost(false);
+          session.setFrontmost(true);
+          await vi.advanceTimersByTimeAsync(2 * 60_000 + 1);
+          session.setFrontmost(false);
+          await vi.advanceTimersByTimeAsync(2 * 60_000 + 1);
+          session.setFrontmost(true);
+          expect(session.reconnecting).toBe(false);
+          expect(f.fetcher.mock.calls.length).toBe(fetches);
+          expect(FakeSocket.instances).toHaveLength(1);
+        } else {
+          expect(session.state.disconnectReason).toBe('server-error');
+          expect(session.state.reconnectFailed).toBe(true);
+          // Retriable: after the background reset, foregrounding tries again.
+          const fetches = f.fetcher.mock.calls.length;
+          session.setFrontmost(false);
+          await vi.advanceTimersByTimeAsync(2 * 60_000 + 1);
+          expect(session.state.reconnectFailed).toBe(false);
+          session.setFrontmost(true);
+          expect(session.reconnecting).toBe(true);
+          await session.connect();
+          expect(f.fetcher.mock.calls.length).toBeGreaterThan(fetches);
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  );
+
+  it('preflight 503 runtime_attach_unsupported without a message uses a fixed one', async () => {
+    const f = fixture();
+    f.fetcher
+      .mockResolvedValueOnce(json(agent))
+      .mockResolvedValueOnce(json({ error: { code: 'runtime_attach_unsupported' } }, 503));
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    expect(session.state.disconnectReason).toBe('attach-unsupported');
+    expect(session.state.error).toContain('no session that serves a terminal');
+  });
+
+  it('other preflight 503s keep the server-error handling', async () => {
+    const f = fixture();
+    f.fetcher
+      .mockResolvedValueOnce(json(agent))
+      .mockResolvedValueOnce(
+        json(
+          {
+            error: {
+              code: 'runtime_broker_unavailable',
+              message: 'Runtime broker not connected',
+              details: { reason: 'broker_not_connected' },
+            },
+          },
+          503
+        )
+      );
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    expect(session.state.disconnectReason).toBe('server-error');
+    expect(session.state.error).toBe('Runtime broker not connected');
+  });
+
   it.each([
     [401, 'auth-401'],
     [404, 'not-found'],
