@@ -107,10 +107,10 @@ HUB_SQLITE_PKGS := ./pkg/hub/... ./perf/bench/seed/... ./pkg/conduit/... ./pkg/s
 
 test-hub-sqlite:
 	@echo "Running pkg/hub + perf/bench/seed + pkg/conduit + pkg/store/entadapter + pkg/artifacts tests (SQLite-enabled)..."
-	@dir=$$(mktemp -d); \
+	@dir=$$(mktemp -d) || exit 1; \
 	$(HUB_TEST_GOGC) go test -c -o "$$dir/" $(HUB_SQLITE_PKGS); \
 	status=$$?; \
-	rm -rf "$$dir"; \
+	if [ -n "$$dir" ]; then rm -rf "$$dir"; fi; \
 	if [ $$status -ne 0 ]; then exit $$status; fi
 	@go test -count=1 -timeout 60m $(HUB_SQLITE_PKGS)
 
@@ -297,12 +297,13 @@ test-launch-store-postgres:
 		echo "ERROR: one or more storetest group/MembershipCleanup cases were skipped -- see '--- SKIP' lines above." >&2; \
 		exit 1; \
 	fi
-	@rm -f /tmp/test-launch-store-postgres-hub.status; \
+	@st=$$(mktemp) || exit 1; \
 	{ $(HUB_TEST_GOGC) go test -tags integration -count=1 -timeout 20m -v \
 		-run '^(TestProjectDeletionService_LockOrderNoDeadlock|TestScheduledSend_TwoHubReplicasPostgres_OneDelivery|$(subst $(space),|,$(strip $(MEMBERSHIP_LOSS_POSTGRES_TESTS))))$$' \
-		./pkg/hub/ 2>&1; echo $$? > /tmp/test-launch-store-postgres-hub.status; } \
+		./pkg/hub/ 2>&1; echo $$? > "$$st"; } \
 		| tee /tmp/test-launch-store-postgres-hub.log; \
-	status=$$(cat /tmp/test-launch-store-postgres-hub.status 2>/dev/null); \
+	status=$$(cat "$$st" 2>/dev/null); \
+	rm -f "$$st"; \
 	case "$$status" in ''|*[!0-9]*) status=1;; esac; \
 	if [ $$status -ne 0 ]; then exit $$status; fi; \
 	if ! grep -qE '^[[:space:]]*--- PASS: TestProjectDeletionService_LockOrderNoDeadlock' /tmp/test-launch-store-postgres-hub.log; then \
@@ -331,8 +332,8 @@ test-launch-store-postgres:
 # WEBCHAT_POSTGRES_TESTS reports no PASS line. CI runs this in
 # the T1 Launch Store PostgreSQL Tests job. The tests drop and recreate the
 # webchat_* tables, so point the DSN at a scratch database. go test output
-# is streamed with tee (exit status kept in a status file, since make's
-# /bin/sh has no pipefail) so a step killed mid-run still shows what ran
+# is streamed with tee (exit status kept in a per-run mktemp file, since
+# make's /bin/sh has no pipefail) so a step killed mid-run still shows what ran
 # (ptone/scion#4083).
 WEBCHAT_POSTGRES_TESTS := TestListTopicsByProjects_Postgres \
 	TestC4Fix_Postgres_FreshDB \
@@ -348,12 +349,13 @@ test-webchat-postgres:
 		echo "ERROR: SCION_TEST_POSTGRES_DSN is not set -- the Postgres tests would silently skip instead of running." >&2; \
 		exit 1; \
 	fi
-	@rm -f /tmp/test-webchat-postgres.status; \
+	@st=$$(mktemp) || exit 1; \
 	{ $(HUB_TEST_GOGC) go test -count=1 -timeout 10m -v \
 		-run '^($(subst $(eval) ,|,$(strip $(WEBCHAT_POSTGRES_TESTS))))$$' \
-		./pkg/hub/ 2>&1; echo $$? > /tmp/test-webchat-postgres.status; } \
+		./pkg/hub/ 2>&1; echo $$? > "$$st"; } \
 		| tee /tmp/test-webchat-postgres.log; \
-	status=$$(cat /tmp/test-webchat-postgres.status 2>/dev/null); \
+	status=$$(cat "$$st" 2>/dev/null); \
+	rm -f "$$st"; \
 	case "$$status" in ''|*[!0-9]*) status=1;; esac; \
 	if [ $$status -ne 0 ]; then exit $$status; fi; \
 	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-webchat-postgres.log; then \
@@ -384,12 +386,13 @@ test-conduit-authz-postgres:
 		echo "ERROR: SCION_TEST_POSTGRES_DSN is not set -- the Postgres tests would silently skip instead of running." >&2; \
 		exit 1; \
 	fi
-	@rm -f /tmp/test-conduit-authz-postgres.status; \
+	@st=$$(mktemp) || exit 1; \
 	{ $(HUB_TEST_GOGC) go test -count=1 -timeout 10m -v \
 		-run '^($(subst $(eval) ,|,$(strip $(CONDUIT_AUTHZ_POSTGRES_TESTS))))$$' \
-		./pkg/hub/ 2>&1; echo $$? > /tmp/test-conduit-authz-postgres.status; } \
+		./pkg/hub/ 2>&1; echo $$? > "$$st"; } \
 		| tee /tmp/test-conduit-authz-postgres.log; \
-	status=$$(cat /tmp/test-conduit-authz-postgres.status 2>/dev/null); \
+	status=$$(cat "$$st" 2>/dev/null); \
+	rm -f "$$st"; \
 	case "$$status" in ''|*[!0-9]*) status=1;; esac; \
 	if [ $$status -ne 0 ]; then exit $$status; fi; \
 	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-conduit-authz-postgres.log; then \
