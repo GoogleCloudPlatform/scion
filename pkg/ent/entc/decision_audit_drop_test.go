@@ -115,7 +115,10 @@ func TestDecisionAuditDrop_AtomicFailure(t *testing.T) {
 			client := ent.NewClient(ent.Driver(driver))
 			require.ErrorIs(t, dropDecisionAuditTable(context.Background(), client), fault)
 			require.Equal(t, 1, driver.begins)
-			if stage != "begin" {
+			if stage == "begin" {
+				require.Zero(t, tx.rollbacks)
+				require.Zero(t, tx.commits)
+			} else {
 				require.Equal(t, 1, tx.rollbacks)
 			}
 			if stage == "exec" {

@@ -191,6 +191,10 @@ Persistence settings for the Hub.
 | `driver` | string | `"sqlite"` | Database driver: `sqlite` or `postgres`. |
 | `url` | string | `"hub.db"` | Connection string or file path. |
 
+:::caution[Permanent decision-audit data removal]
+`AutoMigrate` permanently drops `decision_audits` and its data. Export first if preservation is required. During Hub schema migration on PostgreSQL, the drop takes an `ACCESS EXCLUSIVE` table lock while the existing advisory schema lock is held. Mixed old replicas may log write failures after the drop. Rolling back to an old binary can recreate an empty table but cannot restore the deleted data.
+:::
+
 :::caution[Postgres: `broker_dispatch` index on upgrade]
 On Postgres, auto-migrate creates the `brokerdispatch_state_updated_at` index on `broker_dispatch (state, updated_at)` with a plain `CREATE INDEX`, which blocks writes to the table while it builds. On a large deployment, create the index before upgrading so auto-migrate finds it already in place:
 

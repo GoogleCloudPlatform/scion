@@ -49,3 +49,12 @@ reopening and mutation/history conservation. Hub, command and real PostgreSQL
 checks remain unexecuted for this revision.
 
 Final emitter and failed-start cleanup comments now match retained behavior; static diff and stale-text checks passed.
+
+The third code review aligns the experiment description and its test pin with
+non-persistence on admission, freshness or logging-health failure. Database
+reference guidance now covers permanent removal, export, PostgreSQL locks,
+mixed replicas and old-binary rollback. Pool-wait commentary and the negative
+health-key sentinel comment match current behavior. Begin-transaction failure
+coverage now requires zero commits and rollbacks. Focused Entc migration tests
+passed; Hub, command, experiment-package, documentation-build and PostgreSQL
+validation remain unexecuted for this revision.

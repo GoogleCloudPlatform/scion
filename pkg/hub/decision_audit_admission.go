@@ -32,8 +32,9 @@ const (
 	decisionAuditCancelBudget       = time.Second
 	decisionAuditCompleteBudget     = 2 * time.Second
 	decisionAuditNewHealthKey       = "authorization_decision_audit_new"
-	decisionAuditLegacyHealthKey    = "authorization_decision_audit_legacy"
-	decisionAuditFaultWarning       = "unhealthy: CRITICAL authorization decision logging fault; NEW off; triggering record may be lost; subsequent decisions have no persistence"
+	// Negative compatibility/test sentinel; production health does not emit this key.
+	decisionAuditLegacyHealthKey = "authorization_decision_audit_legacy"
+	decisionAuditFaultWarning    = "unhealthy: CRITICAL authorization decision logging fault; NEW off; triggering record may be lost; subsequent decisions have no persistence"
 )
 
 // These facts describe a finite local contract, not production provenance.
