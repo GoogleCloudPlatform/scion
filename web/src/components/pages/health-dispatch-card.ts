@@ -97,6 +97,8 @@ export class ScionHealthDispatchCard extends LitElement {
       border: 1px solid var(--scion-border);
       border-radius: var(--scion-radius-lg);
       padding: 1.25rem;
+      height: 100%;
+      box-sizing: border-box;
     }
 
     .card-title {
