@@ -326,16 +326,22 @@ type workspaceHealthProbeKey struct {
 // workspaceProbesInFlight on the request path.
 var workspaceHealthProbesInFlight sync.Map
 
+// workspaceHealthProbeBeforeDone, when non-nil, is called by the stat
+// goroutine just before it closes done. It is a test seam for checking that
+// the in-flight entry is already gone by then; it is nil in production.
+var workspaceHealthProbeBeforeDone func(key workspaceHealthProbeKey)
+
 // startWorkspaceHealthProbe returns the in-flight stat for mountPath, starting
 // one if none is running. The stat goroutine removes its entry before closing
-// done, so the first probe after a stat returns starts a fresh one.
+// done, so the first probe after a stat returns starts a fresh one. A probe
+// that joins an in-flight stat can return a result up to one stat old.
 func startWorkspaceHealthProbe(mountPath string, requireMount bool) *workspaceHealthProbeCall {
 	key := workspaceHealthProbeKey{path: mountPath, requireMount: requireMount}
 	call := &workspaceHealthProbeCall{done: make(chan struct{})}
 	if existing, loaded := workspaceHealthProbesInFlight.LoadOrStore(key, call); loaded {
 		return existing.(*workspaceHealthProbeCall)
 	}
-	stat, rootPath := workspaceHealthStat, containerRootPath
+	stat, rootPath, beforeDone := workspaceHealthStat, containerRootPath, workspaceHealthProbeBeforeDone
 	go func(c *workspaceHealthProbeCall) {
 		fi, err := stat(mountPath)
 		if err != nil {
@@ -348,6 +354,9 @@ func startWorkspaceHealthProbe(mountPath string, requireMount bool) *workspaceHe
 			c.res = workspaceHealthStatResult{mounted: mounted, determinable: determinable}
 		}
 		workspaceHealthProbesInFlight.CompareAndDelete(key, c)
+		if beforeDone != nil {
+			beforeDone(key)
+		}
 		close(c.done)
 	}(call)
 	return call
