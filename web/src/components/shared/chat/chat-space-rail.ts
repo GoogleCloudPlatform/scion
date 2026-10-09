@@ -3149,12 +3149,14 @@ export class ScionChatSpaceRail extends LitElement {
     return html`
       <div class="rail-header"><span>Projects</span></div>
 
-      ${this.loading
-        ? html`<div class="loading-state"><sl-spinner></sl-spinner></div>`
-        : html`
-            ${this.renderToolbar()}
-            <div class="rail-body" @click=${this.handleRailBodyClick}>${this.renderSpaces()}</div>
-          `}
+      ${
+        this.loading
+          ? html`<div class="loading-state"><sl-spinner></sl-spinner></div>`
+          : html`
+              ${this.renderToolbar()}
+              <div class="rail-body" @click=${this.handleRailBodyClick}>${this.renderSpaces()}</div>
+            `
+      }
       ${this.contextMenuTarget && !this.menuAsSheet ? this.renderContextMenu() : nothing}
       ${this.groupContextMenuTarget && !this.menuAsSheet ? this.renderGroupContextMenu() : nothing}
       ${this.renderMenuSheet()} ${this.emojiPickerSpaceId ? this.renderEmojiPicker() : nothing}
@@ -3494,11 +3496,13 @@ export class ScionChatSpaceRail extends LitElement {
             <span class="group-name">${group.name}</span>
             <span class="group-count">(${groupThreads.length})</span>
           </div>
-          ${!collapsed
-            ? html`<div class="thread-group">
-                ${groupThreads.map((t) => this.renderThread(t, projectId))}
-              </div>`
-            : nothing}
+          ${
+            !collapsed
+              ? html`<div class="thread-group">
+                  ${groupThreads.map((t) => this.renderThread(t, projectId))}
+                </div>`
+              : nothing
+          }
         `;
       })}
       ${this.groupNameInput?.projectId === projectId ? this.renderGroupNameInput() : nothing}

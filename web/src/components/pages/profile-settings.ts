@@ -505,10 +505,10 @@ export class ScionPageProfileSettings extends LitElement {
           <div class="setting-info">
             <p class="setting-label">Times shown in</p>
             <p class="setting-description">
-              Controls how times are displayed and how date/time inputs are interpreted in native
-              chat and scheduling forms, and the rest of the UI follows over time. Choose "Auto" to
-              follow your browser's zone (currently ${browserTimeZone()}); this never changes how
-              agent containers are configured.
+              Controls how times are displayed and how date/time inputs are interpreted in
+              native chat and scheduling forms, and the rest of the UI follows over time. Choose
+              "Auto" to follow your browser's zone (currently ${browserTimeZone()}); this never
+              changes how agent containers are configured.
             </p>
           </div>
           <div class="setting-control">

@@ -974,8 +974,7 @@ export class ScionAgentMessageViewer extends LitElement {
               <div class="msg-badges">
                 ${msg.crossProject
                   ? html`<span class="msg-badge badge-cross-project"
-                      ><sl-icon name="globe" style="font-size:0.625rem"></sl-icon>
-                      cross-project</span
+                      ><sl-icon name="globe" style="font-size:0.625rem"></sl-icon> cross-project</span
                     >`
                   : nothing}
                 ${msg.msgType
