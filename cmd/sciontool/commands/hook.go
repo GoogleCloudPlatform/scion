@@ -176,6 +176,15 @@ func runHookWithEvent(eventName string) {
 // limits_exceeded and the final stop status are reported by sciontool init.
 const hookHubBudget = 3 * time.Second
 
+// shutdownSessionReportTimeout bounds the Hub call with which sciontool init
+// reports a session still open at shutdown (reportOpenSessionAtShutdown,
+// session_backstop.go): the session-end metrics report that a hook process
+// never made because session-end did not fire. It is the init-side
+// counterpart of hookHubBudget. Together with the session state lock wait
+// (2s) it keeps that backstop well inside the runtime's default 10s stop
+// grace period. A variable only so tests can shorten it.
+var shutdownSessionReportTimeout = 3 * time.Second
+
 // processHookData parses and handles hook event data.
 func processHookData(data []byte) error {
 	var rawData map[string]interface{}

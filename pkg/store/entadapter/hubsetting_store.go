@@ -18,10 +18,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sync"
 
 	"entgo.io/ent/dialect"
-	entsql "entgo.io/ent/dialect/sql"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubsetting"
@@ -30,9 +28,7 @@ import (
 
 // HubSettingStore implements store.HubSettingStore backed by Ent.
 type HubSettingStore struct {
-	client      *ent.Client
-	dialectOnce sync.Once
-	dialectName string
+	client *ent.Client
 }
 
 // NewHubSettingStore creates a new Ent-backed HubSettingStore.
@@ -42,14 +38,11 @@ func NewHubSettingStore(client *ent.Client) *HubSettingStore {
 
 // usesRowLocks returns true when the underlying database supports SELECT …
 // FOR UPDATE (i.e. Postgres). SQLite uses a single-writer lock instead, so
-// ForUpdate must be skipped — it returns an error on SQLite.
-func (s *HubSettingStore) usesRowLocks(ctx context.Context) bool {
-	s.dialectOnce.Do(func() {
-		_, _ = s.client.HubSetting.Query().
-			Where(func(sel *entsql.Selector) { s.dialectName = sel.Dialect() }).
-			Exist(ctx)
-	})
-	return s.dialectName == dialect.Postgres
+// ForUpdate must be skipped — it returns an error on SQLite. The dialect is
+// read from the driver with no query, the same idiom as
+// BrokerSettingStore.usesRowLocks.
+func (s *HubSettingStore) usesRowLocks() bool {
+	return s.client.Driver().Dialect() == dialect.Postgres
 }
 
 // entHubSettingToStore converts an Ent HubSetting entity to the store model.
@@ -111,10 +104,7 @@ func (s *HubSettingStore) UpsertHubSetting(
 	expectedRevision int64,
 	origin string,
 ) (*store.HubSetting, error) {
-	// Detect dialect BEFORE opening a transaction — with SQLite's
-	// MaxOpenConns=1 the dialect-probe query would deadlock if the
-	// tx already held the single connection.
-	useLock := s.usesRowLocks(ctx)
+	useLock := s.usesRowLocks()
 
 	tx, err := s.client.Tx(ctx)
 	if err != nil {

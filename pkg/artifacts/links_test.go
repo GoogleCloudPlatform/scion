@@ -1132,6 +1132,11 @@ func TestGrantKindsEachCount(t *testing.T) {
 	}
 }
 
+func (s *recordingStore) DeleteGrant(ctx context.Context, artifactID, grantID string) error {
+	s.record("DeleteGrant")
+	return s.Store.DeleteGrant(ctx, artifactID, grantID)
+}
+
 // noExpiryStore returns resolved link grants without an expiry.
 type noExpiryStore struct{ Store }
 

@@ -33,6 +33,8 @@ Key properties:
 - `gcloud`, `docker`, `python3`, and `openssl`.
 - Enabled APIs: Cloud Run, IAP, Artifact Registry, Secret Manager, IAM Credentials,
   Cloud SQL Admin, Cloud Storage, and Cloud Logging.
+- Permission for the identity running `deploy.sh` to enable services
+  (`serviceusage.services.enable`); each run enables the IAM Credentials API.
 - A Cloud SQL Postgres instance in the target region.
 - A GCS bucket for Hub artifacts.
 - Filestore/NFS details for Cloud Run Instances workspaces.
@@ -72,6 +74,7 @@ Useful optional variables:
 | `SCION_BROKER_NAME` | `Cloud Run Instances` | Display name for the logical broker. |
 | `SCION_SESSION_SECRET` | generated | Shared cookie/JWT signing secret stored in Secret Manager. |
 | `SCION_IAP_CLIENT_ID` / `SCION_IAP_CLIENT_SECRET` | unset | Optional custom OAuth client for IAP. |
+| `SCION_HUB_SA_MINTING` | `true` | `true` or `false`. `true` grants the Hub service account `roles/iam.serviceAccountAdmin` on the project so the Hub can mint service accounts for agents; `false` skips the grant (and does not revoke an earlier one). See [Hub-minted service accounts](#hub-minted-service-accounts). |
 
 ## Deploy
 
@@ -104,8 +107,10 @@ that URL unless `SCION_PUBLIC_URL` was provided.
 ## What the Script Does
 
 1. Creates or reuses the Hub, transport-auth, and agent runtime service accounts.
-2. Grants the Hub service account Cloud SQL, Secret Manager, GCS, Cloud Run
-   Instances, logging, IAP tunnel, and service-account attachment permissions.
+2. Enables `iamcredentials.googleapis.com` and grants the Hub service account
+   Cloud SQL, Secret Manager, GCS, Cloud Run Instances, logging, IAP tunnel, and
+   service-account attachment permissions, plus `roles/iam.serviceAccountAdmin`
+   unless `SCION_HUB_SA_MINTING=false`.
 3. Grants the Hub service account token-creator access on the transport SA.
 4. Builds and pushes the Hub container image to Artifact Registry.
 5. Renders `hub-settings-template.yaml` with Postgres, GCS, IAP transport, and
@@ -115,6 +120,44 @@ that URL unless `SCION_PUBLIC_URL` was provided.
    `--no-cpu-throttling`, min instances `>= 2`, and Cloud SQL attachment.
 8. Grants the IAP service agent `roles/run.invoker`.
 9. Grants the transport SA `roles/iap.httpsResourceAccessor`.
+
+## Hub-minted service accounts
+
+Project owners can have the Hub mint new GCP service accounts for agents. The
+Hub does this with its own credentials, which on this deployment are the Hub
+service account (`SCION_SA_NAME`, default
+`scion-hub-sa@PROJECT_ID.iam.gserviceaccount.com`). Minting creates the
+account, sets IAM policy on it, and deletes it if a follow-up grant fails. The
+deploy script therefore grants the Hub service account
+`roles/iam.serviceAccountAdmin` on the project by default, and enables
+`iamcredentials.googleapis.com`, which the Hub uses to issue tokens for minted
+accounts. To skip the role grant, set `SCION_HUB_SA_MINTING=false` (the
+environment-variable form of the single-node VM deploy's `hub_sa_minting`
+key). That does not revoke a grant from an earlier deploy; the deploy output
+prints the removal command.
+
+`roles/iam.serviceAccountAdmin` applies to every service account in the
+project, not only the ones the Hub mints. In a project shared with other
+workloads or other hubs, the Hub service account can therefore change IAM
+policy on, and delete, those accounts too. The default grant assumes one hub
+per GCP project, in a project that holds no other privileged service accounts.
+If you run more than one hub in the same project, or the project holds other
+privileged service accounts, set `SCION_HUB_SA_MINTING=false` and grant
+minting access separately, for example from a dedicated project.
+
+For a deployment made before the script granted this role, re-run the deploy
+script, or grant the role by hand (no Hub restart needed; IAM changes can take
+a few minutes to apply):
+
+```bash
+gcloud projects add-iam-policy-binding PROJECT_ID \
+  --member="serviceAccount:scion-hub-sa@PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/iam.serviceAccountAdmin" --condition=None
+gcloud services enable iamcredentials.googleapis.com --project=PROJECT_ID
+```
+
+Minted accounts start with no roles: grant each one whatever its agents need
+(for example `roles/aiplatform.user` for Vertex AI) before assigning it.
 
 ## Verification
 

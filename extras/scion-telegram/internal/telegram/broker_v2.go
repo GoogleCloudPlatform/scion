@@ -1899,8 +1899,10 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 
 	b.mu.RLock()
 	botUsername := ""
+	botID := int64(0)
 	if b.botInfo != nil {
 		botUsername = b.botInfo.Username
+		botID = b.botInfo.ID
 	}
 	b.mu.RUnlock()
 
@@ -1949,10 +1951,6 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		replyFromID := int64(0)
 		if tgMsg.ReplyToMessage.From != nil {
 			replyFromID = tgMsg.ReplyToMessage.From.ID
-		}
-		botID := int64(0)
-		if b.botInfo != nil {
-			botID = b.botInfo.ID
 		}
 		b.log.Debug("Fallback1: checking reply-to message", "reply_from_id", replyFromID, "bot_id", botID)
 		replyText := tgMsg.ReplyToMessage.Text

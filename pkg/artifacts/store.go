@@ -33,6 +33,20 @@ var ErrConflict = errors.New("artifacts: conflict")
 // the maximum number of unexpired share links.
 var ErrTooManyLinks = errors.New("artifacts: too many share links")
 
+// ErrTooManyGrants is returned by PutGrant when an artifact already has
+// the maximum number of principal and scope grants.
+var ErrTooManyGrants = errors.New("artifacts: too many grants")
+
+// ErrHomeGrantAdmin is returned when a write would make the scope grant of
+// an artifact's home scope an admin grant (PutGrant), or move an artifact
+// to a scope that holds an admin grant on it (UpdateArtifact). The home
+// project's grant is read or write only.
+var ErrHomeGrantAdmin = errors.New("artifacts: the home scope's grant may only be read or write")
+
+// ErrCrossScopeDisabled is returned by PutGrant for a scope grant to a
+// scope other than the artifact's home while sharing across scopes is off.
+var ErrCrossScopeDisabled = errors.New("artifacts: sharing with other scopes is off")
+
 // ErrTooManyPending is returned by CreateVersion when an artifact already
 // has the maximum number of pending versions.
 var ErrTooManyPending = errors.New("artifacts: too many pending versions")
@@ -202,11 +216,14 @@ type Store interface {
 	// and scope, or ErrNotFound.
 	GetArtifactByKey(ctx context.Context, scopeKind, scopeRef, ownerKind, ownerRef, key string) (*Artifact, error)
 
-	// MarkReceived records that the bytes of file path of the pending
-	// version versionID have arrived, with their media type. It returns
-	// ErrNotFound when the file is not in the manifest and ErrConflict when
-	// the version is no longer pending.
-	MarkReceived(ctx context.Context, versionID, path, mediaType string) error
+	// MarkReceived records, in one transaction, that the bytes of file path
+	// of the pending version versionID have arrived, with their media type,
+	// and that the files named in siblings (path -> media type), which have
+	// the same digest and share the stored object, have arrived too.
+	// Siblings that are not pending files of the version with that digest
+	// are left alone. It returns ErrNotFound when path is not in the
+	// manifest and ErrConflict when the version is no longer pending.
+	MarkReceived(ctx context.Context, versionID, path, mediaType string, siblings map[string]string) error
 
 	// ClaimFinalize moves the pending version seq of an artifact to
 	// finalizing, so that exactly one finalize request completes it. A
@@ -309,6 +326,69 @@ type Store interface {
 	// returns ErrNotFound when no such link grant exists.
 	RevokeLink(ctx context.Context, artifactID, linkID string) error
 
+	// PutGrant adds the principal or scope grant g to its artifact, or,
+	// when the artifact already has a grant for the same subject, sets
+	// that grant's permission to g's (g.ID and g.CreatedAt then take the
+	// stored grant's). created reports which. Under the artifact's lock it
+	// reads the artifact's home scope and refuses an admin grant to it
+	// (ErrHomeGrantAdmin) and, unless crossScope, a scope grant to any
+	// other scope (ErrCrossScopeDisabled). It refuses with
+	// ErrTooManyGrants when adding would exceed maxGrants principal and
+	// scope grants, and returns ErrNotFound when the artifact is absent or
+	// deleted.
+	PutGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool) (created bool, err error)
+
+	// DeleteGrant deletes principal or scope grant grantID of artifact
+	// artifactID. It returns ErrNotFound when there is no such grant, and
+	// ErrConflict, deleting nothing, when the grant is the scope grant of
+	// the artifact's current home scope (checked under the artifact's
+	// lock, so a concurrent move cannot slip between check and delete).
+	DeleteGrant(ctx context.Context, artifactID, grantID string) error
+
+	// SetExpiry sets (or, with nil, clears) a live artifact's expiry and
+	// returns the updated artifact, or ErrNotFound.
+	SetExpiry(ctx context.Context, artifactID string, expiresAt *time.Time) (*Artifact, error)
+
+	// UpdateArtifact applies u to a live artifact in one transaction under
+	// the artifact's lock and returns the updated artifact. It returns
+	// ErrNotFound when the artifact is absent or deleted, ErrConflict when
+	// a move would give the owner two live artifacts with the same key in
+	// the new scope, ErrTooManyGrants when a move would exceed u.MaxGrants
+	// principal and scope grants, and ErrHomeGrantAdmin when the new scope
+	// holds an admin grant on the artifact (lower it first).
+	UpdateArtifact(ctx context.Context, artifactID string, u ArtifactUpdate) (*Artifact, error)
+
+	// SweepExpired soft-deletes up to limit live artifacts whose expiry is
+	// at or before now, deleting their grants and share links in the same
+	// transaction, and returns how many it deleted.
+	SweepExpired(ctx context.Context, now time.Time, limit int) (int, error)
+
+	// TouchBlob records that a write is about to store blob digest at now,
+	// so the blob sweep leaves the blob alone for the grace period. It
+	// waits for a sweep that holds the blob's state to finish.
+	TouchBlob(ctx context.Context, digest string, now time.Time) error
+
+	// MarkBlobs records, for each blob (at most MaxBlobBatch), whether a
+	// live artifact references it: a referenced blob's state is dropped;
+	// an unreferenced one is marked unreferenced since now unless it
+	// already is, and its listed generation is recorded.
+	MarkBlobs(ctx context.Context, blobs []BlobMark, now time.Time) error
+
+	// ReclaimBlobs deletes up to limit blobs marked unreferenced since at
+	// or before cutoff and not touched since cutoff. For each, in one
+	// transaction holding the blob's state row, it checks the mark, the
+	// touch and the references again, calls del
+	// with the digest and the generation recorded at marking (0 when
+	// unknown), which removes the bytes, and drops the row; a writer
+	// touching the blob meanwhile waits for that transaction. It returns
+	// how many blobs it deleted. An error from del keeps that blob and its
+	// mark and the pass goes on with the others; the pass then returns an
+	// error wrapping the first such failure. A del error that wraps
+	// context.DeadlineExceeded or context.Canceled, or a third del failure
+	// in a row (an unknown generation does not count), ends the pass, as
+	// does any other error.
+	ReclaimBlobs(ctx context.Context, cutoff time.Time, limit int, del func(digest string, generation int64) error) (int, error)
+
 	// AddMessageRefs records that message messageID references refs, in the
 	// artifact_message_ref link table. A reference already recorded for the
 	// message and artifact is left as it is. The caller has already checked
@@ -319,6 +399,28 @@ type Store interface {
 	// messageIDs, keyed by message id and ordered by artifact id. Messages
 	// without references are absent from the map.
 	ListMessageRefs(ctx context.Context, messageIDs []string) (map[string][]MessageRef, error)
+}
+
+// BlobMark is one listed blob for MarkBlobs.
+type BlobMark struct {
+	Digest string
+	// Generation is the object generation the listing returned, or 0.
+	Generation int64
+}
+
+// ArtifactUpdate is a change UpdateArtifact applies.
+type ArtifactUpdate struct {
+	// HomeGrant, when set, moves the artifact to the scope it names
+	// (HomeGrant.SubjectRef). The old home scope's grant is removed; the
+	// new scope gets HomeGrant (a read grant) unless it already has a scope
+	// grant, which is kept as it is.
+	HomeGrant *Grant
+	// MaxGrants bounds the artifact's principal and scope grants after a
+	// move.
+	MaxGrants int
+	// SetExpiry applies ExpiresAt, which nil clears.
+	SetExpiry bool
+	ExpiresAt *time.Time
 }
 
 // CandidateQuery selects rows for ListCandidates.

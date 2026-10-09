@@ -33,6 +33,7 @@ const hostedUserGuide = {
 		{ label: 'Port Forwarding & Auto-Expose', slug: 'hosted/user/port-forwarding' },
 		{ label: 'Messaging & Notifications', slug: 'hosted/user/messaging' },
 		{ label: 'Scheduling & Events', slug: 'hosted/user/scheduling' },
+		{ label: 'Scheduled Chat Messages', slug: 'hosted/user/scheduled-send' },
 		{ label: 'External Channels', slug: 'hosted/user/external-channels' },
 		{ label: 'A2A Protocol Bridge', slug: 'hosted/user/a2a-bridge' },
 		{ label: 'AWS Federation', slug: 'hosted/user/aws-federation' },

@@ -43,6 +43,7 @@ var (
 	conduitGrantKeyActivation string
 	conduitReconnectWindow    string
 	conduitAuthzRecheck       string
+	conduitUserStreamAuthzMax string
 	conduitTCPAllowedPorts    []int
 )
 
@@ -53,6 +54,7 @@ func registerConduitServerFlags(f *pflag.FlagSet) {
 	f.StringVar(&conduitGrantKeyActivation, "conduit-grant-key-activation", "", "Publish-before-sign delay of a new conduit grant key (default 15m, minimum 1m)")
 	f.StringVar(&conduitReconnectWindow, "conduit-reconnect-window", "", "Jitter window targets redial in after a planned conduit close (default 5s, 0s-5m)")
 	f.StringVar(&conduitAuthzRecheck, "conduit-authz-recheck-interval", "", "Period of the authorization re-check sweep of open conduit user streams (default 60s, 1s-10m)")
+	f.StringVar(&conduitUserStreamAuthzMax, "conduit-stream-authz-max-user", "", "Authorization interval of user-originated conduit streams: at its end the hub re-checks the user and renews or closes the stream (default 8h, 1m-168h)")
 	f.IntSliceVar(&conduitTCPAllowedPorts, "conduit-tcp-allowed-ports", nil, "Additional agent-local ports a conduit TCP stream may target besides the agent's exposed ports (comma-separated; reserved ports are always refused; default: exposed ports only)")
 }
 
@@ -75,6 +77,9 @@ func applyConduitFlagOverrides(cmd *cobra.Command, cfg *config.GlobalConfig) {
 	if f.Changed("conduit-authz-recheck-interval") {
 		cfg.Hub.Conduit.AuthzRecheckInterval = conduitAuthzRecheck
 	}
+	if f.Changed("conduit-stream-authz-max-user") {
+		cfg.Hub.Conduit.StreamAuthzMax.User = conduitUserStreamAuthzMax
+	}
 	if f.Changed("conduit-tcp-allowed-ports") {
 		cfg.Hub.Conduit.TCPAllowedPorts = append([]int(nil), conduitTCPAllowedPorts...)
 	}
@@ -84,7 +89,7 @@ func applyConduitFlagOverrides(cmd *cobra.Command, cfg *config.GlobalConfig) {
 // --foreground daemon child.
 func appendConduitDaemonArgs(cmd *cobra.Command, args []string) []string {
 	f := cmd.Flags()
-	for _, name := range []string{"internal-listen", "internal-advertise", "conduit-grant-key-activation", "conduit-reconnect-window", "conduit-authz-recheck-interval"} {
+	for _, name := range []string{"internal-listen", "internal-advertise", "conduit-grant-key-activation", "conduit-reconnect-window", "conduit-authz-recheck-interval", "conduit-stream-authz-max-user"} {
 		if f.Changed(name) {
 			args = append(args, fmt.Sprintf("--%s=%s", name, f.Lookup(name).Value.String()))
 		}
@@ -130,6 +135,17 @@ func conduitAuthzRecheckIntervalSetting(cfg *config.GlobalConfig) time.Duration 
 		return 0
 	}
 	return d
+}
+
+// conduitUserStreamAuthzMaxSetting returns the configured authorization
+// interval of user-originated streams (0 = hub default).
+// validateServerPreflight has already rejected a malformed value.
+func conduitUserStreamAuthzMaxSetting(cfg *config.GlobalConfig) time.Duration {
+	m, err := cfg.Hub.Conduit.StreamAuthzMaxDurations()
+	if err != nil {
+		return 0
+	}
+	return m.User
 }
 
 // conduitAdvertiseEndpoint derives the internal endpoint other hub nodes

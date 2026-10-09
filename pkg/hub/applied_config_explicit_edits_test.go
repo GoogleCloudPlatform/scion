@@ -553,25 +553,15 @@ func loadTestdataJSONBody(t *testing.T, name string) map[string]interface{} {
 // LIVE AppliedConfig.InlineConfig.Telemetry and .Env themselves untouched
 // too.
 //
-// That last part is carryForwardAbsentPageOwnedFields' job
-// (applied_config_explicit_edits.go), not recordExplicitEdits: once
-// buildConfig stopped echoing an untouched telemetry control (R1-1) or an
-// untouched env (R2-1), the unconditional wholesale InlineConfig replace in
-// applyAgentUpdate would otherwise wipe both live fields -- including an
-// explicit telemetry opt-out, and (for a legacy agent with no CreateInputs)
-// every explicit env key `scion reincarnate` has no other record of at all
-// (R4-1) -- on a plain Start with no Save, since the request never mentions
-// either key at all. The carve-out (right before `agent.AppliedConfig.
-// InlineConfig = cfg`) copies both forward from the pre-PATCH InlineConfig
-// whenever their key was absent from the request; this runs AFTER
-// recordExplicitEdits, so CreateInputs still correctly never sees either as
-// explicit. Earlier versions of this test asserted the opposite for each
-// field in turn (`assert.Nil(...InlineConfig.Telemetry)` then
-// `assert.Nil(...InlineConfig.Env)`, both calling the loss "pre-existing
-// §7.2") -- that was wrong both times; §7.2 is the general wholesale
-// InlineConfig replace, but both fields had always survived a configure-page
-// round trip before R1-1/R2-1 made them (correctly) stop being echoed, so
-// their being wiped was this PR's own regression, not a pre-existing one.
+// That last part is mergePresentInlineFields' job
+// (applied_config_explicit_edits.go), not recordExplicitEdits: buildConfig
+// does not echo an untouched telemetry control (R1-1) or an untouched env
+// (R2-1), and applyAgentUpdate builds the new live InlineConfig from the
+// pre-PATCH one, overlaying only the keys the request names
+// (ptone/scion#3901), so both live fields are kept -- including an explicit
+// telemetry opt-out, and (for a legacy agent with no CreateInputs) every
+// explicit env key `scion reincarnate` has no other record of at all
+// (R4-1). CreateInputs still never sees either as explicit.
 //
 // Also covers R2-1 facet (a)'s two-step sequence: this fixture's live env
 // never had a SCION_AUTO_EXPOSE_* key, so after the untouched Save (step 1)
@@ -624,8 +614,8 @@ func TestApplyAgentUpdate_UntouchedSaveLeavesHubTelemetryAndEnvAlone(t *testing.
 	assert.JSONEq(t, string(beforeEnv), string(afterEnv), "an untouched Save must leave live Env alone")
 	require.NotNil(t, updated.AppliedConfig.InlineConfig)
 	// R4-1: live InlineConfig.Env must survive an untouched Save/Start --
-	// carryForwardAbsentPageOwnedFields copies it forward from the pre-PATCH
-	// InlineConfig whenever the request omits "env", specifically so a
+	// mergePresentInlineFields keeps the pre-PATCH value whenever the
+	// request omits "env", specifically so a
 	// legacy agent (no CreateInputs) doesn't lose every explicit env key the
 	// next time it's reincarnated (legacyCreateInputsFromAppliedConfig reads
 	// exactly this field).
@@ -723,10 +713,10 @@ func TestApplyAgentUpdate_UntouchedSavePreservesExplicitTelemetryOptOut(t *testi
 // existed) relies entirely on legacyCreateInputsFromAppliedConfig
 // (reincarnate_config.go) reading its LIVE InlineConfig.Env back at
 // reincarnate time to recover its explicit env -- there is no CreateInputs
-// record to fall back on. Before the R4-1 carve-out, an untouched Save/Start
-// would wipe InlineConfig.Env via the wholesale replace, and reincarnate
-// would then silently lose every one of this agent's explicit env keys with
-// no warning.
+// record to fall back on. applyAgentUpdate keeps InlineConfig.Env when the
+// request omits "env" (mergePresentInlineFields); without that, reincarnate
+// would silently lose every one of this agent's explicit env keys with no
+// warning.
 func TestApplyAgentUpdate_UntouchedSaveThenReincarnateKeepsLegacyAgentExplicitEnv(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
@@ -795,7 +785,7 @@ func TestApplyAgentUpdate_ReloadAfterUntouchedSavePreservesLiveAutoExposeValue(t
 	assert.Equal(t, "true", mid.AppliedConfig.Env["SCION_AUTO_EXPOSE_PORTS"], "step 1 must leave live auto-expose unchanged")
 	require.NotNil(t, mid.AppliedConfig.InlineConfig)
 	// R4-1: InlineConfig.Env must now ALSO survive the untouched save,
-	// carried forward by carryForwardAbsentPageOwnedFields.
+	// kept by mergePresentInlineFields.
 	require.NotNil(t, mid.AppliedConfig.InlineConfig.Env, "InlineConfig.Env must survive the untouched save")
 	assert.Equal(t, "true", mid.AppliedConfig.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"])
 

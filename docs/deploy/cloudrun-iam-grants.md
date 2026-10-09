@@ -65,6 +65,33 @@ gcloud projects add-iam-policy-binding ptone-experiments \
   --role=roles/iap.tunnelResourceAccessor
 ```
 
+### Hub-minted service accounts (granted by default)
+
+`scripts/cloudrun/deploy.sh` grants this role and enables the API by default;
+set `SCION_HUB_SA_MINTING=false` to skip the role grant (it does not revoke an
+earlier one). The Hub mints service accounts for agents with its own
+credentials: it creates each account, sets IAM policy on it, and deletes it if
+a follow-up grant fails, so `roles/iam.serviceAccountCreator` alone is not
+enough.
+
+```bash
+# Create, set IAM policy on, and delete hub-minted service accounts
+gcloud projects add-iam-policy-binding ptone-experiments \
+  --member=serviceAccount:scion-hub-runner@ptone-experiments.iam.gserviceaccount.com \
+  --role=roles/iam.serviceAccountAdmin --condition=None
+
+# Issue tokens for minted service accounts
+gcloud services enable iamcredentials.googleapis.com --project=ptone-experiments
+```
+
+`roles/iam.serviceAccountAdmin` applies to every service account in the
+project, so in a project shared with other workloads or other hubs the Hub SA
+can change IAM policy on those accounts too. The default grant assumes one hub
+per GCP project. If you run more than one hub in the same project, or the
+project holds other privileged service accounts, set
+`SCION_HUB_SA_MINTING=false` and grant minting access separately, for example
+from a dedicated project.
+
 ### GKE Autopilot Runtime (optional — for gke profile)
 ```bash
 # Deploy pods to GKE Autopilot cluster
@@ -118,5 +145,6 @@ gcloud projects add-iam-policy-binding ptone-experiments \
 | iam.serviceAccountUser | scion-hub-runner | ✅ granted |
 | logging.viewer | scion-hub-runner | ✅ granted |
 | iap.tunnelResourceAccessor | scion-hub-runner | ✅ granted |
+| iam.serviceAccountAdmin | scion-hub-runner | granted by deploy.sh unless SCION_HUB_SA_MINTING=false |
 | container.developer | scion-hub-runner | ✅ granted |
 | secretmanager.secretAccessor | scion-instance-gym | ✅ granted |

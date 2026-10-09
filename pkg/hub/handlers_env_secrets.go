@@ -2209,6 +2209,12 @@ func (s *Server) handleProjectSecretByKey(w http.ResponseWriter, r *http.Request
 	s.handleScopedSecretByKey(w, r, key, store.ScopeProject, projectID)
 }
 
+// autoProvideLinkedBy is the ProjectProvider.LinkedBy value recorded by
+// autoLinkProviders. brokerProviderHasOwnerConsent treats it as consent,
+// because only brokers whose auto-provide setting was authorized are linked
+// this way.
+const autoProvideLinkedBy = "auto-provide"
+
 // autoLinkProviders links brokers with auto_provide enabled as providers for a project.
 // If the project has no default runtime broker, the first auto-provided broker is set as default.
 func (s *Server) autoLinkProviders(ctx context.Context, project *store.Project) {
@@ -2227,7 +2233,7 @@ func (s *Server) autoLinkProviders(ctx context.Context, project *store.Project) 
 			BrokerID:   autoBroker.ID,
 			BrokerName: autoBroker.Name,
 			Status:     autoBroker.Status,
-			LinkedBy:   "auto-provide",
+			LinkedBy:   autoProvideLinkedBy,
 		}
 		if addErr := s.store.AddProjectProvider(ctx, provider); addErr != nil {
 			s.envSecretLog.Warn("Failed to auto-link broker to project",
@@ -2289,7 +2295,15 @@ func (s *Server) handleProjectProviders(w http.ResponseWriter, r *http.Request, 
 
 	// SECURITY-GATE: CheckAccess — one check here gates the whole providers
 	// subtree (list, link, unlink) before dispatching to the handlers below.
-	if !s.authorize(w, r, projectResource(project), action) {
+	// Linking additionally requires the broker owner's consent
+	// (authorizeBrokerProvide in addProjectProvider). Unlinking one broker
+	// is also open to that broker's owner (authorizeProviderUnlink), so an
+	// owner can withdraw a broker from a project it does not administer.
+	if r.Method == http.MethodDelete && subPath != "" {
+		if !s.authorizeProviderUnlink(w, r, project, subPath) {
+			return
+		}
+	} else if !s.authorize(w, r, projectResource(project), action) {
 		return
 	}
 
@@ -2468,6 +2482,13 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 
+	// SECURITY-GATE: broker-side consent — the caller must hold broker.update
+	// on this broker (its owner or a super-admin) in addition to the
+	// project.update gate in handleProjectProviders. Checked before any write.
+	if !s.authorizeBrokerProvide(w, r, broker) {
+		return
+	}
+
 	// Get the user who is performing this action
 	var linkedBy string
 	if user := GetUserIdentityFromContext(ctx); user != nil {
@@ -2475,33 +2496,45 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 	}
 
 	// Validate LocalPath before persisting — fail fast before touching the DB.
+	// LocalPath names a directory on the broker's host. Every broker's path
+	// passes the same checks (checkProviderLocalPath). Only the embedded
+	// broker shares the hub's filesystem, so only for it does the hub check
+	// that the directory exists and initialize its .scion directory below.
+	// For any other broker the path is validated and stored.
+	//
+	// The global-directory check needs the project; a lookup failure fails
+	// the request rather than skipping the check.
+	target, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
 	var cleanPath string
+	embedded := s.isEmbeddedBroker(broker.ID)
 	if req.LocalPath != "" {
-		cleanPath = filepath.Clean(req.LocalPath)
-		if !filepath.IsAbs(cleanPath) {
-			ValidationError(w, "localPath must be an absolute path", nil)
-			return
-		}
-		for _, prefix := range []string{"/etc", "/usr", "/bin", "/sbin", "/sys", "/proc", "/dev", "/boot", "/lib"} {
-			if cleanPath == prefix || strings.HasPrefix(cleanPath, prefix+"/") {
-				ValidationError(w, "localPath points to a restricted system directory", nil)
-				return
-			}
-		}
-		// The global-directory check needs the project; a lookup failure
-		// fails the request rather than skipping the check.
-		target, err := s.store.GetProject(ctx, projectID)
+		cleanPath, err = checkProviderLocalPath("localPath", target.Name, target.Slug, req.LocalPath)
 		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		if err := validateProviderLocalPath(target.Name, target.Slug, cleanPath); err != nil {
 			ValidationError(w, err.Error(), map[string]interface{}{"field": "localPath"})
 			return
 		}
-		info, err := os.Stat(cleanPath)
-		if err != nil || !info.IsDir() {
-			ValidationError(w, "localPath must be an existing directory", nil)
+		if embedded {
+			info, err := os.Stat(cleanPath)
+			if err != nil || !info.IsDir() {
+				ValidationError(w, "localPath must be an existing directory", nil)
+				return
+			}
+		}
+	}
+
+	// A request without a path keeps the path stored for an existing
+	// provider when checkProviderLocalPath accepts it for this project, and
+	// clears it otherwise. A broker that is not yet a provider gets no path.
+	// A store error reading the provider fails the request before any write.
+	localPath := cleanPath
+	if localPath == "" {
+		localPath, err = s.registerProviderLocalPath(ctx, target, broker.ID, "", false)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
 			return
 		}
 	}
@@ -2511,7 +2544,7 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 		ProjectID:  projectID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
-		LocalPath:  req.LocalPath,
+		LocalPath:  localPath,
 		Status:     broker.Status,
 		LinkedBy:   linkedBy,
 	}
@@ -2521,9 +2554,10 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 
-	// For linked projects (local directory), initialize the .scion directory
-	// so agents and templates directories exist before the first agent starts.
-	if cleanPath != "" {
+	// For linked projects (local directory) on the embedded broker, initialize
+	// the .scion directory so agents and templates directories exist before
+	// the first agent starts. Other brokers manage their own filesystem.
+	if cleanPath != "" && embedded {
 		scionDir := filepath.Join(cleanPath, ".scion")
 		if err := initLinkedProjectDir(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
 			slog.Warn("failed to initialize .scion in linked project",
@@ -2539,11 +2573,47 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 	}
 
 	// Log the link event
-	LogLinkEvent(ctx, s.auditLogger, broker.ID, broker.Name, projectID, linkedBy, getClientIP(r))
+	LogLinkEvent(ctx, s.auditLogger, broker.ID, broker.Name, projectID, linkedBy, getClientIP(r), brokerAuditCredentialDetails(ctx))
 
 	writeJSON(w, http.StatusCreated, AddProviderResponse{
 		Provider: provider,
 	})
+}
+
+// authorizeProviderUnlink decides DELETE /api/v1/projects/{id}/providers/{brokerId}:
+// the request credential must be a user credential admitted for broker
+// association (an interactive session, a dev credential or a user access
+// token, see brokerUserCredentialKindAdmitted); a broker acting on a user's
+// behalf, and any other non-user credential, is not admitted by either arm.
+// The caller must then hold project.update on the project, or broker.update
+// on the named broker (its owner or a super-admin, see
+// brokerProvideDecision), which withdraws the owner's consent to the
+// association. On denial it logs and writes the project.update 403, and
+// returns false.
+func (s *Server) authorizeProviderUnlink(w http.ResponseWriter, r *http.Request, project *store.Project, brokerID string) bool {
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return false
+	}
+	if !brokerUserCredentialKindAdmitted(ctx, identity, true) {
+		logAuthzDenial(r, identity, projectResource(project), ActionUpdate, "credential kind not admitted for broker association")
+		writeForbiddenStructuredDenial(w, "", "project", ActionUpdate, "")
+		return false
+	}
+	decision := s.authzService.CheckAccess(ctx, identity, projectResource(project), ActionUpdate)
+	if decision.Allowed {
+		return true
+	}
+	if broker, err := s.store.GetRuntimeBroker(ctx, brokerID); err == nil && broker != nil {
+		if allowed, _, _ := s.brokerProvideDecision(ctx, identity, broker); allowed {
+			return true
+		}
+	}
+	logAuthzDenial(r, identity, projectResource(project), ActionUpdate, decision.Reason)
+	writeForbiddenStructuredDenial(w, "", "project", ActionUpdate, decision.DeniedBy)
+	return false
 }
 
 // removeProjectProvider removes a broker from a project's providers.
@@ -2562,7 +2632,7 @@ func (s *Server) removeProjectProvider(w http.ResponseWriter, r *http.Request, p
 	}
 
 	// Log the unlink event
-	LogUnlinkEvent(ctx, s.auditLogger, brokerID, projectID, actorID, getClientIP(r))
+	LogUnlinkEvent(ctx, s.auditLogger, brokerID, projectID, actorID, getClientIP(r), brokerAuditCredentialDetails(ctx))
 
 	w.WriteHeader(http.StatusNoContent)
 }
