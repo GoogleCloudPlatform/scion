@@ -522,13 +522,17 @@ const provisionedRestingNote = "The agent is still provisioned and can be starte
 // broker: the start superseded the stop. It runs after the start's claim is
 // released, so it re-reads the row and clears only while run intent is still
 // running and the queued status or notice is still there: a stop recorded
-// since keeps its own state. The container status becomes running unless
-// the broker reported one.
+// since keeps its own state. A row a delete has won (deletedOrDeleteHeld)
+// keeps its state too: the delete claim does not move run intent (the
+// engine records stop later, in dispatch), and the store's delete guard
+// does not cover the container status, so without this check the clear
+// would repaint a deleting row running (ptone/scion#3696). The container
+// status becomes running unless the broker reported one.
 func (s *Server) clearSupersededQueuedStop(ctx context.Context, agent *store.Agent) {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	cur, err := s.store.GetAgent(cctx, agent.ID)
-	if err != nil || cur.RunIntent != store.RunIntentRunning ||
+	if err != nil || deletedOrDeleteHeld(cur) || cur.RunIntent != store.RunIntentRunning ||
 		(cur.ContainerStatus != containerStatusStopQueued && cur.Message != offlineStopMessage) {
 		return
 	}
