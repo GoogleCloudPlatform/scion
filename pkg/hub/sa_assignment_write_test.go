@@ -225,6 +225,100 @@ func TestSAParentCeiling_ScheduledCreateAssignmentInSameTx(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
+// TestSAParentCeiling_ScheduledHostPassthroughRecordsRevisionPrincipal: a
+// project-default passthrough on a sandbox broker is translated to the
+// broker's host account by the scheduled ladder. The scheduled create
+// succeeds and records the assignment with the revision principal as its
+// source, under the edge's scheduler provenance and ceiling.
+func TestSAParentCeiling_ScheduledHostPassthroughRecordsRevisionPrincipal(t *testing.T) {
+	hostSAEmail := "broker-host@sa-rec-sched-pt.iam.gserviceaccount.com"
+	owner := ptUser(tid("user-sa-rec-sched-pt"), "sa-rec-sched-pt@test.com", store.UserRoleMember)
+	srv, s, project, _ := setupPassthroughSandboxServer(t, owner, hostSAEmail, "sa-rec-sched-pt")
+	ctx := context.Background()
+	proj, err := s.GetProject(ctx, project.ID)
+	require.NoError(t, err)
+	if proj.Annotations == nil {
+		proj.Annotations = map[string]string{}
+	}
+	proj.Annotations[projectSettingDefaultGCPIdentityMode] = store.GCPMetadataModePassthrough
+	require.NoError(t, s.UpdateProject(ctx, proj))
+
+	evt := withSessionRevision(store.ScheduledEvent{
+		ID:        "evt-sa-rec-sched-pt",
+		ProjectID: project.ID,
+		EventType: "dispatch_agent",
+		Payload:   `{"agentName":"sa-rec-sched-pt","task":"scheduled work"}`,
+		CreatedBy: owner.ID,
+	}, owner.ID)
+	require.NoError(t, srv.dispatchAgentEventHandler()(ctx, evt), "the scheduled create on a sandbox broker succeeds")
+
+	agent := agentBySlug(t, s, project.ID, "sa-rec-sched-pt")
+	saID := agentAssignedServiceAccountID(agent)
+	require.NotEmpty(t, saID, "the passthrough default is translated to an assign-mode identity")
+	hostSA, err := s.GetGCPServiceAccount(ctx, saID)
+	require.NoError(t, err)
+	assert.Equal(t, hostSAEmail, hostSA.Email, "precondition: the account is the broker's host account")
+
+	rows := activeAssignments(t, s, agent.ID)
+	require.Len(t, rows, 1)
+	row := rows[0]
+	assert.Equal(t, store.SAAssignmentOriginHostPassthroughTranslation, row.Origin)
+	assert.Equal(t, saID, row.ServiceAccountID)
+	assert.Equal(t, store.SourceCredentialScheduler, row.SourceCredentialKind)
+	assert.Equal(t, store.DelegationPrincipalUser, row.SourcePrincipalKind)
+	assert.Equal(t, owner.ID, row.SourcePrincipalID, "the revision principal is the source")
+	assert.NotEqual(t, saID, row.SourcePrincipalID, "the host account is never the source")
+	assert.NotEqual(t, hostSAEmail, row.SourcePrincipalID)
+	assert.Equal(t, evt.ID, row.SourceEventID)
+	edges := activeEdgesFor(t, s, agent.ID)
+	require.Len(t, edges, 1)
+	assert.Equal(t, edges[0].AuthorityProvenance, row.AuthorityProvenance, "the assignment records the edge's provenance")
+	assert.Equal(t, edges[0].EffectCeiling, row.EffectCeiling)
+}
+
+// TestSAParentCeiling_ProfileDefaultOrigins: the per-profile rung records
+// its own origin on the create path and on the scheduled ladder, distinct
+// from the project-wide rung. Origin is descriptive only.
+func TestSAParentCeiling_ProfileDefaultOrigins(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		pf := newProfileDefaultFixture(t, "remote")
+		pf.setProjectDefaultAssignBroad(t)
+		pf.setProfileDefaults(t, map[string]string{"remote": pf.k8s.ID})
+		agent := createdAgentRecord(t, pf.bypassAgentsFixture, CreateAgentRequest{Name: "sa-rec-profile-create"})
+		rows := activeAssignments(t, pf.store, agent.ID)
+		require.Len(t, rows, 1)
+		assert.Equal(t, store.SAAssignmentOriginCreateProjectProfileDefault, rows[0].Origin)
+		assert.Equal(t, pf.k8s.ID, rows[0].ServiceAccountID)
+		assert.Equal(t, pf.owner.ID, rows[0].SourcePrincipalID)
+	})
+
+	t.Run("scheduled", func(t *testing.T) {
+		pf := newProfileDefaultFixture(t, "remote")
+		pf.setProjectDefaultAssignBroad(t)
+		pf.setProfileDefaults(t, map[string]string{"remote": pf.k8s.ID})
+		require.NoError(t, fireScheduledDispatchAsOwner(t, pf.bypassAgentsFixture, "sa-rec-profile-sched"))
+		agent := agentBySlug(t, pf.store, pf.proj.ID, "sa-rec-profile-sched")
+		rows := activeAssignments(t, pf.store, agent.ID)
+		require.Len(t, rows, 1)
+		assert.Equal(t, store.SAAssignmentOriginScheduledProjectProfileDefault, rows[0].Origin)
+		assert.Equal(t, pf.k8s.ID, rows[0].ServiceAccountID)
+		assert.Equal(t, store.SourceCredentialScheduler, rows[0].SourceCredentialKind)
+		assert.Equal(t, pf.owner.ID, rows[0].SourcePrincipalID, "the revision principal is the source")
+	})
+
+	t.Run("scheduled without a profile entry", func(t *testing.T) {
+		pf := newProfileDefaultFixture(t, "local")
+		pf.setProjectDefaultAssignBroad(t)
+		pf.setProfileDefaults(t, map[string]string{"remote": pf.k8s.ID})
+		require.NoError(t, fireScheduledDispatchAsOwner(t, pf.bypassAgentsFixture, "sa-rec-profile-sched-miss"))
+		agent := agentBySlug(t, pf.store, pf.proj.ID, "sa-rec-profile-sched-miss")
+		rows := activeAssignments(t, pf.store, agent.ID)
+		require.Len(t, rows, 1)
+		assert.Equal(t, store.SAAssignmentOriginScheduledProjectDefault, rows[0].Origin)
+		assert.Equal(t, pf.broad.ID, rows[0].ServiceAccountID)
+	})
+}
+
 // ---- PATCH -------------------------------------------------------------------
 
 func patchGCPIdentityAsOwner(t *testing.T, f *bypassAgentsFixture, agentID string, body map[string]interface{}) *httptest.ResponseRecorder {
@@ -257,6 +351,35 @@ func TestSAParentCeiling_PatchAssignmentInSameTx(t *testing.T) {
 	assert.GreaterOrEqual(t, rec.Code, http.StatusInternalServerError, rec.Body.String())
 	got := mustGetAgent(t, f.store, other.ID)
 	assert.Equal(t, "", agentAssignedServiceAccountID(got), "the identity is not written without its assignment")
+}
+
+// TestSAParentCeiling_PatchSourceIsCaller: the PATCH caller, not the agent's
+// creator, is recorded as the source.
+func TestSAParentCeiling_PatchSourceIsCaller(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	ctx := context.Background()
+	sa := bypassAgentsCreateSA(t, f, f.proj.ID, true)
+	agent := pendingAgentForPatch(t, f, "sa-rec-patch-caller")
+	caller := &store.User{
+		ID: tid("sa-rec-patch-caller"), Email: "sa-rec-patch-caller@example.com", DisplayName: "Patch Caller",
+		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, f.store.CreateUser(ctx, caller))
+	ensureHubMembership(ctx, f.store, caller.ID)
+	grantProjectRole(t, f.store, caller.ID, f.proj.ID, store.ProjectRoleAdmin)
+	require.NotEqual(t, caller.ID, agent.CreatedBy, "precondition: the caller is not the creator")
+
+	rec := doRequestAsUser(t, f.srv, caller, http.MethodPatch, "/api/v1/agents/"+agent.ID,
+		map[string]interface{}{"gcp_identity": map[string]interface{}{
+			"metadata_mode": store.GCPMetadataModeAssign, "service_account_id": sa.ID}})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rows := activeAssignments(t, f.store, agent.ID)
+	require.Len(t, rows, 1)
+	assert.Equal(t, store.SAAssignmentOriginUpdate, rows[0].Origin)
+	assert.Equal(t, caller.ID, rows[0].SourcePrincipalID, "the PATCH caller is the source")
+	assert.NotEqual(t, agent.CreatedBy, rows[0].SourcePrincipalID, "the creator is not the source")
+	assert.Equal(t, store.SourceCredentialSession, rows[0].SourceCredentialKind)
+	assert.Equal(t, sa.ID, rows[0].ServiceAccountID)
 }
 
 func TestSAParentCeiling_ClearIdentityDeactivates(t *testing.T) {
@@ -548,6 +671,76 @@ func TestSAParentCeiling_ReincarnateWithServiceAccountReplacesAssignment(t *test
 	})
 	err := reincarnateClaimFor(t, srv, agent2, &store.AgentServiceAccountAssignment{ServiceAccountID: "sa-x"})
 	assert.ErrorIs(t, err, errAgentCreateWriteInvalid)
+}
+
+// TestSAParentCeiling_ReincarnateRequestRecordsRequester drives a
+// reincarnation with a service account through the HTTP handler. The
+// requester, not the agent's creator, is recorded as the source of the new
+// assignment, under the requester's ceiling; a fault computing that ceiling
+// answers 503 with nothing claimed.
+func TestSAParentCeiling_ReincarnateRequestRecordsRequester(t *testing.T) {
+	t.Run("session requester", func(t *testing.T) {
+		disp := newReincarnateTestDispatcher()
+		srv, s, project, broker := setupReincarnateTestServer(t, disp)
+		agent := newReincarnateTestAgent(t, s, project, broker, nil)
+		seedAgentEdge(t, s, tid("delegator"), agent)
+		seedAssignment(t, s, agent, tid("delegator"), "sa-reinc-http-old")
+		user := newReincarnateAuthzUser(t, s, "sa-reinc-http")
+		grantAgentLifecycleAtProject(t, s, user.ID, project.ID)
+		grantAgentDelegationAtProject(t, s, user.ID, project.ID)
+		grantPermissionViaRoleBinding(t, s, user.ID, "agent.update", store.RoleScopeProject, project.ID)
+		sa := patchTestSA(t, s, project.ID, true, user.ID)
+		require.NotEqual(t, user.ID, agent.CreatedBy, "precondition: the requester is not the creator")
+
+		requester := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "web")
+		rec := httptest.NewRecorder()
+		srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, requester,
+			ReincarnateAgentRequest{Handoff: "h", ServiceAccount: sa.ID}), agent.ID)
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		settled := waitForReincarnationSettled(t, s, agent.ID)
+		assert.Equal(t, store.AgentReincarnationStateCompleted, settled.State)
+
+		rows := activeAssignments(t, s, agent.ID)
+		require.Len(t, rows, 1, "the new account's assignment replaces the old one")
+		row := rows[0]
+		assert.Equal(t, sa.ID, row.ServiceAccountID)
+		assert.Equal(t, store.SAAssignmentOriginReincarnate, row.Origin)
+		assert.Equal(t, store.DelegationPrincipalUser, row.SourcePrincipalKind)
+		assert.Equal(t, user.ID, row.SourcePrincipalID, "the requester is the source")
+		assert.NotEqual(t, agent.CreatedBy, row.SourcePrincipalID, "the creator is not the source")
+		assert.Equal(t, store.SourceCredentialSession, row.SourceCredentialKind)
+		assertCeilingFromSource(t, srv, requester, row.EffectCeiling)
+		assert.Equal(t, sa.ID, agentAssignedServiceAccountID(mustGetAgent(t, s, agent.ID)))
+	})
+
+	t.Run("source ceiling fault", func(t *testing.T) {
+		disp := newReincarnateTestDispatcher()
+		srv, s, project, broker := setupReincarnateTestServer(t, disp)
+		agent := newReincarnateTestAgent(t, s, project, broker, saAssigningAgent(t, s, project.ID))
+		sa := patchTestSA(t, s, project.ID, true, "someone")
+		self := agentIdentityFor(agent.ID, project.ID,
+			append(ScopesForRole(AgentRoleBaseline), ScopeAgentLifecycle, ScopeAgentSAAssign)...)
+		// The requester's ceiling reads its own assignment rows; that read
+		// fails.
+		saved := srv.authzService.store
+		srv.authzService.store = &mintAssignErrStore{Store: saved}
+		t.Cleanup(func() { srv.authzService.store = saved })
+
+		// Every check before the claim passes under the fault: a dry run is
+		// planned.
+		rec := httptest.NewRecorder()
+		srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self,
+			ReincarnateAgentRequest{DryRun: true, ServiceAccount: sa.ID}), agent.ID)
+		require.Equal(t, http.StatusOK, rec.Code, "precondition: %s", rec.Body.String())
+
+		before := snapshotAgent(t, s, agent.ID)
+		rec = httptest.NewRecorder()
+		srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self,
+			ReincarnateAgentRequest{ServiceAccount: sa.ID}), agent.ID)
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+		assertAgentUntouched(t, s, disp, agent.ID, before)
+		assert.Empty(t, activeAssignments(t, s, agent.ID), "nothing is recorded")
+	})
 }
 
 // TestSAParentCeiling_ReincarnateFailedRestoreWithholdsUntilReassigned pins
