@@ -282,15 +282,17 @@ func writeConversationIDNotFound(ctx context.Context, w http.ResponseWriter, rou
 }
 
 // senderCanReadGroup reports whether the authenticated sender may read a
-// group conversation of projectID: an agent only within its own project (the
-// strict rule for agents), a user with read access to the project. Any other
-// caller, and any lookup error, answers false.
+// group conversation of projectID: a user with read access to the project,
+// an agent only within its own project (the strict rule for agents). The
+// sender is resolved in the same order as authenticatedSender, so the check
+// and the participant row describe the same principal. Any other caller,
+// and any lookup error, answers false.
 func (s *Server) senderCanReadGroup(ctx context.Context, projectID string) bool {
-	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-		return agentIdent.ProjectID() != "" && agentIdent.ProjectID() == projectID
-	}
 	if user := GetUserIdentityFromContext(ctx); user != nil {
 		return s.canReadProject(ctx, user, projectID)
+	}
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		return agentIdent.ProjectID() != "" && agentIdent.ProjectID() == projectID
 	}
 	return false
 }
