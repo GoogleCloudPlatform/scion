@@ -48,6 +48,7 @@ const clientTests = [
   'src/client/paginate-all.test.ts',
   'src/client/state.test.ts',
   'src/client/__fixtures__/agent-store-harness.ts',
+  'src/client/__fixtures__/request-url.ts',
 ];
 const componentTests = [
   'src/components/shared/palette/quick-palette.test.ts',
