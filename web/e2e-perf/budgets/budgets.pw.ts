@@ -17,10 +17,14 @@
  * views at 100 generated agents (fixture.mjs, see mock-api.ts).
  *
  * Per view: one warm-up load (not measured; it lets the dev server
- * transform and cache the modules), then LOADS measured loads, each in a
- * fresh browser context. A load is measured once the view has rendered its
- * agents (25 cards or rows on the first page of the grid and list, 100
- * graph nodes) and the deep DOM count has stopped changing.
+ * transform and cache the modules), then LOADS measured loads, then one
+ * load with the CPU slowed SLOW_CPU_RATE times, each in a fresh browser
+ * context. A load is measured once the view has written its readiness mark
+ * (READY_MARK, turned on in the mocked page data), has rendered its agents
+ * (25 cards or rows on the first page of the grid and list, 100 graph
+ * nodes), and its deep DOM count is the same on three reads 500 ms apart.
+ * The slowed load must settle on the same DOM count as the normal ones, so
+ * the gate cannot depend on how fast the runner is.
  *
  * Counters:
  * - domElements: every element in the document, including inside shadow
@@ -227,6 +231,19 @@ for (const v of VIEWS) {
         n,
         `${v.view}: DOM elements over budget (baseline ${v.baseline.domElements})`
       ).toBeLessThanOrEqual(limit.domElements);
+    }
+    // Non-fatal: a count well under its baseline means the baseline is
+    // stale, and the old headroom would let a later regression through.
+    if (dom[0] < v.baseline.domElements - DOM_MARGIN) {
+      console.warn(
+        `note: ${v.view} DOM elements ${dom[0]} are below baseline ${v.baseline.domElements} by more than the margin; consider lowering the baseline`
+      );
+    }
+    const ltMargin = limit.longTasks - v.baseline.longTasks;
+    if (median(lt) < v.baseline.longTasks - ltMargin) {
+      console.warn(
+        `note: ${v.view} median long tasks ${median(lt)} are below baseline ${v.baseline.longTasks} by more than the margin; consider lowering the baseline`
+      );
     }
     expect(
       median(lt),

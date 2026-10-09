@@ -783,8 +783,8 @@ SQLite file, starts an isolated hub on loopback (scrubbed environment, as
 in "Isolate the hub environment" above), runs both benchmarks with the
 trial counts above, and runs `median-ratio.mjs`.
 
-Prerequisites: Go (the `go.mod` version), Node.js 20 or newer with npm,
-curl and git. Network access is needed once, for `npm ci` and the Chromium
+Prerequisites: Linux with bash 4.4 or newer and GNU coreutils, Go (the
+`go.mod` version), Node.js 20 or newer with npm, curl and git. Network access is needed once, for `npm ci` and the Chromium
 download. No root is needed, but Playwright's Chromium needs the usual
 system libraries (`npx playwright install-deps chromium` installs them,
 with root).
@@ -801,7 +801,11 @@ perf/bench/wallclock.sh --baseline perf/bench/wallclock-baseline.json
 Options: `--workdir DIR` (default: a new `/tmp/scion-wallclock.*`
 directory, kept after the run), `--skip-build` (reuse the binaries and web
 build from an earlier run in the same `--workdir`) and `--port N` (default
-`18080`; the hub also uses `N+1`).
+`18080`; the hub also uses `N+1`). `--api-runs`, `--api-warmup`,
+`--browser-runs` and `--min-trials` change the trial counts; values below
+the defaults are refused unless `--smoke` is given. That is for a setup
+smoke run only: a baseline written with `--smoke` is marked as such, and a
+normal check refuses it.
 
 Outputs, in the work directory: `seed-100.json`, `api-100.json` (the
 apibench report), `browser-100.json` (the browser report), `hub.log` and,
@@ -823,7 +827,10 @@ node e2e-perf/median-ratio.mjs --baseline ../perf/bench/wallclock-baseline.json 
   --api /path/to/api-100.json --browser /path/to/browser-100.json
 ```
 
-`--ratio` and `--min-trials` override the defaults (1.25 and 10). Both are
+`--ratio` (a finite number above 0) and `--min-trials` (an integer of at
+least 1) override the defaults (1.25 and 10); an invalid value is a setup
+error (exit 2), as are an unreadable report or baseline and a baseline with
+no metrics. Both are
 also stored in the baseline file, and a baseline's values apply unless
 overridden on the command line.
 

@@ -34,13 +34,15 @@ const PORT = 4537;
 export default defineConfig({
   testDir: '.',
   testMatch: '**/*.pw.ts',
-  timeout: 120_000,
+  // Per test (one view): a warm-up, three loads and one 4x-slowed load,
+  // each waiting for its readiness mark and a settled DOM.
+  timeout: 240_000,
   workers: 1,
   forbidOnly: CI,
   // No retries: the counters are deterministic except long tasks, which
   // already take the median of several loads.
   retries: 0,
-  globalTimeout: CI ? 8 * 60_000 : 0,
+  globalTimeout: CI ? 15 * 60_000 : 0,
   outputDir: '../../test-results/perf-budgets',
   reporter: CI ? [['github'], ['list']] : 'list',
   use: {
@@ -59,6 +61,7 @@ export default defineConfig({
     cwd: fileURLToPath(new URL('../../', import.meta.url)),
     url: `http://127.0.0.1:${PORT}/`,
     reuseExistingServer: false,
+    // A cold Vite start on a CI runner can take longer than the default.
     timeout: 120_000,
   },
 });

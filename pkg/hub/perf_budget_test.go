@@ -41,7 +41,10 @@ package hub
 //   - bytes:  baseline + 1%, rounded up
 //
 // The margins are tight on purpose. The seed is deterministic, so the
-// counts are exact: they repeat on every run and every machine. Measured
+// counts are exact: they repeat on every run and every machine (given a
+// monotonic wall clock with sub-microsecond resolution, so the agents'
+// stamped updated times are strictly increasing and the sort order is
+// stable). Measured
 // byte jitter between runs is under 0.01% (serverTime and the agents'
 // created and updated times, which the store stamps), well inside the 1%.
 // The margin only absorbs small, intended per-request changes: a single
@@ -118,7 +121,7 @@ var perfBudgets = []perfBudget{
 		baseline: perfBudgetCounts{authzStoreCalls: 74, decisions: 280, dbReads: 4, bytes: 48478},
 	},
 	{
-		name: "project list, next page by ids",
+		name: "project list, page by ids (25)",
 		path: func(f *perfBudgetFixture) string {
 			return "/api/v1/projects/" + f.project.ID + "/agents?sort=updated&dir=desc&limit=25&ids=" + strings.Join(f.agentIDs[25:50], ",")
 		},
@@ -256,8 +259,11 @@ func newPerfBudgetFixture(t *testing.T) *perfBudgetFixture {
 			Labels:    map[string]string{"bench": "true", "bench-seq": fmt.Sprint(i), "bench-tier": tier},
 			CreatedBy: creator,
 			OwnerID:   creator,
-			Created:   now.Add(-time.Duration(rng.Intn(30*24)) * time.Hour),
-			Updated:   now.Add(-time.Duration(rng.Intn(24*60)) * time.Minute),
+			// The store overwrites Created and Updated (and so LastSeen) with
+			// the current time; the rng draws are kept so the rng sequence,
+			// and with it the seeded rows and the baselines, do not move.
+			Created: now.Add(-time.Duration(rng.Intn(30*24)) * time.Hour),
+			Updated: now.Add(-time.Duration(rng.Intn(24*60)) * time.Minute),
 		}
 		if phase != "created" {
 			a.LastSeen = a.Updated
@@ -380,6 +386,19 @@ func TestPerfBudget_AgentEndpoints(t *testing.T) {
 			check("authz decisions", got.decisions, limit.decisions, b.baseline.decisions)
 			check("agent-row DB reads", got.dbReads, limit.dbReads, b.baseline.dbReads)
 			check("response bytes", got.bytes, limit.bytes, b.baseline.bytes)
+			// Non-fatal: a value well under its baseline means the baseline
+			// is stale, and the old headroom would let a later regression
+			// through. Lower the baseline in the change that lowered it.
+			low := func(what string, got, limit, baseline int64) {
+				if margin := limit - baseline; got < baseline-margin {
+					t.Logf("note: %s = %d is below baseline %d by more than the margin %d; consider lowering the baseline",
+						what, got, baseline, margin)
+				}
+			}
+			low("authz store calls", got.authzStoreCalls, limit.authzStoreCalls, b.baseline.authzStoreCalls)
+			low("authz decisions", got.decisions, limit.decisions, b.baseline.decisions)
+			low("agent-row DB reads", got.dbReads, limit.dbReads, b.baseline.dbReads)
+			low("response bytes", got.bytes, limit.bytes, b.baseline.bytes)
 		})
 	}
 }
@@ -387,10 +406,11 @@ func TestPerfBudget_AgentEndpoints(t *testing.T) {
 // The web counter budgets (web/e2e-perf/budgets) render the project page
 // from mocked API responses that a small deterministic generator builds at
 // test time (web/e2e-perf/budgets/fixture.mjs). To keep that generator on
-// the hub's real response shape, this test writes the field names of the
-// hub's responses for the requests the page sends, for this fixture and
-// caller, to perfBudgetWebSchemaFile. The "web fixture schema is current"
-// subtest fails when the hub's fields no longer match the file, and a web
+// the hub's real response shape, this test writes the field names and
+// JSON types of the hub's responses for the requests the page sends, for
+// this fixture and caller, to perfBudgetWebSchemaFile. The "web fixture
+// schema is current" subtest fails when the hub's fields or their types
+// no longer match the file, and a web
 // unit test (npm run test:e2e-perf) fails when the generator's output does
 // not match it. To refresh the file after an intended API change:
 //
@@ -430,18 +450,40 @@ type perfBudgetWebSchema struct {
 }
 
 // perfBudgetWebSchemaEndpoint is one request's status and the sorted,
-// de-duplicated field paths of its JSON body: object keys joined with
-// ".", array elements as "[]" (so every agent in a list contributes to
-// "agents[].<field>"). A non-JSON body has no fields.
+// de-duplicated field paths of its JSON body, each with the JSON types of
+// its values: object keys joined with ".", array elements as "[]" (so
+// every agent in a list contributes to "agents[].<field>"), then ":" and
+// the "|"-joined sorted types seen there (array, boolean, null, number,
+// object, string), e.g. "agents[].generation:number". A non-JSON body
+// has no fields.
 type perfBudgetWebSchemaEndpoint struct {
 	Status int      `json:"status"`
 	Fields []string `json:"fields"`
 }
 
-// perfBudgetFieldPaths returns the field paths of a decoded JSON value, as
-// described on perfBudgetWebSchemaEndpoint.
+// perfBudgetJSONType names the JSON type of a decoded value.
+func perfBudgetJSONType(v any) string {
+	switch v.(type) {
+	case map[string]any:
+		return "object"
+	case []any:
+		return "array"
+	case string:
+		return "string"
+	case float64:
+		return "number"
+	case bool:
+		return "boolean"
+	default:
+		return "null"
+	}
+}
+
+// perfBudgetFieldPaths returns the typed field paths of a decoded JSON
+// value, as described on perfBudgetWebSchemaEndpoint. fixture.mjs's
+// fieldPaths computes the same strings.
 func perfBudgetFieldPaths(v any) []string {
-	set := map[string]bool{}
+	types := map[string]map[string]bool{}
 	var walk func(v any, prefix string)
 	walk = func(v any, prefix string) {
 		switch x := v.(type) {
@@ -451,7 +493,10 @@ func perfBudgetFieldPaths(v any) []string {
 				if prefix != "" {
 					p = prefix + "." + k
 				}
-				set[p] = true
+				if types[p] == nil {
+					types[p] = map[string]bool{}
+				}
+				types[p][perfBudgetJSONType(c)] = true
 				walk(c, p)
 			}
 		case []any:
@@ -461,9 +506,14 @@ func perfBudgetFieldPaths(v any) []string {
 		}
 	}
 	walk(v, "")
-	out := make([]string, 0, len(set))
-	for p := range set {
-		out = append(out, p)
+	out := make([]string, 0, len(types))
+	for p, ts := range types {
+		names := make([]string, 0, len(ts))
+		for t := range ts {
+			names = append(names, t)
+		}
+		sort.Strings(names)
+		out = append(out, p+":"+strings.Join(names, "|"))
 	}
 	sort.Strings(out)
 	return out
@@ -511,7 +561,7 @@ func (f *perfBudgetFixture) checkWebSchema(t *testing.T) {
 	want, err := os.ReadFile(perfBudgetWebSchemaFile)
 	require.NoError(t, err)
 	if !bytes.Equal(want, got) {
-		t.Errorf("%s does not match the field names of the hub's current responses. "+
+		t.Errorf("%s does not match the field names and types of the hub's current responses. "+
 			"If the API change is intended, refresh it with "+
 			"SCION_PERF_BUDGET_WRITE_WEB_SCHEMA=1 go test -run '^TestPerfBudget_AgentEndpoints$' ./pkg/hub/ "+
 			"and update web/e2e-perf/budgets/fixture.mjs to match (see perf-tracing.md).\n--- file\n%s\n--- hub\n%s",

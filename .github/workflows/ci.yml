@@ -975,8 +975,9 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.web == 'true') }}
     runs-on: ubuntu-latest
-    # Above the config's CI globalTimeout (8m) plus setup.
-    timeout-minutes: 15
+    # Above the config's CI globalTimeout (15m) plus setup (npm ci and the
+    # Chromium install), so a slow run stops inside Playwright with a report.
+    timeout-minutes: 25
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

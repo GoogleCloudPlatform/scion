@@ -260,13 +260,13 @@ Two CI checks hold the agent-list counts at their current values. Both use a fix
 Each budget is a baseline, measured on `main`, plus a margin. The baselines and margins are written next to the test that uses them:
 
 - Hub counts: the baseline plus 2%, or plus 2, whichever is larger. Response bytes: the baseline plus 1%. These margins are tight on purpose. The seed is deterministic, so the counts repeat exactly on every run, and response bytes vary by under 0.01% between runs. A single extra read or decision per request sits inside the +2 floor and passes. An N+1 regression (one more read or decision per returned agent) is over every budget.
-- DOM elements: the baseline plus 10 elements. Every measured load must stay within it.
+- DOM elements: the baseline plus 10 elements. Every measured load must stay within it. The count is taken once the view has written its readiness mark and the element count is stable across three reads, and each view also runs one load with the CPU slowed 4x whose count must equal the normal loads'. The DOM count must not depend on how fast the page loads.
 - Long tasks: the baseline plus 50%, or plus 3, whichever is larger, applied to the median of three loads. This is the one counter that depends on the runner's CPU and load. The wide margin and the median are there so that one slow load cannot fail CI.
 
-The web test mocks the API with responses from a small deterministic generator, `web/e2e-perf/budgets/fixture.mjs`. It builds the same 100-agent shape with fixed IDs and times. To keep the generator on the hub's real response shape, the hub test writes the field names of the hub's responses for the page's requests to `web/e2e-perf/budgets/fixture-schema.json`. Two checks hold the three in step:
+The web test mocks the API with responses from a small deterministic generator, `web/e2e-perf/budgets/fixture.mjs`. It builds the same 100-agent shape with fixed IDs and times. To keep the generator on the hub's real response shape, the hub test writes the field names and JSON types of the hub's responses for the page's requests to `web/e2e-perf/budgets/fixture-schema.json`. Two checks hold the three in step:
 
-- The hub test fails with "does not match the field names of the hub's current responses" when the hub's fields change.
-- `npm run test:e2e-perf` (`fixture.test.mjs`) fails when the generator's fields differ from the schema file.
+- The hub test fails with "does not match the field names and types of the hub's current responses" when the hub's fields or their types change.
+- `npm run test:e2e-perf` (`fixture.test.mjs`) fails when the generator's fields or types differ from the schema file.
 
 The web test also fails when the page sends a request that the generator does not answer.
 
@@ -280,7 +280,7 @@ If a change is meant to raise a count, update the baseline in the same change an
    go test -run '^TestPerfBudget_AgentEndpoints$' -v ./pkg/hub/
    ```
 
-   Then set that request's `baseline` in `perfBudgets` to the new values. Also update `perfBudgetBaseline`, the commit the baselines were taken on.
+   Then set that request's `baseline` in `perfBudgets` to the new values. Also update `perfBudgetBaseline`, the label the failure messages print for where the baselines come from: `main <sha>` of the base you measured on, or a short description of the change. The test prints a non-fatal note when a value is below its baseline by more than the margin, which means the baseline is stale.
 
 2. **Web fixture.** If the change adds, renames or removes a field in a response the project page reads, refresh the schema file and commit it:
 
@@ -296,7 +296,7 @@ If a change is meant to raise a count, update the baseline in the same change an
    npm run test:e2e:perf-budgets
    ```
 
-   Then set the view's `baseline` in `VIEWS` in `budgets.pw.ts`, and update `BASELINE_COMMIT`. Base the long-task baseline on several runs, not one.
+   Then set the view's `baseline` in `VIEWS` in `budgets.pw.ts`, and update `BASELINE_COMMIT` in the same way. Base the long-task baseline on several runs, not one. The suite also warns (non-fatally) when a measured value is below its baseline by more than the margin.
 
 Wall-clock times are not checked in CI. They are compared as a median ratio against a stored baseline, only on a quiet runner booked for the run. See "Wall-clock budgets" in the perf/bench README.
 

@@ -64,10 +64,14 @@ export async function setupBudgetMocks(page: Page, fx: BudgetFixture): Promise<s
     async (route) => {
       if (route.request().resourceType() !== 'document') return route.fallback();
       const resp = await route.fetch();
-      const html = (await resp.text()).replace(
-        '<body>',
-        '<body><script id="__SCION_DATA__" type="application/json">{"readinessMarks":true}</script>'
-      );
+      const page = await resp.text();
+      const body = /<body[^>]*>/.exec(page);
+      if (!body) throw new Error('index.html has no <body> tag to inject readiness data into');
+      const at = body.index + body[0].length;
+      const html =
+        page.slice(0, at) +
+        '<script id="__SCION_DATA__" type="application/json">{"readinessMarks":true}</script>' +
+        page.slice(at);
       return route.fulfill({ response: resp, body: html });
     }
   );

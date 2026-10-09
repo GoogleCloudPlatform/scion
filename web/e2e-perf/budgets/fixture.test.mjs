@@ -22,7 +22,7 @@ import { buildFixture, fieldPaths, schemaOf } from './fixture.mjs';
 
 const schema = JSON.parse(readFileSync(new URL('./fixture-schema.json', import.meta.url), 'utf8'));
 
-test("the generated fixture has exactly the hub's field names (fixture-schema.json)", () => {
+test("the generated fixture has exactly the hub's field names and types (fixture-schema.json)", () => {
   const got = schemaOf(buildFixture());
   assert.equal(got.agents, schema.agents);
   // Per endpoint, so a failure names the request and the differing fields.
@@ -36,7 +36,7 @@ test("the generated fixture has exactly the hub's field names (fixture-schema.js
         extra: g.fields.filter((f) => !want.fields.includes(f)),
       },
       { missing: [], extra: [] },
-      `${path}: fields differ from the hub's (update fixture.mjs; see perf-tracing.md)`
+      `${path}: fields or types differ from the hub's (update fixture.mjs; see perf-tracing.md)`
     );
   }
 });
@@ -45,13 +45,9 @@ test('the generated fixture is deterministic', () => {
   assert.deepEqual(buildFixture(), buildFixture());
 });
 
-test('fieldPaths joins keys, collapses arrays and sorts byte-wise', () => {
-  assert.deepEqual(fieldPaths({ b: [{ x: 1 }, { y: [[1]] }], a: null, Z: { k: 'v' } }), [
-    'Z',
-    'Z.k',
-    'a',
-    'b',
-    'b[].x',
-    'b[].y',
-  ]);
+test('fieldPaths joins keys, collapses arrays, records leaf types and sorts byte-wise', () => {
+  assert.deepEqual(
+    fieldPaths({ b: [{ x: 1 }, { x: 'one', y: [[1]] }], a: null, Z: { k: 'v', t: true } }),
+    ['Z.k:string', 'Z.t:boolean', 'Z:object', 'a:null', 'b:array', 'b[].x:number|string', 'b[].y:array']
+  );
 });

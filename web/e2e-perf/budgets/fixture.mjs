@@ -269,27 +269,38 @@ export function buildFixture() {
   };
 }
 
+/** jsonType names the JSON type of a value, as perfBudgetJSONType does in Go. */
+function jsonType(x) {
+  if (x === null || x === undefined) return 'null';
+  if (Array.isArray(x)) return 'array';
+  return typeof x; // 'object', 'string', 'number' or 'boolean'
+}
+
 /**
- * fieldPaths returns the sorted, de-duplicated field paths of a JSON
- * value: object keys joined with '.', array elements as '[]'. It matches
- * perfBudgetFieldPaths in pkg/hub/perf_budget_test.go.
+ * fieldPaths returns the sorted, de-duplicated typed field paths of a JSON
+ * value: object keys joined with '.', array elements as '[]', then ':' and
+ * the '|'-joined sorted JSON types seen at that path (for example
+ * 'agents[].generation:number'). It matches perfBudgetFieldPaths in
+ * pkg/hub/perf_budget_test.go.
  */
 export function fieldPaths(v) {
-  const set = new Set();
+  const types = new Map();
   const walk = (x, prefix) => {
     if (Array.isArray(x)) {
       for (const c of x) walk(c, prefix + '[]');
     } else if (x !== null && typeof x === 'object') {
       for (const [k, c] of Object.entries(x)) {
         const p = prefix ? `${prefix}.${k}` : k;
-        set.add(p);
+        if (!types.has(p)) types.set(p, new Set());
+        types.get(p).add(jsonType(c));
         walk(c, p);
       }
     }
   };
   walk(v, '');
   // Byte-wise order, as Go's sort.Strings.
-  return [...set].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const byteOrder = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+  return [...types].map(([p, ts]) => `${p}:${[...ts].sort(byteOrder).join('|')}`).sort(byteOrder);
 }
 
 /**
