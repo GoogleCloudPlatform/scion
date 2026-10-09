@@ -77,4 +77,17 @@ is no local PASS. The stale assertion now checks the retained NEW budgets
 instead: 1s cancel and 2s complete, both relative to the original handoff. Close
 adds no timeout of its own. The original-handoff, ownership, cancel and
 reference-release assertions are unchanged. No production code changed. The
-targeted Hub rerun for this correction has not been executed yet.
+subsequent local validation at `336a30bb53beb759327d8ef3235616994a6e9c5b`
+recorded 29 targeted top-level tests and 83 subtests passing. Those results
+apply to that prior revision.
+
+Fixture coverage now expects 73 domain tables and explicitly rejects the retired
+decision-audit table. The fixed count and exhaustive nonempty-table assertion
+remain. Source inspection confirms that generated schema and fixture inventories
+agree, with only `decision_audits` removed from the baseline's 74 tables. The
+upgrade/restart test now checks its deferred close error. No production code
+changed. Formatting and focused fixture coverage, loadability and determinism
+tests passed, as did the focused Entc fresh, upgrade/restart, atomic-failure and
+PostgreSQL-dialect tests. These checks ran on the corrected working tree; local
+Hub validation at the next committed revision remains pending separate approval.
+Real PostgreSQL, command, documentation-build and lint checks were not rerun.

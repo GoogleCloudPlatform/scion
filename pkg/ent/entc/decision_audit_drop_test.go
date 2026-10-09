@@ -56,7 +56,7 @@ func TestDecisionAuditDrop_UpgradeRestart(t *testing.T) {
 	requireNoDecisionTable(t, client)
 	require.NoError(t, client.Close())
 	client = open()
-	defer client.Close()
+	defer func() { require.NoError(t, client.Close()) }()
 	for range 2 {
 		require.NoError(t, AutoMigrate(ctx, client))
 		requireNoDecisionTable(t, client)
