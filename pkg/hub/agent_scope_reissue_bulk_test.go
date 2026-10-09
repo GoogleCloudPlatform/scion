@@ -23,9 +23,11 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -128,30 +130,56 @@ func TestScopeReissueBulk_T11_Isolation(t *testing.T) {
 	}
 }
 
-// T12: without an explicit dry_run=false the bulk run writes no record and
-// no credential change, and its report equals the applied run's diff.
+// bulkHTTP calls the reset-auth-all handler as identity with cred.
+func bulkHTTP(t *testing.T, srv *Server, ctx context.Context, body any, identity Identity, cred CredentialContext) *httptest.ResponseRecorder {
+	t.Helper()
+	data, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/agents/reset-auth-all", bytes.NewReader(data))
+	req.ContentLength = int64(len(data))
+	req = req.WithContext(contextWithCredentialContext(contextWithIdentity(ctx, identity), cred))
+	rec := httptest.NewRecorder()
+	srv.handleAdminResetAuthAll(rec, req)
+	return rec
+}
+
+// T12: without an explicit dry_run=false the bulk run is a dry run. A bulk
+// dry run writes no per-agent rows (only the batch row with dry_run=true and
+// counts); a single-agent --dry-run keeps its dry_run=true row (see
+// TestScopeReissue_T9_DryRunMatchesRealRun). It also writes no edge and no
+// credential change, and its report equals the applied run's diff
+// for a parent and child in one tree, where the child gains the scopes
+// only through its parent's re-issue: the dry run computes the child
+// against the parent's would-be record. The parent is NOT re-issued
+// beforehand.
 func TestScopeReissueBulk_T12_DryRunDefault(t *testing.T) {
 	f := newReissueFixture(t, "rsb-t12", store.ProjectRoleOwner)
-	f.run(t, f.parent, false) // so the child's dry-run diff is not order-dependent
 	jti := "rsb-t12-jti"
 	insertTestAgentCredential(t, f.store, f.child.ID, f.projectID, jti)
 	credBefore := getTestAgentCredential(t, f.store, jti)
-	edges := f.allEdges(t, f.child)
+	parentEdges, childEdges := f.allEdges(t, f.parent), f.allEdges(t, f.child)
 
-	body, err := json.Marshal(map[string]bool{"reissue_scopes": true})
-	require.NoError(t, err)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/agents/reset-auth-all", bytes.NewReader(body))
-	req.ContentLength = int64(len(body))
-	admin := f.adminSession(t)
-	req = req.WithContext(contextWithCredentialContext(contextWithIdentity(req.Context(), admin), CredentialContext{Kind: CredentialKindInteractive}))
-	rec := httptest.NewRecorder()
-	f.srv.handleAdminResetAuthAll(rec, req)
+	rec := bulkHTTP(t, f.srv, context.Background(), map[string]bool{"reissue_scopes": true}, f.adminSession(t), CredentialContext{Kind: CredentialKindInteractive})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var dry ScopeReissueBulkResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &dry))
 	assert.True(t, dry.DryRun, "dry run is the default")
-	assert.Equal(t, edges, f.allEdges(t, f.child))
+	assert.True(t, dry.BatchAuditRecorded)
+	assert.Equal(t, parentEdges, f.allEdges(t, f.parent), "dry run writes no edge")
+	assert.Equal(t, childEdges, f.allEdges(t, f.child), "dry run writes no edge")
 	assertCredentialUnrevoked(t, f.store, jti, credBefore)
+	for _, id := range []string{f.root.ID, f.parent.ID, f.child.ID} {
+		assert.Empty(t, reissueAudits(t, f.store, id, mutationTypeAgentScopesReissued), "no per-agent row for %s", id)
+		assert.Empty(t, issueDeniedAudits(t, f.store, id))
+	}
+	batch := batchAudits(t, f.store)
+	require.Len(t, batch, 1)
+	assert.Contains(t, batch[0].AfterSummary, `"dry_run":true`)
+
+	// The child's preview already includes the scopes it gains through its
+	// parent.
+	assert.Equal(t, artifactScopeStrings(), reissueSorted(bulkAgent(t, &dry, f.child.ID).Added), "child previewed against the parent's would-be record")
+	assert.Equal(t, "changed", bulkAgent(t, &dry, f.child.ID).Outcome)
 
 	applied := f.bulk(t, false)
 	for _, id := range []string{f.root.ID, f.parent.ID, f.child.ID} {
@@ -160,7 +188,82 @@ func TestScopeReissueBulk_T12_DryRunDefault(t *testing.T) {
 		assert.ElementsMatch(t, d.Added, a.Added, id)
 		assert.ElementsMatch(t, d.Removed, a.Removed, id)
 		assert.Equal(t, d.RoleAfter, a.RoleAfter, id)
+		assert.Equal(t, d.Outcome, a.Outcome, id)
 	}
+}
+
+// A refused parent leaves its child computed against the parent's
+// unchanged record, in the dry run as in the applied run.
+func TestScopeReissueBulk_DryRunRefusedParent(t *testing.T) {
+	f := newReissueFixture(t, "rsb-refp", store.ProjectRoleOwner)
+	// The parent's edge becomes unrecorded: its re-issue is refused.
+	ctx := context.Background()
+	_, err := f.store.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, f.parent.ID, store.Deactivation{
+		Cause: store.EdgeDeactivationReincarnateReplaced, OpID: "test-op",
+	})
+	require.NoError(t, err)
+	f.edge(t, store.DelegationPrincipalAgent, f.root.ID, f.parent.ID, store.EffectCeiling{}, store.AuthorityProvenance{})
+
+	dry := f.bulk(t, true)
+	applied := f.bulk(t, false)
+	assert.Equal(t, "refused", bulkAgent(t, dry, f.parent.ID).Outcome)
+	assert.Equal(t, "refused", bulkAgent(t, applied, f.parent.ID).Outcome)
+	d, a := bulkAgent(t, dry, f.child.ID), bulkAgent(t, applied, f.child.ID)
+	assert.Equal(t, a.Outcome, d.Outcome)
+	assert.ElementsMatch(t, a.Added, d.Added)
+	assert.ElementsMatch(t, a.Removed, d.Removed)
+}
+
+// Agents whose delegation record cannot be read for ordering are reported.
+func TestScopeReissueBulk_DepthUnresolvedReported(t *testing.T) {
+	f := newReissueFixture(t, "rsb-depth", store.ProjectRoleOwner)
+	f.faults.dupEdgeAgentID = f.child.ID
+	f.faults.arm()
+	resp := f.bulk(t, true)
+	assert.Equal(t, []string{f.child.ID}, resp.DepthUnresolved)
+	assert.Equal(t, "refused", bulkAgent(t, resp, f.child.ID).Outcome)
+}
+
+// When the batch row cannot be written the response says so; the
+// per-agent rows stand.
+func TestScopeReissueBulk_BatchAuditFailureReported(t *testing.T) {
+	f := newReissueFixture(t, "rsb-batchaudit", store.ProjectRoleOwner)
+	f.faults.batchAuditFail = true
+	f.faults.arm()
+	resp := f.bulk(t, false)
+	assert.False(t, resp.BatchAuditRecorded)
+	assert.Empty(t, batchAudits(t, f.store))
+	require.Len(t, reissueAudits(t, f.store, f.child.ID, mutationTypeAgentScopesReissued), 1)
+}
+
+// A client that goes away mid-run does not cancel the remaining agents or
+// lose the batch row.
+func TestScopeReissueBulk_ClientCancelDoesNotStopRun(t *testing.T) {
+	f := newReissueFixture(t, "rsb-cancel", store.ProjectRoleOwner)
+	for i := 0; i < 3; i++ {
+		f.childAgent(t, "rsb-cancel-extra-"+itoa(i), f.parent, AgentRoleFull)
+	}
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	defer cancelReq()
+	var calls atomic.Int32
+	prev := reissueBulkAgentHook
+	reissueBulkAgentHook = func(string) {
+		if calls.Add(1) == 1 {
+			cancelReq() // the client disconnects as the first agent starts
+		}
+	}
+	t.Cleanup(func() { reissueBulkAgentHook = prev })
+
+	rec := bulkHTTP(t, f.srv, reqCtx, map[string]bool{"reissue_scopes": true, "dry_run": false}, f.adminSession(t), CredentialContext{Kind: CredentialKindInteractive})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp ScopeReissueBulkResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Equal(t, int32(6), calls.Load(), "every agent had its turn")
+	assert.Empty(t, resp.Refused, "no agent failed because the client went away: %+v", resp.Refused)
+	assert.Len(t, resp.Succeeded, 5, "parent, child and three extras changed")
+	assert.True(t, resp.BatchAuditRecorded)
+	require.Len(t, batchAudits(t, f.store), 1, "the batch row is written")
+	assert.Contains(t, scopeStrings(f.grant(t, f.child)), string(ScopeProjectArtifactWrite))
 }
 
 func (f *reissueFixture) adminSession(t *testing.T) UserIdentity {
@@ -234,14 +337,26 @@ func TestScopeReissueBulk_OperatorRefusals(t *testing.T) {
 	body, err := json.Marshal(map[string]bool{"reissue_scopes": true, "dry_run": false})
 	require.NoError(t, err)
 	member := NewAuthenticatedUser(f.userID, "owner@test.com", "Owner", "member", "")
+	hubAdminID := tid("rsb-op-hub-admin")
+	require.NoError(t, f.store.CreateUser(context.Background(), &store.User{
+		ID: hubAdminID, Email: "hub-admin@test.com", DisplayName: "Hub Admin", Role: "member", Status: "active",
+	}))
+	grantSystemRole(t, f.store, hubAdminID, store.SystemRoleHubAdmin)
+	require.False(t, f.srv.authzService.IsSystemAdmin(context.Background(), hubAdminID))
+	hubAdmin := NewAuthenticatedUser(hubAdminID, "hub-admin@test.com", "Hub Admin", "member", "")
+	adminUser := f.adminSession(t)
+	uat := NewScopedUserIdentityWithCeiling(adminUser, f.projectID, []string{"project:agent:manage"}, "uat-rsb-op",
+		permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: allRegistryIDs()})
 	claims := &AgentTokenClaims{ProjectID: f.projectID, Scopes: ScopesForRole(AgentRoleFull)}
 	claims.Subject = f.child.ID
 	for name, tc := range map[string]struct {
 		identity Identity
 		cred     CredentialContext
 	}{
-		"member session": {member, CredentialContext{Kind: CredentialKindInteractive}},
-		"agent token":    {&agentIdentityWrapper{claims}, CredentialContext{Kind: CredentialKindAgentJWT}},
+		"member session":                        {member, CredentialContext{Kind: CredentialKindInteractive}},
+		"agent token":                           {&agentIdentityWrapper{claims}, CredentialContext{Kind: CredentialKindAgentJWT}},
+		"hub-admin session without super-admin": {hubAdmin, CredentialContext{Kind: CredentialKindInteractive}},
+		"super-admin user access token":         {uat, credentialContextForIdentity(uat)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/agents/reset-auth-all", bytes.NewReader(body))
@@ -254,4 +369,9 @@ func TestScopeReissueBulk_OperatorRefusals(t *testing.T) {
 	}
 	assert.Len(t, f.allEdges(t, f.child), 1)
 	assert.Empty(t, batchAudits(t, f.store))
+	for _, id := range []string{f.root.ID, f.parent.ID, f.child.ID} {
+		assert.Empty(t, reissueAudits(t, f.store, id, mutationTypeAgentScopesReissued), "no per-agent row for %s", id)
+		assert.Empty(t, reissueAudits(t, f.store, id, mutationTypeAgentScopesReissueDispatch), "no dispatch row for %s", id)
+		assert.Empty(t, issueDeniedAudits(t, f.store, id), "no denial row for %s", id)
+	}
 }

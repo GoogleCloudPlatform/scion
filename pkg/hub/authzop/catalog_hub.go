@@ -104,11 +104,12 @@ var hubOperations = []OperationSpec{
 		},
 		AuthorityEval: AuthorityEvalBeforeAndAfter,
 		AuditObligation: &AuditObligation{
-			EventType:     "agent_scopes_reissue_batch",
-			ContextFields: []string{"actor_id"},
-			BeforeFields:  []string{"total"},
-			AfterFields:   []string{"dry_run", "succeeded", "noop", "refused", "push_failed"},
-			Atomic:        true,
+			EventType:              "agent_scopes_reissue_batch",
+			ContextFields:          []string{"actor_id"},
+			BeforeFields:           []string{"total"},
+			AfterFields:            []string{"dry_run", "succeeded", "noop", "refused", "push_failed"},
+			Atomic:                 false,
+			NonAtomicJustification: "Each agent's re-issue commits with its own agent_scopes_reissued row in one transaction; the batch row is a summary written after the run with a fresh context, and the response reports batch_audit_recorded=false if it could not be written",
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
 		TestRefs: []TestRef{

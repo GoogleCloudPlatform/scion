@@ -678,13 +678,27 @@ type ScopeReissueBulkResult struct {
 	Refused    []ScopeReissueBulkRef   `json:"refused"`
 	PushFailed []ScopeReissueBulkRef   `json:"push_failed"`
 	Agents     []ScopeReissueBulkAgent `json:"agents"`
+	// DepthUnresolved lists agents whose delegation edge could not be read
+	// when ordering the run.
+	DepthUnresolved []string `json:"depth_unresolved"`
+	// BatchAuditRecorded is false when the hub could not write the batch
+	// audit row.
+	BatchAuditRecorded bool `json:"batch_audit_recorded"`
 }
 
 // ReissueScopesAll posts the bulk re-issue to the admin reset-auth-all
-// route. It is not retried.
+// route. It is not retried. The run can take much longer than the client's
+// default request timeout, so this one call waits until ctx's deadline
+// instead (callers must set one).
 func (s *agentService) ReissueScopesAll(ctx context.Context, apply bool) (*ScopeReissueBulkResult, error) {
 	body := map[string]bool{"reissue_scopes": true, "dry_run": !apply}
-	resp, err := s.c.postNoRetry(ctx, "/api/v1/admin/agents/reset-auth-all", body, nil)
+	tr := *s.c.transport
+	if deadline, ok := ctx.Deadline(); ok && tr.HTTPClient != nil {
+		hc := *tr.HTTPClient
+		hc.Timeout = time.Until(deadline)
+		tr.HTTPClient = &hc
+	}
+	resp, err := tr.PostNoRetry(ctx, "/api/v1/admin/agents/reset-auth-all", body, nil)
 	if err != nil {
 		return nil, err
 	}

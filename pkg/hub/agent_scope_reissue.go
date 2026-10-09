@@ -296,7 +296,10 @@ func (s *Server) computeScopeReissue(ctx context.Context, agent *store.Agent) (*
 	if agent == nil || !agent.DeletedAt.IsZero() {
 		return nil, reissueRefusal(DenyCauseCeilingOrphaned, fmt.Errorf("%w: agent deleted", ErrProvenanceChain))
 	}
-	ctx = contextWithDelegationCeilingCache(ctx)
+	// Fresh per computation: no edge or principal memo from the caller's
+	// request carries over, so in a bulk run a child always sees its
+	// parent's committed (or, in a dry run, overlaid) edge.
+	ctx = contextWithDelegationCeilingCache(maskAllAuthzMemo(ctx))
 
 	// The single active project edge E.
 	active, err := a.activeProjectEdges(ctx, agent.ID, agent.ProjectID)
@@ -385,6 +388,7 @@ func (s *Server) planAgentDelegatorReissue(ctx context.Context, plan *scopeReiss
 	if parent == nil || !parent.DeletedAt.IsZero() {
 		return reissueRefusal(DenyCauseCeilingOrphaned, fmt.Errorf("%w: delegator agent %s deleted", ErrProvenanceChain, edge.DelegatorID))
 	}
+	parent = reissueOverlayFrom(ctx).agent(parent)
 	if parent.ProjectID != agent.ProjectID {
 		return reissueRefusal(DenyCauseCeilingOrphaned, fmt.Errorf("%w: delegator agent %s is in another project", ErrProvenanceChain, parent.ID))
 	}
@@ -934,16 +938,13 @@ func reissueAuditRecord(plan *scopeReissuePlan, opID, batchOpID string, dryRun b
 	})
 }
 
-// commitScopeReissue writes the re-issue in one transaction: deactivate E
-// (guarded on its updated time, so a concurrent change refuses), create E',
-// lower the stored role when it went down, revoke every active credential
-// of the agent, and write the agent_scopes_reissued record. Nothing is
-// written when any step fails. It returns E' and the revoked count.
-func (s *Server) commitScopeReissue(ctx context.Context, plan *scopeReissuePlan, operator reissueOperator, opID, batchOpID string) (*store.DelegationEdge, int, error) {
-	actor := auditActorFromContext(ctx)
-	now := time.Now()
+// replacementEdge returns E', the edge that replaces plan.edge: the same
+// delegator and source, the re-issued role and ceiling, and the operator as
+// initiator. The commit writes it; a bulk dry run hands it to descendants
+// through the overlay instead (reissueOverlay).
+func (plan *scopeReissuePlan) replacementEdge(operator reissueOperator) *store.DelegationEdge {
 	old := plan.edge
-	newEdge := &store.DelegationEdge{
+	return &store.DelegationEdge{
 		DelegatorType: old.DelegatorType,
 		DelegatorID:   old.DelegatorID,
 		DelegateType:  store.DelegationPrincipalAgent,
@@ -967,6 +968,18 @@ func (s *Server) commitScopeReissue(ctx context.Context, plan *scopeReissuePlan,
 		},
 		EffectCeiling: plan.ceiling,
 	}
+}
+
+// commitScopeReissue writes the re-issue in one transaction: deactivate E
+// (guarded on its updated time, so a concurrent change refuses), create E',
+// lower the stored role when it went down, revoke every active credential
+// of the agent, and write the agent_scopes_reissued record. Nothing is
+// written when any step fails. It returns E' and the revoked count.
+func (s *Server) commitScopeReissue(ctx context.Context, plan *scopeReissuePlan, operator reissueOperator, opID, batchOpID string) (*store.DelegationEdge, int, error) {
+	actor := auditActorFromContext(ctx)
+	now := time.Now()
+	old := plan.edge
+	newEdge := plan.replacementEdge(operator)
 	revoked := 0
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
 		updatedAt := old.UpdatedAt
@@ -1077,23 +1090,7 @@ func (s *Server) runScopeReissue(ctx context.Context, agent *store.Agent, operat
 		}
 		return nil, err
 	}
-	resp := &ScopeReissueResponse{
-		OpID:          opID,
-		AgentID:       agent.ID,
-		DryRun:        dryRun,
-		Noop:          plan.noop,
-		Added:         scopeStrings(plan.added),
-		Removed:       scopeStrings(plan.removed),
-		Kept:          scopeStrings(plan.kept),
-		Withheld:      plan.withheld,
-		RoleBefore:    string(plan.roleBefore),
-		RoleAfter:     string(plan.roleAfter),
-		CeilingSource: plan.source,
-		EdgeReplaced:  plan.edge.ID,
-	}
-	if resp.Withheld == nil {
-		resp.Withheld = []reissueWithheldScope{}
-	}
+	resp := reissueResponseFromPlan(plan, opID, dryRun)
 
 	if dryRun {
 		record, err := reissueAuditRecord(plan, opID, batchOpID, true, "", 0, auditActorFromContext(ctx), time.Now())
@@ -1155,6 +1152,28 @@ func (s *Server) runScopeReissue(ctx context.Context, agent *store.Agent, operat
 	resp.Dispatched = true
 	resp.Message = "Scopes re-issued and a new token dispatched"
 	return resp, nil
+}
+
+// reissueResponseFromPlan builds the operator response for plan.
+func reissueResponseFromPlan(plan *scopeReissuePlan, opID string, dryRun bool) *ScopeReissueResponse {
+	resp := &ScopeReissueResponse{
+		OpID:          opID,
+		AgentID:       plan.agent.ID,
+		DryRun:        dryRun,
+		Noop:          plan.noop,
+		Added:         scopeStrings(plan.added),
+		Removed:       scopeStrings(plan.removed),
+		Kept:          scopeStrings(plan.kept),
+		Withheld:      plan.withheld,
+		RoleBefore:    string(plan.roleBefore),
+		RoleAfter:     string(plan.roleAfter),
+		CeilingSource: plan.source,
+		EdgeReplaced:  plan.edge.ID,
+	}
+	if resp.Withheld == nil {
+		resp.Withheld = []reissueWithheldScope{}
+	}
+	return resp
 }
 
 // handleAgentScopeReissue handles POST .../reset-auth with
