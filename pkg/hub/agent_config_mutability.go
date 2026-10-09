@@ -627,7 +627,7 @@ func startMergeKeepsBase(key string, req *api.ScionConfig) bool {
 		return v.Int() <= 0
 	case reflect.Map, reflect.Slice:
 		return v.Len() == 0
-	case reflect.Ptr:
+	case reflect.Pointer:
 		if v.IsNil() {
 			return true
 		}
