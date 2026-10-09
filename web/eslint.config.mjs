@@ -59,7 +59,9 @@ export default defineConfig([
       sourceType: 'module',
       globals: { ...globals.node, ...globals.es2022 },
       parserOptions: {
-        project: './tsconfig.json',
+        // Covers every src .ts/.tsx file, tests included, so none of them
+        // fail to parse for being outside a TS project.
+        project: './tsconfig.eslint.json',
         tsconfigRootDir,
       },
     },
@@ -71,6 +73,8 @@ export default defineConfig([
   project(['e2e/terminal-hidden/*.ts'], './e2e/terminal-hidden/tsconfig.json'),
   project(['e2e/chat-mobile/*.ts'], './e2e/chat-mobile/tsconfig.json'),
   project(['e2e/agent-store-count/*.ts'], './e2e/agent-store-count/tsconfig.json'),
+  project(['e2e/chat-file-preview/*.ts'], './e2e/chat-file-preview/tsconfig.json'),
+  project(['e2e/project-files-tabs/*.ts'], './e2e/project-files-tabs/tsconfig.json'),
   project(['src/client/terminal-*.test.ts'], './src/client/tsconfig.terminal-tests.json'),
   project(
     [
@@ -132,6 +136,23 @@ export default defineConfig([
     ],
     './e2e/chat-palette/tsconfig.json'
   ),
+
+  // Test files: a looser type-aware rule set than sources. Tests reach
+  // into private members and use `as any` fakes, so the no-unsafe-* rules
+  // for `any` values, unbound-method (vi.fn() mocks passed to expect) and
+  // no-unnecessary-type-assertion are off (ptone/scion#2944, option A).
+  {
+    files: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+    rules: {
+      '@typescript-eslint/no-unsafe-member-access': 'off',
+      '@typescript-eslint/no-unsafe-call': 'off',
+      '@typescript-eslint/no-unsafe-assignment': 'off',
+      '@typescript-eslint/no-unsafe-argument': 'off',
+      '@typescript-eslint/no-unsafe-return': 'off',
+      '@typescript-eslint/unbound-method': 'off',
+      '@typescript-eslint/no-unnecessary-type-assertion': 'off',
+    },
+  },
 
   // Components navigate through src/client/navigation.ts (#2857, #3118):
   // no importing the client entry module (its load boots the app) and
