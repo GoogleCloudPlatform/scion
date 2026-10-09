@@ -127,11 +127,11 @@ function createElement(): any {
 }
 
 /** Create an element, set up basic state, and stub fetch for resolveUploadTarget tests. */
-function createForUploadTest(calls: Call[], opts: MockOptions = {}): Promise<any> {
+function createForUploadTest(calls: Call[], opts: MockOptions = {}): any {
   vi.stubGlobal('fetch', vi.fn(makeFetchMock(calls, opts)));
   const el = createElement();
   el.projectId = 'proj-1';
-  return Promise.resolve(el);
+  return el;
 }
 
 function cleanup() {

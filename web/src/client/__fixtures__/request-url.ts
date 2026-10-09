@@ -29,5 +29,5 @@ export function requestBodyText(body: BodyInit | null | undefined): string {
   if (typeof body === 'string') return body;
   if (body === null || body === undefined) return String(body);
   if (body instanceof URLSearchParams) return body.toString();
-  throw new TypeError('expected a string request body');
+  throw new TypeError('unsupported request body kind');
 }
