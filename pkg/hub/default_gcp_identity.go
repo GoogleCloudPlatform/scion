@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -146,7 +147,15 @@ func pinResolvedProfile(ac *store.AgentAppliedConfig, profile string) {
 // or a *saAssignDenial (authorization gate), so a caller with an HTTP
 // response can render either the same way resolveDefaultSAAssignment does.
 func (s *Server) resolveDefaultSAAssignmentCore(ctx context.Context, r *http.Request, projectID, saID, surface string, tier defaultTier) (*store.GCPIdentityConfig, error) {
-	sa, err := s.store.GetGCPServiceAccount(ctx, saID)
+	sa, err := s.resolveGCPServiceAccountRef(ctx, projectID, saID)
+	var amb *errGCPSAAmbiguous
+	if errors.As(err, &amb) {
+		slog.Warn(tier.name+"-default SA assignment failed: service account reference is ambiguous",
+			"surface", surface,
+			"project_id", projectID,
+			"sa_ref", saID)
+		return nil, amb
+	}
 	// Scope-aware admissibility (P4 item F), same predicate as the two
 	// caller-supplied assign sites. A default may legitimately nominate a
 	// hub-scoped account; a project-scoped one is only usable in its own
@@ -218,6 +227,9 @@ func (s *Server) resolveDefaultSAAssignment(ctx context.Context, w http.Response
 	}
 	if denial, ok := err.(*saAssignDenial); ok {
 		denial.write(w)
+		return nil, false
+	}
+	if writeGCPSAAmbiguous(w, err) {
 		return nil, false
 	}
 	writeError(w, http.StatusBadRequest, ErrCodeValidationError, err.Error(), nil)

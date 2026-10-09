@@ -1658,11 +1658,16 @@ func (s *Server) createAgentInProject(
 		}
 	}
 
-	// Validate GCP identity SA assignment: verify the SA exists, belongs to this project, and is verified.
+	// Validate GCP identity SA assignment: resolve the reference (id, email or
+	// display name; see resolveGCPServiceAccountRef), then verify the SA
+	// belongs to this project and is verified.
 	var resolvedGCPSA *store.GCPServiceAccount
 	if req.GCPIdentity != nil && req.GCPIdentity.MetadataMode == store.GCPMetadataModeAssign {
-		sa, err := s.store.GetGCPServiceAccount(ctx, req.GCPIdentity.ServiceAccountID)
+		sa, err := s.resolveGCPServiceAccountRef(ctx, projectID, req.GCPIdentity.ServiceAccountID)
 		if err != nil {
+			if writeGCPSAAmbiguous(w, err) {
+				return
+			}
 			// errors.Is, not ==, and that is load-bearing rather than style. A
 			// wrapped ErrNotFound would miss a == comparison and fall through to
 			// writeErrorFromErr, which answers ErrNotFound with 404 — reopening
@@ -4261,8 +4266,11 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 				ValidationError(w, "service_account_id is required when metadata_mode is 'assign'", nil)
 				return
 			}
-			sa, err := s.store.GetGCPServiceAccount(ctx, updates.GCPIdentity.ServiceAccountID)
+			sa, err := s.resolveGCPServiceAccountRef(ctx, agent.ProjectID, updates.GCPIdentity.ServiceAccountID)
 			if err != nil {
+				if writeGCPSAAmbiguous(w, err) {
+					return
+				}
 				// Was writeErrorFromErr(w, err, "GCP service account not found"),
 				// which was wrong twice over. That third parameter is requestID,
 				// not a message, so the string shipped in the response's requestId

@@ -219,7 +219,7 @@ failed start.
     - `--label <key=value>`: Label for the agent (repeatable).
     - `--role <string>`: Agent role for Hub API access (`none`, `readonly`, `baseline`, `full`).
     - `--message-mode <mode>`: Set the agent's initial message mode (`project`, `branch`, `lineage`, `none`, or `hub`). See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes).
-    - `--service-account <string>`: GCP service account ID to assign (Hub mode).
+    - `--service-account <string>`: GCP service account to assign (Hub mode): its id, email or display name. An email matches the project's own account before a hub-wide one; a display name that matches more than one account returns `identity_ambiguous` with the candidates' ids, and you retry with an id.
     - `--upload-template`, `--no-upload`, `--template-scope <scope>`: Template upload behavior in Hub mode.
 
 ### `scion stop`
@@ -620,7 +620,7 @@ as stop, start, and restart); an agent can always reincarnate itself.
     - `--handoff-template`: Print the handoff template and exit. Ignores other flags and arguments, and does not contact the Hub.
     - `--dry-run`: Print the resolved plan (old → new template, image, harness config, model, env key names, and branch) without migrating anything.
     - `--broker <name|id>`: Move the agent to another Runtime Broker (see [Moving to another Runtime Broker](#moving-to-another-runtime-broker) below). Both Runtime Brokers must mount the same NFS export, so the workspace moves without being copied. The CLI dry-runs the move first and stops if it is refused; add `--dry-run` to only check it.
-    - `--service-account <id>`: Patch the GCP service account of the new generation. Gets the same access checks as `scion create`.
+    - `--service-account <id|email|name>`: Patch the GCP service account of the new generation. Accepts the same forms and gets the same access checks as `scion create`.
     - `--role <role>`: Patch the agent role of the new generation: `none`, `readonly`, `baseline`, or `full`. Gets the same access checks as `scion create`; an agent reincarnating itself can lower its own role but not raise it.
     - `--model <model>`: Patch the model of the new generation. Model aliases are accepted, as with `scion start`.
     - `--harness-auth <method>`: Patch the harness auth method of the new generation: `api-key`, `oauth-token`, `auth-file`, or `vertex-ai`.

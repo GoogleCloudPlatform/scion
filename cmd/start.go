@@ -104,6 +104,6 @@ func init() {
 	startCmd.Flags().DurationVar(&startWaitTimeout, "wait-timeout", 0, "Hub mode: how long to wait for the agent to be running (default: the Hub's remaining launch time plus 30s, or 5m when the Hub does not report it)")
 
 	// GCP service account assignment flag
-	startCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account ID to assign to this agent (requires Hub mode)")
+	startCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account to assign to this agent: its id, email or display name (requires Hub mode)")
 
 }

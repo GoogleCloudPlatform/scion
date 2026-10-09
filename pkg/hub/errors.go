@@ -65,6 +65,11 @@ const (
 	// ErrCodeRuntimeBrokerAmbiguous is returned when a runtime broker name
 	// or slug matches more than one broker; the caller must use the ID.
 	ErrCodeRuntimeBrokerAmbiguous = "runtime_broker_ambiguous"
+	// ErrCodeIdentityAmbiguous is returned when a GCP service-account
+	// reference (email or display name) matches more than one registered
+	// account reachable from the project; details list the candidates' ids
+	// and scopes so the caller can retry with an id. Status 400.
+	ErrCodeIdentityAmbiguous = "identity_ambiguous"
 	// ErrCodeNotImplemented is returned for a request the API accepts but
 	// the hub does not carry out yet. Status 501.
 	ErrCodeNotImplemented = "not_implemented"
