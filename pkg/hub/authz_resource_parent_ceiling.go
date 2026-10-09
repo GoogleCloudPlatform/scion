@@ -237,7 +237,8 @@ func (a *AuthzService) EvaluateServiceAccountParentCeiling(ctx context.Context, 
 	proof.SourcePrincipal = ProvenancePrincipal{Kind: row.SourcePrincipalKind, ID: row.SourcePrincipalID}
 	proof.SourceCredentialKind = row.SourceCredentialKind
 
-	// 3. Freshness and recorded provenance.
+	// 3. Freshness and recorded provenance. Rows come from the active-only
+	// lookup, so !row.Active is defence in depth.
 	if !row.Active || row.ServiceAccountID != serviceAccountID ||
 		agentAssignedServiceAccountID(agent) != serviceAccountID {
 		return parentCeilingDeny(DenyCauseCeilingProvenanceStale, "recorded service account does not match the account in use", proof)
