@@ -36,6 +36,40 @@ const sharedRules = {
   'prettier/prettier': 'error',
 };
 
+// Curated test files linted against their own TS project. They are
+// lint-clean under the full rule set, so the test-file relaxation below
+// does not apply to them. Explicit lists, not globs (terminal tests
+// excepted): other files in the same directories are not lint-clean.
+const terminalTests = ['src/client/terminal-*.test.ts'];
+const clientTests = [
+  'src/client/agent-store.test.ts',
+  'src/client/agent-store-feed.test.ts',
+  'src/client/agent-store-probe.test.ts',
+  'src/client/paginate-all.test.ts',
+  'src/client/state.test.ts',
+  'src/client/__fixtures__/agent-store-harness.ts',
+];
+const componentTests = [
+  'src/components/shared/palette/quick-palette.test.ts',
+  'src/components/shared/palette/quick-palette-groups.test.ts',
+  'src/components/shared/palette/quick-palette-ranking-memo.test.ts',
+  'src/components/shared/palette/quick-palette-host.test.ts',
+  'src/components/shared/palette/graph-palette-controller.test.ts',
+  'src/components/shared/palette/palette-typeahead.test.ts',
+  'src/utils/platform.test.ts',
+  'src/components/pages/graph-palette-hosts.test.ts',
+  'src/components/shared/open-modal.test.ts',
+  'src/components/shared/agent-tree-view.test.ts',
+  'src/components/shared/deep-active-element.test.ts',
+  'src/components/terminal/terminal-pane.test.ts',
+  'src/components/shared/header.test.ts',
+  'src/components/shared/group-member-editor-membership.test.ts',
+  'src/components/pages/onboarding.test.ts',
+  'src/components/pages/chat-hub-members.test.ts',
+  'src/components/shared/chat/chat-thread-peer-project.test.ts',
+  'src/components/pages/agent-detail-reincarnate.test.ts',
+];
+
 /** Points the given files at their own TypeScript project. */
 const project = (files, path) => ({
   files,
@@ -75,43 +109,9 @@ export default defineConfig([
   project(['e2e/agent-store-count/*.ts'], './e2e/agent-store-count/tsconfig.json'),
   project(['e2e/chat-file-preview/*.ts'], './e2e/chat-file-preview/tsconfig.json'),
   project(['e2e/project-files-tabs/*.ts'], './e2e/project-files-tabs/tsconfig.json'),
-  project(['src/client/terminal-*.test.ts'], './src/client/tsconfig.terminal-tests.json'),
-  project(
-    [
-      'src/client/agent-store.test.ts',
-      'src/client/agent-store-feed.test.ts',
-      'src/client/agent-store-probe.test.ts',
-      'src/client/paginate-all.test.ts',
-      'src/client/state.test.ts',
-      'src/client/__fixtures__/agent-store-harness.ts',
-    ],
-    './src/client/tsconfig.client-tests.json'
-  ),
-  // Explicit lists, not globs: only these files are lint-clean against
-  // their project. Other files in the same directories are not.
-  project(
-    [
-      'src/components/shared/palette/quick-palette.test.ts',
-      'src/components/shared/palette/quick-palette-groups.test.ts',
-      'src/components/shared/palette/quick-palette-ranking-memo.test.ts',
-      'src/components/shared/palette/quick-palette-host.test.ts',
-      'src/components/shared/palette/graph-palette-controller.test.ts',
-      'src/components/shared/palette/palette-typeahead.test.ts',
-      'src/utils/platform.test.ts',
-      'src/components/pages/graph-palette-hosts.test.ts',
-      'src/components/shared/open-modal.test.ts',
-      'src/components/shared/agent-tree-view.test.ts',
-      'src/components/shared/deep-active-element.test.ts',
-      'src/components/terminal/terminal-pane.test.ts',
-      'src/components/shared/header.test.ts',
-      'src/components/shared/group-member-editor-membership.test.ts',
-      'src/components/pages/onboarding.test.ts',
-      'src/components/pages/chat-hub-members.test.ts',
-      'src/components/shared/chat/chat-thread-peer-project.test.ts',
-      'src/components/pages/agent-detail-reincarnate.test.ts',
-    ],
-    './src/components/tsconfig.component-tests.json'
-  ),
+  project(terminalTests, './src/client/tsconfig.terminal-tests.json'),
+  project(clientTests, './src/client/tsconfig.client-tests.json'),
+  project(componentTests, './src/components/tsconfig.component-tests.json'),
   project(
     [
       'e2e/chat-palette/accessibility.pw.ts',
@@ -141,8 +141,10 @@ export default defineConfig([
   // into private members and use `as any` fakes, so the no-unsafe-* rules
   // for `any` values, unbound-method (vi.fn() mocks passed to expect) and
   // no-unnecessary-type-assertion are off (ptone/scion#2944, option A).
+  // The curated lint-clean test files keep the full rule set.
   {
     files: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+    ignores: [...terminalTests, ...clientTests, ...componentTests],
     rules: {
       '@typescript-eslint/no-unsafe-member-access': 'off',
       '@typescript-eslint/no-unsafe-call': 'off',
