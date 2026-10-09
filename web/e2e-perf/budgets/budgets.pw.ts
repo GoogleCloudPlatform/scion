@@ -43,10 +43,13 @@
  *   noisy load cannot fail CI.
  *
  * Baselines were measured on BASELINE_COMMIT, Chromium headless shell,
- * one worker, over 3 runs (9 normal loads and 3 slowed loads per view):
- * - domElements: identical on all 12 loads per view, slowed ones included.
- * - longTasks: the median of the 9 normal loads (grid 3-7, list 4-8, graph
- *   3-7 per load; run medians grid 4-6, list 5-6, graph 4-6).
+ * one worker:
+ * - domElements: identical on all loads per view, slowed ones included
+ *   (12 loads on main 7049f53, 9 more on main 48a6715).
+ * - longTasks: the median of the 6 normal loads of 2 runs on main
+ *   48a6715, rounded up (grid 3-7, list 3-7, graph 4-9 per load),
+ *   so that no run median (up to 7 in every view) sits within 1 of its
+ *   limit.
  * Limits:
  * - domElements: baseline + DOM_MARGIN elements. One extra element per
  *   rendered card or row adds 25 (grid, list) or 100 (graph) and fails.
@@ -63,7 +66,7 @@ import { expect, test, type Browser, type Page } from '@playwright/test';
 
 import { loadFixture, setupBudgetMocks } from './mock-api.js';
 
-const BASELINE_COMMIT = 'main 7049f53';
+const BASELINE_COMMIT = 'main 48a6715';
 const LOADS = 3;
 const DOM_MARGIN = 10;
 // The page's Date, a few minutes after the fixture's agent times, so
@@ -83,19 +86,19 @@ const VIEWS: ViewBudget[] = [
     view: 'grid',
     selector: '.agent-card',
     expected: 25,
-    baseline: { domElements: 2448, longTasks: 5 },
+    baseline: { domElements: 2448, longTasks: 7 },
   },
   {
     view: 'list',
     selector: '.agent-table-container tbody tr',
     expected: 25,
-    baseline: { domElements: 2369, longTasks: 5 },
+    baseline: { domElements: 2369, longTasks: 6 },
   },
   {
     view: 'graph',
     selector: '.node-wrapper',
     expected: 100,
-    baseline: { domElements: 2971, longTasks: 6 },
+    baseline: { domElements: 2971, longTasks: 7 },
   },
 ];
 
