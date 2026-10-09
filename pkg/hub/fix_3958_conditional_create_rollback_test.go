@@ -209,6 +209,10 @@ type httpRollbackSite struct {
 	// delete_in_progress refusal whether or not the rollback finds the row
 	// held.
 	deleteClaim bool
+	// wantStatus and wantCode are the failure's own answer, given when no
+	// delete holds the row.
+	wantStatus int
+	wantCode   string
 }
 
 // httpRollbackSites are every non-managed HTTP create failure site that
@@ -216,10 +220,10 @@ type httpRollbackSite struct {
 // failure is a delete's claim.
 func httpRollbackSites() []httpRollbackSite {
 	return []httpRollbackSite{
-		{name: "storage"},
-		{name: "upload URL"},
-		{name: "workspace storage"},
-		{name: "unsupported capability", own: &createRollbackSite{
+		{name: "storage", wantStatus: http.StatusBadGateway, wantCode: ErrCodeRuntimeError},
+		{name: "upload URL", wantStatus: http.StatusBadGateway, wantCode: ErrCodeRuntimeError},
+		{name: "workspace storage", wantStatus: http.StatusServiceUnavailable, wantCode: ErrCodeUnavailable},
+		{name: "unsupported capability", wantStatus: http.StatusPreconditionFailed, wantCode: ErrCodeUnsupportedCapability, own: &createRollbackSite{
 			disp: &createAgentDispatcher{},
 			setup: func(t *testing.T, srv *Server) {
 				// A hub-managed project with no git remote on a remote
@@ -229,7 +233,7 @@ func httpRollbackSites() []httpRollbackSite {
 			},
 			wantStage: createStageWorkspaceStorage,
 		}},
-		{name: "workspace upload", own: &createRollbackSite{
+		{name: "workspace upload", wantStatus: http.StatusBadGateway, wantCode: ErrCodeRuntimeError, own: &createRollbackSite{
 			disp: &createAgentDispatcher{},
 			setup: func(t *testing.T, srv *Server) {
 				// The workspace upload runs past its own budget.
@@ -253,23 +257,23 @@ func httpRollbackSites() []httpRollbackSite {
 			},
 			wantStage: createStageWorkspaceUpload,
 		}},
-		{name: "provision-only run intent", runIntent: true, own: &createRollbackSite{
+		{name: "provision-only run intent", runIntent: true, wantStatus: http.StatusInternalServerError, wantCode: ErrCodeInternalError, own: &createRollbackSite{
 			disp:      &createAgentDispatcher{},
 			req:       CreateAgentRequest{ProvisionOnly: true},
 			wantStage: createStageRunIntent,
 		}},
-		{name: "run intent", runIntent: true},
-		{name: "run intent with env gather", runIntent: true},
-		{name: "dispatch with env gather"},
-		{name: "dispatch"},
-		{name: "missing env"},
-		{name: "provision"},
-		{name: "provision token", own: &createRollbackSite{
+		{name: "run intent", runIntent: true, wantStatus: http.StatusInternalServerError, wantCode: ErrCodeInternalError},
+		{name: "run intent with env gather", runIntent: true, wantStatus: http.StatusInternalServerError, wantCode: ErrCodeInternalError},
+		{name: "dispatch with env gather", wantStatus: http.StatusBadGateway, wantCode: ErrCodeRuntimeError},
+		{name: "dispatch", wantStatus: http.StatusBadGateway, wantCode: ErrCodeRuntimeError},
+		{name: "missing env", wantStatus: http.StatusUnprocessableEntity, wantCode: ErrCodeMissingEnvVars},
+		{name: "provision", wantStatus: http.StatusNotFound, wantCode: skillResolutionErrorCode},
+		{name: "provision token", wantStatus: http.StatusInternalServerError, wantCode: ErrCodeInternalError, own: &createRollbackSite{
 			disp:      &skillFailDispatcher{provisionErr: fmt.Errorf("provision: %w", errAgentTokenRecord)},
 			req:       CreateAgentRequest{ProvisionOnly: true},
 			wantStage: createStageProvision,
 		}},
-		{name: "dispatch delete claim", deleteClaim: true, own: &createRollbackSite{
+		{name: "dispatch delete claim", deleteClaim: true, wantStatus: http.StatusConflict, wantCode: ErrCodeDeleteInProgress, own: &createRollbackSite{
 			disp:      &failingCreateDispatcher{createErr: fmt.Errorf("persist run id: %w", store.ErrDeleteInProgress)},
 			wantStage: createStageDispatch,
 		}},
@@ -399,11 +403,7 @@ func TestFix3958_HTTPCreateRollback_DeferToHeldRow(t *testing.T) {
 			assertRolledBack(t, plain.s, plain.agentID, stage, true)
 			assert.Zero(t, plain.deleteCalls, "no unconditional row delete")
 			assert.Equal(t, 1, plain.finalizeCalls, "one conditional compensation")
-			if site.deleteClaim {
-				requireDeleteInProgressRefusal(t, plain)
-			} else {
-				assert.NotEqual(t, http.StatusConflict, plain.status, "fixture check: the failure's own answer is not a 409")
-			}
+			requireSiteAnswer(t, site, plain)
 
 			for _, del := range rollbackDeletes() {
 				t.Run(del.name, func(t *testing.T) {
@@ -467,6 +467,20 @@ func TestFix3958_HTTPCreateRollback_FallbackDefersToHeldRow(t *testing.T) {
 	}
 }
 
+// requireSiteAnswer checks run answered the site's own failure:
+// site.wantStatus and site.wantCode, and the delete_in_progress refusal's
+// body when the failure was the delete's claim.
+func requireSiteAnswer(t *testing.T, site httpRollbackSite, run httpRollbackRun) {
+	t.Helper()
+	require.Equal(t, site.wantStatus, run.status, run.body)
+	var body ErrorResponse
+	require.NoError(t, json.Unmarshal([]byte(run.body), &body))
+	assert.Equal(t, site.wantCode, body.Error.Code)
+	if site.deleteClaim {
+		requireDeleteInProgressRefusal(t, run)
+	}
+}
+
 // requireHeldRowAnswer checks the answer of a create whose rollback left
 // the row to a delete: 409 delete_in_progress with details.agentId and no
 // correlation ID; the deleted-during-create message, or the
@@ -499,10 +513,11 @@ func requireDeleteInProgress409(t *testing.T, run httpRollbackRun) ErrorResponse
 	assert.Equal(t, ErrCodeDeleteInProgress, body.Error.Code)
 	assert.Equal(t, run.agentID, body.Error.Details["agentId"], "details.agentId")
 	assert.NotContains(t, body.Error.Details, "correlation_id", "no correlation ID")
+	assert.Len(t, body.Error.Details, 1, "details carry only agentId")
 	return body
 }
 
-// (A) At a site that does not ask for DeleteWon (dispatch), when every
+// (A) At a failCreate site (dispatch), when every
 // conditional row delete gives up because the row keeps changing
 // (store.ErrVersionConflict), the row is left to whatever is writing it:
 // it is kept, its phase is not marked failed, no compensation is recorded
@@ -636,8 +651,9 @@ func runSchedRollback(t *testing.T, st schedRollbackStage, faults rollbackFaults
 // keeps it, and the fire fails with errScheduledChildDeletedDuringCreate
 // (ptone/scion#4061), unless the failure was the delete's claim; a failed
 // or lapsed delete does not hold it, the create is rolled back and the
-// fire fails with the same error text as the same failure with no delete. The scheduled create takes no quota reservation,
-// so there is none to hold or release.
+// fire fails with the same error text as the same failure with no delete.
+// The scheduled create takes no quota reservation, so there is none to hold
+// or release.
 func TestFix3958_SchedDispatchRollback_DeferToHeldRow(t *testing.T) {
 	for _, st := range schedRollbackStages() {
 		t.Run(st.name, func(t *testing.T) {

@@ -1273,6 +1273,10 @@ const (
 // The 500 takes precedence over every original response, including a 409
 // delete_in_progress: when the rollback is incomplete, the caller needs the
 // correlation ID to report the leftover records.
+//
+// When a delete holds the row, failCreate answers 409 delete_in_progress
+// before this is reached (ptone/scion#4061): the delete owns the records,
+// so there are none for the caller to report.
 func writeCreateFailure(w http.ResponseWriter, correlationID string, writeOriginal func()) {
 	if correlationID == "" {
 		writeOriginal()
