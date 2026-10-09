@@ -195,7 +195,7 @@ func (s *Server) handleDiagnosticsLogsStream(w http.ResponseWriter, r *http.Requ
 			flusher.Flush()
 		case <-recheck.C:
 			if !s.streamCredentialStillAuthorized(ctx, Resource{Type: "hub", ID: "hub"}, ActionRead, "hub.diagnostics.read") {
-				// The re-check fails on a cancelled request; end without the event.
+				// A re-check on a cancelled request can fail; end without the event.
 				if ctx.Err() != nil {
 					return
 				}
