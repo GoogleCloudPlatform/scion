@@ -21,7 +21,7 @@ The Hub is part of the main `scion` binary. You can start it using the `server s
 ```bash
 # Start the Hub, Web Dashboard, and a local Runtime Broker
 
-SESSION_SECRET=\${SESSION_SECRET} scion --global server start --foreground --production --debug --enable-hub --enable-runtime-broker --enable-web --runtime-broker-port 9800 --web-port 8080 --storage-bucket \${SCION_HUB_STORAGE_BUCKET} --auto-provide
+SESSION_SECRET=\${SESSION_SECRET} scion --global server start --foreground --production --enable-hub --enable-runtime-broker --enable-web --runtime-broker-port 9800 --web-port 8080 --storage-bucket \${SCION_HUB_STORAGE_BUCKET} --auto-provide
 
 ```
 
@@ -30,6 +30,8 @@ Pass the session secret via the `SESSION_SECRET` environment variable (e.g., thr
 :::
 
 This is often best managed through something like systemd
+
+Debug logging is off by default and should stay off in production. To troubleshoot, turn it on temporarily: add `--debug` to the startup command, or set `SCION_LOG_LEVEL=debug` in the Hub's environment, then restart the Hub. When you are done, remove the flag or variable and restart again.
 
 ### Hub vs. Broker Processes
 While they can run in the same process—known as **Combo Mode** (the default for `scion server start` with no flags, which runs in workstation mode)—they serve distinct roles:
