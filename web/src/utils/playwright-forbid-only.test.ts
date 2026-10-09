@@ -26,14 +26,23 @@ import { join, relative, resolve } from 'node:path';
 const WEB_ROOT = resolve(__dirname, '../..');
 const E2E_ROOT = join(WEB_ROOT, 'e2e');
 
+/**
+ * Same reach and file-name pattern as the include globs in
+ * tsconfig.e2e-configs.json: playwright.config.ts at the web root, and
+ * any playwright*.config.ts file at any depth under e2e/.
+ */
+const E2E_CONFIG_NAME = /^playwright.*\.config\.ts$/;
+
+function e2eConfigs(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) return e2eConfigs(path);
+    return entry.isFile() && E2E_CONFIG_NAME.test(entry.name) ? [path] : [];
+  });
+}
+
 function playwrightConfigs(): string[] {
-  const suites = readdirSync(E2E_ROOT, { withFileTypes: true }).filter((d) => d.isDirectory());
-  const nested = suites.flatMap((suite) =>
-    readdirSync(join(E2E_ROOT, suite.name))
-      .filter((name) => /^playwright(\..+)?\.config\.ts$/.test(name))
-      .map((name) => join(E2E_ROOT, suite.name, name))
-  );
-  return [join(WEB_ROOT, 'playwright.config.ts'), ...nested];
+  return [join(WEB_ROOT, 'playwright.config.ts'), ...e2eConfigs(E2E_ROOT).sort()];
 }
 
 /** forbidOnly set from the CI env var, directly or through a CI constant. */
