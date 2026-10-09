@@ -987,6 +987,11 @@ func (s *Server) commitScopeReissue(ctx context.Context, plan *scopeReissuePlan,
 		if err != nil {
 			return fmt.Errorf("scope re-issue: re-read agent: %w", err)
 		}
+		if cur == nil {
+			// A store that answers no row and no error: refuse rather
+			// than write against an agent we cannot see.
+			return errReissueConflict
+		}
 		curRole, _ := agentRoleAndScopes(cur)
 		if !cur.DeletedAt.IsZero() || curRole != plan.roleBefore {
 			return errReissueConflict
@@ -1115,7 +1120,7 @@ func (s *Server) runScopeReissue(ctx context.Context, agent *store.Agent, operat
 
 	summary := reissueDispatchSummary{OpID: opID, BatchOpID: batchOpID, CredentialsRevoked: revoked}
 	fresh, err := s.store.GetAgent(ctx, agent.ID)
-	if err != nil {
+	if err != nil || fresh == nil {
 		summary.ErrorClass = mintErrorClassLookup
 		recordReissueDispatch(ctx, s.store, agent.ID, summary)
 		resp.DispatchError = "the agent could not be re-read after the re-issue; run reset-auth to deliver a new token"
