@@ -311,14 +311,16 @@ export class ScionPageAdminGroups extends LitElement {
     }
 
     .description-text {
-      /* block so max-width + ellipsis actually apply (no-ops on an inline span) */
+      /* Show the full description as wrapping text (no ellipsis, no
+         hover-only title). Block so max-width applies; overflow-wrap lets
+         long unbroken tokens break instead of widening the table. Rows grow
+         to fit the text by design. */
       display: block;
       font-size: 0.8125rem;
       color: var(--scion-text-muted, #64748b);
       max-width: 300px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      white-space: normal;
+      overflow-wrap: anywhere;
     }
 
     .meta-text {
@@ -1235,9 +1237,7 @@ export class ScionPageAdminGroups extends LitElement {
           </span>
         </td>
         <td class="hide-mobile">
-          <span class="description-text" title=${group.description || nothing}
-            >${group.description || '—'}</span
-          >
+          <span class="description-text">${group.description || '—'}</span>
         </td>
         <td class="hide-mobile">
           ${labels.length > 0

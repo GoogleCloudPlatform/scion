@@ -35,22 +35,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 // so happy-dom tries to fetch icons from localhost:3000 and logs
 // ECONNREFUSED on stderr. These tests only need a stub; it matches the
 // one in pages/chat.test.ts.
-vi.mock('../../../client/main.js', () => ({
-  navigateTo: vi.fn(),
-  pushRoute: vi.fn((path: string) => {
-    window.history.pushState({}, '', path);
-    return Promise.resolve();
-  }),
-  replaceRoute: vi.fn((path: string) => {
-    window.history.replaceState(
-      window.history.state,
-      '',
-      path + window.location.search + window.location.hash
-    );
-    return Promise.resolve();
-  }),
-  stateManager: new EventTarget(),
-}));
+vi.mock('../../../client/main.js', () => import('../../../client/__fixtures__/main-stub.js'));
 
 // The real tooltip renders the markup test's message. It is defined before
 // any member renders: a row first rendered while sl-tooltip is undefined

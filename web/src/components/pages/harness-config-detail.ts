@@ -38,6 +38,7 @@ import { HarnessConfigFileEditorDataSource } from '../shared/file-editor.js';
 import type { FileEditorDataSource } from '../shared/file-editor.js';
 import '../shared/hash-display.js';
 import { showToast } from '../../utils/toast.js';
+import { describeSourceUrl } from '../../shared/source-url.js';
 
 @customElement('scion-page-harness-config-detail')
 export class ScionPageHarnessConfigDetail extends LitElement {
@@ -730,14 +731,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
                 <scion-hash-display .hash=${hc.contentHash} max-width="14ch"></scion-hash-display
               ></span>`
             : ''}
-          ${hc.sourceUrl
-            ? html`<span class="source-url"
-                >Source:
-                <a href=${hc.sourceUrl.replace(/^git\+/, '')} target="_blank" rel="noopener"
-                  >${hc.sourceUrl}</a
-                >
-              </span>`
-            : ''}
+          ${this.renderSourceUrl(hc.sourceUrl)}
         </div>
         ${this.reimportStatus
           ? html`<p class="reimport-status success">${this.reimportStatus}</p>`
@@ -747,6 +741,18 @@ export class ScionPageHarnessConfigDetail extends LitElement {
           : ''}
       </div>
     `;
+  }
+
+  private renderSourceUrl(sourceUrl: string | undefined): unknown {
+    const shown = describeSourceUrl(sourceUrl);
+    if (!shown) return '';
+    if (!shown.href) {
+      return html`<span class="source-url">Source: ${shown.text}</span>`;
+    }
+    return html`<span class="source-url"
+      >Source:
+      <a href=${shown.href} target="_blank" rel="noopener noreferrer">${shown.text}</a>
+    </span>`;
   }
 
   private renderFilesSection() {

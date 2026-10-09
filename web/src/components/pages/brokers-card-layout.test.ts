@@ -16,7 +16,7 @@
 
 import { describe, it, expect, beforeAll } from 'vitest';
 import { render, type TemplateResult } from 'lit';
-import { elementStyleRules } from './__fixtures__/card-layout.js';
+import { elementStyleRules } from './__fixtures__/css-rules.js';
 
 type BrokerPage = HTMLElement & {
   renderBrokerCard(item: Record<string, unknown>): TemplateResult;

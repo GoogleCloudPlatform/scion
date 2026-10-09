@@ -62,7 +62,8 @@ def _make_ctx(
 
     manifest: dict[str, Any] = {
         "harness_bundle_dir": bundle,
-        "agent_workspace": "/workspace",
+        # A scratch path, never the real /workspace (ptone/scion#2993).
+        "agent_workspace": os.path.join(bundle, "workspace"),
         "harness_config": harness_config or {},
     }
     return sh.ProvisionContext(harness, manifest)
@@ -1285,7 +1286,9 @@ class TestTomlEditPreserves(unittest.TestCase):
 
 class TestWriteTomlIfPreserves(unittest.TestCase):
     def _ctx(self) -> tuple["sh.ProvisionContext", list[str]]:
-        ctx = sh.ProvisionContext("test", {})
+        workspace = tempfile.TemporaryDirectory()
+        self.addCleanup(workspace.cleanup)
+        ctx = sh.ProvisionContext("test", {"agent_workspace": workspace.name})
         warnings: list[str] = []
         ctx.warn = warnings.append  # type: ignore[method-assign]
         return ctx, warnings
@@ -1674,7 +1677,11 @@ class TestRunScaffold(unittest.TestCase):
         bundle = tempfile.mkdtemp()
         manifest_path = os.path.join(bundle, "manifest.json")
         with open(manifest_path, "w") as f:
-            json.dump({"command": "provision", "harness_bundle_dir": bundle}, f)
+            json.dump({
+                "command": "provision",
+                "harness_bundle_dir": bundle,
+                "agent_workspace": os.path.join(bundle, "workspace"),
+            }, f)
 
         called = []
 
@@ -1702,7 +1709,11 @@ class TestRunScaffold(unittest.TestCase):
         bundle = tempfile.mkdtemp()
         manifest_path = os.path.join(bundle, "manifest.json")
         with open(manifest_path, "w") as f:
-            json.dump({"command": "provision", "harness_bundle_dir": bundle}, f)
+            json.dump({
+                "command": "provision",
+                "harness_bundle_dir": bundle,
+                "agent_workspace": os.path.join(bundle, "workspace"),
+            }, f)
 
         def bad_provision(ctx):
             raise sh.ProvisionError("something broke")
@@ -1720,7 +1731,9 @@ class TestRunScaffold(unittest.TestCase):
 
 class TestProvisionContext(unittest.TestCase):
     def test_workspace_default(self):
-        ctx = _make_ctx()
+        # No agent_workspace in the manifest: the product default applies.
+        # Only the string is checked; nothing is written there.
+        ctx = sh.ProvisionContext("test", {"harness_bundle_dir": "/tmp"})
         self.assertEqual(ctx.workspace, "/workspace")
 
     def test_workspace_from_manifest(self):
@@ -1939,7 +1952,9 @@ class TestMapThinkingLevel(unittest.TestCase):
 
 class TestResolveThinking(unittest.TestCase):
     def _ctx(self, harness_config: dict[str, Any] | None) -> tuple["sh.ProvisionContext", list[str], list[str]]:
-        manifest: dict[str, Any] = {}
+        workspace = tempfile.TemporaryDirectory()
+        self.addCleanup(workspace.cleanup)
+        manifest: dict[str, Any] = {"agent_workspace": workspace.name}
         if harness_config is not None:
             manifest["harness_config"] = harness_config
         ctx = sh.ProvisionContext("test", manifest)
@@ -2039,7 +2054,10 @@ class TestResolveThinking(unittest.TestCase):
             self.assertEqual(sh.resolve_thinking(ctx), "medium")
 
     def test_reads_block_from_manifest_json(self):
+        workspace = tempfile.TemporaryDirectory()
+        self.addCleanup(workspace.cleanup)
         manifest = json.loads(json.dumps({"harness_config": {"thinking": _CODEX_THINKING}}))
+        manifest["agent_workspace"] = workspace.name
         ctx = sh.ProvisionContext("test", manifest)
         ctx.info = lambda _m: None  # type: ignore[method-assign]
         self.assertEqual(sh.resolve_thinking(ctx, "76"), "xhigh")

@@ -99,7 +99,7 @@ func TestPTYLifecycle_ClientCloseReleasesHubStreamOnce(t *testing.T) {
 	connection.streamsMu.RUnlock()
 	require.Zero(t, remaining)
 	require.True(t, manager.IsConnected(connection.brokerID), "closing one attach must preserve broker connection")
-	_, err := session.stream.Read(context.Background())
+	_, err := session.up.(*brokerPTYUpstream).stream.Read(context.Background())
 	require.Error(t, err, "stream readers must unblock")
 	require.NoError(t, browser.SetReadDeadline(time.Now().Add(time.Second)))
 	_, _, err = browser.ReadMessage()

@@ -276,11 +276,11 @@ conclusion.
 Neither `agents/` nor `harness-configs/` will exist directly under
 `/home/scion/.scion`, and that is correct. Two mechanisms combine, and they are
 independent — losing one does not restore the directories.
-`cmd/server_foreground.go:1771` bootstraps templates and harness configs from
+`initHubServer` (`cmd/server_foreground.go`) bootstraps templates and harness configs from
 local `~/.scion` directories only in the `else` arm of an explicit
 `if hostedMode`; the hosted arm uses `BootstrapBundledResources` instead, "so
 every replica converges on the same DB + storage state". And
-`config.InitGlobal`, at `cmd/server_foreground.go:104`, which *does* run in
+`config.InitGlobal`, called from `runServerStart` (`cmd/server_foreground.go`), which *does* run in
 hosted mode and *would* create both directories, is reached only
 `if os.Stat(globalDir)` reports the directory missing — and the chart mounts an
 `emptyDir` at exactly that path, so it never fires.
@@ -290,15 +290,18 @@ which is why it is written down rather than assumed.
 
 Nothing in the hub needs either directory in this deployment, and that is an
 enumeration of the source rather than an inference from one comment. For
-`harness-configs/` the three non-CLI readers are `cmd/server_foreground.go:1777`
-(the `else` arm above) and `pkg/hub/system_handlers.go:348` and `:538`, both
-registered behind `requireWorkstation` (`pkg/hub/server.go:3591`, `:3594`),
-which returns 404 whenever `Workstation` is false — and
-`cmd/server_foreground.go:1496` sets `Workstation: !hostedMode`. For `agents/`
-the reachable readers are `pkg/agent/provision.go:88` and
-`pkg/agent/list.go:201`; both *are* reachable here, because the chart enables
+`harness-configs/` the three non-CLI readers are `bootstrapWorkstationResources`
+(`cmd/server_foreground.go`, the `else` arm above) and
+`Server.computeOnboardingStatus` and `Server.cleanupUnselectedHarnessConfigs`
+(`pkg/hub/system_handlers.go`), both behind `/api/v1/system/*` routes classified
+`RouteWorkstation` (`pkg/hub/route_metadata.go`), which `Server.routeGuard`
+hands to `Server.requireWorkstation` (`pkg/hub/server.go`), which returns 404
+whenever `Workstation` is false — and `buildHubServerConfig`
+(`cmd/server_foreground.go`) sets `Workstation: !hostedMode`. For `agents/`
+the reachable readers are `DeleteAgentFiles` (`pkg/agent/provision.go`) and
+`AgentManager.List` (`pkg/agent/list.go`); both *are* reachable here, because the chart enables
 the runtime broker, and both treat a missing directory as "no agents"
-(`provision.go:172-176` stats each candidate and `continue`s; `list.go:207-210`
+(`DeleteAgentFiles` stats each candidate and `continue`s; `AgentManager.List`
 reads and `continue`s on error). No reader returns an error, warns, or fails a
 startup step.
 
@@ -306,15 +309,15 @@ Those two results are not equally durable, and the difference is worth carrying.
 `agents/` is safe because of what its readers do, which survives any later phase
 switching a feature on. `harness-configs/` is safe because of which features are
 off, which does not. **If a later phase makes workstation mode or the onboarding
-endpoints reachable**, `handleSystemInit` (`pkg/hub/system_handlers.go:446`)
+endpoints reachable**, `handleSystemInit` (`pkg/hub/system_handlers.go`)
 becomes an HTTP endpoint that calls `config.InitMachine` and `os.RemoveAll`
 inside the tree this chart mounts a read-only settings file over. Neither gate
 holding it shut is visible from the chart's side.
 
 **What you should see instead** is `cache/templates`, `cache/harness-configs`
 and `cache/skills`, created at broker startup by `templatecache.New`
-(`pkg/templatecache/cache.go:85`) from `pkg/runtimebroker/server.go:396`, `:413`
-and `:422`. Note the collision: `cache/harness-configs` is **not**
+(`pkg/templatecache/cache.go`), called three times from
+`Server.initHubIntegration` (`pkg/runtimebroker/server.go`). Note the collision: `cache/harness-configs` is **not**
 `harness-configs`. A check that greps for the name, or runs
 `find /home/scion/.scion -name harness-configs`, finds one and concludes the
 bootstrap ran — the opposite of the truth.
@@ -330,7 +333,7 @@ missing `agents/` or `harness-configs/` directory, or about templates it could
 not find; and the **absence** of the `cache/` tree, which would mean the state
 directory is not writable. That failure is silent — `templatecache.New` failing
 is handled with `slog.Warn` and the broker continues without a template cache
-(`pkg/runtimebroker/server.go:337`) — so it degrades rather than crashing, and
+(`New` logs the `Server.initHubIntegration` error, `pkg/runtimebroker/server.go`) — so it degrades rather than crashing, and
 nothing else will tell you.
 
 #### 3. What silently does not persist, until ptone/scion#1091
@@ -419,7 +422,7 @@ to supply `S` — every connection a replica holds that is not in the ent pool.
 measured it.** The value shipped is an operator input for exactly that reason.
 
 `NOTES.txt` also prints a **structural maximum**, `S_max = 2 * max(4, NumCPU) + 2`,
-derived by reading pgx v5.9.2 (`pgxpool/pool.go:383`, `defaultMaxConns = 4`,
+derived by reading pgx v5.9.2 (`pgxpool/pool.go`, `defaultMaxConns = 4`,
 raised to `runtime.NumCPU()` when larger) against the hub's two pool
 constructions. **That is a ceiling read out of source, not an overhead observed
 in a process**, and the two must not be confused: a ceiling tells you what the

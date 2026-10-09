@@ -170,6 +170,19 @@ While a break-glass is active, a save from the maintenance page updates the stor
 
 `admin_mode: true` in `settings.yaml` can only be cleared by editing the file: the admin API stores maintenance in the database, not in `settings.yaml`.
 
+## Profiling
+
+The `profiling` section holds operational switches for in-app profiling. It is stored only in the Hub database: it has no `settings.yaml` key and no environment variable, and it is not seeded. A change applies to every replica through the usual settings propagation.
+
+| Key | Type | Default | Effect |
+|-----|------|---------|--------|
+| `readiness_marks` | boolean | `false` | The web client writes readiness marks (User Timing marks for agent data arrival, first visible rows and graph ready). See [readiness marks](/scion/contributing/perf-tracing/#readiness-marks). |
+
+- **Changing it:** `PUT /api/v1/admin/profiling` with `{"readiness_marks": true}` (or `false`, or `null` to reset). It needs a hub administrator on an interactive session; user access tokens are refused. There is no admin UI card. `GET /api/v1/admin/profiling` returns the current value and the section revision.
+- **Reading it:** `GET /api/v1/profiling` returns `{"readinessMarks": true|false}` to any signed-in caller.
+- **In the web client:** while it is on, the page shell's initial data carries `"readinessMarks": true` for a signed-in user, the same value that user reads from `GET /api/v1/profiling`. Signed-out pages, and every page while it is off, are served exactly as without the setting. The client reads the value once per page load, so a change applies on the next full load.
+- Off, the client makes no `performance.mark` calls and the server adds nothing to the shell.
+
 ## HA Bootstrap Guidance
 
 For high-availability deployments with multiple hub replicas:
