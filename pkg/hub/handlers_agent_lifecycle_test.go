@@ -350,20 +350,22 @@ func TestStatusUpdateIsEmpty_EveryFieldCounts(t *testing.T) {
 
 // reincarnateBeforeStatusStore sets the agent's ReincarnationState just
 // before the first UpdateAgentStatus reaches the store, as if a
-// reincarnation started after the status handler read the agent.
+// reincarnation started after the status handler read the agent. It acts
+// only once its fault switch is armed; before that it is a pass-through.
 type reincarnateBeforeStatusStore struct {
 	store.Store
-	t    *testing.T
-	done bool
+	fault *storeFaultSwitch
+	t     *testing.T
+	done  bool
 }
 
 func (r *reincarnateBeforeStatusStore) UpdateAgentStatus(ctx context.Context, id string, su store.AgentStatusUpdate) error {
-	if !r.done {
+	if r.fault.Active() && !r.done {
 		r.done = true
-		a, err := r.Store.GetAgent(ctx, id)
+		a, err := r.GetAgent(ctx, id)
 		require.NoError(r.t, err)
 		a.ReincarnationState = store.ReincarnationStateStopping
-		require.NoError(r.t, r.Store.UpdateAgent(ctx, a))
+		require.NoError(r.t, r.UpdateAgent(ctx, a))
 	}
 	return r.Store.UpdateAgentStatus(ctx, id, su)
 }
@@ -375,7 +377,9 @@ func (r *reincarnateBeforeStatusStore) UpdateAgentStatus(ctx context.Context, id
 // GuardReincarnation and the store re-checks on the row it locks. The
 // fields the reincarnation does not own still apply.
 func TestAgentStatusUpdate_ReincarnationStartedAfterRead(t *testing.T) {
-	srv, s := testServer(t)
+	srv, s, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *reincarnateBeforeStatusStore {
+		return &reincarnateBeforeStatusStore{Store: inner, fault: f, t: t}
+	})
 	ctx := context.Background()
 
 	project := &store.Project{ID: tid("proj-reinc-race"), Name: "Reinc Race Project", Slug: "reinc-race-project"}
@@ -385,8 +389,7 @@ func TestAgentStatusUpdate_ReincarnationStartedAfterRead(t *testing.T) {
 		ProjectID: project.ID, Phase: string(state.PhaseRunning), Activity: string(state.ActivityWorking),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
-	wrapped := &reincarnateBeforeStatusStore{Store: s, t: t}
-	srv.store = wrapped
+	fault.Arm()
 
 	rec := postAgentStatusAsAgent(t, srv, agent,
 		`{"phase":"error","activity":"crashed","message":"boom","exitCode":1,"exitReason":"crashed","containerStatus":"Exited (1)"}`)
