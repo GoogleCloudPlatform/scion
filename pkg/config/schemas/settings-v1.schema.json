@@ -1243,11 +1243,11 @@
         },
         "gcp_iam_check_mode": {
           "type": "string",
-          "description": "Whether the IAM actAs permission is checked when a GCP service account is bound to an agent: 'off' (default) or 'enforce'."
+          "description": "Whether the IAM actAs permission is checked when a GCP service account is bound to an agent: 'off' (default) or 'enforce'. Any other non-empty value is treated as 'enforce', with a warning."
         },
         "gcp_iam_deny_unknown_policy": {
           "type": "string",
-          "description": "Behaviour when GCP IAM deny policies cannot be evaluated: 'fail-open' (default; allowed if the allow check passes) or 'fail-closed' (treated as denied)."
+          "description": "Behaviour when GCP IAM deny policies cannot be evaluated: 'fail-open' (default; allowed if the allow check passes) or 'fail-closed' (treated as denied). Any other non-empty value is treated as 'fail-closed', with a warning."
         },
         "disable_legacy_storage_fallback": {
           "type": "boolean",
@@ -1508,19 +1508,19 @@
         "url": { "type": "string", "x-env-var": "SCION_SERVER_DATABASE_URL" },
         "max_open_conns": {
           "type": "integer",
-          "description": "Maximum number of open connections to the database. For sqlite this must be 1, to serialize writes."
+          "description": "Maximum number of open connections to the database. For sqlite this is forced to 1 whatever is configured, to serialize writes. For postgres a value of 1 or less takes the default (5)."
         },
         "max_idle_conns": {
           "type": "integer",
-          "description": "Maximum number of idle connections in the pool."
+          "description": "Maximum number of idle connections in the pool. For postgres a value of 1 or less takes the default (2). For sqlite a value of 0 or less takes the default (1)."
         },
         "conn_max_lifetime": {
           "type": "string",
-          "description": "Maximum time a connection may be reused (Go duration, e.g. '30m'). Empty means unlimited."
+          "description": "Maximum time a connection may be reused (Go duration, e.g. '30m'). Empty takes the driver default (postgres: 30m; sqlite: unlimited). '0' means unlimited."
         },
         "conn_max_idle_time": {
           "type": "string",
-          "description": "Maximum time a connection may sit idle in the pool before it is closed (Go duration, e.g. '5m'). Set it shorter than the server-side or proxy idle timeout so idle connections are recycled first. Empty means no idle limit."
+          "description": "Maximum time a connection may sit idle in the pool before it is closed (Go duration, e.g. '5m'). Set it shorter than the server-side or proxy idle timeout so idle connections are recycled first. Empty takes the driver default (postgres: 5m; sqlite: no idle limit). '0' means no idle limit."
         }
       }
     },

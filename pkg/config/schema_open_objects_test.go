@@ -126,11 +126,11 @@ profiles:
             volume_name: filestore
 `
 
-// TestValidateSettings_OpenObjectFieldsValidate checks that the newly
+// TestValidateSettings_OpenObjectFieldsValidateAndLoad checks that the newly
 // documented fields validate with valid values, and that the same document
 // loads into the Go types with the values intact (so the schema keys are the
 // keys the loader reads).
-func TestValidateSettings_OpenObjectFieldsValidate(t *testing.T) {
+func TestValidateSettings_OpenObjectFieldsValidateAndLoad(t *testing.T) {
 	errs, err := ValidateSettings([]byte(schemaOpenObjectsDoc), "1")
 	require.NoError(t, err)
 	assert.Empty(t, errs, "documented open-object fields should validate, got: %v", errs)
