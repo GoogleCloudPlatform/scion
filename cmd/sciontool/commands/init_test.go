@@ -3187,7 +3187,7 @@ func TestConfigureSharedWorkspaceGit_NeverConsultsPATHForGit(t *testing.T) {
 // (pkg/sciontool/services) guards against for the services manager: the
 // reaper's generic wait4(-1, ...) can steal the git child's exit status
 // from cmd.Wait() before CombinedOutput() gets to it, surfacing as an
-// ECHILD-shaped "wait: no child processes" error that makes runGitConfig
+// ECHILD-shaped "waitid: no child processes" error that makes runGitConfig
 // log and move on (it has no error to return). git usually writes the key
 // before it exits, so the .gitconfig contents alone cannot show the
 // failure; the test therefore also records every runGitConfig failure
@@ -3200,7 +3200,7 @@ func TestConfigureSharedWorkspaceGit_NeverConsultsPATHForGit(t *testing.T) {
 // Positive control: this test is not vacuously green. Reverting
 // runGitConfig's call back to a raw cmd.CombinedOutput() makes it fail
 // (the reaper takes the exit status of some git children, and cmd.Wait
-// reports "wait: no child processes"), which `go test -count=10 -run
+// reports "waitid: no child processes"), which `go test -count=10 -run
 // TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD
 // ./cmd/sciontool/commands/` shows on every run; with
 // procreap.CombinedOutputManaged in place it passes on every run.
