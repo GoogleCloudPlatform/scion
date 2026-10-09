@@ -15,7 +15,7 @@ The quickest path to a deployed Scion Hub that builds from source is a single Go
 
 ## Configuration
 
-Every script sources `scripts/starter-hub/hub-config.sh`. That file generates nothing. It is a shared set of shell variables that sets resource names, domains, and file paths from `HUB_NAME` (default `demo`) and `BASE_DOMAIN` (default `scion-ai.dev`). Set those, and any other variable listed in `hub-config.sh`, such as `CERT_EMAIL`, `REGION`, or `ZONE`, in your environment before you run a script:
+Every script sources `scripts/starter-hub/hub-config.sh`. That file generates nothing. It is a shared set of shell variables that sets resource names, domains, and file paths from `HUB_NAME` (default `demo`) and `BASE_DOMAIN` (default `scion-ai.dev`). Set those, and any other variable listed in `hub-config.sh`, such as `REGION` or `ZONE`, in your environment before you run a script. Set `CERT_EMAIL` in `hub-config.sh`, or in your environment, to your own address; Let's Encrypt uses it for certificate notices:
 
 ```bash
 export HUB_NAME=demo
@@ -126,7 +126,7 @@ The steps above assume a public-facing VM with an external IP and public DNS. If
 | 1. Provision the VM | `gce-demo-provision.sh` | **No** — run the script as-is. It creates firewall rules for inbound HTTP/HTTPS (tcp:80, tcp:443) that are unnecessary if the VM is not publicly reachable; you can remove them afterward or let your network team manage internal firewall rules instead. |
 | 4. DNS and certificates | `gce-certs.sh` | **Yes** — this script fetches the VM's external IP, creates public Cloud DNS records, and obtains Let's Encrypt certificates via DNS challenge. All of this requires a public IP and will fail without one. |
 
-Steps 0, 2, 3, and 5 work without modification. Because `gce-demo-deploy.sh` always runs step 4, run the [individual steps](#individual-steps) instead of the all-in-one script.
+Steps 0, 2, and 3 work without modification. Step 5 needs a certificate and key at `/etc/letsencrypt/live/<CERT_DOMAIN>/fullchain.pem` and `privkey.pem`, readable by group `caddy`. `gce-start-hub.sh --full` always writes a Caddyfile that points at those files and restarts Caddy; if they are missing, Caddy fails to start and the script stops before it starts the Hub. Because `gce-demo-deploy.sh` always runs step 4, run the [individual steps](#individual-steps) instead of the all-in-one script.
 
 ### Set `SCION_SERVER_BASE_URL`
 
@@ -160,7 +160,7 @@ hub.internal.example.com {
 }
 ```
 
-Then start Caddy manually (`sudo caddy start --config /etc/caddy/Caddyfile`) instead of running `gce-certs.sh`. `gce-start-hub.sh --full` replaces `/etc/caddy/Caddyfile` with its own version, so restore your file after each `--full` run.
+Then start Caddy manually (`sudo caddy start --config /etc/caddy/Caddyfile`) instead of running `gce-certs.sh`. `gce-start-hub.sh --full` replaces `/etc/caddy/Caddyfile` with its own version, which points at `/etc/letsencrypt/live/<CERT_DOMAIN>/`, and restarts Caddy. Before each `--full` run, place your certificate and key at that path as `fullchain.pem` and `privkey.pem`, readable by group `caddy`; otherwise the run stops before it starts the Hub. Restore your own Caddyfile after each `--full` run, or keep the generated one if it serves your certificate.
 
 **Option B — TLS terminated upstream**
 
