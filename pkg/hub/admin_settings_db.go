@@ -541,6 +541,49 @@ func overlayEndpointsRequest(d *opsettings.EndpointsSettings, req *ServerConfigU
 	}
 }
 
+// accessNoRowBase is the access base when no access row exists: the
+// effective access values of the snapshot (bootstrap or file).
+func accessNoRowBase(ops *OperationalSettings) map[string]json.RawMessage {
+	snap := ops.Snapshot()
+	return structToRawMap(opsettings.AccessSettings{
+		AdminEmails:       snap.AdminEmails,
+		UserAccessMode:    snap.UserAccessMode,
+		DefaultUserRole:   snap.DefaultUserRole,
+		AuthorizedDomains: snap.AuthorizedDomains,
+	})
+}
+
+// endpointsNoRowBase is the endpoints base when no endpoints row exists:
+// the effective public_url and image_registry. hub_name is left out: the
+// bootstrap value applies without being written (bootstrapAppliesWhenAbsent).
+func endpointsNoRowBase(ops *OperationalSettings) map[string]json.RawMessage {
+	snap := ops.Snapshot()
+	return structToRawMap(opsettings.EndpointsSettings{
+		PublicURL:     snap.PublicURL,
+		ImageRegistry: snap.ImageRegistry,
+	})
+}
+
+// endpointsSeededBase drops hub_name from a non-managed endpoints base: a
+// seeded row holds the bootstrap hub_name, which applies without being
+// written (Snapshot falls back to it) and may not match the schema
+// pattern, so it is not carried into the managed row.
+func endpointsSeededBase(base map[string]json.RawMessage) {
+	delete(base, "hub_name")
+}
+
+// bodyMergeOptions returns the base rules of a section in
+// bodyMergedSections.
+func bodyMergeOptions(section string) sectionMergeOptions {
+	switch section {
+	case "access":
+		return sectionMergeOptions{noRowBase: accessNoRowBase}
+	case "endpoints":
+		return sectionMergeOptions{noRowBase: endpointsNoRowBase, seededBase: endpointsSeededBase}
+	}
+	return sectionMergeOptions{}
+}
+
 // detectKeySource determines which bootstrap layer provides a given section key.
 // It checks the individual layers in reverse precedence order (server_env first,
 // then seed_env, then yaml) and returns the first match.
@@ -789,7 +832,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	}
 	// telemetry.cloud.headers values are masked in GET too: a masked echo
 	// keeps the stored header (the snapshot value GET showed).
-	if err := restoreMaskedTelemetryHeaders(req.Telemetry, ops.Snapshot().TelemetryConfig); err != nil {
+	if err := restoreMaskedTelemetryHeaders(req.Telemetry, ops.Snapshot().TelemetryConfig, rawTelemetryObject(rawBody)); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
 		return
 	}
@@ -1115,6 +1158,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// behavior: if a conflict occurs partway, exactly the alphabetically-first
 	// sections are applied, giving clients predictable retry semantics.
 	applied := make(map[string]int64)
+	var unchanged []string // sections whose write was skipped (unchangedManagedRow)
 	var conflicted []map[string]interface{}
 
 	sortedSections := make([]string, 0, len(sectionDocs))
@@ -1139,7 +1183,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		// byte-identical (ptone/scion#3899).
 		if secName != gcpIAMSection {
 			if rev, same := unchangedManagedRow(r.Context(), ops, secName, doc, expectedRev); same {
+				// The revision is reported for the client's next CAS; the
+				// section is listed as unchanged, not as written.
 				applied[secName] = rev
+				unchanged = append(unchanged, secName)
 				continue
 			}
 		}
@@ -1197,12 +1244,21 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	sort.Strings(unchanged)
+	written := make(map[string]int64, len(applied))
+	for sec, rev := range applied {
+		written[sec] = rev
+	}
+	for _, sec := range unchanged {
+		delete(written, sec)
+	}
 	slog.Info("Server config updated via admin API (DB-backed)",
 		"user", updatedBy,
-		"sections", mapKeys(applied),
+		"sections", mapKeys(written),
+		"unchanged", unchanged,
 	)
 
-	appliedKeys := mapKeys(applied)
+	appliedKeys := mapKeys(written)
 	requiresRestart := []string{}
 
 	var fileChanged []string
@@ -1232,6 +1288,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			"applied":          appliedKeys,
 			"requires_restart": requiresRestart,
 		},
+	}
+	if len(unchanged) > 0 {
+		resp["unchanged"] = unchanged
 	}
 	if len(fileChanged) > 0 {
 		resp["file_keys"] = fileChanged

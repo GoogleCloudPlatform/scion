@@ -326,13 +326,15 @@ func maskedTelemetry(t *config.V1TelemetryConfig) *config.V1TelemetryConfig {
 // so a form round trip keeps the stored headers. A real value is left
 // alone and replaces the stored one as usual.
 //
-// As for the server secrets, a masked value is restored only into the
-// same block: every other member the request sends in telemetry.cloud
-// must equal the stored value GET showed (stored, masked), so a stored
-// header is never sent along to a changed endpoint or provider. A masked
-// header with no stored value, or with a stored value that is itself the
-// placeholder, is an error too. The caller answers 400 to an error.
-func restoreMaskedTelemetryHeaders(incoming, stored *config.V1TelemetryConfig) error {
+// A masked value is restored only when every other telemetry.cloud member
+// the request sends equals what GET showed for it (stored, masked). The
+// sent members are read from rawTelemetry, the telemetry object of the
+// request body, so a member sent as "" or null counts as sent: it equals
+// the shown value only when GET showed none (null), and is a change
+// otherwise. Nested objects are compared whole. A masked header with no
+// stored value, or with a stored value that is itself the placeholder, is
+// an error too. The caller answers 400 to an error.
+func restoreMaskedTelemetryHeaders(incoming, stored *config.V1TelemetryConfig, rawTelemetry json.RawMessage) error {
 	if incoming == nil || incoming.Cloud == nil {
 		return nil
 	}
@@ -351,7 +353,7 @@ func restoreMaskedTelemetryHeaders(incoming, stored *config.V1TelemetryConfig) e
 		storedCloud = *stored.Cloud
 	}
 	shown := maskedTelemetry(&config.V1TelemetryConfig{Cloud: &storedCloud}).Cloud
-	if !sentMembersEqual(incoming.Cloud, shown, "headers") {
+	if !sentCloudMembersEqual(rawTelemetry, shown) {
 		return fmt.Errorf("telemetry.cloud.headers.%s is the masked placeholder %q but other fields of telemetry.cloud changed; send the real value", names[0], maskedValue)
 	}
 	headers := make(map[string]string, len(incoming.Cloud.Headers))
@@ -373,26 +375,48 @@ func restoreMaskedTelemetryHeaders(incoming, stored *config.V1TelemetryConfig) e
 	return nil
 }
 
-// sentMembersEqual reports whether every member of a's JSON object other
-// than skip equals the same member of b's JSON object. Members a leaves
-// out (omitted, or zero values dropped by omitempty) are not compared.
-func sentMembersEqual(a, b any, skip string) bool {
-	av, err1 := toJSONValue(a)
-	bv, err2 := toJSONValue(b)
-	if err1 != nil || err2 != nil {
+// sentCloudMembersEqual reports whether every member the telemetry object
+// rawTelemetry sends in its cloud object, other than headers, equals the
+// same member of shown (as JSON values; a member shown has none of is
+// null). Members are matched to fields with sentStructFields, the rule
+// the typed request decode follows. A body that sends no cloud object
+// sends no members.
+func sentCloudMembersEqual(rawTelemetry json.RawMessage, shown *config.V1TelemetryCloudConfig) bool {
+	rawCloud, ok := sentAtPath(reflect.TypeOf(config.V1TelemetryConfig{}), rawTelemetry, []string{"cloud"})
+	if !ok {
+		return true
+	}
+	fields, ok := sentStructFields(reflect.TypeOf(config.V1TelemetryCloudConfig{}), rawCloud)
+	if !ok {
 		return false
 	}
-	am, _ := av.(map[string]any)
-	bm, _ := bv.(map[string]any)
-	for k, v := range am {
-		if k == skip {
+	sv, err := toJSONValue(shown)
+	if err != nil {
+		return false
+	}
+	shownMembers, _ := sv.(map[string]any)
+	for _, sf := range fields {
+		name := jsonFieldName(sf.field)
+		if name == "headers" {
 			continue
 		}
-		if !reflect.DeepEqual(v, bm[k]) {
+		var sent any
+		if err := json.Unmarshal(sf.val, &sent); err != nil {
+			return false
+		}
+		if !reflect.DeepEqual(sent, shownMembers[name]) {
 			return false
 		}
 	}
 	return true
+}
+
+// rawTelemetryObject returns the telemetry member of a server-config PUT
+// body, resolved with the rule the typed request decode follows, or nil
+// when the body has none.
+func rawTelemetryObject(rawBody []byte) json.RawMessage {
+	v, _ := sentAtPath(reflect.TypeOf(ServerConfigUpdateRequest{}), rawBody, []string{"telemetry"})
+	return v
 }
 
 // maskedCopy returns a deep copy of s with GET's masking applied.

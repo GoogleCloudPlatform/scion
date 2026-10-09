@@ -549,6 +549,25 @@ func TestPutServerConfigDB_PageSaveLeavesUntouchedRowsUnchanged(t *testing.T) {
 	rr := putServerConfigDB(t, srv, ops, page)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
+	// The response names the written section in reload.applied and the
+	// skipped ones in unchanged.
+	var resp struct {
+		Reload struct {
+			Applied []string `json:"applied"`
+		} `json:"reload"`
+		Unchanged []string `json:"unchanged"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Equal(t, []string{"lifecycle"}, resp.Reload.Applied)
+	var wantUnchanged []string
+	for sec := range pageSaveRows {
+		if sec != "lifecycle" {
+			wantUnchanged = append(wantUnchanged, sec)
+		}
+	}
+	sort.Strings(wantUnchanged)
+	assert.Equal(t, wantUnchanged, resp.Unchanged)
+
 	for sec, doc := range pageSaveRows {
 		row := storedRow(fake, sec)
 		require.NotNil(t, row, sec)
@@ -686,6 +705,9 @@ func TestPutServerConfigDB_TelemetryMaskedHeadersRejected(t *testing.T) {
 	for _, tc := range []struct{ name, body string }{
 		{"changed endpoint", `{"telemetry":{"cloud":{"endpoint":"other.example.com:4317","headers":{"x-api-key":"********"}}}}`},
 		{"no stored value", `{"telemetry":{"cloud":{"headers":{"x-new":"********"}}}}`},
+		{"cleared endpoint", `{"telemetry":{"cloud":{"endpoint":"","headers":{"x-api-key":"********"}}}}`},
+		{"null protocol", `{"telemetry":{"cloud":{"protocol":null,"headers":{"x-api-key":"********"}}}}`},
+		{"case-variant endpoint member", `{"telemetry":{"cloud":{"Endpoint":"other.example.com:4317","headers":{"x-api-key":"********"}}}}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
@@ -699,6 +721,44 @@ func TestPutServerConfigDB_TelemetryMaskedHeadersRejected(t *testing.T) {
 			assert.Equal(t, int64(1), storedRow(fake, "telemetry").Revision, "nothing is written")
 		})
 	}
+}
+
+// A masked header sent with the stored endpoint, protocol and enabled
+// sent explicitly, and with a null for a member GET did not show, keeps the
+// stored header.
+func TestPutServerConfigDB_TelemetryMaskedHeaderSameMembersKeeps(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv, fake, ops := newTestDBServer(t)
+	fake.seedWithOrigin("telemetry", json.RawMessage(storedTelemetryWithHeaders), "managed")
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+
+	rr := putServerConfigDB(t, srv, ops, `{"telemetry":{"cloud":{"enabled":true,"endpoint":"otel.example.com:4317","protocol":"grpc","tls":null,"headers":{"x-api-key":"********","x-tenant":"t9"}}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	headers, _ := valueAtPath(decodeJSONValue(t, storedRow(fake, "telemetry").Value), []string{"cloud", "headers"})
+	assert.Equal(t, map[string]any{"x-api-key": "real-key", "x-tenant": "t9"}, headers)
+}
+
+// File mode: a masked header sent next to a cleared endpoint is rejected
+// and settings.yaml is left as it is.
+func TestPutServerConfig_FileMode_TelemetryMaskedHeaderClearedEndpointRejected(t *testing.T) {
+	settingsPath := setTempScionHome(t)
+	original := `schema_version: "1"
+telemetry:
+  cloud:
+    endpoint: otel.example.com:4317
+    headers:
+      x-api-key: real-key
+`
+	require.NoError(t, os.WriteFile(settingsPath, []byte(original), 0600))
+	srv := &Server{}
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+		`{"telemetry":{"cloud":{"endpoint":"","headers":{"x-api-key":"********"}}}}`))
+	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+	data, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+	assert.Equal(t, original, string(data))
 }
 
 // File mode: the same masked echo keeps the stored header in settings.yaml,
@@ -746,4 +806,34 @@ func TestMaskedTelemetry_DoesNotModifyInput(t *testing.T) {
 	var buf bytes.Buffer
 	require.NoError(t, json.NewEncoder(&buf).Encode(out))
 	assert.NotContains(t, buf.String(), "secret")
+}
+
+// The system registry PUT skips a write that would leave a managed
+// endpoints row as it is, and writes a real change.
+func TestSystemRegistry_UnchangedManagedRowNotRewritten(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv, fake, ops := newTestDBServer(t)
+	const stored = `{"public_url": "https://hub.example.com", "image_registry": "registry.example.com"}`
+	fake.seedWithOrigin("endpoints", json.RawMessage(stored), "managed")
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+
+	put := func(body string) {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		req := adminRequest(http.MethodPut, "/api/v1/system/registry", body)
+		req.RemoteAddr = "127.0.0.1:1234"
+		srv.handleSystemRegistry(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	}
+	put(`{"image_registry":"registry.example.com"}`)
+	row := storedRow(fake, "endpoints")
+	assert.Equal(t, stored, string(row.Value), "an unchanged registry must not rewrite the row")
+	assert.Equal(t, int64(1), row.Revision)
+
+	put(`{"image_registry":"other.example.com"}`)
+	row = storedRow(fake, "endpoints")
+	assert.Equal(t, int64(2), row.Revision)
+	got, _ := valueAtPath(decodeJSONValue(t, row.Value), []string{"image_registry"})
+	assert.Equal(t, "other.example.com", got)
 }

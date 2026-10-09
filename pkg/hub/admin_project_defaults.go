@@ -86,9 +86,10 @@ func (s *Server) handleGetProjectDefaults(w http.ResponseWriter) {
 
 // handlePutProjectDefaults accepts a partial update to the project_defaults
 // section: a key the body omits keeps its stored value, and an explicit
-// null clears it (mergeSectionOnCurrent). It writes the section via OperationalSettings.Update() (which
-// handles validation, persistence, and cross-replica propagation) or falls
-// back to a 501 when the hub has no OperationalSettings.
+// null clears it (mergeSectionOnCurrent). It writes the section via
+// OperationalSettings.Update() (which handles validation, persistence, and
+// cross-replica propagation) or falls back to a 501 when the hub has no
+// OperationalSettings.
 func (s *Server) handlePutProjectDefaults(w http.ResponseWriter, r *http.Request) {
 	rawBody, err := readRawBody(w, r)
 	if err != nil {

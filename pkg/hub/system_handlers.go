@@ -383,6 +383,12 @@ func (s *Server) handleSystemRegistry(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to save image registry setting", nil)
 			return
 		}
+		// A write that would leave a managed row as it is is skipped, as
+		// in the server-config PUT (unchangedManagedRow).
+		if _, same := unchangedManagedRow(r.Context(), ops, "endpoints", doc, baseRev); same {
+			writeJSON(w, http.StatusOK, putRegistryResponse(req))
+			return
+		}
 		if _, err := ops.Update(r.Context(), "endpoints", doc, updatedByFromRequest(r), baseRev, "managed"); err != nil {
 			if errors.Is(err, store.ErrRevisionConflict) {
 				writeError(w, http.StatusConflict, ErrCodeConflict, "image registry setting changed concurrently; retry", nil)

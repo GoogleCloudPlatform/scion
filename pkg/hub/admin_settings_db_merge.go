@@ -95,17 +95,17 @@ import (
 // The row is read fresh from the store (the ops cache can be stale in HA).
 // With no row, the base is empty (access and endpoints start from the
 // effective snapshot values instead; see sectionMergeOptions) and the save
-// creates the row from the sent keys only; from then on the row owns every key in the section. In
-// practice the no-row path is rare: startup seeding (syncHubSettings in
-// cmd/server_foreground.go) creates a seeded row from bootstrap material
-// for every registered section on boot, so the base is normally that
-// seeded row. For a non-managed (seeded) row, stored keys overridden by a
-// node-local env var are dropped, so one node's env value is not pinned
-// into the shared row as managed (ptone/scion#2068; only this node's env
-// keys are known, so a row seeded by another node may still carry that
-// node's env values). In a deep-merge
-// section only the overridden nested key is dropped (for example
-// telemetry.cloud.enabled), never the object that holds it.
+// creates the row from the sent keys only; from then on the row owns every
+// key in the section. In practice the no-row path is rare: startup seeding
+// (syncHubSettings in cmd/server_foreground.go) creates a seeded row from
+// bootstrap material for every registered section on boot, so the base is
+// normally that seeded row. For a non-managed (seeded) row, stored keys
+// overridden by a node-local env var are dropped, so one node's env value
+// is not pinned into the shared row as managed (ptone/scion#2068; only
+// this node's env keys are known, so a row seeded by another node may
+// still carry that node's env values). In a deep-merge section only the
+// overridden nested key is dropped (for example telemetry.cloud.enabled),
+// never the object that holds it.
 //
 // It returns the revision the base was read at (0 when no row exists), for
 // use as the CAS expected revision, so a concurrent write to the section
@@ -892,49 +892,6 @@ func structToRawMap(v any) map[string]json.RawMessage {
 		return nil
 	}
 	return m
-}
-
-// accessNoRowBase is the access base when no access row exists: the
-// effective access values of the snapshot (bootstrap or file).
-func accessNoRowBase(ops *OperationalSettings) map[string]json.RawMessage {
-	snap := ops.Snapshot()
-	return structToRawMap(opsettings.AccessSettings{
-		AdminEmails:       snap.AdminEmails,
-		UserAccessMode:    snap.UserAccessMode,
-		DefaultUserRole:   snap.DefaultUserRole,
-		AuthorizedDomains: snap.AuthorizedDomains,
-	})
-}
-
-// endpointsNoRowBase is the endpoints base when no endpoints row exists:
-// the effective public_url and image_registry. hub_name is left out: the
-// bootstrap value applies without being written (bootstrapAppliesWhenAbsent).
-func endpointsNoRowBase(ops *OperationalSettings) map[string]json.RawMessage {
-	snap := ops.Snapshot()
-	return structToRawMap(opsettings.EndpointsSettings{
-		PublicURL:     snap.PublicURL,
-		ImageRegistry: snap.ImageRegistry,
-	})
-}
-
-// endpointsSeededBase drops hub_name from a non-managed endpoints base: a
-// seeded row holds the bootstrap hub_name, which applies without being
-// written (Snapshot falls back to it) and may not match the schema
-// pattern, so it is not carried into the managed row.
-func endpointsSeededBase(base map[string]json.RawMessage) {
-	delete(base, "hub_name")
-}
-
-// bodyMergeOptions returns the base rules of a section in
-// bodyMergedSections.
-func bodyMergeOptions(section string) sectionMergeOptions {
-	switch section {
-	case "access":
-		return sectionMergeOptions{noRowBase: accessNoRowBase}
-	case "endpoints":
-		return sectionMergeOptions{noRowBase: endpointsNoRowBase, seededBase: endpointsSeededBase}
-	}
-	return sectionMergeOptions{}
 }
 
 // unchangedManagedRow reports whether writing doc to section would leave
