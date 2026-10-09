@@ -105,20 +105,45 @@ func servingWriteTimeout(ctx context.Context, configured time.Duration) time.Dur
 	return configured
 }
 
+// restartWriteBudget is the write deadline, from the start of the restart's
+// stop leg, of a lifecycle restart: the ephemeral workspace check before the
+// stop, then two synchronous dispatches (the stop leg and the start leg),
+// each bounded by syncDispatchTimeout, plus syncDispatchWriteSlack.
+func restartWriteBudget() time.Duration {
+	return workspaceCheckTimeout + 2*syncDispatchTimeout + syncDispatchWriteSlack
+}
+
+// hubWorkspaceUploadWriteBudget is the write deadline, from the start of the
+// upload, of a create that uploads its hub-managed project workspace: the
+// upload's own budget plus syncDispatchWriteSlack, for the failure answer
+// written when the upload runs out of time. A create that goes on to
+// dispatch moves the deadline again (extendWriteDeadlineForSyncDispatch).
+func hubWorkspaceUploadWriteBudget() time.Duration {
+	return hubWorkspaceUploadTimeout + syncDispatchWriteSlack
+}
+
 // extendWriteDeadlineForSyncDispatch moves the connection's write deadline
 // to syncDispatchWriteBudget from now, so a launch that finishes within
 // syncDispatchTimeout still gets its response written instead of being cut
-// at the serving listener's WriteTimeout (ptone/scion#3850). The timeout
-// compared is that of the server actually serving the request (see
-// servingWriteTimeout), with configuredWriteTimeout as the fallback: the
-// deadline is extended whenever that timeout is positive and shorter than
-// the budget, and left alone when it is unbounded (0) or already at least
-// the budget, so this never shortens it. http.NewResponseController reaches
-// the connection through the middleware wrappers that implement Unwrap; a
-// ResponseWriter without deadline support is logged at debug and otherwise
-// ignored.
+// at the serving listener's WriteTimeout (ptone/scion#3850). See
+// extendWriteDeadline.
 func extendWriteDeadlineForSyncDispatch(ctx context.Context, w http.ResponseWriter, configuredWriteTimeout time.Duration) {
-	budget := syncDispatchWriteBudget()
+	extendWriteDeadline(ctx, w, configuredWriteTimeout, syncDispatchWriteBudget())
+}
+
+// extendWriteDeadline moves the connection's write deadline to budget from
+// now, for a request that waits on the broker (or on storage) for longer
+// than the serving listener's WriteTimeout (ptone/scion#3850,
+// ptone/scion#3890). The timeout compared is that of the server actually
+// serving the request (see servingWriteTimeout), with
+// configuredWriteTimeout as the fallback: the deadline is extended whenever
+// that timeout is positive and shorter than the budget, and left alone when
+// it is unbounded (0) or already at least the budget, so this never
+// shortens it below the listener's own timeout. http.NewResponseController
+// reaches the connection through the middleware wrappers that implement
+// Unwrap; a ResponseWriter without deadline support is logged at debug and
+// otherwise ignored.
+func extendWriteDeadline(ctx context.Context, w http.ResponseWriter, configuredWriteTimeout, budget time.Duration) {
 	serverWriteTimeout := servingWriteTimeout(ctx, configuredWriteTimeout)
 	if serverWriteTimeout <= 0 || serverWriteTimeout >= budget {
 		return
