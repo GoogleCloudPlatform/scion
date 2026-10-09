@@ -39,7 +39,7 @@ func newMonitoringDBServer(t *testing.T) (*Server, *fakeHubSettingStore, *Operat
 	return srv, fakeStore, ops
 }
 
-func putServerConfig(t *testing.T, srv *Server, ops *OperationalSettings, body string) *httptest.ResponseRecorder {
+func putMonitoringConfig(t *testing.T, srv *Server, ops *OperationalSettings, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	rr := httptest.NewRecorder()
 	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body), ops)
@@ -64,7 +64,7 @@ func TestMonitoringDashboardURL_SaveAppliesLive(t *testing.T) {
 	assert.Empty(t, srv.monitoringDashboardURL())
 	assert.Nil(t, srv.healthSummaryLinks(), "unset: no links block")
 
-	rr := putServerConfig(t, srv, ops, `{"server":{"hub":{"monitoring_dashboard_url":"`+testDashboardURL+`"}}}`)
+	rr := putMonitoringConfig(t, srv, ops, `{"server":{"hub":{"monitoring_dashboard_url":"`+testDashboardURL+`"}}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
 	got, ok := storedMonitoringURL(t, fakeStore)
@@ -82,19 +82,19 @@ func TestMonitoringDashboardURL_SaveAppliesLive(t *testing.T) {
 
 func TestMonitoringDashboardURL_WriteSemantics(t *testing.T) {
 	srv, fakeStore, ops := newMonitoringDBServer(t)
-	rr := putServerConfig(t, srv, ops, `{"server":{"hub":{"monitoring_dashboard_url":"`+testDashboardURL+`"}}}`)
+	rr := putMonitoringConfig(t, srv, ops, `{"server":{"hub":{"monitoring_dashboard_url":"`+testDashboardURL+`"}}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
 	// Omitted in a save of another endpoints key: kept.
-	rr = putServerConfig(t, srv, ops, `{"server":{"hub":{"public_url":"https://hub.example.com"}}}`)
+	rr = putMonitoringConfig(t, srv, ops, `{"server":{"hub":{"public_url":"https://hub.example.com"}}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	got, _ := storedMonitoringURL(t, fakeStore)
 	assert.Equal(t, testDashboardURL, got, "omitted keeps")
 
 	// A save of another section: kept.
-	rr = putServerConfig(t, srv, ops, `{"server":{"hub":{"stalled_threshold":"10m"}}}`)
+	rr = putMonitoringConfig(t, srv, ops, `{"server":{"hub":{"stalled_threshold":"10m"}}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	rr = putServerConfig(t, srv, ops, `{"image_registry":"ghcr.io/example"}`)
+	rr = putMonitoringConfig(t, srv, ops, `{"image_registry":"ghcr.io/example"}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	got, _ = storedMonitoringURL(t, fakeStore)
 	assert.Equal(t, testDashboardURL, got, "unrelated save keeps")
@@ -106,13 +106,13 @@ func TestMonitoringDashboardURL_WriteSemantics(t *testing.T) {
 		"monitoring_dashboard_url": resp.Server.Hub.MonitoringDashboardURL,
 	}}})
 	require.NoError(t, err)
-	rr = putServerConfig(t, srv, ops, string(echo))
+	rr = putMonitoringConfig(t, srv, ops, string(echo))
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	got, _ = storedMonitoringURL(t, fakeStore)
 	assert.Equal(t, testDashboardURL, got)
 
 	// An explicit "" clears it, live.
-	rr = putServerConfig(t, srv, ops, `{"server":{"hub":{"monitoring_dashboard_url":""}}}`)
+	rr = putMonitoringConfig(t, srv, ops, `{"server":{"hub":{"monitoring_dashboard_url":""}}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	got, _ = storedMonitoringURL(t, fakeStore)
 	assert.Empty(t, got, "\"\" clears")
@@ -137,7 +137,7 @@ func TestMonitoringDashboardURL_InvalidRejected(t *testing.T) {
 				"public_url":               "https://hub.example.com",
 			}}})
 			require.NoError(t, err)
-			rr := putServerConfig(t, srv, ops, string(body))
+			rr := putMonitoringConfig(t, srv, ops, string(body))
 			require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
 
 			var env struct {
@@ -173,7 +173,7 @@ func TestMonitoringDashboardURL_BootstrapAppliesAndIsKept(t *testing.T) {
 	ApplySnapshot(srv, ops.Snapshot())
 	assert.Equal(t, testDashboardURL, srv.monitoringDashboardURL())
 
-	rr := putServerConfig(t, srv, ops, `{"server":{"hub":{"public_url":"https://hub.example.com"}}}`)
+	rr := putMonitoringConfig(t, srv, ops, `{"server":{"hub":{"public_url":"https://hub.example.com"}}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	got, ok := storedMonitoringURL(t, fakeStore)
 	require.True(t, ok)
@@ -195,7 +195,7 @@ func TestMonitoringDashboardURL_EnvOverrideNotWrittenToRow(t *testing.T) {
 
 	assert.Contains(t, ops.EnvOverriddenKeys(), config.MonitoringDashboardURLKey)
 
-	rr := putServerConfig(t, srv, ops, `{"server":{"hub":{"public_url":"https://hub.example.com"}}}`)
+	rr := putMonitoringConfig(t, srv, ops, `{"server":{"hub":{"public_url":"https://hub.example.com"}}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	got, ok := storedMonitoringURL(t, fakeStore)
 	require.True(t, ok)
