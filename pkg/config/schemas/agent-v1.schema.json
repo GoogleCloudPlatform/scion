@@ -47,10 +47,10 @@
     },
     "clone_depth": {
       "oneOf": [
-        { "type": "string", "pattern": "^(full|[1-9][0-9]*)$" },
-        { "type": "integer", "minimum": 1 }
+        { "type": "string", "pattern": "^(full|[1-9][0-9]{0,8})$" },
+        { "type": "integer", "minimum": 1, "maximum": 999999999 }
       ],
-      "description": "Git clone depth for a clone-per-agent workspace: \"full\" for a full (non-shallow) clone, or a positive integer N for a clone of depth N. Overrides any profiles.<name>.clone_depth. Unset keeps the profile value, else the default shallow (depth 1) clone."
+      "description": "Git clone depth for a clone-per-agent workspace: \"full\" for a full (non-shallow) clone, or an integer N from 1 to 999999999 for a clone of depth N. Overrides any profiles.<name>.clone_depth. Unset keeps the profile value, else the default shallow (depth 1) clone."
     },
     "max_duration": {
       "type": "string",

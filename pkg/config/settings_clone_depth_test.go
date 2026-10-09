@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -93,7 +94,7 @@ func TestCloneDepthSettings_Schema(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, errs)
 
-	for _, bad := range []string{"0", "-1", "shallow", "\"0\"", "true"} {
+	for _, bad := range []string{"0", "-1", "shallow", "\"0\"", "true", "1000000000", "\"1000000000\""} {
 		doc := "schema_version: \"1\"\nprofiles:\n  p:\n    runtime: k8s\n    clone_depth: " + bad + "\n"
 		errs, err := ValidateSettings([]byte(doc), "1")
 		require.NoError(t, err)
@@ -111,7 +112,7 @@ func TestCloneDepthAgentSchema(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, errs, ok)
 	}
-	for _, bad := range []string{`{"clone_depth": 0}`, `{"clone_depth": "shallow"}`} {
+	for _, bad := range []string{`{"clone_depth": 0}`, `{"clone_depth": "shallow"}`, `{"clone_depth": 1000000000}`, `{"clone_depth": "1000000000"}`} {
 		errs, err := ValidateAgentConfig([]byte(bad), "1")
 		require.NoError(t, err)
 		assert.NotEmpty(t, errs, bad)
@@ -131,12 +132,25 @@ func TestCloneDepth_SchemaAndDecoderAgree(t *testing.T) {
 		{lit: "5.0", depth: 5, ok: true},
 		{lit: "1e2", depth: 100, ok: true},
 		{lit: "2.5e1", depth: 25, ok: true},
+		{lit: "5.0000000000000001", depth: 5, ok: true},
+		{lit: "999999999", depth: 999999999, ok: true},
+		{lit: `"999999999"`, depth: 999999999, ok: true},
 		{lit: "1.5"},
 		{lit: "0"},
 		{lit: "0.0"},
 		{lit: "-1"},
+		{lit: "true"},
+		{lit: "1000000000"},
+		{lit: "1e19"},
+		{lit: "9223372036854775808"},
+		{lit: `"99999999999999999999"`},
+		{lit: "1" + strings.Repeat("0", 1000000)},
 	} {
-		t.Run("json "+tt.lit, func(t *testing.T) {
+		name := tt.lit
+		if len(name) > 32 {
+			name = name[:32] + "..."
+		}
+		t.Run("json "+name, func(t *testing.T) {
 			doc := `{"clone_depth": ` + tt.lit + `}`
 			errs, err := ValidateAgentConfig([]byte(doc), "1")
 			require.NoError(t, err)
@@ -164,8 +178,16 @@ func TestCloneDepth_SchemaAndDecoderAgree(t *testing.T) {
 		{lit: "1e2", depth: 100, ok: true},
 		{lit: "0x10", depth: 16, ok: true},
 		{lit: "0o20", depth: 16, ok: true},
+		{lit: "5.0000000000000001", depth: 5, ok: true},
+		{lit: "!!binary NQ==", depth: 5, ok: true},
+		{lit: "999999999", depth: 999999999, ok: true},
 		{lit: "1.5"},
 		{lit: "0x0"},
+		{lit: "true"},
+		{lit: "1000000000"},
+		{lit: "1e19"},
+		{lit: "9223372036854775808"},
+		{lit: `"99999999999999999999"`},
 	} {
 		t.Run("yaml "+tt.lit, func(t *testing.T) {
 			settingsDoc := "schema_version: \"1\"\nprofiles:\n  p:\n    runtime: k8s\n    clone_depth: " + tt.lit + "\n"
@@ -176,8 +198,16 @@ func TestCloneDepth_SchemaAndDecoderAgree(t *testing.T) {
 			dir := t.TempDir()
 			require.NoError(t, os.WriteFile(filepath.Join(dir, "scion-agent.yaml"), []byte("clone_depth: "+tt.lit+"\n"), 0644))
 			cfg, err := (&Template{Path: dir}).LoadConfig()
+
+			// The settings file loader agrees with the template loader:
+			// it either fails or yields a value GitDepth rejects.
+			vs, _, sErr := LoadEffectiveSettings(writeSharedDirK8sGlobalSettings(t, settingsDoc))
 			if !tt.ok {
 				require.Error(t, err)
+				if sErr == nil {
+					_, _, pErr := vs.Profiles["p"].CloneDepth.GitDepth()
+					assert.Error(t, pErr, "settings loader accepted %s as %q", tt.lit, vs.Profiles["p"].CloneDepth)
+				}
 				return
 			}
 			require.NoError(t, err)
@@ -186,9 +216,7 @@ func TestCloneDepth_SchemaAndDecoderAgree(t *testing.T) {
 			assert.True(t, ok)
 			assert.Equal(t, tt.depth, depth)
 
-			// The settings file loader agrees with the template loader.
-			vs, _, err := LoadEffectiveSettings(writeSharedDirK8sGlobalSettings(t, settingsDoc))
-			require.NoError(t, err)
+			require.NoError(t, sErr)
 			pDepth, pOK, pErr := vs.Profiles["p"].CloneDepth.GitDepth()
 			require.NoError(t, pErr)
 			assert.True(t, pOK)
