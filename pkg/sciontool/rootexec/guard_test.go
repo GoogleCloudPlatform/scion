@@ -296,8 +296,8 @@ func TestNoRootContextExecUsesABareUnresolvedCommandName(t *testing.T) {
 		// exec.Command/exec.CommandContext aliases (e.g. "var
 		// execCommandContext = exec.CommandContext"), across every non-test
 		// file in the directory.
-		aliases := map[string]aliasKind{}
 		files := map[string]*ast.File{}
+		var parsed []*ast.File
 		for _, e := range entries {
 			if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
 				continue
@@ -308,16 +308,9 @@ func TestNoRootContextExecUsesABareUnresolvedCommandName(t *testing.T) {
 				t.Fatalf("parse %s: %v", path, err)
 			}
 			files[path] = f
+			parsed = append(parsed, f)
 		}
-		// Repeat until no new alias appears, so an alias of an alias
-		// declared in another file of the package is found regardless of
-		// file order.
-		for n := -1; n != len(aliases); {
-			n = len(aliases)
-			for _, f := range files {
-				collectExecAliases(f, aliases)
-			}
-		}
+		aliases := collectPackageExecAliases(parsed)
 
 		// Pass 2: find every exec.Command/exec.CommandContext (direct or
 		// aliased) call and classify its command-name argument.
@@ -699,47 +692,59 @@ func execFuncKind(expr ast.Expr, pkgNames map[string]bool, dot bool) (aliasKind,
 // an exec constructor ("var X = exec.Command", "var X = x.CommandContext"
 // through a renamed import, "var X = Command" through a dot import) or an
 // alias already recorded ("var Y = X"), and records them in aliases. These
-// are package-wide, so the caller runs it over every file of a package
-// until aliases stops growing, to follow chains that cross files.
+// are package-wide, so collectPackageExecAliases runs it over every file of
+// a package until aliases stops growing, which follows chains in any
+// declaration order, within a file or across files.
 func collectExecAliases(f *ast.File, aliases map[string]aliasKind) {
 	pkgNames, dot := execImportNames(f)
-	for changed := true; changed; {
-		changed = false
-		for _, decl := range f.Decls {
-			gd, ok := decl.(*ast.GenDecl)
-			if !ok || gd.Tok != token.VAR {
+	for _, decl := range f.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok || len(vs.Names) != len(vs.Values) {
 				continue
 			}
-			for _, spec := range gd.Specs {
-				vs, ok := spec.(*ast.ValueSpec)
-				if !ok || len(vs.Names) != len(vs.Values) {
+			for i, val := range vs.Values {
+				name := vs.Names[i].Name
+				if _, done := aliases[name]; done || name == "_" {
 					continue
 				}
-				for i, val := range vs.Values {
-					name := vs.Names[i].Name
-					if _, done := aliases[name]; done || name == "_" {
-						continue
+				k, ok := execFuncKind(val, pkgNames, dot)
+				if !ok {
+					if id, isIdent := ast.Unparen(val).(*ast.Ident); isIdent {
+						k, ok = aliases[id.Name]
 					}
-					k, ok := execFuncKind(val, pkgNames, dot)
-					if !ok {
-						if id, isIdent := ast.Unparen(val).(*ast.Ident); isIdent {
-							k, ok = aliases[id.Name]
-						}
-					}
-					if ok {
-						aliases[name] = k
-						changed = true
-					}
+				}
+				if ok {
+					aliases[name] = k
 				}
 			}
 		}
 	}
 }
 
-// localAlias is a variable declared or assigned inside a function body
-// whose value is an exec constructor (e.g. "cmd := exec.Command" or
-// "var f = exec.CommandContext"). It is visible from pos to end, the
-// smallest enclosing function or closure body.
+// collectPackageExecAliases runs collectExecAliases over every file of one
+// package until no new alias appears, so an alias of an alias declared in
+// another file of the package is found regardless of file order.
+func collectPackageExecAliases(files []*ast.File) map[string]aliasKind {
+	aliases := map[string]aliasKind{}
+	for n := -1; n != len(aliases); {
+		n = len(aliases)
+		for _, f := range files {
+			collectExecAliases(f, aliases)
+		}
+	}
+	return aliases
+}
+
+// localAlias is a variable declared inside a function body whose value is
+// an exec constructor (e.g. "cmd := exec.Command", "var f =
+// exec.CommandContext", or a "f = exec.Command" whose f is declared in that
+// same body). It is visible from pos to end, the smallest enclosing
+// function or closure body.
 type localAlias struct {
 	name     string
 	kind     aliasKind
@@ -771,18 +776,24 @@ func newExecResolver(f *ast.File, pkgAliases map[string]aliasKind) *execResolver
 		aliasValues: map[ast.Expr]bool{},
 	}
 	funcLikes := collectFuncLikes(f)
-	// Iterate to a fixed point so a chain ("f := exec.Command; g := f")
-	// resolves regardless of the order the definitions are visited in.
+	declared := declaredLocals(f, funcLikes)
+	// Iterate to a fixed point. ast.Inspect visits definitions in source
+	// order and Go rejects a ":=" or "var" chain that refers forward, so
+	// those resolve in one pass; but a "=" chain can run against source
+	// order inside a loop ("for { _ = g(name); g = f; f = exec.Command }"),
+	// where g only becomes an alias once f is known.
 	for changed := true; changed; {
 		changed = false
 		ast.Inspect(f, func(n ast.Node) bool {
 			var names []*ast.Ident
 			var values []ast.Expr
+			assign := false
 			switch s := n.(type) {
 			case *ast.AssignStmt:
 				if len(s.Lhs) != len(s.Rhs) {
 					return true
 				}
+				assign = s.Tok == token.ASSIGN
 				for i, lhs := range s.Lhs {
 					if id, ok := lhs.(*ast.Ident); ok {
 						names = append(names, id)
@@ -813,6 +824,15 @@ func newExecResolver(f *ast.File, pkgAliases map[string]aliasKind) *execResolver
 					}
 					continue
 				}
+				// A plain "=" is an alias only when its target is
+				// declared (by var or :=) in this same function body.
+				// A package var, a variable captured from an enclosing
+				// function, or a named result can be read from code
+				// this function's scope does not cover, so the value
+				// is left unconsumed and execValueEscapes reports it.
+				if assign && id.Name != "_" && !declared[fl.pos][id.Name] {
+					continue
+				}
 				k, ok := r.funcRef(val, val.Pos())
 				if !ok {
 					continue
@@ -827,6 +847,44 @@ func newExecResolver(f *ast.File, pkgAliases map[string]aliasKind) *execResolver
 		})
 	}
 	return r
+}
+
+// declaredLocals returns, for each function body in f (keyed by the
+// body's start position), the names declared directly in it by a var
+// declaration or a ":=" assignment. A declaration inside a nested closure
+// belongs to the closure's body, not the enclosing function's.
+func declaredLocals(f *ast.File, funcLikes []funcLike) map[token.Pos]map[string]bool {
+	declared := map[token.Pos]map[string]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		var ids []*ast.Ident
+		switch s := n.(type) {
+		case *ast.AssignStmt:
+			if s.Tok != token.DEFINE {
+				return true
+			}
+			for _, lhs := range s.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok {
+					ids = append(ids, id)
+				}
+			}
+		case *ast.ValueSpec:
+			ids = s.Names
+		default:
+			return true
+		}
+		for _, id := range ids {
+			fl := enclosingFunc(funcLikes, id.Pos())
+			if fl == nil {
+				continue
+			}
+			if declared[fl.pos] == nil {
+				declared[fl.pos] = map[string]bool{}
+			}
+			declared[fl.pos][id.Name] = true
+		}
+		return true
+	})
+	return declared
 }
 
 // funcRef reports whether expr, appearing at pos, names exec.Command or
@@ -1194,17 +1252,37 @@ func run() {
 // them for real guarded files.
 func runSyntheticGuard(t *testing.T, src string, allowlist map[execSite]string) (violations, stale []string) {
 	t.Helper()
+	return runSyntheticPackageGuard(t, []string{src}, allowlist)
+}
+
+// runSyntheticPackageGuard is runSyntheticGuard over a multi-file package:
+// srcs[0] is "synthetic.go", srcs[1] "synthetic2.go", and so on. Package
+// aliases are collected over the files in that order, as the real guard
+// does for a package directory.
+func runSyntheticPackageGuard(t *testing.T, srcs []string, allowlist map[execSite]string) (violations, stale []string) {
+	t.Helper()
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "synthetic.go", src, 0)
-	if err != nil {
-		t.Fatalf("parse: %v\n%s", err, src)
+	names := make([]string, len(srcs))
+	files := make([]*ast.File, len(srcs))
+	for i, src := range srcs {
+		names[i] = "synthetic.go"
+		if i > 0 {
+			names[i] = fmt.Sprintf("synthetic%d.go", i+1)
+		}
+		f, err := parser.ParseFile(fset, names[i], src, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v\n%s", names[i], err, src)
+		}
+		files[i] = f
 	}
-	aliases := map[string]aliasKind{}
-	collectExecAliases(f, aliases)
-	violations, seenList := checkFileExecSites(fset, "synthetic.go", f, aliases, allowlist)
+	aliases := collectPackageExecAliases(files)
 	seen := map[execSite]bool{}
-	for _, s := range seenList {
-		seen[s] = true
+	for i, f := range files {
+		v, seenList := checkFileExecSites(fset, names[i], f, aliases, allowlist)
+		violations = append(violations, v...)
+		for _, s := range seenList {
+			seen[s] = true
+		}
 	}
 	return violations, staleAllowlistEntries(allowlist, seen)
 }
@@ -1478,9 +1556,13 @@ func TestGuard_ExecCallFormsAreResolved(t *testing.T) {
 		dotImport     = "dot import of os/exec"
 		escape        = "used as a value the guard cannot follow"
 	)
+	const execFuncType = "func(string, ...string) *exec.Cmd"
 	tests := []struct {
 		name string
 		src  string
+		// files, when set instead of src, is a multi-file package
+		// (see runSyntheticPackageGuard).
+		files []string
 		// want lists, in sorted violation order, a substring each
 		// violation must contain; the violation count must match.
 		want []string
@@ -1571,10 +1653,90 @@ func TestGuard_ExecCallFormsAreResolved(t *testing.T) {
 				"var table = map[string]func(string, ...string) *exec.Cmd{\"run\": exec.Command}\n",
 			want: []string{escape},
 		},
+		// A plain "=" binds an alias only when its target is declared in
+		// the assigning function itself; otherwise the value escapes.
+		{
+			name: "package var assigned in init",
+			src: "package synthetic\n\nimport \"os/exec\"\n\nvar f " + execFuncType + "\n\n" +
+				"func init() {\n\tf = exec.Command\n}\n\n" +
+				"func run(name string) {\n\t_ = f(name)\n}\n",
+			want: []string{escape},
+		},
+		{
+			name: "package var assigned in another function",
+			src: "package synthetic\n\nimport \"os/exec\"\n\nvar f " + execFuncType + "\n\n" +
+				"func setup() {\n\tf = exec.Command\n}\n\n" +
+				"func run(name string) {\n\t_ = f(name)\n}\n",
+			want: []string{escape},
+		},
+		{
+			name: "package var assigned in a function in another file",
+			files: []string{
+				"package synthetic\n\nimport \"os/exec\"\n\nvar f " + execFuncType + "\n\n" +
+					"func run(name string) {\n\t_ = f(name)\n}\n",
+				"package synthetic\n\nimport \"os/exec\"\n\n" +
+					"func setup() {\n\tf = exec.Command\n}\n",
+			},
+			want: []string{"synthetic2.go (line 6): exec constructor exec.Command used as a value"},
+		},
+		{
+			name: "captured variable assigned in a closure",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"func run(name string) {\n\tvar f " + execFuncType + "\n" +
+				"\tfunc() {\n\t\tf = exec.Command\n\t}()\n\t_ = f(name)\n}\n",
+			want: []string{escape},
+		},
+		{
+			name: "named result and bare return",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"func get() (f " + execFuncType + ") {\n\tf = exec.Command\n\treturn\n}\n\n" +
+				"func run(name string) {\n\t_ = get()(name)\n}\n",
+			want: []string{escape},
+		},
+		{
+			name: "local declared by :=, then reassigned with =",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"func newCmd(string, ...string) *exec.Cmd { return nil }\n\n" +
+				"func run(name string) {\n\tf := newCmd\n\tf = exec.Command\n\t_ = f(name)\n}\n",
+			want: []string{"synthetic.go: run: f(name)"},
+		},
+		{
+			name: "= chain against source order in a loop",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"func run(name string) {\n\tvar f, g " + execFuncType + "\n" +
+				"\tfor {\n\t\t_ = g(name)\n\t\tg = f\n\t\tf = exec.Command\n\t}\n}\n",
+			want: []string{"synthetic.go: run: g(name)"},
+		},
+		{
+			name: "package-level alias of an alias",
+			src: "package synthetic\n\nimport \"os/exec\"\n\nvar a = exec.Command\n\nvar b = a\n\n" +
+				"func run(name string) {\n\t_ = b(name)\n}\n",
+			want: []string{"synthetic.go: run: b(name)"},
+		},
+		{
+			name: "package-level alias of an alias declared later in the file",
+			src: "package synthetic\n\nimport \"os/exec\"\n\nvar b = a\n\nvar a = exec.Command\n\n" +
+				"func run(name string) {\n\t_ = b(name)\n}\n",
+			want: []string{"synthetic.go: run: b(name)"},
+		},
+		{
+			// synthetic.go is collected first, so a single pass over
+			// the files would miss b.
+			name: "package-level alias of an alias in another file",
+			files: []string{
+				"package synthetic\n\nvar b = a\n\nfunc run(name string) {\n\t_ = b(name)\n}\n",
+				"package synthetic\n\nimport \"os/exec\"\n\nvar a = exec.Command\n",
+			},
+			want: []string{"synthetic.go: run: b(name)"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			violations, _ := runSyntheticGuard(t, tc.src, nil)
+			files := tc.files
+			if files == nil {
+				files = []string{tc.src}
+			}
+			violations, _ := runSyntheticPackageGuard(t, files, nil)
 			sort.Strings(violations)
 			if len(violations) != len(tc.want) {
 				t.Fatalf("got %d violation(s), want %d:\n%s", len(violations), len(tc.want), strings.Join(violations, "\n"))
@@ -1640,6 +1802,31 @@ func TestGuard_ExecCallFormsNegative(t *testing.T) {
 			name: "package-level alias, called with an absolute path",
 			src: "package synthetic\n\nimport \"os/exec\"\n\nvar execCommand = exec.Command\n\n" +
 				"func run() {\n\t_ = execCommand(\"/bin/true\")\n}\n",
+		},
+		{
+			// A local alias is scoped to its own function: the same
+			// name in another function is not an exec constructor.
+			name: "same-named variable in another function",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"func a() {\n\tcmd := exec.Command\n\t_ = cmd(\"/bin/true\")\n}\n\n" +
+				"func b(name string) {\n\tcmd := func(string) {}\n\tcmd(name)\n}\n",
+		},
+		{
+			// The closure's own f (Command, argument 0) wins over the
+			// outer f (CommandContext, argument 1), whichever comes
+			// first in source order.
+			name: "smallest enclosing alias wins, outer declared first",
+			src: "package synthetic\n\nimport (\n\t\"context\"\n\t\"os/exec\"\n)\n\n" +
+				"func run(ctx context.Context, name string) {\n\tf := exec.CommandContext\n" +
+				"\t_ = f(ctx, \"/bin/sh\")\n\tfunc() {\n\t\tf := exec.Command\n" +
+				"\t\t_ = f(\"/bin/true\", name)\n\t}()\n}\n",
+		},
+		{
+			name: "smallest enclosing alias wins, closure declared first",
+			src: "package synthetic\n\nimport (\n\t\"context\"\n\t\"os/exec\"\n)\n\n" +
+				"func run(ctx context.Context, name string) {\n\tfunc() {\n\t\tf := exec.Command\n" +
+				"\t\t_ = f(\"/bin/true\", name)\n\t}()\n\tf := exec.CommandContext\n" +
+				"\t_ = f(ctx, \"/bin/sh\")\n}\n",
 		},
 		{
 			name: "unrelated local function value named like an alias",
