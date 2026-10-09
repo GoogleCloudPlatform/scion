@@ -1323,8 +1323,8 @@ export class ScionPageOnboarding extends LitElement {
             typeof d['index'] === 'number' &&
             typeof d['total'] === 'number'
           ) {
-            this.pullIndex = d['index'] as number;
-            this.pullTotal = d['total'] as number;
+            this.pullIndex = d['index'];
+            this.pullTotal = d['total'];
           }
 
           if (status === 'done' || status === 'exists' || status === 'error') {

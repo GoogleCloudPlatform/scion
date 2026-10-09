@@ -535,13 +535,14 @@ func TestApplySettingsUpdates_ClearFieldsToBlank(t *testing.T) {
 		"default_max_turns":       200,
 		"default_max_model_calls": 500,
 		"default_model":           "gemini-2.0-flash",
-		"default_thinking_level":  3,
 	}
 
-	// Verify they're present.
+	// Verify they're present. default_thinking_level is not cleared by 0
+	// (the PUT handler rejects 0; an explicit null clears it), see
+	// TestServerConfigFile_ThinkingLevel.
 	for _, key := range []string{
 		"default_max_duration", "default_max_turns",
-		"default_max_model_calls", "default_model", "default_thinking_level",
+		"default_max_model_calls", "default_model",
 	} {
 		if _, ok := raw[key]; !ok {
 			t.Fatalf("precondition: expected %q to be present", key)
@@ -556,7 +557,6 @@ func TestApplySettingsUpdates_ClearFieldsToBlank(t *testing.T) {
 		DefaultMaxTurns:      &zeroInt,
 		DefaultMaxModelCalls: &zeroInt,
 		DefaultModel:         &emptyStr,
-		DefaultThinkingLevel: &zeroInt,
 	}
 
 	applySettingsUpdates(raw, req)
@@ -564,7 +564,7 @@ func TestApplySettingsUpdates_ClearFieldsToBlank(t *testing.T) {
 	// Step 3: Verify all fields are deleted from the raw map.
 	for _, key := range []string{
 		"default_max_duration", "default_max_turns",
-		"default_max_model_calls", "default_model", "default_thinking_level",
+		"default_max_model_calls", "default_model",
 	} {
 		if _, ok := raw[key]; ok {
 			t.Errorf("expected %q to be deleted after clearing to blank, but it still exists with value %v", key, raw[key])

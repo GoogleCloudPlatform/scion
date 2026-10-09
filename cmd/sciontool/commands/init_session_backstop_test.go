@@ -210,3 +210,34 @@ func TestRunInit_PinsSessionMetricsBackstopCallSites(t *testing.T) {
 		})
 	}
 }
+
+// RunInit installs the session usage sink once, for the agent home, before
+// the harness starts (before the startup tombstone clear, which itself is
+// pinned to run before the harness). Without it, natively derived usage
+// never reaches session reports.
+func TestRunInit_WiresSessionUsage(t *testing.T) {
+	var homes []string
+	r := pinBackstopCallSites(t, `touch "$1"; sleep 0.5; exit 0`, func(t *testing.T, order *[]string) {
+		orig := runWireSessionUsage
+		runWireSessionUsage = func(_ sessionUsageSinkSetter, home string) {
+			homes = append(homes, home)
+			*order = append(*order, "wire session usage")
+		}
+		t.Cleanup(func() { runWireSessionUsage = orig })
+	})
+	if len(homes) != 1 || len(r.clearHomes) != 1 || homes[0] != r.clearHomes[0] {
+		t.Fatalf("wire calls = %q, want one with the agent home %q", homes, r.clearHomes)
+	}
+	wireIdx, clearIdx := -1, -1
+	for i, step := range r.order {
+		switch step {
+		case "wire session usage":
+			wireIdx = i
+		case "clear":
+			clearIdx = i
+		}
+	}
+	if wireIdx < 0 || clearIdx < 0 || wireIdx > clearIdx {
+		t.Errorf("order = %q, want the session usage wiring before the tombstone clear", r.order)
+	}
+}

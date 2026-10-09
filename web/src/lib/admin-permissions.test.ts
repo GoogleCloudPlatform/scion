@@ -135,7 +135,7 @@ describe('hasAnyPermission: access_constraint permissions', () => {
 // Settings tab gating: each tab is gated on the permission its data needs
 // ---------------------------------------------------------------------------
 
-describe('admin-permissions: settings environment variables and secrets tabs', () => {
+describe('admin-permissions: settings environment variables and hub settings tabs', () => {
   // System-scope permissions of the built-in roles relevant to these tabs.
   const hubAdmin = adminWithPermissions(
     'hub.settings.read',
@@ -147,6 +147,7 @@ describe('admin-permissions: settings environment variables and secrets tabs', (
     isSuperAdmin: false,
     permissions: ['hub.settings.read', 'template.read'],
   };
+  const hubViewer = adminWithPermissions('hub.settings.read');
   const superAdmin: AdminStatus = { isAdmin: true, isSuperAdmin: true, permissions: [] };
 
   it('shows the environment variables tab read-only to a hub admin', () => {
@@ -154,9 +155,24 @@ describe('admin-permissions: settings environment variables and secrets tabs', (
     expect(canEditHubEnvVars(hubAdmin)).toBe(false);
   });
 
-  it('keeps the secrets tab gated on hub.settings.read for a hub admin', () => {
-    expect(isSettingsTabVisible(hubAdmin, 'secrets')).toBe(true);
+  // The hub settings tab must match its list call, which admits only a
+  // legacy admin (isSuperAdmin); hub roles get a 403 from it even though
+  // they all hold hub.settings.read.
+  it('shows the hub settings tab to a legacy hub admin (super-admin)', () => {
+    expect(isSettingsTabVisible(superAdmin, 'secrets')).toBe(true);
+  });
+
+  it('hides the hub settings tab from hub-admin, member and viewer roles', () => {
+    expect(isSettingsTabVisible(hubAdmin, 'secrets')).toBe(false);
+    expect(isSettingsTabVisible(hubMember, 'secrets')).toBe(false);
+    expect(isSettingsTabVisible(hubViewer, 'secrets')).toBe(false);
     expect(isSettingsTabVisible(adminWithPermissions('hub.env_vars.read'), 'secrets')).toBe(false);
+  });
+
+  it('keeps the environment variables tab visible to the hub roles that hold its permission', () => {
+    expect(isSettingsTabVisible(hubAdmin, 'env-vars')).toBe(true);
+    expect(isSettingsTabVisible(hubMember, 'env-vars')).toBe(false);
+    expect(isSettingsTabVisible(hubViewer, 'env-vars')).toBe(false);
   });
 
   it('hides the environment variables tab without hub.env_vars.read', () => {

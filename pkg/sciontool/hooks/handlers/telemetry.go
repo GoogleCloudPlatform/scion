@@ -810,20 +810,30 @@ var aggregatorUpdates = map[string]aggregatorUpdate{
 		a.RecordToolEnd(event.Data.ToolName, event.Data.Error)
 		return noSummary()
 	}),
+	// With SCION_USAGE_SOURCE=native, usage reaches the session from the
+	// native usage deriver instead (telemetry.HookUsageFeedsSessionMetrics),
+	// so model-end events then count neither the call nor its tokens.
 	hooks.EventModelEnd: observed(func(a *telemetry.Aggregator, event *hooks.Event) (telemetry.SessionSummary, bool) {
-		a.RecordModelEnd(
-			event.Data.InputTokens,
-			event.Data.OutputTokens,
-			event.Data.CachedTokens,
-			event.Data.ReasoningTokens,
-		)
+		if telemetry.HookUsageFeedsSessionMetrics() {
+			a.RecordModelEnd(
+				event.Data.InputTokens,
+				event.Data.OutputTokens,
+				event.Data.CachedTokens,
+				event.Data.ReasoningTokens,
+			)
+		}
 		return noSummary()
 	}),
 	hooks.EventAgentEnd: observed(func(a *telemetry.Aggregator, _ *hooks.Event) (telemetry.SessionSummary, bool) {
 		a.RecordTurn()
 		return noSummary()
 	}),
+	// Session-end token totals override the accumulated tokens, so with
+	// native usage they are not passed: the natively derived tokens stand.
 	hooks.EventSessionEnd: observed(func(a *telemetry.Aggregator, event *hooks.Event) (telemetry.SessionSummary, bool) {
+		if !telemetry.HookUsageFeedsSessionMetrics() {
+			return a.Finalize(0, 0, 0, 0, event.Data.Error), true
+		}
 		return a.Finalize(
 			event.Data.InputTokens,
 			event.Data.OutputTokens,
