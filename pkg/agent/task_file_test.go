@@ -81,6 +81,46 @@ func TestDeliverTaskFile_Threshold(t *testing.T) {
 	}
 }
 
+// TestDeliverTaskFile_QuotedThreshold checks that the threshold counts
+// the task as quoted in the harness start command, where each single
+// quote takes 13 bytes.
+func TestDeliverTaskFile_QuotedThreshold(t *testing.T) {
+	quoteHeavy := strings.Repeat("it's ", 1600) // 8000 bytes, 1600 quotes
+	limitQuotes := strings.Repeat("'", InlineTaskMaxBytes/13) +
+		strings.Repeat("x", InlineTaskMaxBytes%13)
+	for _, tc := range []struct {
+		name   string
+		task   string
+		inline bool
+	}{
+		{"quote_heavy_under_8KiB", quoteHeavy, false},
+		{"quotes_at_limit", limitQuotes, true},
+		{"quotes_just_over", limitQuotes + "x", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if len(tc.task) > InlineTaskMaxBytes {
+				t.Fatalf("test task is %d bytes, want at most %d", len(tc.task), InlineTaskMaxBytes)
+			}
+			home := t.TempDir()
+			got, err := deliverTaskFile(home, tc.task)
+			if err != nil {
+				t.Fatalf("deliverTaskFile: %v", err)
+			}
+			want := tc.task
+			if !tc.inline {
+				want = taskFilePointer(len(tc.task))
+			}
+			if got != want {
+				t.Errorf("task of %d bytes (%d quoted): got %.60q, want %.60q",
+					len(tc.task), runtime.QuotedTaskBytes(tc.task), got, want)
+			}
+			if content, _ := readTaskFile(t, home); content != tc.task {
+				t.Errorf("task file has %d bytes, want %d", len(content), len(tc.task))
+			}
+		})
+	}
+}
+
 func TestDeliverTaskFile_OverwritesEarlierFile(t *testing.T) {
 	home := t.TempDir()
 	path := filepath.Join(home, ".scion", "task.md")

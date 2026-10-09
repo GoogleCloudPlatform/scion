@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // TaskFileRel is where, relative to the agent home, the full text of the
@@ -31,15 +33,18 @@ const TaskFileRel = ".scion/task.md"
 // TaskFileContainerPath is TaskFileRel as the agent sees it.
 const TaskFileContainerPath = "~/" + TaskFileRel
 
-// InlineTaskMaxBytes is the largest task passed to the harness inline.
-// The task is part of the tmux command that starts the harness, and tmux
-// rejects commands over about 16 KB, so a larger task is replaced by a
-// short task that points to TaskFileContainerPath.
+// InlineTaskMaxBytes is the largest task passed to the harness inline,
+// measured as the bytes it takes in the tmux command that starts the
+// harness once quoted for the shell (runtime.QuotedTaskBytes), where each
+// single quote takes 13 bytes. tmux rejects commands over about 16 KB, so
+// a larger task is replaced by a short task that points to
+// TaskFileContainerPath.
 const InlineTaskMaxBytes = 8 * 1024
 
 // deliverTaskFile writes task to TaskFileRel under agentHome, replacing
 // any file left by an earlier start, and returns the task to pass to the
-// harness: task itself when it is at most InlineTaskMaxBytes, otherwise a
+// harness: task itself when its quoted size is at most
+// InlineTaskMaxBytes, otherwise a
 // short task that points to the file. An empty task writes nothing and
 // is returned unchanged.
 func deliverTaskFile(agentHome, task string) (string, error) {
@@ -49,7 +54,7 @@ func deliverTaskFile(agentHome, task string) (string, error) {
 	if err := writeTaskFile(agentHome, task); err != nil {
 		return "", err
 	}
-	if len(task) <= InlineTaskMaxBytes {
+	if runtime.QuotedTaskBytes(task) <= InlineTaskMaxBytes {
 		return task, nil
 	}
 	return taskFilePointer(len(task)), nil
