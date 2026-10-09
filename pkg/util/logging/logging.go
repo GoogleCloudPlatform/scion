@@ -69,8 +69,14 @@ func ParseLevelSpec(s string) (loglevel.Spec, error) {
 // SetLogLevelSetting applies a settings-file level spec (for example
 // server.log_level) at setting precedence: it takes effect only when neither
 // a flag nor the environment chose a level, and it may be called again on
-// settings reload. Handlers installed by Setup and SetupWithOTel pick up the
-// change immediately.
+// settings reload.
+//
+// The level filter that Setup and SetupWithOTel install picks up the change
+// on the next record. Handlers built with a fixed floor from ResolveLogLevel
+// (the main CloudHandler, the request logger and the message logger) keep the
+// floor they were constructed with, so a change to a more verbose level does
+// not reach them until they are rebuilt; making those floors follow the
+// shared state is left to a later change.
 func SetLogLevelSetting(spec string) (applied bool, err error) {
 	return loglevel.SetSetting(spec)
 }

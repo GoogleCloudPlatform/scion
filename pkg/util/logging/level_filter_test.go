@@ -19,6 +19,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -171,4 +172,69 @@ func assertLines(t *testing.T, out string, all, want []string) {
 			t.Errorf("%s emitted = %v, want %v\noutput:\n%s", msg, got, wantSet[msg], out)
 		}
 	}
+}
+
+// TestRequestLogKeepsInfoWhenLevelRaised mirrors the server wiring: the
+// request logger takes its floor from ResolveLogLevel and is not gated by
+// the shared level filter, so SCION_LOG_LEVEL=error must not drop the Info
+// entries of successful requests from the request log.
+func TestRequestLogKeepsInfoWhenLevelRaised(t *testing.T) {
+	resetLevelState(t)
+	t.Setenv(loglevel.EnvLogLevel, "error")
+	path := filepath.Join(t.TempDir(), "requests.log")
+	logger, cleanup, err := NewRequestLogger(RequestLoggerConfig{
+		FilePath:  path,
+		Component: "test",
+		Level:     ResolveLogLevel(false),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger.Info("ok-request")
+	if cleanup != nil {
+		cleanup()
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "ok-request") {
+		t.Errorf("request log dropped an Info entry under SCION_LOG_LEVEL=error:\n%s", data)
+	}
+}
+
+func TestLevelFilterSubsystemScanOnlyWithComponents(t *testing.T) {
+	t.Run("no components skips the scan", func(t *testing.T) {
+		resetLevelState(t)
+		t.Setenv(loglevel.EnvLogLevel, "warn")
+		var buf bytes.Buffer
+		l := newFilteredTestLogger(&buf)
+		before := subsystemScans.Load()
+		l.Warn("plain-warn", "k", "v")
+		l.Warn("inline-warn", AttrSubsystem, "hub.auth")
+		l.Info("inline-info", AttrSubsystem, "hub.auth")
+		if got := subsystemScans.Load() - before; got != 0 {
+			t.Errorf("scanned %d records, want 0 with no component levels", got)
+		}
+		assertLines(t, buf.String(), []string{"plain-warn", "inline-warn", "inline-info"}, []string{"plain-warn", "inline-warn"})
+	})
+	t.Run("components scan the record", func(t *testing.T) {
+		resetLevelState(t)
+		t.Setenv(loglevel.EnvLogLevel, "warn,hub.auth=info")
+		var buf bytes.Buffer
+		l := newFilteredTestLogger(&buf)
+		before := subsystemScans.Load()
+		l.Info("inline-info", AttrSubsystem, "hub.auth")
+		l.Info("plain-info")
+		if got := subsystemScans.Load() - before; got != 2 {
+			t.Errorf("scanned %d records, want 2", got)
+		}
+		// A subsystem set via With is known up front and never scanned.
+		before = subsystemScans.Load()
+		l.With(AttrSubsystem, "hub.auth").Info("with-info")
+		if got := subsystemScans.Load() - before; got != 0 {
+			t.Errorf("scanned %d records for a With subsystem, want 0", got)
+		}
+		assertLines(t, buf.String(), []string{"inline-info", "plain-info", "with-info"}, []string{"inline-info", "with-info"})
+	})
 }

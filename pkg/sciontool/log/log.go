@@ -39,6 +39,10 @@ var (
 	// production purpose: tests use it to check that concurrent first log
 	// calls run the lazy init exactly once.
 	initRuns atomic.Int64
+	// subsystemScans counts record attribute scans for a subsystem in
+	// slogHandler.Handle. It is test-only: tests use it to check that the
+	// scan is skipped when the spec has no per-component levels.
+	subsystemScans atomic.Int64
 	// logFile is the cached, already-opened handle for logPath, guarded by
 	// mu, and reused for every log line for the life of the process:
 	// reopening logPath from scratch on each line would give a workload a
@@ -422,7 +426,10 @@ func (h *slogHandler) Enabled(_ context.Context, level slog.Level) bool {
 
 func (h *slogHandler) Handle(_ context.Context, r slog.Record) error {
 	sub := h.subsystem
-	if sub == "" {
+	// A record-level subsystem attribute only matters when some component
+	// has its own level.
+	if sub == "" && loglevel.HasComponents() {
+		subsystemScans.Add(1)
 		r.Attrs(func(a slog.Attr) bool {
 			if a.Key == "subsystem" {
 				sub = a.Value.String()

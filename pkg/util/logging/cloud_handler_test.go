@@ -305,8 +305,11 @@ func TestResolveLogLevel(t *testing.T) {
 	}{
 		{name: "debug flag", debug: true, logLevel: "error", want: slog.LevelDebug},
 		{name: "env var debug", logLevel: "debug", want: slog.LevelDebug},
-		{name: "env var warn", logLevel: "warn", want: slog.LevelWarn},
-		{name: "env var error", logLevel: "error", want: slog.LevelError},
+		// The floor is clamped at info: request and message logs must keep
+		// their Info entries even when the main log is raised to warn/error.
+		{name: "env var warn clamps to info", logLevel: "warn", want: slog.LevelInfo},
+		{name: "env var error clamps to info", logLevel: "error", want: slog.LevelInfo},
+		{name: "components above info clamp to info", logLevel: "error,hub.web=warn", want: slog.LevelInfo},
 		{name: "component debug lowers the floor", logLevel: "error,hub.auth=debug", want: slog.LevelDebug},
 		{name: "deprecated SCION_DEBUG", debugEnv: "1", want: slog.LevelDebug},
 		{name: "default info", want: slog.LevelInfo},

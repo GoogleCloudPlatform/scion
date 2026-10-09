@@ -18,6 +18,7 @@ import (
 	"context"
 	"log/slog"
 	"math"
+	"sync/atomic"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 )
@@ -65,10 +66,18 @@ func (h *levelFilter) Enabled(ctx context.Context, level slog.Level) bool {
 	return level >= floor && h.inner.Enabled(ctx, level)
 }
 
+// subsystemScans counts record attribute scans for a subsystem. It is
+// test-only: tests use it to check that the scan is skipped when the spec
+// has no per-component levels.
+var subsystemScans atomic.Int64
+
 // Handle implements slog.Handler.
 func (h *levelFilter) Handle(ctx context.Context, r slog.Record) error {
 	sub := h.subsystem
-	if sub == "" && !h.grouped {
+	// A record-level subsystem attribute only matters when some component
+	// has its own level; otherwise every record uses the default.
+	if sub == "" && !h.grouped && loglevel.HasComponents() {
+		subsystemScans.Add(1)
 		r.Attrs(func(a slog.Attr) bool {
 			if a.Key == AttrSubsystem {
 				sub = a.Value.String()

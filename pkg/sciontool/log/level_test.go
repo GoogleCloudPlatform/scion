@@ -162,3 +162,34 @@ func TestQuietSilencesDeprecationWarning(t *testing.T) {
 		t.Error("SCION_DEBUG should still enable debug lines in agent.log")
 	}
 }
+
+func TestSlogSubsystemScanOnlyWithComponents(t *testing.T) {
+	t.Run("no components skips the scan", func(t *testing.T) {
+		resetUninitializedForTest(t)
+		t.Setenv(loglevel.EnvLogLevel, "warn")
+		Init()
+		before := subsystemScans.Load()
+		slog.Warn("plain-warn", "k", "v")
+		slog.Info("inline-info", "subsystem", "hooks")
+		if got := subsystemScans.Load() - before; got != 0 {
+			t.Errorf("scanned %d records, want 0 with no component levels", got)
+		}
+		out := readLog(t)
+		if !strings.Contains(out, "plain-warn") || strings.Contains(out, "inline-info") {
+			t.Errorf("unexpected log contents:\n%s", out)
+		}
+	})
+	t.Run("components scan the record", func(t *testing.T) {
+		resetUninitializedForTest(t)
+		t.Setenv(loglevel.EnvLogLevel, "warn,hooks=info")
+		Init()
+		before := subsystemScans.Load()
+		slog.Info("inline-info", "subsystem", "hooks")
+		if got := subsystemScans.Load() - before; got != 1 {
+			t.Errorf("scanned %d records, want 1", got)
+		}
+		if !strings.Contains(readLog(t), "inline-info") {
+			t.Error("hooks=info should admit the inline-subsystem Info record")
+		}
+	})
+}

@@ -196,7 +196,7 @@ Where each part of Scion applies the level:
 
 | Part | Where it applies |
 | :--- | :--- |
-| Hub and Broker server log | The default level and per-component levels filter every log sink: stdout, OpenTelemetry and direct Cloud Logging. |
+| Hub and Broker server log | The default level and per-component levels filter the main server log on every sink: stdout, OpenTelemetry and direct Cloud Logging. The HTTP request log and the message log are an access and audit trail: `SCION_LOG_LEVEL` can only make them more verbose (`debug`), so `warn` or `error` never drops their INFO entries. |
 | CLI | `[DEBUG]` lines on stderr appear when the default level is `debug`. Tagged lines such as `[hubsync]` also appear when that tag's component level is `debug`. |
 | `sciontool` (`agent.log`) | The default level filters DEBUG, INFO and WARN lines. A tag on a line, or a `subsystem` attribute on a structured log record, is matched against the per-component levels. |
 
@@ -219,7 +219,7 @@ If both `SCION_LOG_LEVEL` and `SCION_DEBUG` are set, `SCION_LOG_LEVEL` wins.
 Warning: SCION_DEBUG is deprecated and will be removed in a future release; use SCION_LOG_LEVEL=debug instead.
 ```
 
-The warning is not written to `agent.log`. `sciontool hook` and `sciontool status` run as short-lived subprocesses whose stderr their caller captures, so they never print it.
+Because `SCION_DEBUG` is now an alias, a Hub or Broker started with `SCION_DEBUG` set in its environment logs at DEBUG level, which it did not do before. The warning is not written to `agent.log`. `sciontool hook` and `sciontool status` run as short-lived subprocesses whose stderr their caller captures, so they never print it.
 
 Switch scripts and environment files from `SCION_DEBUG=1` to `SCION_LOG_LEVEL=debug`.
 

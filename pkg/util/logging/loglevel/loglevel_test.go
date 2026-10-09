@@ -110,6 +110,19 @@ func TestParseLevelSpec(t *testing.T) {
 		{name: "second bare level rejected", in: "info,debug", wantDefault: slog.LevelInfo, wantErr: "only the first entry"},
 		{name: "missing component name", in: "info,=debug", wantDefault: slog.LevelInfo, wantErr: "missing component name"},
 		{name: "empty entries ignored", in: "warn,,", wantDefault: slog.LevelWarn},
+		{name: "leading empty entry", in: ",debug", wantDefault: slog.LevelDebug},
+		{name: "leading blank entry", in: " ,warn", wantDefault: slog.LevelWarn},
+		{
+			name: "leading empty entries then components", in: ",, error ,hub.auth=debug",
+			wantDefault:    slog.LevelError,
+			wantComponents: map[string]slog.Level{"hub.auth": slog.LevelDebug},
+		},
+		{
+			name: "bare level after a component rejected", in: "hub.auth=debug,warn",
+			wantDefault:    slog.LevelInfo,
+			wantComponents: map[string]slog.Level{"hub.auth": slog.LevelDebug},
+			wantErr:        "only the first entry",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -315,5 +328,22 @@ func TestEnableDebugKeepsComponents(t *testing.T) {
 	}
 	if got := Effective("hub.web"); got != slog.LevelError {
 		t.Errorf("Effective(hub.web) = %v, want error kept", got)
+	}
+}
+
+func TestHasComponents(t *testing.T) {
+	resetState(t)
+	if HasComponents() {
+		t.Error("default spec should have no components")
+	}
+	t.Setenv(EnvLogLevel, "warn")
+	Reset(true)
+	if HasComponents() {
+		t.Error("warn should have no components")
+	}
+	t.Setenv(EnvLogLevel, "warn,hub.auth=debug")
+	Reset(true)
+	if !HasComponents() {
+		t.Error("warn,hub.auth=debug should have components")
 	}
 }

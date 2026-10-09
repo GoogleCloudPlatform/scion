@@ -128,19 +128,20 @@ func ParseLevel(s string) (slog.Level, error) {
 func ParseLevelSpec(s string) (Spec, error) {
 	spec := DefaultSpec()
 	var errs []error
-	defaultSeen := false
-	for i, raw := range strings.Split(s, ",") {
+	first := true
+	for _, raw := range strings.Split(s, ",") {
 		tok := strings.TrimSpace(raw)
 		if tok == "" {
 			continue
 		}
+		isFirst := first
+		first = false
 		key, val, isPair := strings.Cut(tok, "=")
 		if !isPair {
-			if i != 0 || defaultSeen {
+			if !isFirst {
 				errs = append(errs, fmt.Errorf("unexpected bare level %q: only the first entry may omit a component", tok))
 				continue
 			}
-			defaultSeen = true
 			lvl, err := ParseLevel(tok)
 			if err != nil {
 				errs = append(errs, err)
@@ -400,6 +401,14 @@ func Current() (Spec, Source) {
 func Effective(component string) slog.Level {
 	ensureInit()
 	return cur.Load().spec.Level(component)
+}
+
+// HasComponents reports whether the current spec has any per-component
+// levels. Handlers use it to skip looking for a subsystem attribute on
+// records when no component could change the outcome.
+func HasComponents() bool {
+	ensureInit()
+	return len(cur.Load().spec.Components) > 0
 }
 
 // ComponentLevel returns the explicitly configured level for component, if
