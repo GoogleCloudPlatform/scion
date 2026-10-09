@@ -37,6 +37,7 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { navigateTo } from '../../client/navigation.js';
 import { setDocumentTitle } from '../../client/page-title.js';
 import { getPrincipalIcon } from '../shared/role-binding-utils.js';
+import '../shared/detail-header.js';
 import '../shared/principal-picker.js';
 import '../shared/project-picker.js';
 import type { AssignmentFormValues } from '../shared/role-binding-assignment-form.js';
@@ -151,44 +152,10 @@ export class ScionPageAdminRoleDetail extends LitElement {
       color: var(--scion-primary, #3b82f6);
     }
 
-    .header {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      margin-bottom: 1.5rem;
-      gap: 1rem;
-    }
-
-    .header-info {
-      flex: 1;
-      min-width: 0;
-    }
-
-    /* A long role name breaks inside its line beside the actions. */
-    .header h1 {
-      font-size: 1.5rem;
-      font-weight: 700;
-      color: var(--scion-text, #1e293b);
-      margin: 0 0 0.25rem 0;
-      overflow-wrap: anywhere;
-    }
-
     .header-description {
       font-size: 0.875rem;
       color: var(--scion-text-muted, #64748b);
       margin: 0;
-    }
-
-    .header-actions {
-      display: flex;
-      gap: 0.5rem;
-      flex-shrink: 0;
-    }
-
-    .badges {
-      display: flex;
-      gap: 0.5rem;
-      margin-bottom: 0.5rem;
     }
 
     .type-badge {
@@ -491,10 +458,6 @@ export class ScionPageAdminRoleDetail extends LitElement {
     @media (max-width: 768px) {
       .hide-mobile {
         display: none;
-      }
-
-      .header {
-        flex-direction: column;
       }
     }
   `;
@@ -906,23 +869,18 @@ export class ScionPageAdminRoleDetail extends LitElement {
     if (!role) return nothing;
 
     return html`
-      <div class="header">
-        <div class="header-info">
-          <div class="badges">
-            <span class="type-badge ${role.system ? 'system' : 'custom'}">
-              ${role.system ? 'System' : 'Custom'}
-            </span>
-            <span class="scope-badge">${role.scopeType}</span>
-          </div>
-          <h1>${role.name}</h1>
-          ${role.description
-            ? html`<p class="header-description">${role.description}</p>`
-            : nothing}
-          <div class="metadata-row">
-            Updated ${formatRelative(role.updatedAt)} · Created ${formatRelative(role.createdAt)}
-          </div>
+      <scion-detail-header heading=${role.name}>
+        <span class="type-badge ${role.system ? 'system' : 'custom'}">
+          ${role.system ? 'System' : 'Custom'}
+        </span>
+        <span class="scope-badge">${role.scopeType}</span>
+        ${role.description
+          ? html`<p slot="meta" class="header-description">${role.description}</p>`
+          : nothing}
+        <div slot="meta" class="metadata-row">
+          Updated ${formatRelative(role.updatedAt)} · Created ${formatRelative(role.createdAt)}
         </div>
-        <div class="header-actions">
+        <div slot="actions" class="header-actions">
           <sl-button variant="default" size="small" @click=${() => this.openDuplicateDialog()}>
             <sl-icon slot="prefix" name="copy"></sl-icon>
             Duplicate
@@ -955,7 +913,7 @@ export class ScionPageAdminRoleDetail extends LitElement {
                 </sl-button>
               `}
         </div>
-      </div>
+      </scion-detail-header>
 
       <sl-tab-group @sl-tab-show=${(e: CustomEvent) => this.handleTabChange(e)}>
         <sl-tab slot="nav" panel="permissions" ?active=${this.activeTab === 'permissions'}>
