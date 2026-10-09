@@ -22,7 +22,7 @@
  * from agents it already holds without pulling either into its bundle.
  */
 
-import { agentCandidateId, type PaletteCandidate } from './chat-palette-types.js';
+import { agentCandidateId, type PaletteCandidate } from './palette-types.js';
 
 /** The agent fields an Agents-group row reads. */
 export interface AgentCandidateSource {
@@ -42,7 +42,7 @@ export interface AgentCandidateSource {
  *
  * `activityMs` is always 0: there is no conversation recency here, so
  * ranking falls back to match tier, then label, then ID — see
- * `utils/chat-palette-match.ts`.
+ * `utils/palette-match.ts`.
  */
 export function buildAgentCandidate(agent: AgentCandidateSource): PaletteCandidate {
   const displayName = agent.name || agent.slug || agent.id;

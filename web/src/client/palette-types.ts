@@ -15,9 +15,10 @@
  */
 
 /**
- * Shared discriminated target/candidate/group-state types for the native
- * chat quick command palette, covering the Agents/DM, Threads, People and
- * Documents groups.
+ * Shared discriminated target/candidate/group-state types for the quick
+ * palette (`<scion-quick-palette>`), used by chat, the terminal "Jump to
+ * agent" switcher and the graph view. Covers the Agents/DM, Threads,
+ * People and Documents groups.
  *
  * Type-only module: importing this file must not eagerly pull in the
  * `<scion-quick-palette>` component or any API client. The `RecentFile` import
@@ -25,6 +26,13 @@
  * in the `chatRecentFiles` singleton module.
  */
 
+import type {
+  AgentActivity,
+  AgentMessageability,
+  AgentMessageabilityDetail,
+  AgentPhase,
+  Capabilities,
+} from '../shared/types.js';
 import type { RecentFile } from './chat-recent-files.js';
 
 /** The kind of DM peer: an agent or a human user. */
@@ -92,7 +100,7 @@ export type PaletteTarget =
  * The four groups the full palette renders (Agents, Threads, People,
  * Documents, in that reading order). This exact array is the single source
  * of truth for that reading/Tab order — the ranking comparator
- * (`chat-palette-match.ts`) and the palette's own Tab/Shift+Tab cycling
+ * (`palette-match.ts`) and the palette's own Tab/Shift+Tab cycling
  * (`quick-palette.ts`) both derive their group ordering from it so the two
  * can never independently drift apart.
  */
@@ -193,4 +201,22 @@ export function threadCandidateId(projectId: string, threadId: string): string {
  */
 export function documentCandidateId(fileKey: string): string {
   return JSON.stringify(['document', fileKey]);
+}
+
+/**
+ * The agent fields palette candidate building reads. `phase`, `activity`
+ * and `project` are for the terminal view's own agents-only candidate
+ * source; chat's candidate building (`buildAgentCandidates` and
+ * `isPaletteAgentViable` in `chat-palette-data.ts`) reads none of the
+ * three.
+ */
+export interface RawPaletteAgent {
+  id: string;
+  name?: string;
+  slug?: string;
+  project?: string;
+  phase?: AgentPhase;
+  activity?: AgentActivity;
+  _capabilities?: Capabilities;
+  _messageability?: AgentMessageability | AgentMessageabilityDetail;
 }

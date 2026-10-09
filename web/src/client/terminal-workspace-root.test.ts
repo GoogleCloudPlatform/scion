@@ -25,7 +25,7 @@ import {
 import type { ScionQuickPalette } from '../components/shared/palette/quick-palette.js';
 import type { ScionTerminalPane } from '../components/terminal/terminal-pane.js';
 import type { TerminalPaletteAgentsLoadOptions } from './terminal-palette-data.js';
-import type { PaletteCandidate } from './chat-palette-types.js';
+import type { PaletteCandidate } from './palette-types.js';
 import { AgentStore } from './agent-store.js';
 import { FakeEventSource } from './__fixtures__/agent-store-harness.js';
 import { TOUCH_PRIMARY_QUERY } from '../utils/input-modality.js';
