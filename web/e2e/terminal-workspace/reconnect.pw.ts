@@ -321,8 +321,16 @@ test('unavailable agent shows correct state in rail and pane', async ({ page }) 
     }
   }, agent);
 
-  // Rail should show unavailable state, not disconnected
-  await expect(page.locator('#terminal-workspace')).toContainText('Unavailable');
+  // Rail should show unavailable state, not disconnected. The row carries no
+  // visible status text; the state lives in its data attributes and in the
+  // select button's accessible label.
+  const railItem = page.locator('#terminal-workspace .terminal-rail-item');
+  await expect(railItem).toHaveAttribute('data-connection', 'unavailable');
+  await expect(railItem).toHaveAttribute('data-disconnect-reason', 'agent-stopped');
+  await expect(railItem.locator('.terminal-rail-select')).toHaveAttribute(
+    'aria-label',
+    /Unavailable/
+  );
 
   // Overlay should show AGENT UNAVAILABLE title
   const overlay = page.locator('scion-terminal-pane .disconnected-overlay');
