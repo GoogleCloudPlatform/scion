@@ -38,6 +38,7 @@ function json(body: unknown, status = 200): Response {
 
 describe('scion-page-health-dashboard cards', () => {
   let el: ScionPageHealthDashboard;
+  let extra: Record<string, unknown> = {};
 
   beforeEach(() => {
     vi.mocked(apiFetch).mockImplementation(async (url: string) => {
@@ -62,6 +63,7 @@ describe('scion-page-health-dashboard cards', () => {
           brokers: [],
           agents: { total: 0, active: 0, errored: 0, considered: 0, by_phase: [], problems: [] },
           dispatch: null,
+          ...extra,
         });
       }
       throw new Error(`unexpected request ${url}`);
@@ -73,6 +75,7 @@ describe('scion-page-health-dashboard cards', () => {
   afterEach(() => {
     el.remove();
     vi.mocked(apiFetch).mockReset();
+    extra = {};
   });
 
   async function rendered(): Promise<string> {
@@ -91,6 +94,49 @@ describe('scion-page-health-dashboard cards', () => {
     expect(text).not.toContain('Recent Alerts');
     expect(text).not.toContain('Cloud Monitoring');
     expect(el.shadowRoot?.querySelector('a[href*="console.cloud.google.com"]')).toBeNull();
+  });
+
+  /** The Hub card's shadow root, where the service account check diagnostic lives. */
+  async function hubCard(): Promise<ShadowRoot> {
+    const card = el.shadowRoot!.querySelector('scion-health-hub-card')!;
+    await (card as LitLike).updateComplete;
+    return card.shadowRoot!;
+  }
+
+  it('renders no service account check diagnostic when the section is absent', async () => {
+    const text = await rendered();
+    expect(text).not.toContain('Service Account Assignment Check');
+    const hub = await hubCard();
+    expect(hub.querySelector('.sa-check')).toBeNull();
+    expect(hub.textContent).not.toContain('Service Account Assignment Check');
+  });
+
+  it('renders the service account check diagnostic in the Hub card with its remedy and docs link', async () => {
+    el.remove();
+    extra = {
+      service_account_check: {
+        status: 'degraded',
+        cause: 'hub_identity_missing_access',
+        remedy: "Grant the hub's identity that access.",
+        docs_url: 'https://example.com/docs#check',
+        since: '2026-10-08T12:00:00Z',
+        last_seen: '2026-10-08T12:05:00Z',
+      },
+    };
+    el = new ScionPageHealthDashboard();
+    document.body.appendChild(el);
+    await rendered();
+    const hub = await hubCard();
+    const block = hub.querySelector('.sa-check');
+    expect(block).not.toBeNull();
+    expect(block!.textContent).toContain('Service Account Assignment Check');
+    expect(block!.textContent).toContain("Grant the hub's identity that access.");
+    const link = hub.querySelector('.sa-check a');
+    expect(link?.getAttribute('href')).toBe('https://example.com/docs#check');
+    // A hub-level block inside the Hub card, not a separate full-width card.
+    for (const full of el.shadowRoot!.querySelectorAll('.grid-full')) {
+      expect(full.textContent).not.toContain('Service Account Assignment Check');
+    }
   });
 
   it('never reads or writes the server config', async () => {

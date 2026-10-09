@@ -1303,11 +1303,10 @@ func registerProject(ctx context.Context, hubCtx *HubContext, projectName string
 		gitRemote = util.GetGitRemote()
 	}
 
-	// Get hostname
-	brokerName, err := os.Hostname()
-	if err != nil {
-		brokerName = "local-broker"
-	}
+	// The broker name: the configured name (see 'runtime-broker register
+	// --broker-name'), else the hostname. The hub matches the embedded
+	// broker by name, so this must not re-derive the hostname.
+	brokerName := config.LocalBrokerName("local-broker")
 
 	req := &hubclient.RegisterProjectRequest{
 		ID:        hubCtx.ProjectID,

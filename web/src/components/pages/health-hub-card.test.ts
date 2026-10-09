@@ -113,6 +113,42 @@ describe('scion-health-hub-card', () => {
     expect(root.textContent).toContain('this instance');
   });
 
+  it('shows the service account check diagnostic only when the section is present', async () => {
+    let root = await mount(hub());
+    expect(root.querySelector('[data-role="sa-check"]')).toBeNull();
+    document.body.innerHTML = '';
+
+    const el = document.createElement('scion-health-hub-card');
+    el.hub = hub({ status: 'degraded' });
+    el.database = db;
+    el.serviceAccountCheck = {
+      status: 'degraded',
+      cause: 'hub_identity_missing_access',
+      remedy: "Grant the hub's identity that access.",
+      docs_url: 'https://example.com/docs#check',
+      since: '2026-10-08T12:00:00Z',
+      last_seen: '2026-10-08T12:05:00Z',
+    };
+    document.body.appendChild(el);
+    await el.updateComplete;
+    root = el.shadowRoot!;
+    const block = root.querySelector('[data-role="sa-check"]')!;
+    expect(block.querySelector('.pill')?.textContent?.trim()).toBe('Cannot run');
+    expect(block.querySelector('.pill')?.classList.contains('tone-warn')).toBe(true);
+    expect(block.querySelector('.sa-check-remedy')?.textContent?.trim()).toBe(
+      "Grant the hub's identity that access."
+    );
+    const link = block.querySelector('a')!;
+    expect(link.getAttribute('href')).toBe('https://example.com/docs#check');
+    expect(link.getAttribute('rel')).toBe('noopener noreferrer');
+
+    // Only an https docs URL becomes a link; the remedy still shows.
+    el.serviceAccountCheck = { ...el.serviceAccountCheck, docs_url: 'http://example.com/docs' };
+    await el.updateComplete;
+    expect(root.querySelector('[data-role="sa-check"] a')).toBeNull();
+    expect(root.querySelector('.sa-check-remedy')).not.toBeNull();
+  });
+
   it('shows not available rather than an empty card when the hub block is missing', async () => {
     const root = await mount(null, null);
     expect(root.textContent).toContain('Hub data not available');

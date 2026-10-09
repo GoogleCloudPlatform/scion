@@ -21,7 +21,8 @@
  * and lays out the section modules (design 5.1, 5.7):
  * - Header: overall status pill, "as of" time, the serving hub instance
  * - Needs attention (health-attention.ts), full width and first
- * - Hub (health-hub-card.ts, database folded in) | Dispatch (health-dispatch-card.ts)
+ * - Hub (health-hub-card.ts, database and the service account check
+ *   diagnostic folded in) | Dispatch (health-dispatch-card.ts)
  * - Runtime brokers (compact table, health-broker-table.ts)
  * - Integrations (chat plugins, health-integrations.ts)
  * - Agents (phase counts and problem groups, health-agents-card.ts)
@@ -36,7 +37,11 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { formatInstant, formatInstantWithZone } from '../../utils/time.js';
 import type { HealthAttentionItem } from './health-attention.js';
 import './health-attention.js';
-import type { HealthSummaryHub, HealthSummaryDatabase } from './health-hub-card.js';
+import type {
+  HealthSummaryHub,
+  HealthSummaryDatabase,
+  HealthSummaryServiceAccountCheck,
+} from './health-hub-card.js';
 import './health-hub-card.js';
 import type { HealthSummaryBrokerList } from './health-broker-table.js';
 import './health-broker-table.js';
@@ -54,6 +59,7 @@ import { healthPillStyles, healthTone } from './health-status.js';
 export { formatHeartbeatAge } from './health-broker-table.js';
 export type { HealthAttentionItem } from './health-attention.js';
 export type { HealthSummaryIntegrationCounts } from './health-integrations.js';
+export type { HealthSummaryServiceAccountCheck } from './health-hub-card.js';
 
 export interface HealthSummary {
   status: string;
@@ -76,6 +82,11 @@ export interface HealthSummary {
   agents: HealthSummaryAgents | null;
   /** Null when the hub could not count dispatch health (not reported). */
   dispatch: HealthSummaryDispatch | null;
+  /**
+   * Present only while the service account assignment check cannot run
+   * because the hub's identity lacks the access it needs.
+   */
+  service_account_check?: HealthSummaryServiceAccountCheck;
 }
 
 @customElement('scion-page-health-dashboard')
@@ -290,6 +301,7 @@ export class ScionPageHealthDashboard extends LitElement {
         <scion-health-hub-card
           .hub=${d.hub ?? null}
           .database=${d.database ?? null}
+          .serviceAccountCheck=${d.service_account_check ?? null}
         ></scion-health-hub-card>
         <scion-health-dispatch-card .dispatch=${d.dispatch ?? null}></scion-health-dispatch-card>
       </div>

@@ -21,6 +21,10 @@
  * in: the database row carries the connection pool as a sub-block. The
  * checks and figures are those of the hub instance that served the
  * summary ("this instance").
+ *
+ * While the service account assignment check cannot run (the summary's
+ * service_account_check section is present), the card also shows that
+ * hub-level diagnostic: the server's remedy and its docs link.
  */
 
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
@@ -52,6 +56,16 @@ export interface HealthSummaryDatabase {
   pool_max: number;
   pool_wait_count_total: number;
   pool_idle: number;
+}
+
+/** The service_account_check section of GET /api/v1/admin/health/summary. */
+export interface HealthSummaryServiceAccountCheck {
+  status: string;
+  cause: string;
+  remedy: string;
+  docs_url: string;
+  since: string;
+  last_seen: string;
 }
 
 /** One check row of the card. */
@@ -92,6 +106,10 @@ export class ScionHealthHubCard extends LitElement {
 
   @property({ attribute: false })
   database: HealthSummaryDatabase | null = null;
+
+  /** Present only while the service account assignment check cannot run. */
+  @property({ attribute: false })
+  serviceAccountCheck: HealthSummaryServiceAccountCheck | null = null;
 
   static override styles = [
     healthPillStyles,
@@ -186,6 +204,39 @@ export class ScionHealthHubCard extends LitElement {
         font-size: 0.875rem;
         margin: 0 0 0.75rem 0;
       }
+
+      .sa-check {
+        border-top: 1px solid var(--scion-border);
+        border-bottom: 1px solid var(--scion-border);
+        padding: 0.75rem 0;
+        margin: 0 0 0.75rem 0;
+        font-size: 0.875rem;
+        color: var(--scion-text);
+      }
+
+      .sa-check-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 1rem;
+        font-weight: 600;
+      }
+
+      .sa-check-remedy {
+        margin: 0.5rem 0;
+        overflow-wrap: anywhere;
+      }
+
+      .sa-check a {
+        color: var(--scion-text);
+        text-decoration: underline;
+        text-decoration-color: var(--scion-border-hover);
+        text-underline-offset: 2px;
+      }
+
+      .sa-check a:hover {
+        text-decoration-color: currentColor;
+      }
     `,
   ];
 
@@ -211,6 +262,7 @@ export class ScionHealthHubCard extends LitElement {
               ${rows.map((r) => this.renderCheck(r))}
             </ul>`
           : html`<div class="empty">No checks reported</div>`}
+        ${this.renderServiceAccountCheck()}
         <div class="stat-row"><span class="label">Uptime</span><span>${hub.uptime}</span></div>
         <div class="stat-row"><span class="label">Version</span><span>${hub.version}</span></div>
         <div class="stat-row">
@@ -223,6 +275,24 @@ export class ScionHealthHubCard extends LitElement {
         <div class="scope">Checks and figures from this instance</div>
       </section>
     `;
+  }
+
+  /** The service account check diagnostic; nothing when the section is absent. */
+  private renderServiceAccountCheck(): TemplateResult | typeof nothing {
+    const c = this.serviceAccountCheck;
+    if (!c) return nothing;
+    return html`<div class="sa-check" data-role="sa-check">
+      <div class="sa-check-head">
+        <span>Service Account Assignment Check</span>
+        <span class="pill tone-${healthTone(c.status)}">Cannot run</span>
+      </div>
+      <p class="sa-check-remedy">${c.remedy}</p>
+      ${(c.docs_url ?? '').startsWith('https://')
+        ? html`<a href=${c.docs_url} target="_blank" rel="noopener noreferrer"
+            >Access the hub's identity needs</a
+          >`
+        : nothing}
+    </div>`;
   }
 
   private renderCheck(r: HubCheckRow): TemplateResult {
