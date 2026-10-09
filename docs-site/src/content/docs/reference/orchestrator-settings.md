@@ -233,9 +233,9 @@ profiles:
 | :--- | :--- | :--- |
 | `runtime` | string | **Required**. Name of a runtime defined in `runtimes`. |
 | `default_template` | string | Default template for agents created under this profile. |
-| `default_harness_config` | string | Default harness config to use. |
-| `default_harness_auth` | string | Default authentication type for new agents under this profile. |
+| `default_harness_config` | string | Default harness config name for agents created under this profile. |
 | `image_registry` | string | Profile-level registry override. Takes precedence over the top-level `image_registry`. |
+| `volumes` | list | Volume mounts for agents created under this profile. Appended after the harness config's `volumes`. Each entry takes the same keys as a harness config volume: `target` (required), `source`, `read_only`, `type` (`local` or `gcs`), `bucket`, `prefix`, `mode`. |
 | `harness_overrides` | map | Per-harness-config overrides. Keys match `harness_configs` names. |
 | `secrets` | list | Required secrets for agents created under this profile. |
 | `resources` | object | Resource requests and limits for agents created under this profile. See [Resource Specification](#resource-specification-resources). |
