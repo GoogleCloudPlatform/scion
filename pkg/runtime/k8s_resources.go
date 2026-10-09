@@ -170,7 +170,9 @@ func appendGoRuntimeEnvFromLimits(env []corev1.EnvVar, limits corev1.ResourceLis
 	}
 
 	if q, ok := limits[corev1.ResourceCPU]; ok && q.Sign() > 0 {
-		cores := (q.MilliValue() + 999) / 1000
+		// Value rounds a fractional quantity up to the next whole number
+		// and does not overflow for very large limits.
+		cores := q.Value()
 		if cores < 1 {
 			cores = 1
 		}
