@@ -229,72 +229,227 @@ func TestDecisionLog_P1_5_ExcludedResourceThroughServer(t *testing.T) {
 	assert.Zero(t, srv.auditWriter.Snapshot().Enqueued)
 }
 
-// P1-6. Authorization outcomes and HTTP results are unchanged while the
-// audit writer is blocked (noncooperative inner handler) and full.
+// P1-6 (with architect ruling R2, msg 7f72a355). Authorization outcomes and
+// HTTP results are unchanged while the audit writer is blocked
+// (noncooperative inner handler) and full. Probes drive every adapter
+// branch a real Decide can reach (in-domain user and agent principals, the
+// delegated-agent AlwaysAudit allow, UAT bearer allow and gate deny with
+// credential decoration, a dependency-unavailable deny, and the
+// excluded_scope/principal/correlation/credential dispositions); each must
+// match the flag-off baseline and move its expected disposition counter.
+// It also pins panic isolation (sink and mapping faults through test seams)
+// and that emission mutates nothing reachable from the Decision or the
+// request. The test finishes while the inner handler is still blocked; it
+// is released only in cleanup.
 func TestDecisionLog_P1_6_OutcomesUnchangedWithWriterBlockedAndFull(t *testing.T) {
 	capture := &decisionLogCapture{block: make(chan struct{}), entered: make(chan struct{}, 1)}
 	srv, s := newDecisionLogServer(t, capture)
-	released := false
-	release := func() {
-		if !released {
-			released = true
-			close(capture.block)
+	l := srv.decisionAuditLogger
+	// Registered after the server's Shutdown cleanup, so it runs first.
+	t.Cleanup(func() {
+		close(capture.block)
+		if err := srv.CloseAuditWriter(context.Background()); err != nil {
+			t.Errorf("CloseAuditWriter after release: %v", err)
 		}
-	}
-	t.Cleanup(release) // before Shutdown (cleanups are LIFO)
+		final := srv.auditWriter.Snapshot()
+		if final.Enqueued != final.Written+final.WriteErrors+final.WriteTimeouts+final.DroppedShutdown {
+			t.Errorf("conservation after drain: %+v", final)
+		}
+	})
+	ctx := context.Background()
 	member, outsider, projectID := seedDecisionLogProject(t, s)
 
-	type probe struct {
-		who    *store.User
-		action Action
+	// Agent fixtures (owner-delegated agents) on their own project.
+	dcProject, dcOwner := tid("dl6-dc-project"), tid("dl6-dc-owner")
+	liveAgent, errAgent := tid("dl6-live-agent"), tid("dl6-err-agent")
+	createDCProject(t, s, dcProject, "dl6-dc-project")
+	createDCUser(t, s, dcOwner, "dl6-owner@example.com", dcProject, store.ProjectRoleOwner)
+	for _, agentID := range []string{liveAgent, errAgent} {
+		createDCAgent(t, s, agentID, dcProject, dcOwner, AgentRoleFull)
+		createDCEdge(t, s, store.DelegationPrincipalUser, dcOwner, store.DelegationPrincipalAgent, agentID,
+			store.RoleScopeProject, dcProject, string(AgentRoleFull))
 	}
-	probes := []probe{{member, ActionRead}, {outsider, ActionRead}, {member, ActionDelete}, {outsider, ActionManage}}
-	decide := func(p probe, id string) Decision {
-		identity := NewAuthenticatedUser(p.who.ID, p.who.Email, p.who.DisplayName, p.who.Role, "web")
-		ctx := logging.ContextWithRequestMeta(contextWithIdentity(context.Background(), identity), &logging.RequestMeta{RequestID: id})
-		return srv.authzService.Decide(ctx, AuthzRequestFromContext(ctx, Resource{Type: "project", ID: projectID}, p.action))
+	// Dependency-unavailable (H2-style) path: a delegation-edge store fault,
+	// emitting through the production decision logger.
+	faultyAuthz := NewAuthzService(&edgeLookupErrStore{Store: s, failID: errAgent}, slog.Default())
+	faultyAuthz.SetDecisionAuditEmitter(l)
+	hubDelivery, err := srv.authzService.newHubDeliveryIdentity(ctx, liveAgent)
+	require.NoError(t, err)
+
+	// UAT bearer fixtures: a project-scoped token on its own project.
+	uatProject, uatOwner := setupUATProjectAndOwner(t, s, "dl6-uat")
+	uatKey := mintScopedUAT(t, srv, uatOwner, uatProject, []string{"project:read"})
+
+	withRequestID := func(c context.Context, id string) context.Context {
+		return logging.ContextWithRequestMeta(c, &logging.RequestMeta{RequestID: id})
 	}
-	statuses := func() (int, int) {
-		a, _ := userRequest(t, srv, member, http.MethodGet, membersPath(projectID), nil, nil)
-		b, _ := userRequest(t, srv, outsider, http.MethodGet, membersPath(projectID), nil, nil)
-		return a.Code, b.Code
+	asIdentity := func(id Identity) func(string) context.Context {
+		return func(reqID string) context.Context { return withRequestID(contextWithIdentity(ctx, id), reqID) }
+	}
+	asUser := func(u *store.User) func(string) context.Context {
+		return asIdentity(NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, "web"))
+	}
+	projectReq := func(id string, action Action) func(context.Context) AuthzRequest {
+		return func(c context.Context) AuthzRequest {
+			return AuthzRequestFromContext(c, Resource{Type: "project", ID: id}, action)
+		}
+	}
+	withPermission := func(f func(context.Context) AuthzRequest, perm string) func(context.Context) AuthzRequest {
+		return func(c context.Context) AuthzRequest { r := f(c); r.Permission = perm; return r }
 	}
 
-	// Baseline with the flag off.
-	var baseline []Decision
-	for i, p := range probes {
-		baseline = append(baseline, decide(p, fmt.Sprintf("dl-base-%d", i)))
+	type probe struct {
+		name        string
+		authz       *AuthzService
+		ctx         func(reqID string) context.Context
+		req         func(context.Context) AuthzRequest
+		want        decisionAuditDisposition
+		alwaysAudit bool
 	}
-	baseA, baseB := statuses()
+	probes := []probe{
+		{name: "member read allow", ctx: asUser(member), req: projectReq(projectID, ActionRead), want: decisionAuditNotEnqueued},
+		{name: "outsider read deny", ctx: asUser(outsider), req: projectReq(projectID, ActionRead), want: decisionAuditNotEnqueued},
+		{name: "member delete deny", ctx: asUser(member), req: projectReq(projectID, ActionDelete), want: decisionAuditNotEnqueued},
+		{name: "outsider manage deny", ctx: asUser(outsider), req: projectReq(projectID, ActionManage), want: decisionAuditNotEnqueued},
+		{name: "delegated agent AlwaysAudit allow", ctx: asIdentity(dcAgentIdentity(liveAgent, dcProject, AgentRoleFull)),
+			req: withPermission(projectReq(dcProject, ActionRead), "project.read"), want: decisionAuditNotEnqueued, alwaysAudit: true},
+		{name: "dependency-unavailable deny", authz: faultyAuthz, ctx: asIdentity(dcAgentIdentity(errAgent, dcProject, AgentRoleFull)),
+			req: withPermission(projectReq(dcProject, ActionRead), "project.read"), want: decisionAuditNotEnqueued},
+		{name: "excluded_scope: project-contained agent resource", ctx: asUser(member),
+			req: func(c context.Context) AuthzRequest {
+				return AuthzRequestFromContext(c, Resource{Type: "agent", ID: liveAgent, ParentType: "project", ParentID: dcProject}, ActionRead)
+			}, want: decisionAuditExcludedScope},
+		{name: "excluded_principal: dev principal", ctx: asIdentity(NewDevUser(DevUserConfig{Username: "dev", DisplayName: "Dev", Email: "dev@localhost"})),
+			req: projectReq(projectID, ActionRead), want: decisionAuditExcludedPrincipal},
+		{name: "excluded_correlation: no request ID", ctx: func(string) context.Context {
+			return contextWithIdentity(ctx, NewAuthenticatedUser(member.ID, member.Email, member.DisplayName, member.Role, "web"))
+		}, req: projectReq(projectID, ActionRead), want: decisionAuditExcludedCorrelation},
+		{name: "excluded_credential: hub_delivery credential", ctx: asIdentity(hubDelivery),
+			req: withPermission(projectReq(dcProject, ActionRead), "project.read"), want: decisionAuditExcludedCredential},
+	}
+	run := func(p probe, reqID string) Decision {
+		authz := p.authz
+		if authz == nil {
+			authz = srv.authzService
+		}
+		c := p.ctx(reqID)
+		return authz.Decide(c, p.req(c))
+	}
+	moved := func(d decisionAuditDisposition) uint64 { return l.counts.get(d, true) + l.counts.get(d, false) }
+	httpStatuses := func() []int {
+		a, _ := userRequest(t, srv, member, http.MethodGet, membersPath(projectID), nil, nil)
+		b, _ := userRequest(t, srv, outsider, http.MethodGet, membersPath(projectID), nil, nil)
+		c := doRequestWithUAT(t, srv, uatKey, http.MethodGet, membersPath(uatProject), nil)
+		d := doRequestWithUAT(t, srv, uatKey, http.MethodGet, membersPath(projectID), nil)
+		return []int{a.Code, b.Code, c.Code, d.Code}
+	}
+	assertParity := func(label string, want, got Decision) {
+		t.Helper()
+		assert.Equal(t, want.Allowed, got.Allowed, label)
+		assert.Equal(t, want.Reason, got.Reason, label)
+		assert.Equal(t, want.PermissionID, got.PermissionID, label)
+		assert.Equal(t, want.DeniedBy, got.DeniedBy, label)
+		assert.Equal(t, want.DenyCause, got.DenyCause, label)
+		assert.Equal(t, want.AlwaysAudit, got.AlwaysAudit, label)
+	}
+
+	// Baseline: flag off (status quo).
+	baseline := make([]Decision, len(probes))
+	for i, p := range probes {
+		before := moved(decisionAuditDisabled)
+		baseline[i] = run(p, fmt.Sprintf("dl6-base-%d", i))
+		require.Greater(t, moved(decisionAuditDisabled), before, "%s: baseline counted disabled", p.name)
+		if p.alwaysAudit {
+			require.True(t, baseline[i].Allowed && baseline[i].AlwaysAudit, "%s: probe must reach the AlwaysAudit allow branch: %+v", p.name, baseline[i])
+		}
+	}
+	require.False(t, baseline[0].Allowed == baseline[1].Allowed, "probes must cover both allow and deny")
+	require.Equal(t, DenyCauseCeilingError, baseline[5].DenyCause, "dependency-unavailable probe: %q", baseline[5].Reason)
+	baseHTTP := httpStatuses()
+	require.Equal(t, http.StatusOK, baseHTTP[2], "UAT allow")
+	require.NotEqual(t, http.StatusOK, baseHTTP[3], "UAT gate deny")
 
 	// Flag on; block the worker in the inner handler, then fill the queue.
 	setDecisionLogFlag(t, srv, true)
-	decide(probes[0], "dl-fill-0")
+	run(probes[0], "dl6-fill-0")
 	<-capture.entered // the worker is now blocked inside the inner handler
 	for i := 1; srv.auditWriter.Snapshot().DroppedFull == 0; i++ {
 		require.Less(t, i, 3*2048, "queue never filled")
-		decide(probes[0], fmt.Sprintf("dl-fill-%d", i))
+		run(probes[0], fmt.Sprintf("dl6-fill-%d", i))
 	}
 	snap := srv.auditWriter.Snapshot()
 	require.Equal(t, 2048, snap.Queued, "count bound reached: %+v", snap)
 
+	// 1. Every mapping branch: parity plus the expected disposition.
 	for i, p := range probes {
-		got := decide(p, fmt.Sprintf("dl-full-%d", i))
-		assert.Equal(t, baseline[i].Allowed, got.Allowed, "probe %d", i)
-		assert.Equal(t, baseline[i].Reason, got.Reason, "probe %d", i)
-		assert.Equal(t, baseline[i].PermissionID, got.PermissionID, "probe %d", i)
-		assert.Equal(t, baseline[i].DeniedBy, got.DeniedBy, "probe %d", i)
+		want := p.want
+		if want == decisionAuditExcludedCredential && !isKnownPermission(baseline[i].PermissionID) {
+			// Mapping checks permission before credential; record which
+			// disposition this real decision reaches instead.
+			t.Logf("%s: decision has no registered permission (%q); excluded_credential not reachable through Decide, expecting excluded_permission",
+				p.name, baseline[i].PermissionID)
+			want = decisionAuditExcludedPermission
+		}
+		before := moved(want)
+		got := run(p, fmt.Sprintf("dl6-full-%d", i))
+		assertParity(p.name, baseline[i], got)
+		assert.Greater(t, moved(want), before, "%s: disposition %s did not move", p.name, want)
 	}
-	a, b := statuses()
-	assert.Equal(t, baseA, a)
-	assert.Equal(t, baseB, b)
-	assert.Greater(t, srv.decisionAuditLogger.counts.get(decisionAuditNotEnqueued, true), uint64(0))
+	beforeHTTP := moved(decisionAuditNotEnqueued)
+	beforeCred := moved(decisionAuditExcludedCredential)
+	assert.Equal(t, baseHTTP, httpStatuses(), "HTTP results unchanged (member, outsider, UAT allow, UAT gate deny)")
+	assert.GreaterOrEqual(t, moved(decisionAuditNotEnqueued), beforeHTTP+4, "each HTTP probe reached the full writer")
+	assert.Equal(t, beforeCred, moved(decisionAuditExcludedCredential),
+		"UAT decoration maps to a credential reference (NewRef path), never excluded_credential")
 
-	release()
-	require.NoError(t, srv.CloseAuditWriter(context.Background()))
-	final := srv.auditWriter.Snapshot()
-	assert.Equal(t, final.Enqueued, final.Written+final.WriteErrors+final.WriteTimeouts+final.DroppedShutdown,
-		"conservation after drain: %+v", final)
+	// 2. Panic isolation through test seams: the decision is returned
+	// unchanged and the panic is counted, not propagated.
+	savedSink := l.sink
+	l.sink = panickingAuditSink{}
+	before := moved(decisionAuditNotEnqueued)
+	require.NotPanics(t, func() { assertParity("sink panic", baseline[0], run(probes[0], "dl6-panic-sink")) })
+	l.sink = savedSink
+	assert.Equal(t, before+1, moved(decisionAuditNotEnqueued), "sink panic counted not_enqueued")
+
+	savedEnabled := l.enabled
+	l.enabled = func() bool { panic("injected mapping fault") }
+	before = moved(decisionAuditInvalid)
+	require.NotPanics(t, func() { assertParity("mapping panic", baseline[1], run(probes[1], "dl6-panic-map")) })
+	l.enabled = savedEnabled
+	assert.Equal(t, before+1, moved(decisionAuditInvalid), "mapping panic counted invalid")
+
+	// 3. No shared mutation: everything reachable from the Decision and the
+	// request that the record builder and adapter read is identical after
+	// emission (snapshot by value through JSON of the exported graph).
+	for _, res := range []Resource{
+		{Type: "project", ID: projectID, OwnerID: member.ID, Labels: map[string]string{"team": "a"}},
+		{Type: "agent", ID: liveAgent, ParentType: "project", ParentID: dcProject, Ancestry: []string{"root", dcProject}, Labels: map[string]string{"k": "v"}},
+	} {
+		c := withRequestID(contextWithIdentity(ctx, NewAuthenticatedUser(member.ID, member.Email, member.DisplayName, member.Role, "web")), "dl6-mutation")
+		req := AuthzRequestFromContext(c, res, ActionRead)
+		req.Actor = &DecisionActor{Kind: PrincipalKindUser, ID: member.ID}
+		req.Purpose = "parity-check"
+		dec := srv.authzService.decide(c, req)
+		dec.ExplainTrace = []DecisionStep{{Step: "s", Detail: "d"}}
+		dec.Actor = &DecisionActor{Kind: PrincipalKindUser, ID: member.ID}
+		snapshot := func() string {
+			b, err := json.Marshal(struct {
+				D        Decision
+				R        Resource
+				A        *DecisionActor
+				P        string
+				Perm     string
+				Always   bool
+				Princ    string
+				CredKind CredentialKind
+			}{dec, req.Resource, req.Actor, req.Purpose, req.Permission, req.AlwaysAudit, req.Principal.ID, req.Credential.Kind})
+			require.NoError(t, err)
+			return string(b)
+		}
+		pre := snapshot()
+		srv.authzService.emitDecisionAudit(c, req, dec)
+		assert.Equal(t, pre, snapshot(), "emission mutated the decision or request (%s)", res.Type)
+	}
 }
 
 // P1-7. Health: healthy, then degraded on a write failure; the composite
