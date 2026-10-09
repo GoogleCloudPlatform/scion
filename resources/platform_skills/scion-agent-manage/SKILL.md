@@ -104,8 +104,16 @@ not report one.
 
 - Pass `--wait-timeout <duration>` (for example `--wait-timeout 15m`) to wait
   longer — needed if the Hub's launch timeout has been raised.
-- If the wait times out, the launch keeps going on the Hub. Re-run
-  `scion start <name>` to resume waiting; it does not start a second agent.
+- An exit status of 0 does not always mean the agent is running. When the
+  Hub accepted the launch but the wait could not follow it to running (the
+  wait timed out, or the agent's status is not readable with your
+  credential), `scion start` prints "accepted by Hub and launching" (with
+  `--format json`, the result carries a `launchNote` detail) and exits 0.
+  The launch keeps going and may still fail: check with `scion list` or
+  `scion look <name>` before relying on the agent. Do not retry the start
+  under a new name; that leaves a duplicate agent.
+- If the wait timed out, re-run `scion start <name>` to resume waiting; it
+  does not start a second agent.
 - Pass `--no-wait` to return as soon as the Hub accepts the launch; check
   progress later with `scion look <name>` or `scion list`.
 - If the error says the create did not complete, the agent cannot be

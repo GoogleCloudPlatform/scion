@@ -121,28 +121,35 @@ going instead of rolling the agent back. Each dispatch attempt is bounded at
 120 seconds, so a slow cold start (for example on Kubernetes) can still fail on
 a synchronous launch; enable [asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create) for those. While waiting, each launch step is printed to stderr (nothing
 extra under `--format json`). If the wait times out, or you press Ctrl-C, only
-the wait stops: the launch continues on the Hub, and re-running
-`scion start <agent-name>` resumes waiting. Ctrl-C exits with status 130 and
-SIGTERM with 143; a failed launch or a timeout exits 1. Network errors and
-Hub answers of 5xx, 408 or 429 are retried while waiting; any other 4xx (for
-example 401 or 403) stops the wait at once with the Hub's error, and the launch
-continues on the Hub. One exception: until the agent's status has been read
-once, a 403 or 404 is retried for up to 5 seconds while the Hub is still
-launching the agent (an asynchronous launch, or a start after a workspace
-upload). If an agent launcher still cannot read the new agent's status after
-that, the wait reports that the launch was accepted and its status is not
-readable with this credential's scope, and exits 1; the launch continues on the
-Hub. When the Hub has already finished the start and you wait with `--attach`,
-there is no retry: an agent launcher's 404 gives the same not-readable report
-at once. The agent is reported as deleted only on a 404 after its status was
-read, or, for a user's login, on a 404 before that: after the 5-second retry
-while the Hub is still launching the agent, and at once otherwise. If the
-agent's create did not complete (for example the image could not be pulled),
-the error shows the stored template and task. Delete the agent and create it
-again (`scion delete <agent-name>`, then `scion start` with the same template
-and task). If soft-delete retention is enabled on the Hub, the name stays
-reserved until the agent is deleted with force=true or purged; until then, use
-a new name. With `--format json`, `--attach` after a workspace upload attaches
+the wait stops: the launch continues on the Hub, and re-running `scion start
+<agent-name>` resumes waiting. When the Hub accepted the launch and the wait
+times out, `start` reports the agent as accepted and launching, says why it
+stopped following the launch, suggests `scion list` to check on it, and exits
+0, so a caller does not retry a launch that is under way (under `--format json`
+the result has status `success` and a `launchNote` detail). With `--attach`,
+which needs a running agent, a timeout exits 1. Ctrl-C exits with status 130
+and SIGTERM with 143; a rejected create, a failed launch or an agent deleted
+while launching exits 1. Network errors and Hub answers of 5xx, 408 or 429 are
+retried while waiting; any other 4xx (for example 401 or 403) stops the wait at
+once with the Hub's error, and the launch continues on the Hub. One exception:
+until the agent's status has been read once, a 403 or 404 is retried for up to
+5 seconds while the Hub is still launching the agent (an asynchronous launch,
+or a start after a workspace upload). If an agent launcher still cannot read
+the new agent's status after that, `start` reports that the launch was accepted
+and its status is not readable with this credential's scope, and exits 0 like a
+timeout (1 with `--attach`); the launch continues on the Hub. When the Hub has
+already finished the start and you wait with `--attach`, there is no retry: an
+agent launcher's 404 gives the same not-readable report at once, and exits 1.
+The agent is reported as deleted only on a 404 after its status was read that
+persists through a 5-second retry (or until the wait ends, if that is sooner),
+or, for a user's login, on a 404 before that: after the 5-second retry while
+the Hub is still launching the agent, and at once otherwise. If the agent's
+create did not complete (for example the image could not be pulled), the error
+shows the stored template and task. Delete the agent and create it again
+(`scion delete <agent-name>`, then `scion start` with the same template and
+task). If soft-delete retention is enabled on the Hub, the name stays reserved
+until the agent is deleted with force=true or purged; until then, use a new
+name. With `--format json`, `--attach` after a workspace upload attaches
 without printing the JSON result.
 
 ### `scion create`
