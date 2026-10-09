@@ -556,9 +556,10 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	if projectID := query.Get("projectId"); projectID != "" {
 		filter["scion.project_id"] = projectID
 	}
-	if status := query.Get("status"); status != "" {
-		filter["status"] = status
-	}
+	// The status query matches the agent's Phase after listing. It is not
+	// a runtime label filter: containers carry no status label, so passing
+	// it to the runtimes would match nothing (ptone/scion#3020).
+	status := query.Get("status")
 
 	agents, err := s.manager.List(ctx, filter)
 	if err != nil {
@@ -595,6 +596,16 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 				agents = append(agents, ag)
 			}
 		}
+	}
+
+	if status != "" {
+		matched := make([]api.AgentInfo, 0, len(agents))
+		for _, ag := range agents {
+			if strings.EqualFold(ag.Phase, status) {
+				matched = append(matched, ag)
+			}
+		}
+		agents = matched
 	}
 
 	// Convert to API response format

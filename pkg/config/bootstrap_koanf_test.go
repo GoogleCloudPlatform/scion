@@ -17,7 +17,10 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
+	"time"
 )
 
 // TestLoadSeedEnvKoanf verifies that LoadSeedEnvKoanf loads SCION_SEED_*
@@ -109,6 +112,37 @@ func TestServerEnvToOpsettingsKey(t *testing.T) {
 		{"DEFAULTTEMPLATE", "default_template"},
 		{"DEFAULTMAXTURNS", "default_max_turns"},
 		{"IMAGEREGISTRY", "image_registry"},
+		// ptone/scion#3836: federation is a server sub-key, and the
+		// project_defaults / harness_configs segments map to snake_case.
+		{"FEDERATION_ENABLED", "server.federation.enabled"},
+		{"FEDERATION_ALGORITHMS", "server.federation.algorithms"},
+		{"FEDERATION_REFRESHINTERVAL", "server.federation.refresh_interval"},
+		{"FEDERATION_DEBOUNCEINTERVAL", "server.federation.debounce_interval"},
+		{"PROJECTDEFAULTS_DEFAULTSCRATCHPAD", "project_defaults.default_scratchpad"},
+		{"HARNESSCONFIGS", "harness_configs"},
+		{"HARNESSCONFIGS_CLAUDE_IMAGE", "harness_configs.claude.image"},
+		{"HARNESSCONFIGS_CLAUDE_IMAGEPULLPOLICY", "harness_configs.claude.image_pull_policy"},
+		{"HARNESSCONFIGS_CLAUDE_TASKFLAG", "harness_configs.claude.task_flag"},
+		{"HARNESSCONFIGS_CLAUDE_AUTHSELECTEDTYPE", "harness_configs.claude.auth_selected_type"},
+		{"HARNESSCONFIGS_CLAUDE_MODELALIASES", "harness_configs.claude.model_aliases"},
+		{"HARNESSCONFIGS_CLAUDE_CONFIGDIR", "harness_configs.claude.config_dir"},
+		{"HARNESSCONFIGS_CLAUDE_SKILLSDIR", "harness_configs.claude.skills_dir"},
+		{"HARNESSCONFIGS_CLAUDE_INTERRUPTKEY", "harness_configs.claude.interrupt_key"},
+		{"HARNESSCONFIGS_CLAUDE_INTERRUPTSIGNAL", "harness_configs.claude.interrupt_signal"},
+		{"HARNESSCONFIGS_CLAUDE_INSTRUCTIONSFILE", "harness_configs.claude.instructions_file"},
+		{"HARNESSCONFIGS_CLAUDE_SYSTEMPROMPTFILE", "harness_configs.claude.system_prompt_file"},
+		{"HARNESSCONFIGS_CLAUDE_SYSTEMPROMPTMODE", "harness_configs.claude.system_prompt_mode"},
+		{"HARNESSCONFIGS_CLAUDE_ENVTEMPLATE", "harness_configs.claude.env_template"},
+		{"HARNESSCONFIGS_CLAUDE_NOAUTH", "harness_configs.claude.no_auth"},
+		// ptone/scion#3859: keys now mapped.
+		{"AGENTSECRETS_USERSCOPEONLY", "agent_secrets.user_scope_only"},
+		{"QUOTAS_ENFORCEBROKERQUOTAS", "quotas.enforce_broker_quotas"},
+		{"SHAREDDIRSTORAGE", "server.shared_dir_storage"},
+		{"HOMESTORAGE", "server.home_storage"},
+		{"MAINTENANCE", "server.maintenance"},
+		{"SCHEDULER", "server.scheduler"},
+		{"OIDCLOGIN_ENABLED", "server.oidc_login.enabled"},
+		{"OIDC", "server.oidc"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.envKey, func(t *testing.T) {
@@ -117,6 +151,98 @@ func TestServerEnvToOpsettingsKey(t *testing.T) {
 				t.Errorf("serverEnvToOpsettingsKey(%q) = %q, want %q", tt.envKey, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestSeedEnvToOpsettingsKey_MappedNames verifies SCION_SEED_* spellings,
+// which go through envKeyToOpsettingsKey with an explicit SERVER_ segment for
+// server keys: the federation, project_defaults and harness_configs keys
+// (ptone/scion#3836) and the remaining server keys (ptone/scion#3859).
+func TestSeedEnvToOpsettingsKey_MappedNames(t *testing.T) {
+	for envKey, want := range map[string]string{
+		"SERVER_FEDERATION_ENABLED":             "server.federation.enabled",
+		"SERVER_FEDERATION_REFRESHINTERVAL":     "server.federation.refresh_interval",
+		"PROJECTDEFAULTS_DEFAULTSCRATCHPAD":     "project_defaults.default_scratchpad",
+		"HARNESSCONFIGS_CLAUDE_IMAGE":           "harness_configs.claude.image",
+		"HARNESSCONFIGS_CLAUDE_IMAGEPULLPOLICY": "harness_configs.claude.image_pull_policy",
+		// ptone/scion#3859: keys now mapped.
+		"AGENTSECRETS_USERSCOPEONLY": "agent_secrets.user_scope_only",
+		"QUOTAS_ENFORCEBROKERQUOTAS": "quotas.enforce_broker_quotas",
+		"SERVER_SHAREDDIRSTORAGE":    "server.shared_dir_storage",
+		"SERVER_HOMESTORAGE":         "server.home_storage",
+		"SERVER_OIDCLOGIN_ENABLED":   "server.oidc_login.enabled",
+		// Unchanged existing mappings.
+		"SERVER_HUB_ADMINEMAILS":     "server.hub.admin_emails",
+		"AUTOEXPOSEPORTS_ENABLED":    "auto_expose_ports.enabled",
+		"SERVER_HUB_RECONNECTWINDOW": "server.hub.reconnect_window",
+	} {
+		if got := envKeyToOpsettingsKey(envKey); got != want {
+			t.Errorf("envKeyToOpsettingsKey(%q) = %q, want %q", envKey, got, want)
+		}
+	}
+}
+
+// TestServerEnvToOpsettingsKey_CoversEveryServerConfigKey checks that every
+// top-level V1ServerConfig koanf tag is a server sub-key and that its
+// flat-lowercased env segment maps back to it, so SCION_SERVER_<KEY>_* lands
+// under server.<key>.* (ptone/scion#3859).
+func TestServerEnvToOpsettingsKey_CoversEveryServerConfigKey(t *testing.T) {
+	typ := reflect.TypeOf(V1ServerConfig{})
+	for i := 0; i < typ.NumField(); i++ {
+		tag, _, _ := strings.Cut(typ.Field(i).Tag.Get("koanf"), ",")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		if !serverSubKeys[tag] {
+			t.Errorf("V1ServerConfig key %q is missing from serverSubKeys", tag)
+			continue
+		}
+		segment := strings.ToUpper(strings.ReplaceAll(tag, "_", ""))
+		if got, want := serverEnvToOpsettingsKey(segment+"_X"), "server."+tag+".x"; got != want {
+			t.Errorf("serverEnvToOpsettingsKey(%q) = %q, want %q", segment+"_X", got, want)
+		}
+	}
+}
+
+// TestLoadBootstrapKoanf_FederationAlgorithmsCommaSplit verifies that the
+// list-typed server.federation.algorithms set through SCION_SERVER_* reaches
+// bootstrap material as a list; the extracted section is checked in
+// opsettings (ptone/scion#3836).
+func TestLoadBootstrapKoanf_FederationAlgorithmsCommaSplit(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SCION_SERVER_FEDERATION_ALGORITHMS", "RS256,ES256")
+
+	k := LoadBootstrapKoanf()
+	if got := k.Strings("server.federation.algorithms"); len(got) != 2 || got[0] != "RS256" || got[1] != "ES256" {
+		t.Fatalf("server.federation.algorithms = %#v, want [RS256 ES256]", k.Get("server.federation.algorithms"))
+	}
+}
+
+// TestSeedAndServerEnv_AutoExposePorts verifies that the flat-lowercased
+// AUTOEXPOSEPORTS segment maps to the Layer-1 key auto_expose_ports.enabled
+// for both SCION_SEED_* and SCION_SERVER_*, and that the seed value reaches
+// bootstrap material (ptone/scion#3052).
+func TestSeedAndServerEnv_AutoExposePorts(t *testing.T) {
+	t.Setenv("SCION_SEED_AUTOEXPOSEPORTS_ENABLED", "true")
+	if k := LoadSeedEnvKoanf(); !k.Exists("auto_expose_ports.enabled") || !k.Bool("auto_expose_ports.enabled") {
+		t.Errorf("SCION_SEED_AUTOEXPOSEPORTS_ENABLED should map to auto_expose_ports.enabled=true; keys: %v", k.Keys())
+	}
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if k := LoadBootstrapKoanf(); !k.Bool("auto_expose_ports.enabled") {
+		t.Errorf("bootstrap material should carry auto_expose_ports.enabled=true from SCION_SEED_*; keys: %v", k.Keys())
+	}
+
+	if got := serverEnvToOpsettingsKey("AUTOEXPOSEPORTS_ENABLED"); got != "auto_expose_ports.enabled" {
+		t.Errorf("serverEnvToOpsettingsKey(AUTOEXPOSEPORTS_ENABLED) = %q, want auto_expose_ports.enabled", got)
 	}
 }
 
@@ -464,4 +590,244 @@ func indexOf(s string, c byte) int {
 		}
 	}
 	return -1
+}
+
+// writeConfigPathFixture writes ~/.scion/settings.yaml (global) and
+// <tmp>/cfg/settings.yaml (the --config directory) and returns both dirs.
+func writeConfigPathFixture(t *testing.T, global, cfg string) (scionDir, cfgDir string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	scionDir = filepath.Join(tmpDir, ".scion")
+	cfgDir = filepath.Join(tmpDir, "cfg")
+	for dir, content := range map[string]string{scionDir: global, cfgDir: cfg} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return scionDir, cfgDir
+}
+
+// assertStalledThresholdAgrees checks that LoadGlobalConfig (startup and the
+// file-mode reload) and LoadBootstrapKoanfWithConfigPath (DB-tier bootstrap)
+// resolve the Layer-1 key server.hub.stalled_threshold to the same value.
+func assertStalledThresholdAgrees(t *testing.T, configPath, want string) {
+	t.Helper()
+	gc, err := LoadGlobalConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadGlobalConfig(%q): %v", configPath, err)
+	}
+	if got := gc.Hub.StalledThreshold.String(); got != want {
+		t.Errorf("LoadGlobalConfig(%q): stalled_threshold = %s, want %s", configPath, got, want)
+	}
+	k := LoadBootstrapKoanfWithConfigPath(configPath)
+	d, err := time.ParseDuration(k.String("server.hub.stalled_threshold"))
+	if err != nil || d.String() != want {
+		t.Errorf("LoadBootstrapKoanfWithConfigPath(%q): stalled_threshold = %q, want %s",
+			configPath, k.String("server.hub.stalled_threshold"), want)
+	}
+}
+
+// When the global settings.yaml has a server key, LoadGlobalConfig ignores
+// the --config settings.yaml, so bootstrap must too (ptone/scion#3070).
+func TestLoadBootstrapKoanfWithConfigPath_GlobalServerKeyWins(t *testing.T) {
+	_, cfgDir := writeConfigPathFixture(t,
+		"schema_version: \"1\"\nimage_registry: global.example.com\nserver:\n  hub:\n    stalled_threshold: 5m\n",
+		"schema_version: \"1\"\nimage_registry: cfg.example.com\nserver:\n  hub:\n    stalled_threshold: 9m\n")
+
+	for _, path := range []string{cfgDir, filepath.Join(cfgDir, "settings.yaml")} {
+		assertStalledThresholdAgrees(t, path, "5m0s")
+		if got := LoadBootstrapKoanfWithConfigPath(path).String("image_registry"); got != "global.example.com" {
+			t.Errorf("%s: image_registry = %q, want global.example.com", path, got)
+		}
+	}
+}
+
+// When only the --config settings.yaml has a server key, LoadGlobalConfig
+// reads it, so bootstrap layers it over the global file; SCION_SERVER_*
+// stays on top (ptone/scion#3070).
+func TestLoadBootstrapKoanfWithConfigPath_ConfigServerKeyUsedWhenGlobalHasNone(t *testing.T) {
+	scionDir, cfgDir := writeConfigPathFixture(t,
+		"schema_version: \"1\"\nimage_registry: global.example.com\n",
+		"schema_version: \"1\"\nimage_registry: cfg.example.com\nserver:\n  hub:\n    stalled_threshold: 9m\n    public_url: https://cfg.example.com\n")
+	t.Setenv("SCION_SERVER_HUB_PUBLICURL", "https://env.example.com")
+
+	for _, path := range []string{cfgDir, filepath.Join(cfgDir, "settings.yaml")} {
+		assertStalledThresholdAgrees(t, path, "9m0s")
+		k := LoadBootstrapKoanfWithConfigPath(path)
+		if got := k.String("image_registry"); got != "cfg.example.com" {
+			t.Errorf("%s: image_registry = %q, want cfg.example.com from the --config file", path, got)
+		}
+		if got := k.String("server.hub.public_url"); got != "https://env.example.com" {
+			t.Errorf("%s: public_url = %q, want SCION_SERVER_* on top", path, got)
+		}
+	}
+
+	// No --config path, or one naming the global directory: global only.
+	for _, path := range []string{"", scionDir} {
+		if got := LoadBootstrapKoanfWithConfigPath(path).String("image_registry"); got != "global.example.com" {
+			t.Errorf("%q: image_registry = %q, want global.example.com", path, got)
+		}
+	}
+}
+
+// TestLoadBootstrapKoanfWithConfigPath_LegacyFile verifies that a --config
+// path naming a non-settings file is read as-is, as the legacy server
+// config loader reads it.
+func TestLoadBootstrapKoanfWithConfigPath_LegacyFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".scion"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	cfgFile := filepath.Join(tmpDir, "hub-config.yaml")
+	if err := os.WriteFile(cfgFile, []byte("image_registry: file.example.com\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadBootstrapKoanfWithConfigPath(cfgFile).String("image_registry"); got != "file.example.com" {
+		t.Errorf("image_registry = %q, want file.example.com", got)
+	}
+}
+
+// When the --config settings.yaml wins, LoadGlobalConfig takes the keys it
+// models (here quotas and default_timezone) only from that file, so a value
+// set only in the global settings.yaml must not reach bootstrap either. Keys
+// LoadGlobalConfig does not model (here image_registry) still come from the
+// global file, as the file-mode settings load reads them (ptone/scion#3070).
+func TestLoadBootstrapKoanfWithConfigPath_ConfigWinsDropsGlobalModelledKeys(t *testing.T) {
+	_, cfgDir := writeConfigPathFixture(t,
+		"schema_version: \"1\"\nimage_registry: global.example.com\ndefault_timezone: Europe/Paris\nquotas:\n  enforce_broker_quotas: false\n",
+		"schema_version: \"1\"\nserver:\n  hub:\n    stalled_threshold: 9m\n")
+
+	gc, err := LoadGlobalConfig(cfgDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := LoadBootstrapKoanfWithConfigPath(cfgDir)
+
+	if gc.EnforceBrokerQuotas != nil {
+		t.Errorf("LoadGlobalConfig: quotas.enforce_broker_quotas = %v, want unset", *gc.EnforceBrokerQuotas)
+	}
+	if k.Exists("quotas.enforce_broker_quotas") {
+		t.Errorf("bootstrap: quotas.enforce_broker_quotas = %v, want unset like LoadGlobalConfig", k.Get("quotas.enforce_broker_quotas"))
+	}
+	if gc.DefaultTimezone != "" || k.String("default_timezone") != "" {
+		t.Errorf("default_timezone: LoadGlobalConfig %q, bootstrap %q; want both unset", gc.DefaultTimezone, k.String("default_timezone"))
+	}
+
+	t.Chdir(filepath.Dir(cfgDir)) // no project settings from the working directory
+	vs, _, err := LoadEffectiveSettings("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := k.String("image_registry"); got != "global.example.com" || vs.ImageRegistry != got {
+		t.Errorf("image_registry: bootstrap %q, effective settings %q; want both global.example.com", got, vs.ImageRegistry)
+	}
+	assertStalledThresholdAgrees(t, cfgDir, "9m0s")
+}
+
+// topLevelSettingsSectionKeys must cover every key applyTopLevelSettingsSections
+// reads; it only sees listed keys, so a missing entry drops that setting.
+func TestApplyTopLevelSettingsSections_ReadsListedKeys(t *testing.T) {
+	raw := map[string]interface{}{
+		"telemetry":                 map[string]interface{}{"enabled": true},
+		"project_defaults":          map[string]interface{}{"default_scratchpad": false},
+		"quotas":                    map[string]interface{}{"enforce_broker_quotas": false},
+		"agent_secrets":             map[string]interface{}{"user_scope_only": true},
+		"default_harness_config":    "hc",
+		"default_timezone":          "Europe/Paris",
+		"default_gcp_identity_mode": "block",
+		"default_gcp_identity_service_account_id": "sa-1",
+	}
+	if len(raw) != len(topLevelSettingsSectionKeys) {
+		t.Fatalf("fixture covers %d keys, list has %d", len(raw), len(topLevelSettingsSectionKeys))
+	}
+	gc := &GlobalConfig{}
+	applyTopLevelSettingsSections(gc, raw)
+	if gc.TelemetryEnabled == nil || gc.DefaultScratchpad == nil || gc.EnforceBrokerQuotas == nil ||
+		gc.AgentSecretsUserScopeOnly == nil || gc.DefaultHarnessConfig != "hc" || gc.DefaultTimezone != "Europe/Paris" ||
+		gc.DefaultGCPIdentityMode != "block" || gc.DefaultGCPIdentityServiceAccountID != "sa-1" {
+		t.Errorf("applyTopLevelSettingsSections dropped a listed key: %+v", gc)
+	}
+}
+
+// sameDir treats a symlink to a directory as that directory, so a --config
+// path that reaches the global dir through a symlink is not layered twice.
+func TestSameDir_FollowsSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real")
+	if err := os.MkdirAll(real, 0755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	other := filepath.Join(dir, "other")
+	if err := os.MkdirAll(other, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if !sameDir(link, real) {
+		t.Errorf("sameDir(%q, %q) = false, want true", link, real)
+	}
+	if sameDir(other, real) {
+		t.Errorf("sameDir(%q, %q) = true, want false", other, real)
+	}
+	// Neither path exists: fall back to comparing cleaned absolute paths.
+	if missing := dir + "/missing"; !sameDir(missing, dir+"/sub/../missing") {
+		t.Errorf("sameDir should fall back to cleaned absolute paths for missing paths")
+	}
+}
+
+// In legacy mode (no server key in any settings.yaml), a --config file
+// inside the global dir is layered over the global server.yaml by
+// LoadGlobalConfig, so bootstrap must layer it too, whether the path names
+// the global dir directly or through a symlink (ptone/scion#3070).
+func TestLoadBootstrapKoanfWithConfigPath_LegacyFileInGlobalDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	scionDir := filepath.Join(tmpDir, ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scionDir, "server.yaml"), []byte("hub:\n  port: 1111\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scionDir, "custom.yaml"), []byte("hub:\n  port: 2222\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(tmpDir, "scion-link")
+	// A named file is layered over the global server.yaml; naming the
+	// global server.yaml itself re-loads it, which changes nothing.
+	type tc struct {
+		path string
+		want int
+	}
+	cases := []tc{
+		{filepath.Join(scionDir, "custom.yaml"), 2222},
+		{filepath.Join(scionDir, "server.yaml"), 1111},
+	}
+	if err := os.Symlink(scionDir, link); err == nil {
+		cases = append(cases,
+			tc{filepath.Join(link, "custom.yaml"), 2222},
+			tc{filepath.Join(link, "server.yaml"), 1111})
+	} else {
+		t.Logf("symlinks unavailable, skipping the symlinked spelling: %v", err)
+	}
+
+	for _, c := range cases {
+		gc, err := LoadGlobalConfig(c.path)
+		if err != nil {
+			t.Fatalf("LoadGlobalConfig(%q): %v", c.path, err)
+		}
+		if gc.Hub.Port != c.want {
+			t.Errorf("LoadGlobalConfig(%q): hub.port = %d, want %d", c.path, gc.Hub.Port, c.want)
+		}
+		if got := LoadBootstrapKoanfWithConfigPath(c.path).Int("hub.port"); got != gc.Hub.Port {
+			t.Errorf("LoadBootstrapKoanfWithConfigPath(%q): hub.port = %d, LoadGlobalConfig = %d; want them to agree", c.path, got, gc.Hub.Port)
+		}
+	}
 }

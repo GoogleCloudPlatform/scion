@@ -180,6 +180,21 @@ func (a *Aggregator) RecordModelEnd(inputTokens, outputTokens, cachedTokens, rea
 	a.tokensReasoning += reasoningTokens
 }
 
+// RecordUsage adds usage derived from native harness telemetry (see
+// SessionUsage): calls model/API calls and their token counts. It is the
+// native counterpart of RecordModelEnd; a harness feeds one or the other,
+// never both, so a call is counted once.
+func (a *Aggregator) RecordUsage(u SessionUsage) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.apiCallCount += int(u.Calls)
+	a.tokensInput += u.TokensInput
+	a.tokensOutput += u.TokensOutput
+	a.tokensCached += u.TokensCached
+	a.tokensReasoning += u.TokensReasoning
+}
+
 // RecordTurn records an agent turn (agent-end event).
 func (a *Aggregator) RecordTurn() {
 	a.mu.Lock()

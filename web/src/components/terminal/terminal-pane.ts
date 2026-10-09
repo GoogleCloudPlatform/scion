@@ -113,10 +113,10 @@ export class ScionTerminalPane extends LitElement {
   private reconnectInProgress = false;
 
   /**
-   * Derived from `connection ∈ {loading, connecting}` rather than
-   * `session.reconnecting`. `pending` clears once the WebSocket is
-   * constructed, before the handshake finishes, so it under-reports how
-   * long an attempt is actually running; connection state does not.
+   * True while `connection ∈ {loading, connecting}` or `session.reconnecting`.
+   * Connection state covers the attempt through the handshake (`pending`
+   * clears once the WebSocket is constructed); `session.reconnecting` adds
+   * the jitter wait before an automatic attempt after a 4503 close.
    */
   @state()
   private attempting = false;
@@ -1008,7 +1008,13 @@ export class ScionTerminalPane extends LitElement {
     this.error = this.metadataError ?? state.error;
     this.disconnectReason = state.disconnectReason;
     this.reconnectInProgress = this.ownedSession?.reconnecting ?? false;
-    this.attempting = state.connection === 'loading' || state.connection === 'connecting';
+    // Also true during the jitter wait before an automatic attempt
+    // (session.reconnecting), so the overlay says RECONNECTING... from the
+    // close through the redial.
+    this.attempting =
+      state.connection === 'loading' ||
+      state.connection === 'connecting' ||
+      this.reconnectInProgress;
     this.idle = state.connection === 'idle';
     this.reconnectFailed = state.reconnectFailed;
     this.reconnectFailedManual = state.reconnectFailedManual;
@@ -1920,8 +1926,8 @@ export class ScionTerminalPane extends LitElement {
   private get overlayTitle(): string {
     // While an attempt (automatic or manual) is running, the overlay always
     // shows "Reconnecting...", regardless of the reason that preceded it.
-    // Derived from connection state, not from session.reconnecting: `pending`
-    // clears once the socket is constructed, before the handshake finishes.
+    // Connection state covers the attempt through the handshake;
+    // session.reconnecting adds the jitter wait before an automatic attempt.
     if (this.attempting) return 'RECONNECTING...';
     switch (this.disconnectReason) {
       case 'auth-401':

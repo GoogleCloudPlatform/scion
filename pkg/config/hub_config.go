@@ -1068,46 +1068,19 @@ func LoadGlobalConfig(configPath string) (*GlobalConfig, error) {
 // loadGlobalConfigFromSettings attempts to load server config from settings.yaml files.
 // Returns (config, true) if settings.yaml had a server key, (nil, false) otherwise.
 func loadGlobalConfigFromSettings(configPath string) (*GlobalConfig, bool) {
-	// Check global settings.yaml
-	globalDir, err := GetGlobalDir()
-	if err != nil {
+	src := resolveServerSettingsSource(configPath)
+	if src.globalDir == "" || src.legacy {
 		return nil, false
 	}
-
-	gc, found := loadServerFromSettingsFile(globalDir)
-	if !found {
-		// Also check local path
-		if configPath != "" {
-			info, err := os.Stat(configPath)
-			if err == nil {
-				dir := configPath
-				if !info.IsDir() {
-					dir = filepath.Dir(configPath)
-				}
-				gc, found = loadServerFromSettingsFile(dir)
-			}
-		}
-	}
-
-	if !found {
-		return nil, false
-	}
+	globalDir := src.globalDir
+	gc := src.gc
 
 	// Emit deprecation warning if server.yaml also exists
 	if hasServerYAML(globalDir) {
 		fmt.Fprintf(os.Stderr, "Warning: Both settings.yaml (server key) and server.yaml exist in %s. Using settings.yaml. server.yaml is deprecated; move its contents under the server key in settings.yaml and remove it (ptone/scion#3116).\n", globalDir)
 	}
-	if configPath != "" {
-		info, err := os.Stat(configPath)
-		if err == nil {
-			dir := configPath
-			if !info.IsDir() {
-				dir = filepath.Dir(configPath)
-			}
-			if dir != globalDir && hasServerYAML(dir) {
-				fmt.Fprintf(os.Stderr, "Warning: Both settings.yaml (server key) and server.yaml exist in %s. Using settings.yaml. server.yaml is deprecated.\n", dir)
-			}
-		}
+	if dir := src.configDir; dir != "" && !sameDir(dir, globalDir) && hasServerYAML(dir) {
+		fmt.Fprintf(os.Stderr, "Warning: Both settings.yaml (server key) and server.yaml exist in %s. Using settings.yaml. server.yaml is deprecated.\n", dir)
 	}
 
 	// Apply environment variable overrides (SCION_SERVER_ prefix).
@@ -1123,6 +1096,84 @@ func loadGlobalConfigFromSettings(configPath string) (*GlobalConfig, bool) {
 	applyDatabasePoolDefaults(&gc.Database)
 
 	return gc, true
+}
+
+// serverSettingsSource is where the server's settings come from for a given
+// --config path. resolveServerSettingsSource is the single rule shared by
+// LoadGlobalConfig (startup and file-mode reload) and
+// LoadBootstrapKoanfWithConfigPath (DB-tier bootstrap), so both take the
+// server block and the top-level hub sections from the same settings.yaml
+// (ptone/scion#3070).
+type serverSettingsSource struct {
+	globalDir string // "" when the global dir cannot be resolved
+	configDir string // directory of configPath ("" when unset or missing)
+	// configFile is configPath when it names a file, else "".
+	configFile string
+	// settingsDir is the directory whose settings.yaml supplies the server
+	// block and the top-level hub sections: the global dir when its
+	// settings.yaml has a server key, else configDir when its settings.yaml
+	// has one. In legacy mode (no server key in either) it is the first of
+	// the two with a readable settings.yaml, as findTopLevelSettingsRaw
+	// reads it, or "" when neither has one.
+	settingsDir string
+	// legacy reports that neither settings.yaml has a server key, so the
+	// server block comes from server.yaml (loadGlobalConfigLegacy).
+	legacy bool
+	// gc is the server config parsed from settingsDir (nil in legacy mode).
+	gc *GlobalConfig
+}
+
+// configPathDir returns the directory of configPath (configPath itself when
+// it is a directory) and, when configPath names a file, that file. Both are
+// "" when configPath is empty or does not exist.
+func configPathDir(configPath string) (dir, file string) {
+	if configPath == "" {
+		return "", ""
+	}
+	info, err := os.Stat(configPath)
+	if err != nil {
+		return "", ""
+	}
+	if info.IsDir() {
+		return configPath, ""
+	}
+	return filepath.Dir(configPath), configPath
+}
+
+// resolveServerSettingsSource applies the --config resolution rule: the
+// global settings.yaml wins when it has a server key; the --config
+// directory's settings.yaml is used only when the global one has none.
+func resolveServerSettingsSource(configPath string) serverSettingsSource {
+	var src serverSettingsSource
+	if globalDir, err := GetGlobalDir(); err == nil {
+		src.globalDir = globalDir
+	}
+	src.configDir, src.configFile = configPathDir(configPath)
+
+	if src.globalDir != "" {
+		if gc, found := loadServerFromSettingsFile(src.globalDir); found {
+			src.settingsDir, src.gc = src.globalDir, gc
+			return src
+		}
+	}
+	if src.configDir != "" {
+		if gc, found := loadServerFromSettingsFile(src.configDir); found {
+			src.settingsDir, src.gc = src.configDir, gc
+			return src
+		}
+	}
+
+	src.legacy = true
+	for _, dir := range []string{src.globalDir, src.configDir} {
+		if dir == "" {
+			continue
+		}
+		if _, ok := readSettingsFileRaw(dir); ok {
+			src.settingsDir = dir
+			break
+		}
+	}
+	return src
 }
 
 // LegacyServerConfigSources returns the legacy server.yaml files the server
@@ -1145,13 +1196,12 @@ func LegacyServerConfigSources(configPath string) []string {
 // settingsHierarchySources, a resolved path already seen (e.g. configPath, or
 // the cwd it defaults to, is the global dir itself) is not listed twice.
 func serverConfigSources(configPath string) []string {
-	seen := make(map[string]struct{}, 2)
 	add := func(out []string, path string) []string {
-		clean := filepath.Clean(path)
-		if _, ok := seen[clean]; ok {
-			return out
+		for _, seen := range out {
+			if sameDir(seen, path) {
+				return out
+			}
 		}
-		seen[clean] = struct{}{}
 		return append(out, path)
 	}
 
@@ -1396,12 +1446,14 @@ func parseCommaSeparatedList(s string) []string {
 var snakeCaseFields = map[string]string{
 	// Layer-1 compound segments (from opsettings registry)
 	"adminemails":                "admin_emails",
+	"agentsecrets":               "agent_secrets",
 	"agentendpoint":              "agent_endpoint",
 	"agentrunscope":              "agent_run_scope",
 	"agentrunscopelegacyuntil":   "agent_run_scope_legacy_until",
 	"apibaseurl":                 "api_base_url",
 	"appid":                      "app_id",
 	"authorizeddomains":          "authorized_domains",
+	"autoexposeports":            "auto_expose_ports",
 	"autosuspendstalled":         "auto_suspend_stalled",
 	"cafile":                     "ca_file",
 	"defaultharnessconfig":       "default_harness_config",
@@ -1409,9 +1461,16 @@ var snakeCaseFields = map[string]string{
 	"defaultuserrole":            "default_user_role",
 	"defaultmaxmodelcalls":       "default_max_model_calls",
 	"defaultmaxturns":            "default_max_turns",
+	"enforcebrokerquotas":        "enforce_broker_quotas",
+	"defaultscratchpad":          "default_scratchpad",
 	"defaultresources":           "default_resources",
 	"defaulttemplate":            "default_template",
 	"githubapp":                  "github_app",
+	"homestorage":                "home_storage",
+	"oidclogin":                  "oidc_login",
+	"shareddirstorage":           "shared_dir_storage",
+	"userscopeonly":              "user_scope_only",
+	"harnessconfigs":             "harness_configs",
 	"hubname":                    "hub_name",
 	"imageregistry":              "image_registry",
 	"insecureskipverify":         "insecure_skip_verify",
@@ -1426,12 +1485,15 @@ var snakeCaseFields = map[string]string{
 	"peerserviceaccounts":        "peer_service_accounts",
 	"peeraudience":               "peer_audience",
 	"reconnectwindow":            "reconnect_window",
+	"refreshinterval":            "refresh_interval",
+	"debounceinterval":           "debounce_interval",
 	"authzrecheckinterval":       "authz_recheck_interval",
 	"lifetimecap":                "lifetime_cap",
 	"streamauthzmax":             "stream_authz_max",
 	"instanceid":                 "instance_id",
 	"notificationchannels":       "notification_channels",
 	"privatekeypath":             "private_key_path",
+	"projectdefaults":            "project_defaults",
 	"publicurl":                  "public_url",
 	"reportinterval":             "report_interval",
 	"respectdebugmode":           "respect_debug_mode",
@@ -1462,6 +1524,21 @@ var snakeCaseFields = map[string]string{
 	"readtimeout":             "read_timeout",
 	"workspacestorage":        "workspace_storage",
 	"writetimeout":            "write_timeout",
+	// harness_configs.<name>.* leaves (HarnessConfigEntry koanf tags,
+	// ptone/scion#3836)
+	"imagepullpolicy":  "image_pull_policy",
+	"taskflag":         "task_flag",
+	"authselectedtype": "auth_selected_type",
+	"modelaliases":     "model_aliases",
+	"configdir":        "config_dir",
+	"skillsdir":        "skills_dir",
+	"interruptkey":     "interrupt_key",
+	"interruptsignal":  "interrupt_signal",
+	"instructionsfile": "instructions_file",
+	"systempromptfile": "system_prompt_file",
+	"systempromptmode": "system_prompt_mode",
+	"envtemplate":      "env_template",
+	"noauth":           "no_auth",
 	// Maintenance (runtime-only, no yaml, but env detection still needs it)
 	"maintenancemessage": "maintenance_message",
 }
@@ -1587,7 +1664,9 @@ var serverSubKeys = map[string]bool{
 	"log_level": true, "log_format": true,
 	"notification_channels": true, "message_broker": true,
 	"native_chat": true, "plugins": true, "github_app": true,
-	"mode": true, "env": true,
+	"mode": true, "env": true, "federation": true,
+	"shared_dir_storage": true, "home_storage": true, "maintenance": true,
+	"scheduler": true, "oidc_login": true, "oidc": true,
 }
 
 // serverEnvToOpsettingsKey maps a SCION_SERVER_* env var key (after prefix
@@ -1683,6 +1762,20 @@ func LoadSeedEnvKoanf() *koanf.Koanf {
 // (e.g. server.hub.admin_emails, not hub.adminEmails). This ensures
 // ExtractSectionFromKoanf can find values from any layer.
 func LoadBootstrapKoanf() *koanf.Koanf {
+	return LoadBootstrapKoanfWithConfigPath("")
+}
+
+// LoadBootstrapKoanfWithConfigPath is LoadBootstrapKoanf for a server started
+// with --config. The --config location is resolved with LoadGlobalConfig's
+// rule (resolveServerSettingsSource), so the DB-tier bootstrap takes the keys
+// LoadGlobalConfig models from the same file as startup and the file-mode
+// reload (ptone/scion#3070). When the --config settings.yaml wins, the server
+// block and the top-level sections applyTopLevelSettingsSections reads
+// (topLevelSettingsSectionKeys) come only from it; other global keys that
+// LoadGlobalConfig does not model (image_registry, runtimes, profiles) still
+// come from the global settings.yaml, as they do in file mode. An empty
+// configPath, or one that resolves to the global directory, changes nothing.
+func LoadBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
 	k := koanf.New(".")
 
 	// 1. Coded defaults in the opsettings keyspace (server.* snake_case).
@@ -1726,12 +1819,23 @@ func LoadBootstrapKoanf() *koanf.Koanf {
 	if err != nil {
 		slog.Warn("LoadBootstrapKoanf: failed to resolve global settings directory", "error", err)
 	}
+	src := resolveServerSettingsSource(configPath)
 	if globalDir != "" {
-		if _, err := loadSettingsFile(k, globalDir); err != nil {
+		globalK := koanf.New(".")
+		if _, err := loadSettingsFile(globalK, globalDir); err != nil {
 			slog.Warn("LoadBootstrapKoanf: failed to load settings file", "dir", globalDir, "error", err)
 		}
+		if configSettingsWin(src, globalDir) {
+			// LoadGlobalConfig reads these only from the --config file.
+			globalK.Delete("server")
+			for _, key := range topLevelSettingsSectionKeys {
+				globalK.Delete(key)
+			}
+		}
+		_ = k.Merge(globalK)
 		loadServerConfigFile(k, globalDir)
 	}
+	loadConfigPathFiles(k, src, globalDir)
 
 	// 4. SCION_SERVER_* environment variables (highest precedence in bootstrap).
 	// Uses serverEnvToOpsettingsKey which re-adds the "server." prefix for keys
@@ -1744,6 +1848,86 @@ func LoadBootstrapKoanf() *koanf.Koanf {
 	splitCommaSeparatedKoanfKeys(k)
 
 	return k
+}
+
+// loadConfigPathFiles layers the --config location over k using the same
+// resolution rule as LoadGlobalConfig (resolveServerSettingsSource), so the
+// DB-tier bootstrap takes the server block and topLevelSettingsSectionKeys
+// from the same settings.yaml as the startup/file-mode load:
+//   - The global settings.yaml has a server key: it wins, and the --config
+//     location adds nothing.
+//   - The global settings.yaml has no server key and the --config
+//     directory's has one: that file is layered over the global one, from
+//     which the caller has removed the server block and the
+//     topLevelSettingsSectionKeys (see configSettingsWin).
+//   - Neither has a server key (legacy server.yaml): the --config
+//     directory's settings.yaml is layered only when there is no global
+//     settings.yaml (as findTopLevelSettingsRaw picks it), then the --config
+//     server.yaml, or the named file itself, as loadGlobalConfigLegacy
+//     layers it over the global server.yaml.
+//
+// When the --config directory is globalDir (sameDir, so symlinked spellings
+// count), its directory-level files are already loaded and are skipped; a
+// named legacy file inside it is still layered, as loadGlobalConfigLegacy
+// does.
+func loadConfigPathFiles(k *koanf.Koanf, src serverSettingsSource, globalDir string) {
+	if src.configDir == "" {
+		return
+	}
+	dirIsGlobal := globalDir != "" && sameDir(src.configDir, globalDir)
+	loadSettings := func() {
+		if _, err := loadSettingsFile(k, src.configDir); err != nil {
+			slog.Warn("LoadBootstrapKoanf: failed to load settings file", "dir", src.configDir, "error", err)
+		}
+	}
+	if !src.legacy {
+		if !dirIsGlobal && src.settingsDir == src.configDir {
+			loadSettings()
+		}
+		return
+	}
+	if !dirIsGlobal && src.settingsDir == src.configDir {
+		loadSettings()
+	}
+	if src.configFile == "" {
+		if !dirIsGlobal {
+			loadServerConfigFile(k, src.configDir)
+		}
+		return
+	}
+	switch filepath.Base(src.configFile) {
+	case "settings.yaml", "settings.yml", "settings.json":
+		// A settings file is never a legacy server config.
+	default:
+		if err := k.Load(file.Provider(src.configFile), yaml.Parser()); err != nil {
+			slog.Warn("LoadBootstrapKoanf: failed to load config file", "path", src.configFile, "error", err)
+		}
+	}
+}
+
+// configSettingsWin reports whether the --config directory's settings.yaml
+// supplies the server block and top-level hub sections instead of the global
+// one: the global file has no server key and the --config file has one.
+func configSettingsWin(src serverSettingsSource, globalDir string) bool {
+	return !src.legacy && src.configDir != "" && src.settingsDir == src.configDir &&
+		(globalDir == "" || !sameDir(src.configDir, globalDir))
+}
+
+// sameDir reports whether a and b name the same directory (or file): the
+// same file per os.SameFile when both exist (so a symlinked path matches its
+// target), else the same cleaned absolute path.
+func sameDir(a, b string) bool {
+	if fiA, errA := os.Stat(a); errA == nil {
+		if fiB, errB := os.Stat(b); errB == nil {
+			return os.SameFile(fiA, fiB)
+		}
+	}
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	if errA != nil || errB != nil {
+		return filepath.Clean(a) == filepath.Clean(b)
+	}
+	return absA == absB
 }
 
 // embeddedAgentDefaultsKoanfMap extracts default_template and
@@ -1791,6 +1975,7 @@ var commaSplitKoanfKeys = []string{
 	"server.auth.authorized_domains",
 	"server.hub.conduit.peer_service_accounts",
 	"server.hub.conduit.tcp_allowed_ports",
+	"server.federation.algorithms",
 }
 
 // envListConfigKeys are the GlobalConfig koanf keys (as mapped by
@@ -2082,25 +2267,12 @@ func readSettingsFileRaw(dir string) (map[string]interface{}, bool) {
 // server-less settings.yaml still contributes its top-level hub sections
 // (quotas, agent_secrets, default_timezone, ...; ptone/scion#2284).
 func findTopLevelSettingsRaw(configPath string) map[string]interface{} {
-	var dirs []string
-	if globalDir, err := GetGlobalDir(); err == nil && globalDir != "" {
-		dirs = append(dirs, globalDir)
+	src := resolveServerSettingsSource(configPath)
+	if src.settingsDir == "" {
+		return nil
 	}
-	if configPath != "" {
-		if info, err := os.Stat(configPath); err == nil {
-			dir := configPath
-			if !info.IsDir() {
-				dir = filepath.Dir(configPath)
-			}
-			dirs = append(dirs, dir)
-		}
-	}
-	for _, dir := range dirs {
-		if raw, ok := readSettingsFileRaw(dir); ok {
-			return raw
-		}
-	}
-	return nil
+	raw, _ := readSettingsFileRaw(src.settingsDir)
+	return raw
 }
 
 // decodeTopLevelSection decodes raw[key] into out (a pointer to a small
@@ -2136,13 +2308,35 @@ func topLevelTelemetryEnabled(raw map[string]interface{}) *bool {
 	return tel.Enabled
 }
 
+// topLevelSettingsSectionKeys are the top-level settings.yaml keys (outside
+// "server") that applyTopLevelSettingsSections reads. It sees only these keys,
+// so a key it reads must be listed here; LoadBootstrapKoanfWithConfigPath
+// uses the same list to take them from the --config file when that file wins.
+var topLevelSettingsSectionKeys = []string{
+	"telemetry",
+	"project_defaults",
+	"quotas",
+	"agent_secrets",
+	"default_harness_config",
+	"default_timezone",
+	"default_gcp_identity_mode",
+	"default_gcp_identity_service_account_id",
+}
+
 // applyTopLevelSettingsSections copies the hub-level settings that live at
-// the top level of settings.yaml (outside "server") onto gc: telemetry,
-// project_defaults, quotas, agent_secrets, default_harness_config,
-// default_timezone and default_gcp_identity_*. It runs whether or not the
-// file has a "server" key, so LoadGlobalConfig agrees with
-// LoadBootstrapKoanf, which loads the whole file.
+// the top level of settings.yaml (outside "server") onto gc: the keys in
+// topLevelSettingsSectionKeys. It runs whether or not the file has a
+// "server" key, so LoadGlobalConfig agrees with LoadBootstrapKoanf, which
+// loads the whole file.
 func applyTopLevelSettingsSections(gc *GlobalConfig, raw map[string]interface{}) {
+	listed := make(map[string]interface{}, len(topLevelSettingsSectionKeys))
+	for _, key := range topLevelSettingsSectionKeys {
+		if v, ok := raw[key]; ok {
+			listed[key] = v
+		}
+	}
+	raw = listed
+
 	// Also check for top-level "telemetry" section — it lives outside "server"
 	// in settings.yaml but controls the default telemetry opt-in for the Hub.
 	if telRaw, ok := raw["telemetry"]; ok && telRaw != nil {

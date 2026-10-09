@@ -42,11 +42,13 @@ var sectionSchemaDiffAllowList = map[string]string{
 	// the value is dropped when the doc decodes. Tracked in ptone/scion#3048.
 	"profiles.*.env: missing from root schema": "section-only key with no Go field; ptone/scion#3048",
 
-	// The gcp_iam keys have no definition in settings-v1.schema.json; the
-	// section schema is hand-written with the recognised values. Adding
-	// them to the root schema would also change settings.yaml validation.
-	"gcp_iam.gcp_iam_check_mode: missing from root schema at server.hub.gcp_iam_check_mode":                   "hand-written section schema; root schema has no definition",
-	"gcp_iam.gcp_iam_deny_unknown_policy: missing from root schema at server.hub.gcp_iam_deny_unknown_policy": "hand-written section schema; root schema has no definition",
+	// The gcp_iam section schema is hand-written with the recognised values
+	// (a PUT with any other value is refused). settings-v1.schema.json
+	// documents the keys as plain strings with no enum, because the loader
+	// accepts any string: a set but unrecognised value takes the stricter
+	// value with a warning. An enum there would newly reject such files.
+	"gcp_iam.gcp_iam_check_mode: enum [enforce off], root []":                    "section stricter than root; the loader accepts any string",
+	"gcp_iam.gcp_iam_deny_unknown_policy: enum [fail-closed fail-open], root []": "section stricter than root; the loader accepts any string",
 }
 
 // TestSectionSchemas_MatchRootSchema checks every Layer-1 section schema
