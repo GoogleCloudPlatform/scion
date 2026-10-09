@@ -211,10 +211,16 @@ func (s *Service) adminArtifact(w http.ResponseWriter, r *http.Request, id strin
 		return b, nil, false
 	}
 	if !allowed {
-		writeError(w, http.StatusForbidden, "forbidden", "only the artifact's owner or an admin user may share or change it")
+		writeAdminForbidden(w)
 		return b, nil, false
 	}
 	return b, a, true
+}
+
+// writeAdminForbidden writes the 403 of a caller that may read an artifact
+// but not administer it.
+func writeAdminForbidden(w http.ResponseWriter) {
+	writeError(w, http.StatusForbidden, "forbidden", "only the artifact's owner or an admin user may share or change it")
 }
 
 // manageable reports whether the caller may administer a, which it can
