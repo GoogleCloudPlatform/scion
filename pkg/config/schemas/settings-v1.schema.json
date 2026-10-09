@@ -613,6 +613,12 @@
             "maxLength": 253
           },
           "description": "Maps a lowercase GCP service account email to the Kubernetes ServiceAccount (KSA) name it is bound to via Workload Identity, for GCP identity mode 'assign' on the Kubernetes runtime. Scion does not create, annotate, or bind the KSA; it must already be pre-provisioned by the operator. Only settings the broker itself resolves (this runtime entry, or a same-keyed entry in a profile defined in the same operator-controlled settings) are consulted; a project's own settings.yaml cannot add or override entries here. A same-keyed entry in the active profile overrides this one."
+        },
+        "kubernetes_block_service_account": {
+          "type": "string",
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+          "maxLength": 253,
+          "description": "Kubernetes only. The Kubernetes ServiceAccount (KSA) a pod runs as when its GCP identity mode resolves to 'block'. It must be a dedicated KSA the operator provisions with no Workload Identity annotation and no IAM grants, so it is zero-privilege; Scion does not create or check it. Empty or unset means a block pod runs as the namespace's default ServiceAccount. Block pods also get automountServiceAccountToken false and a node selector for Workload Identity nodes. A profile value wins over this one. Read only from the broker's own operator-controlled settings."
         }
       },
       "additionalProperties": false
@@ -1119,6 +1125,12 @@
             "maxLength": 253
           },
           "description": "Per-profile override of runtimes.<name>.kubernetes_service_account_mappings: for a given GSA email key present here, the KSA name here wins over the runtime-level entry. Only consulted when this profile is defined in the broker's own operator-controlled settings, never from a project's settings.yaml."
+        },
+        "kubernetes_block_service_account": {
+          "type": "string",
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+          "maxLength": 253,
+          "description": "Per-profile override of runtimes.<name>.kubernetes_block_service_account: the Kubernetes ServiceAccount a GCP identity 'block' pod runs as for agents using this profile. Only consulted when this profile is defined in the broker's own operator-controlled settings, never from a project's settings.yaml."
         }
       },
       "additionalProperties": false
