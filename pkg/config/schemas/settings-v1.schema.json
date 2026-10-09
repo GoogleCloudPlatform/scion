@@ -157,6 +157,24 @@
           "description": "Operate in local-only mode even when Hub is configured.",
           "x-env-var": "SCION_HUB_LOCAL_ONLY",
           "x-since": "1"
+        },
+        "transport": {
+          "type": "object",
+          "description": "Transport-layer auth for reaching a Hub behind a platform guard (IAP, Cloud Run invoker IAM). Kept when a legacy settings file is migrated.",
+          "x-since": "1",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "description": "Transport auth mode: iap or cloudrun_invoker.",
+              "x-since": "1"
+            },
+            "audience": {
+              "type": "string",
+              "description": "OIDC audience (typically the IAP OAuth client ID).",
+              "x-since": "1"
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
@@ -179,6 +197,11 @@
           "default": false,
           "description": "Disable interactive prompts (useful for CI/scripts).",
           "x-env-var": "SCION_CLI_INTERACTIVE_DISABLED",
+          "x-since": "1"
+        },
+        "mode": {
+          "type": "string",
+          "description": "CLI mode (human, assistant or agent); SCION_CLI_MODE takes precedence. Kept when a legacy settings file is migrated.",
           "x-since": "1"
         }
       },
@@ -363,6 +386,29 @@
       "description": "Workspace directory for a project whose .scion directory lives outside the workspace (external projects).",
       "x-scope": "any",
       "x-since": "1"
+    },
+    "project_id": {
+      "type": "string",
+      "description": "Local project identifier from a legacy settings file, kept when it is migrated. hub.project_id takes precedence when set.",
+      "x-scope": "any",
+      "x-since": "1"
+    },
+    "hub_connections": {
+      "type": "object",
+      "description": "Named Hub connections for a Runtime Broker, keyed by connection name. Kept when a legacy settings file is migrated.",
+      "x-scope": "any",
+      "x-since": "1",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "description": "Hub API endpoint URL for this connection.",
+            "x-since": "1"
+          }
+        },
+        "additionalProperties": false
+      }
     },
     "shared_dirs": {
       "type": "array",
@@ -1029,6 +1075,14 @@
           "type": "string",
           "description": "Kubernetes only. Default size per shared-dir PVC under this profile (e.g. 10Gi). Wins over the runtime entry's value; a template or agent kubernetes.shared_dir_size wins over this."
         },
+        "clone_depth": {
+          "oneOf": [
+            { "type": "string", "pattern": "^(|full|[1-9][0-9]{0,8})$" },
+            { "type": "integer", "minimum": 1, "maximum": 999999999 },
+            { "type": "null" }
+          ],
+          "description": "Git clone depth for clone-per-agent workspaces of agents under this profile: \"full\" for a full (non-shallow) clone, or an integer N from 1 to 999999999 for a clone of depth N. A template or agent clone_depth wins over this. Unset (absent, null or \"\") keeps the default shallow (depth 1) clone."
+        },
         "safe_to_evict": {
           "type": "boolean",
           "description": "Kubernetes only. Set to false to add the cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\" annotation to agent pods under this profile (on GKE Autopilot this requests extended run duration). true is accepted and adds nothing. Wins over the runtime entry's value; a template or agent kubernetes.safeToEvict wins over this. Ignored, with a warning, on other runtimes."
@@ -1314,6 +1368,12 @@
               "type": "string",
               "description": "Period of the re-check sweep of open user streams: a stream whose authorization was revoked is re-checked within one interval even if the revocation event is missed (e.g. '60s'; default '60s', between '1s' and '10m').",
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_AUTHZRECHECKINTERVAL",
+              "x-since": "1"
+            },
+            "lifetime_cap": {
+              "type": "string",
+              "description": "Platform lifetime cap of a conduit session (Cloud Run request timeout, load balancer or proxy limit). The relay sends GoAway 60s before it and closes streams still open with 4503 relay_restart by the cap (e.g. '3500s'; default '3500s', between '90s' and '24h').",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_LIFETIMECAP",
               "x-since": "1"
             },
             "stream_authz_max": {

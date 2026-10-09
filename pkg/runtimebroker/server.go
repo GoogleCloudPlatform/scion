@@ -241,9 +241,9 @@ type Server struct {
 	mu         sync.RWMutex
 	startTime  time.Time
 
-	// workspaceDownload replaces gcp.SyncFromGCS for downloading a workspace
-	// upload (the create-time bootstrap and handleWorkspaceApply) when set
-	// (see SetWorkspaceDownloader).
+	// workspaceDownload replaces gcp.SyncFromGCS for the GCS workspace
+	// bootstrap (create-time and handleWorkspaceApply) when set (see
+	// SetWorkspaceDownloader).
 	workspaceDownload func(ctx context.Context, bucket, prefix, localPath string) error
 	version           string
 

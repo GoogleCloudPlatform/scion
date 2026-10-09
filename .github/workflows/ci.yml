@@ -214,6 +214,26 @@ jobs:
       - name: Check Conversation Upsert Guard
         run: ./hack/check-conversation-upsert-guard.sh
 
+      - name: Check Hub Store Reassignment Guard
+        run: |
+          set +e
+          ./hack/check-hub-store-reassign.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=Hub store reassignment NOT checked::check-hub-store-reassign --self-test failed (exit $rc) — the guard itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
+          ./hack/check-hub-store-reassign.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 1 ]; then
+            echo "::error title=Hub store reassignment::pkg/hub test srv.store reassignments do not match hack/hub-store-reassign-baseline.txt (ptone/scion#3435). For a new reassignment, use installStoreFault / testServerWithStoreFault from pkg/hub/store_fault_helpers_test.go; if call sites were removed, lower the baseline. Details are in the step log."
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error title=Hub store reassignment NOT checked::check-hub-store-reassign could not run (exit $rc) — nothing was analysed."
+          fi
+          exit "$rc"
+
       - name: Check Harness Coverage in Cloud Build Configs
         run: |
           # Invoked directly rather than via a Makefile target, for the same
@@ -729,14 +749,28 @@ jobs:
             exit 1
           fi
 
+      # The step above lints check-cloud-init.sh as a file but never runs it,
+      # so the cloud-init runcmd body (which executes under /bin/sh, not bash)
+      # went unchecked (ptone/scion#1769). Running the script extracts runcmd
+      # and lints it with `shellcheck -s sh`; a bash-only construct such as
+      # `&>` (SC3020) in runcmd fails this step.
+      - name: Check cloud-init runcmd is POSIX sh
+        if: ${{ !cancelled() }}
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update && sudo apt-get install -y python3-yaml; }
+          ./scripts/single-node-vm/check-cloud-init.sh
+
       - name: Check for bare MethodNotAllowed calls
         # Blocking (ptone/scion#2421). Formerly the reporting-only "Lint 405
         # Allow header (reporting only)" job, folded in here to save a runner
         # spin-up (ptone/scion#2845); the logic now lives in
         # hack/check-method-not-allowed.sh and covers pkg/hub and
-        # pkg/runtimebroker. It is a step, not a separate check, so it adds no
-        # check name. !cancelled() runs it even when Run shellcheck above
-        # failed, so both results show on one run.
+        # pkg/runtimebroker (bare helper calls) plus pkg/sciontool,
+        # extras/docs-agent and extras/scion-telegram (direct
+        # StatusMethodNotAllowed writes without Allow, ptone/scion#2858).
+        # It is a step, not a separate check, so it adds no check name.
+        # !cancelled() runs it even when Run shellcheck above failed, so
+        # both results show on one run.
         #
         # Invoked directly rather than via `make check-method-not-allowed`,
         # for the same reason as Check Authorization Guards in Build & Test:
@@ -768,7 +802,7 @@ jobs:
           set -e
           case "$rc" in
             0) ;;
-            1) echo "::error title=405 Allow header::Bare MethodNotAllowed(w) calls found: a 405 must carry an Allow header (RFC 9110 15.5.6). Pass the accepted methods, e.g. MethodNotAllowed(w, http.MethodGet). The file:line list is in the step log above." ;;
+            1) echo "::error title=405 Allow header::405 responses without an Allow header found (RFC 9110 15.5.6): pass the accepted methods to MethodNotAllowed, e.g. MethodNotAllowed(w, http.MethodGet), or set w.Header().Set(\"Allow\", ...) before writing StatusMethodNotAllowed. The file:line list is in the step log above." ;;
             *) echo "::error title=405 Allow header NOT checked::check-method-not-allowed could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure, not a statement about the codebase." ;;
           esac
           exit "$rc"

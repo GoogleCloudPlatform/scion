@@ -1247,8 +1247,8 @@ func TestAsyncCreate_ClaimLocallyCancelled_SendsNoTerminal(t *testing.T) {
 }
 
 // fakeWorkspaceSync replaces srv's workspace download for the test (through
-// SetWorkspaceDownloader, so per Server), recording each call's bucket and
-// storage path and returning err.
+// SetWorkspaceDownloader), recording each call's bucket and storage path and
+// returning err.
 type fakeWorkspaceSync struct {
 	mu    sync.Mutex
 	calls []fakeWorkspaceSyncCall
@@ -1425,8 +1425,8 @@ func TestCreateAgent_SyncGCSDownloadInvalidWorkspaceDir_Returns400(t *testing.T)
 	if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
 		t.Fatalf("decode error response: %v", err)
 	}
-	if !strings.HasPrefix(errResp.Error.Message, "Invalid workspace directory: ") {
-		t.Fatalf("message = %q, want the \"Invalid workspace directory: \" text", errResp.Error.Message)
+	if errResp.Error.Message != "Invalid workspace directory" {
+		t.Fatalf("message = %q, want the fixed \"Invalid workspace directory\" text", errResp.Error.Message)
 	}
 	assertNoOutsideWorkspace(t, outside)
 	if n := mgr.StartCallCount(); n != 0 {
@@ -1456,8 +1456,8 @@ func TestAsyncCreate_InvalidWorkspaceDir_Returns400BeforeAccept(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
 		t.Fatalf("decode error response: %v", err)
 	}
-	if !strings.HasPrefix(errResp.Error.Message, "Invalid workspace directory: ") {
-		t.Fatalf("message = %q, want the \"Invalid workspace directory: \" text", errResp.Error.Message)
+	if errResp.Error.Message != "Invalid workspace directory" {
+		t.Fatalf("message = %q, want the fixed \"Invalid workspace directory\" text", errResp.Error.Message)
 	}
 	// Registration happens before the 201, so a record for the key would
 	// mean the launch had been accepted.
