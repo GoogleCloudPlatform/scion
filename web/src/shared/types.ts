@@ -556,18 +556,90 @@ export interface TelemetryConfig {
 }
 
 /**
- * Inline configuration values set at agent creation time.
+ * The agent's inline config: every key of api.ScionConfig
+ * (pkg/api/types.go), as the hub returns it in appliedConfig.inlineConfig
+ * and accepts it in the agent PATCH body's `config` object.
  */
 export interface AgentInlineConfig {
+  harness?: string;
+  harness_config?: string;
+  default_harness_config?: string;
+  config_dir?: string;
+  env?: Record<string, string>;
+  volumes?: AgentVolumeMount[];
+  detached?: boolean | null;
+  command_args?: string[];
+  task_flag?: string;
+  model?: string;
+  thinking_level?: number | null;
+  kubernetes?: Record<string, unknown>;
+  auth_selectedType?: string;
+  resources?: AgentResourceSpec;
+  image?: string;
+  services?: AgentServiceSpec[];
+  mcp_servers?: Record<string, AgentMCPServerConfig>;
   max_turns?: number;
   max_model_calls?: number;
   max_duration?: string;
-  model?: string;
-  thinking_level?: number;
-  branch?: string;
-  task?: string;
-  image?: string;
+  hub?: { endpoint?: string };
   telemetry?: TelemetryConfig;
+  clone_depth?: string;
+  secrets?: AgentRequiredSecret[];
+  skills?: AgentSkillReference[];
+  agent_instructions?: string;
+  system_prompt?: string;
+  user?: string;
+  task?: string;
+  branch?: string;
+  explicit_workspace?: boolean;
+  empty_per_agent_workspace?: boolean;
+}
+
+export interface AgentVolumeMount {
+  source?: string;
+  target: string;
+  read_only?: boolean;
+  type?: string;
+  [key: string]: unknown;
+}
+
+export interface AgentResourceSpec {
+  requests?: { cpu?: string; memory?: string };
+  limits?: { cpu?: string; memory?: string };
+  disk?: string;
+}
+
+export interface AgentServiceSpec {
+  name: string;
+  command: string[];
+  restart?: string;
+  env?: Record<string, string>;
+  ready_check?: { type: string; target: string; timeout: string };
+}
+
+export interface AgentMCPServerConfig {
+  transport: string;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+  scope?: string;
+}
+
+export interface AgentRequiredSecret {
+  key: string;
+  description?: string;
+  type?: string;
+  target?: string;
+  alternative_env_keys?: string[];
+}
+
+export interface AgentSkillReference {
+  uri: string;
+  as?: string;
+  optional?: boolean;
+  scope?: string;
 }
 
 export type SupportLevel = 'no' | 'partial' | 'yes';
@@ -602,25 +674,82 @@ export interface HarnessAdvancedCapabilities {
 }
 
 /**
- * Applied configuration snapshot captured at agent creation time.
+ * The agent's applied configuration (store.AgentAppliedConfig,
+ * pkg/store/models.go): what the hub dispatches at the agent's next start.
  */
 export interface AgentAppliedConfig {
   image?: string;
   harnessConfig?: string;
   harnessAuth?: string;
-  noAuth?: boolean;
+  env?: Record<string, string>;
   model?: string;
-  thinkingLevel?: number;
+  thinkingLevel?: number | null;
   profile?: string;
+  runtimeTarget?: string;
   task?: string;
   attach?: boolean;
+  branch?: string;
   workspace?: string;
-  creatorName?: string;
+  gitClone?: Record<string, unknown>;
   templateId?: string;
   templateHash?: string;
-  inlineConfig?: AgentInlineConfig;
-  gcpIdentity?: GCPIdentityConfig;
+  harnessConfigId?: string;
+  harnessConfigHash?: string;
+  harnessConfigSource?: string;
+  creatorName?: string;
+  hubAccessScopes?: string[];
   agentRole?: string;
+  inlineConfig?: AgentInlineConfig;
+  noAuth?: boolean;
+  gcpIdentity?: GCPIdentityConfig;
+  /** The agent's pinned container timezone (IANA name), if any. */
+  explicitTimezone?: string;
+  /** True when explicitTimezone was adopted from a TZ an older hub saved in env. */
+  explicitTimezoneLegacy?: boolean;
+  explicitTimezoneUnpinned?: boolean;
+  /** The requester's explicit inputs, which reincarnate re-derives from. */
+  createInputs?: {
+    inlineConfig?: AgentInlineConfig;
+    harnessConfig?: string;
+    harnessAuth?: string;
+    profile?: string;
+    thinkingLevel?: number | null;
+    noAuth?: boolean;
+    branch?: string;
+    workspace?: string;
+  };
+}
+
+/** Edit tier of an agent field (pkg/hub/agent_config_mutability.go). */
+export type AgentEditTier = 'T0' | 'T1' | 'T2' | 'T3' | 'TX';
+
+/** What happens to an edit of a field in the agent's current phase. */
+export type AgentEditDisposition = 'immediate' | 'now' | 'held' | 'reincarnate' | 'locked';
+
+/** One field's entry in AgentEditability. */
+export interface AgentFieldEditState {
+  tier: AgentEditTier;
+  disposition: AgentEditDisposition;
+  sessionSensitive?: boolean;
+  /** "session" for a session-sensitive field of a suspended agent. */
+  note?: string;
+  /** Clearing or zeroing the field takes effect only at the next reincarnation. */
+  clearNeedsReincarnate?: boolean;
+  /** Why a locked field is locked. */
+  reason?: string;
+}
+
+/** Per-field editability of an agent for the caller (GET /api/v1/agents/{id}). */
+export interface AgentEditability {
+  phase: string;
+  /** Keyed by wire key: "config.<json key>" or the top-level PATCH key. */
+  fields: Record<string, AgentFieldEditState>;
+}
+
+/** The agent PATCH response's disposition. */
+export interface AgentUpdateDisposition {
+  /** Wire keys the request wrote. */
+  applied: string[];
 }
 
 /**
@@ -698,6 +827,11 @@ export interface Agent {
   // Computed by the hub: provisioned but never asked to run
   // (ptone/scion#2929). Absent means false.
   provisionedOnly?: boolean;
+
+  // Per-field editability for the caller; set on the single-agent GET only.
+  editability?: AgentEditability;
+  // Optimistic-concurrency version; send it back with a PATCH.
+  stateVersion?: number;
 }
 
 /** `DeletionInfo.state` values the hub publishes (`finalizing` reads as `deleting`). */

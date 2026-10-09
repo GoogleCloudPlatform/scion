@@ -78,7 +78,7 @@ import '../shared/agent-message-viewer.js';
 import type { ScionAgentMessageViewer } from '../shared/agent-message-viewer.js';
 import '../shared/chat/chat-thread.js';
 import type { ScionChatThread } from '../shared/chat/chat-thread.js';
-import { isFeatureEnabled } from '../../utils/feature-flags.js';
+import { isFeatureEnabled, AGENT_EDIT_FLAG } from '../../utils/feature-flags.js';
 import '../shared/hash-display.js';
 import '../shared/quick-message-dialog.js';
 import '../shared/cascade-mode-dialog.js';
@@ -1560,6 +1560,20 @@ export class ScionPageAgentDetail extends LitElement {
                   <sl-button variant="default" size="small">
                     <sl-icon slot="prefix" name="sliders"></sl-icon>
                     Configure
+                  </sl-button>
+                </a>
+              `
+            : nothing}
+          ${isFeatureEnabled(AGENT_EDIT_FLAG) && can(agent._capabilities, 'update')
+            ? html`
+                <a
+                  href="/agents/${this.agentId}/edit"
+                  style="text-decoration: none;"
+                  data-testid="edit-agent"
+                >
+                  <sl-button variant="default" size="small">
+                    <sl-icon slot="prefix" name="pencil-square"></sl-icon>
+                    Edit
                   </sl-button>
                 </a>
               `
