@@ -522,9 +522,13 @@ func (s *Server) publishAgentStatusFresh(ctx context.Context, a *store.Agent) {
 // holds. It returns an error wrapping store.ErrDeleteInProgress when the row
 // is soft-deleted or deleteBlocksStart holds, so the dispatch row fails with
 // the delete_in_progress sentinel and the requester answers 409
-// delete_in_progress, as the synchronous start gate does. A failed delete
-// check also refuses: without the dispatch table an outstanding delete
-// intent cannot be ruled out.
+// delete_in_progress. For a row a delete holds, that is what the synchronous
+// start gate answers. For a soft-deleted row it is not: the synchronous gate
+// answers 409 conflict "agent is deleted; restore it first"
+// (agentDeletedRefusal), but the dispatch failure envelope has no
+// agent-deleted sentinel, so the queued path reports delete_in_progress. The
+// status code is the same. A failed delete check also refuses: without the
+// dispatch table an outstanding delete intent cannot be ruled out.
 func (s *Server) refuseQueuedStartForDelete(ctx context.Context, a *store.Agent, op string) error {
 	if !a.DeletedAt.IsZero() {
 		return fmt.Errorf("queued %s not applied: agent %s is deleted: %w", op, a.ID, store.ErrDeleteInProgress)

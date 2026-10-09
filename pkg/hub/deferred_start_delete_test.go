@@ -71,15 +71,20 @@ func softDeleteAgentRow(t *testing.T, s store.Store, agentID string) {
 }
 
 func TestExecDispatchStartRestart_RefusedWhileDeleting(t *testing.T) {
-	cases := []struct {
+	type refusalCase struct {
 		name string
 		mark func(t *testing.T, s store.Store, agentID string)
-	}{
-		{"deleting", func(t *testing.T, s store.Store, id string) { seedAgentDeletion(t, s, id, seedLiveDeleting) }},
-		{"finalizing", func(t *testing.T, s store.Store, id string) { seedAgentDeletion(t, s, id, seedExpiredFinalize) }},
-		{"in_doubt with outstanding delete intent", func(t *testing.T, s store.Store, id string) { seedAgentDeletion(t, s, id, seedInDoubtIntent) }},
-		{"soft-deleted", softDeleteAgentRow},
 	}
+	// Every marker in blockingSeeds, so a new blocking marker is covered
+	// here too, plus a soft-deleted row.
+	var cases []refusalCase
+	for _, seed := range blockingSeeds {
+		cases = append(cases, refusalCase{seed.name, func(t *testing.T, s store.Store, id string) {
+			seedAgentDeletion(t, s, id, seed)
+		}})
+	}
+	cases = append(cases, refusalCase{"soft-deleted", softDeleteAgentRow})
+	require.Len(t, cases, 6)
 	for i, tc := range cases {
 		for _, op := range []string{"start", "restart"} {
 			t.Run(tc.name+"/"+op, func(t *testing.T) {
