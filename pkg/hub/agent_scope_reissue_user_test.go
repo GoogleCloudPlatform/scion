@@ -68,9 +68,9 @@ func (f *reissueFixture) legacyUAT(t *testing.T, id string) (*store.UserAccessTo
 	require.NoError(t, f.store.CreateUserAccessToken(ctx, tok))
 	u, err := f.store.GetUser(ctx, f.userID)
 	require.NoError(t, err)
-	identity := NewScopedUserIdentityWithBoundaryAndDecoration(
+	identity := NewScopedUserIdentityWithBoundary(
 		NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, string(ClientTypeAPI)),
-		TokenBoundary{Kind: BoundaryKindProject, ProjectID: f.projectID}, tok.Scopes, tok.ID, tok.NormalizedCeiling(), nil)
+		TokenBoundary{Kind: BoundaryKindProject, ProjectID: f.projectID}, tok.Scopes, tok.ID, tok.NormalizedCeiling())
 	c, _, err := f.srv.authzService.sourceEffectCeiling(ctx, identity)
 	require.NoError(t, err)
 	return tok, c
