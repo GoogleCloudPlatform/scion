@@ -5144,7 +5144,10 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		// rollback compensates the committed create after a later step
 		// failed: the agent row is deleted, its edge deactivated with cause
 		// create_compensation, and an agent_create_dispatch_failed audit
-		// record written (cleanupFailedCreate).
+		// record written (cleanupFailedCreate). The row is removed only if
+		// no delete holds it (ptone/scion#3958); when one does, the row, its
+		// edge and its quotas are left to that delete and the fire fails
+		// with the same error as any other rollback.
 		rollback := func(rb createRollback) error {
 			rb.Agent = agent
 			rb.RuntimeBrokerID = runtimeBrokerID

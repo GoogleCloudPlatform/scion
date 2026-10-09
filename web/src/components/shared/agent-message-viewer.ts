@@ -659,7 +659,7 @@ export class ScionAgentMessageViewer extends LitElement {
     // UserMessageEvent payload (hub store record) per message.
     this.eventSource.addEventListener('message', (event: Event) => {
       try {
-        const msg = JSON.parse((event as MessageEvent).data) as Message;
+        const msg = JSON.parse((event as MessageEvent<string>).data) as Message;
         this.mergeHubMessages([msg]);
       } catch {
         // Skip unparseable entries
@@ -670,7 +670,7 @@ export class ScionAgentMessageViewer extends LitElement {
     // when explicitly opted in): emits "log" events with raw log entries.
     this.eventSource.addEventListener('log', (event: Event) => {
       try {
-        const entry = JSON.parse((event as MessageEvent).data) as MessageLogEntry;
+        const entry = JSON.parse((event as MessageEvent<string>).data) as MessageLogEntry;
         this.mergeEntries([entry]);
       } catch {
         // Skip unparseable entries
