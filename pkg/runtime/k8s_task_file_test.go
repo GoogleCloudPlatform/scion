@@ -26,10 +26,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// TestRun_HomeSyncCarriesTaskFile checks that the task file written to the
-// agent home (.scion/task.md) is copied into the pod's home by the home
-// sync, for plain and NFS homes, readable by the pod user, before the
-// startup gate lets the harness start.
+// TestRun_HomeSyncCarriesTaskFile checks that a task file at .scion/task.md
+// in the staging home is copied into the pod's home by the home sync, for
+// plain and NFS homes, readable by the pod user, before the startup gate
+// lets the harness start. The test writes the file itself, as Start does
+// before Run (the writer and its tests are in pkg/agent, which this
+// package cannot import), so it checks the sync, not the writer, and
+// passes without the task file change too.
 func TestRun_HomeSyncCarriesTaskFile(t *testing.T) {
 	requireTools(t, "tar", "sh")
 	// startFakeK8sPod looks for the pod in "default"; do not let the
