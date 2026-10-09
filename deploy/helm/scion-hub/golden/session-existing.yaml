@@ -118,12 +118,13 @@ data:
   # true unless config.existingSecret was set, because nothing the chart
   # rendered could satisfy the flag: the hub resolves a stable key from a
   # pre-configured key, then SharedSigningSecret, then a secret backend, then
-  # the store (pkg/hub/server.go:1445); SharedSigningSecret comes only from
-  # resolveSessionSecret (cmd/server_foreground.go:1452-1463), which reads
+  # the store (Server.ensureSigningKey, pkg/hub/server.go); SharedSigningSecret
+  # comes only from resolveSessionSecret (cmd/server_foreground.go), which reads
   # --session-secret, SCION_SERVER_SESSION_SECRET and bare SESSION_SECRET; the
   # chart rendered none of the three, and a first boot has an empty store. With
-  # true and no key, pkg/hub/server.go:1634 errors, pkg/hub/server.go:1008 makes
-  # it fatal, and cmd/server_foreground.go:259 turns it into log.Fatalf. Measured
+  # true and no key, Server.ensureSigningKey (pkg/hub/server.go) errors, New
+  # (pkg/hub/server.go) makes it fatal, and runServerStart
+  # (cmd/server_foreground.go) turns it into log.Fatalf. Measured
   # end-to-end through hub.New by gd-p1-dev, not inferred from the citations.
   #
   # WHAT MAKES true SAFE NOW IS NOT THIS DEFAULT - IT IS THAT THE SECRET IS
@@ -250,7 +251,7 @@ spec:
         app.kubernetes.io/part-of: scion
       annotations:
         scion.io/hub-id: "ci-session-existing"
-        checksum/env-config: a5129982fbf978f91fe3200ec6505e24f1b5abf41f72fd600603bd65cfd7c509
+        checksum/env-config: 5dea6cae7c1ea7088b56c4858aebeac9c610a872066bb3465184dbf939393912
         checksum/settings: 556186542ed0f83b2c9799a90bb4d28d9f7ebd16ea3f6bc53a1adb69336affce
     spec:
       serviceAccountName: scion-scion-hub

@@ -29,6 +29,7 @@ import { can } from '../../shared/types.js';
 import { describeSourceUrl, isTemplateSourceRefreshable } from '../../shared/source-url.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
+import '../shared/detail-header.js';
 import '../shared/file-browser.js';
 import '../shared/file-editor.js';
 import { TemplateFileBrowserDataSource } from '../shared/file-browser.js';
@@ -113,40 +114,6 @@ export class ScionPageTemplateDetail extends LitElement {
       color: var(--sl-color-primary-600);
     }
 
-    .template-header {
-      margin-bottom: 1.5rem;
-    }
-    .template-title {
-      display: flex;
-      align-items: flex-start;
-      gap: 0.75rem;
-      margin: 0 0 0.5rem;
-    }
-    .template-title > sl-icon {
-      flex-shrink: 0;
-      color: var(--sl-color-neutral-500);
-      font-size: 1.25rem;
-      /* Centre the icon on the first line of the name: (1.95rem h1 line box
-         - 1.25rem icon) / 2. */
-      margin-top: 0.35rem;
-    }
-    /* A long name wraps on its own line; the badges then follow on the next
-       line instead of floating beside a multi-line name. */
-    .header-title-text {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 0.5rem 0.75rem;
-      min-width: 0;
-    }
-    .template-title h1 {
-      margin: 0;
-      font-size: 1.5rem;
-      font-weight: 600;
-      line-height: 1.3;
-      min-width: 0;
-      overflow-wrap: anywhere;
-    }
     .harness-badge {
       display: inline-block;
       padding: 0.15rem 0.5rem;
@@ -167,18 +134,6 @@ export class ScionPageTemplateDetail extends LitElement {
       margin-top: 0.5rem;
       font-size: 0.75rem;
       color: var(--sl-color-neutral-500);
-    }
-    .template-heading {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 1rem;
-      flex-wrap: wrap;
-    }
-    .header-actions {
-      display: flex;
-      gap: 0.5rem;
-      flex-shrink: 0;
     }
     .template-meta-row {
       flex-wrap: wrap;
@@ -373,35 +328,13 @@ export class ScionPageTemplateDetail extends LitElement {
   private renderHeader() {
     const t = this.template!;
     return html`
-      <div class="template-header">
-        <div class="template-heading">
-          <div class="template-title">
-            <sl-icon name="file-earmark-code"></sl-icon>
-            <div class="header-title-text">
-              <h1>${t.displayName || t.name}</h1>
-              ${t.harness ? html`<span class="harness-badge">${t.harness}</span>` : ''}
-            </div>
-          </div>
-          ${isTemplateSourceRefreshable(t.sourceUrl)
-            ? html`
-                <div class="header-actions">
-                  <sl-button
-                    size="small"
-                    variant="default"
-                    class="refresh-from-source"
-                    @click=${() => void this.startReimport()}
-                    ?disabled=${this.reimportRunning}
-                    ?loading=${this.reimportRunning}
-                  >
-                    <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
-                    Refresh from Source
-                  </sl-button>
-                </div>
-              `
-            : nothing}
-        </div>
-        ${t.description ? html`<p class="template-description">${t.description}</p>` : ''}
-        <div class="template-meta-row">
+      <scion-detail-header heading=${t.displayName || t.name}>
+        <sl-icon slot="icon" name="file-earmark-code"></sl-icon>
+        ${t.harness ? html`<span class="harness-badge">${t.harness}</span>` : ''}
+        ${t.description
+          ? html`<p slot="meta" class="template-description">${t.description}</p>`
+          : ''}
+        <div slot="meta" class="template-meta-row">
           <span>Scope: ${t.scope}</span>
           <span>Status: ${t.status}</span>
           ${t.contentHash
@@ -422,12 +355,29 @@ export class ScionPageTemplateDetail extends LitElement {
             : ''}
         </div>
         ${this.reimportStatus
-          ? html`<p class="reimport-status success">${this.reimportStatus}</p>`
+          ? html`<p slot="meta" class="reimport-status success">${this.reimportStatus}</p>`
           : ''}
         ${this.reimportError
-          ? html`<p class="reimport-status error">${this.reimportError}</p>`
+          ? html`<p slot="meta" class="reimport-status error">${this.reimportError}</p>`
           : ''}
-      </div>
+        ${isTemplateSourceRefreshable(t.sourceUrl)
+          ? html`
+              <div slot="actions" class="header-actions">
+                <sl-button
+                  size="small"
+                  variant="default"
+                  class="refresh-from-source"
+                  @click=${() => void this.startReimport()}
+                  ?disabled=${this.reimportRunning}
+                  ?loading=${this.reimportRunning}
+                >
+                  <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
+                  Refresh from Source
+                </sl-button>
+              </div>
+            `
+          : nothing}
+      </scion-detail-header>
     `;
   }
 

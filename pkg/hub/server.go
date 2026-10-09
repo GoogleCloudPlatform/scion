@@ -135,6 +135,12 @@ type ServerConfig struct {
 	// open user streams (conduit.authz_recheck_interval; 0 = 60s). Only
 	// used behind the hub.conduit experiment.
 	ConduitAuthzRecheckInterval time.Duration
+	// ConduitUserStreamAuthzMax is the authorization interval of
+	// user-originated streams (conduit.stream_authz_max.user; 0 = 8h,
+	// negative disables the deadline, for tests): when a stream reaches
+	// it, the hub re-checks the user and renews or closes the stream.
+	// Only used behind the hub.conduit experiment.
+	ConduitUserStreamAuthzMax time.Duration
 	// AuthMode is the exclusive human auth mode: "oauth" (default), "proxy", "dev".
 	AuthMode string
 	// ProxyAuthenticator is the configured proxy authenticator (when AuthMode == "proxy").
@@ -1530,6 +1536,9 @@ type Server struct {
 
 	// Artifact store for the artifact_* tables (pkg/artifacts) — nil = artifacts unavailable.
 	artifactStore artifacts.Store
+	// artifactBlobSweeper keeps the blob sweep's position between passes
+	// of the artifact maintenance loop (its only user).
+	artifactBlobSweeper artifacts.BlobSweeper
 
 	// Chat notifier for human mention + DM received notifications (W6). Nil-safe.
 	chatNotifier *ChatNotifier
@@ -1620,6 +1629,11 @@ type Server struct {
 	// denyUnknownFailOpen is written with saAssignCheckMode under s.mu
 	// (applyGCPIAMSettingsLocked) and read lock-free by the checker.
 	denyUnknownFailOpen atomic.Bool
+	// saAssignCheckDiag is set while the assignment check cannot run because
+	// the hub's identity lacks the access it needs, and cleared once a
+	// check call succeeds or the check stops being enforced. Updated only
+	// by NoteSAAssignCheckCall. Shown on the admin health summary.
+	saAssignCheckDiag atomic.Pointer[saAssignCheckDiagnostic]
 	// gcpIAMStartup is the deploy-time pair of GCP permission-check
 	// settings, resolved once in New. A stored value that is absent or
 	// cannot be used resolves to it (resolveGCPIAMSettings).
@@ -5424,6 +5438,7 @@ func (s *Server) registerSchedulerHandlers() {
 	s.scheduler.RegisterRecurringSingleton("failed-message-retention", 60, store.LockFailedMessageRetention, s.failedMessageRetentionHandler())
 	s.scheduler.RegisterRecurringSingleton("exposed-ports-sweep", 5, store.LockExposedPortsSweep, s.exposedPortsSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("notification-dispatch-sweep", 5, store.LockNotificationDispatchSweep, s.notificationDispatchSweepHandler())
+	s.scheduler.RegisterRecurringSingleton("notification-orphan-gc", 60, store.LockNotificationOrphanGC, s.notificationOrphanGCHandler())
 	// Reconcile stale max_agents_per_broker reservations (ptone/scion#1963):
 	// runs immediately at tick 0 (startup) and then hourly, fixing rows left
 	// with released_at IS NULL by the pre-fix stop/suspend paths (or any
@@ -6077,6 +6092,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/project-defaults", s.guarded("/api/v1/admin/project-defaults", s.handleAdminProjectDefaults))
 	s.mux.HandleFunc("/api/v1/admin/messaging", s.guarded("/api/v1/admin/messaging", s.handleAdminMessaging))
 	s.mux.HandleFunc("/api/v1/admin/experiments", s.guarded("/api/v1/admin/experiments", s.handleAdminExperiments))
+	s.mux.HandleFunc("/api/v1/admin/profiling", s.guarded("/api/v1/admin/profiling", s.handleAdminProfiling))
 	s.mux.HandleFunc("/api/v1/admin/conduit/grant-keys/rotate", s.guarded("/api/v1/admin/conduit/grant-keys/rotate", s.handleAdminConduitGrantKeyRotate))
 	s.mux.HandleFunc("/api/v1/admin/agents/reset-auth-all", s.guarded("/api/v1/admin/agents/reset-auth-all", s.handleAdminResetAuthAll))
 	s.mux.HandleFunc("/api/v1/admin/delegation-adoption", s.guarded("/api/v1/admin/delegation-adoption", s.handleDelegationAdoption))
@@ -6173,6 +6189,9 @@ func (s *Server) registerRoutes() {
 
 	// Resolved experiments map for signed-in callers (ptone/scion#2217).
 	s.mux.HandleFunc("/api/v1/experiments", s.guarded("/api/v1/experiments", s.handleExperiments))
+
+	// Profiling switches the web client acts on, for signed-in callers.
+	s.mux.HandleFunc("/api/v1/profiling", s.guarded("/api/v1/profiling", s.handleProfiling))
 
 	// GitHub App integration endpoints: method-aware permission enforcement.
 	// Read operations use hub.github_app.read; mutations use hub.github_app.update.

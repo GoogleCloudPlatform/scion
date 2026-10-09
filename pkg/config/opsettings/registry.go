@@ -259,6 +259,15 @@ func init() {
 			KoanfPaths: nil,
 			New:        func() any { return &ArtifactsSettings{} },
 		},
+		{
+			// profiling is durable via DB but has no settings.yaml
+			// representation; it is written through PUT
+			// /api/v1/admin/profiling. Absent DB row = everything off.
+			// Seeding skips this section (KoanfPaths nil).
+			Name:       "profiling",
+			KoanfPaths: nil,
+			New:        func() any { return &ProfilingSettings{} },
+		},
 	}
 
 	ensureIndexes()
@@ -471,6 +480,15 @@ func compileSchemas() {
 		// stored document that breaks them is handled by Resolve (an invalid
 		// remote image value turns remote images off; any other invalid
 		// value disables the service).
+		// profiling schema is hand-written -- it is runtime/API-owned state
+		// with no $defs in settings-v1.schema.json (like messaging).
+		"profiling": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"readiness_marks": map[string]interface{}{"type": "boolean"},
+			},
+			"additionalProperties": false,
+		},
 		"artifacts": {
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -481,6 +499,7 @@ func compileSchemas() {
 				"default_retention_days":       map[string]interface{}{"type": "integer", "minimum": 0},
 				"link_default_ttl_hours":       map[string]interface{}{"type": "integer", "minimum": 1},
 				"link_max_ttl_hours":           map[string]interface{}{"type": "integer", "minimum": 1},
+				"gc_grace_hours":               map[string]interface{}{"type": "integer", "minimum": ArtifactsMinGCGraceHours},
 				"remote_images_enabled":        map[string]interface{}{"type": "boolean"},
 				"remote_image_max_count":       map[string]interface{}{"type": "integer", "minimum": 1},
 				"remote_image_max_bytes":       map[string]interface{}{"type": "integer", "minimum": 1},

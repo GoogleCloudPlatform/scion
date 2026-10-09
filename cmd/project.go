@@ -385,8 +385,8 @@ func getLocalBrokerInfo(settings *config.Settings) (brokerID, brokerName string)
 		}
 	}
 
-	// Get hostname for display
-	brokerName, _ = os.Hostname()
+	// Get the broker name for display: the configured name, else the hostname
+	brokerName = config.LocalBrokerName("")
 	if brokerName == "" {
 		if brokerID != "" && len(brokerID) >= 8 {
 			brokerName = brokerID[:8]

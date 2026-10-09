@@ -177,6 +177,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/experiments", RouteID: "experiments.resolved",
 		Classification: RouteAuthenticated,
 	},
+	"/api/v1/profiling": {
+		Pattern: "/api/v1/profiling", RouteID: "profiling.client",
+		Classification: RouteAuthenticated,
+	},
 	"/api/v1/auth/admin-status": {
 		Pattern: "/api/v1/auth/admin-status", RouteID: "auth.admin-status",
 		Classification: RouteAuthenticated,
@@ -756,6 +760,14 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteHubAdmin,
 		Permission:     "hub.experiments.update", Resource: "hub", Action: "update",
 	},
+	// Profiling switches (DB-only "profiling" section). Session only: no
+	// token reads or writes them.
+	"/api/v1/admin/profiling": {
+		Pattern: "/api/v1/admin/profiling", RouteID: "admin.profiling",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.config.update", Resource: "hub", Action: "update",
+		SessionOnly: authzop.ReasonHostOperations,
+	},
 	// Conduit grant key rotation, behind hub.conduit. Returns kids and
 	// timestamps only.
 	"/api/v1/admin/conduit/grant-keys/rotate": {
@@ -1198,7 +1210,7 @@ func (s *Server) routePermissionDecision(r *http.Request, meta RouteMetadata) ro
 	}
 	// D4 conversion: permission-based check via Decide. Routes that
 	// declare a Permission in their metadata are evaluated through the
-	// authorization pipeline, which preserves the super-admin bypass and
+	// authorization pipeline, which preserves super-admin access and
 	// enables scoped admin access through role bindings.
 	identity := GetIdentityFromContext(r.Context())
 	if identity == nil {
