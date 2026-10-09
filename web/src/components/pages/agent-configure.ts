@@ -185,6 +185,8 @@ function envMapsEqual(a: Record<string, string>, b: Record<string, string>): boo
 
 interface AppliedConfig {
   image?: string;
+  /** The agent's git branch, fixed once the worktree is provisioned. */
+  branch?: string;
   model?: string;
   thinkingLevel?: number | null;
   harnessConfig?: string;
@@ -861,7 +863,9 @@ export class ScionPageAgentConfigure extends LitElement {
     this.customModelId = derived.customId;
     this.thinkingLevel = ac?.thinkingLevel ?? ic?.thinking_level ?? null;
     this.image = ac?.image || ic?.image || '';
-    this.branch = ic?.branch || '';
+    // Read-only display: the live branch (AppliedConfig.Branch) is what the
+    // provisioned worktree actually uses; fall back to the inline value.
+    this.branch = ac?.branch || ic?.branch || '';
     this.containerUser = ic?.user || '';
     this.authMethod = ac?.harnessAuth || ic?.auth_selectedType || '';
     this.harnessConfig = ac?.harnessConfig || ic?.harness_config || '';
@@ -1045,7 +1049,12 @@ export class ScionPageAgentConfigure extends LitElement {
     // for `scion reincarnate` to restore. A harness-unsupported field is
     // still omitted entirely, since this page gives the user no way to view
     // or edit it in that case.
-    config.branch = this.branch;
+    //
+    // branch is deliberately never sent (ptone/scion#3984): this page only
+    // edits agents in "created" phase, which are already provisioned, so the
+    // worktree and its branch exist and no later transition would apply a
+    // changed value. The field is shown read-only instead, and the hub keeps
+    // the stored value when the key is absent.
     config.user = this.containerUser;
     config.agent_instructions = this.agentInstructions;
     if (!this.isUnsupported(caps?.prompts.system_prompt)) config.system_prompt = this.systemPrompt;
@@ -1602,12 +1611,14 @@ export class ScionPageAgentConfigure extends LitElement {
       <div class="form-field">
         <label>Branch</label>
         <sl-input
-          placeholder="Git branch for the agent"
+          data-testid="branch-input"
+          placeholder="Default branch"
           .value=${this.branch}
-          @sl-input=${(e: Event) => {
-            this.branch = (e.target as HTMLElement & { value: string }).value;
-          }}
+          readonly
         ></sl-input>
+        <div class="hint" data-testid="branch-hint">
+          Set at creation; recreate the agent to change it.
+        </div>
       </div>
 
       <div class="form-field">

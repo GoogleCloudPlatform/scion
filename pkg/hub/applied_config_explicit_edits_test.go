@@ -706,6 +706,46 @@ func TestApplyAgentUpdate_UntouchedSavePreservesExplicitTelemetryOptOut(t *testi
 		"an explicit telemetry opt-out must survive an untouched Save, not silently fall back to broker settings/template")
 }
 
+// TestApplyAgentUpdate_UntouchedSavePreservesInlineBranch pins
+// ptone/scion#3984: the configure page no longer sends "branch" (a
+// provisioned agent's worktree already fixes it), so a PATCH without the key
+// must keep the stored InlineConfig.Branch and the live branch, and must not
+// record anything into CreateInputs.
+func TestApplyAgentUpdate_UntouchedSavePreservesInlineBranch(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	ctx := context.Background()
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseCreated)
+		a.AppliedConfig.Model = "golden-model"
+		a.AppliedConfig.Branch = "feature/x"
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{
+			Model:  "golden-model",
+			Branch: "feature/x",
+		}
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{}
+	})
+
+	before, err := json.Marshal(agent.AppliedConfig.CreateInputs)
+	require.NoError(t, err)
+
+	body := configureUntouchedBody(t)
+	require.NotContains(t, body, "branch", "the configure page must not send branch")
+	rec := patchAgentConfig(t, srv, agent.ID, body)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	after, err := json.Marshal(updated.AppliedConfig.CreateInputs)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(before), string(after), "an untouched Save must leave CreateInputs alone")
+	assert.Equal(t, "feature/x", updated.AppliedConfig.Branch)
+	require.NotNil(t, updated.AppliedConfig.InlineConfig)
+	assert.Equal(t, "feature/x", updated.AppliedConfig.InlineConfig.Branch,
+		"an absent branch key must keep the stored inline branch, not blank it")
+}
+
 // TestApplyAgentUpdate_UntouchedSaveThenReincarnateKeepsLegacyAgentExplicitEnv
 // is R4-1's dedicated regression, the exact scenario options.md §5's test
 // plan and the "Legacy agent (no CI): No-op" edge case both depend on: an
