@@ -160,6 +160,12 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		// this self-reported status update will actually persist (post-guard,
 		// since the guard may clear status.Phase on a regression or while
 		// suspended) — ptone/scion#1963.
+		//
+		// This runs before the store write. If a reincarnation is claimed
+		// between the read above and that write, the store's Guard 0b drops
+		// the phase, so a reservation can be released for a phase that is
+		// never persisted. The periodic quota reconciler corrects the drift,
+		// as it does for the deletion guard's equivalent window.
 		s.reconcileBrokerQuotaOnPhaseChange(ctx, agent, oldPhase, status.Phase)
 	}
 

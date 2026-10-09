@@ -110,7 +110,11 @@ func TestAgentStore_UpdateAgentStatus_ReincarnationGuard(t *testing.T) {
 	})
 
 	for _, rs := range []string{store.ReincarnationStateNone, store.ReincarnationStateFailed} {
-		t.Run("not in flight "+rs+" with flag applies", func(t *testing.T) {
+		label := rs
+		if label == store.ReincarnationStateNone {
+			label = "none"
+		}
+		t.Run("not in flight "+label+" with flag applies", func(t *testing.T) {
 			before := seed(t, "rg-idle-"+rs, rs)
 			time.Sleep(2 * time.Millisecond)
 			require.NoError(t, s.UpdateAgentStatus(ctx, before.ID, newReport(true)))
