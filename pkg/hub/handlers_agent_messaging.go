@@ -2065,6 +2065,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		convResult, convErr := messaging.ResolveOrCreateConversationByKey(
 			ctx, s.store, s.messageLog, req.ExternalRef, "group", &agent.ProjectID, keyOpts...)
 		if convErr != nil {
+			if externalRefOfOtherProject(convErr) {
+				logReferenceRefused(ctx, logging.RequestPath(r), reasonExternalRefOfOtherProject, GetIdentityFromContext(ctx))
+				writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
+				return
+			}
 			if s.writeDenyEnabled() {
 				messaging.WriteDenialMetrics.Inc("agent_msg.phase11")
 				s.messageLog.Error("conversation resolution failed", "error", convErr)

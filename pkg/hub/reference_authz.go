@@ -50,6 +50,19 @@ func logReferenceRefused(ctx context.Context, route, reason string, caller Ident
 	)
 }
 
+// reasonExternalRefOfOtherProject is the logged reason when an external
+// chat reference already names a conversation of another project.
+const reasonExternalRefOfOtherProject = "external reference names a conversation of another project"
+
+// externalRefOfOtherProject reports whether a conversation resolution error
+// is the store keeping an existing conversation in the project it was created
+// with. Such a reference is never reused: the request is refused whatever the
+// write-deny setting, because continuing would deliver the message without
+// the conversation the reference names.
+func externalRefOfOtherProject(err error) bool {
+	return errors.Is(err, store.ErrConversationProjectMismatch)
+}
+
 // sameConversation reports whether msg belongs to the current conversation.
 // A match on either field is enough:
 //
