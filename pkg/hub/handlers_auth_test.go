@@ -1612,7 +1612,7 @@ func TestHandleAuthAdminStatus_CustomRole(t *testing.T) {
 
 // adminStatusForSystemRole creates a member user bound at system scope to the
 // given role definition and returns that user's admin-status response.
-func adminStatusForSystemRole(t *testing.T, srv *Server, s store.Store, name, roleDefinitionID string) AdminStatusResponse {
+func adminStatusForSystemRole(t *testing.T, srv *Server, s store.Store, name string, rd *store.RoleDefinition) AdminStatusResponse {
 	t.Helper()
 	ctx := context.Background()
 
@@ -1621,13 +1621,18 @@ func adminStatusForSystemRole(t *testing.T, srv *Server, s store.Store, name, ro
 	require.NoError(t, s.CreateUser(ctx, &store.User{
 		ID: userID, Email: email, DisplayName: name, Role: "member", Status: "active",
 	}))
+	// Only the system reconciler may create super-admin bindings.
+	createdBy := "test"
+	if rd.Name == store.SystemRoleSuperAdmin {
+		createdBy = store.SystemReconcileCreatedBy
+	}
 	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: roleDefinitionID,
+		RoleDefinitionID: rd.ID,
 		PrincipalType:    store.RoleBindingPrincipalUser,
 		PrincipalID:      userID,
 		ScopeType:        store.RoleScopeSystem,
 		ScopeID:          "",
-		CreatedBy:        "test",
+		CreatedBy:        createdBy,
 	})
 	require.NoError(t, err)
 
@@ -1662,7 +1667,7 @@ func TestHandleAuthAdminStatus_MemberWithOneSystemPermissionIsNotAdmin(t *testin
 	})
 	require.NoError(t, err)
 
-	resp := adminStatusForSystemRole(t, srv, s, "one-perm-member", role.ID)
+	resp := adminStatusForSystemRole(t, srv, s, "one-perm-member", role)
 
 	require.False(t, resp.IsAdmin, "a single system-scoped permission must not set isAdmin")
 	require.False(t, resp.IsSuperAdmin)
@@ -1676,7 +1681,7 @@ func TestHandleAuthAdminStatus_SuperAdminRoleBindingIsAdmin(t *testing.T) {
 	rd, err := s.GetRoleDefinitionByName(context.Background(), store.SystemRoleSuperAdmin, store.RoleScopeSystem)
 	require.NoError(t, err, "super-admin role definition must exist")
 
-	resp := adminStatusForSystemRole(t, srv, s, "super-admin-binding", rd.ID)
+	resp := adminStatusForSystemRole(t, srv, s, "super-admin-binding", rd)
 
 	require.True(t, resp.IsAdmin, "a super-admin role binding must set isAdmin")
 	require.NotEmpty(t, resp.Permissions)
