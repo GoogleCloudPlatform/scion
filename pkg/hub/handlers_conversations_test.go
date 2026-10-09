@@ -1257,7 +1257,9 @@ func TestAddParticipant_NotParticipant(t *testing.T) {
 	rr := httptest.NewRecorder()
 	srv.handleAddParticipant(rr, req, conv.ID)
 
-	require.Equal(t, http.StatusForbidden, rr.Code)
+	// A non-participant gets the same answer as for an unknown conversation.
+	require.Equal(t, http.StatusNotFound, rr.Code)
+	require.Contains(t, rr.Body.String(), "Conversation not found")
 }
 
 func TestAddParticipant_AlreadyExists(t *testing.T) {
@@ -1335,7 +1337,9 @@ func TestAddParticipant_CrossProjectAgent(t *testing.T) {
 	rr := httptest.NewRecorder()
 	srv.handleAddParticipant(rr, req, conv.ID)
 
-	require.Equal(t, http.StatusBadRequest, rr.Code, "body: %s", rr.Body.String())
+	// An agent of another project gets the same answer as an unknown agent.
+	require.Equal(t, http.StatusNotFound, rr.Code, "body: %s", rr.Body.String())
+	require.Contains(t, rr.Body.String(), "agent not found")
 }
 
 func TestAddParticipant_AgentNotFound(t *testing.T) {

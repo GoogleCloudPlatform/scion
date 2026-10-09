@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // conversationResponse wraps a conversation with its participants for API responses.
@@ -963,14 +964,16 @@ func (s *Server) handleAddParticipant(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	// Authorization: caller must be a participant.
+	// Authorization: caller must be a participant. Anyone else gets the
+	// same answer as for an unknown conversation; the reason is logged.
 	isParticipant, err := isConversationParticipant(ctx, s.store, id, identity.Type(), identity.ID())
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 	if !isParticipant {
-		Forbidden(w)
+		logReferenceRefused(ctx, logging.RequestPath(r), "caller is not a participant of the conversation", identity)
+		NotFound(w, "Conversation")
 		return
 	}
 
@@ -996,7 +999,11 @@ func (s *Server) handleAddParticipant(w http.ResponseWriter, r *http.Request, id
 	// it), but the rejection must be explicit.
 	conv, err := s.store.GetConversation(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "Conversation")
+		if errors.Is(err, store.ErrNotFound) {
+			NotFound(w, "Conversation")
+			return
+		}
+		writeErrorFromErr(w, err, "")
 		return
 	}
 	if conv.Kind == "direct" {
@@ -1004,14 +1011,15 @@ func (s *Server) handleAddParticipant(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	// Every caller needs read access to the conversation's project (for a
-	// group with no project, the participant rule above). A token also
-	// needs inbox:write for that project; a group with no project needs a
-	// hub boundary.
-	if !s.authorizeGroupConversationAccess(w, r, conv, ActionRead) {
+	// A token needs inbox:write for the conversation's project; a group
+	// with no project needs a hub boundary. Every caller then needs read
+	// access to the conversation's project (for a group with no project,
+	// the participant rule above); a caller without it gets the same answer
+	// as for an unknown conversation.
+	if cls == inboxCredentialToken && !s.authorizeTokenConversation(w, r, token, permInboxWrite, conv) {
 		return
 	}
-	if cls == inboxCredentialToken && !s.authorizeTokenConversation(w, r, token, permInboxWrite, conv) {
+	if !s.authorizeGroupConversationReadAsNotFound(w, r, conv) {
 		return
 	}
 
@@ -1030,8 +1038,11 @@ func (s *Server) handleAddParticipant(w http.ResponseWriter, r *http.Request, id
 			return
 		}
 
+		// An agent of another project gets the same answer as an
+		// unknown agent; the reason is logged.
 		if conv.ProjectID != nil && agent.ProjectID != *conv.ProjectID {
-			BadRequest(w, "agent does not belong to the conversation's project")
+			logReferenceRefused(ctx, logging.RequestPath(r), "agent belongs to another project than the conversation", identity)
+			writeError(w, http.StatusNotFound, "not_found", "agent not found", nil)
 			return
 		}
 	}

@@ -430,3 +430,87 @@ func TestConversationList_GroupReadLookupErrorOmitsRow(t *testing.T) {
 	assert.NotContains(t, got, groupA2)
 	assert.Contains(t, got, groupC, "groups of other projects are still listed")
 }
+
+// addParticipantAnswer posts an add-participant request as user.
+func (f *refFixture) addParticipantAnswer(t *testing.T, user *store.User, convID, kind, principalID string) refAnswer {
+	t.Helper()
+	rec := doRequestAsUser(t, f.srv, user, http.MethodPost, "/api/v1/conversations/"+convID+"/participants",
+		map[string]string{"principalKind": kind, "principalId": principalID})
+	return refAnswer{status: rec.Code, body: rec.Body.String()}
+}
+
+// agentOfB creates an agent in project B.
+func (f *refFixture) agentOfB(t *testing.T) *store.Agent {
+	t.Helper()
+	bb := &store.Agent{ID: tid("ref-agent-b"), ProjectID: f.projB.ID, Name: "bb", Slug: "bb",
+		Phase: "running", OwnerID: f.ub.ID, CreatedBy: f.ub.ID}
+	require.NoError(t, f.st.CreateAgent(context.Background(), bb))
+	return bb
+}
+
+// TestConversationAddParticipant_NonParticipantMatchesUnknownConversation:
+// a caller who is not a participant gets exactly the answer for an unknown
+// conversation ID.
+func TestConversationAddParticipant_NonParticipantMatchesUnknownConversation(t *testing.T) {
+	f := newRefFixture(t)
+	groupA := seedGroupConversation(t, f.st, f.projA.ID, "add-non-participant")
+	before := participantCount(t, f.st, groupA)
+
+	got := f.addParticipantAnswer(t, f.ub, groupA, "user", f.uc.ID)
+	unknown := f.addParticipantAnswer(t, f.ub, tid("add-unknown-conversation"), "user", f.uc.ID)
+	require.Equal(t, http.StatusNotFound, unknown.status, unknown.body)
+	requireSameAnswer(t, unknown, got)
+	assert.Equal(t, before, participantCount(t, f.st, groupA), "no participant row is written")
+}
+
+// TestConversationAddParticipant_UnreadableGroupMatchesUnknownConversation:
+// a participant who cannot read the group's project gets exactly the answer
+// for an unknown conversation ID.
+func TestConversationAddParticipant_UnreadableGroupMatchesUnknownConversation(t *testing.T) {
+	f := newRefFixture(t)
+	groupA := seedGroupConversation(t, f.st, f.projA.ID, "add-unreadable")
+	addUserParticipant(t, f.st, groupA, f.ub.ID)
+	before := participantCount(t, f.st, groupA)
+
+	got := f.addParticipantAnswer(t, f.ub, groupA, "user", f.uc.ID)
+	unknown := f.addParticipantAnswer(t, f.ub, tid("add-unknown-conversation"), "user", f.uc.ID)
+	require.Equal(t, http.StatusNotFound, unknown.status, unknown.body)
+	requireSameAnswer(t, unknown, got)
+	assert.Equal(t, before, participantCount(t, f.st, groupA), "no participant row is written")
+}
+
+// TestConversationAddParticipant_AgentOfOtherProjectMatchesUnknownAgent: an
+// agent of another project gets exactly the answer for an unknown agent ID,
+// and no participant row is written.
+func TestConversationAddParticipant_AgentOfOtherProjectMatchesUnknownAgent(t *testing.T) {
+	f := newRefFixture(t)
+	bb := f.agentOfB(t)
+	groupA := seedGroupConversation(t, f.st, f.projA.ID, "add-other-agent")
+	addUserParticipant(t, f.st, groupA, f.ua.ID)
+	before := participantCount(t, f.st, groupA)
+
+	got := f.addParticipantAnswer(t, f.ua, groupA, "agent", bb.ID)
+	unknown := f.addParticipantAnswer(t, f.ua, groupA, "agent", tid("add-unknown-agent"))
+	require.Equal(t, http.StatusNotFound, unknown.status, unknown.body)
+	requireSameAnswer(t, unknown, got)
+	assert.Equal(t, before, participantCount(t, f.st, groupA), "no participant row is written")
+
+	// The project's own agent is still added.
+	ok := f.addParticipantAnswer(t, f.ua, groupA, "agent", f.aa.ID)
+	require.Equal(t, http.StatusCreated, ok.status, ok.body)
+}
+
+// TestConversationAddParticipant_ReadCheckErrorRefuses: when the group read
+// check cannot be completed, the request is refused and nothing is written.
+func TestConversationAddParticipant_ReadCheckErrorRefuses(t *testing.T) {
+	f := newRefFixture(t)
+	groupA := seedGroupConversation(t, f.st, f.projA.ID, "add-read-error")
+	addUserParticipant(t, f.st, groupA, f.ua.ID)
+	before := participantCount(t, f.st, groupA)
+
+	f.faults.failGetProject = true
+	f.fault.Arm()
+	got := f.addParticipantAnswer(t, f.ua, groupA, "agent", f.aa.ID)
+	assert.GreaterOrEqual(t, got.status, http.StatusInternalServerError, got.body)
+	assert.Equal(t, before, participantCount(t, f.st, groupA), "no participant row is written")
+}

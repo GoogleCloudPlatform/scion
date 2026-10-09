@@ -507,6 +507,8 @@ func TestConversationLeaveToken_RequiresInboxWrite(t *testing.T) {
 // that project and an added user to be a current member of it; a token
 // also needs inbox:write for it. A group with no project keeps the
 // participant rule for a session and needs a hub boundary for a token.
+// A caller who cannot read the group gets the unknown-conversation answer
+// and an agent of another project the unknown-agent answer.
 func TestConversationAddParticipant_RequiresProjectReadAndMemberPrincipals(t *testing.T) {
 	f := newInboxFixture(t)
 	outsider := f.plainUser(t)
@@ -518,12 +520,12 @@ func TestConversationAddParticipant_RequiresProjectReadAndMemberPrincipals(t *te
 	// Project group: a session participant.
 	gA := f.group(t, f.projA, f.admin, outsider)
 	path := "/api/v1/conversations/" + gA.ID + "/participants"
-	assert.Equal(t, http.StatusForbidden, f.session(t, outsider, http.MethodPost, path, add("user", f.member)).Code,
-		"a participant without project:read on the conversation's project is refused")
+	assert.Equal(t, http.StatusNotFound, f.session(t, outsider, http.MethodPost, path, add("user", f.member)).Code,
+		"a participant without project:read on the conversation's project gets the unknown-conversation answer")
 	assert.Equal(t, http.StatusBadRequest, f.session(t, f.admin, http.MethodPost, path, add("user", outsider)).Code,
 		"a user who is not a member of the conversation's project cannot be added")
-	assert.Equal(t, http.StatusBadRequest, f.session(t, f.admin, http.MethodPost, path, add("agent", f.agentB.ID)).Code,
-		"an agent of another project cannot be added")
+	assert.Equal(t, http.StatusNotFound, f.session(t, f.admin, http.MethodPost, path, add("agent", f.agentB.ID)).Code,
+		"an agent of another project gets the unknown-agent answer")
 	assert.Equal(t, http.StatusCreated, f.session(t, f.admin, http.MethodPost, path, add("user", f.member)).Code)
 	assert.Equal(t, http.StatusCreated, f.session(t, f.admin, http.MethodPost, path, add("agent", f.agentA.ID)).Code)
 
@@ -533,7 +535,8 @@ func TestConversationAddParticipant_RequiresProjectReadAndMemberPrincipals(t *te
 	readOnly := f.mint(t, f.admin, projectBoundary(f.projA), "project:read")
 	assert.Equal(t, http.StatusForbidden, f.call(t, readOnly, http.MethodPost, path2, add("user", f.owner)).Code)
 	writeOnly := f.mint(t, f.admin, projectBoundary(f.projA), "inbox:write")
-	assert.Equal(t, http.StatusForbidden, f.call(t, writeOnly, http.MethodPost, path2, add("user", f.owner)).Code)
+	assert.Equal(t, http.StatusNotFound, f.call(t, writeOnly, http.MethodPost, path2, add("user", f.owner)).Code,
+		"a token that cannot read the project gets the unknown-conversation answer")
 	both := f.mint(t, f.admin, projectBoundary(f.projA), "project:read", "inbox:write")
 	assert.Equal(t, http.StatusCreated, f.call(t, both, http.MethodPost, path2, add("user", f.owner)).Code)
 
@@ -547,8 +550,8 @@ func TestConversationAddParticipant_RequiresProjectReadAndMemberPrincipals(t *te
 	assert.Equal(t, http.StatusCreated, f.call(t, hubTok, http.MethodPost, pathNone, add("user", outsider)).Code)
 	assert.Equal(t, http.StatusCreated, f.session(t, f.admin, http.MethodPost, pathNone, add("user", f.member)).Code,
 		"a session participant keeps the participant rule")
-	assert.Equal(t, http.StatusForbidden, f.session(t, f.owner, http.MethodPost, pathNone, add("user", f.member)).Code,
-		"a session that is not a participant is refused")
+	assert.Equal(t, http.StatusNotFound, f.session(t, f.owner, http.MethodPost, pathNone, add("user", f.member)).Code,
+		"a session that is not a participant gets the unknown-conversation answer")
 }
 
 func resolveResponse(t *testing.T, rec *httptest.ResponseRecorder) conversationResolveResponse {

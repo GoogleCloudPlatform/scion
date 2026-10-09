@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // This file holds the checks for references carried inside chat content: a
@@ -345,4 +346,24 @@ func (m *groupReadMemo) canRead(ctx context.Context, conv *store.Conversation) b
 		m.byProject[projectID] = allowed
 	}
 	return allowed
+}
+
+// authorizeGroupConversationReadAsNotFound reports whether the caller may
+// read conv (canReadGroupConversation). A caller who may not gets the same
+// answer as for an unknown conversation; the reason is logged. A store error
+// is written as that error and refuses.
+func (s *Server) authorizeGroupConversationReadAsNotFound(w http.ResponseWriter, r *http.Request, conv *store.Conversation) bool {
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	allowed, err := s.canReadGroupConversation(ctx, identity, conv)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+	if !allowed {
+		logReferenceRefused(ctx, logging.RequestPath(r), "caller cannot read the group conversation", identity)
+		NotFound(w, "Conversation")
+		return false
+	}
+	return true
 }
