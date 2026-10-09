@@ -3330,6 +3330,10 @@ const (
 	// EdgeDeactivationAdoptionReverted marks an adopted edge deactivated by
 	// an adoption revert.
 	EdgeDeactivationAdoptionReverted EdgeDeactivationCause = "adoption_reverted"
+	// EdgeDeactivationScopeReissueReplaced marks an edge replaced by an
+	// operator scope re-issue (ptone/scion#3652). The row is kept as
+	// evidence of the authority the agent held before.
+	EdgeDeactivationScopeReissueReplaced EdgeDeactivationCause = "scope_reissue_replaced"
 )
 
 // ValidEdgeDeactivationCause reports whether c is a cause that may be
