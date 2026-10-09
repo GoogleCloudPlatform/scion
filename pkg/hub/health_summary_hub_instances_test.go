@@ -84,16 +84,13 @@ func TestHubInstanceState_FakeClockBoundary(t *testing.T) {
 // The same rule through the summary handler: the state is computed against
 // the store clock returned with the rows, not the serving replica's clock.
 func TestHandleHealthSummary_HubInstancesFakeClockStale(t *testing.T) {
-	srv, s := testServer(t)
-	fake := &fakeClockHubInstanceStore{
-		Store: s,
-		now:   hubInstanceT0,
-		rows: []store.HubInstance{
-			{ID: srv.InstanceID(), Label: "hub-a", Version: "v1", Status: "healthy", StartedAt: hubInstanceT0.Add(-time.Hour), LastSeen: hubInstanceT0.Add(-44 * time.Second)},
-			{ID: "hub-b-1", Label: "hub-b", Version: "v1", Status: "healthy", StartedAt: hubInstanceT0.Add(-time.Hour), LastSeen: hubInstanceT0.Add(-46 * time.Second)},
-		},
+	srv, _, fake, _ := testServerWithStoreFault(t, func(inner store.Store, _ *storeFaultSwitch) *fakeClockHubInstanceStore {
+		return &fakeClockHubInstanceStore{Store: inner, now: hubInstanceT0}
+	})
+	fake.rows = []store.HubInstance{
+		{ID: srv.InstanceID(), Label: "hub-a", Version: "v1", Status: "healthy", StartedAt: hubInstanceT0.Add(-time.Hour), LastSeen: hubInstanceT0.Add(-44 * time.Second)},
+		{ID: "hub-b-1", Label: "hub-b", Version: "v1", Status: "healthy", StartedAt: hubInstanceT0.Add(-time.Hour), LastSeen: hubInstanceT0.Add(-46 * time.Second)},
 	}
-	srv.store = fake
 
 	resp, _ := getHubInstancesSummary(t, srv)
 	require.NotNil(t, resp.HubInstances)
@@ -166,8 +163,9 @@ func TestHandleHealthSummary_HubInstancesTwoInstances(t *testing.T) {
 // A registry read failure reports hub_instances as null (not reported) and
 // keeps the store error out of the response.
 func TestHandleHealthSummary_HubInstancesNullWhenReadFails(t *testing.T) {
-	srv, s := testServer(t)
-	srv.store = &fakeClockHubInstanceStore{Store: s, err: errors.New("registry read failed")}
+	srv, _, _, _ := testServerWithStoreFault(t, func(inner store.Store, _ *storeFaultSwitch) *fakeClockHubInstanceStore {
+		return &fakeClockHubInstanceStore{Store: inner, err: errors.New("registry read failed")}
+	})
 
 	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
 	require.Equal(t, http.StatusOK, rr.Code)

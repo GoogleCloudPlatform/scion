@@ -229,9 +229,9 @@ func (c *tickCountingStore) ListRuntimeBrokers(ctx context.Context, f store.Runt
 // ListProjects or runtime broker count. It writes this server's row with
 // its instance ID, version and normalised checks.
 func TestHubInstanceRegistry_TickRunsNoCountQueries(t *testing.T) {
-	srv, s := testServer(t)
-	counting := &tickCountingStore{Store: s}
-	srv.store = counting
+	srv, s, counting, _ := testServerWithStoreFault(t, func(inner store.Store, _ *storeFaultSwitch) *tickCountingStore {
+		return &tickCountingStore{Store: inner}
+	})
 	ctx := context.Background()
 
 	reg := srv.newHubInstanceRegistry()
