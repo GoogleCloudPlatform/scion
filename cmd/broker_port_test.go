@@ -513,6 +513,9 @@ func TestBrokerStartDaemon_FailureKeepsExistingRecord(t *testing.T) {
 // forks, instead of "daemon failed to start. Check log at ...".
 func TestBrokerStartDaemon_RegistryCheckedBeforeFork(t *testing.T) {
 	brokerTestHome(t)
+	// No project above the working directory, so only the test HOME's
+	// settings feed the registry check.
+	t.Chdir(t.TempDir())
 	for _, k := range []string{"SCION_IMAGE_REGISTRY", "SCION_MAINTENANCE_IMAGE_REGISTRY"} {
 		t.Setenv(k, "")
 	}
