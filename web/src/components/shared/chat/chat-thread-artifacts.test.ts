@@ -24,6 +24,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { requestBodyText } from '../../../client/__fixtures__/request-url.js';
 
 class FakeStateManager extends EventTarget {
   currentScope: { type: string; userId: string } | null = null;
@@ -173,7 +174,7 @@ describe('scion-chat-thread artifact references', () => {
     const post = apiFetch.mock.calls.find(
       (c) => (c[1] as RequestInit | undefined)?.method === 'POST'
     );
-    const body = JSON.parse(String((post![1] as RequestInit).body)) as {
+    const body = JSON.parse(requestBodyText((post![1] as RequestInit).body)) as {
       metadata: Record<string, string>;
     };
     expect(body.metadata).toEqual({

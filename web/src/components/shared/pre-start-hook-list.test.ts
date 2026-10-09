@@ -29,6 +29,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -67,7 +68,7 @@ function installFetch(hooks: unknown[], calls: RecordedCall[]): void {
     'fetch',
     vi.fn((url: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const method = init?.method ?? 'GET';
-      const href = String(url);
+      const href = requestUrl(url);
       let body: Record<string, unknown> | undefined;
       if (typeof init?.body === 'string') {
         try {

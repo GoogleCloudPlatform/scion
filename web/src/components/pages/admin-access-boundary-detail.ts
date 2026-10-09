@@ -44,6 +44,7 @@ import { canAccessBoundary } from '../../shared/access-boundaries.js';
 
 // Import sub-components
 import '../shared/access-boundary-status.js';
+import '../shared/detail-header.js';
 import '../shared/access-boundary-impact-summary.js';
 import '../shared/affected-principals-table.js';
 import '../shared/access-boundary-audit-timeline.js';
@@ -106,10 +107,6 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
     }
 
     /* Header */
-    .page-header {
-      margin-bottom: 1.5rem;
-    }
-
     .header-top {
       display: flex;
       align-items: center;
@@ -131,49 +128,16 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
       text-decoration: underline;
     }
 
-    .header-main {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 1rem;
-      flex-wrap: wrap;
-    }
-
-    .header-info {
-      flex: 1;
-      min-width: 200px;
-    }
-
-    .boundary-name {
-      font-size: 1.5rem;
-      font-weight: 700;
-      color: var(--scion-text, #1e293b);
-      margin: 0 0 0.375rem;
-      overflow-wrap: anywhere;
-    }
-
-    .header-badges {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      flex-wrap: wrap;
-      margin-bottom: 0.5rem;
-    }
-
+    /* Long scope or subject labels (ids) break instead of spilling past the
+       shared header's title column. */
     .header-meta {
       font-size: 0.8125rem;
       color: var(--scion-text-muted, #64748b);
+      overflow-wrap: anywhere;
     }
 
     .header-meta span + span::before {
       content: ' · ';
-    }
-
-    .header-actions {
-      display: flex;
-      gap: 0.5rem;
-      align-items: center;
-      flex-shrink: 0;
     }
 
     /* Sections */
@@ -505,19 +469,6 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
     @media (max-width: 768px) {
       .detail-page {
         padding: 0.5rem 0.75rem 2rem;
-      }
-
-      .boundary-name {
-        font-size: 1.25rem;
-      }
-
-      .header-main {
-        flex-direction: column;
-      }
-
-      .header-actions {
-        width: 100%;
-        justify-content: flex-start;
       }
 
       .definition-grid {
@@ -964,70 +915,62 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
 
   private renderPageHeader(b: AccessBoundaryDetail) {
     return html`
-      <div class="page-header">
-        <div class="header-top">
-          <a
-            class="back-link"
-            href="/admin/access-boundaries"
-            @click=${(e: Event) => {
-              e.preventDefault();
-              navigateTo('/admin/access-boundaries');
-            }}
-          >
-            <sl-icon name="arrow-left"></sl-icon>
-            Access Constraints
-          </a>
-        </div>
-
-        <div class="header-main">
-          <div class="header-info">
-            <h1 class="boundary-name">${b.name}</h1>
-            <div class="header-badges">
-              <scion-access-boundary-status
-                status=${b.status}
-                .risk=${b.risk}
-              ></scion-access-boundary-status>
-            </div>
-            <div class="header-meta">
-              <span>${this.scopeDescription()}</span>
-              <span>${this.subjectDescription()}</span>
-              ${b.updatedAt ? html`<span>Updated ${formatRelative(b.updatedAt)}</span>` : nothing}
-              ${b.updatedBy ? html`<span>by ${this.actorDisplay(b.updatedBy)}</span>` : nothing}
-            </div>
-          </div>
-
-          ${!this.isRecoveryDisabled
-            ? html`
-                <div class="header-actions">
-                  ${this.canEdit
-                    ? html`
-                        <sl-button
-                          variant="default"
-                          size="small"
-                          @click=${() => this.handleEditClick()}
-                        >
-                          <sl-icon slot="prefix" name="pencil"></sl-icon>
-                          Edit
-                        </sl-button>
-                      `
-                    : nothing}
-                  ${this.canDelete
-                    ? html`
-                        <sl-button
-                          variant="text"
-                          size="small"
-                          style="color: var(--sl-color-danger-600)"
-                          @click=${() => this.handleDeleteClick()}
-                        >
-                          Delete
-                        </sl-button>
-                      `
-                    : nothing}
-                </div>
-              `
-            : nothing}
-        </div>
+      <div class="header-top">
+        <a
+          class="back-link"
+          href="/admin/access-boundaries"
+          @click=${(e: Event) => {
+            e.preventDefault();
+            navigateTo('/admin/access-boundaries');
+          }}
+        >
+          <sl-icon name="arrow-left"></sl-icon>
+          Access Constraints
+        </a>
       </div>
+
+      <scion-detail-header heading=${b.name}>
+        <scion-access-boundary-status
+          status=${b.status}
+          .risk=${b.risk}
+        ></scion-access-boundary-status>
+        <div slot="meta" class="header-meta">
+          <span>${this.scopeDescription()}</span>
+          <span>${this.subjectDescription()}</span>
+          ${b.updatedAt ? html`<span>Updated ${formatRelative(b.updatedAt)}</span>` : nothing}
+          ${b.updatedBy ? html`<span>by ${this.actorDisplay(b.updatedBy)}</span>` : nothing}
+        </div>
+        ${this.canEdit || this.canDelete
+          ? html`
+              <div slot="actions" class="header-actions">
+                ${this.canEdit
+                  ? html`
+                      <sl-button
+                        variant="default"
+                        size="small"
+                        @click=${() => this.handleEditClick()}
+                      >
+                        <sl-icon slot="prefix" name="pencil"></sl-icon>
+                        Edit
+                      </sl-button>
+                    `
+                  : nothing}
+                ${this.canDelete
+                  ? html`
+                      <sl-button
+                        variant="text"
+                        size="small"
+                        style="color: var(--sl-color-danger-600)"
+                        @click=${() => this.handleDeleteClick()}
+                      >
+                        Delete
+                      </sl-button>
+                    `
+                  : nothing}
+              </div>
+            `
+          : nothing}
+      </scion-detail-header>
     `;
   }
 

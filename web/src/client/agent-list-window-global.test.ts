@@ -65,7 +65,8 @@ function setup(
   let held: Agent[] = [];
   const agents = opts.agents ?? new Map<string, Agent>();
   const fetchPage = vi.fn(
-    opts.fetchPage ?? (async (): Promise<PagedPageResult> => ({ agents: [], totalCount: 0 }))
+    opts.fetchPage ??
+      ((): Promise<PagedPageResult> => Promise.resolve({ agents: [], totalCount: 0 }))
   );
   const win = new AgentListWindow({
     viewState: viewState(vs),
@@ -255,12 +256,13 @@ describe('AgentListWindow — count-only member index', () => {
     const ctx = setup(
       {},
       {
-        fetchPage: async (p) => ({
-          agents: page,
-          totalCount: 2001,
-          nextCursor: 'c',
-          ...(p.wantStats ? { stats } : {}),
-        }),
+        fetchPage: (p) =>
+          Promise.resolve({
+            agents: page,
+            totalCount: 2001,
+            nextCursor: 'c',
+            ...(p.wantStats ? { stats } : {}),
+          }),
       }
     );
     ctx.win.setPaged({ agents: page, totalCount: 2001, nextCursor: 'c1', stats }, '');
