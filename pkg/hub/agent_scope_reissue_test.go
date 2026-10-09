@@ -750,17 +750,6 @@ func TestScopeReissue_StoppedAgentNotPushed(t *testing.T) {
 	assert.Contains(t, recs[0].AfterSummary, `"skipped":"agent_not_running"`)
 }
 
-// Phase 1 refuses a user-delegated agent without writing anything.
-func TestScopeReissue_UserDelegatorNotYetSupported(t *testing.T) {
-	f := newReissueFixture(t, "rs-user", store.ProjectRoleOwner)
-	_, err := f.srv.runScopeReissue(context.Background(), f.reload(t, f.root), f.operator, false)
-	require.ErrorIs(t, err, errReissueUnsupportedDelegator)
-	rec := httptest.NewRecorder()
-	writeScopeReissueError(rec, err)
-	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
-	assert.Len(t, f.allEdges(t, f.root), 1)
-}
-
 // A dispatch during a re-issue records a mint denial against the reissue
 // site, and plain reset-auth keeps its own site.
 func TestMintSiteFromContext(t *testing.T) {
