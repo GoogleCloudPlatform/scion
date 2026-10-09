@@ -95,6 +95,13 @@ test-fixture-coverage:
 	@echo "Running fixture coverage gate (SQLite-enabled)..."
 	@go test -count=1 ./internal/fixturegen/...
 
+# PG_HUB_GOGC is prefixed to the go test runs below that compile the pkg/hub
+# test package. With the default GOGC that single compile peaks at about
+# 15 GB RSS on a 16 GB GitHub-hosted runner, fills its 3 GB swap, and the
+# runner is shut down mid-step (exit 143, ptone/scion#4083). GOGC=25 cut the
+# peak to about 12 GB with no swap. A GOGC already in the environment wins.
+PG_HUB_GOGC = GOGC=$${GOGC:-25}
+
 # MEMBERSHIP_LOSS_POSTGRES_TESTS are the pkg/hub membership loss
 # concurrency tests (ptone/scion#3433) run by test-launch-store-postgres.
 MEMBERSHIP_LOSS_POSTGRES_TESTS := TestMembershipLossProcessor_vs_ProjectDelete_Postgres \
@@ -269,7 +276,7 @@ test-launch-store-postgres:
 		echo "ERROR: one or more storetest group/MembershipCleanup cases were skipped -- see '--- SKIP' lines above." >&2; \
 		exit 1; \
 	fi
-	@go test -tags integration -count=1 -timeout 20m -v \
+	@$(PG_HUB_GOGC) go test -tags integration -count=1 -timeout 20m -v \
 		-run '^(TestProjectDeletionService_LockOrderNoDeadlock|TestScheduledSend_TwoHubReplicasPostgres_OneDelivery|$(subst $(space),|,$(strip $(MEMBERSHIP_LOSS_POSTGRES_TESTS))))$$' \
 		./pkg/hub/ > /tmp/test-launch-store-postgres-hub.log 2>&1; \
 	status=$$?; \
@@ -315,11 +322,12 @@ test-webchat-postgres:
 		echo "ERROR: SCION_TEST_POSTGRES_DSN is not set -- the Postgres tests would silently skip instead of running." >&2; \
 		exit 1; \
 	fi
-	@go test -count=1 -timeout 10m -v \
+	@rm -f /tmp/test-webchat-postgres.status; \
+	{ $(PG_HUB_GOGC) go test -count=1 -timeout 10m -v \
 		-run '^($(subst $(eval) ,|,$(strip $(WEBCHAT_POSTGRES_TESTS))))$$' \
-		./pkg/hub/ > /tmp/test-webchat-postgres.log 2>&1; \
-	status=$$?; \
-	cat /tmp/test-webchat-postgres.log; \
+		./pkg/hub/ 2>&1; echo $$? > /tmp/test-webchat-postgres.status; } \
+		| tee /tmp/test-webchat-postgres.log; \
+	status=$$(cat /tmp/test-webchat-postgres.status 2>/dev/null || echo 1); \
 	if [ $$status -ne 0 ]; then exit $$status; fi; \
 	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-webchat-postgres.log; then \
 		echo "ERROR: a web chat Postgres test was skipped -- see '--- SKIP' lines above." >&2; \
@@ -349,7 +357,7 @@ test-conduit-authz-postgres:
 		echo "ERROR: SCION_TEST_POSTGRES_DSN is not set -- the Postgres tests would silently skip instead of running." >&2; \
 		exit 1; \
 	fi
-	@go test -count=1 -timeout 10m -v \
+	@$(PG_HUB_GOGC) go test -count=1 -timeout 10m -v \
 		-run '^($(subst $(eval) ,|,$(strip $(CONDUIT_AUTHZ_POSTGRES_TESTS))))$$' \
 		./pkg/hub/ > /tmp/test-conduit-authz-postgres.log 2>&1; \
 	status=$$?; \
