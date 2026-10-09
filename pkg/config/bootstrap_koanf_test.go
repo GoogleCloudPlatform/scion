@@ -115,7 +115,6 @@ func TestServerEnvToOpsettingsKey(t *testing.T) {
 		// ptone/scion#3836: federation is a server sub-key, and the
 		// project_defaults / harness_configs segments map to snake_case.
 		{"FEDERATION_ENABLED", "server.federation.enabled"},
-		{"FEDERATION_TRUSTEDISSUERS", "server.federation.trusted_issuers"},
 		{"FEDERATION_ALGORITHMS", "server.federation.algorithms"},
 		{"FEDERATION_REFRESHINTERVAL", "server.federation.refresh_interval"},
 		{"FEDERATION_DEBOUNCEINTERVAL", "server.federation.debounce_interval"},
@@ -129,7 +128,6 @@ func TestServerEnvToOpsettingsKey(t *testing.T) {
 		{"HARNESSCONFIGS_CLAUDE_CONFIGDIR", "harness_configs.claude.config_dir"},
 		{"HARNESSCONFIGS_CLAUDE_SKILLSDIR", "harness_configs.claude.skills_dir"},
 		{"HARNESSCONFIGS_CLAUDE_INTERRUPTKEY", "harness_configs.claude.interrupt_key"},
-		{"HARNESSCONFIGS_CLAUDE_INTERRUPTSEQUENCE", "harness_configs.claude.interrupt_sequence"},
 		{"HARNESSCONFIGS_CLAUDE_INTERRUPTSIGNAL", "harness_configs.claude.interrupt_signal"},
 		{"HARNESSCONFIGS_CLAUDE_INSTRUCTIONSFILE", "harness_configs.claude.instructions_file"},
 		{"HARNESSCONFIGS_CLAUDE_SYSTEMPROMPTFILE", "harness_configs.claude.system_prompt_file"},
@@ -156,14 +154,13 @@ func TestServerEnvToOpsettingsKey(t *testing.T) {
 	}
 }
 
-// TestSeedEnvToOpsettingsKey_FederationProjectDefaultsHarnessConfigs verifies
-// the SCION_SEED_* spellings of the federation, project_defaults and
-// harness_configs keys, which go through envKeyToOpsettingsKey with an
-// explicit SERVER_ segment for server keys (ptone/scion#3836).
-func TestSeedEnvToOpsettingsKey_FederationProjectDefaultsHarnessConfigs(t *testing.T) {
+// TestSeedEnvToOpsettingsKey_MappedNames verifies SCION_SEED_* spellings,
+// which go through envKeyToOpsettingsKey with an explicit SERVER_ segment for
+// server keys: the federation, project_defaults and harness_configs keys
+// (ptone/scion#3836) and the remaining server keys (ptone/scion#3859).
+func TestSeedEnvToOpsettingsKey_MappedNames(t *testing.T) {
 	for envKey, want := range map[string]string{
 		"SERVER_FEDERATION_ENABLED":             "server.federation.enabled",
-		"SERVER_FEDERATION_TRUSTEDISSUERS":      "server.federation.trusted_issuers",
 		"SERVER_FEDERATION_REFRESHINTERVAL":     "server.federation.refresh_interval",
 		"PROJECTDEFAULTS_DEFAULTSCRATCHPAD":     "project_defaults.default_scratchpad",
 		"HARNESSCONFIGS_CLAUDE_IMAGE":           "harness_configs.claude.image",
@@ -204,6 +201,24 @@ func TestServerEnvToOpsettingsKey_CoversEveryServerConfigKey(t *testing.T) {
 		if got, want := serverEnvToOpsettingsKey(segment+"_X"), "server."+tag+".x"; got != want {
 			t.Errorf("serverEnvToOpsettingsKey(%q) = %q, want %q", segment+"_X", got, want)
 		}
+	}
+}
+
+// TestLoadBootstrapKoanf_FederationAlgorithmsCommaSplit verifies that the
+// list-typed server.federation.algorithms set through SCION_SERVER_* reaches
+// bootstrap material as a list; the extracted section is checked in
+// opsettings (ptone/scion#3836).
+func TestLoadBootstrapKoanf_FederationAlgorithmsCommaSplit(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SCION_SERVER_FEDERATION_ALGORITHMS", "RS256,ES256")
+
+	k := LoadBootstrapKoanf()
+	if got := k.Strings("server.federation.algorithms"); len(got) != 2 || got[0] != "RS256" || got[1] != "ES256" {
+		t.Fatalf("server.federation.algorithms = %#v, want [RS256 ES256]", k.Get("server.federation.algorithms"))
 	}
 }
 
