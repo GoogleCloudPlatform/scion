@@ -102,6 +102,121 @@ func TestDeliverTaskFile_OverwritesEarlierFile(t *testing.T) {
 	}
 }
 
+func TestDeliverTaskFile_ReplacesReadOnlyFile(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, ".scion", "task.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("old task"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deliverTaskFile(home, "new task"); err != nil {
+		t.Fatalf("deliverTaskFile: %v", err)
+	}
+	content, mode := readTaskFile(t, home)
+	if content != "new task" || mode != 0o644 {
+		t.Errorf("task file = %q mode %v, want the new task with mode 0644", content, mode)
+	}
+}
+
+func TestDeliverTaskFile_NewDirectoryIsPrivate(t *testing.T) {
+	home := t.TempDir()
+	if _, err := deliverTaskFile(home, "a task"); err != nil {
+		t.Fatalf("deliverTaskFile: %v", err)
+	}
+	st, err := os.Lstat(filepath.Join(home, ".scion"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o700 {
+		t.Errorf(".scion mode = %v, want 0700", st.Mode().Perm())
+	}
+}
+
+// TestDeliverTaskFile_DoesNotFollowLinks checks that a symbolic link at
+// task.md is replaced by the task file, and a symbolic link at .scion
+// makes delivery fail, without anything being written through either
+// link.
+func TestDeliverTaskFile_DoesNotFollowLinks(t *testing.T) {
+	t.Run("link at task.md to an existing file", func(t *testing.T) {
+		home := t.TempDir()
+		outside := filepath.Join(t.TempDir(), "victim")
+		if err := os.WriteFile(outside, []byte("keep"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(home, ".scion"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(home, ".scion", "task.md")
+		if err := os.Symlink(outside, link); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := deliverTaskFile(home, "a task"); err != nil {
+			t.Fatalf("deliverTaskFile: %v", err)
+		}
+		if got, _ := os.ReadFile(outside); string(got) != "keep" {
+			t.Errorf("link target = %q, want it unchanged", got)
+		}
+		st, err := os.Lstat(link)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !st.Mode().IsRegular() {
+			t.Errorf("task.md is %v, want a regular file in place of the link", st.Mode().Type())
+		}
+		if content, mode := readTaskFile(t, home); content != "a task" || mode != 0o644 {
+			t.Errorf("task file = %q mode %v", content, mode)
+		}
+	})
+
+	t.Run("dangling link at task.md", func(t *testing.T) {
+		home := t.TempDir()
+		outside := filepath.Join(t.TempDir(), "created")
+		if err := os.MkdirAll(filepath.Join(home, ".scion"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, filepath.Join(home, ".scion", "task.md")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := deliverTaskFile(home, "a task"); err != nil {
+			t.Fatalf("deliverTaskFile: %v", err)
+		}
+		if _, err := os.Lstat(outside); !os.IsNotExist(err) {
+			t.Errorf("a file was created at the link target (lstat err %v)", err)
+		}
+		if content, _ := readTaskFile(t, home); content != "a task" {
+			t.Errorf("task file = %q", content)
+		}
+	})
+
+	for _, target := range []string{"outside", "inside"} {
+		t.Run("link at .scion to a directory "+target+" the home", func(t *testing.T) {
+			home := t.TempDir()
+			dir := t.TempDir()
+			if target == "inside" {
+				dir = filepath.Join(home, "other")
+				if err := os.Mkdir(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Symlink(dir, filepath.Join(home, ".scion")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := deliverTaskFile(home, "a task"); err == nil {
+				t.Fatal("deliverTaskFile succeeded with .scion a symbolic link")
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Errorf("files written through the .scion link: %v", entries)
+			}
+		})
+	}
+}
+
 func TestDeliverTaskFile_EmptyTaskWritesNothing(t *testing.T) {
 	home := t.TempDir()
 	got, err := deliverTaskFile(home, "")
@@ -140,7 +255,7 @@ profiles:
 	projectScionDir := filepath.Join(tmpDir, "project", ".scion")
 	_ = os.MkdirAll(projectScionDir, 0755)
 
-	start := func(t *testing.T, name, agentCfg, task string) runtime.RunConfig {
+	startErr := func(t *testing.T, name, agentCfg, task string, prepareHome func(home string)) (runtime.RunConfig, error) {
 		t.Helper()
 		var captured runtime.RunConfig
 		mockRT := &runtime.MockRuntime{
@@ -155,15 +270,24 @@ profiles:
 		agentDir := filepath.Join(projectScionDir, "agents", name)
 		_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
 		_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(agentCfg), 0644)
-		if _, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{
+		if prepareHome != nil {
+			prepareHome(filepath.Join(agentDir, "home"))
+		}
+		_, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{
 			Name:        name,
 			ProjectPath: projectScionDir,
 			Task:        task,
 			NoAuth:      true,
-		}); err != nil {
+		})
+		return captured, err
+	}
+	start := func(t *testing.T, name, agentCfg, task string) runtime.RunConfig {
+		t.Helper()
+		cfg, err := startErr(t, name, agentCfg, task, nil)
+		if err != nil {
 			t.Fatalf("Start: %v", err)
 		}
-		return captured
+		return cfg
 	}
 	const plainCfg = `{"harness": "generic", "command_args": ["run"]}`
 	brief := strings.Repeat("brief line\n", 64*1024/11+1)
@@ -204,6 +328,30 @@ profiles:
 		}
 		if content, _ := readTaskFile(t, cfg.HomeDir); content != "second task" {
 			t.Errorf("task file has %d bytes, want only the new task", len(content))
+		}
+	})
+
+	// The runtime home is the staging home for every runtime, including
+	// the Kubernetes plain and NFS homes the home sync fills from it.
+	t.Run("link at the task file is not written through", func(t *testing.T) {
+		outside := filepath.Join(t.TempDir(), "victim")
+		if err := os.WriteFile(outside, []byte("keep"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := startErr(t, "link-task", plainCfg, brief, func(home string) {
+			_ = os.MkdirAll(filepath.Join(home, ".scion"), 0o755)
+			if err := os.Symlink(outside, filepath.Join(home, ".scion", "task.md")); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		if got, _ := os.ReadFile(outside); string(got) != "keep" {
+			t.Errorf("link target = %q, want it unchanged", got)
+		}
+		if content, _ := readTaskFile(t, cfg.HomeDir); content != brief {
+			t.Errorf("task file has %d bytes, want %d", len(content), len(brief))
 		}
 	})
 }
