@@ -127,8 +127,6 @@ constants at the top of `pkg/hub/project_settings_handlers.go`:
 | `scion.io/telemetry-enabled` | `telemetryEnabled` |
 | `scion.io/auto-expose-ports-enabled` | `autoExposePortsEnabled` |
 | `scion.io/active-profile` | `activeProfile` |
-| `scion.io/agent-create-profile` | `agentCreateProfile` (agent-launched creates only; kept on PUT when absent, cleared by `""`) |
-| `scion.io/agent-create-broker` | `agentCreateBroker` (agent-launched creates only; stored as broker ID; kept on PUT when absent, cleared by `""`) |
 | `scion.io/default-max-turns` | `defaultMaxTurns` |
 | `scion.io/default-max-model-calls` | `defaultMaxModelCalls` |
 | `scion.io/default-max-duration` | `defaultMaxDuration` |
