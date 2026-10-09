@@ -559,33 +559,142 @@ func foldCeilings(bounded []permissions.FrozenPermissionCeiling, unrecordedHops 
 }
 
 // ScopeCeilings is the single input set for every agent-token scope filter.
-// Mint and refresh obtain it from loadScopeCeilings and pass it to
-// filterScopes; no other code filters an agent's scope list by a ceiling.
+// Mint, refresh, the scheduler's agent fire identity, the service-account
+// parent ceiling's agent source and EffectiveAgentAuthority obtain it from
+// loadScopeCeilings and pass it to filterScopes; no other code filters an
+// agent's scope list by a ceiling.
 type ScopeCeilings struct {
 	Chain ChainCeiling // chainEffectCeiling(agent)
+	// Assignments are the agent's active service-account assignment rows,
+	// as loaded. Rows are never dropped, so a row that fails a check is
+	// never read as "no row".
+	Assignments []store.AgentServiceAccountAssignment
+	// DevLocalUsable is true when no loaded row has local-development
+	// provenance, or every such row passes both local-development checks.
+	// The zero value is false, so a ScopeCeilings built without
+	// loadScopeCeilings withholds the GCP token scope of such a row.
+	DevLocalUsable bool
+}
+
+// assignmentHasDevLocalProvenance reports whether an assignment was recorded
+// from the local development user, directly or by the scheduler under a
+// revision that user authorized.
+func assignmentHasDevLocalProvenance(a store.AgentServiceAccountAssignment) bool {
+	if a.SourceCredentialKind == store.SourceCredentialDevLocal {
+		return true
+	}
+	return a.SourceCredentialKind == store.SourceCredentialScheduler &&
+		a.InitiatorCredentialKind == store.InitiatorCredentialKindDevLocal
 }
 
 // loadScopeCeilings loads the scope-filter inputs. It performs no filtering.
-// Errors: those of chainEffectCeiling.
+//
+// For each assignment row with local-development provenance it applies the
+// local-development checks in this order, setting DevLocalUsable to false on
+// the first that fails: dev authority is enabled on this server (no lookup
+// when it is not); the row's source principal is user DevUserID (no lookup
+// on a mismatch); then, at most once per load, that user exists and is
+// active. A failed check is not an error: mint withholds only that
+// account's GCP token scope.
+//
+// Errors: those of chainEffectCeiling, and wrapped lookup errors from the
+// assignment store or from the local development user lookup.
 func (a *AuthzService) loadScopeCeilings(ctx context.Context, agent *store.Agent) (ScopeCeilings, error) {
 	chain, err := a.chainEffectCeiling(ctx, agent)
 	if err != nil {
 		return ScopeCeilings{}, err
 	}
-	return ScopeCeilings{Chain: chain}, nil
+	rows, err := a.store.GetActiveAgentServiceAccountAssignments(ctx, agent.ID)
+	if err != nil {
+		return ScopeCeilings{}, fmt.Errorf("service-account assignment lookup for agent %s: %w", agent.ID, err)
+	}
+	sc := ScopeCeilings{Chain: chain, Assignments: rows, DevLocalUsable: true}
+	devUserChecked := false
+	for _, row := range rows {
+		if !assignmentHasDevLocalProvenance(row) || !sc.DevLocalUsable {
+			continue
+		}
+		if !a.devLocalAuthorityEnabled() {
+			sc.DevLocalUsable = false
+			continue
+		}
+		if row.SourcePrincipalKind != store.DelegationPrincipalUser || row.SourcePrincipalID != DevUserID {
+			sc.DevLocalUsable = false
+			continue
+		}
+		if devUserChecked {
+			continue
+		}
+		devUserChecked = true
+		user, err := a.store.GetUser(ctx, DevUserID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				sc.DevLocalUsable = false
+				continue
+			}
+			return ScopeCeilings{}, fmt.Errorf("local development user lookup: %w", err)
+		}
+		if user == nil || user.Status != store.UserStatusActive {
+			sc.DevLocalUsable = false
+		}
+	}
+	return sc, nil
+}
+
+// assignmentAllowsGCPScope is the assignment rule for the GCP token scope
+// of one service account (scope is exactly GCPTokenScopeForSA of it):
+//   - no active row → true: the agent's account was assigned before
+//     assignments were recorded, and only the chain rule applies;
+//   - more than one row → false (ambiguous);
+//   - one row → true only when the row is for exactly this account (never a
+//     prefix match), carries a known provenance version and a recorded
+//     ceiling that allows gcp_service_account.assign, and, when it has
+//     local-development provenance, sc.DevLocalUsable.
+//
+// Every write that sets an assign-mode identity records a row in the same
+// transaction, so "no row" never means a writer skipped the record.
+func assignmentAllowsGCPScope(sc ScopeCeilings, scope AgentTokenScope) bool {
+	switch len(sc.Assignments) {
+	case 0:
+		return true
+	case 1:
+	default:
+		return false
+	}
+	row := sc.Assignments[0]
+	if row.ServiceAccountID == "" || GCPTokenScopeForSA(row.ServiceAccountID) != scope {
+		return false
+	}
+	if !knownProvenanceVersion(row.ProvenanceVersion) || row.Kind == store.EffectCeilingUnrecorded {
+		return false
+	}
+	if !EffectCeilingAllows(row.EffectCeiling, gcpServiceAccountAssignPermission, false) {
+		return false
+	}
+	if assignmentHasDevLocalProvenance(row) && !sc.DevLocalUsable {
+		return false
+	}
+	return true
 }
 
 // filterScopes is the one pure scope filter. It returns the candidates, in
-// order, less every scope that fails ceilingAllowsScope(chain, scope). chain
-// is passed separately from sc so a caller can pass a projected chain
+// order, less every scope that fails either rule:
+//  1. the chain rule, ceilingAllowsScope(chain, scope);
+//  2. for a GCP token scope (prefix ScopeGCPTokenPrefix) only, the
+//     assignment rule, assignmentAllowsGCPScope(sc, scope).
+//
+// chain is passed separately from sc so a caller can pass a projected chain
 // ceiling; filterScopes never reads sc.Chain.
 func filterScopes(candidates []AgentTokenScope, chain store.EffectCeiling, sc ScopeCeilings) []AgentTokenScope {
-	_ = sc
 	out := make([]AgentTokenScope, 0, len(candidates))
 	for _, scope := range candidates {
-		if ceilingAllowsScope(chain, scope) {
-			out = append(out, scope)
+		if !ceilingAllowsScope(chain, scope) {
+			continue
 		}
+		if strings.HasPrefix(string(scope), ScopeGCPTokenPrefix) && !assignmentAllowsGCPScope(sc, scope) {
+			continue
+		}
+		out = append(out, scope)
 	}
 	return out
 }
