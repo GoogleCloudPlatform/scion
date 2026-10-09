@@ -72,7 +72,7 @@ type jnHidden struct {
 type jnRoot struct {
 	jnLevel1
 	jnConflictA
-	*JNConflictB
+	*JNConflictB // pointer: the equal-depth "dup" repeat is deliberate; a value embed trips vet structtag
 	*JNPtr
 	jnTaggedEmbed `json:"tagged_embed"` // a tagged embedded struct is a named field
 	*jnHidden                           // unexported embedded pointer: skipped (see structJSONNames)
