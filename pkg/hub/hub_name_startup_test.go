@@ -60,8 +60,8 @@ func TestApplySnapshot_UnsetHubNameReturnsToStartupName(t *testing.T) {
 	ApplySnapshot(srv, Layer1Snapshot{})
 	assert.Equal(t, "cfg-hub", srv.HubName(), "after a clear")
 
-	// A file-mode snapshot from a settings.yaml without hub_name (reload
-	// reads the global dir, not --config) keeps the startup name too.
+	// A file-mode snapshot from a settings.yaml without hub_name keeps the
+	// startup name too.
 	ApplySnapshot(srv, BuildLayer1SnapshotFromFile(&config.GlobalConfig{}))
 	assert.Equal(t, "cfg-hub", srv.HubName())
 }
@@ -116,4 +116,27 @@ func TestApplySnapshot_GCPSecretLabelFollowsHubName(t *testing.T) {
 
 	ApplySnapshot(srv, Layer1Snapshot{})
 	assert.Equal(t, "cfg-hub", backend.HubName(), "a clear returns the label to the startup name")
+}
+
+// A file-mode reload reads the --config location the server started with,
+// so a Layer-1 key set only there survives the reload instead of being
+// replaced by the global settings (ptone/scion#3070).
+func TestReloadSettings_ReadsConfigPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(home)
+	globalDir := filepath.Join(home, ".scion")
+	require.NoError(t, os.MkdirAll(globalDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"),
+		[]byte("schema_version: \"1\"\n"), 0o644))
+	cfgDir := filepath.Join(home, "cfg")
+	require.NoError(t, os.MkdirAll(cfgDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, "settings.yaml"),
+		[]byte("schema_version: \"1\"\nserver:\n  hub:\n    hub_name: cfg-hub\n    auto_suspend_stalled: true\n"), 0o644))
+
+	srv := newStartupNamedServer(t, "boot-hub")
+	srv.config.ConfigPath = cfgDir
+	srv.reloadSettings()
+	assert.Equal(t, "cfg-hub", srv.HubName())
+	assert.True(t, srv.config.AutoSuspendStalled, "auto_suspend_stalled from the --config file should survive a reload")
 }

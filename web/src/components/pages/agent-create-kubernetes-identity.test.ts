@@ -639,7 +639,9 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     expect(select).not.toBeNull();
     await chooseSelect(el, select!, 'assign');
 
-    expect(gcpIdentityHint(el)).toContain('Block is not available for a Kubernetes runtime target.');
+    expect(gcpIdentityHint(el)).toContain(
+      'Block is not available for a Kubernetes runtime target.'
+    );
     expect(gcpIdentityHint(el)).not.toContain('rejects at dispatch');
   });
 

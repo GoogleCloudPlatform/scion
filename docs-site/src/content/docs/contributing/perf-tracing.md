@@ -45,9 +45,9 @@ Each line records:
 
 A phase or store method appears only if the request entered or called it at least once. The `store_` methods counted are the inputs the authorization service reads: `GetEffectiveGroups`, `GetEffectiveGroupsForAgent`, `GetParentGroups`, `GetUserGroups`, `GetGroupMembership`, `GetGroupBySlug`, `ListRoleBindingsForPrincipals`, `ListRoleBindingsForPrincipal`, `GetRoleDefinition`, `GetRoleDefinitionsByIDs`, `GetRoleDefinitionByName`, `ListAccessConstraints`, `GetDelegationEdgesForDelegate`, `GetUser`, `GetUserAccessToken`, `GetAgent`, `GetProject`, `GetProjectMembership` and `GetHubSetting`. They are counted after request-local reuse, so each count is a real store round trip. Reads made in other ways (relationship progeny lookups, reads inside a store transaction) are not counted. The reference's [Counted scope](/scion/reference/server-config/#request-performance-tracing) paragraph has the details.
 
-Every authorization decision emits one decision-audit record, so `audit_records` is the number of decisions the request made. `audit_emit_us` is only the time spent queueing the records; the database write happens later, off the request path.
+Decision records are counted in memory, so `audit_records` is the number of emitted decision records. With the default sampling setting, each authorization decision emits one record. `audit_emit_us` measures the emitter call. This path performs no database write.
 
-The database pool figures are deltas across the whole shared pool while the request ran. They include waits caused by concurrent requests and by the audit writer, so read them as "how contended was the pool", not "how much did this request wait".
+The database pool figures are deltas across the whole shared pool while the request ran. They include waits caused by concurrent requests, so read them as "how contended was the pool", not "how much did this request wait".
 
 ### The log line format
 

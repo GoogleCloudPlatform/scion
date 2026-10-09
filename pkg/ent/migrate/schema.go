@@ -869,82 +869,6 @@ var (
 			},
 		},
 	}
-	// DecisionAuditsColumns holds the columns for the "decision_audits" table.
-	DecisionAuditsColumns = []*schema.Column{
-		{Name: "id", Type: field.TypeUUID},
-		{Name: "timestamp", Type: field.TypeTime},
-		{Name: "principal_kind", Type: field.TypeString},
-		{Name: "principal_id", Type: field.TypeString},
-		{Name: "credential_id", Type: field.TypeString, Nullable: true},
-		{Name: "credential_type", Type: field.TypeString, Nullable: true},
-		{Name: "route", Type: field.TypeString, Nullable: true},
-		{Name: "resource_type", Type: field.TypeString},
-		{Name: "resource_id", Type: field.TypeString, Nullable: true},
-		{Name: "permission", Type: field.TypeString},
-		{Name: "result", Type: field.TypeString},
-		{Name: "reason", Type: field.TypeString},
-		{Name: "matched_policy", Type: field.TypeString, Nullable: true},
-		{Name: "matched_grant", Type: field.TypeString, Nullable: true},
-		{Name: "policy_id", Type: field.TypeString, Nullable: true},
-		{Name: "correlation_id", Type: field.TypeString, Nullable: true},
-		{Name: "sampled", Type: field.TypeBool, Default: false},
-		{Name: "permission_id", Type: field.TypeString, Nullable: true},
-		{Name: "credential_name", Type: field.TypeString, Nullable: true},
-		{Name: "credential_boundary_kind", Type: field.TypeString, Nullable: true},
-		{Name: "credential_boundary_project_id", Type: field.TypeString, Nullable: true},
-		{Name: "credential_labels", Type: field.TypeString, Nullable: true},
-		{Name: "executor_kind", Type: field.TypeString, Nullable: true},
-		{Name: "executor_id", Type: field.TypeString, Nullable: true},
-		{Name: "denied_by", Type: field.TypeString, Nullable: true},
-	}
-	// DecisionAuditsTable holds the schema information for the "decision_audits" table.
-	DecisionAuditsTable = &schema.Table{
-		Name:       "decision_audits",
-		Columns:    DecisionAuditsColumns,
-		PrimaryKey: []*schema.Column{DecisionAuditsColumns[0]},
-		Indexes: []*schema.Index{
-			{
-				Name:    "decisionaudit_timestamp",
-				Unique:  false,
-				Columns: []*schema.Column{DecisionAuditsColumns[1]},
-			},
-			{
-				Name:    "decisionaudit_principal_kind_principal_id",
-				Unique:  false,
-				Columns: []*schema.Column{DecisionAuditsColumns[2], DecisionAuditsColumns[3]},
-			},
-			{
-				Name:    "decisionaudit_credential_id",
-				Unique:  false,
-				Columns: []*schema.Column{DecisionAuditsColumns[4]},
-			},
-			{
-				Name:    "decisionaudit_route",
-				Unique:  false,
-				Columns: []*schema.Column{DecisionAuditsColumns[6]},
-			},
-			{
-				Name:    "decisionaudit_resource_type_resource_id",
-				Unique:  false,
-				Columns: []*schema.Column{DecisionAuditsColumns[7], DecisionAuditsColumns[8]},
-			},
-			{
-				Name:    "decisionaudit_result",
-				Unique:  false,
-				Columns: []*schema.Column{DecisionAuditsColumns[10]},
-			},
-			{
-				Name:    "decisionaudit_correlation_id",
-				Unique:  false,
-				Columns: []*schema.Column{DecisionAuditsColumns[15]},
-			},
-			{
-				Name:    "decisionaudit_denied_by",
-				Unique:  false,
-				Columns: []*schema.Column{DecisionAuditsColumns[24]},
-			},
-		},
-	}
 	// DelegationAdoptionsColumns holds the columns for the "delegation_adoptions" table.
 	DelegationAdoptionsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -2743,7 +2667,6 @@ var (
 		ConduitSessionsTable,
 		ConversationsTable,
 		ConversationParticipantsTable,
-		DecisionAuditsTable,
 		DelegationAdoptionsTable,
 		DelegationEdgesTable,
 		EntitlementBindingsTable,
