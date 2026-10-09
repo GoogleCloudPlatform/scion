@@ -43,10 +43,9 @@ const InlineTaskMaxBytes = 8 * 1024
 
 // deliverTaskFile writes task to TaskFileRel under agentHome, replacing
 // any file left by an earlier start, and returns the task to pass to the
-// harness: task itself when its quoted size is at most
-// InlineTaskMaxBytes, otherwise a
-// short task that points to the file. An empty task writes nothing and
-// is returned unchanged.
+// harness: task itself when its quoted size is at most InlineTaskMaxBytes,
+// otherwise a short task that points to the file. An empty task writes
+// nothing and is returned unchanged.
 func deliverTaskFile(agentHome, task string) (string, error) {
 	if task == "" || agentHome == "" {
 		return task, nil

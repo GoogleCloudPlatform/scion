@@ -151,13 +151,13 @@ and then the file. The file must be UTF-8 text and not empty or whitespace
 only. The whole task, arguments included, can be at most 96 KiB (98304 bytes).
 The CLI checks this before it contacts the Hub, and anything larger is
 rejected. The Hub forwards the create request to the runtime broker as JSON in
-a control channel message of at most 1 MiB. Even a task made only of
-characters that JSON escapes to six bytes, such as `<`, `>` and `&`, fits in
-that message with room for the rest of the request. The task goes in the create request like any other task. The Hub
-stores it with the agent, so this works for agents a Hub runs on any runtime,
-including Kubernetes agents without access to a storage bucket. It also works
-when an agent launches another agent: the agent's CLI reads the file from the
-agent's own filesystem.
+a control channel message of at most 1 MiB. Even a task made only of characters
+that JSON escapes to six bytes, such as `<`, `>` and `&`, fits in that message
+with room for the rest of the request. The task goes in the create request like
+any other task. The Hub stores it with the agent, so this works for agents a
+Hub runs on any runtime, including Kubernetes agents without access to a
+storage bucket. It also works when an agent launches another agent: the agent's
+CLI reads the file from the agent's own filesystem.
 
 Whenever an agent starts with a task, from arguments, `--task-file` or
 `prompt.md`, the full text is written to `~/.scion/task.md` in the agent's home
