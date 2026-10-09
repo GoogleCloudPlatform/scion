@@ -118,6 +118,19 @@ func TestK8sBuildPod_GoRuntimeEnvFromLimits(t *testing.T) {
 			wantMemLimit: unset,
 		},
 		{
+			name:         "memory limit of MaxInt64 bytes is kept",
+			spec:         &api.ResourceSpec{Limits: api.ResourceList{Memory: "9223372036854775807"}},
+			wantMaxProcs: unset,
+			wantMemLimit: "7916483719987MiB",
+		},
+		{
+			// 2^64+8Gi: Value wraps this to 8Gi.
+			name:         "memory limit that wraps to a small value sets nothing",
+			spec:         &api.ResourceSpec{Limits: api.ResourceList{Memory: "18446744082299486208"}},
+			wantMaxProcs: unset,
+			wantMemLimit: unset,
+		},
+		{
 			name:         "requests without limits set neither",
 			spec:         &api.ResourceSpec{Requests: api.ResourceList{CPU: "2", Memory: "4Gi"}},
 			wantMaxProcs: unset,

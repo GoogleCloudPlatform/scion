@@ -177,7 +177,7 @@ func appendGoRuntimeEnvFromLimits(env []corev1.EnvVar, limits corev1.ResourceLis
 		present[e.Name] = struct{}{}
 	}
 	add := func(name, value string) {
-		if _, ok := present[name]; ok || value == "" {
+		if _, ok := present[name]; ok {
 			return
 		}
 		env = append(env, corev1.EnvVar{Name: name, Value: value})
