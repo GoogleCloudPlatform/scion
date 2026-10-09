@@ -264,6 +264,18 @@ func TestDescribeAttachClose_ReconnectEndedWithClose(t *testing.T) {
 	assert.Same(t, orig, ce, "the original close stays reachable first")
 }
 
+// When the CLI stopped because too many reconnected sessions ended quickly,
+// the message says so rather than offering only the generic retry text.
+func TestDescribeAttachClose_ReconnectLimit(t *testing.T) {
+	orig := &wsclient.PTYCloseError{Code: wsprotocol.ClosePTYUpstreamUnavailable, Reason: "relay_restart"}
+	err := describeAttachClose(&wsclient.PTYReconnectError{Close: orig, Err: wsclient.ErrPTYReconnectLimit}, "a1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "close code 4503: relay_restart")
+	assert.Contains(t, err.Error(), "scion attach stopped after 3 automatic reconnects whose sessions each ended within a minute.")
+	assert.NotContains(t, err.Error(), "automatic reconnect also failed")
+	assert.ErrorIs(t, err, wsclient.ErrPTYReconnectLimit)
+}
+
 func TestDescribeAttachClose_OtherErrorsUnchanged(t *testing.T) {
 	in := errors.New("connection failed with status 403: forbidden")
 	assert.Same(t, in, describeAttachClose(in, "a1"))

@@ -204,6 +204,9 @@ func (f *fakeTiming) jitterWindows() []time.Duration {
 type chanReader struct {
 	chunks chan []byte
 	reads  chan struct{}
+	// armed: the signal of the Read now blocked waiting for a chunk has
+	// already been consumed (by the previous typeAndWait).
+	armed bool
 }
 
 func newChanReader() *chanReader {
@@ -219,25 +222,30 @@ func (r *chanReader) Read(p []byte) (int, error) {
 	return copy(p, b), nil
 }
 
-// typeAndWait sends b and waits until the client has consumed it.
+// typeAndWait sends b and waits until the client has consumed it. Each
+// Read signals exactly once, so this consumes exactly one signal per Read:
+// the signal of the Read that takes b (unless an earlier call already
+// consumed it), then the signal of the next Read, which starts only after
+// the client has taken b from the stdin goroutine.
 func (r *chanReader) typeAndWait(t *testing.T, b []byte) {
 	t.Helper()
+	wait := func(what string) {
+		select {
+		case <-r.reads:
+		case <-time.After(10 * time.Second):
+			t.Fatal(what)
+		}
+	}
+	if !r.armed {
+		wait("client never read stdin")
+	}
 	select {
 	case r.chunks <- b:
 	case <-time.After(10 * time.Second):
-		t.Fatal("client never read stdin")
+		t.Fatal("client never took the stdin chunk")
 	}
-	// The Read that took b signalled before receiving it; drop that
-	// signal and wait for the next Read, which starts only after the
-	// client has taken b from the stdin goroutine.
-	for len(r.reads) > 0 {
-		<-r.reads
-	}
-	select {
-	case <-r.reads:
-	case <-time.After(10 * time.Second):
-		t.Fatal("client never consumed stdin input")
-	}
+	wait("client never consumed stdin input")
+	r.armed = true
 }
 
 // scriptedClient is a client wired to fake timing, a fixed 100x30 terminal
@@ -459,9 +467,10 @@ func TestRun_ShortLivedReconnectsAreBounded(t *testing.T) {
 		sc := newScriptedClient(t, s, ft)
 
 		err := sc.Run()
-		var ce *PTYCloseError
-		require.True(t, errors.As(err, &ce), "got %T: %v", err, err)
-		assert.Equal(t, wsprotocol.ClosePTYUpstreamUnavailable, ce.Code)
+		var re *PTYReconnectError
+		require.True(t, errors.As(err, &re), "got %T: %v", err, err)
+		assert.Equal(t, wsprotocol.ClosePTYUpstreamUnavailable, re.Close.Code)
+		assert.ErrorIs(t, err, ErrPTYReconnectLimit)
 		assert.Equal(t, maxShortReconnects+1, s.attemptCount())
 		assert.Len(t, ft.jitterWindows(), maxShortReconnects)
 		sc.assertRestoredOnce(t)
@@ -692,4 +701,60 @@ func TestRun_CancelDuringRedial(t *testing.T) {
 	var re *PTYReconnectError
 	assert.False(t, errors.As(err, &re))
 	sc.assertRestoredOnce(t)
+}
+
+// TestRun_KeysDuringRedial: stdin is watched while the redial is in flight
+// too. Ctrl-C stops the reconnect with the original close and Ctrl-b d
+// detaches; nothing typed reaches the new connection.
+func TestRun_KeysDuringRedial(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		input   []byte
+		wantNil bool
+	}{
+		{name: "ctrl-c", input: []byte{keyCtrlC}},
+		{name: "detach", input: []byte{keyCtrlB, keyDetach}, wantNil: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dialing := make(chan struct{})
+			release := make(chan struct{})
+			var once sync.Once
+			s := newPTYScriptServer(t, func(idx int) bool {
+				if idx == 0 {
+					return false
+				}
+				once.Do(func() { close(dialing) })
+				<-release
+				return false // let the abandoned dial complete; the client closes it
+			}, func(idx int, s *ptyScriptServer, conn *websocket.Conn) {
+				sendData(conn)
+				if idx == 0 {
+					sendClose(conn, wsprotocol.ClosePTYUpstreamTimeout, "")
+					return
+				}
+				// Hold the late connection open until the test ends. (The
+				// server's recorder goroutine is this connection's only reader.)
+				<-release
+			})
+			// Registered after the server, so it runs before the server closes.
+			t.Cleanup(func() { close(release) })
+			ft := &fakeTiming{}
+			sc := newScriptedClient(t, s, ft)
+			ch := sc.runAsync()
+			waitSignal(t, dialing, "the redial")
+			sc.in.typeAndWait(t, tc.input)
+			err := waitRun(t, ch)
+			if tc.wantNil {
+				assert.NoError(t, err)
+			} else {
+				var ce *PTYCloseError
+				require.True(t, errors.As(err, &ce), "got %T: %v", err, err)
+				assert.Equal(t, wsprotocol.ClosePTYUpstreamTimeout, ce.Code, "the original close is reported")
+				var re *PTYReconnectError
+				assert.False(t, errors.As(err, &re))
+			}
+			assert.Empty(t, s.messagesOfType(1, wsprotocol.TypeData), "nothing typed reaches the new connection")
+			sc.assertRestoredOnce(t)
+		})
+	}
 }

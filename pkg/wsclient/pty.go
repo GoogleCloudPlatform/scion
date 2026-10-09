@@ -112,6 +112,10 @@ const (
 // holding the client in a reconnect loop.
 const maxShortReconnects = 3
 
+// ErrPTYReconnectLimit is the PTYReconnectError.Err Run reports when it
+// stops reconnecting because of maxShortReconnects.
+var ErrPTYReconnectLimit = fmt.Errorf("stopped after %d automatic reconnects whose sessions each ended within a minute", maxShortReconnects)
+
 // Bytes that stop a pending reconnect when typed during the wait: Ctrl-C
 // and Ctrl-D cancel it, and the tmux detach sequence (Ctrl-b d) detaches.
 const (
@@ -466,8 +470,8 @@ func (c *PTYClient) Run() error {
 		}
 		if shortCloses > maxShortReconnects {
 			slog.Debug("PTY client: too many short-lived sessions, not reconnecting", "closes", shortCloses)
-			runErr = err
-			return err
+			runErr = &PTYReconnectError{Close: closeErr, Err: ErrPTYReconnectLimit}
+			return runErr
 		}
 		var delay time.Duration
 		if timing == wsprotocol.ReconnectPrompt {
@@ -479,18 +483,13 @@ func (c *PTYClient) Run() error {
 		_, _ = fmt.Fprintf(c.notice, "\r\n%v; reconnecting (press Ctrl-C to stop)...\r\n", closeErr)
 		slog.Debug("PTY client reconnecting", "code", closeErr.Code, "reason", closeErr.Reason, "delay", delay)
 
-		if stop, waitErr := c.waitToReconnect(delay, stdinCh, closeErr); stop {
-			runErr = waitErr
+		newConn, stop, reconnErr := c.reconnect(delay, stdinCh, closeErr)
+		if stop {
+			runErr = reconnErr
 			return runErr
 		}
-
-		newConn, dialErr := c.redial()
-		if dialErr != nil {
-			if c.ctx.Err() != nil {
-				runErr = c.ctx.Err()
-				return runErr
-			}
-			runErr = &PTYReconnectError{Close: closeErr, Err: dialErr}
+		if reconnErr != nil {
+			runErr = &PTYReconnectError{Close: closeErr, Err: reconnErr}
 			return runErr
 		}
 		conn = newConn
@@ -560,85 +559,87 @@ func (c *PTYClient) startStdinReader() <-chan stdinResult {
 	return ch
 }
 
-// waitToReconnect waits for delay before a reconnect. Input typed during
-// the wait is not sent to the new session: Ctrl-C or Ctrl-D stops the
-// reconnect and returns closeErr, the tmux detach sequence (Ctrl-b d)
-// stops it as a clean detach (nil error), and anything else is discarded.
-// stop is true when the wait ended without a reconnect: one of those keys,
-// stdin ending (closeErr) or failing, or the context being cancelled.
-func (c *PTYClient) waitToReconnect(delay time.Duration, stdinCh <-chan stdinResult, closeErr *PTYCloseError) (stop bool, err error) {
+// reconnect waits for delay, then opens a new connection at the current
+// terminal size and makes it the current connection, closing the old one.
+//
+// Stdin is watched from the close until the new connection is up, through
+// both the wait and the dial, and nothing typed in that time reaches the
+// new session: Ctrl-C or Ctrl-D stops the reconnect and returns closeErr,
+// the tmux detach sequence (Ctrl-b d) stops it as a clean detach (nil
+// error), and anything else is discarded. stdin ending returns closeErr;
+// a cancelled context returns its error. In all of those cases stop is
+// true, and a dial still in flight is abandoned (closed if it completes
+// later). The WebSocket handshake does not itself stop when the context
+// is cancelled, which is another reason the dial runs in its own
+// goroutine. When the dial fails, stop is false and err is the dial error.
+func (c *PTYClient) reconnect(delay time.Duration, stdinCh <-chan stdinResult, closeErr *PTYCloseError) (conn *websocket.Conn, stop bool, err error) {
+	type dialResult struct {
+		conn *websocket.Conn
+		err  error
+	}
+	var results chan dialResult // nil (never ready) until the dial starts
+	abandon := func() {
+		if results == nil {
+			return
+		}
+		go func(results <-chan dialResult) {
+			if r := <-results; r.conn != nil {
+				_ = r.conn.Close()
+			}
+		}(results)
+	}
 	timer := c.after(delay)
 	prevCtrlB := false
 	for {
 		select {
 		case <-timer:
-			return false, nil
-		case <-c.ctx.Done():
-			return true, c.ctx.Err()
-		case r := <-stdinCh:
-			if r.err != nil {
-				if r.err == io.EOF {
-					return true, closeErr
+			timer = nil
+			if c.termSize != nil {
+				if cols, rows, ok := c.termSize(); ok {
+					c.config.Cols, c.config.Rows = cols, rows
 				}
-				return true, r.err
 			}
-			for _, b := range r.data {
+			results = make(chan dialResult, 1)
+			go func(results chan<- dialResult) {
+				conn, err := c.dial(c.ctx)
+				results <- dialResult{conn, err}
+			}(results)
+		case r := <-results:
+			if r.err != nil {
+				return nil, false, r.err
+			}
+			c.writeMu.Lock()
+			old := c.conn
+			c.conn = r.conn
+			c.writeMu.Unlock()
+			if old != nil {
+				_ = old.Close()
+			}
+			return r.conn, false, nil
+		case <-c.ctx.Done():
+			abandon()
+			return nil, true, c.ctx.Err()
+		case in := <-stdinCh:
+			if in.err != nil {
+				abandon()
+				if in.err == io.EOF {
+					return nil, true, closeErr
+				}
+				return nil, true, in.err
+			}
+			for _, b := range in.data {
 				switch {
 				case b == keyCtrlC, b == keyCtrlD:
-					return true, closeErr
+					abandon()
+					return nil, true, closeErr
 				case prevCtrlB && b == keyDetach:
-					return true, nil
+					abandon()
+					return nil, true, nil
 				}
 				prevCtrlB = b == keyCtrlB
 			}
 		}
 	}
-}
-
-// redial opens a new connection at the current terminal size and makes it
-// the current connection, closing the old one.
-func (c *PTYClient) redial() (*websocket.Conn, error) {
-	if c.termSize != nil {
-		if cols, rows, ok := c.termSize(); ok {
-			c.config.Cols, c.config.Rows = cols, rows
-		}
-	}
-	// The WebSocket handshake does not stop when the context is cancelled
-	// (only its deadline applies), so wait for the dial and the context
-	// together: an interrupt during the redial returns at once, and a dial
-	// that completes afterwards is closed.
-	type dialResult struct {
-		conn *websocket.Conn
-		err  error
-	}
-	results := make(chan dialResult, 1)
-	go func() {
-		conn, err := c.dial(c.ctx)
-		results <- dialResult{conn, err}
-	}()
-	var conn *websocket.Conn
-	select {
-	case r := <-results:
-		if r.err != nil {
-			return nil, r.err
-		}
-		conn = r.conn
-	case <-c.ctx.Done():
-		go func() {
-			if r := <-results; r.conn != nil {
-				_ = r.conn.Close()
-			}
-		}()
-		return nil, c.ctx.Err()
-	}
-	c.writeMu.Lock()
-	old := c.conn
-	c.conn = conn
-	c.writeMu.Unlock()
-	if old != nil {
-		_ = old.Close()
-	}
-	return conn, nil
 }
 
 // runConnection pumps one connection: stdin to the WebSocket in this

@@ -643,13 +643,16 @@ func describeAttachClose(err error, agentName string) error {
 	}
 	// wsclient makes one automatic reconnect attempt for some close codes
 	// (wsprotocol.PTYReconnectTiming). When that attempt failed, describe
-	// how it ended: by the new session's own close code if it has one (its
-	// hint is the one that applies now), otherwise by the reconnect error.
+	// how it ended: by the reconnect limit, by the new session's own close
+	// code if it has one (its hint is the one that applies now), otherwise by
+	// the reconnect error.
 	note := ""
 	var reconnectErr *wsclient.PTYReconnectError
 	if errors.As(err, &reconnectErr) && reconnectErr.Err != nil {
 		var second *wsclient.PTYCloseError
-		if errors.As(reconnectErr.Err, &second) {
+		if errors.Is(reconnectErr.Err, wsclient.ErrPTYReconnectLimit) {
+			note = "\nscion attach " + wsclient.ErrPTYReconnectLimit.Error() + "."
+		} else if errors.As(reconnectErr.Err, &second) {
 			note = "\nThis close came on the automatic reconnect after " + ptyCloseCodeText(closeErr) + "."
 			closeErr = second
 		} else {
