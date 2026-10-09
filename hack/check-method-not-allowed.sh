@@ -8,13 +8,17 @@
 #    without Allow (ptone/scion#2421, PR #1413).
 #
 # 2. Direct 405 writes (pkg/sciontool, extras/docs-agent,
-#    extras/scion-telegram). These packages do not use a helper; they write
-#    http.StatusMethodNotAllowed themselves (http.Error, writeError, ...).
-#    Every such write must be preceded, within the ALLOW_WINDOW lines above
-#    it (or on the same line), by a line that sets the "Allow" header
-#    (ptone/scion#2858). Comparisons (== / !=) and comment lines are not
-#    writes and are ignored. The pkg/hub and pkg/runtimebroker helper bodies
-#    write the status from a variable list, so those packages stay on rule 1.
+#    extras/scion-telegram, pkg/hub, pkg/conduit, pkg/artifacts). These
+#    write http.StatusMethodNotAllowed themselves (http.Error, writeError,
+#    ...). Every such write must be preceded, within the ALLOW_WINDOW lines
+#    above it (or on the same line) and in the same func, by a line that
+#    sets the "Allow" header or calls an Allow-setting helper with at least
+#    one method (MethodNotAllowed(w, ...) or writeMethodNotAllowed(w, ...))
+#    (ptone/scion#2858, ptone/scion#4056, ptone/scion#4057). Comparisons
+#    (== / !=) are not writes. Comment lines are ignored entirely, so a
+#    commented-out helper call or a comment mentioning Allow cannot cover a
+#    write. The helper bodies set Allow on the line before their write, so
+#    they pass rule 2.
 #
 # Matches "MethodNotAllowed(w)" anywhere on a line, not only at line end, so
 # `return MethodNotAllowed(w) // ...` or a call inside a larger expression is
@@ -48,7 +52,7 @@ require_tool grep check-method-not-allowed
 
 name="check-method-not-allowed"
 roots=(pkg/hub pkg/runtimebroker)
-status_roots=(pkg/sciontool extras/docs-agent extras/scion-telegram)
+status_roots=(pkg/sciontool extras/docs-agent extras/scion-telegram pkg/hub pkg/conduit pkg/artifacts)
 # Lines above a StatusMethodNotAllowed write searched for an Allow header.
 ALLOW_WINDOW=3
 
@@ -81,9 +85,13 @@ scan_status() {
   # shellcheck disable=SC2086 # candidates is a newline-separated path list
   awk -v win="$ALLOW_WINDOW" '
     FNR == 1 { last_allow = -1000 }
+    /^[ \t]*\/\// { next }                  # comment line: neither a marker nor a write
+    /^[ \t]*func / { last_allow = -1000 }  # an Allow in one func cannot cover the next
     /"Allow"/ { last_allow = FNR }
+    # helper call: only MethodNotAllowed(w, ...) or writeMethodNotAllowed(w, ...)
+    # themselves, not another name ending in MethodNotAllowed.
+    /(^|[^A-Za-z0-9_])(write)?MethodNotAllowed\(w, / { last_allow = FNR }
     /StatusMethodNotAllowed/ {
-      if ($0 ~ /^[ \t]*\/\//) next          # comment line
       if ($0 ~ /[=!]=/) next                  # comparison, not a write
       if (FNR - last_allow > win) print FILENAME ":" FNR ":" $0
     }
@@ -153,6 +161,10 @@ func b(w http.ResponseWriter) {
 	w.Header().Set("Allow", "GET"); writeError(w, http.StatusMethodNotAllowed, "x")
 }
 func c(code int) bool { return code == http.StatusMethodNotAllowed }
+func d(w http.ResponseWriter) {
+	MethodNotAllowed(w, http.MethodGet)
+	status = http.StatusMethodNotAllowed
+}
 // http.Error(w, "x", http.StatusMethodNotAllowed) in a comment is ignored.
 GO
   cat >"$dir/sbad/h.go" <<'GO'
@@ -175,6 +187,24 @@ package h
 func c(w http.ResponseWriter) {
 	w.WriteHeader(http.StatusMethodNotAllowed) // Allow set in the previous file does not count
 }
+func d(w http.ResponseWriter) {
+	writeMethodNotAllowed(w, http.MethodGet)
+}
+func e(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusMethodNotAllowed) // helper call in the previous func does not count
+}
+func f(w http.ResponseWriter) {
+	// MethodNotAllowed(w, http.MethodGet)
+	w.WriteHeader(http.StatusMethodNotAllowed) // a commented-out helper call does not count
+}
+func g(w http.ResponseWriter) {
+	respondMethodNotAllowed(w, http.MethodGet)
+	w.WriteHeader(http.StatusMethodNotAllowed) // another helper name does not count
+}
+func h(w http.ResponseWriter) {
+	// the "Allow" header is set by the caller
+	w.WriteHeader(http.StatusMethodNotAllowed) // a comment mentioning Allow does not count
+}
 GO
   cat >"$dir/sbad/h_test.go" <<'GO'
 package h
@@ -190,8 +220,8 @@ GO
   fi
   out="$(scan_status "$dir/sbad")" && rc=0 || rc=$?
   n="$(count_lines "$out")"
-  if [[ "$rc" -ne 0 || "$n" -ne 3 ]]; then
-    echo "self-test FAIL: status bad fixture: rc=$rc count=$n (want 3, test file excluded)" >&2; failed=1
+  if [[ "$rc" -ne 0 || "$n" -ne 7 ]]; then
+    echo "self-test FAIL: status bad fixture: rc=$rc count=$n (want 7, test file excluded)" >&2; failed=1
   fi
   out="$(scan_status "$dir/sempty")" && rc=0 || rc=$?
   if [[ "$rc" -ne 4 ]]; then

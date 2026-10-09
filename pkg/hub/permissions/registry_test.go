@@ -16,6 +16,8 @@ package permissions
 
 import (
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/credentialmeta"
@@ -538,5 +540,23 @@ func TestCollectionTargetClasses_SkillListSupportsBothClasses(t *testing.T) {
 	}
 	if !hasProject || !hasGlobal {
 		t.Errorf("skill.list must support BOTH ProjectScoped and GlobalCatalog collection classes, got %v", classes)
+	}
+}
+
+func TestReservedIDs_MatchesReservedRows(t *testing.T) {
+	var want []string
+	for _, p := range Registry {
+		if p.IsReserved() {
+			want = append(want, p.ID)
+		}
+	}
+	got := ReservedIDs()
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("ReservedIDs() = %v, want the Reserved rows in registry order %v", got, want)
+	}
+	for _, id := range []string{"artifact.update", "artifact.delete"} {
+		if !slices.Contains(got, id) {
+			t.Errorf("ReservedIDs() lacks %s", id)
+		}
 	}
 }
