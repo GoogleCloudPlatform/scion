@@ -231,6 +231,10 @@ as a likely missing `project:read` scope and stops. A user access token cannot r
 project, so the CLI does not try to link or register the project under one. Link the project
 once with an interactive login (`scion hub link`), then use the token.
 
+Token scopes limit what the CLI can do on the Hub. Local actions, such as `scion clean` and any
+command run with `--no-hub` (for example `scion delete --no-hub`), act on the local machine with
+the user's file permissions, and token scopes don't limit them.
+
 To use the CLI from a coding agent running on your machine, see
 [Using the scion CLI from a coding agent](/scion/hosted/user/coding-agent-cli/).
 
