@@ -449,10 +449,26 @@ func (a *AuthzService) devLocalHopUsable(ctx context.Context, edge *store.Delega
 //
 // Errors: ErrProvenanceMissing (also wrapping errOwnEdgeMissing when the
 // agent's own edge is the missing one), ErrProvenanceAmbiguous,
-// ErrProvenanceChain, errSourceNotAllowed, and wrapped lookup errors.
+// ErrProvenanceChain, errSourceNotAllowed, and wrapped lookup errors. On an
+// error the returned ChainCeiling is the zero value.
 func (a *AuthzService) chainEffectCeiling(ctx context.Context, agent *store.Agent) (ChainCeiling, error) {
+	chain, _, err := a.chainEffectCeilingWalk(ctx, agent)
+	if err != nil {
+		return ChainCeiling{}, err
+	}
+	return chain, nil
+}
+
+// chainEffectCeilingWalk is chainEffectCeiling's walk. On success it returns
+// the same ChainCeiling and a nil error. On an error it also returns
+// unrecordedBelow: the number of unrecorded hops (as hopUnrecorded counts
+// them) strictly below the hop at which the walk stopped, the hops a
+// permission check walking up from the agent passes before it reaches that
+// hop. Only reincarnateChainUnrecorded reads unrecordedBelow; every other
+// caller goes through chainEffectCeiling.
+func (a *AuthzService) chainEffectCeilingWalk(ctx context.Context, agent *store.Agent) (chain ChainCeiling, unrecordedBelow int, err error) {
 	if agent == nil {
-		return ChainCeiling{}, fmt.Errorf("%w: no agent", ErrProvenanceChain)
+		return ChainCeiling{}, 0, fmt.Errorf("%w: no agent", ErrProvenanceChain)
 	}
 	var (
 		bounded       []permissions.FrozenPermissionCeiling
@@ -464,16 +480,16 @@ func (a *AuthzService) chainEffectCeiling(ctx context.Context, agent *store.Agen
 walk:
 	for depth := 0; ; depth++ {
 		if depth > maxDelegationDepth {
-			return ChainCeiling{}, fmt.Errorf("%w: maximum depth exceeded", ErrProvenanceChain)
+			return ChainCeiling{}, unrecorded, fmt.Errorf("%w: maximum depth exceeded", ErrProvenanceChain)
 		}
 		if visited[delegateID] {
-			return ChainCeiling{}, fmt.Errorf("%w: agent %s repeats in the chain", ErrProvenanceChain, delegateID)
+			return ChainCeiling{}, unrecorded, fmt.Errorf("%w: agent %s repeats in the chain", ErrProvenanceChain, delegateID)
 		}
 		visited[delegateID] = true
 
 		active, err := a.activeProjectEdges(ctx, delegateID, agent.ProjectID)
 		if err != nil {
-			return ChainCeiling{}, err
+			return ChainCeiling{}, unrecorded, err
 		}
 		if len(active) == 0 {
 			if depth == 0 && !a.backfillCompleted(ctx) {
@@ -481,14 +497,15 @@ walk:
 				break walk
 			}
 			if depth == 0 {
-				return ChainCeiling{}, fmt.Errorf("%w: %w: agent %s", ErrProvenanceMissing, errOwnEdgeMissing, delegateID)
+				return ChainCeiling{}, unrecorded, fmt.Errorf("%w: %w: agent %s", ErrProvenanceMissing, errOwnEdgeMissing, delegateID)
 			}
-			return ChainCeiling{}, fmt.Errorf("%w: agent %s", ErrProvenanceMissing, delegateID)
+			return ChainCeiling{}, unrecorded, fmt.Errorf("%w: agent %s", ErrProvenanceMissing, delegateID)
 		}
 		if len(active) > 1 {
-			return ChainCeiling{}, fmt.Errorf("%w: agent %s", ErrProvenanceAmbiguous, delegateID)
+			return ChainCeiling{}, unrecorded, fmt.Errorf("%w: agent %s", ErrProvenanceAmbiguous, delegateID)
 		}
 		edge := active[0]
+		below := unrecorded // unrecorded hops below this one
 		if isMigrationSentinel(edge) {
 			unrecorded++
 			break walk
@@ -500,7 +517,7 @@ walk:
 			bounded = append(bounded, frozen)
 		case store.EffectCeilingPrincipal, store.EffectCeilingUnrecorded:
 		default:
-			return ChainCeiling{}, fmt.Errorf("%w: edge %s has ceiling kind %q", ErrProvenanceChain, edge.ID, edge.Kind)
+			return ChainCeiling{}, below, fmt.Errorf("%w: edge %s has ceiling kind %q", ErrProvenanceChain, edge.ID, edge.Kind)
 		}
 		if hopUnrecorded(edge) {
 			unrecorded++
@@ -508,7 +525,7 @@ walk:
 
 		if hasDevLocalProvenance(edge) {
 			if err := a.devLocalHopUsable(ctx, edge, &devUserActive); err != nil {
-				return ChainCeiling{}, err
+				return ChainCeiling{}, below, err
 			}
 		}
 
@@ -518,11 +535,11 @@ walk:
 		case store.DelegationPrincipalAgent:
 			delegateID = edge.DelegatorID
 		default:
-			return ChainCeiling{}, fmt.Errorf("%w: edge %s has delegator type %q", ErrProvenanceChain, edge.ID, edge.DelegatorType)
+			return ChainCeiling{}, below, fmt.Errorf("%w: edge %s has delegator type %q", ErrProvenanceChain, edge.ID, edge.DelegatorType)
 		}
 	}
 
-	return ChainCeiling{Ceiling: foldCeilings(bounded, unrecorded), UnrecordedHops: unrecorded}, nil
+	return ChainCeiling{Ceiling: foldCeilings(bounded, unrecorded), UnrecordedHops: unrecorded}, 0, nil
 }
 
 // hopUnrecorded reports whether one active edge is an unrecorded hop as

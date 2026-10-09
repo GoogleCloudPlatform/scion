@@ -357,10 +357,16 @@ const saAssignGenericForbiddenMsg = "You don't have permission to assign this GC
 // ancestor; the message does not need to identify which hop failed:
 //   - reincarnate by an authorized user: a user's reincarnate that keeps the
 //     role re-records the edge, with the user as delegator, when the
-//     agent's own edge or a hop above it is unrecorded
+//     agent's own edge is unrecorded, or when a hop above it is unrecorded
+//     and the chain walk reaches that hop before any hop it does not accept
 //     (reincarnateChainUnrecorded, ptone/scion#3948), as a user's
-//     role-changing reincarnate always does. Every hop this cause can come
-//     from is an existing edge, which the agent standing gate accepts;
+//     role-changing reincarnate always does. This gate walks up from the
+//     agent and denies at the first hop that fails, so whenever it denies
+//     with this cause every hop below the unrecorded one was accepted and
+//     the reincarnate re-records, even if a hop further up (for example one
+//     with local development provenance on a server without dev auth) is
+//     not accepted. Every hop this cause can come from is an existing edge,
+//     which the agent standing gate accepts;
 //   - recreate by an authorized user directly: a user's create writes the
 //     new agent's edge with recorded provenance (commitAgentCreate).
 //

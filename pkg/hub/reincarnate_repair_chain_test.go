@@ -263,13 +263,30 @@ func TestReincarnateByUserRepairsUnrecordedOwnEdge(t *testing.T) {
 func TestReincarnateByUserRepairsUnrecordedOwnEdgeUnderDevLocalHop(t *testing.T) {
 	f := newRepairFixture(t)
 	ctx := context.Background()
-	createDCUser(t, f.s, DevUserID, "dev-root@repair.test", f.project.ID, store.ProjectRoleMember)
-	parent := f.otherAgent(t, "repair-devlocal-parent", DevUserID)
-	require.NoError(t, f.s.CreateDelegationEdge(ctx, &store.DelegationEdge{
+	parent := f.devLocalRootedAgent(t, "repair-devlocal-parent", store.EffectCeilingPrincipal)
+	old := seedUnrecordedEdge(t, f.s, store.DelegationPrincipalAgent, parent.ID, f.target)
+	f.srv.authzService.setDevLocalAuthorityEnabled(false)
+	_, err := f.srv.authzService.chainEffectCeiling(ctx, mustGetAgent(t, f.s, f.target.ID))
+	require.ErrorIs(t, err, errSourceNotAllowed, "fixture: the chain fold refuses the dev_local hop")
+
+	f.reincarnateAs(t, f.session())
+	f.assertReRecordedByUser(t, old.ID)
+}
+
+// devLocalRootedAgent creates a stopped agent named slug whose own edge is
+// from user:DevUserID with recorded local development provenance and
+// ceiling kind kind, creating that user (active, a project member) first.
+func (f *repairFixture) devLocalRootedAgent(t *testing.T, slug string, kind store.EffectCeilingKind) *store.Agent {
+	t.Helper()
+	if _, err := f.s.GetUser(context.Background(), DevUserID); err != nil {
+		createDCUser(t, f.s, DevUserID, "dev-root@repair.test", f.project.ID, store.ProjectRoleMember)
+	}
+	a := f.otherAgent(t, slug, DevUserID)
+	require.NoError(t, f.s.CreateDelegationEdge(context.Background(), &store.DelegationEdge{
 		DelegatorType: store.DelegationPrincipalUser,
 		DelegatorID:   DevUserID,
 		DelegateType:  store.DelegationPrincipalAgent,
-		DelegateID:    parent.ID,
+		DelegateID:    a.ID,
 		ScopeType:     store.RoleScopeProject,
 		ScopeID:       f.project.ID,
 		Role:          string(AgentRoleFull),
@@ -280,15 +297,106 @@ func TestReincarnateByUserRepairsUnrecordedOwnEdgeUnderDevLocalHop(t *testing.T)
 			SourcePrincipalID:    DevUserID,
 			SourceCredentialKind: store.SourceCredentialDevLocal,
 		},
-		EffectCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+		EffectCeiling: store.EffectCeiling{Kind: kind},
 	}))
-	old := seedUnrecordedEdge(t, f.s, store.DelegationPrincipalAgent, parent.ID, f.target)
+	return a
+}
+
+// T's own edge is recorded, its parent's edge is unrecorded, and the hop
+// above that is recorded with local development provenance on a server
+// without dev auth (dev -> G dev_local, G -> P unrecorded, P -> T recorded).
+// chainEffectCeiling fails the whole chain as a source that is not accepted,
+// but the SA-assign gate, walking up from T, stops at P's unrecorded hop and
+// denies with ceiling_unrecorded. The reincarnate re-records T's edge from U,
+// which cuts both hops out of T's chain, and the SA-assign gate then passes.
+func TestReincarnateByUserRepairsUnrecordedAncestorUnderDevLocalHop(t *testing.T) {
+	f := newRepairFixture(t)
+	ctx := context.Background()
+	grand := f.devLocalRootedAgent(t, "repair-devlocal-grand", store.EffectCeilingPrincipal)
+	parent := f.otherAgent(t, "repair-devlocal-mid", DevUserID, grand.ID)
+	seedUnrecordedEdge(t, f.s, store.DelegationPrincipalAgent, grand.ID, parent)
+	old := seedFullAgentEdge(t, f.s, store.DelegationPrincipalAgent, parent.ID, f.target)
 	f.srv.authzService.setDevLocalAuthorityEnabled(false)
 	_, err := f.srv.authzService.chainEffectCeiling(ctx, mustGetAgent(t, f.s, f.target.ID))
 	require.ErrorIs(t, err, errSourceNotAllowed, "fixture: the chain fold refuses the dev_local hop")
+	assertUnrecordedDeny(t, f.saAssignDecision())
 
 	f.reincarnateAs(t, f.session())
 	f.assertReRecordedByUser(t, old.ID)
+	f.assertRealSAAssignCreate(t)
+}
+
+// T's own edge is recorded and the hop directly above it is recorded with
+// local development provenance on a server without dev auth (dev -> P
+// dev_local, P -> T recorded): no unrecorded hop lies below the hop that
+// is not accepted, so a user's same-role reincarnate keeps T's edge; only a
+// recreate replaces such a chain.
+func TestReincarnateByUserKeepsRecordedEdgeUnderDevLocalHop(t *testing.T) {
+	f := newRepairFixture(t)
+	parent := f.devLocalRootedAgent(t, "repair-devlocal-keep", store.EffectCeilingPrincipal)
+	old := seedFullAgentEdge(t, f.s, store.DelegationPrincipalAgent, parent.ID, f.target)
+	f.srv.authzService.setDevLocalAuthorityEnabled(false)
+	d := f.saAssignDecision()
+	require.False(t, d.Allowed, "fixture: reason %q", d.Reason)
+	assert.Equal(t, DenyCauseCeilingSourceNotAllowed, d.DenyCause, "reason %q", d.Reason)
+
+	f.reincarnateAs(t, f.session())
+	assertEdgeKept(t, f.s, f.target.ID, old, f.targetEdge(t))
+}
+
+// chainEffectCeilingWalk reports, beside a structural error, the unrecorded
+// hops strictly below the hop at which it stopped; the hop that stopped it
+// is not counted even when it is itself unrecorded, as the SA-assign gate
+// denies such a hop with ceiling_source_not_allowed. chainEffectCeiling
+// returns the zero ChainCeiling with the same error.
+func TestChainEffectCeilingWalkUnrecordedBelow(t *testing.T) {
+	cases := map[string]struct {
+		seed func(t *testing.T, f *repairFixture)
+		want int
+	}{
+		"unrecorded ancestor under the dev_local hop": {
+			seed: func(t *testing.T, f *repairFixture) {
+				grand := f.devLocalRootedAgent(t, "walk-grand", store.EffectCeilingPrincipal)
+				parent := f.otherAgent(t, "walk-mid", DevUserID, grand.ID)
+				seedUnrecordedEdge(t, f.s, store.DelegationPrincipalAgent, grand.ID, parent)
+				seedFullAgentEdge(t, f.s, store.DelegationPrincipalAgent, parent.ID, f.target)
+			},
+			want: 1,
+		},
+		"recorded own edge under the dev_local hop": {
+			seed: func(t *testing.T, f *repairFixture) {
+				parent := f.devLocalRootedAgent(t, "walk-parent", store.EffectCeilingPrincipal)
+				seedFullAgentEdge(t, f.s, store.DelegationPrincipalAgent, parent.ID, f.target)
+			},
+			want: 0,
+		},
+		"the dev_local hop itself unrecorded": {
+			seed: func(t *testing.T, f *repairFixture) {
+				parent := f.devLocalRootedAgent(t, "walk-unrec-devlocal", store.EffectCeilingUnrecorded)
+				seedFullAgentEdge(t, f.s, store.DelegationPrincipalAgent, parent.ID, f.target)
+			},
+			want: 0,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newRepairFixture(t)
+			tc.seed(t, f)
+			f.srv.authzService.setDevLocalAuthorityEnabled(false)
+			ctx := context.Background()
+			target := mustGetAgent(t, f.s, f.target.ID)
+
+			chain, below, err := f.srv.authzService.chainEffectCeilingWalk(ctx, target)
+			require.ErrorIs(t, err, errSourceNotAllowed)
+			assert.Equal(t, tc.want, below)
+			assert.Equal(t, ChainCeiling{}, chain)
+
+			wrapped, werr := f.srv.authzService.chainEffectCeiling(ctx, target)
+			require.ErrorIs(t, werr, errSourceNotAllowed)
+			assert.Equal(t, err.Error(), werr.Error())
+			assert.Equal(t, ChainCeiling{}, wrapped)
+		})
+	}
 }
 
 // Only an ancestor hop is unrecorded (U -> P unrecorded, P -> T recorded):
