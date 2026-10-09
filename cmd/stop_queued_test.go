@@ -180,7 +180,7 @@ func TestStopViaHub_RmLocalCleanupFailureWarns(t *testing.T) {
 			var warnings []interface{}
 			if tc.all {
 				var out jsonResultBody
-				require.NoError(t, json.Unmarshal([]byte(jsonBodyOf(stdout)), &out), stdout)
+				require.NoError(t, json.Unmarshal([]byte(stdout), &out), stdout)
 				assert.Equal(t, "success", out.Status)
 				require.Len(t, out.Results, 1)
 				assert.Equal(t, true, out.Results[0]["removed"])
