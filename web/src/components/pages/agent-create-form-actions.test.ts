@@ -49,6 +49,8 @@ interface StartResponse {
   ok: boolean;
   status: number;
   body?: unknown;
+  /** When set, the start fetch rejects with this error. */
+  reject?: Error;
 }
 
 /** Accepts the create request and records every POST for inspection. */
@@ -76,6 +78,7 @@ function stubFetch(createdPhase?: string, start: StartResponse = { ok: true, sta
           } as Response);
         }
         if (url.endsWith('/start')) {
+          if (start.reject) return Promise.reject(start.reject);
           return Promise.resolve({
             ok: start.ok,
             status: start.status,
@@ -218,6 +221,27 @@ describe('Create Agent form actions', () => {
     expect(navigations).toEqual(['/agents/agent-1']);
   });
 
+  it('shows a toast and still opens the agent when the start fetch rejects', async () => {
+    stubFetch(undefined, { ok: false, status: 0, reject: new TypeError('Failed to fetch') });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const el = await mountAgentCreate();
+    const page = el as unknown as AgentCreateInternals & { error: string | null };
+    page.name = 'test-agent';
+    page.projectId = 'p1';
+
+    await clickStart(el);
+    await vi.waitFor(() => expect(navigations).toEqual(['/agents/agent-1']));
+
+    expect(requests.map((r) => r.url)).toEqual(['/api/v1/agents', '/api/v1/agents/agent-1/start']);
+    expect(requests.filter((r) => r.url === '/api/v1/agents')).toHaveLength(1);
+    expect(showToast).toHaveBeenCalledTimes(1);
+    expect(showToast).toHaveBeenCalledWith(
+      'Agent was created but did not start: Failed to fetch',
+      'danger'
+    );
+    expect(page.error).toBeFalsy();
+  });
+
   it('skips the separate start call when the create response shows the agent already starting', async () => {
     stubFetch('provisioning');
     const el = await mountAgentCreate();
@@ -229,5 +253,7 @@ describe('Create Agent form actions', () => {
 
     expect(requests.map((r) => r.url)).toEqual(['/api/v1/agents']);
     expect(requests[0].body).not.toHaveProperty('provisionOnly');
+    expect(showToast).not.toHaveBeenCalled();
+    expect(navigations).toEqual(['/agents/agent-1']);
   });
 });
