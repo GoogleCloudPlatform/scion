@@ -2407,6 +2407,24 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// (except the $(NAME) case described in dedupeEnvVars), so every
 	// $(VAR) reference in a retained entry resolves to the same value as
 	// before de-duplication.
+	// Resolve the container's resource requests/limits from the resolved
+	// spec and kubernetes.resources. Default requests fill only resources
+	// with neither a request nor a limit (see buildK8sResourceRequirements).
+	// Resolved here, before de-duplication, so the Go runtime env derived
+	// from the limits below goes through the same de-duplication path.
+	var k8sResources *api.K8sResources
+	if config.Kubernetes != nil {
+		k8sResources = config.Kubernetes.Resources
+	}
+	containerResources, err := buildK8sResourceRequirements(config.Resources, k8sResources)
+	if err != nil {
+		return nil, err
+	}
+
+	// GOMAXPROCS/GOMEMLIMIT from the container limits, added last and only
+	// for names no other source has set (see goRuntimeEnvFromLimits).
+	envVars = appendGoRuntimeEnvFromLimits(envVars, containerResources.Limits)
+
 	envVars = dedupeEnvVars(envVars)
 
 	// Security context: run agent pods as the image's non-root scion user.
@@ -2826,17 +2844,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, extraVolumeMounts...)
 	}
 
-	// Apply resource requests/limits from the resolved spec and
-	// kubernetes.resources. Default requests fill only resources with neither a
-	// request nor a limit (see buildK8sResourceRequirements).
-	var k8sResources *api.K8sResources
-	if config.Kubernetes != nil {
-		k8sResources = config.Kubernetes.Resources
-	}
-	containerResources, err := buildK8sResourceRequirements(config.Resources, k8sResources)
-	if err != nil {
-		return nil, err
-	}
+	// Apply the resource requests/limits resolved above.
 	pod.Spec.Containers[0].Resources = containerResources
 
 	// Process shared directories — mount shared-dir volumes.

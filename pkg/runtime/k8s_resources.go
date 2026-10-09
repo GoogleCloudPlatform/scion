@@ -125,3 +125,65 @@ func buildK8sResourceRequirements(spec *api.ResourceSpec, k8s *api.K8sResources)
 
 	return corev1.ResourceRequirements{Requests: reqs, Limits: limits}, nil
 }
+
+// goMemLimitPercent is the share of the container memory limit that
+// GOMEMLIMIT is set to. The rest is a margin for non-heap memory and for
+// non-Go processes in the container.
+const goMemLimitPercent = 90
+
+// appendGoRuntimeEnvFromLimits appends GOMAXPROCS and GOMEMLIMIT derived
+// from the container's resource limits, so that Go programs in the pod size
+// themselves to the pod rather than to the node (nproc and free inside a pod
+// report the node). The values are computed from the limits known when the
+// pod spec is built, not through a downward-API resourceFieldRef: a
+// resourceFieldRef reports node allocatable when no limit is set, cannot
+// express a percentage, and rounds CPU to whole units.
+//
+// Each variable is added only when its limit is set and no entry in env
+// already uses that name, so env from the template or any other source
+// wins. A template can set GOMEMLIMIT=off to turn the soft limit off, or
+// any GOMAXPROCS value to override the CPU-derived one. A limit added at
+// admission time (for example by a namespace LimitRange) is not known here,
+// so no variable is set for it.
+//
+//   - GOMAXPROCS is the CPU limit rounded up to whole cores, at least 1.
+//     Setting it explicitly turns off the cgroup-aware default of Go 1.25+
+//     and its runtime updates (for example after an in-place pod resize).
+//     This is a deliberate trade-off: agent images may carry older Go
+//     toolchains that do not read the cgroup CPU quota.
+//   - GOMEMLIMIT is goMemLimitPercent of the memory limit, rounded down to
+//     whole MiB and written with a MiB suffix. It is a per-process soft
+//     limit: every Go process (for example each compile process under go
+//     build) gets its own copy, so it does not cap the container total and
+//     is not OOM protection. It only makes the GC work harder as a process
+//     nears the limit.
+func appendGoRuntimeEnvFromLimits(env []corev1.EnvVar, limits corev1.ResourceList) []corev1.EnvVar {
+	present := make(map[string]struct{}, len(env))
+	for _, e := range env {
+		present[e.Name] = struct{}{}
+	}
+	add := func(name, value string) {
+		if _, ok := present[name]; ok || value == "" {
+			return
+		}
+		env = append(env, corev1.EnvVar{Name: name, Value: value})
+	}
+
+	if q, ok := limits[corev1.ResourceCPU]; ok && q.Sign() > 0 {
+		cores := (q.MilliValue() + 999) / 1000
+		if cores < 1 {
+			cores = 1
+		}
+		add("GOMAXPROCS", fmt.Sprintf("%d", cores))
+	}
+	if q, ok := limits[corev1.ResourceMemory]; ok && q.Sign() > 0 {
+		bytes := q.Value()
+		// bytes/100*percent avoids overflow for very large limits; the
+		// precision lost is below one MiB for any limit that matters.
+		mib := (bytes / 100 * goMemLimitPercent) / (1 << 20)
+		if mib > 0 {
+			add("GOMEMLIMIT", fmt.Sprintf("%dMiB", mib))
+		}
+	}
+	return env
+}
