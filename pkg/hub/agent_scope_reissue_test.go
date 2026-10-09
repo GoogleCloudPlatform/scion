@@ -239,7 +239,7 @@ func TestScopeReissue_T1_LegacyChainGainsArtifactScopes(t *testing.T) {
 	}
 	require.NotNil(t, oldRow)
 	assert.False(t, oldRow.Active)
-	assert.Equal(t, store.EdgeDeactivationScopeReissueReplaced, oldRow.Deactivation.Cause)
+	assert.Equal(t, store.EdgeDeactivationScopeReissueReplaced, oldRow.Cause)
 	newEdge := f.activeEdge(t, f.child)
 	assert.Equal(t, aResp.EdgeNew, newEdge.ID)
 	assert.Equal(t, f.parent.ID, newEdge.DelegatorID)
