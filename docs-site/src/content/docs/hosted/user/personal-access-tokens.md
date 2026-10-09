@@ -206,7 +206,7 @@ The same per-request checks apply, with these limits:
   matching selector, for example `hub_lifecycle_hooks:update` to change hub pre-start hooks.
   Hub pre-start hook scripts are redacted in read responses for every credential other than an
   interactive sign-in, so a token sees hub hook metadata but not the script.
-- **Integrations, GitHub App and metrics.** Chat integration, GitHub App and metrics and
+- **Integrations, GitHub App, and metrics.** Chat integration, GitHub App, metrics, and
   diagnostics operations admit only a hub token carrying the matching selector (for example
   `hub_integrations:update` or `hub_metrics:read`). Some of these operations need an interactive
   sign-in, and every token is refused for them: writing integration secrets or integration
