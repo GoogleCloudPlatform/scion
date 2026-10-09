@@ -253,8 +253,16 @@ func ResolveOrCreateConversationByKey(
 		if len(parts) != 3 {
 			return nil, fmt.Errorf("malformed thread: ref (external_ref=%q, parts=%d)", extRef, len(parts))
 		}
+		// The topic is looked up within the key's project (parts[1]). A
+		// topic of another project answers ErrNotFound and takes the
+		// "not a native topic" fall-through below. That upsert can only
+		// create or reuse the thread:<keyProject>:<id> row of the key's own
+		// project, which carries no content of the other project, so no
+		// further refusal is needed here. Agent outbound sends answer a
+		// missing thread before they reach this point
+		// (outboundThreadConversationState).
 		threadID := parts[2]
-		convID, lookupErr := cfg.topicLookup.GetTopicConversationIDIncludingDeleted(ctx, threadID)
+		convID, lookupErr := cfg.topicLookup.GetTopicConversationIDIncludingDeletedInProject(ctx, parts[1], threadID)
 		if lookupErr == nil && convID != "" {
 			log.Debug("conversation resolved via topic lookup (sink-level)",
 				"external_ref", extRef, "conversation_id", convID)

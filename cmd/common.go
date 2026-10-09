@@ -44,6 +44,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
@@ -83,7 +84,51 @@ var (
 	agentRoleFlag         string
 	messageModeFlag       string
 	serviceAccountFlag    string
+	agentLogLevelFlag     string
 )
+
+// agentLogLevelFlagName is the start/resume flag that sets SCION_LOG_LEVEL
+// in the agent's environment. Agents never inherit debug settings from the
+// CLI or the server; this flag is the explicit per-agent opt-in.
+const agentLogLevelFlagName = "agent-log-level"
+
+const agentLogLevelFlagUsage = "Set SCION_LOG_LEVEL in the agent's environment, e.g. debug or info,hub=debug (scion commands and sciontool inside the agent use it)"
+
+// validateAgentLogLevel checks a --agent-log-level value with the shared
+// level-spec parser and returns the trimmed spec. set reports whether the
+// flag was given; an explicitly empty value is rejected. When the flag is
+// not given the result is "".
+func validateAgentLogLevel(raw string, set bool) (string, error) {
+	spec := strings.TrimSpace(raw)
+	if strings.Trim(spec, ", \t") == "" {
+		if set || raw != "" {
+			return "", fmt.Errorf("invalid --%s value %q: must not be empty (want debug, info, warn or error, optionally followed by component=level entries)", agentLogLevelFlagName, raw)
+		}
+		return "", nil
+	}
+	if _, err := loglevel.ParseLevelSpec(spec); err != nil {
+		return "", fmt.Errorf("invalid --%s value %q: %w", agentLogLevelFlagName, raw, err)
+	}
+	return spec, nil
+}
+
+// localAgentStartEnv returns the initial agent env for a local start: just
+// SCION_LOG_LEVEL when --agent-log-level was given, else nil. The CLI's own
+// --debug never adds anything here.
+func localAgentStartEnv() map[string]string {
+	lvl := agentLogLevelEnvValue()
+	if lvl == "" {
+		return nil
+	}
+	return map[string]string{loglevel.EnvLogLevel: lvl}
+}
+
+// agentLogLevelEnvValue returns the SCION_LOG_LEVEL value requested with
+// --agent-log-level, or "" when the flag was not given. RunAgent validates
+// the flag before either start path runs.
+func agentLogLevelEnvValue() string {
+	return strings.TrimSpace(agentLogLevelFlag)
+}
 
 func validateMessageMode(mode string) error {
 	if mode == "" {
@@ -320,6 +365,7 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 
 	opts := hubsync.EnsureHubReadyOptions{
 		AutoConfirm:      autoConfirm,
+		NonInteractive:   nonInteractive,
 		NoHub:            noHub,
 		EndpointOverride: hubEndpoint,
 		SkipSync:         skipSync,
@@ -708,6 +754,18 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		return asUsageError(err)
 	}
 
+	if _, err := validateAgentLogLevel(agentLogLevelFlag, cmd.Flags().Changed(agentLogLevelFlagName)); err != nil {
+		return asUsageError(err)
+	}
+
+	if err := validateTaskFileStdin(); err != nil {
+		return err
+	}
+	task, err := applyTaskFile(task, taskFilePath, os.Stdin)
+	if err != nil {
+		return asUsageError(err)
+	}
+
 	// Pre-flight: verify .scion/agents/ is gitignored (once, before any provisioning).
 	if err := CheckAgentsGitignore(projectPath); err != nil {
 		return err
@@ -852,12 +910,9 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		opts.TelemetryOverride = &val
 	}
 
-	// Propagate debug mode to container so sciontool logs debug info
-	if debugMode {
-		opts.Env = map[string]string{
-			"SCION_DEBUG": "1",
-		}
-	}
+	// The CLI's own --debug does not reach the agent; --agent-log-level is
+	// the explicit opt-in (ptone/scion#4098).
+	opts.Env = localAgentStartEnv()
 
 	// Thread CLI-resolved hub endpoint so locally-started agents get
 	// hub connectivity. The --hub flag and host SCION_HUB_ENDPOINT env
@@ -1131,7 +1186,7 @@ var configFlagsNotAppliedToExistingAgent = []string{
 	"type", "harness-config", "harness", "harness-auth", "image", "model",
 	"thinking-level", "config", "broker", "label", "role", "message-mode",
 	"branch", "workspace", "service-account", "enable-telemetry",
-	"disable-telemetry", "no-auth", "profile",
+	"disable-telemetry", "no-auth", "profile", agentLogLevelFlagName,
 }
 
 // warnFlagsIgnoredForExistingAgent prints one stderr warning naming the
@@ -1251,6 +1306,8 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 	// Wire --service-account flag into the GCP identity assignment.
 	applyServiceAccountFlag(req, serviceAccountFlag)
 
+	agentLogLevel := agentLogLevelEnvValue()
+
 	// Thread inline config from --config flag into the Hub request.
 	// The inline config is the base; CLI flags override specific fields.
 	if inlineCfg != nil {
@@ -1259,21 +1316,22 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		if agentImage != "" {
 			req.Config.Image = agentImage
 		}
-	} else if agentImage != "" || debugMode || enableTelemetry || disableTelemetry {
+	} else if agentImage != "" || agentLogLevel != "" || enableTelemetry || disableTelemetry {
 		// Build config from CLI flags alone
 		req.Config = &api.ScionConfig{
 			Image: agentImage,
 		}
 	}
 
-	// Add debug/telemetry env vars to config
-	if req.Config != nil && (debugMode || enableTelemetry || disableTelemetry) {
+	// Add agent log level and telemetry env vars to config. The CLI's own
+	// --debug is not forwarded to the agent (ptone/scion#4098).
+	if req.Config != nil && (agentLogLevel != "" || enableTelemetry || disableTelemetry) {
 		configEnv := req.Config.Env
 		if configEnv == nil {
 			configEnv = make(map[string]string)
 		}
-		if debugMode {
-			configEnv["SCION_DEBUG"] = "1"
+		if agentLogLevel != "" {
+			configEnv[loglevel.EnvLogLevel] = agentLogLevel
 		}
 		if enableTelemetry {
 			configEnv["SCION_TELEMETRY_ENABLED"] = "true"
@@ -1540,6 +1598,18 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 	}
 
 	finalAgent := resp.Agent
+	// notFollowed is set when the Hub accepted the launch but the wait could
+	// not follow it to running (status not readable, or still launching at
+	// the wait deadline). The start is then reported as accepted and exits
+	// 0, so a caller does not retry a launch that is going on. --attach
+	// needs a running agent, so it keeps the error.
+	notFollowed := ""
+	// launchReportable is false when finalAgent's launch is not the start
+	// being reported (the create answer predates a workspace finalize).
+	launchReportable := true
+	// statusRead is false when the wait never read the agent, so only the
+	// create answer is known.
+	statusRead := true
 	if needWait {
 		statusf("Waiting for agent '%s' to start...\n", agentName)
 		var progress io.Writer
@@ -1562,10 +1632,11 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 		}
 		// Ctrl-C (or SIGTERM) stops waiting only; the launch continues on
 		// the Hub.
+		accepted := launchActive(resp.Agent) || workspaceFinalized
 		waited, err := waitForAgentLaunchWithSignals(launchWaitOptions{
 			AgentName:  agentName,
 			BudgetFrom: budgetFrom,
-			Accepted:   launchActive(resp.Agent) || workspaceFinalized,
+			Accepted:   accepted,
 			LaunchID:   launchID,
 			Get: func(ctx context.Context) (*hubclient.Agent, error) {
 				return hubCtx.Client.ProjectAgents(projectID).Get(ctx, agentName)
@@ -1573,18 +1644,31 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 			Timeout:  startWaitTimeout,
 			Progress: progress,
 		})
-		if err != nil {
+		note, ok := acceptedLaunchNotFollowed(err)
+		switch {
+		case err == nil:
+			finalAgent = waited
+		case ok && accepted && !attach:
+			notFollowed = note
+			if waited != nil {
+				finalAgent = waited
+			} else {
+				statusRead = false
+				launchReportable = !workspaceFinalized
+			}
+		default:
 			for _, w := range textWarnings {
 				fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
 			}
 			return err
 		}
-		finalAgent = waited
 	}
 
+	// A status that was never read leaves only the create answer, whose
+	// phase predates the launch.
+	phaseKnown := statusRead
 	// After a finalize without waiting, the create answer predates the
 	// dispatched start; report the agent's current state instead.
-	phaseKnown := true
 	if workspaceFinalized && !needWait {
 		getCtx, getCancel := context.WithTimeout(context.Background(), launchFetchTimeout)
 		current, getErr := hubCtx.Client.ProjectAgents(projectID).Get(getCtx, agentName)
@@ -1605,6 +1689,9 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 	}
 	launching := !needWait && launchActive(finalAgent)
 	if workspaceFinalized && !needWait && !agentIsRunning(finalAgent, phaseKnown) {
+		launching = true
+	}
+	if notFollowed != "" {
 		launching = true
 	}
 	message := fmt.Sprintf("Agent '%s' %s via Hub.", agentName, displayStatus)
@@ -1635,7 +1722,10 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 			if finalAgent.RuntimeBrokerID != "" {
 				result.Details["runtimeBrokerId"] = finalAgent.RuntimeBrokerID
 			}
-			if launching && finalAgent.Launch != nil {
+			if notFollowed != "" {
+				result.Details["launchNote"] = notFollowed
+			}
+			if launching && launchReportable && finalAgent.Launch != nil {
 				result.Details["launchId"] = finalAgent.Launch.ID
 				if finalAgent.Launch.Deadline != nil {
 					result.Details["launchDeadline"] = finalAgent.Launch.Deadline.UTC().Format(time.RFC3339)
@@ -1653,7 +1743,11 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 			statusf("Phase: %s\n", phase)
 		}
 	}
-	if launching {
+	switch {
+	case notFollowed != "":
+		statusf("%s\n", notFollowed)
+		statusf("Check its status with: scion list\n")
+	case launching:
 		statusf("Follow the launch with: scion start %s (waits until it is running)\n", agentName)
 	}
 	for _, w := range textWarnings {
@@ -1670,17 +1764,14 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 		agentID = resp.Agent.ID
 	}
 	// agentID keeps the create response's ID unless the fetch returned a
-	// non-empty one. Runtime, broker and profile always take the fetched
-	// value, even if empty: "" is itself a meaningful attach-is-supported
-	// value to attachUnsupportedErr.
-	var agentRuntime, agentBrokerID, agentProfile string
+	// non-empty one. The runtime always takes the fetched value (it feeds
+	// managedAttachErr); the Hub preflight decides the rest.
+	var agentRuntime string
 	if finalAgent != nil {
 		if finalAgent.ID != "" {
 			agentID = finalAgent.ID
 		}
 		agentRuntime = finalAgent.Runtime
-		agentBrokerID = finalAgent.RuntimeBrokerID
-		agentProfile = agentProfileName(finalAgent)
 	}
 	if agentID == "" {
 		agentID = agentName
@@ -1689,11 +1780,9 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 	attachCtx, attachCancel := context.WithTimeout(context.Background(), launchFetchTimeout)
 	defer attachCancel()
 	return attachHubSession(attachCtx, hubCtx, hubAttachTarget{
-		Name:     agentName,
-		ID:       agentID,
-		Runtime:  agentRuntime,
-		BrokerID: agentBrokerID,
-		Profile:  agentProfile,
+		Name:    agentName,
+		ID:      agentID,
+		Runtime: agentRuntime,
 	})
 }
 
@@ -1737,8 +1826,10 @@ func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, pr
 			return nil, err
 		}
 
-		// Only prompt if interactive and not auto-confirm
-		if autoConfirm || !util.IsTerminal() {
+		// Only prompt if interactive and not auto-confirm. Without a
+		// terminal, stdin is never read (an idle open stdin would hang);
+		// the error names --broker so the caller can pick one.
+		if autoConfirm || !isInteractiveTerminal() {
 			return nil, &hubError{msg: nonInteractiveBrokerMessage(apiErr.Message, availableBrokers), err: apiErr}
 		}
 
@@ -1755,7 +1846,7 @@ func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, pr
 			if isDefault {
 				defaultLabel = " (default)"
 			}
-			fmt.Printf("\nUse runtime broker %s (%s)%s? [y/N]: ", name, status, defaultLabel)
+			fmt.Fprintf(os.Stderr, "\nUse runtime broker %s (%s)%s? [y/N]: ", name, status, defaultLabel)
 			input, err := reader.ReadString('\n')
 			if err != nil {
 				return nil, fmt.Errorf("failed to read input: %w", err)
@@ -1767,7 +1858,7 @@ func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, pr
 			req.RuntimeBrokerID, _ = brokerMap["id"].(string)
 		} else {
 			// Multiple brokers - selection prompt
-			fmt.Printf("\nMultiple runtime brokers available for project:\n")
+			fmt.Fprintf(os.Stderr, "\nMultiple runtime brokers available for project:\n")
 			for i, h := range availableBrokers {
 				brokerMap, _ := h.(map[string]interface{})
 				name, _ := brokerMap["name"].(string)
@@ -1777,12 +1868,12 @@ func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, pr
 				if isDefault {
 					defaultLabel = " (default)"
 				}
-				fmt.Printf("  [%d] %s (%s)%s\n", i+1, name, status, defaultLabel)
+				fmt.Fprintf(os.Stderr, "  [%d] %s (%s)%s\n", i+1, name, status, defaultLabel)
 			}
-			fmt.Println()
+			fmt.Fprintln(os.Stderr)
 
 			for {
-				fmt.Print("Select a broker (or 'c' to cancel): ")
+				fmt.Fprint(os.Stderr, "Select a broker (or 'c' to cancel): ")
 				input, err := reader.ReadString('\n')
 				if err != nil {
 					return nil, fmt.Errorf("failed to read input: %w", err)
@@ -1795,7 +1886,7 @@ func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, pr
 
 				var choice int
 				if _, err := fmt.Sscanf(input, "%d", &choice); err != nil || choice < 1 || choice > len(availableBrokers) {
-					fmt.Printf("Invalid choice. Please enter 1-%d.\n", len(availableBrokers))
+					fmt.Fprintf(os.Stderr, "Invalid choice. Please enter 1-%d.\n", len(availableBrokers))
 					continue
 				}
 

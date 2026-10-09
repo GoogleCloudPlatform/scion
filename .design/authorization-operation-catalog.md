@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 178
+**Operations:** 180
 
 ## Table of Contents
 
@@ -127,6 +127,7 @@
 - [user.session.revoke](#usersessionrevoke) — Revoke every cookie session of a user (platform admin only)
 - [user.terminalworkspace](#userterminalworkspace) — Read or replace the caller's own terminal workspace
 - [hub.authreset](#hubauthreset) — Reset all agent authentication credentials (emergency action)
+- [hub.authreset.reissue](#hubauthresetreissue) — Re-issue an agent's role scopes from its delegator's current authority (dispatched from POST .../agents/{id}/reset-auth when reissue_scopes is set; hub super-admin only)
 - [hub.config.read](#hubconfigread) — Read server configuration and schema
 - [hub.config.update](#hubconfigupdate) — Update server configuration sections. The route guard checks hub.config.read, so a token needs hub_config:read and hub_config:update, and writes configuration keys only
 - [hub.messaging.update](#hubmessagingupdate) — Read and update messaging configuration switches
@@ -184,6 +185,7 @@
 - [gcp.identity.read](#gcpidentityread) — Read GCP service account details or list accounts
 - [gcp.identity.verify](#gcpidentityverify) — Verify a GCP service account's IAM configuration
 - [env.read](#envread) — Read project environment variables
+- [env.hub.list](#envhublist) — List hub-level environment variables (scope=hub), without secret entries
 
 ---
 
@@ -3488,11 +3490,11 @@
 
 **Base Permission:** `project.read`
 
-**Resource Resolver:** project-from-url
+**Resource Resolver:** project-from-row
 
 **Effects:** `read-one`, `list-scoped`
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `not_found`
 
 ### Tests
 
@@ -4702,6 +4704,59 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## hub.authreset.reissue
+
+**Domain:** hub
+
+**Description:** Re-issue an agent's role scopes from its delegator's current authority (dispatched from POST .../agents/{id}/reset-auth when reissue_scopes is set; hub super-admin only)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| internal_dispatch | — | `handleAgentResetAuth:reissue-scopes` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `hub.auth_reset.execute`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `change-authority`, `revoke-authority`, `mint-credential`
+
+### Delegation
+
+- **Kind:** `conditional_on_increase`
+- The re-issued role and scopes are checked with CanDelegate against the delegator's live grant (never the operator's), and the role is never raised
+
+**Authority Evaluation:** `before_and_after`
+
+### Governance
+
+- **Kind:** peer_superior
+- Re-recording an agent's delegated authority and revoking its credentials is a hub super-admin action
+
+### Audit
+
+- **Event Type:** `agent_scopes_reissued`
+- **Context Fields:** actor_id
+- **Before Fields:** role_before, edge_replaced
+- **After Fields:** role_after, edge_new, scopes_added, scopes_removed, credentials_revoked
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestScopeReissue_OperatorRefusals`
 
 ---
 
@@ -6656,6 +6711,36 @@
 **Resource Resolver:** project-from-url
 
 **Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## env.hub.list
+
+**Domain:** env
+
+**Description:** List hub-level environment variables (scope=hub), without secret entries
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/env` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `hub.env_vars.read`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `list-scoped`
 
 **Denial Codes:** `forbidden`
 

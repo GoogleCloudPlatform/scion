@@ -115,8 +115,8 @@ export class ScionGitRemoteDisplay extends LitElement {
         >`
       : project.gitRemote;
 
-    // Unlabelled or unknown git modes are shared, matching the hub's
-    // ResolveProjectSharingMode.
+    // Unlabelled or unknown git modes get a clone per agent, matching the
+    // hub's ResolveProjectSharingMode.
     const workspaceModeIcon = isClonePerAgentWorkspace(project)
       ? html`<sl-tooltip content="Clone per agent"
           ><sl-icon name="robot" class="decorator-icon"></sl-icon

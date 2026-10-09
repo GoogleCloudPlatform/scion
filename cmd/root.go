@@ -15,6 +15,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -109,8 +110,8 @@ return an error instead of blocking.`,
 			autoConfirm = true
 		}
 
-		// Enable debug mode if --debug flag is set; otherwise pick the
-		// environment variable that controls debug output for this mode.
+		// Enable debug mode if --debug flag is set, and in agent mode
+		// ignore an inherited SCION_DEBUG (see configureDebugOutput).
 		// The CLI mode depends only on the environment and global
 		// settings, so it is resolved once here and reused below.
 		mode := resolveMode()
@@ -273,7 +274,8 @@ func Execute() {
 	// Decide early whether an inherited SCION_DEBUG applies. This call is
 	// load-bearing: the settings loads below and anything else that runs
 	// before PersistentPreRunE can emit debug lines, and without it they
-	// would still follow the inherited SCION_DEBUG inside an agent.
+	// (and the SCION_DEBUG deprecation warning) would still follow the
+	// inherited SCION_DEBUG inside an agent.
 	// Resolving the mode loads settings, so it runs after the legacy-env
 	// warning above.
 	mode := resolveMode()
@@ -313,7 +315,7 @@ func Execute() {
 		// A failure already reported in the JSON output only sets the exit
 		// status; printing it again would add noise for JSON consumers.
 		if !isReportedInJSON(err) {
-			fmt.Fprintf(os.Stderr, "\n%s%s%sError: %v%s\n\n", util.BgRed, util.White, util.Bold, err, util.Reset)
+			fmt.Fprint(os.Stderr, formatCLIError(os.Stderr, err))
 			if showUsageForError(cmd, err, autoHelp) {
 				_ = cmd.Usage()
 			}
@@ -322,15 +324,25 @@ func Execute() {
 	}
 }
 
+// formatCLIError renders a failed command's error for f. The error banner is
+// coloured only when f is a terminal and NO_COLOR is unset; otherwise every
+// ANSI escape sequence is removed, including any carried in the error text
+// itself, so piped stderr stays plain.
+func formatCLIError(f *os.File, err error) string {
+	return util.ColorFor(f, fmt.Sprintf("\n%s%s%sError: %v%s\n\n", util.BgRed, util.White, util.Bold, err, util.Reset))
+}
+
 // configureDebugOutput sets up CLI debug output for one invocation. An
-// explicit --debug always enables it. Otherwise, in agent mode the CLI
-// ignores the SCION_DEBUG value inherited from the agent's environment
-// (it is meant for in-container tooling and agent logs) and enables
-// debug output only for SCION_LOG_LEVEL=debug; outside agent mode
-// SCION_DEBUG still works.
+// explicit --debug always enables it. In agent mode the CLI also ignores
+// the deprecated SCION_DEBUG alias: inside an agent it is usually inherited
+// from an older broker that set it in every agent, not chosen for the
+// command, and honouring it would print debug lines and the deprecation
+// warning on every command. SCION_LOG_LEVEL still applies in every mode.
 func configureDebugOutput(mode CLIMode, explicitDebug bool) {
-	util.SetAgentDebugPolicy(mode == ModeAgent)
-	util.SetExplicitDebug(explicitDebug)
+	loglevel.SetIgnoreDebugAlias(mode == ModeAgent)
+	if explicitDebug {
+		util.EnableDebug()
+	}
 }
 
 // exitCodeFor returns the process exit status for a failed command: the
@@ -440,7 +452,7 @@ func commandInSubtree(cmd *cobra.Command, name string) bool {
 }
 
 func init() {
-	rootCmd.Long = util.GetBanner() + "\n" + rootCmd.Long
+	rootCmd.Long = util.ColorFor(os.Stdout, util.GetBanner()) + "\n" + rootCmd.Long
 	rootCmd.PersistentFlags().StringVarP(&projectPath, "project", "g", "", "Project identifier: path, slug (with Hub), or git URL (with Hub)")
 
 	rootCmd.PersistentFlags().BoolVar(&globalMode, "global", false, "Use the global project (equivalent to --project global)")
@@ -452,8 +464,8 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&noHub, "no-hub", false, "Disable Hub integration for this invocation (local-only mode)")
 
 	// Confirmation and non-interactive flags
-	rootCmd.PersistentFlags().BoolVarP(&autoConfirm, "yes", "y", false, "Skip confirmation prompt")
-	rootCmd.PersistentFlags().BoolVar(&nonInteractive, "non-interactive", false, "Non-interactive mode: implies --yes, errors on ambiguous prompts")
+	rootCmd.PersistentFlags().BoolVarP(&autoConfirm, "yes", "y", false, "Answer Yes to every confirmation prompt, including destructive ones (required to confirm when stdin is not a terminal)")
+	rootCmd.PersistentFlags().BoolVar(&nonInteractive, "non-interactive", false, "Non-interactive mode: implies --yes (answers Yes to every confirmation), errors on ambiguous prompts")
 
 	// Display zone for human-readable times (JSON output is always UTC)
 	rootCmd.PersistentFlags().StringVar(&displayTZ, "tz", "", "Show times in this IANA time zone, e.g. America/New_York (default: local zone; JSON output is unchanged)")
@@ -461,7 +473,7 @@ func init() {
 	rootCmd.MarkFlagsMutuallyExclusive("tz", "utc")
 
 	// Debug mode flag
-	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Enable debug output. Agents started by this command get SCION_DEBUG=1, which turns on debug logging for in-container tooling and agent logs, not for scion commands run inside the agent; use SCION_LOG_LEVEL=debug there. 'scion server start' has its own --debug (see its help).")
+	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Enable debug output from this command only; agents it starts are not affected (use --agent-log-level on start or resume for that). 'scion server start' has its own --debug (see its help).")
 
 	// Hide flags leaked from rclone via transitive import.
 	// These are registered on pflag.CommandLine (the global flag set), which
@@ -628,8 +640,8 @@ func printDevAuthWarningIfNeeded(projectPath string) {
 	}
 
 	// Dev auth is being used with Hub enabled - print warning to stderr
-	fmt.Fprintf(os.Stderr, "\n%s%s WARNING: Development authentication enabled - not for production use %s\n\n",
-		util.Bold, util.Yellow, util.Reset)
+	fmt.Fprint(os.Stderr, util.ColorFor(os.Stderr, fmt.Sprintf("\n%s%s WARNING: Development authentication enabled - not for production use %s\n\n",
+		util.Bold, util.Yellow, util.Reset)))
 }
 
 // checkAgentContainerContext detects when the CLI is running inside an agent

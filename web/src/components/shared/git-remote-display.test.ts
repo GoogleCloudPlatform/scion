@@ -73,10 +73,10 @@ describe('scion-git-remote-display workspace mode', () => {
   });
 
   it.each([
-    [undefined, 'Shared workspace'],
+    [undefined, 'Clone per agent'],
     [{ 'scion.dev/workspace-mode': 'shared' }, 'Shared workspace'],
-    [{ 'scion.dev/workspace-mode': 'something-new' }, 'Shared workspace'],
-    [{ 'scion.dev/workspace-mode': 'empty-per-agent' }, 'Shared workspace'],
+    [{ 'scion.dev/workspace-mode': 'something-new' }, 'Clone per agent'],
+    [{ 'scion.dev/workspace-mode': 'empty-per-agent' }, 'Clone per agent'],
     [{ 'scion.dev/workspace-mode': 'clone-per-agent' }, 'Clone per agent'],
     [{ 'scion.dev/workspace-mode': 'worktree-per-agent' }, 'Worktree per agent'],
   ] as [Record<string, string> | undefined, string][])(

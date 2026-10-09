@@ -19,61 +19,47 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 )
 
 var (
-	debugEnabled     bool // set by an explicit request such as --debug
-	agentDebugPolicy bool
+	debugEnabled     bool
+	debugInitialized bool
 	debugMu          sync.RWMutex
 )
 
-// SetAgentDebugPolicy selects which environment variable turns on debug
-// output when EnableDebug has not been called.
-//
-// Inside an agent container SCION_DEBUG is inherited from whoever started
-// the agent (a broker or a CLI run with --debug) and is meant for the
-// in-container tooling and agent logs, not for every CLI command the agent
-// runs. With the agent policy on, SCION_DEBUG is ignored and only
-// SCION_LOG_LEVEL=debug enables debug output. With it off (the default),
-// SCION_DEBUG is honoured as before.
-func SetAgentDebugPolicy(on bool) {
-	debugMu.Lock()
-	defer debugMu.Unlock()
-	agentDebugPolicy = on
-}
-
 // EnableDebug explicitly enables debug mode (e.g., from --debug flag).
 func EnableDebug() {
-	SetExplicitDebug(true)
-}
-
-// SetExplicitDebug sets whether debug mode was requested explicitly (for
-// example with --debug). Passing false clears an earlier explicit request,
-// so DebugEnabled falls back to the environment.
-func SetExplicitDebug(on bool) {
 	debugMu.Lock()
 	defer debugMu.Unlock()
-	debugEnabled = on
+	debugEnabled = true
+	debugInitialized = true
 }
 
 // DebugEnabled returns true if debug mode is enabled.
 // Debug mode is enabled if:
 //   - EnableDebug() was called (e.g., --debug flag)
-//   - the agent debug policy is on and SCION_LOG_LEVEL=debug is set
-//   - the agent debug policy is off and SCION_DEBUG is set
+//   - the shared default log level is debug: SCION_LOG_LEVEL=debug, or the
+//     deprecated SCION_DEBUG alias (see package loglevel)
 func DebugEnabled() bool {
-	debugMu.RLock()
-	enabled, agentPolicy := debugEnabled, agentDebugPolicy
-	debugMu.RUnlock()
-	if enabled {
-		return true
-	}
+	return debugEnabledFor("")
+}
 
-	// Not explicitly set, check environment
-	if agentPolicy {
-		return os.Getenv("SCION_LOG_LEVEL") == "debug"
+// debugEnabledFor is DebugEnabled for a component (a DebugfTagged tag):
+// a per-component level such as SCION_LOG_LEVEL=info,hubsync=debug enables
+// debug output for that tag only.
+func debugEnabledFor(component string) bool {
+	debugMu.RLock()
+	if debugInitialized {
+		result := debugEnabled
+		debugMu.RUnlock()
+		return result
 	}
-	return os.Getenv("SCION_DEBUG") != ""
+	debugMu.RUnlock()
+
+	// Not explicitly set: consult the shared level state.
+	return loglevel.DebugEnabled(component)
 }
 
 // Debugf prints a debug message to stderr if debug mode is enabled.
@@ -87,8 +73,10 @@ func Debugf(format string, args ...interface{}) {
 
 // DebugfTagged prints a debug message with a custom tag to stderr if debug mode is enabled.
 // Example: DebugfTagged("hubsync", "syncing %d agents", count) -> [hubsync] syncing 5 agents
+// The tag is also a component name for per-component levels, so
+// SCION_LOG_LEVEL=info,hubsync=debug enables only these lines.
 func DebugfTagged(tag, format string, args ...interface{}) {
-	if DebugEnabled() {
+	if debugEnabledFor(tag) {
 		fmt.Fprintf(os.Stderr, "["+tag+"] "+format+"\n", args...)
 	}
 }

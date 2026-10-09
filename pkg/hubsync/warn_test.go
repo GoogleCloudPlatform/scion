@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 )
 
 // captureWarnings redirects warnf output for the duration of the test.
@@ -53,14 +53,21 @@ func captureStderr(t *testing.T, fn func()) string {
 	return buf.String()
 }
 
+// setLogLevel sets SCION_LOG_LEVEL for the test (clearing SCION_DEBUG,
+// which the container may export) and makes the shared level state
+// re-read it, restoring the state when the test ends.
+func setLogLevel(t *testing.T, level string) {
+	t.Helper()
+	t.Setenv(loglevel.EnvLogLevel, level)
+	t.Setenv(loglevel.EnvDebug, "")
+	loglevel.Reset(false)
+	t.Cleanup(func() { loglevel.Reset(false) })
+}
+
 // debugOff makes sure debug output is disabled for the test.
 func debugOff(t *testing.T) {
 	t.Helper()
-	util.SetExplicitDebug(false)
-	util.SetAgentDebugPolicy(false)
-	t.Setenv("SCION_DEBUG", "")
-	t.Setenv("SCION_LOG_LEVEL", "")
-	t.Cleanup(func() { util.SetExplicitDebug(false) })
+	setLogLevel(t, "")
 }
 
 func TestDebugf_SilentByDefault(t *testing.T) {
@@ -79,8 +86,7 @@ func TestDebugf_SilentByDefault(t *testing.T) {
 }
 
 func TestDebugf_ShownWithDebugOn(t *testing.T) {
-	debugOff(t)
-	util.EnableDebug()
+	setLogLevel(t, "info,hubsync=debug")
 
 	out := captureStderr(t, func() { UpdateLastSyncedAt("", time.Now()) })
 

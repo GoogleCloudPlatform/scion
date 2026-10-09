@@ -43,6 +43,22 @@ Scion features an interactive, top-level **Native Web Chat** interface in the We
 - **Install as an App**: The web UI ships an app logo, PWA icons and a web app manifest, so it can be added to a phone's home screen with its own icon.
 - **Config Toggle**: Top-level native chat can be turned on or off globally by administrators using a single configuration key (`web.native_chat` feature flag) or via the Admin interface.
 
+### Who Can See Chat Content
+
+- **Project spaces are visible to the whole project.** Every thread in a project space, and every message and attachment in it, can be read by everyone who has access to that project. There are no private threads, and access cannot be limited to individual threads.
+- **Direct messages do not appear in the project space.** Messages you exchange with an agent also become part of that agent's history, which the agent's owner can see. If you promote an agent DM into a space thread, its messages move into the space, and everyone with access to the project can then read them.
+- **Pick the right place:**
+  - Use a DM to keep an exchange with one person or one agent out of the project space.
+  - Use a separate project when a group needs its own access boundary. Chat access follows project access, so only that project's members can read its space.
+
+:::caution[Keep credentials out of space threads]
+Do not post credentials, tokens, keys or other sensitive material in a space thread, even in a thread that looks quiet or narrowly named. Everyone with access to the project can read it. Do not send credentials in DMs either. To give an agent a credential, store it as a Hub secret instead (see [Secret & Environment Management](/scion/hosted/user/secrets/)) and refer to it by name in chat.
+:::
+
+:::note[Attachment and shared-directory permissions]
+Shared directories and the storage that holds chat attachments do not have fine-grained permissions: access is not limited per conversation or per member. Do not rely on attachments or shared directories for files that only some project members may see. A planned move of attachments to artifacts will add finer-grained access for attachments.
+:::
+
 ---
 
 ### Advanced Collaboration & Productivity
@@ -417,32 +433,40 @@ Scion does not forward an agent's end-of-turn text to anyone. A user, an agent o
 
 ### 3. Inbound Message Type Discrimination
 
-When an agent receives an inbound message, it arrives wrapped in standard delimiters and includes metadata:
+When an agent receives an inbound message in Hub mode, it arrives as a JSON object wrapped in standard delimiters:
 
 ```text
+You are receiving a message from the orchestration system:
+
 ---BEGIN SCION MESSAGE---
-sender: agent:tech-lead
-type: instruction
-thread_id: 1234
----
-Write a unit test for the auth package.
+{
+  "timestamp": "2026-10-08T21:00:41Z",
+  "message_id": "5d0c8a2e-7f41-4b8e-9c1a-2f6e0b3d9a17",
+  "conversation": {
+    "id": "af3cd254-0489-408f-a876-a749ec6e7f98",
+    "kind": "direct",
+    "surface": "native"
+  },
+  "from": "agent:tech-lead",
+  "type": "message",
+  "msg": "Write a unit test for the auth package."
+}
 ---END SCION MESSAGE---
 ```
+
+The `timestamp` is when the message was created, and `message_id` is the ID of the message the Hub stored for this delivery, so an agent can name the exact message it received, for example to tell the sender which message it is answering. When the envelope names a conversation, the agent can also fetch the message with `scion conversation get-message conv:<conversation.id> <message_id>`; when `conversation` is omitted (for example on a broadcast), there is no conversation to pass and the message cannot be fetched that way. `message_id` is omitted when the Hub stored no message for the delivery: scheduled messages, status notifications, artifact review notices, and plain (`--plain`) deliveries, which carry only the text. In a reply, `reply_to` still names the message being replied to; `message_id` names the reply itself.
 
 **Always check the `type` field before acting or replying:**
 
 | Type | Meaning | Action Required |
 |---|---|---|
-| **`instruction`** | Direct instruction sent to you. | Read and act on it. |
-| **`reply`** | A reply to a message you previously sent. Routes to the original sender agent, not the thread default. Includes `reply_context` metadata with the first 32 characters of the replied-to message. | Read and act on it like an `instruction`. |
-| **`state-change`** | A notification that another agent changed phase (e.g. stopped or stalled). | Treat as FYI — no reply or action needed. |
-| **`input-needed`** | A broadcast that an agent has called `sciontool status ask_user`. | See handling rules below. |
-| **`mention`** | You were CC'd or mentioned in a message. | Treat as FYI unless explicitly directed otherwise. |
-| **`group-set`** | An `@-mention` targeting multiple agents. | Act on it like an `instruction`. |
-| **`system`** | Operational notices generated by the Hub (e.g. `delivery-failed`, `scheduler`, `port-forward`). | Treat as FYI or follow troubleshooting instructions in the notice. |
+| **`message`** | A message for you: a direct message, a group message, or a message routed to you in a chat thread. An @mention fanned out from another agent's `scion message` also arrives as `message`, and so does a notification that an agent you subscribe to is waiting for input (see below). When the message went to several agents, `to` may list them. | Read and act on it. |
+| **`reply`** | A reply to a message you previously sent. Routes to the original sender agent, not the thread default. `reply_to` is the ID of the message being replied to, and `reply_context` holds its first 32 characters. | Read and act on it like a `message`. |
+| **`mention`** | You were @mentioned in a chat message whose primary recipient is someone else. `to` lists every agent the message engaged, including you. | Treat as FYI unless explicitly directed otherwise. |
+| **`event`** | A notice generated by Scion rather than written to you. The `event` object says what happened: `event.type` is one of `agent.state-changed` (an agent you subscribe to changed state; `event.subject` names the agent and `event.status` the state, for example `COMPLETED` or `STALLED`), `schedule.fired` (a scheduled message; `msg` is the scheduled text), `delivery.failed` (a message you sent was not delivered; `event.status` is `DELIVERY_FAILED`, or `DELIVERY_DEFERRED` when it was saved for an agent that is reincarnating), `port.exposed`, or `artifact.review`. | Act on a `schedule.fired` message's text; treat the others as FYI or follow the instructions in the notice. |
 
 :::note[Conversation Model Migration]
-The messaging system has transitioned to a conversation-based model where messages carry a `conversation_id` and are addressed to conversations rather than agents directly. The `scion conversation` CLI command (alias `conv`) provides full management of conversations — listing, viewing messages, creating group conversations, managing participants, and more (see [Conversation Management](#conversation-management) above). During this transition, inbound messages continue to arrive with the `type` fields described above, and agents should continue to discriminate on the `type` field as documented. 
+The messaging system has transitioned to a conversation-based model where messages carry a `conversation_id` and are addressed to conversations rather than agents directly. The `scion conversation` CLI command (alias `conv`) provides full management of conversations — listing, viewing messages, creating group conversations, managing participants, and more (see [Conversation Management](#conversation-management) above). Inbound messages name their conversation in the envelope's `conversation` object (`id`, `kind`, `surface`, and `name` when it has one). The object is omitted when a delivery has no conversation, for example broadcasts, mentions fanned out from an agent's message, and notifications. Agents should discriminate on the envelope `type` values described above; the send types used by `scion message` and the API (such as `instruction`, `state-change` or `group-set`) are not shown to the recipient.
 
 To migrate historical messages that predate the conversation model, administrators can use the `scion server backfill` command.
 
@@ -454,12 +478,12 @@ If a backfill operation is interrupted, it can be safely resumed from its last p
 The backfill uses a robust **compound keyset cursor** `(created, id)` (rather than a strictly-greater-than timestamp). This eliminates the potential for permanent row loss on resume, ensuring that any messages sharing identical timestamps are correctly processed and never skipped during resumes.
 :::
 
-#### Handling `input-needed` Notifications
+#### Handling Waiting-for-Input Notifications
 
-When an agent signals `WAITING_FOR_INPUT` (by calling `sciontool status ask_user`), a notification of type `input-needed` is dispatched to all subscribed agents (including its creator).
+When an agent signals `WAITING_FOR_INPUT` (by calling `sciontool status ask_user`), a notification is dispatched to all subscribed agents (including its creator). It arrives as a `message` from the waiting agent, with text such as `<agent> is WAITING_FOR_INPUT: <question>`.
 
 * **Parent Agent Role**: If you are the parent agent that created the waiting agent, you may be the intended respondent. Use `scion message @<name>` to reply with the answer.
-* **Peer Agent Rule**: Unrelated peer agents should **NOT** reply to `input-needed` notifications. Answering a peer's input prompt wastes context tokens, causes false loop signals, and violates project-scoped boundaries. To request a peer's input, always send an explicit `instruction` instead.
+* **Peer Agent Rule**: Unrelated peer agents should **NOT** reply to waiting-for-input notifications. Answering a peer's input prompt wastes context tokens, causes false loop signals, and violates project-scoped boundaries. To request a peer's input, always send it an explicit message instead.
 
 :::tip[Project-Scoped Message Isolation]
 When using slug-based query paths or addressing agents via `agent:<name>` (e.g., `scion message agent:<name>`), Scion strictly scopes all message queries and deliveries by the active `ProjectID`. This ensures that even if different projects contain agents with identical names or slugs, messages are completely isolated within each project and never leak across project boundaries.

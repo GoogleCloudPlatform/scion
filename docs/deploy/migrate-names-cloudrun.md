@@ -1,14 +1,15 @@
-# Running migrate-names on Cloud Run hubs deployed with the terraform-ha modules
+# Running migrate-names on Cloud Run hubs
 
 Run `scion hub secret migrate-names` against a Cloud Run hub deployed with the
-hub-cloudrun Terraform module, using a one-off Cloud Run job.
+hub-cloudrun Terraform module (sections 1 to 8) or with the manual Deploy on GCP
+guide (§9), using a one-off Cloud Run job.
 
 `scion hub secret migrate-names` renames a hub's GCP Secret Manager secrets from the
 legacy naming scheme to the hub-prefixed scheme (see
 [Secrets: IAM Permissions and Secret Naming](https://scion-ai.dev/scion/hosted/user/secrets/#iam-permissions-and-secret-naming)).
 The command opens the hub's own database directly from a DSN.
 
-**Scope:** this runbook is for Cloud Run hubs deployed with the hub-cloudrun
+**Scope:** sections 1 to 8 are for Cloud Run hubs deployed with the hub-cloudrun
 Terraform module (one of the terraform-ha modules). Private-IP Cloud SQL, Direct VPC
 egress, and an explicit `hub_id` are prerequisites this module provides
 unconditionally: the terraform-ha Cloud SQL module (`cloudsql-instance`) hard-codes
@@ -16,16 +17,15 @@ unconditionally: the terraform-ha Cloud SQL module (`cloudsql-instance`) hard-co
 The DSN is delivered as the `SCION_SERVER_DATABASE_URL` secret env var, and
 `settings.yaml` is mounted from a secret volume. No hub in this scope is ever
 operated from a workstation for this: this job is the only supported way to run
-`migrate-names` against it. Cloud Run hubs not deployed by this module — including
-ones wired up by hand — are not covered by this runbook; see
-[ptone/scion#2395](https://github.com/ptone/scion/issues/2395) for the tracked gap.
+`migrate-names` against it.
 
 Hubs deployed with the manual
 [Deploy on GCP](https://scion-ai.dev/scion/hosted/ha/setup-gcp/#7b-secret-name-migration)
-guide are **not** covered by this runbook. That guide's hub uses a public-IP Cloud
-SQL instance with no Direct VPC egress, and keeps its DSN inside `settings.yaml`
-rather than a separate secret env var — none of which this runbook's discovery
-steps assume.
+guide use a public-IP Cloud SQL instance with no Direct VPC egress, and keep their
+DSN inside `settings.yaml` rather than a separate secret env var. They use the same
+job with a different discovery step and job definition; see
+[§9](#9-hubs-deployed-with-the-deploy-on-gcp-guide-public-ip-cloud-sql). Cloud Run
+hubs wired up any other way are not covered by this runbook.
 
 This runbook avoids handing the database credential to a human, and works around
 the lack of any network path from a workstation to the private-IP Cloud SQL
@@ -697,3 +697,201 @@ runbook doesn't cover:
 4. **Escalate** to the project owner if the job still cannot be created or run. No
    command in this procedure, and no ad hoc substitute for it, may read the DSN or
    the settings secret outside this job.
+
+## 9. Hubs deployed with the Deploy on GCP guide (public-IP Cloud SQL)
+
+> **Not tested against a live hub.** This path has not been run against a live
+> hub; it was checked against the code and `gcloud --help` only. Run pass 1 (dry
+> run) and confirm the `Using hub ID` line before any non-dry pass.
+
+This section covers a Cloud Run hub deployed as the manual
+[Deploy on GCP](https://scion-ai.dev/scion/hosted/ha/setup-gcp/) guide describes:
+the hub service is created with `gcloud run deploy` (guide §3d), connects to a
+public-IP Cloud SQL instance through the Cloud Run Cloud SQL connection
+(`--add-cloudsql-instances`), and reads its whole configuration, including the DSN
+under `server.database.url`, from the `settings.yaml` secret mounted at
+`/home/scion/.scion/settings.yaml`.
+
+The procedure is the same one-off Cloud Run job. As in sections 1 to 8, no human
+handles the DSN: the job receives it only inside the settings secret, supplied from
+Secret Manager with `--set-secrets`, and runs as the hub's own service account. This
+runbook never reads the settings secret's contents. Sections 1, 4, 5, 6 and 8 apply
+as written, with the differences listed below. §2 and §3 are replaced by §9.2 and
+§9.3. §7 does not apply.
+
+### 9.1 What the job mounts, and why
+
+Checked against `cmd/hub_secret_migrate_names.go` and `config.LoadGlobalConfig`:
+
+| Service has it for... | migrate-names needs it? | Included in the job? |
+| :--- | :--- | :--- |
+| The hub runtime service account (`scion-hub-runner` in the guide) | Yes. It is the identity for Cloud SQL (`roles/cloudsql.client`) and Secret Manager (`roles/secretmanager.admin`), both granted in guide §2b. No new IAM is created for the job. | Yes, `--service-account` |
+| `/cloudsql` Cloud SQL connection | Yes. The DSN uses `host=/cloudsql/<connection name>`. The Cloud Run Cloud SQL connection reaches a public-IP instance without any VPC configuration. | Yes, `--set-cloudsql-instances` |
+| Direct VPC egress | Not present on the guide's service, and not needed for a public-IP instance. | **No** |
+| `settings.yaml` secret, mounted at `/home/scion/.scion/settings.yaml` | Yes. `migrate-names` reads `server.database.driver`, `server.database.url` (the DSN) and `server.hub.hub_id` from the file named by `--config`. | Yes, `--set-secrets`, mounted at `/run/secrets/settings.yaml`, as in §3 |
+| `HOME` | Yes, indirectly. `LoadGlobalConfig` reads `$HOME/.scion/settings.yaml` before the directory of `--config`, and skips settings files entirely if `$HOME` cannot be resolved. The guide's image (the default target of the repository `Dockerfile`) does not set `HOME`. `HOME=/tmp` is always resolvable, writable, and has no `.scion/settings.yaml` that could shadow `--config`. | Yes, `--set-env-vars` |
+| Kubeconfig secret, `KUBECONFIG`, `SCION_K8S_NAMESPACE` | No. migrate-names does not talk to Kubernetes. | **No** |
+| `SESSION_SECRET`, `SCION_DEPLOY` | No. | **No** |
+
+The job does not pass `--hub-id`. The command then takes the hub ID from
+`server.hub.hub_id` in the mounted settings file, which is the value the running
+hub uses (the guide's §3c settings set it, and the hub refuses to start in hosted HA
+mode without it). Without `--hub-id`, the command also checks the resolved ID
+against the scope ID of existing hub-scope secret records in the database and stops
+on a mismatch (`checkMigrateNamesHubIDAgainstExistingRecords`). Each pass prints
+`Using hub ID: <id> (prefix: ...)`: confirm it is the `hub_id` you chose in guide
+§3c.
+
+### 9.2 Discover the live service's configuration
+
+Run §1 first (tools, bash, operator IAM). Then set the placeholders. The guide names
+the service `scion-hub`:
+
+```bash
+export PROJECT="PROJECT"
+export REGION="REGION"
+export HUB="scion-hub"
+```
+
+`PROJECT` is also passed as `--gcp-project`. That is correct when
+`server.secrets.gcp_project_id` in the hub's settings is the project the service runs
+in, as in the guide. If your hub's secrets live in a different project, use that
+project for `--gcp-project` instead.
+
+```bash
+SVC=$(gcloud run services describe "$HUB" --project "$PROJECT" --region "$REGION" --format=json)
+SVC_STATUS=$?
+SA=$(echo "$SVC" | jq -r '.spec.template.spec.serviceAccountName')
+CONN=$(echo "$SVC" | jq -r '.spec.template.metadata.annotations["run.googleapis.com/cloudsql-instances"]')
+```
+
+**Settings secret name and version.** `gcloud run deploy --set-secrets` mounts the
+file as a secret volume on the `/home/scion/.scion` directory with one item,
+`settings.yaml`. Find the volume through its mount path, then read the secret name
+and the version (`.key`) of that item:
+
+```bash
+SETTINGS_VOL=$(echo "$SVC" | jq -r '.spec.template.spec.containers[0].volumeMounts[] | select(.mountPath=="/home/scion/.scion") | .name')
+SETTINGS_JSON=$(echo "$SVC" | jq -c --arg vol "$SETTINGS_VOL" '.spec.template.spec.volumes[] | select(.name==$vol) | .secret')
+SETTINGS_SECRET=$(echo "$SETTINGS_JSON" | jq -r '.secretName')
+SETTINGS_VERSION=$(echo "$SETTINGS_JSON" | jq -r '.items[] | select(.path=="settings.yaml") | .key')
+```
+
+The guide mounts version `latest`, so `SETTINGS_VERSION` is normally `latest` and
+the job reads whatever version is current when each execution starts. Do not add a
+new version to the settings secret while the job exists. If you must, delete the job
+(§6) and restart from §9.2.
+
+Running hub instances also resolve `latest` only when each instance starts. A
+settings version added after the serving revision was created, without a hub
+redeploy, means the job would read different settings from the ones the live hub may
+be using. The settings version check below catches this.
+
+**Revision and image.** Run the `REVISION` / `ROLLOUT_OK_JQ` block and the
+`REV_JSON` / `IMG` lines from §2 exactly as written, including its `STOP` check. The
+reasoning there (pin the job to the serving revision's image digest, and stop on an
+unfinished rollout or a traffic tag) applies unchanged.
+
+**Settings version check.** When `SETTINGS_VERSION` is `latest`, compare the
+creation time of the newest settings secret version with the creation time of the
+serving revision. This reads metadata only: it does not access, read or print the
+secret's contents.
+
+```bash
+SECRET_CREATED=$(gcloud secrets versions list "$SETTINGS_SECRET" --project "$PROJECT" \
+  --sort-by=~createTime --limit=1 --format='value(createTime)')
+REV_CREATED=$(echo "$REV_JSON" | jq -r '.metadata.creationTimestamp')
+printf 'newest settings version created: %s\nserving revision created:        %s\n' "$SECRET_CREATED" "$REV_CREATED"
+if [ -z "$SECRET_CREATED" ] || [ -z "$REV_CREATED" ] || [ "$REV_CREATED" = null ]; then
+  echo "STOP: could not read one of the timestamps" >&2
+else
+  # Both timestamps are UTC. Strip fractional seconds and the trailing Z so
+  # both read YYYY-MM-DDTHH:MM:SS, which compares correctly as a string.
+  SEC_NORM="${SECRET_CREATED%%.*}"; SEC_NORM="${SEC_NORM%Z}"
+  REV_NORM="${REV_CREATED%%.*}"; REV_NORM="${REV_NORM%Z}"
+  if [[ "$SEC_NORM" > "$REV_NORM" ]]; then
+    echo "STOP: the newest settings secret version is newer than the serving revision" >&2
+  fi
+fi
+```
+
+If this prints `STOP`, do not create the job. Either redeploy the hub so that a new
+revision picks up the current settings version (guide §7a), or find out why the newer
+version exists. Then restart from §9.2. Run this check again immediately before
+pass 1 if time has passed since §9.2. If `SETTINGS_VERSION` is a pinned version
+number rather than `latest`, the job and the hub read the same version and this
+check is not needed.
+
+**Check before you continue.** None of these values is a secret:
+
+```bash
+for v in SA CONN SETTINGS_SECRET SETTINGS_VERSION REVISION IMG; do
+  eval "val=\$$v"; case "$val" in ""|null) echo "MISSING: $v" >&2; false;; *) printf '%s=%s\n' "$v" "$val";; esac
+done
+```
+
+This section assumes a service deployed as in the guide. Stop and review the
+service definition before continuing if any of these is true:
+
+- `run.googleapis.com/network-interfaces` or `run.googleapis.com/vpc-access-connector`
+  is set on the template. The service has VPC egress the job would not mirror.
+- The container sets any `SCION_SERVER_*` environment variable. Those override the
+  settings file in the running hub, and the job would not see them. Check with
+  `echo "$SVC" | jq -r '.spec.template.spec.containers[0].env[]?.name' | grep '^SCION_SERVER_'`,
+  which should print nothing.
+
+### 9.3 Create the job
+
+```bash
+gcloud run jobs create "${HUB}-migrate-names" \
+  --project "$PROJECT" \
+  --region "$REGION" \
+  --image "$IMG" \
+  --service-account "$SA" \
+  --set-cloudsql-instances "$CONN" \
+  --set-secrets "/run/secrets/settings.yaml=${SETTINGS_SECRET}:${SETTINGS_VERSION}" \
+  --set-env-vars "HOME=/tmp" \
+  --max-retries 0 \
+  --tasks 1 \
+  --task-timeout 10m \
+  --command /usr/local/bin/scion
+```
+
+The flags mean the same as in §3. `--command /usr/local/bin/scion` matches the
+guide's own deploy command and replaces the image's default server arguments. There
+are no network flags.
+
+### 9.4 Run the passes
+
+Use §4 as written, with this `BASE_ARGS` in place of the one there:
+
+```bash
+JOB="${HUB}-migrate-names"
+BASE_ARGS="hub,secret,migrate-names,--gcp-project=${PROJECT},--config=/run/secrets/settings.yaml"
+```
+
+`--hub-id` is left out on purpose (see §9.1). `--global` is not needed: `hub secret
+migrate-names` does not require a scion project. Run the rollout check from §4
+before passes 2, 3 and 4, as §4 describes.
+
+In §5, the `Using hub ID` line is the value read from the settings file and checked
+against existing records, not an echo of a flag. If the command stops with
+`resolved hub ID ... does not match existing hub-scope secret record`, stop and
+review the hub's `server.hub.hub_id` before going further. Do not pass `--hub-id`
+to get past it.
+
+### 9.5 Differences in cleanup and break-glass
+
+§6 applies as written. In §8, a guide-deployed hub has no Terraform:
+
+- Redeploy a known-good image with the guide's own redeploy steps (guide §7a) instead
+  of a Terraform apply.
+- `gcloud run services update` and `gcloud run deploy` keep a traffic pin from §8
+  step 2 in place, so roll forward with
+  `gcloud run services update-traffic "$HUB" --project "$PROJECT" --region "$REGION" --to-latest`
+  as §8 describes.
+- Restart from §9.2, not §2.
+
+The guide's hub has no legacy Terraform grant to remove afterwards. If you added an
+IAM condition for the legacy secret names by hand, remove it only after pass 5
+reports nothing pending, for the same reason given in the command's help text.

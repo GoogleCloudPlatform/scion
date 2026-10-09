@@ -321,13 +321,13 @@ func TestDispatchWorkspaceMode(t *testing.T) {
 		{"non-git legacy empty-per-agent", "", "empty-per-agent", "empty-per-agent"},
 		{"non-git legacy worktree dropped", "", "worktree-per-agent", ""},
 		{"non-git legacy clone-per-agent dropped", "", "clone-per-agent", ""},
-		{"git unlabelled", remote, "", ""},
+		{"git unlabelled", remote, "", "clone-per-agent"},
 		{"git shared", remote, "shared", "shared"},
 		{"git per-agent", remote, "per-agent", "per-agent"},
 		{"git worktree", remote, "worktree-per-agent", "worktree-per-agent"},
 		{"git legacy clone-per-agent", remote, "clone-per-agent", "clone-per-agent"},
-		{"git legacy empty-per-agent dropped", remote, "empty-per-agent", ""},
-		{"git unknown forwarded", remote, "bogus", "bogus"},
+		{"git legacy empty-per-agent", remote, "empty-per-agent", "clone-per-agent"},
+		{"git unknown", remote, "bogus", "clone-per-agent"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -347,8 +347,9 @@ func TestDispatchWorkspaceMode(t *testing.T) {
 }
 
 // TestDispatch_GitProjectLegacyEmptyPerAgentLabel: a git project with a raw
-// legacy "empty-per-agent" label is shared-plain on the hub, so the broker
-// must not receive empty-per-agent, and no capability is required.
+// legacy "empty-per-agent" label resolves like an unlabelled git project
+// (clone-per-agent, ptone/scion#3998), so the broker receives the canonical
+// clone-per-agent, never empty-per-agent, and no capability is required.
 func TestDispatch_GitProjectLegacyEmptyPerAgentLabel(t *testing.T) {
 	const remote = "github.com/a/b"
 	t.Run("create", func(t *testing.T) {
@@ -356,8 +357,8 @@ func TestDispatch_GitProjectLegacyEmptyPerAgentLabel(t *testing.T) {
 		if _, err := f.dispatcher.DispatchAgentCreate(context.Background(), f.agent); err != nil {
 			t.Fatalf("DispatchAgentCreate (no capability needed): %v", err)
 		}
-		if got := f.client.lastCreateReq.WorkspaceMode; got != "" {
-			t.Errorf("wire WorkspaceMode = %q, want empty", got)
+		if got := f.client.lastCreateReq.WorkspaceMode; got != string(store.SharingModeClonePerAgent) {
+			t.Errorf("wire WorkspaceMode = %q, want %q", got, store.SharingModeClonePerAgent)
 		}
 	})
 	t.Run("start", func(t *testing.T) {
@@ -367,14 +368,14 @@ func TestDispatch_GitProjectLegacyEmptyPerAgentLabel(t *testing.T) {
 			t.Fatalf("DispatchAgentStart (no capability needed): %v", err)
 		}
 		env := f.client.lastResolvedEnv
-		if got, ok := env["SCION_WORKSPACE_MODE"]; ok {
-			t.Errorf("SCION_WORKSPACE_MODE = %q, want absent (unlabelled shared-plain)", got)
+		if got := env["SCION_WORKSPACE_MODE"]; got != string(store.SharingModeClonePerAgent) {
+			t.Errorf("SCION_WORKSPACE_MODE = %q, want %q", got, store.SharingModeClonePerAgent)
 		}
 		if env["SCION_WORKSPACE_GIT"] != "true" {
-			t.Errorf("SCION_WORKSPACE_GIT = %q, want true for a git shared-plain workspace", env["SCION_WORKSPACE_GIT"])
+			t.Errorf("SCION_WORKSPACE_GIT = %q, want true for a git clone-per-agent workspace", env["SCION_WORKSPACE_GIT"])
 		}
-		if got := f.client.lastStartExtras.Workspace.WorkspaceMode; got != "" {
-			t.Errorf("start spec WorkspaceMode = %q, want empty", got)
+		if got := f.client.lastStartExtras.Workspace.WorkspaceMode; got != string(store.SharingModeClonePerAgent) {
+			t.Errorf("start spec WorkspaceMode = %q, want %q", got, store.SharingModeClonePerAgent)
 		}
 	})
 }

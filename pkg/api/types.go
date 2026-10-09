@@ -483,6 +483,12 @@ type ScionConfig struct {
 	Hub           *AgentHubConfig            `json:"hub,omitempty" yaml:"hub,omitempty"`
 	Telemetry     *TelemetryConfig           `json:"telemetry,omitempty" yaml:"telemetry,omitempty"`
 
+	// CloneDepth sets the git clone depth for a clone-per-agent
+	// workspace: "full" or a positive integer. It overrides a profile's
+	// clone_depth. Empty keeps the profile value, else the default
+	// shallow clone of depth 1.
+	CloneDepth CloneDepth `json:"clone_depth,omitempty" yaml:"clone_depth,omitempty"`
+
 	Secrets []RequiredSecret `json:"secrets,omitempty" yaml:"secrets,omitempty"`
 
 	// Skills declares skill references to resolve at provision time.
@@ -614,8 +620,16 @@ type AgentInfo struct {
 	HarnessAuth         string `json:"harnessAuth,omitempty"` // Resolved harness auth method (api-key, oauth-token, auth-file, vertex-ai)
 
 	// Project association
-	Project     string `json:"project"`               // Project name (standard field)
-	ProjectID   string `json:"projectId,omitempty"`   // Hosted format: <uuid>__<name>
+	Project string `json:"project"` // Project name (standard field)
+	// ProjectID depends on where the AgentInfo came from. In agent-info.json
+	// (written at provision time) it is the local project-id marker read
+	// from the project directory. The Docker, Podman, Apple and Kubernetes
+	// List fill it from the container's scion.project_id label, which
+	// carries the Hub project ID; Cloud Run Sandbox List fills it from its
+	// state entry, which records the same value. Cloud Run List leaves it
+	// empty. The two sources can differ; callers that need the Hub project
+	// ID should read the scion.project_id label (ptone/scion#3020).
+	ProjectID   string `json:"projectId,omitempty"`
 	ProjectPath string `json:"projectPath,omitempty"` // Filesystem path (solo mode)
 
 	// Metadata
@@ -783,7 +797,7 @@ type EnvKind string
 
 const (
 	// EnvKindPlain is a non-sensitive operational value delivered via
-	// --env KEY=VALUE. Examples: SCION_MODEL, SCION_HUB_NAME, SCION_DEBUG.
+	// --env KEY=VALUE. Examples: SCION_MODEL, SCION_HUB_NAME, SCION_LOG_LEVEL.
 	EnvKindPlain EnvKind = "plain"
 
 	// EnvKindSecretFetchable is a value stored in the hub's secret store,

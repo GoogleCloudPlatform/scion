@@ -15,6 +15,7 @@
 package telemetry
 
 import (
+	"fmt"
 	"os"
 	"sync"
 	"time"
@@ -179,6 +180,21 @@ func (a *Aggregator) RecordModelEnd(inputTokens, outputTokens, cachedTokens, rea
 	a.tokensReasoning += reasoningTokens
 }
 
+// RecordUsage adds usage derived from native harness telemetry (see
+// SessionUsage): calls model/API calls and their token counts. It is the
+// native counterpart of RecordModelEnd; a harness feeds one or the other,
+// never both, so a call is counted once.
+func (a *Aggregator) RecordUsage(u SessionUsage) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.apiCallCount += int(u.Calls)
+	a.tokensInput += u.TokensInput
+	a.tokensOutput += u.TokensOutput
+	a.tokensCached += u.TokensCached
+	a.tokensReasoning += u.TokensReasoning
+}
+
 // RecordTurn records an agent turn (agent-end event).
 func (a *Aggregator) RecordTurn() {
 	a.mu.Lock()
@@ -191,6 +207,9 @@ func (a *Aggregator) RecordTurn() {
 // counts from the session-end event. If the session-end event provides token
 // totals they override the running accumulation (they represent the harness's
 // authoritative totals).
+//
+// The summary always has a session ID: when the session has none, it gets
+// FallbackSessionID.
 func (a *Aggregator) Finalize(inputTokens, outputTokens, cachedTokens, reasoningTokens int64, errMsg string) SessionSummary {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -222,13 +241,23 @@ func (a *Aggregator) Finalize(inputTokens, outputTokens, cachedTokens, reasoning
 	a.open = false
 	a.implicit = false
 
+	// The fallback depends on startedAt. A persisted open state with a zero
+	// StartedAt would make the session-end hook and the shutdown backstop
+	// compute different IDs (each substitutes its own endedAt above). That
+	// cannot report twice (the state lock and tombstone allow one report),
+	// and it is unreachable: resetLocked always sets startedAt.
+	sessionID := a.sessionID
+	if sessionID == "" {
+		sessionID = FallbackSessionID(a.agentID, startedAt)
+	}
+
 	toolCalls := make(map[string]ToolCallStats, len(a.toolCalls))
 	for name, stats := range a.toolCalls {
 		toolCalls[name] = *stats
 	}
 
 	return SessionSummary{
-		SessionID:       a.sessionID,
+		SessionID:       sessionID,
 		AgentID:         a.agentID,
 		ProjectID:       a.projectID,
 		StartedAt:       startedAt,
@@ -243,6 +272,25 @@ func (a *Aggregator) Finalize(inputTokens, outputTokens, cachedTokens, reasoning
 		TokensReasoning: a.tokensReasoning,
 		ToolCalls:       toolCalls,
 	}
+}
+
+// FallbackSessionID returns the session ID used for a session whose harness
+// supplied none (Copilot CLI hook payloads carry no session ID). The Hub
+// requires a session ID, so without it the session's report is dropped.
+//
+// It is derived from the agent ID and the session's start time, both of
+// which every finalizer of one session sees alike: the start time is part
+// of the persisted AggregatorState, so the hook process that handles
+// session-end and the init daemon's shutdown backstop compute the same ID
+// for the same session, and a later session of the same agent gets a
+// different one. The ID is applied only when the session is finalized and
+// is never stored as the open session's ID, so a real ID carried by a later
+// event is still adopted (see ObserveSession).
+func FallbackSessionID(agentID string, startedAt time.Time) string {
+	if agentID == "" {
+		return fmt.Sprintf("scion-%d", startedAt.UnixNano())
+	}
+	return fmt.Sprintf("scion-%s-%d", agentID, startedAt.UnixNano())
 }
 
 // AggregatorState is the serializable form of an Aggregator's per-session

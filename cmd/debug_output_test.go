@@ -16,55 +16,77 @@ package cmd
 
 import (
 	"bytes"
+	"os"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 )
 
+// resetLogLevelState sets the SCION_* level variables for the test and
+// makes the shared level state re-read them, restoring it (including the
+// SCION_DEBUG alias handling) when the test ends.
+func resetLogLevelState(t *testing.T, scionDebug, logLevel string) *bytes.Buffer {
+	t.Helper()
+	t.Setenv(loglevel.EnvDebug, scionDebug)
+	t.Setenv(loglevel.EnvLogLevel, logLevel)
+	var warn bytes.Buffer
+	loglevel.SetWarningOutput(&warn)
+	loglevel.Reset(true)
+	t.Cleanup(func() {
+		loglevel.Reset(true)
+		loglevel.SetWarningOutput(os.Stderr)
+	})
+	return &warn
+}
+
+// The --debug path (util.EnableDebug) is sticky for the process, so these
+// tests check the environment-driven level directly through loglevel.
 func TestConfigureDebugOutput(t *testing.T) {
 	tests := []struct {
 		name       string
 		mode       string
-		explicit   bool
 		scionDebug string
 		logLevel   string
 		want       bool
+		wantWarn   bool
 	}{
 		{name: "agent mode ignores inherited SCION_DEBUG", mode: "agent", scionDebug: "1", want: false},
-		{name: "agent mode with --debug", mode: "agent", explicit: true, scionDebug: "1", want: true},
 		{name: "agent mode with SCION_LOG_LEVEL=debug", mode: "agent", scionDebug: "1", logLevel: "debug", want: true},
-		{name: "human mode honours SCION_DEBUG", mode: "human", scionDebug: "1", want: true},
-		{name: "assistant mode honours SCION_DEBUG", mode: "assistant", scionDebug: "1", want: true},
+		{name: "agent mode with SCION_LOG_LEVEL=info", mode: "agent", logLevel: "info", want: false},
+		{name: "human mode honours SCION_DEBUG", mode: "human", scionDebug: "1", want: true, wantWarn: true},
+		{name: "assistant mode honours SCION_DEBUG", mode: "assistant", scionDebug: "1", want: true, wantWarn: true},
 		{name: "human mode with nothing set", mode: "human", want: false},
-		{name: "human mode with --debug", mode: "human", explicit: true, want: true},
+		{name: "human mode with SCION_LOG_LEVEL=debug", mode: "human", logLevel: "debug", want: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Cleanup(func() { util.SetExplicitDebug(false); util.SetAgentDebugPolicy(false) })
+			warn := resetLogLevelState(t, tt.scionDebug, tt.logLevel)
 			t.Setenv("SCION_CLI_MODE", tt.mode)
-			t.Setenv("SCION_DEBUG", tt.scionDebug)
-			t.Setenv("SCION_LOG_LEVEL", tt.logLevel)
 
-			configureDebugOutput(resolveMode(), tt.explicit)
+			configureDebugOutput(resolveMode(), false)
 
-			if got := util.DebugEnabled(); got != tt.want {
-				t.Errorf("util.DebugEnabled() = %v, want %v", got, tt.want)
+			if got := loglevel.DebugEnabled(""); got != tt.want {
+				t.Errorf("loglevel.DebugEnabled() = %v, want %v", got, tt.want)
+			}
+			if gotWarn := warn.Len() > 0; gotWarn != tt.wantWarn {
+				t.Errorf("deprecation warning printed = %v, want %v (%q)", gotWarn, tt.wantWarn, warn.String())
 			}
 		})
 	}
 }
 
-func TestConfigureDebugOutput_ClearsEarlierExplicitDebug(t *testing.T) {
-	t.Cleanup(func() { util.SetExplicitDebug(false); util.SetAgentDebugPolicy(false) })
-	t.Setenv("SCION_CLI_MODE", "agent")
-	t.Setenv("SCION_DEBUG", "1")
-	t.Setenv("SCION_LOG_LEVEL", "")
+// An agent-mode invocation followed by a human-mode one in the same
+// process must honour SCION_DEBUG again.
+func TestConfigureDebugOutput_ModeSwitchRestoresAlias(t *testing.T) {
+	resetLogLevelState(t, "1", "")
 
-	configureDebugOutput(ModeAgent, true)
 	configureDebugOutput(ModeAgent, false)
-
-	if util.DebugEnabled() {
-		t.Error("debug output still enabled after an invocation without --debug")
+	if loglevel.DebugEnabled("") {
+		t.Fatal("debug output enabled in agent mode with only SCION_DEBUG")
+	}
+	configureDebugOutput(ModeHuman, false)
+	if !loglevel.DebugEnabled("") {
+		t.Error("SCION_DEBUG not honoured after switching back to human mode")
 	}
 }
 
@@ -76,19 +98,13 @@ func TestRootPreRun_AgentModeIgnoresInheritedSCIONDebug(t *testing.T) {
 	origNonInteractive, origAutoConfirm, origDebug := nonInteractive, autoConfirm, debugMode
 	t.Cleanup(func() {
 		nonInteractive, autoConfirm, debugMode = origNonInteractive, origAutoConfirm, origDebug
-		util.SetExplicitDebug(false)
-		util.SetAgentDebugPolicy(false)
 		rootCmd.SetArgs(nil)
 		rootCmd.SetOut(nil)
 		rootCmd.SetErr(nil)
 	})
+	warn := resetLogLevelState(t, "1", "")
 	t.Setenv("SCION_CLI_MODE", "agent")
-	t.Setenv("SCION_DEBUG", "1")
-	t.Setenv("SCION_LOG_LEVEL", "")
 	t.Setenv("SCION_HOST_UID", "")
-
-	// Simulate state left over from an earlier explicit request.
-	util.EnableDebug()
 
 	var buf bytes.Buffer
 	rootCmd.SetOut(&buf)
@@ -98,7 +114,10 @@ func TestRootPreRun_AgentModeIgnoresInheritedSCIONDebug(t *testing.T) {
 		t.Fatalf("scion version: %v", err)
 	}
 
-	if util.DebugEnabled() {
+	if loglevel.DebugEnabled("") {
 		t.Error("debug output enabled in agent mode with only an inherited SCION_DEBUG")
+	}
+	if warn.Len() != 0 {
+		t.Errorf("unexpected deprecation warning in agent mode: %q", warn.String())
 	}
 }

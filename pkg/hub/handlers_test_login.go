@@ -45,7 +45,7 @@ type TestLoginResponse struct {
 // Gated behind --enable-test-login (WebServerConfig.EnableTestLogin).
 func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

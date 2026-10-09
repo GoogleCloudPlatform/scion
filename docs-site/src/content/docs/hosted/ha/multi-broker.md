@@ -105,7 +105,7 @@ A refused move is refused **before any side effect**: the agent is not stopped, 
 
 ### Permissions
 
-Moving another agent needs `agent.lifecycle` on it, as any reincarnation does; an agent moving itself needs no permission unless it also passes patch flags. If you are not the agent, you must also be able to delegate its role: a non-admin reincarnating an agent with a privileged role gets `403` from this authority check before any of the move checks run. The agent keeps its existing delegator unless you also change its role with `--role`, in which case you become its recorded delegator.
+Moving another agent needs `agent.lifecycle` on it, as any reincarnation does; an agent moving itself needs no permission unless it also passes patch flags. If you are not the agent, you must also be able to delegate its role: a non-admin reincarnating an agent with a privileged role gets `403` from this authority check before any of the move checks run. The agent keeps its existing delegator unless you also change its role with `--role`, in which case you become its recorded delegator. A user who moves an agent whose delegation chain has no recorded provenance also becomes its recorded delegator without a role change, as with any reincarnation (see [Identity & Access (RBAC)](/scion/hosted/ha/permissions/)).
 
 For a user, the move then needs:
 

@@ -95,7 +95,9 @@ Settings for the in-process conduit relay and its stream grants. They take effec
 | `peer_service_accounts` | list | own service account | With OIDC peer auth, the service-account emails allowed to call the internal relay API. The hub logs a warning at startup when the default resolves to a Compute Engine default service account. Env: `SCION_SERVER_HUB_CONDUIT_PEERSERVICEACCOUNTS` (comma-separated). |
 | `peer_audience` | string | `"scion-conduit-relay-peer"` | With OIDC peer auth, the ID token audience. It must be identical on every hub node. Env: `SCION_SERVER_HUB_CONDUIT_PEERAUDIENCE`. |
 | `reconnect_window` | duration | `"5s"` | Jitter window sent with a planned close: targets redial after a random delay within it. Between `"0s"` and `"5m"`. Flag: `--conduit-reconnect-window`. Env: `SCION_SERVER_HUB_CONDUIT_RECONNECTWINDOW`. |
-| `authz_recheck_interval` | duration | `"60s"` | Period of the authorization re-check sweep of open user streams (today, port proxy streams). A stream whose user lost the permission is closed with `4401 authz_expired` within one interval even if the revocation event is missed; revocations normally close it at once. Between `"1s"` and `"10m"`. Flag: `--conduit-authz-recheck-interval`. Env: `SCION_SERVER_HUB_CONDUIT_AUTHZRECHECKINTERVAL`. |
+| `authz_recheck_interval` | duration | `"60s"` | Period of the authorization re-check sweep of open user streams: port proxy streams, and terminal attach streams on the agent's Conduit session. User streams are also re-checked when the user's access changes and when the hub's event connection is re-established. A stream whose user lost the permission is closed with `4401 authz_expired` within one interval even if the revocation event is missed; revocations normally close it at once. Between `"1s"` and `"10m"`. Flag: `--conduit-authz-recheck-interval`. Env: `SCION_SERVER_HUB_CONDUIT_AUTHZRECHECKINTERVAL`. |
+| `lifetime_cap` | duration | `"3500s"` | Lifetime cap of a conduit session. Set it below the platform's connection limit (Cloud Run request timeout, load balancer or proxy timeout). 60 seconds before the cap the relay sends `GoAway`: the session takes no new streams, the agent reconnects, and streams still open are closed with `4503 relay_restart` within 30 seconds and never later than the cap. A PTY client sees that close as `4503` and reconnects. Server-sent events are not affected. Between `"90s"` and `"24h"`. Flag: `--conduit-lifetime-cap`. Env: `SCION_SERVER_HUB_CONDUIT_LIFETIMECAP`. |
+| `stream_authz_max` | object | see description | Authorization interval of open streams, per originating principal kind (`user`, `broker`, `agent`). When a stream reaches its interval, the hub re-checks the principal: if the permission still holds, the stream is renewed for one more interval; if not, it is closed with `4401 authz_expired` (`4404 target_not_found` if the agent is gone). If the check cannot be evaluated (for example a store outage), the stream is never renewed or closed early; it is closed with `4401 authz_expired` at the end of its current interval. Revocations and the `authz_recheck_interval` sweep close a revoked stream sooner, but never extend it. Defaults: `user` `"8h"`, `broker` `"24h"`, `agent` `"24h"`, each between `"1m"` and `"168h"`. Only `user` is enforced today (port proxy streams and terminal attach streams on the agent's Conduit session); the `broker` and `agent` values are validated but not yet applied. Flag: `--conduit-stream-authz-max-user`. Env: `SCION_SERVER_HUB_CONDUIT_STREAMAUTHZMAX_USER`, `SCION_SERVER_HUB_CONDUIT_STREAMAUTHZMAX_BROKER`, `SCION_SERVER_HUB_CONDUIT_STREAMAUTHZMAX_AGENT`. |
 | `instance_id` | string | see description | This node's relay instance id. It must be unique among live hub processes: a relay that starts with an id already in use takes it over from the other process. Up to 128 printable ASCII characters, no spaces. Default: `POD_NAME` when set, else the host name plus a random per-process suffix. Env: `SCION_SERVER_HUB_CONDUIT_INSTANCEID`. |
 
 **Rotating grant keys.** `POST /api/v1/admin/conduit/grant-keys/rotate` (unscoped Hub administrators only, `hub.conduit_grant_keys.execute`) prunes expired grant signing keys and rotates in a new one with an overlap window: grants signed with the outgoing key stay valid until the earlier of their own expiry and the outgoing key's `NotAfter`. The response lists only key IDs and timestamps.
@@ -152,8 +154,8 @@ server:
 - `endpoint`: a fixed endpoint class, for example `agents.global.legacy`, `agents.global.sorted`, `agents.project.legacy`, `agents.project.sorted`, `agents.project.sorted_agent`, `sse.events`, or `other`.
 - `phase_<name>_us` and `phase_<name>_n`: time (microseconds) and count per phase. Phases are `list_scope_authz` (list-level authorization before rows are read), `list_db_read` (agent row and member reads; database time only), `list_read_authz` (per-row read decisions), `enrich`, `capabilities` (per-item capabilities and the env-view decision), `messageability`, `scope_capabilities`, `serialize` (encoding and writing the body), and for SSE `sse_expand`, `sse_authorize` and `sse_write`.
 - `store_<method>_n` and `store_<method>_us`, `authz_store_calls`, `authz_store_us`: reads the authorization service makes to prepare its inputs (groups, role bindings, role definitions, access constraints, delegation edges, and user, agent, project and membership rows), counted after request-local reuse.
-- `audit_records`, `audit_allow`, `audit_deny`, `audit_other`, `audit_emit_us`: decision-audit records handed to the audit writer. Each authorization decision emits one record, so `audit_records` is the request's decision count. The database write happens off the request path.
-- `db_wait_count`, `db_wait_us`, `db_in_use`, `db_open`: connection-pool waits during the request and pool use when the line is written (the end of the request), when the database driver reports them. In the response headers they are taken when the response starts. The pool is shared, so waits include concurrent requests and the audit writer.
+- `audit_records`, `audit_allow`, `audit_deny`, `audit_other`, `audit_emit_us`: decision records counted in memory. With the default sampling setting, each authorization decision emits one record, so `audit_records` is the request's decision count. `audit_emit_us` measures the emitter call. This path performs no database write.
+- `db_wait_count`, `db_wait_us`, `db_in_use`, `db_open`: connection-pool waits during the request and pool use when the line is written (the end of the request), when the database driver reports them. In the response headers they are taken when the response starts. The pool is shared, so waits include concurrent requests.
 - `elapsed_us`, `method`, `request_id` (for correlation only), and for SSE `sse_events`.
 
 **Counted scope.** The store counts cover the authorization service's request-path reads of the methods above. Relationship progeny lookups and reads inside a store transaction are not counted, and work handed to a detached background context after the request ends records into a trace that is no longer logged. `capabilities` also includes the rare re-list read decision for a sorted-list row whose authorization inputs changed between reads.
@@ -175,8 +177,8 @@ Controls the Runtime Broker service.
 | `enabled` | bool | `false` | Whether to start the broker service. |
 | `port` | int | `9800` | HTTP port to listen on. |
 | `broker_id` | string | | Unique UUID for this broker. |
-| `broker_name` | string | | Human-readable name. |
-| `broker_nickname` | string | | Short display name. |
+| `broker_name` | string | | Name the broker registers under on the Hub. Default: the hostname (`Hosted Broker` for a broker run with a co-located Hub). |
+| `broker_nickname` | string | | Same as `broker_name`, and takes precedence over it. Set by `scion runtime-broker register --broker-name`. |
 | `hub_endpoint` | string | | The Hub URL this broker connects to. |
 | `container_hub_endpoint` | string | | Overrides `hub_endpoint` when injecting the Hub URL into agent containers. Use when containers cannot reach the Hub at the broker's address (e.g. `http://host.containers.internal:8080` for local development). |
 | `broker_token` | string | | Authentication token for the Hub. |
@@ -190,6 +192,20 @@ Persistence settings for the Hub.
 | :--- | :--- | :--- | :--- |
 | `driver` | string | `"sqlite"` | Database driver: `sqlite` or `postgres`. |
 | `url` | string | `"hub.db"` | Connection string or file path. |
+
+:::caution[Permanent decision-audit data removal]
+Any schema-migration entry point may permanently drop `decision_audits` and its data through `entc.AutoMigrate`, directly or through `CompositeStore.Migrate`. Export first if preservation is required. During Hub schema migration on PostgreSQL, the drop takes an `ACCESS EXCLUSIVE` table lock while the existing advisory schema lock is held.
+
+Direct maintenance callers include:
+
+- `server recover-authz`: SQLite/PostgreSQL through `CompositeStore.Migrate`.
+- `hub secret migrate-names`: SQLite/PostgreSQL through `CompositeStore.Migrate`, except with `--dry-run`.
+- `hub secret migrate`: SQLite through `CompositeStore.Migrate`, including with `--dry-run`.
+- `server backfill` and `server migrate-dm-keys`: SQLite/PostgreSQL through `entc.AutoMigrate`, including their default dry-run mode.
+- `server migrate`: `entc.AutoMigrate` on the PostgreSQL destination only; the SQLite source is read-only and unaffected. Source decision-audit rows are not copied, as in the existing migration behavior.
+
+These direct calls run outside the Hub's advisory schema lock. Mixed old replicas may report degraded legacy health as well as write failures after the drop. Rolling back to an old binary can recreate an empty table but cannot restore the deleted data.
+:::
 
 :::caution[Postgres: `broker_dispatch` index on upgrade]
 On Postgres, auto-migrate creates the `brokerdispatch_state_updated_at` index on `broker_dispatch (state, updated_at)` with a plain `CREATE INDEX`, which blocks writes to the table while it builds. On a large deployment, create the index before upgrading so auto-migrate finds it already in place:
@@ -412,8 +428,9 @@ The `nfs` backend fails closed. Agent start is refused when the block is incompl
 
 With the `nfs` backend, the Hub and brokers also apply the following:
 
-- **Symlink-safe access**: Every Hub operation on an NFS shared directory goes through the same confined resolver. This covers the web file browser, archive downloads, attachment staging, and shared-dir deletion. The resolver walks each path component with `O_NOFOLLOW`, anchored on the inode of the project's tree, and refuses any symlink in the path. A missing or incomplete `nfs` block, or an unusable host base directory, fails closed on the Hub as well as on agent start.
+- **Symlink-safe access**: Every Hub operation on an NFS shared directory goes through the same confined resolver. This covers the web file browser, archive downloads, and shared-dir deletion. The resolver walks each path component with `O_NOFOLLOW`, anchored on the inode of the project's tree, and refuses any symlink in the path. A missing or incomplete `nfs` block, or an unusable host base directory, fails closed on the Hub as well as on agent start.
 - **Leaf modes and ACLs**: A newly created shared directory gets mode `2775` (setgid, group-writable) and a minimal default POSIX ACL, so files agents create inside it inherit group write access regardless of umask. If the export does not support POSIX ACLs, a warning is logged once and the directory stays plain `2775` with no ACL. Files created inside such a directory follow each writer's umask (usually `022`), so they are not group-writable. Directories that already existed are never modified. See the [hybrid tier guide](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/hybrid-tier.md) for the manual fix-up recipe.
+- **No file attachments**: The Hub does not stage chat attachments into NFS-backed shared directories. A file attached to a message for an agent is not copied into the project's `scratchpad` shared directory; the agent is given the Hub-local path, which only an agent running as a process on the Hub's host can read. Files that an agent attaches to its own messages are dropped, and the message carries the warning `the scratchpad shared dir is not available on the hub host`. The Hub logs the staging skip once per project at Info level, and logs an Error for each agent message whose attachments are dropped. Attachments currently need the `local` backend, with the agent on the Hub's co-located broker. Attachment transfer for multi-broker Hubs is tracked in [ptone/scion#2449](https://github.com/ptone/scion/issues/2449).
 - **Ownership on an export that does not squash ids**: the broker creates the project chain as its own user and never changes ownership. Upper directories get `2755` and the leaf `2775`, and each inherits the group of a setgid parent. Pods create nothing on this export; they mount the existing leaf by `subPath`. When agents with different uids share a directory, for example Docker agents and Kubernetes pods, give the share directory (`<mount_root>/<share id>`) a shared group with the setgid bit (for example `chgrp <gid>` and `chmod 2775`) so every leaf inherits it. Scion then adds that group to each agent that mounts the leaf; see [Agent groups](#agent-groups-on-nfs-shared-directories).
 - **Cleanup on delete**: Deleting a project removes its `<subpath_root>/<project id>/shared-dirs` tree from the export. Removing a single shared directory removes that directory's contents. Both are best-effort: failures are logged and never block or roll back the database change.
 - **Startup summary**: At startup the server logs one `server.shared_dir_storage resolved layout: …` line, plus a warning if any ignored `nfs` fields are set.
@@ -495,7 +512,7 @@ server:
   - A start that could not load the global settings records nothing, so the agent picks up its configured backend once the settings load again.
   - Agents created before the backend was recorded use the current resolution.
 - **Host mount**: a broker that starts an `nfs`-resolved agent needs the export mounted at `<mount_root>/<share id>`, as with the global `nfs` backend. A missing mount fails only agents that resolve to `nfs`. Agents on the `local` backend, server startup, and health checks are not affected. The startup log has one line per profile whose backend comes from an override.
-- **Hub file browser and attachments**: the Hub's file browser, archive downloads and attachment staging use `server.shared_dir_storage.backend` only, not the per-profile or [per-directory](#per-directory-backend) overrides.
+- **Hub file browser and attachments**: the Hub's file browser, archive downloads and attachment staging use `server.shared_dir_storage.backend` only, not the per-profile or [per-directory](#per-directory-backend) overrides. When that backend is `nfs`, attachments are not staged (see **No file attachments** above).
 - **Cleanup on delete**: deleting a project removes its tree from the export whenever `server.shared_dir_storage.nfs` is complete, whatever the backend settings select. An agent can still be on `nfs` by its record after every setting has moved to `local`, and the Hub cannot read records kept on brokers. If the global backend is not `nfs` and the export is not mounted on the Hub's host, cleanup logs a warning and the delete still succeeds.
 
 #### Per-directory backend
@@ -783,7 +800,7 @@ project_defaults:
 When running with a postgres database, operational settings (Layer-1) can be configured via `SCION_SEED_*` environment variables and managed in the admin UI. See the [Admin Settings Model](/scion/reference/admin-settings/) for details on the seeded/managed lifecycle and the `SCION_SEED_*` namespace.
 :::
 
-Most server settings can be overridden via environment variables using the `SCION_SERVER_` prefix. Write each path segment in upper case and drop the underscores inside a multi-word field name: `read_timeout` becomes `READTIMEOUT`, not `READ_TIMEOUT`. A name that the Hub does not recognise is ignored and logged as a warning at startup, with a suggested spelling where one exists. Each key's working variable is listed as `x-env-var` in the [settings schema](https://github.com/GoogleCloudPlatform/scion/blob/main/pkg/config/schemas/settings-v1.schema.json).
+Most server settings can be overridden via environment variables using the `SCION_SERVER_` prefix. Write each path segment in upper case and drop the underscores inside a multi-word field name: `read_timeout` becomes `READTIMEOUT`, not `READ_TIMEOUT`. A name that the Hub does not recognise is ignored and logged as a warning at startup, with a suggested spelling where one exists. An exported but empty `SCION_SERVER_*` or `SCION_SEED_*` variable is treated as unset, so it never overrides a configured value. Each key's working variable is listed as `x-env-var` in the [settings schema](https://github.com/GoogleCloudPlatform/scion/blob/main/pkg/config/schemas/settings-v1.schema.json).
 
 There are two exceptions to the pattern:
 
@@ -819,7 +836,8 @@ These environment variables control server-side logging behavior. They are not p
 | Variable | Description | Default |
 | :--- | :--- | :--- |
 | `SCION_LOG_GCP` | Enable GCP Cloud Logging JSON format on stdout | `false` |
-| `SCION_LOG_LEVEL` | Set to `debug` to log at DEBUG level from startup. Any other value leaves the level at `info`. | `info` |
+| `SCION_LOG_LEVEL` | Log level: `debug`, `info`, `warn` or `error`, optionally followed by per-component levels such as `info,hub.auth=debug`. See [Controlling the Log Level](/scion/hosted/single-node/observability/#controlling-the-log-level). | `info` |
+| `SCION_DEBUG` | Deprecated alias for `SCION_LOG_LEVEL=debug`. Any non-empty value enables it, and a warning is printed to stderr once. `SCION_LOG_LEVEL` wins if both are set. | - |
 | `SCION_CLOUD_LOGGING` | Send logs directly to Cloud Logging via client library | `false` |
 | `SCION_CLOUD_LOGGING_LOG_ID` | Log name in Cloud Logging for application logs | `scion` |
 | `SCION_GCP_PROJECT_ID` | GCP project ID for Cloud Logging (priority 1) | auto-detect |
@@ -1052,9 +1070,9 @@ Settings required before the database connection exists, or that are restart-bou
 | Heartbeat reconcile | `hub.missing_agent_grace` |
 | Conduit relay | `hub.conduit.*` |
 
-### Layer 1 — Operational (Postgres `hub_settings` table)
+### Layer 1 — Operational (`hub_settings` table)
 
-Settings that can be changed at runtime and are shared across all replicas. Stored as section-per-row in the `hub_settings` table. In SQLite/workstation mode, these fall back to `settings.yaml` (unchanged behavior), except for the `maintenance` section which is runtime/API-only and has no `settings.yaml` representation (ephemeral in file/SQLite mode).
+Settings that can be changed at runtime and are shared across all replicas. Stored as section-per-row in the `hub_settings` table of the Hub database on every driver, SQLite included. `settings.yaml` only seeds them and is the fallback for a section with no database row (see the [Admin Settings Model](/scion/reference/admin-settings/)). The `maintenance` section is runtime/API-only: it has no `settings.yaml` representation and starts from `admin_mode` until a row exists.
 
 | Section | Contents |
 | :--- | :--- |
@@ -1064,27 +1082,32 @@ Settings that can be changed at runtime and are shared across all replicas. Stor
 | `telemetry` | Full `telemetry.*` subtree (enabled, cloud, hub, local, filter, resource) |
 | `agent_defaults` | `default_template`, `default_harness_config`, `default_max_turns`, `default_max_model_calls`, `default_max_duration`, `default_resources`, `default_model`, `default_thinking_level`, `default_max_agent_role`, `default_agent_role`, `default_runtime_broker`, `default_timezone`, `default_gcp_identity_mode`, `default_gcp_identity_service_account_id` |
 | `federation` | `enabled`, `trusted_issuers[]`, `algorithms`, `refresh_interval`, `debounce_interval` |
-| `endpoints` | `hub.public_url`, `image_registry` |
+| `endpoints` | `hub.public_url`, `hub.hub_name`, `image_registry` |
 | `github_app` | `app_id`, `api_base_url`, `webhooks_enabled`, `installation_url`, `private_key_path` |
 | `notifications` | `notification_channels[]` |
 | `project_defaults` | `default_scratchpad` |
+| `auto_expose_ports` | `enabled` |
+| `quotas` | `enforce_broker_quotas` |
+| `agent_secrets` | `user_scope_only` |
+| `runtimes` | The whole `runtimes` map |
+| `profiles` | The whole `profiles` map |
+| `harness_configs` | The whole `harness_configs` map |
 | *(reserved)* `global_defaults` | Reserved for future hub-resource design — not implemented |
 
 `agent_defaults.default_timezone` is the Hub default `TZ` for agent containers: an IANA zone name, used only when the agent has no pin and no `TZ` environment variable applies. Empty means no default (the image default, UTC). An invalid name or `Local` is rejected with `422`. In `settings.yaml`, and in the `PUT /api/v1/admin/server-config` request body, it is the top-level `default_timezone` field. It does not change how times are stored or displayed. See [Times and Timezones](/scion/reference/times-and-timezones/#hub-default-timezone).
 
 ### Precedence
 
-In Postgres mode, the effective value for any Layer-1 key is resolved in this order (highest priority first):
+On every driver, the effective value for any Layer-1 key is resolved in this order (highest priority first):
 
-1. **`SCION_SERVER_*` environment variable** — node-local escape hatch
-2. **`hub_settings` DB row** — cluster-shared, set via admin API
-3. **`settings.yaml` Layer-1 fields** — fallback when key absent in DB
-4. **Compiled defaults**
+1. **`hub_settings` DB row** — cluster-shared, set via admin API. A row fully owns its section.
+2. **Bootstrap merge** — used only when the section has no row: `SCION_SERVER_*`, then `settings.yaml`, then `SCION_SEED_*`, then compiled defaults. `settings.yaml` is the global `~/.scion/settings.yaml`; see [`--config` and the bootstrap merge](/scion/reference/admin-settings/#configuration-precedence) for how a `--config` location takes part.
+
+A `SCION_SERVER_*` variable on a Layer-1 key therefore does not override a row an admin has saved. It only changes the seed (re-synced into seeded rows at restart) and the fallback, and it is deprecated for Layer-1 keys in favour of `SCION_SEED_*`.
 
 ### Seeding and Migration
 
-- **First startup**: the first replica to start seeds `hub_settings` from its local `settings.yaml` (Layer-1 keys only) under an advisory lock. Subsequent replicas see the seed marker and skip.
-- **Seeding reads file values only** — environment overrides are not baked into shared state.
+- **Every start**: the replica that takes the seed advisory lock syncs `hub_settings` (Layer-1 sections only) from its bootstrap merge: `SCION_SEED_*`, `settings.yaml`, then `SCION_SERVER_*`. A missing section is created, a section no admin has edited (seeded) is re-synced when its content differs, and an edited (managed) section is not touched. A replica that finds the lock held skips the sync.
 - **DB wins**: once a section is seeded/written to DB, the DB row fully owns that section. Omitted fields within the section fall to compiled defaults, not to the file.
 - **Rollback safety**: older builds ignore the `hub_settings` table entirely and read files — rolling back reverts to pre-change behavior.
 
@@ -1092,9 +1115,9 @@ In Postgres mode, the effective value for any Layer-1 key is resolved in this or
 
 Because env overrides on Layer-1 keys reintroduce per-node drift, the system warns administrators:
 
-- `GET /api/v1/admin/server-config` includes an `env_overrides` array listing which Layer-1 keys are overridden by env vars on the serving node.
+- `GET /api/v1/admin/server-config` includes an `env_overrides` array listing every key, Layer-0 or Layer-1, that a `SCION_SERVER_*` variable sets on the serving node.
 - A startup `WARN` log lists any overridden Layer-1 keys.
-- The admin UI renders a visible warning banner when env overrides are detected.
+- The admin UI renders a visible warning banner when env overrides are detected, and an "Overridden by environment on this node" badge on each affected field, or on the section for the `runtimes` and `profiles` maps.
 
 ### Admin API Behavior Notes
 

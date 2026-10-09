@@ -1784,10 +1784,10 @@ test_deploy_create_tier_off_reaches_settings_yaml_with_no_hybrid_ssh_calls() {
 # the Phase-5 proxy-mode write) with the hybrid-tier splices cut out of
 # the source text. The three splices (${HYBRID_X:+${HYBRID_X}<newline>})
 # are cut as one exact fragment that must start its own line and be
-# followed directly by the listen_port line, not expanded with empty
+# followed directly by the listen-port comment line, not expanded with empty
 # variables. A splice that would leave a stray line or character behind,
 # or any text between the splices, on their lines, or between them and
-# the listen_port line, therefore stays in the template and fails the
+# the listen-port comment line, therefore stays in the template and fails the
 # comparison with the render. If the fragment is not found, the output
 # is an error line, not the template, which also fails the comparison.
 # The identity-mode splice (${HYBRID_GCP_IDENTITY_YAML:-"<comment and
@@ -1813,12 +1813,12 @@ settings_yaml_template_tier_off() {
   for var in HYBRID_AUTH_TRANSPORT_YAML HYBRID_USER_ACCESS_YAML HYBRID_SHARED_DIR_STORAGE_YAML; do
     group="${group}\${${var}:+\${${var}}"$'\n'"}"
   done
-  group=$'\n'"${group}  listen_port: 8080"$'\n'
+  group=$'\n'"${group}  # Listen port: set by --web-port in scion-hub.service, not here."$'\n'
   if [[ "$body" != *"$group"* ]]; then
-    echo "settings.yaml heredoc ${n} in deploy.sh has no contiguous hybrid-tier splice fragment before listen_port"
+    echo "settings.yaml heredoc ${n} in deploy.sh has no contiguous hybrid-tier splice fragment before the listen-port comment"
     return 1
   fi
-  body="${body/"$group"/$'\n'  listen_port: 8080$'\n'}"
+  body="${body/"$group"/$'\n'  # Listen port: set by --web-port in scion-hub.service, not here.$'\n'}"
   printf '%s' "$body"
 }
 
@@ -1858,16 +1858,16 @@ test_deploy_create_tier_off_settings_yaml_byte_identical() {
   expected="$(IMAGE_REGISTRY="localhost/scion" HUB_NAME="demohub" ADMIN_EMAIL="admin@example.com" \
     RELEASE_CHANNEL="nightly" UPDATE_POLICY="auto" render_settings_yaml_template "$template"; echo x)"
   expected="${expected%x}"
-  assert_contains "$expected" "  listen_port: 8080" "the rendered template must reach the listen_port line"
+  assert_contains "$expected" "  # Listen port: set by --web-port in scion-hub.service, not here." "the rendered template must reach the listen-port comment line"
   assert_eq "$expected" "$actual" \
     "a tier-off settings.yaml must be byte-for-byte identical to a render with no hybrid-tier splice at all"
   # The comparison above takes the fixed template text from deploy.sh
   # itself, so these pin a few rendered values and the auth block's end.
-  assert_contains "$actual" '    name: "demohub"' "the dev-mode write must carry the hub name"
+  assert_contains "$actual" '    hub_name: "demohub"' "the dev-mode write must carry the hub name"
   assert_contains "$actual" '    release_channel: "nightly"' "the dev-mode write must carry the release channel"
   assert_contains "$actual" '    update_policy: "auto"' "the dev-mode write must carry the update policy"
-  assert_contains "$actual" $'  auth:\n    mode: dev\n  listen_port: 8080\n' \
-    "in the dev-mode write, the listen_port line must directly follow the auth block"
+  assert_contains "$actual" $'  auth:\n    mode: dev\n  # Listen port: set by --web-port in scion-hub.service, not here.\n' \
+    "in the dev-mode write, the listen-port comment line must directly follow the auth block"
 }
 
 # The dev-mode write above is what deploy.sh's own Phase 3 uses on every
@@ -1899,11 +1899,11 @@ test_deploy_create_tier_off_proxy_settings_yaml_byte_identical() {
     "a tier-off proxy-mode settings.yaml must be byte-for-byte identical to a render with no hybrid-tier splice at all"
   # As in the dev-mode test, these pin a few rendered values and the auth
   # block's end independently of the template.
-  assert_contains "$actual" '    name: "demohub"' "the proxy-mode write must carry the hub name"
+  assert_contains "$actual" '    hub_name: "demohub"' "the proxy-mode write must carry the hub name"
   assert_contains "$actual" '    release_channel: "nightly"' "the proxy-mode write must carry the release channel"
   assert_contains "$actual" '    update_policy: "auto"' "the proxy-mode write must carry the update policy"
-  assert_contains "$actual" $'        audience: "/projects/123456789012/locations/us-central1/services/scion-hub-demohub-iap-proxy"\n  listen_port: 8080\n' \
-    "in the proxy-mode write, the listen_port line must directly follow the auth block"
+  assert_contains "$actual" $'        audience: "/projects/123456789012/locations/us-central1/services/scion-hub-demohub-iap-proxy"\n  # Listen port: set by --web-port in scion-hub.service, not here.\n' \
+    "in the proxy-mode write, the listen-port comment line must directly follow the auth block"
 }
 
 test_deploy_create_tier_on_proxy_settings_yaml_has_shared_dir_storage_block() {
@@ -2141,7 +2141,7 @@ test_deploy_create_tier_on_settings_writes_parse_as_yaml() {
   log="$(gcloud_log)"
   transport_sa="$(hybrid_transport_sa_name "$HUB")@demo-project.iam.gserviceaccount.com"
   assert_eq "2" "$(echo "$log" | grep -c "<< 'SETTINGSEOF'" || true)" \
-    "a create through Phase 5 must write settings.yaml twice (dev mode, then proxy mode)"
+    "a create through Phase 5 must write settings.yaml twice (Phase 3 bootstrap, then proxy mode)"
   for n in 1 2; do
     if [[ "$n" == 1 ]]; then mode="dev"; else mode="proxy"; fi
     yaml="$(_settings_heredoc_nth "$log" "$n")"
@@ -2167,8 +2167,8 @@ test_deploy_create_tier_on_settings_writes_parse_as_yaml() {
       "${mode}-mode write: server.shared_dir_storage.backend"
     assert_eq "10.128.0.9" "$(_json_get "$json" server.shared_dir_storage.nfs.shares.0.server)" \
       "${mode}-mode write: the shared_dir_storage share server is the reserved internal IP"
-    assert_eq "8080" "$(_json_get "$json" server.listen_port)" \
-      "${mode}-mode write: server.listen_port stays a server-level key after the splices"
+    assert_eq "<missing>" "$(_json_get "$json" server.listen_port)" \
+      "${mode}-mode write: no server.listen_port key (not in the v1 schema)"
   done
 }
 
@@ -2188,8 +2188,7 @@ image_registry
 schema_version
 server.auth.mode
 server.hub.admin_emails[0]
-server.hub.name
-server.listen_port
+server.hub.hub_name
 server.maintenance.deployment_tier
 server.maintenance.release_channel
 server.maintenance.update_policy
@@ -2215,7 +2214,7 @@ server.storage.local_path"
       "tier-off ${mode}-mode write: no user_access_mode"
     assert_eq "<missing>" "$(_json_get "$json" server.shared_dir_storage)" \
       "tier-off ${mode}-mode write: no shared_dir_storage block"
-    assert_eq "8080" "$(_json_get "$json" server.listen_port)" "tier-off ${mode}-mode write: server.listen_port"
+    assert_eq "<missing>" "$(_json_get "$json" server.listen_port)" "tier-off ${mode}-mode write: no server.listen_port"
     # The fixed keys of the template, pinned by value here rather than
     # read back from deploy.sh, so an edit to the template text outside
     # the hybrid-tier splices fails a test.
@@ -2226,7 +2225,7 @@ server.storage.local_path"
       "tier-off ${mode}-mode write: default_gcp_identity_mode"
     assert_eq "antigravity" "$(_json_get "$json" default_harness_config)" \
       "tier-off ${mode}-mode write: default_harness_config"
-    assert_eq "$HUB" "$(_json_get "$json" server.hub.name)" "tier-off ${mode}-mode write: server.hub.name"
+    assert_eq "$HUB" "$(_json_get "$json" server.hub.hub_name)" "tier-off ${mode}-mode write: server.hub.hub_name"
     assert_eq "admin@example.com" "$(_json_get "$json" server.hub.admin_emails.0)" \
       "tier-off ${mode}-mode write: server.hub.admin_emails"
     assert_eq "binary" "$(_json_get "$json" server.maintenance.deployment_tier)" \

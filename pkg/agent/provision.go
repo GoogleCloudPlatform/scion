@@ -790,16 +790,43 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 		return cfg, err
 	}
 
+	// prompt.md must never hold the previous generation's task once the
+	// disk is re-rendered for the new one (ptone/scion#3985). The new
+	// generation's first task (the hub-built preamble plus handoff) is
+	// still delivered by the subsequent DispatchAgentStart call, but if
+	// that start never reaches this broker's Start (a timeout, a deferred
+	// or failed start), a later task-less, non-resume start falls back to
+	// prompt.md and would otherwise replay generation N's task. So stage
+	// the request's task here, matching AppliedConfig.Task (the hub's own
+	// restart source), or empty the file when the request carries none.
+	// Staging does not deliver the task: prompt.md is only read by Start as
+	// a fallback when its request has no task, and a start that carries
+	// the same task overwrites the file with it and delivers it once.
+	// This runs before the shared dir backend change is recorded, so a
+	// failed write leaves that change unrecorded ("recorded only after
+	// provisioning succeeds").
+	if err := writeReprovisionPrompt(agentDir, opts.Task); err != nil {
+		return cfg, err
+	}
+
 	if sdChange != nil {
 		if err := sdChange.record(opts, cfg); err != nil {
 			return cfg, err
 		}
 	}
 
-	// Deliberately no prompt.md write here: the new generation's first task
-	// (the hub-built preamble plus handoff) is delivered by the subsequent
-	// DispatchAgentStart call, not pre-staged as a file.
 	return withProvisionedImage(opts, agentDir, cfg)
+}
+
+// writeReprovisionPrompt replaces prompt.md in agentDir with task, or
+// empties it when task is empty, so no earlier generation's task survives
+// a reprovision.
+func writeReprovisionPrompt(agentDir, task string) error {
+	promptFile := filepath.Join(agentDir, "prompt.md")
+	if err := os.WriteFile(promptFile, []byte(task), 0644); err != nil {
+		return fmt.Errorf("reprovision: failed to write prompt.md: %w", err)
+	}
+	return nil
 }
 
 // reprovisionEmptyPerAgentPreflight runs Reprovision's empty-per-agent
@@ -844,6 +871,11 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 
 	if err := m.finishProvision(opts, agentDir, agentHome, cfg); err != nil {
 		return cfg, err
+	}
+	// A create: the later start must not mistake this agent for one that
+	// predates per-agent NFS directories (see nfsKeepSharedCheckout).
+	if opts.FreshProvision {
+		recordNFSAgentDir(agentDir, opts.Name)
 	}
 
 	// A provision-only create carries no run (the hub mints runs only for

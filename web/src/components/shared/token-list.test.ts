@@ -121,7 +121,11 @@ function eligibilityResponseIneligible(projectId: string) {
   const resp = eligibilityResponse(projectId);
   resp.scopes[0] = {
     ...resp.scopes[0],
-    eligibility: { boundary: { kind: 'project', projectId }, eligible: false, reason: 'no_relationship_candidacy' },
+    eligibility: {
+      boundary: { kind: 'project', projectId },
+      eligible: false,
+      reason: 'no_relationship_candidacy',
+    },
   };
   return resp;
 }
@@ -152,7 +156,9 @@ function baseFetch(
     const url = typeof input === 'string' ? input : input.toString();
     const method = init?.method ?? 'GET';
     if (url.startsWith('/api/v1/auth/scopes')) {
-      return Promise.resolve(overrides.scopes ? overrides.scopes(url) : jsonResponse(CATALOG_RESPONSE));
+      return Promise.resolve(
+        overrides.scopes ? overrides.scopes(url) : jsonResponse(CATALOG_RESPONSE)
+      );
     }
     if (url === '/api/v1/auth/tokens' && method === 'POST') {
       return Promise.resolve(
@@ -163,7 +169,9 @@ function baseFetch(
       return Promise.resolve(overrides.tokens ? overrides.tokens() : jsonResponse({ items: [] }));
     }
     if (url.startsWith('/api/v1/projects')) {
-      return Promise.resolve(overrides.projects ? overrides.projects() : jsonResponse({ projects: [] }));
+      return Promise.resolve(
+        overrides.projects ? overrides.projects() : jsonResponse({ projects: [] })
+      );
     }
     return Promise.resolve(jsonResponse({}));
   };
@@ -401,7 +409,8 @@ describe('scion-token-list — project eligibility (ptone/scion#2122)', () => {
       baseFetch({
         scopes: (url) => {
           if (url.includes('projectId=proj-a')) return gateA.promise;
-          if (url.includes('projectId=proj-b')) return jsonResponse(eligibilityResponseIneligible('proj-b'));
+          if (url.includes('projectId=proj-b'))
+            return jsonResponse(eligibilityResponseIneligible('proj-b'));
           return jsonResponse(CATALOG_RESPONSE);
         },
       })

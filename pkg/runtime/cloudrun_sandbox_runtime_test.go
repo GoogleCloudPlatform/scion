@@ -29,6 +29,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 // -----------------------------------------------------------------------
@@ -933,7 +934,6 @@ func TestP3a_EnvForBehaviourIdentity(t *testing.T) {
 		"SCION_METADATA_PROJECT_ID=proj-001",
 		"SCION_BROKER_ID=broker-001",
 		"SCION_CREATOR=user@example.com",
-		"SCION_DEBUG=1",
 		// Broker-side secret-injected (B-auth, B-clone)
 		"SCION_AUTH_TOKEN=FAKE-AUTH-SENTINEL-not-a-real-credential",
 		"SCION_GIT_CLONE_URL=https://FAKE-KEY-SENTINEL-not-a-real-credential@github.com/org/repo.git",
@@ -1736,6 +1736,54 @@ func TestCloudRunSandboxRuntime_List_LabelFilter(t *testing.T) {
 	}
 	if agents[0].ContainerID != "sb-1" {
 		t.Errorf("filtered agent = %q, want %q", agents[0].ContainerID, "sb-1")
+	}
+}
+
+// TestCloudRunSandboxRuntime_List_ProjectPathResolved verifies that List
+// compares scion.project_path as a resolved path (as the Docker, Podman and
+// Apple runtimes do through LabelsMatchFilter), so a trailing slash or a
+// symlinked spelling of the same directory still matches (ptone/scion#3020).
+func TestCloudRunSandboxRuntime_List_ProjectPathResolved(t *testing.T) {
+	projectDir := t.TempDir()
+	otherDir := t.TempDir()
+	linkDir := filepath.Join(t.TempDir(), "project-link")
+	if err := os.Symlink(projectDir, linkDir); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	stateFile := filepath.Join(t.TempDir(), "state.json")
+	rt := &CloudRunSandboxRuntime{
+		bin:          "/nonexistent",
+		state:        newSandboxStateStore(stateFile),
+		rootDir:      t.TempDir(),
+		watchCancels: make(map[string]context.CancelFunc),
+	}
+	rt.state.add(&sandboxStateEntry{
+		SandboxName: "sb-trailing",
+		AgentID:     "agent-trailing",
+		Labels:      map[string]string{projectkeys.LabelProjectPath: projectDir + "/"},
+	})
+	rt.state.add(&sandboxStateEntry{
+		SandboxName: "sb-link",
+		AgentID:     "agent-link",
+		Labels:      map[string]string{projectkeys.LabelProjectPath: linkDir},
+	})
+	rt.state.add(&sandboxStateEntry{
+		SandboxName: "sb-other",
+		AgentID:     "agent-other",
+		Labels:      map[string]string{projectkeys.LabelProjectPath: otherDir},
+	})
+
+	agents, err := rt.List(context.Background(), map[string]string{projectkeys.LabelProjectPath: projectDir})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	got := make(map[string]bool)
+	for _, a := range agents {
+		got[a.ContainerID] = true
+	}
+	if len(agents) != 2 || !got["sb-trailing"] || !got["sb-link"] {
+		t.Errorf("List() by project path = %v, want sb-trailing and sb-link", got)
 	}
 }
 

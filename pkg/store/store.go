@@ -286,9 +286,6 @@ type Store interface {
 	// Agent Identity Key operations (per-project display-name / slug uniqueness)
 	AgentIdentityKeyStore
 
-	// Decision Audit operations (Authorization Decision Audit Phase 1I)
-	DecisionAuditStore
-
 	// Mutation Audit operations (Authorization Mutation Audit Phase 1I)
 	MutationAuditStore
 
@@ -3205,24 +3202,6 @@ type AgentIdentityKeyStore interface {
 }
 
 // =============================================================================
-// Decision Audit Store (Authorization Decision Audit Phase 1I)
-// =============================================================================
-
-// DecisionAuditStore defines persistence operations for authorization decision audit records.
-type DecisionAuditStore interface {
-	// CreateDecisionAudit stores a new decision audit record.
-	CreateDecisionAudit(ctx context.Context, record *DecisionAuditRecord) error
-
-	// ListDecisionAudits returns decision audit records matching the filter.
-	// Returns (records, total count, error).
-	ListDecisionAudits(ctx context.Context, filter DecisionAuditFilter) ([]*DecisionAuditRecord, int, error)
-
-	// DeleteDecisionAuditsBefore removes decision audit records older than the given time.
-	// Returns the number of records deleted.
-	DeleteDecisionAuditsBefore(ctx context.Context, before time.Time) (int, error)
-}
-
-// =============================================================================
 // Mutation Audit Store (Authorization Mutation Audit Phase 1I)
 // =============================================================================
 
@@ -3310,6 +3289,19 @@ type QuotaStore interface {
 
 	// ListActiveReservations returns active (non-released) reservations for a limit and scope.
 	ListActiveReservations(ctx context.Context, limitDefinitionID, scopeType, scopeID string) ([]*UsageReservation, error)
+
+	// ListActiveReservationsByScopeType returns active (non-released)
+	// reservations for a limit across every scope ID of scopeType, in one
+	// query, ordered by created_at ascending (the same order
+	// ListActiveReservations uses within a single scope). Callers that need
+	// one scope's rows filter on UsageReservation.ScopeID (ptone/scion#2314).
+	ListActiveReservationsByScopeType(ctx context.Context, limitDefinitionID, scopeType string) ([]*UsageReservation, error)
+
+	// CountActiveReservationsByScope returns the number of active
+	// (non-released) reservations for a limit and scopeType, grouped by scope
+	// ID, in one query. Scope IDs with no active reservation are absent from
+	// the map (ptone/scion#2314).
+	CountActiveReservationsByScope(ctx context.Context, limitDefinitionID, scopeType string) (map[string]int64, error)
 
 	// HasActiveReservation reports whether resourceID already holds a
 	// non-released reservation for the given limit, regardless of scope.
