@@ -732,12 +732,12 @@ step "no SCION_SERVER_DATABASE_* or SCION_SERVER_OIDC_* variable is ever emitted
 # Some of these names bind and some are discarded, and BOTH outcomes are wrong,
 # which is why the check is on the whole prefix rather than on a list of the
 # harmful ones. A name binds only if every underscore-separated segment survives
-# camelCaseFields (pkg/config/hub_config.go:919): SCION_SERVER_DATABASE_URL and
+# camelCaseFields (pkg/config/hub_config.go): SCION_SERVER_DATABASE_URL and
 # SCION_SERVER_DATABASE_DRIVER do, SCION_SERVER_DATABASE_MAX_OPEN_CONNS does not.
-# One that binds is applied AFTER settings.yaml (:683) and wins, so the hub runs
-# a configuration this chart never rendered and every guard in it never saw. One
+# One that binds is applied AFTER settings.yaml (applyEnvOverrides, same file)
+# and wins, so the hub runs a configuration this chart never rendered and every guard in it never saw. One
 # that is discarded is dropped by k.Unmarshal with no error, yet DetectEnvOverrides
-# (pkg/config/opsettings/koanf.go:347) still lists it to the admin server-config
+# (pkg/config/opsettings/koanf.go) still lists it to the admin server-config
 # view as an active override - reported as applied, which is worse than silent.
 # Neither outcome raises anything at runtime, which is why it is caught here.
 #
@@ -953,8 +953,9 @@ step "migration-rename-hazard: schema_version is present in every rendered setti
 # and the hazard does not.
 #
 # The hub auto-migrates a settings file whose format it cannot detect
-# (pkg/config/settings.go:590-600), the detector keys on schema_version, and the
-# migration replaces the file with os.Rename (pkg/config/settings_v1.go:2694).
+# (UpdateSetting, pkg/config/settings.go), the detector keys on schema_version,
+# and the migration replaces the file with os.Rename (MigrateSettingsFile,
+# pkg/config/settings_v1.go).
 # settings.yaml is delivered as a subPath bind mount, and renaming over a bind
 # mount returns EBUSY. Every other write to this file under the mount is soft -
 # a warning, or a 500 to one caller, with the server continuing. This is the
@@ -1031,27 +1032,28 @@ step "every rendered settings.yaml carries a top-level server: key"
 #
 # --config / -c is reserved in hub.args, and at Phase 0 it was not merely
 # reserved, it was LIVE. Not for want of a settings.yaml - the hub seeds one from
-# its own embedded defaults on a first boot (cmd/server_foreground.go:104-109 ->
-# config.InitMachine, pkg/config/init.go:588-599) and those defaults have no
-# server key. THE TRIGGER IS THE KEY, NOT THE FILE, so "the chart mounts a
+# its own embedded defaults on a first boot (runServerStart,
+# cmd/server_foreground.go -> config.InitGlobal, an alias for InitMachine,
+# pkg/config/init.go) and those defaults have no server key. THE TRIGGER IS THE KEY, NOT THE FILE, so "the chart mounts a
 # settings.yaml" is not the property that matters and a check that asserted the
 # mount would not be this check. THIS PHASE MAKES THE FLAG INERT by emitting the
 # top-level server key, and the reason is ours end to end:
-# loadGlobalConfigFromSettings (pkg/config/hub_config.go:640) reads
+# loadGlobalConfigFromSettings (pkg/config/hub_config.go) reads
 # GetGlobalDir() first and unconditionally, and consults the --config path only
-# `if !found` (:647-660). `found` is true exactly when
+# `if !found`. `found` is true exactly when
 # $HOME/.scion/settings.yaml parses AND has a non-nil top-level `server` key -
-# loadServerFromSettingsFile decides it at :1344-1347 on that key alone, not on
+# loadServerFromSettingsFile decides it on that key alone, not on
 # the file existing and not on its contents being useful.
 #
 # So the flag is inert while, and only while, this chart renders that key. Drop
 # it - by minimising the document, by moving the server section under a profile,
 # by rendering a settings.yaml that is only profiles and runtimes - and the flag
 # is live again, in two forms: the --config path's own settings.yaml becomes the
-# sole source of the server config (:648-659), or, failing that,
-# loadGlobalConfigLegacy (:635, :699) layers the --config file over the loaded
-# configuration (:777-787). Neither is a redirect of the whole load and nothing
-# is: GetGlobalDir (pkg/config/paths.go:188-194) takes no arguments.
+# sole source of the server config (the `if !found` branch of
+# loadGlobalConfigFromSettings), or, failing that, loadGlobalConfigLegacy
+# (reached from LoadGlobalConfig) layers the --config file over the loaded
+# configuration. Neither is a redirect of the whole load and nothing is:
+# GetGlobalDir (pkg/config/paths.go) takes no arguments.
 #
 # That is rule 8 from the far side: Phase 0's guard is closed by Phase 1's
 # configuration, so it is deferred to whoever changes Phase 1's configuration,
@@ -1831,7 +1833,7 @@ fi
 step "database.maxOpenConns has a floor of 2, and the floor is the hub's"
 # --------------------------------------------------------------------------
 # PHASE 2. The hub treats MaxOpenConns <= 1 as UNSET for postgres
-# (pkg/config/hub_config.go:573) and substitutes its own default, with a
+# (applyDatabasePoolDefaults, pkg/config/hub_config.go) and substitutes its own default, with a
 # documented rationale: a single-connection pool self-deadlocks the moment one
 # query waits on another. So an operator who sets 1 to economise on connections
 # does not get 1 and does not get an error - they get the hub's default, and
@@ -2742,7 +2744,7 @@ for name in "${PERMUTATIONS[@]}"; do
   # volumes, so replicas share no mutable state at all" and concluded that the
   # strategy choice carries no data consequence. It mounts this one, and with no
   # server.database.url the hub puts its SQLite file inside it
-  # (pkg/config/hub_config.go:691), so RollingUpdate's two-pod window has two
+  # (loadGlobalConfigFromSettings, pkg/config/hub_config.go), so RollingUpdate's two-pod window has two
   # divergent hub.db files. The corrected paragraph rests on this volume being an
   # emptyDir; if Phase 4 makes it a PVC the paragraph changes again, and this is
   # what will say so.
@@ -3680,12 +3682,13 @@ step "nothing points the hub at a second configuration file"
 #
 # WHAT --config / -c ACTUALLY DOES, WHICH IS NOT WHAT THIS COMMENT USED TO SAY.
 # It does not redirect the configuration load unconditionally. LoadGlobalConfig
-# (pkg/config/hub_config.go:628) calls loadGlobalConfigFromSettings (:640), which
-# reads GetGlobalDir() FIRST and UNCONDITIONALLY and consults configPath only
-# `if !found` (:647-660). So the flag's effect depends on whether the global
+# (pkg/config/hub_config.go) calls loadGlobalConfigFromSettings (same file),
+# which reads GetGlobalDir() FIRST and UNCONDITIONALLY and consults configPath
+# only `if !found`. So the flag's effect depends on whether the global
 # read succeeded, and `found` is narrower than "the file exists": it is true
 # exactly when $HOME/.scion/settings.yaml parses AND carries a non-nil top-level
-# `server` key (loadServerFromSettingsFile, :1331, decided at :1344-1347).
+# `server` key (loadServerFromSettingsFile, decided by its raw["server"] nil
+# check).
 #
 # THE FLAG IS INERT BECAUSE OF A PROPERTY OF THIS CHART'S OUTPUT, NOT BECAUSE OF
 # ANYTHING IN THE BINARY, AND IT WAS LIVE AT PHASE 0. What was missing there was
@@ -3697,12 +3700,14 @@ step "nothing points the hub at a second configuration file"
 #
 # NOTHING AT ALL, LITERALLY - NOT EVEN A WARNING, and it would be easy to write
 # "only warns" here and be wrong in the direction that matters. The flag is not
-# marked deprecated: MarkDeprecated appears twice in cmd/server.go, :236 and
-# :290, both for --production, never for config or c (the flag itself is
-# cmd/server.go:237). The only two warnings in the load path,
-# pkg/config/hub_config.go:668 and :678, are about a server.yaml sitting beside
+# marked deprecated: MarkDeprecated appears twice in cmd/server.go's init, on
+# serverStartCmd and on serverInstallCmd, both for --production, never for
+# config or c (the flag itself is a plain StringVarP on serverStartCmd in that
+# same init). The only two warnings in the load path, the two "Both settings.yaml
+# (server key) and server.yaml exist" messages in loadGlobalConfigFromSettings
+# (pkg/config/hub_config.go), are about a server.yaml sitting beside
 # settings.yaml, and the one that depends on the --config path at all additionally
-# requires hasServerYAML(dir) (:1393) - a server.yaml or server.yml next to the
+# requires hasServerYAML(dir) - a server.yaml or server.yml next to the
 # --config target, which this chart creates nowhere. So an operator who appends
 # --config gets no error, no warning and no log line. There is no runtime signal
 # to fall back on, which is precisely why a reserved flag is the only available
@@ -3712,13 +3717,13 @@ step "nothing points the hub at a second configuration file"
 # of the document's top-level shape, a phase that moves everything under a
 # profile - and `found` goes false, the deployment is back in the Phase 0 state,
 # and the flag takes effect. IN TWO FORMS, AND
-# NEITHER OF THEM IS A REDIRECT OF THE WHOLE LOAD. At :648-659 the --config
-# path's own directory is searched for a settings.yaml and, if it has a server
-# key, that file becomes the SOLE source of the server config. Failing that,
-# LoadGlobalConfig falls through to loadGlobalConfigLegacy(configPath) (:635,
-# :699), which loads defaults, then ~/.scion/server.yaml (:772-775), then LAYERS
-# the --config file over the result (:777-787) - an overlay. Nothing can move the
-# directory the hub reads first: GetGlobalDir (pkg/config/paths.go:188-194) is
+# NEITHER OF THEM IS A REDIRECT OF THE WHOLE LOAD. In the `if !found` branch of
+# loadGlobalConfigFromSettings the --config path's own directory is searched
+# for a settings.yaml and, if it has a server key, that file becomes the SOLE source of the server config. Failing that,
+# LoadGlobalConfig falls through to loadGlobalConfigLegacy(configPath), which
+# loads defaults, then ~/.scion/server.yaml, then LAYERS the --config file over
+# the result - an overlay. Nothing can move the directory the hub reads first:
+# GetGlobalDir (pkg/config/paths.go) is
 # os.UserHomeDir() joined with GlobalDir and takes no arguments. Keep the
 # distinction if you narrow this check - an overlay and a redirect have different
 # blast radii, and a mitigation scoped to redirection does not cover an overlay.

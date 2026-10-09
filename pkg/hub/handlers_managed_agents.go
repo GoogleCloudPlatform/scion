@@ -314,7 +314,7 @@ func (s *Server) stopManagedCreateInteraction(ctx context.Context, agent *store.
 	defer cancel()
 	stop := managedCreateStop{interactionID: interactionID, agentID: agent.ID}
 	if err := stopManagedInteraction(cctx, interactionID); err != nil {
-		s.agentLifecycleLog.Warn("Failed to stop the managed agent interaction of a failed managed create",
+		s.agentLifecycleLog.Warn("Failed to stop the managed agent interaction of a managed create (failed, deleted or stopped during create)",
 			"agent_id", agent.ID, "interaction_id", interactionID, "error", err)
 		stop.err = err
 	}

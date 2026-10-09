@@ -1490,6 +1490,19 @@ type V1ServerHubConduitConfig struct {
 	// AuthzRecheckInterval is the period of the re-check sweep of open
 	// user streams (e.g. "60s"; default "60s", 1s-10m).
 	AuthzRecheckInterval string `json:"authz_recheck_interval,omitempty" yaml:"authz_recheck_interval,omitempty" koanf:"authz_recheck_interval"`
+	// StreamAuthzMax is the authorization interval of open streams per
+	// originating principal kind: when a stream reaches it, the hub
+	// re-checks the principal and renews or closes the stream (defaults
+	// "8h" for user, "24h" for broker and agent; each 1m-168h).
+	StreamAuthzMax *V1ServerHubConduitStreamAuthzMax `json:"stream_authz_max,omitempty" yaml:"stream_authz_max,omitempty" koanf:"stream_authz_max"`
+}
+
+// V1ServerHubConduitStreamAuthzMax holds
+// server.hub.conduit.stream_authz_max.
+type V1ServerHubConduitStreamAuthzMax struct {
+	User   string `json:"user,omitempty" yaml:"user,omitempty" koanf:"user"`
+	Broker string `json:"broker,omitempty" yaml:"broker,omitempty" koanf:"broker"`
+	Agent  string `json:"agent,omitempty" yaml:"agent,omitempty" koanf:"agent"`
 }
 
 // V1BrokerConfig holds Runtime Broker configuration.
@@ -2851,6 +2864,7 @@ var knownCompoundFields = []string{
 	"start_unconfirmed_hold",
 	"authz_recheck_interval",
 	"start_claim_lease_ttl",
+	"stream_authz_max",
 	"soft_delete_retention",
 	"peer_service_accounts",
 	"grant_key_activation",
@@ -3210,6 +3224,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				InstanceID:           c.InstanceID,
 				AuthzRecheckInterval: c.AuthzRecheckInterval,
 			}
+			if m := c.StreamAuthzMax; m != nil {
+				gc.Hub.Conduit.StreamAuthzMax = HubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
+			}
 		}
 	}
 
@@ -3547,6 +3564,9 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			ReconnectWindow:      c.ReconnectWindow,
 			InstanceID:           c.InstanceID,
 			AuthzRecheckInterval: c.AuthzRecheckInterval,
+		}
+		if m := c.StreamAuthzMax; !m.IsZero() {
+			v1Hub.Conduit.StreamAuthzMax = &V1ServerHubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
 		}
 	}
 	if gc.Hub.StartClaimLeaseTTL > 0 {

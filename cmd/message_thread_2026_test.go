@@ -97,7 +97,7 @@ func TestSendOutboundMessageViaHub_PrintsConversationID(t *testing.T) {
 		err = sendOutboundMessageViaHub(hubCtx, "user:alice", "hello", false)
 	})
 	require.NoError(t, err)
-	assert.Contains(t, out, "Message sent to user:alice via Hub (conversation "+thread2026ConvID+").")
+	assert.Contains(t, out, "Message sent to user:alice via Hub (conversation "+thread2026ConvID+", message msg-2026).")
 }
 
 func TestSendOutboundMessageViaHub_NoConversationIDKeepsPlainLine(t *testing.T) {
@@ -115,7 +115,7 @@ func TestSendOutboundMessageViaHub_NoConversationIDKeepsPlainLine(t *testing.T) 
 		err = sendOutboundMessageViaHub(hubCtx, "user:alice", "hello", false)
 	})
 	require.NoError(t, err)
-	assert.Contains(t, out, "Message sent to user:alice via Hub.")
+	assert.Contains(t, out, "Message sent to user:alice via Hub (message msg-2026).")
 	assert.NotContains(t, out, "conversation", "an older hub without conversation_id gets the old line")
 }
 

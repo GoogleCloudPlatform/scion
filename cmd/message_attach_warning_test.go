@@ -115,7 +115,7 @@ func TestSendMessageViaHub_AttachmentWarningPrintedToStderr(t *testing.T) {
 		sendErr = sendMessageViaHub(hubCtx, "builder", "see attached", false, false, false)
 	})
 	require.NoError(t, sendErr, "a warning must not turn the send into an error (exit code unchanged)")
-	assert.Contains(t, stdout, "Message delivered to agent 'builder'.")
+	assert.Contains(t, stdout, "Message delivered to agent 'builder' (message msg-agent).")
 	assert.Contains(t, stderr, "Warning: attachment "+attachWarnPath+" was not delivered: file not found on the hub host")
 }
 
@@ -307,7 +307,7 @@ func TestSendMessageViaConversation_AgentRef_AttachmentWarning(t *testing.T) {
 		})
 		require.NoError(t, sendErr, "a warning must not turn the send into an error")
 		assert.EqualValues(t, 1, atomic.LoadInt32(sends))
-		assert.Contains(t, stdout, "Message delivered to agent 'builder'.")
+		assert.Contains(t, stdout, "Message delivered to agent 'builder' (message msg-agent).")
 		assert.Equal(t, 1, strings.Count(stderr,
 			"Warning: attachment "+attachWarnPath+" was not delivered: file not found on the hub host"),
 			"the warning is printed to stderr exactly once: %s", stderr)

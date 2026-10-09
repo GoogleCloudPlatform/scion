@@ -19,6 +19,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import type { PageData, Agent } from '../../shared/types.js';
 import { apiFetch } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
+import { READINESS_MARKS, markReady, resetReadinessMarks } from '../../client/readiness-marks.js';
 import type { AgentsChangedDetail } from '../../client/state.js';
 import { AgentSeedEpoch } from '../../client/agent-seed-epoch.js';
 import {
@@ -279,6 +280,7 @@ export class AgentGraphPage extends LitElement {
     this.error = null;
     this.loading = false;
     this.pendingCreated.clear();
+    markReady(READINESS_MARKS.agentsData, 'graph');
   }
 
   /**
@@ -493,6 +495,7 @@ export class AgentGraphPage extends LitElement {
     this.stale = stale;
     this.error = null;
     this.pendingCreated.clear();
+    markReady(READINESS_MARKS.agentsData, 'graph');
   }
 
   /**
@@ -502,6 +505,9 @@ export class AgentGraphPage extends LitElement {
    * chosen scope is drained (never probed again).
    */
   private applyProjectFilter(target: string): void {
+    // The page keeps the dashboard scope, so a filter change is where the
+    // readiness marks' load for the chosen scope starts.
+    resetReadinessMarks();
     this.loadSeq++;
     this.drainRunner.abort();
     this.probeController?.abort();

@@ -72,7 +72,7 @@ scion runtime-broker provide
 
 Or name the project from anywhere: `scion runtime-broker provide --project <name|id>`.
 
-This tells the Hub: *"My local broker is now a provider for this specific Project."* When anyone on your team starts an agent in this Project and targets your broker, the agent will execute on your machine.
+This tells the Hub: *"My local broker is a provider for this specific Project."* Members of the Project can then start agents on your broker, and those agents execute on your machine. Providing a broker requires update permission on the Project and ownership of the broker; see [Sharing a broker with a project](#sharing-a-broker-with-a-project).
 
 To verify which projects your broker is currently serving:
 
@@ -82,7 +82,7 @@ scion runtime-broker status
 
 ## Headless Registration with a Join Token
 
-`scion runtime-broker register` needs a Hub sign-in on the broker host. For a host where you do not want to sign in, such as a build machine or a VM provisioned by a script, split registration in two: create a join token on your own machine, then redeem it on the host. The host never holds a Hub user credential; it ends up with the same broker credentials `register` would have saved.
+`scion runtime-broker register` needs a Hub credential on the broker host: a sign-in, or a [hub token](#headless-registration-with-a-hub-token). For a host where you do not want to place any Hub user credential, such as a build machine or a VM provisioned by a script, split registration in two: create a join token on your own machine, then redeem it on the host. The host never holds a Hub user credential; it ends up with the same broker credentials `register` would have saved.
 
 **1. On your machine**, signed in to the Hub, create the broker and a token for it:
 
@@ -92,10 +92,10 @@ scion hub brokers join-token create build-host-3 --ttl 30m
 
 The token is printed on stdout and the instructions, including the broker ID, on stderr. `--json` prints `brokerId`, `brokerName`, `joinToken`, `expiresAt`, `hubEndpoint` and `reissued` as one JSON object.
 
-- You need the `broker.create` permission (see [Broker Registration Permission](/scion/hosted/ha/runtime-broker/#broker-registration-permission)), and you become the broker's owner. Creating a token with a [user access token](/scion/hosted/user/personal-access-tokens/) is not supported; use an interactive sign-in (`scion hub auth login`).
+- You need the `broker.create` permission (see [Broker Registration Permission](/scion/hosted/ha/runtime-broker/#broker-registration-permission)), and you become the broker's owner. Sign in with `scion hub auth login`, or use a hub-boundary [user access token](/scion/hosted/user/personal-access-tokens/) that carries `broker:create`; the broker then belongs to the token's user.
 - `--ttl` sets how long the token is valid, from `5m` to `24h`. The default is `1h`.
 - The token is single use.
-- Running the command again for the same broker issues a new token, and the previous unused one stops working. Only the broker's owner or a super-admin can do this.
+- Running the command again for the same broker issues a new token, and the previous unused one stops working. Only the broker's owner, or a super-admin with a sign-in, can do this; a token does this only for a broker its user created.
 - The command never changes an existing broker's settings (auto-provide, labels, GCP host identity) and does not add the broker to any project.
 
 **2. Move the token to the host** through a channel you already trust for secrets, for example `scp` to a file readable only by the broker's user, or your secret manager.
@@ -129,7 +129,7 @@ The `scion runtime-broker register` command accepts transport flags that are per
 ```bash
 scion runtime-broker register \
   --hub https://hub.example.com \
-  --name my-broker \
+  --name my-hub \
   --transport-mode iap \
   --transport-audience "1234567890-abc.apps.googleusercontent.com"
 ```
@@ -163,7 +163,7 @@ When you register your machine as a broker:
 
 ## Broker Registration Permission
 
-Registering a Runtime Broker, or re-minting its join token, requires the `broker.create` permission. This covers `POST /api/v1/brokers` and the embedded Runtime Broker path of `POST /api/v1/projects/register`. `broker.create` is granted through the built-in `hub-member` role, so users with the **member** or **admin** [hub role](/scion/hosted/ha/permissions/#hub-roles) can register Runtime Brokers. Users with the **viewer** hub role cannot. Runtime Broker creation requires a signed-in session: a request authenticated with a [user access token](/scion/hosted/user/personal-access-tokens/) is denied with `403`, whatever the token's boundary or scopes. Registration, re-registration, and secret rotation also refuse agent, delivery, federation, and on-behalf-of credentials: only a user credential (or, for rotation, the Runtime Broker's own credential) is accepted.
+Registering a Runtime Broker, or re-minting its join token, requires the `broker.create` permission. This covers `POST /api/v1/brokers` and the embedded Runtime Broker path of `POST /api/v1/projects/register`. `broker.create` is granted through the built-in `hub-member` role, so users with the **member** or **admin** [hub role](/scion/hosted/ha/permissions/#hub-roles) can register Runtime Brokers. Users with the **viewer** hub role cannot. A request authenticated with a [user access token](/scion/hosted/user/personal-access-tokens/) is admitted only when the token has a hub boundary and carries `broker:create`; any other user access token is denied with `403`. See [Headless registration with a hub token](#headless-registration-with-a-hub-token). Registration, re-registration, and secret rotation also refuse agent, delivery, federation, and on-behalf-of credentials: only a user credential (or, for rotation, the Runtime Broker's own credential) is accepted.
 
 :::caution[Breaking change]
 Viewer-role users could previously register brokers; they now receive a 403. The `hub-member` role is reconciled to revision 3 on Hub start to add `broker.create`, so no manual migration is needed for members.
@@ -171,7 +171,72 @@ Viewer-role users could previously register brokers; they now receive a 403. The
 
 ## Broker Ownership
 
-The user who registers a Runtime Broker becomes its owner. Re-registering an existing Runtime Broker and rotating its HMAC secret are ownership-gated actions. This includes the embedded Runtime Broker's registration path. These actions are allowed only for the Runtime Broker's owner, the Runtime Broker itself (authenticated via HMAC, and only for its own secret), or a system super-admin. The owner and super-admin shortcuts apply only to an unscoped sign-in: a scoped [user access token](/scion/hosted/user/personal-access-tokens/) never satisfies them, even if it belongs to the owner or a super-admin. Runtime Brokers registered before ownership was recorded get an owner assigned automatically when the Hub boots.
+The user who registers a Runtime Broker becomes its owner. Registration admits a CLI or Web UI sign-in, or a hub-boundary [user access token](/scion/hosted/user/personal-access-tokens/) that carries `broker:create`; a Runtime Broker request acting on behalf of a user is not admitted. A broker registered with a token belongs to the token's user.
+
+| Operation | Who may perform it |
+|---|---|
+| Register a new broker | A user who holds `broker.create` (sign-in, or hub token with `broker:create`). |
+| Re-register a broker (new join token) | The same credentials, and the user must be the broker's owner, or a super-admin with a sign-in. This includes the embedded broker's registration path. |
+| Rotate the broker's HMAC secret | The broker itself (HMAC, and only for its own secret), or its owner or a super-admin with a sign-in. No user access token can rotate a secret. |
+| Turn on auto-provide | Additionally requires `broker.auto_provide`, held by super-admins. |
+
+Registering a broker never associates it with a project. Brokers registered before ownership was recorded get an owner assigned automatically when the Hub boots.
+
+Register, re-register, rotate, link and unlink events in the audit log record the credential kind and credential ID next to the user, so you can tell whether a sign-in or a specific token was used.
+
+## Headless registration with a hub token
+
+To register a broker on a machine where you cannot sign in interactively (a build host or a VM), mint a short-lived hub-boundary token on a machine where you are signed in, then use it on the host.
+
+1. **Mint a hub token.** You must be a hub member, which grants `broker.create`. Include `broker:read` as well, so that `register` can check its existing registration. `scion hub token create` does not yet offer a hub boundary, so create the token through the API with your CLI session:
+
+   ```bash
+   HUB=https://hub.example.com
+   SESSION=$(jq -r --arg hub "$HUB" '.hubs[$hub].accessToken' ~/.scion/credentials.json)
+   curl -sS -X POST "$HUB/api/v1/auth/tokens" \
+     -H "Authorization: Bearer $SESSION" \
+     -H "Content-Type: application/json" \
+     -d '{"name":"build-host-3","boundary":{"kind":"hub"},"scopes":["broker:create","broker:read"],"expiresAt":"2026-12-01T00:00:00Z"}'
+   ```
+
+   The response contains the token value (`scion_pat_...`) once. Choose an `expiresAt` that is shortly after you plan to register.
+
+2. **Register on the host** with the broker server running (`scion runtime-broker start`):
+
+   ```bash
+   SCION_HUB_ENDPOINT=https://hub.example.com SCION_HUB_TOKEN=scion_pat_... scion runtime-broker register -y
+   ```
+
+   The broker belongs to the token's user. Do not pass `--auto-provide` unless you hold `broker.auto_provide`.
+
+3. **Share the broker with a project.** As the broker's owner, run `scion runtime-broker provide --project <project>` from a signed-in machine. See [Sharing a broker with a project](#sharing-a-broker-with-a-project).
+
+4. **Revoke the token** when registration is done:
+
+   ```bash
+   scion hub token revoke <token-id>
+   ```
+
+:::caution
+The CLI prefers credentials from `scion hub auth login`, an agent token file, and `SCION_AUTH_TOKEN` over `SCION_HUB_TOKEN`. On a host with a stale sign-in, run `scion hub auth logout` first so the token is used.
+:::
+
+## Sharing a broker with a project
+
+A broker runs agents for a project only after it is **associated** with the project (added as a provider). Association needs consent from both sides:
+
+- **Project side:** update permission on the project (`project.update`, held by project owners and admins).
+- **Broker side:** `broker.update` on the broker, which its owner and super-admins hold. Holding `project.update` alone, or having registered some other broker, is never enough to associate someone else's broker.
+
+Every path that associates a broker applies both checks: `scion runtime-broker provide` (`POST /api/v1/projects/{id}/providers`), the `brokerId` field of `POST /api/v1/projects/register`, and naming a broker that is not yet a provider when creating an agent. A user access token can carry the project side (`project:update`) but not the broker side, so associating a broker needs a sign-in.
+
+Once a broker is associated by its owner (or a super-admin), **members of the project can create agents on it**, including with a project token that can create agents in the project. Members can use a provider broker when its association records the owner's consent (linked by the owner, by auto-provide, or by a user who is an active super-admin); otherwise only holders of `broker.dispatch` on the broker (its owner and super-admins) can use it. Providing the broker as its owner records consent. Brokers with no recorded owner (operator-provisioned) are usable by members of every project they serve.
+
+Related rules:
+
+- **Default broker:** a project's default runtime broker must already be a provider of the project. Provide the broker first, then set it as the default (`scion runtime-broker provide --make-default`).
+- **Withdrawing:** a provider can be removed by anyone with `project.update`, or by the broker's owner (or a super-admin) for that broker without update permission on the project: `scion runtime-broker withdraw --project <project>`, or `DELETE /api/v1/projects/{id}/providers/{brokerId}`. Removal admits a sign-in or a user access token; a Runtime Broker request acting on behalf of a user is not admitted.
+- **Auto-provide:** an auto-provide broker is linked to every new project and is usable by every user. Turning it on requires `broker.auto_provide`.
 
 ## Broker Health Monitoring
 

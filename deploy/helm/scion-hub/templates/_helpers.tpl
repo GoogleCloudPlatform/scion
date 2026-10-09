@@ -544,7 +544,7 @@ answered first every time, so the missing layer behind it could not be seen. Bot
 layers are now asserted separately in the guard table.
 */}}
 {{- define "scion-hub.image" -}}
-{{- $repository := required "image.repository is required: set it to a hub image built from the root Dockerfile with --target hub-gke (image-build/cloudbuild-hub-gke.yaml builds and pushes it as scion-hub-gke). The chart has no default and cannot have one - it has no canonical registry to point at, and the published artifact named scion-hub is NOT it: it runs as root (image-build/hub/Dockerfile:24), which this chart's runAsNonRoot refuses, and it is built with -tags no_embed_web (image-build/scion-base/Dockerfile:55), so --enable-web has nothing to serve." .Values.image.repository }}
+{{- $repository := required "image.repository is required: set it to a hub image built from the root Dockerfile with --target hub-gke (image-build/cloudbuild-hub-gke.yaml builds and pushes it as scion-hub-gke). The chart has no default and cannot have one - it has no canonical registry to point at, and the published artifact named scion-hub is NOT it: it runs as root (the USER root directive in image-build/hub/Dockerfile), which this chart's runAsNonRoot refuses, and it is built with -tags no_embed_web (the go build step in image-build/scion-base/Dockerfile), so --enable-web has nothing to serve." .Values.image.repository }}
 {{- if and .Values.image.tag .Values.image.digest }}
 {{- fail "image.tag and image.digest are mutually exclusive: set image.digest (preferred) or image.tag, not both." }}
 {{- end }}
@@ -581,21 +581,23 @@ never reaches.
   PRESENT TENSE, ON THIS CHART, TODAY - THE ORDERED SEQUENCE. First boot runs a
   sequence of schema and data migration steps before the listener binds, and a
   kill lands BETWEEN two of them. "Partially applied" is not an inference from the
-  word migration: CompositeStore.Migrate (pkg/store/entadapter/composite.go:179-227)
+  word migration: CompositeStore.Migrate (pkg/store/entadapter/composite.go)
   is a null-scope_id backfill, a dedup, entc.AutoMigrate, an allowlist-to-invited
   data migration, a verification-status backfill and a seed, with in-source
-  comments at :180-184 and :202-205 stating that the order matters and why. The
+  comments on its backfill and dedup steps stating that the order matters and why. The
   retry then starts from a different state than the attempt before it, and the
   failure stops being reproducible. THIS HALF RUNS ON SQLITE: migrateStore
-  (cmd/server_foreground.go:1168-1170) returns s.Migrate(ctx) directly for every
-  driver that is not postgres, and this chart's driver IS sqlite - it renders no
-  --db, so the default at pkg/config/hub_config.go:540 stands.
+  (cmd/server_foreground.go) delegates to CompositeStore.MigrateWithSchemaLock
+  (pkg/store/entadapter/migrate_lock.go), which calls Migrate directly for every
+  dialect that is not postgres, and this chart's driver IS sqlite - it renders no
+  --db, so the sqlite default in DefaultGlobalConfig (pkg/config/hub_config.go)
+  stands.
 
   THE CLOUD SQL PHASE, NOT THIS ONE - THE BLOCKING LOCK. pg_advisory_lock is not
-  taken here and cannot be. The postgres branch of migrateStore is its only
+  taken here and cannot be. The postgres branch of MigrateWithSchemaLock is its only
   caller, pkg/provision/provision.go's Locker is documented as "on SQLite it's a
-  no-op (single-writer serializes already)", and composite.go:221-223 says the
-  same thing from the other side. When the Cloud SQL values land the lock becomes
+  no-op (single-writer serializes already)", and MigrateWithSchemaLock's own doc
+  comment says the same thing from the other side. When the Cloud SQL values land the lock becomes
   real, the wait becomes unbounded in the way a lock is unbounded, and 300s stops
   being a margin and starts being a bound. RE-DERIVE IT THERE.
 
@@ -658,14 +660,14 @@ the mechanism was sound and only the justification was invented:
     MUTABLE STATE - which is the property the argument below actually needs.
   - isHADeployment IS TRUE HERE AND WAS FALSE AT PHASE 0, BY TWO INDEPENDENT
     ROUTES. This bullet used to say the chart mounted no volumes and that
-    isHADeployment (cmd/server_foreground.go:927) was false at every replica
+    isHADeployment (cmd/server_foreground.go) was false at every replica
     count. Both halves were true while the chart rendered no settings file. Now
-    a rendered server.database.driver of postgres satisfies the test at :931,
+    a rendered server.database.driver of postgres satisfies its postgres-driver test,
     and server.storage.provider gcs together with server.auth.mode proxy
-    satisfies the one at :934. GKE does not set K_SERVICE, but hub.extraEnv can
+    satisfies its gcs-plus-proxy test. GKE does not set K_SERVICE, but hub.extraEnv can
     and it renders - measured - so that route is reachable from this chart too,
     and scion-hub.haRoutes transcribes all three rather than two.
-    hostedHAGuardsRequired (:921) is therefore satisfied and
+    hostedHAGuardsRequired is therefore satisfied and
     the hosted HA preflight DOES run - which is why this chart renders the five
     Block-1 keys in both auth modes rather than leaving them to the hub.
   - The stated harm - "two hubs writing the same RWX workspace share" - is still
@@ -1388,7 +1390,7 @@ Exactly one list is.
    THAT HEADER WAS WRONG ABOUT THE MECHANISM FOR EVERY MEMBER OF THIS LIST, and
    "imprecise" would be the wrong word for it: the model it gave the reader was
    false and has to be removed rather than softened. config.GetGlobalDir()
-   (pkg/config/paths.go:188-193) is os.UserHomeDir() joined with a constant. IT
+   (pkg/config/paths.go, GetGlobalDir) is os.UserHomeDir() joined with a constant. IT
    TAKES NO ARGUMENTS. There is no flag input on this command that can move the
    global configuration directory - not --config, not --project, not --profile,
    not --global. Anyone re-deriving this list should start there, because it
@@ -1404,7 +1406,8 @@ Exactly one list is.
 
    --config AND -c: READ THIS BEFORE YOU CHANGE OR CHECK IT. It reaches exactly
    one place on this command's path: config.LoadGlobalConfig(serverConfigPath),
-   cmd/server_foreground.go:827, via cmd/server.go:238.
+   in loadAndReconcileConfig (cmd/server_foreground.go), via the --config
+   StringVarP in cmd/server.go's init.
 
    THE STATE OF THIS FLAG, IN THE ONLY FORM THAT STAYS TRUE:
 
@@ -1433,7 +1436,7 @@ Exactly one list is.
    collapsed into that one sentence and each of them was a confident wrong answer
    first, so the reasons are worth keeping:
 
-     - loadServerFromSettingsFile (pkg/config/hub_config.go:1331-1347) reads the
+     - loadServerFromSettingsFile (pkg/config/hub_config.go) reads the
        file and then tests raw["server"] for present AND NON-NIL. It never asks
        whether the file exists as a separate question, and "server: ~" parses,
        has the key, and is still not found.
@@ -1443,8 +1446,8 @@ Exactly one list is.
        lands its rendered settings.yaml into it as a subPath, so the file
        GetGlobalDir() resolves to is the file this chart wrote.
      - THE HUB DOES NOT SEED ONE OVER THE TOP, AND THE REASON IS THE MOUNT. The
-       seeding call is guarded at cmd/server_foreground.go:104 by
-       os.Stat(globalDir) / os.IsNotExist, so config.InitGlobal (:107) fires only
+       seeding call is guarded in runServerStart (cmd/server_foreground.go) by
+       os.Stat(globalDir) / os.IsNotExist, so config.InitGlobal fires only
        when $HOME/.scion is ABSENT. The emptyDir makes the directory exist before
        the process starts, so the guard takes the else branch and the embedded
        defaults in pkg/config/embeds/default_settings.yaml - schema_version,
@@ -1463,31 +1466,34 @@ Exactly one list is.
    THREE VALUES, NOT TWO. Reading the flag as binary is what produced two of the
    wrong answers above. In order of evaluation:
 
-     :647  The GLOBAL settings.yaml is read FIRST and unconditionally. A non-nil
+     loadGlobalConfigFromSettings, its first loadServerFromSettingsFile call:
+           The GLOBAL settings.yaml is read FIRST and unconditionally. A non-nil
            server key here wins and the --config path is NEVER READ. This is the
            Phase 1 state.
 
-     :648-659  ROUTE A - SOLE-SOURCE SUBSTITUTION, and it is NOT an overlay. When
+     loadGlobalConfigFromSettings, its `if !found` branch:
+           ROUTE A - SOLE-SOURCE SUBSTITUTION, and it is NOT an overlay. When
            the global read finds nothing, and --config is set and stat-able, the
            DIRECTORY of the --config path is searched for a settings.yaml, and a
            non-nil server key found there is returned as the server config, built
-           from that file ALONE (ConvertV1ServerToGlobalConfig, :1360). This is
+           from that file ALONE (ConvertV1ServerToGlobalConfig,
+           pkg/config/settings_v1.go). This is
            what an operator pointing --config at a directory actually hits, and it
            fires BEFORE the overlay below.
 
            A detail of route A worth its own sentence, because it is the kind that
            produces an unfalsifiable bug report: IT DOES NOT READ THE FILE THE
-           OPERATOR NAMED. :651-656 stats the path and takes filepath.Dir of it
+           OPERATOR NAMED. That branch stats the path and takes filepath.Dir of it
            when it is not a directory, then appends settings.yaml. So
            --config /etc/scion/myserver.yaml reads /etc/scion/settings.yaml, a
            file the operator never mentioned, and ignores the one they did.
 
-     :699, :772-788  ROUTE B - THE OVERLAY, reached only when route A also finds
-           nothing. loadGlobalConfigLegacy loads embedded defaults, then the
-           global ~/.scion/server.yaml (:773-775), then LAYERS the --config path
-           on top (:778-787). Here a directory means server.yaml or server.yml
-           (loadServerConfigFile, :1314-1322) while a file is loaded verbatim
-           (:785) - so THE SAME FLAG VALUE SELECTS A DIFFERENT FILENAME IN ROUTE A
+     loadGlobalConfigLegacy  ROUTE B - THE OVERLAY, reached only when route A
+           also finds nothing. loadGlobalConfigLegacy loads embedded defaults,
+           then the global ~/.scion/server.yaml, then LAYERS the --config path
+           on top. Here a directory means server.yaml or server.yml
+           (loadServerConfigFile) while a file is loaded verbatim through
+           file.Provider - so THE SAME FLAG VALUE SELECTS A DIFFERENT FILENAME IN ROUTE A
            THAN IN ROUTE B.
 
    Bigger than an overlay, smaller than "the whole configuration load moves",
@@ -1495,21 +1501,21 @@ Exactly one list is.
 
    AND IT GOES INERT IN COMPLETE SILENCE, WHICH IS THE REASON A RESERVED FLAG IS
    THE ONLY GUARD AVAILABLE. There is no deprecation warning on --config and no
-   log line of any kind. --config is a plain StringVarP at cmd/server.go:238 and
+   log line of any kind. --config is a plain StringVarP in cmd/server.go's init and
    carries no MarkDeprecated anywhere. Exactly one flag reachable on server start
-   carries one: "production", marked deprecated at cmd/server.go:237 on
-   serverStartCmd itself. cmd/server.go:291 marks the SAME flag name deprecated
+   carries one: "production", marked deprecated in cmd/server.go's init on
+   serverStartCmd itself. The same init marks the SAME flag name deprecated
    again, but on serverInstallCmd, a DIFFERENT COMMAND - worth stating
    separately so it is not mistaken for a second deprecated flag on this one.
    The only two warnings anywhere on this path
-   (pkg/config/hub_config.go:668 and :678) fire on server.yaml coexisting with
+   (both in loadGlobalConfigFromSettings, pkg/config/hub_config.go) fire on server.yaml coexisting with
    settings.yaml and are not about --config at all. An earlier version of this
    comment claimed a deprecation warning; it does not exist, and "accepted and
    silently ignored" is a worse defect than "redirects", not a milder one - a
    redirect is at least detectable by its effects.
 
    THE ONE FEEDBACK PATH THE FLAG CAN PRODUCE IS WORSE THAN SILENCE. Point
-   --config at a directory that also holds a server.yaml and :678 prints "Both
+   --config at a directory that also holds a server.yaml and the second of them prints "Both
    settings.yaml (server key) and server.yaml exist in <their directory>. Using
    settings.yaml." - naming THEIR directory while the settings.yaml actually in
    force is the global one. The only diagnostic available reads as confirmation
@@ -1593,7 +1599,8 @@ Exactly one list is.
    which rejects it just as absolutely. Its hazard is its own and is not the
    --config hazard by another route, which is what this comment used to claim:
    --global makes the server chdir to $HOME so it operates from the global project
-   context (cmd/server_foreground.go:120-130), so --global=false leaves the hub
+   context (the globalMode block in runServerStart, cmd/server_foreground.go),
+   so --global=false leaves the hub
    running from the container's working directory instead. It does not move
    $HOME/.scion, because nothing does.
 */}}
@@ -1733,13 +1740,13 @@ Exactly one list is.
 
    Per-entry, because the two are here for different failures:
 
-   --production binds the SAME VARIABLE as --hosted (cmd/server.go:235, a
-   deprecated alias). So --production=false disables hosted mode - the first
+   --production binds the SAME VARIABLE as --hosted (both declared in
+   cmd/server.go's init; --production is a deprecated alias). So --production=false disables hosted mode - the first
    hazard this guard was ever written for - while the operator believes they
    passed a no-op about a deprecated spelling.
 
    --port is the hub API port for standalone mode and is IGNORED whenever
-   --enable-web is set (cmd/server.go:241), which this chart always sets. An
+   --enable-web is set (the --port help text in cmd/server.go's init), which this chart always sets. An
    operator moving the port with it changes nothing at all: the listener stays on
    --web-port, the probes still pass, and the flag they set has no effect they can
    observe. A silent no-op that looks like a change is worth a render error.
@@ -1822,9 +1829,9 @@ Exactly one list is.
    Precedence for base-url, read from the hub rather than assumed, because "two
    sources" only matters if one of them silently loses:
 
-     cmd/server_foreground.go:2102 (initWebServer, the OAuth redirect base)
+     cmd/server_foreground.go, initWebServer (the OAuth redirect base)
        --base-url, else SCION_SERVER_BASE_URL, else http://localhost:<web-port>
-     cmd/server_foreground.go:1310 (resolveHubEndpoint, the URL agents dial)
+     cmd/server_foreground.go, resolveHubEndpoint (the URL agents dial)
        settings file server.hub.public_url, else --base-url, else
        SCION_SERVER_BASE_URL, else project settings, else localhost
 
@@ -1860,12 +1867,12 @@ Exactly one list is.
    ALL FOUR ARE LIVE AT THIS HEAD. Unlike $ownedByConfig above, nothing here is
    forward-looking: each of these takes effect today, on this chart, as rendered.
 
-   --session-secret (cmd/server.go:275) is the signing key for the web session
+   --session-secret (cmd/server.go, init) is the signing key for the web session
    cookie store and the hub's JWT signing keys. Two harms, not one. It is a
    credential on argv, readable by anyone who can read the pod spec - which the
    credential guard below would also catch, but only if the operator's value
    happens to look like a credential, and a passphrase does not. And it PRE-EMPTS
-   the delivery channel: resolveSessionSecret (cmd/server_foreground.go:1452-1456)
+   the delivery channel: resolveSessionSecret (cmd/server_foreground.go)
    takes the flag first and only falls back to SCION_SERVER_SESSION_SECRET, so an
    argv value silently outranks the Secret-backed environment variable the
    session-secret phase mounts. THAT CHANNEL IS NOT THE SECRET THIS CHART ALREADY
@@ -1879,30 +1886,31 @@ Exactly one list is.
    emitted. Measured at this head: zero occurrences of SESSION_SECRET in every
    permutation's render.
 
-   --dev-auth (cmd/server.go:251) IS A DIRECT WRITE TO cfg.Auth.Enabled AT
-   cmd/server_foreground.go:884-886, AND THE DANGEROUS DIRECTION IS TRUE, NOT
+   --dev-auth (cmd/server.go, init) IS A DIRECT WRITE TO cfg.Auth.Enabled IN
+   loadAndReconcileConfig (cmd/server_foreground.go), AND THE DANGEROUS DIRECTION IS TRUE, NOT
    FALSE. Worth stating explicitly because the natural reading is backwards. The
    workstation defaults that would turn dev auth on (applyWorkstationDefaults,
-   cmd/server_config.go:35-37, and the assignment at server_foreground.go:843) are
-   BOTH inside an if !hostedMode block, and this chart renders --hosted, so they
+   cmd/server_config.go, and the cfg.Auth.Enabled assignment beside its call in
+   loadAndReconcileConfig) are BOTH inside an if !hostedMode block, and this chart renders --hosted, so they
    do not run: cfg.Auth.Enabled is false here and --dev-auth=false merely restates
    the default. Passing --dev-auth (or =true) is what changes something - it
-   satisfies the gate at :212 and initialises dev-token authentication in a hosted
+   satisfies the cfg.Auth.Enabled gate in runServerStart and initialises dev-token authentication in a hosted
    deployment, standing an auto-generated static token up beside the real identity
-   path. That one is not silent (:216-217 logs a warning in hosted mode), but a
+   path. That one is not silent (the same block logs a warning in hosted mode), but a
    warning in a log nobody reads is not a control, and a render error is.
 
-   --enable-test-login (cmd/server.go:252) is wired to the web server at
-   cmd/server_foreground.go:2163 and registers POST /api/v1/auth/test-login
-   (pkg/hub/web.go:747). The route is always mounted and the flag is the gate:
-   pkg/hub/handlers_test_login.go:52-55 returns 403 unless it is set, after which
+   --enable-test-login (cmd/server.go, init) is wired to the web server in
+   initWebServer (cmd/server_foreground.go) and gates POST /api/v1/auth/test-login
+   (registered in WebServer.registerRoutes, pkg/hub/web.go). The route is always mounted and the flag is the gate:
+   WebServer.handleTestLogin (pkg/hub/handlers_test_login.go) returns 403 unless it is set, after which
    the handler mints a user session behind a challenge token rather than the
-   configured identity provider. Also warned about at :2167-2168, and the same
+   configured identity provider. Also warned about in initWebServer, and the same
    answer applies.
 
-   --web-assets-dir (cmd/server.go:274) replaces the embedded web UI with a
-   directory served straight off the container filesystem: pkg/hub/web.go:497
-   stores it and :832-833 hands it to http.FileServer(http.Dir(...)). It is here
+   --web-assets-dir (cmd/server.go, init) replaces the embedded web UI with a
+   directory served straight off the container filesystem: NewWebServer (pkg/hub/web.go)
+   stores it and WebServer.serveStaticAsset hands it to
+   http.FileServer(http.Dir(...)). It is here
    rather than in $ownedByConfig because the hazard is not a second source for a
    value - it is that the served asset tree stops being the audited one that was
    built into the image.
@@ -1917,24 +1925,25 @@ raised these by name. None is reserved, and the ground is given per flag rather
 than as one blanket sentence, because a blanket sentence is what would survive a
 change that falsified it.
 
-  --no-auto-migrate (cmd/server.go:244). RAISED AS THE ONE MOST LIKELY TO
+  --no-auto-migrate (cmd/server.go, init). RAISED AS THE ONE MOST LIKELY TO
     INTERACT WITH THE STARTUP BUDGET. IT DOES NOT, and that is the finding, not
     an absence of one: it gates only the in-process upgrade of a LEGACY raw-SQL
-    hub.db to the Ent schema (cmd/server_foreground.go:1263-1266, which errors out
+    hub.db to the Ent schema (maybeMigrateLegacySQLite, cmd/server_foreground.go,
+    which errors out
     when it finds one and the flag is set). CompositeStore.Migrate - the ordered
     sequence assertStartupBudget is written against - is not behind it and runs
     either way. A fresh GKE pod has no legacy hub.db, so the flag is inert here.
-  --debug (cmd/server.go:255). Logging verbosity. Note it SHADOWS the persistent
+  --debug (cmd/server.go, init). Logging verbosity. Note it SHADOWS the persistent
     --debug registered in cmd/root.go's init(): a local flag of the same name
     wins, so this sets enableDebug and not debugMode. Harmless either way, and
     recorded only so the duplicate is not mistaken for a finding later.
-  --runtime-broker-port (cmd/server.go:248). Sets cfg.RuntimeBroker.Port
-    (server_foreground.go:881-883). The chart renders --enable-runtime-broker but
+  --runtime-broker-port (cmd/server.go, init). Sets cfg.RuntimeBroker.Port
+    (loadAndReconcileConfig, cmd/server_foreground.go). The chart renders --enable-runtime-broker but
     no port, exposes no broker port on the Service and points no probe at one, so
     moving it stays internally consistent inside the pod.
-  --template-cache-dir, --template-cache-max (cmd/server.go:262-263). Cache
+  --template-cache-dir, --template-cache-max (cmd/server.go, init). Cache
     location and size. No auth, config-selection or credential surface.
-  --simulate-remote-broker (cmd/server.go:266). Test-path selector that skips
+  --simulate-remote-broker (cmd/server.go, init). Test-path selector that skips
     co-located optimisations. Degrades performance, weakens nothing.
 
 IF YOU ARE ADDING TO THIS BLOCK, the bar is the one axis (d) sets: a flag stays
@@ -2189,13 +2198,13 @@ The hub is configured by a settings.yaml file, not by SCION_SERVER_* environment
 variables. That is not a style preference.
 
 THE RULE, MEASURED. On the path this chart uses, loadGlobalConfigFromSettings
-calls applyEnvOverrides (pkg/config/hub_config.go:683 and :1191), which maps each
-name through envKeyToConfigKey (:976): lowercase, split on "_", replace any
-segment that has an entry in the camelCaseFields table (:919), join with ".".
+calls applyEnvOverrides (pkg/config/hub_config.go), which maps each name
+through envKeyToConfigKey: lowercase, split on "_", replace any segment that
+has an entry in the camelCaseFields table (var camelCaseFields), join with ".".
 So a SCION_SERVER_ name binds if and only if EVERY underscore-separated segment
 is either a plain lowercase word matching its koanf tag or has a table entry.
-Anything else produces a key that matches no field, and k.Unmarshal (:1198) is
-called without ErrorUnused, so it is discarded with no error, no warning and no
+Anything else produces a key that matches no field, and the k.Unmarshal in
+applyEnvOverrides is called without ErrorUnused, so it is discarded with no error, no warning and no
 log line.
 
 Worked both ways, because the reachable half is the part that was wrong here for
@@ -2218,7 +2227,7 @@ explicit passing sub-case, so "the database keyspace binds under no spelling" wa
 one `go test` away from being checked at any point.
 
 AND A DISCARDED VARIABLE IS NOT SILENT DOWNSTREAM - IT IS REPORTED AS APPLIED.
-DetectEnvOverrides (pkg/config/opsettings/koanf.go:347) is `envKoanf.Keys()`: it
+DetectEnvOverrides (pkg/config/opsettings/koanf.go) is `envKoanf.Keys()`: it
 returns every SCION_SERVER_ name in the environment, having never asked whether
 any of them reached a field. So the admin server-config view lists a dropped
 variable as an active override. Worse than silence.
@@ -2284,11 +2293,12 @@ gd-p2-dev and gd-p3-dev checked it, from opposite ends, against a passing test i
 the repo.
 
 THE HARM, MEASURED THROUGH THE HUB. applyEnvOverrides runs AFTER settings.yaml is
-loaded (pkg/config/hub_config.go:683) and wins, so a bound SCION_SERVER_DATABASE_
+loaded (its call in loadGlobalConfigFromSettings, pkg/config/hub_config.go)
+and wins, so a bound SCION_SERVER_DATABASE_
 variable silently overrides the file this chart renders. Measured: minimal's
 settings.yaml says driver: sqlite; with SCION_SERVER_DATABASE_DRIVER=postgres in
 the environment, config.LoadGlobalConfig reports driver "postgres",
-isHADeployment (cmd/server_foreground.go:927) flips to TRUE, and the hub aborts
+isHADeployment (cmd/server_foreground.go) flips to TRUE, and the hub aborts
 at the hosted HA preflight - from a release whose HA checks never ran, because
 scion-hub.haRoutes reads .Values.database.driver, which still says sqlite.
 
@@ -2729,10 +2739,10 @@ general fact, and writing it that way is how the property gets dropped. At Phase
 
 AND NOT BECAUSE NO FILE EXISTED. A global settings.yaml may well exist without
 this chart writing one: the hub seeds it from its own embedded defaults on a
-first boot (cmd/server_foreground.go:104-109 -> config.InitMachine,
-pkg/config/init.go:588-599), and those defaults carry no server key.
+first boot (runServerStart, cmd/server_foreground.go -> config.InitGlobal ->
+InitMachine, pkg/config/init.go), and those defaults carry no server key.
 loadServerFromSettingsFile does not test existence, it tests the key
-(:1344-1347).
+(its raw["server"] check).
 
 THE TRIGGER IS THE KEY, NOT THE FILE, which is the whole reason this assertion
 is worth its lines. "The chart mounts a settings.yaml" does not keep --config
@@ -2741,25 +2751,27 @@ second file - every one of those still mounts a settings.yaml, and every one of
 them hands the flag back its effect. This phase supplies the key; drop it and the
 deployment is back where Phase 0 was.
 
-  LoadGlobalConfig            pkg/config/hub_config.go:628
-  loadGlobalConfigFromSettings                        :640
+  all in pkg/config/hub_config.go:
+  LoadGlobalConfig
+  loadGlobalConfigFromSettings
     reads GetGlobalDir() FIRST and UNCONDITIONALLY, and consults the --config
-    path only `if !found`                             :647-660
-  loadServerFromSettingsFile                          :1331
+    path only `if !found`
+  loadServerFromSettingsFile
     found = the file parses AND raw["server"] exists AND is non-nil
-                                                      :1344-1347
 
 WHAT THE FLAG DOES WHEN IT IS LIVE, WHICH IS NOT A REDIRECT. It cannot be one:
-GetGlobalDir (pkg/config/paths.go:188-194) is os.UserHomeDir() joined with
+GetGlobalDir (pkg/config/paths.go) is os.UserHomeDir() joined with
 GlobalDir and TAKES NO ARGUMENTS, so no flag value can move the directory the
 hub reads first. Dropping this key opens two narrower routes instead:
 
-  :648-659  the --config path's own directory is searched for a settings.yaml,
+  loadGlobalConfigFromSettings, `if !found` branch:
+            the --config path's own directory is searched for a settings.yaml,
             and if that file has a server key it becomes the SOLE source of the
             server config - a substitution of that section, nothing merged
-  :635      failing that, loadGlobalConfigLegacy(configPath) (:699), which loads
-            defaults, then ~/.scion/server.yaml (:772-775), then LAYERS the
-            --config path over the result (:777-787) - an overlay
+  LoadGlobalConfig, fallback:
+            failing that, loadGlobalConfigLegacy(configPath), which loads
+            defaults, then ~/.scion/server.yaml, then LAYERS the
+            --config path over the result - an overlay
 
 Both are real and neither is "the whole configuration load moves". Keep the
 distinction: a mitigation scoped to preventing redirection does not cover an
@@ -2769,11 +2781,11 @@ them.
 
 IN THE INERT STATE IT IS A NO-OP WITH NO SIGNAL, WHICH IS WHY THIS ASSERTION IS
 THE ONLY WARNING THERE WILL EVER BE. --config is not marked deprecated -
-MarkDeprecated appears twice in cmd/server.go, :237 and :291, both for
---production; the flag itself is a plain StringVarP at :238 - and the two
-warnings in the load path (:668, :678) are about a server.yaml beside
-settings.yaml, the second of them additionally requiring hasServerYAML(dir)
-(:1393), which this chart creates nowhere. So while this key is emitted the flag
+MarkDeprecated appears twice in cmd/server.go's init, both for --production
+(serverStartCmd and serverInstallCmd); the flag itself is a plain StringVarP -
+and the two warnings in the load path (both in loadGlobalConfigFromSettings)
+are about a server.yaml beside settings.yaml, the second of them additionally
+requiring hasServerYAML(dir), which this chart creates nowhere. So while this key is emitted the flag
 is accepted and ignored in silence, and without it it takes effect in the same
 silence. The author of the refactor that flips it gets no runtime symptom to
 discover. They get this message, at render time, or they get nothing.
@@ -2790,10 +2802,10 @@ The six keys below are nested under server: in V1ServerConfig. A file that
 places any of them at the top level parses, installs, and is silently not read.
 */}}
 {{- if not (hasKey $doc "server") }}
-{{- fail "rendered settings.yaml has no top-level server: section. Two consequences. (1) Every server setting in this file is lost: the hub reads the server section and nothing else from it (pkg/config/hub_config.go:1344-1347). (2) --config goes back to being live, and it is Phase 0's reserved flag. That flag is not inert by nature - at Phase 0 it was fully live, and not because no settings.yaml existed: the hub seeds one from embedded defaults that carry no server key (cmd/server_foreground.go:104-109, pkg/config/init.go:588-599), and the loader tests the key, not the file (:1344-1347). Emitting this key is what makes the global settings read succeed (:647) and the --config path go unread; drop it and loadGlobalConfigFromSettings consults that path instead (:648-659), where its own settings.yaml becomes the sole source of the server config, and failing that loadGlobalConfigLegacy layers the --config file over the loaded configuration (:777-787). Neither state announces itself: --config is silently accepted and ignored while this key is here - no error, no warning, no log line, and it is not marked deprecated (cmd/server.go:238 defines it; the MarkDeprecated calls at :237 and :291 are both for --production) - so this render-time failure is the only signal a settings-shape refactor will ever get." }}
+{{- fail "rendered settings.yaml has no top-level server: section. Two consequences. (1) Every server setting in this file is lost: the hub reads its server settings from the server section only (loadServerFromSettingsFile, pkg/config/hub_config.go). The top-level sections it also applies from this file (applyTopLevelSettingsSections, same file - telemetry, project_defaults, quotas and others) are honoured with or without that key, and none of them carries a server setting. (2) --config goes back to being live, and it is Phase 0's reserved flag. That flag is not inert by nature - at Phase 0 it was fully live, and not because no settings.yaml existed: the hub seeds one from embedded defaults that carry no server key (config.InitGlobal from runServerStart, cmd/server_foreground.go; InitMachine, pkg/config/init.go), and the loader tests the key, not the file (loadServerFromSettingsFile). Emitting this key is what makes the global settings read in loadGlobalConfigFromSettings succeed and the --config path go unread; drop it and loadGlobalConfigFromSettings consults that path instead, where its own settings.yaml becomes the sole source of the server config, and failing that loadGlobalConfigLegacy layers the --config file over the loaded configuration (both pkg/config/hub_config.go). Neither state announces itself: --config is silently accepted and ignored while this key is here - no error, no warning, no log line, and it is not marked deprecated (the init func in cmd/server.go defines it; the two MarkDeprecated calls there are both for --production) - so this render-time failure is the only signal a settings-shape refactor will ever get." }}
 {{- end }}
 {{- if not (kindIs "map" (get $doc "server")) }}
-{{- fail (printf "rendered settings.yaml has a top-level server: key that is not a map (%v). The hub tests raw[\"server\"] != nil (pkg/config/hub_config.go:1344-1347), so an empty or nulled server section reads as no settings file at all: every server setting is lost, and --config - reserved by Phase 0, live there, and silently accepted and ignored only while this chart emits this key as a map - returns to live as a sole-source substitution at :648-659 or as an overlay at :777-787. Same consequence as omitting the key entirely; see the comment above this check." (get $doc "server")) }}
+{{- fail (printf "rendered settings.yaml has a top-level server: key that is not a map (%v). The hub tests raw[\"server\"] != nil (loadServerFromSettingsFile, pkg/config/hub_config.go), so an empty or nulled server section reads as no settings file at all: every server setting is lost, and --config - reserved by Phase 0, live there, and silently accepted and ignored only while this chart emits this key as a map - returns to live as a sole-source substitution in loadGlobalConfigFromSettings or as an overlay in loadGlobalConfigLegacy. Same consequence as omitting the key entirely; see the comment above this check." (get $doc "server")) }}
 {{- end }}
 {{- range $key := list "notification_channels" "message_broker" "native_chat" "plugins" "scheduler" "github_app" }}
 {{- if hasKey $doc $key }}
@@ -2839,12 +2851,16 @@ missing until someone went looking.
 The base URL has two consumers and they do not read the same source. Read from
 the hub rather than assumed, and every step verified independently by review:
 
-  settings_v1.go:517            PublicURL carries koanf:"public_url"
-  settings_v1.go:1404-1405      if v1.Hub.PublicURL != "" { gc.Hub.Endpoint = it }
-  server_foreground.go:1311-12  resolveHubEndpoint returns cfg.Hub.Endpoint - and
-                                this is its FIRST statement, ahead of --base-url
-                                at :1323 and SCION_SERVER_BASE_URL at :1331
-  server_foreground.go:2102-08  initWebServer never reads cfg.Hub.Endpoint
+  pkg/config/settings_v1.go, V1ServerHubConfig.PublicURL
+                                PublicURL carries koanf:"public_url"
+  pkg/config/settings_v1.go, ConvertV1ServerToGlobalConfig
+                                if v1.Hub.PublicURL != "" { gc.Hub.Endpoint = it }
+  cmd/server_foreground.go, resolveHubEndpointWithSource (via resolveHubEndpoint)
+                                returns cfg.Hub.Endpoint - and this is its FIRST
+                                statement, ahead of --base-url and
+                                SCION_SERVER_BASE_URL
+  cmd/server_foreground.go, initWebServer
+                                never reads cfg.Hub.Endpoint
 
 So public_url outranks both other channels for the agent endpoint, and the OAuth
 side cannot see it at any precedence. SCION_SERVER_BASE_URL is the only source
@@ -2995,25 +3011,27 @@ that demanded the chart's own value instead would be demanding a spelling rather
 than a state.
 
 THE HARM IS SILENT, WHICH IS WHY THIS IS A REFUSAL. Nothing validates these
-credentials at startup - they are copied into the server config unchecked at
-cmd/server_foreground.go:1514-1545 - so a hub in oauth mode with no credentials
+credentials at startup - they are copied into the server config unchecked by
+buildHubServerConfig (cmd/server_foreground.go) - so a hub in oauth mode with no credentials
 STARTS, binds, and passes /readyz. The failure arrives per request, at login:
-pkg/hub/web.go:1770-1776 returns 503 "OAuth not configured" or 400 "OAuth
+WebServer.handleOAuthLogin (pkg/hub/web.go) returns 503 "OAuth not configured" or 400 "OAuth
 provider %s is not configured". Green in every Kubernetes signal, and nobody can
 log in. That is worse than a crashloop, because nothing pages for it.
 
 WEB, NOT ANY CLIENT TYPE. The hub keys the login check by client type -
-IsProviderConfiguredForClient(OAuthClientTypeWeb, provider), pkg/hub/oauth.go:194
+OAuthService.IsProviderConfiguredForClient(OAuthClientTypeWeb, provider),
+pkg/hub/oauth.go
 - so credentials under server.oauth.cli or server.oauth.device satisfy nothing
 for a browser login. A check that accepted any client type would pass exactly the
 configuration that fails. cli and device are not refused; they are just not
 counted here.
 
-BOTH HALVES, PER PROVIDER. IsProviderConfigured tests the client ID alone
-(pkg/hub/oauth.go:51-58), so an ID with no secret makes the hub report the
-provider as configured, offer the login button, and fail at the token exchange.
-Half a credential is worse than none: none is caught here, half is caught by the
-user.
+BOTH HALVES, PER PROVIDER. The hub's own check
+(OAuthClientConfig.IsProviderConfigured, pkg/hub/oauth.go) requires both the
+client ID and the client secret, so a half-set provider is treated as not
+configured: no login button is offered for it, and nothing says why. Half a
+credential then looks exactly like a provider that was never set up, which is
+why the render names the missing half here.
 
 Scoped to the rendered document, and therefore not evaluated under
 config.existingSecret - this whole template is skipped there, correctly, because
@@ -3033,10 +3051,10 @@ the chart renders no auth mode in that shape and the operator's file is theirs.
 {{- end }}
 {{- end }}
 {{- if $partial }}
-{{- fail (printf "rendered settings.yaml has an incomplete OAuth web client credential: %s. A provider needs both halves, and the two missing halves fail differently - neither of them loudly. With client_id and no client_secret the hub reports the provider as CONFIGURED, because IsProviderConfigured tests the client ID alone (pkg/hub/oauth.go:51-58); it offers the login button and fails at the token exchange. With client_secret and no client_id the provider is not offered at all, and the secret sits in the settings Secret doing nothing. Either way a half-set credential fails later, and less legibly, than an unset one. Set both auth.oauth.web.<provider>.clientId and .clientSecret, or neither." (join ", " $partial)) }}
+{{- fail (printf "rendered settings.yaml has an incomplete OAuth web client credential: %s. A provider needs both halves, and a missing half does not fail loudly. The hub's check requires both the client ID and the client secret (OAuthClientConfig.IsProviderConfigured, pkg/hub/oauth.go), so with either half missing the provider is treated as not configured and is not offered at all, and the half that is set sits in the settings Secret doing nothing. Either way a half-set credential fails later, and less legibly, than this message. Set both auth.oauth.web.<provider>.clientId and .clientSecret, or neither." (join ", " $partial)) }}
 {{- end }}
 {{- if not $complete }}
-{{- fail "settings.yaml renders server.auth.mode: oauth, but no complete OAuth web client credential is present, so nobody would be able to log in to this deployment. Nothing catches this at runtime: the credentials are copied into the server config unvalidated (cmd/server_foreground.go:1514-1545), so the hub starts, binds and passes /readyz, and every login fails with \"OAuth provider is not configured\" (pkg/hub/web.go:1770-1776) - green in Kubernetes, unusable by humans. Set auth.oauth.web.google.clientId and auth.oauth.web.google.clientSecret (or the github pair), supply server.oauth.web through config.extra, or use auth.mode=proxy. Credentials under server.oauth.cli or server.oauth.device do NOT satisfy this: the hub keys the login check by client type (pkg/hub/oauth.go:194) and a browser login reads the web client only." }}
+{{- fail "settings.yaml renders server.auth.mode: oauth, but no complete OAuth web client credential is present, so nobody would be able to log in to this deployment. Nothing catches this at runtime: the credentials are copied into the server config unvalidated (buildHubServerConfig, cmd/server_foreground.go), so the hub starts, binds and passes /readyz, and every login fails with \"OAuth provider <name> is not configured\" (WebServer.handleOAuthLogin, pkg/hub/web.go) - green in Kubernetes, unusable by humans. Set auth.oauth.web.google.clientId and auth.oauth.web.google.clientSecret (or the github pair), supply server.oauth.web through config.extra, or use auth.mode=proxy. Credentials under server.oauth.cli or server.oauth.device do NOT satisfy this: the hub keys the login check by client type (OAuthService.IsProviderConfiguredForClient, pkg/hub/oauth.go) and a browser login reads the web client only." }}
 {{- end }}
 {{- end }}
 
@@ -3044,8 +3062,8 @@ the chart renders no auth mode in that shape and the operator's file is theirs.
 The camelCase trap, refused by name.
 
 settings.yaml binds client_id/client_secret (V1OAuthProviderConfig,
-pkg/config/settings_v1.go:635). The SCION_SERVER_* env mapper binds
-clientId/clientSecret (OAuthProviderConfig, pkg/config/hub_config.go:334). The
+pkg/config/settings_v1.go). The SCION_SERVER_* env mapper binds
+clientId/clientSecret (OAuthProviderConfig, pkg/config/hub_config.go). The
 doc comment on envKeyToConfigKey states the camelCase form explicitly, so it is
 the spelling a careful reader arrives at - and in this file it binds nothing.
 yaml.v3 drops the unknown key silently: no error, no warning, an empty field, a
@@ -3071,7 +3089,7 @@ struct, so the misspelling is silent there too.
 {{- if kindIs "map" $creds }}
 {{- range $key, $_ := $creds }}
 {{- if or (eq $key "clientId") (eq $key "clientSecret") }}
-{{- fail (printf "rendered settings.yaml sets server.oauth.%s.%s.%s. That spelling binds nothing in a settings file and fails silently: settings.yaml reads client_id and client_secret (V1OAuthProviderConfig, pkg/config/settings_v1.go:635), while clientId and clientSecret are the SCION_SERVER_* environment mapper's spelling (pkg/config/hub_config.go:334). yaml.v3 drops the unknown key with no error, so the credential is simply absent and the hub starts and refuses every login. Rename it to %s. If you reached this through config.extra, that is the only way to reach it - the chart's own render emits snake_case." $clientType $provider $key (ternary "client_id" "client_secret" (eq $key "clientId"))) }}
+{{- fail (printf "rendered settings.yaml sets server.oauth.%s.%s.%s. That spelling binds nothing in a settings file and fails silently: settings.yaml reads client_id and client_secret (V1OAuthProviderConfig, pkg/config/settings_v1.go), while clientId and clientSecret are the SCION_SERVER_* environment mapper's spelling (camelCaseFields, pkg/config/hub_config.go). yaml.v3 drops the unknown key with no error, so the credential is simply absent and the hub starts and refuses every login. Rename it to %s. If you reached this through config.extra, that is the only way to reach it - the chart's own render emits snake_case." $clientType $provider $key (ternary "client_id" "client_secret" (eq $key "clientId"))) }}
 {{- end }}
 {{- end }}
 {{- end }}
@@ -3143,9 +3161,9 @@ server.oauth: the web client credentials, and ONLY when they are set.
 
 SNAKE_CASE HERE, camelCase IN THE VALUES, AND THAT IS NOT AN INCONSISTENCY -
 it is two different schemas that happen to describe the same field. settings.yaml
-binds through V1OAuthProviderConfig (pkg/config/settings_v1.go:635), whose yaml
+binds through V1OAuthProviderConfig (pkg/config/settings_v1.go), whose yaml
 tags are client_id and client_secret. The SCION_SERVER_* env mapper binds through
-OAuthProviderConfig (pkg/config/hub_config.go:334), whose koanf tags are clientId
+OAuthProviderConfig (pkg/config/hub_config.go), whose koanf tags are clientId
 and clientSecret, reached via camelCaseFields["clientid"]. Same value, same hub,
 two spellings, selected by channel.
 
@@ -3163,7 +3181,7 @@ a rendered `client_id: ""` looks like a credential that failed to interpolate.
 Absent means absent.
 
 A provider needs BOTH halves to be emitted at all. Half a credential configures
-nothing - IsProviderConfigured tests ClientID alone (pkg/hub/oauth.go:51-58), so
+nothing - OAuthClientConfig.IsProviderConfigured tests ClientID alone (pkg/hub/oauth.go), so
 an ID with no secret reports the provider as CONFIGURED and then fails the token
 exchange at login. The assertion in assertSettings refuses that pairing by name;
 this is only the render.
@@ -3322,11 +3340,11 @@ anything. Do not drop it, and do not let it be dropped by an override path that
 happens not to be covered.
 
 It is what stops the hub's lazy settings migration from ever firing.
-SetSettingValue auto-migrates when the file's format cannot be detected
-(pkg/config/settings.go:590-600), and the format detector keys on this field;
+UpdateSetting auto-migrates when the file's format cannot be detected
+(pkg/config/settings.go, via DetectSettingsFormat), and the format detector keys on this field;
 with it present the hub delegates to the v1 handler and never migrates. The
 migration itself replaces the file with os.Rename
-(pkg/config/settings_v1.go:2694), which returns EBUSY against a bind-mounted
+(MigrateSettingsFile, pkg/config/settings_v1.go), which returns EBUSY against a bind-mounted
 path - and this file is delivered as a subPath bind mount.
 
 The hub deliberately does NOT guard this path in hosted mode. That decision was
@@ -4032,7 +4050,7 @@ The key inside that Secret which holds the session secret.
 
 For the chart-rendered Secret this is fixed: the hub reads the value through a
 literal os.Getenv("SCION_SERVER_SESSION_SECRET") (resolveSessionSecret,
-cmd/server_foreground.go:1452-1463), and the chart-rendered Secret is consumed
+cmd/server_foreground.go), and the chart-rendered Secret is consumed
 with envFrom, which turns each KEY INTO AN ENV VAR NAME. So the key name is the
 env var name and it is not a free choice.
 
@@ -4055,7 +4073,7 @@ rather than at runtime.
 
 WHY THIS IS A TEMPLATE-TIME FAILURE AND NOT A DEFAULT. The hub does not fail
 without a session secret. resolveSessionSecret returns "" and, in hosted mode,
-emits a single slog.Warn (cmd/server_foreground.go:1460-1462) - then the hub
+emits a single slog.Warn (resolveSessionSecret, cmd/server_foreground.go) - then the hub
 starts, binds, and passes every probe. What it has actually done is derive a
 per-process signing key, so each replica signs tokens the others reject and each
 replica has its own cookie encryption key. The symptom is users being logged out
@@ -4081,7 +4099,7 @@ a working one until sessions start breaking.
 {{- fail "auth.sessionSecret and auth.existingSecret are both set. The chart cannot use both: one would be silently ignored, and a session secret that is silently ignored presents as intermittent logouts rather than as an error. Set exactly one - auth.existingSecret to reference a Secret you manage, or auth.sessionSecret to have the chart render one." }}
 {{- end }}
 {{- if not (or $auth.sessionSecret $auth.existingSecret) }}
-{{- fail "auth.sessionSecret is not set and neither is auth.existingSecret, so this release has no session secret. The chart will not generate one: a generated secret rotates on every helm upgrade, which silently invalidates every session and the shared JWT signing key, and it cannot be rendered reproducibly because lookup returns empty under helm template. Nor will the hub refuse to start without one - it logs a single warning (cmd/server_foreground.go:1460) and then derives a per-process signing key, so each replica signs tokens the others reject and users are logged out whenever the load balancer moves them. Set auth.existingSecret to the name of a Secret you manage (preferred - the value never enters your values file or Helm's release storage), or set auth.sessionSecret to have the chart render one." }}
+{{- fail "auth.sessionSecret is not set and neither is auth.existingSecret, so this release has no session secret. The chart will not generate one: a generated secret rotates on every helm upgrade, which silently invalidates every session and the shared JWT signing key, and it cannot be rendered reproducibly because lookup returns empty under helm template. Nor will the hub refuse to start without one - it only logs warnings (resolveSessionSecret and initHubServer, cmd/server_foreground.go) and then derives a per-process signing key, so each replica signs tokens the others reject and users are logged out whenever the load balancer moves them. Set auth.existingSecret to the name of a Secret you manage (preferred - the value never enters your values file or Helm's release storage), or set auth.sessionSecret to have the chart render one." }}
 {{- end }}
 {{- if and $auth.existingSecretKey (not $auth.existingSecret) }}
 {{- fail "auth.existingSecretKey is set but auth.existingSecret is not. The key names an entry inside a Secret the chart is not being given, so it selects nothing. Set auth.existingSecret too, or remove the key." }}

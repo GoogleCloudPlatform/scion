@@ -373,20 +373,6 @@ func (h *CommandHandler) handleAgents(ctx context.Context, activity *Activity) e
 		return h.sendReply(ctx, activity, hubErrorText(err, mapping, link.ProjectSlug, "Failed to retrieve agents. Please try again."))
 	}
 
-	// Cache agent slugs in store.
-	store := h.getStore()
-	if store != nil {
-		slugs := make([]string, len(agents))
-		for i, a := range agents {
-			slugs[i] = a.Slug
-		}
-		_ = store.SetProjectAgents(ctx, &ProjectAgents{
-			ProjectID:   link.ProjectID,
-			AgentSlugs:  slugs,
-			RefreshedAt: time.Now(),
-		})
-	}
-
 	if len(agents) == 0 {
 		return h.sendReply(ctx, activity, fmt.Sprintf("No agents found in project **%s**.", link.ProjectSlug))
 	}
