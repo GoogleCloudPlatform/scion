@@ -49,8 +49,6 @@ interface PageCase {
   badges: string[];
   /** Classes of the meta slot's elements, in order. */
   meta: string[];
-  /** Whether the page has header actions (the template page has none). */
-  actions?: false;
   /** State overrides under which no header action renders. */
   noActions?: Record<string, unknown>;
 }
@@ -168,6 +166,7 @@ const cases: Array<[string, PageCase]> = [
           description: 'd',
           harness: 'claude',
           scope: 'global',
+          sourceUrl: 'https://github.com/example/templates',
           ...CAPS,
         },
       },
@@ -175,7 +174,16 @@ const cases: Array<[string, PageCase]> = [
       icon: 'sl-icon.[file-earmark-code]',
       badges: ['span'],
       meta: ['template-description', 'template-meta-row'],
-      actions: false,
+      // Refresh from Source shows only for a GitHub source.
+      noActions: {
+        template: {
+          id: 't-1',
+          name: LONG_NAME,
+          harness: 'claude',
+          scope: 'global',
+          ...CAPS,
+        },
+      },
     },
   ],
   [
@@ -363,12 +371,8 @@ describe.each(cases)('%s detail header', (_label, c) => {
     ).toEqual(c.badges);
     expect(inSlot('meta').map((n) => n.className)).toEqual(c.meta);
     const actions = inSlot('actions');
-    if (c.actions === false) {
-      expect(actions).toEqual([]);
-    } else {
-      expect(actions.map((n) => n.className)).toEqual(['header-actions']);
-      expect(actions[0].querySelector('sl-button')).not.toBeNull();
-    }
+    expect(actions.map((n) => n.className)).toEqual(['header-actions']);
+    expect(actions[0].querySelector('sl-button')).not.toBeNull();
     expect(
       children.every((n) => ['icon', 'meta', 'actions', null].includes(n.getAttribute('slot')))
     ).toBe(true);
