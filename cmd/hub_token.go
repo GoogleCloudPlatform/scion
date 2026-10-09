@@ -563,8 +563,9 @@ func parseExpiryAt(s string, now time.Time) (time.Time, error) {
 	// 525600m) are rejected here, before multiplying, so a huge number
 	// cannot overflow into a negative duration (an expiry in the past).
 	if int64(n) > int64(store.UATMaxExpiry/step) {
-		return time.Time{}, fmt.Errorf("%q exceeds the maximum expiry of 1 year (%dh or %dm)",
-			s, int64(store.UATMaxExpiry/time.Hour), int64(store.UATMaxExpiry/time.Minute))
+		return time.Time{}, fmt.Errorf("%q exceeds the maximum expiry of 1 year (1y, %dd, %dh or %dm)",
+			s, int64(store.UATMaxExpiry/(24*time.Hour)), int64(store.UATMaxExpiry/time.Hour),
+			int64(store.UATMaxExpiry/time.Minute))
 	}
 	if unit == 'y' {
 		return now.AddDate(n, 0, 0), nil

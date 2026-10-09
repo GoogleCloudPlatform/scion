@@ -170,7 +170,7 @@ func TestParseExpiry_OverLimit(t *testing.T) {
 			t.Errorf("expected error for input %q, got nil", input)
 			continue
 		}
-		want := fmt.Sprintf("%q exceeds the maximum expiry of 1 year (8760h or 525600m)", input)
+		want := fmt.Sprintf("%q exceeds the maximum expiry of 1 year (1y, 365d, 8760h or 525600m)", input)
 		if err.Error() != want {
 			t.Errorf("error for %q = %q, want %q", input, err.Error(), want)
 		}
