@@ -47,7 +47,7 @@ const (
 	initialDataTimeout = 30 * time.Second
 )
 
-// attachUnsupportedMessage is the one fixed, actionable error text a caller
+// AttachUnsupportedMessage is the one fixed, actionable error text a caller
 // sees when the target runtime has no exec/attach/TTY primitive at all,
 // regardless of which of the two points where the broker can learn that
 // rejects the attempt: the pre-upgrade HTTP 501/runtime_attach_unsupported
@@ -55,7 +55,7 @@ const (
 // 4501/attach_unsupported close code readFromWebSocket checks for. Kept as
 // one constant so the two call sites can never drift into two different
 // wordings for the same outcome.
-const attachUnsupportedMessage = "attach is not supported for this agent's runtime"
+const AttachUnsupportedMessage = "attach is not supported for this agent's runtime"
 
 // PTYCloseError reports that the server ended a PTY session with a close
 // code other than a clean detach (1000). Callers classify Code with
@@ -290,7 +290,7 @@ func (c *PTYClient) dial(ctx context.Context) (*websocket.Conn, error) {
 		if resp != nil && resp.StatusCode >= 400 {
 			code, detail := parseAttachFailureBody(resp, err)
 			if resp.StatusCode == http.StatusNotImplemented && code == wsprotocol.ErrCodeRuntimeAttachUnsupported {
-				return nil, errors.New(attachUnsupportedMessage)
+				return nil, errors.New(AttachUnsupportedMessage)
 			}
 			return nil, fmt.Errorf("connection failed with status %d: %s", resp.StatusCode, detail)
 		}
@@ -854,7 +854,7 @@ func (c *PTYClient) readFromWebSocket(conn *websocket.Conn) error {
 					return nil
 				}
 				if closeErr.Code == wsprotocol.ClosePTYAttachUnsupported {
-					return errors.New(attachUnsupportedMessage)
+					return errors.New(AttachUnsupportedMessage)
 				}
 				return &PTYCloseError{Code: closeErr.Code, Reason: closeErr.Text}
 			}
@@ -930,7 +930,8 @@ func (c *PTYClient) Close() error {
 	return nil
 }
 
-// AttachToAgent is a convenience function that connects and runs a PTY session.
+// AttachToAgent is a convenience function that checks the Hub preflight,
+// then connects and runs a PTY session.
 func AttachToAgent(ctx context.Context, endpoint, token, slug string, opts ...AttachOption) error {
 	// Get terminal size
 	cols, rows := 80, 24
@@ -954,6 +955,14 @@ func AttachToAgent(ctx context.Context, endpoint, token, slug string, opts ...At
 	}
 
 	client := NewPTYClient(cfg)
+
+	// Ask the Hub first: it answers a plain GET with the same path decision
+	// it makes for the WebSocket, so a refusal (for example 503 when there
+	// is no path to the agent's terminal) comes back as a readable status
+	// and reason instead of a failed handshake. There is no retry.
+	if err := client.Preflight(ctx); err != nil {
+		return err
+	}
 
 	if err := client.Connect(ctx); err != nil {
 		return err
