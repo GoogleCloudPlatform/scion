@@ -1029,7 +1029,39 @@ backend is `local` (see
 
 Before running more than one replica, declare a shared volume on the
 Cloud Run service, mount it at `/mnt/<volume_name>`, and select it in
-`settings.yaml`:
+`settings.yaml`.
+
+For example, to use a Filestore (NFS) share, export the service with
+`gcloud run services describe scion-hub --region=${REGION} --format export > service.yaml`,
+add the volume and its mount, and apply the file with
+`gcloud run services replace service.yaml`:
+
+```yaml
+spec:
+  template:
+    metadata:
+      annotations:
+        run.googleapis.com/execution-environment: gen2   # required for NFS volumes
+    spec:
+      containers:
+      - image: IMAGE_URL                 # keep the existing container entry
+        volumeMounts:
+        - name: VOLUME_NAME
+          mountPath: /mnt/VOLUME_NAME    # must be exactly /mnt/<volume_name>
+      volumes:
+      - name: VOLUME_NAME
+        nfs:
+          server: FILESTORE_IP           # Filestore instance IP address
+          path: /FILE_SHARE              # Filestore file share name
+          readOnly: false
+```
+
+The mount path must equal `/mnt/VOLUME_NAME`, with the same name as the
+volume and as `volume_name` below. NFS volumes require the second
+generation (`gen2`) execution environment. Do not use an in-memory
+volume here: it is local to each instance and not shared between
+replicas, even though the readiness check passes because the path is
+mounted.
 
 ```yaml
 server:
