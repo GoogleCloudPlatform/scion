@@ -46,13 +46,13 @@ Scion features an interactive, top-level **Native Web Chat** interface in the We
 ### Who Can See Chat Content
 
 - **Project spaces are visible to the whole project.** Every thread in a project space, and every message and attachment in it, can be read by everyone who has access to that project. There are no private threads, and access cannot be limited to individual threads.
-- **Direct messages are visible only to their participants.** A DM can be read only by the two participants: the two users in a human-to-human DM, or you and the agent in a human-to-agent DM. If you promote a DM into a shared space thread, its messages move into the space, and everyone with access to the project can then read them.
+- **Direct messages do not appear in the project space.** Messages you exchange with an agent also become part of that agent's history, which the agent's owner can see. If you promote an agent DM into a space thread, its messages move into the space, and everyone with access to the project can then read them.
 - **Pick the right place:**
-  - Use a DM for a private exchange with one person or one agent.
+  - Use a DM to keep an exchange with one person or one agent out of the project space.
   - Use a separate project when a group needs its own access boundary. Chat access follows project access, so only that project's members can read its space.
 
 :::caution[Keep credentials out of space threads]
-Do not post credentials, tokens, keys or other sensitive material in a space thread, even in a thread that looks quiet or narrowly named. Everyone with access to the project can read it. To give an agent a credential, store it as a Hub secret instead (see [Secret & Environment Management](/scion/hosted/user/secrets/)) and refer to it by name in chat.
+Do not post credentials, tokens, keys or other sensitive material in a space thread, even in a thread that looks quiet or narrowly named. Everyone with access to the project can read it. Do not send credentials in DMs either. To give an agent a credential, store it as a Hub secret instead (see [Secret & Environment Management](/scion/hosted/user/secrets/)) and refer to it by name in chat.
 :::
 
 ---
