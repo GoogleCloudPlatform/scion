@@ -15,6 +15,7 @@
 package hubsync
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -37,21 +38,37 @@ func TestConfirmAction_AutoConfirm(t *testing.T) {
 	}
 }
 
-func TestConfirmAction_NoAutoConfirm_DefaultYes(t *testing.T) {
-	// When not auto-confirming and stdin returns EOF/error, it falls back to defaultYes.
-	// With defaultYes=true, should return true.
-	result := ConfirmAction("Test prompt", true, false)
-	if !result {
-		t.Error("ConfirmAction with defaultYes=true should return true on stdin EOF")
+func TestConfirmAction_NoTerminal_AnswersNo(t *testing.T) {
+	// Without a terminal on stdin, ConfirmAction must not take a Yes
+	// default: it answers No whatever the default.
+	for _, defaultYes := range []bool{true, false} {
+		withPromptIO(t, strings.NewReader("y\n"), false)
+		if ConfirmAction("Test prompt", defaultYes, false) {
+			t.Errorf("ConfirmAction(defaultYes=%v) without a terminal = true, want false", defaultYes)
+		}
 	}
 }
 
-func TestConfirmAction_NoAutoConfirm_DefaultNo(t *testing.T) {
-	// When not auto-confirming and stdin returns EOF/error, it falls back to defaultYes.
-	// With defaultYes=false, should return false.
-	result := ConfirmAction("Test prompt", false, false)
-	if result {
-		t.Error("ConfirmAction with defaultYes=false should return false on stdin EOF")
+func TestConfirmAction_Terminal(t *testing.T) {
+	tests := []struct {
+		name       string
+		input      string
+		defaultYes bool
+		want       bool
+	}{
+		{"enter takes default yes", "\n", true, true},
+		{"enter takes default no", "\n", false, false},
+		{"explicit yes", "y\n", false, true},
+		{"explicit no", "n\n", true, false},
+		{"end of input is no", "", true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			withPromptIO(t, strings.NewReader(tt.input), true)
+			if got := ConfirmAction("Test prompt", tt.defaultYes, false); got != tt.want {
+				t.Errorf("ConfirmAction = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -128,7 +145,11 @@ func TestShowMatchingProjectsPrompt_AutoConfirm(t *testing.T) {
 		{ID: "id-2", Name: "widgets (2)", Slug: "widgets-2"},
 	}
 
-	choice, selectedID := ShowMatchingProjectsPrompt("widgets", matches, "widgets-3", true)
+	withPromptIO(t, strings.NewReader(""), false)
+	choice, selectedID, err := ShowMatchingProjectsPrompt("widgets", matches, "widgets-3", true, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if choice != ProjectChoiceLink {
 		t.Errorf("expected ProjectChoiceLink, got %v", choice)
 	}

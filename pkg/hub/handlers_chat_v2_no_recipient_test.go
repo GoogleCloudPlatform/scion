@@ -278,8 +278,8 @@ func TestNoRecipient_AgentDMMissingAgentRefused(t *testing.T) {
 	setDMConversationID(t, s, key, "")
 
 	code, resp, m := unreachableSend(t, srv, s, key, "hello")
-	if code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d (body=%v)", code, resp)
+	if code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d (body=%v)", code, resp)
 	}
 	if m != nil {
 		t.Fatalf("expected no persisted row, got %+v", m)
@@ -375,10 +375,13 @@ func (e *errReplyLookupStore) GetMessagesByIDs(ctx context.Context, ids []string
 
 // A failed lookup of the quoted message keeps the previous state.
 func TestNoRecipient_ReplyLookupErrorKeepsPreviousState(t *testing.T) {
-	srv, s, topicID, _, _ := noRecipientSetup(t)
+	srv, s, topicID, _, _, projID := noRecipientSetupProject(t)
+	// The quoted message is in this thread, so the send-time reply check
+	// passes; only the routing lookup of it fails.
+	ref := seedRefMessage(t, s, projID, topicID, "user:x@example.com", api.NewUUID())
 	srv.store = &errReplyLookupStore{Store: s}
 
-	resp, m := replySend(t, srv, s, topicID, "re", api.NewUUID())
+	resp, m := replySend(t, srv, s, topicID, "re", ref)
 	requireDispatchedNotNoRecipient(t, "reply lookup error", resp, m)
 }
 
@@ -449,9 +452,9 @@ func seedRefMessage(t *testing.T, s store.Store, projectID, threadID, sender, se
 }
 
 // Only a quote-reply to the sender's own user message, in any thread, is
-// unaddressed (and then mentions decide). Any other reference, including
-// one in another thread or one that cannot be found, keeps the previous
-// state.
+// unaddressed (and then mentions decide). Any other reference in this
+// thread keeps the previous state; a reference to another thread, or to no
+// message, is refused.
 func TestNoRecipient_QuoteReplyRefKinds(t *testing.T) {
 	srv, s, wcs, proj, db := setupSendTest(t)
 	d := &brokerMockDispatcher{}
@@ -497,15 +500,21 @@ func TestNoRecipient_QuoteReplyRefKinds(t *testing.T) {
 			"ok", store.MessageDispatchDispatched},
 		{"own user ref", seedRefMessage(t, s, proj.ID, topicID, "user:dev@localhost", DevUserID),
 			"ok", store.MessageDispatchNoRecipient},
-		{"another person in another thread", seedRefMessage(t, s, proj.ID, otherTopic, "user:x@example.com", api.NewUUID()),
-			"ok", store.MessageDispatchDispatched},
-		{"agent in another thread", seedRefMessage(t, s, proj.ID, otherTopic, "agent:"+foreign.Slug, foreign.ID),
-			"ok", store.MessageDispatchDispatched},
-		{"missing ref", api.NewUUID(), "ok", store.MessageDispatchDispatched},
-		{"own ref in another thread", seedRefMessage(t, s, proj.ID, otherTopic, "user:dev@localhost", DevUserID),
-			"ok", store.MessageDispatchNoRecipient},
-		{"own ref in another thread, human mention", seedRefMessage(t, s, proj.ID, otherTopic, "user:dev@localhost", DevUserID),
-			"ok @alice", store.MessageDispatchDispatched},
+	}
+	// A reply to a message of another thread, or to no message at all, is
+	// refused before anything is stored (see
+	// TestChatReply_TargetMustBeInSameConversation).
+	for name, ref := range map[string]string{
+		"another person in another thread": seedRefMessage(t, s, proj.ID, otherTopic, "user:x@example.com", api.NewUUID()),
+		"agent in another thread":          seedRefMessage(t, s, proj.ID, otherTopic, "agent:"+foreign.Slug, foreign.ID),
+		"missing ref":                      api.NewUUID(),
+		"own ref in another thread":        seedRefMessage(t, s, proj.ID, otherTopic, "user:dev@localhost", DevUserID),
+	} {
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages",
+			map[string]string{"content": "ok", "reply_to_id": ref})
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: expected 400, got %d: %s", name, rec.Code, rec.Body.String())
+		}
 	}
 	for _, c := range cases {
 		resp, m := replySend(t, srv, s, topicID, c.content, c.ref)

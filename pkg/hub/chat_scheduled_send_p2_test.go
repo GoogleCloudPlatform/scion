@@ -532,7 +532,8 @@ func TestScheduledSend_SendNowChecks(t *testing.T) {
 	_, err = f.store.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, f.bob.ID)
 	require.NoError(t, err)
 	rec = doRequestAsUser(t, f.srv, f.bob, http.MethodPost, f.rowPath(missed.ID, "/send-now"), nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	requireLiveSendAnswer(t, f.srv, f.bob, f.topicID, rec)
 	assert.Equal(t, ScheduledMessageFailed, f.row(t, f.bob, missed.ID).Status)
 }
 

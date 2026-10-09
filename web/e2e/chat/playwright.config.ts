@@ -16,6 +16,8 @@ import { fileURLToPath } from 'node:url';
 
 import { defineConfig } from '@playwright/test';
 
+const CI = !!process.env.CI;
+
 // Deliberately separate from the Hub E2E harness: no project agents or
 // credentials — everything the chat page and space rail fetch is mocked
 // via page.route in the specs themselves.
@@ -24,9 +26,24 @@ export default defineConfig({
   testMatch: '**/*.pw.ts',
   timeout: 30_000,
   workers: 1,
-  forbidOnly: !!process.env.CI,
+  // CI-only settings (local runs are unchanged), as in e2e/chat-mobile: one
+  // retry for a timing blip on a shared runner (still reported as flaky), a
+  // global timeout below the 20m job timeout so the report is still written,
+  // and inline annotations plus an HTML report for the uploaded artifact.
+  retries: CI ? 1 : 0,
+  globalTimeout: CI ? 15 * 60_000 : 0,
+  reporter: CI
+    ? [
+        ['github'],
+        ['list'],
+        ['html', { outputFolder: '../../playwright-report/chat', open: 'never' }],
+      ]
+    : 'list',
+  forbidOnly: CI,
   outputDir: '../../test-results/chat',
   use: {
+    // A trace of the retried attempt in CI.
+    trace: CI ? 'on-first-retry' : 'off',
     baseURL: 'http://127.0.0.1:4535',
     viewport: { width: 1100, height: 700 },
     launchOptions: {
@@ -41,5 +58,7 @@ export default defineConfig({
     cwd: fileURLToPath(new URL('../../', import.meta.url)),
     url: 'http://127.0.0.1:4535/',
     reuseExistingServer: false,
+    // A cold start on a CI runner can exceed Playwright's 60s default (kept locally).
+    timeout: CI ? 120_000 : 60_000,
   },
 });
