@@ -2516,7 +2516,7 @@ ${HYBRID_GCP_IDENTITY_YAML:-"# Hub-wide default GCP identity mode for new agents
 default_gcp_identity_mode: passthrough
 "}server:
   hub:
-    name: \"${HUB_NAME}\"
+    hub_name: \"${HUB_NAME}\"
 ${ADMIN_EMAIL:+    admin_emails:
       - \"${ADMIN_EMAIL}\"}
   maintenance:
@@ -2532,7 +2532,7 @@ ${ADMIN_EMAIL:+    admin_emails:
 ${HYBRID_AUTH_TRANSPORT_YAML:+${HYBRID_AUTH_TRANSPORT_YAML}
 }${HYBRID_USER_ACCESS_YAML:+${HYBRID_USER_ACCESS_YAML}
 }${HYBRID_SHARED_DIR_STORAGE_YAML:+${HYBRID_SHARED_DIR_STORAGE_YAML}
-}  listen_port: 8080
+}  # Listen port: set by --web-port in scion-hub.service, not here.
 SETTINGSEOF
   "
 
@@ -3113,7 +3113,7 @@ ${HYBRID_GCP_IDENTITY_YAML:-"# Hub-wide default GCP identity mode for new agents
 default_gcp_identity_mode: passthrough
 "}server:
   hub:
-    name: \"${HUB_NAME}\"
+    hub_name: \"${HUB_NAME}\"
 ${ADMIN_EMAIL:+    admin_emails:
       - \"${ADMIN_EMAIL}\"}
   maintenance:
@@ -3133,7 +3133,7 @@ ${ADMIN_EMAIL:+    admin_emails:
 ${HYBRID_AUTH_TRANSPORT_YAML:+${HYBRID_AUTH_TRANSPORT_YAML}
 }${HYBRID_USER_ACCESS_YAML:+${HYBRID_USER_ACCESS_YAML}
 }${HYBRID_SHARED_DIR_STORAGE_YAML:+${HYBRID_SHARED_DIR_STORAGE_YAML}
-}  listen_port: 8080
+}  # Listen port: set by --web-port in scion-hub.service, not here.
 SETTINGSEOF
   "
 echo "  settings.yaml updated (auth mode: proxy, provider: iap)."
