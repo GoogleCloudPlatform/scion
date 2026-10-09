@@ -16,6 +16,7 @@ package api
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -238,4 +239,11 @@ func TestScionConfig_CloneDepthJSONRoundTrip(t *testing.T) {
 	b, err = json.Marshal(ScionConfig{})
 	require.NoError(t, err)
 	assert.NotContains(t, string(b), "clone_depth")
+}
+
+// maxCloneDepthDigits stays in step with MaxCloneDepth.
+func TestMaxCloneDepthDigits(t *testing.T) {
+	if got := len(strconv.Itoa(MaxCloneDepth)); got != maxCloneDepthDigits {
+		t.Errorf("MaxCloneDepth has %d digits, maxCloneDepthDigits is %d", got, maxCloneDepthDigits)
+	}
 }

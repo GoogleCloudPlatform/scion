@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1764,12 +1765,18 @@ func TestSafeToEvictSchemaValidation(t *testing.T) {
 }
 
 // TestCloneDepthSchemaValidation checks the profiles section schema for
-// clone_depth: "full" or a positive integer, as a string or a bare integer.
+// clone_depth: "full" or an integer from 1 to 999999999, as a string or a
+// bare integer, with null and "" meaning unset. It is the same rule as
+// settings-v1.schema.json.
 func TestCloneDepthSchemaValidation(t *testing.T) {
 	for _, doc := range []string{
 		`{"gke": {"runtime": "gke", "clone_depth": "full"}}`,
 		`{"gke": {"runtime": "gke", "clone_depth": 50}}`,
 		`{"gke": {"runtime": "gke", "clone_depth": "50"}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": 999999999}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": "999999999"}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": null}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": ""}}`,
 		`{"gke": {"runtime": "gke"}}`,
 	} {
 		if errs := Validate("profiles", json.RawMessage(doc)); len(errs) > 0 {
@@ -1782,10 +1789,47 @@ func TestCloneDepthSchemaValidation(t *testing.T) {
 		`{"gke": {"runtime": "gke", "clone_depth": -1}}`,
 		`{"gke": {"runtime": "gke", "clone_depth": "shallow"}}`,
 		`{"gke": {"runtime": "gke", "clone_depth": true}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": 1000000000}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": "1000000000"}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": "1234567890"}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": "Full"}}`,
 	} {
 		if errs := Validate("profiles", json.RawMessage(doc)); len(errs) == 0 {
 			t.Errorf("expected %s to be rejected", doc)
 		}
+	}
+}
+
+// TestCloneDepthSchemaFromSettingsSchema checks that the profiles section
+// serves the clone_depth rule from settings-v1.schema.json unchanged.
+func TestCloneDepthSchemaFromSettingsSchema(t *testing.T) {
+	data, err := config.GetSettingsSchemaJSON("1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]interface{}
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	defs, _ := root["$defs"].(map[string]interface{})
+	want := profileCloneDepthSchema(defs)
+	if want == nil {
+		t.Fatal("settings schema has no profileConfig.clone_depth")
+	}
+
+	info, ok := SchemaInfo()["profiles"]
+	if !ok {
+		t.Fatal("no profiles section schema")
+	}
+	served, _ := json.Marshal(info.Schema)
+	var section map[string]interface{}
+	if err := json.Unmarshal(served, &section); err != nil {
+		t.Fatal(err)
+	}
+	entry, _ := section["additionalProperties"].(map[string]interface{})
+	props, _ := entry["properties"].(map[string]interface{})
+	if got := props["clone_depth"]; !reflect.DeepEqual(got, want) {
+		t.Errorf("profiles clone_depth schema = %v, want %v", got, want)
 	}
 }
 

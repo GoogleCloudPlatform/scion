@@ -127,7 +127,10 @@ func TestCloneDepth_SchemaAndDecoderAgree(t *testing.T) {
 		lit   string
 		depth int
 		ok    bool
+		unset bool // accepted, and means "not set"
 	}{
+		{lit: "null", ok: true, unset: true},
+		{lit: `""`, ok: true, unset: true},
 		{lit: "5", depth: 5, ok: true},
 		{lit: "5.0", depth: 5, ok: true},
 		{lit: "1e2", depth: 100, ok: true},
@@ -164,16 +167,23 @@ func TestCloneDepth_SchemaAndDecoderAgree(t *testing.T) {
 				return
 			}
 			require.NoError(t, gdErr)
-			assert.True(t, ok)
+			assert.Equal(t, !tt.unset, ok)
 			assert.Equal(t, tt.depth, depth)
 		})
 	}
 
 	for _, tt := range []struct {
+		name  string
 		lit   string
 		depth int
 		ok    bool
+		unset bool // accepted, and means "not set"
 	}{
+		{name: "blank", lit: "", ok: true, unset: true},
+		{lit: "null", ok: true, unset: true},
+		{lit: "~", ok: true, unset: true},
+		{lit: "''", ok: true, unset: true},
+		{lit: `""`, ok: true, unset: true},
 		{lit: "5.0", depth: 5, ok: true},
 		{lit: "1e2", depth: 100, ok: true},
 		{lit: "0x10", depth: 16, ok: true},
@@ -189,7 +199,11 @@ func TestCloneDepth_SchemaAndDecoderAgree(t *testing.T) {
 		{lit: "9223372036854775808"},
 		{lit: `"99999999999999999999"`},
 	} {
-		t.Run("yaml "+tt.lit, func(t *testing.T) {
+		name := tt.name
+		if name == "" {
+			name = tt.lit
+		}
+		t.Run("yaml "+name, func(t *testing.T) {
 			settingsDoc := "schema_version: \"1\"\nprofiles:\n  p:\n    runtime: k8s\n    clone_depth: " + tt.lit + "\n"
 			errs, err := ValidateSettings([]byte(settingsDoc), "1")
 			require.NoError(t, err)
@@ -213,16 +227,39 @@ func TestCloneDepth_SchemaAndDecoderAgree(t *testing.T) {
 			require.NoError(t, err)
 			depth, ok, gdErr := cfg.CloneDepth.GitDepth()
 			require.NoError(t, gdErr)
-			assert.True(t, ok)
+			assert.Equal(t, !tt.unset, ok)
 			assert.Equal(t, tt.depth, depth)
 
 			require.NoError(t, sErr)
 			pDepth, pOK, pErr := vs.Profiles["p"].CloneDepth.GitDepth()
 			require.NoError(t, pErr)
-			assert.True(t, pOK)
+			assert.Equal(t, !tt.unset, pOK)
 			assert.Equal(t, tt.depth, pDepth)
 		})
 	}
+}
+
+// The agent and settings schemas carry the same clone_depth rule.
+func TestCloneDepth_AgentAndSettingsSchemasMatch(t *testing.T) {
+	ruleOf := func(data []byte, path ...string) interface{} {
+		t.Helper()
+		var node interface{}
+		require.NoError(t, json.Unmarshal(data, &node))
+		for _, key := range path {
+			m, ok := node.(map[string]interface{})
+			require.True(t, ok, "no %s in schema", key)
+			node = m[key]
+		}
+		require.NotNil(t, node)
+		return node
+	}
+	agentData, err := GetAgentSchemaJSON("1")
+	require.NoError(t, err)
+	settingsData, err := GetSettingsSchemaJSON("1")
+	require.NoError(t, err)
+	assert.Equal(t,
+		ruleOf(settingsData, "$defs", "profileConfig", "properties", "clone_depth", "oneOf"),
+		ruleOf(agentData, "properties", "clone_depth", "oneOf"))
 }
 
 func TestResolveCloneDepthWithSource(t *testing.T) {

@@ -33,6 +33,9 @@ const CloneDepthFull = "full"
 // most 9 digits ("maximum": 999999999).
 const MaxCloneDepth = 999999999
 
+// maxCloneDepthDigits is the number of digits in MaxCloneDepth.
+const maxCloneDepthDigits = 9
+
 // CloneDepth is the clone_depth setting on a profile or template: "full"
 // for a full clone, or an integer N from 1 to MaxCloneDepth for a clone of
 // depth N. The empty value means "not set", which keeps the default
@@ -133,6 +136,8 @@ func (d CloneDepth) GitDepth() (depth int, ok bool, err error) {
 	}
 	n, convErr := strconv.Atoi(s)
 	if convErr != nil {
+		// Defensive: isPositiveDecimal allows at most 9 digits, which
+		// always fit in an int.
 		return 0, false, fmt.Errorf("invalid clone_depth %q: %w", s, convErr)
 	}
 	return n, true, nil
@@ -141,7 +146,7 @@ func (d CloneDepth) GitDepth() (depth int, ok bool, err error) {
 // isPositiveDecimal reports whether s matches ^[1-9][0-9]{0,8}$, the same
 // form the settings and agent schemas accept.
 func isPositiveDecimal(s string) bool {
-	if s == "" || len(s) > len(strconv.Itoa(MaxCloneDepth)) || s[0] < '1' || s[0] > '9' {
+	if s == "" || len(s) > maxCloneDepthDigits || s[0] < '1' || s[0] > '9' {
 		return false
 	}
 	for i := 1; i < len(s); i++ {

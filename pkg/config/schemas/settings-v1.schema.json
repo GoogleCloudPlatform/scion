@@ -1031,10 +1031,11 @@
         },
         "clone_depth": {
           "oneOf": [
-            { "type": "string", "pattern": "^(full|[1-9][0-9]{0,8})$" },
-            { "type": "integer", "minimum": 1, "maximum": 999999999 }
+            { "type": "string", "pattern": "^(|full|[1-9][0-9]{0,8})$" },
+            { "type": "integer", "minimum": 1, "maximum": 999999999 },
+            { "type": "null" }
           ],
-          "description": "Git clone depth for clone-per-agent workspaces of agents under this profile: \"full\" for a full (non-shallow) clone, or an integer N from 1 to 999999999 for a clone of depth N. A template or agent clone_depth wins over this. Unset keeps the default shallow (depth 1) clone."
+          "description": "Git clone depth for clone-per-agent workspaces of agents under this profile: \"full\" for a full (non-shallow) clone, or an integer N from 1 to 999999999 for a clone of depth N. A template or agent clone_depth wins over this. Unset (absent, null or \"\") keeps the default shallow (depth 1) clone."
         },
         "safe_to_evict": {
           "type": "boolean",
