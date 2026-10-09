@@ -171,7 +171,7 @@ export class SSEClient extends EventTarget {
     this.eventSource.addEventListener('update', (event) => {
       if (es !== this.eventSource) return;
       try {
-        const data = JSON.parse((event as MessageEvent).data) as SSEUpdateEvent;
+        const data = JSON.parse(event.data) as SSEUpdateEvent;
         this.dispatchEvent(new CustomEvent('update', { detail: data }));
       } catch (err) {
         console.error('[SSE] Failed to parse update event:', err);
@@ -196,7 +196,7 @@ export class SSEClient extends EventTarget {
     this.eventSource.addEventListener('connected', (event) => {
       if (es !== this.eventSource) return;
       try {
-        const data = JSON.parse((event as MessageEvent).data) as {
+        const data = JSON.parse(event.data) as {
           connectionId: string;
           subjects: string[];
         };

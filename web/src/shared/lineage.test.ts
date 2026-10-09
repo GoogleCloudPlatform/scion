@@ -1507,7 +1507,7 @@ describe('computeStableLayout', () => {
         for (const orientation of ['vertical', 'horizontal'] as const) {
           for (let i = 0; i < 250; i++) {
             let currentAgents = randomForest(rng, 4 + Math.floor(rng() * 8), 3);
-            let currentCollapsed = randomCollapsed(rng, currentAgents);
+            const currentCollapsed = randomCollapsed(rng, currentAgents);
             let currentLayout = showUsers
               ? layoutForestWithUsers(
                   pruneCollapsed(buildLineageForest(currentAgents), currentCollapsed)

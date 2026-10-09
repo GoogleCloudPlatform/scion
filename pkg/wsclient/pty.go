@@ -116,6 +116,19 @@ const maxShortReconnects = 3
 // stops reconnecting because of maxShortReconnects.
 var ErrPTYReconnectLimit = fmt.Errorf("stopped after %d automatic reconnects whose sessions each ended within a minute", maxShortReconnects)
 
+// reconnectLimitError is the reconnect limit reached while the Hub
+// preflight kept failing to get an answer. It matches ErrPTYReconnectLimit
+// with errors.Is and keeps the last transport error.
+type reconnectLimitError struct{ last error }
+
+func (e *reconnectLimitError) Error() string {
+	return fmt.Sprintf("stopped after %d automatic reconnect attempts in a row; the last could not reach the Hub: %v",
+		maxShortReconnects, e.last)
+}
+
+// Unwrap returns ErrPTYReconnectLimit and the last transport error.
+func (e *reconnectLimitError) Unwrap() []error { return []error{ErrPTYReconnectLimit, e.last} }
+
 // Bytes that stop a pending reconnect when typed during the wait: Ctrl-C
 // and Ctrl-D cancel it, and the tmux detach sequence (Ctrl-b d) detaches.
 const (
@@ -194,6 +207,9 @@ type PTYClient struct {
 	restoreTerm func(fd int, state *term.State) error
 	// redialFn opens a replacement connection; NewPTYClient sets it to dial.
 	redialFn func(ctx context.Context) (*websocket.Conn, error)
+	// preflightFn runs the Hub preflight before each reconnect dial;
+	// NewPTYClient sets it to Preflight.
+	preflightFn func(ctx context.Context) error
 }
 
 // NewPTYClient creates a new PTY client.
@@ -210,6 +226,7 @@ func NewPTYClient(config PTYClientConfig) *PTYClient {
 	}
 	c.termSize = c.localTermSize
 	c.redialFn = c.dial
+	c.preflightFn = c.Preflight
 	return c
 }
 
@@ -380,15 +397,20 @@ func joinEndpointPath(prefix, apiPath string) string {
 // Run starts the PTY session and blocks until it ends.
 //
 // When the server closes the session with a code that
-// wsprotocol.PTYReconnectTiming allows (4503, 4504, 1011), Run makes one reconnect
-// attempt for that close: after a full-jitter delay of up to
+// wsprotocol.PTYReconnectTiming allows (4503, 4504, 1011), Run makes one
+// reconnect attempt for that close: after a full-jitter delay of up to
 // wsprotocol.PTYPromptReconnectMaxDelay for 4503, or after the normal
-// exponential backoff with full jitter for 4504 and 1011. A successful reconnect
-// sends the current terminal size so the remote tmux redraws at the right
-// size. If the reconnect fails (dial error, or the new session closes before
-// it delivers any data), Run returns a *PTYReconnectError and does not try
-// again. Every other close ends Run. The terminal stays in raw mode across a
-// reconnect and is restored once, when Run returns, on every path.
+// exponential backoff with full jitter for 4504 and 1011. Each reconnect
+// first asks the Hub's preflight, as AttachToAgent does for the first
+// connection: a refusal ends the reconnect with a *PTYReconnectError whose
+// Err is the *PTYPreflightError (the Hub's reason); a preflight that gets no
+// answer is retried under the backoff, within the same bound on consecutive
+// short-lived attempts. A successful reconnect sends the current terminal
+// size so the remote tmux redraws at the right size. If the reconnect fails
+// (dial error, or the new session closes before it delivers any data), Run
+// returns a *PTYReconnectError and does not try again. Every other close
+// ends Run. The terminal stays in raw mode across a reconnect and is
+// restored once, when Run returns, on every path.
 func (c *PTYClient) Run() error {
 	conn := c.currentConn()
 	if conn == nil {
@@ -487,14 +509,37 @@ func (c *PTYClient) Run() error {
 		_, _ = fmt.Fprintf(c.notice, "\r\n%v; reconnecting (press Ctrl-C to stop)...\r\n", closeErr)
 		slog.Debug("PTY client reconnecting", "code", closeErr.Code, "reason", closeErr.Reason, "delay", delay)
 
-		newConn, stop, reconnErr := c.reconnect(delay, stdinCh, closeErr)
-		if stop {
-			runErr = reconnErr
-			return runErr
-		}
-		if reconnErr != nil {
-			runErr = &PTYReconnectError{Close: closeErr, Err: reconnErr}
-			return runErr
+		var newConn *websocket.Conn
+		for {
+			var stop bool
+			var reconnErr error
+			newConn, stop, reconnErr = c.reconnect(delay, stdinCh, closeErr)
+			if stop {
+				runErr = reconnErr
+				return runErr
+			}
+			if reconnErr == nil {
+				break
+			}
+			var transport *preflightTransportError
+			if !errors.As(reconnErr, &transport) {
+				// A Hub refusal (*PTYPreflightError) or a failed dial ends the
+				// reconnect: report it with the close that triggered it.
+				runErr = &PTYReconnectError{Close: closeErr, Err: reconnErr}
+				return runErr
+			}
+			// The Hub could not be reached for the preflight: a transient
+			// failure. Wait the normal backoff and try again, under the same
+			// bound on consecutive short-lived attempts.
+			shortCloses++
+			if shortCloses > maxShortReconnects {
+				runErr = &PTYReconnectError{Close: closeErr, Err: &reconnectLimitError{last: transport.err}}
+				return runErr
+			}
+			delay = c.jitter(backoffCeiling(backoffAttempt))
+			backoffAttempt++
+			_, _ = fmt.Fprintf(c.notice, "\r\nthe Hub could not be reached (%v); retrying...\r\n", transport.err)
+			slog.Debug("PTY client: preflight unreachable, retrying", "error", transport.err, "delay", delay)
 		}
 		conn = newConn
 		pendingClose = closeErr
@@ -575,7 +620,13 @@ func (c *PTYClient) startStdinReader() <-chan stdinResult {
 // true, and a dial still in flight is abandoned (closed if it completes
 // later). The WebSocket handshake does not itself stop when the context
 // is cancelled, which is another reason the dial runs in its own
-// goroutine. When the dial fails, stop is false and err is the dial error.
+// goroutine.
+//
+// Before dialing it runs the Hub preflight (preflightFn). When the Hub
+// refuses, stop is false and err is the *PTYPreflightError; when the
+// preflight gets no answer, stop is false and err is a
+// *preflightTransportError, which Run retries under the backoff. When the
+// dial fails, stop is false and err is the dial error.
 func (c *PTYClient) reconnect(delay time.Duration, stdinCh <-chan stdinResult, closeErr *PTYCloseError) (conn *websocket.Conn, stop bool, err error) {
 	type dialResult struct {
 		conn *websocket.Conn
@@ -625,6 +676,17 @@ func (c *PTYClient) reconnect(delay time.Duration, stdinCh <-chan stdinResult, c
 			}
 			results = make(chan dialResult, 1)
 			go func(results chan<- dialResult) {
+				// Ask the Hub first, as AttachToAgent does for the first
+				// connection: the path to the agent's terminal may have
+				// changed (or gone) since then.
+				if err := c.preflightFn(c.ctx); err != nil {
+					var refusal *PTYPreflightError
+					if !errors.As(err, &refusal) {
+						err = &preflightTransportError{err: err}
+					}
+					results <- dialResult{nil, err}
+					return
+				}
 				conn, err := c.redialFn(c.ctx)
 				results <- dialResult{conn, err}
 			}(results)

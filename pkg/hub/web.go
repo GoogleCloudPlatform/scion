@@ -1556,6 +1556,14 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		logPerfTraceLine(perfTraceLogger(), r, trace.Snapshot, slog.String("sse_stage", "connect"))
 	}
 
+	// DM messages are also published on agent and project subjects that
+	// any reader of the agent or project may subscribe to. Deliver them only
+	// to DM participants, matching the REST DM reads (see sseEventVisible).
+	sessionUserID := ""
+	if su := getWebSessionUser(r.Context()); su != nil {
+		sessionUserID = su.UserID
+	}
+
 	eventID := 0
 	heartbeat := time.NewTicker(30 * time.Second)
 	defer heartbeat.Stop()
@@ -1575,6 +1583,9 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				// Publisher closed
 				return
+			}
+			if !sseEventVisible(evt, sessionUserID) {
+				continue
 			}
 			eventID++
 			var writeStart time.Time
@@ -1606,6 +1617,49 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// sseEventVisible reports whether evt may be written to the events stream
+// of the given session user. Subject authorization happens once at connect
+// time; this is the per-event check for DM messages.
+//
+// PublishUserMessage fans a DM message out to agent.<id>.message and, when
+// the recipient is a user, project.<id>.user.message. Readers of the agent
+// or project can subscribe to those subjects, so DM messages on them (a
+// "dm:" thread id) are delivered only to users named in the DM key — the
+// same rule the REST DM reads apply (isDMParticipant). Participants also
+// receive every DM message on user.<id>.chat.dm. All other events, including
+// non-DM agent messages, pass through unchanged.
+func sseEventVisible(evt Event, userID string) bool {
+	if !sseSubjectMayCarryDM(evt.Subject) {
+		return true
+	}
+	var payload struct {
+		ThreadID string `json:"threadId"`
+	}
+	if err := json.Unmarshal(evt.Data, &payload); err != nil {
+		// Fail closed: a message payload that cannot be read cannot be
+		// shown not to be a DM.
+		return false
+	}
+	if !strings.HasPrefix(payload.ThreadID, "dm:") {
+		return true
+	}
+	return userID != "" && isDMParticipant(payload.ThreadID, userID)
+}
+
+// sseSubjectMayCarryDM matches the subjects onto which PublishUserMessage
+// publishes DM messages that are not already scoped to a participant:
+// agent.<id>.message and project.<id>.user.message.
+func sseSubjectMayCarryDM(subject string) bool {
+	tokens := strings.Split(subject, ".")
+	switch {
+	case len(tokens) == 3 && tokens[0] == "agent" && tokens[2] == "message":
+		return true
+	case len(tokens) == 4 && tokens[0] == "project" && tokens[2] == "user" && tokens[3] == "message":
+		return true
+	}
+	return false
 }
 
 // validateSSESubjects validates the subject patterns for SSE subscriptions.

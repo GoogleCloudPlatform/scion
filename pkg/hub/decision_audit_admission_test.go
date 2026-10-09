@@ -1113,9 +1113,11 @@ func TestDecisionAuditDirectContract_SinkFailureHealthAndNextLegacy(t *testing.T
 			assert.Empty(t, f.legacy.records, "failed owned record must not fall back")
 			assert.EqualValues(t, 1, f.router.inspect().failures)
 			assert.True(t, f.router.inspect().fault)
-			newHealth, legacyHealth := f.router.healthProjection()
-			assert.Equal(t, "unhealthy: CRITICAL authorization decision logging fault; NEW off; triggering record may be lost; subsequent decisions use legacy", newHealth)
-			assert.Equal(t, "healthy", legacyHealth)
+			// f.legacy is the test-local auditFixtureLegacy recorder injected into the
+			// router's legacy slot; it observes routing and persists nothing. Production
+			// wires inertDecisionAuditTarget there, so the warning reports no persistence
+			// and the retired writer has no health value.
+			assert.Equal(t, "unhealthy: CRITICAL authorization decision logging fault; NEW off; triggering record may be lost; subsequent decisions have no persistence", f.router.healthProjection())
 			assert.False(t, f.router.inspect().observation.successful)
 			directRequireReleased(t, f)
 			// Healthy true settings cannot rearm a faulted generation.
@@ -2105,7 +2107,7 @@ func TestDecisionAuditRouter_DisableDrainsCooperativeSlots(t *testing.T) {
 
 }
 
-func TestDecisionAuditRouter_CloseSeparatesLegacyDrain(t *testing.T) {
+func TestDecisionAuditRouter_CloseNewPreservesFallback(t *testing.T) {
 	for _, mode := range []string{"close-new", "server-cleanup", "server-http-drain"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newAuditFixture(t, auditFixtureActiveClose)
@@ -2205,7 +2207,8 @@ func TestDecisionAuditRouter_CloseSeparatesLegacyDrain(t *testing.T) {
 			}
 		})
 	}
-	if decisionAuditDrainTimeout+decisionAuditAbortGrace != 5*time.Second {
-		t.Fatal("legacy close bound changed")
+	// Close adds no timeout; it waits for the original handoff-relative bounds.
+	if decisionAuditCancelBudget != time.Second || decisionAuditCompleteBudget != 2*time.Second {
+		t.Fatal("NEW handoff cancel/complete budgets changed")
 	}
 }

@@ -1572,8 +1572,12 @@ type V1DatabaseConfig struct {
 
 // V1AuthConfig holds authentication settings.
 type V1AuthConfig struct {
-	// Mode selects the exclusive human auth mode: "oauth" (default), "proxy", or "dev".
-	// In proxy mode, OAuth handlers are disabled; in dev mode, dev token auth is used.
+	// Mode selects the human auth mode. "proxy" is the only value the code
+	// checks: the server then uses the proxy authenticator configured under
+	// Proxy and offers no OAuth providers. Any other value, including ""
+	// (the default), "oauth" and "dev", leaves the hub handling
+	// authentication itself. Dev auth is enabled by the --dev-auth flag or
+	// the server.auth.dev_mode setting (DevMode), not by Mode.
 	Mode              string   `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
 	DevMode           bool     `json:"dev_mode,omitempty" yaml:"dev_mode,omitempty" koanf:"dev_mode"`
 	DevToken          string   `json:"dev_token,omitempty" yaml:"dev_token,omitempty" koanf:"dev_token"`
