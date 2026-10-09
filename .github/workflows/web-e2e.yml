@@ -20,8 +20,21 @@
 # all in Chromium. Every suite serves the web sources itself (Vite dev
 # server or an esbuild bundle), so there is no shared build step to reuse.
 #
-# Not covered here: web/playwright.config.ts (e2e/*.spec.ts), which builds
-# and starts the Go hub in its global setup.
+# Not covered here:
+# - web/e2e/chat-mobile: the chat-mobile-e2e job in ci.yml owns it (sharded,
+#   with a stable required-check name), so it is not run twice.
+# - web/playwright.config.ts (e2e/*.spec.ts), which builds and starts the Go
+#   hub in its global setup.
+#
+# CI-only settings (retry, trace on retry, github and HTML reporters,
+# webServer start timeout, globalTimeout) live in each suite config, gated
+# on CI, so local runs are unchanged.
+#
+# Runtime and cost: about 23 minutes of test time per full run (most of it
+# terminal-workspace, chat-palette, terminal-entrypoints and
+# terminal-hidden), plus roughly 2-3 minutes of setup per job, so about
+# 50-60 runner-minutes across 12 jobs; retries of failing tests add to that.
+# Wall clock is bounded by the slowest job, about 8-10 minutes.
 
 name: Web E2E (advisory)
 
@@ -51,7 +64,7 @@ permissions:
 
 jobs:
   e2e:
-    name: e2e (${{ matrix.suite }}${{ matrix.shard && format(' {0}/{1}', matrix.shard, matrix.shards) || '' }})
+    name: e2e (${{ matrix.suite }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -70,13 +83,6 @@ jobs:
           - terminal-owner
           - terminal-pane
           - terminal-workspace
-        # chat-mobile runs ~900 tests (several viewports), about 35 minutes
-        # on one worker, so it is split into Playwright shards.
-        include:
-          - { suite: chat-mobile, shard: 1, shards: 4 }
-          - { suite: chat-mobile, shard: 2, shards: 4 }
-          - { suite: chat-mobile, shard: 3, shards: 4 }
-          - { suite: chat-mobile, shard: 4, shards: 4 }
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -125,23 +131,21 @@ jobs:
         working-directory: ./web
         env:
           SUITE: ${{ matrix.suite }}
-          SHARD: ${{ matrix.shard }}
-          SHARDS: ${{ matrix.shards }}
-          PLAYWRIGHT_HTML_OPEN: never
         run: |
           CHROMIUM_EXECUTABLE="$(node -p "require('playwright-core').chromium.executablePath()")"
           export CHROMIUM_EXECUTABLE
           export TERMINAL_OWNER_CHROMIUM="$CHROMIUM_EXECUTABLE"
-          export PLAYWRIGHT_HTML_OUTPUT_DIR="playwright-report/$SUITE${SHARD:+-$SHARD}"
-          npx playwright test -c "e2e/$SUITE/playwright.config.ts" \
-            ${SHARD:+--shard="$SHARD/$SHARDS"} \
-            --trace=retain-on-failure --reporter=list,html
+          npx playwright test -c "e2e/$SUITE/playwright.config.ts"
 
+      # Uploaded whenever the suite ran, so retry traces of flaky tests (which
+      # pass the job) are kept too. Paths match each config's HTML report
+      # folder (playwright-report/<suite>) and outputDir (test-results/<suite>,
+      # or e2e/<suite>/test-results where a config sets none).
       - name: Upload traces and report
-        if: failure()
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: web-e2e-${{ matrix.suite }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
+          name: web-e2e-${{ matrix.suite }}
           path: |
             web/playwright-report/
             web/test-results/
