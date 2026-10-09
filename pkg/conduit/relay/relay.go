@@ -170,8 +170,9 @@ type Config struct {
 	HTTPClient *http.Client
 	// HeartbeatInterval defaults to DefaultHeartbeatInterval.
 	HeartbeatInterval time.Duration
-	// LifetimeHint is sent as Welcome.lifetime_hint_s (0 = none; with a
-	// LifetimeCap it defaults to the time until the lifetime GoAway).
+	// LifetimeHint is sent as Welcome.lifetime_hint_s (0 = none). With a
+	// LifetimeCap the hint is instead each session's time until its
+	// lifetime GoAway.
 	LifetimeHint time.Duration
 	// LifetimeCap is the per-deployment lifetime cap of a session,
 	// counted from the start of its handshake (0 = no cap). At
@@ -299,9 +300,6 @@ func New(cfg Config) (*Relay, error) {
 	}
 	if cfg.LifetimeCap < 0 || (cfg.LifetimeCap > 0 && cfg.LifetimeCap <= LifetimeGoAwayLead) {
 		return nil, fmt.Errorf("conduit relay: LifetimeCap %s must be 0 or longer than the %s GoAway lead", cfg.LifetimeCap, LifetimeGoAwayLead)
-	}
-	if cfg.LifetimeCap > 0 && cfg.LifetimeHint == 0 {
-		cfg.LifetimeHint = cfg.LifetimeCap - LifetimeGoAwayLead
 	}
 	if cfg.HeartbeatInterval <= 0 {
 		cfg.HeartbeatInterval = DefaultHeartbeatInterval
@@ -516,21 +514,25 @@ func (r *Relay) lifetimeGoAway(e *entry) {
 	if e.sess.Info().Draining {
 		return // a drain is already under way; its deadline stands
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), deleteTimeout)
-	if err := r.markSessionDraining(ctx, e); err != nil {
-		r.log.Warn("Conduit: marking session draining failed", "session_id", e.rec.SessionID, "error", err)
-	}
-	cancel()
-	drain := r.drainDeadlineFor(e)
 	r.log.Info("Conduit session nearing its lifetime cap; sending GoAway",
 		"session_id", e.rec.SessionID, "principal_kind", e.principal.Kind, "principal_id", e.principal.ID,
-		"cap_at", e.capAt, "drain_deadline", drain)
-	_ = e.sess.GoAway(conduit.GoAwayOptions{
+		"cap_at", e.capAt)
+	// DrainDeadline 0: goAway computes it after the draining write, so a
+	// slow registry cannot push the deadline past the cap.
+	r.goAway(e, conduit.GoAwayOptions{
 		Code:           conduit.CloseRelayRestart,
 		Reason:         ReasonRelayRestart,
 		ReconnectAfter: r.reconnectAfter(),
-		DrainDeadline:  drain,
 	})
+}
+
+// lifetimeHint is Welcome.lifetime_hint_s for e: with a cap, the whole
+// seconds until its lifetime GoAway; otherwise Config.LifetimeHint.
+func (r *Relay) lifetimeHint(e *entry) time.Duration {
+	if e == nil || e.capAt.IsZero() {
+		return r.cfg.LifetimeHint
+	}
+	return max(e.capAt.Add(-LifetimeGoAwayLead).Sub(r.clk.Now()), 0)
 }
 
 // reconnectAfter is the reconnect hint of a relay-initiated planned close:
@@ -842,6 +844,11 @@ func (r *Relay) goAway(e *entry, opts conduit.GoAwayOptions) {
 		r.log.Warn("Conduit: marking session draining failed", "session_id", e.rec.SessionID, "error", err)
 	}
 	cancel()
+	// The drain deadline never ends after the session's lifetime cap
+	// (0 = the session default, bounded the same way).
+	if limit := r.drainDeadlineFor(e); opts.DrainDeadline <= 0 || opts.DrainDeadline > limit {
+		opts.DrainDeadline = limit
+	}
 	_ = e.sess.GoAway(opts)
 }
 

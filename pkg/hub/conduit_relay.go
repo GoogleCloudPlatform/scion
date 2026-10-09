@@ -87,7 +87,7 @@ type ConduitRelayOptions struct {
 	// LifetimeCap is the lifetime cap of a conduit session: the relay
 	// sends GoAway{4503 relay_restart} 60s before it and every drain
 	// deadline ends by it (server.hub.conduit.lifetime_cap; 0 = the
-	// default, 3500s; negative = no cap, for tests).
+	// default, 3500s).
 	LifetimeCap time.Duration
 	// AuthzRecheckInterval overrides ServerConfig.ConduitAuthzRecheckInterval
 	// (0 = use it; negative disables the sweep, for tests).
@@ -184,11 +184,8 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 		}
 	}
 	lifetimeCap := opts.LifetimeCap
-	switch {
-	case lifetimeCap == 0:
+	if lifetimeCap == 0 {
 		lifetimeCap = config.ConduitDefaultLifetimeCap
-	case lifetimeCap < 0:
-		lifetimeCap = 0
 	}
 	r, err := relay.New(relay.Config{
 		InstanceID:       id,

@@ -20,7 +20,6 @@ import (
 	"bufio"
 	"context"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -32,28 +31,29 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// sseProbe is a live web SSE subscription (GET /events) on its own HTTP
-// server, fed by pub.
+// sseProbe is a live hub SSE subscription served by the fixture hub
+// itself: GET /api/v1/agents/{id}/messages/stream on f.public as the
+// agent's owner, fed by the hub's event publisher. It shares the server,
+// listener and publisher with the PTY and conduit paths under test.
 type sseProbe struct {
-	pub   *ChannelEventPublisher
-	lines chan string
-	ended chan struct{}
+	pub     *ChannelEventPublisher
+	agentID string
+	ownerID string
+	lines   chan string
+	ended   chan struct{}
 }
 
-func newSSEProbe(t *testing.T) *sseProbe {
+func newSSEProbe(t *testing.T, f *ptyConduitFixture) *sseProbe {
 	t.Helper()
-	p := &sseProbe{pub: NewChannelEventPublisher(), lines: make(chan string, 64), ended: make(chan struct{})}
+	p := &sseProbe{pub: NewChannelEventPublisher(), agentID: f.launched.ID, ownerID: f.launched.OwnerID,
+		lines: make(chan string, 64), ended: make(chan struct{})}
 	t.Cleanup(p.pub.Close)
-	web := &WebServer{events: p.pub, authzService: NewAuthzService(&mockAuthzStore{}, nil)}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user := &webSessionUser{UserID: "user-1", Role: "user"}
-		web.handleSSE(w, r.WithContext(context.WithValue(r.Context(), webUserContextKey{}, user)))
-	}))
-	t.Cleanup(srv.Close)
+	f.srv.SetEventPublisher(p.pub)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/events?sub=user.user-1.message", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.public.URL+"/api/v1/agents/"+f.launched.ID+"/messages/stream", nil)
 	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+f.userToken)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -69,10 +69,13 @@ func newSSEProbe(t *testing.T) *sseProbe {
 	return p
 }
 
-// roundTrip publishes marker and waits for it on the same connection.
+// roundTrip publishes a message event carrying marker and waits for it
+// on the same connection.
 func (p *sseProbe) roundTrip(t *testing.T, marker string) {
 	t.Helper()
-	p.pub.publish("user.user-1.message", map[string]string{"text": marker})
+	p.pub.publish("agent."+p.agentID+".message", UserMessageEvent{
+		SenderID: p.ownerID, AgentID: p.agentID, Msg: marker, Type: "instruction",
+	})
 	timeout := time.After(10 * time.Second)
 	for {
 		select {
@@ -92,8 +95,9 @@ func (p *sseProbe) roundTrip(t *testing.T, marker string) {
 // the relay lifetime cap at 90s (fake relay clock), the relay sends GoAway
 // on the agent's session 60s before the cap; the accepted PTY stream keeps
 // working during the drain; at the 30s drain deadline the PTY client
-// receives 4503 relay_restart, before the cap. An SSE subscription open
-// across the hand-off is not affected.
+// receives 4503 relay_restart, before the cap. A hub SSE stream on the
+// same server, opened before the GoAway, keeps delivering events on one
+// connection before, during and after the hand-off.
 func TestAgentPTY_LifetimeCapHandoff(t *testing.T) {
 	var relayClock *clock.Fake
 	f := newPTYConduitFixture(t, func(o *ConduitRelayOptions) {
@@ -103,7 +107,7 @@ func TestAgentPTY_LifetimeCapHandoff(t *testing.T) {
 	require.NotNil(t, relayClock)
 	t0 := relayClock.Now()
 	capAt := t0.Add(90 * time.Second)
-	sse := newSSEProbe(t)
+	sse := newSSEProbe(t, f)
 	sse.roundTrip(t, "before")
 
 	f.setBrokerRow(t, attachCaps(false), "")
