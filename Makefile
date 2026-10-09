@@ -218,6 +218,12 @@ space := $(empty) $(empty)
 # "enttest-sqlite-only: <test name> <reason>". A skipped test is allowed only
 # if its own skip message carries that marker, so there is no name list here
 # and any other skip still fails the target.
+#
+# The entadapter run has a 60m go test timeout. On green main runs it took
+# ~774s and ~1259s, but GoogleCloudPlatform/scion#2855 hit the old 40m
+# (2400s) limit on a runner 2-3x slower than usual, with no failing or hung
+# test (ptone/scion#3945). A timeout there also stops the storetest and
+# pkg/hub runs below, so the headroom is kept generous.
 test-launch-store-postgres:
 	@echo "Running launch store tests against Postgres..."
 	@if [ -z "$$SCION_TEST_POSTGRES_URL" ]; then \
@@ -234,7 +240,7 @@ test-launch-store-postgres:
 		echo "ERROR: one or more Postgres-only integration tests were skipped -- see '--- SKIP' lines above." >&2; \
 		exit 1; \
 	fi
-	@go test -tags integration -count=1 -timeout 40m -v \
+	@go test -tags integration -count=1 -timeout 60m -v \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \

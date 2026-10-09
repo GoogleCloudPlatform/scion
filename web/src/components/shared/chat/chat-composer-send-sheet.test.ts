@@ -188,3 +188,86 @@ describe('composer — send menu on touch', () => {
     expect(sheet().open).toBe(false);
   });
 });
+
+describe('composer — schedule send on touch', () => {
+  let el: any;
+  let schedules: string[];
+
+  const sendBtn = (): HTMLElement => el.shadowRoot.querySelector('.send-btn');
+  const sheet = (): any => el.shadowRoot.querySelector('scion-action-sheet');
+  const scheduleDialog = (): any => el.shadowRoot.querySelector('scion-chat-schedule-dialog');
+
+  async function settle(): Promise<void> {
+    await el.updateComplete;
+    await sheet().updateComplete;
+  }
+
+  async function longPressSend(): Promise<void> {
+    sendBtn().dispatchEvent(pointer('pointerdown'));
+    vi.advanceTimersByTime(LONG_PRESS_MS);
+    window.dispatchEvent(pointer('pointerup'));
+    sendBtn().dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+    await settle();
+  }
+
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    el = document.createElement('scion-chat-composer');
+    el.conversationMode = true;
+    el.projectId = 'proj-1';
+    el.scheduleSendEnabled = true;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    el.text = 'later please';
+    el.runeCount = el.text.length;
+    await el.updateComplete;
+    schedules = [];
+    el.addEventListener('chat-schedule', (e: CustomEvent) => schedules.push(e.detail.text));
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.useRealTimers();
+  });
+
+  it('offers Schedule send in the sheet; choosing it opens the dialog after the sheet closes', async () => {
+    await longPressSend();
+    const rows = [...sheet().shadowRoot.querySelectorAll('.item')].map((r: Element) =>
+      r.textContent?.trim()
+    );
+    expect(rows).toEqual(['Send with interruption', 'Schedule send…']);
+
+    sheet().shadowRoot.querySelector('.item[data-id="schedule-send"]').click();
+    await settle();
+    expect(sheet().open).toBe(false);
+    expect(scheduleDialog().open).toBe(true);
+    expect(el.text).toBe('later please');
+
+    const fireAt = new Date(Date.now() + 3_600_000).toISOString();
+    scheduleDialog().dispatchEvent(
+      new CustomEvent('schedule-confirm', { detail: { fireAt }, bubbles: true, composed: true })
+    );
+    await settle();
+    expect(schedules).toEqual(['later please']);
+  });
+
+  it('the sheet item is disabled while attachments are staged', async () => {
+    el.pendingFiles = [{ id: 'a1', name: 'f.txt', mime: 'text/plain', size: 1, url: '' }];
+    await el.updateComplete;
+    await longPressSend();
+    const item = el.shadowRoot
+      .querySelector('scion-action-sheet')
+      .items.find((i: { id: string }) => i.id === 'schedule-send');
+    expect(item.disabled).toBe(true);
+  });
+
+  it('is not in the sheet unless enabled by the parent', async () => {
+    el.scheduleSendEnabled = false;
+    await el.updateComplete;
+    await longPressSend();
+    const rows = [...sheet().shadowRoot.querySelectorAll('.item')].map((r: Element) =>
+      r.textContent?.trim()
+    );
+    expect(rows).toEqual(['Send with interruption']);
+  });
+});

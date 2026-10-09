@@ -982,6 +982,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "PUT /api/v1/github-app", RouteID: "githubApp.config.update",
 		Classification: RouteHubAdmin,
 		Permission:     "hub.github_app.update", Resource: "hub", Action: "update",
+		SessionOnly: authzop.ReasonCredentialManagement,
 	},
 	"GET /api/v1/github-app/installations": {
 		Pattern: "GET /api/v1/github-app/installations", RouteID: "githubApp.installations.list",
@@ -1028,8 +1029,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 	// check. POST /api/v1/brokers is user-credentialed and enforces
 	// broker.create itself, in-handler, via authorizeBrokerCreate
 	// (handlers_brokers.go) — see createBrokerRegistration and its
-	// ptone/scion#2138 gate. It is not RoutePolicy because the same path
-	// also carries the additional target owner/super-admin re-registration
+	// ptone/scion#2138 gate. UATs are admitted through
+	// authorizeBrokerCreate's bearer gate; broker on-behalf-of requests are
+	// not admitted. It is not RoutePolicy because the same path also
+	// carries the additional target owner/super-admin re-registration
 	// check, which a declarative Permission entry cannot express.
 	// -------------------------------------------------------------------------
 	"/api/v1/brokers": {

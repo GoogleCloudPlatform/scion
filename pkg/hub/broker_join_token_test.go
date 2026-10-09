@@ -181,6 +181,8 @@ func TestBrokerJoinToken_MintThenJoinWithoutUserAuth(t *testing.T) {
 	assert.Equal(t, minter.ID, registerEvent.ActorID)
 	assert.Equal(t, minted.BrokerID, registerEvent.BrokerID)
 	assert.Equal(t, map[string]string{
+		"credential_kind":       string(CredentialKindInteractive),
+		"operation":             "register",
 		"join_token_expires_at": minted.ExpiresAt.UTC().Format(time.RFC3339),
 		"join_token_ttl":        "10m0s",
 		"reissued":              "false",
@@ -541,8 +543,8 @@ func TestBrokerJoinToken_MintForAnotherUsersBrokerDenied(t *testing.T) {
 // TestBrokerJoinToken_MintRequiresBrokerCreate: a mint-shaped request
 // (preserveSettings and joinTokenTtlSeconds) goes through the broker.create
 // check like any other registration: a user without broker.create is
-// refused, and so is a user access token, whatever its scopes, even for a
-// user who holds broker.create in a session.
+// refused, and so is a project-boundary user access token without
+// broker:create, even for a user who holds broker.create in a session.
 func TestBrokerJoinToken_MintRequiresBrokerCreate(t *testing.T) {
 	t.Run("user without broker.create", func(t *testing.T) {
 		srv, s := testServer(t)
@@ -576,4 +578,50 @@ func TestBrokerJoinToken_MintRequiresBrokerCreate(t *testing.T) {
 		_, err = s.GetRuntimeBrokerByName(context.Background(), "jt-uat-broker")
 		assert.ErrorIs(t, err, store.ErrNotFound)
 	})
+}
+
+// TestBrokerJoinToken_HubTokenMintsOnlyForOwnBroker: a hub-boundary user
+// access token carrying broker:create mints a join token for a new broker,
+// which its user owns, and re-issues one for a broker its user created. For
+// a broker another user created it is refused and that broker's unused
+// token stays valid.
+func TestBrokerJoinToken_HubTokenMintsOnlyForOwnBroker(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	member := newHubMemberUser(t, s, "jt-hubtoken-member")
+	other := newHubMemberUser(t, s, "jt-hubtoken-other")
+	key := mintHubBrokerUAT(t, srv, member.ID, "broker:create")
+
+	mintWithToken := func(name string) *httptest.ResponseRecorder {
+		return doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+			Name:                name,
+			JoinTokenTTLSeconds: 600,
+			PreserveSettings:    true,
+		})
+	}
+
+	rec := mintWithToken("jt-hubtoken-broker")
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	first := decodeRegistration(t, rec)
+	assert.NotEmpty(t, first.JoinToken)
+	created, err := s.GetRuntimeBroker(ctx, first.BrokerID)
+	require.NoError(t, err)
+	assert.Equal(t, member.ID, created.CreatedBy, "the token's user owns the new broker")
+
+	rec = mintWithToken("jt-hubtoken-broker")
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	reissued := decodeRegistration(t, rec)
+	assert.Equal(t, first.BrokerID, reissued.BrokerID)
+	assert.True(t, reissued.Reissued)
+
+	otherRec := mintJoinToken(t, srv, other, "jt-hubtoken-other-broker", 600)
+	require.Equal(t, http.StatusCreated, otherRec.Code, "body: %s", otherRec.Body.String())
+	otherMinted := decodeRegistration(t, otherRec)
+
+	rec = mintWithToken("jt-hubtoken-other-broker")
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "joinToken")
+	stored, err := s.GetJoinTokenByBrokerID(ctx, otherMinted.BrokerID)
+	require.NoError(t, err)
+	assert.Equal(t, sha256Hash(otherMinted.JoinToken), stored.TokenHash, "the other user's stored token still matches its issued token")
 }

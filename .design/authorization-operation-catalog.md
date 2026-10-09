@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 174
+**Operations:** 177
 
 ## Table of Contents
 
@@ -136,7 +136,7 @@
 - [hub.adminmode.update](#hubadminmodeupdate) — Toggle admin/maintenance mode
 - [hub.allowlist.update](#huballowlistupdate) — Manage the platform email allow list
 - [hub.health.read](#hubhealthread) — Read platform health summary and GCP quota status
-- [hub.diagnostics.read](#hubdiagnosticsread) — Read diagnostic logs and messaging divergence data
+- [hub.diagnostics.read](#hubdiagnosticsread) — Read diagnostic logs, the diagnostic log stream and messaging divergence data. The log stream re-checks a token credential on every heartbeat and ends once the token stops validating or loses hub.diagnostics.read
 - [hub.scheduler.read](#hubschedulerread) — Read scheduler status and configuration
 - [hub.projectdefaults.read](#hubprojectdefaultsread) — Read project default settings
 - [hub.lifecyclehooks.read](#hublifecyclehooksread) — Read lifecycle hook definitions
@@ -144,11 +144,14 @@
 - [hub.lifecyclehooks.update](#hublifecyclehooksupdate) — Create, update, delete and activate hub lifecycle hooks and hub pre-start hooks. The admin lifecycle-hook route guard checks hub.lifecycle_hooks.read, so a token writing there needs hub_lifecycle_hooks:read and hub_lifecycle_hooks:update
 - [hub.settings.update](#hubsettingsupdate) — Set the user-defined hub injected skills; system entries are preserved
 - [hub.validate.execute](#hubvalidateexecute) — Validate resource definitions against schema
-- [hub.integrations.read](#hubintegrationsread) — Read integration configurations
+- [hub.integrations.read](#hubintegrationsread) — Read integration configurations, the available-integrations list, integration health and integration update status
+- [hub.integrations.update](#hubintegrationsupdate) — Update an integration's settings and restart an integration. The route guard checks hub.integrations.read, so a token needs hub_integrations:read and hub_integrations:update. A config update that sets secrets or any settings key outside the configuration set requires an interactive session
+- [hub.integrations.install](#hubintegrationsinstall) — Install an integration and start an integration update; both build and install code on the hub host, so an interactive session only
 - [hub.teamsmanifest.read](#hubteamsmanifestread) — Read Teams integration manifest
 - [hub.metrics.read](#hubmetricsread) — Read metrics dashboard data
 - [hub.githubapp.read](#hubgithubappread) — Read GitHub App configuration and installations
-- [hub.githubapp.update](#hubgithubappupdate) — Update GitHub App configuration, manage installations, discover and sync
+- [hub.githubapp.update](#hubgithubappupdate) — Create, update and delete GitHub App installations, discover installations and sync permissions
+- [hub.githubapp.config.update](#hubgithubappconfigupdate) — Update the GitHub App configuration, which sets the hub's app credentials; an interactive session only
 - [quota.read](#quotaread) — Read limit definitions, entitlements, and usage
 - [quota.create](#quotacreate) — Create limit definitions and entitlement bindings
 - [quota.update](#quotaupdate) — Update limit definitions and entitlement bindings
@@ -205,12 +208,19 @@
 
 **Resource Resolver:** project-from-body
 
-**Effects:** `create-resource`
+**Effects:** `create-resource`, `grant-authority`
 
 ### Delegation
 
 - **Kind:** `non_amplification`
 - Actor must hold the role and scopes delegated to the new agent (CanDelegate non-amplification); an agent actor is also evaluated against the delegation ceiling of its live delegation chain for agent.create on the target project
+
+### Audit
+
+- **Event Type:** `agent_delegation`
+- **Context Fields:** actor_id
+- **After Fields:** agent_id, can_delegate_result
+- **Atomic:** Yes
 
 **Denial Codes:** `forbidden`, `conflict`
 
@@ -219,6 +229,7 @@
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestAgentCreate_ExplicitRoleAboveParentDenied`
 - `pkg/hub:TestAgentCreate_RequiresLiveDelegator`
+- `pkg/hub:TestCreateAuditFailureRollsBack`
 
 ---
 
@@ -1167,13 +1178,27 @@
 
 **Resource Resolver:** hub-scoped
 
-**Effects:** `create-resource`
+**Effects:** `create-resource`, `grant-authority`
+
+### Delegation
+
+- **Kind:** `non_amplification`
+- The creator is bound to the project-owner role on the project the call creates. A credential with a permission ceiling must cover every permission of that role before any write (projectOwnerGrantDenial); for other callers project.create gates the grant
+
+### Audit
+
+- **Event Type:** `project_member_add`
+- **Context Fields:** actor_id, project_id
+- **After Fields:** user_id, role
+- **Atomic:** Yes
 
 **Denial Codes:** `forbidden`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestOwnerGrantCoverageCheck`
+- `pkg/hub:TestOwnerBindingAuditFailureRollsBack`
 
 ---
 
@@ -1378,13 +1403,27 @@
 
 **Resource Resolver:** project-from-body
 
-**Effects:** `create-resource`
+**Effects:** `create-resource`, `grant-authority`
+
+### Delegation
+
+- **Kind:** `non_amplification`
+- When the call creates the project, the creator is bound to the project-owner role on it; registering an existing project binds no owner. A credential with a permission ceiling must cover every permission of that role before any write (projectOwnerGrantDenial); for other callers project.register gates the grant
+
+### Audit
+
+- **Event Type:** `project_member_add`
+- **Context Fields:** actor_id, project_id
+- **After Fields:** user_id, role
+- **Atomic:** Yes
 
 **Denial Codes:** `forbidden`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestOwnerGrantCoverageCheck`
+- `pkg/hub:TestOwnerBindingAuditFailureRollsBack`
 
 ---
 
@@ -1478,7 +1517,20 @@
 
 **Resource Resolver:** project-from-url
 
-**Effects:** `create-resource`
+**Effects:** `create-resource`, `grant-authority`
+
+### Delegation
+
+- **Kind:** `non_amplification`
+- Only the dispatch_agent event type grants authority. Authoring any event type records the author's frozen effect ceiling (revisionAuthorityCeiling); a dispatch_agent event or schedule then creates an agent at fire time, with a delegation edge from the recorded principal, after CanDelegate for that principal. A message event or schedule grants no authority. Effects are listed per operation, not per event type, so grant-authority is listed for the whole operation
+
+### Audit
+
+- **Event Type:** `agent_delegation`
+- **Context Fields:** actor_id
+- **After Fields:** agent_id, can_delegate_result
+- **Atomic:** No
+- **Non-Atomic Justification:** The authoring write records no mutation audit record: it stores the initiator attribution and the frozen effect ceiling on the event or schedule row in the same insert. The agent_delegation record is written when a dispatch_agent event fires, in the agent-create transaction with the agent row and its delegation edge. A message event writes none
 
 **Denial Codes:** `forbidden`
 
@@ -4933,7 +4985,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.health.read`
 
@@ -4945,7 +4999,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
@@ -4953,7 +5007,7 @@
 
 **Domain:** hub
 
-**Description:** Read diagnostic logs and messaging divergence data
+**Description:** Read diagnostic logs, the diagnostic log stream and messaging divergence data. The log stream re-checks a token credential on every heartbeat and ends once the token stops validating or loses hub.diagnostics.read
 
 ### Entry Points
 
@@ -4965,7 +5019,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.diagnostics.read`
 
@@ -4977,7 +5033,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestDiagnosticsLogStream_EndsWhenTokenStopsValidating`
 
 ---
 
@@ -4995,7 +5051,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.scheduler.read`
 
@@ -5007,7 +5065,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
@@ -5194,7 +5252,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.validate.execute`
 
@@ -5206,7 +5266,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
@@ -5214,7 +5274,7 @@
 
 **Domain:** hub
 
-**Description:** Read integration configurations
+**Description:** Read integration configurations, the available-integrations list, integration health and integration update status
 
 ### Entry Points
 
@@ -5222,10 +5282,15 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/admin/integrations` |
 | http_route | GET | `/api/v1/admin/integrations/{name}` |
+| http_route | GET | `/api/v1/admin/integrations/available` |
+| http_route | GET | `/api/v1/admin/integrations/{name}/health` |
+| http_route | GET | `/api/v1/admin/integrations/{name}/update/{id}` |
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.integrations.read`
 
@@ -5237,7 +5302,73 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## hub.integrations.update
+
+**Domain:** hub
+
+**Description:** Update an integration's settings and restart an integration. The route guard checks hub.integrations.read, so a token needs hub_integrations:read and hub_integrations:update. A config update that sets secrets or any settings key outside the configuration set requires an interactive session
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/admin/integrations/{name}/config` |
+| http_route | POST | `/api/v1/admin/integrations/{name}/restart` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+
+**Base Permission:** `hub.integrations.update`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestIntegrationConfigUpdate_SecretsSessionOnlyForTokens`
+
+---
+
+## hub.integrations.install
+
+**Domain:** hub
+
+**Description:** Install an integration and start an integration update; both build and install code on the hub host, so an interactive session only
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/admin/integrations/{name}/install` |
+| http_route | POST | `/api/v1/admin/integrations/{name}/update` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `HOST_OPERATIONS`)
+
+**Base Permission:** `hub.integrations.update`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestIntegrationInstall_SessionOnlyForTokens`
 
 ---
 
@@ -5255,7 +5386,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.teams_manifest.read`
 
@@ -5267,7 +5400,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
@@ -5286,7 +5419,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.metrics.read`
 
@@ -5298,7 +5433,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestMetricsDashboard_RequiresMetricsSelector`
 
 ---
 
@@ -5318,7 +5453,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.github_app.read`
 
@@ -5330,7 +5467,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
@@ -5338,13 +5475,12 @@
 
 **Domain:** hub
 
-**Description:** Update GitHub App configuration, manage installations, discover and sync
+**Description:** Create, update and delete GitHub App installations, discover installations and sync permissions
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | PUT | `/api/v1/github-app` |
 | http_route | POST | `/api/v1/github-app/installations` |
 | http_route | PUT | `/api/v1/github-app/installations/{id}` |
 | http_route | DELETE | `/api/v1/github-app/installations/{id}` |
@@ -5353,7 +5489,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.github_app.update`
 
@@ -5365,7 +5503,39 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## hub.githubapp.config.update
+
+**Domain:** hub
+
+**Description:** Update the GitHub App configuration, which sets the hub's app credentials; an interactive session only
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/github-app` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Base Permission:** `hub.github_app.update`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestGitHubAppConfigUpdate_SessionOnlyForTokens`
 
 ---
 
