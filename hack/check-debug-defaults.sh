@@ -18,10 +18,11 @@
 #   deploy/helm/<chart>/hack/    chart verification scripts
 #
 # Contract: on every uncommented line in scope, the check flags a standalone
-# `--debug` token (bare or =true, =t, =1) wherever it appears, and any
-# assignment of `debug` to SCION_LOG_LEVEL, log_level or logLevel, or of a
-# non-empty value to SCION_DEBUG (including shell defaults and the Dockerfile
-# `ENV KEY value` form). It is deliberately fail-closed: prose that names the
+# `--debug` token (bare or =true, =t, =1, quoted or not) wherever it appears,
+# and any assignment of `debug` to SCION_LOG_LEVEL, SCION_SERVER_LOG_LEVEL,
+# SCION_SERVER_LOGLEVEL, log_level or logLevel, or of a non-empty value to
+# SCION_DEBUG (including shell defaults and the Dockerfile `ENV KEY value`
+# form). It is deliberately fail-closed: prose that names the
 # flag is flagged too. Intentional mentions go in the commented ALLOWLIST below.
 #
 # Details. Matching is case-insensitive. A line is a comment when its first
@@ -117,9 +118,10 @@ PATTERNS=(
   # Delimiters are complement classes: left is start of line or any character
   # other than a letter, digit, _, - or backtick; right is end of line or any
   # character other than a letter, digit, _, = or -. (\` is a literal backtick.)
-  "(^|[^A-Za-z0-9_\`-])--debug(=(true|t|1))?(\$|[^A-Za-z0-9_=-])"
-  # SCION_LOG_LEVEL / log_level / logLevel = or : debug.
-  "(^|[^A-Za-z0-9_{])(SCION_LOG_LEVEL|log_?level)${q}?[[:space:]]*[=:][[:space:]]*${lvl}"
+  "(^|[^A-Za-z0-9_\`-])--debug(=${q}?(true|t|1)${q}?)?(\$|[^A-Za-z0-9_=-])"
+  # SCION_LOG_LEVEL / SCION_SERVER_LOG_LEVEL / SCION_SERVER_LOGLEVEL /
+  # log_level / logLevel = or : debug.
+  "(^|[^A-Za-z0-9_{])(SCION_LOG_LEVEL|SCION_SERVER_LOG_?LEVEL|log_?level)${q}?[[:space:]]*[=:][[:space:]]*${lvl}"
   # Shell default for the level: ${SCION_LOG_LEVEL:-debug}, ${SCION_LOG_LEVEL:=debug}.
   "[$][{]SCION_LOG_LEVEL:?[-=]${lvl}"
   # SCION_DEBUG = or : a non-empty value (also via a non-empty shell default).
@@ -264,6 +266,10 @@ DEBUG_FLAG=--debug
 Environment=SCION_FLAGS=--debug
 Run `scion server start --debug` to troubleshoot.
 Pass <code>--debug</code> to the server.
+scion server start --debug="true"
+scion server start --debug='1'
+SCION_SERVER_LOGLEVEL=debug
+SCION_SERVER_LOG_LEVEL=debug
 EOF
   # A tab between the words (heredoc tabs are easy to lose in an edit).
   printf 'scion server\tstart --debug\n' >>"$fx/scripts/starter-hub/bad.sh"
@@ -291,6 +297,8 @@ SCION_DEBUG=""
 SCION_DEBUG=${SCION_DEBUG:-}
 SCION_DEBUG_EXTRA=1
 ENV SCION_LOG_LEVEL info
+scion server start --debug="false"
+SCION_SERVER_LOGLEVEL=info
 EOF
   # Pruned: top-level ci/ of a chart.
   printf 'log_level: debug\n' >"$fx/deploy/helm/chart/ci/values.yaml"
