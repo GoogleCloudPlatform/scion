@@ -533,10 +533,21 @@ func (s *Server) recordHubWorkspace(project *store.Project) (recorded bool, err 
 	return true, nil
 }
 
+// setHubWorkspaceDownloader replaces the download of a workspace upload into
+// a hub workspace. nil restores the default (gcp.SyncFromGCS). This is
+// useful for testing.
+func (s *Server) setHubWorkspaceDownloader(fn func(ctx context.Context, bucket, prefix, localPath string) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hubWorkspaceDownload = fn
+}
+
 // hubWorkspaceDownloader returns the function that downloads a workspace
-// upload into a hub workspace: s.hubWorkspaceDownload when set (tests),
-// otherwise gcp.SyncFromGCS.
+// upload into a hub workspace: the one set by setHubWorkspaceDownloader
+// (tests), otherwise gcp.SyncFromGCS.
 func (s *Server) hubWorkspaceDownloader() func(ctx context.Context, bucket, prefix, localPath string) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.hubWorkspaceDownload != nil {
 		return s.hubWorkspaceDownload
 	}

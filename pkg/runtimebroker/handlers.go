@@ -1742,9 +1742,15 @@ func (s *Server) workspaceBootstrapFailed(req CreateAgentRequest, op string, cau
 
 // logWorkspaceBootstrapFailure records a GCS workspace bootstrap failure's
 // cause at the broker, which the client text leaves out. It names the
-// agent, project and run, never the request's credentials.
+// agent, project and run, never the request's credentials. An invalid
+// workspace directory is a 400 for the request, so it is logged at Warn;
+// every other step failure is logged at Error.
 func (s *Server) logWorkspaceBootstrapFailure(req CreateAgentRequest, op string, cause error) {
-	s.agentLifecycleLog.Error("GCS workspace bootstrap failed", "op", op,
+	level := slog.LevelError
+	if op == opValidateWorkspaceDir {
+		level = slog.LevelWarn
+	}
+	s.agentLifecycleLog.Log(context.Background(), level, "GCS workspace bootstrap failed", "op", op,
 		"agent_id", req.ID, "project_id", req.ProjectID, "run_id", req.RunID, "error", cause)
 }
 

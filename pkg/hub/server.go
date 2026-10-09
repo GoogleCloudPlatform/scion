@@ -1739,14 +1739,14 @@ type Server struct {
 	templateLog       *slog.Logger
 	workspaceLog      *slog.Logger
 	agentMetricsLog   *slog.Logger
-
-	// hubWorkspaceDownload replaces gcp.SyncFromGCS for downloads of a
-	// workspace upload into a hub workspace when set (tests only; see
-	// hubWorkspaceDownloader).
-	hubWorkspaceDownload func(ctx context.Context, bucket, prefix, localPath string) error
 	// perfTraceLog receives the per-request perf_trace lines. Set only when
 	// server.hub.perf_trace is on; nil otherwise.
 	perfTraceLog *slog.Logger
+
+	// hubWorkspaceDownload replaces gcp.SyncFromGCS for downloads of a
+	// workspace upload into a hub workspace when set (tests only). Guarded
+	// by mu; see setHubWorkspaceDownloader and hubWorkspaceDownloader.
+	hubWorkspaceDownload func(ctx context.Context, bucket, prefix, localPath string) error
 
 	// Cached rate limit info from the most recent GitHub App API call
 	githubAppRateLimit *githubapp.RateLimitInfo

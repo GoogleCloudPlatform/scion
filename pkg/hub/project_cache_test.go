@@ -362,6 +362,7 @@ func TestHandleProjectCacheRefresh_Failure_FixedText(t *testing.T) {
 
 	assert.Contains(t, logs.String(), detail)
 	assert.Contains(t, logs.String(), "project_id="+project.ID)
+	assert.Contains(t, logs.String(), "broker_id="+broker.ID)
 }
 
 // TestHandleProjectCacheNotify_DownloadFailure_FixedText checks that a failed
@@ -375,9 +376,9 @@ func TestHandleProjectCacheNotify_DownloadFailure_FixedText(t *testing.T) {
 	srv.SetStorage(newMockStorage("bucket"))
 
 	const detail = "sync detail /internal/cache/path gs://bucket/prefix 403"
-	srv.hubWorkspaceDownload = func(context.Context, string, string, string) error {
+	srv.setHubWorkspaceDownloader(func(context.Context, string, string, string) error {
 		return errors.New(detail)
-	}
+	})
 
 	var logs bytes.Buffer
 	srv.workspaceLog = slog.New(slog.NewTextHandler(&logs, nil))

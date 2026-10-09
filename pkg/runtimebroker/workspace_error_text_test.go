@@ -317,6 +317,11 @@ func TestGCSBootstrapError_ClientRefusalsUnchanged(t *testing.T) {
 				t.Errorf("body = %s, must not carry the validation error %q", w.Body.String(), verr.Error())
 			}
 			assertBootstrapLogged(t, logs.String(), opValidateWorkspaceDir, name, verr.Error())
+			// A refused request, not a broker failure: logged at Warn.
+			rec := findLogRecord(logs.String(), "GCS workspace bootstrap failed", map[string]string{"op": opValidateWorkspaceDir})
+			if got, _ := rec["level"].(string); got != slog.LevelWarn.String() {
+				t.Errorf("log record level = %q, want %q", got, slog.LevelWarn.String())
+			}
 		})
 		t.Run("no-bucket-"+mode, func(t *testing.T) {
 			name := "agent-3496-nobucket-" + mode
