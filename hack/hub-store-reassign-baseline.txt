@@ -37,8 +37,7 @@ pkg/hub/broker_heartbeat_reconcile_test.go | 2
 pkg/hub/broker_profile_attach_test.go | 2
 pkg/hub/broker_provider_selfheal_test.go | 3
 pkg/hub/broker_quota_dispatch_test.go | 2
-# Temporary exception: reassignments added after the guard by GoogleCloudPlatform/scion#2943,
-# #2973 and #2981; migrate to installStoreFault and lower (ptone/scion#4068).
+# Temporary exception: added after the guard by GoogleCloudPlatform/scion#2943; migrate to installStoreFault and lower (ptone/scion#4068).
 pkg/hub/broker_scoped_reservations_test.go | 1
 pkg/hub/capabilities_test.go | 1
 pkg/hub/conduit_authz_recheck_test.go | 4
@@ -51,8 +50,7 @@ pkg/hub/execute_agent_keys_test.go | 6
 pkg/hub/fix_2087_create_cleanup_detached_test.go | 2
 pkg/hub/fix_3471_dm_wake_detached_test.go | 2
 pkg/hub/fix_3557_managed_create_unrecorded_test.go | 12
-# Temporary exception: reassignments added after the guard by GoogleCloudPlatform/scion#2943,
-# #2973 and #2981; migrate to installStoreFault and lower (ptone/scion#4068).
+# Temporary exception: added after the guard by GoogleCloudPlatform/scion#2981; migrate to installStoreFault and lower (ptone/scion#4068).
 pkg/hub/fix_3730_workspace_storage_path_test.go | 10
 pkg/hub/fix_3746_managed_create_conflict_retry_test.go | 10
 pkg/hub/gcp_iam_settings_test.go | 2
@@ -97,8 +95,7 @@ pkg/hub/lifecycle_post_reload_delete_test.go | 5
 pkg/hub/material_precheck_test.go | 2
 pkg/hub/material_user_scope_test.go | 1
 pkg/hub/material_value_audit_test.go | 2
-# Temporary exception: reassignments added after the guard by GoogleCloudPlatform/scion#2943,
-# #2973 and #2981; migrate to installStoreFault and lower (ptone/scion#4068).
+# Temporary exception: added after the guard by GoogleCloudPlatform/scion#2973; migrate to installStoreFault and lower (ptone/scion#4068).
 pkg/hub/membership_loss_test.go | 10
 pkg/hub/offload_integration_test.go | 1
 pkg/hub/offload_route_authz_test.go | 4
