@@ -773,10 +773,13 @@ func validRecordedSourceURL(s string) bool {
 // documented scheme-less "github.com/..." shorthand when its https:// form
 // passes the same check (NormalizeTemplateSourceURL adds the scheme).
 func validReimportSourceURL(s string) bool {
+	if len(s) > maxRecordedSourceURLBytes {
+		return false
+	}
 	if validRecordedSourceURL(s) {
 		return true
 	}
-	if strings.HasPrefix(strings.ToLower(s), "github.com/") {
+	if len(s) >= len("github.com/") && strings.EqualFold(s[:len("github.com/")], "github.com/") {
 		return validRecordedSourceURL("https://" + s)
 	}
 	return false
