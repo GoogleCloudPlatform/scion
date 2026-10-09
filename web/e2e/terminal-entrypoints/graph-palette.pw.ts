@@ -615,7 +615,15 @@ test.describe('/agents does not offer it without a graph', () => {
   test('while loading, and on the error page until a Retry loads the graph', async ({ page }) => {
     const hold = deferred();
     await setupGraph(page, storage);
-    await queueResponses(page, agentsList, [{ fail: true, until: hold.promise }]);
+    // The graph loads through the agent drain, which retries a failed page
+    // (DRAIN_PAGE_RETRIES in src/client/agent-drain.ts), so the list fails
+    // every attempt until the Retry below; the first waits for `hold`.
+    let failing = true;
+    await page.route(agentsList, async (route: Route) => {
+      await hold.promise;
+      if (failing) await route.fulfill({ status: 500, json: { error: 'fixture failure' } });
+      else await route.fallback();
+    });
     await page.goto('/agents');
     await expect(page.getByText('Loading agents...')).toBeVisible();
     await expectNotOffered(page);
@@ -624,6 +632,7 @@ test.describe('/agents does not offer it without a graph', () => {
     await expect(page.getByText('Failed to Load Agents')).toBeVisible();
     await expectNotOffered(page);
 
+    failing = false;
     await page.locator('scion-page-agents sl-button', { hasText: 'Retry' }).click();
     await expect(graphNode(page, targetId)).toBeVisible();
     await expect(paletteButton(page)).toBeVisible();
@@ -664,7 +673,9 @@ test.describe('the project page does not offer it without a graph', () => {
 
   test('with no agents', async ({ page }) => {
     await openHost(page, `/projects/${projectId}`, storage, {});
-    await expect(page.getByText('Fixture Project').first()).toBeVisible();
+    // The page heading, not the first text match: the closed template dialog
+    // also names the project.
+    await expect(page.getByRole('heading', { level: 1, name: 'Fixture Project' })).toBeVisible();
     await expect(page.locator('scion-agent-tree-view')).toHaveCount(0);
     await expectNotOffered(page);
   });
