@@ -393,6 +393,8 @@ interface SpaceMember {
   email: string;
   avatarUrl?: string;
   kind: 'user' | 'agent';
+  /** Agent slug, so a thread default stored by slug can be matched. */
+  slug?: string;
 }
 
 type PromoteToastVariant = 'success' | 'warning' | 'danger';
@@ -3369,6 +3371,7 @@ export class ScionPageChat extends LitElement {
         id: a.id,
         name: a.displayName,
         email: '',
+        slug: a.slug || '',
         kind: 'agent' as const,
       })),
     ];
@@ -5625,7 +5628,9 @@ export class ScionPageChat extends LitElement {
             .dmInfoByPeerId=${this.v2DMInfoByPeerId}
             current-user-id="${this.pageData?.user?.id || ''}"
             dm-peer-id="${this.v2Conversation?.isDM ? this.v2Conversation.peerId : ''}"
-            default-agent-slug="${this.v2Conversation?.defaultAgent || ''}"
+            default-agent-slug="${this.resolveDefaultAgentSlug(
+              this.v2Conversation?.defaultAgent || ''
+            )}"
             @member-click=${this.handleMemberClick}
             @member-marked-unread=${this.handleMemberMarkedUnread}
           ></scion-chat-members>
@@ -5672,6 +5677,30 @@ export class ScionPageChat extends LitElement {
     if (byId) return byId.id;
     const bySlug = this.v2AgentMembers.find((a) => a.slug === defaultAgent);
     return bySlug?.id || '';
+  }
+
+  /**
+   * Resolve a thread's `defaultAgent` (an agent ID or a slug) to the agent's
+   * slug, for the members panel, which pins the default by slug. Falls back
+   * to the stored value when the agent isn't a known space member.
+   */
+  private resolveDefaultAgentSlug(defaultAgent: string): string {
+    if (!defaultAgent) return '';
+    const byId = this.v2AgentMembers.find((a) => a.id === defaultAgent);
+    return byId?.slug || defaultAgent;
+  }
+
+  /**
+   * Resolve a thread's `defaultAgent` (an agent ID or a slug) to a name to
+   * show. Falls back to the stored value when the agent isn't a known space
+   * member.
+   */
+  private resolveDefaultAgentName(defaultAgent: string): string {
+    if (!defaultAgent) return '';
+    const agent =
+      this.v2AgentMembers.find((a) => a.id === defaultAgent) ||
+      this.v2AgentMembers.find((a) => a.slug === defaultAgent);
+    return agent?.displayName || agent?.slug || defaultAgent;
   }
 
   /**
@@ -5886,7 +5915,9 @@ export class ScionPageChat extends LitElement {
                 : nothing}
               ${conv.defaultAgent
                 ? html`
-                    <sl-tooltip content="Default agent: ${conv.defaultAgent}">
+                    <sl-tooltip
+                      content="Default agent: ${this.resolveDefaultAgentName(conv.defaultAgent)}"
+                    >
                       <span>🤖</span>
                     </sl-tooltip>
                   `
