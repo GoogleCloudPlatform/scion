@@ -881,3 +881,37 @@ func TestAgentCreatePlacement_ExistingAgentRerunMeetsPlacementRefusal(t *testing
 	assert.Contains(t, rec.Body.String(), "creating agent's broker")
 	pf.assertNoIDs(t, rec)
 }
+
+// An explicit --broker naming the creator's broker turns off the profile
+// setting (tier 2), so the creator's profile (tier 3) is inherited even
+// though the setting names a profile that broker also offers.
+func TestAgentCreatePlacement_ExplicitCreatorBrokerInheritsProfileOverSetting(t *testing.T) {
+	pf := newPlacementFixture(t)
+	enableInheritPlacement(t, pf.srv)
+	pf.setAnnotations(t, map[string]string{projectSettingAgentCreateProfile: "local"})
+
+	agent := pf.createAsCreator(t, CreateAgentRequest{Name: "explicit-creator-over-setting", RuntimeBrokerID: pf.k8sBroker.ID})
+	assertPlacement(t, agent, pf.k8sBroker.ID, store.PlacementSourceFlag, "gke", store.PlacementSourceInherited)
+}
+
+// A PUT that only clears agentCreateProfile succeeds when the stored
+// agent-create broker no longer serves the project, and keeps the stored
+// broker untouched.
+func TestAgentCreatePlacementSettings_ClearProfileSkipsGoneBroker(t *testing.T) {
+	pf := newPlacementFixture(t)
+	pf.setAnnotations(t, map[string]string{
+		projectSettingAgentCreateBroker:  tid("gone-broker"),
+		projectSettingAgentCreateProfile: "gke",
+	})
+
+	rec, resp := putPlacementSettings(t, pf, hubclient.ProjectSettings{AgentCreateProfile: strPtr("")})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Nil(t, resp.AgentCreateProfile)
+	require.NotNil(t, resp.AgentCreateBroker)
+	assert.Equal(t, tid("gone-broker"), *resp.AgentCreateBroker, "the stored broker is kept")
+
+	// Setting a profile still resolves the stored broker and refuses.
+	rec, _ = putPlacementSettings(t, pf, hubclient.ProjectSettings{AgentCreateProfile: strPtr("gke")})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "agentCreateBroker")
+}

@@ -50,14 +50,15 @@ import (
 // A profile is inherited only when the broker that ends up selected is the
 // creator's broker, compared by ID after resolveRuntimeBroker
 // (inheritCreatorProfile), so an explicit --broker elsewhere never carries
-// the creator's profile with it. An inherited profile the creator's broker
-// does not report available refuses the create. With -p alone the
-// creator's broker is still inherited, and the create is refused when that
-// broker does not offer the requested profile (the error names the profile
-// and the broker). A profile
-// from the agent-create profile setting that the creator's broker does not
-// offer does not inherit the broker; the regular chain picks one, and the
-// setting check below applies to it.
+// the creator's profile with it; an explicit --broker that is the creator's
+// broker does inherit it, even over the agent-create profile setting, which
+// --broker turns off. An inherited profile the creator's broker
+// does not report available refuses the create. With -p alone the creator's
+// broker is still inherited, and the create is refused when that broker does
+// not offer the requested profile (the error names the profile and the
+// broker). A profile from the agent-create profile setting that the
+// creator's broker does not offer does not inherit the broker; the regular
+// chain picks one, and the setting check below applies to it.
 //
 // Creates by users never take tiers 2 and 3.
 //
@@ -452,7 +453,7 @@ func (s *Server) matchProjectProvider(ctx context.Context, providers []store.Pro
 // validateAgentCreatePlacementSettings checks the agent-create placement
 // settings on a project settings PUT. It runs only when the request carries
 // either field, so an unrelated save is never refused because a broker went
-// away later. The broker must be a provider of the project and is stored as
+// away later; nor is a PUT that only clears the profile. The broker must be a provider of the project and is stored as
 // its ID; the profile must be offered by that broker or, with no broker set,
 // by at least one of the project's brokers. It writes the error response and
 // returns false when the caller must stop.
@@ -473,6 +474,12 @@ func (s *Server) validateAgentCreatePlacementSettings(w http.ResponseWriter, ctx
 			return false
 		}
 		req.AgentCreateProfile = &profile
+	}
+
+	// A PUT that only clears the profile has nothing to check against the
+	// stored broker, so a broker that has since gone away does not refuse it.
+	if req.AgentCreateBroker == nil && profile == "" {
+		return true
 	}
 
 	var broker *store.RuntimeBroker
