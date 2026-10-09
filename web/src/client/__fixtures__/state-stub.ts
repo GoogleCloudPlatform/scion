@@ -30,4 +30,6 @@ export const stateManager = Object.assign(new EventTarget(), {
   scopeGeneration: 0,
   beginSeedEpoch: (): symbol => Symbol('seed-epoch'),
   endSeedEpoch: (): void => {},
+  // No agents are held: lookups by id find nothing.
+  getAgent: (_id: string): undefined => undefined,
 });

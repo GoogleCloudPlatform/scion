@@ -46,7 +46,8 @@ import type { PageData, Agent } from '../../shared/types.js';
 import { apiFetch, parseApiError } from '../../client/api.js';
 import { navigateTo, pushRoute, replaceRoute, stateManager } from '../../client/main.js';
 import { browserPath, stripBasePath } from '../../client/navigation.js';
-import { agentStore } from '../../client/agent-store.js';
+import { agentIndexOf, agentStore } from '../../client/agent-store.js';
+import { dmPeerFromKey } from '../../client/chat-routes.js';
 import type { AgentListSnapshot } from '../../client/agent-store.js';
 import type { SeedEpochToken } from '../../client/state.js';
 import { dispatchPageTitle, PAGE_TITLE_EVENT } from '../../client/page-title.js';
@@ -80,6 +81,7 @@ import { hasOpenModalDescendant, isOpenModalElement } from '../shared/open-modal
 import { deepActiveElement } from '../shared/deep-active-element.js';
 import { PaletteTypeahead } from '../shared/palette/palette-typeahead.js';
 import '../shared/chat/chat-thread.js';
+import type { PeerAgentResolvedDetail } from '../shared/chat/chat-thread.js';
 import { ChatPanelHistory, type ChatPanel } from './chat-panel-history.js';
 import '../shared/chat/chat-action-sheet.js';
 import type { ActionSheetItem, ActionSheetSelectDetail } from '../shared/chat/chat-action-sheet.js';
@@ -371,6 +373,12 @@ interface V2ConversationState {
    * DM list; a DM that does not exist yet is unmuted.
    */
   muted?: boolean;
+  /**
+   * A DM opened from its URL with no view to inherit a project from: the
+   * peer agent's project, once known, becomes the DM's project and fills
+   * the members sidebar, as opening the DM from that project's members does.
+   */
+  takesPeerProject?: boolean;
 }
 
 /** The parts of a thread that a URL does not carry and have to be resolved. */
@@ -1920,7 +1928,11 @@ export class ScionPageChat extends LitElement {
           this._projectIdToSlug.set(s.projectId, s.projectSlug);
         }
       }
-      if (slugsChanged) this._refreshPaletteAgentRows();
+      if (slugsChanged) {
+        this._refreshPaletteAgentRows();
+        // The maps are not reactive; an agent DM's project crumb reads them.
+        this.requestUpdate();
+      }
       // Re-resolve the route now that slug data is available (handles deep-link on first load)
       this.parseV2Route();
     }
@@ -2095,19 +2107,29 @@ export class ScionPageChat extends LitElement {
 
       if (segment.startsWith('dm:')) {
         this.mobilePanel = this.takeRouteOpenPanel('center');
-        dispatchPageTitle(this, 'DM', 'Chat');
-        // Legacy DM key format (e.g. dm:agent:UUID:user:UUID) — use directly
+        // Full DM key (e.g. dm:agent:UUID:user:UUID) — use directly. The key
+        // names the peer; its name and project come from what the page
+        // already holds, then the DM list and the thread's peer read.
+        const peer = dmPeerFromKey(segment, this.pageData?.user?.id || '');
+        const known = peer ? this.knownDMPeer(peer.peerId, peer.peerKind) : null;
+        const inherited = this.inheritedProjectId();
+        const projectId = inherited || known?.projectId || '';
         this.v2Conversation = {
           conversationKey: segment,
-          projectId: this.inheritedProjectId(),
+          projectId,
           projectSlug: '',
           threadName: '',
           defaultAgent: '',
           isDM: true,
-          peerName: '',
-          peerId: '',
-          peerKind: 'user',
+          peerName: known?.displayName || '',
+          peerId: peer?.peerId || '',
+          peerKind: peer?.peerKind || 'user',
+          ...(!inherited && !projectId && peer?.peerKind === 'agent'
+            ? { takesPeerProject: true }
+            : {}),
         };
+        dispatchPageTitle(this, known?.displayName || 'DM', 'Chat');
+        if (!inherited && projectId) void this.loadV2Members(projectId);
         void this.resolveDMPeerInfo(segment);
       } else {
         // Peer ID format (/chat/dm/<peerId>) — reconstruct the full
@@ -2983,7 +3005,8 @@ export class ScionPageChat extends LitElement {
       };
       const dm = data.dms?.find((d) => d.conversationKey === key);
       if (dm && this.v2Conversation?.conversationKey === key) {
-        const peerName = dm.peerName || dm.peerSlug || dm.peerEmail || dm.peerId;
+        const peerName =
+          dm.peerName || dm.peerSlug || dm.peerEmail || this.v2Conversation.peerName || dm.peerId;
         this.v2Conversation = {
           ...this.v2Conversation,
           peerName,
@@ -4147,6 +4170,54 @@ export class ScionPageChat extends LitElement {
     const ids = [peerId, userId].sort();
     return `dm:user:${ids[0]}:user:${ids[1]}`;
   }
+
+  /**
+   * What the page already holds about a DM peer, with no request: the
+   * members sidebar, then for an agent the global agent map and the agent
+   * store's hub list. Null when none of them has the peer.
+   */
+  private knownDMPeer(
+    peerId: string,
+    peerKind: 'user' | 'agent'
+  ): { displayName: string; projectId: string } | null {
+    if (peerKind === 'user') {
+      const human = this.v2HumanMembers.find((h) => h.id === peerId);
+      return human ? { displayName: human.displayName, projectId: '' } : null;
+    }
+    const member = this.v2AgentMembers.find((a) => a.id === peerId);
+    if (member) return { displayName: member.displayName, projectId: member.projectId || '' };
+    const hub = agentStore.peek(HUB_AGENTS_QUERY);
+    const agent =
+      stateManager.getAgent(peerId) ?? (hub ? agentIndexOf(hub).get(peerId) : undefined);
+    if (!agent) return null;
+    return { displayName: agent.name || agent.slug || '', projectId: agent.projectId || '' };
+  }
+
+  /**
+   * The thread reported the open agent DM's peer: name the DM after it if
+   * nothing else has, and give a DM opened from its URL the agent's project
+   * and that project's members (see `takesPeerProject`).
+   */
+  private handlePeerAgentResolved = (e: CustomEvent<PeerAgentResolvedDetail>): void => {
+    const detail = e.detail;
+    const conv = this.v2Conversation;
+    if (!detail || !conv?.isDM || conv.conversationKey !== detail.conversationKey) return;
+    // The DM list falls back to the raw id when its row has no name; a
+    // real name replaces that.
+    const named = conv.peerName !== (conv.peerId || detail.agentId) ? conv.peerName : '';
+    const peerName = named || detail.name || conv.peerName;
+    const takeProject = !!conv.takesPeerProject && !!detail.projectId;
+    if (peerName === conv.peerName && !takeProject) return;
+    this.v2Conversation = {
+      ...conv,
+      peerName,
+      peerId: conv.peerId || detail.agentId,
+      peerKind: 'agent',
+      ...(takeProject ? { projectId: detail.projectId, takesPeerProject: false } : {}),
+    };
+    if (peerName !== conv.peerName) dispatchPageTitle(this, peerName, 'Chat');
+    if (takeProject) void this.loadV2Members(detail.projectId);
+  };
 
   /**
    * The project a DM inherits: the one the user was already looking at when
@@ -5934,6 +6005,7 @@ export class ScionPageChat extends LitElement {
               .restoreScrollAnchor=${this.scrollRestoreFor(conv.conversationKey)}
               @scroll-restore-consumed=${this.handleScrollRestoreConsumed}
               @default-agent-changed=${this.handleDefaultAgentChanged}
+              @peer-agent-resolved=${this.handlePeerAgentResolved}
             ></scion-chat-thread>
           `}
       ${this.renderPromoteDialog()}
