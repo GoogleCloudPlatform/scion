@@ -205,11 +205,20 @@ const CONNECT_ERROR_FALLBACK_MS = 1_000;
 /**
  * The Hub upgrades the socket before it knows whether the broker stream
  * opened, so a socket can go straight from onopen to a close code without
- * ever proving the stream is live. Bounds how long any attempt (the initial
- * connect or a reconnect) waits, after onopen, for the first data frame
- * before it ends in 'disconnected'.
+ * ever proving the stream is live. Bounds how long a reconnect attempt
+ * waits, after onopen, for the first data frame before it ends in
+ * 'disconnected'.
  */
 const FIRST_FRAME_TIMEOUT_MS = 10_000;
+/**
+ * The same bound for the initial connect, before the session has ever
+ * connected. Longer, because the Hub's OpenStream is fire-and-forget: time
+ * to first byte is the broker's exec plus `tmux attach-session`, and a cold
+ * sandbox exec or a loaded host can legitimately take well over 10s on the
+ * very first attach. Once a session has connected, the agent has shown it
+ * can serve within a normal window, so reconnects use FIRST_FRAME_TIMEOUT_MS.
+ */
+const INITIAL_FIRST_FRAME_TIMEOUT_MS = 60_000;
 /**
  * Bounds how long any attempt waits for onopen once its socket is created.
  * The preflight has already reached the Hub, and the upgrade does not wait
@@ -366,7 +375,8 @@ class Session implements TerminalSession {
   private attemptReachedOpen = false;
   /**
    * The current attempt's connect guard: OPEN_TIMEOUT_MS until onopen, then
-   * FIRST_FRAME_TIMEOUT_MS until the first data frame.
+   * INITIAL_FIRST_FRAME_TIMEOUT_MS (initial connect) or FIRST_FRAME_TIMEOUT_MS
+   * (reconnect) until the first data frame.
    */
   private connectGuardTimer: ReturnType<typeof setTimeout> | null = null;
   /**
@@ -805,13 +815,18 @@ class Session implements TerminalSession {
         this.startHeartbeat(socket, live);
       };
       // Every attempt, the initial connect included, is bounded twice: by
-      // OPEN_TIMEOUT_MS until onopen, then by FIRST_FRAME_TIMEOUT_MS until
-      // the first data frame. Either one ending leaves 'connecting' for
-      // 'disconnected', where the pane offers Retry.
+      // OPEN_TIMEOUT_MS until onopen, then until the first data frame, by
+      // INITIAL_FIRST_FRAME_TIMEOUT_MS before the session has ever connected
+      // and by FIRST_FRAME_TIMEOUT_MS after. Either one ending leaves
+      // 'connecting' for 'disconnected', where the pane offers Retry.
       this.armConnectGuard(socket, live, OPEN_TIMEOUT_MS);
       socket.onopen = (): void => {
         if (!live()) return;
-        this.armConnectGuard(socket, live, FIRST_FRAME_TIMEOUT_MS);
+        this.armConnectGuard(
+          socket,
+          live,
+          this.everConnected ? FIRST_FRAME_TIMEOUT_MS : INITIAL_FIRST_FRAME_TIMEOUT_MS
+        );
       };
       socket.onmessage = (event: MessageEvent): void => {
         if (!live() || typeof event.data !== 'string') return;

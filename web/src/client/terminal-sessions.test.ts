@@ -473,7 +473,7 @@ describe('connect timeouts', () => {
     return listener;
   }
 
-  it('an initial connect whose socket opens but sends no data ends in disconnected with Retry', async () => {
+  it('an initial connect whose socket opens but sends no data for 60s ends in disconnected with Retry', async () => {
     vi.useFakeTimers();
     const f = fixture();
     const session = f.registry.open(agentId, f.initialize);
@@ -482,7 +482,10 @@ describe('connect timeouts', () => {
     socket.open();
     const listener = watch(session);
 
-    await vi.advanceTimersByTimeAsync(10_000 - 1);
+    // The reconnect bound (10s) does not apply before the first connect.
+    await vi.advanceTimersByTimeAsync(10_000 + 1);
+    expect(session.state.connection).toBe('connecting');
+    await vi.advanceTimersByTimeAsync(60_000 - 10_000 - 2);
     expect(session.state.connection).toBe('connecting');
     expect(listener).not.toHaveBeenCalled();
 
@@ -530,6 +533,28 @@ describe('connect timeouts', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('a reconnect whose socket opens but sends no data for 10s ends as a failed attempt', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    FakeSocket.instances[0].open();
+    FakeSocket.instances[0].data([65]);
+    FakeSocket.instances[0].onclose?.({ code: 1006 });
+
+    await session.connect();
+    const socket = FakeSocket.instances[1];
+    socket.open();
+    await vi.advanceTimersByTimeAsync(10_000 - 1);
+    expect(session.state.connection).toBe('connecting');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(session.state.connection).toBe('disconnected');
+    expect(session.state.disconnectReason).toBe('network');
+    expect(session.state.reconnectFailed).toBe(true);
+    expect(socket.close).toHaveBeenCalledTimes(1);
+    expect(FakeSocket.instances).toHaveLength(2);
+  });
+
   it('a reconnect whose socket never opens ends as a failed attempt', async () => {
     vi.useFakeTimers();
     const f = fixture();
@@ -565,7 +590,7 @@ describe('connect timeouts', () => {
       // Keep the handlers the session installed, as a browser that already
       // queued these events would still deliver them.
       const { onopen, onmessage, onclose, onerror } = socket;
-      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.advanceTimersByTimeAsync(stage === 'after open' ? 60_000 : 10_000);
       expect(session.state.connection).toBe('disconnected');
       const settled = session.state;
       const listener = watch(session);
