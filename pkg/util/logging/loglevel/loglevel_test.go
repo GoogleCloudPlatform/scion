@@ -421,26 +421,29 @@ func TestIgnoreDebugAliasToggleBack(t *testing.T) {
 }
 
 func TestIgnoreDebugAliasKeepsFlagAndSetting(t *testing.T) {
-	resetState(t)
-	t.Setenv(EnvDebug, "1")
-	if !EnableDebug(SourceFlag) {
-		t.Fatal("flag should apply")
-	}
-	SetIgnoreDebugAlias(true)
-	if !DebugEnabled("") {
-		t.Error("a flag-set debug level must survive SetIgnoreDebugAlias")
-	}
-
-	resetState(t)
-	SetIgnoreDebugAlias(true)
-	if applied, err := SetSetting("warn"); !applied || err != nil {
-		t.Fatalf("SetSetting = %v, %v", applied, err)
-	}
-	t.Setenv(EnvDebug, "1")
-	SetIgnoreDebugAlias(true)
-	if got := Effective(""); got != slog.LevelWarn {
-		t.Errorf("Effective = %v, want warn from setting", got)
-	}
+	t.Run("flag-set", func(t *testing.T) {
+		resetState(t)
+		t.Setenv(EnvDebug, "1")
+		if !EnableDebug(SourceFlag) {
+			t.Fatal("flag should apply")
+		}
+		SetIgnoreDebugAlias(true)
+		if !DebugEnabled("") {
+			t.Error("a flag-set debug level must survive SetIgnoreDebugAlias")
+		}
+	})
+	t.Run("setting-set", func(t *testing.T) {
+		resetState(t)
+		SetIgnoreDebugAlias(true)
+		if applied, err := SetSetting("warn"); !applied || err != nil {
+			t.Fatalf("SetSetting = %v, %v", applied, err)
+		}
+		t.Setenv(EnvDebug, "1")
+		SetIgnoreDebugAlias(true)
+		if got := Effective(""); got != slog.LevelWarn {
+			t.Errorf("Effective = %v, want warn from setting", got)
+		}
+	})
 }
 
 func TestResetClearsIgnoreDebugAlias(t *testing.T) {

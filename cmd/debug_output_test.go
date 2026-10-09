@@ -16,11 +16,14 @@ package cmd
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 )
@@ -168,7 +171,11 @@ func TestExecuteHelperProcess(t *testing.T) {
 func TestExecute_AgentModeQuiet(t *testing.T) {
 	for _, args := range []string{"version", "--help"} {
 		t.Run(args, func(t *testing.T) {
-			cmd := exec.Command(os.Args[0], "-test.run=^TestExecuteHelperProcess$", "-test.count=1")
+			// Bound the child so a command that starts blocking cannot hang
+			// the whole test binary.
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestExecuteHelperProcess$", "-test.count=1")
 			env := []string{executeHelperEnv + "=1", executeArgsEnv + "=" + args, "HOME=" + t.TempDir()}
 			for _, kv := range os.Environ() {
 				name, _, _ := strings.Cut(kv, "=")
@@ -181,17 +188,25 @@ func TestExecute_AgentModeQuiet(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			cmd.Stdout = &stdout
 			cmd.Stderr = &stderr
+			// After a kill, stop waiting for output pipes a stray grandchild
+			// might still hold open.
+			cmd.WaitDelay = 5 * time.Second
 
-			if err := cmd.Run(); err != nil {
-				t.Fatalf("scion %s: %v\nstdout:\n%s\nstderr:\n%s", args, err, stdout.String(), stderr.String())
+			err := cmd.Run()
+			output := fmt.Sprintf("stdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				t.Fatalf("scion %s: child did not finish within the timeout\n%s", args, output)
+			}
+			if err != nil {
+				t.Fatalf("scion %s: %v\n%s", args, err, output)
 			}
 
 			if !strings.Contains(stdout.String(), executeResultTag+"false") {
-				t.Errorf("scion %s: debug output enabled in agent mode with only SCION_DEBUG; stdout:\n%s", args, stdout.String())
+				t.Errorf("scion %s: debug output enabled in agent mode with only SCION_DEBUG\n%s", args, output)
 			}
 			for _, unwanted := range []string{"SCION_DEBUG is deprecated", "[DEBUG]", "[hubsync]"} {
 				if strings.Contains(stderr.String(), unwanted) {
-					t.Errorf("scion %s: stderr contains %q:\n%s", args, unwanted, stderr.String())
+					t.Errorf("scion %s: stderr contains %q\n%s", args, unwanted, output)
 				}
 			}
 		})
