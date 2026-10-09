@@ -803,7 +803,7 @@ func grantSuperAdmin(t *testing.T, s store.Store, userID string) {
 	require.NoError(t, err)
 	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
 		RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: userID,
-		ScopeType: store.RoleScopeSystem, CreatedBy: "test",
+		ScopeType: store.RoleScopeSystem, CreatedBy: store.SystemReconcileCreatedBy,
 	})
 	if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 		require.NoError(t, err)
