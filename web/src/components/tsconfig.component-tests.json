@@ -2,7 +2,7 @@
   "extends": "../../tsconfig.json",
   "compilerOptions": { "noEmit": true, "types": ["vite/client"] },
   // Type-checks the listed component test files, which the root project
-  // excludes. eslint.config.mjs lints the lint-clean ones against this project.
+  // excludes.
   // Files are listed one by one rather than by glob, so a test file is only
   // checked once it has been made to pass.
   "include": [
@@ -24,7 +24,8 @@
     "shared/header.test.ts",
     "shared/group-member-editor-membership.test.ts",
     "pages/onboarding.test.ts",
-    "pages/agent-detail-reincarnate.test.ts"
+    "pages/agent-detail-reincarnate.test.ts",
+    "pages/project-detail-agent-window.test.ts"
   ],
   "exclude": []
 }

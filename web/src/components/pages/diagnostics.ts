@@ -294,11 +294,7 @@ export class ScionPageDiagnostics extends LitElement {
 
   private renderStatusBanner() {
     const health = this.hubHealth;
-    const {
-      statusClass,
-      label: statusLabel,
-      problems,
-    } = healthBannerState(health as Record<string, unknown> | null);
+    const { statusClass, label: statusLabel, problems } = healthBannerState(health);
 
     const cloudStatus = this.cloudLoggingChecked
       ? this.cloudLoggingAvailable
