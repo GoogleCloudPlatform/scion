@@ -72,13 +72,15 @@ When an agent runs `scion start` inside its container, the CLI reads the Hub end
 | :--- | :--- | :--- |
 | 1 | **Explicit `--broker` / `-p` flag** | Always wins. |
 | 2 | **Project agent-create settings**: `agentCreateBroker` and `agentCreateProfile` (annotations `scion.io/agent-create-broker`, `scion.io/agent-create-profile`) | Set by a project editor through the project settings API. Ignored for creates made by users. Not used when `--broker` is given. |
-| 3 | **Creating agent's broker and profile** | The `hub.agent_create_inherit_placement` [experiment](/scion/reference/experiments/) is on, the creating agent runs on a Kubernetes profile, and its broker serves the target project. |
+| 3 | **Creating agent's broker and profile** | The `hub.agent_create_inherit_placement` [experiment](/scion/reference/experiments/) is on, the creating agent runs on a Kubernetes profile (see below), and its broker serves the target project. |
 | 4 | **The regular cascade above**, then the project's active profile and the broker's default profile | Everything else. This is unchanged for users, and for agents unless tier 2 or 3 applies. |
 
 Rules that apply across the tiers:
 
 - The creating agent's profile is inherited only when the selected broker is the creating agent's own broker. An explicit `--broker` that names a different broker does not carry the profile with it.
-- With `-p` alone, the broker is inherited only when the creating agent's broker offers that profile.
+- With `-p` alone, the creating agent's broker is still inherited. If that broker does not offer the requested profile, the create is refused, and the error names the profile and the broker. Pass `--broker` as well to run the profile on another broker.
+- A broker offers a profile when it registers a profile of that name and reports it available.
+- **Which creators count as Kubernetes.** The Hub decides from the `type` that the creating agent's broker registered for its profile. Today brokers register the profile's runtime **key** (the `runtime:` value in `profiles`) as that type, not the runtime entry's resolved `type:`. Tier 3 applies only when that key is `kubernetes`, `k8s` or `remote`. A custom key such as `runtime: gke` with `type: kubernetes` in its `runtimes` entry is not recognized, so tier 3 does not apply to it; use the tier 2 settings, or key the runtime entry `kubernetes`. Likewise, a runtime keyed `kubernetes` with `type: docker` is treated as Kubernetes here.
 - A value from tier 2 or 3 is checked exactly like the same flag would be, under the caller's own permissions: dispatch access to the broker, the per-profile default identity, and env and secret resolution. Nothing else is taken from the creating agent: no credentials, identity or user scope.
 - **Fail closed.** If tier 2 or 3 applies but the broker no longer serves the project, is offline, or the caller may not dispatch to it, or a profile from tier 2 is not offered by the selected broker, the create is refused. It does not fall back to another broker. The error names the source (the setting or the creating agent), never an ID.
 - The agent record and the create response carry `appliedConfig.placement` with `brokerSource` and `profileSource`, each one of `flag`, `setting`, `inherited` or `default`. A placement from tier 2 or 3 is also recorded, by name, in the create's audit record.

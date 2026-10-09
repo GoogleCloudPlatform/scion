@@ -39,14 +39,21 @@ import (
 //     scion.io/agent-create-profile);
 //  3. the creating agent's own broker and profile, when the
 //     hub.agent_create_inherit_placement experiment is on, the creator runs
-//     on a Kubernetes profile and its broker serves the target project;
+//     on a Kubernetes profile and its broker serves the target project.
+//     "Kubernetes" is isKubernetesRuntimeType on the profile type the broker
+//     registered, which today is the profile's runtime key, not the runtime
+//     entry's resolved type (see the comment on isKubernetesRuntimeType);
 //  4. the regular default chain, unchanged (project default broker and
 //     active profile, hub defaults, broker default, automatic selection).
 //
 // A profile is inherited only when the broker that ends up selected is the
 // creator's broker, so an explicit --broker elsewhere never carries the
-// creator's profile with it. A broker is not inherited when the request or
-// setting already names a profile the creator's broker does not offer.
+// creator's profile with it. With -p alone the creator's broker is still
+// inherited, and the create is refused when that broker does not offer the
+// requested profile (the error names the profile and the broker). A profile
+// from the agent-create profile setting that the creator's broker does not
+// offer does not inherit the broker; the regular chain picks one, and the
+// setting check below applies to it.
 //
 // Creates by users never take tiers 2 and 3.
 //
@@ -168,6 +175,15 @@ func (s *Server) applyAgentCreatePlacement(ctx context.Context, w http.ResponseW
 			return nil, false
 		}
 		if applicable {
+			// -p alone inherits the creator's broker; a profile that broker
+			// does not offer refuses the create instead of moving it to
+			// another broker.
+			if req.RuntimeBrokerID == "" && p.profileSource == store.PlacementSourceFlag && !brokerOffersProfile(creatorBroker, req.Profile) {
+				writeError(w, http.StatusUnprocessableEntity, ErrCodeNoRuntimeBroker,
+					fmt.Sprintf("The creating agent's broker %q does not offer profile %q; pass --broker to choose a broker that offers it, or pass another profile", creatorBroker.Name, req.Profile),
+					map[string]interface{}{"source": store.PlacementSourceInherited})
+				return nil, false
+			}
 			if req.RuntimeBrokerID == "" && (req.Profile == "" || brokerOffersProfile(creatorBroker, req.Profile)) {
 				broker, ok := s.placementBroker(ctx, w, project, creatorBroker.ID, store.PlacementSourceInherited)
 				if !ok {
@@ -339,14 +355,18 @@ func (s *Server) creatorKubernetesPlacement(ctx context.Context, w http.Response
 }
 
 // brokerOffersProfile reports whether broker registers a profile named
-// profile. A broker that registers no profiles cannot confirm it, so false.
+// profile and reports it available (BrokerProfile.Available, the same test
+// reincarnate's brokerProfileAvailable applies). A broker that registers no
+// profiles cannot confirm it, so false. The settings PUT uses the same test,
+// so a setting cannot name a profile the broker reports unavailable; a
+// profile that becomes unavailable later refuses the create at create time.
 func brokerOffersProfile(broker *store.RuntimeBroker, profile string) bool {
 	if broker == nil || profile == "" {
 		return false
 	}
 	for _, bp := range broker.Profiles {
 		if bp.Name == profile {
-			return true
+			return bp.Available
 		}
 	}
 	return false

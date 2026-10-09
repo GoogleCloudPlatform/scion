@@ -58,13 +58,22 @@ func newPlacementFixture(t *testing.T) *placementFixture {
 
 	k8s, err := f.store.GetRuntimeBroker(ctx, f.broker.ID)
 	require.NoError(t, err)
-	k8s.Name, k8s.Slug = "k8s-broker", "k8s-broker"
+	// The name and slug differ so a test can tell a name match from a slug
+	// match.
+	k8s.Name, k8s.Slug = "k8s-broker", "k8s-broker-slug"
 	k8s.Profiles = []store.BrokerProfile{
 		{Name: "gke", Type: "kubernetes", Available: true},
 		{Name: "local", Type: "docker", Available: true},
 	}
 	k8s.DefaultProfile = "local"
 	require.NoError(t, f.store.UpdateRuntimeBroker(ctx, k8s))
+	// bypassAgentsSetup wrote the provider row under the broker's old name;
+	// rewrite it so the provider row carries the new name, as it would for a
+	// broker registered under that name.
+	pv, err := f.store.GetProjectProvider(ctx, f.proj.ID, k8s.ID)
+	require.NoError(t, err)
+	pv.BrokerName = k8s.Name
+	require.NoError(t, f.store.AddProjectProvider(ctx, pv))
 
 	docker := &store.RuntimeBroker{
 		ID:             tid("placement-docker-broker"),
@@ -237,10 +246,24 @@ func TestAgentCreatePlacement_UserCallerKeepsDefaultChain(t *testing.T) {
 		projectSettingAgentCreateProfile: "gke",
 	})
 
-	agent := createdAgentRecord(t, pf.bypassAgentsFixture, CreateAgentRequest{Name: "user-create"})
+	// newPlacementFixture already grants the owner project membership, so
+	// only the members group is seeded here; createAgentAsOwner would also
+	// create an owner role binding, which conflicts with that grant.
+	ctx := context.Background()
+	pf.srv.seedProjectCreatorMembership(ctx, pf.proj)
+	rec := doRequestAsUser(t, pf.srv, pf.owner, http.MethodPost,
+		"/api/v1/projects/"+pf.proj.ID+"/agents", CreateAgentRequest{Name: "user-create"})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Agent)
+	agent, err := pf.store.GetAgent(ctx, resp.Agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, agent.AppliedConfig)
 	require.NotNil(t, agent.AppliedConfig.Placement)
 	assertPlacement(t, agent, pf.dockerBroker.ID, store.PlacementSourceDefault, "", store.PlacementSourceDefault)
 	assert.NotEqual(t, "gke", agent.AppliedConfig.Profile)
+	assert.Empty(t, createAuditSummaryFor(t, pf.store, agent.ID), "a user create records no placement in the audit")
 }
 
 // The creator's broker must serve the target project; otherwise inheritance
@@ -276,6 +299,17 @@ func TestAgentCreatePlacement_InheritedBrokerOfflineRefuses(t *testing.T) {
 // The dispatch check for an inherited broker runs against the caller's own
 // authority: a caller that may not dispatch to the broker is refused, and
 // the create does not fall back to another broker.
+//
+// This calls applyAgentCreatePlacement directly, so it covers the check in
+// placementBroker, not the handler's checkBrokerDispatchAccess. Both call
+// canUseBrokerForProject with the same request context and broker, so they
+// cannot disagree: the handler check sees the inherited broker exactly as an
+// explicit --broker, by construction. The deny case cannot be reached over
+// HTTP for an agent caller, because the create route itself requires
+// agent:create and tier 3 requires the broker to serve the caller's project,
+// which together satisfy the agent branch of brokerDispatchAllowed.
+// TestAgentCreatePlacement_InheritedBrokerDispatchThroughHandler covers the
+// handler path for an inherited broker that is not auto-provide.
 func TestAgentCreatePlacement_InheritedBrokerDispatchUsesCallerAuthority(t *testing.T) {
 	pf := newPlacementFixture(t)
 	enableInheritPlacement(t, pf.srv)
@@ -318,6 +352,22 @@ func TestAgentCreatePlacement_InheritedBrokerDispatchUsesCallerAuthority(t *test
 	assert.Equal(t, store.PlacementSourceInherited, placement.brokerSource)
 }
 
+// Handler level: an inherited broker that is not auto-provide passes both
+// the placement check and the handler's checkBrokerDispatchAccess on the
+// caller's own agent:create scope, and the child lands on it.
+func TestAgentCreatePlacement_InheritedBrokerDispatchThroughHandler(t *testing.T) {
+	pf := newPlacementFixture(t)
+	enableInheritPlacement(t, pf.srv)
+	ctx := context.Background()
+	k8s, err := pf.store.GetRuntimeBroker(ctx, pf.k8sBroker.ID)
+	require.NoError(t, err)
+	k8s.AutoProvide = false
+	require.NoError(t, pf.store.UpdateRuntimeBroker(ctx, k8s))
+
+	agent := pf.createAsCreator(t, CreateAgentRequest{Name: "dispatch-handler"})
+	assertPlacement(t, agent, pf.k8sBroker.ID, store.PlacementSourceInherited, "gke", store.PlacementSourceInherited)
+}
+
 // Explicit flags win. An explicit broker elsewhere does not carry the
 // creator's profile with it.
 func TestAgentCreatePlacement_ExplicitBrokerWins(t *testing.T) {
@@ -338,6 +388,16 @@ func TestAgentCreatePlacement_ExplicitCreatorBrokerInheritsProfile(t *testing.T)
 	assertPlacement(t, agent, pf.k8sBroker.ID, store.PlacementSourceFlag, "gke", store.PlacementSourceInherited)
 }
 
+// An explicit broker given by name (as the CLI sends a --broker value it
+// does not resolve) that names the creator's broker inherits the profile.
+func TestAgentCreatePlacement_ExplicitCreatorBrokerByNameInheritsProfile(t *testing.T) {
+	pf := newPlacementFixture(t)
+	enableInheritPlacement(t, pf.srv)
+
+	agent := pf.createAsCreator(t, CreateAgentRequest{Name: "explicit-broker-name", RuntimeBrokerID: "K8S-Broker"})
+	assertPlacement(t, agent, pf.k8sBroker.ID, store.PlacementSourceFlag, "gke", store.PlacementSourceInherited)
+}
+
 // An explicit profile the creator's broker offers inherits the broker.
 func TestAgentCreatePlacement_ExplicitProfileInheritsBroker(t *testing.T) {
 	pf := newPlacementFixture(t)
@@ -347,14 +407,65 @@ func TestAgentCreatePlacement_ExplicitProfileInheritsBroker(t *testing.T) {
 	assertPlacement(t, agent, pf.k8sBroker.ID, store.PlacementSourceInherited, "local", store.PlacementSourceFlag)
 }
 
-// An explicit profile the creator's broker does not offer does not inherit
-// the broker; the default chain picks one.
-func TestAgentCreatePlacement_ExplicitProfileNotOnCreatorBroker(t *testing.T) {
-	pf := newPlacementFixture(t)
-	enableInheritPlacement(t, pf.srv)
+// -p alone still inherits the creator's broker: a profile that broker does
+// not offer refuses the create, naming the profile and the broker, and does
+// not move the child to another broker. A profile the broker registers but
+// reports unavailable is refused the same way.
+func TestAgentCreatePlacement_ExplicitProfileNotOnCreatorBrokerRefuses(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		profile string
+		setup   func(t *testing.T, pf *placementFixture)
+	}{
+		{name: "not registered", profile: "docker-only"},
+		{name: "registered but unavailable", profile: "local", setup: func(t *testing.T, pf *placementFixture) {
+			ctx := context.Background()
+			k8s, err := pf.store.GetRuntimeBroker(ctx, pf.k8sBroker.ID)
+			require.NoError(t, err)
+			k8s.Profiles = []store.BrokerProfile{
+				{Name: "gke", Type: "kubernetes", Available: true},
+				{Name: "local", Type: "docker", Available: false},
+			}
+			require.NoError(t, pf.store.UpdateRuntimeBroker(ctx, k8s))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pf := newPlacementFixture(t)
+			enableInheritPlacement(t, pf.srv)
+			if tc.setup != nil {
+				tc.setup(t, pf)
+			}
 
-	agent := pf.createAsCreator(t, CreateAgentRequest{Name: "explicit-other-profile", Profile: "docker-only"})
+			rec := createAsAgent(t, pf.bypassAgentsFixture, pf.caller.ID, CreateAgentRequest{Name: "explicit-other-profile", Profile: tc.profile})
+			require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), tc.profile, "the error names the requested profile")
+			assert.Contains(t, rec.Body.String(), "k8s-broker", "the error names the creator's broker")
+			pf.assertNoIDs(t, rec)
+			_, err := pf.store.GetAgentBySlug(context.Background(), pf.proj.ID, "explicit-other-profile")
+			assert.ErrorIs(t, err, store.ErrNotFound, "a refused create must store nothing")
+		})
+	}
+}
+
+// With the experiment off, -p alone keeps today's default chain.
+func TestAgentCreatePlacement_ExplicitProfileExperimentOffKeepsDefaultChain(t *testing.T) {
+	pf := newPlacementFixture(t)
+
+	agent := pf.createAsCreator(t, CreateAgentRequest{Name: "explicit-profile-off", Profile: "docker-only"})
 	assertPlacement(t, agent, pf.dockerBroker.ID, store.PlacementSourceDefault, "docker-only", store.PlacementSourceFlag)
+}
+
+// brokerOffersProfile requires the profile to be registered and available.
+func TestAgentCreatePlacement_BrokerOffersProfileChecksAvailable(t *testing.T) {
+	b := &store.RuntimeBroker{Profiles: []store.BrokerProfile{
+		{Name: "up", Type: "kubernetes", Available: true},
+		{Name: "down", Type: "kubernetes", Available: false},
+	}}
+	assert.True(t, brokerOffersProfile(b, "up"))
+	assert.False(t, brokerOffersProfile(b, "down"))
+	assert.False(t, brokerOffersProfile(b, "missing"))
+	assert.False(t, brokerOffersProfile(b, ""))
+	assert.False(t, brokerOffersProfile(nil, "up"))
 }
 
 // AC2: the project's agent-create settings apply with no flags, and rank
@@ -618,9 +729,15 @@ func TestAgentCreatePlacementSettings_Validation(t *testing.T) {
 		{name: "profile not on broker", body: hubclient.ProjectSettings{AgentCreateBroker: strPtr("docker-broker"), AgentCreateProfile: strPtr("gke")}, want: "agentCreateProfile"},
 		{name: "profile on no broker", body: hubclient.ProjectSettings{AgentCreateProfile: strPtr("nowhere")}, want: "agentCreateProfile"},
 		{name: "invalid profile name", body: hubclient.ProjectSettings{AgentCreateProfile: strPtr("a.b")}, want: "agentCreateProfile"},
+		{name: "profile unavailable on broker", body: hubclient.ProjectSettings{AgentCreateBroker: strPtr("k8s-broker"), AgentCreateProfile: strPtr("down")}, want: "agentCreateProfile"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pf := newPlacementFixture(t)
+			ctx := context.Background()
+			k8s, err := pf.store.GetRuntimeBroker(ctx, pf.k8sBroker.ID)
+			require.NoError(t, err)
+			k8s.Profiles = append(k8s.Profiles, store.BrokerProfile{Name: "down", Type: "kubernetes", Available: false})
+			require.NoError(t, pf.store.UpdateRuntimeBroker(ctx, k8s))
 			rec, _ := putPlacementSettings(t, pf, tc.body)
 			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 			assert.Contains(t, rec.Body.String(), tc.want)
