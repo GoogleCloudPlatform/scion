@@ -448,7 +448,7 @@ func init() {
 	rootCmd.MarkFlagsMutuallyExclusive("tz", "utc")
 
 	// Debug mode flag
-	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Enable debug output; agents started by this command also get SCION_DEBUG=1. 'scion server start' has its own --debug (see its help).")
+	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Enable debug output from this command only; agents it starts are not affected (use --agent-log-level on start or resume for that). 'scion server start' has its own --debug (see its help).")
 
 	// Hide flags leaked from rclone via transitive import.
 	// These are registered on pflag.CommandLine (the global flag set), which

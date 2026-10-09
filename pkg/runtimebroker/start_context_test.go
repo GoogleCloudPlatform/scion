@@ -317,8 +317,15 @@ func TestBuildStartContext_BasicFields(t *testing.T) {
 	if _, ok := sc.Opts.Env["SCION_GROVE_PATH"]; ok {
 		t.Errorf("expected SCION_GROVE_PATH to be absent, got %q", sc.Opts.Env["SCION_GROVE_PATH"])
 	}
-	if sc.Opts.Env["SCION_DEBUG"] != "1" {
-		t.Errorf("expected SCION_DEBUG='1', got %q", sc.Opts.Env["SCION_DEBUG"])
+	// cfg.Debug is set above: the broker's debug setting must not reach the
+	// agent environment (ptone/scion#4098).
+	for _, key := range []string{"SCION_DEBUG", "SCION_LOG_LEVEL"} {
+		if v, ok := sc.Opts.Env[key]; ok {
+			t.Errorf("expected %s to be absent when the broker runs with debug, got %q", key, v)
+		}
+		if _, ok := sc.EnvClassifications[key]; ok {
+			t.Errorf("expected no %s classification when the broker runs with debug", key)
+		}
 	}
 }
 
@@ -353,6 +360,57 @@ func TestBuildStartContext_EnvMerging(t *testing.T) {
 	}
 	if sc.Opts.Env["KEY_C"] != "from-config" {
 		t.Errorf("expected KEY_C='from-config', got %q", sc.Opts.Env["KEY_C"])
+	}
+}
+
+// TestBuildStartContext_DebugNotPropagatedExplicitLogLevelKept covers
+// ptone/scion#4098: a broker running with debug no longer adds SCION_DEBUG to
+// agent environments, and an explicit SCION_LOG_LEVEL in the request env (hub
+// env or the CLI's --agent-log-level) reaches the agent unchanged, with its
+// classification intact.
+func TestBuildStartContext_DebugNotPropagatedExplicitLogLevelKept(t *testing.T) {
+	const spec = "warn,hub.auth=debug"
+
+	for _, tc := range []struct {
+		name        string
+		resolvedEnv map[string]string
+		config      *CreateAgentConfig
+	}{
+		{name: "resolved env", resolvedEnv: map[string]string{"SCION_LOG_LEVEL": spec}},
+		{name: "config env", config: &CreateAgentConfig{Env: []string{"SCION_LOG_LEVEL=" + spec}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultServerConfig()
+			cfg.Debug = true
+			cfg.StateDir = t.TempDir()
+			srv := newTestServerForStartContext(t, cfg)
+
+			r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+			sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+				Name:               "agent-log-level",
+				ResolvedEnv:        tc.resolvedEnv,
+				EnvClassifications: map[string]api.EnvKind{"SCION_LOG_LEVEL": api.EnvKindPlain},
+				Config:             tc.config,
+				HTTPRequest:        r,
+				Operation:          opCreate,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if got := sc.Opts.Env["SCION_LOG_LEVEL"]; got != spec {
+				t.Errorf("SCION_LOG_LEVEL = %q, want %q unchanged", got, spec)
+			}
+			if got := sc.EnvClassifications["SCION_LOG_LEVEL"]; got != api.EnvKindPlain {
+				t.Errorf("SCION_LOG_LEVEL classification = %q, want %q", got, api.EnvKindPlain)
+			}
+			if v, ok := sc.Opts.Env["SCION_DEBUG"]; ok {
+				t.Errorf("SCION_DEBUG = %q, want it unset when the broker runs with debug", v)
+			}
+			if _, ok := sc.EnvClassifications["SCION_DEBUG"]; ok {
+				t.Error("SCION_DEBUG classification added when the broker runs with debug")
+			}
+		})
 	}
 }
 

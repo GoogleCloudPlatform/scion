@@ -789,7 +789,7 @@ type EnvKind string
 
 const (
 	// EnvKindPlain is a non-sensitive operational value delivered via
-	// --env KEY=VALUE. Examples: SCION_MODEL, SCION_HUB_NAME, SCION_DEBUG.
+	// --env KEY=VALUE. Examples: SCION_MODEL, SCION_HUB_NAME, SCION_LOG_LEVEL.
 	EnvKindPlain EnvKind = "plain"
 
 	// EnvKindSecretFetchable is a value stored in the hub's secret store,

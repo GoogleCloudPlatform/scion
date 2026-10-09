@@ -1610,10 +1610,14 @@ func TestCreateAgentWithHubCredentials(t *testing.T) {
 	}
 }
 
-// TestCreateAgentWithDebugMode tests that SCION_DEBUG env var is set when debug mode is enabled.
-// This verifies Fix 4 from progress-report.md: Pass SCION_DEBUG env var.
-func TestCreateAgentWithDebugMode(t *testing.T) {
+// TestCreateAgentDebugServerDoesNotSetAgentDebug covers ptone/scion#4098:
+// the test server runs with Debug enabled, and the created agent's
+// environment must not gain SCION_DEBUG (or a SCION_LOG_LEVEL) from it.
+func TestCreateAgentDebugServerDoesNotSetAgentDebug(t *testing.T) {
 	srv, mgr := newTestServerWithEnvCapture()
+	if !srv.config.Debug {
+		t.Fatal("precondition: test server must run with Debug enabled")
+	}
 
 	body := `{"name": "debug-agent"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1625,14 +1629,36 @@ func TestCreateAgentWithDebugMode(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
 	}
-
-	// Verify SCION_DEBUG was set
 	if mgr.lastEnv == nil {
 		t.Fatal("expected environment variables to be set, got nil")
 	}
+	for _, key := range []string{"SCION_DEBUG", "SCION_LOG_LEVEL"} {
+		if v, ok := mgr.lastEnv[key]; ok {
+			t.Errorf("expected %s to be absent when the server runs with debug, got %q", key, v)
+		}
+	}
+}
 
-	if got := mgr.lastEnv["SCION_DEBUG"]; got != "1" {
-		t.Errorf("expected SCION_DEBUG='1' when server in debug mode, got %q", got)
+// TestCreateAgentExplicitLogLevelPassesThrough covers ptone/scion#4098: an
+// explicit SCION_LOG_LEVEL in the request env reaches the agent unchanged.
+func TestCreateAgentExplicitLogLevelPassesThrough(t *testing.T) {
+	srv, mgr := newTestServerWithEnvCapture()
+
+	body := `{"name": "log-level-agent", "config": {"env": ["SCION_LOG_LEVEL=info,hub=debug"]}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+	if got := mgr.lastEnv["SCION_LOG_LEVEL"]; got != "info,hub=debug" {
+		t.Errorf("expected SCION_LOG_LEVEL='info,hub=debug' unchanged, got %q", got)
+	}
+	if v, ok := mgr.lastEnv["SCION_DEBUG"]; ok {
+		t.Errorf("expected SCION_DEBUG to be absent, got %q", v)
 	}
 }
 

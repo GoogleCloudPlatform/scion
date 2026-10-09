@@ -44,6 +44,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
@@ -83,7 +84,51 @@ var (
 	agentRoleFlag         string
 	messageModeFlag       string
 	serviceAccountFlag    string
+	agentLogLevelFlag     string
 )
+
+// agentLogLevelFlagName is the start/resume flag that sets SCION_LOG_LEVEL
+// in the agent's environment. Agents never inherit debug settings from the
+// CLI or the server; this flag is the explicit per-agent opt-in.
+const agentLogLevelFlagName = "agent-log-level"
+
+const agentLogLevelFlagUsage = "Set SCION_LOG_LEVEL in the agent's environment, e.g. debug or info,hub=debug (scion commands and sciontool inside the agent use it)"
+
+// validateAgentLogLevel checks a --agent-log-level value with the shared
+// level-spec parser and returns the trimmed spec. set reports whether the
+// flag was given; an explicitly empty value is rejected. When the flag is
+// not given the result is "".
+func validateAgentLogLevel(raw string, set bool) (string, error) {
+	spec := strings.TrimSpace(raw)
+	if strings.Trim(spec, ", \t") == "" {
+		if set || raw != "" {
+			return "", fmt.Errorf("invalid --%s value %q: must not be empty (want debug, info, warn or error, optionally followed by component=level entries)", agentLogLevelFlagName, raw)
+		}
+		return "", nil
+	}
+	if _, err := loglevel.ParseLevelSpec(spec); err != nil {
+		return "", fmt.Errorf("invalid --%s value %q: %w", agentLogLevelFlagName, raw, err)
+	}
+	return spec, nil
+}
+
+// localAgentStartEnv returns the initial agent env for a local start: just
+// SCION_LOG_LEVEL when --agent-log-level was given, else nil. The CLI's own
+// --debug never adds anything here.
+func localAgentStartEnv() map[string]string {
+	lvl := agentLogLevelEnvValue()
+	if lvl == "" {
+		return nil
+	}
+	return map[string]string{loglevel.EnvLogLevel: lvl}
+}
+
+// agentLogLevelEnvValue returns the SCION_LOG_LEVEL value requested with
+// --agent-log-level, or "" when the flag was not given. RunAgent validates
+// the flag before either start path runs.
+func agentLogLevelEnvValue() string {
+	return strings.TrimSpace(agentLogLevelFlag)
+}
 
 func validateMessageMode(mode string) error {
 	if mode == "" {
@@ -709,6 +754,10 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		return asUsageError(err)
 	}
 
+	if _, err := validateAgentLogLevel(agentLogLevelFlag, cmd.Flags().Changed(agentLogLevelFlagName)); err != nil {
+		return asUsageError(err)
+	}
+
 	if err := validateTaskFileStdin(); err != nil {
 		return err
 	}
@@ -861,12 +910,9 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		opts.TelemetryOverride = &val
 	}
 
-	// Propagate debug mode to container so sciontool logs debug info
-	if debugMode {
-		opts.Env = map[string]string{
-			"SCION_DEBUG": "1",
-		}
-	}
+	// The CLI's own --debug does not reach the agent; --agent-log-level is
+	// the explicit opt-in (ptone/scion#4098).
+	opts.Env = localAgentStartEnv()
 
 	// Thread CLI-resolved hub endpoint so locally-started agents get
 	// hub connectivity. The --hub flag and host SCION_HUB_ENDPOINT env
@@ -1140,7 +1186,7 @@ var configFlagsNotAppliedToExistingAgent = []string{
 	"type", "harness-config", "harness", "harness-auth", "image", "model",
 	"thinking-level", "config", "broker", "label", "role", "message-mode",
 	"branch", "workspace", "service-account", "enable-telemetry",
-	"disable-telemetry", "no-auth", "profile",
+	"disable-telemetry", "no-auth", "profile", agentLogLevelFlagName,
 }
 
 // warnFlagsIgnoredForExistingAgent prints one stderr warning naming the
@@ -1260,6 +1306,8 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 	// Wire --service-account flag into the GCP identity assignment.
 	applyServiceAccountFlag(req, serviceAccountFlag)
 
+	agentLogLevel := agentLogLevelEnvValue()
+
 	// Thread inline config from --config flag into the Hub request.
 	// The inline config is the base; CLI flags override specific fields.
 	if inlineCfg != nil {
@@ -1268,21 +1316,22 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		if agentImage != "" {
 			req.Config.Image = agentImage
 		}
-	} else if agentImage != "" || debugMode || enableTelemetry || disableTelemetry {
+	} else if agentImage != "" || agentLogLevel != "" || enableTelemetry || disableTelemetry {
 		// Build config from CLI flags alone
 		req.Config = &api.ScionConfig{
 			Image: agentImage,
 		}
 	}
 
-	// Add debug/telemetry env vars to config
-	if req.Config != nil && (debugMode || enableTelemetry || disableTelemetry) {
+	// Add agent log level and telemetry env vars to config. The CLI's own
+	// --debug is not forwarded to the agent (ptone/scion#4098).
+	if req.Config != nil && (agentLogLevel != "" || enableTelemetry || disableTelemetry) {
 		configEnv := req.Config.Env
 		if configEnv == nil {
 			configEnv = make(map[string]string)
 		}
-		if debugMode {
-			configEnv["SCION_DEBUG"] = "1"
+		if agentLogLevel != "" {
+			configEnv[loglevel.EnvLogLevel] = agentLogLevel
 		}
 		if enableTelemetry {
 			configEnv["SCION_TELEMETRY_ENABLED"] = "true"
