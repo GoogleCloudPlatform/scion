@@ -456,6 +456,9 @@ describe('chat page — mobile panel history', () => {
     expect(goSpy).toHaveBeenCalledTimes(1);
     expect(goSpy).toHaveBeenCalledWith(-1);
     await vi.waitFor(() => expect(el.mobilePanel).toBe('center'));
+    // go() was called once, and its stub only defers the traversal by one
+    // timer: no import or request is pending. A fixed flush is enough for
+    // any further popstate that call queued to land.
     await flush();
     expect(el.mobilePanel).toBe('center');
     expect(window.history.length).toBe(length);
