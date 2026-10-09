@@ -109,7 +109,8 @@ func (s *Server) handleDiagnosticsLogs(w http.ResponseWriter, r *http.Request) {
 // Authorization: enforced by routeGuard via hub.diagnostics.read permission.
 // The stream re-checks its credential every streamCredentialRecheckInterval
 // (streamCredentialStillAuthorized) and ends with streamCredentialEndedEvent
-// once the credential stops authorizing hub.diagnostics.read.
+// once the credential stops authorizing hub.diagnostics.read. A request
+// that is cancelled ends without that event.
 func (s *Server) handleDiagnosticsLogsStream(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
@@ -193,7 +194,16 @@ func (s *Server) handleDiagnosticsLogsStream(w http.ResponseWriter, r *http.Requ
 			_, _ = fmt.Fprintf(w, ":heartbeat %d\n\n", time.Now().UnixMilli())
 			flusher.Flush()
 		case <-recheck.C:
+			// A cancelled request ends without the credential event: the
+			// re-check runs only for an open request, and a failure that
+			// coincides with cancellation ends the stream silently.
+			if ctx.Err() != nil {
+				return
+			}
 			if !s.streamCredentialStillAuthorized(ctx, Resource{Type: "hub", ID: "hub"}, ActionRead, "hub.diagnostics.read") {
+				if ctx.Err() != nil {
+					return
+				}
 				_, _ = fmt.Fprint(w, streamCredentialEndedEvent)
 				flusher.Flush()
 				return
