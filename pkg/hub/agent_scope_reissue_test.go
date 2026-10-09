@@ -571,9 +571,9 @@ func TestScopeReissue_OperatorRefusals(t *testing.T) {
 	f := newReissueFixture(t, "rs-op", store.ProjectRoleOwner)
 	body := ScopeReissueRequest{ReissueScopes: true}
 	require.NoError(t, f.store.CreateUser(context.Background(), &store.User{
-		ID: "rs-op-admin", Email: "admin@test.com", DisplayName: "Admin", Role: "admin", Status: "active",
+		ID: tid("rs-op-admin"), Email: "admin@test.com", DisplayName: "Admin", Role: "admin", Status: "active",
 	}))
-	admin := NewAuthenticatedUser("rs-op-admin", "admin@test.com", "Admin", "admin", "")
+	admin := NewAuthenticatedUser(tid("rs-op-admin"), "admin@test.com", "Admin", "admin", "")
 	member := NewAuthenticatedUser(f.userID, "owner@test.com", "Owner", "member", "")
 	selfClaims := &AgentTokenClaims{ProjectID: f.projectID, Scopes: ScopesForRole(AgentRoleFull), Ancestry: f.child.Ancestry}
 	selfClaims.Subject = f.child.ID
@@ -766,4 +766,41 @@ func TestScopeReissue_UserDelegatorNotYetSupported(t *testing.T) {
 func TestMintSiteFromContext(t *testing.T) {
 	assert.Equal(t, mintSiteResetAuth, mintSiteFromContext(context.Background(), mintSiteResetAuth))
 	assert.Equal(t, mintSiteReissue, mintSiteFromContext(withMintSite(context.Background(), mintSiteReissue), mintSiteResetAuth))
+}
+
+// The re-issued set equals what agent creation by the same delegator
+// issues today, for a user-rooted chain: it includes project:artifact:write
+// (which also covers a permission no project role holds) and
+// project:secret:read.
+func TestScopeReissue_EqualsCreateToday(t *testing.T) {
+	f := newReissueFixture(t, "rs-eq", store.ProjectRoleOwner)
+	f.run(t, f.parent, false)
+	resp := f.run(t, f.child, false)
+	require.False(t, resp.Noop)
+	reissued := f.grant(t, f.child)
+
+	// Create a sibling of the child today, through the create route, as
+	// the parent agent with its current token.
+	parent := f.reload(t, f.parent)
+	parentGrant, err := f.srv.AuthorizeAgentToken(context.Background(), parent)
+	require.NoError(t, err)
+	token, err := f.srv.agentTokenService.GenerateAgentToken(parent.ID, f.projectID, parentGrant.Scopes, append(append([]string{}, parent.Ancestry...), parent.ID))
+	require.NoError(t, err)
+	rec := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/projects/"+f.projectID+"/agents",
+		CreateAgentRequest{Name: "rs-eq-sibling", AgentRole: string(AgentRoleFull)}, token)
+	require.Less(t, rec.Code, 300, rec.Body.String())
+	sibling, err := f.store.GetAgentBySlug(context.Background(), f.projectID, "rs-eq-sibling")
+	require.NoError(t, err)
+	created := f.grant(t, sibling)
+
+	assert.ElementsMatch(t, created, reissued, "re-issue equals create-today")
+	assert.Contains(t, scopeStrings(reissued), string(ScopeProjectArtifactWrite))
+	assert.Contains(t, scopeStrings(reissued), string(ScopeProjectSecretRead))
+	assert.Equal(t, effectCeilingsWithoutBoundary(f.activeEdge(t, sibling).EffectCeiling).PermissionIDs,
+		effectCeilingsWithoutBoundary(f.activeEdge(t, f.child).EffectCeiling).PermissionIDs, "same ceiling as creation")
+}
+
+func effectCeilingsWithoutBoundary(c store.EffectCeiling) store.EffectCeiling {
+	c.PermissionIDs = sortedUniqueIDs(c.PermissionIDs)
+	return c
 }

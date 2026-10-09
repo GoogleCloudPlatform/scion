@@ -45,10 +45,13 @@ import (
 //	CanDelegate(delegator's live grant, role)
 //	ceiling = agentRowEffectCeiling(delegator)
 //	role    = childRoleWithinCeiling(ceiling, role)   (only ever lowers)
-//	ceiling = ceiling less every permission of the role's scopes that the
-//	          delegator's live chain does not support
+//	ceiling = ceiling less every permission whose live chain evaluation
+//	          hits a lookup fault
 //	scopes  = role scopes + config scopes, filtered by the fold of the new
 //	          ceiling and the delegator's chain
+//
+// The result equals the scope set an agent created today by the same
+// delegator, at the same role, would be issued; it is never wider.
 //
 // The operator's own authority authorizes the operation only; it is never
 // an input to the computation. Any hop that cannot be evaluated refuses the
@@ -447,42 +450,24 @@ func (s *Server) planAgentDelegatorReissue(ctx context.Context, plan *scopeReiss
 	role = capped
 	candidates := reissueCandidateScopes(a, agent, role)
 
-	// Per scope, the live delegation ceiling of the delegator. A scope is
-	// withheld when any permission it covers cannot be evaluated (a lookup
-	// fault), or when the delegator's live chain supports none of them.
-	// The permissions behind a withheld scope are removed from E', so the
-	// scope stays withheld at every later refresh. A kept scope's
-	// individual permissions are still gated at use by the live walk, as
-	// for any agent. Role selection above uses the creation-time ceiling,
-	// as agent creation does.
+	// The re-issued set equals what agent creation by the delegator
+	// computes today: the creation ceiling, the capped role, and the mint
+	// filter over the fold with the delegator's chain. Creation applies no
+	// per-permission walk (the walk gates each use), so a permission the
+	// delegator's live chain denies does not change the set. Condition 2
+	// still applies per scope: a scope covering a permission whose live
+	// chain cannot be evaluated (a lookup fault) is withheld, and that
+	// permission is removed from E' so refresh agrees.
 	ceiling.PermissionIDs = append([]string(nil), ceiling.PermissionIDs...)
 	for _, scope := range candidates {
-		perms := scopeCeilingPermissions(scope)
-		var faulted, denied []string
-		supported := false
-		for _, perm := range perms {
-			if !containsString(ceiling.PermissionIDs, perm) {
-				continue // the projected ceiling withholds the scope already
-			}
-			if selfOperationSet[perm] {
-				supported = true
+		for _, perm := range scopeCeilingPermissions(scope) {
+			if selfOperationSet[perm] || !containsString(ceiling.PermissionIDs, perm) {
 				continue
 			}
 			switch liveCheck(perm) {
-			case "":
-				supported = true
 			case reissueWithheldLookup, reissueWithheldUnevaluated:
-				faulted = append(faulted, perm)
-			default:
-				denied = append(denied, perm)
+				ceiling.PermissionIDs = removeString(ceiling.PermissionIDs, perm)
 			}
-		}
-		drop := faulted
-		if len(faulted) == 0 && !supported {
-			drop = denied
-		}
-		for _, perm := range drop {
-			ceiling.PermissionIDs = removeString(ceiling.PermissionIDs, perm)
 		}
 	}
 
@@ -513,8 +498,8 @@ func (s *Server) planAgentDelegatorReissue(ctx context.Context, plan *scopeReiss
 	return nil
 }
 
-// reissueAgentDelegatorLive checks permission perm against the live chain
-// above agent: the parent P holds perm through its stored role scopes, and
+// reissueAgentDelegatorLive probes permission perm against the live chain
+// above agent; the re-issue uses only its lookup-fault outcome: the parent P holds perm through its stored role scopes, and
 // the walk from P (every ancestor live and holding perm, every hop's frozen
 // ceiling) allows it. It returns "" when allowed, otherwise the withhold
 // cause. A lookup fault is never read as allowed.
@@ -611,11 +596,11 @@ func scopeCeilingPermissions(scope AgentTokenScope) []string {
 	return nil
 }
 
-// reissueWithholdCause names why scope is not in the re-issued set: the
-// first live-check cause among its permissions, else the ceiling.
+// reissueWithholdCause names why scope is not in the re-issued set: a
+// lookup fault on one of its permissions, else the ceiling.
 func reissueWithholdCause(scope AgentTokenScope, liveDenied map[string]string) string {
 	for _, perm := range scopeCeilingPermissions(scope) {
-		if cause := liveDenied[perm]; cause != "" {
+		if cause := liveDenied[perm]; cause == reissueWithheldLookup || cause == reissueWithheldUnevaluated {
 			return cause
 		}
 	}
