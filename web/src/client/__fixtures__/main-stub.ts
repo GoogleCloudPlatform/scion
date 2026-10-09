@@ -36,11 +36,13 @@ export { stateManager } from './state-stub.js';
 
 export const navigateTo = vi.fn();
 
-/** Adds a history entry for `path`, like the real `pushRoute`. */
-export const pushRoute = vi.fn((path: string): Promise<void> => {
-  window.history.pushState({}, '', path);
-  return Promise.resolve();
-});
+/** Adds a history entry for `path`, with `state` as its history state, like the real `pushRoute`. */
+export const pushRoute = vi.fn(
+  (path: string, state: Record<string, unknown> = {}): Promise<void> => {
+    window.history.pushState(state, '', path);
+    return Promise.resolve();
+  }
+);
 
 /**
  * Replaces the current entry with `path`, keeping the history state, query

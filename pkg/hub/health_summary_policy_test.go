@@ -307,6 +307,18 @@ func TestDeriveHealthSummaryStatus_Rules(t *testing.T) {
 				Message: "Agent proj / worker is offline",
 			}},
 		},
+		{
+			name: "service account assignment check that cannot run degrades",
+			mutate: func(r *HealthSummaryResponse) {
+				r.ServiceAccountCheck = &HealthSummarySACheck{Status: HealthStatusDegraded}
+			},
+			wantStatus: HealthStatusDegraded,
+			wantItems: []HealthAttentionItem{{
+				Severity: HealthAttentionWarning, Kind: HealthAttentionHubCheck,
+				Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: "inst-1"},
+				Message: "Service account assignment check cannot run",
+			}},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

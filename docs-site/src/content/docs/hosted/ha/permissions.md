@@ -150,6 +150,12 @@ The cache is automatically invalidated for a target service account when that se
 
 For Policy Troubleshooter to evaluate a caller's IAM permission across the organization, the Scion Hub's own GCP service account must be granted the **IAM Security Reviewer** role (`roles/iam.securityReviewer`) at either the Google Cloud project or organization level.
 
+### Hub Identity Access for the Assignment Check
+
+The Hub's identity needs access to run the Policy Troubleshooter check against the project or organization that holds each target service account. Until it has that access, service account assignment is denied.
+
+If the check cannot run because of the Hub's identity, the admin health summary (`GET /api/v1/admin/health/summary`) reports it in a `service_account_check` section.
+
 ### Start-Time Admissibility Check
 
 An assignment that was valid when it was made can stop being usable later. Before the Hub starts, restarts or resumes an agent with an assigned service account (from the Web Dashboard, the API, or `scion start` / `scion resume`), it checks that the account:

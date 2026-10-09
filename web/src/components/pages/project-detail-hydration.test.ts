@@ -153,7 +153,7 @@ const projectRequests = () => calls.filter((p) => p === `/api/v1/projects/${PROJ
 const agentsRequests = () =>
   calls.filter((p) => p === `/api/v1/projects/${PROJECT_ID}/agents`).length;
 const heading = (el: TestEl) =>
-  el.shadowRoot?.querySelector('.header h1')?.textContent?.trim() ?? null;
+  el.shadowRoot?.querySelector('scion-detail-header')?.heading ?? null;
 const text = (el: TestEl) => el.shadowRoot?.textContent?.replace(/\s+/g, ' ') ?? '';
 
 const SSR_PROJECT = {

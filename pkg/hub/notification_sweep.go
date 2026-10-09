@@ -64,6 +64,28 @@ func (s *Server) notificationDispatchSweepHandler() func(ctx context.Context) {
 	}
 }
 
+// notificationOrphanGCHandler returns a recurring handler that deletes
+// acknowledged notifications whose agent and subscription are both gone,
+// such as DELETED notifications persisted after an agent's hard delete.
+// Unacknowledged ones stay until acknowledged. Registered as a
+// RecurringSingleton guarded by LockNotificationOrphanGC.
+func (s *Server) notificationOrphanGCHandler() func(ctx context.Context) {
+	return func(ctx context.Context) {
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+
+		purged, err := s.store.PurgeOrphanedNotifications(ctx)
+		if err != nil {
+			s.agentLifecycleLog.Error("notification-orphan-gc: purge failed", "error", err)
+			return
+		}
+		if purged > 0 {
+			s.agentLifecycleLog.Info("notification-orphan-gc: purged notifications",
+				"count", purged)
+		}
+	}
+}
+
 // drainUndispatchedNotifications delivers undispatched notifications for agents
 // on the given broker. Called as a goroutine from markBrokerOnline for sub-second
 // delivery when a broker first connects.
