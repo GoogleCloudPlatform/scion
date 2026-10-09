@@ -172,7 +172,6 @@ func TelemetryConfigToEnv(cfg *api.TelemetryConfig) map[string]string {
 	if cfg.Local != nil {
 		if cfg.Local.Enabled != nil {
 			env["SCION_TELEMETRY_LOCAL_ENABLED"] = strconv.FormatBool(*cfg.Local.Enabled)
-			env["SCION_TELEMETRY_DEBUG"] = strconv.FormatBool(*cfg.Local.Enabled)
 		}
 		if cfg.Local.File != "" {
 			env["SCION_TELEMETRY_LOCAL_FILE"] = cfg.Local.File
@@ -186,9 +185,6 @@ func TelemetryConfigToEnv(cfg *api.TelemetryConfig) map[string]string {
 	if cfg.Filter != nil {
 		if cfg.Filter.Enabled != nil {
 			env["SCION_TELEMETRY_FILTER_ENABLED"] = strconv.FormatBool(*cfg.Filter.Enabled)
-		}
-		if cfg.Filter.RespectDebugMode != nil {
-			env["SCION_TELEMETRY_FILTER_RESPECT_DEBUG_MODE"] = strconv.FormatBool(*cfg.Filter.RespectDebugMode)
 		}
 		if cfg.Filter.Events != nil {
 			if len(cfg.Filter.Events.Include) > 0 {

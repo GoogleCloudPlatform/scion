@@ -84,7 +84,7 @@
           "type": "string",
           "enum": ["text", "json"],
           "default": "text",
-          "description": "Reserved: the hub does not read this key today; the log output format is chosen by the logging setup at startup. There is no environment-variable override.",
+          "description": "Deprecated and ignored: accepted so existing settings files still load, but nothing reads it. The log output format is chosen by the logging setup at startup (SCION_LOG_GCP selects Cloud Logging JSON). There is no environment-variable override.",
           "x-since": "1"
         },
         "scheduler": { "$ref": "#/$defs/serverScheduler" },
@@ -1860,13 +1860,12 @@
     },
     "telemetryLocal": {
       "type": "object",
-      "description": "Local debug telemetry output settings.",
+      "description": "Local debug telemetry output settings. Accepted but ignored: no component reads these keys today.",
       "properties": {
         "enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Enable local debug telemetry output.",
-          "x-env-var": "SCION_TELEMETRY_DEBUG",
+          "description": "Accepted but ignored: no component reads this key today.",
           "x-since": "1"
         },
         "file": {
@@ -1896,7 +1895,7 @@
         "respect_debug_mode": {
           "type": "boolean",
           "default": true,
-          "description": "Bypass filters when debug mode is active.",
+          "description": "Accepted but ignored: no component reads this key today.",
           "x-since": "1"
         },
         "events": { "$ref": "#/$defs/telemetryFilterEvents" },

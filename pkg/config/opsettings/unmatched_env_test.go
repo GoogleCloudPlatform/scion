@@ -90,6 +90,7 @@ func TestFindUnmatchedSettingsEnv_FlagsWithoutHint(t *testing.T) {
 		"SCION_SEED_SERVER_HUB_PORT", // Layer-0: seed values only seed Layer-1
 		"SCION_SERVER_ENV",           // binds in VersionedSettings, never read
 		"SCION_SERVER_LOG_FORMAT",
+		"SCION_SERVER_LOGFORMAT", // server.log_format is accepted but not read
 		// No SEED spelling maps to auto_expose_ports.enabled (no snake-case
 		// mapping for autoexposeports); seed it from settings.yaml.
 		"SCION_SEED_AUTO_EXPOSE_PORTS_ENABLED",

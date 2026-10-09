@@ -315,13 +315,13 @@ Settings for reporting telemetry summaries to the Scion Hub.
 
 ### Local Debug Output (`telemetry.local`)
 
-Settings for local debug telemetry output.
+Settings for local debug telemetry output. These keys are accepted so existing settings files still load, but no component reads them today, so they have no effect.
 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `enabled` | bool | `false` | Enable local debug output. |
-| `file` | string | — | Path for JSONL telemetry file output. |
-| `console` | bool | `false` | Write debug telemetry to stderr. |
+| `enabled` | bool | `false` | Accepted but ignored. |
+| `file` | string | — | Accepted but ignored. |
+| `console` | bool | `false` | Accepted but ignored. |
 
 ### Filtering (`telemetry.filter`)
 
@@ -330,7 +330,7 @@ Controls event filtering, attribute redaction, and sampling.
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `enabled` | bool | `true` | Enable event filtering. |
-| `respect_debug_mode` | bool | `true` | Bypass filters when debug mode is active. |
+| `respect_debug_mode` | bool | `true` | Accepted but ignored: no component reads this key today. |
 | `events.include` | list | `[]` | Event types to include (empty = all). |
 | `events.exclude` | list | `["agent.user.prompt"]` | Event types to exclude. |
 | `attributes.redact` | list | See below | Attribute names to replace with `[REDACTED]`. |
@@ -374,6 +374,5 @@ Settings can be overridden using environment variables with the `SCION_` prefix.
 | `telemetry.cloud.protocol` | `SCION_OTEL_PROTOCOL` |
 | `telemetry.cloud.tls.insecure_skip_verify` | `SCION_OTEL_INSECURE` |
 | `telemetry.hub.enabled` | `SCION_TELEMETRY_HUB_ENABLED` |
-| `telemetry.local.enabled` | `SCION_TELEMETRY_DEBUG` |
 
 See [Local Governance](/scion/local/local-governance/) for more on variable substitution.

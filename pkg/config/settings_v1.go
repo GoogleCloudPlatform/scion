@@ -1214,7 +1214,9 @@ type V1ServerConfig struct {
 	HomeStorage *V1HomeStorageConfig `json:"home_storage,omitempty" yaml:"home_storage,omitempty" koanf:"home_storage"`
 	Secrets     *V1SecretsConfig     `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
 	LogLevel    string               `json:"log_level,omitempty" yaml:"log_level,omitempty" koanf:"log_level"`
-	LogFormat   string               `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
+	// LogFormat is accepted so existing settings files still load, but nothing
+	// reads it (ptone/scion#4103). It is not carried into GlobalConfig.
+	LogFormat string `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
 
 	// Maintenance holds binary auto-update and deployment tier settings.
 	Maintenance *V1MaintenanceConfig `json:"maintenance,omitempty" yaml:"maintenance,omitempty" koanf:"maintenance"`
@@ -3181,9 +3183,6 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 	if v1.LogLevel != "" {
 		gc.LogLevel = v1.LogLevel
 	}
-	if v1.LogFormat != "" {
-		gc.LogFormat = v1.LogFormat
-	}
 
 	// Hub server config
 	if v1.Hub != nil {
@@ -3602,9 +3601,8 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 
 	v1 := &V1ServerConfig{
-		Mode:      gc.Mode,
-		LogLevel:  gc.LogLevel,
-		LogFormat: gc.LogFormat,
+		Mode:     gc.Mode,
+		LogLevel: gc.LogLevel,
 	}
 
 	// Hub server config

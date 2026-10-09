@@ -2107,7 +2107,6 @@ func TestConvertV1ServerToGlobalConfig_Basic(t *testing.T) {
 	gc := ConvertV1ServerToGlobalConfig(v1)
 
 	assert.Equal(t, "debug", gc.LogLevel)
-	assert.Equal(t, "json", gc.LogFormat)
 	assert.Equal(t, 9810, gc.Hub.Port)
 	assert.Equal(t, "test-hub-id", gc.Hub.HubID)
 	assert.Equal(t, "https://hub.example.com", gc.Hub.Endpoint)
@@ -2304,7 +2303,7 @@ server:
 	require.NoError(t, err)
 
 	assert.Equal(t, "debug", gc.LogLevel)
-	assert.Equal(t, "json", gc.LogFormat)
+	// server.log_format is accepted but ignored (ptone/scion#4103).
 	assert.Equal(t, 9999, gc.Hub.Port)
 	assert.Equal(t, "settings-hub-id", gc.Hub.HubID)
 	assert.Equal(t, true, gc.RuntimeBroker.Enabled)
@@ -6906,4 +6905,27 @@ runtimes:
 	assert.Equal(t, "ns-global", vs.Runtimes["k8s"].Namespace)
 	_, mapped := vs.ResolveKubernetesServiceAccountMappingForSelection("", "k8s", "agent-worker@my-project.iam.gserviceaccount.com")
 	assert.False(t, mapped, "the project-configs mapping must not be used")
+}
+
+// server.log_format is accepted and ignored (ptone/scion#4103): a settings
+// file that still sets it validates and decodes, and nothing is carried into
+// the hub's GlobalConfig.
+func TestServerLogFormat_AcceptedAndIgnored(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+server:
+  log_level: info
+  log_format: json
+`)
+	_, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+
+	var vs VersionedSettings
+	require.NoError(t, yaml.Unmarshal(data, &vs))
+	require.NotNil(t, vs.Server)
+	assert.Equal(t, "json", vs.Server.LogFormat)
+
+	gc := ConvertV1ServerToGlobalConfig(vs.Server)
+	assert.Equal(t, "info", gc.LogLevel)
+	assert.Empty(t, ConvertGlobalToV1ServerConfig(gc).LogFormat)
 }

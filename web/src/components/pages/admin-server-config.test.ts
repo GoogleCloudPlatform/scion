@@ -698,12 +698,12 @@ describe('scion-page-admin-server-config', () => {
       base.server.storage.bucket = 'old-bucket';
       base.server.message_broker = { enabled: true, type: 'inprocess' };
       const payload = await capturePut(base, (el) => {
-        el.logFormat = '';
+        el.logLevel = '';
         el.storageBucket = '';
         el.messageBrokerEnabled = false;
       });
       const server = payload.server as Record<string, Record<string, unknown> | string>;
-      expect(server.log_format).toBe('');
+      expect(server.log_level).toBe('');
       expect(server.storage).toEqual({ bucket: '' });
       expect(server.message_broker).toEqual({ enabled: false });
     });

@@ -213,7 +213,6 @@ interface V1GitHubAppConfig {
 interface V1ServerConfig {
   mode?: string;
   log_level?: string;
-  log_format?: string;
   hub?: V1ServerHubConfig;
   broker?: V1BrokerConfig;
   database?: V1DatabaseConfig;
@@ -666,7 +665,6 @@ export class ScionPageAdminServerConfig extends LitElement {
   // Server
   @state() private serverMode = '';
   @state() private logLevel = '';
-  @state() private logFormat = '';
 
   // Hub Server
   @state() private hubPort = 0;
@@ -1730,7 +1728,6 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (srv) {
       this.serverMode = srv.mode || '';
       this.logLevel = srv.log_level || '';
-      this.logFormat = srv.log_format || '';
 
       // Hub
       if (srv.hub) {
@@ -2274,7 +2271,6 @@ export class ScionPageAdminServerConfig extends LitElement {
     const server: Record<string, unknown> = {};
     if (ok('server.mode')) server.mode = this.serverMode || '';
     if (ok('server.log_level')) server.log_level = this.logLevel || '';
-    if (ok('server.log_format')) server.log_format = this.logFormat || '';
 
     const hub: Record<string, unknown> = {};
     if (ok('server.hub.port')) hub.port = this.hubPort || 0;
@@ -2423,7 +2419,6 @@ export class ScionPageAdminServerConfig extends LitElement {
     const server: Record<string, unknown> = {};
     if (ok('server.mode')) server.mode = this.serverMode || '';
     if (ok('server.log_level')) server.log_level = this.logLevel || '';
-    if (ok('server.log_format')) server.log_format = this.logFormat || '';
 
     // Hub server
     const hub: Record<string, unknown> = {};
@@ -3389,22 +3384,6 @@ export class ScionPageAdminServerConfig extends LitElement {
                 <sl-option value="info">Info</sl-option>
                 <sl-option value="warn">Warn</sl-option>
                 <sl-option value="error">Error</sl-option>
-              </sl-select>`
-            )}
-          </div>
-          <div class="form-field">
-            <label>Log Format</label>
-            ${this.renderFieldValue(
-              'server.log_format',
-              this.logFormat || 'text',
-              html`<sl-select
-                value=${this.logFormat || 'text'}
-                @sl-change=${(e: Event) => {
-                  this.logFormat = (e.target as HTMLSelectElement).value;
-                }}
-              >
-                <sl-option value="text">Text</sl-option>
-                <sl-option value="json">JSON</sl-option>
               </sl-select>`
             )}
           </div>

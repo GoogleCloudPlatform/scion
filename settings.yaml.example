@@ -56,13 +56,13 @@ schema_version: "1"
 #   hub:
 #     enabled: true
 #     report_interval: "60s"
-#   local:
+#   local:                             # accepted but ignored (no reader today)
 #     enabled: false
 #     file: ""
 #     console: false
 #   filter:
 #     enabled: false
-#     respect_debug_mode: true
+#     respect_debug_mode: true         # accepted but ignored (no reader today)
 #     events:
 #       include: []
 #       exclude: []
@@ -81,7 +81,6 @@ server:
   mode: workstation                    # "workstation" or "hosted"
   env: prod                            # "prod", "dev", "staging"
   log_level: info                      # "debug", "info", "warn", "error"
-  # log_format: ""                     # "" (default), "json"
 
   # -------------------------------------------------------------------------
   # Layer 0 — Hub Listeners (restart required)

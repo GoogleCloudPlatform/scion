@@ -40,4 +40,7 @@ func TestLogLevelFlag(t *testing.T) {
 	flag := rootCmd.PersistentFlags().Lookup("log-level")
 	require.NotNil(t, flag)
 	assert.Equal(t, "info", flag.DefValue)
+	// The help text must not promise levels that are not honoured
+	// (ptone/scion#4103).
+	assert.Contains(t, flag.Usage, "Only \"debug\" has an effect")
 }
