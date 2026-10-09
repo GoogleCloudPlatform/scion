@@ -117,7 +117,9 @@ func TestProvisionedStart_RunningContainerHealsCreatedRow(t *testing.T) {
 }
 
 // failingDeleteStore fails every agent row delete, and every transaction
-// (so a create's compensation fails too).
+// (so a create's compensation fails too). A create rollback deletes the
+// row with FinalizeAgentDeletion (the compensation, then each fallback
+// attempt), so each of those calls counts as a row delete.
 type failingDeleteStore struct {
 	store.Store
 	deletes *atomic.Int32
@@ -126,6 +128,11 @@ type failingDeleteStore struct {
 func (s failingDeleteStore) DeleteAgent(context.Context, string) error {
 	s.deletes.Add(1)
 	return errors.New("database is locked")
+}
+
+func (s failingDeleteStore) FinalizeAgentDeletion(context.Context, string, store.DeletionPredicate, store.DeletionFinalizeMode, store.DeletionFields, store.DeletionFinalizeHook) (int, error) {
+	s.deletes.Add(1)
+	return 0, errors.New("database is locked")
 }
 
 func (failingDeleteStore) WithTx(context.Context, func(tx store.Store) error) error {
@@ -146,7 +153,8 @@ func TestProvisionedStart_FailedCreateRowThatCannotBeRemoved(t *testing.T) {
 		Cause:           errors.New("dispatch failed"),
 	})
 	assert.NotEmpty(t, corrID, "a failed compensation is reported")
-	assert.Equal(t, int32(createCleanupDeleteAttempts), deletes.Load(), "the row delete is retried")
+	assert.Equal(t, int32(1+createCleanupDeleteAttempts), deletes.Load(),
+		"the compensation's row delete, then the retried fallback row delete")
 	got := getAgent(t, f.s, a.ID)
 	assert.Equal(t, "error", got.Phase)
 	assert.Equal(t, createRowRemoveFailedMessage, got.Message)
