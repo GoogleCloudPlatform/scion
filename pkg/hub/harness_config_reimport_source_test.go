@@ -195,6 +195,8 @@ func TestValidReimportSourceURL(t *testing.T) {
 		"github.com.example.com/myorg/repo",
 		"github.com@example.com/myorg/repo",
 		"github.com/myorg/" + strings.Repeat("a", maxRecordedSourceURLBytes),
+		// Simple case folding: only ASCII case variants of "github.com/" match.
+		"g\u0130thub.com/myorg/repo",
 	}, invalidRecordedSourceURLs...)
 	for _, bad := range rejected {
 		assert.False(t, validReimportSourceURL(bad), "%q must be refused", bad)
