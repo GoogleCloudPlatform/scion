@@ -226,8 +226,9 @@ Key settings:
   `localhost/scion` for local builds, or the registry path for remote images.
 - `hub.hub_name` — display name for the Hub, also reported as the
   `scion.hub.name` telemetry attribute. The name also appears in health
-  and diagnostics output. The deploy script sets it to the hub name you
-  deploy with; when unset, the VM host name is used.
+  output and scopes the diagnostics log queries. The deploy script sets
+  it to the hub name you deploy with; when unset, the VM host name is
+  used.
 - `admin_emails` — email(s) auto-promoted to super-admin on login.
 - `storage.local_path` — all workspace data stored on the VM's local disk.
 - `secrets.backend: local` — secrets are read from `hub.env` on disk, not from

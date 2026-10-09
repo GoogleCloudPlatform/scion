@@ -126,7 +126,7 @@ The steps above assume a public-facing VM with an external IP and public DNS. If
 | 1. Provision the VM | `gce-demo-provision.sh` | **No** — run the script as-is. It creates firewall rules for inbound HTTP/HTTPS (tcp:80, tcp:443) that are unnecessary if the VM is not publicly reachable; you can remove them afterward or let your network team manage internal firewall rules instead. |
 | 4. DNS and certificates | `gce-certs.sh` | **Yes** — this script fetches the VM's external IP, creates public Cloud DNS records, and obtains Let's Encrypt certificates via DNS challenge. All of this requires a public IP and will fail without one. |
 
-Steps 0, 2, and 3 work without modification. Step 5 needs a certificate and key at `/etc/letsencrypt/live/<CERT_DOMAIN>/fullchain.pem` and `privkey.pem`, readable by group `caddy`. `gce-start-hub.sh --full` always writes a Caddyfile that points at those files and restarts Caddy; if they are missing, Caddy fails to start and the script stops before it starts the Hub. Because `gce-demo-deploy.sh` always runs step 4, run the [individual steps](#individual-steps) instead of the all-in-one script.
+Steps 0, 2, and 3 work without modification. Step 5 needs a certificate and key at `/etc/letsencrypt/live/<CERT_DOMAIN>/fullchain.pem` and `privkey.pem`. The directory `/etc/letsencrypt/archive` must also exist; it may be empty. When `/etc/letsencrypt/live` exists, `gce-start-hub.sh --full` runs `chown -R` and `chmod -R` on both `live` and `archive` to give group `caddy` read access. The remote commands run under `set -euo pipefail`, so a missing `archive` directory stops the run before the Hub starts. The script then installs a Caddyfile that points at the certificate files and restarts Caddy when the Caddyfile changes; if the files are missing at that point, Caddy fails to start and the script stops before it starts the Hub. Because `gce-demo-deploy.sh` always runs step 4, run the [individual steps](#individual-steps) instead of the all-in-one script.
 
 ### Set `SCION_SERVER_BASE_URL`
 
@@ -160,7 +160,7 @@ hub.internal.example.com {
 }
 ```
 
-Then start Caddy manually (`sudo caddy start --config /etc/caddy/Caddyfile`) instead of running `gce-certs.sh`. `gce-start-hub.sh --full` replaces `/etc/caddy/Caddyfile` with its own version, which points at `/etc/letsencrypt/live/<CERT_DOMAIN>/`, and restarts Caddy. Before each `--full` run, place your certificate and key at that path as `fullchain.pem` and `privkey.pem`, readable by group `caddy`; otherwise the run stops before it starts the Hub. Restore your own Caddyfile after each `--full` run, or keep the generated one if it serves your certificate.
+Then start Caddy manually (`sudo caddy start --config /etc/caddy/Caddyfile`) instead of running `gce-certs.sh`. `gce-start-hub.sh --full` installs its own `/etc/caddy/Caddyfile`, which points at `/etc/letsencrypt/live/<CERT_DOMAIN>/`, and restarts Caddy when it changes. Before each `--full` run, place your certificate and key at that path as `fullchain.pem` and `privkey.pem`, and make sure `/etc/letsencrypt/archive` exists (it may be empty); otherwise the run stops before it starts the Hub. The script sets group `caddy` on both directories itself. Restore your own Caddyfile after each `--full` run, or keep the generated one if it serves your certificate.
 
 **Option B — TLS terminated upstream**
 
