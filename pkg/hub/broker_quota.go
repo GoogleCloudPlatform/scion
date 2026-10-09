@@ -245,6 +245,13 @@ func (s *Server) ReconcileStaleBrokerQuotaReservations(ctx context.Context) {
 	// grouped by broker below. Only listed brokers are visited, so rows whose
 	// scope ID is not a listed broker are not touched, as before. If this
 	// query fails the whole pass is skipped; the next scheduled pass retries.
+	//
+	// The rows are one snapshot taken at the start of the pass, not a fresh
+	// read per broker, so a later broker's rows can be older than the work
+	// already done for earlier brokers. That is acceptable: a release still
+	// needs the agent, re-read per broker below, to be missing or not in a
+	// counted phase, releasing an already-released row is a no-op, and the
+	// backfill is idempotent through the unique active-reservation index.
 	allReservations, err := s.store.ListActiveReservationsByScopeType(ctx, limitDef.ID, store.QuotaScopeBroker)
 	if err != nil {
 		s.agentLifecycleLog.Warn("quota reconcile: failed to list active reservations", "error", err)

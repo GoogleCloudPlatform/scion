@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -175,4 +176,101 @@ func TestBrokerQuota_ReconcileLeavesUnlistedScopeReservation(t *testing.T) {
 	assert.EqualValues(t, 0, brokerReservationCount(t, s, f.olderBroker.ID),
 		"listed broker's reservations for missing agents are released")
 	assert.EqualValues(t, 0, brokerReservationCount(t, s, f.newerBroker.ID))
+}
+
+// brokerScopedQueryCountingStore counts the reservation queries the
+// broker-scoped views and the reconcile issue.
+type brokerScopedQueryCountingStore struct {
+	store.Store
+	mu                 sync.Mutex
+	byScopeTypeCalls   int
+	countByScopeCalls  int
+	perBrokerListCalls int
+}
+
+func (c *brokerScopedQueryCountingStore) ListActiveReservationsByScopeType(ctx context.Context, limitDefinitionID, scopeType string) ([]*store.UsageReservation, error) {
+	c.mu.Lock()
+	c.byScopeTypeCalls++
+	c.mu.Unlock()
+	return c.Store.ListActiveReservationsByScopeType(ctx, limitDefinitionID, scopeType)
+}
+
+func (c *brokerScopedQueryCountingStore) CountActiveReservationsByScope(ctx context.Context, limitDefinitionID, scopeType string) (map[string]int64, error) {
+	c.mu.Lock()
+	c.countByScopeCalls++
+	c.mu.Unlock()
+	return c.Store.CountActiveReservationsByScope(ctx, limitDefinitionID, scopeType)
+}
+
+func (c *brokerScopedQueryCountingStore) ListActiveReservations(ctx context.Context, limitDefinitionID, scopeType, scopeID string) ([]*store.UsageReservation, error) {
+	if scopeType == store.QuotaScopeBroker {
+		c.mu.Lock()
+		c.perBrokerListCalls++
+		c.mu.Unlock()
+	}
+	return c.Store.ListActiveReservations(ctx, limitDefinitionID, scopeType, scopeID)
+}
+
+func (c *brokerScopedQueryCountingStore) reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.byScopeTypeCalls, c.countByScopeCalls, c.perBrokerListCalls = 0, 0, 0
+}
+
+func (c *brokerScopedQueryCountingStore) counts() (byScopeType, countByScope, perBrokerList int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.byScopeTypeCalls, c.countByScopeCalls, c.perBrokerListCalls
+}
+
+// TestBrokerScopedReservations_OneReservationQueryPerCall pins the query
+// count, not just the result set (ptone/scion#2314): with two listed
+// brokers, usage-by-limit and the reconcile each read reservations with one
+// ListActiveReservationsByScopeType call and no per-broker
+// ListActiveReservations call, and the usage summary uses one
+// CountActiveReservationsByScope call.
+func TestBrokerScopedReservations_OneReservationQueryPerCall(t *testing.T) {
+	srv, s := testServer(t)
+	f := seedBrokerScopedFixture(t, s)
+	ctx := context.Background()
+
+	counting := &brokerScopedQueryCountingStore{Store: srv.store}
+	srv.store = counting
+
+	t.Run("usage by limit", func(t *testing.T) {
+		counting.reset()
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/usage/"+f.def.ID, nil)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		byScopeType, countByScope, perBrokerList := counting.counts()
+		assert.Equal(t, 1, byScopeType)
+		assert.Equal(t, 0, countByScope)
+		assert.Equal(t, 0, perBrokerList)
+	})
+
+	t.Run("list helper", func(t *testing.T) {
+		counting.reset()
+		_, err := srv.listBrokerScopedActiveReservations(ctx, f.def.ID)
+		require.NoError(t, err)
+		byScopeType, _, perBrokerList := counting.counts()
+		assert.Equal(t, 1, byScopeType)
+		assert.Equal(t, 0, perBrokerList)
+	})
+
+	t.Run("usage summary", func(t *testing.T) {
+		counting.reset()
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/usage", nil)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		byScopeType, countByScope, perBrokerList := counting.counts()
+		assert.Equal(t, 0, byScopeType)
+		assert.Equal(t, 1, countByScope)
+		assert.Equal(t, 0, perBrokerList)
+	})
+
+	t.Run("reconcile", func(t *testing.T) {
+		counting.reset()
+		srv.ReconcileStaleBrokerQuotaReservations(ctx)
+		byScopeType, _, perBrokerList := counting.counts()
+		assert.Equal(t, 1, byScopeType)
+		assert.Equal(t, 0, perBrokerList)
+	})
 }
