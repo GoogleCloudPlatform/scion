@@ -1976,6 +1976,9 @@ describe('scion-page-admin-server-config', () => {
       );
       const panel = query(element, 'sl-tab-panel[name="gcp-identity"]');
       expect(panel?.querySelectorAll('.env-badge').length).toBe(2);
+      // The selects stay editable: both render, and neither is env-pinned.
+      expect(panel?.querySelectorAll('sl-select').length).toBe(2);
+      expect(panel?.querySelectorAll('.read-only-badge').length).toBe(0);
     });
 
     it('shows the GCP IAM fields as env-pinned on a file-tier hub', async () => {
