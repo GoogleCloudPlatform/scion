@@ -1016,6 +1016,38 @@ deployment is not HA (see [HA overview](/scion/hosted/ha/overview/)).
 `--max-instances=3` leaves room for Cloud Run to scale up under load.
 :::
 
+:::caution[More than one replica requires shared workspace storage]
+The `settings.yaml` above leaves
+[`server.workspace_storage`](/scion/reference/server-config/#workspace-storage-serverworkspace_storage)
+at its default `local` backend. With that backend each replica keeps
+hub-managed project workspaces on its own container storage, so replicas
+can see different workspace content, and the content is lost when an
+instance is replaced. On Cloud Run the Hub also refuses workspace writes
+(file edits, WebDAV, git clone) with `503 Service Unavailable` while the
+backend is `local` (see
+[Ephemeral Storage & 503 Safety Gate](/scion/reference/server-config/#ephemeral-storage--503-safety-gate)).
+
+Before running more than one replica, declare a shared volume on the
+Cloud Run service, mount it at `/mnt/<volume_name>`, and select it in
+`settings.yaml`:
+
+```yaml
+server:
+  workspace_storage:
+    backend: cloudrun-volume
+    cloudrun_volume:
+      volume_name: VOLUME_NAME       # the volume declared on the service
+      subpath_root: projects         # default
+```
+
+The Hub derives every workspace path from `/mnt/<volume_name>`. If the
+volume is not mounted there, `GET /readyz` returns `503` instead of the
+Hub writing workspaces to container storage. A missing `volume_name`
+stops the Hub at startup. See
+[Workspace Storage](/scion/reference/server-config/#workspace-storage-serverworkspace_storage)
+for all backends and fields.
+:::
+
 :::caution[Cloud Run Timeout Warning]
 We explicitly set `--timeout=900` (15 minutes). When dispatching the very first agent, GKE Autopilot triggers node provisioning to scale up from 0 nodes, which routinely takes 5-10 minutes. The default Cloud Run timeout (300 seconds) will prematurely kill the request, return a `503 Service Unavailable`, and tear down the initiating container. Set the timeout to at least 900 seconds to prevent this.
 :::

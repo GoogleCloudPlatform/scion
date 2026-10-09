@@ -15,16 +15,12 @@
 package runtime
 
 import (
-	"context"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	k8sfake "k8s.io/client-go/kubernetes/fake"
 )
 
 // nfsWorktreeConfig is nfsBaseConfig for a worktree-per-agent agent.
@@ -92,64 +88,47 @@ func TestBuildPod_NFSWorktree_WorkspacePathWins(t *testing.T) {
 	assert.Equal(t, []string{"/repo-root/worktrees/agent-1"}, values)
 }
 
-// In worktree mode every pod adds its own worktree, so a broker lock
-// loser gets the provisioning init container (root, with the chown
-// capabilities), not the wait-only one. In shared-plain a loser still
-// waits.
-func TestBuildPod_NFSWorktree_LockLoserProvisions(t *testing.T) {
-	cfg := nfsWorktreeConfig("wt-loser")
-	cfg.nfsProvisionLockLost = true
+// In worktree mode every pod adds its own worktree: the init container
+// runs as root with the chown capabilities and, for a pre-created
+// workspace, chowns best effort.
+func TestBuildPod_NFSWorktree_PreCreatedProvisions(t *testing.T) {
+	cfg := nfsWorktreeConfig("wt-precreated")
 	cfg.NFSWorkspacePreCreated = true
 	pod, err := newNFSTestK8sRuntime().buildPod("default", cfg)
 	require.NoError(t, err)
 	ic := pod.Spec.InitContainers[0]
-	assert.False(t, hasFlag(ic.Command, "--wait-for-sentinel"), "worktree-mode loser must provision")
 	require.NotNil(t, ic.SecurityContext.RunAsUser)
 	assert.Equal(t, int64(0), *ic.SecurityContext.RunAsUser)
 	assert.ElementsMatch(t, []corev1.Capability{"CHOWN", "FOWNER", "DAC_OVERRIDE"}, ic.SecurityContext.Capabilities.Add)
 	v, ok := envValue(ic.Env, provision.ChownBestEffortEnv)
 	assert.True(t, ok, "a provisioning init container gets the best-effort chown env when the broker prepared the directories")
 	assert.Equal(t, "1", v)
-
-	plain := nfsBaseConfig("plain-loser")
-	plain.nfsProvisionLockLost = true
-	plain.NFSWorkspacePreCreated = true
-	pod, err = newNFSTestK8sRuntime().buildPod("default", plain)
-	require.NoError(t, err)
-	ic = pod.Spec.InitContainers[0]
-	assert.True(t, hasFlag(ic.Command, "--wait-for-sentinel"), "shared-plain loser still waits")
-	assert.Nil(t, ic.SecurityContext.RunAsUser)
-	_, ok = envValue(ic.Env, provision.ChownBestEffortEnv)
-	assert.False(t, ok)
 }
 
 // Shared-plain pods are unchanged: no worktree mounts or env, the shared
 // checkout at /workspace, and the branch field alone changes nothing.
 func TestBuildPod_NFSSharedPlain_Unchanged(t *testing.T) {
-	for _, lockLost := range []bool{false, true} {
-		cfg := nfsBaseConfig("plain")
-		cfg.nfsProvisionLockLost = lockLost
-		pod, err := newNFSTestK8sRuntime().buildPod("default", cfg)
-		require.NoError(t, err)
+	cfg := nfsBaseConfig("plain")
+	pod, err := newNFSTestK8sRuntime().buildPod("default", cfg)
+	require.NoError(t, err)
 
-		main := pod.Spec.Containers[0]
-		assert.Equal(t, "/workspace", main.WorkingDir)
-		assert.Equal(t, []corev1.VolumeMount{
-			{Name: "workspace", MountPath: "/workspace", SubPath: "projects/proj-123/workspace"},
-		}, main.VolumeMounts)
-		_, ok := envValue(main.Env, "SCION_WORKSPACE_PATH")
-		assert.False(t, ok)
-		for _, name := range []string{"SCION_WORKSPACE_MODE", "SCION_AGENT_SLUG", "SCION_AGENT_BRANCH"} {
-			_, ok := envValue(pod.Spec.InitContainers[0].Env, name)
-			assert.False(t, ok, "shared-plain init env must not have %s", name)
-		}
-
-		withBranch := cfg
-		withBranch.NFSWorktreeBranch = "agent-one"
-		pod2, err := newNFSTestK8sRuntime().buildPod("default", withBranch)
-		require.NoError(t, err)
-		assert.Equal(t, pod.Spec, pod2.Spec, "lockLost=%v", lockLost)
+	main := pod.Spec.Containers[0]
+	assert.Equal(t, "/workspace", main.WorkingDir)
+	assert.Equal(t, []corev1.VolumeMount{
+		{Name: "workspace", MountPath: "/workspace", SubPath: "projects/proj-123/workspace"},
+	}, main.VolumeMounts)
+	_, ok := envValue(main.Env, "SCION_WORKSPACE_PATH")
+	assert.False(t, ok)
+	for _, name := range []string{"SCION_WORKSPACE_MODE", "SCION_AGENT_SLUG", "SCION_AGENT_BRANCH"} {
+		_, ok := envValue(pod.Spec.InitContainers[0].Env, name)
+		assert.False(t, ok, "shared-plain init env must not have %s", name)
 	}
+
+	withBranch := cfg
+	withBranch.NFSWorktreeBranch = "agent-one"
+	pod2, err := newNFSTestK8sRuntime().buildPod("default", withBranch)
+	require.NoError(t, err)
+	assert.Equal(t, pod.Spec, pod2.Spec)
 }
 
 // Without the NFS init container (local backend, or no claim) the worktree
@@ -182,29 +161,6 @@ func TestBuildPod_NFSWorktree_RejectsBadAgentName(t *testing.T) {
 		_, err := newNFSTestK8sRuntime().buildPod("default", cfg)
 		assert.Error(t, err, "agent name %q", name)
 	}
-}
-
-// Run: a broker lock loser in worktree mode creates a pod whose init
-// container provisions (adds the worktree) instead of only waiting.
-func TestRun_NFSWorktreeLockLost_CreatesProvisioningPod(t *testing.T) {
-	r := newNFSTestK8sRuntime()
-	cfg := nfsWorktreeConfig("scion-wt-lock-lost")
-	cfg.Locker = &alwaysLoseLocker{}
-	// Run creates the pod, then fails readiness at its first poll (see
-	// failPodReadiness), which keeps the pod for inspection.
-	failPodReadiness(r.Client.Clientset.(*k8sfake.Clientset))
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	r.Run(ctx, cfg) //nolint:errcheck
-
-	pods, err := r.Client.Clientset.CoreV1().Pods("default").List(context.Background(), metav1.ListOptions{})
-	require.NoError(t, err)
-	require.Len(t, pods.Items, 1)
-	require.Len(t, pods.Items[0].Spec.InitContainers, 1)
-	ic := pods.Items[0].Spec.InitContainers[0]
-	assert.False(t, hasFlag(ic.Command, "--wait-for-sentinel"))
-	v, _ := envValue(ic.Env, "SCION_WORKSPACE_MODE")
-	assert.Equal(t, "worktree-per-agent", v)
 }
 
 func TestNFSWorktreeSubPaths(t *testing.T) {

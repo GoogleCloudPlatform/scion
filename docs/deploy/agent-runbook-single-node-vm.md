@@ -830,6 +830,19 @@ gcloud compute ssh scion-hub-HUB_NAME \
 
 **Expected:** A successful response (HTTP 200).
 
+**Authentication before Phase 5.** `/healthz` needs no credentials. The
+Phase 3 `settings.yaml` sets `server.auth.mode: dev`, but that setting alone does
+not enable dev auth, so until the Phase 5 proxy settings are written every
+authenticated API call returns `401`. This is expected; do not treat it as a
+failed deploy. Dev auth is enabled only by `--dev-auth` or
+`server.auth.dev_mode: true`, and the server refuses to start with dev auth
+when the web server binds a non-loopback address. The Hub unit binds
+`0.0.0.0` so the IAP proxy can reach it, so do not enable dev auth on the VM.
+If the user needs authenticated access before Phase 5, configure OAuth
+instead, or, for a short-lived test only, bind the Hub to `127.0.0.1` with
+dev auth and use an SSH tunnel; see the `settings.yaml` section of
+[single-node-vm.md](single-node-vm.md#settingsyaml).
+
 **If it fails:** Check service logs:
 ```bash
 gcloud compute ssh scion-hub-HUB_NAME \
@@ -875,7 +888,7 @@ With the hybrid tier enabled, `deploy.sh` writes `block` instead (see item 6
 under "Hybrid Tier (Optional)" above); the rest of this section describes the
 default single-node deployment.
 
-Both `settings.yaml` heredocs `deploy.sh` writes (the Phase 3 dev-auth one and
+Both `settings.yaml` heredocs `deploy.sh` writes (the Phase 3 bootstrap one and
 the Phase 5 proxy/IAP one) set the top-level key
 `default_gcp_identity_mode: passthrough`. Combined with the VM service
 account's `roles/aiplatform.user` grant (§6.3a's prerequisite, added when the

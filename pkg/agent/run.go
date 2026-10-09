@@ -285,6 +285,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if err != nil {
 		return nil, err
 	}
+	if opts.FreshProvision {
+		recordNFSAgentDir(agentDir, opts.Name)
+	}
 	// Empty-per-agent (design #2703): the request's mode, or the mode
 	// persisted at provision, so a start that lost it (e.g. a dropped or
 	// undecodable request body) still gets the private workspace, no repo
@@ -1917,6 +1920,16 @@ authDone:
 					claimSharedDirNames = append(claimSharedDirNames, name)
 				}
 			}
+			if agentDirName != "" && mount.PVClaimName != "" {
+				if keep, reason := nfsKeepSharedCheckout(opts.FreshProvision, agentDir, resolvedWorkspace, agentDirName); keep {
+					// The agent keeps the layout and mode it had before
+					// ptone/scion#3998, so its work stays where it is.
+					slog.Info("workspace_storage nfs: "+reason, "agent", opts.Name)
+					agentDirName, agentBranch = "", ""
+					opts.Env["SCION_WORKSPACE_MODE"] = string(store.SharingModeSharedPlain)
+					agentEnv = withEnvValue(agentEnv, "SCION_WORKSPACE_MODE", string(store.SharingModeSharedPlain))
+				}
+			}
 			if emptyAgentDirName != "" {
 				// Empty-per-agent: only the agent's own directory is ever
 				// mounted, never the project's workspace path resolved
@@ -1937,6 +1950,9 @@ authDone:
 			}
 			if err != nil {
 				return nil, err
+			}
+			if nfsAgentDirName != "" && !nfsAgentDirEmpty {
+				recordNFSAgentDir(agentDir, opts.Name)
 			}
 			if worktreeName != "" && mount.PVClaimName != "" {
 				worktreePreCreated, err := ensureNFSWorktreeLeaf(m.Runtime.Name(), resolvedWorkspace, mount.PVClaimName, worktreeName)
@@ -2211,6 +2227,7 @@ authDone:
 			}
 			return nil
 		}(),
+		KubernetesBlockIdentity: opts.KubernetesBlockIdentity != nil,
 		Kubernetes: func() *api.KubernetesConfig {
 			// Start from the template/agent config's Kubernetes settings
 			// (namespace, resources, node selector, etc.), then ALWAYS
@@ -2261,6 +2278,17 @@ authDone:
 					k8sCfg = &api.KubernetesConfig{}
 				}
 				k8sCfg.ServiceAccountName = opts.ResolvedKubernetesServiceAccountName
+			}
+			// GCP identity "block" (ptone/scion#4034): the pod runs as the
+			// block ServiceAccount, or as the namespace's default when none
+			// is configured. Either way it replaces any template or
+			// persisted serviceAccountName, which could name a KSA bound to
+			// a GCP service account.
+			if opts.KubernetesBlockIdentity != nil {
+				if k8sCfg == nil {
+					k8sCfg = &api.KubernetesConfig{}
+				}
+				k8sCfg.ServiceAccountName = opts.KubernetesBlockIdentity.ServiceAccountName
 			}
 			return k8sCfg
 		}(),
