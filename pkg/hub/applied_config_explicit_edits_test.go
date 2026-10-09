@@ -751,16 +751,19 @@ func TestApplyAgentUpdate_UntouchedSavePreservesInlineBranch(t *testing.T) {
 
 // TestApplyAgentUpdate_PresentBranchKeyIsApplied pins the other half of
 // mergePresentInlineFields for branch: only an ABSENT key keeps the stored
-// value. A present key (from a caller other than the configure page) still
-// wins, in both InlineConfig and CreateInputs, whether it sets a new value or
-// clears it.
+// value silently. The branch is fixed at creation (ptone/scion#3972), so a
+// present key that would change it, to a new value or to empty, is refused
+// with 400 and stored nowhere; a present key equal to the stored branch is
+// an echo and changes nothing.
 func TestApplyAgentUpdate_PresentBranchKeyIsApplied(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		branch string
+		code   int
 	}{
-		{name: "set", branch: "y"},
-		{name: "cleared", branch: ""},
+		{name: "set", branch: "y", code: http.StatusBadRequest},
+		{name: "cleared", branch: "", code: http.StatusBadRequest},
+		{name: "echoed", branch: "feature/x", code: http.StatusOK},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			disp := newReincarnateTestDispatcher()
@@ -774,17 +777,20 @@ func TestApplyAgentUpdate_PresentBranchKeyIsApplied(t *testing.T) {
 			})
 
 			rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{"branch": tc.branch})
-			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			require.Equal(t, tc.code, rec.Code, rec.Body.String())
+			if tc.code != http.StatusOK {
+				assert.Contains(t, rec.Body.String(), "config.branch")
+			}
 
 			updated, err := s.GetAgent(ctx, agent.ID)
 			require.NoError(t, err)
 			require.NotNil(t, updated.AppliedConfig.InlineConfig)
-			assert.Equal(t, tc.branch, updated.AppliedConfig.InlineConfig.Branch,
-				"a present branch key must replace the stored inline branch")
+			assert.Equal(t, "feature/x", updated.AppliedConfig.InlineConfig.Branch,
+				"the stored inline branch never changes")
 			require.NotNil(t, updated.AppliedConfig.CreateInputs)
-			require.NotNil(t, updated.AppliedConfig.CreateInputs.InlineConfig,
-				"a changed branch must be recorded as an explicit edit")
-			assert.Equal(t, tc.branch, updated.AppliedConfig.CreateInputs.InlineConfig.Branch)
+			if ci := updated.AppliedConfig.CreateInputs.InlineConfig; ci != nil {
+				assert.Empty(t, ci.Branch, "no branch edit is recorded")
+			}
 		})
 	}
 }

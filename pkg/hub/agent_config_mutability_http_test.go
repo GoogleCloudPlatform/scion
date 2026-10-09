@@ -412,7 +412,11 @@ func TestAgentConfigPatch_TaskRefusedWhileSuspended(t *testing.T) {
 	assert.Empty(t, after.AppliedConfig.Task)
 
 	// A stopped agent's next fresh start sends the task, so it is accepted.
-	stopped := newEditTestAgent(t, s, project, broker, state.PhaseStopped)
+	stopped := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.ID = tid("stopped-" + t.Name())
+		a.Slug = "stopped-" + tidSlugSafe(t.Name())
+		a.Phase = string(state.PhaseStopped)
+	})
 	_, code, body = patchAgentBody(t, srv, stopped.ID, map[string]interface{}{
 		"config": map[string]interface{}{"task": "next task"},
 	})
