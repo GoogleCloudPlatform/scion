@@ -3142,14 +3142,14 @@ runtimes:
 	})
 }
 
-// TestGCPIdentityBlockRejectedOnKubernetes_HTTPStatus pins that the
-// Kubernetes/"block" rejection (ptone/scion#2328) reaches the HTTP caller as
-// the 400 startContextError.Status actually names, on all three dispatch
-// endpoints — not the generic 500 runtime_error every buildStartContext
-// error used to collapse into before writeStartContextError (errors.go)
-// started honoring Status.
-func TestGCPIdentityBlockRejectedOnKubernetes_HTTPStatus(t *testing.T) {
-	newKubernetesServer := func(t *testing.T) *Server {
+// TestGCPIdentityBlockAcceptedOnKubernetes_HTTP pins ptone/scion#4034 on all
+// three dispatch endpoints: "block" on Kubernetes, from the request or from
+// a hub-supplied project or hub default, is accepted and reaches the
+// manager with the Kubernetes block identity (here the namespace default
+// ServiceAccount, since none is configured) and the block mode, never
+// passthrough. The restart path runs the late consistency recheck too.
+func TestGCPIdentityBlockAcceptedOnKubernetes_HTTP(t *testing.T) {
+	newKubernetesServer := func(t *testing.T) (*Server, *envCapturingManager) {
 		t.Helper()
 		t.Setenv("HOME", t.TempDir())
 		origWd, err := os.Getwd()
@@ -3183,54 +3183,55 @@ runtimes:
 		cfg.ForceRuntime = "kubernetes"
 		mgr := &envCapturingManager{}
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-		return New(cfg, mgr, rt)
+		return New(cfg, mgr, rt), mgr
 	}
 
-	assertRejected := func(t *testing.T, w *httptest.ResponseRecorder) {
+	assertAccepted := func(t *testing.T, w *httptest.ResponseRecorder, mgr *envCapturingManager) {
 		t.Helper()
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+		if w.Code < 200 || w.Code > 299 {
+			t.Fatalf("expected a 2xx status, got %d: %s", w.Code, w.Body.String())
 		}
-		var resp ErrorResponse
-		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-			t.Fatalf("failed to decode error response: %v (body: %s)", err, w.Body.String())
+		opts := mgr.LastStartOpts()
+		if opts.KubernetesBlockIdentity == nil {
+			t.Fatalf("expected KubernetesBlockIdentity on the started agent")
 		}
-		if resp.Error.Code != ErrCodeValidationError {
-			t.Errorf("expected error code %q, got %q", ErrCodeValidationError, resp.Error.Code)
+		if got := opts.KubernetesBlockIdentity.ServiceAccountName; got != "" {
+			t.Errorf("expected the namespace default ServiceAccount (empty), got %q", got)
 		}
-		if !strings.Contains(resp.Error.Message, "Kubernetes") {
-			t.Errorf("expected the error message to name the Kubernetes runtime, got %q", resp.Error.Message)
+		if got := mgr.lastEnv["SCION_METADATA_MODE"]; got != "block" {
+			t.Errorf("SCION_METADATA_MODE = %q, want block", got)
 		}
 	}
 
 	t.Run("create", func(t *testing.T) {
-		srv := newKubernetesServer(t)
+		srv, mgr := newKubernetesServer(t)
 		body := `{"name": "gcp-block-k8s-agent", "config": {"gcpIdentity": {"metadata_mode": "block"}}}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(w, req)
-		assertRejected(t, w)
+		assertAccepted(t, w, mgr)
 	})
 
 	t.Run("start", func(t *testing.T) {
-		srv := newKubernetesServer(t)
-		body := `{"resolvedEnv": {"SCION_METADATA_MODE": "block"}}`
+		srv, mgr := newKubernetesServer(t)
+		body := `{"resolvedEnv": {"SCION_METADATA_MODE": "block", "SCION_METADATA_MODE_SOURCE": "hub"}}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/gcp-block-k8s-start/start", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(w, req)
-		assertRejected(t, w)
+		assertAccepted(t, w, mgr)
 	})
 
 	t.Run("restart", func(t *testing.T) {
-		srv := newKubernetesServer(t)
-		body := `{"resolvedEnv": {"SCION_METADATA_MODE": "block"}}`
+		srv, mgr := newKubernetesServer(t)
+		mgr.agents = []api.AgentInfo{{ID: "gcp-block-k8s-restart", Name: "gcp-block-k8s-restart", Phase: "running"}}
+		body := `{"resolvedEnv": {"SCION_METADATA_MODE": "block", "SCION_METADATA_MODE_SOURCE": "hub"}}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/gcp-block-k8s-restart/restart", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(w, req)
-		assertRejected(t, w)
+		assertAccepted(t, w, mgr)
 	})
 }
 
