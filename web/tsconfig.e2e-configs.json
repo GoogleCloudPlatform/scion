@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "types": ["node"]
+  },
+  // Type-checks the Playwright config files, which the root project does
+  // not include. Run by the typecheck script.
+  "include": ["playwright.config.ts", "e2e/**/playwright*.config.ts"],
+  "exclude": []
+}
