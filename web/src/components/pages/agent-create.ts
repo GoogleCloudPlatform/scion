@@ -139,8 +139,8 @@ export class ScionPageAgentCreate extends LitElement {
    * Gates whether gcp_identity is sent at all on submit: with no explicit
    * user choice, on any target runtime, the request omits gcp_identity so
    * the server resolves it from its own precedence (per-profile and project
-   * defaults, then hub default, then unset) rather than the form pinning the
-   * identity mode client-side.
+   * defaults, then hub default, then the runtime default) rather than the
+   * form pinning the identity mode client-side.
    */
   @state() private gcpIdentityUserSet = false;
   /**
@@ -1405,7 +1405,8 @@ export class ScionPageAgentCreate extends LitElement {
       // GCP identity: sent only when the user chose it here. Otherwise the
       // request omits gcp_identity, so the server resolves it from its own
       // precedence (per-profile and project defaults, then hub default, then
-      // unset) instead of the form pinning the identity mode client-side.
+      // the runtime default) instead of the form pinning the identity mode
+      // client-side.
       // The displayed mode is the applied project default for context, or
       // blank when none was applied (noIdentityModeChosen), not a user choice.
       if (!this.gcpIdentityUserSet) {

@@ -58,8 +58,6 @@ let projectDefaultMode = '';
 let projectDefaultAccount = 'sa-a';
 /** The project's per-profile defaults (profile name to account ID). */
 let projectProfileDefaults: Record<string, string> = {};
-/** What /gcp-service-accounts returns. */
-let serviceAccounts: unknown[] = [];
 let hubTelemetry = false;
 let bodies: Array<Record<string, unknown>> = [];
 
@@ -76,6 +74,9 @@ const verifiedServiceAccount = {
   verifiedAt: '2026-01-01T00:00:00Z',
   createdBy: 'user-1',
 };
+
+/** What /gcp-service-accounts returns; afterEach resets it to the same value. */
+let serviceAccounts: unknown[] = [verifiedServiceAccount];
 
 function stubFetch(): void {
   bodies = [];
