@@ -1029,6 +1029,13 @@
           "type": "string",
           "description": "Kubernetes only. Default size per shared-dir PVC under this profile (e.g. 10Gi). Wins over the runtime entry's value; a template or agent kubernetes.shared_dir_size wins over this."
         },
+        "clone_depth": {
+          "oneOf": [
+            { "type": "string", "pattern": "^(full|[1-9][0-9]*)$" },
+            { "type": "integer", "minimum": 1 }
+          ],
+          "description": "Git clone depth for clone-per-agent workspaces of agents under this profile: \"full\" for a full (non-shallow) clone, or a positive integer N for a clone of depth N. A template or agent clone_depth wins over this. Unset keeps the default shallow (depth 1) clone."
+        },
         "safe_to_evict": {
           "type": "boolean",
           "description": "Kubernetes only. Set to false to add the cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\" annotation to agent pods under this profile (on GKE Autopilot this requests extended run duration). true is accepted and adds nothing. Wins over the runtime entry's value; a template or agent kubernetes.safeToEvict wins over this. Ignored, with a warning, on other runtimes."

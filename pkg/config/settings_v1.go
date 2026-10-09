@@ -882,6 +882,28 @@ func (vs *VersionedSettings) ResolveSafeToEvictWithSource(profileName string) (v
 	return nil, ""
 }
 
+// ResolveCloneDepthWithSource returns the profile's clone_depth and the
+// settings key it came from ("profiles.NAME.clone_depth"). If profileName
+// is empty, ActiveProfile is used. An unknown profile, or a profile
+// without clone_depth, yields an empty value and source.
+//
+// This is a default only: a template's or agent's clone_depth wins over
+// it. The value is returned as written; callers validate it with
+// api.CloneDepth.GitDepth so the error can name its source.
+func (vs *VersionedSettings) ResolveCloneDepthWithSource(profileName string) (value api.CloneDepth, source string) {
+	if vs == nil {
+		return "", ""
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	profile, ok := vs.Profiles[profileName]
+	if !ok || profile.CloneDepth == "" {
+		return "", ""
+	}
+	return profile.CloneDepth, "profiles." + profileName + ".clone_depth"
+}
+
 // ApplySafeToEvictDefault returns base with SafeToEvict filled from the
 // settings default when base leaves it unset, so a template's or agent's
 // explicit value (true or false) always wins. base is never modified; a
@@ -2586,6 +2608,11 @@ type V1ProfileConfig struct {
 	// loses to a template's or agent's kubernetes.safeToEvict. Only false
 	// has an effect. See ResolveSafeToEvict.
 	SafeToEvict *bool `json:"safe_to_evict,omitempty" yaml:"safe_to_evict,omitempty" koanf:"safe_to_evict"`
+	// CloneDepth is the git clone depth for agents using this profile:
+	// "full" or a positive integer. A template's or agent's clone_depth
+	// wins over it. Empty keeps the default shallow clone. See
+	// ResolveCloneDepth.
+	CloneDepth api.CloneDepth `json:"clone_depth,omitempty" yaml:"clone_depth,omitempty" koanf:"clone_depth"`
 	// SharedDirStorageBackend overrides server.shared_dir_storage.backend
 	// ("local" or "nfs") for agents using this profile. It wins over the
 	// same key on the profile's runtime entry. The nfs details always come

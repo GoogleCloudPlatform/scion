@@ -547,6 +547,33 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		util.Debugf("user resolution: from ScionConfig user=%s", unixUsername)
 	}
 
+	// clone_depth for a clone-per-agent start: the template/agent value,
+	// else the profile's (the one named for this start, else the one the
+	// agent was created with, else the active profile). Unset keeps the
+	// depth sent with the request.
+	if opts.GitClone != nil {
+		cdProfile := opts.Profile
+		if cdProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
+			cdProfile = finalScionCfg.Info.Profile
+		}
+		var cdIn cloneDepthInput
+		if finalScionCfg != nil {
+			cdIn.Template = finalScionCfg.CloneDepth
+		}
+		cdIn.Profile, cdIn.ProfileSource = settings.ResolveCloneDepthWithSource(cdProfile)
+		if opts.Env == nil {
+			opts.Env = make(map[string]string)
+		}
+		gc, err := applyCloneDepth(opts.GitClone, opts.Env, cdIn)
+		if err != nil {
+			return nil, err
+		}
+		if gc != opts.GitClone && gc.Depth != nil {
+			slog.Debug("Start: resolved clone_depth", "agent", opts.Name, "depth", *gc.Depth)
+		}
+		opts.GitClone = gc
+	}
+
 	var warnings []string
 
 	// The template tier: the live template chain (later template wins).

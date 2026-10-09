@@ -1763,6 +1763,32 @@ func TestSafeToEvictSchemaValidation(t *testing.T) {
 	}
 }
 
+// TestCloneDepthSchemaValidation checks the profiles section schema for
+// clone_depth: "full" or a positive integer, as a string or a bare integer.
+func TestCloneDepthSchemaValidation(t *testing.T) {
+	for _, doc := range []string{
+		`{"gke": {"runtime": "gke", "clone_depth": "full"}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": 50}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": "50"}}`,
+		`{"gke": {"runtime": "gke"}}`,
+	} {
+		if errs := Validate("profiles", json.RawMessage(doc)); len(errs) > 0 {
+			t.Errorf("expected %s to be valid, got errors: %v", doc, errs)
+		}
+	}
+	for _, doc := range []string{
+		`{"gke": {"runtime": "gke", "clone_depth": 0}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": "0"}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": -1}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": "shallow"}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": true}}`,
+	} {
+		if errs := Validate("profiles", json.RawMessage(doc)); len(errs) == 0 {
+			t.Errorf("expected %s to be rejected", doc)
+		}
+	}
+}
+
 // TestKubernetesAssignSettingsSchemaValidation checks the runtimes and
 // profiles section schemas for kubernetes_service_account_mappings and the
 // runtime namespace, which use the same patterns as settings-v1.schema.json.

@@ -64,6 +64,15 @@ func kubernetesServiceAccountMappingsSchema() map[string]interface{} {
 	}
 }
 
+// cloneDepthSchema is the schema for a profile's clone_depth: "full" or
+// a positive integer, written either as a string or a bare integer.
+func cloneDepthSchema() map[string]interface{} {
+	return map[string]interface{}{"oneOf": []interface{}{
+		map[string]interface{}{"type": "string", "pattern": "^(full|[1-9][0-9]*)$"},
+		map[string]interface{}{"type": "integer", "minimum": 1},
+	}}
+}
+
 // sharedDirStorageBackendsSchema mirrors shared_dir_storage_backends in
 // settings-v1.schema.json: shared dir name keys (lowercase letters, digits
 // and hyphens, as api.ValidateSharedDirs requires) mapped to local or nfs.
@@ -603,6 +612,7 @@ func compileSchemas() {
 						},
 					},
 					"secrets":                     map[string]interface{}{"type": "array"},
+					"clone_depth":                 cloneDepthSchema(),
 					"shared_dir_storage_class":    map[string]interface{}{"type": "string"},
 					"shared_dir_size":             map[string]interface{}{"type": "string"},
 					"safe_to_evict":               map[string]interface{}{"type": "boolean"},

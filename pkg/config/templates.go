@@ -159,6 +159,10 @@ func (t *Template) LoadConfig() (*api.ScionConfig, error) {
 		return nil, fmt.Errorf("invalid mcp_servers config in %s: %w", configPath, err)
 	}
 
+	if err := cfg.CloneDepth.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid config in %s: %w", configPath, err)
+	}
+
 	return &cfg, nil
 }
 
@@ -947,6 +951,9 @@ func MergeScionConfig(base, override *api.ScionConfig) *api.ScionConfig {
 	}
 	if override.MaxDuration != "" {
 		result.MaxDuration = override.MaxDuration
+	}
+	if override.CloneDepth != "" {
+		result.CloneDepth = override.CloneDepth
 	}
 	if override.Hub != nil {
 		if result.Hub == nil {
