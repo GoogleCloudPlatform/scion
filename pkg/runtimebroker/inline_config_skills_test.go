@@ -208,6 +208,20 @@ func TestDedupeSkillReferences(t *testing.T) {
 			},
 		},
 		{
+			name: "newer version replaces older version of the same skill",
+			in: []api.SkillReference{
+				{URI: "skill://scion/global/x@1.0", Scope: "hub"},
+				{URI: "skill://scion/global/y"},
+				{URI: "skill://scion/global/x@2.0", Scope: "hub"},
+				{URI: "skill://scion/global/x@3.0", As: "other", Scope: "hub"},
+			},
+			want: []api.SkillReference{
+				{URI: "skill://scion/global/y"},
+				{URI: "skill://scion/global/x@2.0", Scope: "hub"},
+				{URI: "skill://scion/global/x@3.0", As: "other", Scope: "hub"},
+			},
+		},
+		{
 			name: "survivors keep the latest relative order",
 			in: []api.SkillReference{
 				{URI: "skill://scion/global/foo", Scope: "hub"},
@@ -315,5 +329,67 @@ func TestDedupeSkillReferences_HubResolveUnchanged(t *testing.T) {
 				t.Fatalf("install outcome changed by the collapse\nbefore: %+v\n after: %+v", b, a)
 			}
 		})
+	}
+}
+
+// TestApplyInlineConfigUpdate_PrunesAndReplacesHubSkills verifies that the
+// skills the Hub sends replace the agent's hub-, user- and project-scoped
+// entries: a version bump replaces the older entry, a skill the Hub no
+// longer sends is pruned, and the broker's own template, platform and
+// unscoped entries survive (ptone/scion#2908).
+func TestApplyInlineConfigUpdate_PrunesAndReplacesHubSkills(t *testing.T) {
+	srv, _ := newTestServerWithProvisionCapture()
+	projectDir := filepath.Join(t.TempDir(), ".scion")
+	agentName := "prune-agent"
+
+	cfgPath := writeAgentConfig(t, projectDir, agentName, api.ScionConfig{
+		Skills: []api.SkillReference{
+			{URI: "skill://scion/global/local-tpl", Scope: "template"},
+			{URI: "skill://scion/global/plat", Scope: "platform"},
+			{URI: "gh://example/repo/skills/unscoped"},
+			{URI: "skill://scion/global/bumped@1.0", Scope: "hub"},
+			{URI: "skill://scion/global/dropped-hub", Scope: "hub"},
+			{URI: "skill://scion/global/dropped-user", Scope: "user"},
+			{URI: "skill://scion/global/dropped-project", Scope: "project"},
+			{URI: "skill://scion/global/kept-user", Scope: "user"},
+		},
+	})
+
+	srv.applyInlineConfigUpdate(agentName, projectDir, &api.ScionConfig{
+		Skills: []api.SkillReference{
+			{URI: "skill://scion/global/bumped@2.0", Scope: "hub"},
+			{URI: "skill://scion/global/kept-user", Scope: "user"},
+		},
+	}, false)
+
+	want := []api.SkillReference{
+		{URI: "skill://scion/global/local-tpl", Scope: "template"},
+		{URI: "skill://scion/global/plat", Scope: "platform"},
+		{URI: "gh://example/repo/skills/unscoped"},
+		{URI: "skill://scion/global/bumped@2.0", Scope: "hub"},
+		{URI: "skill://scion/global/kept-user", Scope: "user"},
+	}
+	if got := readAgentSkills(t, cfgPath); !reflect.DeepEqual(got, want) {
+		t.Fatalf("skills after apply\n got: %+v\nwant: %+v", got, want)
+	}
+}
+
+// TestApplyInlineConfigUpdate_NoSkillsLeavesSkillsUnchanged verifies that an
+// inline config without skills does not prune the agent's existing skills.
+func TestApplyInlineConfigUpdate_NoSkillsLeavesSkillsUnchanged(t *testing.T) {
+	srv, _ := newTestServerWithProvisionCapture()
+	projectDir := filepath.Join(t.TempDir(), ".scion")
+	agentName := "noskills-agent"
+
+	skills := []api.SkillReference{
+		{URI: "skill://scion/global/a", Scope: "hub"},
+		{URI: "skill://scion/global/b", Scope: "template"},
+	}
+	cfgPath := writeAgentConfig(t, projectDir, agentName, api.ScionConfig{Skills: skills})
+
+	srv.applyInlineConfigUpdate(agentName, projectDir, &api.ScionConfig{MaxTurns: 5}, false)
+
+	if got := readAgentSkills(t, cfgPath); !reflect.DeepEqual(got, skills) {
+		t.Fatalf("skills changed\n got: %+v\nwant: %+v", got, skills)
 	}
 }
