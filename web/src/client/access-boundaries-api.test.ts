@@ -63,6 +63,7 @@ describe('listAudit', () => {
   });
 
   it('accepts a retained event whose correlation ID is omitted', async () => {
+    /* eslint-disable-next-line @typescript-eslint/no-unused-vars -- rest-omit idiom: bind and drop the key so `...rest` excludes it */
     const { correlationId: _correlationId, ...withoutCorrelation } = retainedPage.items[0];
     const event: AccessBoundaryAuditEvent = withoutCorrelation;
     const page: AccessBoundaryAuditPage = { ...retainedPage, items: [event] };

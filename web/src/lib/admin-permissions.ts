@@ -67,7 +67,6 @@ export function hasAnyPermission(
  * The `/settings` nav item is visible when the user holds ANY of these.
  */
 const SETTINGS_PERMISSIONS: string[] = [
-  'hub.settings.read',
   'hub.env_vars.read',
   'template.list',
   'template.read',
