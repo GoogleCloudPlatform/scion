@@ -156,8 +156,9 @@ func TestScopeReissueBulk_T12_DryRunDefault(t *testing.T) {
 	applied := f.bulk(t, false)
 	for _, id := range []string{f.root.ID, f.parent.ID, f.child.ID} {
 		d, a := bulkAgent(t, &dry, id), bulkAgent(t, applied, id)
-		assert.Equal(t, d.Added, a.Added, id)
-		assert.Equal(t, d.Removed, a.Removed, id)
+		// The dry run came back over JSON, where an empty list is omitted.
+		assert.ElementsMatch(t, d.Added, a.Added, id)
+		assert.ElementsMatch(t, d.Removed, a.Removed, id)
 		assert.Equal(t, d.RoleAfter, a.RoleAfter, id)
 	}
 }
