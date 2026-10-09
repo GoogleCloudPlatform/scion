@@ -32,8 +32,9 @@ const (
 	decisionAuditCancelBudget       = time.Second
 	decisionAuditCompleteBudget     = 2 * time.Second
 	decisionAuditNewHealthKey       = "authorization_decision_audit_new"
-	decisionAuditLegacyHealthKey    = "authorization_decision_audit_legacy"
-	decisionAuditFaultWarning       = "unhealthy: CRITICAL authorization decision logging fault; NEW off; triggering record may be lost; subsequent decisions use legacy"
+	// Negative compatibility/test sentinel; production health does not emit this key.
+	decisionAuditLegacyHealthKey = "authorization_decision_audit_legacy"
+	decisionAuditFaultWarning    = "unhealthy: CRITICAL authorization decision logging fault; NEW off; triggering record may be lost; subsequent decisions have no persistence"
 )
 
 // These facts describe a finite local contract, not production provenance.
@@ -714,7 +715,7 @@ func (r *decisionAuditRouter) inspect() decisionAuditRouterState {
 	return state
 }
 
-func (r *decisionAuditRouter) healthProjection() (string, string) {
+func (r *decisionAuditRouter) healthProjection() string {
 	r.gate.Lock()
 	fault := r.state.fault
 	r.gate.Unlock()
@@ -722,24 +723,5 @@ func (r *decisionAuditRouter) healthProjection() (string, string) {
 	if fault {
 		newHealth = decisionAuditFaultWarning
 	}
-	// Critical audit severity is independent of Hub-availability criticality.
-	// Read historical legacy state only after releasing the router gate.
-	if r.server == nil || r.server.decisionAuditWriter == nil {
-		return newHealth, "healthy"
-	}
-	writer := r.server.decisionAuditWriter
-	writer.mu.Lock()
-	closed := writer.closed
-	writer.mu.Unlock()
-	if closed {
-		return newHealth, "unhealthy: legacy decision audit writer closed"
-	}
-	for _, reason := range []DecisionAuditDropReason{DecisionAuditDropQueueFull, DecisionAuditDropWriteFailed, DecisionAuditDropShutdown} {
-		for _, decision := range []string{"allow", "deny", "unknown"} {
-			if writer.droppedCount(reason, decision) > 0 {
-				return newHealth, "unhealthy: historical legacy decision audit drops"
-			}
-		}
-	}
-	return newHealth, "healthy"
+	return newHealth
 }

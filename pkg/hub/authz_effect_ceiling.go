@@ -111,7 +111,14 @@ var recordedProvenanceRequired = toPermissionSet(recordedProvenanceRequiredIDs)
 // held them, so it is not issued those scopes and is denied these
 // permissions at use. Principal chains are unaffected: their authority is
 // the live user.
-var legacyChainExcludedPermissions = toPermissionSet(agentScopeCoverage(sortedOptionalRoleScopes()))
+//
+// Every Reserved permission is in the set too. Today that keeps
+// artifact.update excluded after it left project:artifact:write when it
+// was marked Reserved (ptone/scion#3652). This covers a permission only
+// while it is reserved: when you un-reserve a row, decide whether
+// unrecorded chains may hold it, and if not, cover it with a
+// ceiling-optional scope or add it to this set explicitly.
+var legacyChainExcludedPermissions = toPermissionSet(append(agentScopeCoverage(sortedOptionalRoleScopes()), permissions.ReservedIDs()...))
 
 // sortedOptionalRoleScopes returns the keys of ceilingOptionalRoleScopes in
 // sorted order.

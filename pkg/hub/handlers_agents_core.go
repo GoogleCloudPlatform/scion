@@ -5318,6 +5318,11 @@ func relayWorkspaceStorageUnconfigured(w http.ResponseWriter, err error) bool {
 // (ptone/scion#3132). For any other error it writes nothing and returns
 // false. The broker's start markers in error.details are not relayed, as
 // for a skill resolution failure.
+//
+// It also relays the broker's 400 validation_error the same way: the broker
+// answers it for a request it refuses as invalid (its ValidationError
+// helper and the start-context checks), usually a request the caller must
+// fix, so it is not a "runtime broker failed" 502 (ptone/scion#2666).
 func relayHarnessConfigRefusal(w http.ResponseWriter, err error) bool {
 	var se *brokerStatusError
 	if !errors.As(err, &se) {
@@ -5325,6 +5330,7 @@ func relayHarnessConfigRefusal(w http.ResponseWriter, err error) bool {
 	}
 	code := se.brokerErrorCode()
 	switch {
+	case se.StatusCode == http.StatusBadRequest && code == ErrCodeValidationError:
 	case se.StatusCode == http.StatusUnprocessableEntity && code == harnessConfigUnusableErrorCode:
 	case se.StatusCode == http.StatusForbidden && code == ErrCodeForbidden:
 		// Harness-config policy is today the broker's only producer of a
