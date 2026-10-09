@@ -184,8 +184,11 @@ SCION_LOG_LEVEL=debug scion server start --enable-hub
 # Only warnings and errors
 SCION_LOG_LEVEL=warn scion server start --enable-hub
 
-# INFO overall, DEBUG for auth decisions and for the CLI's hub sync output
-SCION_LOG_LEVEL=info,hub.auth=debug,hubsync=debug scion server start --enable-hub
+# INFO overall, DEBUG for auth decisions
+SCION_LOG_LEVEL=info,hub.auth=debug scion server start --enable-hub
+
+# CLI: show only the [hubsync] debug lines of a CLI command
+SCION_LOG_LEVEL=info,hubsync=debug scion list
 ```
 
 Component names are the server's [subsystem names](#available-subsystems), such as `hub.auth` or `broker.heartbeat`, and the tags on the CLI's `[DEBUG]` lines, such as `hubsync`. Matching is hierarchical on dots: `hub=debug` applies to `hub.auth` and `hub.maintenance.pull-images` unless a longer key such as `hub.auth=info` is also given. Component keys that match nothing are accepted and have no effect.

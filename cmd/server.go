@@ -253,7 +253,7 @@ func init() {
 	serverStartCmd.Flags().BoolVar(&enableTestLogin, "enable-test-login", false, "Enable the test-login endpoint for integration testing (do not use in production)")
 
 	// Debug flags
-	serverStartCmd.Flags().BoolVar(&enableDebug, "debug", false, "Enable server debug mode; its log-level effect matches SCION_LOG_LEVEL=debug and takes precedence over it")
+	serverStartCmd.Flags().BoolVar(&enableDebug, "debug", false, "Enable server debug mode; sets the default log level to debug, overriding the SCION_LOG_LEVEL default (per-component levels are kept)")
 
 	// Storage flags
 	serverStartCmd.Flags().StringVar(&storageBucket, "storage-bucket", "", "GCS bucket name for template storage")
