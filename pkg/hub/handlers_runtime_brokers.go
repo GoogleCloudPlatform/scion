@@ -547,24 +547,17 @@ func (s *Server) checkBrokerDispatchAccess(ctx context.Context, w http.ResponseW
 		writeErrorFromErr(w, err, "")
 		return false
 	}
-	allowed := s.canUseBrokerForProject(ctx, broker, project)
-	if broker.IsFlat() {
-		// A flat Runtime Broker keeps the dispatch rule it was gated on:
-		// broker.dispatch (canDispatchToBroker). canUseBrokerForProject's
-		// owner-consented provider arm does not admit a flat create.
-		allowed = s.canDispatchToBroker(ctx, broker)
-	}
-	if !allowed {
-		writeBrokerDispatchForbidden(w)
+	if !s.canUseBrokerForProject(ctx, broker, project) {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"You don't have permission to create agents on this broker", nil)
 		return false
 	}
 	return true
 }
 
 // writeBrokerDispatchForbidden writes the dispatch authorization denial
-// (canDispatchToBroker or canUseBrokerForProject returned false). Every
-// caller of either that answers the request uses it, so the response cannot
-// drift.
+// (canDispatchToBroker returned false). Every caller of canDispatchToBroker
+// that answers the request uses it, so the response cannot drift.
 func writeBrokerDispatchForbidden(w http.ResponseWriter) {
 	writeError(w, http.StatusForbidden, ErrCodeForbidden,
 		"You don't have permission to create agents on this broker", nil)

@@ -2210,6 +2210,14 @@ func (s *Server) canDispatchToBroker(ctx context.Context, broker *store.RuntimeB
 // which it holds broker.dispatch. A nil project leaves only the
 // broker.dispatch arm for users.
 func (s *Server) canUseBrokerForProject(ctx context.Context, broker *store.RuntimeBroker, project *store.Project) bool {
+	// A Runtime Broker row that stores any runtime target descriptor (a flat
+	// Runtime Broker, or an incomplete descriptor) is decided by
+	// canDispatchToBroker alone: the owner-consented provider arm below
+	// applies to legacy Runtime Brokers only. The descriptor comes from the
+	// stored row, never from the request.
+	if hasRuntimeTargetDescriptor(broker) {
+		return s.canDispatchToBroker(ctx, broker)
+	}
 	return s.brokerDispatchAllowed(ctx, broker, func(user UserIdentity) bool {
 		if project != nil && s.brokerProviderHasOwnerConsent(ctx, broker, project.ID) {
 			return true
@@ -2252,6 +2260,14 @@ func (s *Server) brokerDispatchAllowed(ctx context.Context, broker *store.Runtim
 	default:
 		return false
 	}
+}
+
+// hasRuntimeTargetDescriptor reports whether the stored Runtime Broker row
+// carries a runtime target descriptor at all: a flat row (IsFlat), or a
+// descriptor without an ID. canUseBrokerForProject decides every such row by
+// canDispatchToBroker alone.
+func hasRuntimeTargetDescriptor(broker *store.RuntimeBroker) bool {
+	return broker != nil && broker.RuntimeTarget != nil
 }
 
 // userHoldsBrokerDispatch reports whether user holds broker.dispatch on
