@@ -51,6 +51,7 @@ import { MESSAGE_MODE_DISPLAY } from '../../shared/message-mode.js';
 import { defaultTriggersHint } from '../../shared/notification-triggers.js';
 import { apiFetch, apiFetchAllPages, parseApiError } from '../../client/api.js';
 import { navigateTo } from '../../client/navigation.js';
+import { showToast } from '../../utils/toast.js';
 import type { EnvEntry } from '../shared/env-editor.js';
 import '../shared/env-editor.js';
 import '../shared/status-badge.js';
@@ -1455,12 +1456,27 @@ export class ScionPageAgentCreate extends LitElement {
       const startedPhases = ['running', 'provisioning', 'cloning', 'starting'];
       const alreadyStarted = agent?.phase ? startedPhases.includes(agent.phase) : false;
       if (!alreadyStarted) {
-        const startResp = await fetch(`/api/v1/agents/${agentId}/start`, {
-          method: 'POST',
-          credentials: 'include',
-        });
-        if (!startResp.ok) {
-          console.warn('Agent created but failed to start:', startResp.status);
+        // The agent exists, so a failed start, including a rejected fetch,
+        // is reported and its page still opens, where the user can start
+        // it again without creating a second agent. The toast stack
+        // outlives the navigation.
+        let startError: string | null = null;
+        try {
+          const startResp = await fetch(`/api/v1/agents/${agentId}/start`, {
+            method: 'POST',
+            credentials: 'include',
+          });
+          if (!startResp.ok) {
+            const fallback = `HTTP ${startResp.status}`;
+            startError = (await parseApiError(startResp, fallback)).message;
+          }
+        } catch (startErr) {
+          startError =
+            startErr instanceof Error && startErr.message ? startErr.message : 'Request failed';
+        }
+        if (startError !== null) {
+          console.warn('Agent created but failed to start:', startError);
+          showToast(`Agent was created but did not start: ${startError}`, 'danger');
         }
       }
 
@@ -1544,7 +1560,7 @@ export class ScionPageAgentCreate extends LitElement {
             requestAnimationFrame(() => {
               const tabGroup = this.shadowRoot?.querySelector('sl-tab-group');
               if (tabGroup) {
-                (tabGroup as any).show?.('general');
+                (tabGroup as Element & { show?: (panel: string) => void }).show?.('general');
               }
             });
           }}

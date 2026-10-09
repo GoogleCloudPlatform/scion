@@ -33,7 +33,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 )
@@ -1333,24 +1332,9 @@ func (r *CloudRunSandboxRuntime) List(ctx context.Context, labelFilter map[strin
 
 	var agents []api.AgentInfo
 	for _, entry := range entries {
-		// Label filtering (same pattern as docker.go:182-201).
-		match := true
-		for k, v := range labelFilter {
-			actual := entry.Labels[k]
-			if actual == "" {
-				switch k {
-				case projectkeys.LabelProject:
-					actual = projectkeys.ProjectNameFromLabels(entry.Labels)
-				case projectkeys.LabelProjectID:
-					actual = projectkeys.ProjectIDFromLabels(entry.Labels)
-				}
-			}
-			if actual != v {
-				match = false
-				break
-			}
-		}
-		if !match {
+		// Label filtering uses the shared LabelsMatchFilter, so the project
+		// path is compared as a resolved path, as on the other runtimes.
+		if !LabelsMatchFilter(entry.Labels, labelFilter) {
 			continue
 		}
 

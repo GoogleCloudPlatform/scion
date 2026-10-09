@@ -3653,7 +3653,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentResetAuth(ctx context.Context, agent 
 	// current run, and handed out only once its credential is recorded.
 	var token string
 	if d.tokenGenerator != nil {
-		grant, err := authorizeAgentTokenAt(ctx, d.tokenGenerator, d.store, agent, mintSiteResetAuth)
+		// A scope re-issue dispatches through here with its own site
+		// (withMintSite), so a denial is recorded against it.
+		grant, err := authorizeAgentTokenAt(ctx, d.tokenGenerator, d.store, agent, mintSiteFromContext(ctx, mintSiteResetAuth))
 		if err != nil {
 			return fmt.Errorf("DispatchAgentResetAuth: failed to generate agent token: %w", err)
 		}

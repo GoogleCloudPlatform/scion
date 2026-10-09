@@ -112,8 +112,8 @@ func mergePatchWorkspaceModeLabel(stored, updates map[string]string) (map[string
 // stays per-agent; with a git-remote override it becomes git per-agent
 // (clone-per-agent). A legacy raw canonical "empty-per-agent" label is
 // normalised to "per-agent" only on a non-git source, where
-// Project.IsEmptyPerAgent honours it; on a git source it resolved to
-// shared-plain, so it is dropped rather than promoted to clone-per-agent.
+// Project.IsEmptyPerAgent honours it; on a git source it never meant
+// empty-per-agent, so it is dropped rather than carried as "per-agent".
 // Unknown values are dropped defensively.
 func deriveCloneWorkspaceMode(srcLabel string, srcIsGit, cloneIsGit bool) string {
 	if srcLabel == string(store.SharingModeEmptyPerAgent) {
@@ -135,10 +135,13 @@ func deriveCloneWorkspaceMode(srcLabel string, srcIsGit, cloneIsGit bool) string
 // same mode as project.SharingMode() on the hub (design #2703 §2.3):
 //   - empty-per-agent sends the canonical value, never the bare "per-agent"
 //     label, which the broker would map to clone-per-agent;
-//   - a stored label that does not fit the project's git-ness (e.g. a legacy
-//     raw "empty-per-agent" on a git project, or "worktree-per-agent" on a
-//     non-git one) is dropped, so the broker sees an unlabelled project,
-//     matching the hub's shared-plain resolution;
+//   - a git project with no label, or a label that does not resolve to its
+//     mode (an unknown value, or a legacy raw "empty-per-agent"), sends the
+//     canonical "clone-per-agent", matching the per-agent clone agent create
+//     gives it; the broker would map an empty value to shared-plain;
+//   - a non-git project whose stored label does not fit (e.g.
+//     "worktree-per-agent") sends "", so the broker sees an unlabelled
+//     project, matching the hub's shared-plain resolution;
 //   - any other label is forwarded unchanged, as before.
 //
 // A nil project yields "": there is no mode to assert. This matches the
@@ -155,7 +158,10 @@ func dispatchWorkspaceMode(project *store.Project) string {
 	}
 	label := project.Labels[store.LabelWorkspaceMode]
 	if store.ResolveWorkspaceSharingMode(label) != mode {
-		return ""
+		if mode == store.SharingModeSharedPlain {
+			return ""
+		}
+		return string(mode)
 	}
 	return label
 }
