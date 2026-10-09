@@ -528,3 +528,69 @@ func TestGCPSAResolve_AssignGateRunsForEveryForm(t *testing.T) {
 		requireSame403(t, run, sa)
 	})
 }
+
+// saLookupFaultStore fails service-account reads while its switch is armed,
+// with an error that wraps a store sentinel writeErrorFromErr would map to
+// 409, so the test below pins that the default rung answers a plain 500.
+type saLookupFaultStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
+
+var errSALookupFault = fmt.Errorf("injected service-account lookup failure: %w", store.ErrVersionConflict)
+
+func (f *saLookupFaultStore) GetGCPServiceAccount(ctx context.Context, id string) (*store.GCPServiceAccount, error) {
+	if f.fault.Active() {
+		return nil, errSALookupFault
+	}
+	return f.Store.GetGCPServiceAccount(ctx, id)
+}
+
+func (f *saLookupFaultStore) ListGCPServiceAccounts(ctx context.Context, filter store.GCPServiceAccountFilter) ([]store.GCPServiceAccount, error) {
+	if f.fault.Active() {
+		return nil, errSALookupFault
+	}
+	return f.Store.ListGCPServiceAccounts(ctx, filter)
+}
+
+// A store failure while resolving a default is an internal error (500), not
+// the not-available 400 that tells the operator to fix the default. A
+// reference that matches nothing still gets the 400.
+func TestDefaultSAAssignment_StoreErrorIs500(t *testing.T) {
+	ctx := context.Background()
+	srv, s, _, fault := testServerWithStoreFault(t, func(inner store.Store, fault *storeFaultSwitch) *saLookupFaultStore {
+		return &saLookupFaultStore{Store: inner, fault: fault}
+	})
+	const proj = "default-fault-proj"
+	sa := seedResolveSA(t, s, store.ScopeProject, proj, uniqueSAEmail("fault"), "fault account", "u")
+
+	resolve := func(ref string) (int, string) {
+		rec := httptest.NewRecorder()
+		_, ok := srv.resolveDefaultSAAssignment(ctx, rec, nil, proj, ref, SurfaceProjectDefault, defaultTierProject)
+		require.False(t, ok)
+		return rec.Code, rec.Body.String()
+	}
+
+	// Unarmed: a reference that matches nothing is the not-available 400.
+	for _, ref := range []string{uuid.New().String(), "nobody@example.com", "no such name"} {
+		code, body := resolve(ref)
+		require.Equal(t, http.StatusBadRequest, code, "ref %q: %s", ref, body)
+		assert.Contains(t, body, "not available", "ref %q", ref)
+	}
+
+	fault.Arm()
+	for _, ref := range []string{sa.ID, sa.Email, sa.DisplayName} {
+		code, body := resolve(ref)
+		require.Equal(t, http.StatusInternalServerError, code, "ref %q: %s", ref, body)
+		assert.Contains(t, body, ErrCodeInternalError, "ref %q", ref)
+		assert.NotContains(t, body, "injected", "internal error detail is not echoed")
+		assert.NotContains(t, body, "not available", "a store failure must not read as an unusable default")
+	}
+
+	// The core returns the store error itself, so the scheduled-dispatch
+	// path does not report it as an unusable default either.
+	_, err := srv.resolveDefaultSAAssignmentCore(ctx, nil, proj, sa.Email, SurfaceProjectDefault, defaultTierProject)
+	assert.ErrorIs(t, err, errSALookupFault)
+	var unusable *defaultSAUnusableError
+	assert.False(t, errors.As(err, &unusable))
+}

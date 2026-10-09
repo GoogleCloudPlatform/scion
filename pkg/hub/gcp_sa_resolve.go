@@ -134,9 +134,11 @@ func (s *Server) resolveGCPServiceAccountRef(ctx context.Context, projectID, ref
 		}
 	}
 
-	matches := append(projectMatches, hubMatches...)
+	var matches []store.GCPServiceAccount
 	if byEmail && len(projectMatches) > 0 {
 		matches = projectMatches
+	} else {
+		matches = append(projectMatches, hubMatches...)
 	}
 	switch len(matches) {
 	case 0:
