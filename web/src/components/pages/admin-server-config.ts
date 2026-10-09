@@ -1727,7 +1727,9 @@ export class ScionPageAdminServerConfig extends LitElement {
       this.defaultModelSelection = '';
       this.defaultCustomModelId = '';
     }
-    this.defaultThinkingLevel = data.default_thinking_level ?? null;
+    // A stored 0 is not a valid level (the server rejects it); show it as
+    // unset so a save sends null instead of failing (ptone/scion#3898).
+    this.defaultThinkingLevel = data.default_thinking_level || null;
     this.defaultMaxAgentRole = data.default_max_agent_role || '';
     this.defaultAgentRole = data.default_agent_role || '';
     this.defaultRuntimeBroker = data.default_runtime_broker || '';
@@ -2084,6 +2086,10 @@ export class ScionPageAdminServerConfig extends LitElement {
       }
       if (this.defaultResDisk) defaultResources.disk = this.defaultResDisk;
       payload.default_resources = defaultResources;
+    } else if (ok('default_resources')) {
+      // The server keeps an omitted key, so all-empty resources are sent
+      // as null to clear the stored value (ptone/scion#3719).
+      payload.default_resources = null;
     }
 
     // Default model settings
@@ -2094,8 +2100,10 @@ export class ScionPageAdminServerConfig extends LitElement {
           : this.defaultModelSelection;
       payload.default_model = resolvedModel || '';
     }
+    // An unset level is sent as null, which clears it; the server rejects
+    // 0 rather than treating it as a clear (ptone/scion#3898).
     if (ok('default_thinking_level')) {
-      payload.default_thinking_level = this.defaultThinkingLevel ?? 0;
+      payload.default_thinking_level = this.defaultThinkingLevel ?? null;
     }
     if (ok('default_runtime_broker')) {
       payload.default_runtime_broker = this.defaultRuntimeBroker || '';
@@ -2193,7 +2201,9 @@ export class ScionPageAdminServerConfig extends LitElement {
           endpoint: this.telemetryCloudEndpoint,
           protocol: this.telemetryCloudProtocol,
           provider: this.telemetryCloudProvider,
-          gcp_project_id: this.telemetryCloudGcpProjectId || undefined,
+          // null clears a stored project ID; an omitted key would keep it,
+          // because telemetry is merged key by key (ptone/scion#3717).
+          gcp_project_id: this.telemetryCloudGcpProjectId || null,
           cloud_logging: this.telemetryCloudCloudLogging,
         };
       }
@@ -2420,8 +2430,10 @@ export class ScionPageAdminServerConfig extends LitElement {
           : this.defaultModelSelection;
       payload.default_model = resolvedModel || '';
     }
+    // An unset level is sent as null, which clears it; the server rejects
+    // 0 rather than treating it as a clear (ptone/scion#3898).
     if (ok('default_thinking_level')) {
-      payload.default_thinking_level = this.defaultThinkingLevel ?? 0;
+      payload.default_thinking_level = this.defaultThinkingLevel ?? null;
     }
     if (ok('default_runtime_broker')) {
       payload.default_runtime_broker = this.defaultRuntimeBroker || '';

@@ -708,6 +708,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	if !validateMonitoringDashboardURLRequest(w, &req.ServerConfigUpdateRequest) {
 		return
 	}
+	if rejectInvalidThinkingLevel(w, req.DefaultThinkingLevel) {
+		return
+	}
 
 	caller := GetUserIdentityFromContext(r.Context())
 	updatedBy := ""
@@ -861,6 +864,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
+	// Top-level presence of the body; nil (omitted semantics) on a parse
+	// error, which the typed decode above has already ruled out.
+	topFP, _ := parseFieldPresence(rawBody)
+
 	// Build per-section documents from the request.
 	sectionDocs, err := buildSectionDocsFromRequest(&req.ServerConfigUpdateRequest, layer1BySec, rawBody)
 	if err != nil {
@@ -935,6 +942,32 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 		sectionDocs["github_app"] = merged
 		mergedBaseRevs["github_app"] = rev
+	}
+	// telemetry is deep-merged: a nested key the body omits (cloud.headers,
+	// filter, resource, ...) keeps its stored value (ptone/scion#3717).
+	if doc, ok := sectionDocs["telemetry"]; ok {
+		merged, rev, err := mergeSectionOnCurrent(r.Context(), ops, "telemetry", doc, telemetryPresence(rawBody))
+		if err != nil {
+			slog.Error("PUT server-config: failed to build telemetry document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		sectionDocs["telemetry"] = merged
+		mergedBaseRevs["telemetry"] = rev
+	}
+	// agent_defaults: only the keys the body sends change, so env-pinned
+	// fields the page leaves out, and the read-only role keys, are kept
+	// (ptone/scion#3719). This runs before the gcp_iam check, which reads
+	// the default GCP identity mode from the merged doc.
+	if doc, ok := sectionDocs["agent_defaults"]; ok {
+		merged, rev, err := mergeSectionOnCurrent(r.Context(), ops, "agent_defaults", doc, agentDefaultsPresence(topFP))
+		if err != nil {
+			slog.Error("PUT server-config: failed to build agent_defaults document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		sectionDocs["agent_defaults"] = merged
+		mergedBaseRevs["agent_defaults"] = rev
 	}
 
 	// GCP permission-check section: carry an omitted key forward from the
@@ -1074,17 +1107,25 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	}
 	// Validate hub-level default_timezone (IANA name check; rejects "Local",
 	// same rule as the file-mode handler and as the per-user display
-	// preference — design §3 A (d)).
+	// preference — design §3 A (d)) and the default GCP identity. The doc
+	// is merged on the current row, so each check runs only when the body
+	// sends one of its keys: a stored value the body leaves out is not
+	// re-checked on an unrelated save (ptone/scion#2720).
 	if doc, ok := sectionDocs["agent_defaults"]; ok {
 		var agentDefaults opsettings.AgentDefaultsSettings
 		if err := json.Unmarshal(doc, &agentDefaults); err == nil {
-			if err := validateDefaultTimezone(agentDefaults.DefaultTimezone); err != nil {
-				writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-					fmt.Sprintf("invalid default_timezone %q: %v", agentDefaults.DefaultTimezone, err), nil)
-				return
+			adSent := applySectionPatch("agent_defaults", map[string]json.RawMessage{}, nil, agentDefaultsPresence(topFP))
+			if adSent["default_timezone"] {
+				if err := validateDefaultTimezone(agentDefaults.DefaultTimezone); err != nil {
+					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+						fmt.Sprintf("invalid default_timezone %q: %v", agentDefaults.DefaultTimezone, err), nil)
+					return
+				}
 			}
-			if !s.validateHubDefaultGCPIdentity(w, r.Context(), agentDefaults) {
-				return
+			if adSent["default_gcp_identity_mode"] || adSent["default_gcp_identity_service_account_id"] {
+				if !s.validateHubDefaultGCPIdentity(w, r.Context(), agentDefaults) {
+					return
+				}
 			}
 		}
 	}
@@ -1750,6 +1791,17 @@ func appendPresenceAwareKeys(keys []string, rawBody []byte) []string {
 		keys = append(keys, "server.hub.hub_name")
 	}
 
+	// agent_defaults keys: any sent agent_defaults key (including an
+	// explicit null) → add the key, so a lone explicit clear builds the
+	// agent_defaults doc and clears the key instead of being kept by the
+	// merge (ptone/scion#3719). Keys already present are deduplicated.
+	for k := range agentDefaultsPresence(fp).sentKeys() {
+		if key, ok := modelledSectionKey("agent_defaults", k); ok && !keySet[key] {
+			keySet[key] = true
+			keys = append(keys, key)
+		}
+	}
+
 	// Map-of-objects sections: present as null or {} → add the key to clear.
 	if !keySet["runtimes"] && fp.has("runtimes") {
 		keys = append(keys, "runtimes")
@@ -1935,9 +1987,14 @@ func dropEnvOverriddenAccessFields(base *opsettings.AccessSettings, envKeys []st
 //     concurrent write to the section yields a 409, not a lost update.
 //
 // Sections that meet it:
-//   - github_app, through the shared helper mergeSectionOnCurrent, which
-//     also keeps or drops (with a warning) stored keys the request does not
-//     send; see its doc comment. New sections should use it.
+//   - github_app, telemetry and agent_defaults, through the shared helper
+//     mergeSectionOnCurrent, which also keeps or drops (with a warning)
+//     stored keys the request does not send; see its doc comment. New
+//     sections should use it. telemetry is deep-merged: its nested objects
+//     are merged key by key, while maps and arrays are replaced whole
+//     (deepMergeSections; ptone/scion#3717). agent_defaults applies only
+//     the keys the PUT writes (agentDefaultsRequestKeys), so the read-only
+//     role keys are never cleared (ptone/scion#3719).
 //   - access, endpoints and lifecycle, through their own carry-forward
 //     builders (buildAccessDocOnCurrent, buildEndpointsDocOnCurrent,
 //     carryForwardLifecycleSettings), and gcp_iam through buildGCPIAMDoc.
@@ -2025,12 +2082,10 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 		if req.DefaultModel != nil {
 			d.DefaultModel = *req.DefaultModel
 		}
+		// An explicit null (a nil pointer) clears the level. 0 is not a
+		// clear: the PUT handlers reject it (rejectInvalidThinkingLevel).
 		if req.DefaultThinkingLevel != nil {
-			if *req.DefaultThinkingLevel > 0 {
-				d.DefaultThinkingLevel = req.DefaultThinkingLevel
-			} else {
-				d.DefaultThinkingLevel = nil
-			}
+			d.DefaultThinkingLevel = req.DefaultThinkingLevel
 		}
 		if req.DefaultRuntimeBroker != nil {
 			d.DefaultRuntimeBroker = *req.DefaultRuntimeBroker

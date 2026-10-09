@@ -1651,6 +1651,76 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
+  describe('unset values are sent as null (ptone/scion#3898)', () => {
+    // A DB-backed save keeps the stored value of a key the body leaves
+    // out, so an unset value must be sent as an explicit null to clear it.
+    const KEYS = [
+      'default_thinking_level',
+      'default_resources',
+      'telemetry.enabled',
+      'telemetry.cloud.enabled',
+    ];
+
+    it('buildLayer1Payload sends null for an unset thinking level, never 0', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set(KEYS);
+      el.defaultThinkingLevel = null;
+      expect(el.buildLayer1Payload()).toHaveProperty('default_thinking_level', null);
+
+      el.defaultThinkingLevel = 30;
+      expect(el.buildLayer1Payload()).toHaveProperty('default_thinking_level', 30);
+    });
+
+    it('treats a loaded thinking level of 0 as unset', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'db', default_thinking_level: 0 }))
+      );
+      const el = element as any;
+      el.layer1Keys = new Set(KEYS);
+      expect(el.defaultThinkingLevel).toBeNull();
+      expect(el.buildLayer1Payload()).toHaveProperty('default_thinking_level', null);
+    });
+
+    it('buildFilePayload sends null for an unset thinking level, never 0', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.defaultThinkingLevel = null;
+      expect(el.buildFilePayload()).toHaveProperty('default_thinking_level', null);
+    });
+
+    it('buildLayer1Payload sends null default_resources when every resource field is empty', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set(KEYS);
+      el.defaultResCpuReq = '';
+      el.defaultResMemReq = '';
+      el.defaultResCpuLim = '';
+      el.defaultResMemLim = '';
+      el.defaultResDisk = '';
+      expect(el.buildLayer1Payload()).toHaveProperty('default_resources', null);
+
+      el.defaultResCpuReq = '500m';
+      expect(el.buildLayer1Payload().default_resources).toEqual({
+        requests: { cpu: '500m', memory: undefined },
+      });
+    });
+
+    it('buildLayer1Payload sends null for an empty telemetry cloud GCP project ID', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set(KEYS);
+      el.telemetryCloudGcpProjectId = '';
+      const cloud = (el.buildLayer1Payload().telemetry as Record<string, unknown>).cloud as Record<
+        string,
+        unknown
+      >;
+      expect(cloud).toHaveProperty('gcp_project_id', null);
+    });
+  });
+
   // ── Cross-project messaging (D1) ──
 
   describe('File mode server sections keep omitted fields (ptone/scion#2938)', () => {
