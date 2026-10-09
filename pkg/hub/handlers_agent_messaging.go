@@ -3710,9 +3710,16 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 		// Phase 9b(ii): render the delivery envelope for this broadcast
 		// recipient. ConvResult is nil — broadcasts deliberately skip
 		// conversation resolution (no conversation for broadcasts).
+		// The envelope's message_id names the stored row, so it is passed
+		// only when the row was written (ptone/scion#3881); an empty ID
+		// omits the key.
 		if s.writeDenyEnabled() {
+			renderID := ""
+			if persisted {
+				renderID = storeMsg.ID
+			}
 			agentMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
-				MessageID:  storeMsg.ID,
+				MessageID:  renderID,
 				ConvResult: nil,
 				Msg:        &agentMsg,
 				CreatedAt:  storeMsg.CreatedAt,

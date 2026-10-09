@@ -2515,7 +2515,8 @@ func (s *Server) createAgentInProject(
 		} else {
 			agent.Activity = "working"
 		}
-		if err := s.store.UpdateAgent(ctx, agent); err != nil {
+		stored, err := s.updateManagedAgentAfterCreate(ctx, agent)
+		if err != nil {
 			s.agentLifecycleLog.Warn("Failed to update managed agent after create", "agent_id", agent.ID, "error", err)
 			// Without this write the row has neither the managed Runtime
 			// nor the interaction ID, so a later delete could not stop the
@@ -2539,6 +2540,9 @@ func (s *Server) createAgentInProject(
 			writeManagedCreateUnrecorded(w, agent.ID, corrID, stop.warnings(managedCreateUnrecorded))
 			return
 		}
+		// After a retried write, continue with the row as stored: the
+		// created publish and the 201 body answer from it.
+		agent = stored
 
 		// A delete that won the race answers 409 with no agent body, as
 		// the synchronous broker create does (ptone/scion#3099,
@@ -2551,6 +2555,18 @@ func (s *Server) createAgentInProject(
 			// row names the interaction; the delete stops it.
 			writeDeletedDuringCreate(w, agent.ID, s.compensateManagedCreate(ctx, agent, true))
 			return
+		}
+		// A concurrent stop or error landed before the post-create write
+		// recorded the interaction, so its own stop could not find it:
+		// only a retried write keeps such a terminal phase (mergeManagedCreate).
+		// Stop the interaction here, after the write, so a failed stop
+		// still leaves a row that names it (ptone/scion#3746).
+		if isTerminalAgentPhase(agent.Phase) {
+			if agent.Annotations[annotationInteractionID] != "" {
+				s.agentLifecycleLog.Info("Hub: managed agent was stopped while it was being created; stopping its interaction",
+					"agent_id", agent.ID, "agent", agent.Name, "phase", agent.Phase)
+			}
+			s.stopManagedCreateInteraction(ctx, agent, false)
 		}
 		s.enrichAgent(ctx, agent, project, nil)
 
@@ -2574,6 +2590,16 @@ func (s *Server) createAgentInProject(
 	// the post-dispatch phase writes, or a real failure's rollback. Each
 	// dispatch below is bounded by syncDispatch instead.
 	ctx = detachLaunchFromClient(ctx)
+	// On the synchronous outcome the response waits on that dispatch for up
+	// to syncDispatchTimeout, longer than the default WriteTimeout of the
+	// serving listener: extend this request's write deadline to cover it,
+	// so a slow launch that succeeds is not answered with a dropped
+	// connection (ptone/scion#3850). The extension also runs when the
+	// broker accepts the create for asynchronous launch; that response is
+	// written promptly, so the longer deadline is harmless there.
+	if s.GetDispatcher() != nil {
+		extendWriteDeadlineForSyncDispatch(ctx, w, s.config.WriteTimeout)
+	}
 	// acceptedLaunch is set when the broker accepted the create for
 	// asynchronous launch; the launch then reports back to the hub, which
 	// handles a delete that won the race (see compensateLandedRun).
@@ -2977,6 +3003,72 @@ func mergeDispatchedAgent(dst, src *store.Agent) {
 		dst.Message = src.Message
 		dst.StalledFromActivity = src.StalledFromActivity
 	}
+}
+
+// updateManagedAgentAfterCreate is the managed create's post-create write:
+// it records the managed Runtime, the interaction ID and the running phase
+// on the committed row. On success it returns the row as stored.
+//
+// A version conflict gets one re-read and one retry (ptone/scion#3746), as
+// updateAgentAfterDispatch does. A delete that claimed the row and then
+// failed, or whose lease lapsed, bumps state_version but leaves the agent
+// live; without the retry the create would stop a running interaction and
+// answer 500. The retry is skipped, and the first conflict returned, when
+// the re-read cannot be used or shows that a delete won (deleteWonOnRead):
+// the caller's rollback then decides the answer as before. Any other first
+// error, or any error of the retry, is returned as is. There is no loop.
+func (s *Server) updateManagedAgentAfterCreate(ctx context.Context, agent *store.Agent) (*store.Agent, error) {
+	err := s.store.UpdateAgent(ctx, agent)
+	if err == nil {
+		return agent, nil
+	}
+	if !errors.Is(err, store.ErrVersionConflict) {
+		return nil, err
+	}
+
+	fresh, getErr := s.store.GetAgent(ctx, agent.ID)
+	if deleteWonOnRead(fresh, getErr) {
+		return nil, err
+	}
+	if getErr != nil {
+		s.agentLifecycleLog.Warn("failed to re-read managed agent after a conflicting post-create write",
+			"agent_id", agent.ID, "error", getErr)
+		return nil, err
+	}
+
+	mergeManagedCreate(fresh, agent)
+	if err := s.store.UpdateAgent(ctx, fresh); err != nil {
+		return nil, err
+	}
+	return fresh, nil
+}
+
+// mergeManagedCreate copies onto dst (a fresh, live re-read of the row) the
+// fields the managed create sets after the row is committed: the managed
+// Runtime, its annotations (cloud provider, interaction ID, environment ID;
+// other annotation keys on dst are kept), and the running phase and
+// activity. A phase a concurrent writer moved to error or stopped is newer
+// than the create's assumed running and is kept, as mergeDispatchedAgent
+// does; the Runtime and annotations are still written, so a later stop or
+// delete can find the interaction, and the create then stops the
+// interaction itself, since that writer's stop could not find it.
+func mergeManagedCreate(dst, src *store.Agent) {
+	dst.Runtime = src.Runtime
+	for _, key := range []string{annotationCloudProvider, annotationInteractionID, annotationEnvironmentID} {
+		v, ok := src.Annotations[key]
+		if !ok {
+			continue
+		}
+		if dst.Annotations == nil {
+			dst.Annotations = make(map[string]string)
+		}
+		dst.Annotations[key] = v
+	}
+	if isTerminalAgentPhase(dst.Phase) {
+		return
+	}
+	dst.Phase = src.Phase
+	dst.Activity = src.Activity
 }
 
 func isTerminalAgentPhase(phase string) bool {
@@ -3974,8 +4066,11 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		if cfg.Model != "" {
 			agent.AppliedConfig.Model = cfg.Model
 		}
-		// Always apply thinking level from config (nil = explicit unset)
-		agent.AppliedConfig.ThinkingLevel = cfg.ThinkingLevel
+		// Thinking level is applied only when the request names it; an
+		// explicit null unsets it, an absent key leaves it alone.
+		if presentConfigKeys["thinking_level"] {
+			agent.AppliedConfig.ThinkingLevel = cfg.ThinkingLevel
+		}
 		if cfg.Task != "" {
 			agent.AppliedConfig.Task = cfg.Task
 		}
@@ -3994,23 +4089,32 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			}
 			applyPatchAutoExposeEnv(agent.AppliedConfig, &old, project, cfg.Env)
 		}
-		// Narrow carve-out, ptone/scion#2493 R3-1/R4-1 -- NOT part of
-		// recordExplicitEdits/invariant E above, which has already run and
-		// correctly left CreateInputs alone for whichever of these fields
-		// were absent. This instead protects the LIVE InlineConfig value:
-		// the configure page no longer echoes an untouched telemetry
-		// control or an untouched env (R1-1, R2-1), so without this, the
-		// unconditional wholesale InlineConfig replace just below would wipe
-		// them -- an explicit telemetry opt-out, a project's env/telemetry
-		// stamp from create, or (for a legacy agent with no CreateInputs) a
-		// create-time explicit env key that `scion reincarnate` has no other
-		// record of at all. See carryForwardAbsentPageOwnedFields' doc
-		// comment for the field-by-field sweep. A present key (the user
-		// actually touched that field) always wins via cfg as already
-		// decoded; this only fills in a field the request left absent.
-		carryForwardAbsentPageOwnedFields(cfg, &old, presentConfigKeys)
 		dropEchoedInlineImage(cfg, &old, dispatchImageRegistry(s.GetDispatcher()))
-		agent.AppliedConfig.InlineConfig = cfg
+		// Start from the live InlineConfig and overlay only the keys the
+		// request names (ptone/scion#3901). The configure page does not
+		// render volumes, skills, MCP servers, services, command args or
+		// kubernetes, and sends telemetry and env only when touched, so a
+		// wholesale replace would wipe them on every Save and Start.
+		merged := mergePresentInlineFields(old.InlineConfig, cfg, presentConfigKeys)
+		// A config PATCH can change the harness (harness or harness_config)
+		// while keys it does not mention are kept, so re-check the merged
+		// config against the harness it now resolves to. When the harness is
+		// unchanged, the check above already covered every key the request
+		// sends, and kept keys are left as they were.
+		probeConfig := *agent.AppliedConfig
+		probeConfig.InlineConfig = merged
+		probe := *agent
+		probe.AppliedConfig = &probeConfig
+		if mergedHarness, mergedCaps := s.resolveAgentHarnessCapabilities(ctx, &probe); mergedHarness != resolvedHarness {
+			if issues := validateConfigAgainstHarnessCapabilities(merged, mergedCaps); len(issues) > 0 {
+				ValidationError(w, "Config contains unsupported fields for harness "+mergedHarness, map[string]interface{}{
+					"harness": mergedHarness,
+					"fields":  issues,
+				})
+				return
+			}
+		}
+		agent.AppliedConfig.InlineConfig = merged
 	}
 
 	// Apply GCP identity update (only allowed for agents in 'created' phase)

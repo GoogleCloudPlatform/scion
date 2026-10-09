@@ -70,14 +70,15 @@ func (d *HTTPAgentDispatcher) dispatchImageForBroker(ac *store.AgentAppliedConfi
 // dropEchoedInlineImage keeps a configure-page echo of the live image out of
 // the live InlineConfig. The configure page pre-fills `image` from
 // AppliedConfig.Image (the template's or the broker-resolved image), and
-// applyAgentUpdate replaces InlineConfig wholesale with the request's
-// config. Without this, one untouched Save would write that derived image
-// into InlineConfig.Image, where it ranks as an inline image on every later
-// start and — for an agent with no CreateInputs — as the explicit image
-// explicitDispatchImage sends at the top tier, re-freezing the image
-// (ptone/scion#1799). An echo is detected exactly as recordExplicitEdits
-// detects it (both sides registry-canonicalised); on an echo, cfg keeps the
-// image the live InlineConfig already had (possibly none).
+// applyAgentUpdate copies every key present in the request's config into
+// InlineConfig (mergePresentInlineFields). Without this, one untouched Save
+// would write that derived image into InlineConfig.Image, where it ranks as
+// an inline image on every later start and — for an agent with no
+// CreateInputs — as the explicit image explicitDispatchImage sends at the
+// top tier, re-freezing the image (ptone/scion#1799). An echo is detected
+// exactly as recordExplicitEdits detects it (both sides
+// registry-canonicalised); on an echo, cfg keeps the image the live
+// InlineConfig already had (possibly none).
 func dropEchoedInlineImage(cfg *api.ScionConfig, old *store.AgentAppliedConfig, imageRegistry string) {
 	if cfg == nil || old == nil || cfg.Image == "" {
 		return

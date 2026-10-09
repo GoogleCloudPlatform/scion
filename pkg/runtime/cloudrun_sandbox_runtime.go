@@ -145,6 +145,9 @@ type sandboxStateEntry struct {
 	Stopped       bool              `json:"stopped"`
 	ExitCode      *int              `json:"exit_code,omitempty"`
 	StoppedAt     *time.Time        `json:"stopped_at,omitempty"`
+	// EntrypointLogOffset is the entrypoint log size when this run started,
+	// so the exit watcher reports this run's output only.
+	EntrypointLogOffset int64 `json:"entrypoint_log_offset,omitempty"`
 }
 
 // sandboxStateStore is a thread-safe, JSON-backed store of sandbox entries.
@@ -1060,15 +1063,14 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 		// to sandboxAgentHome (/home/scion, the mount destination). The bind
 		// mount makes them the same file. We cannot use `sandbox exec` here
 		// — the probe just proved the sandbox is dead.
+		// Only this run's output (from entrypointLogOffset): with append
+		// mode, the whole file would show a prior run's output as the cause.
 		var diagInfo string
 		logPath := filepath.Join(paths.agentHome, entrypointLogFile)
-		if logData, readErr := os.ReadFile(logPath); readErr == nil {
-			logStr := string(logData)
-			// Truncate to the last 2000 bytes to keep error messages readable.
-			if len(logStr) > 2000 {
-				logStr = "...(truncated)\n" + logStr[len(logStr)-2000:]
-			}
-			diagInfo += fmt.Sprintf("\nentrypoint log (%s):\n%s", logPath, logStr)
+		if logStr := entrypointLogTail(logPath, entrypointLogOffset, entrypointLogTailMax); logStr != "" {
+			diagInfo = fmt.Sprintf("\nentrypoint log (%s):\n%s", logPath, logStr)
+		} else {
+			diagInfo = fmt.Sprintf("\nno entrypoint output from this run (%s)", logPath)
 		}
 
 		runtimeLog.Error("sandbox dead on arrival: all liveness probes failed",
@@ -1099,6 +1101,8 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 		AgentHome:     paths.agentHome,
 		Workspace:     paths.workspace,
 		Image:         cfg.Image,
+
+		EntrypointLogOffset: entrypointLogOffset,
 	}
 	r.state.add(entry)
 
@@ -1473,6 +1477,24 @@ func (r *CloudRunSandboxRuntime) watchSandbox(ctx context.Context, name string) 
 	runtimeLog.Info("sandbox exited", "name", name, "exitCode", exitCode)
 	r.state.markStopped(name, exitCode, &now)
 
+	// A non-zero or unknown exit (e.g. death during provisioning) is logged
+	// with this run's entrypoint output: once Delete drops the state entry,
+	// GetLogs can no longer reach it. A non-zero code is an error; an
+	// unknown code (nil) is treated as normal (C5) and logged at warn.
+	if exitCode == nil || *exitCode != 0 {
+		if entry := r.state.get(name); entry != nil && entry.AgentHome != "" {
+			logPath := filepath.Join(entry.AgentHome, entrypointLogFile)
+			logFn, msg := runtimeLog.Error, "sandbox exited abnormally"
+			if exitCode == nil {
+				logFn, msg = runtimeLog.Warn, "sandbox exited with unknown exit code"
+			}
+			logFn(msg,
+				"name", name, "agentID", entry.AgentID, "exitCode", exitCode,
+				"waitOutput", strings.TrimSpace(string(out)),
+				"entrypointLog", entrypointLogTail(logPath, entry.EntrypointLogOffset, entrypointLogTailMax))
+		}
+	}
+
 	// Clean up the cancel function from the map.
 	r.watchMu.Lock()
 	delete(r.watchCancels, name)
@@ -1482,6 +1504,47 @@ func (r *CloudRunSandboxRuntime) watchSandbox(ctx context.Context, name string) 
 // -----------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------
+
+// entrypointLogTailMax bounds the entrypoint output put in errors and logs.
+const entrypointLogTailMax = 2000
+
+// entrypointLogTail returns the last max bytes of the entrypoint log
+// written at or after offset (this run's output), or "" when there is
+// none or the file cannot be read. A file shorter than offset was
+// truncated and is read from the start. At most max bytes are read, so
+// a large append-mode log is never loaded whole.
+func entrypointLogTail(path string, offset int64, max int) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	size := info.Size()
+	if offset < 0 || size < offset {
+		offset = 0
+	}
+	start := offset
+	if size-int64(max) > start {
+		start = size - int64(max)
+	}
+	if size <= start {
+		return ""
+	}
+	buf := make([]byte, size-start)
+	n, err := f.ReadAt(buf, start)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return ""
+	}
+	tail := string(buf[:n])
+	if start > offset {
+		return "...(truncated)\n" + tail
+	}
+	return tail
+}
 
 // labelValue safely retrieves a label value, returning "" if the map is
 // nil or the key is absent.
