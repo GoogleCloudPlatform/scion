@@ -22,6 +22,7 @@
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { apiFetchAllPages } from './api.js';
+import { requestUrl } from './__fixtures__/request-url.js';
 
 type PageReply = { items: string[]; nextCursor?: string } | 'fail' | 'bad-json';
 
@@ -31,7 +32,7 @@ function stubPages(pages: (i: number) => PageReply): string[] {
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL) => {
-      const url = typeof input === 'string' ? input : input.toString();
+      const url = requestUrl(input);
       urls.push(url);
       const cursor = new URL(url, 'http://x').searchParams.get('cursor');
       const reply = pages(cursor ? Number(cursor) : 0);

@@ -130,7 +130,8 @@ const RESOURCE_TYPE_LABELS: Record<string, string> = {
  * it never carries eligibility (every entry is selectable), so it must not
  * be used to answer "may I select this restriction" -- only the live
  * /api/v1/auth/scopes response does that. The list mirrors every registry
- * selector, including boundary-restricted ones such as broker:create
+ * selector the server offers (reserved permissions' selectors are not
+ * offered), including boundary-restricted ones such as broker:create
  * (hub-boundary tokens only): the live response marks those
  * boundary_not_allowed for a project-scoped token, and the server rejects
  * them on submit.
@@ -215,13 +216,6 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
-    value: 'artifact:delete',
-    label: 'artifact:delete',
-    description: 'Delete artifacts',
-    resource: 'artifact',
-    isAlias: false,
-  },
-  {
     value: 'artifact:manage',
     label: 'artifact:manage',
     description: 'Manage artifact grants and share links',
@@ -232,13 +226,6 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     value: 'artifact:read',
     label: 'artifact:read',
     description: 'Read artifacts',
-    resource: 'artifact',
-    isAlias: false,
-  },
-  {
-    value: 'artifact:update',
-    label: 'artifact:update',
-    description: 'Edit artifact metadata (title, key, expiry)',
     resource: 'artifact',
     isAlias: false,
   },

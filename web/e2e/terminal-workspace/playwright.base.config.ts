@@ -4,6 +4,7 @@ export default defineConfig({
   testDir: '.',
   testMatch: 'base.pw.ts',
   workers: 1,
+  forbidOnly: !!process.env.CI,
   timeout: 30000,
   use: {
     baseURL: 'http://127.0.0.1:4533',

@@ -205,11 +205,27 @@ const CONNECT_ERROR_FALLBACK_MS = 1_000;
 /**
  * The Hub upgrades the socket before it knows whether the broker stream
  * opened, so a socket can go straight from onopen to a close code without
- * ever proving the stream is live. Bounds how long a *reconnect* attempt
- * waits for the first data frame before it counts as failed. Not applied to
- * the initial connect: see the onopen handler in attach().
+ * ever proving the stream is live. Bounds how long a reconnect attempt
+ * waits, after onopen, for the first data frame before it ends in
+ * 'disconnected'.
  */
 const FIRST_FRAME_TIMEOUT_MS = 10_000;
+/**
+ * The same bound for the initial connect, before the session has ever
+ * connected. Longer, because the Hub's OpenStream is fire-and-forget: time
+ * to first byte is the broker's exec plus `tmux attach-session`, and a cold
+ * sandbox exec or a loaded host can legitimately take well over 10s on the
+ * very first attach. Once a session has connected, the agent has shown it
+ * can serve within a normal window, so reconnects use FIRST_FRAME_TIMEOUT_MS.
+ */
+const INITIAL_FIRST_FRAME_TIMEOUT_MS = 60_000;
+/**
+ * Bounds how long any attempt waits for onopen once its socket is created.
+ * The preflight has already reached the Hub, and the upgrade does not wait
+ * for the broker stream, so a socket that has not opened by then is not
+ * going to.
+ */
+const OPEN_TIMEOUT_MS = 10_000;
 /**
  * Upper bound of the full-jitter delay before the automatic reconnect after
  * a 4503 close (a planned relay restart or drain). Many panes are closed
@@ -357,8 +373,12 @@ class Session implements TerminalSession {
    * Reset per attempt.
    */
   private attemptReachedOpen = false;
-  /** Bounds how long an opened socket may go without a first data frame. */
-  private firstFrameTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * The current attempt's connect guard: OPEN_TIMEOUT_MS until onopen, then
+   * INITIAL_FIRST_FRAME_TIMEOUT_MS (initial connect) or FIRST_FRAME_TIMEOUT_MS
+   * (reconnect) until the first data frame.
+   */
+  private connectGuardTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * This session owes exactly one automatic reconnect attempt on the next
    * foregrounding. A session property rather than a function of the last
@@ -390,6 +410,8 @@ class Session implements TerminalSession {
    * 4503 close. While it runs, no automatic attempt starts.
    */
   private reconnectDelayTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The `reconnecting` value subscribers saw at the last notification. */
+  private notifiedReconnecting = false;
 
   /** Application heartbeat (liveness only; never drives retries directly). */
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
@@ -425,8 +447,13 @@ class Session implements TerminalSession {
     return this.snapshot;
   }
 
+  /**
+   * True while an attempt is in flight, and also while the full-jitter wait
+   * before the automatic attempt after a 4503 close is running, so the pane
+   * shows "Reconnecting..." from the close through the redial.
+   */
   get reconnecting(): boolean {
-    return this.pending !== null;
+    return this.pending !== null || this.reconnectDelayTimer !== null;
   }
 
   subscribe(listener: (state: TerminalSessionState) => void): () => void {
@@ -439,7 +466,19 @@ class Session implements TerminalSession {
 
   private update(patch: Partial<TerminalSessionState>): void {
     this.snapshot = { ...this.snapshot, ...patch };
+    this.notifiedReconnecting = this.reconnecting;
     for (const listener of this.listeners) listener(this.snapshot);
+  }
+
+  /**
+   * Notifies subscribers when `reconnecting` (which reads `pending` and the
+   * jitter timer, not the snapshot) has changed since they were last
+   * notified. Connection and disconnect reason only change through
+   * update(), which always notifies.
+   */
+  private notifyIfReconnectingChanged(): void {
+    if (this.state.connection === 'closed') return;
+    if (this.reconnecting !== this.notifiedReconnecting) this.update({});
   }
 
   connect(): Promise<void> {
@@ -459,7 +498,7 @@ class Session implements TerminalSession {
     this.controller?.abort();
     this.releaseSocket();
     this.stopHeartbeat();
-    this.clearFirstFrameGuard();
+    this.clearConnectGuard();
     this.clearBackgroundResetTimer();
     this.clearReconnectDelayTimer();
     this.attemptReachedOpen = false;
@@ -486,7 +525,8 @@ class Session implements TerminalSession {
       reconnectFailedManual: false,
     });
     void attempt.finally(() => {
-      if (this.pending === attempt) this.pending = null;
+      const wasPending = this.pending === attempt;
+      if (wasPending) this.pending = null;
       // Attempts that settle synchronously (agent fetch/preflight failure, thrown
       // error, agent-unavailable) never reach a socket, so onclose never fires.
       // Attempts that reach a socket are judged later, by onopen/onclose.
@@ -513,6 +553,14 @@ class Session implements TerminalSession {
       ) {
         this.markReconnectFailed();
       }
+      // `reconnecting` reads `pending`, which only just cleared. An attempt
+      // that settled without a socket (refused, unavailable, or an error)
+      // must tell subscribers, or they stay on "reconnecting". An attempt
+      // that handed off to a socket ('connecting') does not: the socket's
+      // own events (data, close, error) notify next, and the pane already
+      // treats 'connecting' as an attempt, so a repeat notification would
+      // only duplicate the 'connecting' state.
+      if (wasPending && this.state.connection !== 'connecting') this.notifyIfReconnectingChanged();
     });
     return attempt;
   }
@@ -522,7 +570,7 @@ class Session implements TerminalSession {
     // Close existing socket if any — the agent is no longer reachable.
     this.releaseSocket();
     this.stopHeartbeat();
-    this.clearFirstFrameGuard();
+    this.clearConnectGuard();
     this.clearBackgroundResetTimer();
     this.clearReconnectDelayTimer();
     this.controller?.abort();
@@ -604,7 +652,12 @@ class Session implements TerminalSession {
     this.reconnectDelayTimer = setTimeout(() => {
       this.reconnectDelayTimer = null;
       this.maybeAutoAttempt();
+      // No attempt started (for example a background pane): `reconnecting`
+      // is false again.
+      this.notifyIfReconnectingChanged();
     }, delay);
+    // `reconnecting` is now true.
+    this.notifyIfReconnectingChanged();
   }
 
   private clearReconnectDelayTimer(): void {
@@ -746,7 +799,7 @@ class Session implements TerminalSession {
       // bounded guard so a silently dead stream cannot hang in
       // "Reconnecting..." forever.
       const confirmAttemptLive = (): void => {
-        this.clearFirstFrameGuard();
+        this.clearConnectGuard();
         this.attemptReachedOpen = true;
         this.everConnected = true;
         this.autoArmed = false;
@@ -761,20 +814,19 @@ class Session implements TerminalSession {
         });
         this.startHeartbeat(socket, live);
       };
+      // Every attempt, the initial connect included, is bounded twice: by
+      // OPEN_TIMEOUT_MS until onopen, then until the first data frame, by
+      // INITIAL_FIRST_FRAME_TIMEOUT_MS before the session has ever connected
+      // and by FIRST_FRAME_TIMEOUT_MS after. Either one ending leaves
+      // 'connecting' for 'disconnected', where the pane offers Retry.
+      this.armConnectGuard(socket, live, OPEN_TIMEOUT_MS);
       socket.onopen = (): void => {
         if (!live()) return;
-        // The 10s guard bounds reconnect attempts only, not the initial
-        // connect. The Hub's OpenStream is fire-and-forget, so time to first
-        // byte is the broker's exec plus `tmux attach-session`; a cold
-        // sandbox exec or a loaded host can legitimately take longer than
-        // 10s on the very first attach, and today's behavior accepts that.
-        // Once a session has connected at least once, subsequent attempts
-        // (automatic or manual) are bounded, since by then the agent has
-        // already proven it can serve within a normal window. The initial
-        // connect still waits for the first data frame (this is what fixes
-        // the accept-then-close loop for every attempt), it just never
-        // times out doing so.
-        if (this.everConnected) this.armFirstFrameGuard(socket, live);
+        this.armConnectGuard(
+          socket,
+          live,
+          this.everConnected ? FIRST_FRAME_TIMEOUT_MS : INITIAL_FIRST_FRAME_TIMEOUT_MS
+        );
       };
       socket.onmessage = (event: MessageEvent): void => {
         if (!live() || typeof event.data !== 'string') return;
@@ -797,7 +849,7 @@ class Session implements TerminalSession {
         if (!live()) return;
         this.socket = null;
         this.stopHeartbeat();
-        this.clearFirstFrameGuard();
+        this.clearConnectGuard();
         const reason = closeReasonFor(event.code, event.reason);
         // If this attempt's socket never proved live and we had connected
         // before, this was itself a failed reconnect attempt, not a fresh
@@ -847,7 +899,7 @@ class Session implements TerminalSession {
           if (!live() || this.socket !== socket) return;
           this.socket = null;
           this.stopHeartbeat();
-          this.clearFirstFrameGuard();
+          this.clearConnectGuard();
           try {
             socket.close();
           } catch {
@@ -915,27 +967,29 @@ class Session implements TerminalSession {
     this.heartbeatCheckTimer = null;
   }
 
-  /** Starts the bounded wait for the first data frame after onopen. */
-  private armFirstFrameGuard(socket: WebSocket, live: () => boolean): void {
-    this.clearFirstFrameGuard();
-    this.firstFrameTimer = setTimeout(() => {
-      this.firstFrameTimer = null;
+  /** (Re)starts the bounded wait for the attempt's next connect step. */
+  private armConnectGuard(socket: WebSocket, live: () => boolean, timeoutMs: number): void {
+    this.clearConnectGuard();
+    this.connectGuardTimer = setTimeout(() => {
+      this.connectGuardTimer = null;
       if (!live() || this.socket !== socket) return;
-      this.handleFirstFrameTimeout(socket);
-    }, FIRST_FRAME_TIMEOUT_MS);
+      this.handleConnectTimeout(socket);
+    }, timeoutMs);
   }
 
-  private clearFirstFrameGuard(): void {
-    if (this.firstFrameTimer) clearTimeout(this.firstFrameTimer);
-    this.firstFrameTimer = null;
+  private clearConnectGuard(): void {
+    if (this.connectGuardTimer) clearTimeout(this.connectGuardTimer);
+    this.connectGuardTimer = null;
   }
 
   /**
-   * No data arrived within the guard window after opening: treat this as a
-   * failed/dead attempt instead of hanging in "Reconnecting..." forever, and
-   * instead of silently redialing forever.
+   * The socket did not open, or opened but sent no data, within its guard
+   * window: end the attempt instead of hanging in 'connecting' forever, and
+   * instead of silently redialing forever. The socket is closed with its
+   * handlers detached first, so a late open, message or close cannot change
+   * the state afterward.
    */
-  private handleFirstFrameTimeout(socket: WebSocket): void {
+  private handleConnectTimeout(socket: WebSocket): void {
     if (this.socket !== socket) return;
     this.socket = null;
     this.stopHeartbeat();
@@ -954,20 +1008,18 @@ class Session implements TerminalSession {
       disconnectReason: 'network',
       error: 'No response from the terminal stream.',
     });
-    // This guard only ever arms when everConnected is already true (onopen
-    // only calls armFirstFrameGuard for that case), and attemptReachedOpen
-    // is still false here (the first data frame would have cleared the
-    // guard before it could fire). Unlike onclose and the onerror fallback,
-    // which can also see an established socket die, this guard only fires
-    // during a reconnect attempt that never produced data, so it always
-    // marks the attempt failed.
-    this.markReconnectFailed();
+    // attemptReachedOpen is still false here (the first data frame clears
+    // the guard before it can fire), so this attempt never produced data. A
+    // reconnect that times out is a failed attempt, same as onclose's
+    // wasFailedAttempt. An initial connect is not a reconnect: it stays in
+    // plain 'disconnected', as an initial connect closed by the network does.
+    if (this.everConnected) this.markReconnectFailed();
   }
 
   /** No response to ping: go straight to disconnected without waiting for onclose. */
   private handleDeadSocket(socket: WebSocket): void {
     this.stopHeartbeat();
-    this.clearFirstFrameGuard();
+    this.clearConnectGuard();
     if (this.socket !== socket) return;
     this.socket = null;
     try {
@@ -1029,7 +1081,7 @@ class Session implements TerminalSession {
       });
     this.controller?.abort();
     attempt(() => this.stopHeartbeat());
-    attempt(() => this.clearFirstFrameGuard());
+    attempt(() => this.clearConnectGuard());
     attempt(() => this.clearBackgroundResetTimer());
     attempt(() => this.clearReconnectDelayTimer());
     attempt(() => this.releaseSocket());

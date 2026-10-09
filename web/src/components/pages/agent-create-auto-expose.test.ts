@@ -24,6 +24,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 interface CreatePrivate extends HTMLElement {
   loading: boolean;
@@ -38,11 +39,15 @@ function stubFetch(): void {
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL) => {
-      const url = typeof input === 'string' ? input : input.toString();
+      const url = requestUrl(input);
       const body = url.includes('/settings/public')
         ? { autoExposePortsEnabled: hubDefault }
         : { projects: [], brokers: [], templates: [], harnessConfigs: [] };
-      return Promise.resolve({ ok: true, status: 200, json: async () => body } as Response);
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(body),
+      } as Response);
     })
   );
 }

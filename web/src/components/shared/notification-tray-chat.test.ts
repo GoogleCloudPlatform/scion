@@ -54,9 +54,9 @@ let popups: Array<{ title: string; options: NotificationOptions }> = [];
 
 class FakeNotification {
   static permission: NotificationPermission = 'granted';
-  static requestPermission = vi.fn(async (): Promise<NotificationPermission> => {
+  static requestPermission = vi.fn((): Promise<NotificationPermission> => {
     FakeNotification.permission = 'granted';
-    return FakeNotification.permission;
+    return Promise.resolve(FakeNotification.permission);
   });
 
   constructor(title: string, options: NotificationOptions = {}) {
@@ -248,7 +248,7 @@ describe('notification tray: desktop notification toggle', () => {
 describe('notification tray: loading for the signed-in user', () => {
   const POLL_MS = 5 * 60_000;
   const LIST_URL = '/api/v1/notifications?acknowledged=false';
-  const fetchMock = apiFetch as unknown as ReturnType<typeof vi.fn>;
+  const fetchMock = vi.mocked(apiFetch);
   let server: any[] = [];
   let trays: any[] = [];
 

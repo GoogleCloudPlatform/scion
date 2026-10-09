@@ -162,3 +162,33 @@ func TestNoHubImports(t *testing.T) {
 		}
 	}
 }
+
+// TestWriteMethodNotAllowedSetsAllow pins the helper every 405 in the
+// service goes through: the status, the exact Allow list in call order, and
+// the JSON error code (ptone/scion#4057).
+func TestWriteMethodNotAllowedSetsAllow(t *testing.T) {
+	for _, tc := range []struct {
+		methods []string
+		allow   string
+	}{
+		{[]string{http.MethodDelete}, "DELETE"},
+		{[]string{http.MethodGet, http.MethodHead}, "GET, HEAD"},
+		{[]string{http.MethodGet, http.MethodHead, http.MethodPost}, "GET, HEAD, POST"},
+	} {
+		rec := httptest.NewRecorder()
+		writeMethodNotAllowed(rec, tc.methods[0], tc.methods[1:]...)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Errorf("%v: status %d, want 405", tc.methods, rec.Code)
+		}
+		if got := rec.Header().Get("Allow"); got != tc.allow {
+			t.Errorf("%v: Allow %q, want %q", tc.methods, got, tc.allow)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("%v: body not JSON: %v", tc.methods, err)
+		}
+		if !strings.Contains(rec.Body.String(), "method_not_allowed") {
+			t.Errorf("%v: body %s lacks method_not_allowed", tc.methods, rec.Body.String())
+		}
+	}
+}

@@ -31,6 +31,7 @@
 
 import { dispatchTeardown } from '../utils/auth.js';
 import { setPreferredTimeZone } from '../utils/time.js';
+import type { AuthMeResponse } from '../shared/types.js';
 
 /** Data shape for SSE 'update' events from the server */
 export interface SSEUpdateEvent {
@@ -171,7 +172,7 @@ export class SSEClient extends EventTarget {
     this.eventSource.addEventListener('update', (event) => {
       if (es !== this.eventSource) return;
       try {
-        const data = JSON.parse((event as MessageEvent).data) as SSEUpdateEvent;
+        const data = JSON.parse(event.data as string) as SSEUpdateEvent;
         this.dispatchEvent(new CustomEvent('update', { detail: data }));
       } catch (err) {
         console.error('[SSE] Failed to parse update event:', err);
@@ -196,7 +197,7 @@ export class SSEClient extends EventTarget {
     this.eventSource.addEventListener('connected', (event) => {
       if (es !== this.eventSource) return;
       try {
-        const data = JSON.parse((event as MessageEvent).data) as {
+        const data = JSON.parse(event.data as string) as {
           connectionId: string;
           subjects: string[];
         };
@@ -237,7 +238,7 @@ export class SSEClient extends EventTarget {
       // unrelated render.
       if (resp.ok) {
         try {
-          const data = await resp.json();
+          const data = (await resp.json()) as AuthMeResponse;
           setPreferredTimeZone(data.preferences?.timezone);
         } catch {
           // Malformed/non-JSON body — not this check's concern.

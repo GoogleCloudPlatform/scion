@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-launch-store-postgres test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-launch-store-postgres test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -72,6 +72,19 @@ test-fast:
 	@echo "Running tests (no SQLite)..."
 	@go test -tags no_sqlite ./...
 
+# HUB_TEST_GOGC is prefixed to the go test commands that build the pkg/hub
+# test package: the test-hub-sqlite prebuild (go test -c, build only) and
+# the T1 Postgres targets below. In the T1 targets the go test command both
+# builds and runs the tests, so GOGC=25 also applies to the test process
+# there (those selected tests are short). With the default GOGC the pkg/hub
+# test-package compile peaks at about 15 GB RSS
+# (15.4 GB with -tags integration) on a 16 GB GitHub-hosted runner, fills its
+# 3 GB swap, and the runner is shut down mid-step (exit 143,
+# ptone/scion#4083). GOGC=25 cut the peak to about 12 GB with no swap, for
+# about 5% more compile time (3:59 to 4:12 in one measurement). A non-empty
+# GOGC in the environment wins.
+HUB_TEST_GOGC = GOGC=$${GOGC:-25}
+
 ## test-hub-sqlite: Run pkg/hub, perf/bench/seed, pkg/conduit, pkg/store/entadapter and pkg/artifacts tests with SQLite
 # enabled (no build tag). This is the ~67% of pkg/hub's test files that
 # "make test-fast" never compiles (see ptone/scion#1118), plus
@@ -81,10 +94,25 @@ test-fast:
 # relay/router tests, which run against the SQLite-backed conduit
 # registry store, and pkg/artifacts, whose store and service tests run on
 # SQLite.
+#
+# The test binaries are first compiled with HUB_TEST_GOGC (go test -c into a
+# scratch directory, then deleted). The go test run that follows reuses the
+# cached compiled packages, so only the build runs with the lower GOGC; the
+# tests themselves run with the default GOGC. go test -c with several
+# packages fails if two of the test packages share a package name (Go
+# 1.21+). There are no duplicates among the test packages today; if one
+# appears, prebuild with $(HUB_TEST_GOGC) go test -count=1 -run '^$'
+# instead, which compiles every package and runs no test functions.
+HUB_SQLITE_PKGS := ./pkg/hub/... ./perf/bench/seed/... ./pkg/conduit/... ./pkg/store/entadapter/... ./pkg/artifacts/...
+
 test-hub-sqlite:
 	@echo "Running pkg/hub + perf/bench/seed + pkg/conduit + pkg/store/entadapter + pkg/artifacts tests (SQLite-enabled)..."
-	@go test -count=1 -timeout 60m \
-		./pkg/hub/... ./perf/bench/seed/... ./pkg/conduit/... ./pkg/store/entadapter/... ./pkg/artifacts/...
+	@dir=$$(mktemp -d) || exit 1; \
+	$(HUB_TEST_GOGC) go test -c -o "$$dir/" $(HUB_SQLITE_PKGS); \
+	status=$$?; \
+	if [ -n "$$dir" ]; then rm -rf "$$dir"; fi; \
+	if [ $$status -ne 0 ]; then exit $$status; fi
+	@go test -count=1 -timeout 60m $(HUB_SQLITE_PKGS)
 
 ## test-fixture-coverage: Run the hub fixture coverage gate (TestFixtureCoverage) with SQLite
 # internal/fixturegen's tests carry `//go:build !no_sqlite`, so
@@ -269,11 +297,14 @@ test-launch-store-postgres:
 		echo "ERROR: one or more storetest group/MembershipCleanup cases were skipped -- see '--- SKIP' lines above." >&2; \
 		exit 1; \
 	fi
-	@go test -tags integration -count=1 -timeout 20m -v \
+	@st=$$(mktemp) || exit 1; \
+	{ $(HUB_TEST_GOGC) go test -tags integration -count=1 -timeout 20m -v \
 		-run '^(TestProjectDeletionService_LockOrderNoDeadlock|TestScheduledSend_TwoHubReplicasPostgres_OneDelivery|$(subst $(space),|,$(strip $(MEMBERSHIP_LOSS_POSTGRES_TESTS))))$$' \
-		./pkg/hub/ > /tmp/test-launch-store-postgres-hub.log 2>&1; \
-	status=$$?; \
-	cat /tmp/test-launch-store-postgres-hub.log; \
+		./pkg/hub/ 2>&1; echo $$? > "$$st"; } \
+		| tee /tmp/test-launch-store-postgres-hub.log; \
+	status=$$(cat "$$st" 2>/dev/null); \
+	rm -f "$$st"; \
+	case "$$status" in ''|*[!0-9]*) status=1;; esac; \
 	if [ $$status -ne 0 ]; then exit $$status; fi; \
 	if ! grep -qE '^[[:space:]]*--- PASS: TestProjectDeletionService_LockOrderNoDeadlock' /tmp/test-launch-store-postgres-hub.log; then \
 		echo "ERROR: the pkg/hub project-delete lock-order test did not run." >&2; \
@@ -300,7 +331,10 @@ test-launch-store-postgres:
 # if any selected test skips, or if any test listed in
 # WEBCHAT_POSTGRES_TESTS reports no PASS line. CI runs this in
 # the T1 Launch Store PostgreSQL Tests job. The tests drop and recreate the
-# webchat_* tables, so point the DSN at a scratch database.
+# webchat_* tables, so point the DSN at a scratch database. go test output
+# is streamed with tee (exit status kept in a per-run mktemp file, since
+# make's /bin/sh has no pipefail) so a step killed mid-run still shows what ran
+# (ptone/scion#4083).
 WEBCHAT_POSTGRES_TESTS := TestListTopicsByProjects_Postgres \
 	TestC4Fix_Postgres_FreshDB \
 	TestC4Fix_Postgres_PreExistingDB \
@@ -315,11 +349,14 @@ test-webchat-postgres:
 		echo "ERROR: SCION_TEST_POSTGRES_DSN is not set -- the Postgres tests would silently skip instead of running." >&2; \
 		exit 1; \
 	fi
-	@go test -count=1 -timeout 10m -v \
+	@st=$$(mktemp) || exit 1; \
+	{ $(HUB_TEST_GOGC) go test -count=1 -timeout 10m -v \
 		-run '^($(subst $(eval) ,|,$(strip $(WEBCHAT_POSTGRES_TESTS))))$$' \
-		./pkg/hub/ > /tmp/test-webchat-postgres.log 2>&1; \
-	status=$$?; \
-	cat /tmp/test-webchat-postgres.log; \
+		./pkg/hub/ 2>&1; echo $$? > "$$st"; } \
+		| tee /tmp/test-webchat-postgres.log; \
+	status=$$(cat "$$st" 2>/dev/null); \
+	rm -f "$$st"; \
+	case "$$status" in ''|*[!0-9]*) status=1;; esac; \
 	if [ $$status -ne 0 ]; then exit $$status; fi; \
 	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-webchat-postgres.log; then \
 		echo "ERROR: a web chat Postgres test was skipped -- see '--- SKIP' lines above." >&2; \
@@ -349,11 +386,14 @@ test-conduit-authz-postgres:
 		echo "ERROR: SCION_TEST_POSTGRES_DSN is not set -- the Postgres tests would silently skip instead of running." >&2; \
 		exit 1; \
 	fi
-	@go test -count=1 -timeout 10m -v \
+	@st=$$(mktemp) || exit 1; \
+	{ $(HUB_TEST_GOGC) go test -count=1 -timeout 10m -v \
 		-run '^($(subst $(eval) ,|,$(strip $(CONDUIT_AUTHZ_POSTGRES_TESTS))))$$' \
-		./pkg/hub/ > /tmp/test-conduit-authz-postgres.log 2>&1; \
-	status=$$?; \
-	cat /tmp/test-conduit-authz-postgres.log; \
+		./pkg/hub/ 2>&1; echo $$? > "$$st"; } \
+		| tee /tmp/test-conduit-authz-postgres.log; \
+	status=$$(cat "$$st" 2>/dev/null); \
+	rm -f "$$st"; \
+	case "$$status" in ''|*[!0-9]*) status=1;; esac; \
 	if [ $$status -ne 0 ]; then exit $$status; fi; \
 	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-conduit-authz-postgres.log; then \
 		echo "ERROR: a conduit re-check Postgres test was skipped -- see '--- SKIP' lines above." >&2; \
@@ -529,8 +569,13 @@ check-route-authz-manifest:
 check-method-not-allowed:
 	@./hack/check-method-not-allowed.sh
 
+## check-debug-defaults: Verify setup scripts, deploy templates and hosted setup docs keep debug off by default
+check-debug-defaults:
+	@./hack/check-debug-defaults.sh --self-test
+	@./hack/check-debug-defaults.sh
+
 ## check-custom: Run all custom CI lint checks (see hack/LINT-CONVENTIONS.md)
-check-custom: compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates check-authorization-catalog check-route-authz-manifest cli-time-zones time-literals check-method-not-allowed
+check-custom: compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates check-authorization-catalog check-route-authz-manifest cli-time-zones time-literals check-method-not-allowed check-debug-defaults
 	@echo "All custom checks passed."
 
 ## golangci-lint: Run golangci-lint on new issues only (install via: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)

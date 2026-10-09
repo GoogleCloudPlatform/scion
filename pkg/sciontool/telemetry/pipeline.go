@@ -71,6 +71,7 @@ type Pipeline struct {
 	meter            otelmetric.Meter
 	retryConfig      RetryConfig
 	usageDeriver     atomic.Pointer[UsageDeriver]
+	sessionUsageSink atomic.Pointer[SessionUsageSink]
 	intakeMu         sync.Mutex
 	intakeClosed     bool
 	intakeActive     int
@@ -222,6 +223,7 @@ func (p *Pipeline) ActivateUsageSource(ctx context.Context, source string) (Usag
 	if err != nil {
 		return "", fmt.Errorf("creating usage deriver: %w", err)
 	}
+	deriver.sessionUsage = p.forwardSessionUsage
 	if len(deriver.rules) == 0 {
 		return UsageActivationNoHarnessRule, nil
 	}
@@ -359,6 +361,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	if deriver, err := NewUsageDeriver(ctx, &loopbackConfig); err != nil {
 		log.Error("Failed to create usage deriver: %v", err)
 	} else {
+		deriver.sessionUsage = p.forwardSessionUsage
 		p.usageDeriver.Store(deriver)
 	}
 

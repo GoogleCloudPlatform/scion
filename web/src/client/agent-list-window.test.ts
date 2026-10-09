@@ -128,10 +128,12 @@ describe('AgentListWindow — small state', () => {
   it('setSmall() resets pageIndex to 0 when the previous state was paged', async () => {
     const page0 = [agent('a'), agent('b')];
     const page1 = [agent('c'), agent('d')];
-    const fetchPage = vi.fn(async (params: { cursor?: string }) =>
-      !params.cursor
-        ? pagedResult(page0, { nextCursor: 'c1', totalCount: 4 })
-        : pagedResult(page1, { totalCount: 4 })
+    const fetchPage = vi.fn((params: { cursor?: string }) =>
+      Promise.resolve(
+        !params.cursor
+          ? pagedResult(page0, { nextCursor: 'c1', totalCount: 4 })
+          : pagedResult(page1, { totalCount: 4 })
+      )
     );
     const { win, setHeld } = createWindow({ viewState: makeViewState(), fetchPage });
     win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }), '');
@@ -209,10 +211,12 @@ describe('AgentListWindow — paged state', () => {
   it('next()/prev() call fetchPage with the right cursor and update pageIndex/total', async () => {
     const page0 = [agent('a'), agent('b')];
     const page1 = [agent('c'), agent('d')];
-    const fetchPage = vi.fn(async (params: { cursor?: string }) => {
-      if (!params.cursor) return pagedResult(page0, { nextCursor: 'cursor-1', totalCount: 4 });
-      if (params.cursor === 'cursor-1') return pagedResult(page1, { totalCount: 4 });
-      throw new Error('unexpected cursor');
+    const fetchPage = vi.fn((params: { cursor?: string }) => {
+      if (!params.cursor)
+        return Promise.resolve(pagedResult(page0, { nextCursor: 'cursor-1', totalCount: 4 }));
+      if (params.cursor === 'cursor-1')
+        return Promise.resolve(pagedResult(page1, { totalCount: 4 }));
+      return Promise.reject(new Error('unexpected cursor'));
     });
     const { win } = createWindow({ viewState: makeViewState(), fetchPage });
     win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }), '');
@@ -244,11 +248,12 @@ describe('AgentListWindow — paged state', () => {
   it('steps back a page when a refetch returns empty (an emptied last page)', async () => {
     const page0 = [agent('a'), agent('b')];
     let secondCall = 0;
-    const fetchPage = vi.fn(async (params: { cursor?: string }) => {
-      if (!params.cursor) return pagedResult(page0, { nextCursor: 'c1', totalCount: 3 });
+    const fetchPage = vi.fn((params: { cursor?: string }) => {
+      if (!params.cursor)
+        return Promise.resolve(pagedResult(page0, { nextCursor: 'c1', totalCount: 3 }));
       secondCall++;
-      if (secondCall === 1) return pagedResult([], { totalCount: 2 }); // page 1 is now empty
-      return pagedResult(page0, { totalCount: 2 }); // step-back refetch of page 0
+      if (secondCall === 1) return Promise.resolve(pagedResult([], { totalCount: 2 })); // page 1 is now empty
+      return Promise.resolve(pagedResult(page0, { totalCount: 2 })); // step-back refetch of page 0
     });
     const { win } = createWindow({ viewState: makeViewState(), fetchPage });
     win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }), '');
@@ -536,7 +541,7 @@ describe('AgentListWindow — paged state', () => {
 
   it('refresh() (the chip click) re-fetches the current page and clears the chip', async () => {
     const page0 = [agent('a')];
-    const fetchPage = vi.fn(async () => pagedResult(page0, { totalCount: 1 }));
+    const fetchPage = vi.fn(() => Promise.resolve(pagedResult(page0, { totalCount: 1 })));
     const { win } = createWindow({ viewState: makeViewState(), fetchPage });
     win.setPaged(await fetchPage(), '');
     win.markResync();
@@ -585,10 +590,12 @@ describe('AgentListWindow — page-0 K-range chip predicate and off-page add-rul
   it('setViewState does not reset pageIndex or the current page while paged (a label keystroke must not desync them)', async () => {
     const page0 = [agent('a'), agent('b')];
     const page1 = [agent('c', { labels: { env: 'prod' } }), agent('d')];
-    const fetchPage = vi.fn(async (params: { cursor?: string }) =>
-      !params.cursor
-        ? pagedResult(page0, { nextCursor: 'c1', totalCount: 4 })
-        : pagedResult(page1, { totalCount: 4 })
+    const fetchPage = vi.fn((params: { cursor?: string }) =>
+      Promise.resolve(
+        !params.cursor
+          ? pagedResult(page0, { nextCursor: 'c1', totalCount: 4 })
+          : pagedResult(page1, { totalCount: 4 })
+      )
     );
     const { win } = createWindow({ viewState: makeViewState(), fetchPage });
     win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }), '');
@@ -669,7 +676,9 @@ describe('AgentListWindow — page-0 K-range chip predicate and off-page add-rul
         agent('c', { updated: '2026-01-02T00:00:00Z' }),
       ];
       const known = new Map([...page0, ...page1].map((a) => [a.id, a]));
-      const fetchPage = vi.fn(async () => pagedResult(page1, { totalCount: 3, stats: undefined }));
+      const fetchPage = vi.fn(() =>
+        Promise.resolve(pagedResult(page1, { totalCount: 3, stats: undefined }))
+      );
       const { win } = createWindow({
         viewState: makeViewState({ pageSize: 1 }),
         fetchPage,
@@ -721,7 +730,9 @@ describe('AgentListWindow — page-0 K-range chip predicate and off-page add-rul
     const page0 = [agent('a', { updated: '2026-01-03T00:00:00Z' })];
     const page1 = [agent('d', { updated: '2026-01-02T00:00:00Z' })];
     const known = new Map([...page0, ...page1].map((a) => [a.id, a]));
-    const fetchPage = vi.fn(async () => pagedResult(page1, { totalCount: 3, stats: undefined }));
+    const fetchPage = vi.fn(() =>
+      Promise.resolve(pagedResult(page1, { totalCount: 3, stats: undefined }))
+    );
     const { win } = createWindow({
       viewState: makeViewState({ pageSize: 1 }),
       fetchPage,
@@ -753,10 +764,12 @@ describe('AgentListWindow — page-0 K-range chip predicate and off-page add-rul
   it('rangeStart tracks the real running offset, not pageIndex * pageSize, across a short page', async () => {
     const page0 = [agent('a'), agent('b'), agent('c')]; // a short page0: 3 rows at pageSize 3 (full)
     const page1 = [agent('d'), agent('e')]; // page1 is SHORT: only 2 rows (one race-dropped)
-    const fetchPage = vi.fn(async (params: { cursor?: string }) =>
-      !params.cursor
-        ? pagedResult(page0, { nextCursor: 'c1', totalCount: 10 })
-        : pagedResult(page1, { nextCursor: 'c2', totalCount: 10 })
+    const fetchPage = vi.fn((params: { cursor?: string }) =>
+      Promise.resolve(
+        !params.cursor
+          ? pagedResult(page0, { nextCursor: 'c1', totalCount: 10 })
+          : pagedResult(page1, { nextCursor: 'c2', totalCount: 10 })
+      )
     );
     const { win } = createWindow({ viewState: makeViewState({ pageSize: 3 }), fetchPage });
     win.setPaged(await fetchPage({ cursor: undefined, limit: 3, wantStats: true }), '');
@@ -810,10 +823,12 @@ describe('AgentListWindow — cursor invalidation after a failed view-change', (
   it('invalidateCursors() clears hasNext/hasPrev while paged, until the next setPaged', async () => {
     const page0 = [agent('a'), agent('b')];
     const page1 = [agent('c'), agent('d')];
-    const fetchPage = vi.fn(async (params: { cursor?: string }) =>
-      !params.cursor
-        ? pagedResult(page0, { nextCursor: 'c1', totalCount: 4 })
-        : pagedResult(page1, { totalCount: 4 })
+    const fetchPage = vi.fn((params: { cursor?: string }) =>
+      Promise.resolve(
+        !params.cursor
+          ? pagedResult(page0, { nextCursor: 'c1', totalCount: 4 })
+          : pagedResult(page1, { totalCount: 4 })
+      )
     );
     const { win } = createWindow({ viewState: makeViewState(), fetchPage });
     win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }), '');
@@ -869,10 +884,12 @@ describe('AgentListWindow — refreshing a stranded page after an invalidation',
   it('invalidateCursors() also clears hasPrev on a page other than 0, and prev() makes 0 fetches', async () => {
     const page0 = [agent('a'), agent('b')];
     const page1 = [agent('c'), agent('d')];
-    const fetchPage = vi.fn(async (params: { cursor?: string }) =>
-      !params.cursor
-        ? pagedResult(page0, { nextCursor: 'c1', totalCount: 4 })
-        : pagedResult(page1, { totalCount: 4 })
+    const fetchPage = vi.fn((params: { cursor?: string }) =>
+      Promise.resolve(
+        !params.cursor
+          ? pagedResult(page0, { nextCursor: 'c1', totalCount: 4 })
+          : pagedResult(page1, { totalCount: 4 })
+      )
     );
     const { win } = createWindow({ viewState: makeViewState(), fetchPage });
     win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }), '');
@@ -897,20 +914,23 @@ describe('AgentListWindow — refreshing a stranded page after an invalidation',
     const page1 = [agent('c'), agent('d')];
     const page0Again = [agent('e', { phase: 'stopped' }), agent('f', { phase: 'stopped' })];
     const page1Again = [agent('g', { phase: 'stopped' }), agent('h', { phase: 'stopped' })];
-    const fetchPage = vi.fn(async (params: { cursor?: string }) => {
+    const fetchPage = vi.fn((params: { cursor?: string }) => {
       if (!params.cursor) {
         // The second cursor-free call simulates the server now answering
         // under the new (post-view-change) params.
-        return fetchPage.mock.calls.length <= 1
-          ? pagedResult(page0, { nextCursor: 'c1', totalCount: 4 })
-          : pagedResult(page0Again, { nextCursor: 'c1-new', totalCount: 4 });
+        return Promise.resolve(
+          fetchPage.mock.calls.length <= 1
+            ? pagedResult(page0, { nextCursor: 'c1', totalCount: 4 })
+            : pagedResult(page0Again, { nextCursor: 'c1-new', totalCount: 4 })
+        );
       }
-      if (params.cursor === 'c1') return pagedResult(page1, { totalCount: 4 });
+      if (params.cursor === 'c1') return Promise.resolve(pagedResult(page1, { totalCount: 4 }));
       // The fresh cursor minted by the page-0-again response: distinct from
       // 'c1' (page 1's original, now-stale cursor), so a call with it
       // proves `next()` is using the newly-minted one, not the old one.
-      if (params.cursor === 'c1-new') return pagedResult(page1Again, { totalCount: 4 });
-      throw new Error(`unexpected cursor: ${params.cursor}`);
+      if (params.cursor === 'c1-new')
+        return Promise.resolve(pagedResult(page1Again, { totalCount: 4 }));
+      return Promise.reject(new Error(`unexpected cursor: ${params.cursor}`));
     });
     const { win } = createWindow({ viewState: makeViewState(), fetchPage });
     win.setPaged(await fetchPage({ cursor: undefined, limit: 2, wantStats: true }), '');

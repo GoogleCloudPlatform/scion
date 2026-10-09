@@ -15,11 +15,12 @@ The quickest path to a deployed Scion Hub that builds from source is a single Go
 
 ## Configuration
 
-Every script sources `scripts/starter-hub/hub-config.sh`. That file generates nothing. It is a shared set of shell variables that sets resource names, domains, and file paths from `HUB_NAME` (default `demo`) and `BASE_DOMAIN` (default `scion-ai.dev`). Set those, and any other variable listed in `hub-config.sh`, such as `REGION` or `ZONE`, in your environment before you run a script. Set `CERT_EMAIL` in `hub-config.sh`, or in your environment, to your own address; Let's Encrypt uses it for certificate notices:
+Every script sources `scripts/starter-hub/hub-config.sh`. That file generates nothing. It is a shared set of shell variables that sets resource names, domains, and file paths from `HUB_NAME` (default `demo`) and `BASE_DOMAIN` (default `scion-ai.dev`). Set those, and any other variable listed in `hub-config.sh`, such as `REGION` or `ZONE`, in your environment before you run a script. Set `CERT_EMAIL` in your environment to your own address; Let's Encrypt uses it for certificate notices. It has no default, and `gce-certs.sh` and `gce-demo-deploy.sh` stop with an error before changing anything if it is not set:
 
 ```bash
 export HUB_NAME=demo
 export BASE_DOMAIN=example.com    # the Hub is served at hub.demo.example.com
+export CERT_EMAIL=admin@example.com
 ```
 
 Then create the Hub environment file, which `gce-start-hub.sh --full` uploads to the VM as `hub.env`:
@@ -29,6 +30,15 @@ mkdir -p .scratch
 cp scripts/starter-hub/hub.env.sample .scratch/hub-${HUB_NAME}.env
 # Edit .scratch/hub-<name>.env with your values
 ```
+
+:::caution[Choose who can sign in before you expose the Hub]
+The default user access mode is `open`. Once OAuth is configured, any account that the identity provider accepts can sign in and gets an account with the default role (`member`). Before the Hub is reachable by others, restrict sign-in in `hub.env`:
+
+- `SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS=example.com` allows only accounts from the listed domains.
+- `SCION_SEED_SERVER_AUTH_USERACCESSMODE=invite_only` allows only invited or existing users (`domain_restricted` is the other non-default mode).
+
+These set `server.auth.authorized_domains` and `server.auth.user_access_mode`. See [Who can sign in](/scion/hosted/single-node/auth/#who-can-sign-in-user-access-mode).
+:::
 
 ## Deploy
 
@@ -66,6 +76,8 @@ If your VM has no external IP, or TLS is terminated upstream by a load balancer,
 ```
 
 Without `--full`, `gce-start-hub.sh` only pulls the latest code on the VM, rebuilds, restarts the Hub, and checks its health. Add `--full` again when you change `hub.env` or the generated configuration.
+
+The final health check requests `https://<HUB_DOMAIN>/healthz` and verifies the TLS certificate, so it fails if the certificate is missing or not valid. For a self-signed or test certificate only, add `--insecure-health-check` (or set `HEALTH_CHECK_INSECURE=true`); the script then prints a warning that the certificate was not verified.
 
 ## Post-Setup
 
@@ -126,7 +138,9 @@ The steps above assume a public-facing VM with an external IP and public DNS. If
 | 1. Provision the VM | `gce-demo-provision.sh` | **No** — run the script as-is. It creates firewall rules for inbound HTTP/HTTPS (tcp:80, tcp:443) that are unnecessary if the VM is not publicly reachable; you can remove them afterward or let your network team manage internal firewall rules instead. |
 | 4. DNS and certificates | `gce-certs.sh` | **Yes** — this script fetches the VM's external IP, creates public Cloud DNS records, and obtains Let's Encrypt certificates via DNS challenge. All of this requires a public IP and will fail without one. |
 
-Steps 0, 2, and 3 work without modification. Step 5 needs a certificate and key at `/etc/letsencrypt/live/<CERT_DOMAIN>/fullchain.pem` and `privkey.pem`. The directory `/etc/letsencrypt/archive` must also exist; it may be empty. When `/etc/letsencrypt/live` exists, `gce-start-hub.sh --full` runs `chown -R` and `chmod -R` on both `live` and `archive` to give group `caddy` read access. The remote commands run under `set -euo pipefail`, so a missing `archive` directory stops the run before the Hub starts. The script then installs a Caddyfile that points at the certificate files and restarts Caddy when the Caddyfile changes; if the files are missing at that point, Caddy fails to start and the script stops before it starts the Hub. Because `gce-demo-deploy.sh` always runs step 4, run the [individual steps](#individual-steps) instead of the all-in-one script.
+Steps 0, 2, and 3 work without modification. Step 5 needs a certificate and key at `/etc/letsencrypt/live/<CERT_DOMAIN>/fullchain.pem` and `privkey.pem`. The directory `/etc/letsencrypt/archive` must also exist; it may be empty. When `/etc/letsencrypt/live` exists, `gce-start-hub.sh --full` runs `chown -R` and `chmod -R` on both `live` and `archive` to give group `caddy` read access. The remote commands run under `set -euo pipefail`, so a missing `archive` directory stops the run before the Hub starts. The script then installs a Caddyfile that points at the certificate files and restarts Caddy when the Caddyfile changes; if the files are missing at that point, Caddy fails to start and the script stops before it starts the Hub.
+
+To skip the Caddy/TLS step entirely, for example when TLS is terminated upstream ([Option B](#tls-options)), run `gce-start-hub.sh --full --no-tls` or set `SKIP_TLS=true`. The script then writes no Caddyfile, does not install or restart Caddy, and skips the final HTTPS health check; the health check on the VM still runs. The systemd unit sets `SCION_SERVER_BASE_URL` to `http://<HUB_DOMAIN>:8080` unless you set `HUB_BASE_URL`, and a `SCION_SERVER_BASE_URL` in `hub.env` takes precedence over both. The `http://` default is for a Hub reached directly on port 8080. Behind an upstream TLS terminator, set `SCION_SERVER_BASE_URL` in `hub.env` (or `HUB_BASE_URL`) to the `https://` URL that clients use. With `SKIP_TLS=true`, `gce-demo-deploy.sh` also skips step 4 and does not require `CERT_EMAIL`, so you can use the all-in-one script. Because step 4 is what creates the DNS record, nothing creates one for `HUB_DOMAIN` in this mode: it must resolve to the VM through your own DNS, or set `HUB_BASE_URL` or `SCION_SERVER_BASE_URL` to an address agents can reach. Without it, run the [individual steps](#individual-steps) and skip step 4.
 
 ### Set `SCION_SERVER_BASE_URL`
 

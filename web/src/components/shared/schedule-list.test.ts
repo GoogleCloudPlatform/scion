@@ -26,6 +26,7 @@
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { setPreferredTimeZone } from '../../utils/time.js';
+import { requestBodyText, requestUrl } from '../../client/__fixtures__/request-url.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let mod: any;
@@ -283,7 +284,7 @@ describe('scion-schedule-list pagination', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo | URL) => {
-        const url = String(input);
+        const url = requestUrl(input);
         urls.push(url);
         const cursor = new URL(url, 'http://x').searchParams.get('cursor') ?? '';
         const page = pages[cursor];
@@ -403,8 +404,8 @@ describe('scion-schedule-list edit dialog', () => {
       'fetch',
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
         const method = init?.method ?? 'GET';
-        const url = String(input);
-        const body = init?.body ? (JSON.parse(String(init.body)) as unknown) : undefined;
+        const url = requestUrl(input);
+        const body = init?.body ? (JSON.parse(requestBodyText(init.body)) as unknown) : undefined;
         calls.push({ method, url, body });
         if (method === 'PATCH') {
           if (patchResponse) return Promise.resolve(patchResponse);
@@ -539,7 +540,7 @@ function deferredFetch(): {
     vi.fn(
       (input: RequestInfo | URL, init?: RequestInit) =>
         new Promise<Response>((resolve) => {
-          calls.push({ method: init?.method ?? 'GET', url: String(input), resolve });
+          calls.push({ method: init?.method ?? 'GET', url: requestUrl(input), resolve });
         })
     )
   );
