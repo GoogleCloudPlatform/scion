@@ -43,11 +43,13 @@ func TestSandboxReconcile_ProbeOutcomes(t *testing.T) {
 		{"pattern not found", `echo "Error: sandbox \"$2\" not found" >&2; exit 1`, false, false},
 		{"pattern no such", `echo "error: no such sandbox: $2" >&2; exit 1`, false, false},
 		{"pattern does not exist", `echo "Sandbox $2 does not exist"; exit 2`, false, false},
+		{"pattern in upper case", `echo "Sandbox NOT FOUND" >&2; exit 1`, false, false},
 		{"dead sandbox, non-matching output", `echo "exec: control socket closed" >&2; exit 1`, true, true},
 		{"probe times out", "exec sleep 5", true, true},
 		{"prints not found, then sleeps past the deadline", `echo "Error: sandbox \"$2\" not found" >&2; exec sleep 5`, true, true},
 		{"ambiguous failure", `echo "connection refused" >&2; exit 1`, true, true},
 		{"killed by a signal", `kill -9 $$`, true, true},
+		{"prints not found, then killed by a signal", `echo "Error: sandbox \"$2\" not found" >&2; kill -9 $$`, true, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
