@@ -424,4 +424,75 @@ describe('scion-page-profile-settings — view mode shortcuts', () => {
       before
     );
   });
+
+  describe('when the preference changes outside this page', () => {
+    /** Writes the store directly and fires the storage event another tab's write would. */
+    function writeFromOtherTab(key: string, value: string | null): void {
+      if (value === null) {
+        localStorage.removeItem(key);
+      } else {
+        localStorage.setItem(key, value);
+      }
+      window.dispatchEvent(
+        new StorageEvent('storage', { key, newValue: value, storageArea: localStorage })
+      );
+    }
+
+    it('updates the toggle when another tab changes the preference', async () => {
+      element = await createComponent(createFetchHandler({}));
+      expect(shortcutsSwitch().hasAttribute('checked')).toBe(true);
+
+      writeFromOtherTab('scion-view-mode-shortcuts', 'false');
+      await element.updateComplete;
+      expect(shortcutsSwitch().hasAttribute('checked')).toBe(false);
+
+      writeFromOtherTab('scion-view-mode-shortcuts', null);
+      await element.updateComplete;
+      expect(shortcutsSwitch().hasAttribute('checked')).toBe(true);
+    });
+
+    it('updates the toggle when the preference changes elsewhere in this tab', async () => {
+      const { setViewModeShortcutsEnabled } = await import('../../client/view-mode-shortcuts.js');
+      element = await createComponent(createFetchHandler({}));
+
+      setViewModeShortcutsEnabled(false);
+      await element.updateComplete;
+      expect(shortcutsSwitch().hasAttribute('checked')).toBe(false);
+
+      setViewModeShortcutsEnabled(true);
+      await element.updateComplete;
+      expect(shortcutsSwitch().hasAttribute('checked')).toBe(true);
+    });
+
+    it('ignores a storage event for an unrelated key', async () => {
+      element = await createComponent(createFetchHandler({}));
+
+      // Change the stored value without its own event, then fire an event
+      // for a different key: the toggle must not re-read the preference.
+      localStorage.setItem('scion-view-mode-shortcuts', 'false');
+      writeFromOtherTab('some-other-key', 'x');
+      await element.updateComplete;
+      expect(shortcutsSwitch().hasAttribute('checked')).toBe(true);
+    });
+
+    it('removes the same listeners it added once disconnected', async () => {
+      const { VIEW_MODE_SHORTCUTS_CHANGED_EVENT } =
+        await import('../../client/view-mode-shortcuts.js');
+      const addSpy = vi.spyOn(window, 'addEventListener');
+      element = await createComponent(createFetchHandler({}));
+      const added = (type: string): unknown => addSpy.mock.calls.find(([t]) => t === type)?.[1];
+      const storageHandler = added('storage');
+      const changedHandler = added(VIEW_MODE_SHORTCUTS_CHANGED_EVENT);
+      expect(storageHandler).toBeTypeOf('function');
+      expect(changedHandler).toBeTypeOf('function');
+
+      const removeSpy = vi.spyOn(window, 'removeEventListener');
+      element.remove();
+      element = null;
+      const removed = (type: string): unknown[] =>
+        removeSpy.mock.calls.filter(([t]) => t === type).map(([, h]) => h);
+      expect(removed('storage')).toContain(storageHandler);
+      expect(removed(VIEW_MODE_SHORTCUTS_CHANGED_EVENT)).toContain(changedHandler);
+    });
+  });
 });
