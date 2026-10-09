@@ -3743,6 +3743,34 @@ func k8sDisruptionExitReason(pod *corev1.Pod) string {
 	return ""
 }
 
+// k8sPodWorkspaceRecoverable reports whether a later start of the agent can
+// resume its work after the pod is gone: the pod's "workspace" volume is
+// persistent storage (a PersistentVolumeClaim, as used by the NFS workspace
+// backend, or an NFS volume) rather than an emptyDir. The home backend does
+// not matter: every Kubernetes start creates a new pod, so a pod-local home
+// session is not kept across restarts anyway, and per-agent Secrets are
+// re-created by the start. Read-only on the pod.
+func k8sPodWorkspaceRecoverable(pod *corev1.Pod) bool {
+	for _, v := range pod.Spec.Volumes {
+		if v.Name != "workspace" {
+			continue
+		}
+		return v.PersistentVolumeClaim != nil || v.NFS != nil
+	}
+	return false
+}
+
+// k8sDisruptionPhase returns the agent phase to report for a pod removed by a
+// Kubernetes-initiated disruption (preemption or eviction): stopped when the
+// workspace survives the pod (k8sPodWorkspaceRecoverable), so a later start
+// can resume the work, and error otherwise.
+func k8sDisruptionPhase(pod *corev1.Pod) state.Phase {
+	if k8sPodWorkspaceRecoverable(pod) {
+		return state.PhaseStopped
+	}
+	return state.PhaseError
+}
+
 func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
 	namespace := r.DefaultNamespace
 	// When ListAllNamespaces is enabled, query across all namespaces
@@ -3823,9 +3851,14 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 		// not be reported as preempted/evicted before it actually is —
 		// unless it is already committed to termination (deletionTimestamp),
 		// which the branch below covers.
+		//
+		// A disrupted pod is reported as stopped when its workspace survives
+		// the pod (a later start resumes the work) and as error otherwise
+		// (k8sDisruptionPhase), in place of the generic phase mapping.
 		if agentStatus == string(state.PhaseStopped) || agentStatus == string(state.PhaseError) {
 			if reason := k8sDisruptionExitReason(&p); reason != "" {
 				exitReason = reason
+				agentStatus = string(k8sDisruptionPhase(&p))
 			}
 		} else if p.DeletionTimestamp != nil {
 			// Scheduler preemption and Eviction API deletions remove the pod
@@ -3833,11 +3866,13 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 			// heartbeat observes a terminal phase at all, since List() polls
 			// rather than watches. A pod with a deletionTimestamp and a live
 			// DisruptionTarget condition is already committed to that
-			// termination, so report the reason now, ahead of it actually
-			// stopping. agentStatus (the reported Phase) is deliberately
-			// left alone — this pod has not stopped yet.
+			// termination and cannot return to running, so report the reason
+			// and the resulting phase now, ahead of it actually stopping.
+			// Otherwise no heartbeat may ever report the agent as no longer
+			// running (ptone/scion#2669).
 			if reason := k8sDisruptionExitReason(&p); reason != "" {
 				exitReason = reason
+				agentStatus = string(k8sDisruptionPhase(&p))
 			}
 		}
 

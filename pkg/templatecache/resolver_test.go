@@ -66,7 +66,7 @@ func (m *mockHarnessConfigService) RequestUploadURLs(ctx context.Context, id str
 	return nil, nil
 }
 
-func (m *mockHarnessConfigService) Finalize(ctx context.Context, id string, manifest *hubclient.HarnessConfigManifest) (*hubclient.HarnessConfig, error) {
+func (m *mockHarnessConfigService) Finalize(ctx context.Context, id string, manifest *hubclient.HarnessConfigManifest, sourceURL string) (*hubclient.HarnessConfig, error) {
 	return nil, nil
 }
 

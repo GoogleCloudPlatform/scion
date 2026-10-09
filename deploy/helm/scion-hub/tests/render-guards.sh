@@ -811,8 +811,8 @@ reject "oauth, clientSecret only, template layer" "google (has client_secret, mi
 
 # CLI CREDENTIALS DO NOT SUBSTITUTE FOR WEB ONES, and this row is the reason the
 # guard walks the web subtree specifically instead of asking "is server.oauth
-# non-empty". The hub keys its login check by client type (pkg/hub/oauth.go:194),
-# so a complete cli credential renders, validates, looks like configuration in
+# non-empty". The hub keys its login check by client type
+# (OAuthService.IsProviderConfiguredForClient, pkg/hub/oauth.go), so a complete cli credential renders, validates, looks like configuration in
 # the Secret, and satisfies no browser login. A guard written on presence rather
 # than on client type passes this input.
 reject "complete cli credential does not satisfy oauth mode" "no complete OAuth web client credential is present" \
@@ -821,9 +821,9 @@ reject "complete cli credential does not satisfy oauth mode" "no complete OAuth 
   --set config.extra.server.oauth.cli.google.client_secret=rg-cli-secret
 
 # THE SPELLING GUARD, WHICH IS THE ONE THAT CAUGHT ME. settings.yaml binds
-# client_id/client_secret (V1OAuthProviderConfig, pkg/config/settings_v1.go:635);
+# client_id/client_secret (V1OAuthProviderConfig, pkg/config/settings_v1.go);
 # clientId/clientSecret is the SCION_SERVER_* environment mapper's spelling
-# (pkg/config/hub_config.go:334). Measured both directions in
+# (OAuthProviderConfig, pkg/config/hub_config.go). Measured both directions in
 # harness/zz_p3_oauth_settings_probe_test.go: snake_case binds, camelCase leaves
 # the field empty with no error from yaml.v3. I wrote the positive case in
 # camelCase and expected it to pass.

@@ -58,6 +58,21 @@ Runtime Brokers represent high-trust infrastructure. They use HMAC-based request
 - **Replay Protection**: Nonce-based tracking and timestamp validation (5-minute clock skew tolerance) prevent replay attacks.
 - **NAT Traversal**: Brokers establish a persistent WebSocket control channel. The initial upgrade request is HMAC-authenticated, establishing a trusted session for subsequent commands.
 
+### 1.5 Broker Registration and Association Credentials
+
+User-credentialed broker operations admit a fixed set of credential kinds. A Runtime Broker HMAC request that names a user on whose behalf it acts is **not** a user credential for registering, re-registering, rotating, associating a broker with a project or removing an association; broker HMAC on its own is admitted only for the broker's self-maintenance (heartbeat, control channel, rotating its own secret).
+
+| Operation | Endpoint | Admitted credentials | Additional checks |
+|---|---|---|---|
+| Register a new broker | `POST /api/v1/brokers` | Interactive session, dev credential, hub-boundary UAT with `broker:create` | The user must hold `broker.create` (hub members). The caller's user becomes the owner. Turning on auto-provide also requires `broker.auto_provide` (super-admins). |
+| Re-register (re-mint the join token) | `POST /api/v1/brokers` matching an existing broker | Same as registration | The user must also be the broker's owner, or a super-admin with an interactive session or dev credential. |
+| Rotate the HMAC secret | `POST /api/v1/brokers/{id}/rotate-secret` | Broker HMAC for its own ID; interactive session or dev credential | A user must be the broker's owner or a super-admin. No UAT is admitted. |
+| Associate with a project | `POST /api/v1/projects/{id}/providers`, `brokerId` in `POST /api/v1/projects/register`, explicit broker on agent create | Interactive session, dev credential, or UAT for the project side | `project.update` on the project **and** `broker.update` on the broker (owner or super-admin). No UAT selector carries `broker.update`. |
+| Remove an association | `DELETE /api/v1/projects/{id}/providers/{brokerId}` | Interactive session, dev credential, UAT | `project.update` on the project, or `broker.update` on that broker. |
+| Use an associated broker | Agent creation | As for agent creation | Allowed for auto-provide brokers, for brokers associated with the project with the owner's consent, and for holders of `broker.dispatch` on the broker. |
+
+Registration never associates a broker with a project, and a project's default runtime broker must already be one of its providers. Register, re-register, rotate, link and unlink audit events record the credential kind and credential ID (a token ID or broker ID; never a secret) alongside the user.
+
 ## 2. Transport Security
 
 ### 2.1 TLS and HTTPS Enforcement
@@ -199,7 +214,7 @@ For headless environments (CI/CD, automation), Scion supports **user access toke
 - Only the SHA-256 hash of the token is stored in the database; the original value is never persisted.
 - Tokens can be scoped to specific permissions and projects, and revoked instantly via the dashboard or CLI.
 - Each token row records an explicit boundary (`boundary_kind`, default `project`). A project-boundary token must carry a `project_id`, and a database CHECK constraint enforces the pairing. At startup, the Hub logs the IDs (never the token or project) of any rows that break this rule, and such tokens are rejected when used, while valid tokens keep working. On SQLite, a hand-edited row whose `project_id` is not a UUID fails the schema migration, so correct or delete it before upgrading.
-- Tokens can be minted with an explicit hub boundary (`"boundary": {"kind": "hub"}` on `POST /api/v1/auth/tokens`), which reaches hub-level resources and every project; a request naming no boundary is rejected rather than read as hub-bound. Hub-only selectors such as `broker:create` are mintable only on hub-bound tokens, and broker creation itself still refuses every UAT.
+- Tokens can be minted with an explicit hub boundary (`"boundary": {"kind": "hub"}` on `POST /api/v1/auth/tokens`), which reaches hub-level resources and every project; a request naming no boundary is rejected rather than read as hub-bound. Hub-only selectors such as `broker:create` are mintable only on hub-bound tokens. Broker creation admits a UAT only when it is hub-bound and carries `broker:create`, and such a token re-registers only a broker its own user created (see [Runtime Broker](/scion/hosted/ha/runtime-broker/#broker-ownership)).
 - Every bearer request passes one gate: the boundary is valid, the target's scope is inside the boundary, the permission is inside the stored ceiling, the holder still has active access to a project target, and the holder's live authority allows the action. Any evaluation error denies.
 - At mint time, each requested scope is checked against the caller's live authority before the token is written; an ineligible scope is refused with `403 scope_violation`.
 - Operation-specific checks: inbox, conversation and notification operations check the token's inbox selectors and boundary; project messaging policy, template and project configuration operations each require their own permission; Hub configuration operations admit only hub-bound tokens with the matching selector; and hub pre-start hook scripts are redacted for every credential other than an interactive session. See [User Access Tokens](/scion/hosted/user/personal-access-tokens/#hub-bound-tokens-api-only).

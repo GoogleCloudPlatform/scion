@@ -416,6 +416,7 @@ type Template struct {
 	StoragePath   string          `json:"storagePath,omitempty"`
 	Files         []TemplateFile  `json:"files,omitempty"`
 	BaseTemplate  string          `json:"baseTemplate,omitempty"`
+	SourceURL     string          `json:"sourceUrl,omitempty"`
 	Locked        bool            `json:"locked,omitempty"`
 	Status        string          `json:"status"`
 	OwnerID       string          `json:"ownerId,omitempty"`

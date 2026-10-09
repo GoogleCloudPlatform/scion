@@ -177,6 +177,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/experiments", RouteID: "experiments.resolved",
 		Classification: RouteAuthenticated,
 	},
+	"/api/v1/profiling": {
+		Pattern: "/api/v1/profiling", RouteID: "profiling.client",
+		Classification: RouteAuthenticated,
+	},
 	"/api/v1/auth/admin-status": {
 		Pattern: "/api/v1/auth/admin-status", RouteID: "auth.admin-status",
 		Classification: RouteAuthenticated,
@@ -756,6 +760,14 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteHubAdmin,
 		Permission:     "hub.experiments.update", Resource: "hub", Action: "update",
 	},
+	// Profiling switches (DB-only "profiling" section). Session only: no
+	// token reads or writes them.
+	"/api/v1/admin/profiling": {
+		Pattern: "/api/v1/admin/profiling", RouteID: "admin.profiling",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.config.update", Resource: "hub", Action: "update",
+		SessionOnly: authzop.ReasonHostOperations,
+	},
 	// Conduit grant key rotation, behind hub.conduit. Returns kids and
 	// timestamps only.
 	"/api/v1/admin/conduit/grant-keys/rotate": {
@@ -982,6 +994,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "PUT /api/v1/github-app", RouteID: "githubApp.config.update",
 		Classification: RouteHubAdmin,
 		Permission:     "hub.github_app.update", Resource: "hub", Action: "update",
+		SessionOnly: authzop.ReasonCredentialManagement,
 	},
 	"GET /api/v1/github-app/installations": {
 		Pattern: "GET /api/v1/github-app/installations", RouteID: "githubApp.installations.list",
@@ -1028,8 +1041,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 	// check. POST /api/v1/brokers is user-credentialed and enforces
 	// broker.create itself, in-handler, via authorizeBrokerCreate
 	// (handlers_brokers.go) — see createBrokerRegistration and its
-	// ptone/scion#2138 gate. It is not RoutePolicy because the same path
-	// also carries the additional target owner/super-admin re-registration
+	// ptone/scion#2138 gate. UATs are admitted through
+	// authorizeBrokerCreate's bearer gate; broker on-behalf-of requests are
+	// not admitted. It is not RoutePolicy because the same path also
+	// carries the additional target owner/super-admin re-registration
 	// check, which a declarative Permission entry cannot express.
 	// -------------------------------------------------------------------------
 	"/api/v1/brokers": {

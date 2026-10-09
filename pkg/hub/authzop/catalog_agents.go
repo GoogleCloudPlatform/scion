@@ -30,11 +30,19 @@ var agentOperations = []OperationSpec{
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
 		ResourceResolver: "project-from-body",
 		BasePermission:   "agent.create",
-		Effects:          []SecurityEffect{EffectCreateResource},
+		Effects:          []SecurityEffect{EffectCreateResource, EffectGrantAuthority},
 		DelegationKind:   DelegationNonAmplification,
 		DelegationDescription: "Actor must hold the role and scopes delegated to the new agent (CanDelegate non-amplification); " +
 			"an agent actor is also evaluated against the delegation ceiling of its live delegation chain for agent.create on the target project",
 		AuthorityEval: AuthorityEvalNone,
+		// commitAgentCreate writes the agent row, its delegation edge and
+		// this record in one transaction.
+		AuditObligation: &AuditObligation{
+			EventType:     "agent_delegation",
+			ContextFields: []string{"actor_id"},
+			AfterFields:   []string{"agent_id", "can_delegate_result"},
+			Atomic:        true,
+		},
 		// conflict: the user or agent the agent belongs to no longer exists
 		// (deleted while the create ran), or its slug's identity key is taken.
 		DenialCodes: []DenialCode{DenialForbidden, DenialConflict},
@@ -42,6 +50,7 @@ var agentOperations = []OperationSpec{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestAgentCreate_ExplicitRoleAboveParentDenied"},
 			{Package: "pkg/hub", Function: "TestAgentCreate_RequiresLiveDelegator"},
+			{Package: "pkg/hub", Function: "TestCreateAuditFailureRollsBack"},
 		},
 		Bearer: AdmitOn(BearerTargetProjectBody, BearerBoundaryProject, BearerBoundaryHub),
 	},

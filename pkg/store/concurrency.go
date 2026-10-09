@@ -240,6 +240,10 @@ const (
 	// creation so replicas starting together against one database do not
 	// run the CREATE IF NOT EXISTS statements concurrently.
 	LockTelegramSchema AdvisoryLockKey = 0x5C100029
+
+	// LockNotificationOrphanGC guards the periodic removal of acknowledged
+	// notifications whose agent and subscription are both gone.
+	LockNotificationOrphanGC AdvisoryLockKey = 0x5C10002A
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide
