@@ -48,7 +48,39 @@ var hubOperations = []OperationSpec{
 	},
 
 	{
-		ID:          "hub.authreset.reissuescopes",
+		ID:          "hub.authreset.reissue",
+		Domain:      "hub",
+		Description: "Re-issue an agent's role scopes from its delegator's current authority (dispatched from POST .../agents/{id}/reset-auth when reissue_scopes is set; hub super-admin only)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointInternalDispatch, Pattern: "handleAgentResetAuth:reissue-scopes"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.auth_reset.execute",
+		Effects:          []SecurityEffect{EffectRevokeAuthority},
+		DelegationKind:   DelegationNone,
+		Governance: &GovernancePolicy{
+			Kind:        GovernancePeerSuperior,
+			Description: "Re-recording an agent's delegated authority and revoking its credentials is a hub super-admin action",
+		},
+		AuthorityEval: AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "agent_scopes_reissued",
+			ContextFields: []string{"actor_id"},
+			BeforeFields:  []string{"role_before", "edge_replaced"},
+			AfterFields:   []string{"role_after", "edge_new", "scopes_added", "scopes_removed", "credentials_revoked"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestScopeReissue_OperatorRefusals"},
+		},
+		Bearer: SessionOnly(ReasonGovernancePending),
+	},
+	{
+		ID:          "hub.authreset.reissueall",
 		Domain:      "hub",
 		Description: "Re-issue every agent's role scopes from its delegator's current authority (dispatched from POST /api/v1/admin/agents/reset-auth-all when reissue_scopes is set; dry run by default; hub super-admin only)",
 		EntryPoints: []EntryPoint{
@@ -58,14 +90,19 @@ var hubOperations = []OperationSpec{
 		Credentials:      []CredentialKind{CredentialSessionJWT},
 		ResourceResolver: "hub-scoped",
 		BasePermission:   "hub.auth_reset.execute",
-		Effects:          []SecurityEffect{EffectChangeAuthority, EffectRevokeAuthority},
+		Effects:          []SecurityEffect{EffectRevokeAuthority},
 		DelegationKind:   DelegationNone,
-		AuthorityEval:    AuthorityEvalNone,
+		Governance: &GovernancePolicy{
+			Kind:        GovernancePeerSuperior,
+			Description: "A hub-wide re-issue of delegated authority is a hub super-admin action; each agent is re-issued and audited on its own",
+		},
+		AuthorityEval: AuthorityEvalNone,
 		AuditObligation: &AuditObligation{
 			EventType:     "agent_scopes_reissue_batch",
 			ContextFields: []string{"actor_id"},
-			AfterFields:   []string{"dry_run", "total", "succeeded", "noop", "refused", "push_failed"},
-			Atomic:        false,
+			BeforeFields:  []string{"total"},
+			AfterFields:   []string{"dry_run", "succeeded", "noop", "refused", "push_failed"},
+			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
 		TestRefs: []TestRef{
