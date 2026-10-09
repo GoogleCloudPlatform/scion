@@ -342,19 +342,30 @@ func TestChatSendRefusal_ReasonLoggedNotReturned(t *testing.T) {
 
 func TestChatDMHistory_StaysReadableAfterProjectAccessEnds(t *testing.T) {
 	f := newRefFixture(t)
-	ctx := context.Background()
 
-	// An agent of project B, which carol cannot read (any more).
-	agent := &store.Agent{ID: tid("ref-agent-b"), ProjectID: f.projB.ID, Name: "ab", Slug: "ab",
-		Phase: "running", OwnerID: f.ub.ID, CreatedBy: f.ub.ID}
-	require.NoError(t, f.st.CreateAgent(ctx, agent))
-	require.False(t, f.srv.canReadProject(ctx, NewAuthenticatedUser(f.uc.ID, f.uc.Email, f.uc.DisplayName, f.uc.Role, string(ClientTypeWeb)), f.projB.ID))
+	// alice's DM with agent aa of project A.
+	dm := dmKeyFor(t, "agent", f.aa.ID, "user", f.ua.ID)
+	f.seedMessage(t, f.projA.ID, dm, "", "earlier DM message")
+	require.NotEmpty(t, f.history(t, f.ua, dm).Messages)
 
-	dm := dmKeyFor(t, "agent", agent.ID, "user", f.uc.ID)
-	f.seedMessage(t, f.projB.ID, dm, "", "earlier DM message")
+	f.removeFromProject(t, f.ua, f.projA)
 
-	hist := f.history(t, f.uc, dm)
+	hist := f.history(t, f.ua, dm)
 	assert.NotEmpty(t, hist.Messages, "the user's own DM history with the agent stays readable")
+}
+
+// removeFromProject takes away every role user has in project, and checks
+// that the user can no longer read it.
+func (f *refFixture) removeFromProject(t *testing.T, user *store.User, project *store.Project) {
+	t.Helper()
+	ctx := context.Background()
+	membersGroup, err := f.st.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
+	require.NoError(t, err)
+	_ = f.st.RemoveGroupMember(ctx, membersGroup.ID, store.GroupMemberTypeUser, user.ID)
+	_, err = f.st.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, user.ID)
+	require.NoError(t, err)
+	ident := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, string(ClientTypeWeb))
+	require.False(t, f.srv.canReadProject(ctx, ident, project.ID), "precondition: the user no longer reads the project")
 }
 
 func TestChatRead_WatermarkMustBeInConversation(t *testing.T) {
@@ -626,13 +637,7 @@ func TestAttachmentDownload_AgentDMFileReadableAfterProjectAccessEnds(t *testing
 	require.Equal(t, http.StatusOK, f.download(t, f.ua, file).status)
 
 	// alice loses access to project A.
-	membersGroup, err := f.st.GetGroupBySlug(ctx, "project:"+f.projA.Slug+":members")
-	require.NoError(t, err)
-	_ = f.st.RemoveGroupMember(ctx, membersGroup.ID, store.GroupMemberTypeUser, f.ua.ID)
-	_, err = f.st.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, f.ua.ID)
-	require.NoError(t, err)
-	alice := NewAuthenticatedUser(f.ua.ID, f.ua.Email, f.ua.DisplayName, f.ua.Role, string(ClientTypeWeb))
-	require.False(t, f.srv.canReadProject(ctx, alice, f.projA.ID), "precondition: alice no longer reads project A")
+	f.removeFromProject(t, f.ua, f.projA)
 
 	got := f.download(t, f.ua, file)
 	require.Equal(t, http.StatusOK, got.status, "the DM's file stays readable with the DM: %s", got.body)
