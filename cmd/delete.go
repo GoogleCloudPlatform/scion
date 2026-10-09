@@ -109,61 +109,8 @@ already removes the container.`,
 				return err
 			}
 
-			rt := runtime.GetRuntime(projectPath, profile)
-			mgr := agent.NewManager(rt)
-
-			filters := map[string]string{
-				"scion.agent":        "true",
-				"scion.project_path": resolvedProjectPath,
-				"scion.project":      config.GetProjectName(resolvedProjectPath),
-			}
-
-			agents, err := mgr.List(context.Background(), filters)
-			if err != nil {
-				return err
-			}
-
-			var deletedCount int
-			for _, a := range agents {
-				if a.ContainerID == "" {
-					continue // No container
-				}
-
-				// Get the canonical agent name from labels (Docker Names field has leading slash)
-				agentName := a.Labels["scion.name"]
-				if agentName == "" {
-					continue // Not a scion-managed container
-				}
-
-				// Skip running/provisioning agents
-				if a.Phase == string(state.PhaseRunning) || a.Phase == string(state.PhaseProvisioning) {
-					continue
-				}
-
-				statusf("Deleting stopped agent '%s' (status: %s)...\n", agentName, a.ContainerStatus)
-
-				targetProjectPath := a.ProjectPath
-				if targetProjectPath == "" {
-					targetProjectPath = resolvedProjectPath
-				}
-
-				branchDeleted, err := mgr.Delete(context.Background(), agentName, true, targetProjectPath, !preserveBranch)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Failed to delete agent '%s': %v\n", agentName, err)
-					continue
-				}
-
-				if branchDeleted {
-					statusf("Git branch associated with agent '%s' deleted.\n", agentName)
-				}
-				statusf("Agent '%s' deleted.\n", agentName)
-				deletedCount++
-			}
-
-			if deletedCount == 0 {
-				statusln("No stopped agents found.")
-			}
-			return nil
+			mgr := agent.NewManager(runtime.GetRuntime(projectPath, profile))
+			return deleteStoppedLocal(mgr, resolvedProjectPath)
 		}
 
 		// Use Hub if available
@@ -492,11 +439,108 @@ func deleteStoppedViaHub(hubCtx *HubContext) error {
 	return deleteAgentsViaHub(hubCtx, agentNames)
 }
 
+// deleteStoppedLocal deletes every stopped agent of the project at
+// resolvedProjectPath through mgr (local mode, no Hub). In JSON mode it
+// writes one result document and, if any delete failed, exits non-zero
+// like the Hub path does.
+func deleteStoppedLocal(mgr agent.Manager, resolvedProjectPath string) error {
+	filters := map[string]string{
+		"scion.agent":        "true",
+		"scion.project_path": resolvedProjectPath,
+		"scion.project":      config.GetProjectName(resolvedProjectPath),
+	}
+
+	agents, err := mgr.List(context.Background(), filters)
+	if err != nil {
+		return err
+	}
+
+	results := []map[string]interface{}{}
+	var deleted, failed int
+	for _, a := range agents {
+		if a.ContainerID == "" {
+			continue // No container
+		}
+
+		// Get the canonical agent name from labels (Docker Names field has leading slash)
+		agentName := a.Labels["scion.name"]
+		if agentName == "" {
+			continue // Not a scion-managed container
+		}
+
+		// Skip running/provisioning agents
+		if a.Phase == string(state.PhaseRunning) || a.Phase == string(state.PhaseProvisioning) {
+			continue
+		}
+
+		statusf("Deleting stopped agent '%s' (status: %s)...\n", agentName, a.ContainerStatus)
+
+		targetProjectPath := a.ProjectPath
+		if targetProjectPath == "" {
+			targetProjectPath = resolvedProjectPath
+		}
+
+		branchDeleted, err := mgr.Delete(context.Background(), agentName, true, targetProjectPath, !preserveBranch)
+		if err != nil {
+			failed++
+			if isJSONOutput() {
+				results = append(results, map[string]interface{}{
+					"agent":  agentName,
+					"status": "error",
+					"error":  err.Error(),
+				})
+			} else {
+				fmt.Fprintf(os.Stderr, "Failed to delete agent '%s': %v\n", agentName, err)
+			}
+			continue
+		}
+
+		if branchDeleted {
+			statusf("Git branch associated with agent '%s' deleted.\n", agentName)
+		}
+		statusf("Agent '%s' deleted.\n", agentName)
+		deleted++
+		results = append(results, map[string]interface{}{
+			"agent":  agentName,
+			"status": "success",
+		})
+	}
+
+	if isJSONOutput() {
+		doc := map[string]interface{}{
+			"status":  "success",
+			"command": "delete",
+			"results": results,
+		}
+		if len(results) == 0 {
+			doc["message"] = "No stopped agents found."
+		} else if failed > 0 {
+			doc["status"] = "partial"
+		}
+		return outputJSONResult(doc, failed > 0, "failed to delete some stopped agents")
+	}
+
+	if deleted == 0 {
+		statusln("No stopped agents found.")
+	}
+	return nil
+}
+
+// textOutf prints a local delete progress line to stdout in text mode, as
+// scion delete always has, and prints nothing in JSON mode so stdout holds
+// only the JSON document.
+func textOutf(format string, a ...interface{}) {
+	if isJSONOutput() {
+		return
+	}
+	fmt.Printf(format, a...)
+}
+
 func deleteAgentLocal(agentName string) error {
 	rt := runtime.GetRuntime(projectPath, profile)
 	mgr := agent.NewManager(rt)
 
-	fmt.Printf("Deleting agent '%s'...\n", agentName)
+	textOutf("Deleting agent '%s'...\n", agentName)
 
 	// We check if it exists in List to provide better feedback
 	util.Debugf("delete: listing containers for %s", agentName)
@@ -529,7 +573,7 @@ func deleteAgentLocal(agentName string) error {
 		if !agentDirExists {
 			return fmt.Errorf("agent '%s' not found", agentName)
 		}
-		fmt.Println("No container found, removing agent definition...")
+		textOutf("No container found, removing agent definition...\n")
 	}
 
 	branchDeleted, err := mgr.Delete(context.Background(), agentName, true, projectPath, !preserveBranch)
@@ -538,10 +582,10 @@ func deleteAgentLocal(agentName string) error {
 	}
 
 	if branchDeleted {
-		fmt.Printf("Git branch associated with agent '%s' deleted.\n", agentName)
+		textOutf("Git branch associated with agent '%s' deleted.\n", agentName)
 	}
 
-	fmt.Printf("Agent '%s' deleted.\n", agentName)
+	textOutf("Agent '%s' deleted.\n", agentName)
 	return nil
 }
 
