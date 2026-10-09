@@ -54,6 +54,11 @@ var inDoubtWrittenHook func(agentID string)
 // such delete to re-claim (another claim, another state or code, a missing
 // or unreadable request, or a request matches refuses).
 func (s *Server) reclaimInDoubtDeletion(ctx context.Context, agentID string, claim int64, redispatch bool, matches func(store.DeletionRequestInfo) bool) (*agentDeletionPlan, error) {
+	// Detached from the caller, as the engine's steps are: a caller
+	// cancelled between the re-claim and the re-read must not leave the
+	// row finalizing with no engine until the lease lapses.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deleteShortStep)
+	defer cancel()
 	cur, err := s.store.GetAgent(ctx, agentID)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, nil // already finalized
@@ -143,8 +148,9 @@ func (s *Server) finalizeInDoubtDelete(ctx context.Context, agentID string, args
 	}
 	s.agentLifecycleLog.Info("in_doubt delete: intent succeeded; finalizing",
 		"agent_id", agentID, "intent_claim", args.Claim, "claim", plan.claim)
-	s.events.PublishAgentStatus(ctx, plan.snapshot)
-	out := <-s.runAgentDeletion(ctx, plan)
+	base := context.WithoutCancel(ctx)
+	s.events.PublishAgentStatus(base, plan.snapshot)
+	out := <-s.runAgentDeletion(base, plan)
 	s.logInDoubtOutcome(agentID, plan.claim, out)
 }
 
@@ -170,10 +176,8 @@ func (e *deletionEngine) recheckInDoubt() (deletionOutcome, bool) {
 	if err != nil || !completed {
 		return deletionOutcome{}, false
 	}
-	ctx, cancel = context.WithTimeout(e.base, deleteShortStep)
-	plan, err := s.reclaimInDoubtDeletion(ctx, agentID, e.plan.claim, true, nil)
+	plan, err := s.reclaimInDoubtDeletion(e.base, agentID, e.plan.claim, true, nil)
 	if err != nil || plan == nil {
-		cancel()
 		if err != nil {
 			s.agentLifecycleLog.Error("in_doubt delete: re-claim after the recheck failed",
 				"agent_id", agentID, "claim", e.plan.claim, "error", err)
@@ -182,8 +186,7 @@ func (e *deletionEngine) recheckInDoubt() (deletionOutcome, bool) {
 	}
 	s.agentLifecycleLog.Info("in_doubt delete: intent completed during the in_doubt write; deleting again",
 		"agent_id", agentID, "old_claim", e.plan.claim, "claim", plan.claim)
-	s.events.PublishAgentStatus(ctx, plan.snapshot)
-	cancel()
+	s.events.PublishAgentStatus(e.base, plan.snapshot)
 	out := <-s.runAgentDeletion(e.base, plan)
 	s.logInDoubtOutcome(agentID, plan.claim, out)
 	return out, true

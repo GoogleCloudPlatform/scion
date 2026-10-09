@@ -56,6 +56,9 @@ type engineHookStore struct {
 	// onDeletionWrite, when set, observes every UpdateAgentDeletion
 	// predicate before the write runs.
 	onDeletionWrite func(pred store.DeletionPredicate)
+	// afterDeletionWrite, when set, observes every UpdateAgentDeletion
+	// predicate and its result after the write ran.
+	afterDeletionWrite func(pred store.DeletionPredicate, n int)
 }
 
 var errInjectedDeletionWrite = errors.New("injected deletion write error")
@@ -78,8 +81,13 @@ func (h *engineHookStore) UpdateAgentDeletion(ctx context.Context, id string, pr
 		h.mu.Unlock()
 		return 0, errInjectedDeletionWrite
 	}
+	after := h.afterDeletionWrite
 	h.mu.Unlock()
-	return h.Store.UpdateAgentDeletion(ctx, id, pred, set)
+	n, err := h.Store.UpdateAgentDeletion(ctx, id, pred, set)
+	if after != nil && err == nil {
+		after(pred, n)
+	}
+	return n, err
 }
 
 func (h *engineHookStore) setFailDeletionWrite(fn func(set store.DeletionFields) bool) {

@@ -41,12 +41,18 @@ import (
 // delete's claim.
 func newInDoubtFixture(t *testing.T, suffix string, setup func(f *deferredDeleteFixture)) (*deferredDeleteFixture, store.BrokerDispatch, int64) {
 	t.Helper()
+	return newInDoubtFixtureQuery(t, suffix, "", setup)
+}
+
+// newInDoubtFixtureQuery is newInDoubtFixture with a DELETE query string.
+func newInDoubtFixtureQuery(t *testing.T, suffix, query string, setup func(f *deferredDeleteFixture)) (*deferredDeleteFixture, store.BrokerDispatch, int64) {
+	t.Helper()
 	setDeleteWaitTimeout(t, func(context.Context) time.Duration { return 100 * time.Millisecond })
 	f := newDeferredDeleteFixture(t, suffix, nil)
 	if setup != nil {
 		setup(f)
 	}
-	requireInDoubt(t, f, f.del(t, ""))
+	requireInDoubt(t, f, f.del(t, query))
 	intents := f.pendingDeleteIntents(t)
 	require.Len(t, intents, 1, "the intent is still outstanding")
 	require.Equal(t, store.DispatchStatePending, intents[0].State, "in_doubt because the intent never ran")
@@ -443,16 +449,20 @@ func TestInDoubtDelete_ClaimlessIntentDoesNotFinalize(t *testing.T) {
 // in_doubt for a retry or force; the intent still completes.
 func TestInDoubtDelete_RequestMismatchStaysInDoubt(t *testing.T) {
 	cases := []struct {
-		name string
-		req  string
+		name  string
+		query string
+		req   string
 	}{
-		{"missing request", ""},
-		{"soft differs", `{"deleteFiles":true,"removeBranch":true,"soft":true}`},
-		{"delete files differ", `{"removeBranch":true}`},
+		// A hard delete without files, so a zero request would match the
+		// intent's settings: only the missing-request check refuses it.
+		{"missing request", "?deleteFiles=false&removeBranch=false", ""},
+		{"unreadable request", "?deleteFiles=false&removeBranch=false", "{"},
+		{"soft differs", "", `{"deleteFiles":true,"removeBranch":true,"soft":true}`},
+		{"delete files differ", "", `{"removeBranch":true}`},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f, intent, claim := newInDoubtFixture(t, "idreq-"+string(rune('a'+i)), nil)
+			f, intent, claim := newInDoubtFixtureQuery(t, "idreq-"+string(rune('a'+i)), tc.query, nil)
 			req := tc.req
 			n, err := f.store.UpdateAgentDeletion(context.Background(), f.agent.ID,
 				store.DeletionPredicate{Claim: &claim}, store.DeletionFields{Request: &req})
@@ -465,4 +475,138 @@ func TestInDoubtDelete_RequestMismatchStaysInDoubt(t *testing.T) {
 			assert.Equal(t, store.DispatchStateDone, intentState(t, f.store, intent.ID))
 		})
 	}
+}
+
+// The re-claim must still hold the claim it wrote when it re-reads the row:
+// if the row was re-claimed again in between, it does nothing.
+func TestInDoubtDelete_ReclaimLostBeforeReread(t *testing.T) {
+	f, _, claim := newInDoubtFixture(t, "idlost", nil)
+	ctx := context.Background()
+	f.hooks.afterDeletionWrite = func(pred store.DeletionPredicate, n int) {
+		if n == 1 && slices.Contains(pred.Codes, store.DeletionCodeInDoubt) {
+			cur := claim + 1
+			m, err := f.store.UpdateAgentDeletion(ctx, f.agent.ID, store.DeletionPredicate{Claim: &cur},
+				store.DeletionFields{BumpClaim: true})
+			assert.NoError(t, err)
+			assert.Equal(t, 1, m)
+		}
+	}
+
+	plan, err := f.srv.reclaimInDoubtDeletion(ctx, f.agent.ID, claim, false, nil)
+	require.NoError(t, err)
+	assert.Nil(t, plan, "the claim moved on before the re-read")
+	assert.Equal(t, claim+2, mustGetAgent(t, f.store, f.agent.ID).DeletionClaim)
+}
+
+// The drain's context ending right after the re-claim does not stop the
+// finalize: the re-claim's re-read and the engine are detached from it.
+func TestInDoubtDelete_DrainCancelDoesNotStopFinalize(t *testing.T) {
+	f, _, _ := newInDoubtFixture(t, "idcancel", nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var cancelled atomic.Bool
+	f.hooks.afterDeletionWrite = func(pred store.DeletionPredicate, n int) {
+		if n == 1 && slices.Contains(pred.Codes, store.DeletionCodeInDoubt) {
+			cancelled.Store(true)
+			cancel()
+		}
+	}
+	f.client.returnErr = nil
+
+	f.srv.drainBrokerDispatch(ctx, f.agent.RuntimeBrokerID, nil)
+
+	require.True(t, cancelled.Load(), "the re-claim ran")
+	assert.True(t, agentGone(t, f.store, f.agent.ID))
+	requireDeletedOnce(t, f)
+}
+
+// The engine's recheck re-claims only when no delete intent is outstanding
+// and one completed since the delete started.
+func TestInDoubtDelete_EngineRecheckNeedsCompletedIntent(t *testing.T) {
+	cases := []struct {
+		name    string
+		endOwn  bool // end the engine's own intent (failed)
+		doneOne bool // complete a claimless intent
+	}{
+		{"own intent outstanding, another completed", false, true},
+		{"own intent failed, none completed", true, false},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setDeleteWaitTimeout(t, func(context.Context) time.Duration { return 100 * time.Millisecond })
+			f := newDeferredDeleteFixture(t, "idneed-"+string(rune('a'+i)), nil)
+			var once sync.Once
+			var fired atomic.Bool
+			setInDoubtWrittenHook(t, func(agentID string) {
+				if agentID != f.agent.ID {
+					return
+				}
+				once.Do(func() {
+					fired.Store(true)
+					if tc.endOwn {
+						for _, d := range f.pendingDeleteIntents(t) {
+							endIntent(t, f.store, d.ID, false)
+						}
+					}
+					if tc.doneOne {
+						cl := insertClaimlessDeleteIntent(t, f)
+						endIntent(t, f.store, cl.ID, true)
+					}
+				})
+			})
+			requireInDoubt(t, f, f.del(t, ""))
+			require.True(t, fired.Load(), "the in_doubt write ran the seam")
+			before := mustGetAgent(t, f.store, f.agent.ID).DeletionClaim
+			requireStillInDoubt(t, f, before)
+			intents := f.pendingDeleteIntents(t)
+			if tc.endOwn {
+				assert.Empty(t, intents, "no re-dispatch")
+			} else {
+				require.Len(t, intents, 1)
+				args, err := UnmarshalDeleteArgs(intents[0].Args)
+				require.NoError(t, err)
+				assert.Equal(t, before, args.Claim, "only the engine's own intent; no re-dispatch")
+			}
+		})
+	}
+}
+
+// The recheck's re-claim starts a fresh delete: the new dispatch's
+// classification counts only intents completed after it, so a broker
+// failure on the re-dispatch rolls back rather than reading the older
+// completed intent as success.
+func TestInDoubtDelete_EngineRecheckClassifiesFromFreshStart(t *testing.T) {
+	setDeleteWaitTimeout(t, func(context.Context) time.Duration { return 100 * time.Millisecond })
+	var offset atomic.Int64
+	setDeleteClock(t, func() time.Time { return time.Now().Add(time.Duration(offset.Load())) })
+	f := newDeferredDeleteFixture(t, "idfresh", nil)
+	var once sync.Once
+	var fired atomic.Bool
+	setInDoubtWrittenHook(t, func(agentID string) {
+		if agentID != f.agent.ID {
+			return
+		}
+		once.Do(func() {
+			fired.Store(true)
+			for _, d := range f.pendingDeleteIntents(t) {
+				endIntent(t, f.store, d.ID, false)
+			}
+			cl := insertClaimlessDeleteIntent(t, f)
+			endIntent(t, f.store, cl.ID, true)
+			// The re-claim's start is strictly after that completion.
+			offset.Store(int64(2 * time.Second))
+			f.client.returnErr = &brokerStatusError{StatusCode: http.StatusInternalServerError, Body: "boom"}
+		})
+	})
+
+	r := f.del(t, "")
+	require.True(t, fired.Load(), "the in_doubt write ran the seam")
+	require.Equal(t, http.StatusBadGateway, r.rec.Code, r.rec.Body.String())
+	_, details := errorBody(t, r.rec)
+	assert.Equal(t, store.DeletionCodeRuntimeError, details["deletionCode"])
+	got := mustGetAgent(t, f.store, f.agent.ID)
+	assert.Equal(t, store.DeletionStateFailed, got.DeletionState)
+	assert.Equal(t, store.DeletionCodeRuntimeError, got.DeletionCode)
+	assert.Zero(t, f.pub.count("deleted"))
+	assert.Zero(t, f.revokes())
 }
