@@ -154,6 +154,9 @@ func (c *PTYClient) httpClient() *http.Client {
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil // websocket.Dialer{} in dial has no Proxy either
+	// One request per client: do not leave an idle connection (and its
+	// goroutines) behind after the preflight.
+	transport.DisableKeepAlives = true
 	return &http.Client{
 		Transport: transport,
 		CheckRedirect: func(*http.Request, []*http.Request) error {

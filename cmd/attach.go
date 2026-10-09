@@ -373,8 +373,8 @@ func attachHubSession(ctx context.Context, hubCtx *HubContext, target hubAttachT
 
 // describeAttachPreflight turns a *wsclient.PTYPreflightError into an
 // actionable message for agentName: what the Hub said and what to do next.
-// 401, 403 and 404 reuse the messages for the matching close codes (4401,
-// 4403, 4404); 422 means the agent has no runtime broker; 503 is the Hub's
+// 401, 403 and 404 have their own summaries and reuse the hints of the
+// matching close codes (4401, 4403, 4404); 422 means the agent has no runtime broker; 503 is the Hub's
 // reason (final when there is no path to the terminal, otherwise
 // presented as temporary). The CLI retries none of them. The text keeps
 // the "status N" detail, which attachErrorWithUATHint looks for. Any
@@ -384,14 +384,20 @@ func describeAttachPreflight(err error, agentName string) error {
 	if !errors.As(err, &pe) {
 		return err
 	}
+	// The summaries are the preflight's own (this is often the first
+	// attach, and the Hub answered, not the broker); the hints are the
+	// close-code ones.
 	var msg ptyCloseMessage
 	switch pe.Status {
 	case http.StatusUnauthorized:
-		msg = ptyCloseMessages[wsprotocol.ClosePTYAuthRequired]
+		msg = ptyCloseMessage{Summary: "your Hub credentials are not valid",
+			Hint: ptyCloseMessages[wsprotocol.ClosePTYAuthRequired].Hint}
 	case http.StatusForbidden:
-		msg = ptyCloseMessages[wsprotocol.ClosePTYForbidden]
+		msg = ptyCloseMessage{Summary: "you do not have permission to attach to this agent",
+			Hint: ptyCloseMessages[wsprotocol.ClosePTYForbidden].Hint}
 	case http.StatusNotFound:
-		msg = ptyCloseMessages[wsprotocol.ClosePTYAgentNotFound]
+		msg = ptyCloseMessage{Summary: "the Hub cannot find the agent",
+			Hint: ptyCloseMessages[wsprotocol.ClosePTYAgentNotFound].Hint}
 	case http.StatusUnprocessableEntity:
 		msg = ptyCloseMessage{
 			Summary: "the agent has no runtime broker",

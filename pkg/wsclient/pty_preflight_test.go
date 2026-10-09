@@ -214,6 +214,7 @@ func TestPreflight_ClientPolicy(t *testing.T) {
 	tr, ok := hc.Transport.(*http.Transport)
 	require.True(t, ok)
 	assert.Nil(t, tr.Proxy, "no environment proxy, matching the WebSocket dialer")
+	assert.True(t, tr.DisableKeepAlives, "no idle connection left behind")
 	require.NotNil(t, hc.CheckRedirect)
 	assert.ErrorIs(t, hc.CheckRedirect(nil, nil), http.ErrUseLastResponse)
 }

@@ -425,7 +425,7 @@ func TestAttachViaHub_NoPath_ExitsWithReasonWithoutRetry(t *testing.T) {
 }
 
 // TestDescribeAttachPreflight covers the CLI's wording for preflight
-// refusals: 401, 403 and 404 reuse the close-code messages, 422 says the
+// refusals: 401, 403 and 404 reuse the close-code hints, 422 says the
 // agent has no runtime broker, a no-path 503 is final, another 503 is
 // presented as temporary, and the "status N" detail is always kept.
 func TestDescribeAttachPreflight(t *testing.T) {
@@ -436,11 +436,11 @@ func TestDescribeAttachPreflight(t *testing.T) {
 		excludes []string
 	}{
 		{name: "401", in: &wsclient.PTYPreflightError{Status: 401, Code: "unauthorized", Message: "Authentication required"},
-			contains: []string{"cannot attach to agent 'a1': your Hub credentials are no longer valid (status 401, unauthorized)", "scion hub auth login"}},
+			contains: []string{"cannot attach to agent 'a1': your Hub credentials are not valid (status 401, unauthorized)", "scion hub auth login"}},
 		{name: "403", in: &wsclient.PTYPreflightError{Status: 403, Code: "forbidden", Message: "no"},
-			contains: []string{"permission to attach to this agent (status 403, forbidden)", "attach access to agent 'a1'"}},
+			contains: []string{"you do not have permission to attach to this agent (status 403, forbidden)", "attach access to agent 'a1'"}},
 		{name: "404", in: &wsclient.PTYPreflightError{Status: 404, Code: "not_found", Message: "Agent not found"},
-			contains: []string{"cannot find the agent or its container (status 404, not_found)", "scion list"}},
+			contains: []string{"the Hub cannot find the agent (status 404, not_found)", "scion list"}},
 		{name: "422", in: &wsclient.PTYPreflightError{Status: 422, Code: "no_runtime_broker", Message: "Agent has no runtime broker"},
 			contains: []string{"the agent has no runtime broker (status 422, no_runtime_broker)", "Check the agent with: scion list"}},
 		{name: "no path", in: &wsclient.PTYPreflightError{Status: 503, Code: wsprotocol.ErrCodeRuntimeAttachUnsupported, Reason: "agent_pty_unavailable"},
