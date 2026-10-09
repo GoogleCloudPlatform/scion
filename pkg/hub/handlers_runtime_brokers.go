@@ -547,7 +547,14 @@ func (s *Server) checkBrokerDispatchAccess(ctx context.Context, w http.ResponseW
 		writeErrorFromErr(w, err, "")
 		return false
 	}
-	if !s.canUseBrokerForProject(ctx, broker, project) {
+	allowed := s.canUseBrokerForProject(ctx, broker, project)
+	if broker.IsFlat() {
+		// A flat Runtime Broker keeps the dispatch rule it was gated on:
+		// broker.dispatch (canDispatchToBroker). canUseBrokerForProject's
+		// owner-consented provider arm does not admit a flat create.
+		allowed = s.canDispatchToBroker(ctx, broker)
+	}
+	if !allowed {
 		writeBrokerDispatchForbidden(w)
 		return false
 	}
