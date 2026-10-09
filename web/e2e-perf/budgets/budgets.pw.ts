@@ -176,7 +176,7 @@ for (const v of VIEWS) {
     const dom = loads.map((l) => l.domElements);
     const lt = loads.map((l) => l.longTasks);
     const limit = limits(v.baseline);
-    console.log(
+    console.info(
       `measured ${v.view}: domElements=${dom.join(',')} longTasks=${lt.join(',')} (median ${median(lt)}); ` +
         `baseline ${v.baseline.domElements}/${v.baseline.longTasks} on ${BASELINE_COMMIT}; ` +
         `limit ${limit.domElements}/${limit.longTasks}`

@@ -112,6 +112,7 @@ export default defineConfig([
   project(['e2e/agent-store-count/*.ts'], './e2e/agent-store-count/tsconfig.json'),
   project(['e2e/chat-file-preview/*.ts'], './e2e/chat-file-preview/tsconfig.json'),
   project(['e2e/project-files-tabs/*.ts'], './e2e/project-files-tabs/tsconfig.json'),
+  project(['e2e-perf/budgets/*.ts'], './e2e-perf/budgets/tsconfig.json'),
   project(terminalTests, './src/client/tsconfig.terminal-tests.json'),
   project(clientTests, './src/client/tsconfig.client-tests.json'),
   project(componentTests, './src/components/tsconfig.component-tests.json'),
