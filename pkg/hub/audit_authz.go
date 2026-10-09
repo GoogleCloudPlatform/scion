@@ -108,6 +108,12 @@ func BuildDecisionAuditRecord(ctx context.Context, request AuthzRequest, decisio
 		PolicyID:       decision.BindingID,
 		CorrelationID:  logging.RequestIDFromContext(ctx),
 		DeniedBy:       string(decision.DeniedBy),
+
+		ResourceParentType:     request.Resource.ParentType,
+		ResourceParentID:       request.Resource.ParentID,
+		ResourceAncestryLen:    len(request.Resource.Ancestry),
+		ResourceScopeKind:      request.Resource.ScopeKind,
+		ResourceScopeUserIDSet: request.Resource.ScopeUserID != "",
 	}
 
 	if route := routeFromContext(ctx); route != "" {

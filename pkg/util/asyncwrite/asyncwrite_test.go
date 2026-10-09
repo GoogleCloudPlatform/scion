@@ -788,11 +788,6 @@ func TestResultLabelsAreClosedSet(t *testing.T) {
 	if ResultWritten.IsFailure() || ResultLateReturn.IsFailure() {
 		t.Fatal("non-failures marked as failures")
 	}
-	for _, r := range []Result{ResultError, ResultTimeout, ResultShutdown} {
-		if r.IsRejection() {
-			t.Fatalf("%v is terminal, not a rejection", r)
-		}
-	}
 }
 
 // Real timers, cooperative writer: the worker goroutine exits on Close.

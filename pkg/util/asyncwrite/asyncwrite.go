@@ -150,17 +150,6 @@ func (r Result) IsFailure() bool {
 	}
 }
 
-// IsRejection reports whether the result describes an attempt that was
-// never admitted to the queue.
-func (r Result) IsRejection() bool {
-	switch r {
-	case ResultQueueFull, ResultOversize, ResultUnsupported, ResultClosed:
-		return true
-	default:
-		return false
-	}
-}
-
 // Recorder optionally mirrors writer outcomes into an external metrics
 // system. Implementations must be cheap, non-blocking and must not panic:
 // Record is called unrecovered from request goroutines, the worker and timer
