@@ -423,6 +423,9 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 		}
 		return "", fmt.Errorf("dispatch delete: %w", err)
 	}
+	// The intent ran. If its delete ended in_doubt, finish it now, before
+	// the drain marks the intent done (ptone/scion#2882).
+	s.finalizeInDoubtDelete(ctx, agent.ID, args)
 	return "", nil
 }
 

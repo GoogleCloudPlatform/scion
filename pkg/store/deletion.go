@@ -16,6 +16,7 @@ package store
 
 import (
 	"context"
+	"slices"
 	"time"
 )
 
@@ -60,6 +61,9 @@ func (p DeletionPredicate) Matches(a *Agent) bool {
 		if !ok {
 			return false
 		}
+	}
+	if len(p.Codes) > 0 && !slices.Contains(p.Codes, a.DeletionCode) {
+		return false
 	}
 	if p.DeletedAtNull && !a.DeletedAt.IsZero() {
 		return false
