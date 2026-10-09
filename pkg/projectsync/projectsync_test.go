@@ -133,10 +133,32 @@ func TestDefaultExcludeRules_Matching(t *testing.T) {
 		{"docs/readme.md", true},
 		{"sub/.scion", true}, // the hub only hides a top-level .scion entry
 		{".scionrc", true},
+		{".scion-foo", true}, // ordinary file; "/.scion" is not a prefix match
+		// A nested .scion marker file is synced: "/.scion" is anchored to the
+		// root and ".scion/**" only matches entries inside a .scion directory.
+		// This mirrors the hub, which hides only top-level entries.
+		{"a/b/.scion", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.remote, func(t *testing.T) {
 			assert.Equal(t, tt.included, fi.IncludeRemote(tt.remote))
+		})
+	}
+
+	// rclone must not descend into a .scion directory at all.
+	includeDir := fi.IncludeDirectory(context.Background(), nil)
+	dirTests := []struct {
+		dir      string
+		included bool
+	}{
+		{".scion", false},
+		{"sub", true},
+	}
+	for _, tt := range dirTests {
+		t.Run("dir:"+tt.dir, func(t *testing.T) {
+			got, err := includeDir(tt.dir)
+			require.NoError(t, err)
+			assert.Equal(t, tt.included, got)
 		})
 	}
 }
