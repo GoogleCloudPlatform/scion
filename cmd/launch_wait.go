@@ -414,10 +414,10 @@ func isUnreadableStatusError(err error) bool {
 // retryUnreadableStatus retries a status fetch that failed with an
 // unreadable-status error (a refusal or a not-found that may be transient
 // or may mean the status is not readable or the agent is gone), with
-// backoff, for launchUnreadableGrace; the last
-// delay is shortened to end at the grace. It returns the first success, the
-// first other error, or the last unreadable-status error when the grace
-// runs out or ctx ends (also when ctx ends during a read).
+// backoff, for launchUnreadableGrace; the last delay is shortened to end
+// at the grace. It returns the first success, the first other error, or
+// the last unreadable-status error when the grace runs out or ctx ends
+// (also when ctx ends during a read).
 func retryUnreadableStatus(ctx context.Context, get func(context.Context) (*hubclient.Agent, error), err error) (*hubclient.Agent, error) {
 	deadline := launchNow().Add(launchUnreadableGrace)
 	delay := launchUnreadableBackoff
