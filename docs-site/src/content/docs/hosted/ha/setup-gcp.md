@@ -1363,21 +1363,21 @@ When redeploying the Hub with a new image:
 
 ### 7b. Secret Name Migration
 
-A hub deployed exactly as this guide describes is **not covered** by the Cloud Run
-job runbook in
-[`docs/deploy/migrate-names-cloudrun.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/migrate-names-cloudrun.md):
-that runbook is scoped to hubs deployed with the hub-cloudrun Terraform module
-(private-IP Cloud SQL, Direct VPC egress, DSN as a separate secret env var). This
-guide's hub uses a public-IP Cloud SQL instance with no Direct VPC egress, and keeps
-its DSN inside `settings.yaml` (§3c) rather than a separate secret env var — none of
-which the runbook's discovery steps assume. No workstation ever fetches
-`scion-hub-settings` or runs `migrate-names` directly against this hub's database
-either; that path is deliberately unsupported (no human handles the DSN). There is
-currently no supported way to run `scion hub secret migrate-names` against a hub
-deployed exactly per this guide. A DSN-free migration path for this guide's hubs is
-tracked in [ptone/scion#2395](https://github.com/ptone/scion/issues/2395). (The
-guide's `settings.yaml` already sets an explicit `server.hub.hub_id`; see
-[Set a stable `hub_id`](#3c-configure-and-store-settingsyaml) in §3c.) See
+Run `scion hub secret migrate-names` against a hub deployed with this guide from a
+one-off Cloud Run job, as described in §9 of
+[`docs/deploy/migrate-names-cloudrun.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/migrate-names-cloudrun.md#9-hubs-deployed-with-the-deploy-on-gcp-guide-public-ip-cloud-sql).
+The job uses the serving revision's image digest and runs as `scion-hub-runner`. It
+reaches this guide's public-IP Cloud SQL instance through the same Cloud Run Cloud
+SQL connection as the hub, so it needs no VPC configuration. The DSN is supplied
+only through Secret Manager: the job mounts the `scion-hub-settings` secret with
+`--set-secrets`, and no operator reads or handles the DSN. Do not run
+`migrate-names` from a workstation against this hub's database.
+
+The job takes the hub ID from `server.hub.hub_id` in that settings file (see
+[Set a stable `hub_id`](#3c-configure-and-store-settingsyaml) in §3c), and the
+command checks it against the hub's existing secret records. Sections 1, 4, 5, 6 and 8
+of the runbook apply to this guide's hubs, with the differences listed in its §9;
+section 7 (Terraform cleanup) does not. See
 [Secrets: IAM Permissions and Secret Naming](/scion/hosted/user/secrets/#iam-permissions-and-secret-naming)
 for what the command does in general, and `--help` for its flags.
 
