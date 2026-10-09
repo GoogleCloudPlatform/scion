@@ -142,7 +142,7 @@ describe('terminal close codes classify without an auto attempt', () => {
       const socket = await connectAndOpen(session);
       session.setFrontmost(true);
       socket.readyState = 3;
-      socket.onclose?.({ code, reason });
+      socket.onclose?.(reason === undefined ? { code } : { code, reason });
 
       expect(session.state.connection).toBe('disconnected');
       expect(session.state.disconnectReason).toBe(expected);
