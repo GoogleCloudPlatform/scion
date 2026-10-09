@@ -148,10 +148,19 @@ type reissueFaultStore struct {
 	// this ID answers no row and no error.
 	nilAgentAfterCommitID string
 	committed             atomic.Bool
+	// batchAuditFail: the agent_scopes_reissue_batch audit write fails.
+	batchAuditFail bool
 	// failUserID: GetUser for this ID fails.
 	failUserID string
 	// uatReadErr: GetUserAccessToken fails.
 	uatReadErr bool
+}
+
+func (s *reissueFaultStore) CreateMutationAudit(ctx context.Context, r *store.MutationAuditRecord) error {
+	if s.fault.Active() && s.batchAuditFail && r.MutationType == mutationTypeAgentScopesReissueBatch {
+		return errors.New("injected batch audit write fault")
+	}
+	return s.Store.CreateMutationAudit(ctx, r)
 }
 
 func (s *reissueFaultStore) GetUser(ctx context.Context, id string) (*store.User, error) {

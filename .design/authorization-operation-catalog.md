@@ -4807,7 +4807,8 @@
 - **Context Fields:** actor_id
 - **Before Fields:** total
 - **After Fields:** dry_run, succeeded, noop, refused, push_failed
-- **Atomic:** Yes
+- **Atomic:** No
+- **Non-Atomic Justification:** Each agent's re-issue commits with its own agent_scopes_reissued row in one transaction; the batch row is a summary written after the run with a fresh context, and the response reports batch_audit_recorded=false if it could not be written
 
 **Denial Codes:** `forbidden`
 

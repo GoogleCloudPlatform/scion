@@ -49,7 +49,13 @@ import (
 //   - A failure affects that agent only. Re-running is idempotent: agents
 //     already re-issued are no-ops.
 //   - One agent_scopes_reissue_batch row records the operator, dry_run and
-//     counts only (no scope names).
+//     counts only (no scope names). If it cannot be written the response
+//     says so (batch_audit_recorded=false).
+//   - A dry run writes nothing per agent: it previews each agent through
+//     the same computation and hands the would-be result to its descendants
+//     (reissueOverlay), so it reports exactly what --apply would change.
+//   - The run is detached from the request and bounded by
+//     ReissueBulkRunTimeout.
 //
 // The bulk run is never triggered automatically.
 
@@ -61,7 +67,22 @@ const (
 	reissueBulkConcurrency = 8
 	// reissueBulkMaxPages bounds the enumeration against a cursor loop.
 	reissueBulkMaxPages = 100000
+	// reissueBulkAgentTimeout bounds one agent's re-issue (computation,
+	// commit and push).
+	reissueBulkAgentTimeout = time.Minute
+	// ReissueBulkRunTimeout bounds a whole bulk run. The run is detached
+	// from the request (a client that goes away does not stop it), so this
+	// is its only deadline. The CLI waits this long, plus a margin, for the
+	// response.
+	ReissueBulkRunTimeout = 30 * time.Minute
+	// reissueBulkAuditTimeout bounds the batch audit write, which uses a
+	// fresh context so it is written even when the run's deadline passed.
+	reissueBulkAuditTimeout = 10 * time.Second
 )
+
+// reissueBulkAgentHook is a test seam called as each agent's turn starts.
+// Nil in production.
+var reissueBulkAgentHook func(agentID string)
 
 // reissueBulkPageSize is the enumeration page size (a variable so tests can
 // force several pages).
@@ -108,6 +129,14 @@ type ScopeReissueBulkResponse struct {
 	Refused    []ScopeReissueBulkRef   `json:"refused"`
 	PushFailed []ScopeReissueBulkRef   `json:"push_failed"`
 	Agents     []ScopeReissueBulkAgent `json:"agents"`
+	// DepthUnresolved lists agents placed at depth 0 because their
+	// delegation edge could not be read (or was not a single active edge).
+	// Their own run reports why; their descendants may have been computed
+	// before them.
+	DepthUnresolved []string `json:"depth_unresolved"`
+	// BatchAuditRecorded is false when the agent_scopes_reissue_batch row
+	// could not be written. The per-agent rows are unaffected.
+	BatchAuditRecorded bool `json:"batch_audit_recorded"`
 }
 
 // reissueBatchSummary is the AfterSummary of agent_scopes_reissue_batch:
@@ -175,10 +204,17 @@ func (s *Server) listAllAgentsForReissue(ctx context.Context) ([]store.Agent, er
 // reissueDepths returns each agent's delegation depth within the set: 0 for
 // an agent whose active edge names a user (or that has no single active
 // edge, so its own run refuses), else 1 + its parent agent's depth. A
-// parent outside the set (another project, deleted) counts as depth 0
-// above it. A cycle or a lookup fault leaves the agent at depth 0; its own
-// run then reports the fault.
-func (s *Server) reissueDepths(ctx context.Context, agents []store.Agent) map[string]int {
+// parent outside the set (deleted) counts as depth 0 above it. A cycle or a
+// lookup fault leaves the agent at depth 0; its own run then reports the
+// fault.
+//
+// Ordering is per project: delegation edges are project-scoped
+// (activeProjectEdges reads only the agent's own project), and an agent
+// whose delegator agent sits in another project is refused by its own run
+// (planAgentDelegatorReissue), so no cross-project parent can need to run
+// first. unresolved lists the agents whose edge could not be read or was
+// not a single active edge.
+func (s *Server) reissueDepths(ctx context.Context, agents []store.Agent) (depths map[string]int, unresolved []string) {
 	parentOf := make(map[string]string, len(agents))
 	inSet := make(map[string]bool, len(agents))
 	for _, a := range agents {
@@ -187,6 +223,10 @@ func (s *Server) reissueDepths(ctx context.Context, agents []store.Agent) map[st
 	for _, a := range agents {
 		edges, err := s.authzService.activeProjectEdges(ctx, a.ID, a.ProjectID)
 		if err != nil || len(edges) != 1 {
+			if err != nil {
+				slog.ErrorContext(ctx, "scope re-issue: bulk depth: edge lookup failed", "agent_id", a.ID, "error", err)
+			}
+			unresolved = append(unresolved, a.ID)
 			continue
 		}
 		if e := edges[0]; e.DelegatorType == store.DelegationPrincipalAgent && inSet[e.DelegatorID] {
@@ -211,7 +251,8 @@ func (s *Server) reissueDepths(ctx context.Context, agents []store.Agent) map[st
 	for _, a := range agents {
 		resolve(a.ID, 0)
 	}
-	return depth
+	sort.Strings(unresolved)
+	return depth, unresolved
 }
 
 // runScopeReissueBulk runs the bulk re-issue. It returns an error only when
@@ -222,7 +263,12 @@ func (s *Server) runScopeReissueBulk(ctx context.Context, operator reissueOperat
 		return nil, err
 	}
 	batchOpID := api.NewUUID()
-	depths := s.reissueDepths(ctx, agents)
+	depths, unresolved := s.reissueDepths(ctx, agents)
+	if dryRun {
+		// The would-be result of each agent is handed to the agents after
+		// it, so the dry run reports exactly what --apply would change.
+		ctx = withReissueOverlay(ctx, newReissueOverlay())
+	}
 
 	// Group by project, then by depth.
 	type key struct {
@@ -282,7 +328,10 @@ func (s *Server) runScopeReissueBulk(ctx context.Context, operator reissueOperat
 		BatchOpID: batchOpID, DryRun: dryRun, Total: len(results),
 		Succeeded: []ScopeReissueBulkRef{}, Noop: []ScopeReissueBulkRef{},
 		Refused: []ScopeReissueBulkRef{}, PushFailed: []ScopeReissueBulkRef{},
-		Agents: results,
+		Agents: results, DepthUnresolved: unresolved,
+	}
+	if resp.DepthUnresolved == nil {
+		resp.DepthUnresolved = []string{}
 	}
 	for _, r := range results {
 		ref := ScopeReissueBulkRef{ID: r.ID, Name: r.Name, Cause: r.Cause}
@@ -298,6 +347,10 @@ func (s *Server) runScopeReissueBulk(ctx context.Context, operator reissueOperat
 		}
 	}
 
+	// The batch row is written with a fresh bounded context, so it is
+	// recorded even when the run's own deadline has passed.
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reissueBulkAuditTimeout)
+	defer cancel()
 	record, err := lifecycleAudit(mutationTypeAgentScopesReissueBatch, "", auditActorFromContext(ctx), time.Now(), reissueBatchSummary{
 		BatchOpID: batchOpID, DryRun: dryRun, Total: resp.Total,
 		Succeeded: len(resp.Succeeded), Noop: len(resp.Noop), Refused: len(resp.Refused), PushFailed: len(resp.PushFailed),
@@ -305,33 +358,48 @@ func (s *Server) runScopeReissueBulk(ctx context.Context, operator reissueOperat
 	if err == nil {
 		record.TargetType = "hub"
 		record.TargetID = "hub"
-		err = s.store.CreateMutationAudit(ctx, record)
+		err = s.store.CreateMutationAudit(auditCtx, record)
 	}
 	if err != nil {
 		slog.ErrorContext(ctx, "scope re-issue: batch audit write failed", "batch_op_id", batchOpID, "error", err)
 	}
+	resp.BatchAuditRecorded = err == nil
 	return resp, nil
 }
 
 // reissueOneForBulk runs the single-agent re-issue for a and classifies the
-// outcome. It re-reads the agent so a child sees its parent's committed
-// record and its own current row.
+// outcome. It re-reads the agent so it computes against its own current
+// row. In a dry run it previews instead (previewScopeReissue): the same
+// computation, with the would-be result handed to later agents through the
+// overlay and nothing written.
 func (s *Server) reissueOneForBulk(ctx context.Context, a *store.Agent, depth int, operator reissueOperator, dryRun bool, batchOpID string) ScopeReissueBulkAgent {
+	if reissueBulkAgentHook != nil {
+		reissueBulkAgentHook(a.ID)
+	}
+	ctx, cancel := context.WithTimeout(ctx, reissueBulkAgentTimeout)
+	defer cancel()
 	out := ScopeReissueBulkAgent{ID: a.ID, Name: a.Name, ProjectID: a.ProjectID, Depth: depth}
 	fresh, err := s.store.GetAgent(ctx, a.ID)
-	if err != nil {
+	if err != nil || fresh == nil {
 		out.Outcome = "refused"
-		if errors.Is(err, store.ErrNotFound) {
+		if errors.Is(err, store.ErrNotFound) || (err == nil && fresh == nil) {
 			out.Cause = string(DenyCauseCeilingOrphaned)
 		} else {
+			slog.ErrorContext(ctx, "scope re-issue: bulk agent lookup failed",
+				"agent_id", a.ID, "batch_op_id", batchOpID, "error", err)
 			out.Cause = mintErrorClassLookup
 		}
 		return out
 	}
-	resp, err := s.runScopeReissue(ctx, fresh, operator, dryRun, batchOpID)
+	var resp *ScopeReissueResponse
+	if dryRun {
+		resp, err = s.previewScopeReissue(ctx, fresh, operator)
+	} else {
+		resp, err = s.runScopeReissue(ctx, fresh, operator, false, batchOpID)
+	}
 	if err != nil {
 		out.Outcome = "refused"
-		out.Cause = reissueBulkCause(err)
+		out.Cause = reissueBulkCause(ctx, err, a.ID, batchOpID)
 		return out
 	}
 	out.OpID = resp.OpID
@@ -351,15 +419,39 @@ func (s *Server) reissueOneForBulk(ctx context.Context, a *store.Agent, depth in
 	return out
 }
 
+// previewScopeReissue is the bulk dry run of one agent: the same
+// computation as the applied run (computeScopeReissue), whose result, when
+// it changes the agent, goes to the overlay in place of the commit. It
+// mints, revokes, pushes and records nothing (no edge, no audit row, no
+// denial row); the batch row records the dry run and its counts.
+func (s *Server) previewScopeReissue(ctx context.Context, agent *store.Agent, operator reissueOperator) (*ScopeReissueResponse, error) {
+	plan, err := s.computeScopeReissue(ctx, agent)
+	if err != nil {
+		return nil, err
+	}
+	if !plan.noop {
+		reissueOverlayFrom(ctx).record(agent.ID, plan.replacementEdge(operator), plan.roleAfter)
+	}
+	resp := reissueResponseFromPlan(plan, "", true)
+	resp.Message = "Dry run: nothing was changed"
+	return resp, nil
+}
+
 // reissueBulkCause is the cause reported for a refused agent.
-func reissueBulkCause(err error) string {
+func reissueBulkCause(ctx context.Context, err error, agentID, batchOpID string) string {
 	var issueErr *agentTokenIssueError
 	switch {
 	case errors.As(err, &issueErr):
+		if issueErr.Lookup {
+			slog.ErrorContext(ctx, "scope re-issue: bulk agent lookup fault",
+				"agent_id", agentID, "batch_op_id", batchOpID, "error", err)
+		}
 		return issueErr.errorClass()
 	case errors.Is(err, errReissueConflict), errors.Is(err, store.ErrVersionConflict), errors.Is(err, store.ErrAlreadyExists):
 		return "conflict"
 	default:
+		slog.ErrorContext(ctx, "scope re-issue: bulk agent failed with an unclassified error",
+			"agent_id", agentID, "batch_op_id", batchOpID, "error", err)
 		return "error"
 	}
 }
@@ -372,7 +464,14 @@ func (s *Server) handleAdminScopeReissueAll(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	dryRun := req.DryRun == nil || *req.DryRun
-	resp, err := s.runScopeReissueBulk(r.Context(), operator, dryRun)
+	// The run is detached from the request: a client that disconnects or
+	// times out does not cancel the remaining agents or lose the batch row.
+	// ReissueBulkRunTimeout is its own deadline, and the response may take
+	// that long, past the server's usual write timeout.
+	extendWriteDeadline(r.Context(), w, s.config.WriteTimeout, ReissueBulkRunTimeout+time.Minute)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), ReissueBulkRunTimeout)
+	defer cancel()
+	resp, err := s.runScopeReissueBulk(ctx, operator, dryRun)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "bulk scope re-issue failed", "error", err)
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,

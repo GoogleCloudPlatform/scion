@@ -120,7 +120,9 @@ func reissueScopesAllViaHub(hubCtx *HubContext, apply bool) error {
 	} else {
 		statusf("Computing scope re-issue for every agent on the Hub (dry run)...\n")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	// The hub bounds the run with its own deadline (30 minutes,
+	// hub.ReissueBulkRunTimeout); wait a little longer for the response.
+	ctx, cancel := context.WithTimeout(context.Background(), reissueBulkCLITimeout)
 	defer cancel()
 	reissuer, ok := hubCtx.Client.Agents().(hubclient.BulkScopeReissuer)
 	if !ok {
@@ -161,11 +163,21 @@ func reissueScopesAllViaHub(hubCtx *HubContext, apply bool) error {
 	if res.DryRun {
 		statusf("Dry run: nothing was changed. Re-run with --apply to apply.\n")
 	}
+	if len(res.DepthUnresolved) > 0 {
+		statusf("%d agents could not be ordered (their delegation record could not be read); see their results above\n", len(res.DepthUnresolved))
+	}
+	if !res.BatchAuditRecorded {
+		return fmt.Errorf("the hub could not record the batch audit entry (batch %s); the per-agent results above stand", res.BatchOpID)
+	}
 	if len(res.PushFailed) > 0 {
 		return fmt.Errorf("%d agents did not receive their new token; run reset-auth for each", len(res.PushFailed))
 	}
 	return nil
 }
+
+// reissueBulkCLITimeout is how long the CLI waits for a bulk re-issue: the
+// hub's run deadline plus a margin.
+const reissueBulkCLITimeout = 31 * time.Minute
 
 func reissueScopesViaHub(hubCtx *HubContext, agentName string, dryRun bool) error {
 	PrintUsingHub(hubCtx.Endpoint)
