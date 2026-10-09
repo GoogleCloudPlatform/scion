@@ -935,8 +935,8 @@ const (
 	// quotaReleaseTimeout bounds releaseAgentQuotas (two store writes).
 	quotaReleaseTimeout = 5 * time.Second
 
-	// createCleanupStoreTimeout bounds the store.DeleteAgent of a failed
-	// create's row.
+	// createCleanupStoreTimeout bounds each store step of a failed
+	// create's cleanup (the conditional row delete included).
 	createCleanupStoreTimeout = 5 * time.Second
 
 	// createCleanupRuntimeTimeout bounds the runtime-side delete of a failed
@@ -1005,7 +1005,9 @@ type createRollback struct {
 //     edge with cause create_compensation and writes an
 //     agent_create_dispatch_failed audit record naming rb.CreateAuditID and
 //     rb.Stage; and
-//  4. releases its quota reservations.
+//  4. releases its quota reservations, unless the row was left to a delete
+//     that holds it or to a concurrent writer (the conditional row delete
+//     gave up with store.ErrVersionConflict).
 //
 // Every step runs on a context detached from ctx with its own short budget,
 // so a canceled request cannot skip any of them. The cleanup runs
