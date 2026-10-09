@@ -150,7 +150,8 @@ type Permission struct {
 	// that no code checks yet. It holds the reason. Every row must either
 	// declare a use (Enforcement or NonRouteUse) or be Reserved, never
 	// both, and nothing may grant a reserved permission: it carries no
-	// AgentScopes, no role holds it, and it is left out of manage aliases
+	// AgentScopes, no role holds it (custom role definitions are rejected
+	// by pkg/hub validateRolePermissionIDs), and it is left out of manage aliases
 	// and the scope options offered to users (UATScopeOptions). Its
 	// UATScope stays valid (UATValidScopes) so existing tokens that carry
 	// it keep working. TestPermissionRegistryRowsEnforcedOrReserved in

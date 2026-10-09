@@ -209,10 +209,12 @@ func TestCheckRowsEnforcedOrReserved_RejectsBadRows(t *testing.T) {
 // one up forces clearing Reserved. A use is, in non-test files: the
 // pkg/artifacts constant inside pkg/artifacts, an artifacts.Permission<X>
 // selector in pkg/hub, or the permission ID as a string literal in either
-// package. The constant declarations themselves and pkg/hub/seed.go (role
-// tables, checked by TestPermissionRegistryRowsEnforcedOrReserved) do not
-// count; the registry and applicability tables live in pkg/hub/permissions,
-// which is not scanned.
+// package. The constant declarations themselves do not count, nor do the
+// role tables in pkg/hub/seed.go (BuiltInRoles and the *PermissionIDs
+// functions): a role listing a permission is a grant, not a check, and
+// TestPermissionRegistryRowsEnforcedOrReserved fails any role holding a
+// reserved one. The rest of seed.go is scanned. The registry and
+// applicability tables live in pkg/hub/permissions, which is not scanned.
 func TestArtifactPermissionsConsumedUnlessReserved(t *testing.T) {
 	constants := map[string]string{
 		"PermissionRead":   artifacts.PermissionRead,
@@ -221,7 +223,7 @@ func TestArtifactPermissionsConsumedUnlessReserved(t *testing.T) {
 		"PermissionDelete": artifacts.PermissionDelete,
 		"PermissionManage": artifacts.PermissionManage,
 	}
-	uses := artifactPermissionUses(t, constants, map[string]bool{"seed.go": true})
+	uses := artifactPermissionUses(t, constants, isSeedRoleTable)
 	seen := map[string]bool{}
 	for _, p := range permissions.Registry {
 		if p.Resource != permissions.ResourceArtifact {
@@ -242,22 +244,33 @@ func TestArtifactPermissionsConsumedUnlessReserved(t *testing.T) {
 	}
 }
 
+// isSeedRoleTable reports whether function fn in pkg/hub file is one of the
+// built-in role tables in seed.go.
+func isSeedRoleTable(file, fn string) bool {
+	return file == "seed.go" && (fn == "BuiltInRoles" || strings.HasSuffix(fn, "PermissionIDs"))
+}
+
 // artifactPermissionUses counts uses of each artifact permission ID (see
 // TestArtifactPermissionsConsumedUnlessReserved) across the non-test Go
 // files of pkg/artifacts and pkg/hub. constants maps each pkg/artifacts
-// constant name to its permission ID; skipHub names pkg/hub files to skip.
-func artifactPermissionUses(t *testing.T, constants map[string]string, skipHub map[string]bool) map[string]int {
+// constant name to its permission ID; skipHubFunc reports which pkg/hub
+// function bodies (by file and function name) to skip.
+func artifactPermissionUses(t *testing.T, constants map[string]string, skipHubFunc func(file, fn string) bool) map[string]int {
 	t.Helper()
 	ids := map[string]bool{}
 	for _, id := range constants {
 		ids[id] = true
 	}
 	counts := map[string]int{}
-	countFile := func(file *ast.File, inArtifacts bool) {
+	countFile := func(file *ast.File, fileName string, inArtifacts bool) {
 		// Identifiers and literals that make up a Permission constant's own
-		// declaration are not uses.
+		// declaration are not uses, nor is anything in a skipped function.
 		skip := map[ast.Node]bool{}
 		ast.Inspect(file, func(n ast.Node) bool {
+			if fd, ok := n.(*ast.FuncDecl); ok && !inArtifacts && skipHubFunc(fileName, fd.Name.Name) {
+				skip[fd] = true
+				return false
+			}
 			if vs, ok := n.(*ast.ValueSpec); ok {
 				for i, name := range vs.Names {
 					if _, isConst := constants[name.Name]; isConst && inArtifacts {
@@ -314,15 +327,12 @@ func artifactPermissionUses(t *testing.T, constants map[string]string, skipHub m
 			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 				continue
 			}
-			if !dir.inArtifacts && skipHub[name] {
-				continue
-			}
 			file, err := parser.ParseFile(fset, filepath.Join(dir.path, name), nil, 0)
 			if err != nil {
 				t.Fatalf("parse %s: %v", name, err)
 			}
 			files++
-			countFile(file, dir.inArtifacts)
+			countFile(file, name, dir.inArtifacts)
 		}
 		if files == 0 {
 			t.Fatalf("no Go files found in %s", dir.path)
