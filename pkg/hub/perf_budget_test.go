@@ -40,13 +40,15 @@ package hub
 //   - counts: baseline + max(2, 2% of baseline, rounded up)
 //   - bytes:  baseline + 1%, rounded up
 //
-// The counts are exact: they repeat on every run and every machine. The
-// margin only absorbs small, intended per-request changes (a read or two).
-// One more store read, decision or row read per returned agent (25 on a
-// first page, 100 on a full list) is over every count budget, and so is
-// about 20 more bytes per agent on a full list. Bytes vary by under 0.01%
-// between runs (serverTime and the agents' created and updated times,
-// which the store stamps), well inside the 1%.
+// The margins are tight on purpose. The seed is deterministic, so the
+// counts are exact: they repeat on every run and every machine. Measured
+// byte jitter between runs is under 0.01% (serverTime and the agents'
+// created and updated times, which the store stamps), well inside the 1%.
+// The margin only absorbs small, intended per-request changes: a single
+// extra read or decision per request sits inside the +2 floor and passes.
+// An N+1 regression, one more store read, decision or row read per
+// returned agent (25 on a first page, 100 on a full list), is over every
+// count budget, and so is about 20 more bytes per agent on a full list.
 //
 // Updating a budget for an intended change: run
 //
