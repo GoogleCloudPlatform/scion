@@ -15,10 +15,12 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -96,16 +98,26 @@ func carryOverSkillsDir(agentHome, oldSkillsDir, newSkillsDir string) ([]string,
 	// is again missing or empty and a later Start retries the carry-over
 	// instead of skipping it as non-empty. A new directory that existed
 	// before (empty) is kept; only the skills written into it are removed.
-	undo := func(partial string) {
+	// It returns cause joined with any removal error, so a failed cleanup is
+	// visible to the caller.
+	undo := func(cause error, partial string) error {
+		errs := []error{cause}
 		if newMissing {
-			_ = root.RemoveAll(newRel)
-			return
+			if err := root.RemoveAll(newRel); err != nil {
+				errs = append(errs, fmt.Errorf("remove %s: %w", newRel, err))
+			}
+			return errors.Join(errs...)
 		}
 		for _, name := range append(copied, partial) {
-			if name != "" {
-				_ = root.RemoveAll(filepath.Join(newRel, name))
+			if name == "" {
+				continue
+			}
+			p := filepath.Join(newRel, name)
+			if err := root.RemoveAll(p); err != nil {
+				errs = append(errs, fmt.Errorf("remove %s: %w", p, err))
 			}
 		}
+		return errors.Join(errs...)
 	}
 	for _, e := range entries {
 		// Only real skill directories; a symlinked entry is not followed.
@@ -113,12 +125,10 @@ func carryOverSkillsDir(agentHome, oldSkillsDir, newSkillsDir string) ([]string,
 			continue
 		}
 		if err := root.MkdirAll(newRel, 0755); err != nil {
-			undo("")
-			return nil, fmt.Errorf("create skills dir %s: %w", newRel, err)
+			return nil, undo(fmt.Errorf("create skills dir %s: %w", newRel, err), "")
 		}
 		if err := copyRootTree(root, filepath.Join(oldRel, e.Name()), filepath.Join(newRel, e.Name())); err != nil {
-			undo(e.Name())
-			return nil, fmt.Errorf("copy skill %s to %s: %w", e.Name(), newRel, err)
+			return nil, undo(fmt.Errorf("copy skill %s to %s: %w", e.Name(), newRel, err), e.Name())
 		}
 		copied = append(copied, e.Name())
 	}
@@ -157,14 +167,18 @@ func realDirChain(root *os.Root, rel string, requireExist bool) (bool, error) {
 	return true, nil
 }
 
-// readRootDir lists the directory rel inside root.
+// readRootDir lists the directory rel inside root, sorted by name like
+// os.ReadDir (File.ReadDir returns directory order), so the copy order and
+// the error reported on a failure do not depend on the filesystem.
 func readRootDir(root *os.Root, rel string) ([]os.DirEntry, error) {
 	f, err := root.Open(rel)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	return f.ReadDir(-1)
+	entries, err := f.ReadDir(-1)
+	slices.SortFunc(entries, func(a, b os.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
+	return entries, err
 }
 
 // copyRootTree copies the directory src to dst, both inside root, keeping

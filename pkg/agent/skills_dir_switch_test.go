@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -416,7 +417,8 @@ func TestCarryOverSkillsDir_FailurePartwayIsRetried(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
 			oldDir, newDir := filepath.Join(home, ".a/skills"), filepath.Join(home, ".b/skills")
-			// Entries are listed in name order: "a-good" copies, then "b-bad" fails.
+			// readRootDir sorts by name: "a-good" copies, then "b-bad" fails,
+			// so undo must remove the already-copied "a-good" too.
 			writeSkill(t, oldDir, "a-good", "good")
 			writeSkill(t, oldDir, "b-bad", "bad")
 			unreadable := filepath.Join(oldDir, "b-bad", "SKILL.md")
@@ -432,6 +434,8 @@ func TestCarryOverSkillsDir_FailurePartwayIsRetried(t *testing.T) {
 
 			if _, err := carryOverSkillsDir(home, ".a/skills", ".b/skills"); err == nil {
 				t.Fatal("want an error for the unreadable skill file")
+			} else if !strings.Contains(err.Error(), "copy skill b-bad") {
+				t.Fatalf("error = %v, want it to name skill b-bad", err)
 			}
 			if tc.newExists {
 				entries, err := os.ReadDir(newDir)
@@ -469,12 +473,16 @@ func TestCarryOverSkillsDir_SkipsPythonBytecode(t *testing.T) {
 	home := t.TempDir()
 	oldDir, newDir := filepath.Join(home, ".a/skills"), filepath.Join(home, ".b/skills")
 	writeSkill(t, oldDir, "one", "1")
-	for _, d := range []string{"one/__pycache__", "one/lib", "__pycache__"} {
+	// Only a __pycache__ directory and a non-directory ending in .pyc are
+	// skipped; a directory ending in .pyc, a file named __pycache__ and
+	// similar names are copied (the rule in util.CopyDir).
+	for _, d := range []string{"one/__pycache__", "one/lib", "__pycache__", "one/mypyc", "one/data.pyc"} {
 		if err := os.MkdirAll(filepath.Join(oldDir, d), 0755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, f := range []string{"one/__pycache__/x.cpython-311.pyc", "one/lib/mod.pyc", "one/lib/mod.py", "__pycache__/y.pyc"} {
+	for _, f := range []string{"one/__pycache__/x.cpython-311.pyc", "one/lib/mod.pyc", "one/lib/mod.py", "__pycache__/y.pyc",
+		"one/pycache_notes.txt", "one/mypyc/m.py", "one/data.pyc/d.txt", "one/lib/__pycache__"} {
 		if err := os.WriteFile(filepath.Join(oldDir, f), []byte("x"), 0644); err != nil {
 			t.Fatal(err)
 		}
@@ -489,11 +497,17 @@ func TestCarryOverSkillsDir_SkipsPythonBytecode(t *testing.T) {
 	}
 	got := snapshotSkillsTree(t, newDir)
 	want := map[string]string{
-		".":              "dir",
-		"one":            "dir",
-		"one/SKILL.md":   "file:1",
-		"one/lib":        "dir",
-		"one/lib/mod.py": "file:x",
+		".":                     "dir",
+		"one":                   "dir",
+		"one/SKILL.md":          "file:1",
+		"one/lib":               "dir",
+		"one/lib/mod.py":        "file:x",
+		"one/lib/__pycache__":   "file:x",
+		"one/pycache_notes.txt": "file:x",
+		"one/mypyc":             "dir",
+		"one/mypyc/m.py":        "file:x",
+		"one/data.pyc":          "dir",
+		"one/data.pyc/d.txt":    "file:x",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("new dir = %v, want %v", got, want)
