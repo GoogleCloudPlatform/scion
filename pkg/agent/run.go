@@ -826,6 +826,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			// over so the agent keeps them (ptone/scion#3129).
 			if prevHC := storedHarnessConfigName(finalScionCfg); prevHC != "" && prevHC != harnessConfigName {
 				prevSkillsDir := previousHarnessSkillsDir(prevHC, projectDir, resolveTemplatePaths, settings, profileName)
+				if prevSkillsDir == "" {
+					// The stored harness-config may have been Hub-supplied
+					// and is not on disk at this Start; nothing is copied.
+					util.Debugf("Start: harness-config %q not found; skipping the skills carry-over to %s", prevHC, h.SkillsDir())
+				}
 				if copied, cpErr := carryOverSkillsDir(agentHome, prevSkillsDir, h.SkillsDir()); cpErr != nil {
 					fmt.Fprintf(os.Stderr, "Warning: copying skills to the new harness skills directory failed: %v\n", cpErr)
 				} else if len(copied) > 0 {

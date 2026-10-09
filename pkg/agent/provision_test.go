@@ -4127,9 +4127,7 @@ func TestGetAgent_ResolutionFailureLeavesNothingBehind(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tmpDir := t.TempDir()
 
-			oldWd, _ := os.Getwd()
-			_ = os.Chdir(tmpDir)
-			defer func() { _ = os.Chdir(oldWd) }()
+			t.Chdir(tmpDir)
 			t.Setenv("HOME", tmpDir)
 
 			projectDir := filepath.Join(tmpDir, "project")
