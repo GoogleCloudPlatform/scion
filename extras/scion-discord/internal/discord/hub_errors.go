@@ -46,9 +46,15 @@ type HubError struct {
 	Code    string
 	Message string
 	Details map[string]interface{}
+	// text, when set, replaces the default Error() text so callers that
+	// show the error to users keep their existing wording.
+	text string
 }
 
 func (e *HubError) Error() string {
+	if e.text != "" {
+		return e.text
+	}
 	msg := fmt.Sprintf("%s returned status %d", e.Op, e.StatusCode)
 	if e.Message != "" {
 		msg += ": " + e.Message

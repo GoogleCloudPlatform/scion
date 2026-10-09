@@ -92,6 +92,7 @@ func TestAdvisoryLockKeys_NonOverlapping(t *testing.T) {
 		LockMembershipStopRetry,
 		LockAgentLaunchDeadline,
 		LockBrokerJoinTokenCleanup,
+		LockTelegramSchema,
 		LockNotificationOrphanGC,
 	}
 
@@ -188,6 +189,7 @@ func TestAdvisoryLockKeys_AllUnique(t *testing.T) {
 		{"LockBrokerQuotaReconcile", LockBrokerQuotaReconcile},
 		{"LockAgentLaunchDeadline", LockAgentLaunchDeadline},
 		{"LockBrokerJoinTokenCleanup", LockBrokerJoinTokenCleanup},
+		{"LockTelegramSchema", LockTelegramSchema},
 		{"LockNotificationOrphanGC", LockNotificationOrphanGC},
 	}
 

@@ -55,6 +55,17 @@ const (
 	// deadline that follows it.
 	ConduitMinLifetimeCap = 90 * time.Second
 	ConduitMaxLifetimeCap = 24 * time.Hour
+	// ConduitDefaultUserStreamAuthzMax is the default authorization
+	// interval of user-originated streams (stream_authz_max.user).
+	ConduitDefaultUserStreamAuthzMax = 8 * time.Hour
+	// ConduitDefaultServiceStreamAuthzMax is the default authorization
+	// interval of broker- and agent-originated streams
+	// (stream_authz_max.broker, stream_authz_max.agent).
+	ConduitDefaultServiceStreamAuthzMax = 24 * time.Hour
+	// ConduitMinStreamAuthzMax and ConduitMaxStreamAuthzMax bound every
+	// stream_authz_max value.
+	ConduitMinStreamAuthzMax = time.Minute
+	ConduitMaxStreamAuthzMax = 7 * 24 * time.Hour
 )
 
 // ConduitMaxInstanceIDLen is the longest accepted instance_id.
@@ -103,13 +114,43 @@ type HubConduitConfig struct {
 	// the default, 3500s; design §3.3). The relay sends GoAway 60s before
 	// it, and every drain deadline ends by it.
 	LifetimeCap string `json:"lifetimeCap,omitempty" yaml:"lifetimeCap,omitempty" koanf:"lifetimeCap"`
+	// StreamAuthzMax is the authorization interval of open streams, per
+	// originating principal kind (design §3.5, Q6): when a stream reaches
+	// it, the hub re-checks the principal and renews the stream or closes
+	// it.
+	StreamAuthzMax HubConduitStreamAuthzMax `json:"streamAuthzMax,omitzero" yaml:"streamAuthzMax,omitempty" koanf:"streamAuthzMax"`
+}
+
+// HubConduitStreamAuthzMax holds the stream authorization interval per
+// originating principal kind (server.hub.conduit.stream_authz_max). Each
+// value is a duration ("" = the default: 8h for user, 24h for broker and
+// agent).
+type HubConduitStreamAuthzMax struct {
+	// User applies to user-originated streams (port proxy, PTY).
+	User string `json:"user,omitempty" yaml:"user,omitempty" koanf:"user"`
+	// Broker applies to broker-originated streams.
+	Broker string `json:"broker,omitempty" yaml:"broker,omitempty" koanf:"broker"`
+	// Agent applies to agent-originated streams.
+	Agent string `json:"agent,omitempty" yaml:"agent,omitempty" koanf:"agent"`
+}
+
+// IsZero reports whether nothing is configured.
+func (m HubConduitStreamAuthzMax) IsZero() bool {
+	return m.User == "" && m.Broker == "" && m.Agent == ""
+}
+
+// ConduitStreamAuthzMax is the parsed stream authorization interval per
+// originating principal kind, with defaults applied.
+type ConduitStreamAuthzMax struct {
+	User, Broker, Agent time.Duration
 }
 
 // IsZero reports whether nothing is configured.
 func (c HubConduitConfig) IsZero() bool {
 	return c.GrantKeyActivation == "" && len(c.TCPAllowedPorts) == 0 && c.InternalListen == "" &&
 		c.InternalAdvertise == "" && c.PeerAuth == "" && len(c.PeerServiceAccounts) == 0 && c.PeerAudience == "" &&
-		c.ReconnectWindow == "" && c.InstanceID == "" && c.AuthzRecheckInterval == "" && c.LifetimeCap == ""
+		c.ReconnectWindow == "" && c.InstanceID == "" && c.AuthzRecheckInterval == "" && c.LifetimeCap == "" &&
+		c.StreamAuthzMax.IsZero()
 }
 
 // LifetimeCapDuration parses LifetimeCap ("" = ConduitDefaultLifetimeCap).
@@ -126,6 +167,41 @@ func (c HubConduitConfig) LifetimeCapDuration() (time.Duration, error) {
 		return 0, fmt.Errorf("invalid server.hub.conduit.lifetime_cap %q: must be between %s and %s (the relay sends GoAway 60s before the cap and drains for up to 30s)", c.LifetimeCap, ConduitMinLifetimeCap, ConduitMaxLifetimeCap)
 	}
 	return d, nil
+}
+
+// StreamAuthzMaxDurations parses StreamAuthzMax, applying the defaults
+// for unset values and the same bounds as Validate. Every invalid value
+// is reported.
+func (c HubConduitConfig) StreamAuthzMaxDurations() (ConduitStreamAuthzMax, error) {
+	parse := func(kind, v string, def time.Duration) (time.Duration, error) {
+		if v == "" {
+			return def, nil
+		}
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return 0, fmt.Errorf("invalid server.hub.conduit.stream_authz_max.%s %q: %w", kind, v, err)
+		}
+		if d < ConduitMinStreamAuthzMax || d > ConduitMaxStreamAuthzMax {
+			return 0, fmt.Errorf("invalid server.hub.conduit.stream_authz_max.%s %q: must be between %s and %s", kind, v, ConduitMinStreamAuthzMax, ConduitMaxStreamAuthzMax)
+		}
+		return d, nil
+	}
+	var out ConduitStreamAuthzMax
+	var errs []error
+	var err error
+	if out.User, err = parse("user", c.StreamAuthzMax.User, ConduitDefaultUserStreamAuthzMax); err != nil {
+		errs = append(errs, err)
+	}
+	if out.Broker, err = parse("broker", c.StreamAuthzMax.Broker, ConduitDefaultServiceStreamAuthzMax); err != nil {
+		errs = append(errs, err)
+	}
+	if out.Agent, err = parse("agent", c.StreamAuthzMax.Agent, ConduitDefaultServiceStreamAuthzMax); err != nil {
+		errs = append(errs, err)
+	}
+	if len(errs) > 0 {
+		return ConduitStreamAuthzMax{}, errors.Join(errs...)
+	}
+	return out, nil
 }
 
 // AuthzRecheckIntervalDuration parses AuthzRecheckInterval ("" = 0,
@@ -201,6 +277,9 @@ func (c HubConduitConfig) Validate() error {
 		errs = append(errs, err)
 	}
 	if _, err := c.LifetimeCapDuration(); err != nil {
+		errs = append(errs, err)
+	}
+	if _, err := c.StreamAuthzMaxDurations(); err != nil {
 		errs = append(errs, err)
 	}
 	seen := map[int]bool{}

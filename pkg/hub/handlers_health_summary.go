@@ -67,6 +67,10 @@ type HealthSummaryResponse struct {
 	// IntegrationCounts is the non-identifying aggregate of the
 	// integrations, returned to every caller.
 	IntegrationCounts HealthSummaryIntegrationCounts `json:"integration_counts"`
+
+	// ServiceAccountCheck is set while the service account assignment check
+	// cannot run because the hub's identity lacks the access it needs.
+	ServiceAccountCheck *HealthSummarySACheck `json:"service_account_check,omitempty"`
 }
 
 // HealthSummaryHub contains hub-level health information.
@@ -335,6 +339,8 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 		Integrations:       integrations,
 		IntegrationsDetail: true,
 		IntegrationCounts:  healthSummaryIntegrationCounts(integrations),
+
+		ServiceAccountCheck: s.healthSummarySACheck(),
 	}
 	// The policy sees the full integration list, so the status does not
 	// depend on who asks. Identity is removed afterwards for callers

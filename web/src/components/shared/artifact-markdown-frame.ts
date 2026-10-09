@@ -22,6 +22,11 @@
  * client/artifact-preview.ts) and shows the result in a srcdoc frame that
  * is sandboxed without allow-scripts and whose document carries a
  * Content-Security-Policy allowing images from the hub only.
+ *
+ * critic selects how CriticMarkup is shown: "off" (as written, the
+ * default), "marks" (rendered as insertions, deletions, highlights and
+ * numbered notes), "clean" (every mark rejected) or "accept" (every mark
+ * accepted), the projections the hub serves with ?resolve=.
  */
 
 import { LitElement, html, css } from 'lit';
@@ -32,6 +37,9 @@ import { getMarkdownRenderer } from '../../utils/markdown.js';
 import { PREVIEW_SANDBOX, previewDocument, rewriteImages } from '../../client/artifact-preview.js';
 import type { PreviewTheme } from '../../client/artifact-preview.js';
 import type { ArtifactFile } from '../../client/artifacts.js';
+import { projectCritic } from '../../utils/critic.js';
+
+export type CriticView = 'off' | 'marks' | 'clean' | 'accept';
 
 @customElement('scion-artifact-markdown-frame')
 export class ScionArtifactMarkdownFrame extends LitElement {
@@ -42,6 +50,15 @@ export class ScionArtifactMarkdownFrame extends LitElement {
   @property({ type: Number }) seq = 0;
   @property({ type: String }) entryPath = '';
   @property({ attribute: false }) files: ArtifactFile[] = [];
+  @property({ type: String }) critic: CriticView = 'off';
+  /** Lay comment notes out in a margin (the page decides from its width). */
+  @property({ type: Boolean }) marginNotes = false;
+  /** Author shown in each comment's note header. */
+  @property({ type: String }) noteAuthor = '';
+  /** A short note shown first in the margin. */
+  @property({ type: String }) sideNote = '';
+  /** Style the side note as an empty-state placeholder. */
+  @property({ type: Boolean }) sideNoteEmpty = false;
 
   @state() private srcdoc = '';
   @state() private error: string | null = null;
@@ -80,7 +97,12 @@ export class ScionArtifactMarkdownFrame extends LitElement {
       changed.has('files') ||
       changed.has('seq') ||
       changed.has('entryPath') ||
-      changed.has('artifactId')
+      changed.has('artifactId') ||
+      changed.has('critic') ||
+      changed.has('marginNotes') ||
+      changed.has('noteAuthor') ||
+      changed.has('sideNote') ||
+      changed.has('sideNoteEmpty')
     ) {
       void this.build();
     }
@@ -103,14 +125,25 @@ export class ScionArtifactMarkdownFrame extends LitElement {
   private async build(): Promise<void> {
     try {
       const renderer = await getMarkdownRenderer();
-      const clean = renderer.render(this.content);
+      const source =
+        this.critic === 'clean' || this.critic === 'accept'
+          ? projectCritic(this.content, this.critic)
+          : this.content;
+      const clean = renderer.render(source, {
+        criticMarks: this.critic === 'marks',
+        criticAuthor: this.noteAuthor,
+      });
       const body = rewriteImages(clean, {
         id: this.artifactId,
         seq: this.seq,
         entryPath: this.entryPath,
         files: this.files,
       });
-      this.srcdoc = previewDocument(body, this.theme());
+      this.srcdoc = previewDocument(body, this.theme(), {
+        marginNotes: this.marginNotes && this.critic !== 'off',
+        sideNote: this.critic === 'off' ? '' : this.sideNote,
+        sideNoteEmpty: this.sideNoteEmpty,
+      });
       this.error = null;
     } catch (err) {
       console.error('Failed to render markdown:', err);

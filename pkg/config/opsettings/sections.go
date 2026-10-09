@@ -147,6 +147,11 @@ type ArtifactsSettings struct {
 	// LinkMaxTTLHours is the longest lifetime a share link may be given.
 	// Share links always expire.
 	LinkMaxTTLHours *int `json:"link_max_ttl_hours,omitempty"`
+	// GCGraceHours is how long a blob no live artifact references is kept
+	// before the blob sweep deletes it; it is also the window in which a
+	// deleted artifact's bytes still exist. At least
+	// ArtifactsMinGCGraceHours.
+	GCGraceHours *int `json:"gc_grace_hours,omitempty"`
 	// RemoteImagesEnabled turns on fetching the remote images a markdown
 	// artifact references at publish time.
 	RemoteImagesEnabled *bool `json:"remote_images_enabled,omitempty"`
@@ -172,6 +177,9 @@ const (
 	ArtifactsDefaultRetentionDays         = 0   // never expire
 	ArtifactsDefaultLinkTTLHours          = 168 // 7 days
 	ArtifactsDefaultLinkMaxTTLHours       = 720 // 30 days
+	ArtifactsDefaultGCGraceHours          = 168 // 7 days
+	// ArtifactsMinGCGraceHours is the shortest gc_grace_hours accepted.
+	ArtifactsMinGCGraceHours = 24
 
 	ArtifactsDefaultRemoteImagesEnabled            = true
 	ArtifactsDefaultRemoteImageMaxCount            = 32
@@ -197,6 +205,7 @@ type ArtifactsConfig struct {
 	DefaultRetentionDays int
 	LinkDefaultTTLHours  int
 	LinkMaxTTLHours      int
+	GCGraceHours         int
 
 	RemoteImagesEnabled      bool
 	RemoteImageMaxCount      int
@@ -222,6 +231,7 @@ func DefaultArtifactsConfig() ArtifactsConfig {
 		DefaultRetentionDays: ArtifactsDefaultRetentionDays,
 		LinkDefaultTTLHours:  ArtifactsDefaultLinkTTLHours,
 		LinkMaxTTLHours:      ArtifactsDefaultLinkMaxTTLHours,
+		GCGraceHours:         ArtifactsDefaultGCGraceHours,
 
 		RemoteImagesEnabled:      ArtifactsDefaultRemoteImagesEnabled,
 		RemoteImageMaxCount:      ArtifactsDefaultRemoteImageMaxCount,
@@ -252,7 +262,8 @@ func MalformedArtifactsConfig() ArtifactsConfig {
 // default and the file limits.
 //
 // Valid service values: every size and count limit and both link TTLs are
-// at least 1, retention is at least 0, a file limit does not exceed the
+// at least 1, retention is at least 0, the blob sweep's grace is at least
+// ArtifactsMinGCGraceHours, a file limit does not exceed the
 // bundle limit, and the default link TTL does not exceed the maximum.
 // Valid remote image values: count, size and both timeouts are at least 1,
 // a remote image is no larger than a file, there are no more remote images
@@ -280,6 +291,9 @@ func (a ArtifactsSettings) Resolve() (ArtifactsConfig, error) {
 	}
 	if a.LinkMaxTTLHours != nil {
 		c.LinkMaxTTLHours = *a.LinkMaxTTLHours
+	}
+	if a.GCGraceHours != nil {
+		c.GCGraceHours = *a.GCGraceHours
 	}
 	if a.RemoteImagesEnabled != nil {
 		c.RemoteImagesEnabled = *a.RemoteImagesEnabled
@@ -317,6 +331,8 @@ func (a ArtifactsSettings) Resolve() (ArtifactsConfig, error) {
 		err = fmt.Errorf("link_default_ttl_hours must be at least 1, got %d", c.LinkDefaultTTLHours)
 	case c.LinkMaxTTLHours < 1:
 		err = fmt.Errorf("link_max_ttl_hours must be at least 1, got %d", c.LinkMaxTTLHours)
+	case c.GCGraceHours < ArtifactsMinGCGraceHours:
+		err = fmt.Errorf("gc_grace_hours must be at least %d, got %d", ArtifactsMinGCGraceHours, c.GCGraceHours)
 	case c.MaxFileBytes > c.MaxBundleBytes:
 		err = fmt.Errorf("max_file_bytes (%d) exceeds max_bundle_bytes (%d)", c.MaxFileBytes, c.MaxBundleBytes)
 	case c.LinkDefaultTTLHours > c.LinkMaxTTLHours:

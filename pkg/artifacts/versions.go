@@ -137,6 +137,7 @@ func (s *Service) handleCreate(w http.ResponseWriter, r *http.Request) {
 	a := &Artifact{
 		ID: uuid.NewString(), ScopeKind: ScopeKindProject, ScopeRef: scope,
 		OwnerKind: kind, OwnerRef: ref, Key: key, Title: title, CreatedAt: now, UpdatedAt: now,
+		ExpiresAt: retentionExpiry(b.currentLimits(ctx), now),
 	}
 	v, files := pendingVersion(a.ID, req, kind, ref, now, nil)
 	v.Seq = 1
@@ -270,8 +271,12 @@ func versionKind(k string) string {
 
 func writePending(w http.ResponseWriter, a *Artifact, v *Version, files []File) {
 	resp := PendingVersionResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files), Upload: UploadInfo{Required: []string{}}}
+	// One upload per digest: files with the same bytes share the stored
+	// object, and uploading one marks the others received.
+	seen := map[string]bool{}
 	for _, f := range files {
-		if f.Pending {
+		if f.Pending && !seen[f.SHA256] {
+			seen[f.SHA256] = true
 			resp.Upload.Required = append(resp.Upload.Required, f.Path)
 		}
 	}
@@ -588,7 +593,22 @@ func (s *Service) handlePutFile(w http.ResponseWriter, r *http.Request, id strin
 		writeError(w, http.StatusInternalServerError, "internal", "could not store the file")
 		return
 	}
-	switch err := b.store.MarkReceived(ctx, v.ID, filePath, mediaType); {
+	// The other pending files of the version with the same bytes share the
+	// stored object: they arrive with this upload, each with the media type
+	// detected for its own path.
+	files, err := b.store.ListFiles(ctx, v.ID)
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: list files failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not record the file")
+		return
+	}
+	siblings := map[string]string{}
+	for _, o := range files {
+		if o.Path != filePath && o.Pending && o.SHA256 == f.SHA256 && fileOrigin(o.Origin) == FileOriginUpload {
+			siblings[o.Path] = detectMediaType(o.Path, o.MediaType, spool.head)
+		}
+	}
+	switch err := b.store.MarkReceived(ctx, v.ID, filePath, mediaType, siblings); {
 	case errors.Is(err, ErrConflict), errors.Is(err, ErrNotFound):
 		// ErrNotFound: the version was reaped since it was loaded.
 		writeError(w, http.StatusConflict, "conflict", "the version is not pending")
