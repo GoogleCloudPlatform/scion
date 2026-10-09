@@ -430,13 +430,18 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 // intent alone, for when its row is gone (ptone/scion#3665). Only a
 // claimless intent that records its target qualifies: an engine's intent
 // needs the row to check its claim, and an intent without a target
-// (written by an older hub) has nothing to send. The delete path reads
-// only the fields set here (the ID for logging, the broker, the recorded
-// runtime, the project and slug) and the runs applyDeleteIntentRuns sets;
-// a lookup of the project's path finds nothing, as for a direct delete
-// after the project is gone.
+// (written by an older hub) has nothing to send. The target's broker
+// must be the one whose queue is being drained (d.BrokerID), so an intent
+// is never sent to a different broker. The delete path reads only the
+// fields set here (the ID for logging, the broker, the recorded runtime,
+// the project and slug) and the runs applyDeleteIntentRuns sets; a lookup
+// of the project's path finds nothing, as for a direct delete after the
+// project is gone.
 func deleteIntentTargetAgent(d store.BrokerDispatch, args *DeleteDispatchArgs) (*store.Agent, bool) {
 	if args == nil || args.Claim != 0 || args.Target == nil || args.Target.BrokerID == "" || args.Target.Slug == "" {
+		return nil, false
+	}
+	if args.Target.BrokerID != d.BrokerID {
 		return nil, false
 	}
 	return &store.Agent{

@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"testing"
@@ -284,8 +285,10 @@ func TestProjectDeleteDeferred_RowGone_RefusalSettlesIntent(t *testing.T) {
 
 // With the row present the intent's target is not used: the delete goes to
 // the row's slug and runtime, as before. With the row gone, an intent with
-// no target (an older hub) or with an engine claim fails not-found, as
-// before, and nothing reaches the broker.
+// no target (an older hub), with an engine claim, or whose target names a
+// broker other than the one being drained fails not-found, as before, and
+// nothing reaches the broker. A lookup error other than not-found is
+// returned as is, and the target is not used.
 func TestExecDispatchDelete_RowlessOnlyForClaimlessTargetedIntents(t *testing.T) {
 	ctx := context.Background()
 	exec := func(t *testing.T, f *rowlessFixture, args DeleteDispatchArgs) (*rowlessRecordingClient, error) {
@@ -337,6 +340,49 @@ func TestExecDispatchDelete_RowlessOnlyForClaimlessTargetedIntents(t *testing.T)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"run-a", "run-p"}, rowlessRuns(client.sent()))
 	})
+	t.Run("row gone, target on another broker: not found", func(t *testing.T) {
+		f := newRowlessFixture(t)
+		f.removeRows(t)
+		tgt := target(f)
+		tgt.BrokerID = uuid.NewString()
+		client, err := exec(t, f, DeleteDispatchArgs{RunID: "run-a", PreviousRunIDs: []string{"run-p"}, Target: tgt})
+		require.ErrorIs(t, err, store.ErrNotFound)
+		assert.Empty(t, client.sent())
+	})
+	t.Run("lookup error other than not found: returned, target unused", func(t *testing.T) {
+		f := newRowlessFixture(t)
+		raw, err := MarshalDispatchArgs(&DeleteDispatchArgs{RunID: "run-a", PreviousRunIDs: []string{"run-p"}, Target: target(f)})
+		require.NoError(t, err)
+		client := newRowlessRecordingClient(nil)
+		owner, _ := f.owner(t, client)
+		injected := errors.New("injected agent lookup failure")
+		_, fault := installStoreFault(t, owner, func(inner store.Store, fs *storeFaultSwitch) *rowlessGetAgentErrStore {
+			return &rowlessGetAgentErrStore{Store: inner, fault: fs, err: injected}
+		})
+		fault.Arm()
+		_, execErr := owner.execDispatchDelete(ctx, store.BrokerDispatch{
+			ID: uuid.NewString(), BrokerID: f.broker, AgentID: f.snapshot.ID, AgentSlug: f.snapshot.Slug,
+			ProjectID: f.snapshot.ProjectID, Op: brokerDispatchOpDelete, Args: raw,
+		})
+		require.Error(t, execErr)
+		assert.NotErrorIs(t, execErr, store.ErrNotFound)
+		assert.ErrorIs(t, execErr, injected)
+		assert.Empty(t, client.sent())
+	})
+}
+
+// rowlessGetAgentErrStore fails GetAgent with err once its switch is armed.
+type rowlessGetAgentErrStore struct {
+	store.Store
+	fault *storeFaultSwitch
+	err   error
+}
+
+func (s *rowlessGetAgentErrStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if !s.fault.Active() {
+		return s.Store.GetAgent(ctx, id)
+	}
+	return nil, s.err
 }
 
 // The originating node records a notAfter on a claimless intent and only
@@ -393,6 +439,60 @@ func TestDeferredDelete_NotAfterOnlyWhenClaimless(t *testing.T) {
 			assert.True(t, args.NotAfter.Equal(want), "notAfter = %v, want %v", args.NotAfter, want)
 		})
 	}
+}
+
+// A claimless intent that the executing node cannot deliver itself (the
+// broker is connected to another node) is deferred again by
+// execDispatchDelete with the notAfter it was written with, not a new one.
+func TestExecDispatchDelete_DeferredAgainKeepsNotAfter(t *testing.T) {
+	t0 := fenceNow(t)
+	ctx := context.Background()
+	f := newRowlessFixture(t)
+	// Not the notAfter a new claimless intent written at t0 would get.
+	notAfter := t0.Add(time.Minute)
+	require.False(t, notAfter.Equal(claimlessDeleteNotAfter(t0)))
+	raw, err := MarshalDispatchArgs(&DeleteDispatchArgs{
+		DeleteFiles: true, RunID: "run-a", PreviousRunIDs: []string{"run-p"},
+		Target:   &DeleteIntentTarget{BrokerID: f.broker, ProjectID: f.snapshot.ProjectID, Slug: f.snapshot.Slug, Runtime: "docker"},
+		NotAfter: notAfter,
+	})
+	require.NoError(t, err)
+
+	// The executing node is not connected to the broker either.
+	node := f.originator(t)
+	errc := make(chan error, 1)
+	go func() {
+		_, execErr := node.execDispatchDelete(ctx, store.BrokerDispatch{
+			ID: uuid.NewString(), BrokerID: f.broker, AgentID: f.snapshot.ID, AgentSlug: f.snapshot.Slug,
+			ProjectID: f.snapshot.ProjectID, Op: brokerDispatchOpDelete, Args: raw,
+		})
+		errc <- execErr
+	}()
+	var d store.BrokerDispatch
+	require.Eventually(t, func() bool {
+		pending, err := f.store.ListPendingDispatch(ctx, f.broker)
+		if err != nil || len(pending) == 0 {
+			return false
+		}
+		d = pending[0]
+		return true
+	}, 5*time.Second, 10*time.Millisecond, "the intent was not deferred again")
+	_, _ = f.store.ClaimBrokerDispatch(ctx, d.ID, "owner-hub")
+	require.NoError(t, f.store.CompleteBrokerDispatch(ctx, d.ID, ""))
+	f.events.PublishDispatchDone(ctx, d.ID)
+	select {
+	case execErr := <-errc:
+		require.NoError(t, execErr)
+	case <-time.After(20 * time.Second):
+		t.Fatal("execDispatchDelete never returned")
+	}
+
+	require.Equal(t, brokerDispatchOpDelete, d.Op)
+	args, err := UnmarshalDeleteArgs(d.Args)
+	require.NoError(t, err)
+	assert.Zero(t, args.Claim)
+	assert.True(t, args.NotAfter.Equal(notAfter), "deferred-again notAfter = %v, want the original %v", args.NotAfter, notAfter)
+	assert.Equal(t, "run-a", args.RunID)
 }
 
 // The executing node sends a claimless intent with its recorded notAfter,
