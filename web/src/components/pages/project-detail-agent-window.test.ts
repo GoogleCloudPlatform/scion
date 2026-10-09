@@ -28,7 +28,10 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 import type { Agent, Capabilities, DeletionInfo, PageData } from '../../shared/types.js';
 import { resetHubProjectCapabilitiesCache } from '../../client/hub-capabilities.js';
 import { stateManager } from '../../client/state.js';
-import { PROJECT_AGENTS_FIT_THRESHOLD } from '../../client/agent-list-window.js';
+import {
+  PROJECT_AGENTS_FIT_THRESHOLD,
+  type AgentListWindow,
+} from '../../client/agent-list-window.js';
 import { AgentDrainRunner } from '../../client/agent-drain.js';
 import { holdable } from './__fixtures__/global-agents-endpoint.js';
 
@@ -308,6 +311,10 @@ interface Internals {
     items: Agent[];
     display: Agent[];
     pageIndex: number;
+    hasNext: boolean;
+    hasPrev: boolean;
+    memberIndex: AgentListWindow['memberIndex'];
+    planRequest: AgentListWindow['planRequest'];
     updatesAvailable: boolean;
     error: string | null;
     loading: boolean;
