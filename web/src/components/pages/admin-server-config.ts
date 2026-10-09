@@ -103,6 +103,16 @@ export function containsMaskedValue(v: unknown): boolean {
 
 // ── Type definitions matching the Go API response ──
 
+/** GCP identity minting quota from GET /api/v1/admin/gcp-quota. */
+interface GCPQuotaSummary {
+  minting_configured: boolean;
+  gcp_project_id?: string;
+  global_minted: number;
+  global_cap: number;
+  per_project_cap: number;
+  projects?: { project_id: string; project_name: string; minted: number }[];
+}
+
 interface V1CORSConfig {
   enabled?: boolean;
   allowed_origins?: string[];
@@ -781,14 +791,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // GCP Identity Quota
   @state() private gcpQuotaLoading = false;
-  @state() private gcpQuotaData: {
-    minting_configured: boolean;
-    gcp_project_id?: string;
-    global_minted: number;
-    global_cap: number;
-    per_project_cap: number;
-    projects?: { project_id: string; project_name: string; minted: number }[];
-  } | null = null;
+  @state() private gcpQuotaData: GCPQuotaSummary | null = null;
 
   // Runtimes, Profiles & Harness Configs
   @state() private runtimes: Record<string, V1RuntimeConfig> = {};
@@ -1837,7 +1840,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.agentSecretsUserScopeOnly = data.agent_secrets?.user_scope_only ?? false;
 
     // Runtimes, profiles, harness_configs — deep-copy into editable state
-    this.runtimes = data.runtimes ? JSON.parse(JSON.stringify(data.runtimes)) : {};
+    this.runtimes = data.runtimes
+      ? (JSON.parse(JSON.stringify(data.runtimes)) as Record<string, V1RuntimeConfig>)
+      : {};
     this.profiles = data.profiles
       ? (JSON.parse(JSON.stringify(data.profiles)) as Record<string, V1ProfileConfig>)
       : {};
@@ -6009,7 +6014,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     try {
       const res = await apiFetch('/api/v1/admin/gcp-quota');
       if (res.ok) {
-        this.gcpQuotaData = await res.json();
+        this.gcpQuotaData = (await res.json()) as GCPQuotaSummary;
       }
     } catch {
       // Non-critical

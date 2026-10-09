@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { setPreferredTimeZone } from '../../utils/time.js';
+import type { ScionPageAdminServerConfig } from './admin-server-config.js';
 
 // ── Shared mock data builders ──
 
@@ -228,8 +229,6 @@ function createFetchHandler(
 }
 
 // Import the component module once so the custom element is only registered once.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let ScionPageAdminServerConfig: any;
 
 async function createComponent(
   fetchHandler: (url: string | URL | Request, init?: RequestInit) => Promise<Response>
@@ -264,8 +263,7 @@ describe('scion-page-admin-server-config', () => {
 
   beforeAll(async () => {
     vi.stubGlobal('fetch', vi.fn(createFetchHandler(makeBaseConfig())));
-    const mod = await import('./admin-server-config.js');
-    ScionPageAdminServerConfig = mod.ScionPageAdminServerConfig;
+    await import('./admin-server-config.js');
   });
 
   afterEach(() => {

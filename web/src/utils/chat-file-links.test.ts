@@ -19,7 +19,6 @@ import {
   isRecognizedFilePath,
   extractContainerPaths,
   parseContainerPath,
-  buildFileApiUrl,
   buildFileApiUrlPinOnly,
   buildAttachmentApiUrl,
   buildAttachmentApiUrlPinOnly,

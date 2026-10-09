@@ -22,13 +22,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { principalLabel, principalName, resetPrincipalNames } from './principal-names.js';
+import { requestUrl } from './__fixtures__/request-url.js';
 
 function stubStatus(statuses: number[]): string[] {
   const urls: string[] = [];
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL) => {
-      urls.push(String(input));
+      urls.push(requestUrl(input));
       const status = statuses.shift() ?? 200;
       return Promise.resolve(
         status === 200

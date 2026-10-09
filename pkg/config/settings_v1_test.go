@@ -6929,3 +6929,56 @@ server:
 	assert.Equal(t, "info", gc.LogLevel)
 	assert.Empty(t, ConvertGlobalToV1ServerConfig(gc).LogFormat)
 }
+
+// TestResolveKubernetesBlockServiceAccountForSelection covers the block
+// ServiceAccount precedence (ptone/scion#4034): profile over runtime entry,
+// an empty value treated as unset, and the Kubernetes profiles reported as
+// having none.
+func TestResolveKubernetesBlockServiceAccountForSelection(t *testing.T) {
+	vs := &VersionedSettings{
+		Profiles: map[string]V1ProfileConfig{
+			"team":   {Runtime: "gke", KubernetesBlockServiceAccount: "team-block"},
+			"shared": {Runtime: "gke"},
+			"bare":   {Runtime: "k8s-bare"},
+			"empty":  {Runtime: "k8s-bare", KubernetesBlockServiceAccount: ""},
+			"local":  {Runtime: "docker"},
+		},
+		Runtimes: map[string]V1RuntimeConfig{
+			"gke":      {Type: "kubernetes", KubernetesBlockServiceAccount: "entry-block"},
+			"k8s-bare": {Type: "kubernetes"},
+			"docker":   {Type: "docker"},
+		},
+	}
+	cases := []struct {
+		profile, entry string
+		want           string
+		wantOK         bool
+	}{
+		{"team", "gke", "team-block", true},
+		{"shared", "gke", "entry-block", true},
+		{"", "gke", "entry-block", true},
+		{"bare", "k8s-bare", "", false},
+		{"empty", "k8s-bare", "", false},
+		{"", "", "", false},
+	}
+	for _, tc := range cases {
+		got, ok := vs.ResolveKubernetesBlockServiceAccountForSelection(tc.profile, tc.entry)
+		if got != tc.want || ok != tc.wantOK {
+			t.Errorf("(%q, %q) = (%q, %v), want (%q, %v)", tc.profile, tc.entry, got, ok, tc.want, tc.wantOK)
+		}
+	}
+	missing := vs.KubernetesProfilesWithoutBlockServiceAccount()
+	if strings.Join(missing, ",") != "bare,empty" {
+		t.Errorf("KubernetesProfilesWithoutBlockServiceAccount = %v, want [bare empty]", missing)
+	}
+	var nilVS *VersionedSettings
+	if _, ok := nilVS.ResolveKubernetesBlockServiceAccountForSelection("team", "gke"); ok {
+		t.Error("expected nil settings to resolve nothing")
+	}
+	if err := ValidateKubernetesBlockServiceAccount("scion-block"); err != nil {
+		t.Errorf("valid name refused: %v", err)
+	}
+	if err := ValidateKubernetesBlockServiceAccount("Not_Valid"); err == nil {
+		t.Error("expected an invalid name to be refused")
+	}
+}
