@@ -15,12 +15,11 @@
 package cmd
 
 import (
-	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
+	"github.com/GoogleCloudPlatform/scion/pkg/wsclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -74,41 +74,59 @@ func clearAppTokenSources(t *testing.T) {
 }
 
 // mockAttachBrokerID is the fixed runtime broker ID the mock Hub servers in
-// this file put on agent records, and the ID they serve a matching
-// GET /api/v1/runtime-brokers/{id} response under — exercising the CLI's
-// broker-metadata attach check (attachSupportedByBroker) the same way a real
-// Hub round-trip would, rather than a name-based shortcut.
+// this file put on agent records. The CLI no longer reads the broker record
+// to decide attach support; the Hub preflight does.
 const mockAttachBrokerID = "test-broker-1"
 
-// mockAttachBroker returns a minimal hubclient.RuntimeBroker whose
-// broker-wide Capabilities.Attach reflects whether runtimeType supports
-// attach. These fixtures set no agent profile, so attachSupportedByBroker
-// falls back to this broker-wide value rather than a per-profile one. Only
-// "noattach" is unsupported today.
-func mockAttachBroker(runtimeType string) hubclient.RuntimeBroker {
-	return hubclient.RuntimeBroker{
-		ID: mockAttachBrokerID,
-		Capabilities: &hubclient.BrokerCapabilities{
-			Attach: runtimeType != "noattach",
-		},
+// noPathPreflightBody is the Hub's 503 body when it has no path to an
+// agent's terminal (pkg/hub resolvePTYPath).
+const noPathPreflightBody = `{"error":{"code":"runtime_attach_unsupported","message":"The agent's runtime does not support attach, and the agent has no conduit session that serves PTY","details":{"reason":"agent_pty_unavailable","path":"none"}}}`
+
+// assertNoPathRefusal checks the CLI's message for a Hub preflight that
+// found no path to agentName's terminal.
+func assertNoPathRefusal(t *testing.T, err error, agentName string) {
+	t.Helper()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot attach to agent '"+agentName+"'")
+	assert.Contains(t, err.Error(), "runtime_attach_unsupported, reason agent_pty_unavailable")
+	assert.Contains(t, err.Error(), "no session that serves a terminal")
+	assert.NotContains(t, err.Error(), "try again", "a no-path refusal is not presented as retryable")
+	var pe *wsclient.PTYPreflightError
+	require.True(t, errors.As(err, &pe), "the preflight error stays reachable")
+	assert.True(t, pe.NoPath())
+}
+
+// servePTYPreflight answers the agent's /pty endpoint the way the Hub
+// does for runtime: "noattach" stands for an agent with no PTY path (503
+// with the no-path reason); any other runtime gets a 200 preflight. A
+// WebSocket upgrade attempt also gets the plain response, so the dial fails
+// with a handshake error after a passing preflight.
+func servePTYPreflight(w http.ResponseWriter, runtime string) {
+	if runtime == "noattach" {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(noPathPreflightBody))
+		return
 	}
+	w.WriteHeader(http.StatusOK)
 }
 
 // newAttachMockHubServer creates a mock Hub server that handles the agent GET
-// request needed by attachViaHub(), plus the runtime-broker GET that backs
-// its attach-capability check. The agent is returned in the "running" phase
-// with the given runtime string (use "" for a normal non-managed agent).
+// request needed by attachViaHub(), plus the agent's /pty preflight (see
+// servePTYPreflight). The agent is returned in the "running" phase with the
+// given runtime string (use "" for a normal non-managed agent).
 func newAttachMockHubServer(t *testing.T, projectID, agentName, agentID, runtime string) *httptest.Server {
 	t.Helper()
 
 	agentPath := "/api/v1/projects/" + projectID + "/agents/" + agentName
-	brokerPath := "/api/v1/runtime-brokers/" + mockAttachBrokerID
+	ptyPath := "/api/v1/agents/" + agentID + "/pty"
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/healthz":
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.Method == http.MethodGet && r.URL.Path == ptyPath:
+			servePTYPreflight(w, runtime)
 		case r.Method == http.MethodGet && r.URL.Path == agentPath:
 			agent := hubclient.Agent{
 				ID:              agentID,
@@ -118,8 +136,6 @@ func newAttachMockHubServer(t *testing.T, projectID, agentName, agentID, runtime
 				RuntimeBrokerID: mockAttachBrokerID,
 			}
 			_ = json.NewEncoder(w).Encode(agent)
-		case r.Method == http.MethodGet && r.URL.Path == brokerPath:
-			_ = json.NewEncoder(w).Encode(mockAttachBroker(runtime))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -172,481 +188,6 @@ func TestAttachCmd_BadArgsDoesNotSilenceUsage(t *testing.T) {
 	require.Error(t, err, "expected an args error for a missing <agent> argument")
 	assert.False(t, attachCmd.SilenceUsage,
 		"a bad-arguments error must leave usage enabled")
-}
-
-// TestAttachSupportedByBroker_ProfileAttachFalse_ReturnsFalse verifies that
-// attachSupportedByBroker honors a named profile's own Attach=false, even
-// though the broker-wide Capabilities.Attach on this fixture is true — a
-// false result here can only come from the profile-level match, not the
-// broker-wide fallback.
-func TestAttachSupportedByBroker_ProfileAttachFalse_ReturnsFalse(t *testing.T) {
-	falseVal := false
-	const brokerID = "broker-profile-false"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/runtime-brokers/"+brokerID {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(hubclient.RuntimeBroker{
-			ID: brokerID,
-			Profiles: []hubclient.BrokerProfile{
-				{Name: "noattach-prof", Type: "noattach", Attach: &falseVal},
-			},
-			Capabilities: &hubclient.BrokerCapabilities{Attach: true},
-		})
-	}))
-	t.Cleanup(srv.Close)
-
-	client, err := hubclient.New(srv.URL)
-	require.NoError(t, err)
-	hubCtx := &HubContext{Client: client, Endpoint: srv.URL}
-
-	supported, unreadable := attachSupportedByBroker(context.Background(), hubCtx, brokerID, "noattach-prof")
-	if supported {
-		t.Error("attachSupportedByBroker supported = true, want false for a profile with Attach=false")
-	}
-	if unreadable {
-		t.Error("attachSupportedByBroker unreadable = true, want false: the record was read successfully")
-	}
-}
-
-// TestAttachSupportedByBroker_ProfileFieldAbsent_ReturnsTrue verifies the
-// missing-field-⇒-supported default at the profile level: a profile entry
-// present in the broker's list, but whose JSON carries no "attach" key at
-// all (an older broker's exact wire shape), is treated as supported. The
-// response body here is raw JSON rather than a hubclient.BrokerProfile{}
-// literal, so this proves the *bool json:"attach,omitempty" decode itself
-// leaves Attach nil, not just that a Go zero value happens to be nil.
-func TestAttachSupportedByBroker_ProfileFieldAbsent_ReturnsTrue(t *testing.T) {
-	const brokerID = "broker-profile-absent"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/runtime-brokers/"+brokerID {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(w, `{"id":%q,"profiles":[{"name":"old-prof","type":"docker","available":true}]}`, brokerID)
-	}))
-	t.Cleanup(srv.Close)
-
-	client, err := hubclient.New(srv.URL)
-	require.NoError(t, err)
-	hubCtx := &HubContext{Client: client, Endpoint: srv.URL}
-
-	supported, unreadable := attachSupportedByBroker(context.Background(), hubCtx, brokerID, "old-prof")
-	if !supported {
-		t.Error(`attachSupportedByBroker supported = false, want true for a profile whose JSON omits "attach" entirely`)
-	}
-	if unreadable {
-		t.Error("attachSupportedByBroker unreadable = true, want false: the record was read successfully")
-	}
-}
-
-// TestAttachSupportedByBroker_NoBrokerID_ReturnsTrueWithoutCallingHub proves
-// the missing-broker-ID default fires without making any Hub call:
-// hubCtx.Client is nil here, so calling it would panic.
-func TestAttachSupportedByBroker_NoBrokerID_ReturnsTrueWithoutCallingHub(t *testing.T) {
-	hubCtx := &HubContext{Client: nil}
-	supported, unreadable := attachSupportedByBroker(context.Background(), hubCtx, "", "any-profile")
-	if !supported {
-		t.Error("attachSupportedByBroker supported = false, want true when runtimeBrokerID is empty")
-	}
-	if unreadable {
-		t.Error("attachSupportedByBroker unreadable = true, want false when there is nothing to read")
-	}
-}
-
-// newAttachGateFallbackServer builds a mock Hub server for exercising the
-// CLI's point-GET-then-LIST-fallback attach gate end to end through
-// attachViaHub: the agent GET matches newAttachMockHubServer's shape, the
-// runtime-broker point-GET always answers 403 (a hub-member principal can be
-// denied the point-GET yet still see the broker on LIST — LIST is
-// deliberately left with its own, wider read scope rather than this test
-// widening anything), and the LIST response is
-// either listBrokers or a 403 when listFails is set. The returned *bool
-// flips true if the PTY WebSocket path is ever requested, so callers can
-// prove either that attachViaHub refused before dialing, or that it
-// proceeded to dial.
-func newAttachGateFallbackServer(t *testing.T, projectID, agentName, agentID, brokerID string, listBrokers []hubclient.RuntimeBroker, listFails bool) (*httptest.Server, *bool) {
-	t.Helper()
-	dialed := false
-	agentPath := "/api/v1/projects/" + projectID + "/agents/" + agentName
-	brokerPath := "/api/v1/runtime-brokers/" + brokerID
-	ptyPath := "/api/v1/agents/" + agentID + "/pty"
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/healthz":
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
-		case r.Method == http.MethodGet && r.URL.Path == agentPath:
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(hubclient.Agent{
-				ID:              agentID,
-				Name:            agentName,
-				Phase:           "running",
-				RuntimeBrokerID: brokerID,
-			})
-		case r.Method == http.MethodGet && r.URL.Path == brokerPath:
-			w.WriteHeader(http.StatusForbidden)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runtime-brokers":
-			if listFails {
-				w.WriteHeader(http.StatusForbidden)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"brokers": listBrokers})
-		case r.URL.Path == ptyPath:
-			dialed = true
-			w.WriteHeader(http.StatusNotFound)
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	t.Cleanup(srv.Close)
-	return srv, &dialed
-}
-
-// TestAttachViaHub_PointGETForbidden_ListShowsAttachFalse_RefusesPreDial
-// covers a hub-member principal: the point-GET returns
-// 403, the LIST fallback succeeds and shows the broker with attach=false,
-// and attachViaHub must refuse before ever dialing the PTY WebSocket.
-func TestAttachViaHub_PointGETForbidden_ListShowsAttachFalse_RefusesPreDial(t *testing.T) {
-	clearAppTokenSources(t)
-	attachTransportFakeAllowsDial(t)
-
-	const (
-		projectID = "proj-gate-1"
-		agentName = "gate-agent-1"
-		agentID   = "agent-uuid-gate-1"
-		brokerID  = "gate-broker-1"
-	)
-	srv, dialed := newAttachGateFallbackServer(t, projectID, agentName, agentID, brokerID,
-		[]hubclient.RuntimeBroker{{ID: brokerID, Capabilities: &hubclient.BrokerCapabilities{Attach: false}}}, false)
-
-	client, err := hubclient.New(srv.URL)
-	require.NoError(t, err)
-	hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}
-
-	err = attachViaHub(hubCtx, agentName)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "attach is not supported")
-	assert.False(t, *dialed, "the PTY WebSocket must never be dialed when the gate refuses")
-}
-
-// TestAttachViaHub_PointGETForbidden_ListAlsoFails_ProceedsToDial covers a
-// principal without broker-record read access (e.g. a UAT): neither the
-// point-GET nor the LIST fallback can produce the broker record (both 403),
-// which is this client's read access, not the runtime's own attach support.
-// attachViaHub must
-// treat that as unknown and proceed to dial rather than refuse client-side
-// — the broker's own dial-path gate stays authoritative for a runtime that
-// genuinely doesn't support attach.
-func TestAttachViaHub_PointGETForbidden_ListAlsoFails_ProceedsToDial(t *testing.T) {
-	clearAppTokenSources(t)
-	attachTransportFakeAllowsDial(t)
-
-	const (
-		projectID = "proj-gate-2"
-		agentName = "gate-agent-2"
-		agentID   = "agent-uuid-gate-2"
-		brokerID  = "gate-broker-2"
-	)
-	srv, dialed := newAttachGateFallbackServer(t, projectID, agentName, agentID, brokerID, nil, true)
-
-	client, err := hubclient.New(srv.URL)
-	require.NoError(t, err)
-	hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}
-
-	err = attachViaHub(hubCtx, agentName)
-	require.Error(t, err, "expected a WS dial error — the gate must not have refused pre-dial")
-	assert.NotContains(t, err.Error(), "attach is not supported")
-	assert.NotContains(t, err.Error(), "cannot determine whether this agent's runtime supports attach")
-	assert.True(t, *dialed, "the PTY WebSocket must be dialed when the broker record is unreadable — the broker's own gate is authoritative")
-}
-
-// TestAttachViaHub_PointGETForbidden_ListShowsAttachTrue_PassesGate covers
-// the case where the LIST fallback shows the broker as attach-capable:
-// attachViaHub must proceed past the gate and reach the WebSocket dial
-// stage (which then fails because the mock server doesn't handle WebSocket
-// upgrades) — that failure mode is what proves the gate was cleared.
-func TestAttachViaHub_PointGETForbidden_ListShowsAttachTrue_PassesGate(t *testing.T) {
-	clearAppTokenSources(t)
-	attachTransportFakeAllowsDial(t)
-
-	const (
-		projectID = "proj-gate-3"
-		agentName = "gate-agent-3"
-		agentID   = "agent-uuid-gate-3"
-		brokerID  = "gate-broker-3"
-	)
-	srv, dialed := newAttachGateFallbackServer(t, projectID, agentName, agentID, brokerID,
-		[]hubclient.RuntimeBroker{{ID: brokerID, Capabilities: &hubclient.BrokerCapabilities{Attach: true}}}, false)
-
-	client, err := hubclient.New(srv.URL)
-	require.NoError(t, err)
-	hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}
-
-	err = attachViaHub(hubCtx, agentName)
-	require.Error(t, err, "expected a WS dial error — the gate should have been cleared")
-	assert.NotContains(t, err.Error(), "attach is not supported")
-	assert.NotContains(t, err.Error(), "cannot determine whether this agent's runtime supports attach")
-	assert.True(t, *dialed, "the PTY WebSocket should have been dialed once the gate passed")
-}
-
-// attachTransportFakeAllowsDial installs the fake resolveAttachTransportFn
-// every test in this file that needs to reach the WebSocket dial stage
-// uses, restoring the original via t.Cleanup. Without it, a broken gate
-// would fail at the token gate instead of ever reaching a dial, leaving any
-// "no dial happened" assertion true regardless of whether the gate under
-// test actually fired.
-func attachTransportFakeAllowsDial(t *testing.T) {
-	t.Helper()
-	orig := resolveAttachTransportFn
-	resolveAttachTransportFn = func() (transportauth.TokenSource, transportauth.HeaderMode, error) {
-		return &fakeTransportSource{token: "fake-oidc-token", expiry: time.Now().Add(time.Hour)}, transportauth.HeaderProxyAuthorization, nil
-	}
-	t.Cleanup(func() { resolveAttachTransportFn = orig })
-}
-
-// TestAttachViaHub_PointGETForbidden_ListHasMultipleBrokers_MatchesByID pins
-// that the LIST fallback matches the target broker by ID rather than, say,
-// taking the first or last entry in the response: the target sits in the
-// MIDDLE of the list, with a decoy showing attach=true on each side. A
-// match that ignored ID and returned the first broker, or one that
-// returned the last, would both read a decoy's attach=true and proceed to
-// dial; only the correct by-ID match reads the target's attach=false and
-// refuses before ever dialing.
-func TestAttachViaHub_PointGETForbidden_ListHasMultipleBrokers_MatchesByID(t *testing.T) {
-	clearAppTokenSources(t)
-	attachTransportFakeAllowsDial(t)
-
-	const (
-		projectID     = "proj-gate-multi-1"
-		agentName     = "gate-agent-multi-1"
-		agentID       = "agent-uuid-gate-multi-1"
-		brokerID      = "gate-broker-multi-1-target"
-		decoyBeforeID = "gate-broker-multi-1-decoy-before"
-		decoyAfterID  = "gate-broker-multi-1-decoy-after"
-	)
-	srv, dialed := newAttachGateFallbackServer(t, projectID, agentName, agentID, brokerID,
-		[]hubclient.RuntimeBroker{
-			{ID: decoyBeforeID, Capabilities: &hubclient.BrokerCapabilities{Attach: true}},
-			{ID: brokerID, Capabilities: &hubclient.BrokerCapabilities{Attach: false}},
-			{ID: decoyAfterID, Capabilities: &hubclient.BrokerCapabilities{Attach: true}},
-		}, false)
-
-	client, err := hubclient.New(srv.URL)
-	require.NoError(t, err)
-	hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}
-
-	err = attachViaHub(hubCtx, agentName)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "attach is not supported")
-	assert.False(t, *dialed, "a decoy broker listed before or after the target must not be mistaken for it")
-}
-
-// TestAttachViaHub_PointGETForbidden_ListHasMultipleBrokers_TargetTrueAmongFalseDecoys
-// is the mirror case: a decoy showing attach=false is listed first, and
-// the target — matching agent.RuntimeBrokerID — shows attach=true. A
-// match that ignored ID (or returned the first broker) would read the
-// decoy's attach=false and refuse; the correct match reads the target's
-// attach=true and proceeds to dial.
-func TestAttachViaHub_PointGETForbidden_ListHasMultipleBrokers_TargetTrueAmongFalseDecoys(t *testing.T) {
-	clearAppTokenSources(t)
-	attachTransportFakeAllowsDial(t)
-
-	const (
-		projectID = "proj-gate-multi-2"
-		agentName = "gate-agent-multi-2"
-		agentID   = "agent-uuid-gate-multi-2"
-		brokerID  = "gate-broker-multi-2-target"
-		decoyID   = "gate-broker-multi-2-decoy"
-	)
-	srv, dialed := newAttachGateFallbackServer(t, projectID, agentName, agentID, brokerID,
-		[]hubclient.RuntimeBroker{
-			{ID: decoyID, Capabilities: &hubclient.BrokerCapabilities{Attach: false}},
-			{ID: brokerID, Capabilities: &hubclient.BrokerCapabilities{Attach: true}},
-		}, false)
-
-	client, err := hubclient.New(srv.URL)
-	require.NoError(t, err)
-	hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}
-
-	err = attachViaHub(hubCtx, agentName)
-	require.Error(t, err, "expected a WS dial error — the gate should have been cleared")
-	assert.NotContains(t, err.Error(), "attach is not supported")
-	assert.True(t, *dialed, "the target's own attach=true must win over a false decoy")
-}
-
-// TestAttachViaHub_PointGETForbidden_ListSucceedsWithoutTarget_ProceedsToDial
-// covers a successful LIST response that simply never includes the target
-// broker at all — a decoy with attach=true is present, so a match that
-// ignored ID entirely (or matched the first/only entry) would read it as
-// supported for the wrong reason. The target being absent from LIST is
-// still "unreadable" (nothing to read FOR THIS agent's broker, whatever the
-// reason), so attachViaHub must proceed to dial rather than refuse
-// client-side. Reaching this path through attachViaHub (rather than calling
-// findRuntimeBrokerByIDViaList directly) is what pins the caller's own
-// broker == nil check in attachSupportedByBroker: without it,
-// attachSupportedFromBrokerRecord would be called with a nil broker and
-// panic.
-func TestAttachViaHub_PointGETForbidden_ListSucceedsWithoutTarget_ProceedsToDial(t *testing.T) {
-	clearAppTokenSources(t)
-	attachTransportFakeAllowsDial(t)
-
-	const (
-		projectID = "proj-gate-absent"
-		agentName = "gate-agent-absent"
-		agentID   = "agent-uuid-gate-absent"
-		brokerID  = "gate-broker-absent-target"
-		decoyID   = "gate-broker-absent-decoy"
-	)
-	srv, dialed := newAttachGateFallbackServer(t, projectID, agentName, agentID, brokerID,
-		[]hubclient.RuntimeBroker{
-			{ID: decoyID, Capabilities: &hubclient.BrokerCapabilities{Attach: true}},
-		}, false)
-
-	client, err := hubclient.New(srv.URL)
-	require.NoError(t, err)
-	hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}
-
-	err = attachViaHub(hubCtx, agentName)
-	require.Error(t, err, "expected a WS dial error — the gate must not have refused pre-dial")
-	assert.NotContains(t, err.Error(), "attach is not supported")
-	assert.NotContains(t, err.Error(), "cannot determine whether this agent's runtime supports attach")
-	assert.True(t, *dialed, "the PTY WebSocket must be dialed when the target is absent from a successful LIST — the broker's own gate is authoritative")
-}
-
-// TestFindRuntimeBrokerByIDViaList_PagesToSecondPage_SendsCursor pins that
-// the LIST fallback actually follows pagination: the target broker isn't on
-// the first page, so a second request must be made, and it must carry the
-// cursor the first page returned rather than an empty one.
-func TestFindRuntimeBrokerByIDViaList_PagesToSecondPage_SendsCursor(t *testing.T) {
-	const (
-		brokerID = "paged-broker-target"
-		decoyID  = "paged-broker-decoy"
-	)
-	var requests []url.Values
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/runtime-brokers" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		requests = append(requests, r.URL.Query())
-		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Query().Get("cursor") == "" {
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"brokers":    []hubclient.RuntimeBroker{{ID: decoyID}},
-				"nextCursor": "page-2-cursor",
-			})
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"brokers": []hubclient.RuntimeBroker{{ID: brokerID, Capabilities: &hubclient.BrokerCapabilities{Attach: false}}},
-		})
-	}))
-	t.Cleanup(srv.Close)
-
-	client, err := hubclient.New(srv.URL)
-	require.NoError(t, err)
-	hubCtx := &HubContext{Client: client, Endpoint: srv.URL}
-
-	broker, err := findRuntimeBrokerByIDViaList(context.Background(), hubCtx, brokerID)
-	require.NoError(t, err)
-	require.NotNil(t, broker)
-	assert.Equal(t, brokerID, broker.ID)
-
-	require.Len(t, requests, 2, "expected exactly two LIST requests: one per page")
-	assert.Empty(t, requests[0].Get("cursor"), "the first request must not carry a cursor")
-	assert.Equal(t, "page-2-cursor", requests[1].Get("cursor"),
-		"the second request must carry the first page's nextCursor")
-}
-
-// TestFindRuntimeBrokerByIDViaList_SendsProjectID pins that the LIST
-// fallback scopes its request to hubCtx.ProjectID when known, rather than
-// listing every broker the caller can see.
-func TestFindRuntimeBrokerByIDViaList_SendsProjectID(t *testing.T) {
-	const (
-		brokerID  = "scoped-broker"
-		projectID = "proj-scoped-1"
-	)
-	var gotProjectID string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotProjectID = r.URL.Query().Get("projectId")
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"brokers": []hubclient.RuntimeBroker{{ID: brokerID}},
-		})
-	}))
-	t.Cleanup(srv.Close)
-
-	client, err := hubclient.New(srv.URL)
-	require.NoError(t, err)
-	hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}
-
-	_, err = findRuntimeBrokerByIDViaList(context.Background(), hubCtx, brokerID)
-	require.NoError(t, err)
-	assert.Equal(t, projectID, gotProjectID)
-}
-
-// TestFindRuntimeBrokerByIDViaList_RepeatedCursor_StopsAfterTwoRequests pins
-// the repeated-cursor guard directly: every page carries the same
-// nextCursor and never contains the target. The first request has no
-// cursor at all; the second carries the repeated cursor and is where the
-// guard must fire, stopping the loop rather than requesting a third page
-// forever.
-func TestFindRuntimeBrokerByIDViaList_RepeatedCursor_StopsAfterTwoRequests(t *testing.T) {
-	const brokerID = "cursor-loop-target"
-	var requestCount int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount++
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"brokers":    []hubclient.RuntimeBroker{{ID: "cursor-loop-decoy"}},
-			"nextCursor": "same",
-		})
-	}))
-	t.Cleanup(srv.Close)
-
-	client, err := hubclient.New(srv.URL)
-	require.NoError(t, err)
-	hubCtx := &HubContext{Client: client, Endpoint: srv.URL}
-
-	broker, err := findRuntimeBrokerByIDViaList(context.Background(), hubCtx, brokerID)
-	require.NoError(t, err)
-	assert.Nil(t, broker)
-	assert.Equal(t, 2, requestCount, "must stop once a cursor repeats rather than requesting forever")
-}
-
-// TestFindRuntimeBrokerByIDViaList_FreshCursorEveryPage_StopsAtPageCap pins
-// the page-count cap directly: the server hands out a distinct, never-seen
-// cursor on every page (so the repeated-cursor guard never fires) and never
-// contains the target. The loop must still stop, at exactly
-// findRuntimeBrokerListMaxPages requests, rather than following the
-// endlessly-advancing cursor forever.
-func TestFindRuntimeBrokerByIDViaList_FreshCursorEveryPage_StopsAtPageCap(t *testing.T) {
-	const brokerID = "cursor-advance-target"
-	var requestCount int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount++
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"brokers":    []hubclient.RuntimeBroker{{ID: "cursor-advance-decoy"}},
-			"nextCursor": fmt.Sprintf("cursor-%d", requestCount),
-		})
-	}))
-	t.Cleanup(srv.Close)
-
-	client, err := hubclient.New(srv.URL)
-	require.NoError(t, err)
-	hubCtx := &HubContext{Client: client, Endpoint: srv.URL}
-
-	broker, err := findRuntimeBrokerByIDViaList(context.Background(), hubCtx, brokerID)
-	require.NoError(t, err)
-	assert.Nil(t, broker)
-	assert.Equal(t, findRuntimeBrokerListMaxPages, requestCount, "must stop at the page cap rather than following an endlessly-advancing cursor")
 }
 
 // TestResolveAttachTransport_PlainMode verifies that resolveAttachTransport returns
@@ -791,7 +332,7 @@ func newStartAgentMockHubServer(t *testing.T, projectID, agentName, agentID, age
 	agentPath := "/api/v1/projects/" + projectID + "/agents/" + agentName
 	agentsPath := "/api/v1/projects/" + projectID + "/agents"
 	projectGetPath := "/api/v1/projects/" + projectID
-	brokerPath := "/api/v1/runtime-brokers/" + mockAttachBrokerID
+	ptyPath := "/api/v1/agents/" + agentID + "/pty"
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -803,8 +344,8 @@ func newStartAgentMockHubServer(t *testing.T, projectID, agentName, agentID, age
 			// Git-remote display: return a project with no GitRemote to suppress output.
 			_ = json.NewEncoder(w).Encode(hubclient.Project{ID: projectID, Name: "test"})
 
-		case r.Method == http.MethodGet && r.URL.Path == brokerPath:
-			_ = json.NewEncoder(w).Encode(mockAttachBroker(agentRuntime))
+		case r.Method == http.MethodGet && r.URL.Path == ptyPath:
+			servePTYPreflight(w, agentRuntime)
 
 		case r.Method == http.MethodGet && r.URL.Path == agentPath:
 			// Suspend check (pre-create) and polling (post-create): return running.
@@ -920,13 +461,15 @@ func TestStartAgentViaHub_Site2_PlainMode_EmptyToken_RequiresAppToken(t *testing
 
 // TestStartAgentViaHub_Site2_NoAttachAgent_ReturnsExplicitError directly
 // calls startAgentViaHub() with attach=true on an agent whose runtime is
-// "noattach" and exercises site 2 (the ready: label in the main polling
-// path). A noattach agent started with `-a` must fail with the same fixed,
-// explicit, non-zero-exit error as `scion attach` itself, and never reach the
-// WebSocket dial step — this is the same silent-failure bug on a sibling
-// code path.
+// "noattach" (the mock Hub's preflight finds no PTY path for it) and
+// exercises site 2 (the ready: label in the main polling path). A start -a
+// on such an agent must fail with the same no-path refusal as `scion attach`
+// itself, and never reach the WebSocket dial step.
 func TestStartAgentViaHub_Site2_NoAttachAgent_ReturnsExplicitError(t *testing.T) {
 	clearAppTokenSources(t)
+	// The preflight runs after the token gate, so present a token.
+	t.Setenv("SCION_HUB_TOKEN", "test-token")
+	stubPlainTransport(t)
 
 	restore := saveAttachTestState()
 	defer restore()
@@ -955,10 +498,7 @@ func TestStartAgentViaHub_Site2_NoAttachAgent_ReturnsExplicitError(t *testing.T)
 	}
 
 	err = startAgentViaHub(nil, hubCtx, agentName, "", false, nil)
-
-	require.Error(t, err)
-	const wantMsg = "attach is not supported for agents on the noattach runtime"
-	assert.Equal(t, wantMsg, err.Error(), "noattach start -a must fail with the fixed message, got: %v", err)
+	assertNoPathRefusal(t, err, agentName)
 }
 
 // TestStartAgentViaHub_Site1_NoAttachAgent_ReturnsExplicitError mirrors
@@ -972,6 +512,9 @@ func TestStartAgentViaHub_Site2_NoAttachAgent_ReturnsExplicitError(t *testing.T)
 // WebSocket dial step must never be reached.
 func TestStartAgentViaHub_Site1_NoAttachAgent_ReturnsExplicitError(t *testing.T) {
 	clearAppTokenSources(t)
+	// The preflight runs after the token gate, so present a token.
+	t.Setenv("SCION_HUB_TOKEN", "test-token")
+	stubPlainTransport(t)
 
 	restore := saveAttachTestState()
 	defer restore()
@@ -1006,7 +549,7 @@ func TestStartAgentViaHub_Site1_NoAttachAgent_ReturnsExplicitError(t *testing.T)
 	agentPath := "/api/v1/projects/" + projectID + "/agents/" + agentName
 	agentsPath := "/api/v1/projects/" + projectID + "/agents"
 	projectGetPath := "/api/v1/projects/" + projectID
-	brokerPath := "/api/v1/runtime-brokers/" + mockAttachBrokerID
+	ptyPath := "/api/v1/agents/" + agentID + "/pty"
 	// startAgentViaHub finalizes against resp.Agent.Slug, falling back to
 	// agentName when Slug is unset — the mock Create response below leaves
 	// Slug unset, so the finalize call lands on agentName.
@@ -1035,8 +578,8 @@ func TestStartAgentViaHub_Site1_NoAttachAgent_ReturnsExplicitError(t *testing.T)
 		case r.Method == http.MethodPost && r.URL.Path == finalizePath:
 			_ = json.NewEncoder(w).Encode(hubclient.SyncToFinalizeResponse{Applied: true, FilesApplied: 1})
 
-		case r.Method == http.MethodGet && r.URL.Path == brokerPath:
-			_ = json.NewEncoder(w).Encode(mockAttachBroker("noattach"))
+		case r.Method == http.MethodGet && r.URL.Path == ptyPath:
+			servePTYPreflight(w, "noattach")
 
 		case r.Method == http.MethodGet && r.URL.Path == agentPath:
 			// Suspend check (pre-create) and post-finalize polling both hit
@@ -1067,10 +610,7 @@ func TestStartAgentViaHub_Site1_NoAttachAgent_ReturnsExplicitError(t *testing.T)
 	}
 
 	err = startAgentViaHub(nil, hubCtx, agentName, "", false, nil)
-
-	require.Error(t, err)
-	const wantMsg = "attach is not supported for agents on the noattach runtime"
-	assert.Equal(t, wantMsg, err.Error(), "noattach start -a via the workspace-upload path must fail with the fixed message, got: %v", err)
+	assertNoPathRefusal(t, err, agentName)
 }
 
 // TestAttachViaHub_NoAttachAgent_ReturnsExplicitError verifies that attach on
@@ -1080,6 +620,9 @@ func TestStartAgentViaHub_Site1_NoAttachAgent_ReturnsExplicitError(t *testing.T)
 // fixed message is present).
 func TestAttachViaHub_NoAttachAgent_ReturnsExplicitError(t *testing.T) {
 	clearAppTokenSources(t)
+	// The preflight runs after the token gate, so present a token.
+	t.Setenv("SCION_HUB_TOKEN", "test-token")
+	stubPlainTransport(t)
 
 	const (
 		projectID = "proj-noattach-123"
@@ -1098,10 +641,7 @@ func TestAttachViaHub_NoAttachAgent_ReturnsExplicitError(t *testing.T) {
 	}
 
 	err = attachViaHub(hubCtx, agentName)
-
-	require.Error(t, err)
-	const wantMsg = "attach is not supported for agents on the noattach runtime"
-	assert.Equal(t, wantMsg, err.Error(), "noattach attach must fail with the fixed message, got: %v", err)
+	assertNoPathRefusal(t, err, agentName)
 
 	// No infra-specific details (namespaces, actor names, node/pod
 	// names, URLs, image refs) may leak into the user-facing message.
@@ -1147,7 +687,7 @@ func TestAttachViaHub_DockerAgent_UnaffectedByNoAttachCheck(t *testing.T) {
 	err = attachViaHub(hubCtx, agentName)
 
 	require.Error(t, err, "expected a WS dial error — the docker path must reach the dial step unchanged")
-	assert.NotContains(t, err.Error(), "attach is not supported for agents on the noattach runtime",
+	assert.NotContains(t, err.Error(), "cannot attach to agent",
 		"docker agent must not be rejected by the noattach guard, got: %v", err)
 	// Pin that the phase and token gates were actually passed and the
 	// WebSocket dial itself was reached (pkg/wsclient/pty.go:123/125), not

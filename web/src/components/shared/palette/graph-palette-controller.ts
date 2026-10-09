@@ -38,7 +38,7 @@
 
 import type { ReactiveController, ReactiveControllerHost } from 'lit';
 import type { Agent } from '../../../shared/types.js';
-import type { PaletteCandidate } from '../../../client/chat-palette-types.js';
+import type { PaletteCandidate } from '../../../client/palette-types.js';
 import { buildAgentCandidate } from '../../../client/agent-palette-candidate.js';
 import {
   GRAPH_PALETTE_OPEN_REQUEST_EVENT,

@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TerminalMetadata } from './terminal-metadata.js';
 import { StateManager } from './state.js';
+import { requestUrl } from './__fixtures__/request-url.js';
 
 const id = (n: number) => `11111111-1111-4111-8111-${String(n).padStart(12, '0')}`;
 const agent = (n = 1) => ({ id: id(n), name: `agent-${n}`, phase: 'running', activity: 'idle' });
@@ -48,7 +49,7 @@ beforeEach(() => {
   Source.instances = [];
   vi.stubGlobal('EventSource', Source);
   fetcher = vi.fn<typeof fetch>().mockImplementation((url) => {
-    const n = Number(String(url).slice(-12));
+    const n = Number(requestUrl(url).slice(-12));
     return Promise.resolve(json(agent(n)));
   });
   vi.stubGlobal('fetch', fetcher);
@@ -185,7 +186,7 @@ it.each([403, 404])(
     metadata.retain(id(2));
     await flush();
     fetcher.mockImplementation((url) =>
-      Promise.resolve(String(url).endsWith(id(1)) ? json({}, status) : json(agent(2)))
+      Promise.resolve(requestUrl(url).endsWith(id(1)) ? json({}, status) : json(agent(2)))
     );
     Source.instances[0].onerror?.();
     await flush();
@@ -199,7 +200,7 @@ it.each([403, 404])(
     await flush();
     expect(metadata.get(id(2))?.availability).toBe('ready');
     fetcher.mockImplementation((url) =>
-      Promise.resolve(json(agent(String(url).endsWith(id(1)) ? 1 : 2)))
+      Promise.resolve(json(agent(requestUrl(url).endsWith(id(1)) ? 1 : 2)))
     );
     const retry = metadata.refresh(id(1));
     await flush();
@@ -214,7 +215,7 @@ it('does not exclude transient failures or repeatedly diagnose the same rejected
   metadata.retain(id(1));
   await flush();
   fetcher.mockImplementation((url) =>
-    Promise.resolve(String(url).includes('/auth/me') ? json({}) : json({}, 503))
+    Promise.resolve(requestUrl(url).includes('/auth/me') ? json({}) : json({}, 503))
   );
   Source.instances[0].onerror?.();
   await flush();
@@ -283,7 +284,7 @@ it('reports authentication expiry without excluding a subject or marking it dele
   metadata.retain(id(1));
   await flush();
   fetcher.mockImplementation((url) =>
-    Promise.resolve(String(url).includes('auth/me') ? json({}) : json({}, 401))
+    Promise.resolve(requestUrl(url).includes('auth/me') ? json({}) : json({}, 401))
   );
   Source.instances[0].onerror?.();
   await flush();
@@ -297,15 +298,15 @@ it('reports authentication expiry without excluding a subject or marking it dele
 it('aborts bounded diagnostic requests on disposal without rebuilding after late responses', async () => {
   const gates = Array.from({ length: 6 }, () => deferred<Response>());
   fetcher.mockImplementation((url) =>
-    String(url).includes('auth/me')
+    requestUrl(url).includes('auth/me')
       ? Promise.resolve(json({}))
-      : gates[Number(String(url).slice(-12)) - 1].promise
+      : gates[Number(requestUrl(url).slice(-12)) - 1].promise
   );
   for (let n = 1; n <= 6; n++) metadata.retain(id(n));
   await flush();
   Source.instances[0].onerror?.();
   await flush();
-  const calls = fetcher.mock.calls.filter(([url]) => !String(url).includes('auth/me'));
+  const calls = fetcher.mock.calls.filter(([url]) => !requestUrl(url).includes('auth/me'));
   expect(calls).toHaveLength(4);
   metadata.dispose();
   expect(calls.every(([, options]) => options?.signal?.aborted)).toBe(true);

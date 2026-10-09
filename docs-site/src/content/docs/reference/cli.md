@@ -102,6 +102,7 @@ ptone/scion#1855.
     - `--no-auth`: Disable authentication propagation (also sent to the Hub in Hub mode; applies when the agent is created).
     - `-d, --detached`: Run in detached mode (default true).
     - `--config <path>`: Path to inline agent config file (YAML/JSON) for Just-In-Time (JIT) overrides, or `-` for stdin.
+    - `--task-file <path>`: Read the task from a file, or `-` for stdin, up to 96 KiB. See [Long tasks and task files](#long-tasks-and-task-files).
     - `--harness-config <string>`: Named harness configuration to use.
     - `--thinking-level <value>`: Thinking level to inject into the agent config: an integer from 0 to 100, or a case-insensitive shorthand: `low` (25), `medium` (50), `high` (75), `max` (100). The level is stored as an integer; each harness maps it to its own tiers (see [Thinking Level Map](/scion/reference/harness-settings/#thinking-level-map-thinking)).
     - `--harness-auth <string>`: Override auth method for the harness. Universal types: `api-key`, `oauth-token`, `vertex-ai`, `auth-file` (each harness accepts a subset — see [Harness Authentication](/scion/local/agent-credentials/)).
@@ -152,6 +153,35 @@ until the agent is deleted with force=true or purged; until then, use a new
 name. With `--format json`, `--attach` after a workspace upload attaches
 without printing the JSON result.
 
+#### Long tasks and task files
+
+`--task-file <path>` on `scion start` and `scion create` reads the task from a
+file (`-` reads stdin). Use it for long briefs that are too big for a command
+line or a message. Any `[task]` arguments come first, followed by a blank line
+and then the file. The file must be UTF-8 text and not empty or whitespace
+only. The whole task, arguments included, can be at most 96 KiB (98304 bytes).
+The CLI checks this before it contacts the Hub, and anything larger is
+rejected. The Hub forwards the create request to the runtime broker as JSON in
+a control channel message of at most 1 MiB. Even a task made only of characters
+that JSON escapes to six bytes, such as `<`, `>` and `&`, fits in that message
+with room for the rest of the request. The task goes in the create request like
+any other task. The Hub stores it with the agent, so this works for agents a
+Hub runs on any runtime, including Kubernetes agents without access to a
+storage bucket. It also works when an agent launches another agent: the agent's
+CLI reads the file from the agent's own filesystem.
+
+Whenever an agent starts with a task, from arguments, `--task-file` or
+`prompt.md`, the full text is written to `~/.scion/task.md` in the agent's home
+directory (mode 0644). Each start that has a task replaces that file; a
+symbolic link at that path is replaced, never written through, and the start
+fails if `~/.scion` is a symbolic link. The task starts the harness inside a
+tmux command, and tmux rejects commands larger than about 16 KB. The harness
+gets a task inline, as before, when it takes at most 8 KiB (8192 bytes) in that
+command once quoted for the shell. Each single quote (`'`) takes 13 bytes
+there, so a task with many quotes is passed as a file at a smaller size. A
+larger task is replaced by a short task that names `~/.scion/task.md` and its
+size and asks the agent to read the whole file.
+
 ### `scion create`
 
 Provisions a new agent without starting it. Scion writes the agent's
@@ -182,6 +212,7 @@ failed start.
     - `-b, --branch <string>`: Git branch to use for the agent workspace.
     - `-w, --workspace <string>`: Host path or project-relative subdirectory to mount as `/workspace`.
     - `--config <path>`: Path to inline agent config file (YAML/JSON), or `-` for stdin.
+    - `--task-file <path>`: Read the task from a file, or `-` for stdin, up to 96 KiB. See [Long tasks and task files](#long-tasks-and-task-files).
     - `--harness-config <string>` (alias `--harness`): Named harness configuration to use.
     - `--harness-auth <string>`: Override auth method for the harness (`api-key`, `oauth-token`, `auth-file`, `vertex-ai`).
     - `--broker <string>`: Preferred runtime broker ID or name.
@@ -264,7 +295,8 @@ If the agent is stopped, the attach ends immediately rather than waiting and ret
 - **Key Bindings:**
     - `Ctrl-b`, then `d`: Detach from the session without stopping the agent (the tmux detach key; see [Interactive Sessions with Tmux](/scion/local/tmux/)). The container runtime's default `Ctrl-p Ctrl-q` detach sequence is not used, so `Ctrl-p` reaches the agent. Podman's detach keys are off. Docker's are moved to `Ctrl-\` then `Ctrl-^`: a single `Ctrl-\` is delayed until the next key, and the full sequence ends the attach while the agent keeps running (see [Interactive Sessions with Tmux](/scion/local/tmux/#basic-operations)).
 - **Requires a terminal:** `scion attach`, `scion start --attach` and `scion resume --attach` need an interactive terminal on both stdin and stdout. Without one (for example from a script or a coding harness) they fail at once with `attach requires an interactive terminal` and a non-zero exit, before starting anything. Use `scion look` to view a session and `scion message` to send input instead.
-- **Not running:** if the Hub reports the agent as not running, `scion attach` names the next step for the agent's phase: `scion resume <agent> --attach` for a stopped or suspended agent, waiting and then resuming for a stopping agent, `scion logs <agent>` and then resuming for an agent in the `error` phase, and `scion start <agent> --attach` for anything else. An agent whose runtime doesn't support attach gets that error first, whatever its phase.
+- **Not running:** if the Hub reports the agent as not running, `scion attach` names the next step for the agent's phase: `scion resume <agent> --attach` for a stopped or suspended agent, waiting and then resuming for a stopping agent, `scion logs <agent>` and then resuming for an agent in the `error` phase, and `scion start <agent> --attach` for anything else. A managed agent is refused before the phase check, whatever its phase; any other agent gets the Hub preflight (below) once it is running.
+- **Preflight:** in Hub mode `scion attach` first asks the Hub whether it can reach the agent's terminal (a plain `GET` of the agent's `/pty` endpoint). The Hub picks the path: the Runtime Broker, or the agent's own session when the broker's runtime has no attach. A `503` ends the command with the Hub's reason and is not retried; when the Hub has no path at all (`runtime_attach_unsupported`), the message says so. `scion start --attach` and `scion resume --attach` use the same preflight.
 - **Reconnect:** in Hub mode `scion attach` reconnects by itself, once per close, when the session closes with `4503` (after a random delay of up to 5 seconds) or `4504` or `1011` (after the normal backoff), and the screen redraws. It stops after 3 reconnects in a row whose sessions each ended within a minute, and Ctrl-C during the wait stops it. It does not reconnect after any other close. When the session ends for any other reason than a detach, a reconnect fails, or the CLI stops reconnecting after 3 short sessions in a row, the command exits non-zero with a message that says what happened and what to run next, based on the [PTY close code](/scion/reference/api/#pty-close-codes). For example, a dropped runtime broker (`4503`) whose reconnect also failed suggests running `scion attach` again, and an ended session (`4410`) suggests `scion resume`. `scion start --attach` and `scion resume --attach` use the same attach flow and print the same messages.
 - **Hub URL with a path prefix:** a Hub served under a path (for example `https://example.com/scion`) works for attach as it does for other commands.
 
@@ -612,10 +644,25 @@ To reincarnate another principal's agent you must be able to delegate the agent'
 keeps its existing delegator unless you change its role with `--role`; then you become its recorded
 delegator (refused with `403` if you descend from the agent, since that would close a delegation
 loop). If you are an agent, the agent then depends on your delegation chain, so prefer a user for role
-changes on long-lived agents. An agent whose delegator was changed by an earlier reincarnation by
-another agent (for example, one that now gets `403` when creating agents) is not repaired by this rule;
-recreate it. Two role changes by a signed-in user (for example to `baseline` and back) also re-point
-its edge to that user, but recreating is recommended. A caller who cannot delegate the role, for
+changes on long-lived agents.
+
+One exception repairs agents left without recorded provenance, for example after a hub upgrade. When
+a user reincarnates an agent without changing its role, and the agent's own delegation edge is
+missing or has no recorded provenance, or an edge further up its chain has no recorded provenance
+and every edge between it and the agent is accepted on this hub, the user becomes the agent's
+recorded delegator. This clears the
+`ceiling_unrecorded` denial, which blocks service-account assignment among other actions. The
+**Reincarnate** button in the web UI does the same. A reincarnation by the agent itself or by another
+agent keeps the edge, and so does a user's reincarnation of an agent whose chain is fully recorded,
+or whose first problem walking up from the agent is an edge this hub does not accept (for example
+one recorded with local development credentials on a hub without dev auth); recreate such an agent.
+An agent whose chain has a missing ancestor edge or a loop is suspended, and a reincarnation of it is
+refused with `409`.
+
+An agent whose delegator was changed by an earlier reincarnation by another agent (for example, one
+that now gets `403` when creating agents) is not repaired by this rule, because its chain is
+recorded; recreate it. Two role changes by a signed-in user (for example to `baseline` and back) also
+re-point its edge to that user, but recreating is recommended. A caller who cannot delegate the role, for
 example a non-admin reincarnating an agent with a privileged role, gets `403` from this authority
 check. It runs before the workspace and capability checks (`400`, `412`), so expect the `403` first.
 

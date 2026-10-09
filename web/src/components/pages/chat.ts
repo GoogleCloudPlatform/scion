@@ -60,7 +60,7 @@ import { TouchPrimaryController } from '../../utils/input-modality.js';
 import { isMacTextFieldCtrlKey } from '../shared/text-field-keys.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
 import { blurElement, focusElement } from '../shared/focus-moved.js';
-import type { GroupState, PaletteGroup, PaletteTarget } from '../../client/chat-palette-types.js';
+import type { GroupState, PaletteGroup, PaletteTarget } from '../../client/palette-types.js';
 import {
   AGENTS_IDLE_TIMEOUT_MS,
   ChatPaletteDataController,

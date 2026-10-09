@@ -113,7 +113,7 @@ function hubSnapshot(agents: Agent[], version = 1): AgentListSnapshot {
 }
 
 function row(id: string, projectId: string): Agent {
-  return { id, name: id, projectId, template: '', phase: 'running' } as Agent;
+  return { id, name: id, projectId, template: '', phase: 'running' };
 }
 
 /** An agent DM thread opened and loaded (history, then its follow-up reads). */

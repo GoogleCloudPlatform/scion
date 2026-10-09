@@ -17,6 +17,7 @@ package telemetry
 import (
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestNewAggregator_ProjectIDEnvPrecedence(t *testing.T) {
@@ -501,5 +502,63 @@ func TestAggregator_RepeatedSessionStartEmptyIDResets(t *testing.T) {
 	}
 	if len(summary.ToolCalls) != 0 {
 		t.Errorf("ToolCalls = %v, want none", summary.ToolCalls)
+	}
+}
+
+// A session whose harness supplies no ID is finalized under the fallback
+// ID derived from the agent ID and the session's start time, so the Hub
+// accepts its report. A restored copy of the same state finalizes to the
+// same ID.
+func TestAggregator_EmptySessionIDUsesFallback(t *testing.T) {
+	a := newTestAggregator()
+	a.StartSession("")
+	a.RecordTurn()
+	st := a.State()
+
+	summary := a.Finalize(0, 0, 0, 0, "")
+	want := FallbackSessionID("agent-1", summary.StartedAt)
+	if summary.SessionID == "" || summary.SessionID != want {
+		t.Errorf("SessionID = %q, want %q", summary.SessionID, want)
+	}
+
+	restored := newTestAggregator()
+	restored.RestoreState(st)
+	if got := restored.Finalize(0, 0, 0, 0, "").SessionID; got != want {
+		t.Errorf("restored SessionID = %q, want %q", got, want)
+	}
+}
+
+// The fallback is applied only at Finalize: a harness-supplied ID, even one
+// that first arrives after the session opened without one, is kept.
+func TestAggregator_SuppliedSessionIDKeptOverFallback(t *testing.T) {
+	a := newTestAggregator()
+	a.StartSession("")
+	if st := a.State(); st.SessionID != "" {
+		t.Fatalf("open session ID = %q, want empty", st.SessionID)
+	}
+	a.ObserveSession("harness-session-1")
+	if got := a.Finalize(0, 0, 0, 0, "").SessionID; got != "harness-session-1" {
+		t.Errorf("SessionID = %q, want harness-session-1", got)
+	}
+
+	a.StartSession("harness-session-2")
+	if got := a.Finalize(0, 0, 0, 0, "").SessionID; got != "harness-session-2" {
+		t.Errorf("SessionID = %q, want harness-session-2", got)
+	}
+}
+
+func TestFallbackSessionID(t *testing.T) {
+	at := time.Date(2026, 1, 2, 3, 4, 5, 6, time.UTC)
+	if got, want := FallbackSessionID("agent-1", at), FallbackSessionID("agent-1", at.Local()); got != want || got == "" {
+		t.Errorf("not stable across time zones: %q vs %q", got, want)
+	}
+	if FallbackSessionID("agent-1", at) == FallbackSessionID("agent-1", at.Add(time.Nanosecond)) {
+		t.Error("different start times share an ID")
+	}
+	if FallbackSessionID("agent-1", at) == FallbackSessionID("agent-2", at) {
+		t.Error("different agents share an ID")
+	}
+	if FallbackSessionID("", at) == "" {
+		t.Error("empty fallback without an agent ID")
 	}
 }
