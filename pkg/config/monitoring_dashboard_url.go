@@ -28,14 +28,16 @@ import (
 const MonitoringDashboardURLKey = "server.hub.monitoring_dashboard_url"
 
 // MonitoringDashboardURLMaxLength is the longest accepted
-// server.hub.monitoring_dashboard_url, in bytes. It matches the maxLength
-// of the key in settings-v1.schema.json.
+// server.hub.monitoring_dashboard_url, in characters (Unicode code points,
+// as JSON Schema maxLength counts them). It matches the maxLength of the
+// key in settings-v1.schema.json, and web/src/utils/http-url.ts counts the
+// same way.
 const MonitoringDashboardURLMaxLength = 2048
 
 // ValidateMonitoringDashboardURL reports whether raw is an acceptable
 // server.hub.monitoring_dashboard_url: "" (unset), or an absolute http or
 // https URL with a host, no user credentials, and at most
-// MonitoringDashboardURLMaxLength bytes, that contains no whitespace (any
+// MonitoringDashboardURLMaxLength characters, that contains no whitespace (any
 // Unicode White_Space, e.g. U+00A0, U+2028, U+2029), no control character
 // (C0, DEL or C1, e.g. U+0085), no bidirectional formatting character
 // (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069), no
@@ -55,7 +57,7 @@ func ValidateMonitoringDashboardURL(raw string) error {
 	if raw == "" {
 		return nil
 	}
-	if len(raw) > MonitoringDashboardURLMaxLength {
+	if utf8.RuneCountInString(raw) > MonitoringDashboardURLMaxLength {
 		return fmt.Errorf("%s: must be at most %d characters", MonitoringDashboardURLKey, MonitoringDashboardURLMaxLength)
 	}
 	if !utf8.ValidString(raw) {

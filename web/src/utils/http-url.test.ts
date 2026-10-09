@@ -15,7 +15,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { isHttpUrl } from './http-url.js';
+import { HTTP_URL_MAX_LENGTH, isHttpUrl } from './http-url.js';
 
 describe('isHttpUrl', () => {
   it.each([
@@ -79,5 +79,27 @@ describe('isHttpUrl', () => {
   it('rejects non-strings', () => {
     expect(isHttpUrl(undefined)).toBe(false);
     expect(isHttpUrl(null)).toBe(false);
+  });
+  describe('length limit (code points, as the hub counts)', () => {
+    const prefix = 'https://dash.example.com/';
+    const fill = (ch: string, n: number) => prefix + ch.repeat(n);
+
+    it('accepts an ASCII URL at the limit and rejects one over it', () => {
+      expect(isHttpUrl(fill('a', HTTP_URL_MAX_LENGTH - prefix.length))).toBe(true);
+      expect(isHttpUrl(fill('a', HTTP_URL_MAX_LENGTH - prefix.length + 1))).toBe(false);
+    });
+
+    it('accepts a multi-byte URL at the limit and rejects one over it', () => {
+      const atLimit = fill('\u00e9', HTTP_URL_MAX_LENGTH - prefix.length);
+      expect(isHttpUrl(atLimit)).toBe(true);
+      expect(isHttpUrl(atLimit + '\u00e9')).toBe(false);
+    });
+
+    it('counts an astral character as one code point, not two UTF-16 units', () => {
+      const atLimit = fill('\u{1f600}', HTTP_URL_MAX_LENGTH - prefix.length);
+      expect(atLimit.length).toBeGreaterThan(HTTP_URL_MAX_LENGTH);
+      expect(isHttpUrl(atLimit)).toBe(true);
+      expect(isHttpUrl(atLimit + '\u{1f600}')).toBe(false);
+    });
   });
 });

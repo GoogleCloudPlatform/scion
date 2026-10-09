@@ -22,6 +22,8 @@ import (
 func TestValidateMonitoringDashboardURL(t *testing.T) {
 	long := "https://dash.example.com/" + strings.Repeat("a", MonitoringDashboardURLMaxLength)
 	atLimit := "https://dash.example.com/" + strings.Repeat("a", MonitoringDashboardURLMaxLength-len("https://dash.example.com/"))
+	// 2048 characters but more than 2048 bytes: the limit counts characters.
+	multiAtLimit := "https://dash.example.com/" + strings.Repeat("\u00e9", MonitoringDashboardURLMaxLength-len("https://dash.example.com/"))
 	cases := []struct {
 		name  string
 		value string
@@ -79,6 +81,8 @@ func TestValidateMonitoringDashboardURL(t *testing.T) {
 		{"IDN host", "https://b\u00fccher.example/d", true},
 		{"non-ASCII letters allowed", "https://dash.example.com/d/caf\u00e9", true},
 		{"too long", long, false},
+		{"multi-byte at max length", multiAtLimit, true},
+		{"multi-byte over max length", multiAtLimit + "\u00e9", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

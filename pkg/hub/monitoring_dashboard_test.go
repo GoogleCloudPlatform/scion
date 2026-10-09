@@ -188,6 +188,35 @@ func TestMonitoringDashboardURL_BootstrapAppliesAndIsKept(t *testing.T) {
 	assert.Equal(t, testDashboardURL, srv.monitoringDashboardURL())
 }
 
+// The length limit counts characters, as the schema's maxLength does: a
+// multi-byte URL of exactly MonitoringDashboardURLMaxLength characters
+// saves through the API (passing the section schema too), one more does not.
+func TestMonitoringDashboardURL_LengthCountsCharacters(t *testing.T) {
+	prefix := "https://dash.example.com/"
+	atLimit := prefix + strings.Repeat("\u00e9", config.MonitoringDashboardURLMaxLength-len(prefix))
+	require.Greater(t, len(atLimit), config.MonitoringDashboardURLMaxLength, "more bytes than the limit")
+
+	srv, fakeStore, ops := newMonitoringDBServer(t)
+	body, err := json.Marshal(map[string]interface{}{"server": map[string]interface{}{"hub": map[string]interface{}{
+		"monitoring_dashboard_url": atLimit,
+	}}})
+	require.NoError(t, err)
+	rr := putMonitoringConfig(t, srv, ops, string(body))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	got, _ := storedMonitoringURL(t, fakeStore)
+	assert.Equal(t, atLimit, got)
+
+	body, err = json.Marshal(map[string]interface{}{"server": map[string]interface{}{"hub": map[string]interface{}{
+		"monitoring_dashboard_url": atLimit + "\u00e9",
+	}}})
+	require.NoError(t, err)
+	rr = putMonitoringConfig(t, srv, ops, string(body))
+	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), config.MonitoringDashboardURLKey)
+	got, _ = storedMonitoringURL(t, fakeStore)
+	assert.Equal(t, atLimit, got, "the over-long value is not written")
+}
+
 // Invalid UTF-8 in the request body reaches the validator as U+FFFD
 // (json.Unmarshal replaces it) and is rejected with the structured 422.
 func TestMonitoringDashboardURL_InvalidUTF8BodyRejected(t *testing.T) {

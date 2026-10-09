@@ -28,13 +28,22 @@ const DISALLOWED =
 
 /**
  * Whether value is an absolute http:// or https:// URL with a host and no
- * user credentials, whose port (if any) is 1 to 65535. Used to decide
+ * user credentials, whose port (if any) is 1 to 65535, at most
+ * HTTP_URL_MAX_LENGTH characters long. Used to decide
  * whether an operator-configured link is rendered at all; the hub
  * validates the same rule when the setting is saved, so this is a second
  * check on the display side.
  */
+/**
+ * Longest accepted URL in characters (Unicode code points), as the hub's
+ * MonitoringDashboardURLMaxLength and the settings schema's maxLength.
+ */
+export const HTTP_URL_MAX_LENGTH = 2048;
+
 export function isHttpUrl(value: string | null | undefined): value is string {
   if (typeof value !== 'string' || value === '' || DISALLOWED.test(value)) return false;
+  // Count code points, not UTF-16 units, so the limit matches the hub's.
+  if (Array.from(value).length > HTTP_URL_MAX_LENGTH) return false;
   let u: URL;
   try {
     u = new URL(value);
