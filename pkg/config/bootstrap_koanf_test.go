@@ -781,3 +781,42 @@ func TestSameDir_FollowsSymlinks(t *testing.T) {
 		t.Errorf("sameDir should fall back to cleaned absolute paths for missing paths")
 	}
 }
+
+// In legacy mode (no server key in any settings.yaml), a --config file
+// inside the global dir is layered over the global server.yaml by
+// LoadGlobalConfig, so bootstrap must layer it too, whether the path names
+// the global dir directly or through a symlink (ptone/scion#3070).
+func TestLoadBootstrapKoanfWithConfigPath_LegacyFileInGlobalDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	scionDir := filepath.Join(tmpDir, ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scionDir, "server.yaml"), []byte("hub:\n  port: 1111\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scionDir, "custom.yaml"), []byte("hub:\n  port: 2222\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(tmpDir, "scion-link")
+	paths := []string{filepath.Join(scionDir, "custom.yaml")}
+	if err := os.Symlink(scionDir, link); err == nil {
+		paths = append(paths, filepath.Join(link, "custom.yaml"))
+	} else {
+		t.Logf("symlinks unavailable, skipping the symlinked spelling: %v", err)
+	}
+
+	for _, path := range paths {
+		gc, err := LoadGlobalConfig(path)
+		if err != nil {
+			t.Fatalf("LoadGlobalConfig(%q): %v", path, err)
+		}
+		if gc.Hub.Port != 2222 {
+			t.Errorf("LoadGlobalConfig(%q): hub.port = %d, want 2222", path, gc.Hub.Port)
+		}
+		if got := LoadBootstrapKoanfWithConfigPath(path).Int("hub.port"); got != gc.Hub.Port {
+			t.Errorf("LoadBootstrapKoanfWithConfigPath(%q): hub.port = %d, LoadGlobalConfig = %d; want them to agree", path, got, gc.Hub.Port)
+		}
+	}
+}

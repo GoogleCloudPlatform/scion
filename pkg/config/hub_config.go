@@ -1079,7 +1079,7 @@ func loadGlobalConfigFromSettings(configPath string) (*GlobalConfig, bool) {
 	if hasServerYAML(globalDir) {
 		fmt.Fprintf(os.Stderr, "Warning: Both settings.yaml (server key) and server.yaml exist in %s. Using settings.yaml. server.yaml is deprecated; move its contents under the server key in settings.yaml and remove it (ptone/scion#3116).\n", globalDir)
 	}
-	if dir := src.configDir; dir != "" && dir != globalDir && hasServerYAML(dir) {
+	if dir := src.configDir; dir != "" && (globalDir == "" || !sameDir(dir, globalDir)) && hasServerYAML(dir) {
 		fmt.Fprintf(os.Stderr, "Warning: Both settings.yaml (server key) and server.yaml exist in %s. Using settings.yaml. server.yaml is deprecated.\n", dir)
 	}
 
@@ -1196,13 +1196,12 @@ func LegacyServerConfigSources(configPath string) []string {
 // settingsHierarchySources, a resolved path already seen (e.g. configPath, or
 // the cwd it defaults to, is the global dir itself) is not listed twice.
 func serverConfigSources(configPath string) []string {
-	seen := make(map[string]struct{}, 2)
 	add := func(out []string, path string) []string {
-		clean := filepath.Clean(path)
-		if _, ok := seen[clean]; ok {
-			return out
+		for _, seen := range out {
+			if sameDir(seen, path) {
+				return out
+			}
 		}
-		seen[clean] = struct{}{}
 		return append(out, path)
 	}
 
@@ -1867,27 +1866,33 @@ func LoadBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
 //     server.yaml, or the named file itself, as loadGlobalConfigLegacy
 //     layers it over the global server.yaml.
 //
-// A --config location equal to globalDir (already loaded) adds nothing.
+// When the --config directory is globalDir (sameDir, so symlinked spellings
+// count), its directory-level files are already loaded and are skipped; a
+// named legacy file inside it is still layered, as loadGlobalConfigLegacy
+// does.
 func loadConfigPathFiles(k *koanf.Koanf, src serverSettingsSource, globalDir string) {
-	if src.configDir == "" || (globalDir != "" && sameDir(src.configDir, globalDir)) {
+	if src.configDir == "" {
 		return
 	}
+	dirIsGlobal := globalDir != "" && sameDir(src.configDir, globalDir)
 	loadSettings := func() {
 		if _, err := loadSettingsFile(k, src.configDir); err != nil {
 			slog.Warn("LoadBootstrapKoanf: failed to load settings file", "dir", src.configDir, "error", err)
 		}
 	}
 	if !src.legacy {
-		if src.settingsDir == src.configDir {
+		if !dirIsGlobal && src.settingsDir == src.configDir {
 			loadSettings()
 		}
 		return
 	}
-	if src.settingsDir == src.configDir {
+	if !dirIsGlobal && src.settingsDir == src.configDir {
 		loadSettings()
 	}
 	if src.configFile == "" {
-		loadServerConfigFile(k, src.configDir)
+		if !dirIsGlobal {
+			loadServerConfigFile(k, src.configDir)
+		}
 		return
 	}
 	switch filepath.Base(src.configFile) {
@@ -1908,9 +1913,9 @@ func configSettingsWin(src serverSettingsSource, globalDir string) bool {
 		(globalDir == "" || !sameDir(src.configDir, globalDir))
 }
 
-// sameDir reports whether a and b name the same directory: the same file
-// per os.SameFile when both exist (so a symlinked path matches its target),
-// else the same cleaned absolute path.
+// sameDir reports whether a and b name the same directory (or file): the
+// same file per os.SameFile when both exist (so a symlinked path matches its
+// target), else the same cleaned absolute path.
 func sameDir(a, b string) bool {
 	if fiA, errA := os.Stat(a); errA == nil {
 		if fiB, errB := os.Stat(b); errB == nil {
