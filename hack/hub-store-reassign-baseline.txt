@@ -8,8 +8,9 @@
 # When a change migrates call sites, lower the count (or delete the entry)
 # in the same change, or the gate fails as stale.
 #
-# store_fault_helpers_test.go is the fault-switch helper itself: its single
-# assignment installs the wrapper before setup runs.
+# store_fault_helpers_test.go is the fault-switch helper itself. Its count
+# of 2 is the one real assignment (installing the wrapper before setup runs)
+# plus a t.Fatalf message string that the textual match also counts.
 #
 pkg/hub/agent_compact_view_test.go | 2
 pkg/hub/agent_create_chain_ceiling_test.go | 2

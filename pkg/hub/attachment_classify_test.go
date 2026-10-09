@@ -742,8 +742,10 @@ func TestAttachmentUpload_InternalFailureBatchStatus(t *testing.T) {
 		return files
 	}
 	allTen := map[string]bool{}
+	allTenFailed := map[string]string{}
 	for _, f := range tenFiles() {
 		allTen[f.name] = true
+		allTenFailed[f.name] = "upload failed"
 	}
 
 	cases := []struct {
@@ -770,10 +772,10 @@ func TestAttachmentUpload_InternalFailureBatchStatus(t *testing.T) {
 			failNames:    allTen,
 			wantStatus:   http.StatusInternalServerError,
 			wantStored:   0,
-			wantFailures: nil, // filled below: every file, "upload failed"
+			wantFailures: allTenFailed,
 		},
 		{
-			name:       "internal failure beats caller rejections when nothing is stored",
+			name:       "internal failure beats a later caller rejection when nothing is stored",
 			files:      []uploadFile{logFile("boom.log"), rejected},
 			failNames:  map[string]bool{"boom.log": true},
 			wantStatus: http.StatusInternalServerError,
@@ -781,6 +783,17 @@ func TestAttachmentUpload_InternalFailureBatchStatus(t *testing.T) {
 			wantFailures: map[string]string{
 				"boom.log": "upload failed",
 				"bad.exe":  "dangerous file extension: .exe",
+			},
+		},
+		{
+			name:       "internal failure beats an earlier caller rejection when nothing is stored",
+			files:      []uploadFile{rejected, logFile("boom.log")},
+			failNames:  map[string]bool{"boom.log": true},
+			wantStatus: http.StatusInternalServerError,
+			wantStored: 0,
+			wantFailures: map[string]string{
+				"bad.exe":  "dangerous file extension: .exe",
+				"boom.log": "upload failed",
 			},
 		},
 		{
@@ -809,14 +822,6 @@ func TestAttachmentUpload_InternalFailureBatchStatus(t *testing.T) {
 				failNames:    tc.failNames,
 			})
 
-			wantFailures := tc.wantFailures
-			if wantFailures == nil && tc.wantStatus == http.StatusInternalServerError {
-				wantFailures = map[string]string{}
-				for name := range tc.failNames {
-					wantFailures[name] = "upload failed"
-				}
-			}
-
 			rec := uploadAttachments(t, srv, tc.files)
 			if rec.Code != tc.wantStatus {
 				t.Fatalf("status = %d, want %d: %s", rec.Code, tc.wantStatus, rec.Body.String())
@@ -825,11 +830,11 @@ func TestAttachmentUpload_InternalFailureBatchStatus(t *testing.T) {
 			if len(resp.Attachments) != tc.wantStored {
 				t.Fatalf("stored %d files, want %d: %s", len(resp.Attachments), tc.wantStored, rec.Body.String())
 			}
-			if len(resp.Failures) != len(wantFailures) {
-				t.Fatalf("failures = %+v, want %d entries", resp.Failures, len(wantFailures))
+			if len(resp.Failures) != len(tc.wantFailures) {
+				t.Fatalf("failures = %+v, want %d entries", resp.Failures, len(tc.wantFailures))
 			}
 			for _, f := range resp.Failures {
-				want, ok := wantFailures[f.Name]
+				want, ok := tc.wantFailures[f.Name]
 				if !ok {
 					t.Errorf("unexpected failure entry for %q: %q", f.Name, f.Error)
 					continue

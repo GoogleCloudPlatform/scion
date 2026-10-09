@@ -22,7 +22,10 @@
 # Comment lines are ignored. LIMITATIONS: the check is textual and
 # line-oriented. It does not see a reassignment through a differently named
 # variable (e.g. `x := srv; x.store = ...`) or a multi-value assignment
-# (`srv.store, y = ...`).
+# (`srv.store, y = ...`). Matches inside string literals are counted too
+# (e.g. a t.Fatalf message that quotes `srv.store = ...`). Counts are per
+# file, so a change that removes one site and adds another in the same file
+# passes.
 #
 # Severity: FORMATTING-GRADE (test hygiene)
 #   Missing rg:          exit 3 (nothing analysed; see hack/lib/require-tool.sh)
@@ -83,9 +86,23 @@ scan() {
     | sort >"$actual"
 
   # Baseline: "<file> | <count>", '#' comments and blank lines ignored.
-  awk -F'|' '/^[[:space:]]*(#|$)/ { next }
-             { f = $1; c = $2; gsub(/[[:space:]]/, "", f); gsub(/[[:space:]]/, "", c); print f " " c }' \
-    "$baseline" | sort >"$expected"
+  # A line that is not exactly "<file> | <number>" is a parse error, reported
+  # as such (failing closed) rather than as a count mismatch.
+  local parsed="$work/parsed"
+  if ! awk -F'|' '{ sub(/\r$/, "") }
+             /^[[:space:]]*(#|$)/ { next }
+             { f = $1; c = $2; gsub(/[[:space:]]/, "", f); gsub(/[[:space:]]/, "", c)
+               if (NF != 2 || f == "" || c !~ /^[0-9]+$/) {
+                 printf "%s: baseline parse error at line %d: want \"<file> | <count>\", got: %s\n", name, NR, $0 > "/dev/stderr"
+                 bad = 1; next
+               }
+               print f " " c }
+             END { exit bad }' name="$name" \
+    "$baseline" >"$parsed"; then
+    echo "Fix the malformed line(s) in $baseline." >&2
+    return 1
+  fi
+  sort "$parsed" >"$expected"
 
   local over under
   over="$(join -a1 -e0 -o '0,1.2,2.2' "$actual" "$expected" | awk '$2 > $3 { print "  " $1 ": " $2 " (baseline " $3 ")" }')"
@@ -113,7 +130,7 @@ scan() {
 }
 
 self_test() {
-  local dir="$work/fixture" failed=0 rc
+  local dir="$work/fixture" failed=0 rc out
   mkdir -p "$dir/pkg/hub"
 
   cat >"$dir/pkg/hub/a_test.go" <<'EOF'
@@ -158,6 +175,17 @@ EOF
   rc=0; scan "$dir" "$dir/baseline" fixture 2>/dev/null || rc=$?
   [[ $rc -eq 0 ]] || { echo "self-test FAIL: updated baseline: rc=$rc (want 0)" >&2; failed=1; }
 
+  printf 'pkg/hub/a_test.go 4\npkg/hub/b_test.go | 1\n' >"$dir/baseline"
+  rc=0; out="$(scan "$dir" "$dir/baseline" fixture 2>&1)" || rc=$?
+  [[ $rc -eq 1 && "$out" == *"baseline parse error at line 1"* && "$out" != *"new direct"* ]] ||
+    { echo "self-test FAIL: malformed baseline: rc=$rc (want 1 with a parse error)" >&2; failed=1; }
+
+  printf 'pkg/hub/a_test.go | 4\npkg/hub/b_test.go | one\n' >"$dir/baseline"
+  rc=0; out="$(scan "$dir" "$dir/baseline" fixture 2>&1)" || rc=$?
+  [[ $rc -eq 1 && "$out" == *"baseline parse error at line 2"* ]] ||
+    { echo "self-test FAIL: non-numeric count: rc=$rc (want 1 with a parse error)" >&2; failed=1; }
+
+  printf 'pkg/hub/a_test.go | 4\npkg/hub/b_test.go | 1\n' >"$dir/baseline"
   rc=0; scan "$dir/missing" "$dir/baseline" fixture 2>/dev/null || rc=$?
   [[ $rc -eq 4 ]] || { echo "self-test FAIL: missing root: rc=$rc (want 4)" >&2; failed=1; }
 

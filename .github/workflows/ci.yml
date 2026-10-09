@@ -216,8 +216,14 @@ jobs:
 
       - name: Check Hub Store Reassignment Guard
         run: |
-          ./hack/check-hub-store-reassign.sh --self-test
           set +e
+          ./hack/check-hub-store-reassign.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=Hub store reassignment NOT checked::check-hub-store-reassign --self-test failed (exit $rc) — the guard itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
           ./hack/check-hub-store-reassign.sh
           rc=$?
           set -e
