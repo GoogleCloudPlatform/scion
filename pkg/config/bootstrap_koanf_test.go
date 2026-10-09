@@ -753,3 +753,31 @@ func TestApplyTopLevelSettingsSections_ReadsListedKeys(t *testing.T) {
 		t.Errorf("applyTopLevelSettingsSections dropped a listed key: %+v", gc)
 	}
 }
+
+// sameDir treats a symlink to a directory as that directory, so a --config
+// path that reaches the global dir through a symlink is not layered twice.
+func TestSameDir_FollowsSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real")
+	if err := os.MkdirAll(real, 0755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	other := filepath.Join(dir, "other")
+	if err := os.MkdirAll(other, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if !sameDir(link, real) {
+		t.Errorf("sameDir(%q, %q) = false, want true", link, real)
+	}
+	if sameDir(other, real) {
+		t.Errorf("sameDir(%q, %q) = true, want false", other, real)
+	}
+	// Neither path exists: fall back to comparing cleaned absolute paths.
+	if missing := dir + "/missing"; !sameDir(missing, dir+"/sub/../missing") {
+		t.Errorf("sameDir should fall back to cleaned absolute paths for missing paths")
+	}
+}

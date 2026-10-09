@@ -1908,9 +1908,15 @@ func configSettingsWin(src serverSettingsSource, globalDir string) bool {
 		(globalDir == "" || !sameDir(src.configDir, globalDir))
 }
 
-// sameDir reports whether a and b name the same directory after cleaning
-// and resolving to absolute paths.
+// sameDir reports whether a and b name the same directory: the same file
+// per os.SameFile when both exist (so a symlinked path matches its target),
+// else the same cleaned absolute path.
 func sameDir(a, b string) bool {
+	if fiA, errA := os.Stat(a); errA == nil {
+		if fiB, errB := os.Stat(b); errB == nil {
+			return os.SameFile(fiA, fiB)
+		}
+	}
 	absA, errA := filepath.Abs(a)
 	absB, errB := filepath.Abs(b)
 	if errA != nil || errB != nil {
