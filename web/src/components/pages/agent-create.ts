@@ -55,6 +55,15 @@ import type { EnvEntry } from '../shared/env-editor.js';
 import '../shared/env-editor.js';
 import '../shared/status-badge.js';
 
+/** GCP Identity hint while no mode is chosen and no applied default is the outcome. */
+const NO_IDENTITY_MODE_HINT =
+  "No mode chosen: the server applies this project's per-profile or project default, " +
+  'then the hub-wide default, then the runtime default.';
+
+/** Appended to an applied project default's hint while no profile is selected. */
+const PROFILE_DEFAULT_PRECEDENCE_HINT =
+  'A per-profile default for the chosen profile, if set, takes precedence.';
+
 @customElement('scion-page-agent-create')
 export class ScionPageAgentCreate extends LitElement {
   // ── Data from API ───────────────────────────────────────────────────
@@ -196,6 +205,15 @@ export class ScionPageAgentCreate extends LitElement {
    * displayed mode is then only this page's placeholder, not the outcome.
    */
   @state() private projectGCPIdentityDefaultApplied = false;
+  /**
+   * This project's per-profile GCP identity defaults (profile name to
+   * service account ID), or {} when none. Set in loadGCPServiceAccounts. On
+   * the server a per-profile default outranks the project default, so when
+   * the explicitly selected profile has an entry the applied project default
+   * is not the outcome (see projectDefaultIsOutcome). The server's profile
+   * resolution for an empty profile selection is not replicated here.
+   */
+  @state() private projectGCPIdentityProfileDefaults: Record<string, string> = {};
 
   // ── Additional Options > Prompts Tab ────────────────────────────────
   @state() private systemPrompt = '';
@@ -231,6 +249,7 @@ export class ScionPageAgentCreate extends LitElement {
       defaultMaxDuration?: string;
       defaultGCPIdentityMode?: string;
       defaultGCPIdentityServiceAccountID?: string;
+      defaultGCPIdentityServiceAccountIDByProfile?: Record<string, string>;
       defaultModel?: string;
     }
   > = new Map();
@@ -272,46 +291,62 @@ export class ScionPageAgentCreate extends LitElement {
     return (
       this.targetRuntimeIsKubernetesOnly &&
       this.projectGCPIdentityDefaultMode === 'block' &&
+      !this.selectedProfileHasProjectDefault &&
       !this.gcpIdentityUserSet
     );
   }
 
   /**
-   * True when the user has not chosen a GCP identity mode and no project
-   * default was applied to the display (projectGCPIdentityDefaultApplied),
-   * on any target runtime. The request then omits gcp_identity, and the
-   * hint reads: "No mode chosen: the server applies this project's per-profile or project default, then the hub-wide default, then the runtime default." The page cannot show that outcome, so the picker
-   * renders blank instead of this page's own placeholder. That also makes
-   * any pick, including the placeholder's value, a real sl-change that sets
-   * gcpIdentityUserSet. Unlike blockDefaultNeedsExplicitChoice this does not
-   * block submit: creating with nothing chosen is allowed.
+   * True when the explicitly selected profile has a per-profile GCP identity
+   * default in this project, which the server applies ahead of the project
+   * default. False with no profile selected.
+   */
+  private get selectedProfileHasProjectDefault(): boolean {
+    return !!this.profile && !!this.projectGCPIdentityProfileDefaults[this.profile];
+  }
+
+  /**
+   * True when the applied project default is what the server resolves for
+   * an untouched picker: a default was applied to the display and the
+   * explicitly selected profile has no per-profile default outranking it.
+   */
+  private get projectDefaultIsOutcome(): boolean {
+    return this.projectGCPIdentityDefaultApplied && !this.selectedProfileHasProjectDefault;
+  }
+
+  /**
+   * True when the user has not chosen a GCP identity mode and the applied
+   * project default, if any, is not the outcome (projectDefaultIsOutcome),
+   * on any target runtime. The request then omits gcp_identity and the hint
+   * names the server precedence (NO_IDENTITY_MODE_HINT). The page cannot
+   * show that outcome, so the picker renders blank instead of a placeholder
+   * or an outranked default. That also makes any pick, including the
+   * internal mode's value, a real sl-change that sets gcpIdentityUserSet.
+   * Unlike blockDefaultNeedsExplicitChoice this does not block submit:
+   * creating with nothing chosen is allowed.
    */
   private get noIdentityModeChosen(): boolean {
-    return !this.gcpIdentityUserSet && !this.projectGCPIdentityDefaultApplied;
+    return !this.gcpIdentityUserSet && !this.projectDefaultIsOutcome;
   }
 
   /**
    * The Kubernetes-specific portion of the GCP Identity hint, naming the
    * actual effective identity rather than overclaiming the broker's own
-   * default applies — that is only true when nothing is configured at any
-   * level. Four cases:
-   *  - the user explicitly picked a mode here: just name that Block isn't an
-   *    option, no further explanation needed;
+   * default applies. Three cases:
+   *  - the user explicitly picked a mode here, or no applied project default
+   *    is the outcome (noIdentityModeChosen; NO_IDENTITY_MODE_HINT already
+   *    names the server precedence): just name that Block isn't an option;
    *  - untouched, and this project's own default is itself "block": there is
    *    no identity that is safe to leave unset here (see
    *    blockDefaultNeedsExplicitChoice), so say that creation is blocked
    *    until an explicit choice is made, and name Assign Service Account
    *    only when the project actually has a service account to offer;
-   *  - untouched, but this project has some other default GCP identity
-   *    configured: omitting gcp_identity resolves to *that* default, not to
-   *    Kubernetes' own default — say so;
-   *  - untouched, and this project has no default: the create request omits
-   *    gcp_identity, and what resolves depends on the hub-wide default (which
-   *    this page has no visibility into) or, if nothing is configured
-   *    anywhere, Kubernetes' own default (passthrough, Phase 1).
+   *  - untouched, with some other project default applied: omitting
+   *    gcp_identity resolves to *that* default, not to Kubernetes' own
+   *    default — say so.
    */
   private get kubernetesIdentityHintSuffix(): string {
-    if (this.gcpIdentityUserSet) {
+    if (this.gcpIdentityUserSet || this.noIdentityModeChosen) {
       return 'Block is not available for a Kubernetes runtime target.';
     }
     if (this.projectGCPIdentityDefaultMode === 'block') {
@@ -321,18 +356,10 @@ export class ScionPageAgentCreate extends LitElement {
         (this.verifiedGCPServiceAccounts.length > 0 ? ' or Assign Service Account.' : '.')
       );
     }
-    if (this.projectGCPIdentityDefaultMode) {
-      return (
-        'Block is not available for a Kubernetes runtime target. No explicit identity has been ' +
-        "chosen here, so this project's own default GCP identity applies instead; choosing " +
-        'Passthrough or Assign here sends that choice explicitly instead of the project default.'
-      );
-    }
     return (
       'Block is not available for a Kubernetes runtime target. No explicit identity has been ' +
-      'chosen, and this project has no default configured, so the hub-wide default — or, if ' +
-      "none is configured there either, Kubernetes' own default — applies automatically; " +
-      'choosing Passthrough or Assign here sends that choice explicitly instead.'
+      "chosen here, so this project's own default GCP identity applies instead; choosing " +
+      'Passthrough or Assign here sends that choice explicitly instead of the project default.'
     );
   }
 
@@ -1057,6 +1084,7 @@ export class ScionPageAgentCreate extends LitElement {
     this.gcpUserBlockSuspended = false;
     this.projectGCPIdentityDefaultMode = '';
     this.projectGCPIdentityDefaultApplied = false;
+    this.projectGCPIdentityProfileDefaults = {};
 
     if (projectId) {
       let accounts: GCPServiceAccount[] = [];
@@ -1083,6 +1111,8 @@ export class ScionPageAgentCreate extends LitElement {
       // must never overwrite a user choice.
       const settings = await this.fetchProjectSettings(projectId);
       if (isStale()) return;
+      this.projectGCPIdentityProfileDefaults =
+        settings?.defaultGCPIdentityServiceAccountIDByProfile ?? {};
       if (settings?.defaultGCPIdentityMode) {
         this.projectGCPIdentityDefaultMode = settings.defaultGCPIdentityMode;
         const mode = settings.defaultGCPIdentityMode as 'block' | 'passthrough' | 'assign';
@@ -1120,6 +1150,7 @@ export class ScionPageAgentCreate extends LitElement {
     defaultMaxDuration?: string;
     defaultGCPIdentityMode?: string;
     defaultGCPIdentityServiceAccountID?: string;
+    defaultGCPIdentityServiceAccountIDByProfile?: Record<string, string>;
     defaultModel?: string;
   } | null> {
     if (!projectId) return null;
@@ -1138,6 +1169,7 @@ export class ScionPageAgentCreate extends LitElement {
           defaultMaxDuration?: string;
           defaultGCPIdentityMode?: string;
           defaultGCPIdentityServiceAccountID?: string;
+          defaultGCPIdentityServiceAccountIDByProfile?: Record<string, string>;
           defaultModel?: string;
         };
         this.projectSettingsCache.set(projectId, data);
@@ -2115,18 +2147,21 @@ export class ScionPageAgentCreate extends LitElement {
           ${this.blockDefaultNeedsExplicitChoice
             ? 'No GCP identity is selected yet.'
             : this.noIdentityModeChosen
-              ? "No mode chosen: the server applies this project's per-profile or project default, then the hub-wide default, then the runtime default."
+              ? NO_IDENTITY_MODE_HINT
               : this.gcpMetadataMode === 'block'
                 ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
                 : this.gcpMetadataMode === 'assign'
                   ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
                   : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership."}
+          ${!this.gcpIdentityUserSet && this.projectDefaultIsOutcome && !this.profile
+            ? ` ${PROFILE_DEFAULT_PRECEDENCE_HINT}`
+            : ''}
           ${this.targetRuntimeIsKubernetesOnly ? ` ${this.kubernetesIdentityHintSuffix}` : ''}
         </div>
       </div>
 
-      <!-- GCP Service Account (conditional) -->
-      ${this.gcpMetadataMode === 'assign'
+      <!-- GCP Service Account (conditional; hidden while the picker is blank) -->
+      ${this.gcpMetadataMode === 'assign' && !this.noIdentityModeChosen
         ? html`
             <div class="form-field">
               <label>Service Account</label>

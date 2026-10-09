@@ -56,6 +56,8 @@ interface CreatePrivate extends HTMLElement {
 let projectDefaultMode = '';
 /** The account an assign project default names; 'sa-a' is the verified one. */
 let projectDefaultAccount = 'sa-a';
+/** The project's per-profile defaults (profile name to account ID). */
+let projectProfileDefaults: Record<string, string> = {};
 let hubTelemetry = false;
 let bodies: Array<Record<string, unknown>> = [];
 
@@ -96,14 +98,15 @@ function stubFetch(): void {
       } else if (url.includes('/api/v1/projects?')) {
         body = { projects: [{ id: 'p1', name: 'P1' }] };
       } else if (url.includes('/api/v1/projects/p1/settings')) {
-        body = !projectDefaultMode
-          ? {}
-          : projectDefaultMode === 'assign'
-            ? {
-                defaultGCPIdentityMode: 'assign',
-                defaultGCPIdentityServiceAccountID: projectDefaultAccount,
-              }
-            : { defaultGCPIdentityMode: projectDefaultMode };
+        const settings: Record<string, unknown> = {};
+        if (projectDefaultMode) settings.defaultGCPIdentityMode = projectDefaultMode;
+        if (projectDefaultMode === 'assign') {
+          settings.defaultGCPIdentityServiceAccountID = projectDefaultAccount;
+        }
+        if (Object.keys(projectProfileDefaults).length > 0) {
+          settings.defaultGCPIdentityServiceAccountIDByProfile = projectProfileDefaults;
+        }
+        body = settings;
       } else if (url.includes('/gcp-service-accounts')) {
         body = { items: [verifiedServiceAccount] };
       }
@@ -121,6 +124,7 @@ afterEach(() => {
   document.body.innerHTML = '';
   projectDefaultMode = '';
   projectDefaultAccount = 'sa-a';
+  projectProfileDefaults = {};
   hubTelemetry = false;
 });
 
@@ -151,6 +155,8 @@ interface TargetFixture {
   brokers: BrokerFixture[];
   brokerId: string;
   profile: string;
+  /** Whether the form treats the selection as Kubernetes-only. */
+  kubernetesOnly: boolean;
 }
 
 function singleTypeTarget(type: string): TargetFixture {
@@ -166,6 +172,7 @@ function singleTypeTarget(type: string): TargetFixture {
     ],
     brokerId: `broker-${type}`,
     profile: '',
+    kubernetesOnly: type === 'kubernetes',
   };
 }
 
@@ -187,6 +194,7 @@ function mixedTarget(profile: string): TargetFixture {
     ],
     brokerId: 'broker-mixed',
     profile,
+    kubernetesOnly: profile === 'k8s',
   };
 }
 
@@ -195,9 +203,31 @@ const noBrokerTarget: TargetFixture = {
   brokers: [],
   brokerId: '',
   profile: '',
+  kubernetesOnly: false,
 };
 const dockerTarget = singleTypeTarget('docker');
 const k8sTarget = singleTypeTarget('kubernetes');
+
+/** A broker with two docker profiles, so a profile can be chosen explicitly. */
+function twoProfileDockerTarget(profile: string): TargetFixture {
+  return {
+    label: profile ? `a docker broker with profile ${profile} chosen` : 'a docker broker',
+    brokers: [
+      {
+        id: 'broker-two',
+        name: 'two-profile-broker',
+        status: 'online',
+        profiles: [
+          { name: 'small', type: 'docker', available: true },
+          { name: 'large', type: 'docker', available: true },
+        ],
+      },
+    ],
+    brokerId: 'broker-two',
+    profile,
+    kubernetesOnly: false,
+  };
+}
 
 /** The target runtime selections the omission must hold for. */
 const targets: TargetFixture[] = [
@@ -277,6 +307,21 @@ describe('Create Agent: gcp_identity is sent only when the user chose it', () =>
     }
   }
 
+  // A block project default is left out of the matrix above on
+  // Kubernetes-only targets, where blockDefaultNeedsExplicitChoice stops
+  // submit until the user picks a mode.
+  for (const t of targets.filter((x) => !x.kubernetesOnly)) {
+    it(`omits gcp_identity when untouched, on ${t.label} (project default: block)`, async () => {
+      projectDefaultMode = 'block';
+      const c = await mount();
+      await selectTarget(c, t);
+      expect(c.gcpIdentityUserSet).toBe(false);
+
+      const body = await submit(c);
+      expect(body).not.toHaveProperty('gcp_identity');
+    });
+  }
+
   it('does not count an applied project default as a user choice', async () => {
     projectDefaultMode = 'passthrough';
     const c = await mount();
@@ -307,16 +352,76 @@ describe('Create Agent: gcp_identity is sent only when the user chose it', () =>
   const noModeHint =
     "No mode chosen: the server applies this project's per-profile or project default, " +
     'then the hub-wide default, then the runtime default.';
+  const blockUnavailable = 'Block is not available for a Kubernetes runtime target.';
+  const profilePrecedence =
+    'A per-profile default for the chosen profile, if set, takes precedence.';
 
   for (const t of targets) {
     it(`shows the same no-mode hint with no project default, on ${t.label}`, async () => {
       const c = await mount();
       await selectTarget(c, t);
-      // Kubernetes-only targets append their own suffix after it.
-      expect(gcpIdentityHint(c).startsWith(noModeHint)).toBe(true);
-      expect(gcpIdentityHint(c)).not.toContain('Prevents the agent');
+      // Kubernetes-only targets append only that Block is not offered.
+      expect(gcpIdentityHint(c)).toBe(
+        t.kubernetesOnly ? `${noModeHint} ${blockUnavailable}` : noModeHint
+      );
     });
   }
+
+  // A per-profile default for an explicitly selected profile outranks the
+  // project default on the server, so the applied project default is not
+  // the outcome: blank picker, no-mode hint.
+  it('treats the project default as not applied when the chosen profile has a per-profile default', async () => {
+    projectDefaultMode = 'passthrough';
+    projectProfileDefaults = { large: 'sa-a' };
+    const c = await mount();
+    await selectTarget(c, twoProfileDockerTarget('large'));
+    expect(gcpIdentitySelect(c).value).toBe('');
+    expect(gcpIdentityHint(c)).toBe(noModeHint);
+
+    expect(await submit(c)).not.toHaveProperty('gcp_identity');
+
+    await chooseIdentity(c, 'passthrough');
+    expect((await submit(c)).gcp_identity).toEqual({ metadata_mode: 'passthrough' });
+  });
+
+  it('shows the applied project default when the chosen profile has no per-profile default', async () => {
+    projectDefaultMode = 'passthrough';
+    projectProfileDefaults = { large: 'sa-a' };
+    const c = await mount();
+    await selectTarget(c, twoProfileDockerTarget('small'));
+    expect(gcpIdentitySelect(c).value).toBe('passthrough');
+    expect(gcpIdentityHint(c)).not.toContain(profilePrecedence);
+  });
+
+  it('notes per-profile precedence on an applied project default while no profile is chosen', async () => {
+    projectDefaultMode = 'passthrough';
+    const c = await mount();
+    await selectTarget(c, twoProfileDockerTarget(''));
+    expect(gcpIdentitySelect(c).value).toBe('passthrough');
+    expect(gcpIdentityHint(c).endsWith(profilePrecedence)).toBe(true);
+  });
+
+  it('does not note per-profile precedence once the user picks a mode', async () => {
+    projectDefaultMode = 'passthrough';
+    const c = await mount();
+    await selectTarget(c, twoProfileDockerTarget(''));
+    await chooseIdentity(c, 'block');
+    expect(gcpIdentityHint(c)).not.toContain(profilePrecedence);
+  });
+
+  // The Kubernetes Block-default guard follows the same rule: with a
+  // per-profile default outranking the block project default, submit is
+  // allowed and omits gcp_identity.
+  it('does not require a pick for a block project default outranked by the chosen profile on a kubernetes target', async () => {
+    projectDefaultMode = 'block';
+    projectProfileDefaults = { k8s: 'sa-a' };
+    const c = await mount();
+    await selectTarget(c, mixedTarget('k8s'));
+    expect(gcpIdentitySelect(c).value).toBe('');
+    expect(gcpIdentityHint(c)).toBe(`${noModeHint} ${blockUnavailable}`);
+
+    expect(await submit(c)).not.toHaveProperty('gcp_identity');
+  });
 
   // Asserting the blank picker first is what pins the fix: under happy-dom
   // Shoelace is not registered, so sl-change fires even for an unchanged

@@ -56,6 +56,7 @@ interface AgentCreateInternals {
   defaultGcpMetadataMode: string;
   gcpServiceAccountId: string;
   gcpIdentityUserSet: boolean;
+  projectGCPIdentityDefaultApplied: boolean;
   gcpServiceAccounts: GCPServiceAccountFixture[];
   loadGCPServiceAccounts: () => Promise<void>;
 }
@@ -693,6 +694,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     await el.updateComplete;
 
     expect(page.gcpMetadataMode).toBe('passthrough');
+    expect((gcpIdentitySelect(el) as HTMLElement & { value: string }).value).toBe('passthrough');
 
     await page.handleSubmit(new Event('submit'));
     expect(bodies).toHaveLength(1);
@@ -728,6 +730,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     await el.updateComplete;
 
     expect(page.gcpMetadataMode).toBe('assign');
+    expect((gcpIdentitySelect(el) as HTMLElement & { value: string }).value).toBe('assign');
     expect(page.gcpServiceAccountId).toBe('sa-a');
 
     await page.handleSubmit(new Event('submit'));
@@ -1188,7 +1191,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     await el.updateComplete;
 
     expect(gcpIdentityHint(el)).not.toContain("This project's default GCP identity is Block");
-    expect(gcpIdentityHint(el)).toContain('this project has no default configured');
+    expect(gcpIdentityHint(el)).toContain('No mode chosen');
   });
 
   // defaultGcpMetadataMode and defaultGcpServiceAccountId must also be reset
@@ -1451,9 +1454,11 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     // Direct state writes in the test, not a user pick — defaultGcpMetadataMode
     // must agree with gcpMetadataMode or normalize corrects the mode back to
     // the (unset) default on the next render, same as it would for any other
-    // untouched mismatch.
+    // untouched mismatch. The applied flag models a project default of
+    // assign, without which the picker (and this select) would be blank.
     page.defaultGcpMetadataMode = 'assign';
     page.gcpMetadataMode = 'assign';
+    page.projectGCPIdentityDefaultApplied = true;
     page.gcpIdentityUserSet = false;
     await el.updateComplete;
 
