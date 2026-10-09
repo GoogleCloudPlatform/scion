@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -31,6 +32,11 @@ import (
 // error code or details into structured fields, so the CLI reads them back
 // out of the body.
 const brokerReturnedErrorMarker = "runtime broker returned error "
+
+// brokerCodePattern bounds a broker error code shown to the user. The code
+// comes from another machine's response body, so anything else (control
+// characters, other bytes, overlong values) is dropped rather than printed.
+var brokerCodePattern = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
 
 // brokerFailure is a runtime broker error recovered from a Hub response.
 type brokerFailure struct {
@@ -67,7 +73,9 @@ func parseBrokerFailure(err error) (apiErr *apiclient.APIError, bf brokerFailure
 		} `json:"error"`
 	}
 	if json.Unmarshal([]byte(strings.TrimSpace(body)), &parsed) == nil {
-		bf.Code = parsed.Error.Code
+		if brokerCodePattern.MatchString(parsed.Error.Code) {
+			bf.Code = parsed.Error.Code
+		}
 		bf.Details = parsed.Error.Details
 	}
 	return apiErr, bf, true
@@ -95,7 +103,7 @@ func brokerFailureCategory(bf brokerFailure) string {
 		}
 		return "the runtime broker could not prepare the agent's template"
 	case "runtime_error":
-		return "the runtime broker could not create or start the agent container (for example, an image pull or container runtime failure)"
+		return "the runtime broker's container runtime operation failed (for example, an image pull or container runtime failure)"
 	case "runtime_unavailable":
 		return "the container runtime is not available on the runtime broker; retry later"
 	case "hub_unreachable":

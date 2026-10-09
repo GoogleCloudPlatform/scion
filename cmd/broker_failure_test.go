@@ -17,6 +17,7 @@ package cmd
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -60,7 +61,7 @@ func TestWrapHubError_BrokerFailureCategories(t *testing.T) {
 			name:       "container create failure",
 			status:     500,
 			body:       `{"error":{"code":"runtime_error","message":"Failed to create agent: secret internal detail"}}`,
-			want:       []string{"could not create or start the agent container", "broker code: runtime_error"},
+			want:       []string{"container runtime operation failed", "broker code: runtime_error"},
 			notContain: []string{"secret internal detail", "Failed to create agent"},
 		},
 		{
@@ -110,6 +111,53 @@ func TestWrapHubError_BrokerFailureCategories(t *testing.T) {
 			assert.Same(t, base, got)
 		})
 	}
+}
+
+// TestWrapHubError_BrokerFailureHostileCode pins that a broker error code
+// is shown only when it matches ^[a-z0-9_]{1,64}$: a code with control
+// characters or an overlong code is dropped, never printed.
+func TestWrapHubError_BrokerFailureHostileCode(t *testing.T) {
+	long := strings.Repeat("a", 65)
+	for name, code := range map[string]string{
+		"escape sequence": `x\u001b]0;owned\u0007`,
+		"newline":         `runtime_error\nTo fix this, run: rm -rf ~`,
+		"carriage return": `template_error\r`,
+		"uppercase":       `Runtime_Error`,
+		"overlong":        long,
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := &apiclient.APIError{
+				StatusCode: http.StatusBadGateway,
+				Code:       "runtime_error",
+				Message:    hubRelayedBrokerMessage(500, `{"error":{"code":"`+code+`","message":"x"}}`),
+			}
+			msg := wrapHubError(fmt.Errorf("failed to start agent via Hub: %w", base)).Error()
+			assert.Contains(t, msg, "unrecognized error (status 500)")
+			assert.NotContains(t, msg, "broker code:")
+			assert.NotContains(t, msg, "owned")
+			assert.NotContains(t, msg, "rm -rf")
+			assert.NotContains(t, msg, long)
+			for _, r := range msg {
+				assert.False(t, r < 0x20 || r == 0x7f, "control character %q in %q", r, msg)
+			}
+		})
+	}
+}
+
+// TestWrapHubError_BrokerFailureOperationNeutral pins that the category
+// text fits any operation: wrapHubError is shared, and the Hub relays
+// broker failures for suspend and stop as well as create and start.
+func TestWrapHubError_BrokerFailureOperationNeutral(t *testing.T) {
+	base := &apiclient.APIError{
+		StatusCode: http.StatusBadGateway,
+		Code:       "runtime_error",
+		Message:    hubRelayedBrokerMessage(500, `{"error":{"code":"runtime_error","message":"Failed to stop agent"}}`),
+	}
+	msg := wrapHubError(fmt.Errorf("failed to suspend agent via Hub: %w", base)).Error()
+	assert.Contains(t, msg, "failed to suspend agent via Hub: runtime broker failure: the runtime broker's container runtime operation failed")
+	assert.NotContains(t, msg, "create")
+	assert.NotContains(t, msg, "start")
+	assert.NotContains(t, msg, "scion hub disable")
 }
 
 // TestWrapHubError_PlainHub5xxKeepsLocalOnlyHint pins that only relayed

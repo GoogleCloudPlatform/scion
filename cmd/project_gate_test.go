@@ -32,7 +32,7 @@ func TestHubAndBrokerCommandsRunOutsideProject(t *testing.T) {
 		hubAuthLoginCmd, hubAuthLogoutCmd,
 		hubStatusCmd, hubEnableCmd, hubDisableCmd,
 		brokerRegisterCmd, brokerDeregisterCmd, brokerStartCmd, brokerStopCmd,
-		brokerRestartCmd, brokerStatusCmd, brokerHubsCmd,
+		brokerRestartCmd, brokerStatusCmd, brokerHubsCmd, brokerJoinCmd,
 	}
 	for _, c := range cmds {
 		t.Run(c.CommandPath(), func(t *testing.T) {
@@ -111,6 +111,56 @@ func TestConfigSetGlobalOutsideProject(t *testing.T) {
 			assert.Contains(t, string(data), "registry.example.test/team")
 		})
 	}
+}
+
+// TestConfigSetExistingGlobalForms pins that forms that already worked
+// before the #3317 fix keep their behavior: -g global config set (with
+// and without the subcommand's --global) writes the global file, and
+// config set --global inside a project writes the global file and leaves
+// the project's settings untouched.
+func TestConfigSetExistingGlobalForms(t *testing.T) {
+	for name, args := range map[string][]string{
+		"-g global":          {"-g", "global", "config", "set", "image_registry", "registry.example.test/team"},
+		"-g global --global": {"-g", "global", "config", "set", "--global", "image_registry", "registry.example.test/team"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			setupNoProjectPreRun(t)
+			restoreAllSilenceUsage(t)
+			resetConfigSetFlags(t)
+
+			rootCmd.SetArgs(args)
+			require.NoError(t, rootCmd.Execute())
+
+			data, err := os.ReadFile(filepath.Join(os.Getenv("HOME"), ".scion", "settings.yaml"))
+			require.NoError(t, err)
+			assert.Contains(t, string(data), "registry.example.test/team")
+		})
+	}
+
+	t.Run("--global inside a project", func(t *testing.T) {
+		setupNoProjectPreRun(t)
+		restoreAllSilenceUsage(t)
+		resetConfigSetFlags(t)
+
+		wd, err := os.Getwd()
+		require.NoError(t, err)
+		projectDir := filepath.Join(wd, ".scion")
+		require.NoError(t, os.MkdirAll(projectDir, 0o755))
+		projectSettings := filepath.Join(projectDir, "settings.yaml")
+		const projectContent = "schema_version: \"1\"\n"
+		require.NoError(t, os.WriteFile(projectSettings, []byte(projectContent), 0o644))
+
+		rootCmd.SetArgs([]string{"config", "set", "--global", "image_registry", "registry.example.test/team"})
+		require.NoError(t, rootCmd.Execute())
+
+		data, err := os.ReadFile(filepath.Join(os.Getenv("HOME"), ".scion", "settings.yaml"))
+		require.NoError(t, err)
+		assert.Contains(t, string(data), "registry.example.test/team")
+
+		got, err := os.ReadFile(projectSettings)
+		require.NoError(t, err)
+		assert.Equal(t, projectContent, string(got), "project settings must be untouched")
+	})
 }
 
 // TestConfigSetLocalOutsideProjectStillFails pins that only --global lifts

@@ -30,7 +30,8 @@ var hubUserLevelCommands = map[string]bool{
 }
 
 // brokerMachineLevelCommands are "scion runtime-broker" subcommands that act
-// on this machine's broker process or its hub registration. "provide" and
+// on this machine's broker process or its hub registration (join only sends
+// a join token and adds the broker to no project). "provide" and
 // "withdraw" are left out: they act on a project.
 var brokerMachineLevelCommands = map[string]bool{
 	"register":   true,
@@ -40,6 +41,7 @@ var brokerMachineLevelCommands = map[string]bool{
 	"restart":    true,
 	"status":     true,
 	"hubs":       true,
+	"join":       true,
 }
 
 // commandRequiresProject reports whether cmd needs an active scion project

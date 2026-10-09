@@ -487,6 +487,9 @@ func TestBrokerStartDaemon_FailureKeepsExistingRecord(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			_, globalDir := brokerTestHome(t)
+			// Pass the pre-fork image_registry check so the daemon start
+			// itself is what fails.
+			t.Setenv("SCION_IMAGE_REGISTRY", "registry.example.test/team")
 			live := buildBrokerDaemonArgs(19866, false, false)
 			require.NoError(t, daemon.SaveArgs(brokerDaemonComponent, globalDir, live))
 
@@ -503,6 +506,30 @@ func TestBrokerStartDaemon_FailureKeepsExistingRecord(t *testing.T) {
 			assert.Equal(t, live, got)
 		})
 	}
+}
+
+// TestBrokerStartDaemon_RegistryCheckedBeforeFork: without image_registry,
+// daemon-mode start fails with the actionable registry error before it
+// forks, instead of "daemon failed to start. Check log at ...".
+func TestBrokerStartDaemon_RegistryCheckedBeforeFork(t *testing.T) {
+	brokerTestHome(t)
+	for _, k := range []string{"SCION_IMAGE_REGISTRY", "SCION_MAINTENANCE_IMAGE_REGISTRY"} {
+		t.Setenv(k, "")
+	}
+	savedStart, savedDelay, savedFG := startBrokerDaemon, brokerStartVerifyDelay, brokerStartForeground
+	t.Cleanup(func() {
+		startBrokerDaemon, brokerStartVerifyDelay, brokerStartForeground = savedStart, savedDelay, savedFG
+	})
+	forked := false
+	startBrokerDaemon = func(string, []string, string) error { forked = true; return nil }
+	brokerStartVerifyDelay, brokerStartForeground = 0, false
+	setBrokerFlagForTest(t, brokerStartCmd, "port", strconv.Itoa(unusedPort(t)))
+
+	var err error
+	captureStdout(t, func() { err = runBrokerStart(brokerStartCmd, nil) })
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "image_registry is not configured")
+	assert.False(t, forked, "the daemon must not be started without an image registry")
 }
 
 func TestBrokerStartPortHelpHasOneDefault(t *testing.T) {
