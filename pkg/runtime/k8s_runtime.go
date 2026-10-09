@@ -2400,13 +2400,6 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		envVars = append(envVars, corev1.EnvVar{Name: "SCION_WORKSPACE_PATH", Value: NFSWorktreeContainerPath(config.NFSWorktreeName)})
 	}
 
-	// Env vars are assembled above from several sources (harness env, config.Env,
-	// resolved auth, resolved secrets) that can legitimately overlap in name
-	// (e.g. SCION_AGENT_NAME, GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_REGION).
-	// De-duplicate, collapsing each name to its last occurrence in place
-	// (except the $(NAME) case described in dedupeEnvVars), so every
-	// $(VAR) reference in a retained entry resolves to the same value as
-	// before de-duplication.
 	// Resolve the container's resource requests/limits from the resolved
 	// spec and kubernetes.resources. Default requests fill only resources
 	// with neither a request nor a limit (see buildK8sResourceRequirements).
@@ -2422,9 +2415,16 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	}
 
 	// GOMAXPROCS/GOMEMLIMIT from the container limits, added last and only
-	// for names no other source has set (see goRuntimeEnvFromLimits).
+	// for names no other source has set (see appendGoRuntimeEnvFromLimits).
 	envVars = appendGoRuntimeEnvFromLimits(envVars, containerResources.Limits)
 
+	// Env vars are assembled above from several sources (harness env, config.Env,
+	// resolved auth, resolved secrets) that can legitimately overlap in name
+	// (e.g. SCION_AGENT_NAME, GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_REGION).
+	// De-duplicate, collapsing each name to its last occurrence in place
+	// (except the $(NAME) case described in dedupeEnvVars), so every
+	// $(VAR) reference in a retained entry resolves to the same value as
+	// before de-duplication.
 	envVars = dedupeEnvVars(envVars)
 
 	// Security context: run agent pods as the image's non-root scion user.
