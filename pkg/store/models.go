@@ -3758,22 +3758,6 @@ type DecisionAuditRecord struct {
 	DeniedBy string
 }
 
-// DecisionAuditFilter defines query parameters for listing decision audit records.
-type DecisionAuditFilter struct {
-	PrincipalID   string
-	PrincipalKind string
-	CredentialID  string
-	Route         string
-	ResourceType  string
-	ResourceID    string
-	Result        string // "allow" or "deny"
-	Since         time.Time
-	Until         time.Time
-	CorrelationID string
-	Limit         int
-	Offset        int
-}
-
 // =============================================================================
 // Mutation Audit (Authorization Mutation Audit Phase 1I)
 // =============================================================================
