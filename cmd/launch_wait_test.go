@@ -1402,6 +1402,27 @@ func TestFinishHubStart_FinalizeAgentLauncherCannotReadStatus(t *testing.T) {
 			require.NoError(t, err, "an accepted start whose status cannot be read exits 0")
 			assert.Greater(t, hub.getsAfterCR, 1, "the read is retried within the grace")
 		})
+		t.Run(name+"/json", func(t *testing.T) {
+			t.Setenv("SCION_AGENT_ID", "agent-launcher")
+			hub := &launchMockHub{t: t, created: true, afterCreate: []interface{}{http.StatusNotFound}}
+			hubCtx := setupLaunchStartTest(t, hub)
+			outputFormat = "json"
+			var err error
+			var stdout string
+			_ = captureStderr(t, func() {
+				stdout = captureStdout(t, func() {
+					err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, false, finalizeCreateResponse(launch), nil, true)
+				})
+			})
+			require.NoError(t, err)
+			var result ActionResult
+			require.NoError(t, json.Unmarshal([]byte(stdout), &result), "stdout must be a single JSON document: %q", stdout)
+			assert.Equal(t, "success", result.Status)
+			assert.Contains(t, result.Details["launchNote"], "status is not readable")
+			assert.NotContains(t, result.Details, "launchId", "the create answer's launch is not the finalize's")
+			assert.NotContains(t, result.Details, "launchDeadline")
+			assert.NotContains(t, result.Details, "phase")
+		})
 	}
 }
 
