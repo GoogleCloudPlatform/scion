@@ -81,9 +81,10 @@ import (
 // Each dropped key is named by path ("<section>.<key>", never its value)
 // in a warning. A key the body sends is never dropped: if its value is
 // invalid, the write's validation rejects the save as before. In a
-// deep-merge section the same holds inside a merged object: a carried
-// nested key whose value fails the schema is dropped
-// ("<section>.<key>.<nested key>"), a sent one is not.
+// deep-merge section the check reaches nested keys, in merged and carried
+// objects alike: only the carried nested key whose value fails is dropped
+// ("<section>.<key>.<nested key>"), not the object holding it; a sent
+// nested key is never dropped.
 //
 // Only keys the section models (sectionKeyKoanfPath) are
 // applied, so request-only members (for example the GitHub App secrets,
@@ -145,11 +146,12 @@ func mergeSectionOnCurrent(ctx context.Context, ops *OperationalSettings, sectio
 			"section", section, "keys", dropped)
 	}
 	validate := func(doc json.RawMessage) bool { return len(opsettings.Validate(section, doc)) == 0 }
-	dropped := dropInvalidCarriedKeys(section, schema, base, tree.keys(), validate)
+	var dropped []string
 	if deepMergeSections[section] {
-		dropped = append(dropped, dropInvalidCarriedNestedKeys(section, base, tree, validate)...)
-		sort.Strings(dropped)
+		dropped = dropInvalidCarriedNestedKeys(section, base, tree, validate)
 	}
+	dropped = append(dropped, dropInvalidCarriedKeys(section, schema, base, tree.keys(), validate)...)
+	sort.Strings(dropped)
 	if len(dropped) > 0 {
 		slog.Warn("admin settings save: removing stored keys whose value fails the section schema (takes effect only if the save is written)",
 			"section", section, "keys", dropped)
@@ -321,19 +323,27 @@ func sectionModelType(section string) reflect.Type {
 }
 
 // dropInvalidCarriedNestedKeys is dropInvalidCarriedKeys inside the
-// objects a deep-merge section merged key by key (tree): within each,
-// nested keys the body did not send whose value fails the section schema
-// are removed. It returns their paths ("<section>.<key>.<nested key>"),
-// sorted. Each carried key is checked on its own, as a document holding
-// only that key inside its parent objects.
+// objects of a deep-merge section: nested keys the body did not send whose
+// value fails the section schema are removed, so one bad stored leaf (for
+// example telemetry.cloud.batch.max_size) costs only that leaf, not the
+// object holding it. It walks both the objects the body merged key by key
+// (tree) and the stored objects the body left out. It returns the removed
+// paths ("<section>.<key>.<nested key>"), sorted. Each carried key is
+// checked on its own, as a document holding only that key inside its
+// parent objects. Top-level keys are left to dropInvalidCarriedKeys, which
+// runs after this.
 func dropInvalidCarriedNestedKeys(section string, doc map[string]json.RawMessage, tree sentTree, validate func(json.RawMessage) bool) []string {
 	if whole, err := json.Marshal(doc); err != nil || validate(whole) {
 		return nil
 	}
 	var dropped []string
-	for key, sub := range tree {
+	for key := range doc {
+		sub, sent := tree[key]
+		if sent && sub == nil {
+			continue // applied whole as sent; the write's validation decides
+		}
 		if sub == nil {
-			continue
+			sub = sentTree{}
 		}
 		dropped = append(dropped, dropInvalidCarriedIn(section, doc, []string{key}, sub, validate)...)
 	}
@@ -343,7 +353,9 @@ func dropInvalidCarriedNestedKeys(section string, doc map[string]json.RawMessage
 
 // dropInvalidCarriedIn checks the object at path (relative to the section
 // document) inside parent, whose last element names it, for
-// dropInvalidCarriedNestedKeys.
+// dropInvalidCarriedNestedKeys. sent holds the keys the body sent inside
+// it. A carried key whose value fails is first checked key by key when it
+// is an object itself; it is removed whole only if it still fails.
 func dropInvalidCarriedIn(section string, parent map[string]json.RawMessage, path []string, sent sentTree, validate func(json.RawMessage) bool) []string {
 	key := path[len(path)-1]
 	v, ok := parent[key]
@@ -358,19 +370,26 @@ func dropInvalidCarriedIn(section string, parent map[string]json.RawMessage, pat
 		return nil
 	}
 	var dropped []string
-	for k, cv := range obj {
+	for k := range obj {
 		sub, wasSent := sent[k]
-		switch {
-		case sub != nil:
-			dropped = append(dropped, dropInvalidCarriedIn(section, obj, append(append([]string{}, path...), k), sub, validate)...)
-		case wasSent:
-		default:
-			if validate(wrapAtPath(path, map[string]json.RawMessage{k: cv})) {
-				continue
-			}
-			delete(obj, k)
-			dropped = append(dropped, section+"."+strings.Join(path, ".")+"."+k)
+		childPath := append(append([]string{}, path...), k)
+		if sub != nil {
+			dropped = append(dropped, dropInvalidCarriedIn(section, obj, childPath, sub, validate)...)
+			continue
 		}
+		if wasSent {
+			continue
+		}
+		if validate(wrapAtPath(path, map[string]json.RawMessage{k: obj[k]})) {
+			continue
+		}
+		inner := dropInvalidCarriedIn(section, obj, childPath, sentTree{}, validate)
+		if _, ok := obj[k]; ok && validate(wrapAtPath(path, map[string]json.RawMessage{k: obj[k]})) {
+			dropped = append(dropped, inner...)
+			continue
+		}
+		delete(obj, k)
+		dropped = append(dropped, section+"."+strings.Join(childPath, "."))
 	}
 	if b, err := json.Marshal(obj); err == nil {
 		parent[key] = b
