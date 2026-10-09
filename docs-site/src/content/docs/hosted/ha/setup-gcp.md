@@ -1363,6 +1363,11 @@ When redeploying the Hub with a new image:
 
 ### 7b. Secret Name Migration
 
+:::note
+This path has not been run against a live hub; it was checked against the code and
+`gcloud --help` only.
+:::
+
 Run `scion hub secret migrate-names` against a hub deployed with this guide from a
 one-off Cloud Run job, as described in §9 of
 [`docs/deploy/migrate-names-cloudrun.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/migrate-names-cloudrun.md#9-hubs-deployed-with-the-deploy-on-gcp-guide-public-ip-cloud-sql).

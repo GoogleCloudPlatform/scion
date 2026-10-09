@@ -700,6 +700,10 @@ runbook doesn't cover:
 
 ## 9. Hubs deployed with the Deploy on GCP guide (public-IP Cloud SQL)
 
+> **Not tested against a live hub.** This path has not been run against a live
+> hub; it was checked against the code and `gcloud --help` only. Run pass 1 (dry
+> run) and confirm the `Using hub ID` line before any non-dry pass.
+
 This section covers a Cloud Run hub deployed as the manual
 [Deploy on GCP](https://scion-ai.dev/scion/hosted/ha/setup-gcp/) guide describes:
 the hub service is created with `gcloud run deploy` (guide §3d), connects to a
@@ -778,10 +782,39 @@ the job reads whatever version is current when each execution starts. Do not add
 new version to the settings secret while the job exists. If you must, delete the job
 (§6) and restart from §9.2.
 
+Running hub instances also resolve `latest` only when each instance starts. A
+settings version added after the serving revision was created, without a hub
+redeploy, means the job would read different settings from the ones the live hub may
+be using. The settings version check below catches this.
+
 **Revision and image.** Run the `REVISION` / `ROLLOUT_OK_JQ` block and the
 `REV_JSON` / `IMG` lines from §2 exactly as written, including its `STOP` check. The
 reasoning there (pin the job to the serving revision's image digest, and stop on an
 unfinished rollout or a traffic tag) applies unchanged.
+
+**Settings version check.** When `SETTINGS_VERSION` is `latest`, compare the
+creation time of the newest settings secret version with the creation time of the
+serving revision. This reads metadata only: it does not access, read or print the
+secret's contents.
+
+```bash
+SECRET_CREATED=$(gcloud secrets versions list "$SETTINGS_SECRET" --project "$PROJECT" \
+  --sort-by=~createTime --limit=1 --format='value(createTime)')
+REV_CREATED=$(echo "$REV_JSON" | jq -r '.metadata.creationTimestamp')
+printf 'newest settings version created: %s\nserving revision created:        %s\n' "$SECRET_CREATED" "$REV_CREATED"
+if [ -z "$SECRET_CREATED" ] || [ -z "$REV_CREATED" ] || [ "$REV_CREATED" = null ]; then
+  echo "STOP: could not read one of the timestamps" >&2
+elif [ "$(date -d "$SECRET_CREATED" +%s)" -gt "$(date -d "$REV_CREATED" +%s)" ]; then
+  echo "STOP: the newest settings secret version is newer than the serving revision" >&2
+fi
+```
+
+If this prints `STOP`, do not create the job. Either redeploy the hub so that a new
+revision picks up the current settings version (guide §7a), or find out why the newer
+version exists. Then restart from §9.2. Run this check again immediately before
+pass 1 if time has passed since §9.2. If `SETTINGS_VERSION` is a pinned version
+number rather than `latest`, the job and the hub read the same version and this
+check is not needed. `date -d` is GNU `date`; on macOS use `gdate` from coreutils.
 
 **Check before you continue.** None of these values is a secret:
 
