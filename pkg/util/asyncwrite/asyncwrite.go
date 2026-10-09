@@ -162,8 +162,9 @@ func (r Result) IsRejection() bool {
 }
 
 // Recorder optionally mirrors writer outcomes into an external metrics
-// system. Implementations must be cheap and non-blocking: Record may be
-// called from a request goroutine, the worker, or a timer callback.
+// system. Implementations must be cheap, non-blocking and must not panic:
+// Record is called unrecovered from request goroutines, the worker and timer
+// callback goroutines, where a panic would crash the process.
 type Recorder interface {
 	Record(writer string, result Result)
 }
@@ -245,9 +246,11 @@ func (c Config) validate() error {
 	return nil
 }
 
-// Stats holds in-process counters. They are always present, whether or not
-// a Recorder is attached, and Health reads them.
-type Stats struct {
+// stats holds the in-process counters. They are always present, whether or
+// not a Recorder is attached; Health reads them and Snapshot copies them.
+// They are deliberately not exported so no caller can corrupt the
+// conservation counters.
+type stats struct {
 	// Enqueued counts admitted items only.
 	Enqueued atomic.Uint64
 	// Terminal outcomes of admitted items.
@@ -267,10 +270,6 @@ type Stats struct {
 	// recent failure, stored with a monotonic max. Zero means none.
 	LastFailureUnixNano atomic.Int64
 }
-
-// Stats returns the writer's live counters. Callers must treat them as
-// read-only.
-func (w *Writer[T]) Stats() *Stats { return &w.stats }
 
 // Snapshot is a plain copy of the counters plus queue state.
 type Snapshot struct {
@@ -341,8 +340,8 @@ type entry[T any] struct {
 // Writer is a bounded, non-blocking FIFO drained by one worker.
 type Writer[T any] struct {
 	cfg   Config
-	write func(T) error
-	stats Stats
+	write func(context.Context, T) error
+	stats stats
 
 	recorder atomic.Pointer[recorderBox]
 
@@ -377,12 +376,17 @@ type recorderBox struct{ r Recorder }
 
 // New creates a Writer and starts its single worker goroutine. write is
 // called sequentially from that goroutine; it must not call back into the
-// Writer.
-func New[T any](cfg Config, write func(T) error) (*Writer[T], error) {
+// Writer. Each call receives a fresh context derived from
+// context.Background() with the WriteBudget as its deadline, so cooperative
+// writers can stop at the budget. No producer context is ever retained or
+// passed. The per-write timer and its CAS remain the sole source of truth for
+// the timeout outcome: a write that returns a context error after its timer
+// claimed it is a late return, and one that returns it before is an error.
+func New[T any](cfg Config, write func(context.Context, T) error) (*Writer[T], error) {
 	return newWriter(cfg, write, testHooks{})
 }
 
-func newWriter[T any](cfg Config, write func(T) error, hooks testHooks) (*Writer[T], error) {
+func newWriter[T any](cfg Config, write func(context.Context, T) error, hooks testHooks) (*Writer[T], error) {
 	if write == nil {
 		return nil, errors.New("asyncwrite: write function is required")
 	}
@@ -457,7 +461,11 @@ func (w *Writer[T]) Reject(r Result) {
 	w.reject(r)
 }
 
+// reject counts one rejected attempt. Order matches C3.2: the attempt is
+// claimed by the caller (it was never admitted), then the time is sampled,
+// then the counter, then the LastFailure max-store.
 func (w *Writer[T]) reject(r Result) {
+	ts := w.cfg.Now()
 	switch r {
 	case ResultQueueFull:
 		w.stats.DroppedFull.Add(1)
@@ -468,7 +476,7 @@ func (w *Writer[T]) reject(r Result) {
 	case ResultClosed:
 		w.stats.DroppedClosed.Add(1)
 	}
-	w.noteFailure(w.cfg.Now())
+	w.noteFailure(ts)
 	w.record(r)
 }
 
@@ -557,12 +565,14 @@ func (w *Writer[T]) writeOne(tk *ticket, v T) {
 }
 
 func (w *Writer[T]) safeWrite(v T) (err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), w.cfg.WriteBudget)
+	defer cancel()
 	defer func() {
 		if p := recover(); p != nil {
 			err = fmt.Errorf("asyncwrite: write panicked: %v", p)
 		}
 	}()
-	return w.write(v)
+	return w.write(ctx, v)
 }
 
 // expire is the write-budget timer callback for tk. It performs atomics
@@ -696,8 +706,10 @@ func (w *Writer[T]) Close(ctx context.Context) error {
 	w.mu.Unlock()
 
 	if dropped > 0 {
+		// Claimed under mu above; then sample, count, max-store (C3.2 order).
+		ts := w.cfg.Now()
 		w.stats.DroppedShutdown.Add(uint64(dropped))
-		w.noteFailure(w.cfg.Now())
+		w.noteFailure(ts)
 		for i := 0; i < dropped; i++ {
 			w.record(ResultShutdown)
 		}

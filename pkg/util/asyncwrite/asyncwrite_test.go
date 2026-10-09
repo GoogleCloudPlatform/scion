@@ -87,15 +87,17 @@ func (c *fakeClock) now() time.Time  { return time.Unix(0, c.n.Load()) }
 type gate struct {
 	entered chan int
 	release chan error
+	ctxs    chan context.Context
 	mu      sync.Mutex
 	got     []int
 }
 
 func newGate() *gate {
-	return &gate{entered: make(chan int, 64), release: make(chan error)}
+	return &gate{entered: make(chan int, 64), release: make(chan error), ctxs: make(chan context.Context, 64)}
 }
 
-func (g *gate) write(v int) error {
+func (g *gate) write(ctx context.Context, v int) error {
+	g.ctxs <- ctx
 	g.entered <- v
 	err := <-g.release
 	if err == nil {
@@ -189,8 +191,8 @@ func assertConservation(t *testing.T, s Snapshot) {
 }
 
 func TestNewValidatesConfig(t *testing.T) {
-	ok := func(int) error { return nil }
-	if _, err := New(Config{Name: "x"}, (func(int) error)(nil)); err == nil {
+	ok := func(context.Context, int) error { return nil }
+	if _, err := New(Config{Name: "x"}, (func(context.Context, int) error)(nil)); err == nil {
 		t.Fatal("nil write accepted")
 	}
 	if _, err := New[int](Config{}, ok); err == nil {
@@ -315,7 +317,7 @@ func TestWriteErrorAndPanicAreCountedAndWorkerContinues(t *testing.T) {
 	var calls atomic.Int32
 	w, err := newWriter(Config{Name: "p", WriteBudget: testBudget, DrainTimeout: testDrain,
 		Now: clock.now, AfterFunc: timers.afterFunc},
-		func(v int) error {
+		func(_ context.Context, v int) error {
 			calls.Add(1)
 			switch v {
 			case 0:
@@ -561,29 +563,33 @@ func TestDelayedClaimDoesNotStallLaterWriteAndLastFailureIsMonotonic(t *testing.
 		t.Fatalf("write 2 ticket not inflight: %+v", tk2)
 	}
 
-	// 6. a later claim with the clock moved backwards does not decrease
-	// LastFailure.
-	later := tClaim.Add(time.Hour)
-	h.w.noteFailure(later)
-	h.clock.set(tClaim.Add(-time.Hour))
-	h.w.noteFailure(h.clock.now())
-	if got := h.w.Snapshot().LastFailure; !got.Equal(later) {
-		t.Fatalf("LastFailure decreased: %v, want %v", got, later)
-	}
-	// Same through a real claim: a backwards-clock timeout on a fresh ticket.
-	tkX := &ticket{gen: 99}
-	h.w.expire(tkX)
-	if got := h.w.Snapshot().LastFailure; !got.Equal(later) {
-		t.Fatalf("LastFailure decreased via claim: %v, want %v", got, later)
-	}
-	// Undo the synthetic ticket's counter for the conservation check below.
-	h.w.stats.WriteTimeouts.Add(^uint64(0))
-
 	// 7. complete write 2; conservation 2 = 1 written + 1 timeout.
 	h.g.release <- nil
 	<-h.wrote
 	s = h.w.Snapshot()
 	if s.Enqueued != 2 || s.Written != 1 || s.WriteTimeouts != 1 || s.Queued != 0 || s.InflightUnresolved != 0 {
+		t.Fatalf("after write 2: %+v", s)
+	}
+	assertConservation(t, s)
+
+	// 6. repeat a real claim with the clock behind the stored LastFailure:
+	// write 3 times out at a clock earlier than tClaim, and LastFailure must
+	// not decrease. (Run after step 7 so step 7's identity is checked
+	// exactly as the design states it.)
+	h.clock.set(tClaim.Add(-time.Hour))
+	if err := h.w.TryEnqueue(3, 1); err != nil {
+		t.Fatal(err)
+	}
+	<-h.g.entered
+	(<-h.timers.writes).fire()
+	s = h.w.Snapshot()
+	if s.WriteTimeouts != 2 || !s.LastFailure.Equal(tClaim) {
+		t.Fatalf("backwards claim: timeouts=%d LastFailure=%v, want 2 and %v", s.WriteTimeouts, s.LastFailure, tClaim)
+	}
+	h.g.release <- nil
+	<-h.wrote
+	s = h.w.Snapshot()
+	if s.Enqueued != 3 || s.Written != 1 || s.WriteTimeouts != 2 || s.LateReturns != 2 {
 		t.Fatalf("final: %+v", s)
 	}
 	assertConservation(t, s)
@@ -792,7 +798,7 @@ func TestResultLabelsAreClosedSet(t *testing.T) {
 // Real timers, cooperative writer: the worker goroutine exits on Close.
 func TestRealTimersCooperativeClose(t *testing.T) {
 	var n atomic.Int32
-	w, err := New(Config{Name: "real"}, func(int) error { n.Add(1); return nil })
+	w, err := New(Config{Name: "real"}, func(context.Context, int) error { n.Add(1); return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -810,4 +816,121 @@ func TestRealTimersCooperativeClose(t *testing.T) {
 		t.Fatalf("snapshot = %+v", s)
 	}
 	assertConservation(t, s)
+}
+
+// Choice (b): a rejection alone makes Health report recent failures, for
+// FailureWindow, at the fake-clock sampled time.
+func TestRejectionsAloneDegradeHealth(t *testing.T) {
+	cases := map[string]func(t *testing.T, h *harness){
+		"oversize":    func(_ *testing.T, h *harness) { h.w.Reject(ResultOversize) },
+		"unsupported": func(_ *testing.T, h *harness) { h.w.Reject(ResultUnsupported) },
+		"queue_full": func(t *testing.T, h *harness) {
+			if err := h.w.TryEnqueue(0, 1); err != nil {
+				t.Fatal(err)
+			}
+			<-h.g.entered
+			<-h.timers.writes
+			if err := h.w.TryEnqueue(1, 1); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.w.TryEnqueue(2, 1); !errors.Is(err, ErrFull) {
+				t.Fatalf("enqueue = %v, want ErrFull", err)
+			}
+		},
+	}
+	for name, provoke := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, Config{Capacity: 1}, testHooks{})
+			now := h.clock.now()
+			if hl := h.w.Health(now); !hl.Healthy {
+				t.Fatalf("initial health = %+v", hl)
+			}
+			provoke(t, h)
+			s := h.w.Snapshot()
+			if !s.LastFailure.Equal(now) {
+				t.Fatalf("LastFailure = %v, want %v", s.LastFailure, now)
+			}
+			if hl := h.w.Health(now); hl.Healthy || hl.Reason != HealthRecentFailures {
+				t.Fatalf("health after %s = %+v", name, hl)
+			}
+			if hl := h.w.Health(now.Add(DefaultFailureWindow)); !hl.Healthy {
+				t.Fatalf("health after window = %+v", hl)
+			}
+			if name == "queue_full" {
+				h.g.release <- nil
+				<-h.wrote
+				<-h.g.entered
+				<-h.timers.writes
+				h.g.release <- nil
+				<-h.wrote
+			}
+			h.closeWhenIdle(t)
+			assertConservation(t, h.w.Snapshot())
+		})
+	}
+}
+
+// F3: the worker passes a fresh budget context (deadline set, no producer
+// values) to each write.
+type producerKey struct{}
+
+func TestWriteReceivesFreshBudgetContext(t *testing.T) {
+	h := newHarness(t, Config{}, testHooks{})
+	if err := h.w.TryEnqueue(1, 1); err != nil {
+		t.Fatal(err)
+	}
+	ctx := <-h.g.ctxs
+	<-h.g.entered
+	<-h.timers.writes
+	if _, ok := ctx.Deadline(); !ok {
+		t.Fatal("write context has no deadline")
+	}
+	if ctx.Value(producerKey{}) != nil {
+		t.Fatal("unexpected value")
+	}
+	h.g.release <- nil
+	<-h.wrote
+	if ctx.Err() == nil {
+		t.Fatal("write context not cancelled after the write returned")
+	}
+	h.closeWhenIdle(t)
+}
+
+// F3 (architect requirement): a handler returning context.DeadlineExceeded
+// goes through the same ticket CAS. If the worker wins it is one error; if
+// the timer already won it is the timeout plus a late return. Never both,
+// never reclassified outside the CAS.
+func TestDeadlineExceededReturnGoesThroughTicketCAS(t *testing.T) {
+	t.Run("worker wins: error", func(t *testing.T) {
+		h := newHarness(t, Config{}, testHooks{})
+		if err := h.w.TryEnqueue(1, 1); err != nil {
+			t.Fatal(err)
+		}
+		<-h.g.entered
+		<-h.timers.writes // never fired
+		h.g.release <- context.DeadlineExceeded
+		<-h.wrote
+		s := h.w.Snapshot()
+		if s.WriteErrors != 1 || s.WriteTimeouts != 0 || s.LateReturns != 0 || s.Written != 0 {
+			t.Fatalf("snapshot = %+v", s)
+		}
+		h.closeWhenIdle(t)
+		assertConservation(t, h.w.Snapshot())
+	})
+	t.Run("timer wins: timeout plus late return", func(t *testing.T) {
+		h := newHarness(t, Config{}, testHooks{})
+		if err := h.w.TryEnqueue(1, 1); err != nil {
+			t.Fatal(err)
+		}
+		<-h.g.entered
+		(<-h.timers.writes).fire()
+		h.g.release <- context.DeadlineExceeded
+		<-h.wrote
+		s := h.w.Snapshot()
+		if s.WriteTimeouts != 1 || s.LateReturns != 1 || s.WriteErrors != 0 || s.Written != 0 {
+			t.Fatalf("snapshot = %+v", s)
+		}
+		h.closeWhenIdle(t)
+		assertConservation(t, h.w.Snapshot())
+	})
 }
