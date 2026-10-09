@@ -334,7 +334,7 @@ func TestAgentCreatePlacement_ExplicitCreatorBrokerInheritsProfile(t *testing.T)
 	pf := newPlacementFixture(t)
 	enableInheritPlacement(t, pf.srv)
 
-	agent := pf.createAsCreator(t, CreateAgentRequest{Name: "explicit-same-broker", RuntimeBrokerID: pf.k8sBroker.Name})
+	agent := pf.createAsCreator(t, CreateAgentRequest{Name: "explicit-same-broker", RuntimeBrokerID: pf.k8sBroker.ID})
 	assertPlacement(t, agent, pf.k8sBroker.ID, store.PlacementSourceFlag, "gke", store.PlacementSourceInherited)
 }
 
