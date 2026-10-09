@@ -21,6 +21,7 @@
     "shared/chat/chat-thread-peer-project.test.ts",
     "pages/graph-palette-hosts.test.ts",
     "terminal/terminal-pane.test.ts",
+    "terminal/terminal-keys.test.ts",
     "shared/header.test.ts",
     "shared/group-member-editor-membership.test.ts",
     "pages/onboarding.test.ts",
