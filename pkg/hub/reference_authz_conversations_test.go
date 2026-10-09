@@ -514,3 +514,39 @@ func TestConversationAddParticipant_ReadCheckErrorRefuses(t *testing.T) {
 	assert.GreaterOrEqual(t, got.status, http.StatusInternalServerError, got.body)
 	assert.Equal(t, before, participantCount(t, f.st, groupA), "no participant row is written")
 }
+
+// resolveTargetAs calls GET /api/v1/messaging/targets/resolve as identity.
+func resolveTargetAs(t *testing.T, srv *Server, identity Identity, project, agent string) refAnswer {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/messaging/targets/resolve?project="+project+"&agent="+agent, nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), identity))
+	rr := httptest.NewRecorder()
+	srv.handleMessagingTargetsResolve(rr, req)
+	return refAnswer{status: rr.Code, body: rr.Body.String()}
+}
+
+// TestMessagingTargetsResolve_ReplyOnlyTargetMatchesMissing: target lookup
+// answers only for targets the caller may message. A target that could only
+// reply to the caller gets exactly the answer for an unknown target.
+func TestMessagingTargetsResolve_ReplyOnlyTargetMatchesMissing(t *testing.T) {
+	srv, _, _, _, _, _, agentA, agentB := cpmSetup(t)
+	// agentA (hub mode, project A) may message agentB (project mode,
+	// project B); agentB may not message agentA.
+	callerB := cpmAgentIdentity(agentB.ID, agentB.ProjectID, agentB.Ancestry)
+	callerA := cpmAgentIdentity(agentA.ID, agentA.ProjectID, agentA.Ancestry)
+
+	got := resolveTargetAs(t, srv, callerB, "project-a", agentA.Slug)
+	unknown := resolveTargetAs(t, srv, callerB, "project-a", "no-such-agent")
+	require.Equal(t, http.StatusNotFound, unknown.status, unknown.body)
+	requireSameAnswer(t, unknown, got)
+
+	forward := resolveTargetAs(t, srv, callerA, "project-b", agentB.Slug)
+	require.Equal(t, http.StatusOK, forward.status, forward.body)
+	var resp targetResolveResponse
+	require.NoError(t, json.Unmarshal([]byte(forward.body), &resp))
+	require.NotNil(t, resp.Messageability)
+	assert.True(t, resp.Messageability.CanMessage)
+	assert.False(t, resp.Messageability.CanReachViewer, "the reply direction is still reported")
+	assert.Contains(t, forward.body, `"canReachViewer"`)
+}
