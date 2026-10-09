@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -100,25 +99,15 @@ func stopAllEnv(t *testing.T, agentName string, replies ...getReply) *asyncDelet
 	return env
 }
 
-// jsonBodyOf returns stdout from the first '{'. stop --all --rm prints its
-// confirmation list on stdout before the JSON body even in JSON mode; that
-// predates ptone/scion#2894 and is left as is here.
-func jsonBodyOf(stdout string) string {
-	if i := strings.Index(stdout, "{"); i >= 0 {
-		return stdout[i:]
-	}
-	return stdout
-}
-
 // ptone/scion#2894: scion stop --all --rm --format json exits non-zero when
 // an agent fails, with the unchanged JSON body on stdout and nothing else.
+// ptone/scion#3494: the confirmation list does not precede it on stdout.
 func TestStopAllAgentsViaHub_JSONPartialExitsNonZero(t *testing.T) {
 	env := stopAllEnv(t, "all-agent", getReply{body: replyInDoubt})
 	setStopRm(t)
 	setJSONOutput(t)
 	var err error
 	stdout, stderr := captureStdIO(t, func() { err = stopAllAgentsViaHub(env.hubCtx) })
-	stdout = jsonBodyOf(stdout)
 	require.Error(t, err)
 	assert.True(t, isReportedInJSON(err))
 	assert.Empty(t, stderr)
@@ -137,7 +126,6 @@ func TestStopAllAgentsViaHub_JSONSuccessExitsZero(t *testing.T) {
 	setJSONOutput(t)
 	var err error
 	stdout, _ := captureStdIO(t, func() { err = stopAllAgentsViaHub(env.hubCtx) })
-	stdout = jsonBodyOf(stdout)
 	require.NoError(t, err, "a pending removal is not a failure")
 	var out jsonResultBody
 	require.NoError(t, json.Unmarshal([]byte(stdout), &out), stdout)
