@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -160,7 +161,7 @@ func TestAgentLifecycle_StartFakeBroker500Stays502(t *testing.T) {
 func TestCreateAgent_FakeBrokerValidationErrorBecomes400(t *testing.T) {
 	createErr := fakeBrokerCreateErr(t, http.StatusBadRequest, brokerErrorBody("validation_error", brokerValidationMessage))
 	disp := &failingCreateDispatcher{createErr: createErr}
-	srv, _, project := setupCreateAgentServer(t, disp)
+	srv, s, project := setupCreateAgentServer(t, disp)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:      "create-val-fail",
@@ -170,4 +171,7 @@ func TestCreateAgent_FakeBrokerValidationErrorBecomes400(t *testing.T) {
 
 	assertHarnessConfigRelayed(t, rec, http.StatusBadRequest, ErrCodeValidationError, brokerValidationMessage)
 	assert.True(t, disp.deleteCalled, "the failed create is still cleaned up on the broker")
+	require.NotNil(t, disp.capturedAgent, "the dispatcher saw the create-time agent")
+	_, err := s.GetAgent(context.Background(), disp.capturedAgent.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the hub agent row is removed, as for the 422 and 403 relays")
 }

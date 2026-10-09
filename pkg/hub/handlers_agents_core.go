@@ -5303,8 +5303,8 @@ func relayWorkspaceStorageUnconfigured(w http.ResponseWriter, err error) bool {
 //
 // It also relays the broker's 400 validation_error the same way: the broker
 // answers it for a request it refuses as invalid (its ValidationError
-// helper and the start-context checks), which the caller must fix, so it is
-// not a "runtime broker failed" 502 (ptone/scion#2666).
+// helper and the start-context checks), usually a request the caller must
+// fix, so it is not a "runtime broker failed" 502 (ptone/scion#2666).
 func relayHarnessConfigRefusal(w http.ResponseWriter, err error) bool {
 	var se *brokerStatusError
 	if !errors.As(err, &se) {
