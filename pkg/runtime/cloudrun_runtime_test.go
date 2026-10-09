@@ -804,6 +804,8 @@ func TestResolveCloudRunNFSTarget(t *testing.T) {
 			wantErr: []string{"cloudrun.nfs_export", `"/other"`, "server.workspace_storage.nfs.shares[0].export", `"/scion"`}},
 		{name: "no server anywhere is refused",
 			wantErr: []string{"nfs_server must be non-empty"}},
+		{name: "no export anywhere is refused", runtimeServer: "10.0.0.2", shareServer: "10.0.0.2",
+			wantErr: []string{"nfs_export must be non-empty", "cloudrun.nfs_export", "server.workspace_storage.nfs.shares[0].export"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -623,6 +623,10 @@ func resolveCloudRunNFSTarget(runtimeServer, runtimeExport, shareServer, shareEx
 		return "", "", fmt.Errorf("cloudrun: nfs_server must be non-empty when workspace backend is NFS " +
 			"(set cloudrun.nfs_server or server.workspace_storage.nfs.shares[0].server)")
 	}
+	if export == "" {
+		return "", "", fmt.Errorf("cloudrun: nfs_export must be non-empty when workspace backend is NFS " +
+			"(set cloudrun.nfs_export or server.workspace_storage.nfs.shares[0].export)")
+	}
 	return server, export, nil
 }
 
