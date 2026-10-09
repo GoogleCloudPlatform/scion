@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -120,16 +121,50 @@ func lookViaHub(hubCtx *HubContext, agentName string, execCmd []string) error {
 		return wrapHubError(err)
 	}
 
+	agentSvc := hubCtx.Client.ProjectAgents(projectID)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	resp, err := hubCtx.Client.ProjectAgents(projectID).Exec(ctx, agentName, execCmd, 10)
+	resp, err := agentSvc.Exec(ctx, agentName, execCmd, 10)
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to capture terminal output for agent '%s': %w", agentName, err))
 	}
 
+	printLookIdentityHeader(hubCtx.Client, agentSvc, projectID, agentName)
 	printLookOutput(resp.Output)
 	return nil
+}
+
+// printLookIdentityHeader writes the agent's GCP identity header to stderr,
+// so stdout keeps only the captured terminal output that scripts parse. It is
+// best effort: when the agent cannot be read, no header is printed.
+func printLookIdentityHeader(client hubclient.Client, agentSvc hubclient.AgentService, projectID, agentName string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	agent, err := agentSvc.Get(ctx, agentName)
+	if err != nil || agent == nil {
+		return
+	}
+	id := agentGCPIdentity(*agent)
+	if id == nil {
+		return
+	}
+	if id.ServiceAccountID != "" {
+		pid := agent.ProjectID
+		if pid == "" {
+			pid = projectID
+		}
+		id.DisplayName = serviceAccountDisplayNames(ctx, client, []string{pid})[id.ServiceAccountID]
+	}
+	profile := ""
+	if agent.AppliedConfig != nil {
+		profile = agent.AppliedConfig.Profile
+	}
+	if header := lookIdentityHeader(id, profile); header != "" {
+		fmt.Fprintln(os.Stderr, header)
+	}
 }
 
 func init() {
