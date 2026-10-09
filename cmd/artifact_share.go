@@ -64,7 +64,7 @@ Examples:
 }
 
 func init() {
-	artifactShareCmd.Flags().StringVar(&artifactShareTTL, "ttl", "", "Link lifetime in whole hours or days, e.g. 24h or 7d (default: the hub's)")
+	artifactShareCmd.Flags().StringVar(&artifactShareTTL, "ttl", "", "Link lifetime in whole hours or days, e.g. 24h or 7d (default: the hub's; above the hub's maximum, 30 days unless changed, the request is rejected)")
 	artifactShareCmd.Flags().BoolVar(&artifactShareList, "list", false, "List the artifact's active share links instead of creating one")
 	artifactShareCmd.Flags().StringVar(&artifactShareRevoke, "revoke", "", "Revoke the share link with this id instead of creating one")
 	artifactCmd.AddCommand(artifactShareCmd)
