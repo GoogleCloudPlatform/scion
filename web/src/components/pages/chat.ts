@@ -88,6 +88,8 @@ import type { ActionSheetItem, ActionSheetSelectDetail } from '../shared/chat/ch
 import '../shared/chat/chat-file-preview.js';
 import type { PreviewTarget } from '../shared/chat/chat-file-preview.js';
 import { touchMenuItemStyles } from '../shared/touch-styles.js';
+import { findDefaultAgent } from '../shared/chat/default-agent.js';
+import type { ChatAgentMember } from '../shared/chat/chat-members.js';
 import {
   rememberChatScrollAnchor,
   takeChatScrollAnchor,
@@ -5672,34 +5674,34 @@ export class ScionPageChat extends LitElement {
    * `conv.peerId`. Empty string when the agent isn't a known space member.
    */
   private resolveDefaultAgentId(defaultAgent: string): string {
-    if (!defaultAgent) return '';
-    const byId = this.v2AgentMembers.find((a) => a.id === defaultAgent);
-    if (byId) return byId.id;
-    const bySlug = this.v2AgentMembers.find((a) => a.slug === defaultAgent);
-    return bySlug?.id || '';
+    return this.findDefaultAgentMember(defaultAgent)?.id || '';
   }
 
   /**
-   * Resolve a thread's `defaultAgent` (an agent ID or a slug) to the agent's
-   * slug, for the members panel, which pins the default by slug. Falls back
-   * to the stored value when the agent isn't a known space member.
+   * The space agent member a thread's `defaultAgent` names, matched by ID,
+   * then slug, then display name (see default-agent.ts).
+   */
+  private findDefaultAgentMember(defaultAgent: string): ChatAgentMember | undefined {
+    return findDefaultAgent(defaultAgent, this.v2AgentMembers, (a) => a.displayName);
+  }
+
+  /**
+   * Resolve a thread's `defaultAgent` to the agent's slug, for the members
+   * panel, which pins the default by slug. Falls back to the stored value
+   * when the agent isn't a known space member or has no slug.
    */
   private resolveDefaultAgentSlug(defaultAgent: string): string {
     if (!defaultAgent) return '';
-    const byId = this.v2AgentMembers.find((a) => a.id === defaultAgent);
-    return byId?.slug || defaultAgent;
+    return this.findDefaultAgentMember(defaultAgent)?.slug || defaultAgent;
   }
 
   /**
-   * Resolve a thread's `defaultAgent` (an agent ID or a slug) to a name to
-   * show. Falls back to the stored value when the agent isn't a known space
-   * member.
+   * Resolve a thread's `defaultAgent` to a name to show. Falls back to the
+   * stored value when the agent isn't a known space member.
    */
   private resolveDefaultAgentName(defaultAgent: string): string {
     if (!defaultAgent) return '';
-    const agent =
-      this.v2AgentMembers.find((a) => a.id === defaultAgent) ||
-      this.v2AgentMembers.find((a) => a.slug === defaultAgent);
+    const agent = this.findDefaultAgentMember(defaultAgent);
     return agent?.displayName || agent?.slug || defaultAgent;
   }
 

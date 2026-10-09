@@ -9016,3 +9016,79 @@ describe('scion-chat-thread older-page loads and message jumps', () => {
     internals._jumpScrollCleanup = null;
   });
 });
+
+describe('scion-chat-thread default agent stored by ID', () => {
+  const AGENT_ID = '3f2a9c1e-7b4d-4e8a-9c2f-1a2b3c4d5e6f';
+
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  async function mountWithIdDefault(): Promise<ScionChatThread> {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    el.agentMembers = [
+      { id: AGENT_ID, kind: 'agent', displayName: 'Code Writer', slug: 'coder' },
+      { id: 'agent-2', kind: 'agent', displayName: 'Other', slug: 'other' },
+    ];
+    el.defaultAgent = AGENT_ID;
+    return el;
+  }
+
+  function agentMessage(slug: string, senderId: string): Message {
+    return {
+      id: 'm-' + slug,
+      projectId: '',
+      sender: 'agent:' + slug,
+      senderId,
+      recipient: '',
+      recipientId: '',
+      msg: 'hi',
+      type: 'assistant-reply',
+      agentId: senderId,
+      createdAt: '2026-01-01T00:00:00Z',
+    };
+  }
+
+  it('hides "Make this agent thread default" for the current default agent', async () => {
+    const el = await mountWithIdDefault();
+    const internals = el as unknown as {
+      messageMenuActions(msg: Message): { id: string }[];
+    };
+    const ids = (m: Message): string[] => internals.messageMenuActions(m).map((a) => a.id);
+    expect(ids(agentMessage('coder', AGENT_ID))).not.toContain('set-default-agent');
+    expect(ids(agentMessage('other', 'agent-2'))).toContain('set-default-agent');
+  });
+
+  it('names the agent by slug on the optimistic send', async () => {
+    const el = await mountWithIdDefault();
+    const internals = el as unknown as {
+      messageMap: Map<string, Message>;
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+    apiFetch.mockImplementationOnce(() => new Promise<Response>(() => {}));
+
+    void internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'Please help',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+    const optimistic = Array.from(internals.messageMap.values()).find(
+      (message) => message.dispatchState === 'pending'
+    );
+    expect(optimistic?.recipient).toBe('agent:coder');
+    expect(optimistic?.recipientId).toBe(AGENT_ID);
+  });
+});

@@ -85,6 +85,22 @@ describe('composer — thread default chip', () => {
     expect(checkedItems(el)).toEqual(['Code Reviewer']);
   });
 
+  it('marks the menu item checked when the default is stored as a display name', async () => {
+    const el = await renderComposer('Code Reviewer');
+    expect(chipName(el)).toBe('Code Reviewer');
+    expect(checkedItems(el)).toEqual(['Code Reviewer']);
+  });
+
+  it("picks the slug match when the slug equals another agent's name", async () => {
+    const members = [
+      { id: 'agent-a', name: 'helper', email: '', slug: 'agent-a-slug', kind: 'agent' },
+      { id: 'agent-b', name: 'Helper Prime', email: '', slug: 'helper', kind: 'agent' },
+    ];
+    const el = await renderComposer('helper', members);
+    expect(chipName(el)).toBe('Helper Prime');
+    expect(checkedItems(el)).toEqual(['Helper Prime']);
+  });
+
   it('falls back to the stored value when the agent is not a member', async () => {
     const el = await renderComposer('gone-agent');
     expect(chipName(el)).toBe('gone-agent');

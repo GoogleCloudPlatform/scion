@@ -53,6 +53,7 @@ import { ARTIFACTS_FLAG, MAX_MESSAGE_ARTIFACTS } from '../../../client/artifacts
 import { isFeatureEnabled } from '../../../utils/feature-flags.js';
 import type { ArtifactPickerSelectDetail, PendingArtifact } from './artifact-picker.js';
 import './artifact-picker.js';
+import { findDefaultAgent } from './default-agent.js';
 
 /** The touch presentation of the send button's right-click menu. */
 const SEND_SHEET_INTERRUPT: ActionSheetItem = {
@@ -1429,14 +1430,8 @@ export class ScionChatComposer extends LitElement {
    * all three are matched, ID first.
    */
   private defaultAgentMember(): MemberInfo | undefined {
-    const ref = this.defaultAgent;
-    if (!ref) return undefined;
     const agents = this.members.filter((m) => m.kind === 'agent');
-    return (
-      agents.find((m) => m.id === ref) ||
-      agents.find((m) => m.slug === ref) ||
-      agents.find((m) => m.name === ref)
-    );
+    return findDefaultAgent(this.defaultAgent, agents, (m) => m.name);
   }
 
   /** Render the dropdown menu for selecting a default agent. */
