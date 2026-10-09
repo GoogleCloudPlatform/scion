@@ -55,6 +55,10 @@ Scion features an interactive, top-level **Native Web Chat** interface in the We
 Do not post credentials, tokens, keys or other sensitive material in a space thread, even in a thread that looks quiet or narrowly named. Everyone with access to the project can read it. Do not send credentials in DMs either. To give an agent a credential, store it as a Hub secret instead (see [Secret & Environment Management](/scion/hosted/user/secrets/)) and refer to it by name in chat.
 :::
 
+:::note[Attachment and shared-directory permissions]
+Shared directories and the storage that holds chat attachments do not have fine-grained permissions: access is not limited per conversation or per member. Do not rely on attachments or shared directories for files that only some project members may see. A planned move of attachments to artifacts will add finer-grained access for attachments.
+:::
+
 ---
 
 ### Advanced Collaboration & Productivity
