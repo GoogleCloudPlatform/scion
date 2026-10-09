@@ -37,6 +37,13 @@ Choosing the right recipient is critical to avoid spam and ensure the message re
   you were addressed in. View its details with
   `scion conversation get conv:<uuid>`; see the `scion-conversation` skill.
 
+### Conversation delivery
+
+- **A post to a conversation (`conv:<uuid>`) is not pushed to every participant by default.** This keeps noise down, but it means participants who are not addressed may not see it.
+- **To reach a specific agent**, either @-mention it in the message text (`@<agent-name>`; it gets a mention notification) or message it directly (`@<agent-name>`, or the legacy `agent:<name>` form).
+- **For anything actionable**, also send direct copies to the agents who must act, and check that each direct send reports `Message delivered`.
+- **There is no supported `--cc` flag.** Put an @-mention in the message body instead.
+
 ### Mentions
 
 - You can alert a secondary tier participant in a conversation by using the `@<agent-name>` or `@<email>` recipient types in the body of a message. Use this for FYI informative or CC, be clear if there is a response or action expected. If there is more than one primary recipient use the `group[]` recipient type.
@@ -228,6 +235,8 @@ Within a conversation, the `type` field classifies how the message reached you:
 - **`"mention"`** — you were @-mentioned in a message primarily addressed to someone else. **Default to treating this as FYI — no action required.** Only act if the message text explicitly directs you to do something (e.g., "@agent-X, please review this PR"). Being CC'd or name-dropped in passing is not a request. When in doubt, do nothing.
 
 ### Conversation routing
+
+**Default: reply to the conversation.** When a message arrived through a conversation, reply to that conversation (`conv:<uuid>`), not with a direct message to the sender. This applies to the first conversation message you receive, too: answering it with a direct message splits the thread.
 
 Inbound messages carry a `conversation` field with an `id` that identifies the conversation. When replying, use `conv:<id>` addressing so the reply stays in the same conversation:
 

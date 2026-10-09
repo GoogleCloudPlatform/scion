@@ -443,6 +443,13 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 		return errors.New("no dispatcher")
 	}
 	provisioned := agent.Phase == string(state.PhaseCreated) || agent.Phase == string(state.PhaseProvisioning)
+	// Taken before the dispatch, which may record a new placement: a start
+	// replacing a previous run's ephemeral workspace warns about it
+	// (ptone/scion#3819). A provisioned agent has no previous run, and a
+	// start of a running agent (other than a restart's start leg) keeps
+	// the running pod, so its workspace is not re-cloned.
+	hadEphemeral := !provisioned && hasEphemeralWorkspace(agent) &&
+		(agent.Phase != string(state.PhaseRunning) || opts.Kind == store.StartClaimRestart)
 	supersedesQueuedStop := agent.ContainerStatus == containerStatusStopQueued
 	sd := opts.Dispatch
 	callerDeadline, hasCallerDeadline := ctx.Deadline()
@@ -493,6 +500,9 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 		// hold was settled or rolled back, and when there is no hold (sd is
 		// nil: rollback is nil-safe).
 		sd.rollback(ctx)
+	}
+	if err == nil || errors.Is(err, errStartedStatusWrite) {
+		s.addEphemeralWorkspaceStartWarning(ctx, agent, hadEphemeral)
 	}
 	if supersedesQueuedStop && (err == nil || errors.Is(err, errStartedStatusWrite)) {
 		s.clearSupersededQueuedStop(ctx, agent)

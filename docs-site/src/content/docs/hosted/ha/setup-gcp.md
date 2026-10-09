@@ -1372,9 +1372,10 @@ which the runbook's discovery steps assume. No workstation ever fetches
 `scion-hub-settings` or runs `migrate-names` directly against this hub's database
 either; that path is deliberately unsupported (no human handles the DSN). There is
 currently no supported way to run `scion hub secret migrate-names` against a hub
-deployed exactly per this guide. This gap — the missing `server.hub.hub_id` this
-guide never sets, and a DSN-free migration path for this guide's hubs — is tracked in
-[ptone/scion#2395](https://github.com/ptone/scion/issues/2395). See
+deployed exactly per this guide. A DSN-free migration path for this guide's hubs is
+tracked in [ptone/scion#2395](https://github.com/ptone/scion/issues/2395). (The
+guide's `settings.yaml` already sets an explicit `server.hub.hub_id`; see
+[Set a stable `hub_id`](#3c-configure-and-store-settingsyaml) in §3c.) See
 [Secrets: IAM Permissions and Secret Naming](/scion/hosted/user/secrets/#iam-permissions-and-secret-naming)
 for what the command does in general, and `--help` for its flags.
 
