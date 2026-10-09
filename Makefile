@@ -72,9 +72,12 @@ test-fast:
 	@echo "Running tests (no SQLite)..."
 	@go test -tags no_sqlite ./...
 
-# HUB_TEST_GOGC is prefixed to the go commands that compile the pkg/hub test
-# package (the test-hub-sqlite prebuild and the T1 Postgres targets
-# below). With the default GOGC that single compile peaks at about 15 GB RSS
+# HUB_TEST_GOGC is prefixed to the go test commands that build the pkg/hub
+# test package: the test-hub-sqlite prebuild (go test -c, build only) and
+# the T1 Postgres targets below. In the T1 targets the go test command both
+# builds and runs the tests, so GOGC=25 also applies to the test process
+# there (those selected tests are short). With the default GOGC the pkg/hub
+# test-package compile peaks at about 15 GB RSS
 # (15.4 GB with -tags integration) on a 16 GB GitHub-hosted runner, fills its
 # 3 GB swap, and the runner is shut down mid-step (exit 143,
 # ptone/scion#4083). GOGC=25 cut the peak to about 12 GB with no swap, for
@@ -95,7 +98,11 @@ HUB_TEST_GOGC = GOGC=$${GOGC:-25}
 # The test binaries are first compiled with HUB_TEST_GOGC (go test -c into a
 # scratch directory, then deleted). The go test run that follows reuses the
 # cached compiled packages, so only the build runs with the lower GOGC; the
-# tests themselves run with the default GOGC.
+# tests themselves run with the default GOGC. go test -c with several
+# packages fails if two of the test packages share a package name (Go
+# 1.21+). There are no duplicates among the test packages today; if one
+# appears, prebuild with $(HUB_TEST_GOGC) go test -count=1 -run '^$'
+# instead, which compiles every package and runs no test functions.
 HUB_SQLITE_PKGS := ./pkg/hub/... ./perf/bench/seed/... ./pkg/conduit/... ./pkg/store/entadapter/... ./pkg/artifacts/...
 
 test-hub-sqlite:
