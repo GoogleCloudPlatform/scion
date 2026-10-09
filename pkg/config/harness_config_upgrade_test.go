@@ -65,6 +65,11 @@ provisioner:
 			if !errors.Is(err, ErrHarnessConfigNotBundled) {
 				t.Fatalf("%s force=%v: err = %v, want ErrHarnessConfigNotBundled", tc.name, force, err)
 			}
+			// The message names the declared type, not the generic
+			// harness an unknown type resolves to.
+			if msg := err.Error(); !strings.Contains(msg, `"custom"`) || strings.Contains(msg, `"generic"`) {
+				t.Errorf("%s force=%v: error %q should name the declared type \"custom\"", tc.name, force, msg)
+			}
 			if plan != nil {
 				t.Errorf("%s force=%v: expected nil plan, got %+v", tc.name, force, plan)
 			}

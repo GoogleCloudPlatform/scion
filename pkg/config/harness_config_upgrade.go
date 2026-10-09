@@ -70,6 +70,17 @@ func hasBundledHarnessConfig(h api.Harness, harnessesFS fs.FS) bool {
 	return err == nil
 }
 
+// declaredHarnessType returns the harness type declared in the config.yaml at
+// dir, falling back to h.Name(). An unknown declared type resolves to the
+// generic harness, so h.Name() alone would report "generic" instead of the
+// type the user configured.
+func declaredHarnessType(dir string, h api.Harness) string {
+	if hcDir, err := LoadHarnessConfigDir(dir); err == nil && hcDir.Config.Harness != "" {
+		return hcDir.Config.Harness
+	}
+	return h.Name()
+}
+
 func UpgradeHarnessConfig(targetDir string, h api.Harness, opts HarnessConfigUpgradeOptions) (*HarnessConfigUpgradePlan, error) {
 	if opts.Now == nil {
 		opts.Now = time.Now
@@ -91,7 +102,7 @@ func UpgradeHarnessConfig(targetDir string, h api.Harness, opts HarnessConfigUpg
 	// say so rather than returning an empty plan (also under Force, which
 	// would otherwise report a reset that never happens).
 	if !hasBundledHarnessConfig(h, opts.HarnessesFS) {
-		return nil, fmt.Errorf("%w: %q (upgrade applies only to bundled harness types)", ErrHarnessConfigNotBundled, h.Name())
+		return nil, fmt.Errorf("%w: %q (upgrade applies only to bundled harness types)", ErrHarnessConfigNotBundled, declaredHarnessType(absTarget, h))
 	}
 
 	if opts.Force {
