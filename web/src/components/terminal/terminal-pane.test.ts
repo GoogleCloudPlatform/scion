@@ -4,6 +4,12 @@ import type { ScionTerminalPane } from './terminal-pane.js';
 import { TerminalSessionRegistry } from '../../client/terminal-sessions.js';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
+/**
+ * The automatic reconnect after a 4503 close waits a full-jitter delay;
+ * these pane tests expect it at once, so the registries draw a zero delay.
+ */
+const zeroJitter = { random: () => 0 };
+
 const showToast = vi.fn();
 vi.mock('../../utils/toast.js', () => ({ showToast }));
 
@@ -106,10 +112,13 @@ beforeEach(() => {
   );
   vi.stubGlobal('fetch', fetcher);
   page = document.createElement('scion-terminal-pane');
-  registry = new TerminalSessionRegistry({
-    hubUrl: window.location.origin,
-    accountId: 'account-1',
-  });
+  registry = new TerminalSessionRegistry(
+    {
+      hubUrl: window.location.origin,
+      accountId: 'account-1',
+    },
+    zeroJitter
+  );
   page.open(registry, agentId);
   vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800);
   vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(500);
@@ -200,10 +209,13 @@ describe('retained terminal pane', () => {
   });
 
   it('requires explicit identity and prevents rebinding a session to another pane', () => {
-    const registry = new TerminalSessionRegistry({
-      hubUrl: window.location.origin,
-      accountId: 'test',
-    });
+    const registry = new TerminalSessionRegistry(
+      {
+        hubUrl: window.location.origin,
+        accountId: 'test',
+      },
+      zeroJitter
+    );
     const first = document.createElement('scion-terminal-pane');
     const second = document.createElement('scion-terminal-pane');
     const session = first.open(registry, agentId);
@@ -312,10 +324,13 @@ describe('hidden pane interaction isolation (P1.8)', () => {
 
   it('window drag prevention is not installed when pane starts hidden', () => {
     const pane2 = document.createElement('scion-terminal-pane');
-    const reg2 = new TerminalSessionRegistry({
-      hubUrl: window.location.origin,
-      accountId: 'test-hidden',
-    });
+    const reg2 = new TerminalSessionRegistry(
+      {
+        hubUrl: window.location.origin,
+        accountId: 'test-hidden',
+      },
+      zeroJitter
+    );
     pane2.setVisible(false);
     const addSpy = vi.spyOn(window, 'addEventListener');
     document.body.append(pane2);
@@ -438,10 +453,13 @@ it('a failed metadata snapshot does not remove the independently authorized term
   page.dispose();
   FakeEventSource.instances = [];
   page = document.createElement('scion-terminal-pane');
-  registry = new TerminalSessionRegistry({
-    hubUrl: window.location.origin,
-    accountId: 'account-1',
-  });
+  registry = new TerminalSessionRegistry(
+    {
+      hubUrl: window.location.origin,
+      accountId: 'account-1',
+    },
+    zeroJitter
+  );
   let resolve!: (response: Response) => void;
   const gate = new Promise<Response>((r) => {
     resolve = r;
@@ -463,10 +481,13 @@ it('a failed metadata snapshot does not remove the independently authorized term
 
 describe('bind-after-mount still arms frontmost', () => {
   it('a pane mounted before open() (the legacy page order) still auto-reconnects on a retriable close', async () => {
-    const registry2 = new TerminalSessionRegistry({
-      hubUrl: window.location.origin,
-      accountId: 'account-r3',
-    });
+    const registry2 = new TerminalSessionRegistry(
+      {
+        hubUrl: window.location.origin,
+        accountId: 'account-r3',
+      },
+      zeroJitter
+    );
     const page2 = document.createElement('scion-terminal-pane');
     // connectedCallback runs with no session bound yet — the exact order that
     // pages/terminal.ts uses (mount the shell, then open()).
@@ -529,8 +550,9 @@ describe('overlay strings', () => {
     await mountConnected();
     FakeSocket.instances[0].readyState = 3;
     FakeSocket.instances[0].onclose?.({ code: 4503 });
-    await page.updateComplete;
-    expect(page.shadowRoot?.textContent).toContain('RECONNECTING...');
+    // The automatic attempt starts from the (zero) jitter timer, a macrotask
+    // after the close, so wait for it rather than for one render.
+    await vi.waitFor(() => expect(page.shadowRoot?.textContent).toContain('RECONNECTING...'));
     expect(page.shadowRoot?.querySelector('.disconnected-overlay sl-spinner')).toBeTruthy();
   });
 
