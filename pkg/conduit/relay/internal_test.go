@@ -124,7 +124,7 @@ func TestRemoteRPCAndStream(t *testing.T) {
 		_, _ = st.Write(payload)
 		_ = st.(interface{ CloseWrite() error }).CloseWrite()
 	}()
-	got, err := io.ReadAll(st)
+	got, err := readAllWithin(t, st, "echoed payload")
 	if err != nil || !bytes.Equal(got, payload) {
 		t.Fatalf("echo: %d bytes, err %v; want %d bytes", len(got), err, len(payload))
 	}
@@ -455,6 +455,7 @@ func TestInternalStreamCapabilityChecks(t *testing.T) {
 		if err := c.WriteMessage(websocket.BinaryMessage, open); err != nil {
 			t.Fatal(err)
 		}
+		_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
 		_, b, err := c.ReadMessage()
 		if err != nil {
 			t.Fatal(err)
@@ -772,7 +773,7 @@ func TestBridgeLateAcceptCleanedUp(t *testing.T) {
 	}
 	relaytest.WaitClosed(t, callerGone, "caller hop to end")
 	st := relaytest.Wait(t, accepted, "target accept")
-	_, rerr := io.ReadAll(st)
+	_, rerr := readAllWithin(t, st, "target stream end after late accept")
 	if code := conduit.CodeOf(rerr, 0); code != conduit.CloseCancelled {
 		t.Fatalf("target stream ended with %v, want 4499", rerr)
 	}
@@ -822,7 +823,7 @@ func TestBridgeNoLeakAfterManyStreams(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = warm.(interface{ CloseWrite() error }).CloseWrite()
-	_, _ = io.ReadAll(warm)
+	_, _ = readAllWithin(t, warm, "warm-up stream end")
 	relaytest.Wait(t, ended, "warm-up target stream to end")
 	p.a.Relay.WaitBridgesForTest()
 	settle(t, "warm-up target stream removal", func() bool { return p.target.Stats().OpenStreams == 0 })
@@ -838,7 +839,7 @@ func TestBridgeNoLeakAfterManyStreams(t *testing.T) {
 		switch mode {
 		case "normal": // half-close round trip
 			_ = st.(interface{ CloseWrite() error }).CloseWrite()
-			if _, err := io.ReadAll(st); err != nil {
+			if _, err := readAllWithin(t, st, "normal stream end"); err != nil {
 				t.Fatalf("normal stream: %v", err)
 			}
 		case "caller_abort":
@@ -846,7 +847,7 @@ func TestBridgeNoLeakAfterManyStreams(t *testing.T) {
 		case "caller_close": // closes without reading
 			_ = st.Close()
 		case "target_abort":
-			_, err := io.ReadAll(st)
+			_, err := readAllWithin(t, st, "target abort")
 			if code := conduit.CodeOf(err, 0); code != conduit.CloseForbidden {
 				t.Fatalf("target abort reached the caller as %v, want 4403", err)
 			}
@@ -862,6 +863,30 @@ func TestBridgeNoLeakAfterManyStreams(t *testing.T) {
 	// completion signal; settle is bounded and only checks for leaks.
 	settle(t, "target stream table to empty", func() bool { return p.target.Stats().OpenStreams == 0 })
 	settle(t, "goroutines to return to the baseline", func() bool { return runtime.NumGoroutine() <= baseline })
+}
+
+// readAllWithin reads st to the end, failing the test if that takes more
+// than 10s of real time (a safety net, not synchronisation). On timeout it
+// closes st so the reading goroutine returns.
+func readAllWithin(t *testing.T, st conduit.Stream, what string) ([]byte, error) {
+	t.Helper()
+	type result struct {
+		b   []byte
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		b, err := io.ReadAll(st)
+		done <- result{b, err}
+	}()
+	select {
+	case r := <-done:
+		return r.b, r.err
+	case <-time.After(10 * time.Second):
+		_ = st.Close()
+		t.Fatalf("timed out reading %s", what)
+		return nil, nil
+	}
 }
 
 // settle re-checks cond until it holds, failing after 10s. It is a leak

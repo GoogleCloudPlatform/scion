@@ -303,13 +303,21 @@ func Execute() {
 		// A failure already reported in the JSON output only sets the exit
 		// status; printing it again would add noise for JSON consumers.
 		if !isReportedInJSON(err) {
-			fmt.Fprintf(os.Stderr, "\n%s%s%sError: %v%s\n\n", util.BgRed, util.White, util.Bold, err, util.Reset)
+			fmt.Fprint(os.Stderr, formatCLIError(os.Stderr, err))
 			if showUsageForError(cmd, err, autoHelp) {
 				_ = cmd.Usage()
 			}
 		}
 		os.Exit(exitCodeFor(err))
 	}
+}
+
+// formatCLIError renders a failed command's error for f. The error banner is
+// coloured only when f is a terminal and NO_COLOR is unset; otherwise every
+// ANSI escape sequence is removed, including any carried in the error text
+// itself, so piped stderr stays plain.
+func formatCLIError(f *os.File, err error) string {
+	return util.ColorFor(f, fmt.Sprintf("\n%s%s%sError: %v%s\n\n", util.BgRed, util.White, util.Bold, err, util.Reset))
 }
 
 // exitCodeFor returns the process exit status for a failed command: the
@@ -419,7 +427,7 @@ func commandInSubtree(cmd *cobra.Command, name string) bool {
 }
 
 func init() {
-	rootCmd.Long = util.GetBanner() + "\n" + rootCmd.Long
+	rootCmd.Long = util.ColorFor(os.Stdout, util.GetBanner()) + "\n" + rootCmd.Long
 	rootCmd.PersistentFlags().StringVarP(&projectPath, "project", "g", "", "Project identifier: path, slug (with Hub), or git URL (with Hub)")
 
 	rootCmd.PersistentFlags().BoolVar(&globalMode, "global", false, "Use the global project (equivalent to --project global)")
@@ -431,8 +439,8 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&noHub, "no-hub", false, "Disable Hub integration for this invocation (local-only mode)")
 
 	// Confirmation and non-interactive flags
-	rootCmd.PersistentFlags().BoolVarP(&autoConfirm, "yes", "y", false, "Skip confirmation prompt")
-	rootCmd.PersistentFlags().BoolVar(&nonInteractive, "non-interactive", false, "Non-interactive mode: implies --yes, errors on ambiguous prompts")
+	rootCmd.PersistentFlags().BoolVarP(&autoConfirm, "yes", "y", false, "Answer Yes to every confirmation prompt, including destructive ones (required to confirm when stdin is not a terminal)")
+	rootCmd.PersistentFlags().BoolVar(&nonInteractive, "non-interactive", false, "Non-interactive mode: implies --yes (answers Yes to every confirmation), errors on ambiguous prompts")
 
 	// Display zone for human-readable times (JSON output is always UTC)
 	rootCmd.PersistentFlags().StringVar(&displayTZ, "tz", "", "Show times in this IANA time zone, e.g. America/New_York (default: local zone; JSON output is unchanged)")
@@ -607,8 +615,8 @@ func printDevAuthWarningIfNeeded(projectPath string) {
 	}
 
 	// Dev auth is being used with Hub enabled - print warning to stderr
-	fmt.Fprintf(os.Stderr, "\n%s%s WARNING: Development authentication enabled - not for production use %s\n\n",
-		util.Bold, util.Yellow, util.Reset)
+	fmt.Fprint(os.Stderr, util.ColorFor(os.Stderr, fmt.Sprintf("\n%s%s WARNING: Development authentication enabled - not for production use %s\n\n",
+		util.Bold, util.Yellow, util.Reset)))
 }
 
 // checkAgentContainerContext detects when the CLI is running inside an agent

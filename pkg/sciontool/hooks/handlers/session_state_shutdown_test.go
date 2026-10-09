@@ -472,30 +472,85 @@ func TestClearSessionTombstone_LeavesOtherStateAlone(t *testing.T) {
 	})
 }
 
-// A session without an ID is never tombstoned: nothing is returned (the
-// Hub would refuse it), its state is removed as on the hook path, and later
-// ID-less events open and count a new session.
-func TestCloseOpenSession_EmptySessionIDNotTombstoned(t *testing.T) {
-	store := NewFileSessionState(t.TempDir())
-	hookRun(t, store, toolEvent("", "Bash"))
-	if s, ok := closeOpen(t, store, ""); ok {
-		t.Fatalf("empty-ID session returned: %+v", s)
+// copyStateHome copies src's state and lock files into a new home, so the
+// same persisted session can be finalized once by each path.
+func copyStateHome(t *testing.T, src *FileSessionState) *FileSessionState {
+	t.Helper()
+	dst := NewFileSessionState(t.TempDir())
+	if err := os.MkdirAll(filepath.Dir(dst.Path), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Lstat(store.Path); !os.IsNotExist(err) {
-		t.Fatalf("empty-ID state left behind: %v", err)
+	for _, suffix := range []string{"", ".lock"} {
+		data, err := os.ReadFile(src.Path + suffix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dst.Path+suffix, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
+	return dst
+}
 
-	hookRun(t, store, toolEvent("", "Read"))
-	data, err := os.ReadFile(store.Path)
+// A harness that supplies no session ID (Copilot CLI) still gets its
+// session reported, under one stable fallback ID: the session-end hook and
+// the shutdown backstop, finalizing the same persisted session, report the
+// same non-empty ID. The backstop's tombstone carries it, so a late ID-less
+// event is ignored; the next session gets a different ID.
+func TestCloseOpenSession_EmptySessionIDUsesFallback(t *testing.T) {
+	t.Setenv("SCION_AGENT_ID", "agent-test-1")
+	hookStore := NewFileSessionState(t.TempDir())
+	for _, ev := range []*hooks.Event{
+		sessionEvent(hooks.EventSessionStart, ""),
+		toolEvent("", "Bash"),
+		sessionEvent(hooks.EventAgentEnd, ""),
+	} {
+		if s := hookRun(t, hookStore, ev); s != nil {
+			t.Fatalf("%s ended the session", ev.Name)
+		}
+	}
+	data, err := os.ReadFile(hookStore.Path)
 	if err != nil {
-		t.Fatalf("later ID-less event not recorded: %v", err)
+		t.Fatal(err)
 	}
 	file, err := decodeSessionState(data)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if file.Closed || !file.Aggregator.Open || file.Aggregator.ToolCalls["Read"].Calls != 1 || file.Aggregator.ToolCalls["Bash"].Calls != 0 {
-		t.Errorf("state after later ID-less event = %+v", file)
+	if file.Aggregator.SessionID != "" {
+		t.Fatalf("persisted session ID = %q, want empty (the fallback is applied only when finalizing)", file.Aggregator.SessionID)
+	}
+	want := telemetry.FallbackSessionID("agent-test-1", file.Aggregator.StartedAt)
+
+	backstopStore := copyStateHome(t, hookStore)
+
+	ended := hookRun(t, hookStore, sessionEvent(hooks.EventSessionEnd, ""))
+	if ended == nil {
+		t.Fatal("session-end reported nothing")
+	}
+	closed, ok := closeOpen(t, backstopStore, "")
+	if !ok {
+		t.Fatal("shutdown backstop reported nothing")
+	}
+	if ended.SessionID == "" || ended.SessionID != want || closed.SessionID != want {
+		t.Errorf("session IDs: session-end %q, backstop %q; want both %q", ended.SessionID, closed.SessionID, want)
+	}
+	if ended.ToolCalls["Bash"].Calls != 1 || closed.ToolCalls["Bash"].Calls != 1 || closed.TurnCount != 1 {
+		t.Errorf("counts: session-end %+v, backstop %+v", ended, closed)
+	}
+
+	// The backstop's tombstone holds the fallback ID and swallows a late
+	// ID-less session-end, so the session is not reported twice.
+	if got := hookRun(t, backstopStore, sessionEvent(hooks.EventSessionEnd, "")); got != nil {
+		t.Errorf("late session-end after the backstop reported again: %+v", got)
+	}
+
+	// A later session of the same agent gets a different fallback ID.
+	time.Sleep(time.Millisecond)
+	hookRun(t, hookStore, sessionEvent(hooks.EventSessionStart, ""))
+	next := hookRun(t, hookStore, sessionEvent(hooks.EventSessionEnd, ""))
+	if next == nil || next.SessionID == "" || next.SessionID == want {
+		t.Errorf("next session = %+v, want a new non-empty ID other than %q", next, want)
 	}
 }
 

@@ -63,6 +63,8 @@ export interface Artifact {
   key?: string;
   title: string;
   currentSeq: number;
+  /** When the artifact expires and is deleted; absent when kept until deleted. */
+  expiresAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -71,6 +73,8 @@ export interface ArtifactResponse {
   artifact: Artifact;
   version?: ArtifactVersion;
   warnings?: string[];
+  /** On a GET: the caller may share and change the artifact. */
+  canManage?: boolean;
 }
 
 /** GET /api/v1/artifacts/{id}/versions: ready versions, newest first, without files. */
@@ -250,10 +254,18 @@ function artifactPath(id: string): string {
 /** One page of the artifacts homed in a project that the caller can read. */
 export async function listProjectArtifacts(
   projectId: string,
-  opts: { q?: string; cursor?: string; limit?: number; signal?: AbortSignal } = {}
+  opts: {
+    q?: string;
+    cursor?: string;
+    limit?: number;
+    signal?: AbortSignal;
+    /** Only artifacts homed elsewhere and shared with the project. */
+    sharedOnly?: boolean;
+  } = {}
 ): Promise<ArtifactListResponse> {
   const params = new URLSearchParams({ mine: '1', scope: projectId });
   if (opts.q) params.set('q', opts.q);
+  if (opts.sharedOnly) params.set('shared', '1');
   if (opts.cursor) params.set('cursor', opts.cursor);
   if (opts.limit) params.set('limit', String(opts.limit));
   return okJSON(
@@ -518,7 +530,18 @@ export function publishErrorMessage(err: unknown): string {
 export interface ArtifactListItem extends Artifact {
   /** The current version is a review awaiting the owner. */
   reviewPending: boolean;
+  /** Why the caller sees the artifact. */
+  access?: ArtifactAccess;
+  /** In a list narrowed to a project: homed elsewhere and shared with it. */
+  sharedWithScope?: boolean;
+  /** The artifact's home project was deleted. */
+  scopeDeleted?: boolean;
+  /** Set on rows with scopeDeleted: the caller may move the artifact. */
+  canManage?: boolean;
 }
+
+/** Why the caller sees an artifact in the list. */
+export type ArtifactAccess = 'owned' | 'project' | 'shared';
 
 /** Body of GET /api/v1/artifacts?mine=1. */
 export interface ArtifactListResponse {
@@ -535,6 +558,8 @@ export interface ArtifactListFilters {
   reviewPending?: boolean;
   /** Only artifacts the caller owns. */
   ownedOnly?: boolean;
+  /** Only artifacts a grant shares with the caller. */
+  sharedOnly?: boolean;
 }
 
 /**
@@ -547,6 +572,7 @@ export function artifactListUrl(filters: ArtifactListFilters, cursor?: string): 
   if (q) params.set('q', q);
   if (filters.reviewPending) params.set('review_pending', '1');
   if (filters.ownedOnly) params.set('owner', 'me');
+  if (filters.sharedOnly) params.set('shared', '1');
   if (cursor) params.set('cursor', cursor);
   return `/api/v1/artifacts?${params.toString()}`;
 }
@@ -558,6 +584,175 @@ export function artifactListUrl(filters: ArtifactListFilters, cursor?: string): 
 export function artifactPagePath(a: Pick<Artifact, 'id' | 'scopeRef'>, seq = 0): string {
   const base = `/projects/${encodeURIComponent(a.scopeRef)}/artifacts/${encodeURIComponent(a.id)}`;
   return seq > 0 ? `${base}/v/${seq}` : base;
+}
+
+// ---------------------------------------------------------------------------
+// Sharing: share links, grants, expiry and moving (pkg/artifacts/links.go,
+// pkg/artifacts/grants.go)
+// ---------------------------------------------------------------------------
+
+/** A share link. The hub never returns its token after creation. */
+export interface ShareLink {
+  id: string;
+  createdAt: string;
+  expiresAt: string;
+  /** "user:<id>" of the user who created it. */
+  createdBy?: string;
+}
+
+/** POST /api/v1/artifacts/{id}/links. */
+export interface CreateLinkResponse {
+  link: ShareLink;
+  /** Hub-relative path of the link; shown once, never retrievable later. */
+  url: string;
+  /** The link ends earlier than asked because the artifact expires then. */
+  clampedToArtifactExpiry?: boolean;
+}
+
+/** Grant permissions, weakest first. */
+export type GrantPermission = 'read' | 'write' | 'admin';
+
+/** A grant to a user or agent ("principal") or a project ("scope"). */
+export interface ArtifactGrant {
+  id: string;
+  subjectKind: 'principal' | 'scope';
+  /** "user:<id>" or "agent:<id>" for a principal, a project id for a scope. */
+  subjectRef: string;
+  permission: GrantPermission;
+  /** The home project's grant: listed first, never removed. */
+  home?: boolean;
+  createdAt: string;
+  createdBy?: string;
+}
+
+/** GET /api/v1/artifacts/{id}/grants. */
+export interface GrantListResponse {
+  grants: ArtifactGrant[];
+  /** Grants to other projects, and moves to them, are turned on. */
+  crossProjectSharing: boolean;
+}
+
+/** PATCH /api/v1/artifacts/{id}. */
+export interface PatchArtifactResponse {
+  artifact: Artifact;
+  linksCutShort?: number;
+  grantsRemoved?: number;
+}
+
+/** The lifetimes a share link can be created with. */
+export const LINK_LIFETIMES: ReadonlyArray<{ label: string; hours: number }> = [
+  { label: '1 day', hours: 24 },
+  { label: '7 days', hours: 7 * 24 },
+  { label: '30 days', hours: 30 * 24 },
+];
+
+/** The default share link lifetime, in hours. */
+export const DEFAULT_LINK_HOURS = 7 * 24;
+
+/** Labels of the grant permissions. */
+export const PERMISSION_LABELS: Record<GrantPermission, string> = {
+  read: 'Can view',
+  write: 'Can edit',
+  admin: 'Can manage',
+};
+
+/** Lists an artifact's unexpired share links. */
+export async function listLinks(id: string): Promise<ShareLink[]> {
+  const body = await okJSON<{ links: ShareLink[] }>(await apiFetch(`${artifactPath(id)}/links`));
+  return body.links ?? [];
+}
+
+/** Creates a share link that lasts ttlHours. */
+export async function createLink(id: string, ttlHours: number): Promise<CreateLinkResponse> {
+  return okJSON(
+    await apiFetch(`${artifactPath(id)}/links`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ttlHours }),
+    })
+  );
+}
+
+/** Revokes a share link. */
+export async function revokeLink(id: string, linkId: string): Promise<void> {
+  const res = await apiFetch(`${artifactPath(id)}/links/${encodeURIComponent(linkId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+}
+
+/** Lists an artifact's grants, the home project's first. */
+export async function listGrants(id: string): Promise<GrantListResponse> {
+  const body = await okJSON<GrantListResponse>(await apiFetch(`${artifactPath(id)}/grants`));
+  return { grants: body.grants ?? [], crossProjectSharing: !!body.crossProjectSharing };
+}
+
+/** Adds a grant, or changes the permission of the subject's grant. */
+export async function putGrant(
+  id: string,
+  subjectKind: ArtifactGrant['subjectKind'],
+  subjectRef: string,
+  permission: GrantPermission
+): Promise<ArtifactGrant> {
+  const body = await okJSON<{ grant: ArtifactGrant }>(
+    await apiFetch(`${artifactPath(id)}/grants`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subjectKind, subjectRef, permission }),
+    })
+  );
+  return body.grant;
+}
+
+/** Removes a grant. */
+export async function deleteGrant(id: string, grantId: string): Promise<void> {
+  const res = await apiFetch(`${artifactPath(id)}/grants/${encodeURIComponent(grantId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+}
+
+/**
+ * Changes an artifact: expiresAt sets its expiry (null clears it), scopeRef
+ * moves it to another home project.
+ */
+export async function patchArtifact(
+  id: string,
+  change: { expiresAt?: string | null; scopeRef?: string }
+): Promise<PatchArtifactResponse> {
+  return okJSON(
+    await apiFetch(artifactPath(id), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(change),
+    })
+  );
+}
+
+/** The absolute URL of a share link from the hub-relative path it was created with. */
+export function shareLinkUrl(path: string, origin: string): string {
+  return new URL(path, origin).toString();
+}
+
+/**
+ * What setting the artifact's expiry to expiresAt (null: kept until
+ * deleted) would cut: the unexpired links that would end before their own
+ * expiry, and the grants deleted with the artifact. Mirrors the counts the
+ * hub returns from PATCH.
+ */
+export function expiryImpact(
+  expiresAt: Date | null,
+  links: readonly ShareLink[],
+  grants: readonly ArtifactGrant[],
+  now: Date
+): { linksCutShort: number; grantsRemoved: number } {
+  if (!expiresAt) return { linksCutShort: 0, grantsRemoved: 0 };
+  let linksCutShort = 0;
+  for (const l of links) {
+    const end = new Date(l.expiresAt);
+    if (end > now && expiresAt < end) linksCutShort++;
+  }
+  return { linksCutShort, grantsRemoved: grants.length };
 }
 
 // ---------------------------------------------------------------------------

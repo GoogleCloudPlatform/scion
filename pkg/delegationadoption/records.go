@@ -31,6 +31,33 @@ const CohortSection = "delegation_provenance_adoption_cohort"
 // HeaderSchemaVersion is the layout of the header and marker.
 const HeaderSchemaVersion = 1
 
+// RetryVersion is the version of the retry pass over skipped boot records.
+// A marker whose RetryVersion is lower was written before the pass existed
+// (or before its current rules), so the next start re-runs adoption for the
+// cohort's retryable skipped records and then records this version in the
+// marker. The pass runs once per version, not on every start.
+//
+// Version 1: before it, the write guard compared the edge's updated time as
+// stored text, so on SQLite a row whose stored timestamp text was not in
+// canonical form failed the guard even though it was unchanged. Such hops
+// were recorded skipped_changed/edge_changed, and their descendants
+// skipped_changed/ancestor_not_adopted.
+const RetryVersion = 1
+
+// Retryable reports whether a skipped_changed record with reason may be
+// retried by the retry pass. edge_changed may have come from the earlier
+// write guard rather than a real change, and ancestor_not_adopted follows
+// from a skipped ancestor. A retry re-plans the hop against current state
+// with every rule ApplyAdopt applies, so a hop that really changed is
+// skipped again.
+func Retryable(reason string) bool {
+	switch Reason(reason) {
+	case ReasonEdgeChanged, ReasonAncestorNotAdopted:
+		return true
+	}
+	return false
+}
+
 // Header is the JSON value of the cohort header and of the
 // completion marker.
 type Header struct {
@@ -39,6 +66,10 @@ type Header struct {
 	CohortID      string         `json:"cohort_id"`
 	Completed     bool           `json:"completed,omitempty"`
 	Counts        map[string]int `json:"counts,omitempty"`
+	// RetryVersion, on the marker, is the RetryVersion of the last retry
+	// pass over the cohort's skipped records. Zero on a marker written
+	// before the pass existed.
+	RetryVersion int `json:"retry_version,omitempty"`
 }
 
 // SnapshotRecords returns the records a plan contributes to a cohort:

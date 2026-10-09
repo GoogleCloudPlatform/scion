@@ -153,8 +153,8 @@ func (a *admitter) Admit(ctx context.Context, hello *conduitv1.Hello) (*conduitv
 		GrantKeys:           keys,
 		EndpointIncarnation: inc.Value,
 	}
-	if r.cfg.LifetimeHint > 0 {
-		w.LifetimeHintS = uint32(r.cfg.LifetimeHint.Seconds())
+	if h := r.lifetimeHint(a.e); h > 0 {
+		w.LifetimeHintS = uint32(h.Seconds())
 	}
 	return w, nil
 }

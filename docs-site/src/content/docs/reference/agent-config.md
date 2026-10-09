@@ -53,6 +53,12 @@ These platform skills are managed by Scion and do not need to be manually includ
 | `max_duration` | string | Maximum runtime duration (e.g., `"2h"`, `"30m"`). Exceeding this triggers a `LIMITS_EXCEEDED` state and termination. |
 | `resources` | object | Container resource requests/limits (see below). |
 
+### Workspace Clone
+
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `clone_depth` | string or int | Git clone depth for a clone-per-agent workspace: `full` for a full (non-shallow) clone, or an integer N from 1 to 999999999 for a clone of depth N. Overrides the profile's `clone_depth`. Unset (absent, null or empty) keeps the profile's value, else the default shallow clone of depth 1. Applies only when the workspace is cloned (a new agent, or a recreated workspace); restarting an agent whose workspace is already a shallow clone keeps it shallow. See [Profiles](/scion/reference/orchestrator-settings/#profiles-profiles). |
+
 ### Resource Specification
 
 ```yaml

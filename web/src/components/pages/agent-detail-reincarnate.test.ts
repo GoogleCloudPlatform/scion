@@ -109,7 +109,7 @@ function makeAgent(overrides: Partial<Agent> = {}): Agent {
     phase: 'running',
     _capabilities: { actions: ['read', 'lifecycle'] },
     ...overrides,
-  } as Agent;
+  };
 }
 
 function jsonResponse(status: number, body: unknown): Response {

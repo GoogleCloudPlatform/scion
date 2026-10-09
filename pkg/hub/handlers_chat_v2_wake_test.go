@@ -641,18 +641,27 @@ func TestChatV2Wake_PanicAfterPersist_KeepsGateState(t *testing.T) {
 			f.srv.mu.RUnlock()
 			f.srv.SetWebChatStore(panickingReplyStore{WebChatStore: wcs})
 
+			// A human-sent message of this topic: a reply to it keeps the
+			// default agent as primary but still stores the reply link,
+			// which panics.
+			replyTarget := tid("chat-wake-reply-target-" + tc.name)
+			require.NoError(t, f.s.CreateMessage(t.Context(), &store.Message{
+				ID: replyTarget, ProjectID: f.proj.ID, Sender: "user:dev", SenderID: DevUserID, Recipient: "thread:" + f.topic,
+				Msg: "earlier", Type: "instruction", Channel: "web", ThreadID: f.topic,
+				CreatedAt: time.Now().Add(-time.Minute).UTC(),
+			}))
+
 			func() {
 				defer func() { _ = recover() }()
-				// An unknown reply_to_id keeps the default agent as primary
-				// but still stores the reply link, which panics.
 				_ = doRequest(t, f.srv, http.MethodPost, f.path(),
-					map[string]any{"content": "hello", "reply_to_id": "no-such-message"})
+					map[string]any{"content": "hello", "reply_to_id": replyTarget})
 			}()
 
 			res, err := f.s.ListMessages(t.Context(), store.MessageFilter{ThreadID: f.topic}, store.ListOptions{Limit: 10})
 			require.NoError(t, err)
-			require.Len(t, res.Items, 1, "the row was stored before the panic")
+			require.Len(t, res.Items, 2, "the row was stored before the panic")
 			m := res.Items[0]
+			require.NotEqual(t, replyTarget, m.ID, "newest row first")
 			assert.Equal(t, tc.wantState, m.DispatchState, "the gate's state must survive the panic")
 			if tc.wantReason != "" {
 				require.NotNil(t, m.DispatchFailureReason)
