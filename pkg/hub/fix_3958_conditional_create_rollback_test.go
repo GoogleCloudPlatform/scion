@@ -559,17 +559,44 @@ type schedRollbackStage struct {
 	name      string
 	stage     string
 	runIntent bool
+	// createErr is the dispatch's error; "broker unavailable" when nil.
+	createErr error
+	// deleteClaim: the failure is itself a delete's claim
+	// (store.ErrDeleteInProgress), so the fire keeps its own error whether
+	// or not the rollback finds the row held.
+	deleteClaim bool
 }
 
 func schedRollbackStages() []schedRollbackStage {
 	return []schedRollbackStage{
 		{name: "run intent", stage: createStageRunIntent, runIntent: true},
 		{name: "dispatch", stage: createStageDispatch},
+		{name: "dispatch delete claim", stage: createStageDispatch, deleteClaim: true,
+			createErr: fmt.Errorf("persist run id: %w", store.ErrDeleteInProgress)},
 	}
+}
+
+// schedDeletedDuringCreateErr is the error text of a fire whose rollback
+// left the row to a delete (errScheduledChildDeletedDuringCreate).
+const schedDeletedDuringCreateErr = `scheduled dispatch of agent "s3958-child": agent was deleted while it was being created`
+
+// assertSchedHeldRowErr checks the error of a fire whose rollback left the
+// row to a delete: errScheduledChildDeletedDuringCreate, or the plain error
+// when the failure was the delete's claim.
+func assertSchedHeldRowErr(t *testing.T, st schedRollbackStage, plain, run schedRollbackRun) {
+	t.Helper()
+	if st.deleteClaim {
+		assert.Equal(t, plain.errText, run.errText, "the event error is unchanged")
+		assert.NotErrorIs(t, run.err, errScheduledChildDeletedDuringCreate)
+		return
+	}
+	assert.ErrorIs(t, run.err, errScheduledChildDeletedDuringCreate)
+	assert.Equal(t, schedDeletedDuringCreateErr, run.errText, "no correlation ID in the event error")
 }
 
 // schedRollbackRun is the outcome of one failed scheduled fire.
 type schedRollbackRun struct {
+	err           error
 	errText       string
 	agentID       string
 	finalizeCalls int
@@ -581,7 +608,11 @@ type schedRollbackRun struct {
 func runSchedRollback(t *testing.T, st schedRollbackStage, faults rollbackFaults) schedRollbackRun {
 	t.Helper()
 	f := newSchedFire(t, "s3958-"+tidSlugSafe(st.name))
-	f.srv.SetDispatcher(&schedFailingDispatcher{failingCreateDispatcher{createErr: errors.New("broker unavailable")}})
+	createErr := st.createErr
+	if createErr == nil {
+		createErr = errors.New("broker unavailable")
+	}
+	f.srv.SetDispatcher(&schedFailingDispatcher{failingCreateDispatcher{createErr: createErr}})
 	faults.runIntent = st.runIntent
 	cs, fault := installRollbackStore(t, f.srv, f.store, faults)
 	fault.Arm()
@@ -592,6 +623,7 @@ func runSchedRollback(t *testing.T, st schedRollbackStage, faults rollbackFaults
 	agentID, finalizeCalls, deleteCalls := cs.snapshot()
 	require.NotEmpty(t, agentID, "the rollback ran: %v", err)
 	return schedRollbackRun{
+		err:           err,
 		errText:       normalizeCorrelationID(strings.ReplaceAll(err.Error(), agentID, "<agent-id>")),
 		agentID:       agentID,
 		finalizeCalls: finalizeCalls,
@@ -601,9 +633,10 @@ func runSchedRollback(t *testing.T, st schedRollbackStage, faults rollbackFaults
 }
 
 // (B) The scheduler's dispatch_agent rollback: a delete that holds the row
-// keeps it, and the fire fails with the same error text as the same failure
-// with no delete; a failed or lapsed delete does not hold it, and the
-// create is rolled back. The scheduled create takes no quota reservation,
+// keeps it, and the fire fails with errScheduledChildDeletedDuringCreate
+// (ptone/scion#4061), unless the failure was the delete's claim; a failed
+// or lapsed delete does not hold it, the create is rolled back and the
+// fire fails with the same error text as the same failure with no delete. The scheduled create takes no quota reservation,
 // so there is none to hold or release.
 func TestFix3958_SchedDispatchRollback_DeferToHeldRow(t *testing.T) {
 	for _, st := range schedRollbackStages() {
@@ -622,13 +655,14 @@ func TestFix3958_SchedDispatchRollback_DeferToHeldRow(t *testing.T) {
 							del.apply(t, s, id)
 						}
 					}})
-					assert.Equal(t, plain.errText, run.errText, "the event error is unchanged")
 					assert.Zero(t, run.deleteCalls, "no unconditional row delete")
 					if del.held {
+						assertSchedHeldRowErr(t, st, plain, run)
 						assertRowLeftToDelete(t, run.s, run.agentID, del, false)
 						assert.Equal(t, 1, run.finalizeCalls, "the refused compensation, and no fallback")
 						return
 					}
+					assert.Equal(t, plain.errText, run.errText, "the event error is unchanged")
 					assertRolledBack(t, run.s, run.agentID, st.stage, false)
 				})
 			}
@@ -636,7 +670,10 @@ func TestFix3958_SchedDispatchRollback_DeferToHeldRow(t *testing.T) {
 	}
 }
 
-// (B) The scheduler rollback's fallback row delete is conditional too.
+// (B) The scheduler rollback's fallback row delete is conditional too: a
+// delete that holds the row before it keeps the row, and the fire fails
+// with errScheduledChildDeletedDuringCreate and no correlation ID, unless
+// the failure was the delete's claim (ptone/scion#4061).
 func TestFix3958_SchedDispatchRollback_FallbackDefersToHeldRow(t *testing.T) {
 	for _, st := range schedRollbackStages() {
 		t.Run(st.name, func(t *testing.T) {
@@ -653,13 +690,14 @@ func TestFix3958_SchedDispatchRollback_FallbackDefersToHeldRow(t *testing.T) {
 							del.apply(t, s, id)
 						}
 					}})
-					assert.Equal(t, plain.errText, run.errText, "the event error is unchanged")
 					assert.Zero(t, run.deleteCalls, "no unconditional row delete")
 					if del.held {
+						assertSchedHeldRowErr(t, st, plain, run)
 						assertRowLeftToDelete(t, run.s, run.agentID, del, false)
 						assert.Equal(t, 2, run.finalizeCalls, "the failed compensation, then one refused fallback delete")
 						return
 					}
+					assert.Equal(t, plain.errText, run.errText, "the event error is unchanged")
 					assert.True(t, agentGone(t, run.s, run.agentID), "the fallback removes the row")
 				})
 			}
