@@ -241,17 +241,10 @@ interface V1TelemetryHubConfig {
   report_interval?: string;
 }
 
-interface V1TelemetryLocalConfig {
-  enabled?: boolean;
-  file?: string;
-  console?: boolean;
-}
-
 interface V1TelemetryConfig {
   enabled?: boolean;
   cloud?: V1TelemetryCloudConfig;
   hub?: V1TelemetryHubConfig;
-  local?: V1TelemetryLocalConfig;
 }
 
 // Keys match CloudRunConfig JSON tags in pkg/config/settings_v1.go.
@@ -512,9 +505,6 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   'telemetry.cloud.cloud_logging': 'Cloud Logging',
   'telemetry.hub.enabled': 'Hub Reporting Enabled',
   'telemetry.hub.report_interval': 'Hub Report Interval',
-  'telemetry.local.enabled': 'Local Telemetry Enabled',
-  'telemetry.local.file': 'Local Telemetry File',
-  'telemetry.local.console': 'Local Telemetry Console',
   // agent_defaults section
   default_template: 'Default Template',
   default_harness_config: 'Default Harness Config',
@@ -733,9 +723,6 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private telemetryCloudCloudLogging = false;
   @state() private telemetryHubEnabled = false;
   @state() private telemetryHubReportInterval = '';
-  @state() private telemetryLocalEnabled = false;
-  @state() private telemetryLocalFile = '';
-  @state() private telemetryLocalConsole = false;
 
   // Message Broker
   @state() private messageBrokerEnabled = false;
@@ -1819,11 +1806,6 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.telemetryHubEnabled = tel.hub.enabled || false;
         this.telemetryHubReportInterval = tel.hub.report_interval || '';
       }
-      if (tel.local) {
-        this.telemetryLocalEnabled = tel.local.enabled || false;
-        this.telemetryLocalFile = tel.local.file || '';
-        this.telemetryLocalConsole = tel.local.console || false;
-      }
     }
 
     // Auto-expose ports
@@ -2193,13 +2175,6 @@ export class ScionPageAdminServerConfig extends LitElement {
         telemetry.hub = {
           enabled: this.telemetryHubEnabled,
           report_interval: this.telemetryHubReportInterval,
-        };
-      }
-      if (ok('telemetry.local.enabled')) {
-        telemetry.local = {
-          enabled: this.telemetryLocalEnabled,
-          file: this.telemetryLocalFile,
-          console: this.telemetryLocalConsole,
         };
       }
       payload.telemetry = telemetry;
@@ -2582,13 +2557,6 @@ export class ScionPageAdminServerConfig extends LitElement {
         report_interval: ok('telemetry.hub.report_interval')
           ? this.telemetryHubReportInterval || undefined
           : undefined,
-      };
-    }
-    if (ok('telemetry.local.enabled')) {
-      telemetry.local = {
-        enabled: this.telemetryLocalEnabled,
-        file: ok('telemetry.local.file') ? this.telemetryLocalFile || undefined : undefined,
-        console: ok('telemetry.local.console') ? this.telemetryLocalConsole : undefined,
       };
     }
     if (Object.keys(telemetry).length > 0) payload.telemetry = telemetry;
@@ -5861,52 +5829,6 @@ export class ScionPageAdminServerConfig extends LitElement {
                   placeholder="30s"
                   @sl-input=${(e: Event) => {
                     this.telemetryHubReportInterval = (e.target as HTMLInputElement).value;
-                  }}
-                ></sl-input>`
-            )}
-          </div>
-        </div>
-      </div>
-
-      <div class="section">
-        <h3 class="section-title">Local Debug Output</h3>
-        <div class="form-grid">
-          <div class="form-field">
-            ${this.renderFieldValue(
-              'telemetry.local.enabled',
-              this.telemetryLocalEnabled ? 'Enabled' : 'Disabled',
-              html`${this.renderEnvBadge('telemetry.local.enabled')}<sl-switch
-                  ?checked=${this.telemetryLocalEnabled}
-                  @sl-change=${(e: Event) => {
-                    this.telemetryLocalEnabled = (e.target as HTMLInputElement).checked;
-                  }}
-                  >Enable Local Output</sl-switch
-                >`
-            )}
-          </div>
-          <div class="form-field">
-            ${this.renderFieldValue(
-              'telemetry.local.console',
-              this.telemetryLocalConsole ? 'Enabled' : 'Disabled',
-              html`${this.renderEnvBadge('telemetry.local.console')}<sl-switch
-                  ?checked=${this.telemetryLocalConsole}
-                  @sl-change=${(e: Event) => {
-                    this.telemetryLocalConsole = (e.target as HTMLInputElement).checked;
-                  }}
-                  >Console Output</sl-switch
-                >`
-            )}
-          </div>
-          <div class="form-field full-width">
-            <label>Log File</label>
-            ${this.renderFieldValue(
-              'telemetry.local.file',
-              this.telemetryLocalFile || '—',
-              html`${this.renderEnvBadge('telemetry.local.file')}<sl-input
-                  value=${this.telemetryLocalFile}
-                  placeholder="/var/log/scion/telemetry.log"
-                  @sl-input=${(e: Event) => {
-                    this.telemetryLocalFile = (e.target as HTMLInputElement).value;
                   }}
                 ></sl-input>`
             )}
