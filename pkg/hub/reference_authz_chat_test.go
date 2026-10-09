@@ -59,7 +59,7 @@ type refFixture struct {
 	aa     *store.Agent // agent of project A, owned by ua
 }
 
-var errRefStoreFault = errors.New("injected store fault")
+var errRefStoreFault = errors.New("store fault for test")
 
 // refFaultStore fails selected store calls once its switch is armed. Set
 // the fields before arming.
