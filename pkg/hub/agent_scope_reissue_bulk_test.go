@@ -143,9 +143,11 @@ func bulkHTTP(t *testing.T, srv *Server, ctx context.Context, body any, identity
 	return rec
 }
 
-// T12: without an explicit dry_run=false the bulk run is a dry run. It
-// writes no edge, no credential change and no per-agent row (only the
-// batch row, marked dry_run), and its report equals the applied run's diff
+// T12: without an explicit dry_run=false the bulk run is a dry run. A bulk
+// dry run writes no per-agent rows (only the batch row with dry_run=true and
+// counts); a single-agent --dry-run keeps its dry_run=true row (see
+// TestScopeReissue_T9_DryRunMatchesRealRun). It also writes no edge and no
+// credential change, and its report equals the applied run's diff
 // for a parent and child in one tree, where the child gains the scopes
 // only through its parent's re-issue: the dry run computes the child
 // against the parent's would-be record. The parent is NOT re-issued
