@@ -149,18 +149,37 @@ func TestRelationshipDelegatorExecutionAdmission_InactiveDelegator(t *testing.T)
 	assert.Contains(t, reason, "execution source user is not active")
 }
 
-// A relationship permission outside the execution class is unchanged: the
-// owner of an agent attaches to it without admission to its project.
+// A relationship permission outside the execution class is not subject to
+// the execution-project stage. The owner's relationship grant on a
+// project-scoped agent still needs the owner's active access to the agent's
+// project (the project-access stage), but not an execution-project match.
 func TestRelationshipDelegatorNonExecutionUnchanged(t *testing.T) {
 	f := newDelegatorAdmissionFixture(t, "nonexec")
+
+	// Unadmitted, the owner's attach is refused by the project-access
+	// stage, not by the execution-project stage.
 	ok, reason := f.evaluate(t, f.ownedAgent(), ActionAttach, "agent.attach")
+	assert.False(t, ok)
+	assert.Contains(t, reason, "restricted by "+RelationshipRejectProjectAccess)
+
+	// Admitted through a role that grants only project.read, the owner
+	// attaches through the relationship grant.
+	f.admitWithoutGrant(t, f.projectID)
+	ok, reason = f.evaluate(t, f.ownedAgent(), ActionAttach, "agent.attach")
 	assert.True(t, ok, "reason %q", reason)
 	assert.Contains(t, reason, "relationship grant")
 
-	// Without admission the execution-class permission is refused for the
-	// same delegator.
-	ok, _ = f.evaluate(t, f.personalSkill(), ActionRead, "skill.read")
+	// With a delegation scope outside the agent's project, the
+	// execution-class permission is refused for the same delegator by the
+	// execution-project stage, while attach is still granted.
+	ok, reason, err := f.authz.evaluateUserDelegatorAuthority(context.Background(), f.userID, f.ownedAgent(), ActionAttach, "agent.attach", store.RoleScopeSystem, "")
+	require.NoError(t, err)
+	assert.True(t, ok, "reason %q", reason)
+	assert.Contains(t, reason, "relationship grant")
+	ok, reason, err = f.authz.evaluateUserDelegatorAuthority(context.Background(), f.userID, f.personalSkill(), ActionRead, "skill.read", store.RoleScopeSystem, "")
+	require.NoError(t, err)
 	assert.False(t, ok)
+	assert.Contains(t, reason, "execution project does not match the agent's project")
 }
 
 // A role grant is unaffected: a project owner holds skill.read through the

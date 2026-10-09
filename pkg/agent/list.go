@@ -290,6 +290,9 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 					Activity:        info.Activity,
 					Runtime:         info.Runtime,
 					Profile:         info.Profile,
+					// No container and phase "created": provisioned by a
+					// local scion create but never started (ptone/scion#2875).
+					ProvisionedOnly: info.Phase == string(state.PhaseCreated) && info.DeletedAt.IsZero(),
 				}
 
 				// Use agent-info.json mtime as LastSeen for local agents

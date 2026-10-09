@@ -1303,12 +1303,8 @@ func loadGlobalConfigLegacy(configPath string, topLevel map[string]interface{}) 
 	//       SCION_SERVER_DATABASE_DRIVER -> database.driver
 	//       SCION_SERVER_LOGLEVEL -> logLevel
 	//       SCION_SERVER_OAUTH_CLI_GOOGLE_CLIENTID -> oauth.cli.google.clientId
-	_ = k.Load(env.Provider("SCION_SERVER_", ".", func(s string) string {
-		key := strings.TrimPrefix(s, "SCION_SERVER_")
-		// Replace underscores with dots for nested keys and handle camelCase
-		key = envKeyToConfigKey(key)
-		return key
-	}), nil)
+	// Underscores become dots for nested keys, with camelCase handling.
+	_ = k.Load(nonEmptyEnvProvider("SCION_SERVER_", envKeyToConfigKey), nil)
 	splitKoanfListKeys(k, envListConfigKeys)
 
 	// Unmarshal into GlobalConfig struct
@@ -1635,6 +1631,20 @@ func LoadFileOnlyKoanf() *koanf.Koanf {
 	return k
 }
 
+// nonEmptyEnvProvider returns a koanf env provider for the variables with the
+// given prefix. mapKey receives the name with the prefix stripped and returns
+// the koanf key. An exported but empty variable is treated as unset, so it
+// never replaces a value from a lower layer with an empty string or list.
+// This matches the settings overlay (see LoadVersionedSettings).
+func nonEmptyEnvProvider(prefix string, mapKey func(string) string) *env.Env {
+	return env.ProviderWithValue(prefix, ".", func(name, value string) (string, interface{}) {
+		if value == "" {
+			return "", nil
+		}
+		return mapKey(strings.TrimPrefix(name, prefix)), value
+	})
+}
+
 // LoadEnvKoanf returns a koanf instance loaded with only the SCION_SERVER_*
 // environment variables (no file, no defaults). Keys are mapped to the
 // opsettings registry keyspace (snake_case with server.* prefix where
@@ -1642,10 +1652,7 @@ func LoadFileOnlyKoanf() *koanf.Koanf {
 // match them against the registry.
 func LoadEnvKoanf() *koanf.Koanf {
 	k := koanf.New(".")
-	_ = k.Load(env.Provider("SCION_SERVER_", ".", func(s string) string {
-		key := strings.TrimPrefix(s, "SCION_SERVER_")
-		return serverEnvToOpsettingsKey(key)
-	}), nil)
+	_ = k.Load(nonEmptyEnvProvider("SCION_SERVER_", serverEnvToOpsettingsKey), nil)
 	return k
 }
 
@@ -1655,10 +1662,7 @@ func LoadEnvKoanf() *koanf.Koanf {
 // e.g. SCION_SEED_SERVER_HUB_ADMINEMAILS → server.hub.admin_emails
 func LoadSeedEnvKoanf() *koanf.Koanf {
 	k := koanf.New(".")
-	_ = k.Load(env.Provider("SCION_SEED_", ".", func(s string) string {
-		key := strings.TrimPrefix(s, "SCION_SEED_")
-		return envKeyToOpsettingsKey(key)
-	}), nil)
+	_ = k.Load(nonEmptyEnvProvider("SCION_SEED_", envKeyToOpsettingsKey), nil)
 	return k
 }
 
@@ -1728,10 +1732,7 @@ func LoadBootstrapKoanf() *koanf.Koanf {
 	// 4. SCION_SERVER_* environment variables (highest precedence in bootstrap).
 	// Uses serverEnvToOpsettingsKey which re-adds the "server." prefix for keys
 	// that belong under V1ServerConfig (e.g. HUB_ADMINEMAILS → server.hub.admin_emails).
-	_ = k.Load(env.Provider("SCION_SERVER_", ".", func(s string) string {
-		key := strings.TrimPrefix(s, "SCION_SERVER_")
-		return serverEnvToOpsettingsKey(key)
-	}), nil)
+	_ = k.Load(nonEmptyEnvProvider("SCION_SERVER_", serverEnvToOpsettingsKey), nil)
 
 	// 5. Split comma-separated list values from env vars. Koanf's env provider
 	// loads everything as strings; list fields need explicit splitting so
@@ -1834,10 +1835,7 @@ func splitKoanfListKeys(k *koanf.Koanf, keys []string) {
 // legacy server.yaml).
 func applyEnvOverrides(gc *GlobalConfig) error {
 	k := koanf.New(".")
-	_ = k.Load(env.Provider("SCION_SERVER_", ".", func(s string) string {
-		key := strings.TrimPrefix(s, "SCION_SERVER_")
-		return envKeyToConfigKey(key)
-	}), nil)
+	_ = k.Load(nonEmptyEnvProvider("SCION_SERVER_", envKeyToConfigKey), nil)
 	splitKoanfListKeys(k, envListConfigKeys)
 
 	if err := k.Unmarshal("", gc); err != nil {

@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
-	"sync"
 	"time"
 
 	"entgo.io/ent/dialect"
@@ -64,12 +63,6 @@ type AgentStore struct {
 	client *ent.Client
 	inTx   bool // true when client wraps an ambient WithTx transaction
 
-	// dialect is detected lazily on first use of a lock-taking path and
-	// memoized. SELECT ... FOR UPDATE is only emitted on Postgres; the SQLite
-	// driver rejects the clause outright, so it must be elided there.
-	dialectOnce sync.Once
-	dialectName string
-
 	// afterRunIDRead, when set (tests only), runs between SetAgentRunID's
 	// read and its swap, to simulate a concurrent writer.
 	afterRunIDRead func(agentID string)
@@ -81,14 +74,13 @@ func NewAgentStore(client *ent.Client) *AgentStore {
 }
 
 // usesRowLocks reports whether the backend supports SELECT ... FOR UPDATE.
-// The dialect is captured from a no-op selector the first time it is needed.
-func (s *AgentStore) usesRowLocks(ctx context.Context) bool {
-	s.dialectOnce.Do(func() {
-		_, _ = s.client.Agent.Query().
-			Where(func(sel *entsql.Selector) { s.dialectName = sel.Dialect() }).
-			Exist(ctx)
-	})
-	return s.dialectName == dialect.Postgres
+// SELECT ... FOR UPDATE is only emitted on Postgres; the SQLite driver
+// rejects the clause outright, so it must be elided there. The dialect is
+// read from the driver (a construction-time property) with no query, so it
+// cannot be lost to a failed or cancelled probe and never contends for a
+// connection -- the same idiom as BrokerSettingStore.usesRowLocks.
+func (s *AgentStore) usesRowLocks() bool {
+	return s.client.Driver().Dialect() == dialect.Postgres
 }
 
 // Compile-time assertion that AgentStore satisfies the store.AgentStore
@@ -1442,10 +1434,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		return err
 	}
 
-	// Prime dialect detection before opening the transaction: the detection
-	// probe runs on s.client, which would contend with the open transaction on
-	// single-connection SQLite.
-	useLock := s.usesRowLocks(ctx)
+	useLock := s.usesRowLocks()
 
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
@@ -1617,6 +1606,54 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	return tx.Commit()
 }
 
+// SetAgentAnnotation implements store.AgentStore.SetAgentAnnotation. The
+// annotations are read and written back in one transaction (with a row lock
+// where the dialect has one), so two narrow writes of different keys do not
+// drop each other.
+func (s *AgentStore) SetAgentAnnotation(ctx context.Context, agentID, key, value string) error {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return err
+	}
+	useLock := s.usesRowLocks()
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	q := tx.Agent.Query().Where(agent.IDEQ(uid), agent.DeletedAtIsNil())
+	if useLock {
+		q = q.ForUpdate()
+	}
+	current, err := q.Only(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	annotations := make(map[string]string, len(current.Annotations)+1)
+	for k, v := range current.Annotations {
+		annotations[k] = v
+	}
+	if value == "" {
+		if _, ok := annotations[key]; !ok {
+			return tx.Commit()
+		}
+		delete(annotations, key)
+	} else {
+		annotations[key] = value
+	}
+	upd := tx.Agent.UpdateOneID(uid)
+	if len(annotations) == 0 {
+		upd.ClearAnnotations()
+	} else {
+		upd.SetAnnotations(annotations)
+	}
+	if err := upd.Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	return tx.Commit()
+}
+
 // SetAgentWorkspacePlacement implements store.AgentStore.SetAgentWorkspacePlacement.
 func (s *AgentStore) SetAgentWorkspacePlacement(ctx context.Context, agentID, placement string) error {
 	uid, err := parseUUID(agentID)
@@ -1677,17 +1714,6 @@ func utcExposedPorts(ports []store.ExposedPort) []store.ExposedPort {
 	return out
 }
 
-// PurgeDeletedAgents permanently removes soft-deleted agents older than cutoff.
-func (s *AgentStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error) {
-	deleted, err := s.client.Agent.Delete().
-		Where(agent.DeletedAtNotNil(), agent.DeletedAtLT(cutoff)).
-		Exec(ctx)
-	if err != nil {
-		return 0, err
-	}
-	return deleted, nil
-}
-
 // staleOfflineExcluded lists the terminal/sticky activities that must not be
 // overwritten when sweeping stale agents to "offline".
 var staleOfflineExcluded = []string{"completed", "limits_exceeded", "blocked", "offline"}
@@ -1695,7 +1721,7 @@ var staleOfflineExcluded = []string{"completed", "limits_exceeded", "blocked", "
 // MarkStaleAgentsOffline marks running agents whose last heartbeat predates
 // threshold as offline, returning the updated records for event publishing.
 func (s *AgentStore) MarkStaleAgentsOffline(ctx context.Context, threshold time.Time) ([]store.Agent, error) {
-	useLock := s.usesRowLocks(ctx)
+	useLock := s.usesRowLocks()
 
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
@@ -1774,6 +1800,9 @@ func (s *AgentStore) MarkAgentContainerMissingIfUnchanged(ctx context.Context, i
 		runID = agent.Or(agent.RunIDIsNil(), agent.RunIDEQ(""))
 	}
 	return s.markAgentContainerMissing(ctx, id, brokerID, cutoff, message,
+		// The exec agent_not_found path concludes only for an agent that
+		// was running; the heartbeat reconcile also settles stopping.
+		agent.PhaseEQ(string(state.PhaseRunning)),
 		agent.StateVersionEQ(pre.StateVersion),
 		runID,
 		agent.StartClaimIDIsNil(),
@@ -1801,7 +1830,9 @@ func (s *AgentStore) markAgentContainerMissing(ctx context.Context, id, brokerID
 				agent.IDEQ(uid),
 				agent.DeletedAtIsNil(),
 				agent.RuntimeBrokerIDEQ(brokerID),
-				agent.PhaseEQ("running"),
+				// stopping: the container's own shutdown report arrived
+				// but its final stopped report never did (ptone/scion#2669).
+				agent.PhaseIn(string(state.PhaseRunning), string(state.PhaseStopping)),
 				agent.Or(
 					agent.ReincarnationStateIsNil(),
 					agent.ReincarnationStateIn(store.ReincarnationStateNone, store.ReincarnationStateFailed),
@@ -1884,9 +1915,7 @@ func (s *AgentStore) ClearAgentRuntimeTarget(ctx context.Context, id string) (bo
 	if err != nil {
 		return false, 0, err
 	}
-	// Prime dialect detection before opening a transaction (see
-	// UpdateAgentStatus).
-	useLock := s.usesRowLocks(ctx)
+	useLock := s.usesRowLocks()
 	for i := 0; i < clearRuntimeTargetAttempts; i++ {
 		res, err := s.clearRuntimeTargetOnce(ctx, uid, id, useLock)
 		if err != nil {
@@ -2003,9 +2032,7 @@ func (s *AgentStore) SetAgentRuntimeTarget(ctx context.Context, id string, expec
 	if err != nil {
 		return false, err
 	}
-	// Prime dialect detection before opening a transaction (see
-	// UpdateAgentStatus).
-	useLock := s.usesRowLocks(ctx)
+	useLock := s.usesRowLocks()
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
 		return false, err
@@ -2082,7 +2109,7 @@ var stalledExcluded = []string{"completed", "limits_exceeded", "blocked", "stall
 // activityThreshold but whose heartbeat is still recent (>= heartbeatRecency)
 // as stalled, preserving the prior activity in stalled_from_activity.
 func (s *AgentStore) MarkStalledAgents(ctx context.Context, activityThreshold, heartbeatRecency time.Time) ([]store.Agent, error) {
-	useLock := s.usesRowLocks(ctx)
+	useLock := s.usesRowLocks()
 
 	tx, err := s.client.Tx(ctx)
 	if err != nil {

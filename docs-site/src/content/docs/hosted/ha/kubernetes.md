@@ -261,7 +261,18 @@ Scion also distinguishes a Kubernetes-initiated disruption from a plain stop or 
 | `DisruptionTarget` condition, reason `TerminationByKubelet` or `EvictionByEvictionAPI` | `evicted` |
 | `DisruptionTarget` condition, any other reason (for example a taint-manager or pod-GC removal) | `evicted` |
 
-This is reported as soon as either signal is observed: a pod still `Running` but already committed to termination (it has a `deletionTimestamp` and a live `DisruptionTarget` condition — most of what preemption and the Eviction API delete this way), or a pod that has actually reached a terminal state (`Failed`/`Succeeded`) while still carrying the signal. A `DisruptionTarget` condition with no `deletionTimestamp` yet is not reported — that pod is still finishing its grace period and has not stopped. It depends on the runtime observing one of these two states before the pod object is removed from the API server entirely; if the pod disappears between polls without either ever being observed, the agent may instead be reported through a different, more generic terminal path rather than as preempted/evicted. Docker and other non-Kubernetes runtimes are unaffected.
+This is reported as soon as either signal is observed: a pod still `Running` but already committed to termination (it has a `deletionTimestamp` and a live `DisruptionTarget` condition — most of what preemption and the Eviction API delete this way), or a pod that has actually reached a terminal state (`Failed`/`Succeeded`) while still carrying the signal. A `DisruptionTarget` condition with no `deletionTimestamp` yet is not reported — that pod is still finishing its grace period. Docker and other non-Kubernetes runtimes are unaffected.
+
+When either signal is observed, the agent leaves `running` at once, and its status message reads `Agent pod was preempted` or `Agent pod was evicted`. The phase depends on whether a later `scion start` can resume the work:
+
+| Agent workspace volume | Phase |
+|---|---|
+| Persistent (NFS workspace storage, a PersistentVolumeClaim) | `stopped` — the work survives; start the agent again to resume it |
+| `emptyDir` (the default local workspace) | `error` — the workspace was lost with the pod |
+
+The home backend does not change this: with a pod-local home the harness session is not kept across any Kubernetes restart. A `scion stop` that races a preemption stays `stopped`.
+
+If the pod disappears between polls without either signal ever being observed, the agent falls back to the missing-container reconcile: after `missing_agent_grace` it moves to `error` with exit reason `container_missing` (see [server configuration](/scion/reference/server-config/)). One known gap: an agent preempted within about two broker heartbeats of its start, before the Hub has confirmed which runtime target lists it, is not covered by that fallback.
 
 ### Safe-to-Evict
 
@@ -630,6 +641,21 @@ An agent image whose `sciontool` predates `SCION_WORKSPACE_MODE` prepares `agent
 With NFS workspace storage, an Empty-per-agent agent's workspace is on the export and is kept when the agent stops; see [Sharing Modes on the NFS Workspace](#sharing-modes-on-the-nfs-workspace).
 
 On clusters without NFS workspace storage (including `gke-shared-volume`), an agent in an Empty-per-agent project (a Hub-managed project without git created with workspace mode `per-agent`; see [Workspaces & Sharing Modes](/scion/local/workspaces-and-sharing/)) gets its own EmptyDir workspace volume. It starts empty, as intended, but **its contents are lost when the agent stops or its Pod is replaced**, so suspend/resume does not keep them either. Git clone-per-agent workspaces on EmptyDir behave the same way. Have agents write anything that must survive to a [shared directory](#shared-directory-pvcs).
+
+#### Unpushed work warning
+
+A git clone-per-agent workspace on EmptyDir is cloned again from the remote when the agent next starts, so commits that were not pushed and uncommitted or untracked files are lost on stop, suspend and restart. The Hub warns about this but does not block the operation:
+
+- **Before a single-agent stop, suspend or restart**, the Hub runs a short git check inside the running agent container (as the agent user; the check and recording its result take at most 6 seconds). It counts the commits not on the branch's upstream (or, without an upstream, not on any remote branch) and the changed and untracked files. If it finds any, the stop or suspend response carries a warning, which `scion stop` and `scion suspend` print:
+
+  ```
+  Warning: Workspace is ephemeral and will be re-cloned on next start; 2 unpushed commits and 3 changed files will be lost. Push first to keep them.
+  ```
+
+  If the check cannot run (for example the container has already exited, or it times out), there is no warning and the stop goes ahead as usual. The Hub's stop-all action (for example **Stop All** in the Web Dashboard) does not run the check, to keep it fast; `scion stop --all` stops each agent on its own and does run it.
+- **When the agent next starts** (`scion start`, `scion resume`, or a restart), the response repeats the result recorded at the stop, for example `Workspace is ephemeral and was re-cloned; 2 unpushed commits and 3 changed files from the previous run were lost.` When there is no record (the Pod went away without a single-agent stop, or the check did not complete), it says `Workspace is ephemeral and is re-cloned on start; local changes from the previous run are not kept.` A clean workspace gives no warning.
+
+To keep the work, push it before stopping the agent, or use [NFS workspace storage](#sharing-modes-on-the-nfs-workspace). Agents on NFS workspace storage and agents on other runtimes, such as Docker, are not checked and get no warning. The check runs only for agents managed through a Hub; local mode with the Kubernetes runtime does not warn.
 
 ### Persistent Agent Home (NFS)
 
