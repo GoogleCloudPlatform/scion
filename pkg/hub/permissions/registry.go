@@ -149,9 +149,13 @@ type Permission struct {
 	// Reserved marks a row that is part of the published vocabulary but
 	// that no code checks yet. It holds the reason. Every row must either
 	// declare a use (Enforcement or NonRouteUse) or be Reserved, never
-	// both: TestPermissionRegistryRowsEnforcedOrReserved in pkg/hub fails
-	// a row with neither. When code starts checking a reserved permission,
-	// clear Reserved and record the check in Enforcement.
+	// both, and nothing may grant a reserved permission: it carries no
+	// AgentScopes, no role holds it, and it is left out of manage aliases
+	// and the scope options offered to users (UATScopeOptions). Its
+	// UATScope stays valid (UATValidScopes) so existing tokens that carry
+	// it keep working. TestPermissionRegistryRowsEnforcedOrReserved in
+	// pkg/hub enforces all of this. When code starts checking a reserved
+	// permission, clear Reserved and record the check in Enforcement.
 	Reserved string
 	// ExcludeFromManageAlias keeps this permission's UAT scope out of the
 	// resource's "<resource>:manage" convenience alias. Used for observation
@@ -192,7 +196,7 @@ var Registry = []Permission{
 
 	{ID: "artifact.read", Resource: ResourceArtifact, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "artifact:read", AgentScopes: []string{"project:artifact:read"}, Description: "Read artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/read.go:PermissionRead"}},
 	{ID: "artifact.create", Resource: ResourceArtifact, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "artifact:create", AgentScopes: []string{"project:artifact:write"}, Description: "Publish artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/publish.go:PermissionCreate", "pkg/artifacts/versions.go:PermissionCreate"}},
-	{ID: "artifact.update", Resource: ResourceArtifact, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "artifact:update", AgentScopes: []string{"project:artifact:write"}, Description: "Edit artifact metadata (title, key, expiry)", Reserved: "no artifact route checks artifact.update; PATCH on an artifact is gated by artifact.manage (canAdminister)"},
+	{ID: "artifact.update", Resource: ResourceArtifact, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "artifact:update", Description: "Edit artifact metadata (title, key, expiry)", Reserved: "no artifact route checks artifact.update; PATCH on an artifact is gated by artifact.manage (canAdminister)"},
 	{ID: "artifact.delete", Resource: ResourceArtifact, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "artifact:delete", Description: "Delete artifacts", Reserved: "no artifact route checks artifact.delete; the service has no artifact delete route"},
 	{ID: "artifact.manage", Resource: ResourceArtifact, Action: ActionManage, CapabilityKind: CapabilityResource, UATScope: "artifact:manage", Description: "Manage artifact grants and share links", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/links.go:func (s *Service) canAdminister"}},
 
@@ -372,6 +376,12 @@ var Registry = []Permission{
 	{ID: "user_skill_injection.update", Resource: ResourceUserSkillInjection, Action: ActionUpdate, UATScope: "user_skill_injection:update", Description: "Change the skills injected into your own agents", NonRouteUse: []string{"pkg/hub/authorize.go:authorizeSelfScoped"}},
 }
 
+// IsReserved reports whether p is a reserved row (see Permission.Reserved).
+// A blank or whitespace-only Reserved does not count.
+func (p Permission) IsReserved() bool {
+	return strings.TrimSpace(p.Reserved) != ""
+}
+
 // ResourceActions returns item-level capability actions keyed by resource type.
 func ResourceActions() map[string][]string {
 	return actionsByKind(CapabilityResource)
@@ -422,10 +432,12 @@ func UATManageScopesFor(resource string) []string {
 }
 
 // UATScopeOptions returns UAT scopes with display metadata for CLI/UI surfaces.
+// Reserved permissions are left out: their scopes stay valid for existing
+// tokens (UATValidScopes) but are not offered.
 func UATScopeOptions(includeAliases bool) []Permission {
 	var out []Permission
 	for _, permission := range Registry {
-		if permission.UATScope != "" {
+		if permission.UATScope != "" && !permission.IsReserved() {
 			out = append(out, permission)
 		}
 	}
@@ -473,7 +485,7 @@ func UATScopeHelp() string {
 func uatScopesForResource(resource string) []string {
 	var out []string
 	for _, permission := range Registry {
-		if permission.Resource == resource && permission.UATScope != "" && !permission.ExcludeFromManageAlias {
+		if permission.Resource == resource && permission.UATScope != "" && !permission.ExcludeFromManageAlias && !permission.IsReserved() {
 			out = append(out, permission.UATScope)
 		}
 	}

@@ -111,7 +111,24 @@ var recordedProvenanceRequired = toPermissionSet(recordedProvenanceRequiredIDs)
 // held them, so it is not issued those scopes and is denied these
 // permissions at use. Principal chains are unaffected: their authority is
 // the live user.
-var legacyChainExcludedPermissions = toPermissionSet(agentScopeCoverage(sortedOptionalRoleScopes()))
+//
+// Every Reserved permission is in the set too. Nothing checks one today,
+// and when a check is wired an unrecorded chain must not gain it by
+// default. This also keeps artifact.update, which left
+// project:artifact:write when it was marked Reserved (ptone/scion#3652),
+// excluded as before.
+var legacyChainExcludedPermissions = toPermissionSet(append(agentScopeCoverage(sortedOptionalRoleScopes()), reservedPermissionIDs()...))
+
+// reservedPermissionIDs returns the IDs of the Reserved registry rows.
+func reservedPermissionIDs() []string {
+	var out []string
+	for _, p := range permissions.Registry {
+		if p.IsReserved() {
+			out = append(out, p.ID)
+		}
+	}
+	return out
+}
 
 // sortedOptionalRoleScopes returns the keys of ceilingOptionalRoleScopes in
 // sorted order.
