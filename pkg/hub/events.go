@@ -276,24 +276,28 @@ type BrokerStatusEvent struct {
 // UserMessageEvent is published when a message involving a human user is
 // persisted — either an agent→user reply or a user→agent instruction.
 type UserMessageEvent struct {
-	ID            string          `json:"id"`
-	ProjectID     string          `json:"projectId"`
-	Sender        string          `json:"sender"`
-	SenderID      string          `json:"senderId"`
-	Recipient     string          `json:"recipient"`
-	RecipientID   string          `json:"recipientId"`
-	Msg           string          `json:"msg"`
-	Type          string          `json:"type"`
-	Urgent        bool            `json:"urgent,omitempty"`
-	Broadcasted   bool            `json:"broadcasted,omitempty"`
-	AgentID       string          `json:"agentId"`
-	CreatedAt     string          `json:"createdAt"`
-	Channel       string          `json:"channel,omitempty"`
-	ThreadID      string          `json:"threadId,omitempty"`
-	GroupID       string          `json:"groupId,omitempty"`
-	Read          bool            `json:"read"`
-	DispatchState string          `json:"dispatchState,omitempty"`
-	Attachments   []AttachmentRef `json:"attachments,omitempty"`
+	ID          string `json:"id"`
+	ProjectID   string `json:"projectId"`
+	Sender      string `json:"sender"`
+	SenderID    string `json:"senderId"`
+	Recipient   string `json:"recipient"`
+	RecipientID string `json:"recipientId"`
+	Msg         string `json:"msg"`
+	Type        string `json:"type"`
+	Urgent      bool   `json:"urgent,omitempty"`
+	Broadcasted bool   `json:"broadcasted,omitempty"`
+	AgentID     string `json:"agentId"`
+	CreatedAt   string `json:"createdAt"`
+	Channel     string `json:"channel,omitempty"`
+	ThreadID    string `json:"threadId,omitempty"`
+	GroupID     string `json:"groupId,omitempty"`
+	// ConversationID mirrors the stored message (and the REST message
+	// JSON). The agent messages stream filters on it when the conversation
+	// setting is on.
+	ConversationID string          `json:"conversationId,omitempty"`
+	Read           bool            `json:"read"`
+	DispatchState  string          `json:"dispatchState,omitempty"`
+	Attachments    []AttachmentRef `json:"attachments,omitempty"`
 
 	// DispatchFailureReason and DispatchFailureCode carry the same failure
 	// detail as chatMessageResponse (nc-delivery-unreachable review R2), so
@@ -805,27 +809,29 @@ func (p *eventBuilder) PublishInviteChanged(_ context.Context, action, inviteID,
 //
 // DM messages (a "dm:" thread id) on the agent and project subjects are
 // delivered by the web events stream only to DM participants; see
-// sseEventVisible in web.go.
+// sseEventVisible in web.go. Other messages on those subjects follow the
+// agent message history rule (sseMessageViewer in web.go).
 func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message, attachments []AttachmentRef) {
 	evt := UserMessageEvent{
-		ID:            msg.ID,
-		ProjectID:     msg.ProjectID,
-		Sender:        msg.Sender,
-		SenderID:      msg.SenderID,
-		Recipient:     msg.Recipient,
-		RecipientID:   msg.RecipientID,
-		Msg:           msg.Msg,
-		Type:          msg.Type,
-		Urgent:        msg.Urgent,
-		Broadcasted:   msg.Broadcasted,
-		AgentID:       msg.AgentID,
-		CreatedAt:     msg.CreatedAt.UTC().Format(time.RFC3339Nano),
-		Channel:       msg.Channel,
-		ThreadID:      msg.ThreadID,
-		GroupID:       msg.GroupID,
-		Read:          msg.Read,
-		DispatchState: msg.DispatchState,
-		Attachments:   attachments,
+		ID:             msg.ID,
+		ProjectID:      msg.ProjectID,
+		Sender:         msg.Sender,
+		SenderID:       msg.SenderID,
+		Recipient:      msg.Recipient,
+		RecipientID:    msg.RecipientID,
+		Msg:            msg.Msg,
+		Type:           msg.Type,
+		Urgent:         msg.Urgent,
+		Broadcasted:    msg.Broadcasted,
+		AgentID:        msg.AgentID,
+		CreatedAt:      msg.CreatedAt.UTC().Format(time.RFC3339Nano),
+		Channel:        msg.Channel,
+		ThreadID:       msg.ThreadID,
+		GroupID:        msg.GroupID,
+		ConversationID: msg.ConversationID,
+		Read:           msg.Read,
+		DispatchState:  msg.DispatchState,
+		Attachments:    attachments,
 	}
 	// nc-delivery-unreachable review R2: carry the failure reason/code onto
 	// the event for a row that is already known to be failed at publish

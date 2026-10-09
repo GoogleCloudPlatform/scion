@@ -462,7 +462,8 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 // handleAgentMessagesStream handles GET /api/v1/agents/{id}/messages/stream.
 // Streams new messages involving a specific agent in real time. Callers
 // holding agent.attach on the agent see all messages; others see only their
-// own.
+// own. With the conversation setting on, both see only their own DM
+// conversation with the agent, matching the REST default path.
 // Unlike /message-logs/stream this does not depend on Cloud Logging: it
 // subscribes to the in-process event bus that handleAgentOutboundMessage
 // and handleAgentMessage already publish to, so it works on any hub
@@ -509,6 +510,33 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	// With the conversation setting on, REST's default path (no thread_id,
+	// channel web or unset — the only form this stream has) limits history
+	// to the DM conversation between the agent and the caller, for attach
+	// holders too. The stream applies the same limit by conversation id.
+	// A DM that does not exist yet is looked up again when the first
+	// message the caller takes part in arrives.
+	conv := agentStreamConversation{}
+	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() {
+		conv.enabled = true
+		conv.resolve = func() (string, error) {
+			res, err := messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, "agent", agent.ID, "user", user.ID())
+			if err != nil || res == nil {
+				return "", err
+			}
+			return res.ConversationID, nil
+		}
+		id, err := conv.resolve()
+		if err != nil {
+			slog.Error("read-switch: DM conversation lookup failed",
+				"agent_id", agent.ID, "user_id", user.ID(), "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"Failed to look up conversation", nil)
+			return
+		}
+		conv.id = id
+	}
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
@@ -551,12 +579,16 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 			if !ok {
 				return
 			}
-			if filterStream {
+			if filterStream || conv.enabled {
 				var payload UserMessageEvent
 				if err := json.Unmarshal(evt.Data, &payload); err != nil {
 					continue
 				}
-				if payload.SenderID != userID && payload.RecipientID != userID {
+				participant := payload.SenderID == userID || payload.RecipientID == userID
+				if filterStream && !participant {
+					continue
+				}
+				if !conv.includes(payload.ConversationID, participant) {
 					continue
 				}
 			}
@@ -573,4 +605,29 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
+}
+
+// agentStreamConversation limits the agent messages stream to the caller's
+// DM conversation with the agent when the conversation setting is on.
+type agentStreamConversation struct {
+	enabled bool
+	id      string
+	resolve func() (string, error)
+}
+
+// includes reports whether a message in conversation msgConvID belongs on
+// the stream. participant says whether the caller sent or received it;
+// only then can it be the first message of a DM not resolved yet.
+func (c *agentStreamConversation) includes(msgConvID string, participant bool) bool {
+	if !c.enabled {
+		return true
+	}
+	if c.id == "" && participant && msgConvID != "" {
+		id, err := c.resolve()
+		if err != nil {
+			slog.Warn("read-switch: DM conversation lookup failed on messages stream", "error", err)
+		}
+		c.id = id
+	}
+	return c.id != "" && msgConvID == c.id
 }
