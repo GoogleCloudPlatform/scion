@@ -48,6 +48,7 @@ pkg/hub/execute_agent_keys_test.go | 6
 pkg/hub/fix_2087_create_cleanup_detached_test.go | 2
 pkg/hub/fix_3471_dm_wake_detached_test.go | 2
 pkg/hub/fix_3557_managed_create_unrecorded_test.go | 12
+pkg/hub/fix_3746_managed_create_conflict_retry_test.go | 10
 pkg/hub/gcp_iam_settings_test.go | 2
 pkg/hub/gcs_link_test.go | 3
 pkg/hub/grant_audit_tx_test.go | 6
@@ -66,6 +67,7 @@ pkg/hub/handlers_chat_v2_space_members_authz_test.go | 1
 pkg/hub/handlers_chat_v2_space_members_paginate_test.go | 5
 pkg/hub/handlers_chat_v2_test.go | 6
 pkg/hub/handlers_chat_v2_unreachable_test.go | 2
+pkg/hub/handlers_chat_v2_wake_test.go | 1
 pkg/hub/handlers_conversations_test.go | 1
 pkg/hub/handlers_conversations_topic_test.go | 2
 pkg/hub/handlers_gcp_identity_mint_authz_test.go | 2
@@ -75,6 +77,7 @@ pkg/hub/handlers_groups_parent_authz_test.go | 5
 pkg/hub/handlers_health_summary_dispatch_test.go | 2
 pkg/hub/handlers_health_summary_test.go | 5
 pkg/hub/handlers_health_test.go | 2
+pkg/hub/handlers_project_provider_localpath_test.go | 1
 pkg/hub/handlers_project_providers_capacity_test.go | 2
 pkg/hub/handlers_runtime_brokers_capacity_test.go | 1
 pkg/hub/handlers_runtime_brokers_test.go | 8
@@ -92,12 +95,15 @@ pkg/hub/membership_loss_test.go | 8
 pkg/hub/offload_integration_test.go | 1
 pkg/hub/offload_route_authz_test.go | 4
 pkg/hub/platform_skills_seed_test.go | 1
+pkg/hub/project_clone_default_broker_test.go | 1
 pkg/hub/project_owner_grant_test.go | 2
 pkg/hub/project_profile_default_sa_test.go | 2
 pkg/hub/project_settings_handlers_test.go | 1
 pkg/hub/provider_localpath_test.go | 1
 pkg/hub/provisioned_start_test.go | 2
+pkg/hub/pty_conduit_test.go | 2
 pkg/hub/publish_guard_test.go | 4
+pkg/hub/queued_stop_delete_test.go | 1
 pkg/hub/queued_stop_test.go | 6
 pkg/hub/reincarnate_keep_edge_test.go | 1
 pkg/hub/reincarnate_move_worker_test.go | 7
