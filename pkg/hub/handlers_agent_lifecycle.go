@@ -960,6 +960,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		if relaySkillResolutionError(w, dispatchErr) {
 			return
 		}
+		if relayIdentityMappingError(w, dispatchErr) {
+			return
+		}
 		if relayHarnessConfigRefusal(w, dispatchErr) {
 			return
 		}
