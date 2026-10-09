@@ -75,9 +75,10 @@ func (d *HTTPAgentDispatcher) dispatchImageForBroker(ac *store.AgentAppliedConfi
 // would write that derived image into InlineConfig.Image, where it ranks as
 // an inline image on every later start and — for an agent with no
 // CreateInputs — as the explicit image explicitDispatchImage sends at the
-// top tier, re-freezing the image (ptone/scion#1799). An echo is detected exactly as recordExplicitEdits
-// detects it (both sides registry-canonicalised); on an echo, cfg keeps the
-// image the live InlineConfig already had (possibly none).
+// top tier, re-freezing the image (ptone/scion#1799). An echo is detected
+// exactly as recordExplicitEdits detects it (both sides
+// registry-canonicalised); on an echo, cfg keeps the image the live
+// InlineConfig already had (possibly none).
 func dropEchoedInlineImage(cfg *api.ScionConfig, old *store.AgentAppliedConfig, imageRegistry string) {
 	if cfg == nil || old == nil || cfg.Image == "" {
 		return
