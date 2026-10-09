@@ -24,31 +24,57 @@ import (
 var (
 	debugEnabled     bool
 	debugInitialized bool
+	agentDebugPolicy bool
 	debugMu          sync.RWMutex
 )
 
-// EnableDebug explicitly enables debug mode (e.g., from --debug flag).
-func EnableDebug() {
+// SetAgentDebugPolicy selects which environment variable turns on debug
+// output when EnableDebug has not been called.
+//
+// Inside an agent container SCION_DEBUG is inherited from whoever started
+// the agent (a broker or a CLI run with --debug) and is meant for the
+// in-container tooling and agent logs, not for every CLI command the agent
+// runs. With the agent policy on, SCION_DEBUG is ignored and only
+// SCION_LOG_LEVEL=debug enables debug output. With it off (the default),
+// SCION_DEBUG is honoured as before.
+func SetAgentDebugPolicy(on bool) {
 	debugMu.Lock()
 	defer debugMu.Unlock()
-	debugEnabled = true
-	debugInitialized = true
+	agentDebugPolicy = on
+}
+
+// EnableDebug explicitly enables debug mode (e.g., from --debug flag).
+func EnableDebug() {
+	SetExplicitDebug(true)
+}
+
+// SetExplicitDebug sets whether debug mode was requested explicitly (for
+// example with --debug). Passing false clears an earlier explicit request,
+// so DebugEnabled falls back to the environment.
+func SetExplicitDebug(on bool) {
+	debugMu.Lock()
+	defer debugMu.Unlock()
+	debugEnabled = on
+	debugInitialized = on
 }
 
 // DebugEnabled returns true if debug mode is enabled.
 // Debug mode is enabled if:
-// - EnableDebug() was called (e.g., --debug flag)
-// - SCION_DEBUG environment variable is set
+//   - EnableDebug() was called (e.g., --debug flag)
+//   - the agent debug policy is on and SCION_LOG_LEVEL=debug is set
+//   - the agent debug policy is off and SCION_DEBUG is set
 func DebugEnabled() bool {
 	debugMu.RLock()
-	if debugInitialized {
-		result := debugEnabled
-		debugMu.RUnlock()
-		return result
-	}
+	initialized, enabled, agentPolicy := debugInitialized, debugEnabled, agentDebugPolicy
 	debugMu.RUnlock()
+	if initialized {
+		return enabled
+	}
 
 	// Not explicitly set, check environment
+	if agentPolicy {
+		return os.Getenv("SCION_LOG_LEVEL") == "debug"
+	}
 	return os.Getenv("SCION_DEBUG") != ""
 }
 

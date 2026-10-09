@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -40,6 +41,16 @@ import (
 // debugf prints a debug message if debug mode is enabled.
 func debugf(format string, args ...interface{}) {
 	util.DebugfTagged("hubsync", format, args...)
+}
+
+// warnOut is where warnf writes. Tests replace it to capture output.
+var warnOut io.Writer = os.Stderr
+
+// warnf reports a best-effort hubsync step that failed but did not stop
+// the command. Unlike debugf it is always shown, on stderr so it never
+// mixes with structured stdout output.
+func warnf(format string, args ...interface{}) {
+	fmt.Fprintf(warnOut, "Warning: "+format+"\n", args...)
 }
 
 // AgentRef holds both name and ID for an agent.
@@ -422,7 +433,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 			// No ID match - fall back to name-based matching
 			matches, err := findMatchingProjects(ctx, hubCtx, projectName)
 			if err != nil {
-				debugf("Warning: failed to search for matching projects: %v", err)
+				warnf("failed to search for matching projects: %v", err)
 				// Continue with registration - the hub will handle matching
 			}
 
@@ -500,7 +511,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	// Auto-provide may have linked the broker without a local_path, so we always
 	// check and update if needed.
 	if err := ensureProviderPath(context.Background(), hubCtx); err != nil {
-		debugf("Warning: failed to ensure provider path: %v", err)
+		warnf("failed to ensure provider path: %v", err)
 	}
 
 	// Skip sync if requested
@@ -532,7 +543,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		if len(effectiveSyncResult.ToRegister) > 0 {
 			hasOnlineBroker, err := checkBrokerAvailability(context.Background(), hubCtx)
 			if err != nil {
-				debugf("Warning: failed to check broker availability: %v", err)
+				warnf("failed to check broker availability: %v", err)
 				// Continue with sync attempt - the error will surface during ExecuteSync
 			} else if !hasOnlineBroker {
 				// No brokers available - print warning and skip sync
@@ -614,14 +625,14 @@ func UpdateLastSyncedAt(projectPath string, hubTime time.Time) {
 
 	currentState, err := config.LoadProjectState(projectPath)
 	if err != nil {
-		debugf("Warning: failed to load current state.yaml for watermark update: %v", err)
+		warnf("failed to load current state.yaml for watermark update: %v", err)
 		currentState = &config.ProjectState{}
 	}
 
 	if currentState.LastSyncedAt != "" {
 		existingTS, parseErr := time.Parse(time.RFC3339Nano, currentState.LastSyncedAt)
 		if parseErr != nil {
-			debugf("Warning: failed to parse existing lastSyncedAt %q: %v", currentState.LastSyncedAt, parseErr)
+			warnf("failed to parse existing lastSyncedAt %q: %v", currentState.LastSyncedAt, parseErr)
 		} else if existingTS.After(ts) {
 			ts = existingTS
 		}
@@ -630,7 +641,7 @@ func UpdateLastSyncedAt(projectPath string, hubTime time.Time) {
 	currentState.LastSyncedAt = ts.UTC().Format(time.RFC3339Nano)
 
 	if err := saveProjectStateAtomic(projectPath, currentState); err != nil {
-		debugf("Warning: failed to save lastSyncedAt to state.yaml: %v", err)
+		warnf("failed to save lastSyncedAt to state.yaml: %v", err)
 	}
 }
 
@@ -648,7 +659,7 @@ func UpdateSyncedAgents(projectPath string, agents []string) {
 
 	currentState, err := config.LoadProjectState(projectPath)
 	if err != nil {
-		debugf("Warning: failed to load state.yaml for synced agents update: %v", err)
+		warnf("failed to load state.yaml for synced agents update: %v", err)
 		currentState = &config.ProjectState{}
 	}
 
@@ -663,7 +674,7 @@ func UpdateSyncedAgents(projectPath string, agents []string) {
 	currentState.SyncedAgents = sorted
 
 	if err := saveProjectStateAtomic(projectPath, currentState); err != nil {
-		debugf("Warning: failed to save synced agents to state.yaml: %v", err)
+		warnf("failed to save synced agents to state.yaml: %v", err)
 	}
 }
 
@@ -689,7 +700,7 @@ func AddSyncedAgent(projectPath, agentName string) {
 	currentState.SyncedAgents = append(currentState.SyncedAgents, agentName)
 
 	if err := saveProjectStateAtomic(projectPath, currentState); err != nil {
-		debugf("Warning: failed to add synced agent to state.yaml: %v", err)
+		warnf("failed to add synced agent to state.yaml: %v", err)
 	}
 }
 
@@ -716,7 +727,7 @@ func RemoveSyncedAgent(projectPath, agentName string) {
 	currentState.SyncedAgents = filtered
 
 	if err := saveProjectStateAtomic(projectPath, currentState); err != nil {
-		debugf("Warning: failed to remove synced agent from state.yaml: %v", err)
+		warnf("failed to remove synced agent from state.yaml: %v", err)
 	}
 }
 
@@ -799,7 +810,7 @@ func CompareAgents(ctx context.Context, hubCtx *HubContext) (*SyncResult, error)
 			lastSyncedAt = parsed.UTC()
 			debugf("lastSyncedAt: %s", lastSyncedAt.Format(time.RFC3339))
 		} else {
-			debugf("Warning: failed to parse lastSyncedAt %q: %v", lastSyncedAtStr, err)
+			warnf("failed to parse lastSyncedAt %q: %v", lastSyncedAtStr, err)
 		}
 	}
 
@@ -1572,7 +1583,7 @@ func cleanupProjectBrokerCredentials(projectPath string) {
 			return nil
 		})
 		if err != nil {
-			debugf("Warning: failed to clean v1 project settings: %v", err)
+			warnf("failed to clean v1 project settings: %v", err)
 		}
 		return
 	}
@@ -1590,12 +1601,12 @@ func cleanupProjectBrokerCredentials(projectPath string) {
 
 	if isYAML {
 		if err := yaml.Unmarshal(data, &settings); err != nil {
-			debugf("Warning: failed to parse project settings YAML: %v", err)
+			warnf("failed to parse project settings YAML: %v", err)
 			return
 		}
 	} else {
 		if err := util.UnmarshalJSONC(data, &settings); err != nil {
-			debugf("Warning: failed to parse project settings JSON: %v", err)
+			warnf("failed to parse project settings JSON: %v", err)
 			return
 		}
 	}
@@ -1626,19 +1637,19 @@ func cleanupProjectBrokerCredentials(projectPath string) {
 	if isYAML {
 		newData, err = yaml.Marshal(settings)
 		if err != nil {
-			debugf("Warning: failed to marshal cleaned settings as YAML: %v", err)
+			warnf("failed to marshal cleaned settings as YAML: %v", err)
 			return
 		}
 	} else {
 		newData, err = json.MarshalIndent(settings, "", "  ")
 		if err != nil {
-			debugf("Warning: failed to marshal cleaned settings as JSON: %v", err)
+			warnf("failed to marshal cleaned settings as JSON: %v", err)
 			return
 		}
 	}
 
 	if err := os.WriteFile(settingsPath, newData, 0644); err != nil {
-		debugf("Warning: failed to write cleaned settings: %v", err)
+		warnf("failed to write cleaned settings: %v", err)
 	}
 }
 

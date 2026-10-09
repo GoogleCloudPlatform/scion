@@ -16,11 +16,13 @@ These flags are available on all commands:
 - `--no-hub`: Disable Hub integration for this invocation (local-only mode).
 - `-y, --yes`: Skip confirmation prompts.
 - `--non-interactive`: Full non-interactive mode (implies `--yes`, errors on ambiguous prompts).
-- `--debug`: Enable verbose debug output.
+- `--debug`: Enable verbose debug output. Agents started by the command get `SCION_DEBUG=1`, which turns on debug logging for `sciontool` and `agent.log`. It does not turn on debug output for `scion` commands run inside the agent.
 - `--tz <IANA zone>`: Show times in this time zone, for example `America/New_York`. Defaults to the local zone (which honors `TZ`). `Local` and invalid names are rejected.
 - `--utc`: Show times in UTC. Takes precedence over `--tz`.
 
 Human-readable times use a 24-hour clock and always include a zone. `--tz` and `--utc` only change human-readable output: JSON output (`--format json`) keeps the API's UTC values.
+
+**Debug output.** Outside an agent, setting `SCION_DEBUG` to any non-empty value also turns on CLI debug output. Inside an agent container (agent CLI mode), the CLI ignores the inherited `SCION_DEBUG`, so `[hubsync]` and `[DEBUG]` lines stay out of normal command output. To see them there, pass `--debug` or set `SCION_LOG_LEVEL=debug`.
 
 **Project resolution order.** The CLI picks the project in this order:
 

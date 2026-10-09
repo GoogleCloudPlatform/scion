@@ -109,10 +109,9 @@ return an error instead of blocking.`,
 			autoConfirm = true
 		}
 
-		// Enable debug mode if --debug flag is set
-		if debugMode {
-			util.EnableDebug()
-		}
+		// Enable debug mode if --debug flag is set; otherwise pick the
+		// environment variable that controls debug output for this mode.
+		configureDebugOutput(debugMode)
 
 		// Detect agent container context without a reachable Hub endpoint.
 		// SCION_HOST_UID is set by the runtime when launching agent containers.
@@ -268,6 +267,11 @@ func Execute() {
 	target, _, _ := rootCmd.Find(cliArgs)
 	maybeWarnRemovedLegacyEnv(target)
 
+	// Decide early whether an inherited SCION_DEBUG applies, so debug
+	// lines emitted before PersistentPreRunE follow the same policy. This
+	// loads settings, so it runs after the legacy-env warning above.
+	configureDebugOutput(false)
+
 	// Early settings load to determine autoHelp behavior
 	// This handles cases where ExecuteC fails during flag parsing or unknown commands
 	tempProjectPath := ""
@@ -310,6 +314,16 @@ func Execute() {
 		}
 		os.Exit(exitCodeFor(err))
 	}
+}
+
+// configureDebugOutput sets up CLI debug output for one invocation. An
+// explicit --debug always enables it. Otherwise, in agent mode the CLI ignores the
+// SCION_DEBUG value inherited from the agent's environment (it is meant
+// for in-container tooling and agent logs) and enables debug output only
+// for SCION_LOG_LEVEL=debug; outside agent mode SCION_DEBUG still works.
+func configureDebugOutput(explicitDebug bool) {
+	util.SetAgentDebugPolicy(resolveMode() == ModeAgent)
+	util.SetExplicitDebug(explicitDebug)
 }
 
 // exitCodeFor returns the process exit status for a failed command: the
@@ -440,7 +454,7 @@ func init() {
 	rootCmd.MarkFlagsMutuallyExclusive("tz", "utc")
 
 	// Debug mode flag
-	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Enable debug output; agents started by this command also get SCION_DEBUG=1. 'scion server start' has its own --debug (see its help).")
+	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Enable debug output. Agents started by this command get SCION_DEBUG=1, which turns on debug logging for in-container tooling and agent logs, not for scion commands run inside the agent; use SCION_LOG_LEVEL=debug there. 'scion server start' has its own --debug (see its help).")
 
 	// Hide flags leaked from rclone via transitive import.
 	// These are registered on pflag.CommandLine (the global flag set), which
