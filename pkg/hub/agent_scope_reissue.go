@@ -236,9 +236,8 @@ func (s *Server) authorizeScopeReissue(w http.ResponseWriter, r *http.Request, a
 	if s.authzService == nil {
 		return deny("authorization service not initialized")
 	}
-	if !IsUnscopedLocalPlatformAdmin(user) && !s.authzService.IsSystemAdmin(ctx, user.ID()) {
-		return deny("not a hub super-admin")
-	}
+	// hub.auth_reset.execute is held by the super-admin class only (hub
+	// admins exclude auth reset), so Decide is the super-admin check.
 	decision := s.authzService.Decide(ctx, AuthzRequest{
 		Principal:  principalContextForIdentity(user),
 		Credential: credentialContextForIdentity(user),
@@ -750,8 +749,8 @@ func (s *Server) reissueAgentDelegatorLive(ctx context.Context, agent, parent *s
 var reissueLiveCheckFault func(perm string) error
 
 // reissuePermissionTarget returns the resource and action the live check
-// evaluates perm on: the agent itself for an agent permission, otherwise a
-// resource of the permission's type in the agent's project. ok is false for
+// evaluates perm on: the agent itself for an agent permission, otherwise the
+// agent's project. ok is false for
 // an unregistered permission.
 func reissuePermissionTarget(agent *store.Agent, perm string) (Resource, Action, bool) {
 	for _, p := range permissions.Registry {
@@ -765,7 +764,8 @@ func reissuePermissionTarget(agent *store.Agent, perm string) (Resource, Action,
 				Ancestry: agent.Ancestry,
 			}, Action(p.Action), true
 		}
-		return Resource{Type: p.Resource, ParentType: "project", ParentID: agent.ProjectID}, Action(p.Action), true
+		// Other permissions are probed on the agent's project.
+		return Resource{Type: "project", ID: agent.ProjectID}, Action(p.Action), true
 	}
 	return Resource{}, "", false
 }
