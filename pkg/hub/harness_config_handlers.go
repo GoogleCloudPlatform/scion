@@ -741,6 +741,10 @@ func (s *Server) handleHarnessConfigUpload(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+// maxRecordedSourceURLBytes caps the length of a recorded harness config
+// source URL.
+const maxRecordedSourceURLBytes = 2048
+
 // isDisallowedSourceURLRune reports whether r may not appear in a recorded
 // source URL: control characters and invisible formatting or line/paragraph
 // separator characters (Unicode categories Cc, Cf, Zl, Zp).
@@ -781,8 +785,9 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 	}
 
 	sourceURL := strings.TrimSpace(req.SourceURL)
-	if sourceURL != "" && (!config.IsRemoteURI(sourceURL) || strings.ContainsFunc(sourceURL, isDisallowedSourceURLRune)) {
-		ValidationError(w, "sourceUrl must be a single-line remote URI (http://, https://, or rclone)", nil)
+	if sourceURL != "" && (!config.IsRemoteURI(sourceURL) || strings.ContainsFunc(sourceURL, isDisallowedSourceURLRune) ||
+		len(sourceURL) > maxRecordedSourceURLBytes) {
+		ValidationError(w, fmt.Sprintf("sourceUrl must be a single-line remote URI (http://, https://, or rclone) of at most %d bytes", maxRecordedSourceURLBytes), nil)
 		return
 	}
 

@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"io/fs"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -252,6 +253,7 @@ func TestInstallSourceURL_NonRemoteSourceURLRejected(t *testing.T) {
 		"https://github.com/GoogleCloudPlatform/scion/harnesses/\u2029claude",
 		"https://github.com/GoogleCloudPlatform/scion/harnesses/\u200bclaude",
 		"https://github.com/GoogleCloudPlatform/scion/harnesses/\u2066claude\u2069",
+		sourceURLOfLength(t, maxRecordedSourceURLBytes+1),
 	} {
 		body := map[string]interface{}{
 			"manifest":  map[string]interface{}{"files": []map[string]interface{}{{"path": "config.yaml", "size": 1, "hash": "sha256:x"}}},
@@ -303,4 +305,24 @@ func TestInstallSourceURL_FinalizeAuthzUnchanged(t *testing.T) {
 	after := globalClaude(t, s)
 	require.NotNil(t, after)
 	assert.Equal(t, installPinnedClaudeURL, after.SourceURL, "a denied finalize must not change the source URL")
+}
+
+// sourceURLOfLength returns an https URL exactly n bytes long.
+func sourceURLOfLength(t *testing.T, n int) string {
+	t.Helper()
+	const prefix = "https://example.com/configs/"
+	require.Greater(t, n, len(prefix))
+	u := prefix + strings.Repeat("a", n-len(prefix))
+	require.Len(t, u, n)
+	return u
+}
+
+// TestInstallSourceURL_MaxLengthSourceURLAccepted: a source URL of exactly
+// maxRecordedSourceURLBytes is recorded (one byte more is rejected, see
+// TestInstallSourceURL_NonRemoteSourceURLRejected).
+func TestInstallSourceURL_MaxLengthSourceURLAccepted(t *testing.T) {
+	srv, s := testInstallSourceServer(t)
+	longest := sourceURLOfLength(t, maxRecordedSourceURLBytes)
+	hc := installClaudeViaHub(t, srv, s, longest)
+	assert.Equal(t, longest, hc.SourceURL)
 }
