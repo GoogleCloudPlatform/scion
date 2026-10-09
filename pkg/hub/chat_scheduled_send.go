@@ -915,12 +915,14 @@ func (s *Server) checkScheduledFire(ctx context.Context, m *ScheduledChatMessage
 }
 
 // scheduledFailureFromSendError maps a sendChatMessage error at fire time
-// to a failure reason. A 404 is a delivery error, not conversation_gone:
-// checkScheduledFire has just shown that the topic and its project exist,
-// and sendChatMessage also answers 404 for a store error while reading
-// them.
+// to a failure reason. sendChatMessage answers a refusal of the sender's
+// access as not found (404); such a refusal is marked accessRefused and is
+// no_access, like a 403. Any other 404 is a delivery error, not
+// conversation_gone: checkScheduledFire has just shown that the topic and
+// its project exist, and sendChatMessage also answers 404 for a store error
+// while reading them.
 func scheduledFailureFromSendError(serr *chatSendError) string {
-	if serr.Status == http.StatusForbidden {
+	if serr.Status == http.StatusForbidden || serr.accessRefused {
 		return ScheduledFailureNoAccess
 	}
 	return ScheduledFailureDeliveryError

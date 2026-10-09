@@ -665,3 +665,21 @@ func TestCheckAccessError_DeniesGroupPost(t *testing.T) {
 	assert.NotEqual(t, http.StatusOK, got.status, "a project lookup error refuses the post: %s", got.body)
 	assert.Equal(t, before, participantCount(t, f.st, groupA), "no participant row is written")
 }
+
+// A refusal of the sender's access is answered as not found but stays
+// distinguishable inside the hub, so a scheduled send records no_access.
+func TestChatSendRefusal_MarkedAsAccessRefusal(t *testing.T) {
+	f := newRefFixture(t)
+	ctx := context.Background()
+	bob := NewAuthenticatedUser(f.ub.ID, f.ub.Email, f.ub.DisplayName, f.ub.Role, string(ClientTypeWeb))
+
+	_, refused := f.srv.authorizeChatSend(ctx, bob, f.topicA)
+	require.NotNil(t, refused)
+	_, missing := f.srv.authorizeChatSend(ctx, bob, uuid.NewString())
+	require.NotNil(t, missing)
+
+	assert.Equal(t, missing.Status, refused.Status)
+	assert.Equal(t, missing.Message, refused.Message)
+	assert.Equal(t, ScheduledFailureNoAccess, scheduledFailureFromSendError(refused))
+	assert.Equal(t, ScheduledFailureDeliveryError, scheduledFailureFromSendError(missing))
+}

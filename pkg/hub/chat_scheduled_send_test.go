@@ -1352,10 +1352,12 @@ func TestScheduledSend_ExperimentTurnedOffMidBatch_RestHeld(t *testing.T) {
 	assert.Equal(t, ScheduledMessagePending, held.Status)
 }
 
-// A 404 from sendChatMessage at fire time is a delivery error: the checks
-// just before it proved the conversation exists.
+// A 404 from sendChatMessage at fire time is a delivery error (the checks
+// just before it proved the conversation exists), unless it is a refusal of
+// the sender's access answered as not found, which is no_access.
 func TestScheduledSend_FailureMapping(t *testing.T) {
 	assert.Equal(t, ScheduledFailureNoAccess, scheduledFailureFromSendError(chatSendForbidden()))
+	assert.Equal(t, ScheduledFailureNoAccess, scheduledFailureFromSendError(chatSendRefusedAsNotFound("Thread")))
 	assert.Equal(t, ScheduledFailureDeliveryError, scheduledFailureFromSendError(chatSendNotFound("Thread")))
 	assert.Equal(t, ScheduledFailureDeliveryError, scheduledFailureFromSendError(
 		newChatSendError(http.StatusInternalServerError, "INTERNAL", "x", nil)))

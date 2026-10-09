@@ -62,6 +62,11 @@ type chatSendError struct {
 	Message    string
 	Details    map[string]interface{}
 	RetryAfter time.Duration
+	// accessRefused marks a refusal of the sender's access to the
+	// conversation that is answered as not found. It is never written to
+	// the response; callers without a request (scheduled sends) use it to
+	// tell a refusal from a missing or unreadable row.
+	accessRefused bool
 }
 
 func (e *chatSendError) Error() string {
@@ -101,6 +106,14 @@ func chatSendForbidden() *chatSendError {
 
 func chatSendNotFound(resource string) *chatSendError {
 	return newChatSendError(http.StatusNotFound, ErrCodeNotFound, resource+" not found", nil)
+}
+
+// chatSendRefusedAsNotFound is a refusal of the sender's access, answered
+// exactly as chatSendNotFound.
+func chatSendRefusedAsNotFound(resource string) *chatSendError {
+	e := chatSendNotFound(resource)
+	e.accessRefused = true
+	return e
 }
 
 func chatSendFromAgentDMError(e *AgentDMError) *chatSendError {
@@ -157,7 +170,7 @@ func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key s
 		// DM key: verify the caller is one of the two participants.
 		if !isDMParticipant(key, user.ID()) {
 			logReferenceRefused(ctx, chatSendPath(key), "sender is not a participant of this DM", user)
-			return nil, chatSendNotFound("Thread")
+			return nil, chatSendRefusedAsNotFound("Thread")
 		}
 		// The other participant must be a principal the caller may message.
 		if serr := s.authorizeDMPeer(ctx, user, key); serr != nil {
@@ -192,7 +205,7 @@ func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key s
 			logAttrs = append(logAttrs, "ceiling_cause", cause)
 		}
 		slog.InfoContext(ctx, "chat send refused as not found", logAttrs...)
-		return nil, chatSendNotFound("Thread")
+		return nil, chatSendRefusedAsNotFound("Thread")
 	}
 	target.ProjectID = topic.ProjectID
 	target.Topic = topic
@@ -279,7 +292,7 @@ func (s *Server) authorizeDMPeer(ctx context.Context, user UserIdentity, key str
 // thread, with the reason in the server log.
 func dmPeerRefused(ctx context.Context, user UserIdentity, key, reason string) *chatSendError {
 	logReferenceRefused(ctx, chatSendPath(key), reason, user)
-	return chatSendNotFound("Thread")
+	return chatSendRefusedAsNotFound("Thread")
 }
 
 // dmPeerLookupFailure maps a failed DM peer lookup: not found is the
@@ -375,7 +388,7 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 	// check sits in the function that sends user-to-user messages
 	// (sendHumanToHuman), as hack/checksecuritymarkergates requires.
 	if target.IsDM && !isDMParticipant(key, user.ID()) {
-		return nil, chatSendNotFound("Thread")
+		return nil, chatSendRefusedAsNotFound("Thread")
 	}
 
 	// --- Validate ---
