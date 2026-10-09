@@ -478,6 +478,55 @@ it('a failed metadata snapshot does not remove the independently authorized term
   expect(page.shadowRoot?.textContent).toContain('metadata unavailable');
 });
 
+describe('initial-load preflight refusal', () => {
+  it.each([
+    [
+      'denied (403)',
+      403,
+      { error: { code: 'forbidden', message: 'denied' } },
+      'You do not have permission to attach to this agent.',
+    ],
+    [
+      'no path (503 runtime_attach_unsupported)',
+      503,
+      { error: { code: 'runtime_attach_unsupported', message: 'No path to the terminal' } },
+      'No path to the terminal',
+    ],
+  ] as const)(
+    '%s shows the error state with an enabled Retry button',
+    async (_name, status, body, text) => {
+      page.dispose();
+      page = document.createElement('scion-terminal-pane');
+      registry = new TerminalSessionRegistry(
+        {
+          hubUrl: window.location.origin,
+          accountId: 'account-refusal',
+        },
+        zeroJitter
+      );
+      // Answer by URL, so the order of the agent, metadata and preflight
+      // requests does not matter.
+      fetcher.mockImplementation((input) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.endsWith('/pty')) return Promise.resolve(json(body, status));
+        return Promise.resolve(json({ id: agentId, name: 'test', phase: 'running' }));
+      });
+      page.open(registry, agentId);
+      document.body.append(page);
+
+      await vi.waitFor(() => expect(page.shadowRoot?.querySelector('.error-state')).not.toBeNull());
+      await page.updateComplete;
+      const errorState = page.shadowRoot!.querySelector('.error-state')!;
+      expect(errorState.textContent).toContain(text);
+      const retry = errorState.querySelector('button')!;
+      expect(retry.disabled).toBe(false);
+      expect(retry.textContent?.trim()).toBe('Retry');
+      expect(page.session?.reconnecting).toBe(false);
+      expect(FakeSocket.instances).toHaveLength(0);
+    }
+  );
+});
+
 describe('bind-after-mount still arms frontmost', () => {
   it('a pane mounted before open() (the legacy page order) still auto-reconnects on a retriable close', async () => {
     const registry2 = new TerminalSessionRegistry(
