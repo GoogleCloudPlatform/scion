@@ -1967,19 +1967,26 @@ describe('scion-page-admin-server-config', () => {
       expect(envBadgeCount(element)).toBe(0);
     });
 
-    it('badges the GCP IAM check mode and deny policy fields', async () => {
+    const gcpIamEnv = ['server.hub.gcp_iam_check_mode', 'server.hub.gcp_iam_deny_unknown_policy'];
+
+    it('badges the GCP IAM check mode and deny policy fields on a hosted DB hub', async () => {
+      // gcp_iam is Layer-1, so the selects stay editable and carry the env badge.
       element = await createComponent(
-        createFetchHandler(
-          makeBaseConfig({
-            env_overrides: [
-              'server.hub.gcp_iam_check_mode',
-              'server.hub.gcp_iam_deny_unknown_policy',
-            ],
-          })
-        )
+        createFetchHandler(makeBaseConfig({ settings_tier: 'db', env_overrides: gcpIamEnv }))
       );
       const panel = query(element, 'sl-tab-panel[name="gcp-identity"]');
       expect(panel?.querySelectorAll('.env-badge').length).toBe(2);
+    });
+
+    it('shows the GCP IAM fields as env-pinned on a file-tier hub', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ env_overrides: gcpIamEnv }))
+      );
+      const panel = query(element, 'sl-tab-panel[name="gcp-identity"]');
+      const pinned = Array.from(panel?.querySelectorAll('.read-only-badge') ?? []).filter((b) =>
+        (b.textContent ?? '').includes('environment variable')
+      );
+      expect(pinned.length).toBe(2);
     });
   });
 
