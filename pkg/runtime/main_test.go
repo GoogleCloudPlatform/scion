@@ -37,7 +37,7 @@ func runHermetic(m *testing.M) int {
 		fmt.Fprintf(os.Stderr, "TestMain: create temp dir: %v\n", err)
 		return 1
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 	// A path that does not exist: the file step of the chain is skipped and
 	// resolution falls through to "default".
 	serviceAccountNamespacePath = filepath.Join(dir, "namespace-absent")
