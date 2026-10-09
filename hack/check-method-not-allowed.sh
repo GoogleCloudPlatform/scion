@@ -15,8 +15,10 @@
 #    sets the "Allow" header or calls an Allow-setting helper with at least
 #    one method (MethodNotAllowed(w, ...) or writeMethodNotAllowed(w, ...))
 #    (ptone/scion#2858, ptone/scion#4056, ptone/scion#4057). Comparisons
-#    (== / !=) and comment lines are not writes and are ignored. The helper
-#    bodies set Allow on the line before their write, so they pass rule 2.
+#    (== / !=) are not writes. Comment lines are ignored entirely, so a
+#    commented-out helper call or a comment mentioning Allow cannot cover a
+#    write. The helper bodies set Allow on the line before their write, so
+#    they pass rule 2.
 #
 # Matches "MethodNotAllowed(w)" anywhere on a line, not only at line end, so
 # `return MethodNotAllowed(w) // ...` or a call inside a larger expression is
@@ -83,11 +85,13 @@ scan_status() {
   # shellcheck disable=SC2086 # candidates is a newline-separated path list
   awk -v win="$ALLOW_WINDOW" '
     FNR == 1 { last_allow = -1000 }
+    /^[ \t]*\/\// { next }                  # comment line: neither a marker nor a write
     /^[ \t]*func / { last_allow = -1000 }  # an Allow in one func cannot cover the next
     /"Allow"/ { last_allow = FNR }
-    /MethodNotAllowed\(w, / { last_allow = FNR }  # helper call: sets Allow
+    # helper call: only MethodNotAllowed(w, ...) or writeMethodNotAllowed(w, ...)
+    # themselves, not another name ending in MethodNotAllowed.
+    /(^|[^A-Za-z0-9_])(write)?MethodNotAllowed\(w, / { last_allow = FNR }
     /StatusMethodNotAllowed/ {
-      if ($0 ~ /^[ \t]*\/\//) next          # comment line
       if ($0 ~ /[=!]=/) next                  # comparison, not a write
       if (FNR - last_allow > win) print FILENAME ":" FNR ":" $0
     }
@@ -189,6 +193,18 @@ func d(w http.ResponseWriter) {
 func e(w http.ResponseWriter) {
 	w.WriteHeader(http.StatusMethodNotAllowed) // helper call in the previous func does not count
 }
+func f(w http.ResponseWriter) {
+	// MethodNotAllowed(w, http.MethodGet)
+	w.WriteHeader(http.StatusMethodNotAllowed) // a commented-out helper call does not count
+}
+func g(w http.ResponseWriter) {
+	respondMethodNotAllowed(w, http.MethodGet)
+	w.WriteHeader(http.StatusMethodNotAllowed) // another helper name does not count
+}
+func h(w http.ResponseWriter) {
+	// the "Allow" header is set by the caller
+	w.WriteHeader(http.StatusMethodNotAllowed) // a comment mentioning Allow does not count
+}
 GO
   cat >"$dir/sbad/h_test.go" <<'GO'
 package h
@@ -204,8 +220,8 @@ GO
   fi
   out="$(scan_status "$dir/sbad")" && rc=0 || rc=$?
   n="$(count_lines "$out")"
-  if [[ "$rc" -ne 0 || "$n" -ne 4 ]]; then
-    echo "self-test FAIL: status bad fixture: rc=$rc count=$n (want 4, test file excluded)" >&2; failed=1
+  if [[ "$rc" -ne 0 || "$n" -ne 7 ]]; then
+    echo "self-test FAIL: status bad fixture: rc=$rc count=$n (want 7, test file excluded)" >&2; failed=1
   fi
   out="$(scan_status "$dir/sempty")" && rc=0 || rc=$?
   if [[ "$rc" -ne 4 ]]; then
