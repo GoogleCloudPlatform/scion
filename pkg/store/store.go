@@ -300,6 +300,9 @@ type Store interface {
 
 	// Agent Reincarnation operations (agent-reincarnate, ptone/scion#1821)
 	AgentReincarnationStore
+
+	// Hub-instance registry operations (health dashboard F3)
+	HubInstanceStore
 }
 
 // AgentStore defines agent-related persistence operations.

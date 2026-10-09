@@ -71,6 +71,11 @@ type HealthSummaryResponse struct {
 	// ServiceAccountCheck is set while the service account assignment check
 	// cannot run because the hub's identity lacks the access it needs.
 	ServiceAccountCheck *HealthSummarySACheck `json:"service_account_check,omitempty"`
+	// HubInstances lists the hub instances (processes) from the
+	// hub-instance registry, read from the database only. Nil when the
+	// registry could not be read ("not reported"). See
+	// health_summary_hub_instances.go.
+	HubInstances *HealthSummaryHubInstances `json:"hub_instances"`
 }
 
 // HealthSummaryHub contains hub-level health information.
@@ -329,6 +334,13 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 
 	integrations := s.healthSummaryIntegrations(ctx, pluginRecordNames)
 
+	// Hub instances, from the registry table only. A failed read leaves
+	// the section nil ("not reported").
+	hubInstances, err := s.healthSummaryHubInstances(ctx, now)
+	if err != nil {
+		slog.Error("health summary: failed to list hub instances", "error", err)
+	}
+
 	resp := HealthSummaryResponse{
 		GeneratedAt:        now,
 		Hub:                hubSummary,
@@ -341,6 +353,7 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 		IntegrationCounts:  healthSummaryIntegrationCounts(integrations),
 
 		ServiceAccountCheck: s.healthSummarySACheck(),
+		HubInstances:        hubInstances,
 	}
 	// The policy sees the full integration list, so the status does not
 	// depend on who asks. Identity is removed afterwards for callers

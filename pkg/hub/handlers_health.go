@@ -143,6 +143,25 @@ type HealthStats struct {
 // This can be called directly by co-located components (e.g., the WebServer)
 // to build composite health responses without making an HTTP round-trip.
 func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
+	checks := s.healthChecks(ctx)
+	return &HealthResponse{
+		Status:       deriveHealthStatus(checks),
+		Version:      "0.1.0", // TODO: Get from build info
+		ScionVersion: version.Short(),
+		HubID:        s.HubID(),
+		HubName:      s.HubName(),
+		Uptime:       time.Since(s.startTime).Round(time.Second).String(),
+		Checks:       checks,
+		Stats:        s.healthStats(ctx),
+	}
+}
+
+// healthChecks runs this process's health checks and returns the check map
+// (see the check-map contract on criticalHealthChecks): one store Ping,
+// workspace storage, the co-located broker and the decision audit router.
+// It runs no count queries, so the hub-instance registry tick can call it
+// every tick (hub_instance_registry.go).
+func (s *Server) healthChecks(ctx context.Context) map[string]string {
 	checks := make(map[string]string)
 
 	// Check database
@@ -160,7 +179,12 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 
 	s.checkDecisionAuditHealth(checks)
 
-	// Get stats
+	return checks
+}
+
+// healthStats counts running agents, projects and online runtime brokers
+// for GetHealthInfo. A failed count is left at zero.
+func (s *Server) healthStats(ctx context.Context) *HealthStats {
 	stats := &HealthStats{}
 	if agentResult, err := s.store.ListAgents(ctx, store.AgentFilter{Phase: string(state.PhaseRunning)}, store.ListOptions{Limit: 1}); err == nil {
 		stats.ActiveAgents = agentResult.TotalCount
@@ -171,17 +195,7 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 	if count, err := s.countOnlineRuntimeBrokers(ctx); err == nil {
 		stats.ConnectedBrokers = count
 	}
-
-	return &HealthResponse{
-		Status:       deriveHealthStatus(checks),
-		Version:      "0.1.0", // TODO: Get from build info
-		ScionVersion: version.Short(),
-		HubID:        s.HubID(),
-		HubName:      s.HubName(),
-		Uptime:       time.Since(s.startTime).Round(time.Second).String(),
-		Checks:       checks,
-		Stats:        stats,
-	}
+	return stats
 }
 
 // connectedBrokerPageSize is the page size countOnlineRuntimeBrokers uses

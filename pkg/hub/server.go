@@ -5588,6 +5588,16 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// The evaluator detects postgres from the EventPublisher type for
 	// backend-aware deduplication; callers may also pass WithDBDriver.
 	s.StartLifecycleHookEvaluator()
+
+	// Start the hub-instance registry writer last: it waits (at most
+	// hubInstanceStartWait) for its first write, so this replica's row
+	// usually exists before the listener starts. It runs on the
+	// server-lifetime context, so Shutdown/CleanupResources stops it.
+	registryCtx := s.ctx
+	if registryCtx == nil {
+		registryCtx = ctx
+	}
+	s.startHubInstanceRegistry(registryCtx)
 }
 
 func (s *Server) Start(ctx context.Context) error {

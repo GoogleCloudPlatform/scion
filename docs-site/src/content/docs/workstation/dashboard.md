@@ -128,6 +128,7 @@ Centralized views for managing the Scion infrastructure and access control (avai
 - **Brokers**: Comprehensive broker detail pages providing a grouped view of all active agents by their respective projects.
 - **Health Dashboard**: The **Health** page (`/health`, also `/admin/health`) shows the current state of the Hub instance that served the request, with optional auto-refresh. Access requires the `hub.health.read` permission. It has these sections:
   - **Hub Status** and **Database**: overall status and failing checks, uptime, version, and database pool use and total wait count.
+  - **Hub instances**: one row per Hub instance (process) with its label, state, version, uptime, last reported status, and when it was last seen. The serving instance is marked "(this instance)". The list is built from the database only, so every Hub replica shows the same list. See [Hub instances in an HA deployment](#hub-instances-in-an-ha-deployment) below.
   - **Runtime brokers**: a compact table with each Runtime Broker's status, runtime, **Health**, workspace storage, running agents and agents needing attention, version, and last heartbeat. The **Health** column comes from the optional self-health report each Runtime Broker sends with its heartbeat. Plugin records are not listed here.
   - **Integrations**: chat plugins with their platform, health, connection state, and version, linking to the integrations page. Hidden when no plugins are registered.
   - **Agents**: active and total counts, counts by phase, and lists of agents in the `error` phase, crashed, or offline, each linking to the agent.
@@ -138,6 +139,20 @@ Centralized views for managing the Scion infrastructure and access control (avai
   One policy sets the overall status of the summary. It is the worst of: the Hub's own status (`unhealthy` when a critical check fails); `degraded` when a Runtime Broker is not online, reports itself `degraded` or `unhealthy`, or reports an unhealthy NFS workspace share; `degraded` when dispatch has stuck messages or stuck Runtime Broker dispatches; `degraded` when an integration reports unhealthy; `degraded` when at least 5% of agents are in `error` or `crashed`; and `degraded` when the service account assignment check cannot run. A section that could not be read adds a warning but does not change the status. The same policy produces `attention`, a ranked "Needs attention" list in the `GET /api/v1/admin/health/summary` response. Each entry has a `severity` (`critical` or `warning`), a `kind` (`hub_check`, `broker_offline`, `broker_degraded`, `broker_nfs`, `integration`, `dispatch` or `agents`), a `subject`, and a fixed, server-written `message`.
 
   For rates and per-replica history, see the [Hub monitoring dashboard](/scion/hosted/single-node/hub-monitoring-dashboard/).
+
+  #### Hub instances in an HA deployment
+
+  Every Hub process writes a small row about itself to the `hub_instances` table: once at start, then every 15 seconds (with ±10% jitter). The row holds the instance's label (the pod name; on Cloud Run, the revision and the first 8 characters of the instance ID; otherwise the host name), its version, its start time, its overall status, and its checks reduced to fixed values (`healthy`, `degraded`, `unhealthy`, `available`, `unavailable` or `unknown`). A restart is a new process, so it gets a new row; the label shows that two rows belong to the same pod. On a single-node SQLite Hub the table shows the one running instance and that instance's earlier restarts.
+
+  The summary computes each instance's state when it is read:
+
+  - **live**: the instance wrote its row within the last 45 seconds (three write intervals).
+  - **stale**: the instance has not written its row for more than 45 seconds. The process stopped without a clean shutdown (for example, it was killed or its node was lost), or it is running but cannot write to the database. A stale instance's status and version are its last report, shown greyed.
+  - **stopped**: the instance shut down cleanly. Clean shutdowns are not recorded yet, so for now an instance that shut down cleanly also shows as stale until it leaves the list.
+
+  Instances whose last write is within the last hour are listed, up to 50. During a rolling upgrade, a Hub replica that predates this table does not appear in the list, and when such a replica serves the page, the Hub instances table is hidden. "Hub instance data not available" means the serving instance could not read the table.
+
+  On Cloud Run, keep CPU always allocated (`--no-cpu-throttling`, which the shipped deploy script sets) so each instance keeps writing its row between requests. With CPU throttling, an idle instance stops writing and shows as stale.
 - **Metrics Dashboard**: View infrastructure health and agent telemetry metrics. Access requires the `hub.metrics.read` permission scope. For details on the metrics collected, see [Metrics & OpenTelemetry](/scion/hosted/single-node/metrics/). Daily charts group days by calendar day in your display zone, and their headings name that zone (see [Metrics dashboard day buckets](/scion/reference/times-and-timezones/#metrics-dashboard-day-buckets)).
 - **Server Configuration Editor**: A full-featured settings editor at `/admin/server-config`. Restructured the **General** settings tab into three dedicated cards (General, Agent Defaults with sub-tabs, and Project Default Settings). Adds `DefaultModel`, `DefaultThinkingLevel`, and `DefaultHarnessAuth` fields to the defaults pipeline, moves the Telemetry toggle to Agent Defaults, and groups the Message Broker configuration in the Hub Server tab.
 - **Maintenance Mode**: Toggle maintenance mode for the Hub and Web servers to facilitate safe infrastructure updates.
