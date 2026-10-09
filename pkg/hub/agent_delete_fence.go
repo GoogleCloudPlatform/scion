@@ -65,7 +65,8 @@ import (
 
 // errStaleDeleteDispatch is the error for a delete that was not acted on
 // because it was stale: the broker answered 409 stale_dispatch, or a
-// deferred intent was dropped because its claim was no longer live.
+// deferred intent was dropped because its claim was no longer live or its
+// recorded notAfter passed.
 var errStaleDeleteDispatch = errors.New(staleDeleteDispatchPrefix + " delete dispatch was stale; nothing was done")
 
 // staleDeleteDispatchPrefix starts the error text of a stale delete, so a

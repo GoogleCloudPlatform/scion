@@ -359,6 +359,18 @@ func TestExecDispatchDelete_RowlessOnlyForClaimlessTargetedIntents(t *testing.T)
 		assert.Contains(t, err.Error(), "resolve agent "+f.snapshot.ID, "the error is the row lookup's")
 		assert.Empty(t, client.sent(), "a delete reached a broker")
 	})
+	t.Run("row gone, target without slug: not found", func(t *testing.T) {
+		f := newRowlessFixture(t)
+		f.removeRows(t)
+		// The target's broker is the fixture's registered broker, so only
+		// the missing slug keeps the delete from the recording client.
+		tgt := target(f)
+		tgt.Slug = ""
+		client, err := exec(t, f, DeleteDispatchArgs{RunID: "run-a", PreviousRunIDs: []string{"run-p"}, Target: tgt})
+		require.ErrorIs(t, err, store.ErrNotFound)
+		assert.Contains(t, err.Error(), "resolve agent "+f.snapshot.ID, "the error is the row lookup's")
+		assert.Empty(t, client.sent(), "a delete reached a broker")
+	})
 	t.Run("lookup error other than not found: returned, target unused", func(t *testing.T) {
 		f := newRowlessFixture(t)
 		raw, err := MarshalDispatchArgs(&DeleteDispatchArgs{RunID: "run-a", PreviousRunIDs: []string{"run-p"}, Target: target(f)})
@@ -582,5 +594,17 @@ func TestExecDispatchDelete_ClaimlessNotAfter(t *testing.T) {
 		want := row.DeletionLeaseAt.Add(-deleteNotAfterMargin)
 		assert.True(t, sent[0].opts.NotAfter.Equal(want), "notAfter = %v, want %v", sent[0].opts.NotAfter, want)
 		assert.Empty(t, logs.named(staleClaimlessDeleteMsg))
+	})
+	t.Run("engine claim refused as stale by the broker: no claimless warning", func(t *testing.T) {
+		t0 := fenceNow(t)
+		f := newRowlessFixture(t)
+		seedAgentDeletion(t, f.store, f.snapshot.ID, seedLiveDeleting)
+		row := mustGetAgent(t, f.store, f.snapshot.ID)
+		client := newRowlessRecordingClient(staleDispatchErr())
+		logs, err := run(t, f, client, DeleteDispatchArgs{RunID: "run-a", Claim: row.DeletionClaim, NotAfter: t0.Add(time.Minute)})
+		require.Error(t, err)
+		assert.True(t, staleDeleteDispatchFromText(err.Error()), "error text %q lacks the stale marker", err.Error())
+		assert.NotEmpty(t, client.sent(), "the engine's delete reached the broker")
+		assert.Empty(t, logs.named(staleClaimlessDeleteMsg), "an engine intent was logged as a claimless one")
 	})
 }
