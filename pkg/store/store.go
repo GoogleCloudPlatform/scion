@@ -286,9 +286,6 @@ type Store interface {
 	// Agent Identity Key operations (per-project display-name / slug uniqueness)
 	AgentIdentityKeyStore
 
-	// Decision Audit operations (Authorization Decision Audit Phase 1I)
-	DecisionAuditStore
-
 	// Mutation Audit operations (Authorization Mutation Audit Phase 1I)
 	MutationAuditStore
 
@@ -3202,24 +3199,6 @@ type AgentIdentityKeyStore interface {
 	// ListAgentIdentityKeys returns every identity-key row in projectID,
 	// across all agents.
 	ListAgentIdentityKeys(ctx context.Context, projectID string) ([]*AgentIdentityKey, error)
-}
-
-// =============================================================================
-// Decision Audit Store (Authorization Decision Audit Phase 1I)
-// =============================================================================
-
-// DecisionAuditStore defines persistence operations for authorization decision audit records.
-type DecisionAuditStore interface {
-	// CreateDecisionAudit stores a new decision audit record.
-	CreateDecisionAudit(ctx context.Context, record *DecisionAuditRecord) error
-
-	// ListDecisionAudits returns decision audit records matching the filter.
-	// Returns (records, total count, error).
-	ListDecisionAudits(ctx context.Context, filter DecisionAuditFilter) ([]*DecisionAuditRecord, int, error)
-
-	// DeleteDecisionAuditsBefore removes decision audit records older than the given time.
-	// Returns the number of records deleted.
-	DeleteDecisionAuditsBefore(ctx context.Context, before time.Time) (int, error)
 }
 
 // =============================================================================

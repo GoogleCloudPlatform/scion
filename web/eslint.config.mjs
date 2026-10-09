@@ -115,6 +115,8 @@ export default defineConfig([
   project(terminalTests, './src/client/tsconfig.terminal-tests.json'),
   project(clientTests, './src/client/tsconfig.client-tests.json'),
   project(componentTests, './src/components/tsconfig.component-tests.json'),
+  // Checks the Playwright configs, so it needs their TS project.
+  project(['src/utils/playwright-forbid-only.test.ts'], './tsconfig.e2e-configs.json'),
   project(
     [
       'e2e/chat-palette/accessibility.pw.ts',
@@ -207,6 +209,23 @@ export default defineConfig([
             'Import navigation helpers from client/navigation.js; importing client/main boots the app.',
         },
       ],
+    },
+  },
+
+  // Lit components: Lit binds `@event=${this.handler}` template listeners
+  // to the host element (the `host` render option), so passing an unbound
+  // method there is correct and unbound-method only reports false
+  // positives. Test files have their own settings above. The rule stays
+  // on for src/client and every other source directory (ptone/scion#4070).
+  // Trade-off: this turns the rule off for all component code, so a future
+  // arr.map(this.method) or addEventListener(type, this.method) under
+  // src/components will not be reported. That is acceptable because every
+  // current finding here is a Lit template binding.
+  {
+    files: ['src/components/**/*.ts'],
+    ignores: ['src/components/**/*.test.ts'],
+    rules: {
+      '@typescript-eslint/unbound-method': 'off',
     },
   },
 

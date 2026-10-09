@@ -166,7 +166,7 @@ export class ScionPageBrokers extends LitElement {
 
     // Subscribe to broker SSE events
     stateManager.setScope({ type: 'brokers-list' });
-    stateManager.addEventListener('brokers-updated', this.boundOnBrokersUpdated as EventListener);
+    stateManager.addEventListener('brokers-updated', this.boundOnBrokersUpdated);
 
     // Periodically re-render to keep relative timestamps fresh
     this.relativeTimeInterval = setInterval(() => this.requestUpdate(), 15_000);
@@ -174,10 +174,7 @@ export class ScionPageBrokers extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    stateManager.removeEventListener(
-      'brokers-updated',
-      this.boundOnBrokersUpdated as EventListener
-    );
+    stateManager.removeEventListener('brokers-updated', this.boundOnBrokersUpdated);
     if (this.relativeTimeInterval) {
       clearInterval(this.relativeTimeInterval);
       this.relativeTimeInterval = null;

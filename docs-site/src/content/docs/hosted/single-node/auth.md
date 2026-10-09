@@ -46,6 +46,37 @@ is reserved for organizational isolation, a different concern. See the
 [Glossary](/scion/glossary/).
 :::
 
+### Who can sign in (user access mode)
+
+:::caution[The default access mode is open]
+The default user access mode is `open`: once OAuth is configured, any account that the identity provider accepts can sign in and gets an account with the default role described below (`member` unless changed). Choose a mode before the Hub is reachable by others.
+:::
+
+`server.auth.user_access_mode` controls who can sign in:
+
+| Mode | Who can sign in |
+|------|-----------------|
+| `open` (default) | Any account the identity provider accepts, limited to `authorized_domains` when that list is set. |
+| `domain_restricted` | Only accounts from `authorized_domains`. With an empty list, no one except `admin_emails` can sign in. |
+| `invite_only` | Only users who were invited or already have an account, still limited to `authorized_domains` when set. |
+
+Accounts in `admin_emails` can always sign in. On a single-node Hub, set the initial values in `hub.env`; an admin can change them later in **Admin > Server Config**:
+
+```bash
+SCION_SEED_SERVER_AUTH_USERACCESSMODE=invite_only
+SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS=example.com
+```
+
+Or in `settings.yaml`:
+
+```yaml
+server:
+  auth:
+    user_access_mode: invite_only     # open (default) | domain_restricted | invite_only
+    authorized_domains:
+      - example.com
+```
+
 ### Default role for new users
 
 In a multi-user deployment, each user has a hub role: `admin`, `member` or `viewer`. Users listed in `admin_emails` are always admins. Everyone else gets the role set by `server.auth.default_user_role` (`member` by default) when their account is first created or activated. This includes the first sign-in of an invited or allow-listed user. Set it to `viewer` if new users should be able to work in projects they are added to, but not create projects of their own:
@@ -151,7 +182,7 @@ Users whose only email address is unverified at their provider can no longer sig
 
 ## Domain Authorization
 
-You can restrict authentication to specific email domains using the `SCION_AUTHORIZED_DOMAINS` setting. This provides an additional layer of access control beyond OAuth authentication.
+You can restrict authentication to specific email domains using the `server.auth.authorized_domains` setting. This provides an additional layer of access control beyond OAuth authentication. See also [Who can sign in](#who-can-sign-in-user-access-mode).
 
 ### Configuration
 
@@ -159,7 +190,7 @@ Set the environment variable with a comma-separated list of allowed domains:
 
 ```bash
 # Allow only users from these domains
-export SCION_AUTHORIZED_DOMAINS="example.com,mycompany.org"
+export SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS="example.com,mycompany.org"
 ```
 
 Or configure in `server.yaml`:

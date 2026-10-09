@@ -303,7 +303,7 @@ function setCloudRunKey<B extends 'cloudrun' | 'cloudrun_instances'>(
     delete next[key as string];
   }
   if (Object.keys(next).length > 0) {
-    rt[block] = next as V1RuntimeConfig[B];
+    rt[block] = next;
   } else {
     delete rt[block];
   }
@@ -1714,7 +1714,9 @@ export class ScionPageAdminServerConfig extends LitElement {
       this.defaultModelSelection = '';
       this.defaultCustomModelId = '';
     }
-    this.defaultThinkingLevel = data.default_thinking_level ?? null;
+    // A stored 0 is not a valid level (the server rejects it); show it as
+    // unset so a save sends null instead of failing (ptone/scion#3898).
+    this.defaultThinkingLevel = data.default_thinking_level || null;
     this.defaultMaxAgentRole = data.default_max_agent_role || '';
     this.defaultAgentRole = data.default_agent_role || '';
     this.defaultRuntimeBroker = data.default_runtime_broker || '';
@@ -2067,6 +2069,10 @@ export class ScionPageAdminServerConfig extends LitElement {
       }
       if (this.defaultResDisk) defaultResources.disk = this.defaultResDisk;
       payload.default_resources = defaultResources;
+    } else if (ok('default_resources')) {
+      // The server keeps an omitted key, so all-empty resources are sent
+      // as null to clear the stored value (ptone/scion#3719).
+      payload.default_resources = null;
     }
 
     // Default model settings
@@ -2077,8 +2083,10 @@ export class ScionPageAdminServerConfig extends LitElement {
           : this.defaultModelSelection;
       payload.default_model = resolvedModel || '';
     }
+    // An unset level is sent as null, which clears it; the server rejects
+    // 0 rather than treating it as a clear (ptone/scion#3898).
     if (ok('default_thinking_level')) {
-      payload.default_thinking_level = this.defaultThinkingLevel ?? 0;
+      payload.default_thinking_level = this.defaultThinkingLevel ?? null;
     }
     if (ok('default_runtime_broker')) {
       payload.default_runtime_broker = this.defaultRuntimeBroker || '';
@@ -2175,7 +2183,9 @@ export class ScionPageAdminServerConfig extends LitElement {
           endpoint: this.telemetryCloudEndpoint,
           protocol: this.telemetryCloudProtocol,
           provider: this.telemetryCloudProvider,
-          gcp_project_id: this.telemetryCloudGcpProjectId || undefined,
+          // null clears a stored project ID; an omitted key would keep it,
+          // because telemetry is merged key by key (ptone/scion#3717).
+          gcp_project_id: this.telemetryCloudGcpProjectId || null,
           cloud_logging: this.telemetryCloudCloudLogging,
         };
       }
@@ -2386,8 +2396,10 @@ export class ScionPageAdminServerConfig extends LitElement {
           : this.defaultModelSelection;
       payload.default_model = resolvedModel || '';
     }
+    // An unset level is sent as null, which clears it; the server rejects
+    // 0 rather than treating it as a clear (ptone/scion#3898).
     if (ok('default_thinking_level')) {
-      payload.default_thinking_level = this.defaultThinkingLevel ?? 0;
+      payload.default_thinking_level = this.defaultThinkingLevel ?? null;
     }
     if (ok('default_runtime_broker')) {
       payload.default_runtime_broker = this.defaultRuntimeBroker || '';
@@ -2798,13 +2810,27 @@ export class ScionPageAdminServerConfig extends LitElement {
    */
   private renderEnvBadge(...koanfKeys: string[]): typeof nothing | ReturnType<typeof html> {
     const overridden = koanfKeys.some((k) => this.envOverrides.includes(k));
-    if (!overridden) return nothing;
+    return overridden ? this.envBadgeTemplate() : nothing;
+  }
+
+  /** The env-override badge shared by renderEnvBadge and renderEnvBadgeUnder. */
+  private envBadgeTemplate(): ReturnType<typeof html> {
     return html`
       <span class="env-badge">
         <sl-icon name="exclamation-triangle"></sl-icon>
         Overridden by environment on this node
       </span>
     `;
+  }
+
+  /**
+   * Renders the env-override badge for a map-valued section (runtimes,
+   * profiles) whose env_overrides entries are leaf keys under the section
+   * (e.g. profiles.local.runtime from SCION_SERVER_PROFILES_LOCAL_RUNTIME).
+   */
+  private renderEnvBadgeUnder(prefix: string): typeof nothing | ReturnType<typeof html> {
+    const overridden = this.envOverrides.some((k) => k === prefix || k.startsWith(`${prefix}.`));
+    return overridden ? this.envBadgeTemplate() : nothing;
   }
 
   /**
@@ -3057,7 +3083,7 @@ export class ScionPageAdminServerConfig extends LitElement {
             <div class="validation-errors-section">
               <div class="validation-errors-section-name">${section}</div>
               <ul class="validation-errors-list">
-                ${(errors as ValidationErrorDetail[]).map(
+                ${errors.map(
                   (err) => html`
                     <li>
                       ${err.field ? html`<code>${err.field}</code>` : nothing} ${err.message || err}
@@ -4316,6 +4342,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       <div class="section">
         ${this.renderSectionHeader('Runtimes', 'runtimes')} ${this.renderSectionMeta('runtimes')}
         ${runtimeReadOnly ? html`${this.renderReadOnlyBadge(runtimeReadOnly)}` : nothing}
+        ${this.renderEnvBadgeUnder('runtimes')}
         ${runtimeNames.length === 0
           ? html`<p class="hint">No runtimes configured.</p>`
           : runtimeNames.map((name) => this.renderRuntimeEntry(name, !!runtimeReadOnly))}
@@ -4752,6 +4779,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       <div class="section">
         ${this.renderSectionHeader('Profiles', 'profiles')} ${this.renderSectionMeta('profiles')}
         ${profileReadOnly ? html`${this.renderReadOnlyBadge(profileReadOnly)}` : nothing}
+        ${this.renderEnvBadgeUnder('profiles')}
         ${profileNames.length === 0
           ? html`<p class="hint">No profiles configured.</p>`
           : profileNames.map((name) =>
@@ -4832,7 +4860,7 @@ export class ScionPageAdminServerConfig extends LitElement {
               class="shared-dir-storage-backend"
               placeholder="Runtime or server setting"
               clearable
-              value=${(profile.shared_dir_storage_backend as string) || ''}
+              value=${profile.shared_dir_storage_backend || ''}
               ?disabled=${readOnly}
               @sl-change=${(e: Event) => {
                 this.updateProfileField(
@@ -4856,7 +4884,7 @@ export class ScionPageAdminServerConfig extends LitElement {
               class="home-storage-backend"
               placeholder="Runtime or server setting"
               clearable
-              value=${(profile.home_storage_backend as string) || ''}
+              value=${profile.home_storage_backend || ''}
               ?disabled=${readOnly}
               @sl-change=${(e: Event) => {
                 this.updateProfileField(
@@ -4880,7 +4908,7 @@ export class ScionPageAdminServerConfig extends LitElement {
               class="home-storage-leaf"
               placeholder="Runtime or server setting"
               clearable
-              value=${(profile.home_storage_leaf as string) || ''}
+              value=${profile.home_storage_leaf || ''}
               ?disabled=${readOnly}
               @sl-change=${(e: Event) => {
                 this.updateProfileField(
