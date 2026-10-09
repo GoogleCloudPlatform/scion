@@ -71,6 +71,9 @@ func newReissueFixture(t *testing.T, name string, topRole string) *reissueFixtur
 	t.Helper()
 	f := newMintFixture(t, name)
 	setBackfillCompleted(t, f.store)
+	// The test server enables dev auth, which raises every mint to the
+	// full role; the re-issue is tested against production minting.
+	f.srv.authzService.mintDevAuthOverride = false
 	if topRole != store.ProjectRoleOwner {
 		// Replace the owner with a user holding topRole.
 		userID := tid(name + "-top")
@@ -567,6 +570,9 @@ func reissueHTTP(t *testing.T, srv *Server, agentID string, body any, identity I
 func TestScopeReissue_OperatorRefusals(t *testing.T) {
 	f := newReissueFixture(t, "rs-op", store.ProjectRoleOwner)
 	body := ScopeReissueRequest{ReissueScopes: true}
+	require.NoError(t, f.store.CreateUser(context.Background(), &store.User{
+		ID: "rs-op-admin", Email: "admin@test.com", DisplayName: "Admin", Role: "admin", Status: "active",
+	}))
 	admin := NewAuthenticatedUser("rs-op-admin", "admin@test.com", "Admin", "admin", "")
 	member := NewAuthenticatedUser(f.userID, "owner@test.com", "Owner", "member", "")
 	selfClaims := &AgentTokenClaims{ProjectID: f.projectID, Scopes: ScopesForRole(AgentRoleFull), Ancestry: f.child.Ancestry}

@@ -43,9 +43,10 @@ import (
 //
 //	role    = minRole(stored role, delegator's stored role, project max)
 //	CanDelegate(delegator's live grant, role)
-//	ceiling = agentRowEffectCeiling(delegator) less every permission the
-//	          delegator's live chain no longer supports
+//	ceiling = agentRowEffectCeiling(delegator)
 //	role    = childRoleWithinCeiling(ceiling, role)   (only ever lowers)
+//	ceiling = ceiling less every permission of the role's scopes that the
+//	          delegator's live chain does not support
 //	scopes  = role scopes + config scopes, filtered by the fold of the new
 //	          ceiling and the delegator's chain
 //
@@ -329,19 +330,10 @@ func (s *Server) computeScopeReissue(ctx context.Context, agent *store.Agent) (*
 	}
 	projectMax := projectMaxAgentRole(project)
 
-	// The refresh-equivalent "before": what a mint issues under E now.
-	// Credentials do not store their scopes, so this is the honest
-	// baseline. It also refuses a held agent.
-	beforeGrant, err := s.AuthorizeAgentToken(ctx, agent)
-	if err != nil {
-		return nil, reissueErrorFromChain(err)
-	}
-
 	plan := &scopeReissuePlan{
 		agent:      agent,
 		edge:       edge,
 		roleBefore: storedRole,
-		before:     beforeGrant.Scopes,
 	}
 
 	switch edge.DelegatorType {
@@ -354,6 +346,15 @@ func (s *Server) computeScopeReissue(ctx context.Context, agent *store.Agent) (*
 	default:
 		return nil, reissueRefusal(DenyCauseCeilingOrphaned, fmt.Errorf("%w: edge %s has delegator type %q", ErrProvenanceChain, edge.ID, edge.DelegatorType))
 	}
+
+	// The refresh-equivalent "before": what a mint issues under E now.
+	// Credentials do not store their scopes, so this is the honest
+	// baseline. It also refuses a held agent.
+	beforeGrant, err := s.AuthorizeAgentToken(ctx, agent)
+	if err != nil {
+		return nil, reissueErrorFromChain(err)
+	}
+	plan.before = beforeGrant.Scopes
 
 	plan.added, plan.removed, plan.kept = diffScopes(plan.before, plan.after)
 	plan.noop = len(plan.added) == 0 && len(plan.removed) == 0 &&
@@ -426,44 +427,62 @@ func (s *Server) planAgentDelegatorReissue(ctx context.Context, plan *scopeReiss
 		return cause
 	}
 
-	// Cap the role and narrow the ceiling until both are stable. The role
-	// only goes down, so this ends after at most one pass per role level.
-	var candidates []AgentTokenScope
-	for iter := 0; ; iter++ {
-		if iter > 4 {
-			return reissueLookupFault(errors.New("scope re-issue: role did not settle"))
-		}
-		decision := a.CanDelegate(ctx, actor, GrantDescriptor{
-			Type:      GrantTypeAgentDelegation,
-			AgentRole: string(role),
-			ProjectID: agent.ProjectID,
-			ScopeType: store.RoleScopeProject,
-			ScopeID:   agent.ProjectID,
-		})
-		if !decision.Allowed {
-			return reissueRefusal(DenyCauseCeilingDelegatorLacksPermission, fmt.Errorf("delegator agent %s cannot delegate role %q: %s", parent.ID, role, decision.Reason))
-		}
-		capped, cause, ok := childRoleWithinCeiling(ceiling, role, false)
-		if !ok {
-			return reissueRefusal(cause, fmt.Errorf("no agent role fits the delegator's current ceiling"))
-		}
-		role = capped
-		candidates = reissueCandidateScopes(a, agent, role)
+	// The creation-time gate: CanDelegate for the delegator's live grant,
+	// then cap the role to what the delegator's ceiling covers. The role
+	// only goes down (minRole includes the stored role).
+	decision := a.CanDelegate(ctx, actor, GrantDescriptor{
+		Type:      GrantTypeAgentDelegation,
+		AgentRole: string(role),
+		ProjectID: agent.ProjectID,
+		ScopeType: store.RoleScopeProject,
+		ScopeID:   agent.ProjectID,
+	})
+	if !decision.Allowed {
+		return reissueRefusal(DenyCauseCeilingDelegatorLacksPermission, fmt.Errorf("delegator agent %s cannot delegate role %q: %s", parent.ID, role, decision.Reason))
+	}
+	capped, cause, ok := childRoleWithinCeiling(ceiling, role, false)
+	if !ok {
+		return reissueRefusal(cause, fmt.Errorf("no agent role fits the delegator's current ceiling"))
+	}
+	role = capped
+	candidates := reissueCandidateScopes(a, agent, role)
 
-		narrowed := false
-		for _, scope := range candidates {
-			for _, perm := range scopeCeilingPermissions(scope) {
-				if selfOperationSet[perm] || !containsString(ceiling.PermissionIDs, perm) {
-					continue
-				}
-				if liveCheck(perm) != "" {
-					ceiling.PermissionIDs = removeString(ceiling.PermissionIDs, perm)
-					narrowed = true
-				}
+	// Per scope, the live delegation ceiling of the delegator. A scope is
+	// withheld when any permission it covers cannot be evaluated (a lookup
+	// fault), or when the delegator's live chain supports none of them.
+	// The permissions behind a withheld scope are removed from E', so the
+	// scope stays withheld at every later refresh. A kept scope's
+	// individual permissions are still gated at use by the live walk, as
+	// for any agent. Role selection above uses the creation-time ceiling,
+	// as agent creation does.
+	ceiling.PermissionIDs = append([]string(nil), ceiling.PermissionIDs...)
+	for _, scope := range candidates {
+		perms := scopeCeilingPermissions(scope)
+		var faulted, denied []string
+		supported := false
+		for _, perm := range perms {
+			if !containsString(ceiling.PermissionIDs, perm) {
+				continue // the projected ceiling withholds the scope already
+			}
+			if selfOperationSet[perm] {
+				supported = true
+				continue
+			}
+			switch liveCheck(perm) {
+			case "":
+				supported = true
+			case reissueWithheldLookup, reissueWithheldUnevaluated:
+				faulted = append(faulted, perm)
+			default:
+				denied = append(denied, perm)
 			}
 		}
-		if !narrowed {
-			break
+		drop := faulted
+		if len(faulted) == 0 && !supported {
+			drop = denied
+		}
+		for _, perm := range drop {
+			ceiling.PermissionIDs = removeString(ceiling.PermissionIDs, perm)
 		}
 	}
 
