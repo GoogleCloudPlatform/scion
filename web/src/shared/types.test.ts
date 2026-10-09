@@ -88,12 +88,12 @@ describe('projectWorkspaceModeIcon', () => {
   const remote = 'https://github.com/org/repo.git';
 
   it.each([
-    [{ gitRemote: remote }, 'git', 'Git repository, shared workspace'],
-    [{ gitRemote: remote, labels: mode('bogus') }, 'git', 'Git repository, shared workspace'],
+    [{ gitRemote: remote }, 'git', 'Git repository, clone per agent'],
+    [{ gitRemote: remote, labels: mode('bogus') }, 'git', 'Git repository, clone per agent'],
     [
       { gitRemote: remote, labels: mode('empty-per-agent') },
       'git',
-      'Git repository, shared workspace',
+      'Git repository, clone per agent',
     ],
     [{ gitRemote: remote, labels: mode('per-agent') }, 'git', 'Git repository, clone per agent'],
     [

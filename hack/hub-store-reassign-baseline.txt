@@ -37,6 +37,8 @@ pkg/hub/broker_heartbeat_reconcile_test.go | 2
 pkg/hub/broker_profile_attach_test.go | 2
 pkg/hub/broker_provider_selfheal_test.go | 3
 pkg/hub/broker_quota_dispatch_test.go | 2
+# Temporary exception: added after the guard by GoogleCloudPlatform/scion#2943; migrate to installStoreFault and lower (ptone/scion#4068).
+pkg/hub/broker_scoped_reservations_test.go | 1
 pkg/hub/capabilities_test.go | 1
 pkg/hub/conduit_authz_recheck_test.go | 4
 pkg/hub/create_bootstrap_managed_delete_won_test.go | 3
@@ -91,7 +93,8 @@ pkg/hub/lifecycle_post_reload_delete_test.go | 5
 pkg/hub/material_precheck_test.go | 2
 pkg/hub/material_user_scope_test.go | 1
 pkg/hub/material_value_audit_test.go | 2
-pkg/hub/membership_loss_test.go | 8
+# Temporary exception: added after the guard by GoogleCloudPlatform/scion#2973; migrate to installStoreFault and lower (ptone/scion#4068).
+pkg/hub/membership_loss_test.go | 10
 pkg/hub/offload_integration_test.go | 1
 pkg/hub/offload_route_authz_test.go | 4
 pkg/hub/platform_skills_seed_test.go | 1

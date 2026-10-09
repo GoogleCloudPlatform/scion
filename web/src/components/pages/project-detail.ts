@@ -159,6 +159,15 @@ function isProjectShaped(value: unknown): value is { id: string; name: string } 
   return typeof record.id === 'string' && typeof record.name === 'string';
 }
 
+/** Project metrics from GET /api/v1/projects/{id}/metrics-summary. */
+interface ProjectMetricsSummary {
+  sessionsCount24h: number;
+  apiCalls24h: number;
+  tokenUsage24h: number;
+  activeAgents24h: number;
+  periodLabel: string;
+}
+
 @customElement('scion-page-project-detail')
 export class ScionPageProjectDetail extends LitElement {
   /** Re-renders absolute times when the display timezone changes. */
@@ -488,13 +497,7 @@ export class ScionPageProjectDetail extends LitElement {
    * Metrics summary for the project (null = not loaded or unavailable)
    */
   @state()
-  private metricsSummary: {
-    sessionsCount24h: number;
-    apiCalls24h: number;
-    tokenUsage24h: number;
-    activeAgents24h: number;
-    periodLabel: string;
-  } | null = null;
+  private metricsSummary: ProjectMetricsSummary | null = null;
 
   /**
    * DB-backed session metrics summary for the project.
@@ -1221,7 +1224,7 @@ export class ScionPageProjectDetail extends LitElement {
     const storedSort = localStorage.getItem(`scion-sort-project-agents-${this.projectId}`);
     if (storedSort) {
       try {
-        const parsed = JSON.parse(storedSort);
+        const parsed = JSON.parse(storedSort) as { field?: unknown; dir?: unknown } | null;
         if (
           parsed &&
           (parsed.field === 'name' ||
@@ -1271,20 +1274,17 @@ export class ScionPageProjectDetail extends LitElement {
     void this.loadHubProjectCapabilities();
 
     // Listen for real-time updates
-    stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated as EventListener);
-    stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
-    stateManager.addEventListener('agents-resync', this.boundOnAgentsResync as EventListener);
+    stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated);
+    stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged);
+    stateManager.addEventListener('agents-resync', this.boundOnAgentsResync);
     this.agentWindow.addEventListener('change', this.boundOnWindowChange);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    stateManager.removeEventListener(
-      'projects-updated',
-      this.boundOnProjectsUpdated as EventListener
-    );
-    stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
-    stateManager.removeEventListener('agents-resync', this.boundOnAgentsResync as EventListener);
+    stateManager.removeEventListener('projects-updated', this.boundOnProjectsUpdated);
+    stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged);
+    stateManager.removeEventListener('agents-resync', this.boundOnAgentsResync);
     this.agentWindow.removeEventListener('change', this.boundOnWindowChange);
     this.cancelAgentsLoad();
     this.filesSectionObserver?.disconnect();
@@ -1626,7 +1626,10 @@ export class ScionPageProjectDetail extends LitElement {
         this.metricsSummary = null;
         return;
       }
-      const data = await res.json();
+      const data = (await res.json()) as
+        | (ProjectMetricsSummary & { available?: undefined })
+        | { available: false }
+        | null;
       // If metrics service is unavailable, the backend returns {available: false}
       if (data && data.available === false) {
         this.metricsSummary = null;
@@ -2498,8 +2501,7 @@ export class ScionPageProjectDetail extends LitElement {
         method: 'POST',
       });
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const result = (await response.json()) as any;
+      const result = await response.json();
 
       if (!response.ok) {
         // Extract error message from structured APIError or legacy format

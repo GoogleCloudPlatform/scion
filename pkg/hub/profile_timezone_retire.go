@@ -24,6 +24,7 @@ import (
 	"sort"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -284,6 +285,15 @@ func retireDBTierProfileTimezones(ctx context.Context, ops *OperationalSettings,
 		if err != nil {
 			return fmt.Errorf("encoding agent_defaults: %w", err)
 		}
+		// The write is validated against the section schema, so a stored
+		// value that no longer passes it (a legacy default_thinking_level
+		// of 0) would fail the copy. Drop such values with a warning that
+		// names their path, as a server-config save does
+		// (mergeSectionOnCurrent; ptone/scion#3898).
+		doc, err = dropInvalidStoredAgentDefaults(doc, log)
+		if err != nil {
+			return err
+		}
 		var rev int64 // 0 = create-only when there is no row yet
 		if adRow != nil {
 			rev = adRow.Revision
@@ -322,4 +332,27 @@ func retireDBTierProfileTimezones(ctx context.Context, ops *OperationalSettings,
 			"file", file.Path, "profile", v.Profile, "timezone", v.Timezone, "action", decision.action(v.Timezone))
 	}
 	return nil
+}
+
+// dropInvalidStoredAgentDefaults removes from an agent_defaults document the
+// keys other than default_timezone whose value fails the section schema
+// (dropInvalidCarriedKeys), logging their paths but not their values.
+func dropInvalidStoredAgentDefaults(doc json.RawMessage, log *slog.Logger) (json.RawMessage, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(doc, &raw); err != nil {
+		return nil, fmt.Errorf("decoding agent_defaults: %w", err)
+	}
+	schema, _ := opsettings.SchemaInfo()["agent_defaults"].Schema.(map[string]interface{})
+	validate := func(d json.RawMessage) bool { return len(opsettings.Validate("agent_defaults", d)) == 0 }
+	dropped := dropInvalidCarriedKeys("agent_defaults", schema, raw, map[string]bool{"default_timezone": true}, validate)
+	if len(dropped) == 0 {
+		return doc, nil
+	}
+	log.Warn("removing stored agent_defaults keys whose value fails the section schema before copying the profile timezone",
+		"section", "agent_defaults", "keys", dropped)
+	out, err := json.Marshal(raw)
+	if err != nil {
+		return nil, fmt.Errorf("encoding agent_defaults: %w", err)
+	}
+	return out, nil
 }

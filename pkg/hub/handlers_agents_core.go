@@ -935,8 +935,8 @@ const (
 	// quotaReleaseTimeout bounds releaseAgentQuotas (two store writes).
 	quotaReleaseTimeout = 5 * time.Second
 
-	// createCleanupStoreTimeout bounds the store.DeleteAgent of a failed
-	// create's row.
+	// createCleanupStoreTimeout bounds each store step of a failed
+	// create's cleanup (the conditional row delete included).
 	createCleanupStoreTimeout = 5 * time.Second
 
 	// createCleanupRuntimeTimeout bounds the runtime-side delete of a failed
@@ -978,14 +978,15 @@ type createRollback struct {
 	// DeleteRuntime deletes the agent's runtime-side resources; nil when
 	// the create has none.
 	DeleteRuntime func(context.Context) error
-	// DeleteWon, when non-nil, makes the row removal conditional
-	// (createCompensation.IfNotDeleteHeld, ptone/scion#3557): a delete that
-	// holds the row when the compensation runs keeps it, and the cleanup
-	// leaves the row, its edge and its quotas to that delete and sets
-	// *DeleteWon. The other steps (revoke, DeleteRuntime) have run by then.
-	// When the fallback's conditional row deletes give up because the row
-	// kept changing (store.ErrVersionConflict), the row, its phase, its edge
-	// and its quotas are likewise left alone, but the compensation failure is
+	// DeleteWon, when non-nil, receives the outcome of the conditional row
+	// removal (ptone/scion#3557, ptone/scion#3958). The removal is always
+	// conditional: a delete that holds the row when the compensation runs
+	// keeps it, and the cleanup leaves the row, its edge and its quotas to
+	// that delete; *DeleteWon is then set. The other steps (revoke,
+	// DeleteRuntime) have run by then. When the fallback's conditional row
+	// deletes give up because the row kept changing
+	// (store.ErrVersionConflict), the row, its phase, its edge and its
+	// quotas are likewise left alone, but the compensation failure is
 	// reported (correlation ID) and *DeleteWon stays false.
 	DeleteWon *bool
 }
@@ -999,11 +1000,14 @@ type createRollback struct {
 //     non-nil (DispatchAgentDelete for a broker agent, managedAgentDelete for
 //     a managed one);
 //  3. compensates the committed create (compensateAgentCreate): one
-//     transaction that deletes the agent row, deactivates its delegation
+//     transaction that deletes the agent row unless a delete holds it
+//     (createRowHeldCheck), deactivates its delegation
 //     edge with cause create_compensation and writes an
 //     agent_create_dispatch_failed audit record naming rb.CreateAuditID and
 //     rb.Stage; and
-//  4. releases its quota reservations.
+//  4. releases its quota reservations, unless the row was left to a delete
+//     that holds it or to a concurrent writer (the conditional row delete
+//     gave up with store.ErrVersionConflict).
 //
 // Every step runs on a context detached from ctx with its own short budget,
 // so a canceled request cannot skip any of them. The cleanup runs
@@ -1076,9 +1080,11 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 			return ""
 		}
 	}
-	// leftContended: in conditional mode the row was left to a concurrent
-	// writer after the fallback's conditional deletes gave up
-	// (ErrVersionConflict).
+	// deleteWon: a delete holds the row, or removed it; the row, its edge
+	// and its quotas are left to that delete.
+	deleteWon := false
+	// leftContended: the row was left to a concurrent writer after the
+	// fallback's conditional deletes gave up (ErrVersionConflict).
 	leftContended := false
 	func() {
 		sctx, cancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
@@ -1090,7 +1096,6 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 			OpID:            opID,
 			Stage:           rb.Stage,
 			Cause:           rb.Cause,
-			IfNotDeleteHeld: rb.DeleteWon != nil,
 		})
 		if err == nil {
 			return
@@ -1098,7 +1103,7 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 		if errors.Is(err, errCreateRowDeleteHeld) {
 			s.agentLifecycleLog.Info("Create-failure cleanup: a delete holds the agent row; leaving it to the delete",
 				"agent_id", agent.ID, "stage", rb.Stage)
-			*rb.DeleteWon = true
+			deleteWon = true
 			return
 		}
 		compensationFailureCorrelationID = compensationFailureID(ctx)
@@ -1115,23 +1120,23 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 		// The row delete is retried a few times; if it still fails, the row
 		// is left visibly failed rather than in phase created with no
 		// message.
-		derr := s.deleteFailedCreateRow(ctx, agent.ID, rb.DeleteWon != nil)
+		derr := s.deleteFailedCreateRow(ctx, agent.ID)
 		if errors.Is(derr, errCreateRowDeleteHeld) {
 			// A delete claimed the row since: it owns the row and its
 			// edge. The failed compensation's correlation ID is logged
 			// above (logCompensationFailure) and returned, but a caller
 			// that answers 409 for a delete that won does not put it in
 			// the response.
-			*rb.DeleteWon = true
+			deleteWon = true
 			return
 		}
-		if rb.DeleteWon != nil && errors.Is(derr, store.ErrVersionConflict) {
-			// Conditional mode, and the row kept changing under the
-			// conditional deletes (the fallback's retries included) until
-			// FinalizeAgentDeletion gave up: something else, most likely a
-			// delete, is writing it. Leave the row, its phase, its edge and
-			// its quotas to that writer; the correlation ID is still
-			// reported (ptone/scion#3557).
+		if errors.Is(derr, store.ErrVersionConflict) {
+			// The row kept changing under the conditional deletes (the
+			// fallback's retries included) until FinalizeAgentDeletion
+			// gave up: something else, most likely a delete, is writing it.
+			// Leave the row, its phase, its edge and its quotas to that
+			// writer; the correlation ID is still reported
+			// (ptone/scion#3557).
 			leftContended = true
 			return
 		}
@@ -1158,7 +1163,10 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 			s.agentLifecycleLog.Warn("Create-failure cleanup: edge deactivation failed", "agent_id", agent.ID, "op_id", opID, "error", derr)
 		}
 	}()
-	if leftContended || (rb.DeleteWon != nil && *rb.DeleteWon) {
+	if rb.DeleteWon != nil {
+		*rb.DeleteWon = deleteWon
+	}
+	if leftContended || deleteWon {
 		// The delete releases the quotas when it finishes.
 		return compensationFailureCorrelationID
 	}
@@ -1216,13 +1224,13 @@ func isCreateCleanupRefusedRow(a *store.Agent) bool {
 
 // deleteFailedCreateRow removes a failed create's agent row, trying
 // createCleanupDeleteAttempts times with a growing backoff, each attempt on
-// its own detached context. A row already gone counts as removed.
+// its own detached context.
 //
-// When conditional is set (createRollback.DeleteWon, ptone/scion#3557), the
-// row is removed only if no delete holds it (createRowHeldCheck, checked in
-// the delete's transaction); a row a delete holds, or one already gone or
-// soft-deleted, returns errCreateRowDeleteHeld.
-func (s *Server) deleteFailedCreateRow(ctx context.Context, agentID string, conditional bool) error {
+// The row is removed only if no delete holds it (createRowHeldCheck, checked
+// in the delete's transaction; ptone/scion#3557, ptone/scion#3958); a row a
+// delete holds, or one already gone or soft-deleted, returns
+// errCreateRowDeleteHeld.
+func (s *Server) deleteFailedCreateRow(ctx context.Context, agentID string) error {
 	var err error
 	for attempt := 0; attempt < createCleanupDeleteAttempts; attempt++ {
 		if attempt > 0 {
@@ -1231,10 +1239,6 @@ func (s *Server) deleteFailedCreateRow(ctx context.Context, agentID string, cond
 		func() {
 			sctx, cancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
 			defer cancel()
-			if !conditional {
-				err = s.store.DeleteAgent(sctx, agentID)
-				return
-			}
 			var n int
 			n, err = s.store.FinalizeAgentDeletion(sctx, agentID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{}, createRowHeldCheck(nil))
 			if err == nil && n == 0 {
@@ -2290,6 +2294,10 @@ func (s *Server) createAgentInProject(
 	// (see cleanupFailedCreate) and reports a compensation correlation ID,
 	// or "" when the rollback succeeded.
 	// The caller supplies the stage, the cause and the per-site steps.
+	// The row is removed only if no delete holds it (ptone/scion#3958); a
+	// site that does not pass DeleteWon still writes its own answer when a
+	// delete holds the row, and the row, its edge and its quotas are left to
+	// that delete.
 	cleanup := func(rb createRollback) string {
 		rb.Agent = agent
 		rb.RuntimeBrokerID = runtimeBrokerID
@@ -2841,7 +2849,10 @@ func (s *Server) createAgentInProject(
 					writeCreateFailure(w, corrID, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
 				}
-				warnings = append(warnings, api.ProvisionFailedWarningPrefix+err.Error())
+				// A Kubernetes identity mapping refusal reads as the
+				// hub's coded message, not the raw broker body
+				// (ptone/scion#4024).
+				warnings = append(warnings, api.ProvisionFailedWarningPrefix+dispatchFailureText(err))
 			} else {
 				agent.Phase = string(state.PhaseCreated)
 				if err := s.updateAgentAfterDispatch(ctx, agent); err != nil {
@@ -3445,6 +3456,9 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		// finalize-env creates the agent on the broker, so it can meet the
 		// same workspace-bucket refusal as create (ptone/scion#3422).
 		if relayWorkspaceStorageUnconfigured(w, err) {
+			return
+		}
+		if relayIdentityMappingError(w, err) {
 			return
 		}
 		if relayHarnessConfigRefusal(w, err) {
@@ -5136,8 +5150,26 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 // It generates a fresh token and pushes it into the running agent container
 // via the runtime broker, restarting the agent's token refresh loop without
 // a full container restart.
+//
+// With {"reissue_scopes": true} it re-issues the agent's role scopes from its
+// delegator's current authority instead (handleAgentScopeReissue): super-admin
+// only, optionally as a dry run.
 func (s *Server) handleAgentResetAuth(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
+
+	reissue, err := decodeScopeReissueRequest(r)
+	if err != nil {
+		ValidationError(w, "invalid reset-auth request body", nil)
+		return
+	}
+	if reissue.ReissueScopes {
+		s.handleAgentScopeReissue(w, r, id, reissue)
+		return
+	}
+	if reissue.DryRun {
+		ValidationError(w, "dry_run applies only with reissue_scopes", nil)
+		return
+	}
 
 	agent, err := s.store.GetAgent(ctx, id)
 	if err != nil {
@@ -5233,6 +5265,8 @@ func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID strin
 		// Response already written.
 	case relayHarnessConfigRefusal(w, err):
 		// Response already written.
+	case relayIdentityMappingError(w, err):
+		// Response already written.
 	case isBrokerStatus(err, http.StatusNotFound):
 		message := err.Error()
 		var se *brokerStatusError
@@ -5308,6 +5342,11 @@ func relayWorkspaceStorageUnconfigured(w http.ResponseWriter, err error) bool {
 // (ptone/scion#3132). For any other error it writes nothing and returns
 // false. The broker's start markers in error.details are not relayed, as
 // for a skill resolution failure.
+//
+// It also relays the broker's 400 validation_error the same way: the broker
+// answers it for a request it refuses as invalid (its ValidationError
+// helper and the start-context checks), usually a request the caller must
+// fix, so it is not a "runtime broker failed" 502 (ptone/scion#2666).
 func relayHarnessConfigRefusal(w http.ResponseWriter, err error) bool {
 	var se *brokerStatusError
 	if !errors.As(err, &se) {
@@ -5315,6 +5354,7 @@ func relayHarnessConfigRefusal(w http.ResponseWriter, err error) bool {
 	}
 	code := se.brokerErrorCode()
 	switch {
+	case se.StatusCode == http.StatusBadRequest && code == ErrCodeValidationError:
 	case se.StatusCode == http.StatusUnprocessableEntity && code == harnessConfigUnusableErrorCode:
 	case se.StatusCode == http.StatusForbidden && code == ErrCodeForbidden:
 		// Harness-config policy is today the broker's only producer of a

@@ -113,7 +113,7 @@ export class ScionSubscriptionManager extends LitElement {
       } else if (Array.isArray(data)) {
         this.subscriptions = data;
       } else {
-        this.subscriptions = (data as { subscriptions?: Subscription[] }).subscriptions || [];
+        this.subscriptions = data.subscriptions || [];
       }
     } catch (err) {
       console.error('Failed to load subscriptions:', err);

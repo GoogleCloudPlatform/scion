@@ -292,7 +292,7 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 100,
-      "description": "Default thinking/reasoning level for new agents (1-100). 0 is reserved as the clear sentinel.",
+      "description": "Default thinking/reasoning level for new agents (1-100). Through the admin server-config API, null clears it; 0 is rejected.",
       "x-scope": "any",
       "x-since": "1"
     },
@@ -613,6 +613,12 @@
             "maxLength": 253
           },
           "description": "Maps a lowercase GCP service account email to the Kubernetes ServiceAccount (KSA) name it is bound to via Workload Identity, for GCP identity mode 'assign' on the Kubernetes runtime. Scion does not create, annotate, or bind the KSA; it must already be pre-provisioned by the operator. Only settings the broker itself resolves (this runtime entry, or a same-keyed entry in a profile defined in the same operator-controlled settings) are consulted; a project's own settings.yaml cannot add or override entries here. A same-keyed entry in the active profile overrides this one."
+        },
+        "kubernetes_block_service_account": {
+          "type": "string",
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+          "maxLength": 253,
+          "description": "Kubernetes only. The Kubernetes ServiceAccount (KSA) a pod runs as when its GCP identity mode resolves to 'block'. It must be a dedicated KSA the operator provisions with no Workload Identity annotation and no IAM grants, so it is zero-privilege; Scion does not create or check it. Empty or unset means a block pod runs as the namespace's default ServiceAccount. Block pods also get automountServiceAccountToken false and a node selector for Workload Identity nodes. A profile value wins over this one. Read only from the broker's own operator-controlled settings."
         }
       },
       "additionalProperties": false
@@ -1119,6 +1125,12 @@
             "maxLength": 253
           },
           "description": "Per-profile override of runtimes.<name>.kubernetes_service_account_mappings: for a given GSA email key present here, the KSA name here wins over the runtime-level entry. Only consulted when this profile is defined in the broker's own operator-controlled settings, never from a project's settings.yaml."
+        },
+        "kubernetes_block_service_account": {
+          "type": "string",
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+          "maxLength": 253,
+          "description": "Per-profile override of runtimes.<name>.kubernetes_block_service_account: the Kubernetes ServiceAccount a GCP identity 'block' pod runs as for agents using this profile. Only consulted when this profile is defined in the broker's own operator-controlled settings, never from a project's settings.yaml."
         }
       },
       "additionalProperties": false
@@ -1156,10 +1168,17 @@
         "source": { "type": "string" },
         "target": { "type": "string" },
         "read_only": { "type": "boolean", "default": false },
-        "type": { "type": "string", "enum": ["local", "gcs"], "default": "local" },
+        "type": {
+          "type": "string",
+          "description": "Volume kind: 'local' (host bind mount; needs source), 'gcs' (GCS FUSE mount; needs bucket), 'nfs' (NFS mount; needs server and source, the export path), 'cloudrun-volume' (Cloud Run managed volume; needs volume_name) or 'gke-shared-volume' (GKE-provided shared volume such as a Filestore CSI PVC; needs volume_name).",
+          "enum": ["local", "gcs", "nfs", "cloudrun-volume", "gke-shared-volume"],
+          "default": "local"
+        },
         "bucket": { "type": "string" },
         "prefix": { "type": "string" },
-        "mode": { "type": "string" }
+        "mode": { "type": "string" },
+        "server": { "type": "string", "description": "NFS server host or IP. Required when type is 'nfs'." },
+        "volume_name": { "type": "string", "description": "Cloud Run or GKE volume name. Required when type is 'cloudrun-volume' or 'gke-shared-volume'." }
       }
     },
     "resourceSpec": {
@@ -1233,6 +1252,18 @@
           "description": "Preserve workspace files during soft-delete period.",
           "x-env-var": "SCION_SERVER_HUB_SOFTDELETERETAINFILES",
           "x-since": "1"
+        },
+        "gcp_iam_check_mode": {
+          "type": "string",
+          "description": "Whether the IAM actAs permission is checked when a GCP service account is bound to an agent: 'off' (default) or 'enforce'. Any other non-empty value is treated as 'enforce', with a warning."
+        },
+        "gcp_iam_deny_unknown_policy": {
+          "type": "string",
+          "description": "Behaviour when GCP IAM deny policies cannot be evaluated: 'fail-open' (default; allowed if the allow check passes) or 'fail-closed' (treated as denied). Any other non-empty value is treated as 'fail-closed', with a warning."
+        },
+        "disable_legacy_storage_fallback": {
+          "type": "boolean",
+          "description": "Disables the fallback to legacy un-namespaced storage paths, so only hub-scoped paths are checked. Turn on after all resources have moved to namespaced paths."
         },
         "auto_suspend_stalled": {
           "type": "boolean",
@@ -1486,13 +1517,33 @@
       "type": "object",
       "properties": {
         "driver": { "type": "string", "enum": ["sqlite", "postgres"], "default": "sqlite", "x-env-var": "SCION_SERVER_DATABASE_DRIVER" },
-        "url": { "type": "string", "x-env-var": "SCION_SERVER_DATABASE_URL" }
+        "url": { "type": "string", "x-env-var": "SCION_SERVER_DATABASE_URL" },
+        "max_open_conns": {
+          "type": "integer",
+          "description": "Maximum number of open connections to the database. For sqlite this is forced to 1 whatever is configured, to serialize writes. For postgres a value of 1 or less takes the default (5)."
+        },
+        "max_idle_conns": {
+          "type": "integer",
+          "description": "Maximum number of idle connections in the pool. For postgres a value of 1 or less takes the default (2). For sqlite a value of 0 or less takes the default (1)."
+        },
+        "conn_max_lifetime": {
+          "type": "string",
+          "description": "Maximum time a connection may be reused (Go duration, e.g. '30m'). Empty takes the driver default (postgres: 30m; sqlite: unlimited). '0' means unlimited."
+        },
+        "conn_max_idle_time": {
+          "type": "string",
+          "description": "Maximum time a connection may sit idle in the pool before it is closed (Go duration, e.g. '5m'). Set it shorter than the server-side or proxy idle timeout so idle connections are recycled first. Empty takes the driver default (postgres: 5m; sqlite: no idle limit). '0' means no idle limit."
+        }
       }
     },
     "serverAuth": {
       "type": "object",
       "description": "Auth settings. dev_token/dev_token_file are used by both the server and the hub client in dev mode.",
       "properties": {
+        "mode": {
+          "type": "string",
+          "description": "Exclusive human auth mode: 'oauth' (default), 'proxy' or 'dev'. In proxy mode the OAuth handlers are disabled and proxy settings apply; in dev mode dev token auth is used."
+        },
         "dev_mode": { "type": "boolean", "default": false, "x-env-var": "SCION_SERVER_AUTH_DEVMODE" },
         "dev_token": {
           "type": "string",
@@ -1534,7 +1585,59 @@
           "format": "date-time",
           "x-env-var": "SCION_SERVER_AUTH_AGENTRUNSCOPELEGACYUNTIL",
           "x-since": "1"
-        }
+        },
+        "proxy": {
+          "type": "object",
+          "description": "Proxy auth settings, consulted when mode is 'proxy'.",
+          "properties": {
+            "provider": { "type": "string", "description": "Proxy auth provider: 'iap', 'jwt' or 'header'. Any other value is a startup error when mode is 'proxy'." },
+            "iap": {
+              "type": "object",
+              "description": "Google IAP settings.",
+              "properties": {
+                "audience": { "type": "string", "description": "Expected audience claim. Required for the 'iap' provider." },
+                "issuer": { "type": "string", "description": "Overrides the default IAP issuer (for testing)." },
+                "jwks_url": { "type": "string", "description": "Overrides the default IAP JWKS URL (for testing)." }
+              }
+            },
+            "jwt": {
+              "type": "object",
+              "description": "Settings for the generic JWT proxy auth provider.",
+              "properties": {
+                "header": { "type": "string", "description": "Request header that carries the JWT." },
+                "algorithm": { "type": "string", "description": "Expected JWT signing algorithm." },
+                "issuer": { "type": "string", "description": "Expected JWT issuer." },
+                "audience": { "type": "string", "description": "If set, validated against the JWT 'aud' claim." },
+                "jwks_url": { "type": "string", "description": "Remote JWKS endpoint URL (not yet supported)." },
+                "jwks_file": { "type": "string", "description": "Local path to a JWKS JSON file (not yet supported)." },
+                "public_key_file": { "type": "string", "description": "Local path to a PEM-encoded public key." },
+                "claims": {
+                  "type": "object",
+                  "description": "Maps JWT claim names to identity fields.",
+                  "properties": {
+                    "email": { "type": "string", "description": "Claim with the user's email (default 'email')." },
+                    "subject": { "type": "string", "description": "Claim with the stable user identifier (default 'sub')." },
+                    "display_name": { "type": "string", "description": "Claim with the user's display name (default 'name')." },
+                    "domain": { "type": "string", "description": "Claim with the user's hosted domain (default 'hd')." }
+                  }
+                }
+              }
+            },
+            "require_trusted_proxy_ip": { "type": "boolean", "description": "Also require requests to come from a trusted proxy IP." }
+          }
+        },
+        "transport": {
+          "type": "object",
+          "description": "Transport-layer auth settings for agent outbound requests.",
+          "properties": {
+            "mode": { "type": "string", "description": "Transport auth mode: 'none' (default), 'cloudrun_invoker' or 'iap'." },
+            "oidc_audience": { "type": "string", "description": "OIDC audience for transport tokens." },
+            "platform_auth_sa": { "type": "string", "description": "Dedicated service account email used for transport-layer auth." }
+          }
+        },
+        "username": { "type": "string", "description": "Dev user's login name (defaults to the OS user name)." },
+        "display_name": { "type": "string", "description": "Dev user's display name (defaults to the OS full name)." },
+        "email": { "type": "string", "description": "Dev user's email (defaults to <username>@localhost)." }
       }
     },
     "serverOAuth": {
@@ -1639,7 +1742,12 @@
       "properties": {
         "backend": { "type": "string", "enum": ["local", "gcpsm"], "default": "local", "x-env-var": "SCION_SERVER_SECRETS_BACKEND" },
         "gcp_project_id": { "type": "string", "x-env-var": "SCION_SERVER_SECRETS_GCPPROJECTID" },
-        "gcp_credentials": { "type": "string", "x-env-var": "SCION_SERVER_SECRETS_GCPCREDENTIALS" }
+        "gcp_credentials": { "type": "string", "x-env-var": "SCION_SERVER_SECRETS_GCPCREDENTIALS" },
+        "gcp_replication_locations": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "If non-empty, switches GCP Secret Manager from automatic (global) to user-managed replication in these locations. Required when an organization policy restricts resource locations (constraints/gcp.resourceLocations)."
+        }
       }
     },
     "serverSharedDirStorage": {

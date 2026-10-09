@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -28,7 +27,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
@@ -241,175 +239,15 @@ func resolveAttachOptions() ([]wsclient.AttachOption, transportauth.TokenSource,
 	return opts, transportSrc, nil
 }
 
-// attachUnsupportedErr returns a fixed, explicit error for an agent that has
-// no exec/attach/TTY primitive to dial, or nil when attach should proceed to
-// dial. It covers managed agents (a `managed:`-prefixed runtime) and any
-// agent whose runtime broker advertises its profile — or, failing that, the
-// broker as a whole — as EXPLICITLY not supporting attach (see
-// attachSupportedByBroker). A runtime whose broker would otherwise reject
-// the PTY stream only after the WebSocket upgrade has already happened is
-// rejected here instead when the broker's own record is readable, so that
-// rejection never reaches the CLI process. Every attach entry point (both
-// the direct `scion attach` path and the `scion start -a` / `scion resume
-// -a` paths) must call this before dialing.
-func attachUnsupportedErr(ctx context.Context, hubCtx *HubContext, agentRuntime, runtimeBrokerID, profile string) error {
+// managedAttachErr refuses attach for managed agents (a `managed:`-prefixed
+// runtime), which have no terminal to attach. Whether any other agent can
+// be attached is the Hub's decision: attachHubSession asks it with the
+// preflight (wsclient.AttachToAgent) before dialing.
+func managedAttachErr(agentRuntime string) error {
 	if strings.HasPrefix(agentRuntime, "managed:") {
 		return fmt.Errorf("attach is not supported for managed agents — use scion message and scion look")
 	}
-	supported, unreadable := attachSupportedByBroker(ctx, hubCtx, runtimeBrokerID, profile)
-	if unreadable {
-		// The broker record could not be read at all (point-GET and the LIST
-		// fallback both failed, e.g. a 403/404 the CLI's own principal
-		// doesn't have read access to). That is not "the broker said no", it
-		// is "this client doesn't know" — a hub-member principal without
-		// broker-record read access must not be refused attach client-side
-		// for a runtime that does support it. Proceed to dial: the broker's
-		// own gate on the dial path (the 4501 close or the 501
-		// runtime_attach_unsupported pre-upgrade response) stays the
-		// authoritative check and still refuses a genuinely unsupported
-		// runtime, with this same fixed message, before any PTY data flows.
-		return nil
-	}
-	if !supported {
-		if agentRuntime == "" {
-			return fmt.Errorf("attach is not supported for this agent's runtime")
-		}
-		return fmt.Errorf("attach is not supported for agents on the %s runtime", agentRuntime)
-	}
 	return nil
-}
-
-// attachSupportedByBroker reports whether attach is supported for an agent
-// on runtimeBrokerID's profile, read from the Hub's own record of that
-// broker: runtimebroker.BrokerProfile.Attach / BrokerCapabilities.Attach,
-// mirrored into store.RuntimeBroker at registration and served back by
-// hubclient.RuntimeBrokers().Get — the same broker/provider read other CLI
-// commands already use (e.g. printAutoResolvedBroker), not a new endpoint.
-// When the point-GET can't be read (a 403, a 404, or anything else), it
-// falls back to the same broker's entry in the LIST response — a hub-member
-// principal can be denied the point-GET yet still see the broker on LIST,
-// since LIST applies its own, already-authorized, read-scope boundary
-// rather than widening anything here; the GET-vs-LIST authorization
-// difference is a separate hub concern.
-//
-// The named profile's own Attach wins when the broker gave one (from
-// whichever read produced the record). When it didn't — an older broker, or
-// one whose registration producer has no live runtime instance to ask for a
-// non-default profile (see buildBrokerProfiles) — this falls through to the
-// broker-wide Capabilities.Attach, and THAT answer is final: true (or the
-// whole Capabilities record being absent, an older broker's shape) means
-// supported, but an explicit broker-wide false means not, even though the
-// specific profile itself said nothing. A profile carrying no signal is not
-// itself information; the broker saying "my default runtime doesn't
-// support attach" is. This does mean a non-default-type profile on a
-// broker whose default runtime opts out of attach is refused before
-// dialing even though that specific profile's own runtime might support
-// it fine — an accepted, documented cost of not being able to ask a
-// specific profile's own runtime without a live instance for it (see
-// pkg/runtimebroker's resolver and its own equivalent unknown-profile
-// cases): a silent profile on a broker whose broker-wide Capabilities.Attach
-// is false refuses.
-//
-// No broker ID on the agent record defaults to supported: there is nothing
-// to read in that case, unlike a broker that answered but had nothing to
-// say about that particular profile, and the server-side gate stays the
-// authoritative check regardless. A broker ID that neither the point-GET
-// nor the LIST fallback could resolve to a record also comes back
-// unreadable, for the same reason a 403/404 on either read does: the caller
-// (attachUnsupportedErr) treats "could not find out" as unknown and lets
-// the dial proceed, rather than refusing client-side on a signal that is
-// about this principal's read access, not about the runtime's own attach
-// support.
-func attachSupportedByBroker(ctx context.Context, hubCtx *HubContext, runtimeBrokerID, profile string) (supported bool, unreadable bool) {
-	if hubCtx == nil || hubCtx.Client == nil || runtimeBrokerID == "" {
-		return true, false
-	}
-	broker, err := hubCtx.Client.RuntimeBrokers().Get(ctx, runtimeBrokerID)
-	if err != nil || broker == nil {
-		// The point-GET error itself never reaches the user-facing message
-		// (attachUnsupportedErr's fixed wording carries no raw server text);
-		// log it at debug level only, for diagnosability.
-		slog.Debug("attach gate: runtime broker point-GET unreadable, falling back to LIST", "broker_id", runtimeBrokerID, "error", err)
-		broker, err = findRuntimeBrokerByIDViaList(ctx, hubCtx, runtimeBrokerID)
-		if err != nil || broker == nil {
-			slog.Debug("attach gate: runtime broker unreadable via LIST fallback too", "broker_id", runtimeBrokerID, "error", err)
-			return false, true
-		}
-	}
-	return attachSupportedFromBrokerRecord(broker, profile), false
-}
-
-// attachSupportedFromBrokerRecord applies the profile-then-broker-wide
-// attach ruling documented on attachSupportedByBroker to a broker record
-// that was successfully read, regardless of whether it came from the
-// point-GET or the LIST fallback.
-func attachSupportedFromBrokerRecord(broker *hubclient.RuntimeBroker, profile string) bool {
-	if profile != "" {
-		for _, p := range broker.Profiles {
-			if p.Name != profile {
-				continue
-			}
-			if p.Attach != nil {
-				return *p.Attach
-			}
-			break // found the profile, but it said nothing; fall through below
-		}
-	}
-	if broker.Capabilities != nil {
-		return broker.Capabilities.Attach
-	}
-	return true
-}
-
-// findRuntimeBrokerListMaxPages bounds how many pages
-// findRuntimeBrokerByIDViaList will follow before giving up, so a
-// misbehaving Hub response (a cursor that never ends, or cycles back on
-// itself) can't turn one CLI attach call into an unbounded loop.
-const findRuntimeBrokerListMaxPages = 50
-
-// findRuntimeBrokerByIDViaList looks up runtimeBrokerID by paging through
-// RuntimeBrokers().List — the fallback attachSupportedByBroker uses when the
-// point-GET can't be read — scoped to hubCtx.ProjectID when known. It
-// returns (nil, nil) when the list pages are exhausted without a match, the
-// page cap is hit, or a cursor repeats; the caller (attachSupportedByBroker)
-// treats all three the same as unreadable, which attachUnsupportedErr in
-// turn treats as unknown and lets the dial proceed, rather than refusing
-// client-side on a signal that is about this principal's read access, not
-// about the runtime's own attach support.
-func findRuntimeBrokerByIDViaList(ctx context.Context, hubCtx *HubContext, runtimeBrokerID string) (*hubclient.RuntimeBroker, error) {
-	opts := &hubclient.ListBrokersOptions{ProjectID: hubCtx.ProjectID}
-	seenCursors := map[string]bool{}
-	for page := 0; page < findRuntimeBrokerListMaxPages; page++ {
-		resp, err := hubCtx.Client.RuntimeBrokers().List(ctx, opts)
-		if err != nil {
-			return nil, err
-		}
-		for i := range resp.Brokers {
-			if resp.Brokers[i].ID == runtimeBrokerID {
-				return &resp.Brokers[i], nil
-			}
-		}
-		if !resp.Page.HasMore() {
-			return nil, nil
-		}
-		if seenCursors[resp.Page.NextCursor] {
-			return nil, nil
-		}
-		seenCursors[resp.Page.NextCursor] = true
-		opts.Page.Cursor = resp.Page.NextCursor
-	}
-	return nil, nil
-}
-
-// agentProfileName returns the settings profile an agent was created with,
-// or "" when the agent record carries no applied config (an older broker,
-// or an agent created before AppliedConfig was tracked) — the "no profile"
-// case attachSupportedByBroker falls back to the broker-wide capability for.
-func agentProfileName(agent *hubclient.Agent) string {
-	if agent == nil || agent.AppliedConfig == nil {
-		return ""
-	}
-	return agent.AppliedConfig.Profile
 }
 
 // attachViaHub attaches to an agent via Hub WebSocket connection.
@@ -431,10 +269,10 @@ func attachViaHub(hubCtx *HubContext, agentName string) error {
 		return wrapHubError(fmt.Errorf("failed to get agent '%s': %w", agentName, err))
 	}
 
-	// Check attach support before the phase: an agent whose runtime can never
-	// be attached must not be told to resume first (resuming has side effects
-	// and would still end in "attach is not supported").
-	if err := attachUnsupportedErr(ctx, hubCtx, agent.Runtime, agent.RuntimeBrokerID, agentProfileName(agent)); err != nil {
+	// A managed agent can never be attached: say so before the phase, so it
+	// is not told to resume first. Every other agent is checked by the Hub
+	// preflight once it is running.
+	if err := managedAttachErr(agent.Runtime); err != nil {
 		return err
 	}
 
@@ -466,13 +304,9 @@ func attachViaHub(hubCtx *HubContext, agentName string) error {
 		agentID = agentName // Fall back to name if ID not set
 	}
 	return attachHubSession(ctx, hubCtx, hubAttachTarget{
-		Name:     agentName,
-		ID:       agentID,
-		Runtime:  agent.Runtime,
-		BrokerID: agent.RuntimeBrokerID,
-		Profile:  agentProfileName(agent),
-		// attachUnsupportedErr already ran above, before the phase check.
-		GateChecked: true,
+		Name:    agentName,
+		ID:      agentID,
+		Runtime: agent.Runtime,
 	})
 }
 
@@ -498,31 +332,22 @@ type hubAttachTarget struct {
 	Name string
 	// ID is the agent ID used in the /pty URL.
 	ID string
-	// Runtime, BrokerID and Profile feed attachUnsupportedErr. Empty values
-	// are meaningful there (they default to "supported").
-	Runtime  string
-	BrokerID string
-	Profile  string
-	// GateChecked means the caller already ran attachUnsupportedErr for this
-	// agent, so attachHubSession skips a second broker lookup.
-	GateChecked bool
+	// Runtime feeds managedAttachErr.
+	Runtime string
 }
 
 // attachHubSession is the shared Hub attach flow used by scion attach and by
-// scion start -a / resume -a, so that both get the same capability gate, auth
+// scion start -a / resume -a, so that both get the same preflight, auth
 // resolution, error wrapping and hints. The agent must already be running.
+//
+// Whether the agent can be attached is decided by the Hub, not from broker
+// metadata on the client: wsclient.AttachToAgent asks the Hub's preflight
+// first, which picks the broker path or, when the broker's runtime has no
+// attach, the agent path. A preflight refusal is described by
+// describeAttachPreflight and is not retried.
 func attachHubSession(ctx context.Context, hubCtx *HubContext, target hubAttachTarget) error {
-	// Some runtimes have no exec/attach/TTY primitive to dial: managed agents
-	// never did, and a runtime that opts out of attach entirely (see
-	// attachUnsupportedErr) would otherwise have its broker reject the PTY
-	// stream only after the WebSocket upgrade has already happened. Reject
-	// here instead, using broker metadata the Hub already serves, so the user
-	// gets a fixed, explicit, non-zero-exit error before any WebSocket dial
-	// is attempted.
-	if !target.GateChecked {
-		if err := attachUnsupportedErr(ctx, hubCtx, target.Runtime, target.BrokerID, target.Profile); err != nil {
-			return err
-		}
+	if err := managedAttachErr(target.Runtime); err != nil {
+		return err
 	}
 
 	// Resolve transport auth for IAP/Cloud Run traversal FIRST — in IAP mode
@@ -546,10 +371,88 @@ func attachHubSession(ctx context.Context, hubCtx *HubContext, target hubAttachT
 	statusf("Attaching to agent '%s' via Hub...\n", target.Name)
 
 	if err := attachToAgentFn(context.Background(), hubCtx.Endpoint, token, target.ID, attachOpts...); err != nil {
-		return attachErrorWithUATHint(describeAttachClose(err, target.Name), token)
+		return attachErrorWithUATHint(describeAttachPreflight(describeAttachClose(err, target.Name), target.Name), token)
 	}
 	return nil
 }
+
+// preflightRefusalMessage is what the CLI says for a Hub preflight refusal,
+// on the first attach and on an automatic reconnect alike. The summaries
+// are the preflight's own (the Hub answered, not the broker); the hints
+// are the close-code ones. ok is false for a status with no specific
+// message.
+func preflightRefusalMessage(pe *wsclient.PTYPreflightError) (msg ptyCloseMessage, ok bool) {
+	switch pe.Status {
+	case http.StatusUnauthorized:
+		return ptyCloseMessage{Summary: "your Hub credentials are not valid",
+			Hint: ptyCloseMessages[wsprotocol.ClosePTYAuthRequired].Hint}, true
+	case http.StatusForbidden:
+		return ptyCloseMessage{Summary: "you do not have permission to attach to this agent",
+			Hint: ptyCloseMessages[wsprotocol.ClosePTYForbidden].Hint}, true
+	case http.StatusNotFound:
+		return ptyCloseMessage{Summary: "the Hub cannot find the agent",
+			Hint: ptyCloseMessages[wsprotocol.ClosePTYAgentNotFound].Hint}, true
+	case http.StatusUnprocessableEntity:
+		return ptyCloseMessage{
+			Summary: "the agent has no runtime broker",
+			Hint:    "Check the agent with: scion list",
+		}, true
+	case http.StatusServiceUnavailable:
+		if pe.NoPath() {
+			return ptyCloseMessage{
+				Summary: wsclient.AttachUnsupportedMessage + ", and the agent has no session that serves a terminal",
+				Hint:    ptyCloseTerminalHint,
+			}, true
+		}
+		msg = ptyCloseMessage{Summary: pe.Message, Hint: ptyCloseRetryHint}
+		if msg.Summary == "" {
+			msg.Summary = "the Hub cannot attach to this agent right now"
+		}
+		return msg, true
+	default:
+		return ptyCloseMessage{}, false
+	}
+}
+
+// describeAttachPreflight turns a *wsclient.PTYPreflightError into an
+// actionable message for agentName: what the Hub said and what to do next.
+// 401, 403 and 404 have their own summaries and reuse the hints of the
+// matching close codes (4401, 4403, 4404); 422 means the agent has no runtime broker; 503 is the Hub's
+// reason (final when there is no path to the terminal, otherwise
+// presented as temporary). The CLI retries none of them. The text keeps
+// the "status N" detail, which attachErrorWithUATHint looks for. Any
+// other error, or another status, is returned unchanged.
+func describeAttachPreflight(err error, agentName string) error {
+	var pe *wsclient.PTYPreflightError
+	if !errors.As(err, &pe) {
+		return err
+	}
+	// A refusal at a reconnect is described with the close that led to it,
+	// by describeAttachClose.
+	var reconnectErr *wsclient.PTYReconnectError
+	if errors.As(err, &reconnectErr) {
+		return err
+	}
+	msg, ok := preflightRefusalMessage(pe)
+	if !ok {
+		return err
+	}
+	return &attachPreflightError{
+		msg: fmt.Sprintf("cannot attach to agent '%s': %s (%s)\n\n%s",
+			agentName, msg.Summary, pe.Detail(), strings.ReplaceAll(msg.Hint, "{agent}", agentName)),
+		err: err,
+	}
+}
+
+// attachPreflightError is the user-facing form of a preflight refusal. It
+// unwraps to the original so callers can still inspect it.
+type attachPreflightError struct {
+	msg string
+	err error
+}
+
+func (e *attachPreflightError) Error() string { return e.msg }
+func (e *attachPreflightError) Unwrap() error { return e.err }
 
 // attachToAgentFn dials and runs the Hub PTY session. It is a variable so
 // tests can substitute a fake session.
@@ -647,11 +550,25 @@ func describeAttachClose(err error, agentName string) error {
 	// code if it has one (its hint is the one that applies now), otherwise by
 	// the reconnect error.
 	note := ""
+	hintOverride := ""
 	var reconnectErr *wsclient.PTYReconnectError
 	if errors.As(err, &reconnectErr) && reconnectErr.Err != nil {
 		var second *wsclient.PTYCloseError
-		if errors.Is(reconnectErr.Err, wsclient.ErrPTYReconnectLimit) {
-			note = "\nscion attach " + wsclient.ErrPTYReconnectLimit.Error() + "."
+		var refusal *wsclient.PTYPreflightError
+		if errors.As(reconnectErr.Err, &refusal) {
+			// The Hub refused the reconnect at its preflight: the same text
+			// and next step as a refusal on the first attach.
+			msg, ok := preflightRefusalMessage(refusal)
+			if !ok {
+				msg = ptyCloseMessage{Summary: refusal.Message, Hint: ptyCloseRetryHint}
+				if msg.Summary == "" {
+					msg.Summary = "the Hub refused the attach"
+				}
+			}
+			note = fmt.Sprintf("\nThe Hub refused the automatic reconnect: %s (%s).", msg.Summary, refusal.Detail())
+			hintOverride = msg.Hint
+		} else if errors.Is(reconnectErr.Err, wsclient.ErrPTYReconnectLimit) {
+			note = "\nscion attach " + reconnectErr.Err.Error() + "."
 		} else if errors.As(reconnectErr.Err, &second) {
 			note = "\nThis close came on the automatic reconnect after " + ptyCloseCodeText(closeErr) + "."
 			closeErr = second
@@ -671,6 +588,9 @@ func describeAttachClose(err error, agentName string) error {
 		} else {
 			hint = ptyCloseTerminalHint
 		}
+	}
+	if hintOverride != "" {
+		hint = hintOverride
 	}
 	return &attachCloseError{
 		msg: fmt.Sprintf("attach to agent '%s' ended: %s (%s)%s\n\n%s",
