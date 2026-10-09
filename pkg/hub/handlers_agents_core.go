@@ -1157,6 +1157,13 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 		}); derr != nil {
 			s.agentLifecycleLog.Warn("Create-failure cleanup: edge deactivation failed", "agent_id", agent.ID, "op_id", opID, "error", derr)
 		}
+		if _, derr := s.store.DeactivateAgentServiceAccountAssignments(fctx, agent.ID, store.Deactivation{
+			Cause: store.EdgeDeactivationCreateCompensation,
+			At:    &now,
+			OpID:  opID,
+		}); derr != nil {
+			s.agentLifecycleLog.Warn("Create-failure cleanup: service-account assignment deactivation failed", "agent_id", agent.ID, "op_id", opID, "error", derr)
+		}
 	}()
 	if leftContended || (rb.DeleteWon != nil && *rb.DeleteWon) {
 		// The delete releases the quotas when it finishes.
@@ -1963,6 +1970,12 @@ func (s *Server) createAgentInProject(
 	// via the GCE metadata server unless explicitly opted into "passthrough"
 	// or "assign"), "passthrough" on Kubernetes, which does not support
 	// "block" (ptone/scion#2328 phase 1).
+	//
+	// saOrigin names the rung that chose an assign-mode account. It is
+	// recorded on the service-account assignment as a description only: the
+	// assignment's source is this request's principal, never the
+	// administrator who configured a default.
+	var saOrigin store.SAAssignmentOrigin
 	if req.GCPIdentity != nil {
 		switch req.GCPIdentity.MetadataMode {
 		case store.GCPMetadataModeAssign:
@@ -1972,6 +1985,7 @@ func (s *Server) createAgentInProject(
 				ServiceAccountEmail: resolvedGCPSA.Email,
 				ProjectID:           resolvedGCPSA.ProjectID,
 			}
+			saOrigin = store.SAAssignmentOriginCreateExplicit
 		case store.GCPMetadataModePassthrough:
 			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 				MetadataMode: store.GCPMetadataModePassthrough,
@@ -2004,6 +2018,7 @@ func (s *Server) createAgentInProject(
 			return
 		}
 		agent.AppliedConfig.GCPIdentity = cfg
+		saOrigin = store.SAAssignmentOriginCreateProjectProfileDefault
 		pinResolvedProfile(agent.AppliedConfig, profileName)
 		slog.Debug("GCP identity chosen by default", "source", "project-profile-default",
 			"project_id", projectID, "agent", agent.Name, "profile", profileName, "sa_id", cfg.ServiceAccountID)
@@ -2025,6 +2040,7 @@ func (s *Server) createAgentInProject(
 					return
 				}
 				agent.AppliedConfig.GCPIdentity = cfg
+				saOrigin = store.SAAssignmentOriginCreateProjectDefault
 				slog.Debug("GCP identity chosen by default", "source", "project-default",
 					"project_id", projectID, "agent", agent.Name, "sa_id", cfg.ServiceAccountID)
 			} else {
@@ -2119,6 +2135,7 @@ func (s *Server) createAgentInProject(
 						return
 					}
 					agent.AppliedConfig.GCPIdentity = cfg
+					saOrigin = store.SAAssignmentOriginCreateHubDefault
 					slog.Debug("GCP identity chosen by default", "source", "hub-default",
 						"project_id", projectID, "agent", agent.Name, "sa_id", cfg.ServiceAccountID)
 				} else {
@@ -2172,6 +2189,11 @@ func (s *Server) createAgentInProject(
 			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
 				"failed to configure GCP identity for sandbox runtime: "+err.Error(), nil)
 			return
+		}
+		if agentHasAssignModeIdentity(agent) {
+			// The translated host account is recorded like any other
+			// assignment, with this request's principal as its source.
+			saOrigin = store.SAAssignmentOriginHostPassthroughTranslation
 		}
 	}
 
@@ -2262,6 +2284,7 @@ func (s *Server) createAgentInProject(
 		},
 		Audit:        createAudit,
 		Subscription: subscription,
+		SAOrigin:     saOrigin,
 	}); err != nil {
 		s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
 		if errors.Is(err, errInvalidDisplayName) {
@@ -4014,6 +4037,12 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 	}
 
 	// Apply GCP identity update (only allowed for agents in 'created' phase)
+	//
+	// saWrite is the service-account assignment change committed with the
+	// agent row: an assign-mode result (an assigned account, or passthrough
+	// translated to the host account) records this caller as the source,
+	// under the caller's frozen ceiling; any other result clears it.
+	var saWrite *saAssignmentWrite
 	if updates.GCPIdentity != nil {
 		if agent.Phase != string(state.PhaseCreated) {
 			Conflict(w, "GCP identity can only be updated for agents in 'created' phase")
@@ -4118,6 +4147,19 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			ValidationError(w, "invalid metadata_mode: must be 'block', 'passthrough', or 'assign'", nil)
 			return
 		}
+		saWrite = &saAssignmentWrite{}
+		if agentHasAssignModeIdentity(agent) {
+			origin := store.SAAssignmentOriginUpdate
+			if updates.GCPIdentity.MetadataMode == store.GCPMetadataModePassthrough {
+				origin = store.SAAssignmentOriginHostPassthroughTranslation
+			}
+			ceiling, prov, ok := s.saAssignmentSourceCeiling(w, r,
+				Resource{Type: "agent", ID: agent.ID, ParentType: "project", ParentID: agent.ProjectID}, ActionUpdate)
+			if !ok {
+				return
+			}
+			saWrite.Assignment = newSAAssignment(agent, origin, ceiling, prov)
+		}
 	}
 
 	// Writer (b) of ExplicitTimezone. Unlike config edits it is accepted in
@@ -4161,7 +4203,26 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			if err := tx.UpdateAgent(ctx, agent); err != nil {
 				return err
 			}
-			return tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, keys)
+			if err := tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, keys); err != nil {
+				return err
+			}
+			if saWrite != nil {
+				return saWrite.apply(r, tx, agent.ID)
+			}
+			return nil
+		})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+	} else if saWrite != nil {
+		// The GCP identity and its service-account assignment are written
+		// in one transaction: neither commits without the other.
+		err := s.store.WithTx(ctx, func(tx store.Store) error {
+			if err := tx.UpdateAgent(ctx, agent); err != nil {
+				return err
+			}
+			return saWrite.apply(r, tx, agent.ID)
 		})
 		if err != nil {
 			writeErrorFromErr(w, err, "")

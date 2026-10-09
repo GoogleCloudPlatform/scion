@@ -59,12 +59,57 @@ type agentCreateWrite struct {
 	Audit *store.MutationAuditRecord
 	// Subscription is optional; its AgentID is set to the created agent.
 	Subscription *store.NotificationSubscription
+	// SAOrigin names the rung that chose the agent's service account. It is
+	// required when Agent carries an assign-mode GCP identity, and is
+	// recorded on the assignment row only as a description.
+	SAOrigin store.SAAssignmentOrigin
+}
+
+// agentAssignedServiceAccountID returns the service account ID of agent's
+// assign-mode GCP identity, or "" when the agent has none.
+func agentAssignedServiceAccountID(agent *store.Agent) string {
+	if agent == nil || agent.AppliedConfig == nil || agent.AppliedConfig.GCPIdentity == nil ||
+		agent.AppliedConfig.GCPIdentity.MetadataMode != store.GCPMetadataModeAssign {
+		return ""
+	}
+	return agent.AppliedConfig.GCPIdentity.ServiceAccountID
+}
+
+// agentHasAssignModeIdentity reports whether agent's applied GCP identity is
+// in assign mode.
+func agentHasAssignModeIdentity(agent *store.Agent) bool {
+	return agent != nil && agent.AppliedConfig != nil && agent.AppliedConfig.GCPIdentity != nil &&
+		agent.AppliedConfig.GCPIdentity.MetadataMode == store.GCPMetadataModeAssign
+}
+
+// newSAAssignment builds the assignment row for agent's assign-mode GCP
+// identity, authorized by the source whose frozen ceiling and provenance
+// are given. The source is the requester of the write (the creator, the
+// PATCH caller, the schedule revision principal or the reincarnation
+// requester), never the principal who configured a default and never the
+// service account itself.
+func newSAAssignment(agent *store.Agent, origin store.SAAssignmentOrigin, ceiling store.EffectCeiling, prov store.AuthorityProvenance) *store.AgentServiceAccountAssignment {
+	return &store.AgentServiceAccountAssignment{
+		AgentID:             agent.ID,
+		ProjectID:           agent.ProjectID,
+		ServiceAccountID:    agentAssignedServiceAccountID(agent),
+		Origin:              origin,
+		Active:              true,
+		AuthorityProvenance: prov,
+		EffectCeiling:       ceiling,
+	}
 }
 
 // commitAgentCreate writes the agent row, its identity keys, its delegation
-// edge, the create audit record and the optional notification subscription
-// in one transaction: either all of them commit or none do. Dispatch (and
-// the mint it performs) runs after this returns.
+// edge, the service-account assignment when the agent has an assign-mode
+// GCP identity, the create audit record and the optional notification
+// subscription in one transaction: either all of them commit or none do.
+// Dispatch (and the mint it performs) runs after this returns.
+//
+// The assignment records the create's own source: w.Ceiling and
+// w.Provenance, the pair frozen on the edge. An assign-mode agent without
+// w.SAOrigin, or without a service account ID, returns
+// errAgentCreateWriteInvalid before any write.
 //
 // A slug that fails display-name validation returns an error wrapping
 // errInvalidDisplayName before any write. An incomplete write (nil agent,
@@ -87,6 +132,16 @@ func (s *Server) commitAgentCreate(ctx context.Context, w agentCreateWrite) erro
 		return fmt.Errorf("%w: no audit record", errAgentCreateWriteInvalid)
 	case w.Provenance.ProvenanceVersion == 0:
 		return fmt.Errorf("%w: provenance not recorded", errAgentCreateWriteInvalid)
+	}
+	var assignment *store.AgentServiceAccountAssignment
+	if agentHasAssignModeIdentity(w.Agent) {
+		switch {
+		case w.SAOrigin == "":
+			return fmt.Errorf("%w: service account origin not recorded", errAgentCreateWriteInvalid)
+		case agentAssignedServiceAccountID(w.Agent) == "":
+			return fmt.Errorf("%w: assign-mode identity without a service account", errAgentCreateWriteInvalid)
+		}
+		assignment = newSAAssignment(w.Agent, w.SAOrigin, w.Ceiling, w.Provenance)
 	}
 	if _, err := api.ValidateDisplayName(w.Slug); err != nil {
 		return fmt.Errorf("%w: %s", errInvalidDisplayName, err)
@@ -116,6 +171,13 @@ func (s *Server) commitAgentCreate(ctx context.Context, w agentCreateWrite) erro
 		w.Edge.DelegateID = agent.ID
 		if err := tx.CreateDelegationEdge(ctx, w.Edge); err != nil {
 			return err
+		}
+		if assignment != nil {
+			assignment.AgentID = agent.ID
+			assignment.ProjectID = agent.ProjectID
+			if err := tx.ReplaceAgentServiceAccountAssignment(ctx, assignment); err != nil {
+				return fmt.Errorf("agent create service-account assignment: %w", err)
+			}
 		}
 		w.Audit.TargetType = "agent"
 		w.Audit.TargetID = agent.ID
@@ -213,12 +275,15 @@ var errCreateRowDeleteHeld = errors.New("agent row is held by a delete")
 
 // compensateAgentCreate rolls back a committed create after a later step
 // failed, in one transaction: it deletes the agent row (identity keys
-// cascade), deactivates the agent's delegation edges with cause
-// create_compensation, and writes an agent_create_dispatch_failed audit
-// record naming the create's audit record and the failed stage.
+// cascade), runs the hard-delete work with cause create_compensation
+// (agentHardDeleteWork: delegation edges, service-account assignments and
+// the hard-delete hooks), and writes an agent_create_dispatch_failed audit
+// record naming the create's audit record and the failed stage. A hook
+// error rolls the compensation back.
 //
 // It is idempotent: when the agent row is already gone and no active edge
-// is left, it changes nothing and writes no audit record.
+// or assignment is left, it changes nothing, runs no hook and writes no
+// audit record.
 //
 // The caller passes a context detached from the request (see
 // cleanupFailedCreate). Credential revocation, the broker-side delete and
@@ -258,16 +323,17 @@ func (s *Server) compensateAgentCreate(ctx context.Context, c createCompensation
 
 	// edgesAndAudit runs in the compensation's transaction, after the row
 	// delete.
+	actor := auditActorFromContext(ctx)
 	edgesAndAudit := func(tx store.Store, rowDeleted bool) error {
-		deactivated, err := tx.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agentID, store.Deactivation{
+		deactivated, assignments, err := s.agentHardDeleteWork(ctx, tx, c.Agent, actor, store.Deactivation{
 			Cause: store.EdgeDeactivationCreateCompensation,
 			At:    &now,
 			OpID:  opID,
-		})
+		}, "compensation", rowDeleted)
 		if err != nil {
-			return fmt.Errorf("deactivate delegation edges: %w", err)
+			return err
 		}
-		if !rowDeleted && deactivated == 0 {
+		if !rowDeleted && deactivated == 0 && assignments == 0 {
 			// Already compensated: nothing changed, so nothing to record.
 			return nil
 		}
