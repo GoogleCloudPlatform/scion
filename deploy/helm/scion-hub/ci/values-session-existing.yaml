@@ -61,7 +61,7 @@ auth:
 
   # A NON-DEFAULT KEY NAME ON PURPOSE. The default is
   # SCION_SERVER_SESSION_SECRET, which is also the environment variable the hub
-  # reads (resolveSessionSecret, cmd/server_foreground.go:1452-1463). Using a
+  # reads (resolveSessionSecret, cmd/server_foreground.go). Using a
   # different name here proves the chart maps key -> variable rather than
   # assuming they are the same string - a chart that ignored this key would
   # still render a working-looking manifest against the default.

@@ -17,14 +17,13 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -339,13 +338,19 @@ func TestRegisterProviderLocalPath_NewProjectCheckedAgainstAssignedSlug(t *testi
 	ctx := context.Background()
 
 	lost := &store.Project{ID: tid("gd-race-lost"), Name: "global (1)", Slug: "global-1"}
-	assert.Empty(t, srv.registerProviderLocalPath(ctx, lost, "broker-1", brokerGlobalDir, true))
+	got, err := srv.registerProviderLocalPath(ctx, lost, "broker-1", brokerGlobalDir, true)
+	require.NoError(t, err)
+	assert.Empty(t, got)
 
 	won := &store.Project{ID: tid("gd-race-won"), Name: "global", Slug: "global"}
-	assert.Equal(t, brokerGlobalDir, srv.registerProviderLocalPath(ctx, won, "broker-1", brokerGlobalDir, true))
+	got, err = srv.registerProviderLocalPath(ctx, won, "broker-1", brokerGlobalDir, true)
+	require.NoError(t, err)
+	assert.Equal(t, brokerGlobalDir, got)
 
 	other := &store.Project{ID: tid("gd-race-other"), Name: "web-app", Slug: "web-app"}
-	assert.Equal(t, "/srv/web-app/.scion", srv.registerProviderLocalPath(ctx, other, "broker-1", "/srv/web-app/.scion", true))
+	got, err = srv.registerProviderLocalPath(ctx, other, "broker-1", "/srv/web-app/.scion", true)
+	require.NoError(t, err)
+	assert.Equal(t, "/srv/web-app/.scion", got)
 }
 
 // add-provider fails the request when it cannot load the project for the
@@ -358,14 +363,34 @@ func TestAddProvider_ProjectLookupErrorFailsClosed(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 	projectRoot := t.TempDir()
 
-	srv.store = &flakyProjectStore{Store: s, err: errors.New("db unavailable")}
-	body, err := json.Marshal(map[string]interface{}{"brokerId": broker.ID, "localPath": projectRoot})
-	require.NoError(t, err)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+project.ID+"/providers", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.addProjectProvider(w, req, project.ID)
+	// The route's project gate and the broker consent check pass; the
+	// project lookup issued after the broker lookup fails.
+	srv.store = &projectLookupFailsAfterBrokerStore{Store: s, err: errors.New("db unavailable")}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/providers", map[string]interface{}{
+		"brokerId": broker.ID, "localPath": projectRoot,
+	})
 
-	assert.Equal(t, http.StatusInternalServerError, w.Code, "body: %s", w.Body.String())
-	_, err = s.GetProjectProvider(ctx, project.ID, broker.ID)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, "body: %s", rec.Body.String())
+	_, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound, "no provider may be written when the check could not run")
+}
+
+// projectLookupFailsAfterBrokerStore fails every GetProject call issued after
+// the first GetRuntimeBroker call.
+type projectLookupFailsAfterBrokerStore struct {
+	store.Store
+	brokerRead atomic.Bool
+	err        error
+}
+
+func (s *projectLookupFailsAfterBrokerStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {
+	s.brokerRead.Store(true)
+	return s.Store.GetRuntimeBroker(ctx, id)
+}
+
+func (s *projectLookupFailsAfterBrokerStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
+	if s.brokerRead.Load() {
+		return nil, s.err
+	}
+	return s.Store.GetProject(ctx, id)
 }

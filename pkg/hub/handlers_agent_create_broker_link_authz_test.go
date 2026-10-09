@@ -45,12 +45,15 @@ func brokerLinkAuthzSetup(t *testing.T) *brokerLinkAuthzFixture {
 	f := &brokerLinkAuthzFixture{bypassAgentsFixture: bypassAgentsSetup(t)}
 	ctx := context.Background()
 
+	// Owned by the project owner: linking needs broker.update on the broker
+	// (owner or super-admin) in addition to project.update.
 	f.unlinked = &store.RuntimeBroker{
 		ID:          uuid.New().String(),
 		Name:        "link-authz-unlinked",
 		Slug:        "link-authz-unlinked",
 		Status:      store.BrokerStatusOnline,
 		AutoProvide: true,
+		CreatedBy:   f.owner.ID,
 		Created:     time.Now(),
 		Updated:     time.Now(),
 	}

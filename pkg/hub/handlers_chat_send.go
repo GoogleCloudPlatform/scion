@@ -146,13 +146,8 @@ func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key s
 	target := &chatSendTarget{Key: key, wcs: wcs}
 	if strings.HasPrefix(key, "dm:") {
 		target.IsDM = true
-		// Validate DM key format before any further processing.
-		if !validDMKey(key) {
-			return nil, chatSendBadRequest("invalid DM key format")
-		}
-		// DM key: verify the caller is one of the two participants.
-		if !isDMParticipant(key, user.ID()) {
-			return nil, chatSendForbidden()
+		if serr := authorizeDMKeyParticipant(key, user.ID()); serr != nil {
+			return nil, serr
 		}
 		// The other participant must be a principal the caller may message.
 		if serr := s.authorizeDMPeer(ctx, user, key); serr != nil {
@@ -190,6 +185,22 @@ func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key s
 	target.ProjectID = topic.ProjectID
 	target.Topic = topic
 	return target, nil
+}
+
+// authorizeDMKeyParticipant runs the first two DM steps of
+// authorizeChatSend: the key is well formed, and userID is one of its two
+// participants. Callers that need only these steps use it so their
+// responses are the same as authorizeChatSend's.
+func authorizeDMKeyParticipant(key, userID string) *chatSendError {
+	// Validate DM key format before any further processing.
+	if !validDMKey(key) {
+		return chatSendBadRequest("invalid DM key format")
+	}
+	// DM key: verify the caller is one of the two participants.
+	if !isDMParticipant(key, userID) {
+		return chatSendForbidden()
+	}
+	return nil
 }
 
 // chatSendMessageDenied is the refusal for a sender the messaging rules do
@@ -375,8 +386,15 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 	routingLookupFailed := false
 	if isDM {
 		if agentID := parseAgentDMKey(key); agentID != "" {
-			if dmAgent, err := s.store.GetAgent(ctx, agentID); err == nil && dmAgent != nil {
+			dmAgent, err := s.store.GetAgent(ctx, agentID)
+			switch {
+			case err == nil && dmAgent != nil:
 				defaultAgent = dmAgent
+			case errors.Is(err, store.ErrNotFound):
+				// The agent record is gone: report the DM undelivered
+				// exactly like a soft-deleted agent, instead of
+				// recording it as a delivered human-to-human DM.
+				unresolvedDefaultAgent = &store.Agent{ID: agentID, Slug: agentID}
 			}
 		}
 	} else if projectID != "" {
@@ -396,8 +414,8 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 			// missing default. Before nc-delivery-unreachable, that hiccup
 			// degraded to an ordinary human-to-human message; keep that
 			// fallthrough (leave defaultAgent and unresolvedDefaultAgent
-			// nil) instead of permanently persisting "Agent unreachable
-			// (deleted)" rows for a transient failure.
+			// nil) instead of permanently persisting "Agent unreachable"
+			// rows for a transient failure.
 			transientLookupErr := false
 			if daErr != nil && !errors.Is(daErr, store.ErrNotFound) {
 				transientLookupErr = true
@@ -412,8 +430,8 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 					// soft-deleted agents — DEF-31.
 					if da.ProjectID == projectID {
 						// Same project, soft-deleted: keep the row around so
-						// the caller can report "Agent unreachable (deleted)"
-						// with the real slug/ID instead of a generic one.
+						// the caller can report "Agent unreachable" with the
+						// real slug/ID instead of a generic one.
 						unresolvedDefaultAgent = da
 					} else {
 						foreignProjectDefault = true
@@ -453,8 +471,7 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 	// override below (review round 2, Consider 2): plan.Agents being empty
 	// because of a planning error is not evidence the default agent is
 	// unreachable, so that case must keep the pre-existing human-to-human
-	// fallthrough instead of mislabelling the send "Agent unreachable
-	// (deleted)".
+	// fallthrough instead of mislabelling the send "Agent unreachable".
 	var planErr error
 	if projectID != "" {
 		plan, planErr = resolveRoutingAgents(ctx, s.store, projectID, content, defaultAgent)
@@ -490,11 +507,11 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 	// plan reflects a routing-plan failure, not the deleted default, so keep
 	// the pre-existing human-to-human error handling below instead.
 	if unresolvedDefaultAgent != nil && planErr == nil {
-		return s.sendHumanToHuman(ctx, key, projectID, user, content, senderLabel, false, false, plan.MentionNames, attachmentRefs, now, in.ReplyToID,
+		return s.sendHumanToHuman(ctx, key, projectID, user, content, senderLabel, isDM, false, plan.MentionNames, attachmentRefs, now, in.ReplyToID,
 			&unreachableAgentOverride{
 				AgentSlug: unresolvedDefaultAgent.Slug,
 				AgentID:   unresolvedDefaultAgent.ID,
-				Reason:    "Agent unreachable (deleted)",
+				Reason:    agentGoneReason,
 				Code:      dispatchFailureCodeAgentUnreachable,
 			})
 	}

@@ -406,6 +406,55 @@ describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
     }
   );
 
+  it('shows only the empty state in the single layout with no terminals open', async () => {
+    await flush();
+    const overlays = visibleOverlays();
+    expect(overlays.map((el) => el.className)).toEqual(['terminal-empty']);
+    expect(overlays[0].textContent).toBe('No terminals are open.');
+  });
+
+  it('shows the status message when terminals are open but none is selected', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'test',
+    });
+    root.withAutoSelectSuspended(() => root.create(registry, AGENT_ID, { deferConnect: true }));
+    await flush();
+
+    expect(root.layoutManager.getVisibleSlots()).toEqual([null]);
+    const overlays = visibleOverlays();
+    expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
+    expect(overlays[0].textContent).toBe('No terminal selected.');
+  });
+
+  it('shows the status message again after the selected terminal is closed', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'test',
+    });
+    const session = root.create(registry, AGENT_ID);
+    root.select(session);
+    await flush();
+    root.withAutoSelectSuspended(() =>
+      root.create(registry, '22222222-2222-4222-8222-222222222222', { deferConnect: true })
+    );
+    root.withAutoSelectSuspended(() => session.close());
+    await flush();
+
+    expect(root.layoutManager.getVisibleSlots()).toEqual([null]);
+    const overlays = visibleOverlays();
+    expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
+    expect(overlays[0].textContent).toBe('No terminal selected.');
+  });
+
+  it('keeps a message set through setStatus visible with no terminals open', async () => {
+    root.setStatus('Terminal selected in its owning tab.');
+    await flush();
+    const overlays = visibleOverlays();
+    expect(overlays.map((el) => el.className)).toEqual(['terminal-empty', 'terminal-status']);
+    expect(overlays[1].textContent).toBe('Terminal selected in its owning tab.');
+  });
+
   it.each(presets)(
     'shows %s placeholders that accept a drop when no slot is filled',
     async (preset, count) => {

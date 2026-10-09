@@ -81,6 +81,7 @@ import {
 } from '../../utils/critic.js';
 import type { CriticCounts, CriticTool } from '../../utils/critic.js';
 import '../shared/artifact-markdown-frame.js';
+import '../shared/detail-header.js';
 import '../shared/artifact-publish-dialog.js';
 import '../shared/code-editor.js';
 import './not-found.js';
@@ -227,30 +228,6 @@ export class ScionPageArtifactDetail extends LitElement {
     .back-link:hover {
       color: var(--sl-color-primary-600);
     }
-    .header {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-      gap: 1rem;
-      flex-wrap: wrap;
-      margin-bottom: 1rem;
-    }
-    .title {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      margin: 0 0 0.5rem;
-    }
-    .title h1 {
-      margin: 0;
-      font-size: 1.5rem;
-      font-weight: 600;
-      word-break: break-word;
-    }
-    .title sl-icon {
-      font-size: 1.25rem;
-      color: var(--sl-color-neutral-500);
-    }
     .meta {
       display: flex;
       flex-wrap: wrap;
@@ -268,12 +245,6 @@ export class ScionPageArtifactDetail extends LitElement {
       display: inline-flex;
       align-items: center;
       gap: 0.25rem;
-    }
-    .actions {
-      display: flex;
-      gap: 0.5rem;
-      align-items: center;
-      flex-wrap: wrap;
     }
     .menu-note {
       display: block;
@@ -1032,38 +1003,35 @@ export class ScionPageArtifactDetail extends LitElement {
     const owner = this.label(a.ownerKind, a.ownerRef);
     const f = this.entry;
     const ownFiles = v ? v.files.filter((x) => !isRemoteFile(x)) : [];
+    // Every action needs a version or edit rights (Download needs a
+    // version), and all are hidden while editing or reviewing.
+    const hasActions = !this.editing && !this.reviewing && (!!v || this.canEdit);
     return html`
-      <div class="header">
-        <div>
-          <div class="title">
-            <sl-icon name="file-earmark-richtext"></sl-icon>
-            <h1>${a.title}</h1>
-            ${this.currentIsReview
-              ? html`<sl-badge variant="warning" pill>
-                  <sl-icon name="chat-dots"></sl-icon>&nbsp;Review pending
-                </sl-badge>`
-              : nothing}
-          </div>
-          <div class="meta">
-            <span>Owner: ${owner}</span>
-            ${a.key ? html`<span>Key: <code>${a.key}</code></span>` : nothing}
-            <span>Updated: ${formatInstant(a.updatedAt)}</span>
-            <span class="ref">
-              <code>${v ? v.ref : a.ref}</code>
-              <sl-tooltip content=${this.copied ? 'Copied' : 'Copy reference'}>
-                <sl-icon-button
-                  name="clipboard"
-                  label="Copy reference"
-                  @click=${(): void => void this.copyRef()}
-                ></sl-icon-button>
-              </sl-tooltip>
-            </span>
-          </div>
+      <scion-detail-header heading=${a.title}>
+        <sl-icon slot="icon" name="file-earmark-richtext"></sl-icon>
+        ${this.currentIsReview
+          ? html`<sl-badge variant="warning" pill>
+              <sl-icon name="chat-dots"></sl-icon>&nbsp;Review pending
+            </sl-badge>`
+          : nothing}
+        <div slot="meta" class="meta">
+          <span>Owner: ${owner}</span>
+          ${a.key ? html`<span>Key: <code>${a.key}</code></span>` : nothing}
+          <span>Updated: ${formatInstant(a.updatedAt)}</span>
+          <span class="ref">
+            <code>${v ? v.ref : a.ref}</code>
+            <sl-tooltip content=${this.copied ? 'Copied' : 'Copy reference'}>
+              <sl-icon-button
+                name="clipboard"
+                label="Copy reference"
+                @click=${(): void => void this.copyRef()}
+              ></sl-icon-button>
+            </sl-tooltip>
+          </span>
         </div>
-        ${this.editing || this.reviewing
-          ? nothing
-          : html`
-              <div class="actions">
+        ${hasActions
+          ? html`
+              <div slot="actions" class="header-actions">
                 ${v ? this.renderVersionMenu() : nothing}
                 ${this.canEdit
                   ? html`<sl-button size="small" @click=${this.startEdit}>
@@ -1088,8 +1056,9 @@ export class ScionPageArtifactDetail extends LitElement {
                     </sl-button>`
                   : nothing}
               </div>
-            `}
-      </div>
+            `
+          : nothing}
+      </scion-detail-header>
     `;
   }
 

@@ -1119,3 +1119,38 @@ func TestListCreatedAgentScanMatchesRuntimeFilter(t *testing.T) {
 		t.Errorf("matched %d of %d filters; the fixture must exercise both outcomes", matched, len(filters))
 	}
 }
+
+// TestListLocalProvisionedOnly covers ptone/scion#2875: a container-less
+// local agent in phase "created" was provisioned but never started.
+func TestListLocalProvisionedOnly(t *testing.T) {
+	tests := []struct {
+		name string
+		info api.AgentInfo
+		want bool
+	}{
+		{name: "created, never started", info: api.AgentInfo{Phase: "created"}, want: true},
+		{name: "stopped", info: api.AgentInfo{Phase: "stopped"}, want: false},
+		{name: "error", info: api.AgentInfo{Phase: "error"}, want: false},
+		{name: "created but soft-deleted", info: api.AgentInfo{Phase: "created", DeletedAt: time.Now()}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			projectPath := filepath.Join(t.TempDir(), ".scion")
+			tt.info.Name = "po-agent"
+			writeCreatedAgentDirWithInfo(t, projectPath, tt.info)
+
+			agents, err := NewManager(&runtime.MockRuntime{}).List(context.Background(), map[string]string{
+				"scion.project_path": projectPath,
+			})
+			if err != nil {
+				t.Fatalf("List() error: %v", err)
+			}
+			if len(agents) != 1 {
+				t.Fatalf("List() returned %d agents, want 1", len(agents))
+			}
+			if got := agents[0].ProvisionedOnly; got != tt.want {
+				t.Errorf("ProvisionedOnly = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

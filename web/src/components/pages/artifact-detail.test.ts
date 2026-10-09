@@ -186,7 +186,7 @@ describe('artifact page', () => {
     expect(preview).not.toBeNull();
     expect(preview!.content).toBe('# Hello');
     expect(urls).toContain(`/api/v1/artifacts/${ID}/versions/1/files/design.md?stream=1`);
-    expect(el.shadowRoot!.querySelector('h1')!.textContent).toBe('Design');
+    expect(el.shadowRoot!.querySelector('scion-detail-header')!.heading).toBe('Design');
   });
 
   it('renders text read-only in the code editor', async () => {
@@ -359,8 +359,8 @@ describe('artifact page', () => {
     const urls = mockFetch(meta, '# Old');
     const el = await mount(true, `/projects/p-1/artifacts/${ID}/v/1`);
     expect(urls[0]).toBe(`/api/v1/artifacts/${ID}/versions/1`);
-    const labels = Array.from(el.shadowRoot!.querySelectorAll('.actions sl-button')).map((b) =>
-      b.textContent!.trim()
+    const labels = Array.from(el.shadowRoot!.querySelectorAll('.header-actions sl-button')).map(
+      (b) => b.textContent!.trim()
     );
     expect(labels.some((l) => l.includes('Version v1'))).toBe(true);
     expect(labels.some((l) => l.includes('Edit'))).toBe(false);
@@ -368,8 +368,8 @@ describe('artifact page', () => {
 
     mockFetch(artifact('design.md', 'text/markdown'), '# Now');
     const cur = await mount(true);
-    const curLabels = Array.from(cur.shadowRoot!.querySelectorAll('.actions sl-button')).map((b) =>
-      b.textContent!.trim()
+    const curLabels = Array.from(cur.shadowRoot!.querySelectorAll('.header-actions sl-button')).map(
+      (b) => b.textContent!.trim()
     );
     expect(curLabels.some((l) => l.includes('Version v1 (current)'))).toBe(true);
     expect(curLabels.some((l) => l.includes('Edit'))).toBe(true);
@@ -434,8 +434,8 @@ describe('artifact page', () => {
       },
     });
     const el = await mount(true);
-    const editBtn = Array.from(el.shadowRoot!.querySelectorAll('.actions sl-button')).find((b) =>
-      b.textContent!.includes('Edit')
+    const editBtn = Array.from(el.shadowRoot!.querySelectorAll('.header-actions sl-button')).find(
+      (b) => b.textContent!.includes('Edit')
     ) as HTMLElement;
     editBtn.click();
     await el.updateComplete;
@@ -456,8 +456,8 @@ describe('artifact page', () => {
       el.shadowRoot!.querySelector('scion-code-editor[readonly]') ??
         el.shadowRoot!.querySelector('scion-artifact-markdown-frame')
     ).not.toBeNull();
-    const labels = Array.from(el.shadowRoot!.querySelectorAll('.actions sl-button')).map((b) =>
-      b.textContent!.trim()
+    const labels = Array.from(el.shadowRoot!.querySelectorAll('.header-actions sl-button')).map(
+      (b) => b.textContent!.trim()
     );
     expect(labels.some((l) => l.includes('Version v2 (current)'))).toBe(true);
   });
@@ -486,7 +486,7 @@ describe('artifact page', () => {
     });
     const el = await mount(true);
     (
-      Array.from(el.shadowRoot!.querySelectorAll('.actions sl-button')).find((b) =>
+      Array.from(el.shadowRoot!.querySelectorAll('.header-actions sl-button')).find((b) =>
         b.textContent!.includes('Edit')
       ) as HTMLElement
     ).click();
@@ -654,7 +654,7 @@ describe('artifact page', () => {
     await newerSecond;
     await settle();
     expect(priv.loading).toBe(false);
-    expect(el.shadowRoot!.querySelector('h1')!.textContent).toBe('Newer');
+    expect(el.shadowRoot!.querySelector('scion-detail-header')!.heading).toBe('Newer');
 
     // The earlier load answers last: the newer result and state stay.
     const olderLast = priv.load();
@@ -664,12 +664,12 @@ describe('artifact page', () => {
     await newerFirst;
     await settle();
     expect(priv.loading).toBe(false);
-    expect(el.shadowRoot!.querySelector('h1')!.textContent).toBe('Newest');
+    expect(el.shadowRoot!.querySelector('scion-detail-header')!.heading).toBe('Newest');
     release[2](meta('Stale'));
     await olderLast;
     await settle();
     expect(priv.loading).toBe(false);
-    expect(el.shadowRoot!.querySelector('h1')!.textContent).toBe('Newest');
+    expect(el.shadowRoot!.querySelector('scion-detail-header')!.heading).toBe('Newest');
   });
 
   it('keeps the newer view when an earlier mint answers last', async () => {
@@ -741,7 +741,7 @@ describe('artifact page', () => {
       ],
     });
     const el = await mount(true);
-    const badge = el.shadowRoot!.querySelector('.title sl-badge');
+    const badge = el.shadowRoot!.querySelector('scion-detail-header > sl-badge');
     expect(badge?.textContent).toContain('Review pending');
     const banner = el.shadowRoot!.querySelector('sl-alert.review-banner');
     expect(banner?.textContent).toContain('1 comment and 1 suggestion on v1');
@@ -763,20 +763,20 @@ describe('artifact page', () => {
   it('shows no review state for a published version and offers Review for markdown only', async () => {
     mockFetch(artifact('plan.md', 'text/markdown'), 'We ship in Q3.\n');
     const el = await mount(true);
-    expect(el.shadowRoot!.querySelector('.title sl-badge')).toBeNull();
+    expect(el.shadowRoot!.querySelector('scion-detail-header > sl-badge')).toBeNull();
     expect(el.shadowRoot!.querySelector('sl-alert.review-banner')).toBeNull();
     expect(el.shadowRoot!.querySelector('sl-radio-group.critic-toggle')).toBeNull();
     const frame = el.shadowRoot!.querySelector('scion-artifact-markdown-frame') as HTMLElement & {
       critic: string;
     };
     expect(frame.critic).toBe('off');
-    expect(button(el, '.actions sl-button', 'Review')).toBeDefined();
+    expect(button(el, '.header-actions sl-button', 'Review')).toBeDefined();
     document.body.innerHTML = '';
     vi.unstubAllGlobals();
     mockFetch(artifact('notes.txt', 'text/plain'), 'hello');
     const txt = await mount(true);
-    expect(button(txt, '.actions sl-button', 'Edit')).toBeDefined();
-    expect(button(txt, '.actions sl-button', 'Review')).toBeUndefined();
+    expect(button(txt, '.header-actions sl-button', 'Edit')).toBeDefined();
+    expect(button(txt, '.header-actions sl-button', 'Review')).toBeUndefined();
   });
 
   it('saves a review of marks only as a version of kind review', async () => {
@@ -819,10 +819,10 @@ describe('artifact page', () => {
       })
     );
     const el = await mount(true);
-    button(el, '.actions sl-button', 'Review')!.click();
+    button(el, '.header-actions sl-button', 'Review')!.click();
     await el.updateComplete;
     // While reviewing, Edit and Review are hidden.
-    expect(button(el, '.actions sl-button', 'Edit')).toBeUndefined();
+    expect(button(el, '.header-actions sl-button', 'Edit')).toBeUndefined();
     const save = (): HTMLElement & { disabled: boolean } =>
       button(el, '.edit-footer sl-button', 'Save review') as HTMLElement & { disabled: boolean };
     expect(save().hasAttribute('disabled')).toBe(true);
@@ -859,7 +859,7 @@ describe('artifact page', () => {
     expect(urls.some((u) => u.startsWith('PUT ') && u.includes('/versions/2/files/plan.md'))).toBe(
       true
     );
-    expect(el.shadowRoot!.querySelector('.title sl-badge')?.textContent).toContain(
+    expect(el.shadowRoot!.querySelector('scion-detail-header > sl-badge')?.textContent).toContain(
       'Review pending'
     );
   });
@@ -892,7 +892,7 @@ describe('artifact page', () => {
       },
     });
     const el = await mount(true);
-    button(el, '.actions sl-button', 'Review')!.click();
+    button(el, '.header-actions sl-button', 'Review')!.click();
     await el.updateComplete;
     el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
       new CustomEvent('content-changed', { detail: { content: MARKED } })
@@ -954,7 +954,7 @@ describe('artifact page', () => {
       ),
     });
     const el = await mount(true);
-    button(el, '.actions sl-button', 'Review')!.click();
+    button(el, '.header-actions sl-button', 'Review')!.click();
     await el.updateComplete;
     const editor = (): HTMLElement & { content: string } =>
       el.shadowRoot!.querySelector('scion-code-editor.review-editor') as HTMLElement & {
@@ -1015,7 +1015,7 @@ describe('artifact page', () => {
       ),
     });
     const el = await mount(true);
-    button(el, '.actions sl-button', 'Review')!.click();
+    button(el, '.header-actions sl-button', 'Review')!.click();
     await el.updateComplete;
     el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
       new CustomEvent('content-changed', { detail: { content: MARKED } })
@@ -1060,7 +1060,7 @@ describe('artifact page', () => {
         : inner(input, init)
     );
     const el = await mount(true);
-    button(el, '.actions sl-button', 'Review')!.click();
+    button(el, '.header-actions sl-button', 'Review')!.click();
     await el.updateComplete;
     el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
       new CustomEvent('content-changed', { detail: { content: MARKED } })
@@ -1080,7 +1080,7 @@ describe('artifact page', () => {
   it('shows the margin placeholder only while the review has no marks at all', async () => {
     mockFetch(artifact('plan.md', 'text/markdown'), 'We ship in Q3.\n');
     const el = await mount(true);
-    button(el, '.actions sl-button', 'Review')!.click();
+    button(el, '.header-actions sl-button', 'Review')!.click();
     await el.updateComplete;
     const frame = el.shadowRoot!.querySelector(
       '.review-panes scion-artifact-markdown-frame'
@@ -1098,7 +1098,7 @@ describe('artifact page', () => {
   it('clears the pending preview update on Cancel', async () => {
     mockFetch(artifact('plan.md', 'text/markdown'), 'We ship in Q3.\n');
     const el = await mount(true);
-    button(el, '.actions sl-button', 'Review')!.click();
+    button(el, '.header-actions sl-button', 'Review')!.click();
     await el.updateComplete;
     el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
       new CustomEvent('content-changed', { detail: { content: MARKED } })
@@ -1124,7 +1124,7 @@ describe('artifact page', () => {
       ],
     });
     const el = await mount(true, `/projects/p-1/artifacts/${ID}/v/1`);
-    expect(el.shadowRoot!.querySelector('.title sl-badge')?.textContent).toContain(
+    expect(el.shadowRoot!.querySelector('scion-detail-header > sl-badge')?.textContent).toContain(
       'Review pending'
     );
   });
@@ -1200,7 +1200,7 @@ describe('artifact page', () => {
         marginNotes: boolean;
       };
       expect(page.marginNotes, `page at ${width}`).toBe(width >= 1100);
-      button(el, '.actions sl-button', 'Review')!.click();
+      button(el, '.header-actions sl-button', 'Review')!.click();
       await el.updateComplete;
       const pane = el.shadowRoot!.querySelector(
         '.review-panes scion-artifact-markdown-frame'
@@ -1214,7 +1214,7 @@ describe('artifact page', () => {
   it('updates the Review preview after typing pauses, the counts at once', async () => {
     mockFetch(artifact('plan.md', 'text/markdown'), 'We ship in Q3.\n');
     const el = await mount(true);
-    button(el, '.actions sl-button', 'Review')!.click();
+    button(el, '.header-actions sl-button', 'Review')!.click();
     await el.updateComplete;
     el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
       new CustomEvent('content-changed', { detail: { content: MARKED } })
@@ -1235,7 +1235,7 @@ describe('artifact page', () => {
   it('applies toolbar marks to plain text and refuses a selection inside a mark', async () => {
     mockFetch(artifact('plan.md', 'text/markdown'), 'We ship in Q3.\n');
     const el = await mount(true);
-    button(el, '.actions sl-button', 'Review')!.click();
+    button(el, '.header-actions sl-button', 'Review')!.click();
     await el.updateComplete;
     const editor = el.shadowRoot!.querySelector(
       'scion-code-editor.review-editor'
@@ -1300,7 +1300,7 @@ describe('artifact page', () => {
   it('reviews a CRLF file in LF form, so toolbar offsets match the editor', async () => {
     mockFetch(artifact('plan.md', 'text/markdown'), 'We ship.\r\nLine two Q3.\r\n');
     const el = await mount(true);
-    button(el, '.actions sl-button', 'Review')!.click();
+    button(el, '.header-actions sl-button', 'Review')!.click();
     await el.updateComplete;
     const { editor, replaced, select } = stubEditor(el);
     expect(editor.content).toBe('We ship.\nLine two Q3.\n');
@@ -1317,7 +1317,7 @@ describe('artifact page', () => {
   it('refuses a mark an opener would swallow in a CRLF file', async () => {
     mockFetch(artifact('plan.md', 'text/markdown'), '{\r\n{\r\n{++-');
     const el = await mount(true);
-    button(el, '.actions sl-button', 'Review')!.click();
+    button(el, '.header-actions sl-button', 'Review')!.click();
     await el.updateComplete;
     const { editor, replaced, select } = stubEditor(el);
     const at = editor.content.indexOf('++');
@@ -1333,7 +1333,7 @@ describe('artifact page', () => {
   it("checks toolbar actions against the editor's content", async () => {
     mockFetch(artifact('plan.md', 'text/markdown'), 'We ship in Q3.\n');
     const el = await mount(true);
-    button(el, '.actions sl-button', 'Review')!.click();
+    button(el, '.header-actions sl-button', 'Review')!.click();
     await el.updateComplete;
     const { editor, replaced, select } = stubEditor(el);
     // The editor holds text whose change event has not reached the page.
@@ -1372,7 +1372,7 @@ describe('artifact page', () => {
         : inner(input, init)
     );
     const el = await mount(true);
-    button(el, '.actions sl-button', 'Review')!.click();
+    button(el, '.header-actions sl-button', 'Review')!.click();
     await el.updateComplete;
     el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
       new CustomEvent('content-changed', { detail: { content: MARKED } })
@@ -1391,7 +1391,7 @@ describe('artifact page', () => {
   it('does not offer to save an unchanged review of a CRLF review version', async () => {
     mockFetch(reviewMeta(), MARKED.replace(/\n/g, '\r\n'));
     const el = await mount(true);
-    button(el, '.actions sl-button', 'Review')!.click();
+    button(el, '.header-actions sl-button', 'Review')!.click();
     await el.updateComplete;
     // The marks are there and only marks differ from the baseline, but
     // nothing was changed: Save stays disabled.
@@ -1430,7 +1430,7 @@ describe('artifact page', () => {
       ),
     });
     const el = await mount(true);
-    button(el, '.actions sl-button', 'Review')!.click();
+    button(el, '.header-actions sl-button', 'Review')!.click();
     await el.updateComplete;
     el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
       new CustomEvent('content-changed', { detail: { content: MARKED } })

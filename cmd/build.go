@@ -302,7 +302,7 @@ func syncBuildToHub(harnessConfigName string, hcDir *config.HarnessConfigDir) {
 		fmt.Printf("Warning: could not sync to Hub: %v\n", hubErr)
 		fmt.Println("Run 'scion harness-config push " + harnessConfigName + "' to sync manually.")
 	} else if hubCtx != nil {
-		if err := syncHarnessConfigToHub(hubCtx, harnessConfigName, hcDir.Path, "global", "", hcDir.Config.Harness); err != nil {
+		if err := syncHarnessConfigToHub(hubCtx, harnessConfigName, hcDir.Path, "global", "", hcDir.Config.Harness, ""); err != nil {
 			fmt.Printf("Warning: failed to sync to Hub: %v\n", err)
 			fmt.Println("Run 'scion harness-config push " + harnessConfigName + "' to sync manually.")
 		}

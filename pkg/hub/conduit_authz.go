@@ -138,15 +138,19 @@ func (s *Server) authorizeConduitAction(ctx context.Context, identity Identity, 
 
 // conduitStreamParams builds the params signed into a grant: the caller's
 // params, restricted to the stream kind's allow-list, plus the params the hub
-// sets itself. tcp allows exactly host and port from the caller; pty, ssh,
-// logs and events allow none until their targets define params. For a broker
-// target the hub binds the grant to the authorized agent with
-// grant.ParamAgentID; a caller may repeat that value but not change it.
+// sets itself. tcp allows exactly host and port from the caller; pty allows
+// exactly cols, rows and session; ssh, logs and events allow none until
+// their targets define params. For a broker target the hub binds the grant
+// to the authorized agent with grant.ParamAgentID; a caller may repeat that
+// value but not change it.
 // Hub-set params are added here.
 func conduitStreamParams(req conduitGrantRequest) (map[string]string, error) {
 	var allowed []string
-	if req.Stream.Kind == grant.StreamKindTCP {
+	switch req.Stream.Kind {
+	case grant.StreamKindTCP:
 		allowed = []string{grant.ParamHost, grant.ParamPort}
+	case grant.StreamKindPTY:
+		allowed = []string{grant.ParamCols, grant.ParamRows, grant.ParamSession}
 	}
 	broker := req.Target.Kind == grant.TargetKindBroker
 	params := make(map[string]string, len(req.Stream.Params)+1)
@@ -191,6 +195,29 @@ func conduitTCPTarget(params map[string]string, broker bool) (int, error) {
 		return 0, fmt.Errorf("%w: invalid tcp port %q", errConduitInvalid, raw)
 	}
 	return port, nil
+}
+
+// conduitPTYSession is the only tmux session a pty grant may name.
+const conduitPTYSession = "scion"
+
+// conduitPTYMaxDim is the largest cols or rows a pty grant may carry.
+const conduitPTYMaxDim = 4096
+
+// conduitPTYTarget validates pty stream params: exactly {cols, rows,
+// session}, cols and rows canonical base-10 integers in 1..4096, session
+// "scion" (contracts §2).
+func conduitPTYTarget(params map[string]string) error {
+	if len(params) != 3 || params[grant.ParamSession] != conduitPTYSession {
+		return fmt.Errorf("%w: pty target must be exactly {cols, rows, session:%s}", errConduitInvalid, conduitPTYSession)
+	}
+	for _, k := range []string{grant.ParamCols, grant.ParamRows} {
+		raw, ok := params[k]
+		n, err := strconv.Atoi(raw)
+		if !ok || err != nil || n < 1 || n > conduitPTYMaxDim || strconv.Itoa(n) != raw {
+			return fmt.Errorf("%w: invalid pty %s %q", errConduitInvalid, k, raw)
+		}
+	}
+	return nil
 }
 
 // authorizeConduitTCPTarget checks that port is an authorized agent-local
@@ -282,6 +309,11 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 			return nil, nil, err
 		}
 		if err := s.authorizeConduitTCPTarget(agent, port); err != nil {
+			return nil, nil, err
+		}
+	}
+	if req.Stream.Kind == grant.StreamKindPTY {
+		if err := conduitPTYTarget(params); err != nil {
 			return nil, nil, err
 		}
 	}
