@@ -887,9 +887,9 @@ Telemetry env vars map to settings paths via `versionedEnvKeyMapper`:
 | `SCION_TELEMETRY_CLOUD_BATCH_MAX_SIZE`         | `telemetry.cloud.batch.max_size`             |
 | `SCION_TELEMETRY_HUB_ENABLED`                  | `telemetry.hub.enabled`                      |
 | `SCION_TELEMETRY_HUB_REPORT_INTERVAL`          | `telemetry.hub.report_interval`              |
-| `SCION_TELEMETRY_LOCAL_ENABLED`                 | `telemetry.local.enabled`                    |
+| `SCION_TELEMETRY_LOCAL_ENABLED`                 | `telemetry.local.enabled` (ignored)          |
 | `SCION_TELEMETRY_FILTER_ENABLED`                | `telemetry.filter.enabled`                   |
-| `SCION_TELEMETRY_FILTER_RESPECT_DEBUG_MODE`     | `telemetry.filter.respect_debug_mode`        |
+| `SCION_TELEMETRY_FILTER_RESPECT_DEBUG_MODE`     | `telemetry.filter.respect_debug_mode` (ignored) |
 
 The `SCION_OTEL_*` variables from section 10.1 are aliased into the
 `telemetry.cloud` sub-tree:

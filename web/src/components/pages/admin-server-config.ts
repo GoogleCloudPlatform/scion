@@ -241,10 +241,18 @@ interface V1TelemetryHubConfig {
   report_interval?: string;
 }
 
+/** telemetry.local: accepted but ignored (ptone/scion#4103); no UI edits it. */
+interface V1TelemetryLocalConfig {
+  enabled?: boolean;
+  file?: string;
+  console?: boolean;
+}
+
 interface V1TelemetryConfig {
   enabled?: boolean;
   cloud?: V1TelemetryCloudConfig;
   hub?: V1TelemetryHubConfig;
+  local?: V1TelemetryLocalConfig;
 }
 
 // Keys match CloudRunConfig JSON tags in pkg/config/settings_v1.go.
@@ -723,6 +731,12 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private telemetryCloudCloudLogging = false;
   @state() private telemetryHubEnabled = false;
   @state() private telemetryHubReportInterval = '';
+  /**
+   * Stored telemetry.local, kept only so a file-mode save (which replaces the
+   * whole telemetry object) writes it back unchanged. No UI edits it: nothing
+   * reads these keys (ptone/scion#4103).
+   */
+  private storedTelemetryLocal: V1TelemetryLocalConfig | undefined;
 
   // Message Broker
   @state() private messageBrokerEnabled = false;
@@ -1792,6 +1806,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
     // Telemetry
     const tel = data.telemetry;
+    this.storedTelemetryLocal = tel?.local;
     if (tel) {
       this.telemetryEnabled = tel.enabled || false;
       if (tel.cloud) {
@@ -2559,7 +2574,12 @@ export class ScionPageAdminServerConfig extends LitElement {
           : undefined,
       };
     }
-    if (Object.keys(telemetry).length > 0) payload.telemetry = telemetry;
+    if (Object.keys(telemetry).length > 0) {
+      // A file-mode save replaces the whole telemetry object, so echo the
+      // stored telemetry.local back to keep it (ptone/scion#4103).
+      if (this.storedTelemetryLocal) telemetry.local = this.storedTelemetryLocal;
+      payload.telemetry = telemetry;
+    }
 
     // Auto-expose ports
     if (ok('auto_expose_ports.enabled')) {

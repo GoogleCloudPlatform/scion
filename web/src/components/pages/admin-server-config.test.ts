@@ -1716,8 +1716,10 @@ describe('scion-page-admin-server-config', () => {
   });
 
   describe('telemetry.local is not edited (ptone/scion#4103)', () => {
-    // Nothing reads telemetry.local, so the page shows no controls for it and
-    // never sends it; an omitted key keeps whatever value is stored.
+    // Nothing reads telemetry.local, so the page shows no controls for it.
+    // A DB-backed save merges key by key, so the omitted key keeps its stored
+    // value; a file-mode save replaces the whole telemetry object, so the
+    // stored value is echoed back unchanged.
     const storedLocal = { enabled: true, file: '/tmp/t.jsonl', console: true };
     const withLocal = (tier: string) =>
       makeBaseConfig({
@@ -1752,12 +1754,63 @@ describe('scion-page-admin-server-config', () => {
       expect(telemetry).not.toHaveProperty('local');
     });
 
-    it('buildFilePayload omits telemetry.local', async () => {
+    it('buildFilePayload echoes the stored telemetry.local unchanged', async () => {
       element = await createComponent(createFetchHandler(withLocal('file')));
       const el = element as any;
-      const telemetry = (el.buildFilePayload().telemetry ?? {}) as Record<string, unknown>;
+      const telemetry = el.buildFilePayload().telemetry as Record<string, unknown>;
+      expect(telemetry).toHaveProperty('hub');
+      expect(telemetry.local).toEqual(storedLocal);
+    });
+
+    it('buildFilePayload sends no telemetry.local when none is stored', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'file',
+            telemetry: { enabled: true, cloud: { enabled: false }, hub: { enabled: true } },
+          })
+        )
+      );
+      const el = element as any;
+      const telemetry = el.buildFilePayload().telemetry as Record<string, unknown>;
       expect(telemetry).toHaveProperty('hub');
       expect(telemetry).not.toHaveProperty('local');
+    });
+  });
+
+  describe('server.log_format is not edited (ptone/scion#4103)', () => {
+    // server.log_format is accepted but ignored; guard against the no-op
+    // Log Format control coming back.
+    it('renders no Log Format control', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      expect(shadowText(element)).toContain('Log Level');
+      expect(shadowText(element)).not.toContain('Log Format');
+    });
+
+    it('DB-mode builders never send server.log_format', async () => {
+      // buildLayer1Payload carries no server leaves; on a workstation hub the
+      // server fields go through buildLayer0Candidate instead.
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'db', layer0_editable: true }))
+      );
+      const el = element as any;
+      el.logLevel = 'debug';
+      const layer1Server = (el.buildLayer1Payload().server ?? {}) as Record<string, unknown>;
+      expect(layer1Server).not.toHaveProperty('log_format');
+      const server = el.buildLayer0Candidate().server as Record<string, unknown>;
+      expect(server).toHaveProperty('log_level', 'debug');
+      expect(server).not.toHaveProperty('log_format');
+    });
+
+    it('buildFilePayload never sends server.log_format', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.logLevel = 'debug';
+      const server = el.buildFilePayload().server as Record<string, unknown>;
+      expect(server).toHaveProperty('log_level', 'debug');
+      expect(server).not.toHaveProperty('log_format');
     });
   });
 

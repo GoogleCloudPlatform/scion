@@ -551,6 +551,7 @@ export interface TelemetryConfig {
   enabled?: boolean;
   cloud?: TelemetryCloudConfig;
   hub?: TelemetryHubConfig;
+  /** Accepted but ignored: no component reads telemetry.local (ptone/scion#4103). */
   local?: TelemetryLocalConfig;
   filter?: TelemetryFilterConfig;
 }
