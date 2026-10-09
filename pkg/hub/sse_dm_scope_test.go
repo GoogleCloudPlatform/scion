@@ -157,3 +157,69 @@ func TestSSEEventVisible(t *testing.T) {
 		})
 	}
 }
+
+// TestPublishUserMessage_DMSubjectsScoped guards the subject list in
+// sseSubjectMayCarryDM. It captures every subject PublishUserMessage uses for
+// DM messages and requires each one to be either a user.<participant>.*
+// subject or a subject the events stream filters by participant. A new
+// fan-out subject that carries DM messages fails here until it is scoped.
+func TestPublishUserMessage_DMSubjectsScoped(t *testing.T) {
+	const agentID, projectID = "agent-1", "project-1"
+	const userA, userB, outsider = "user-a", "user-b", "user-outsider"
+	agentDM := "dm:agent:" + agentID + ":user:" + userA
+	userDM := "dm:user:" + userA + ":user:" + userB
+
+	var cases []*store.Message
+	for _, channel := range []string{"web", "", "slack"} {
+		for _, projID := range []string{projectID, ""} {
+			cases = append(cases,
+				// Agent reply in an agent DM.
+				&store.Message{ID: "reply", ProjectID: projID, AgentID: agentID, Channel: channel, ThreadID: agentDM,
+					Sender: "agent:a", SenderID: agentID, Recipient: "user:" + userA, RecipientID: userA},
+				// User prompt in an agent DM.
+				&store.Message{ID: "prompt", ProjectID: projID, AgentID: agentID, Channel: channel, ThreadID: agentDM,
+					Sender: "user:" + userA, SenderID: userA, Recipient: "agent:a", RecipientID: agentID},
+				// User-to-user DM, with and without an agent id.
+				&store.Message{ID: "u2u", ProjectID: projID, Channel: channel, ThreadID: userDM,
+					Sender: "user:" + userA, SenderID: userA, Recipient: "user:" + userB, RecipientID: userB},
+				&store.Message{ID: "u2u-agent", ProjectID: projID, AgentID: agentID, Channel: channel, ThreadID: userDM,
+					Sender: "user:" + userB, SenderID: userB, Recipient: "user:" + userA, RecipientID: userA},
+			)
+		}
+	}
+
+	for _, msg := range cases {
+		t.Run(msg.ID+"/"+msg.Channel+"/"+msg.ProjectID, func(t *testing.T) {
+			var subjects []string
+			var payloads [][]byte
+			b := &eventBuilder{sink: func(subject string, evt interface{}) {
+				data, err := json.Marshal(evt)
+				require.NoError(t, err)
+				subjects = append(subjects, subject)
+				payloads = append(payloads, data)
+			}}
+			msg.CreatedAt = time.Unix(0, 0)
+			b.PublishUserMessage(context.Background(), msg, nil)
+			require.NotEmpty(t, subjects)
+
+			participants := dmUserParticipants(msg.ThreadID)
+			for i, subject := range subjects {
+				tokens := strings.Split(subject, ".")
+				if tokens[0] == "user" && len(tokens) >= 3 {
+					assert.Contains(t, participants, tokens[1],
+						"DM message published to a non-participant user subject %q", subject)
+					continue
+				}
+				if !assert.True(t, sseSubjectMayCarryDM(subject),
+					"DM message published to %q, which is neither participant-scoped nor filtered by sseEventVisible", subject) {
+					continue
+				}
+				evt := Event{Subject: subject, Data: payloads[i]}
+				assert.False(t, sseEventVisible(evt, outsider), "non-participant receives %q", subject)
+				for _, p := range participants {
+					assert.True(t, sseEventVisible(evt, p), "participant %s misses %q", p, subject)
+				}
+			}
+		})
+	}
+}
