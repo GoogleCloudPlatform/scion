@@ -489,6 +489,9 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	if rejectUnknownFileConfigKeys(w, rawBody) {
 		return
 	}
+	if rejectInvalidThinkingLevel(w, req.DefaultThinkingLevel) {
+		return
+	}
 
 	// server.hub.agent_endpoint has no live-reload path (like public_url, it
 	// only takes effect at the next restart), so a malformed value written
@@ -632,6 +635,13 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// server object tells the merge which server fields were sent.
 	rawServer := rawServerObject(rawBody)
 	applySettingsUpdatesFromBody(raw, &req, rawServer)
+	// default_thinking_level is cleared by an explicit null, which the typed
+	// decode leaves as a nil pointer (indistinguishable from an omitted key).
+	if top, err := parseFieldPresence(rawBody); err == nil {
+		if v, sent := top.sentFold("default_thinking_level"); sent && isJSONNull(v) {
+			delete(raw, "default_thinking_level")
+		}
+	}
 
 	// The server section is deep-merged, so a section the request changes
 	// only in part is validated again as merged with the stored fields.
@@ -870,12 +880,11 @@ func applySettingsUpdatesFromBody(raw map[string]interface{}, req *ServerConfigU
 			delete(raw, "default_model")
 		}
 	}
+	// An explicit null clears default_thinking_level (handlePutServerConfig
+	// sees it in the body); 0 is rejected before this runs
+	// (rejectInvalidThinkingLevel), so it is never a silent clear.
 	if req.DefaultThinkingLevel != nil {
-		if *req.DefaultThinkingLevel > 0 {
-			raw["default_thinking_level"] = *req.DefaultThinkingLevel
-		} else {
-			delete(raw, "default_thinking_level")
-		}
+		raw["default_thinking_level"] = *req.DefaultThinkingLevel
 	}
 	setOrDeleteString(raw, "default_max_agent_role", req.DefaultMaxAgentRole)
 	setOrDeleteString(raw, "default_agent_role", req.DefaultAgentRole)
@@ -966,4 +975,19 @@ func user(u UserIdentity) string {
 		return "unknown"
 	}
 	return u.Email()
+}
+
+// rejectInvalidThinkingLevel writes a 422 and returns true when a PUT sends
+// a default_thinking_level outside 1-100 (the settings schema range). An
+// explicit null, not 0, clears the level; 0 is rejected rather than treated
+// as a clear, so a client that sends 0 for "unset" learns of it instead of
+// clearing the value by accident (ptone/scion#3898). Shared by the DB-backed
+// and file-mode server-config PUT handlers.
+func rejectInvalidThinkingLevel(w http.ResponseWriter, level *int) bool {
+	if level == nil || (*level >= 1 && *level <= 100) {
+		return false
+	}
+	writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+		fmt.Sprintf("invalid default_thinking_level %d: must be between 1 and 100; send null to clear it", *level), nil)
+	return true
 }
