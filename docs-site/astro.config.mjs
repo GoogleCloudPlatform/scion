@@ -28,6 +28,7 @@ const hostedUserGuide = {
 	items: [
 		{ label: 'Connecting to a Hub', slug: 'hosted/user/hosted-user' },
 		{ label: 'User Access Tokens', slug: 'hosted/user/personal-access-tokens' },
+		{ label: 'CLI from a Coding Agent', slug: 'hosted/user/coding-agent-cli' },
 		{ label: 'Secrets & Environment', slug: 'hosted/user/secrets' },
 		{ label: 'Pre-Start Hooks', slug: 'hosted/user/pre-start-hooks' },
 		{ label: 'Port Forwarding & Auto-Expose', slug: 'hosted/user/port-forwarding' },

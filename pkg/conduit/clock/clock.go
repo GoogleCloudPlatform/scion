@@ -166,11 +166,32 @@ func (c *Fake) Pending() int {
 // became true. Tests use it to wait until the code under test has armed
 // its timers before calling Advance.
 func (c *Fake) WaitFor(timeout time.Duration, cond func(pending int) bool) bool {
+	return c.waitLocked(timeout, func() bool { return cond(len(c.timers)) })
+}
+
+// WaitForTimer blocks until a timer with deadline at is armed or timeout
+// of real time elapses, and reports whether it was. Unlike a pending
+// count, it is not disturbed by short-lived timers that other goroutines
+// arm and stop meanwhile (per-write deadlines, for example).
+func (c *Fake) WaitForTimer(timeout time.Duration, at time.Time) bool {
+	return c.waitLocked(timeout, func() bool {
+		for t := range c.timers {
+			if t.at.Equal(at) {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// waitLocked blocks until cond, evaluated under the clock's lock, returns
+// true or timeout of real time elapses.
+func (c *Fake) waitLocked(timeout time.Duration, cond func() bool) bool {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	for {
 		c.mu.Lock()
-		ok := cond(len(c.timers))
+		ok := cond()
 		ch := c.changed
 		c.mu.Unlock()
 		if ok {

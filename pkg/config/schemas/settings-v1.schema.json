@@ -1362,6 +1362,12 @@
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_AUTHZRECHECKINTERVAL",
               "x-since": "1"
             },
+            "lifetime_cap": {
+              "type": "string",
+              "description": "Platform lifetime cap of a conduit session (Cloud Run request timeout, load balancer or proxy limit). The relay sends GoAway 60s before it and closes streams still open with 4503 relay_restart by the cap (e.g. '3500s'; default '3500s', between '90s' and '24h').",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_LIFETIMECAP",
+              "x-since": "1"
+            },
             "stream_authz_max": {
               "type": "object",
               "description": "Authorization interval of open streams, per originating principal kind: when a stream reaches it, the hub re-checks the principal and renews the stream (AuthRefresh) or closes it with 4401 authz_expired. Each value is a duration between '1m' and '168h'. Enforced on user streams; the broker and agent values apply once those streams are tracked.",
