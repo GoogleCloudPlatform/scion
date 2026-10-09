@@ -108,7 +108,7 @@ func (s *FileSessionState) CloseOpenSession(errMsg string) (telemetry.SessionSum
 			log.Error("Session metrics: session %s not reported at shutdown: cannot write the closed marker, so a second report could not be ruled out: %v",
 				summary.SessionID, err)
 			if uerr := dirfd.UnlinkAt(dirFd, leaf); uerr != nil {
-				return fmt.Errorf("closing: %v; removing: %v", err, uerr)
+				return fmt.Errorf("writing tombstone: %v; removing: %v", err, uerr)
 			}
 			return nil
 		}
