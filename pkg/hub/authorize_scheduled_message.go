@@ -37,6 +37,9 @@ import (
 //   - the caller is not currently authorized to message the target
 //     (fail-fast preview — the definitive check runs again at fire time).
 //
+// A target the caller cannot read and may not message is treated like an
+// unknown agent ID: authoring is accepted, and the fire-time check refuses.
+//
 // An admitted revision records its author's ceiling, and each fire
 // re-checks the recorded authority under resolveScheduledAuthority
 // (authorizeScheduledMessageFire).
@@ -124,6 +127,20 @@ func (s *Server) authorizeScheduledMessageAuthoring(
 		return true
 	}
 
+	// A target the caller cannot read, and may not message, is treated
+	// exactly like an unknown agent ID: authoring is accepted and the
+	// fire-time check refuses it. This runs before any answer that would
+	// describe the target. A target the caller can read keeps the answers
+	// below, which name nothing the caller cannot already see.
+	if !s.scheduledTargetReadable(ctx, identity, agent) {
+		if allowed, _, _ := s.authorizeAgentMessage(ctx, identity, agent, false); !allowed {
+			slog.InfoContext(ctx, "scheduled target not readable; treated as unknown",
+				"identity", identity.ID(), "identity_type", identity.Type(),
+				"agent_id", agent.ID, "project_id", projectID)
+			return true
+		}
+	}
+
 	// Phase 5 D3: Cross-project scheduled message support.
 	// The event remains owned/administered in the sender's project; its target
 	// agent/project are separate immutable fields.
@@ -171,6 +188,17 @@ func (s *Server) authorizeScheduledMessageAuthoring(
 	}
 
 	return true
+}
+
+// scheduledTargetReadable reports whether identity may read the target
+// agent: an agent caller only within its own project, any other caller when
+// the authorization service allows agent read. A denied decision, for any
+// reason, counts as not readable.
+func (s *Server) scheduledTargetReadable(ctx context.Context, identity Identity, agent *store.Agent) bool {
+	if agentIdent, ok := identity.(AgentIdentity); ok {
+		return agentIdent.ProjectID() == agent.ProjectID
+	}
+	return s.authzService.CheckAccess(ctx, identity, agentResource(agent), ActionRead).Allowed
 }
 
 // scheduledMessagePermission is the permission a scheduled message fire

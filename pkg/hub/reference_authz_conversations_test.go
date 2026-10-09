@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -629,4 +630,75 @@ func TestRefusalReasonsLoggedNotReturned_Conversations(t *testing.T) {
 		assert.Contains(t, logs.String(), "target not messageable")
 		assert.NotContains(t, got.body, "messageable")
 	})
+}
+
+// disableCrossProjectMessaging turns messaging between projects off on srv.
+func disableCrossProjectMessaging(t *testing.T, srv *Server) {
+	t.Helper()
+	fakeStore := newFakeHubSettingStore()
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+	srv.SetOperationalSettings(ops)
+	require.False(t, srv.GetOperationalSettings().CrossProjectMessagingEnabled())
+}
+
+// responseKeys returns the top-level JSON keys of body.
+func responseKeys(t *testing.T, body string) []string {
+	t.Helper()
+	var m map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(body), &m), body)
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return sortedStrings(keys)
+}
+
+// TestScheduledMessageAuthoring_UnreadableTargetMatchesUnknownTarget:
+// scheduling a message to an agent the author cannot read and may not
+// message behaves exactly like scheduling to an unknown agent ID, whether or
+// not messaging between projects is enabled, and the answer does not name the
+// agent.
+func TestScheduledMessageAuthoring_UnreadableTargetMatchesUnknownTarget(t *testing.T) {
+	for _, cpm := range []bool{true, false} {
+		name := "messaging between projects on"
+		if !cpm {
+			name = "messaging between projects off"
+		}
+		t.Run(name, func(t *testing.T) {
+			srv, s, projectA, _, ownerA, _, _, agentB := cpmSetup(t)
+			srv.scheduler = NewScheduler(s, slog.Default())
+			if !cpm {
+				disableCrossProjectMessaging(t, srv)
+			}
+			author := authUser(ownerA)
+			require.False(t, srv.scheduledTargetReadable(context.Background(), author, agentB), "precondition: target not readable")
+
+			got := doAuthoredEventRequest(t, srv, author, projectA,
+				CreateScheduledEventRequest{EventType: "message", FireIn: "30m", AgentID: agentB.ID, Message: "later"})
+			unknown := doAuthoredEventRequest(t, srv, author, projectA,
+				CreateScheduledEventRequest{EventType: "message", FireIn: "30m", AgentID: tid("sched-unknown-agent"), Message: "later"})
+			require.Equal(t, http.StatusCreated, unknown.Code, unknown.Body.String())
+			require.Equal(t, unknown.Code, got.Code, got.Body.String())
+			assert.Equal(t, responseKeys(t, unknown.Body.String()), responseKeys(t, got.Body.String()))
+			assert.NotContains(t, got.Body.String(), agentB.Slug, "the answer does not name the agent")
+		})
+	}
+}
+
+// TestScheduledMessageFire_UnreadableTargetRefused: a schedule accepted for
+// an agent the author cannot read is refused when it fires.
+func TestScheduledMessageFire_UnreadableTargetRefused(t *testing.T) {
+	srv, s, projectA, _, ownerA, _, _, agentB := cpmSetup(t)
+	srv.scheduler = NewScheduler(s, slog.Default())
+	ctx := context.Background()
+	rec := doAuthoredEventRequest(t, srv, authUser(ownerA), projectA,
+		CreateScheduledEventRequest{EventType: "message", FireIn: "30m", AgentID: agentB.ID, Message: "later"})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	events, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: projectA}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, events.Items, 1)
+	assert.Error(t, authorizeScheduledMessageFireFor(srv, events.Items[0], agentB), "refused at fire time")
 }
