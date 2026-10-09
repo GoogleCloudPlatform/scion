@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -936,6 +937,7 @@ func TestRun_PreflightTransportFailureIsRetried(t *testing.T) {
 
 	require.NoError(t, sc.Run())
 	assert.EqualValues(t, 2, calls.Load())
+	assert.Contains(t, sc.notice.String(), "the Hub could not be reached (dial tcp: connection refused); retrying...")
 	assert.Equal(t, 2, s.attemptCount())
 	// The 4503 wait, then one backoff before the retried preflight.
 	assert.Equal(t, []time.Duration{wsprotocol.PTYPromptReconnectMaxDelay, reconnectBackoffBase}, ft.jitterWindows())
@@ -960,9 +962,12 @@ func TestRun_PreflightTransportFailuresAreBounded(t *testing.T) {
 
 	err := sc.Run()
 	assert.ErrorIs(t, err, ErrPTYReconnectLimit)
+	assert.Contains(t, err.Error(), "connection refused", "the last transport error is kept")
 	var re *PTYReconnectError
 	require.True(t, errors.As(err, &re))
 	assert.Equal(t, wsprotocol.ClosePTYUpstreamUnavailable, re.Close.Code)
+	// One notice per retry: the failures before the last one.
+	assert.Equal(t, maxShortReconnects-1, strings.Count(sc.notice.String(), "the Hub could not be reached"))
 	// The close is the first short-lived attempt; the bound allows
 	// maxShortReconnects in a row, so the preflight runs that many times.
 	assert.EqualValues(t, maxShortReconnects, calls.Load())
@@ -970,11 +975,14 @@ func TestRun_PreflightTransportFailuresAreBounded(t *testing.T) {
 	sc.assertRestoredOnce(t)
 }
 
-// TestRun_CtrlCArrivesWithTheRedialResult: Ctrl-C typed while the redial
-// completes (here, consumed by the client after the dial and before
-// redialFn returns its connection) cancels the reconnect: the original
-// close is reported and the new connection is closed.
-func TestRun_CtrlCArrivesWithTheRedialResult(t *testing.T) {
+// TestRun_CtrlCWhileTheRedialCompletesClosesTheNewConnection: Ctrl-C read
+// after the new connection is established but before the dial result is
+// handed back (the reconnect's main select takes the key while the result
+// is pending) cancels the reconnect: the original close is reported and
+// the new connection, once handed back, is closed. The narrower case of
+// the key and the result arriving at the same moment (the check after the
+// result) is not deterministic to set up and is not covered here.
+func TestRun_CtrlCWhileTheRedialCompletesClosesTheNewConnection(t *testing.T) {
 	s := newPTYScriptServer(t, nil, func(idx int, s *ptyScriptServer, conn *websocket.Conn) {
 		sendData(conn)
 		if idx == 0 {

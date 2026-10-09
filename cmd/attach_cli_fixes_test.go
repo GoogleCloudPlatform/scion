@@ -298,11 +298,28 @@ func TestDescribeAttachClose_ReconnectRefusedByHub(t *testing.T) {
 		assert.NotContains(t, err.Error(), "try again")
 		assert.ErrorIs(t, err, refusal)
 	})
-	t.Run("denied", func(t *testing.T) {
+	t.Run("denied: same text and hint as on the first attach", func(t *testing.T) {
 		refusal := &wsclient.PTYPreflightError{Status: 403, Code: "forbidden", Message: "no access"}
 		in := &wsclient.PTYReconnectError{Close: orig, Err: refusal}
 		err := describeAttachPreflight(describeAttachClose(in, "a1"), "a1")
-		assert.Contains(t, err.Error(), "The Hub refused the automatic reconnect: no access (status 403, forbidden).")
+		assert.Contains(t, err.Error(),
+			"The Hub refused the automatic reconnect: you do not have permission to attach to this agent (status 403, forbidden).")
+		assert.Contains(t, err.Error(), "Ask a project owner for attach access to agent 'a1'")
+		assert.NotContains(t, err.Error(), "try again")
+	})
+	t.Run("empty message gets the fixed summary", func(t *testing.T) {
+		for _, tc := range []struct {
+			refusal *wsclient.PTYPreflightError
+			want    string
+		}{
+			{&wsclient.PTYPreflightError{Status: 503}, "the Hub cannot attach to this agent right now (status 503)."},
+			{&wsclient.PTYPreflightError{Status: 502}, "the Hub refused the attach (status 502)."},
+		} {
+			in := &wsclient.PTYReconnectError{Close: orig, Err: tc.refusal}
+			err := describeAttachPreflight(describeAttachClose(in, "a1"), "a1")
+			assert.Contains(t, err.Error(), "The Hub refused the automatic reconnect: "+tc.want)
+			assert.NotContains(t, err.Error(), ":  (")
+		}
 	})
 	t.Run("direct preflight refusal still described by describeAttachPreflight", func(t *testing.T) {
 		refusal := &wsclient.PTYPreflightError{Status: 403, Code: "forbidden", Message: "no"}

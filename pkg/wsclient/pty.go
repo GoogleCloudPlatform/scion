@@ -116,6 +116,19 @@ const maxShortReconnects = 3
 // stops reconnecting because of maxShortReconnects.
 var ErrPTYReconnectLimit = fmt.Errorf("stopped after %d automatic reconnects whose sessions each ended within a minute", maxShortReconnects)
 
+// reconnectLimitError is the reconnect limit reached while the Hub
+// preflight kept failing to get an answer. It matches ErrPTYReconnectLimit
+// with errors.Is and keeps the last transport error.
+type reconnectLimitError struct{ last error }
+
+func (e *reconnectLimitError) Error() string {
+	return fmt.Sprintf("stopped after %d automatic reconnect attempts in a row; the last could not reach the Hub: %v",
+		maxShortReconnects, e.last)
+}
+
+// Unwrap returns ErrPTYReconnectLimit and the last transport error.
+func (e *reconnectLimitError) Unwrap() []error { return []error{ErrPTYReconnectLimit, e.last} }
+
 // Bytes that stop a pending reconnect when typed during the wait: Ctrl-C
 // and Ctrl-D cancel it, and the tmux detach sequence (Ctrl-b d) detaches.
 const (
@@ -384,8 +397,8 @@ func joinEndpointPath(prefix, apiPath string) string {
 // Run starts the PTY session and blocks until it ends.
 //
 // When the server closes the session with a code that
-// wsprotocol.PTYReconnectTiming allows (4503, 4504, 1011), Run makes one reconnect
-// attempt for that close: after a full-jitter delay of up to
+// wsprotocol.PTYReconnectTiming allows (4503, 4504, 1011), Run makes one
+// reconnect attempt for that close: after a full-jitter delay of up to
 // wsprotocol.PTYPromptReconnectMaxDelay for 4503, or after the normal
 // exponential backoff with full jitter for 4504 and 1011. Each reconnect
 // first asks the Hub's preflight, as AttachToAgent does for the first
@@ -395,8 +408,9 @@ func joinEndpointPath(prefix, apiPath string) string {
 // short-lived attempts. A successful reconnect sends the current terminal
 // size so the remote tmux redraws at the right size. If the reconnect fails
 // (dial error, or the new session closes before it delivers any data), Run
-// returns a *PTYReconnectError and does not try again. Every other close ends Run. The terminal stays in raw mode across a
-// reconnect and is restored once, when Run returns, on every path.
+// returns a *PTYReconnectError and does not try again. Every other close
+// ends Run. The terminal stays in raw mode across a reconnect and is
+// restored once, when Run returns, on every path.
 func (c *PTYClient) Run() error {
 	conn := c.currentConn()
 	if conn == nil {
@@ -519,11 +533,12 @@ func (c *PTYClient) Run() error {
 			// bound on consecutive short-lived attempts.
 			shortCloses++
 			if shortCloses > maxShortReconnects {
-				runErr = &PTYReconnectError{Close: closeErr, Err: ErrPTYReconnectLimit}
+				runErr = &PTYReconnectError{Close: closeErr, Err: &reconnectLimitError{last: transport.err}}
 				return runErr
 			}
 			delay = c.jitter(backoffCeiling(backoffAttempt))
 			backoffAttempt++
+			_, _ = fmt.Fprintf(c.notice, "\r\nthe Hub could not be reached (%v); retrying...\r\n", transport.err)
 			slog.Debug("PTY client: preflight unreachable, retrying", "error", transport.err, "delay", delay)
 		}
 		conn = newConn
@@ -605,7 +620,13 @@ func (c *PTYClient) startStdinReader() <-chan stdinResult {
 // true, and a dial still in flight is abandoned (closed if it completes
 // later). The WebSocket handshake does not itself stop when the context
 // is cancelled, which is another reason the dial runs in its own
-// goroutine. When the dial fails, stop is false and err is the dial error.
+// goroutine.
+//
+// Before dialing it runs the Hub preflight (preflightFn). When the Hub
+// refuses, stop is false and err is the *PTYPreflightError; when the
+// preflight gets no answer, stop is false and err is a
+// *preflightTransportError, which Run retries under the backoff. When the
+// dial fails, stop is false and err is the dial error.
 func (c *PTYClient) reconnect(delay time.Duration, stdinCh <-chan stdinResult, closeErr *PTYCloseError) (conn *websocket.Conn, stop bool, err error) {
 	type dialResult struct {
 		conn *websocket.Conn
