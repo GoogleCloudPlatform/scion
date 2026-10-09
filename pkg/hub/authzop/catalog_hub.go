@@ -47,6 +47,44 @@ var hubOperations = []OperationSpec{
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 
+	{
+		ID:          "hub.authreset.reissue",
+		Domain:      "hub",
+		Description: "Re-issue an agent's role scopes from its delegator's current authority (dispatched from POST .../agents/{id}/reset-auth when reissue_scopes is set; hub super-admin only)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointInternalDispatch, Pattern: "handleAgentResetAuth:reissue-scopes"},
+		},
+		Principals:            []PrincipalKind{PrincipalUser},
+		Credentials:           []CredentialKind{CredentialSessionJWT},
+		ResourceResolver:      "hub-scoped",
+		BasePermission:        "hub.auth_reset.execute",
+		Effects:               []SecurityEffect{EffectChangeAuthority, EffectRevokeAuthority, EffectMintCredential},
+		DelegationKind:        DelegationConditionalIncrease,
+		DelegationDescription: "The re-issued role and scopes are checked with CanDelegate against the delegator's live grant (never the operator's), and the role is never raised",
+		Governance: &GovernancePolicy{
+			Kind:        GovernancePeerSuperior,
+			Description: "Re-recording an agent's delegated authority and revoking its credentials is a hub super-admin action",
+		},
+		AuthorityEval: AuthorityEvalBeforeAndAfter,
+		AuditObligation: &AuditObligation{
+			EventType:     "agent_scopes_reissued",
+			ContextFields: []string{"actor_id"},
+			BeforeFields:  []string{"role_before", "edge_replaced"},
+			AfterFields:   []string{"role_after", "edge_new", "scopes_added", "scopes_removed", "credentials_revoked"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestScopeReissue_OperatorRefusals"},
+			{Package: "pkg/hub", Function: "TestScopeReissue_UserDelegatorFailClosed"},
+			{Package: "pkg/hub", Function: "TestScopeReissue_UserDelegatorLookupFault"},
+			{Package: "pkg/hub", Function: "TestScopeReissue_SessionRootedEqualsCreateToday"},
+			{Package: "pkg/hub", Function: "TestScopeReissue_SessionRootedEqualsCreateTodayAfterChange"},
+		},
+		Bearer: SessionOnly(ReasonGovernancePending),
+	},
+
 	// =====================================================================
 	// Domain: hub — hub admin reads and configuration
 	// =====================================================================

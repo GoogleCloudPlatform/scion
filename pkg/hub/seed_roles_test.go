@@ -170,7 +170,8 @@ func TestBuiltInRoles_HubMemberAndViewerAreCurated(t *testing.T) {
 }
 
 // TestBuiltInRoles_SuperAdminHasAllPermissions verifies that super-admin
-// contains every permission in the registry (by design).
+// contains every permission in the registry (by design) except the Reserved
+// rows, which no role may hold.
 func TestBuiltInRoles_SuperAdminHasAllPermissions(t *testing.T) {
 	var superAdminPerms []string
 	for _, role := range BuiltInRoles() {

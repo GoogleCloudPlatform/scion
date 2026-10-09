@@ -77,7 +77,7 @@ function pagedResult(agents: Agent[], opts: Partial<PagedPageResult> = {}): Page
 
 function setup(vs: Partial<AgentListViewState> = {}) {
   let held: Agent[] = [];
-  const fetchPage = vi.fn(async () => pagedResult([]));
+  const fetchPage = vi.fn(() => Promise.resolve(pagedResult([])));
   const win = new AgentListWindow({
     viewState: viewState(vs),
     fetchPage,
@@ -744,7 +744,7 @@ describe('AgentListWindow states — off-page activity from an unknown delta', (
             agent('a', { updated: '2026-01-01T00:00:00Z' }),
             agent('b', { updated: '2026-01-02T00:00:00Z' }),
           ];
-    const fetchPage = vi.fn(async () => pagedResult([]));
+    const fetchPage = vi.fn(() => Promise.resolve(pagedResult([])));
     const win = new AgentListWindow({
       viewState: viewState({ sortDir }),
       fetchPage,
@@ -923,7 +923,7 @@ describe('AgentListWindow states — optimistic local update', () => {
 describe('AgentListWindow states — live changes during a paged request', () => {
   function setupWithStore(
     store: Map<string, Agent>,
-    fetchPage = vi.fn(async () => pagedResult([]))
+    fetchPage = vi.fn(() => Promise.resolve(pagedResult([])))
   ) {
     const win = new AgentListWindow({
       viewState: viewState(),
@@ -960,8 +960,8 @@ describe('AgentListWindow states — live changes during a paged request', () =>
   it('a page fetch replays a live create into the member index after its stats seed', async () => {
     const created = agent('new', { updated: '2026-02-01T00:00:00Z' });
     const store = new Map([[created.id, created]]);
-    const fetchPage = vi.fn(async () =>
-      pagedResult([agent('a')], { totalCount: 1, liveChanged: ['new'] })
+    const fetchPage = vi.fn(() =>
+      Promise.resolve(pagedResult([agent('a')], { totalCount: 1, liveChanged: ['new'] }))
     );
     const { win } = setupWithStore(store, fetchPage);
     win.setPaged(pagedResult([agent('a')], { totalCount: 1 }), '');

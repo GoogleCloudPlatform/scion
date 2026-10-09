@@ -141,7 +141,7 @@ func (r *Relay) serveInternal(w http.ResponseWriter, req *http.Request) {
 	path := req.URL.Path
 	if path == internalSelfPath {
 		if req.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			methodNotAllowed(w, http.MethodGet)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -163,11 +163,21 @@ func (r *Relay) serveInternal(w http.ResponseWriter, req *http.Request) {
 		r.serveRPC(w, req, peer, sessionID)
 	case op == "stream" && req.Method == http.MethodGet:
 		r.serveStream(w, req, peer, sessionID)
-	case op == "rpc" || op == "stream":
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	case op == "rpc":
+		methodNotAllowed(w, http.MethodPost)
+	case op == "stream":
+		methodNotAllowed(w, http.MethodGet)
 	default:
 		http.NotFound(w, req)
 	}
+}
+
+// methodNotAllowed answers 405 with the Allow header RFC 9110 §15.5.6
+// requires. It is a plain HTTP response written before any WebSocket
+// upgrade.
+func methodNotAllowed(w http.ResponseWriter, allow string) {
+	w.Header().Set("Allow", allow)
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 }
 
 // admitInternal re-checks, on the owner, that the session is local and
