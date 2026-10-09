@@ -1914,8 +1914,14 @@ Exactly one list is.
    rather than in $ownedByConfig because the hazard is not a second source for a
    value - it is that the served asset tree stops being the audited one that was
    built into the image.
+
+   --enable-debug-endpoints (cmd/server.go, init) serves diagnostic endpoints
+   meant for local development only. loadAndReconcileConfig
+   (cmd/server_foreground.go) refuses it in hosted mode, and this chart always
+   renders --hosted, so passing it would only fail the pod at startup. Refusing it
+   here reports the same problem at render time instead.
 */}}
-{{- $unsafeToPass := list "session-secret" "dev-auth" "enable-test-login" "web-assets-dir" }}
+{{- $unsafeToPass := list "session-secret" "dev-auth" "enable-test-login" "web-assets-dir" "enable-debug-endpoints" }}
 
 {{- /*
 ADJUDICATED AND DELIBERATELY NOT RESERVED. The six lists above say what is
@@ -2078,7 +2084,7 @@ overlay on the other, and no single verb covers both.
 {{- fail (printf "hub.args may not contain -%s: this setting has a delivery channel other than argv - the settings file, or for base-url the SCION_SERVER_BASE_URL environment variable - and argv silently wins over both, so an argv copy is a second and invisible source for one value, with nothing reporting the disagreement. Four of the five are live in this release: -base-url is shadowed onto the SCION_SERVER_BASE_URL this chart renders, and -storage-bucket, -db and -admin-emails onto server.storage.bucket, server.database.url and server.hub.admin_emails in the settings file it renders, so passing any of them makes argv the winner over a value set here. The fifth, -storage-dir, has no second source in this release and would simply take effect; it stays reserved because the channel arrives on a schedule and reserving after the fact requires somebody to notice." $flag) }}
 {{- end }}
 {{- if has $flag $unsafeToPass }}
-{{- fail (printf "hub.args may not contain -%s: it weakens authentication or places credential material where anyone with pod read access can read it." $flag) }}
+{{- fail (printf "hub.args may not contain -%s: it weakens authentication, enables a diagnostic endpoint meant for local development only, or places credential material where anyone with pod read access can read it." $flag) }}
 {{- end }}
 {{- /*
    THE CLUSTER WALK. See the $neverPassedShorthand comment for the pflag

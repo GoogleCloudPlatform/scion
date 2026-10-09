@@ -149,6 +149,24 @@ func buildDaemonStartArgs(cmd *cobra.Command) []string {
 	return daemonArgs
 }
 
+// resolveDaemonServerMode validates server.mode, sets hostedMode from it
+// unless --hosted or --production was given, and checks the flags that
+// depend on the mode. The daemon parent runs it so that a refused setting is
+// reported directly instead of as a generic start failure from the child.
+func resolveDaemonServerMode(cmd *cobra.Command) error {
+	// Check if hosted mode is set in config (settings.yaml server.mode).
+	// LoadServerMode() normalizes the legacy "production" value to "hosted".
+	if err := config.ValidateServerMode(config.LoadServerMode()); err != nil {
+		return err
+	}
+	if !cmd.Flags().Changed("hosted") && !cmd.Flags().Changed("production") {
+		if config.LoadServerMode() == "hosted" {
+			hostedMode = true
+		}
+	}
+	return validateDebugEndpoints(hostedMode, enableDebugEndpoints)
+}
+
 // runServerStartOrDaemon handles the server start command. By default it launches
 // the server as a background daemon. When --foreground is set, it runs directly.
 func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
@@ -178,15 +196,8 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("port conflict: ports %v are occupied", phantomPorts)
 	}
 
-	// Check if hosted mode is set in config (settings.yaml server.mode).
-	// LoadServerMode() normalizes the legacy "production" value to "hosted".
-	if err := config.ValidateServerMode(config.LoadServerMode()); err != nil {
+	if err := resolveDaemonServerMode(cmd); err != nil {
 		return err
-	}
-	if !cmd.Flags().Changed("hosted") && !cmd.Flags().Changed("production") {
-		if config.LoadServerMode() == "hosted" {
-			hostedMode = true
-		}
 	}
 
 	// Apply workstation defaults when not in hosted mode.

@@ -3104,7 +3104,7 @@ func (ws *WebServer) handleAuthProviders(w http.ResponseWriter, r *http.Request)
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// handleAuthDebug returns session diagnostic info. It is served only when
+// handleAuthDebug serves the diagnostic endpoint. It is served only when
 // EnableDebugEndpoints is set; otherwise it answers 404.
 // Route: GET /auth/debug
 func (ws *WebServer) handleAuthDebug(w http.ResponseWriter, r *http.Request) {

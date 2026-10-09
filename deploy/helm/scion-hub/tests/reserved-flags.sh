@@ -32,7 +32,7 @@
 # an empty table and exited 0; this must not be able to do that.
 set -u
 
-EXPECTED_TOTAL=39          # 33 must-reject + 6 must-accept. Update deliberately.
+EXPECTED_TOTAL=40          # 34 must-reject + 6 must-accept. Update deliberately.
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -298,8 +298,8 @@ reject grove
 for f in production port; do reject "$f"; done
 # $ownedByConfig - delivered through another channel.
 for f in admin-emails base-url db storage-bucket storage-dir; do reject "$f"; done
-# $unsafeToPass - weaken auth or expose credentials.
-for f in session-secret dev-auth enable-test-login web-assets-dir; do reject "$f"; done
+# $unsafeToPass - weaken auth, expose credentials, or local-development only.
+for f in session-secret dev-auth enable-test-login web-assets-dir enable-debug-endpoints; do reject "$f"; done
 # Case-insensitivity of the reserved match (pflag itself is case-SENSITIVE).
 for f in CONFIG Global; do reject "$f"; done
 

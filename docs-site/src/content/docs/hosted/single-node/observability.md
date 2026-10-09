@@ -356,7 +356,7 @@ Hub and Broker logs include a `subsystem` attribute that identifies the internal
 | `hub.templates` | Template CRUD, hydration, and bootstrap |
 | `hub.workspace` | Git worktree sync operations |
 | `hub.dispatcher` | HTTP agent dispatch to brokers |
-| `hub.web` | Web server requests and sessions. At `debug`, every web request is logged; requests that return an error status or are aborted are logged at any level. |
+| `hub.web` | Web server requests and sessions. At `debug`, every web request is logged; requests that return an error status or are aborted are logged at info and more verbose levels. |
 | `broker.agent-lifecycle` | Container provisioning, environment resolution, template hydration |
 | `broker.control-channel` | Broker-side WebSocket connection to the hub |
 | `broker.messages` | Message injection into agent tmux sessions |
