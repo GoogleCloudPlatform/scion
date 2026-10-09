@@ -56,6 +56,21 @@ export async function setupBudgetMocks(page: Page, fx: BudgetFixture): Promise<s
       close(): void {}
     } as unknown as typeof EventSource;
   });
+  // Turn on the readiness marks (web/src/client/readiness-marks.ts) the way
+  // the hub's shell does when its profiling readiness_marks setting is on:
+  // in the page's initial data. The budget test waits for the view's mark.
+  await page.route(
+    (url) => url.pathname.startsWith('/projects/'),
+    async (route) => {
+      if (route.request().resourceType() !== 'document') return route.fallback();
+      const resp = await route.fetch();
+      const html = (await resp.text()).replace(
+        '<body>',
+        '<body><script id="__SCION_DATA__" type="application/json">{"readinessMarks":true}</script>'
+      );
+      return route.fulfill({ response: resp, body: html });
+    }
+  );
   await page.route(/\/(api|auth)\//, (route) => {
     const req = route.request();
     const url = new URL(req.url());

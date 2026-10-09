@@ -125,7 +125,18 @@ interface LoadResult {
   unexpected: string[];
 }
 
-async function measureLoad(browser: Browser, v: ViewBudget): Promise<LoadResult> {
+// The readiness mark each view writes once it has rendered its first page
+// (grid, list) or laid out and fitted the graph (web/src/client/readiness-marks.ts).
+const READY_MARK: Record<ViewBudget['view'], string> = {
+  grid: 'scion:ready:rows-grid',
+  list: 'scion:ready:rows-list',
+  graph: 'scion:ready:graph',
+};
+
+// CPU slowdown for the timing check load (Chrome DevTools throttling).
+const SLOW_CPU_RATE = 4;
+
+async function measureLoad(browser: Browser, v: ViewBudget, slow = false): Promise<LoadResult> {
   const context = await browser.newContext();
   try {
     const page = await context.newPage();
@@ -139,25 +150,42 @@ async function measureLoad(browser: Browser, v: ViewBudget): Promise<LoadResult>
         w.__budgetLongTasks += list.getEntries().length;
       }).observe({ type: 'longtask', buffered: true });
     }, v.view);
+    if (slow) {
+      const cdp = await context.newCDPSession(page);
+      await cdp.send('Emulation.setCPUThrottlingRate', { rate: SLOW_CPU_RATE });
+    }
     await page.goto(`/projects/${encodeURIComponent(fixture.projectId)}`);
 
+    // Settled on a defined signal, not a delay: the view's readiness mark,
+    // then the rendered items, then a deep element count that is unchanged
+    // across three reads 500 ms apart (Shoelace and Lit render their
+    // shadow roots asynchronously).
+    await expect
+      .poll(
+        () =>
+          page.evaluate((name) => performance.getEntriesByName(name).length, READY_MARK[v.view]),
+        { timeout: 60_000, message: `${v.view}: readiness mark ${READY_MARK[v.view]}` }
+      )
+      .toBeGreaterThan(0);
     await expect
       .poll(() => countDeep(page, v.selector), {
         timeout: 30_000,
         message: `${v.view}: rendered items`,
       })
       .toBe(v.expected);
-
-    // Settled: the deep element count is unchanged across two reads 500 ms
-    // apart (Shoelace and Lit render their shadow roots asynchronously).
-    let last = -1;
-    let domElements = await countDeep(page, '*');
-    for (let i = 0; i < 20 && domElements !== last; i++) {
+    const reads = [await countDeep(page, '*')];
+    for (let i = 0; i < 40; i++) {
+      const n = reads.length;
+      if (n >= 3 && reads[n - 1] === reads[n - 2] && reads[n - 2] === reads[n - 3]) break;
       await page.waitForTimeout(500);
-      last = domElements;
-      domElements = await countDeep(page, '*');
+      reads.push(await countDeep(page, '*'));
     }
-    expect(domElements, `${v.view}: DOM count did not settle`).toBe(last);
+    const domElements = reads[reads.length - 1];
+    expect(reads.slice(-3), `${v.view}: DOM count did not settle`).toEqual([
+      domElements,
+      domElements,
+      domElements,
+    ]);
     const longTasks = await page.evaluate(
       () => (window as unknown as { __budgetLongTasks: number }).__budgetLongTasks
     );
@@ -172,20 +200,28 @@ for (const v of VIEWS) {
     await measureLoad(browser, v); // warm-up, not measured
     const loads: LoadResult[] = [];
     for (let i = 0; i < LOADS; i++) loads.push(await measureLoad(browser, v));
+    // Timing check: the same load with the CPU slowed down must settle on
+    // the same DOM. Not counted for long tasks.
+    const slowLoad = await measureLoad(browser, v, true);
 
     const dom = loads.map((l) => l.domElements);
     const lt = loads.map((l) => l.longTasks);
     const limit = limits(v.baseline);
     console.info(
-      `measured ${v.view}: domElements=${dom.join(',')} longTasks=${lt.join(',')} (median ${median(lt)}); ` +
+      `measured ${v.view}: domElements=${dom.join(',')} (slowed ${slowLoad.domElements}) ` +
+        `longTasks=${lt.join(',')} (median ${median(lt)}); ` +
         `baseline ${v.baseline.domElements}/${v.baseline.longTasks} on ${BASELINE_COMMIT}; ` +
         `limit ${limit.domElements}/${limit.longTasks}`
     );
 
     expect(
-      [...new Set(loads.flatMap((l) => l.unexpected))],
+      [...new Set([...loads, slowLoad].flatMap((l) => l.unexpected))],
       'requests with no generated response in fixture.mjs (add them; see perf-tracing.md)'
     ).toEqual([]);
+    expect(
+      [...dom, slowLoad.domElements],
+      `${v.view}: the DOM count must not depend on load speed (normal loads, then a ${SLOW_CPU_RATE}x slowed load)`
+    ).toEqual(Array(LOADS + 1).fill(dom[0]));
     for (const n of dom) {
       expect(
         n,
