@@ -217,10 +217,16 @@ func (s *Service) adminArtifact(w http.ResponseWriter, r *http.Request, id strin
 	return b, a, true
 }
 
+// adminForbiddenMessage is the text of every 403 for a caller that may read
+// an artifact but not administer it. It states the rule, the same for every
+// artifact and every refusal, and never why this caller was refused.
+const adminForbiddenMessage = "only the artifact's owner or a user with an admin grant may share or change it; " +
+	"on an artifact owned by an agent, the agent's delegating user or an admin of its home project may also grant review access"
+
 // writeAdminForbidden writes the 403 of a caller that may read an artifact
 // but not administer it.
 func writeAdminForbidden(w http.ResponseWriter) {
-	writeError(w, http.StatusForbidden, "forbidden", "only the artifact's owner or an admin user may share or change it")
+	writeError(w, http.StatusForbidden, "forbidden", adminForbiddenMessage)
 }
 
 // manageable reports whether the caller may administer a, which it can

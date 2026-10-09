@@ -19,6 +19,7 @@ package artifacts
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -342,5 +343,27 @@ func TestReviewGrantArtifactDeletedMeanwhile(t *testing.T) {
 	}
 	if g := f.grantOf(id, reviewerID); g != nil {
 		t.Errorf("grant written: %+v", g)
+	}
+}
+
+// TestAdminForbiddenCopy: the non-admin 403 states the current rule,
+// review access on agent-owned artifacts included, and is the same for a
+// user-owned and an agent-owned artifact.
+func TestAdminForbiddenCopy(t *testing.T) {
+	f, agentOwned := newReviewGrantFixture(t)
+	userOwned := f.publish(userU, "mine.md", []byte("# mine"), "scope=project-1").Artifact.ID
+	a := f.postGrantBody(member, agentOwned, "junk")
+	u := f.postGrantBody(member, userOwned, "junk")
+	if response(a) != response(u) {
+		t.Errorf("403 differs by owner kind:\n%s\n%s", response(a), response(u))
+	}
+	var e errorResponse
+	if err := json.Unmarshal(a.Body.Bytes(), &e); err != nil || a.Code != http.StatusForbidden {
+		t.Fatalf("%d %v", a.Code, err)
+	}
+	for _, want := range []string{"owner", "admin grant", "delegating user", "admin of its home project", "review access"} {
+		if !strings.Contains(e.Error.Message, want) {
+			t.Errorf("message %q lacks %q", e.Error.Message, want)
+		}
 	}
 }
