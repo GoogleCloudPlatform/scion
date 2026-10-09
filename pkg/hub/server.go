@@ -3793,8 +3793,21 @@ func (s *Server) SetGEExchangeMetrics(m GEExchangeMetricsRecorder) {
 func (s *Server) SetLocalImageChecker(l imagecheck.LocalImageExister) {
 	s.imageChecker.SetLocal(l)
 	if mgr, ok := l.(imageManager); ok {
+		// Under s.mu: this also runs after serving has started (broker
+		// startup and the runtime reload func), while handlers read the
+		// field through getImageManager.
+		s.mu.Lock()
 		s.imageManager = mgr
+		s.mu.Unlock()
 	}
+}
+
+// getImageManager returns the co-located runtime's image manager, or nil.
+// Callers take one snapshot and use it for the whole operation.
+func (s *Server) getImageManager() imageManager {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.imageManager
 }
 
 // GetMaintenanceState returns the runtime maintenance state.
@@ -5530,7 +5543,14 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	if s.config.SchedulerMaxConcurrency != nil {
 		schedOpts = append(schedOpts, WithMaxConcurrency(*s.config.SchedulerMaxConcurrency))
 	}
-	s.scheduler = NewScheduler(s.store, logging.Subsystem("hub.scheduler"), schedOpts...)
+	// Written under s.mu: in combined mode the CleanupResources goroutine
+	// (cmd/server_foreground.go) is already running and reads s.scheduler
+	// under s.mu.RLock. The reads in registerSchedulerHandlers below run on
+	// this goroutine, after this write, so they need no lock.
+	sched := NewScheduler(s.store, logging.Subsystem("hub.scheduler"), schedOpts...)
+	s.mu.Lock()
+	s.scheduler = sched
+	s.mu.Unlock()
 	s.registerSchedulerHandlers()
 
 	// Report non-canonical stored timestamps (SQLite). It runs in the
@@ -5682,9 +5702,24 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 		if s.decisionAuditRouter != nil {
 			_ = s.decisionAuditRouter.CloseNew(ctx)
 		}
+		// Fields whose setters take s.mu.Lock are snapshotted once here
+		// and only the locals are used below. Those setters
+		// (StartBackgroundServices, StartNotificationDispatcher,
+		// StartLifecycleHookEvaluator, StartMessageBroker,
+		// InitPresenceManager, SetEventPublisher, SetCommandBus) can run
+		// on the startup goroutine while this runs on shutdown during
+		// startup, and cleanupOnce does not order them. The other fields
+		// used below are set in New(), before any caller can reach this.
 		s.mu.RLock()
 		cc := s.controlChannel
 		stopPoolSampler := s.stopPoolSampler
+		scheduler := s.scheduler
+		notificationDispatcher := s.notificationDispatcher
+		lifecycleHookEvaluator := s.lifecycleHookEvaluator
+		messageBrokerProxy := s.messageBrokerProxy
+		presenceManager := s.presenceManager
+		events := s.events
+		commandBus := s.commandBus
 		s.mu.RUnlock()
 
 		slog.Info("Cleaning up Hub resources...")
@@ -5724,17 +5759,17 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 		if s.brokerAuthService != nil {
 			s.brokerAuthService.Close()
 		}
-		if s.scheduler != nil {
-			s.scheduler.Stop()
+		if scheduler != nil {
+			scheduler.Stop()
 		}
-		if s.notificationDispatcher != nil {
-			s.notificationDispatcher.Stop()
+		if notificationDispatcher != nil {
+			notificationDispatcher.Stop()
 		}
-		if s.lifecycleHookEvaluator != nil {
-			s.lifecycleHookEvaluator.Stop()
+		if lifecycleHookEvaluator != nil {
+			lifecycleHookEvaluator.Stop()
 		}
-		if s.messageBrokerProxy != nil {
-			s.messageBrokerProxy.Stop()
+		if messageBrokerProxy != nil {
+			messageBrokerProxy.Stop()
 		}
 		if s.telegramLinkService != nil {
 			s.telegramLinkService.Close()
@@ -5750,14 +5785,14 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 			s.previewService.Close()
 		}
 		// Stop presence manager before closing event publisher
-		if s.presenceManager != nil {
-			s.presenceManager.Stop()
+		if presenceManager != nil {
+			presenceManager.Stop()
 		}
-		if s.events != nil {
-			s.events.Close()
+		if events != nil {
+			events.Close()
 		}
-		if s.commandBus != nil {
-			s.commandBus.Close()
+		if commandBus != nil {
+			commandBus.Close()
 		}
 		if s.logQueryService != nil {
 			_ = s.logQueryService.Close()
