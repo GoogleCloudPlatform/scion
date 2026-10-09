@@ -222,6 +222,39 @@ func TestDedupeSkillReferences(t *testing.T) {
 			},
 		},
 		{
+			name: "userinfo with @ in the authority does not merge different skills",
+			in: []api.SkillReference{
+				{URI: "skill://u@host/a"},
+				{URI: "skill://u@host/b"},
+			},
+			want: []api.SkillReference{
+				{URI: "skill://u@host/a"},
+				{URI: "skill://u@host/b"},
+			},
+		},
+		{
+			name: "userinfo with @ in the authority still collapses versions",
+			in: []api.SkillReference{
+				{URI: "skill://u@host/a@1.0"},
+				{URI: "skill://u@host/a@2.0"},
+			},
+			want: []api.SkillReference{
+				{URI: "skill://u@host/a@2.0"},
+			},
+		},
+		{
+			name: "query is kept out of the version and in the key",
+			in: []api.SkillReference{
+				{URI: "gh://o/r/s@v1?token=X"},
+				{URI: "gh://o/r/s?token=X"},
+				{URI: "gh://o/r/s?token=Y"},
+			},
+			want: []api.SkillReference{
+				{URI: "gh://o/r/s?token=X"},
+				{URI: "gh://o/r/s?token=Y"},
+			},
+		},
+		{
 			name: "survivors keep the latest relative order",
 			in: []api.SkillReference{
 				{URI: "skill://scion/global/foo", Scope: "hub"},
@@ -241,6 +274,62 @@ func TestDedupeSkillReferences(t *testing.T) {
 				t.Errorf("got %+v, want %+v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSkillBaseURI(t *testing.T) {
+	for in, want := range map[string]string{
+		"my-skill":                        "my-skill",
+		"my-skill@1.0":                    "my-skill",
+		"scion://my-skill@1.0":            "scion://my-skill",
+		"skill://scion/global/x@2.0":      "skill://scion/global/x",
+		"skill://u@host/a":                "skill://u@host/a",
+		"skill://u:p@host/a@1.0":          "skill://u:p@host/a",
+		"gh://o/r/s?token=X":              "gh://o/r/s?token=X",
+		"gh://o/r/s@v1?token=X":           "gh://o/r/s?token=X",
+		"gh://o/r/s@v1?token=a@b/c":       "gh://o/r/s?token=a@b/c",
+		"gh://o/r/s@v1#frag":              "gh://o/r/s#frag",
+		"gcp-skill://bucket/path/s@3":     "gcp-skill://bucket/path/s",
+		"gcp-skill://bucket/path/s/":      "gcp-skill://bucket/path/s/",
+		"skill://scion/global/no-at-tail": "skill://scion/global/no-at-tail",
+	} {
+		if got := skillBaseURI(in); got != want {
+			t.Errorf("skillBaseURI(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestApplyInlineConfigUpdate_VersionCollapse verifies the version case of
+// the dedupe: when the Hub sends a newer version of a skill the agent already
+// carries, the later version replaces the earlier one and the skill count
+// does not grow across repeated starts.
+func TestApplyInlineConfigUpdate_VersionCollapse(t *testing.T) {
+	srv, _ := newTestServerWithProvisionCapture()
+	projectDir := filepath.Join(t.TempDir(), ".scion")
+	agentName := "version-agent"
+
+	cfgPath := writeAgentConfig(t, projectDir, agentName, api.ScionConfig{
+		Skills: []api.SkillReference{
+			{URI: "gh://example/repo/skills/x@v1", Scope: "template"},
+			{URI: "skill://scion/global/other", Scope: "template"},
+		},
+	})
+
+	// MergeScionConfig stamps the unscoped incoming entry "template", so the
+	// broker-owned entry survives the hub-scope prune and only the dedupe can
+	// collapse the two versions.
+	want := []api.SkillReference{
+		{URI: "skill://scion/global/other", Scope: "template"},
+		{URI: "gh://example/repo/skills/x@v2", Scope: "template"},
+	}
+	for i := 0; i < 3; i++ { // start, restart, restart
+		srv.applyInlineConfigUpdate(agentName, projectDir, &api.ScionConfig{
+			Skills: []api.SkillReference{{URI: "gh://example/repo/skills/x@v2"}},
+		}, false)
+		got := readAgentSkills(t, cfgPath)
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("after apply #%d\n got: %+v\nwant: %+v", i+1, got, want)
+		}
 	}
 }
 

@@ -3102,13 +3102,26 @@ func dropHubManagedSkills(refs []api.SkillReference) []api.SkillReference {
 }
 
 // skillBaseURI strips a trailing version specifier from a skill URI:
-// "scion://my-skill@1.0" becomes "scion://my-skill". An "@" before the
-// scheme separator is not a version specifier.
+// "scion://my-skill@1.0" becomes "scion://my-skill". It uses the rule
+// api.ParseSkillURI uses for skill:// URIs: the version is an "@" in the last
+// path segment, so an "@" in the authority ("skill://user@host/a") is not a
+// version specifier. A query or fragment ("?token=...") is not part of the
+// path: it is set aside before the version is found and kept in the result,
+// so "gh://o/r/s@v1?token=X" and "gh://o/r/s?token=X" share a key.
 func skillBaseURI(uri string) string {
-	if i := strings.LastIndex(uri, "@"); i > strings.Index(uri, "://") {
-		return uri[:i]
+	prefix, rest := "", uri
+	if i := strings.Index(uri, "://"); i >= 0 {
+		prefix, rest = uri[:i+3], uri[i+3:]
 	}
-	return uri
+	suffix := ""
+	if i := strings.IndexAny(rest, "?#"); i >= 0 {
+		rest, suffix = rest[:i], rest[i:]
+	}
+	tailStart := strings.LastIndex(rest, "/") + 1
+	if i := strings.LastIndex(rest[tailStart:], "@"); i >= 0 {
+		rest = rest[:tailStart+i]
+	}
+	return prefix + rest + suffix
 }
 
 // dedupeSkillReferences keeps only the final occurrence of each skill
@@ -3126,6 +3139,14 @@ func skillBaseURI(uri string) string {
 // Scope and Optional, matching the Hub path. References with the same URI
 // but different As are kept as separate entries, because the dedupe does not
 // merge different install names (the per-reference resolvers install both).
+//
+// References to different versions of a skill have different URIs, so the
+// Hub resolver does not collapse them: here they collapse before resolution
+// instead. The outcome still matches resolving the full list, for a
+// different reason: every version installs under the same destination name,
+// and install keeps the later entry for a shared destination name, which is
+// the one the dedupe keeps. So the later version wins and the list does not
+// grow when a newer version is appended.
 func dedupeSkillReferences(refs []api.SkillReference) []api.SkillReference {
 	if len(refs) < 2 {
 		return refs
