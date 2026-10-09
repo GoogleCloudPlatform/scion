@@ -51,9 +51,11 @@ type captureInner struct {
 }
 
 type captured struct {
-	line string
-	span trace.SpanContext
-	ctx  context.Context
+	line        string
+	span        trace.SpanContext
+	ctx         context.Context
+	errAtWrite  error // ctx.Err() observed inside Handle
+	hasDeadline bool
 }
 
 func newCaptureInner(gate chan struct{}) *captureInner {
@@ -85,7 +87,9 @@ func (v *captureView) Handle(ctx context.Context, r slog.Record) error {
 	err := v.json.Handle(ctx, r)
 	line := v.c.buf.String()
 	v.c.mu.Unlock()
-	v.c.out <- captured{line: line, span: trace.SpanContextFromContext(ctx), ctx: ctx}
+	_, hasDeadline := ctx.Deadline()
+	v.c.out <- captured{line: line, span: trace.SpanContextFromContext(ctx), ctx: ctx,
+		errAtWrite: ctx.Err(), hasDeadline: hasDeadline}
 	return err
 }
 func (v *captureView) WithAttrs(as []slog.Attr) slog.Handler {
@@ -204,11 +208,56 @@ func TestAsyncHandler_SpanContextSurvivesCancellationAndNothingElseRetained(t *t
 	if !got.span.Equal(sc) {
 		t.Fatalf("span context = %v, want %v", got.span, sc)
 	}
-	if got.ctx.Err() != nil {
-		t.Fatal("write context inherited caller cancellation")
+	if errors.Is(got.errAtWrite, context.Canceled) {
+		t.Fatalf("write context inherited caller cancellation: %v", got.errAtWrite)
 	}
 	if got.ctx.Value(ctxKey{}) != nil {
 		t.Fatal("caller context value retained")
+	}
+}
+
+// F1: the caller's TraceState (request-supplied, variable size) is never
+// retained; only TraceID, SpanID, TraceFlags and Remote are.
+func TestAsyncHandler_SpanSnapshotDropsTraceState(t *testing.T) {
+	gate := make(chan struct{})
+	h, _, c := newTestAsync(t, gate)
+	ts, err := trace.ParseTraceState("vendor1=" + strings.Repeat("a", 200) + ",vendor2=b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{0xa, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+		SpanID:     trace.SpanID{0xb, 2, 3, 4, 5, 6, 7, 8},
+		TraceFlags: trace.FlagsSampled,
+		TraceState: ts,
+		Remote:     true,
+	})
+	if sc.TraceState().Len() != 2 {
+		t.Fatalf("setup: trace state len = %d", sc.TraceState().Len())
+	}
+	ctx := trace.ContextWithRemoteSpanContext(context.Background(), sc)
+	if err := h.Handle(ctx, rec("scion.audit")); err != nil {
+		t.Fatal(err)
+	}
+	close(gate)
+	got := (<-c.out).span
+	if got.TraceID() != sc.TraceID() || got.SpanID() != sc.SpanID() ||
+		got.TraceFlags() != sc.TraceFlags() || got.IsRemote() != sc.IsRemote() {
+		t.Fatalf("span identity changed: got %v want %v", got, sc)
+	}
+	if got.TraceState().Len() != 0 {
+		t.Fatalf("TraceState retained: %q", got.TraceState().String())
+	}
+}
+
+// F3: the write context carries the worker's budget deadline.
+func TestAsyncHandler_WriteContextHasBudgetDeadline(t *testing.T) {
+	h, _, c := newTestAsync(t, nil)
+	if err := h.Handle(context.Background(), rec("m")); err != nil {
+		t.Fatal(err)
+	}
+	if !(<-c.out).hasDeadline {
+		t.Fatal("write context has no budget deadline")
 	}
 }
 

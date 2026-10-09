@@ -51,7 +51,11 @@ var (
 )
 
 // AsyncRecord is the immutable item queued by AsyncHandler. It holds only
-// cloned values: no caller context, no shared attr storage.
+// cloned values: no caller context, no shared attr storage. From the caller
+// context it keeps only the fixed-size trace identity (TraceID, SpanID,
+// TraceFlags, Remote) of a valid span context; the variable-size,
+// request-supplied TraceState is deliberately dropped, because it is caller
+// memory outside every byte budget and no sink needs it.
 type AsyncRecord struct {
 	handler slog.Handler
 	record  slog.Record
@@ -59,14 +63,14 @@ type AsyncRecord struct {
 }
 
 // NewAsyncWriter creates the asyncwrite.Writer that drains AsyncRecords into
-// their (view-derived) inner handlers. Each write runs with a fresh
-// background context carrying only the caller's snapshotted span context.
+// their (view-derived) inner handlers. Each write runs with the worker's
+// fresh budget context (deadline = WriteBudget, derived from
+// context.Background()) carrying only the snapshotted span identity.
 func NewAsyncWriter(cfg asyncwrite.Config) (*asyncwrite.Writer[AsyncRecord], error) {
 	return asyncwrite.New(cfg, writeAsyncRecord)
 }
 
-func writeAsyncRecord(item AsyncRecord) error {
-	ctx := context.Background()
+func writeAsyncRecord(ctx context.Context, item AsyncRecord) error {
 	if item.span.IsValid() {
 		ctx = trace.ContextWithSpanContext(ctx, item.span)
 	}
@@ -144,9 +148,7 @@ func (h *AsyncHandler) Handle(ctx context.Context, r slog.Record) error {
 	})
 
 	item := AsyncRecord{handler: h.inner, record: out}
-	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
-		item.span = sc
-	}
+	item.span = snapshotSpan(trace.SpanContextFromContext(ctx))
 	return h.w.TryEnqueue(item, int64(acc.bytes))
 }
 
@@ -195,6 +197,19 @@ func (h *AsyncHandler) WithGroup(name string) slog.Handler {
 		preAttrs: h.preAttrs,
 		depth:    h.depth + 1,
 	}
+}
+
+// snapshotSpan keeps only the fixed-size identity of a valid span context.
+func snapshotSpan(sc trace.SpanContext) trace.SpanContext {
+	if !sc.IsValid() {
+		return trace.SpanContext{}
+	}
+	return trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    sc.TraceID(),
+		SpanID:     sc.SpanID(),
+		TraceFlags: sc.TraceFlags(),
+		Remote:     sc.IsRemote(),
+	})
 }
 
 func (h *AsyncHandler) rejecting() *AsyncHandler {

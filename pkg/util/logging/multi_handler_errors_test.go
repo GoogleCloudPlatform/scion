@@ -72,8 +72,17 @@ func TestMultiHandler_HandleNilWhenAllSucceed(t *testing.T) {
 	}
 }
 
-// slog.Logger callers are unaffected: the joined error is discarded.
+// slog.Logger callers are unaffected: the joined error is discarded and a
+// healthy sibling still receives the record.
 func TestMultiHandler_LoggerIgnoresJoinedError(t *testing.T) {
-	m := newMultiHandler(&failingHandler{err: errors.New("x")})
-	slog.New(m).Info("does not panic or surface")
+	failing := &failingHandler{err: errors.New("x")}
+	var buf bytes.Buffer
+	m := newMultiHandler(failing, slog.NewJSONHandler(&buf, nil))
+	slog.New(m).Info("through logger")
+	if failing.calls != 1 {
+		t.Fatalf("failing child calls = %d", failing.calls)
+	}
+	if !strings.Contains(buf.String(), `"msg":"through logger"`) {
+		t.Fatalf("healthy sibling not written via slog.Logger: %q", buf.String())
+	}
 }
