@@ -161,10 +161,10 @@ function clickMention(el: any, slug: string): void {
  */
 function swipe(
   el: any,
-  opts: { dx: number; dy?: number; durationMs?: number; path?: EventTarget[] }
+  opts: { dx: number; dy?: number; durationMs?: number; path?: EventTarget[]; startX?: number }
 ): { moveCancelled: boolean } {
   const dy = opts.dy ?? 0;
-  const start = 200;
+  const start = opts.startX ?? 200;
   const now = Date.now();
   vi.setSystemTime(now);
   let moveCancelled = false;
@@ -316,6 +316,351 @@ describe('chat page — @mention click opens a DM', () => {
   });
 });
 
+describe('chat page — mobile panel history', () => {
+  /**
+   * A page in the given layout that may write panel entries. Pages here are
+   * never connected (see the file doc comment), so the route check that
+   * gates history writes is stood in for, and `popstate` is relayed by hand.
+   */
+  function historyPage(mobile = true): any {
+    const el = createPage();
+    el.isMobileLayout = mobile;
+    el.ownsPanelHistory = (): boolean => el.isMobileLayout;
+    el.routeShowsCurrentUrl = (): boolean => true;
+    const relay = (e: PopStateEvent): void => el._handlePopState(e);
+    window.addEventListener('popstate', relay);
+    relays.push(relay);
+    return el;
+  }
+  const relays: Array<(e: PopStateEvent) => void> = [];
+  let goSpy: MockInstance | null = null;
+  const panelOf = (state: unknown): unknown =>
+    (state as Record<string, { panel?: string }> | null)?.scionInPage?.panel;
+
+  beforeEach(() => {
+    window.history.replaceState({}, '', '/chat/alpha/topic-1');
+    // Browsers traverse history asynchronously: `popstate` arrives in a later
+    // task, not inside `history.go()` as happy-dom dispatches it.
+    const go = window.history.go.bind(window.history);
+    goSpy = vi.spyOn(window.history, 'go').mockImplementation((delta?: number) => {
+      setTimeout(() => go(delta), 0);
+    });
+  });
+  afterEach(() => {
+    for (const relay of relays.splice(0)) window.removeEventListener('popstate', relay);
+    goSpy?.mockRestore();
+    goSpy = null;
+    vi.mocked(pushRoute).mockClear();
+  });
+
+  it('Back goes from members to the conversation to the rail, and Forward redoes it', async () => {
+    const el = historyPage();
+    const start = window.history.length;
+
+    el.goToPanel('center'); // a swipe from the rail
+    el.goToPanel('right'); // the members button
+    expect(window.history.length).toBe(start + 2);
+    expect(panelOf(window.history.state)).toBe('right');
+
+    window.history.back();
+    await vi.waitFor(() => expect(el.mobilePanel).toBe('center'));
+    window.history.back();
+    await vi.waitFor(() => expect(el.mobilePanel).toBe('left'));
+    // Popping never pushes: the entries are all still there to go forward to.
+    expect(window.history.length).toBe(start + 2);
+    expect(window.location.pathname).toBe('/chat/alpha/topic-1');
+
+    window.history.forward();
+    await vi.waitFor(() => expect(el.mobilePanel).toBe('center'));
+    window.history.forward();
+    await vi.waitFor(() => expect(el.mobilePanel).toBe('right'));
+    expect(window.history.length).toBe(start + 2);
+  });
+
+  it("the app's own back controls step back through history instead of adding entries", async () => {
+    const el = historyPage();
+    el.goToPanel('center');
+    el.goToPanel('right');
+    const length = window.history.length;
+
+    el.goToPanel('center'); // the members panel's back button
+    // The panel follows the popstate.
+    await vi.waitFor(() => expect(el.mobilePanel).toBe('center'));
+    el.mobilePanel = 'center';
+    swipe(el, { dx: 120 }); // a swipe back to the rail
+    await vi.waitFor(() => expect(el.mobilePanel).toBe('left'));
+
+    expect(window.history.length).toBe(length);
+    expect(panelOf(window.history.state)).toBe('left');
+  });
+
+  it('a swipe and a tap landing together go back one panel, not two', async () => {
+    const el = historyPage();
+    el.goToPanel('center');
+    el.goToPanel('right');
+    const length = window.history.length;
+
+    el.goToPanel('center'); // the back button
+    el.goToPanel('center'); // tapped twice
+    el.handleSwipeRight(); // and a swipe, before the first popstate
+
+    expect(goSpy).toHaveBeenCalledTimes(1);
+    expect(goSpy).toHaveBeenCalledWith(-1);
+    await vi.waitFor(() => expect(el.mobilePanel).toBe('center'));
+    await flush();
+    expect(el.mobilePanel).toBe('center');
+    expect(window.history.length).toBe(length);
+  });
+
+  it('opening a thread from the rail puts the rail entry beneath it, on its URL', async () => {
+    const el = historyPage();
+    window.history.replaceState(
+      { scionInPage: { panel: 'left', below: [] } },
+      '',
+      '/chat/alpha/topic-1'
+    );
+    const start = window.history.length;
+
+    el.navigateToThread({
+      conversationKey: 'topic-2',
+      projectId: 'p-alpha',
+      projectSlug: 'alpha',
+      threadName: 'two',
+    });
+
+    expect(el.mobilePanel).toBe('center');
+    expect(window.history.length).toBe(start + 1);
+    expect(window.location.pathname).toBe('/chat/alpha/topic-2');
+    expect(panelOf(window.history.state)).toBe('center');
+
+    window.history.back();
+    await vi.waitFor(() => expect(el.mobilePanel).toBe('left'));
+    // Back slid to the rail without leaving the thread's URL.
+    expect(window.location.pathname).toBe('/chat/alpha/topic-2');
+    expect(el.v2Conversation.conversationKey).toBe('topic-2');
+  });
+
+  it('a rail reload on a space URL leaves the panel and its entry alone; another space opens on the rail', () => {
+    const el = historyPage();
+    // Pages here are never connected: stand in a rail for selectSpaceBySlug.
+    const rail = { expandSpace: vi.fn() };
+    Object.defineProperty(el, 'shadowRoot', {
+      value: { querySelector: (sel: string) => (sel === 'scion-chat-space-rail' ? rail : null) },
+    });
+    el._slugToProjectId.set('alpha', 'p-alpha');
+    el._slugToProjectId.set('beta', 'p-beta');
+    window.history.replaceState({}, '', '/chat/alpha');
+
+    el.parseV2Route(); // the space opens: the rail
+    expect(el.mobilePanel).toBe('left');
+    el.goToPanel('center'); // the user swipes to the (empty) conversation panel
+    const length = window.history.length;
+
+    el.parseV2Route(); // the rail reloads and re-parses the route
+    // What updated() does with the panel the re-parse left.
+    el._panelHistory.sync(el.mobilePanel);
+
+    expect(el.mobilePanel).toBe('center');
+    expect(window.history.state.scionInPage).toMatchObject({ panel: 'center', below: ['left'] });
+    expect(window.history.length).toBe(length);
+    expect(rail.expandSpace).toHaveBeenCalledTimes(2);
+
+    // Another space still opens on the rail.
+    window.history.replaceState(window.history.state, '', '/chat/beta');
+    el.parseV2Route();
+    expect(el.mobilePanel).toBe('left');
+  });
+
+  it('opening a thread by its legacy URL leaves the rail entry on its own URL', () => {
+    const el = historyPage();
+    window.history.replaceState(
+      { scionInPage: { panel: 'left', below: [], run: 1 } },
+      '',
+      '/chat/alpha/topic-1'
+    );
+    const start = window.history.length;
+
+    // No slug known: the page pushes the legacy URL and rewrites it later.
+    el.navigateToThread({ conversationKey: 'topic-2', projectId: 'p-other', threadName: 'two' });
+
+    expect(window.location.pathname).toBe('/chat/space/p-other/thread/topic-2');
+    expect(window.history.length).toBe(start + 1);
+    expect(window.history.state.scionInPage).toMatchObject({ panel: 'center', below: [] });
+    window.history.back();
+    // The entry beneath is still the rail on the URL it had.
+    expect(window.location.pathname).toBe('/chat/alpha/topic-1');
+    expect(window.history.state.scionInPage).toMatchObject({ panel: 'left', below: [] });
+  });
+
+  it('picking the open thread again adds no entry', () => {
+    const el = historyPage();
+    el.v2Conversation = { conversationKey: 'topic-1', projectId: 'p-alpha', isDM: false };
+    el.mobilePanel = 'center';
+    const start = window.history.length;
+    vi.mocked(pushRoute).mockClear();
+
+    el.navigateToThread({
+      conversationKey: 'topic-1',
+      projectId: 'p-alpha',
+      projectSlug: 'alpha',
+      threadName: 'one',
+    });
+
+    expect(pushRoute).not.toHaveBeenCalled();
+    expect(window.history.length).toBe(start);
+    expect(el.mobilePanel).toBe('center');
+  });
+
+  it('reopening the open DM from the members panel steps back instead of adding an entry', async () => {
+    const el = historyPage();
+    const dmKey = 'dm:agent:agent-1:user:user-me';
+    window.history.replaceState({}, '', `/chat/dm/${encodeURIComponent(dmKey)}`);
+    el.goToPanel('center');
+    el.goToPanel('right');
+    const length = window.history.length;
+    vi.mocked(pushRoute).mockClear();
+
+    el.openDM('agent-1', 'agent', 'Coder One');
+
+    expect(pushRoute).not.toHaveBeenCalled();
+    expect(goSpy).toHaveBeenCalledWith(-1);
+    await vi.waitFor(() => expect(window.history.state.scionInPage.panel).toBe('center'));
+    expect(el.mobilePanel).toBe('center');
+    expect(window.history.length).toBe(length);
+  });
+
+  it('adds no entries for panel changes on desktop, and pushes thread URLs as before', () => {
+    const el = historyPage(false);
+    el.mobilePanel = 'center';
+    const start = window.history.length;
+
+    el.goToPanel('right');
+    el.goToPanel('center');
+    expect(window.history.length).toBe(start);
+    expect(window.history.state).toEqual({});
+
+    el.navigateToThread({
+      conversationKey: 'topic-2',
+      projectId: 'p-alpha',
+      projectSlug: 'alpha',
+      threadName: 'two',
+    });
+    expect(pushRoute).toHaveBeenLastCalledWith('/chat/alpha/topic-2');
+    expect(window.history.length).toBe(start + 1);
+  });
+
+  it('a popstate on desktop leaves the panel alone', () => {
+    const el = historyPage(false);
+    el.mobilePanel = 'center';
+    el._handlePopState(
+      new PopStateEvent('popstate', { state: { scionInPage: { panel: 'left', below: [] } } })
+    );
+    expect(el.mobilePanel).toBe('center');
+  });
+
+  it('on desktop, Back onto panel entries left from the mobile layout leaves the URL in one press', async () => {
+    window.history.replaceState({}, '', '/before');
+    window.history.pushState({}, '', '/chat/alpha/topic-1');
+    const el = historyPage();
+    el.goToPanel('center');
+    el.goToPanel('right');
+    // The window widens (or the page is next used on a wide screen).
+    el.isMobileLayout = false;
+    el._panelHistory.observe();
+
+    window.history.back();
+    await vi.waitFor(() => expect(window.location.pathname).toBe('/before'));
+    expect(goSpy).toHaveBeenLastCalledWith(-2);
+  });
+
+  it('a page created wide on top of panel entries skips them on Back too', async () => {
+    window.history.replaceState({}, '', '/before');
+    window.history.pushState({}, '', '/chat/alpha/topic-1');
+    historyPage().goToPanel('center');
+    // A reload or a return to the URL, now wide: the page starts on the entry.
+    for (const relay of relays.splice(0)) window.removeEventListener('popstate', relay);
+    const wide = historyPage(false);
+    wide._panelHistory.observe();
+
+    window.history.back();
+    await vi.waitFor(() => expect(window.location.pathname).toBe('/before'));
+  });
+
+  it('back in the mobile layout, shows the panel the current entry records', () => {
+    const el = historyPage(false);
+    el.mobilePanel = 'center';
+    window.history.replaceState(
+      { scionInPage: { panel: 'right', below: ['left', 'center'] } },
+      '',
+      '/chat/alpha/topic-1'
+    );
+
+    el._handleMobileLayoutChange({ matches: true });
+
+    expect(el.mobilePanel).toBe('right');
+    // The entry keeps its record; nothing was pushed or rewritten.
+    expect(window.history.state).toEqual({
+      scionInPage: { panel: 'right', below: ['left', 'center'] },
+    });
+  });
+
+  it('leaves a popstate on another URL to the router, without moving its own panel', () => {
+    const el = historyPage();
+    el.mobilePanel = 'center';
+    el.routeShowsCurrentUrl = (): boolean => false;
+    el._handlePopState(
+      new PopStateEvent('popstate', { state: { scionInPage: { panel: 'right', below: [] } } })
+    );
+    expect(el.mobilePanel).toBe('center');
+  });
+
+  it("leaves a rightward swipe from the screen's left edge to the browser's back gesture", () => {
+    vi.useFakeTimers();
+    const el = historyPage();
+    el.mobilePanel = 'center';
+    const length = window.history.length;
+
+    swipe(el, { dx: 150, startX: 10 });
+    expect(el.mobilePanel).toBe('center');
+    expect(goSpy).not.toHaveBeenCalled();
+    expect(window.history.length).toBe(length);
+
+    // Just inside the edge strip it is the app's swipe again.
+    swipe(el, { dx: 150, startX: 30 });
+    expect(el.mobilePanel).toBe('left');
+    // A leftward swipe from the edge is not a back gesture.
+    swipe(el, { dx: -150, startX: 10 });
+    expect(el.mobilePanel).toBe('center');
+  });
+
+  it('a reloaded entry opens its conversation on the panel it recorded', () => {
+    const el = createPage();
+    el.isMobileLayout = true;
+    el._slugToProjectId.set('alpha', 'p-alpha');
+    el._restoredPanel = 'right';
+
+    el.parseV2Route();
+
+    expect(el.v2Conversation.conversationKey).toBe('topic-1');
+    expect(el.mobilePanel).toBe('right');
+
+    // Only the first time: a later open from the URL lands on the conversation.
+    el.v2Conversation = null;
+    el.parseV2Route();
+    expect(el.mobilePanel).toBe('center');
+  });
+
+  it('a deep link with no recorded panel opens on the conversation', () => {
+    const el = createPage();
+    el.isMobileLayout = true;
+    el._slugToProjectId.set('alpha', 'p-alpha');
+
+    el.parseV2Route();
+
+    expect(el.mobilePanel).toBe('center');
+  });
+});
+
 describe('chat page — mobile panel default and header navigation', () => {
   it('starts on the space rail so a conversation can be picked', () => {
     expect(createPage().mobilePanel).toBe('left');
@@ -323,12 +668,25 @@ describe('chat page — mobile panel default and header navigation', () => {
 
   it('returns to the rail when the route clears the conversation', () => {
     const el = createPageOnConversation();
+    el.v2Conversation = { conversationKey: 'topic-1', projectId: 'p1', isDM: false };
     window.history.replaceState({}, '', '/chat');
 
     el.parseV2Route();
 
     expect(el.v2Conversation).toBeNull();
     expect(el.mobilePanel).toBe('left');
+  });
+
+  it('leaves the panel alone when /chat is parsed again with nothing open', () => {
+    // The rail reloads re-parse the route; a user on the (empty) centre
+    // panel stays there instead of being pulled back to the rail.
+    const el = createPageOnConversation();
+    window.history.replaceState({}, '', '/chat');
+
+    el.parseV2Route();
+
+    expect(el.v2Conversation).toBeNull();
+    expect(el.mobilePanel).toBe('center');
   });
 
   it('opens the conversation panel for a deep-linked DM', () => {
@@ -420,6 +778,28 @@ describe('chat page — mobile panel default and header navigation', () => {
     // Same thread, now carrying the slug the URL names.
     expect(el.v2Conversation).toEqual({ ...opened, projectSlug: 'alpha' });
     expect(el.mobilePanel).toBe('left');
+  });
+
+  it('rewrites a legacy space URL in place instead of pushing a redirect', () => {
+    // A push would leave the legacy URL beneath the rail, and Back to it
+    // would redirect forward again.
+    const el = createPage();
+    window.history.replaceState({}, '', '/chat/space/p1?x=1');
+    el._slugToProjectId.set('alpha', 'p1');
+    el._projectIdToSlug.set('p1', 'alpha');
+    vi.mocked(navigateTo).mockClear();
+    const selectSpace = vi.spyOn(el, 'selectSpaceBySlug').mockResolvedValue(undefined);
+    const historyLength = window.history.length;
+
+    el.parseV2Route();
+
+    expect(replaceRoute).toHaveBeenCalledWith('/chat/alpha');
+    expect(navigateTo).not.toHaveBeenCalled();
+    expect(window.location.pathname).toBe('/chat/alpha');
+    expect(window.location.search).toBe('?x=1');
+    expect(window.history.length).toBe(historyLength);
+    // The readable URL is then parsed on the same page: the space opens.
+    expect(selectSpace).toHaveBeenCalledWith('alpha', 'p1');
   });
 
   it('re-titles the thread once the router has caught up with the rewrite', async () => {
