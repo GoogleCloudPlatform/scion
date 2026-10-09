@@ -118,6 +118,85 @@ func TestCloneDepthAgentSchema(t *testing.T) {
 	}
 }
 
+// Every number form the schemas accept as clone_depth also decodes to a
+// value GitDepth accepts, and every form they reject fails GitDepth, so a
+// config that validates never fails later at template load or start.
+func TestCloneDepth_SchemaAndDecoderAgree(t *testing.T) {
+	for _, tt := range []struct {
+		lit   string
+		depth int
+		ok    bool
+	}{
+		{lit: "5", depth: 5, ok: true},
+		{lit: "5.0", depth: 5, ok: true},
+		{lit: "1e2", depth: 100, ok: true},
+		{lit: "2.5e1", depth: 25, ok: true},
+		{lit: "1.5"},
+		{lit: "0"},
+		{lit: "0.0"},
+		{lit: "-1"},
+	} {
+		t.Run("json "+tt.lit, func(t *testing.T) {
+			doc := `{"clone_depth": ` + tt.lit + `}`
+			errs, err := ValidateAgentConfig([]byte(doc), "1")
+			require.NoError(t, err)
+			assert.Equal(t, tt.ok, len(errs) == 0, "schema result for %s: %v", doc, errs)
+
+			var cfg api.ScionConfig
+			require.NoError(t, json.Unmarshal([]byte(doc), &cfg))
+			depth, ok, gdErr := cfg.CloneDepth.GitDepth()
+			if !tt.ok {
+				assert.Error(t, gdErr)
+				return
+			}
+			require.NoError(t, gdErr)
+			assert.True(t, ok)
+			assert.Equal(t, tt.depth, depth)
+		})
+	}
+
+	for _, tt := range []struct {
+		lit   string
+		depth int
+		ok    bool
+	}{
+		{lit: "5.0", depth: 5, ok: true},
+		{lit: "1e2", depth: 100, ok: true},
+		{lit: "0x10", depth: 16, ok: true},
+		{lit: "0o20", depth: 16, ok: true},
+		{lit: "1.5"},
+		{lit: "0x0"},
+	} {
+		t.Run("yaml "+tt.lit, func(t *testing.T) {
+			settingsDoc := "schema_version: \"1\"\nprofiles:\n  p:\n    runtime: k8s\n    clone_depth: " + tt.lit + "\n"
+			errs, err := ValidateSettings([]byte(settingsDoc), "1")
+			require.NoError(t, err)
+			assert.Equal(t, tt.ok, len(errs) == 0, "settings schema result for %s: %v", tt.lit, errs)
+
+			dir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "scion-agent.yaml"), []byte("clone_depth: "+tt.lit+"\n"), 0644))
+			cfg, err := (&Template{Path: dir}).LoadConfig()
+			if !tt.ok {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			depth, ok, gdErr := cfg.CloneDepth.GitDepth()
+			require.NoError(t, gdErr)
+			assert.True(t, ok)
+			assert.Equal(t, tt.depth, depth)
+
+			// The settings file loader agrees with the template loader.
+			vs, _, err := LoadEffectiveSettings(writeSharedDirK8sGlobalSettings(t, settingsDoc))
+			require.NoError(t, err)
+			pDepth, pOK, pErr := vs.Profiles["p"].CloneDepth.GitDepth()
+			require.NoError(t, pErr)
+			assert.True(t, pOK)
+			assert.Equal(t, tt.depth, pDepth)
+		})
+	}
+}
+
 func TestResolveCloneDepthWithSource(t *testing.T) {
 	projectDir := writeSharedDirK8sGlobalSettings(t, cloneDepthSettingsYAML)
 	vs, _, err := LoadEffectiveSettings(projectDir)

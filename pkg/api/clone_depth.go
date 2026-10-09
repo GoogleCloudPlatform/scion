@@ -18,7 +18,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"strconv"
+	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // CloneDepthFull is the clone_depth value that requests a full clone
@@ -30,10 +34,13 @@ const CloneDepthFull = "full"
 // empty value means "not set", which keeps the default shallow clone.
 //
 // It decodes from either a JSON/YAML string ("full", "50") or a bare
-// integer (50), so `clone_depth: 50` works in YAML and JSON alike.
+// integer (50), so `clone_depth: 50` works in YAML and JSON alike. A bare
+// number is stored in canonical decimal form when it is whole-valued
+// (5.0, 1e2 and YAML 0x10 become "5", "100" and "16"), which matches the
+// schemas: they count any whole-valued number as an integer.
 type CloneDepth string
 
-// UnmarshalJSON accepts a JSON string or a JSON integer.
+// UnmarshalJSON accepts a JSON string or a JSON number.
 func (d *CloneDepth) UnmarshalJSON(b []byte) error {
 	b = bytes.TrimSpace(b)
 	if bytes.Equal(b, []byte("null")) {
@@ -52,8 +59,80 @@ func (d *CloneDepth) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, &n); err != nil {
 		return fmt.Errorf("clone_depth: want \"full\" or a positive integer, got %s", string(b))
 	}
-	*d = CloneDepth(n.String())
+	raw := n.String()
+	*d = CloneDepth(raw)
+	if !smallExponent(raw) {
+		// Too large to be a usable depth; keep the text so validation
+		// rejects it, without expanding a huge power of ten.
+		return nil
+	}
+	if r, ok := new(big.Rat).SetString(raw); ok {
+		*d = canonicalNumber(r, raw)
+	}
 	return nil
+}
+
+// maxCloneDepthExponent bounds the exponent of a JSON number that is
+// converted exactly; any larger value is far outside the int range.
+const maxCloneDepthExponent = 64
+
+// smallExponent reports whether the JSON number raw has no exponent, or
+// one whose magnitude is at most maxCloneDepthExponent.
+func smallExponent(raw string) bool {
+	i := strings.IndexAny(raw, "eE")
+	if i < 0 {
+		return true
+	}
+	exp, err := strconv.Atoi(raw[i+1:])
+	return err == nil && exp >= -maxCloneDepthExponent && exp <= maxCloneDepthExponent
+}
+
+// UnmarshalYAML accepts a YAML string or a YAML number. A number is
+// decoded the way yaml.v3 decodes it into an untyped value (the form the
+// schema validator sees), so 0x10 is 16 and 1e2 is 100.
+func (d *CloneDepth) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind == yaml.AliasNode && node.Alias != nil {
+		node = node.Alias
+	}
+	if node.Kind != yaml.ScalarNode {
+		return fmt.Errorf("clone_depth: want \"full\" or a positive integer, got %s", node.ShortTag())
+	}
+	var v interface{}
+	if err := node.Decode(&v); err != nil {
+		return err
+	}
+	r := new(big.Rat)
+	switch n := v.(type) {
+	case nil:
+		*d = ""
+		return nil
+	case int:
+		r.SetInt64(int64(n))
+	case int64:
+		r.SetInt64(n)
+	case uint64:
+		r.SetUint64(n)
+	case float64:
+		if r.SetFloat64(n) == nil {
+			// NaN or an infinity: keep the text so validation rejects it.
+			*d = CloneDepth(node.Value)
+			return nil
+		}
+	default:
+		*d = CloneDepth(node.Value)
+		return nil
+	}
+	*d = canonicalNumber(r, node.Value)
+	return nil
+}
+
+// canonicalNumber returns r in decimal form when it is whole-valued, else
+// raw (which GitDepth then rejects).
+func canonicalNumber(r *big.Rat, raw string) CloneDepth {
+	if !r.IsInt() {
+		return CloneDepth(raw)
+	}
+	return CloneDepth(r.Num().String())
 }
 
 // GitDepth converts the setting to a GitCloneConfig.Depth value. ok is
