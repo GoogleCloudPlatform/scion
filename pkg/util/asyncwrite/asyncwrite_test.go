@@ -870,10 +870,9 @@ func TestRejectionsAloneDegradeHealth(t *testing.T) {
 	}
 }
 
-// F3: the worker passes a fresh budget context (deadline set, no producer
-// values) to each write.
-type producerKey struct{}
-
+// F3: the worker passes a fresh budget context with the write budget as its
+// deadline to each write. (No producer value can reach it: TryEnqueue takes
+// no context.)
 func TestWriteReceivesFreshBudgetContext(t *testing.T) {
 	h := newHarness(t, Config{}, testHooks{})
 	if err := h.w.TryEnqueue(1, 1); err != nil {
@@ -882,11 +881,13 @@ func TestWriteReceivesFreshBudgetContext(t *testing.T) {
 	ctx := <-h.g.ctxs
 	<-h.g.entered
 	<-h.timers.writes
-	if _, ok := ctx.Deadline(); !ok {
+	deadline, ok := ctx.Deadline()
+	if !ok {
 		t.Fatal("write context has no deadline")
 	}
-	if ctx.Value(producerKey{}) != nil {
-		t.Fatal("unexpected value")
+	// One-sided: the deadline cannot be later than WriteBudget from now.
+	if limit := time.Now().Add(testBudget); deadline.After(limit) {
+		t.Fatalf("deadline %v later than budget limit %v", deadline, limit)
 	}
 	h.g.release <- nil
 	<-h.wrote

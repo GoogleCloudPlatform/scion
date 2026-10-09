@@ -105,7 +105,17 @@ func newTestAsync(t *testing.T, gate chan struct{}) (*AsyncHandler, *asyncwrite.
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = w.Close(context.Background()) })
+	// If the test failed (possibly before releasing its gate), Close with a
+	// cancelled context so Cleanup returns instead of waiting forever on a
+	// parked worker; neverAfterFunc also disables the drain timer.
+	t.Cleanup(func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		if t.Failed() {
+			cancel()
+		}
+		defer cancel()
+		_ = w.Close(ctx)
+	})
 	c := newCaptureInner(gate)
 	return NewAsyncHandler(c.handler(), w), w, c
 }
@@ -523,4 +533,63 @@ func TestAsyncHandler_AuditShapedRecordAccepted(t *testing.T) {
 		t.Fatalf("audit-shaped record rejected: %v", err)
 	}
 	<-c.out
+}
+
+// N1: pass 2 does not trust pass 1. A caller that mutates shared attr
+// storage between the passes gets the record rejected as unsupported:
+// no panic, nothing unvalidated queued.
+func TestAsyncHandler_Pass2RejectsConcurrentMutation(t *testing.T) {
+	cases := map[string]func(members []slog.Attr, list []string){
+		"kind swapped to LogValuer": func(m []slog.Attr, _ []string) { m[0] = slog.Any("m", panicValuer{t}) },
+		"kind swapped to map":       func(m []slog.Attr, _ []string) { m[0] = slog.Any("m", map[string]int{}) },
+		"string grew":               func(m []slog.Attr, _ []string) { m[0] = slog.String("m", "a-longer-value") },
+		"list item grew":            func(_ []slog.Attr, l []string) { l[0] = "a-longer-item" },
+		"key grew":                  func(m []slog.Attr, _ []string) { m[0] = slog.String("mm", "v") },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			h, w, _ := newTestAsync(t, nil)
+			members := []slog.Attr{slog.String("m", "v")}
+			list := []string{"x"}
+			h.betweenPasses = func() { mutate(members, list) }
+			r := rec("scion.audit", slog.Attr{Key: "g", Value: slog.GroupValue(members...)}, slog.Any("l", list))
+			if err := h.Handle(context.Background(), r); !errors.Is(err, ErrAsyncUnsupported) {
+				t.Fatalf("Handle = %v, want ErrAsyncUnsupported", err)
+			}
+			if s := w.Snapshot(); s.DroppedUnsupported != 1 || s.Enqueued != 0 {
+				t.Fatalf("snapshot = %+v", s)
+			}
+		})
+	}
+}
+
+// N1: the pass-2 cloner fails (never panics) outside the accepted kinds and
+// recomputes exactly the pass-1 accounting for accepted values.
+func TestAsyncHandler_ClonerMatchesPass1Accounting(t *testing.T) {
+	attrs := []slog.Attr{
+		slog.String("s", "abc"), slog.Int64("i", 1), slog.Bool("b", true),
+		slog.Group("g", slog.String("k", "vv"), slog.Any("l", []string{"x", "yz"})),
+	}
+	var acc accounting
+	cl := cloner{}
+	for _, a := range attrs {
+		if err := acc.attr(a, 0); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := cl.attr(a); !ok {
+			t.Fatalf("cloner rejected accepted attr %v", a)
+		}
+	}
+	if !cl.ok() || cl.bytes != acc.bytes || cl.attrs != acc.attrs {
+		t.Fatalf("cloner bytes/attrs = %d/%d, pass 1 = %d/%d", cl.bytes, cl.attrs, acc.bytes, acc.attrs)
+	}
+	for _, bad := range []slog.Attr{
+		slog.Any("v", panicValuer{t}), slog.Any("v", 42), slog.Any("v", []int{1}),
+		slog.Group("g", slog.Any("v", panicStringer{t})),
+	} {
+		c := cloner{}
+		if _, ok := c.attr(bad); ok || c.ok() {
+			t.Fatalf("cloner accepted %v", bad)
+		}
+	}
 }

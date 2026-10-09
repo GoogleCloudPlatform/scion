@@ -101,6 +101,10 @@ type AsyncHandler struct {
 	// reject marks a view whose WithAttrs/WithGroup input failed
 	// validation; every Handle counts unsupported and enqueues nothing.
 	reject bool
+
+	// betweenPasses is a test-only hook run after pass 1 succeeds and before
+	// pass 2; nil in production.
+	betweenPasses func()
 }
 
 // NewAsyncHandler wraps inner, queueing records on w.
@@ -140,12 +144,30 @@ func (h *AsyncHandler) Handle(ctx context.Context, r slog.Record) error {
 		return verr
 	}
 
+	if h.betweenPasses != nil {
+		h.betweenPasses()
+	}
+
 	// Pass 2: clone into a fresh record; never r.Clone (shared storage).
+	// The record's attr storage is shared with the caller, so pass 2 does
+	// not trust pass 1: it re-checks every kind and recomputes the
+	// accounting. Any divergence (only possible if the caller mutated the
+	// attrs concurrently) rejects the record as unsupported; nothing
+	// unvalidated is ever queued and nothing panics.
 	out := slog.NewRecord(r.Time, r.Level, strings.Clone(r.Message), r.PC)
+	cl := cloner{bytes: h.preBytes + len(r.Message), attrs: h.preAttrs}
 	r.Attrs(func(a slog.Attr) bool {
-		out.AddAttrs(cloneAttr(a))
+		c, ok := cl.attr(a)
+		if !ok {
+			return false
+		}
+		out.AddAttrs(c)
 		return true
 	})
+	if !cl.ok() || cl.bytes != acc.bytes || cl.attrs != acc.attrs {
+		h.w.Reject(asyncwrite.ResultUnsupported)
+		return ErrAsyncUnsupported
+	}
 
 	item := AsyncRecord{handler: h.inner, record: out}
 	item.span = snapshotSpan(trace.SpanContextFromContext(ctx))
@@ -168,8 +190,16 @@ func (h *AsyncHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 		return h.rejecting()
 	}
 	cloned := make([]slog.Attr, len(attrs))
+	cl := cloner{bytes: h.preBytes, attrs: h.preAttrs}
 	for i, a := range attrs {
-		cloned[i] = cloneAttr(a)
+		c, ok := cl.attr(a)
+		if !ok {
+			return h.rejecting()
+		}
+		cloned[i] = c
+	}
+	if !cl.ok() || cl.bytes != acc.bytes || cl.attrs != acc.attrs {
+		return h.rejecting()
 	}
 	return &AsyncHandler{
 		w:        h.w,
@@ -291,30 +321,72 @@ func (acc *accounting) attr(a slog.Attr, depth int) error {
 	return nil
 }
 
-// cloneAttr deep-copies an attr already accepted by accounting.attr.
-func cloneAttr(a slog.Attr) slog.Attr {
-	return slog.Attr{Key: strings.Clone(a.Key), Value: cloneValue(a.Value)}
+// cloner is pass 2: it deep-copies attrs while re-checking each kind
+// against the accepted set (checked assertions only) and recomputing the
+// pass-1 accounting, so the caller can compare the two totals.
+type cloner struct {
+	bytes  int
+	attrs  int
+	failed bool
 }
 
-func cloneValue(v slog.Value) slog.Value {
+func (c *cloner) ok() bool { return !c.failed }
+
+func (c *cloner) attr(a slog.Attr) (slog.Attr, bool) {
+	c.attrs++
+	c.bytes += len(a.Key)
+	if len(a.Key) > AsyncMaxKeyBytes {
+		c.failed = true
+		return slog.Attr{}, false
+	}
+	v, ok := c.value(a.Value)
+	if !ok {
+		c.failed = true
+		return slog.Attr{}, false
+	}
+	return slog.Attr{Key: strings.Clone(a.Key), Value: v}, true
+}
+
+func (c *cloner) value(v slog.Value) (slog.Value, bool) {
 	switch v.Kind() {
 	case slog.KindString:
-		return slog.StringValue(strings.Clone(v.String()))
+		s := v.String()
+		c.bytes += len(s)
+		if len(s) > AsyncMaxStringBytes {
+			return slog.Value{}, false
+		}
+		return slog.StringValue(strings.Clone(s)), true
+	case slog.KindInt64, slog.KindUint64, slog.KindFloat64, slog.KindBool,
+		slog.KindDuration, slog.KindTime:
+		c.bytes += asyncScalarAccounting
+		return v, true // scalars are values
 	case slog.KindGroup:
 		members := v.Group()
 		cloned := make([]slog.Attr, len(members))
 		for i, m := range members {
-			cloned[i] = cloneAttr(m)
+			cm, ok := c.attr(m)
+			if !ok {
+				return slog.Value{}, false
+			}
+			cloned[i] = cm
 		}
-		return slog.GroupValue(cloned...)
+		return slog.GroupValue(cloned...), true
 	case slog.KindAny:
-		items := slices.Clone(v.Any().([]string))
+		src, ok := v.Any().([]string)
+		if !ok || len(src) > AsyncMaxStringsItems {
+			return slog.Value{}, false
+		}
+		items := slices.Clone(src)
 		for i := range items {
+			if len(items[i]) > AsyncMaxStringsItem {
+				return slog.Value{}, false
+			}
+			c.bytes += len(items[i])
 			items[i] = strings.Clone(items[i])
 		}
-		return slog.AnyValue(items)
-	default: // scalars are values
-		return v
+		return slog.AnyValue(items), true
+	default: // KindLogValuer and anything unknown
+		return slog.Value{}, false
 	}
 }
 
