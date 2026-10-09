@@ -1670,13 +1670,13 @@ export class ScionPageAgentConfigure extends LitElement {
                 ></scion-message-mode-badge>
               </div>
               <div class="hint">
-                Message mode cannot be changed here. Use the
+                Message mode cannot be changed here. Use the Configuration tab of the
                 <a
                   data-testid="message-mode-detail-link"
                   href="/agents/${this.agent.id || this.agentId}"
                   >agent detail page</a
                 >
-                to change it.
+                to change it (requires permission to set message mode).
               </div>
             </div>
           `
