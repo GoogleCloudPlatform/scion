@@ -1497,6 +1497,10 @@ type V1ServerHubConduitConfig struct {
 	// AuthzRecheckInterval is the period of the re-check sweep of open
 	// user streams (e.g. "60s"; default "60s", 1s-10m).
 	AuthzRecheckInterval string `json:"authz_recheck_interval,omitempty" yaml:"authz_recheck_interval,omitempty" koanf:"authz_recheck_interval"`
+	// LifetimeCap is the platform lifetime cap of a conduit session
+	// (e.g. "3500s"; default "3500s", 90s-24h). The relay sends GoAway
+	// 60s before it.
+	LifetimeCap string `json:"lifetime_cap,omitempty" yaml:"lifetime_cap,omitempty" koanf:"lifetime_cap"`
 	// StreamAuthzMax is the authorization interval of open streams per
 	// originating principal kind: when a stream reaches it, the hub
 	// re-checks the principal and renews or closes the stream (defaults
@@ -2900,6 +2904,7 @@ var knownCompoundFields = []string{
 	"reconnect_window",
 	"internal_listen",
 	"peer_audience",
+	"lifetime_cap",
 	"instance_id",
 	"peer_auth",
 	"authorized_domains",
@@ -3247,6 +3252,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				ReconnectWindow:      c.ReconnectWindow,
 				InstanceID:           c.InstanceID,
 				AuthzRecheckInterval: c.AuthzRecheckInterval,
+				LifetimeCap:          c.LifetimeCap,
 			}
 			if m := c.StreamAuthzMax; m != nil {
 				gc.Hub.Conduit.StreamAuthzMax = HubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
@@ -3588,6 +3594,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			ReconnectWindow:      c.ReconnectWindow,
 			InstanceID:           c.InstanceID,
 			AuthzRecheckInterval: c.AuthzRecheckInterval,
+			LifetimeCap:          c.LifetimeCap,
 		}
 		if m := c.StreamAuthzMax; !m.IsZero() {
 			v1Hub.Conduit.StreamAuthzMax = &V1ServerHubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
