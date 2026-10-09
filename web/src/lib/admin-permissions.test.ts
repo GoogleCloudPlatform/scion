@@ -224,3 +224,40 @@ describe('admin-permissions: settings environment variables and hub settings tab
     expect(canEditHubEnvVars(null)).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Gating reads permissions, not isAdmin
+// ---------------------------------------------------------------------------
+
+describe('hasAnyPermission: members with system permissions', () => {
+  // isAdmin is true only for hub admins and super admins; a member can hold
+  // system-scoped permissions with isAdmin false.
+  const member = (...perms: string[]): AdminStatus => ({
+    isAdmin: false,
+    isSuperAdmin: false,
+    permissions: perms,
+  });
+
+  it('opens the admin page a member holds a permission for', () => {
+    expect(hasAnyPermission(member('quota.read'), NAV_PERMISSION_MAP['/admin/quotas'])).toBe(true);
+    expect(
+      hasAnyPermission(member('quota.read'), ROUTE_PERMISSION_MAP['scion-page-admin-quotas'])
+    ).toBe(true);
+  });
+
+  it('keeps other admin pages closed for that member', () => {
+    expect(hasAnyPermission(member('quota.read'), NAV_PERMISSION_MAP['/admin/users'])).toBe(false);
+    expect(isSettingsTabVisible(member('quota.read'), 'secrets')).toBe(false);
+  });
+
+  it('does not open an admin page from isAdmin alone', () => {
+    const adminWithoutPermissions: AdminStatus = {
+      isAdmin: true,
+      isSuperAdmin: false,
+      permissions: [],
+    };
+    expect(hasAnyPermission(adminWithoutPermissions, NAV_PERMISSION_MAP['/admin/quotas'])).toBe(
+      false
+    );
+  });
+});
