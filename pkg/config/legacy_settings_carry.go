@@ -53,9 +53,9 @@ type legacyKeyHandling int
 
 const (
 	// legacyKeyConverted: AdaptLegacySettings converts the value to its v1
-	// form (a v1 key of the same name and shape, such as workspace_path or
-	// hub_connections, or a new place such as server.broker or state.yaml,
-	// with a deprecation warning).
+	// form: a v1 key of the same name and shape (such as workspace_path or
+	// hub_connections), or a new place (such as server.broker or
+	// state.yaml) with a deprecation warning.
 	legacyKeyConverted legacyKeyHandling = iota + 1
 	// legacyKeyDropped: deprecated and not kept; AdaptLegacySettings warns.
 	legacyKeyDropped

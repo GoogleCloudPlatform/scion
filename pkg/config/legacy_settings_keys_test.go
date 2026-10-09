@@ -300,9 +300,9 @@ func TestMigrateSettingsFile_EveryLegacyKey(t *testing.T) {
 	}
 }
 
-// scion config set against a legacy file migrates it first; the carried
+// scion config set against a legacy file migrates it first; the converted
 // keys survive that write and are read back by the settings loader.
-func TestUpdateSetting_LegacyKeepsUnconvertedLegacyKeys(t *testing.T) {
+func TestUpdateSetting_LegacyKeepsConvertedV1Keys(t *testing.T) {
 	dir := carryTestDir(t, "settings.yaml", legacyEveryKeyYAML)
 	if err := UpdateSetting(dir, "default_template", "other", false); err != nil {
 		t.Fatalf("UpdateSetting: %v", err)
@@ -338,7 +338,7 @@ func TestUpdateSetting_LegacyKeepsUnconvertedLegacyKeys(t *testing.T) {
 
 // In a JSON file the legacy keys match case-insensitively; a converted
 // legacy key or field is written under its canonical name, once.
-func TestMigrateSettingsFile_JSONCarriedLegacyKeyCanonicalName(t *testing.T) {
+func TestMigrateSettingsFile_JSONLegacyKeyCanonicalName(t *testing.T) {
 	dir := carryTestDir(t, "settings.json", `{"Workspace_Path": "/w", "CLI": {"Mode": "agent", "autohelp": true}}`)
 	if _, err := MigrateSettingsFile(dir, false); err != nil {
 		t.Fatalf("MigrateSettingsFile: %v", err)
