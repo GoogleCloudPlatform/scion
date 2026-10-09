@@ -2611,7 +2611,7 @@ type V1ProfileConfig struct {
 	// CloneDepth is the git clone depth for agents using this profile:
 	// "full" or a positive integer. A template's or agent's clone_depth
 	// wins over it. Empty keeps the default shallow clone. See
-	// ResolveCloneDepth.
+	// ResolveCloneDepthWithSource.
 	CloneDepth api.CloneDepth `json:"clone_depth,omitempty" yaml:"clone_depth,omitempty" koanf:"clone_depth"`
 	// SharedDirStorageBackend overrides server.shared_dir_storage.backend
 	// ("local" or "nfs") for agents using this profile. It wins over the

@@ -480,12 +480,14 @@ type ScionConfig struct {
 	MaxTurns      int                        `json:"max_turns,omitempty" yaml:"max_turns,omitempty"`
 	MaxModelCalls int                        `json:"max_model_calls,omitempty" yaml:"max_model_calls,omitempty"`
 	MaxDuration   string                     `json:"max_duration,omitempty" yaml:"max_duration,omitempty"`
-	// CloneDepth sets the git clone depth for the agent's workspace:
-	// "full" or a positive integer. It overrides a profile's clone_depth.
-	// Empty keeps the profile value, else the default shallow clone.
-	CloneDepth CloneDepth       `json:"clone_depth,omitempty" yaml:"clone_depth,omitempty"`
-	Hub        *AgentHubConfig  `json:"hub,omitempty" yaml:"hub,omitempty"`
-	Telemetry  *TelemetryConfig `json:"telemetry,omitempty" yaml:"telemetry,omitempty"`
+	Hub           *AgentHubConfig            `json:"hub,omitempty" yaml:"hub,omitempty"`
+	Telemetry     *TelemetryConfig           `json:"telemetry,omitempty" yaml:"telemetry,omitempty"`
+
+	// CloneDepth sets the git clone depth for a clone-per-agent
+	// workspace: "full" or a positive integer. It overrides a profile's
+	// clone_depth. Empty keeps the profile value, else the default
+	// shallow clone of depth 1.
+	CloneDepth CloneDepth `json:"clone_depth,omitempty" yaml:"clone_depth,omitempty"`
 
 	Secrets []RequiredSecret `json:"secrets,omitempty" yaml:"secrets,omitempty"`
 
