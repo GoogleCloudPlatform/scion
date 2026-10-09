@@ -685,6 +685,16 @@ func TestScheduledSend_ScopedTokenRefused(t *testing.T) {
 // Store
 // ---------------------------------------------------------------------------
 
+// overdueBase is a fire time for rows that must be due now and still be
+// delivered: well past due, but far inside scheduledLateCutoff. A base of
+// exactly now-1h sits on the cutoff, so (with fire times rounded up to the
+// whole second) such a row turns missed and fails instead of being sent
+// whenever more than a fraction of a second passes before its fire-time
+// check, which a loaded CI runner easily takes (ptone/scion#4054).
+func overdueBase() time.Time {
+	return time.Now().Add(-scheduledLateCutoff / 2)
+}
+
 func newTestScheduledRow(key, sender string, fireAt time.Time) *ScheduledChatMessage {
 	now := time.Now().UTC()
 	return &ScheduledChatMessage{
@@ -1483,7 +1493,7 @@ func TestScheduledSend_HeavySendersDoNotStarveOthers(t *testing.T) {
 	f.srv.SetDispatcher(disp)
 
 	// bob and alice each have 26 due messages, older than carol's.
-	base := time.Now().Add(-time.Hour)
+	base := overdueBase()
 	for i := 0; i < 26; i++ {
 		for _, sender := range []string{f.bob.ID, f.alice.ID} {
 			m := newTestScheduledRow(fmt.Sprintf("heavy-%s-%d", sender, i), sender, base.Add(time.Duration(i)*time.Second))
@@ -1867,7 +1877,7 @@ func TestScheduledSend_ManyHeavySendersRotate(t *testing.T) {
 		heavy = append(heavy, u.ID)
 	}
 	require.Len(t, heavy, scheduledSendWorkers+1)
-	base := time.Now().Add(-time.Hour)
+	base := overdueBase()
 	for i := 0; i < 3*scheduledSendYieldAfter; i++ {
 		for j, sender := range heavy {
 			m := newTestScheduledRow(fmt.Sprintf("rot-%d-%d", j, i), sender, base.Add(time.Duration(i)*time.Second))
@@ -1972,7 +1982,7 @@ func TestScheduledSend_TwoReplicas_OneSenderManyRows(t *testing.T) {
 func TestScheduledSend_NoYieldWithoutContention(t *testing.T) {
 	f := newScheduledSendFixture(t)
 	ctx := context.Background()
-	base := time.Now().Add(-time.Hour)
+	base := overdueBase()
 	for i := 0; i < 12; i++ {
 		m := newTestScheduledRow(fmt.Sprintf("burst-%d", i), f.bob.ID, base.Add(time.Duration(i)*time.Second))
 		m.ConversationKey = f.topicID
@@ -2063,7 +2073,7 @@ func newTwoServerSQLite(t *testing.T, n int) *twoServerSQLite {
 	f.bob = bob
 
 	f.sms = scheduledMessageStoreFrom(f.a.wcs)
-	base := time.Now().Add(-time.Hour)
+	base := overdueBase()
 	for i := 0; i < n; i++ {
 		m := newTestScheduledRow(fmt.Sprintf("two-srv-%d", i), bob.ID, base.Add(time.Duration(i)*time.Second))
 		m.ConversationKey = f.topicID
