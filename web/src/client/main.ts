@@ -24,7 +24,7 @@ import themeCSS from '../styles/theme.css?inline';
 import '@shoelace-style/shoelace/dist/themes/light.css';
 import '@shoelace-style/shoelace/dist/themes/dark.css';
 
-import type { PageData, User } from '../shared/types.js';
+import type { AuthMeResponse, PageData, User } from '../shared/types.js';
 import { stateManager } from './state.js';
 import { debugLog } from './debug-log.js';
 import { setDocumentTitle } from './page-title.js';
@@ -241,7 +241,7 @@ async function fetchCurrentUser(): Promise<User | null> {
   try {
     const res = await fetch('/auth/me', { credentials: 'include' });
     if (!res.ok) return null;
-    const data = await res.json();
+    const data = (await res.json()) as AuthMeResponse;
     return {
       id: data.id,
       email: data.email,
@@ -287,7 +287,7 @@ async function loadPreferredTimeZone(): Promise<void> {
   try {
     const res = await fetch('/auth/me', { credentials: 'include' });
     if (!res.ok) return;
-    const data = await res.json();
+    const data = (await res.json()) as AuthMeResponse;
     setPreferredTimeZone(data.preferences?.timezone);
   } catch {
     // Non-critical — the effective zone falls back to the browser zone.
@@ -768,7 +768,7 @@ window.addEventListener('error', (event) => {
     source: event.filename,
     lineno: event.lineno,
     colno: event.colno,
-    error: event.error,
+    error: event.error as unknown,
   });
 });
 window.addEventListener('unhandledrejection', (event) => {
@@ -869,7 +869,7 @@ async function init(): Promise<void> {
     try {
       const statusRes = await fetch('/api/v1/system/status', { credentials: 'include' });
       if (statusRes.ok) {
-        const status = await statusRes.json();
+        const status = (await statusRes.json()) as { complete?: boolean };
         if (!status.complete) {
           sessionStorage.setItem('onboardingStatus', JSON.stringify(status));
           window.history.replaceState({}, '', '/onboarding');

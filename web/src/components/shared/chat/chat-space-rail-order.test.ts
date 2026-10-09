@@ -28,6 +28,7 @@
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { apiFetch } from '../../../client/api.js';
+import { requestBodyText } from '../../../client/__fixtures__/request-url.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -67,7 +68,7 @@ function serveUserPrefs(stored: Record<string, string> = {}): void {
       return Promise.resolve(new Response('{}', { status: 200 }));
     }
     if (init?.method === 'PUT') {
-      const body = JSON.parse(String(init.body)) as Record<string, string>;
+      const body = JSON.parse(requestBodyText(init.body)) as Record<string, string>;
       stored = {
         spaceSortMode: body.spaceSortMode || 'activity',
         threadSortMode: body.threadSortMode || 'activity',

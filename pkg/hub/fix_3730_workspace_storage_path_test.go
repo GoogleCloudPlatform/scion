@@ -61,9 +61,11 @@ var errWorkspaceRecordWrite = errors.New("workspace record write failed")
 //     returned by it instead.
 //
 // It records the agent ID and counts every UpdateAgent from the first
-// record write on (writes).
+// record write on (writes). Until fault is armed it delegates every call
+// unchanged; installWorkspaceRecordStore installs it.
 type workspaceRecordStore struct {
 	store.Store
+	fault        *storeFaultSwitch
 	mu           sync.Mutex
 	beforeFirst  func(agentID string)
 	firstErr     error
@@ -79,6 +81,9 @@ type workspaceRecordStore struct {
 }
 
 func (s *workspaceRecordStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
+	if !s.fault.Active() {
+		return s.Store.UpdateAgent(ctx, a)
+	}
 	s.mu.Lock()
 	first := !s.firstDone && a.AppliedConfig != nil && a.AppliedConfig.WorkspaceStoragePath != ""
 	second := s.firstFailed && !s.retried
@@ -113,6 +118,9 @@ func (s *workspaceRecordStore) UpdateAgent(ctx context.Context, a *store.Agent) 
 }
 
 func (s *workspaceRecordStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if !s.fault.Active() {
+		return s.Store.GetAgent(ctx, id)
+	}
 	s.mu.Lock()
 	var injected error
 	if s.firstFailed {
@@ -123,6 +131,22 @@ func (s *workspaceRecordStore) GetAgent(ctx context.Context, id string) (*store.
 		return nil, injected
 	}
 	return s.Store.GetAgent(ctx, id)
+}
+
+// installWorkspaceRecordStore installs a workspaceRecordStore on srv through
+// installStoreFault, right after the server is built. configure, when set,
+// fills in the hooks and injected errors before the wrapper is installed.
+// The wrapper delegates until the returned switch is armed; tests arm it
+// just before the create under test.
+func installWorkspaceRecordStore(t *testing.T, srv *Server, configure func(fs *workspaceRecordStore)) (*workspaceRecordStore, *storeFaultSwitch) {
+	t.Helper()
+	return installStoreFault(t, srv, func(inner store.Store, fault *storeFaultSwitch) *workspaceRecordStore {
+		fs := &workspaceRecordStore{Store: inner, fault: fault}
+		if configure != nil {
+			configure(fs)
+		}
+		return fs
+	})
 }
 
 func (s *workspaceRecordStore) snapshot() (agentID string, writes int, retried bool) {
@@ -206,9 +230,9 @@ func assertWorkspaceRecordRolledBack(t *testing.T, s store.Store, project *store
 func TestWorkspaceRecord_FirstWriteLands(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, project := setupCreateAgentServer(t, disp)
+	fs, fault := installWorkspaceRecordStore(t, srv, nil)
 	uploads := useHubWorkspaceUpload(t, srv, project)
-	fs := &workspaceRecordStore{Store: s}
-	srv.store = fs
+	fault.Arm()
 
 	rec := brokerCreate(t, srv, project.ID, "ws-record-ok")
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
@@ -230,10 +254,12 @@ func TestWorkspaceRecord_FirstWriteLands(t *testing.T) {
 func TestWorkspaceRecord_WriteFails_RollsBack(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, project := setupCreateAgentServer(t, disp)
+	fs, fault := installWorkspaceRecordStore(t, srv, func(fs *workspaceRecordStore) {
+		fs.firstErr = errWorkspaceRecordWrite
+	})
 	useHubWorkspaceUpload(t, srv, project)
 	pub := recordCreatedEvents(t, srv)
-	fs := &workspaceRecordStore{Store: s, firstErr: errWorkspaceRecordWrite}
-	srv.store = fs
+	fault.Arm()
 
 	rec := brokerCreate(t, srv, project.ID, "ws-record-fail")
 	requireWorkspaceRecordFailed(t, rec)
@@ -276,11 +302,13 @@ func TestWorkspaceRecord_ConflictRetry_Answers201(t *testing.T) {
 				} else {
 					srv, s, project = setupCreateAgentServer(t, disp)
 				}
+				fs, fault := installWorkspaceRecordStore(t, srv, func(fs *workspaceRecordStore) {
+					fs.beforeFirst = func(id string) {
+						claimForTest(t, s, id, tc.state, tc.lease)
+					}
+				})
 				useHubWorkspaceUpload(t, srv, project)
-				fs := &workspaceRecordStore{Store: s, beforeFirst: func(id string) {
-					claimForTest(t, s, id, tc.state, tc.lease)
-				}}
-				srv.store = fs
+				fault.Arm()
 
 				rec := brokerCreate(t, srv, project.ID, fmt.Sprintf("ws-record-retry-%d-%t", i, nilDispatcher))
 				require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
@@ -308,12 +336,14 @@ func TestWorkspaceRecord_ConflictRetry_Answers201(t *testing.T) {
 func TestWorkspaceRecord_DeleteHoldsRow_Answers409(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, project := setupCreateAgentServer(t, disp)
+	fs, fault := installWorkspaceRecordStore(t, srv, func(fs *workspaceRecordStore) {
+		fs.beforeFirst = func(id string) {
+			claimForTest(t, s, id, store.DeletionStateDeleting, time.Minute)
+		}
+	})
 	useHubWorkspaceUpload(t, srv, project)
 	pub := recordCreatedEvents(t, srv)
-	fs := &workspaceRecordStore{Store: s, beforeFirst: func(id string) {
-		claimForTest(t, s, id, store.DeletionStateDeleting, time.Minute)
-	}}
-	srv.store = fs
+	fault.Arm()
 
 	rec := brokerCreate(t, srv, project.ID, "ws-record-held")
 	agentID, writes, retried := fs.snapshot()
@@ -349,17 +379,16 @@ func TestWorkspaceRecord_RetryFails_RollsBack(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 			srv, s, project := setupCreateAgentServer(t, disp)
+			fs, fault := installWorkspaceRecordStore(t, srv, func(fs *workspaceRecordStore) {
+				fs.beforeFirst = func(id string) { bumpPhase(t, s, id, string(state.PhaseCreated), "") }
+				fs.secondErr = tc.secondErr
+				if tc.bumpSecond {
+					fs.beforeSecond = func(id string) { bumpPhase(t, s, id, string(state.PhaseCreated), "") }
+				}
+			})
 			useHubWorkspaceUpload(t, srv, project)
 			pub := recordCreatedEvents(t, srv)
-			fs := &workspaceRecordStore{
-				Store:       s,
-				beforeFirst: func(id string) { bumpPhase(t, s, id, string(state.PhaseCreated), "") },
-				secondErr:   tc.secondErr,
-			}
-			if tc.bumpSecond {
-				fs.beforeSecond = func(id string) { bumpPhase(t, s, id, string(state.PhaseCreated), "") }
-			}
-			srv.store = fs
+			fault.Arm()
 
 			rec := brokerCreate(t, srv, project.ID, fmt.Sprintf("ws-record-retry-fail-%d", i))
 			requireWorkspaceRecordFailed(t, rec)
@@ -381,14 +410,13 @@ func TestWorkspaceRecord_RetryFails_RollsBack(t *testing.T) {
 func TestWorkspaceRecord_RereadFails_RollsBack(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, project := setupCreateAgentServer(t, disp)
+	fs, fault := installWorkspaceRecordStore(t, srv, func(fs *workspaceRecordStore) {
+		fs.beforeFirst = func(id string) { bumpPhase(t, s, id, string(state.PhaseCreated), "") }
+		fs.rereadErr = errors.New("re-read failed")
+	})
 	useHubWorkspaceUpload(t, srv, project)
 	pub := recordCreatedEvents(t, srv)
-	fs := &workspaceRecordStore{
-		Store:       s,
-		beforeFirst: func(id string) { bumpPhase(t, s, id, string(state.PhaseCreated), "") },
-		rereadErr:   errors.New("re-read failed"),
-	}
-	srv.store = fs
+	fault.Arm()
 
 	rec := brokerCreate(t, srv, project.ID, "ws-record-reread-fail")
 	requireWorkspaceRecordFailed(t, rec)
@@ -408,12 +436,14 @@ func TestWorkspaceRecord_RereadFails_RollsBack(t *testing.T) {
 func TestWorkspaceRecord_DeleteRemovedRow_Answers409(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, project := setupCreateAgentServer(t, disp)
+	fs, fault := installWorkspaceRecordStore(t, srv, func(fs *workspaceRecordStore) {
+		fs.beforeFirst = func(id string) {
+			require.NoError(t, s.DeleteAgent(context.Background(), id))
+		}
+	})
 	useHubWorkspaceUpload(t, srv, project)
 	pub := recordCreatedEvents(t, srv)
-	fs := &workspaceRecordStore{Store: s, beforeFirst: func(id string) {
-		require.NoError(t, s.DeleteAgent(context.Background(), id))
-	}}
-	srv.store = fs
+	fault.Arm()
 
 	rec := brokerCreate(t, srv, project.ID, "ws-record-removed")
 	agentID, writes, retried := fs.snapshot()
@@ -434,11 +464,13 @@ func TestWorkspaceRecord_DeleteRemovedRow_Answers409(t *testing.T) {
 // mergeDispatchedConfig) keeps the path on the row.
 func TestWorkspaceRecord_AsyncAccepted_ConflictRetryKeepsStoragePath(t *testing.T) {
 	srv, s, project, client := newAsyncCreateServer(t, true)
+	fs, fault := installWorkspaceRecordStore(t, srv, func(fs *workspaceRecordStore) {
+		fs.beforeFirst = func(id string) {
+			claimForTest(t, s, id, store.DeletionStateFailed, time.Minute)
+		}
+	})
 	useHubWorkspaceUpload(t, srv, project)
-	fs := &workspaceRecordStore{Store: s, beforeFirst: func(id string) {
-		claimForTest(t, s, id, store.DeletionStateFailed, time.Minute)
-	}}
-	srv.store = fs
+	fault.Arm()
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", map[string]interface{}{
 		"name": "ws-record-async", "projectId": project.ID, "task": "do it", "acceptAsyncLaunch": true,
@@ -464,13 +496,15 @@ func TestWorkspaceRecord_AsyncAccepted_ConflictRetryKeepsStoragePath(t *testing.
 // the storage path and the managed fields, and the create answers 201.
 func TestWorkspaceRecord_Managed_ConflictRetryKeepsStoragePath(t *testing.T) {
 	srv, s, project := setupCreateAgentServer(t, &createRaceDispatcher{})
+	fs, fault := installWorkspaceRecordStore(t, srv, func(fs *workspaceRecordStore) {
+		fs.beforeFirst = func(id string) {
+			claimForTest(t, s, id, store.DeletionStateFailed, time.Minute)
+		}
+	})
 	useHubWorkspaceUpload(t, srv, project)
 	backend := newInteractionLedgerBackend()
 	useManagedBackend(t, backend)
-	fs := &workspaceRecordStore{Store: s, beforeFirst: func(id string) {
-		claimForTest(t, s, id, store.DeletionStateFailed, time.Minute)
-	}}
-	srv.store = fs
+	fault.Arm()
 
 	rec := managedCreate(t, srv, project.ID, "ws-record-managed")
 	row := requireManagedCreated(t, rec, s)
@@ -491,13 +525,15 @@ func TestWorkspaceRecord_Managed_ConflictRetryKeepsStoragePath(t *testing.T) {
 // create stops its interaction once.
 func TestWorkspaceRecord_Managed_ConcurrentStopBeforeRecord_KeepsStopped(t *testing.T) {
 	srv, s, project := setupCreateAgentServer(t, &createRaceDispatcher{})
+	fs, fault := installWorkspaceRecordStore(t, srv, func(fs *workspaceRecordStore) {
+		fs.beforeFirst = func(id string) {
+			bumpPhase(t, s, id, string(state.PhaseStopped), "")
+		}
+	})
 	useHubWorkspaceUpload(t, srv, project)
 	backend := newInteractionLedgerBackend()
 	useManagedBackend(t, backend)
-	fs := &workspaceRecordStore{Store: s, beforeFirst: func(id string) {
-		bumpPhase(t, s, id, string(state.PhaseStopped), "")
-	}}
-	srv.store = fs
+	fault.Arm()
 
 	rec := managedCreate(t, srv, project.ID, "ws-record-managed-stopped")
 	row := requireManagedCreated(t, rec, s)
