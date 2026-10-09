@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
@@ -37,6 +38,7 @@ import (
 func resetConduitFlags() {
 	conduitInternalListen, conduitInternalAdvertise = "", ""
 	conduitGrantKeyActivation, conduitReconnectWindow = "", ""
+	conduitUserStreamAuthzMax = ""
 	conduitTCPAllowedPorts = nil
 }
 
@@ -101,6 +103,11 @@ func TestApplyConduitFlagOverrides(t *testing.T) {
 			},
 		},
 		{
+			name: "user stream authz max",
+			args: []string{"--conduit-stream-authz-max-user=2h"},
+			want: func() config.HubConduitConfig { c := configured; c.StreamAuthzMax.User = "2h"; return c }(),
+		},
+		{
 			name: "an explicit empty value clears the setting",
 			args: []string{"--internal-advertise="},
 			want: func() config.HubConduitConfig { c := configured; c.InternalAdvertise = ""; return c }(),
@@ -147,7 +154,7 @@ func TestAppendConduitDaemonArgs(t *testing.T) {
 // TestConduitDaemonArgsRoundTrip: what the daemon parent forwards, the
 // --foreground child parses back to the same settings.
 func TestConduitDaemonArgsRoundTrip(t *testing.T) {
-	parent := conduitFlagCommand(t, "--internal-listen=:9810", "--conduit-grant-key-activation=30m", "--conduit-tcp-allowed-ports=22,3000")
+	parent := conduitFlagCommand(t, "--internal-listen=:9810", "--conduit-grant-key-activation=30m", "--conduit-tcp-allowed-ports=22,3000", "--conduit-stream-authz-max-user=90m")
 	parentCfg := &config.GlobalConfig{}
 	applyConduitFlagOverrides(parent, parentCfg)
 
@@ -155,6 +162,7 @@ func TestConduitDaemonArgsRoundTrip(t *testing.T) {
 	childCfg := &config.GlobalConfig{}
 	applyConduitFlagOverrides(child, childCfg)
 	assert.Equal(t, parentCfg.Hub.Conduit, childCfg.Hub.Conduit)
+	assert.Equal(t, "90m", childCfg.Hub.Conduit.StreamAuthzMax.User)
 }
 
 func TestValidateServerPreflight_Conduit(t *testing.T) {
@@ -169,6 +177,9 @@ func TestValidateServerPreflight_Conduit(t *testing.T) {
 		{name: "bad reconnect window", hub: true, conduit: config.HubConduitConfig{ReconnectWindow: "1h"}, wantErr: "server.hub.conduit.reconnect_window"},
 		{name: "bad activation", hub: true, conduit: config.HubConduitConfig{GrantKeyActivation: "10s"}, wantErr: "server.hub.conduit.grant_key_activation"},
 		{name: "bad port", hub: true, conduit: config.HubConduitConfig{TCPAllowedPorts: []int{0}}, wantErr: "server.hub.conduit.tcp_allowed_ports"},
+		{name: "bad user stream authz max", hub: true, conduit: config.HubConduitConfig{StreamAuthzMax: config.HubConduitStreamAuthzMax{User: "30s"}}, wantErr: "server.hub.conduit.stream_authz_max.user"},
+		{name: "bad broker stream authz max (validated though not enforced)", hub: true, conduit: config.HubConduitConfig{StreamAuthzMax: config.HubConduitStreamAuthzMax{Broker: "200h"}}, wantErr: "server.hub.conduit.stream_authz_max.broker"},
+		{name: "bad agent stream authz max (validated though not enforced)", hub: true, conduit: config.HubConduitConfig{StreamAuthzMax: config.HubConduitStreamAuthzMax{Agent: "never"}}, wantErr: "server.hub.conduit.stream_authz_max.agent"},
 		{name: "broker-only process skips the check", conduit: config.HubConduitConfig{ReconnectWindow: "1h"}},
 	}
 	for _, tt := range tests {
@@ -485,6 +496,22 @@ func TestBuildHubServerConfig_ConduitTCPAllowedPorts(t *testing.T) {
 			cfg.Hub.Conduit.TCPAllowedPorts = ports
 			sc := buildHubServerConfig(&cfg, "", "", nil, false, "", nil)
 			assert.Equal(t, ports, sc.ConduitTCPAllowedPorts)
+		})
+	}
+}
+
+// TestBuildHubServerConfig_ConduitUserStreamAuthzMax: the hub receives the
+// user stream interval, 8h when unset.
+func TestBuildHubServerConfig_ConduitUserStreamAuthzMax(t *testing.T) {
+	for name, tc := range map[string]struct {
+		value string
+		want  time.Duration
+	}{"unset": {"", 8 * time.Hour}, "set": {"2h", 2 * time.Hour}} {
+		t.Run(name, func(t *testing.T) {
+			cfg := config.DefaultGlobalConfig()
+			cfg.Hub.Conduit.StreamAuthzMax.User = tc.value
+			sc := buildHubServerConfig(&cfg, "", "", nil, false, "", nil)
+			assert.Equal(t, tc.want, sc.ConduitUserStreamAuthzMax)
 		})
 	}
 }
