@@ -185,8 +185,8 @@ func TestHubInstanceRegistry_FailedWriteUpsertsNext(t *testing.T) {
 }
 
 func TestJitteredHubInstanceInterval_WithinTenPercent(t *testing.T) {
-	lo := time.Duration(float64(hubInstanceTickInterval) * 0.9)
-	hi := time.Duration(float64(hubInstanceTickInterval) * 1.1)
+	lo := hubInstanceTickInterval - hubInstanceTickInterval/10
+	hi := hubInstanceTickInterval + hubInstanceTickInterval/10
 	for i := 0; i < 1000; i++ {
 		d := jitteredHubInstanceInterval()
 		require.GreaterOrEqual(t, d, lo)
@@ -292,7 +292,7 @@ func TestHubInstanceLabel(t *testing.T) {
 		assert.NotEmpty(t, hubInstanceLabel("0123abcd"))
 	})
 	t.Run("bounded printable", func(t *testing.T) {
-		t.Setenv("POD_NAME", "pod\x00name"+strings.Repeat("p", 100))
+		t.Setenv("POD_NAME", "pod\x01\x7fname"+strings.Repeat("p", 100))
 		got := hubInstanceLabel("x")
 		assert.Len(t, got, hubInstanceMaxLabelBytes)
 		assert.True(t, strings.HasPrefix(got, "podname"))

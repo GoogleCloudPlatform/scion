@@ -51,7 +51,7 @@ func (f *fakeClockHubInstanceStore) ListHubInstances(_ context.Context, seenSinc
 	return f.rows, f.now, nil
 }
 
-func getHealthSummary(t *testing.T, srv *Server) (HealthSummaryResponse, map[string]json.RawMessage) {
+func getHubInstancesSummary(t *testing.T, srv *Server) (HealthSummaryResponse, map[string]json.RawMessage) {
 	t.Helper()
 	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
 	require.Equal(t, http.StatusOK, rr.Code)
@@ -95,7 +95,7 @@ func TestHandleHealthSummary_HubInstancesFakeClockStale(t *testing.T) {
 	}
 	srv.store = fake
 
-	resp, _ := getHealthSummary(t, srv)
+	resp, _ := getHubInstancesSummary(t, srv)
 	require.NotNil(t, resp.HubInstances)
 	require.Len(t, resp.HubInstances.Items, 2)
 	assert.Equal(t, srv.InstanceID(), resp.HubInstances.Items[0].ID)
@@ -132,7 +132,7 @@ func TestHandleHealthSummary_HubInstancesTwoInstances(t *testing.T) {
 		byID[r.ID] = r
 	}
 
-	resp, raw := getHealthSummary(t, srv)
+	resp, raw := getHubInstancesSummary(t, srv)
 	require.Contains(t, raw, "hub_instances")
 	require.NotNil(t, resp.HubInstances)
 	got := resp.HubInstances
