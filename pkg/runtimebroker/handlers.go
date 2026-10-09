@@ -1649,7 +1649,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent's files belong to another run",
 					"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name,
 					"run_id", opts.RunID, "files_run_id", owner)
-			} else if _, cleanupErr := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); cleanupErr != nil {
+			} else if _, cleanupErr := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); cleanupErr != nil && !errors.Is(cleanupErr, agent.ErrAgentProjectUnresolved) {
 				s.agentLifecycleLog.Warn("Failed to clean up agent files after start failure",
 					"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name, "error", cleanupErr)
 			} else {
@@ -2932,12 +2932,13 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	// Resolve saved profile for runtime selection, and re-resolve the
 	// manager against it. This resolution is the authoritative one for what
 	// actually starts, so the hub-default passthrough re-check runs again
-	// here (recheckHubDefaultPassthrough), and so does the Kubernetes/"block"
-	// rejection (rejectKubernetesBlock, start_context.go, ptone/scion#2328):
-	// a saved profile buildStartContext could not see may resolve to
-	// Kubernetes only at this later point. This runs before any side effect
-	// below (applyInlineConfigUpdate's scion-agent.json write), so a
-	// rejection here does not leave a partial update applied.
+	// here (recheckHubDefaultPassthrough), and so do the Kubernetes "assign"
+	// and "block" consistency checks (rejectKubernetesAssignRuntimeChange,
+	// rejectKubernetesBlockRuntimeChange): a saved profile buildStartContext
+	// could not see may resolve to Kubernetes only at this later point.
+	// This runs before any side effect below (applyInlineConfigUpdate's
+	// scion-agent.json write), so a rejection here does not leave a partial
+	// update applied.
 	if opts.ProjectPath != "" && !s.isFlat() {
 		opts.Profile = agent.GetSavedProfile(id, opts.ProjectPath)
 	}
@@ -2963,7 +2964,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		s.writeStartContextError(w, sce, "start agent")
 		return
 	}
-	if sce := rejectKubernetesBlock(resolvedRuntimeType, opts.Env["SCION_METADATA_MODE"]); sce != nil {
+	if sce := rejectKubernetesBlockRuntimeChange(runtimeOpts, sc.BlockSelection, resolvedRuntimeType, func() dispatchProfileSelection {
+		return s.resolveDispatchProfileSelection(runtimeOpts)
+	}); sce != nil {
 		s.writeStartContextError(w, sce, "start agent")
 		return
 	}
@@ -3877,7 +3880,9 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		s.writeStartContextError(w, sce, "restart agent")
 		return
 	}
-	if sce := rejectKubernetesBlock(resolvedRuntimeType, opts.Env["SCION_METADATA_MODE"]); sce != nil {
+	if sce := rejectKubernetesBlockRuntimeChange(runtimeOpts, sc.BlockSelection, resolvedRuntimeType, func() dispatchProfileSelection {
+		return s.resolveDispatchProfileSelection(runtimeOpts)
+	}); sce != nil {
 		s.writeStartContextError(w, sce, "restart agent")
 		return
 	}

@@ -201,18 +201,11 @@ type createCompensation struct {
 	Stage string
 	// Cause is the failure that triggered the rollback; may be nil.
 	Cause error
-	// IfNotDeleteHeld makes the row delete conditional (ptone/scion#3557):
-	// the row is removed only when no delete holds it (createRowHeldCheck),
-	// checked inside the compensation's own transaction. When a delete
-	// holds it, or the row is already gone or soft-deleted, nothing is
-	// written and errCreateRowDeleteHeld is returned: the row, its edge
-	// and its quotas are left to the delete.
-	IfNotDeleteHeld bool
 }
 
-// errCreateRowDeleteHeld is returned by a conditional compensation
-// (createCompensation.IfNotDeleteHeld) and deleteFailedCreateRow when a
-// delete holds the agent row, or the row is gone: the delete owns it.
+// errCreateRowDeleteHeld is returned by compensateAgentCreate and
+// deleteFailedCreateRow when a delete holds the agent row, or the row is
+// gone or soft-deleted: the delete owns it.
 var errCreateRowDeleteHeld = errors.New("agent row is held by a delete")
 
 // compensateAgentCreate rolls back a committed create after a later step
@@ -221,8 +214,15 @@ var errCreateRowDeleteHeld = errors.New("agent row is held by a delete")
 // create_compensation, and writes an agent_create_dispatch_failed audit
 // record naming the create's audit record and the failed stage.
 //
-// It is idempotent: when the agent row is already gone and no active edge
-// is left, it changes nothing and writes no audit record.
+// The row delete is conditional (ptone/scion#3557, ptone/scion#3958): the
+// row is removed only when no delete holds it (createRowHeldCheck), checked
+// inside the compensation's own transaction. When a delete holds it, or the
+// row is already gone or soft-deleted, nothing is written and
+// errCreateRowDeleteHeld is returned: the row, its edge and its quotas are
+// left to the delete. A failed delete, or a deleting row whose lease lapsed,
+// does not hold the row, so the rollback removes it. A second compensation
+// of the same create therefore writes nothing and returns
+// errCreateRowDeleteHeld.
 //
 // The caller passes a context detached from the request (see
 // cleanupFailedCreate). Credential revocation, the broker-side delete and
@@ -262,18 +262,13 @@ func (s *Server) compensateAgentCreate(ctx context.Context, c createCompensation
 
 	// edgesAndAudit runs in the compensation's transaction, after the row
 	// delete.
-	edgesAndAudit := func(tx store.Store, rowDeleted bool) error {
-		deactivated, err := tx.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agentID, store.Deactivation{
+	edgesAndAudit := func(tx store.Store) error {
+		if _, err := tx.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agentID, store.Deactivation{
 			Cause: store.EdgeDeactivationCreateCompensation,
 			At:    &now,
 			OpID:  opID,
-		})
-		if err != nil {
+		}); err != nil {
 			return fmt.Errorf("deactivate delegation edges: %w", err)
-		}
-		if !rowDeleted && deactivated == 0 {
-			// Already compensated: nothing changed, so nothing to record.
-			return nil
 		}
 		if err := tx.CreateMutationAudit(ctx, record); err != nil {
 			return fmt.Errorf("compensation audit: %w", err)
@@ -281,38 +276,24 @@ func (s *Server) compensateAgentCreate(ctx context.Context, c createCompensation
 		return nil
 	}
 
-	if c.IfNotDeleteHeld {
-		// One transaction that reads the row (locked where supported),
-		// removes it, checks it is not delete-held and runs edgesAndAudit
-		// (the same agent_create_dispatch_failed record as below); a
-		// refused check rolls it all back. A delete claim that lands after
-		// the read bumps state_version, so the row delete misses and the
-		// attempt is retried from a fresh read, which then refuses.
-		n, err := s.store.FinalizeAgentDeletion(ctx, agentID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
-			createRowHeldCheck(func(tx store.Store) error { return edgesAndAudit(tx, true) }))
-		if errors.Is(err, errCreateRowDeleteHeld) {
-			return errCreateRowDeleteHeld
-		}
-		if err != nil {
-			return fmt.Errorf("delete agent: %w", err)
-		}
-		if n == 0 {
-			// The row is gone or soft-deleted: a delete removed it.
-			return errCreateRowDeleteHeld
-		}
-		return nil
+	// One transaction that reads the row (locked where supported), removes
+	// it, checks it is not delete-held and runs edgesAndAudit; a refused
+	// check rolls it all back. A delete claim that lands after the read
+	// bumps state_version, so the row delete misses and the attempt is
+	// retried from a fresh read, which then refuses.
+	n, err := s.store.FinalizeAgentDeletion(ctx, agentID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
+		createRowHeldCheck(edgesAndAudit))
+	if errors.Is(err, errCreateRowDeleteHeld) {
+		return errCreateRowDeleteHeld
 	}
-
-	return s.store.WithTx(ctx, func(tx store.Store) error {
-		rowDeleted := true
-		if err := tx.DeleteAgent(ctx, agentID); err != nil {
-			if !errors.Is(err, store.ErrNotFound) {
-				return fmt.Errorf("delete agent: %w", err)
-			}
-			rowDeleted = false
-		}
-		return edgesAndAudit(tx, rowDeleted)
-	})
+	if err != nil {
+		return fmt.Errorf("delete agent: %w", err)
+	}
+	if n == 0 {
+		// The row is gone or soft-deleted: a delete removed it.
+		return errCreateRowDeleteHeld
+	}
+	return nil
 }
 
 // compensationFailureID returns the correlation ID reported to the caller

@@ -183,7 +183,7 @@ export class ScionPageSettings extends LitElement {
     try {
       const res = await fetch('/api/v1/auth/admin-status', { credentials: 'include' });
       if (res.ok) {
-        const data = await res.json();
+        const data = (await res.json()) as Partial<AdminStatus>;
         this.adminStatus = {
           isAdmin: data.isAdmin === true,
           isSuperAdmin: data.isSuperAdmin === true,
