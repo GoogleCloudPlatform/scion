@@ -854,7 +854,8 @@ func TestDecisionAuditRouter_CloseNewPreservesFallback(t *testing.T) {
 			}
 		})
 	}
-	if decisionAuditDrainTimeout+decisionAuditAbortGrace != 5*time.Second {
-		t.Fatal("legacy close bound changed")
+	// Close adds no timeout; it waits for the original handoff-relative bounds.
+	if decisionAuditCancelBudget != time.Second || decisionAuditCompleteBudget != 2*time.Second {
+		t.Fatal("NEW handoff cancel/complete budgets changed")
 	}
 }

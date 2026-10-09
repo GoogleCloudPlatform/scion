@@ -69,3 +69,12 @@ from the read-only source in `server migrate`. Source decision-audit rows were
 already excluded from data copying in the baseline. Direct maintenance migrations
 run outside the Hub advisory schema lock. This documentation correction changes
 no command or dry-run behavior; no Go commands or new validation were run.
+
+A local Hub compile at `354350b6c1ccd3e1dfdf035512a7ba601658f26a` failed in
+`decision_audit_admission_test.go` on references to the deleted legacy writer
+drain and abort-grace constants; 0 of 29 targeted tests ran (NOT RUN) and there
+is no local PASS. The stale assertion now checks the retained NEW budgets
+instead: 1s cancel and 2s complete, both relative to the original handoff. Close
+adds no timeout of its own. The original-handoff, ownership, cancel and
+reference-release assertions are unchanged. No production code changed. The
+targeted Hub rerun for this correction has not been executed yet.
