@@ -147,6 +147,28 @@ func TestFlatDispatchAuthz_FlatOnlyDefaultNotUsableByMember(t *testing.T) {
 	}
 	_, err := f.s.GetAgentBySlug(ctx, p.ID, "flat-only-default")
 	assert.ErrorIs(t, err, store.ErrNotFound, "no agent row is written")
+
+	// Positive control for the list: in a project where a usable legacy row
+	// and the same flat row are both linked, an unknown broker name answers
+	// with a list that names the legacy row and not the flat row.
+	require.NoError(t, f.s.AddProjectProvider(ctx, &store.ProjectProvider{ProjectID: f.project.ID, BrokerID: f.flat.ID, BrokerName: f.flat.Name, Status: store.BrokerStatusOnline}))
+	require.True(t, f.srv.brokerProviderHasOwnerConsent(ctx, f.legacy, f.project.ID))
+	member2 := flatMemberUser(t, f.s, f.project.ID, "flat-only-member-2")
+	w := httptest.NewRecorder()
+	_, rerr := f.srv.resolveRuntimeBroker(contextWithIdentity(ctx, userIdentityFor(member2)), w, "ghost", f.project)
+	require.Error(t, rerr)
+	require.Equal(t, http.StatusNotFound, w.Code, w.Body.String())
+	var ctrl ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &ctrl))
+	listed, ok := ctrl.Error.Details["availableBrokers"].([]interface{})
+	require.True(t, ok, "availableBrokers must be a list, got %T", ctrl.Error.Details["availableBrokers"])
+	var ids []string
+	for _, entry := range listed {
+		m, _ := entry.(map[string]interface{})
+		id, _ := m["id"].(string)
+		ids = append(ids, id)
+	}
+	assert.Equal(t, []string{f.legacy.ID}, ids, "the usable legacy row is listed; the flat row is not")
 }
 
 // No new grant: the set of callers admitted by checkBrokerDispatchAccess is
