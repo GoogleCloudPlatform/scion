@@ -34,8 +34,9 @@ const (
 	// scheduledTargetNew: the caller names the target (event or schedule
 	// create).
 	scheduledTargetNew scheduledTargetMode = iota
-	// scheduledTargetExisting: the caller edits or resumes a schedule whose
-	// target it can already see in the stored payload.
+	// scheduledTargetExisting: the caller resumes a schedule, or updates it
+	// without changing its target, which it can already see in the stored
+	// payload.
 	scheduledTargetExisting
 )
 
@@ -53,10 +54,10 @@ func (s *Server) authorizeScheduledMessageAuthoring(
 	return s.authorizeScheduledMessageTarget(w, r, scheduledTargetNew, projectID, rawPayload, agentID, agentName)
 }
 
-// authorizeScheduledMessageReauthoring validates a schedule update or resume:
-// the same checks as authoring, but the target is the existing schedule's, so
-// a target the caller may not message is refused (403) rather than treated
-// like an unknown agent.
+// authorizeScheduledMessageReauthoring validates a schedule resume, or an
+// update that keeps the schedule's target: the same checks as authoring, but
+// the target is the existing schedule's, so a target the caller may not
+// message is refused (403) rather than treated like an unknown agent.
 func (s *Server) authorizeScheduledMessageReauthoring(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -64,6 +65,20 @@ func (s *Server) authorizeScheduledMessageReauthoring(
 	rawPayload string,
 ) bool {
 	return s.authorizeScheduledMessageTarget(w, r, scheduledTargetExisting, projectID, rawPayload, "", "")
+}
+
+// scheduledPayloadTargetChanged reports whether a replacement message
+// payload names another target (agentId or agentName) than the stored one.
+// A payload that does not decode names no target.
+func scheduledPayloadTargetChanged(stored, replacement string) bool {
+	target := func(raw string) MessageEventPayload {
+		var p MessageEventPayload
+		if raw != "" {
+			_ = json.Unmarshal([]byte(raw), &p)
+		}
+		return MessageEventPayload{AgentID: p.AgentID, AgentName: p.AgentName}
+	}
+	return target(stored) != target(replacement)
 }
 
 // authorizeScheduledMessageTarget validates a scheduled-message event at

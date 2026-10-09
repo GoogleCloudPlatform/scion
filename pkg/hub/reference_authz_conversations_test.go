@@ -825,3 +825,45 @@ func TestBrokerInbound_ThreadKeyOfOtherProjectNotResolved(t *testing.T) {
 		requireNoConversation(t, f, key)
 	})
 }
+
+// TestScheduleUpdate_NewUnreadableTargetMatchesUnknownTarget: a schedule
+// update whose replacement payload names an agent the caller cannot read and
+// may not message answers exactly like the same update naming an unknown
+// agent ID, whether or not messaging between projects is enabled, and the
+// answer does not name the agent.
+func TestScheduleUpdate_NewUnreadableTargetMatchesUnknownTarget(t *testing.T) {
+	for _, cpm := range []bool{true, false} {
+		name := "messaging between projects on"
+		if !cpm {
+			name = "messaging between projects off"
+		}
+		t.Run(name, func(t *testing.T) {
+			srv, s, projectA, _, ownerA, _, agentA, agentB := cpmSetup(t)
+			srv.scheduler = NewScheduler(s, slog.Default())
+			if !cpm {
+				disableCrossProjectMessaging(t, srv)
+			}
+			author := authUser(ownerA)
+			require.False(t, srv.scheduledTargetReadable(context.Background(), author, agentB), "precondition: target not readable")
+
+			create := func(name string) string {
+				rec := doAuthoredScheduleRequest(t, srv, author, projectA, "", http.MethodPost,
+					CreateScheduleRequest{Name: name, CronExpr: "0 * * * *", EventType: "message", AgentName: agentA.Slug, Message: "hi"})
+				require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+				var sc store.Schedule
+				require.NoError(t, json.NewDecoder(rec.Body).Decode(&sc))
+				return sc.ID
+			}
+			update := func(id, agentID string) *httptest.ResponseRecorder {
+				return doAuthoredScheduleRequest(t, srv, author, projectA, id, http.MethodPatch,
+					UpdateScheduleRequest{Payload: `{"agentId":"` + agentID + `","message":"later"}`})
+			}
+			unknown := update(create("sched-update-unknown"), tid("sched-update-unknown-agent"))
+			require.Equal(t, http.StatusOK, unknown.Code, unknown.Body.String())
+			got := update(create("sched-update-unreadable"), agentB.ID)
+			require.Equal(t, unknown.Code, got.Code, got.Body.String())
+			assert.Equal(t, responseKeys(t, unknown.Body.String()), responseKeys(t, got.Body.String()))
+			assert.NotContains(t, got.Body.String(), agentB.Slug, "the answer does not name the agent")
+		})
+	}
+}
