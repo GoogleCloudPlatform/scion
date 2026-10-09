@@ -109,9 +109,11 @@ func TestDeleteReclaim_Finalizing_StaysFinalizing(t *testing.T) {
 
 // holdsRecordingStore records, after every deletion write that affected the
 // row, whether the delete still holds it, and the answer of a start request
-// sent at the first such write.
+// sent at the first such write. It only records once its fault switch is
+// armed; before that it is a plain pass-through.
 type holdsRecordingStore struct {
 	store.Store
+	fault        *storeFaultSwitch
 	onFirstWrite func()
 
 	mu    sync.Mutex
@@ -121,10 +123,10 @@ type holdsRecordingStore struct {
 
 func (s *holdsRecordingStore) UpdateAgentDeletion(ctx context.Context, id string, pred store.DeletionPredicate, set store.DeletionFields) (int, error) {
 	n, err := s.Store.UpdateAgentDeletion(ctx, id, pred, set)
-	if err != nil || n == 0 {
+	if err != nil || n == 0 || !s.fault.Active() {
 		return n, err
 	}
-	if row, gerr := s.Store.GetAgent(ctx, id); gerr == nil && row.DeletedAt.IsZero() {
+	if row, gerr := s.GetAgent(ctx, id); gerr == nil && row.DeletedAt.IsZero() {
 		s.mu.Lock()
 		s.holds = append(s.holds, row.DeletionHoldsRow(time.Now()))
 		s.mu.Unlock()
@@ -147,6 +149,15 @@ func (s *holdsRecordingStore) recorded() []bool {
 // throughout: start answers 409 before the re-claim and right after it.
 func TestDeleteReclaim_Finalizing_BrokerOffline_NoForce(t *testing.T) {
 	srv, base, pub, disp := engineTestServer(t)
+	var path string
+	startCode := 0
+	rs, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *holdsRecordingStore {
+		rs := &holdsRecordingStore{Store: inner, fault: f}
+		rs.onFirstWrite = func() {
+			startCode = doRequest(t, srv, http.MethodPost, path+"/start", nil).Code
+		}
+		return rs
+	})
 	ctx := context.Background()
 	agent := setupBrokerAgentInPhase(t, base, "reclaim-fin-offline", state.PhaseStopped)
 	require.NoError(t, base.UpdateRuntimeBrokerHeartbeat(ctx, agent.RuntimeBrokerID, store.BrokerStatusOffline))
@@ -154,15 +165,10 @@ func TestDeleteReclaim_Finalizing_BrokerOffline_NoForce(t *testing.T) {
 	seedAgentDeletion(t, base, agent.ID, seedExpiredFinalize)
 	require.True(t, mustGetAgent(t, base, agent.ID).DeletionHoldsRow(time.Now()))
 
-	path := "/api/v1/agents/" + agent.ID
+	path = "/api/v1/agents/" + agent.ID
 	requireDeleteInProgress(t, doRequest(t, srv, http.MethodPost, path+"/start", nil))
 
-	startCode := 0
-	rs := &holdsRecordingStore{Store: base}
-	rs.onFirstWrite = func() {
-		startCode = doRequest(t, srv, http.MethodPost, path+"/start", nil).Code
-	}
-	srv.store = rs
+	fault.Arm()
 
 	rec := doRequest(t, srv, http.MethodDelete, path, nil)
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
