@@ -3383,15 +3383,16 @@ type Deactivation struct {
 type SAAssignmentOrigin string
 
 const (
-	SAAssignmentOriginCreateExplicit              SAAssignmentOrigin = "create_explicit"
-	SAAssignmentOriginCreateProjectProfileDefault SAAssignmentOrigin = "create_project_profile_default"
-	SAAssignmentOriginCreateProjectDefault        SAAssignmentOrigin = "create_project_default"
-	SAAssignmentOriginCreateHubDefault            SAAssignmentOrigin = "create_hub_default"
-	SAAssignmentOriginUpdate                      SAAssignmentOrigin = "update"
-	SAAssignmentOriginReincarnate                 SAAssignmentOrigin = "reincarnate"
-	SAAssignmentOriginScheduledProjectDefault     SAAssignmentOrigin = "scheduled_project_default"
-	SAAssignmentOriginScheduledHubDefault         SAAssignmentOrigin = "scheduled_hub_default"
-	SAAssignmentOriginHostPassthroughTranslation  SAAssignmentOrigin = "host_passthrough_translation"
+	SAAssignmentOriginCreateExplicit                 SAAssignmentOrigin = "create_explicit"
+	SAAssignmentOriginCreateProjectProfileDefault    SAAssignmentOrigin = "create_project_profile_default"
+	SAAssignmentOriginCreateProjectDefault           SAAssignmentOrigin = "create_project_default"
+	SAAssignmentOriginCreateHubDefault               SAAssignmentOrigin = "create_hub_default"
+	SAAssignmentOriginUpdate                         SAAssignmentOrigin = "update"
+	SAAssignmentOriginReincarnate                    SAAssignmentOrigin = "reincarnate"
+	SAAssignmentOriginScheduledProjectProfileDefault SAAssignmentOrigin = "scheduled_project_profile_default"
+	SAAssignmentOriginScheduledProjectDefault        SAAssignmentOrigin = "scheduled_project_default"
+	SAAssignmentOriginScheduledHubDefault            SAAssignmentOrigin = "scheduled_hub_default"
+	SAAssignmentOriginHostPassthroughTranslation     SAAssignmentOrigin = "host_passthrough_translation"
 )
 
 // AgentServiceAccountAssignment records who authorized an agent's

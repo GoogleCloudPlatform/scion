@@ -4717,7 +4717,7 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 		pinResolvedProfile(agent.AppliedConfig, profileName)
 		slog.Debug("GCP identity chosen by default", "source", "project-profile-default",
 			"project_id", agent.ProjectID, "agent", agent.Name, "profile", profileName, "sa_id", cfg.ServiceAccountID)
-		return store.SAAssignmentOriginScheduledProjectDefault, nil
+		return store.SAAssignmentOriginScheduledProjectProfileDefault, nil
 	}
 	projectSettings := projectSettingsFromAnnotations(project)
 	switch projectSettings.DefaultGCPIdentityMode {
