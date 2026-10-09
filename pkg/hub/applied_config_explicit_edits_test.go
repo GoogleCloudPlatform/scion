@@ -709,7 +709,7 @@ func TestApplyAgentUpdate_UntouchedSavePreservesExplicitTelemetryOptOut(t *testi
 // TestApplyAgentUpdate_UntouchedSavePreservesInlineBranch pins
 // ptone/scion#3984: the configure page no longer sends "branch" (a
 // provisioned agent's worktree already fixes it), so a PATCH without the key
-// must keep the stored InlineConfig.Branch and the live branch, and must not
+// must keep the stored InlineConfig.Branch, and must not
 // record anything into CreateInputs.
 func TestApplyAgentUpdate_UntouchedSavePreservesInlineBranch(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
@@ -740,10 +740,49 @@ func TestApplyAgentUpdate_UntouchedSavePreservesInlineBranch(t *testing.T) {
 	after, err := json.Marshal(updated.AppliedConfig.CreateInputs)
 	require.NoError(t, err)
 	assert.JSONEq(t, string(before), string(after), "an untouched Save must leave CreateInputs alone")
-	assert.Equal(t, "feature/x", updated.AppliedConfig.Branch)
 	require.NotNil(t, updated.AppliedConfig.InlineConfig)
 	assert.Equal(t, "feature/x", updated.AppliedConfig.InlineConfig.Branch,
 		"an absent branch key must keep the stored inline branch, not blank it")
+}
+
+// TestApplyAgentUpdate_PresentBranchKeyIsApplied pins the other half of
+// mergePresentInlineFields for branch: only an ABSENT key keeps the stored
+// value. A present key (from a caller other than the configure page) still
+// wins, in both InlineConfig and CreateInputs, whether it sets a new value or
+// clears it.
+func TestApplyAgentUpdate_PresentBranchKeyIsApplied(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		branch string
+	}{
+		{name: "set", branch: "y"},
+		{name: "cleared", branch: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := newReincarnateTestDispatcher()
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			ctx := context.Background()
+
+			agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+				a.Phase = string(state.PhaseCreated)
+				a.AppliedConfig.InlineConfig = &api.ScionConfig{Branch: "feature/x"}
+				a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{}
+			})
+
+			rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{"branch": tc.branch})
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+			updated, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			require.NotNil(t, updated.AppliedConfig.InlineConfig)
+			assert.Equal(t, tc.branch, updated.AppliedConfig.InlineConfig.Branch,
+				"a present branch key must replace the stored inline branch")
+			require.NotNil(t, updated.AppliedConfig.CreateInputs)
+			require.NotNil(t, updated.AppliedConfig.CreateInputs.InlineConfig,
+				"a changed branch must be recorded as an explicit edit")
+			assert.Equal(t, tc.branch, updated.AppliedConfig.CreateInputs.InlineConfig.Branch)
+		})
+	}
 }
 
 // TestApplyAgentUpdate_UntouchedSaveThenReincarnateKeepsLegacyAgentExplicitEnv
@@ -813,7 +852,6 @@ func TestApplyAgentUpdate_ReloadAfterUntouchedSavePreservesLiveAutoExposeValue(t
 	// Step 1: untouched Save (no env key at all).
 	rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
 		"thinking_level":     nil,
-		"branch":             "",
 		"user":               "",
 		"agent_instructions": "",
 		"system_prompt":      "",
