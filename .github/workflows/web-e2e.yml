@@ -13,9 +13,12 @@
 # limitations under the License.
 
 # Web Playwright e2e suites (ptone/scion#2580). Advisory: not a required
-# check. One matrix job per suite config under web/e2e/*/playwright.config.ts,
-# all in Chromium. Every suite serves the web sources itself (Vite dev server
-# or an esbuild bundle), so there is no shared build step to reuse.
+# check. PRs and main pushes run only when web/ (or this file) changes;
+# the nightly run covers everything else, such as browser drift.
+#
+# One matrix job per suite config under web/e2e/*/playwright.config.ts,
+# all in Chromium. Every suite serves the web sources itself (Vite dev
+# server or an esbuild bundle), so there is no shared build step to reuse.
 #
 # Not covered here: web/playwright.config.ts (e2e/*.spec.ts), which builds
 # and starts the Go hub in its global setup.
@@ -29,6 +32,9 @@ on:
       - '.github/workflows/web-e2e.yml'
   push:
     branches: [ main ]
+    paths:
+      - 'web/**'
+      - '.github/workflows/web-e2e.yml'
   # The odd minute avoids the top-of-hour spike in scheduled GitHub jobs.
   schedule:
     - cron: '41 5 * * *'
