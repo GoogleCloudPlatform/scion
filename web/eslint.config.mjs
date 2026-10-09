@@ -115,6 +115,8 @@ export default defineConfig([
   project(['e2e/agent-store-count/*.ts'], './e2e/agent-store-count/tsconfig.json'),
   project(['e2e/chat-file-preview/*.ts'], './e2e/chat-file-preview/tsconfig.json'),
   project(['e2e/project-files-tabs/*.ts'], './e2e/project-files-tabs/tsconfig.json'),
+  // Checks the Playwright configs, so it needs their TS project.
+  project(['src/utils/playwright-forbid-only.test.ts'], './tsconfig.e2e-configs.json'),
   project(
     [
       'e2e/chat-palette/accessibility.pw.ts',
