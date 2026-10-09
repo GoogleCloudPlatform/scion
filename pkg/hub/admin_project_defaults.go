@@ -16,9 +16,11 @@ package hub
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // handleAdminProjectDefaults handles GET/PUT /api/v1/admin/project-defaults.
@@ -83,7 +85,8 @@ func (s *Server) handleGetProjectDefaults(w http.ResponseWriter) {
 }
 
 // handlePutProjectDefaults accepts a partial update to the project_defaults
-// section. It writes the section via OperationalSettings.Update() (which
+// section: a key the body omits keeps its stored value, and an explicit
+// null clears it (mergeSectionOnCurrent). It writes the section via OperationalSettings.Update() (which
 // handles validation, persistence, and cross-replica propagation) or falls
 // back to a 501 when the hub has no OperationalSettings.
 func (s *Server) handlePutProjectDefaults(w http.ResponseWriter, r *http.Request) {
@@ -129,11 +132,38 @@ func (s *Server) handlePutProjectDefaults(w http.ResponseWriter, r *http.Request
 			updatedBy = caller.Email()
 		}
 
-		// last-writer-wins (-1) — no CAS needed for this endpoint.
-		if _, err := ops.Update(r.Context(), "project_defaults", doc, updatedBy, -1, "managed"); err != nil {
+		// Merged on the current row: a key the body omits keeps its stored
+		// value and an explicit null clears it; the row revision read is
+		// the CAS base, so a concurrent write is a 409 (ptone/scion#3720).
+		fp, err := parseFieldPresence(rawBody)
+		if err != nil {
+			BadRequest(w, "Invalid request body: "+err.Error())
+			return
+		}
+		merged, baseRev, err := mergeSectionOnCurrent(r.Context(), ops, "project_defaults", doc, fp)
+		if err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				"Failed to update project defaults: "+err.Error(), nil)
 			return
+		}
+		if errs := opsettings.Validate("project_defaults", merged); len(errs) > 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+				"error":  "validation_failed",
+				"errors": errs,
+			})
+			return
+		}
+		if _, same := unchangedManagedRow(r.Context(), ops, "project_defaults", merged, baseRev); !same {
+			if _, err := ops.Update(r.Context(), "project_defaults", merged, updatedBy, baseRev, "managed"); err != nil {
+				if errors.Is(err, store.ErrRevisionConflict) {
+					writeError(w, http.StatusConflict, ErrCodeConflict,
+						"Project defaults changed concurrently; retry", nil)
+					return
+				}
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"Failed to update project defaults: "+err.Error(), nil)
+				return
+			}
 		}
 
 		// Read back the applied state.

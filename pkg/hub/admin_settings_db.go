@@ -106,8 +106,10 @@ type ServerConfigUpdateDBRequest struct {
 	ServerConfigUpdateRequest
 
 	// ExpectedRevisions maps section name → expected revision for CAS.
-	// Omitted sections use last-writer-wins semantics, except access, which
-	// uses the revision the handler read as an implicit CAS (see accessBaseRev).
+	// A section merged on its current row (mergeSectionOnCurrent) that has
+	// no entry uses the revision the merge read as an implicit CAS; the
+	// map sections (runtimes, profiles, harness_configs) use
+	// last-writer-wins.
 	ExpectedRevisions map[string]int64 `json:"expected_revisions,omitempty"`
 }
 
@@ -512,15 +514,16 @@ func dropEchoedHubName(keys []string, req *ServerConfigUpdateRequest, effective 
 	return append(keys[:idx:idx], keys[idx+1:]...), false
 }
 
-// overlayEndpointsRequest applies the endpoints fields present in the
-// request onto d, presence-aware (N6):
-//   - public_url: non-empty sets it; an explicit "" clears it.
-//   - image_registry: set when present (an explicit "" clears it).
+// overlayEndpointsRequest applies the endpoints fields the request sets
+// onto d, which buildSingleSectionDoc then encodes as the request doc:
+//   - public_url and image_registry: their request values.
 //   - hub_name: set when hubNameChanged (see dropEchoedHubName, which drops
-//     an echo of the configured value); a change to "" clears it, so the
-//     bootstrap name, or with none each replica's startup default, applies.
+//     an echo of the configured value).
 //
-// Omitted fields keep whatever d already holds.
+// A sent "" or null is left out of the encoded doc, so the merge on the
+// current row (mergeSectionOnCurrent) clears that key; a cleared hub_name
+// lets the bootstrap name, or with none each replica's startup default,
+// apply. Omitted fields keep whatever d already holds.
 func overlayEndpointsRequest(d *opsettings.EndpointsSettings, req *ServerConfigUpdateRequest, fp *fieldPresence, hubNameChanged bool) {
 	hubFP := fp.nestedPresence("server").nestedPresence("hub")
 	if req.Server != nil && req.Server.Hub != nil {
@@ -535,70 +538,6 @@ func overlayEndpointsRequest(d *opsettings.EndpointsSettings, req *ServerConfigU
 	}
 	if req.ImageRegistry != nil {
 		d.ImageRegistry = *req.ImageRegistry
-	}
-}
-
-// buildEndpointsDocOnCurrent builds the endpoints section doc for a PUT on
-// top of the current row, so fields the request omits keep their value
-// (the same carry-forward as buildAccessDocOnCurrent, with the same env
-// guard for a non-managed base).
-//
-// hub_name is carried forward only from a managed row: a seeded row holds
-// the bootstrap hub_name, which applies without being written (Snapshot
-// falls back to it), and may not match the schema pattern. With no row,
-// the base is the effective public_url and image_registry.
-//
-// It returns the revision the base was read at (0 when no row exists) for
-// use as the CAS expected revision.
-func buildEndpointsDocOnCurrent(ctx context.Context, ops *OperationalSettings, req *ServerConfigUpdateRequest, rawBody []byte, hubNameChanged bool) (json.RawMessage, int64, error) {
-	fp, err := parseFieldPresence(rawBody)
-	if err != nil {
-		fp = nil // omitted-semantics; the typed decode already succeeded
-	}
-
-	base := &opsettings.EndpointsSettings{}
-	var baseRev int64
-	row, err := ops.store.GetHubSetting(ctx, "endpoints")
-	switch {
-	case err == nil:
-		if len(row.Value) > 0 {
-			if err := json.Unmarshal(row.Value, base); err != nil {
-				return nil, 0, fmt.Errorf("decoding current endpoints row: %w", err)
-			}
-		}
-		baseRev = row.Revision
-		if row.Origin != "managed" {
-			base.HubName = ""
-			dropEnvOverriddenEndpointsFields(base, ops.EnvOverriddenKeys())
-		}
-	case errors.Is(err, store.ErrNotFound):
-		snap := ops.Snapshot()
-		base.PublicURL = snap.PublicURL
-		base.ImageRegistry = snap.ImageRegistry
-		dropEnvOverriddenEndpointsFields(base, ops.EnvOverriddenKeys())
-	default:
-		return nil, 0, fmt.Errorf("reading current endpoints row: %w", err)
-	}
-
-	overlayEndpointsRequest(base, req, fp, hubNameChanged)
-	doc, err := json.Marshal(base)
-	if err != nil {
-		return nil, 0, fmt.Errorf("marshalling endpoints doc: %w", err)
-	}
-	return doc, baseRev, nil
-}
-
-// dropEnvOverriddenEndpointsFields clears endpoints fields overridden by a
-// node-local env var, so an env-derived value in a non-managed base is not
-// carried into the shared row (see buildAccessDocOnCurrent).
-func dropEnvOverriddenEndpointsFields(base *opsettings.EndpointsSettings, envKeys []string) {
-	for _, k := range envKeys {
-		switch k {
-		case "server.hub.public_url":
-			base.PublicURL = ""
-		case "image_registry":
-			base.ImageRegistry = ""
-		}
 	}
 }
 
@@ -848,6 +787,12 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			return
 		}
 	}
+	// telemetry.cloud.headers values are masked in GET too: a masked echo
+	// keeps the stored header (the snapshot value GET showed).
+	if err := restoreMaskedTelemetryHeaders(req.Telemetry, ops.Snapshot().TelemetryConfig); err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+		return
+	}
 
 	// Top-level presence of the body; nil (omitted semantics) on a parse
 	// error, which the typed decode above has already ruled out.
@@ -862,62 +807,43 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Access section: carry omitted fields forward from the current row
-	// instead of wiping them (design §5.A item 3a). Other sections keep
-	// replace semantics. accessBaseRev is used as the CAS revision when the
-	// client did not supply one, so a concurrent access write between our
-	// read and our write yields a 409 rather than a lost update.
-	accessBaseRev := int64(-1)
-	if _, ok := sectionDocs["access"]; ok {
-		doc, rev, err := buildAccessDocOnCurrent(r.Context(), ops, &req.ServerConfigUpdateRequest, rawBody)
+	// Sections merged on the current row by mergeSectionOnCurrent: only the
+	// keys the body sends change, and the row revision read is the CAS base
+	// (ptone/scion#3718, ptone/scion#3720).
+	mergedBaseRevs := map[string]int64{}
+	for _, sec := range bodyMergedSections {
+		doc, ok := sectionDocs[sec]
+		if !ok {
+			continue
+		}
+		fp := sectionBodyPresence(sec, rawBody)
+		if sec == "endpoints" && !hubNameChanged {
+			// An echo of the effective hub_name is not a change
+			// (dropEchoedHubName), so it is not applied.
+			delete(fp.raw, "hub_name")
+		}
+		merged, rev, err := mergeSectionOnCurrentWith(r.Context(), ops, sec, doc, fp, bodyMergeOptions(sec))
 		if err != nil {
-			slog.Error("PUT server-config: failed to build access document", "error", err)
+			slog.Error("PUT server-config: failed to build section document", "section", sec, "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
 			return
 		}
-		sectionDocs["access"] = doc
-		accessBaseRev = rev
+		sectionDocs[sec] = merged
+		mergedBaseRevs[sec] = rev
 	}
 
-	// Endpoints section: like access, carry omitted fields forward from the
-	// current row so a PUT changes only the fields it carries.
-	endpointsBaseRev := int64(-1)
-	if _, ok := sectionDocs["endpoints"]; ok {
-		doc, rev, err := buildEndpointsDocOnCurrent(r.Context(), ops, &req.ServerConfigUpdateRequest, rawBody, hubNameChanged)
-		if err != nil {
-			slog.Error("PUT server-config: failed to build endpoints document", "error", err)
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
-			return
-		}
-		sectionDocs["endpoints"] = doc
-		endpointsBaseRev = rev
-	}
-
-	// Lifecycle section: like access, carry omitted keys forward from the
-	// current row (ptone/scion#3464), and validate the start-claim keys.
-	lifecycleBaseRev := int64(-1)
+	// The start-claim keys are checked on the merged lifecycle document,
+	// so a value carried from the row counts as well.
 	if doc, ok := sectionDocs["lifecycle"]; ok {
-		merged, rev, err := carryForwardLifecycleSettings(r.Context(), ops, doc, rawBody)
-		if err != nil {
-			slog.Error("PUT server-config: failed to build lifecycle document", "error", err)
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
-			return
-		}
 		var lc opsettings.LifecycleSettings
-		if err := json.Unmarshal(merged, &lc); err == nil {
+		if err := json.Unmarshal(doc, &lc); err == nil {
 			if err := validateStartClaimSettingStrings(s.config.StartClaim, lc); err != nil {
 				writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, err.Error(), nil)
 				return
 			}
 		}
-		sectionDocs["lifecycle"] = merged
-		lifecycleBaseRev = rev
 	}
 
-	// Sections merged on the current row by mergeSectionOnCurrent: only the
-	// keys the body sends change, and the row revision read is the CAS base
-	// (ptone/scion#3718).
-	mergedBaseRevs := map[string]int64{}
 	if doc, ok := sectionDocs["github_app"]; ok {
 		merged, rev, err := mergeSectionOnCurrent(r.Context(), ops, "github_app", doc, githubAppPresence(rawBody))
 		if err != nil {
@@ -1198,16 +1124,20 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		expectedRev := int64(-1) // last-writer-wins by default
 		if rev, ok := req.ExpectedRevisions[secName]; ok {
 			expectedRev = rev
-		} else if secName == "access" && accessBaseRev >= 0 {
-			expectedRev = accessBaseRev
-		} else if secName == "endpoints" && endpointsBaseRev >= 0 {
-			expectedRev = endpointsBaseRev
-		} else if secName == "lifecycle" && lifecycleBaseRev >= 0 {
-			expectedRev = lifecycleBaseRev
 		} else if secName == gcpIAMSection && gcpIAMBaseRev >= 0 {
 			expectedRev = gcpIAMBaseRev
 		} else if rev, ok := mergedBaseRevs[secName]; ok {
 			expectedRev = rev
+		}
+
+		// A write that would leave a managed row as it is is skipped, so a
+		// save leaves the rows of the sections it does not change
+		// byte-identical (ptone/scion#3899).
+		if secName != gcpIAMSection {
+			if rev, same := unchangedManagedRow(r.Context(), ops, secName, doc, expectedRev); same {
+				applied[secName] = rev
+				continue
+			}
 		}
 
 		// A GCP permission-check change is recorded before it is written;
@@ -1707,11 +1637,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 // extractKoanfKeysFromRequest can't detect these because Go's zero values
 // make them invisible.
 //
-// Only the clearable Layer-1 fields are checked here:
-// admin_emails, user_access_mode, default_user_role, notification_channels,
-// public_url, the four lifecycle keys (auto_suspend_stalled,
-// stalled_threshold, soft_delete_retention, soft_delete_retain_files),
-// runtimes, profiles, harness_configs.
+// The fields checked here are the keys of the sections in
+// bodyMergedSections, the agent_defaults keys the PUT writes, and the map
+// sections runtimes, profiles and harness_configs.
 func appendPresenceAwareKeys(keys []string, rawBody []byte) []string {
 	fp, err := parseFieldPresence(rawBody)
 	if err != nil {
@@ -1726,46 +1654,23 @@ func appendPresenceAwareKeys(keys []string, rawBody []byte) []string {
 		keySet[k] = true
 	}
 
-	serverFP := fp.nestedPresence("server")
-	hubFP := serverFP.nestedPresence("hub")
-	authFP := serverFP.nestedPresence("auth")
-
-	// admin_emails: present in hub but empty → add the key.
-	if !keySet["server.hub.admin_emails"] && hubFP.has("admin_emails") {
-		keys = append(keys, "server.hub.admin_emails")
-	}
-	// user_access_mode: present in auth but empty → add the key.
-	if !keySet["server.auth.user_access_mode"] && authFP.has("user_access_mode") {
-		keys = append(keys, "server.auth.user_access_mode")
-	}
-	// default_user_role: present in auth but empty → add the key.
-	if !keySet["server.auth.default_user_role"] && authFP.has("default_user_role") {
-		keys = append(keys, "server.auth.default_user_role")
-	}
-	// authorized_domains: present in auth but empty → add the key.
-	if !keySet["server.auth.authorized_domains"] && authFP.has("authorized_domains") {
-		keys = append(keys, "server.auth.authorized_domains")
-	}
-	// notification_channels: present in server but empty → add the key.
-	if !keySet["server.notification_channels"] && serverFP.has("notification_channels") {
-		keys = append(keys, "server.notification_channels")
-	}
-	// public_url: present in hub but empty → add the key.
-	if !keySet["server.hub.public_url"] && hubFP.has("public_url") {
-		keys = append(keys, "server.hub.public_url")
-	}
-	// Lifecycle keys: present in hub but empty or null → add the key, so a
-	// lone explicit clear builds the lifecycle doc and clears the key
-	// instead of being carried forward (ptone/scion#3464).
-	for _, k := range []string{"auto_suspend_stalled", "stalled_threshold", "soft_delete_retention", "soft_delete_retain_files"} {
-		if !keySet["server.hub."+k] && hubFP.has(k) {
-			keys = append(keys, "server.hub."+k)
+	// Keys of the sections merged on their current row
+	// (bodyMergedSections): any sent key, including an explicit null or an
+	// empty value, adds its koanf key, so a lone explicit clear builds the
+	// section doc and clears the key instead of being kept by the merge
+	// (ptone/scion#3464, ptone/scion#3720). An echoed hub_name added here
+	// is dropped again by dropEchoedHubName.
+	for _, sec := range bodyMergedSections {
+		sent := sectionBodyPresence(sec, rawBody).sentKeys()
+		for _, key := range sectionJSONKeys(sec) {
+			if _, ok := sent[key]; !ok {
+				continue
+			}
+			if p := sectionKeyKoanfPath(sec, key); p != "" && !keySet[p] {
+				keySet[p] = true
+				keys = append(keys, p)
+			}
 		}
-	}
-	// hub_name: present in hub but empty → add the key (clears a managed
-	// hub_name; handlePutServerConfigDB drops it when it is an echo).
-	if !keySet["server.hub.hub_name"] && hubFP.has("hub_name") {
-		keys = append(keys, "server.hub.hub_name")
 	}
 
 	// agent_defaults keys: any sent agent_defaults key (including an
@@ -1825,8 +1730,10 @@ func buildSectionDocsFromRequest(req *ServerConfigUpdateRequest, layer1BySec map
 //   - explicitly sent empty ("", [], null) → cleared
 //   - omitted → d keeps whatever it already holds
 //
-// With an empty d this yields the replace-semantics doc; with d loaded from
-// the current row it yields the carry-forward doc (design §5.A item 3a).
+// buildSingleSectionDoc calls it with an empty d, so the request doc holds
+// only the sent values; the DB-backed PUT merges that doc on the current
+// row (mergeSectionOnCurrent), where a cleared key is removed and an
+// omitted one is kept (design §5.A item 3a).
 func overlayAccessRequest(d *opsettings.AccessSettings, req *ServerConfigUpdateRequest, fp *fieldPresence) {
 	serverFP := fp.nestedPresence("server")
 	hubFP := serverFP.nestedPresence("hub")
@@ -1861,126 +1768,48 @@ func overlayAccessRequest(d *opsettings.AccessSettings, req *ServerConfigUpdateR
 	}
 }
 
-// buildAccessDocOnCurrent builds the access section doc for a DB-backed
-// PUT with carry-forward semantics (design §5.A item 3a): fields omitted from
-// the request keep their current value instead of being wiped by the
-// full-row replace in UpsertHubSetting.
-//
-// The base is read fresh from the store (the ops cache can be stale in HA).
-// When no access row exists yet, the base is the effective snapshot's access
-// values (bootstrap/file).
-//
-// Env guard: bootstrap material (and therefore a "seeded" row, which
-// syncHubSettings rewrites on every boot, or the no-row snapshot) carries
-// node-local SCION_SERVER_* values at the highest precedence. Carrying those
-// forward would pin one node's env value into the shared row as "managed".
-// So for a non-managed base, fields overridden by env on this node are
-// dropped (dropEnvOverriddenAccessFields). The written field is then empty,
-// the same as the old replace behaviour; the settings.yaml / SCION_SEED_*
-// value beneath the env value is not recoverable here (ptone/scion#2068).
-// Only this node's env keys are known, so a row seeded by another node may
-// still carry that node's env values.
-// A "managed" base came from an admin write, not env, and is carried as is.
-//
-// It returns the revision the base was read at (0 when no row exists), for
-// use as the CAS expected revision: 0 means create-only, so a concurrent
-// writer turns a lost update into a 409 instead of silently dropping fields.
-func buildAccessDocOnCurrent(ctx context.Context, ops *OperationalSettings, req *ServerConfigUpdateRequest, rawBody []byte) (json.RawMessage, int64, error) {
-	fp, err := parseFieldPresence(rawBody)
-	if err != nil {
-		fp = nil // omitted-semantics; the typed decode already succeeded
-	}
-
-	base := &opsettings.AccessSettings{}
-	var baseRev int64
-	row, err := ops.store.GetHubSetting(ctx, "access")
-	switch {
-	case err == nil:
-		if len(row.Value) > 0 {
-			if err := json.Unmarshal(row.Value, base); err != nil {
-				return nil, 0, fmt.Errorf("decoding current access row: %w", err)
-			}
-		}
-		baseRev = row.Revision
-		if row.Origin != "managed" {
-			dropEnvOverriddenAccessFields(base, ops.EnvOverriddenKeys())
-		}
-	case errors.Is(err, store.ErrNotFound):
-		snap := ops.Snapshot()
-		base.AdminEmails = snap.AdminEmails
-		base.UserAccessMode = snap.UserAccessMode
-		base.DefaultUserRole = snap.DefaultUserRole
-		base.AuthorizedDomains = snap.AuthorizedDomains
-		dropEnvOverriddenAccessFields(base, ops.EnvOverriddenKeys())
-	default:
-		return nil, 0, fmt.Errorf("reading current access row: %w", err)
-	}
-
-	overlayAccessRequest(base, req, fp)
-	doc, err := json.Marshal(base)
-	if err != nil {
-		return nil, 0, fmt.Errorf("marshalling access doc: %w", err)
-	}
-	return doc, baseRev, nil
-}
-
-// dropEnvOverriddenAccessFields clears access fields whose koanf key is
-// overridden by a node-local env var, so an env-derived value in a
-// non-managed base is not carried into the shared row. Explicit request
-// values are applied afterwards and are unaffected.
-func dropEnvOverriddenAccessFields(base *opsettings.AccessSettings, envKeys []string) {
-	for _, k := range envKeys {
-		switch k {
-		case "server.hub.admin_emails":
-			base.AdminEmails = nil
-		case "server.auth.user_access_mode":
-			base.UserAccessMode = ""
-		case "server.auth.default_user_role":
-			base.DefaultUserRole = ""
-		case "server.auth.authorized_domains":
-			base.AuthorizedDomains = nil
-		}
-	}
-}
-
 // buildSingleSectionDoc extracts the fields for a single section from the
 // update request and marshals them into a section document. The document
 // holds the request's values only; how it is written is decided by the
 // DB-backed PUT (handlePutServerConfigDB).
 //
-// Target contract for a DB-backed save (ptone/scion#3718), met today only
-// by the sections listed below: a save changes only the keys the request
-// body sends.
+// Contract for a DB-backed save (ptone/scion#3718, ptone/scion#3720): a
+// save changes only the keys the request body sends.
 //   - OMITTED key → keeps its stored value.
 //   - Sent key → replaces the stored value, or clears it when the field's
 //     encoding in this doc leaves the sent value out: an explicit null, and
-//     for omitempty fields their zero value. A *bool field such as
-//     github_app webhooks_enabled carries an explicit false as a value, so
-//     false is stored, not cleared. A cleared key is removed from the
-//     stored row; because a section with a stored row owns all of its
-//     keys, the key is then unset (bootstrap values from settings.yaml or
-//     env are not re-applied).
+//     for omitempty fields their zero value. A *bool field (for example
+//     github_app webhooks_enabled, quotas enforce_broker_quotas) carries an
+//     explicit false as a value, so false is stored, not cleared. A
+//     cleared key is removed from the stored row; because a section with a
+//     stored row owns all of its keys, the key is then unset (bootstrap
+//     values from settings.yaml or env are not re-applied).
 //   - The write is a CAS against the row revision the merge read, so a
 //     concurrent write to the section yields a 409, not a lost update.
 //
-// Sections that meet it:
-//   - github_app, telemetry and agent_defaults, through the shared helper
-//     mergeSectionOnCurrent, which also keeps or drops (with a warning)
-//     stored keys the request does not send; see its doc comment. New
-//     sections should use it. telemetry is deep-merged: its nested objects
-//     are merged key by key, while maps and arrays are replaced whole
+// Every section with keys except the map sections and gcp_iam meets it
+// through the shared helper mergeSectionOnCurrent, which also keeps or
+// drops (with a warning) stored keys the request does not send; see its
+// doc comment:
+//   - access, endpoints, lifecycle, notifications, federation,
+//     auto_expose_ports, quotas and agent_secrets take the presence of
+//     their keys from the body paths of their koanf keys
+//     (bodyMergedSections, sectionBodyPresence). access and endpoints
+//     start from the effective snapshot values when they have no row, and
+//     endpoints writes hub_name only when it changes (dropEchoedHubName).
+//   - github_app, telemetry and agent_defaults have presence functions of
+//     their own. telemetry is deep-merged: its nested objects are merged
+//     key by key, while maps and arrays are replaced whole
 //     (deepMergeSections; ptone/scion#3717). agent_defaults applies only
 //     the keys the PUT writes (agentDefaultsRequestKeys), so the read-only
 //     role keys are never cleared (ptone/scion#3719).
-//   - access, endpoints and lifecycle, through their own carry-forward
-//     builders (buildAccessDocOnCurrent, buildEndpointsDocOnCurrent,
-//     carryForwardLifecycleSettings), and gcp_iam through buildGCPIAMDoc.
-//     Their clear rules are field by field; see each builder.
+//   - gcp_iam is built on the current row by buildGCPIAMDoc, with its own
+//     transition rules.
 //
-// Every other section still replaces the whole row with this doc, so an
-// omitted field is dropped from the DB. For those, fp (the raw JSON
-// presence; N6/N7) only decides whether an explicitly sent empty value is
-// written as the zero value to clear it.
+// The map sections (runtimes, profiles, harness_configs) replace the whole
+// row by design: the Server Config editor always sends the full map, so a
+// sent map is the new value and an explicit null or {} clears it. An
+// omitted map section is not written.
 //
 // The file-mode handler (hub without OperationalSettings) does not use
 // this.
@@ -1994,9 +1823,6 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 
 	switch secName {
 	case "access":
-		// Standalone callers get replace semantics (omitted fields are
-		// absent from the doc). handlePutServerConfigDB rebuilds the access
-		// doc on top of the current row via buildAccessDocOnCurrent.
 		d := &opsettings.AccessSettings{}
 		overlayAccessRequest(d, req, fp)
 		doc = d
@@ -2079,11 +1905,9 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 		doc = d
 
 	case "endpoints":
-		// Standalone callers get replace semantics: exactly the request's
-		// endpoints fields. handlePutServerConfigDB rebuilds the doc on the
-		// current row (buildEndpointsDocOnCurrent) after dropping an echoed
-		// hub_name, so here any hub_name the request still carries counts
-		// as a change.
+		// handlePutServerConfigDB drops an echoed hub_name from the request
+		// (dropEchoedHubName) before this runs, so any hub_name the request
+		// still carries counts as a change.
 		d := &opsettings.EndpointsSettings{}
 		overlayEndpointsRequest(d, req, fp, true)
 		doc = d

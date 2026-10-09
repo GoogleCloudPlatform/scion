@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	yamlv3 "gopkg.in/yaml.v3"
@@ -164,6 +165,7 @@ var maskedServerFields = []maskedServerField{
 // client. Its inverse for the PUT path is restoreMaskedServerSecrets; both are
 // driven by maskedServerFields.
 func maskSensitiveFields(resp *ServerConfigResponse) {
+	resp.Telemetry = maskedTelemetry(resp.Telemetry)
 	if resp.Server == nil {
 		return
 	}
@@ -282,6 +284,115 @@ func restoreMaskedServerSecrets(incoming, stored *config.V1ServerConfig) error {
 		*r.dst = r.val
 	}
 	return nil
+}
+
+// maskedTelemetry returns t with every non-empty telemetry.cloud.headers
+// value replaced by maskedValue, to match the other secret fields. t
+// itself is never modified (the DB-mode GET passes the snapshot's own
+// config): when a value is masked, the result is a copy holding a new
+// headers map; otherwise it is t.
+func maskedTelemetry(t *config.V1TelemetryConfig) *config.V1TelemetryConfig {
+	if t == nil || t.Cloud == nil {
+		return t
+	}
+	masked := false
+	for _, v := range t.Cloud.Headers {
+		if v != "" {
+			masked = true
+			break
+		}
+	}
+	if !masked {
+		return t
+	}
+	headers := make(map[string]string, len(t.Cloud.Headers))
+	for k, v := range t.Cloud.Headers {
+		if v != "" {
+			v = maskedValue
+		}
+		headers[k] = v
+	}
+	cloud := *t.Cloud
+	cloud.Headers = headers
+	out := *t
+	out.Cloud = &cloud
+	return &out
+}
+
+// restoreMaskedTelemetryHeaders is the inverse of maskedTelemetry for the
+// PUT path, the counterpart of restoreMaskedServerSecrets: a
+// telemetry.cloud.headers value in incoming that still holds maskedValue
+// (an echo of GET) is replaced with the stored value of the same header,
+// so a form round trip keeps the stored headers. A real value is left
+// alone and replaces the stored one as usual.
+//
+// As for the server secrets, a masked value is restored only into the
+// same block: every other member the request sends in telemetry.cloud
+// must equal the stored value GET showed (stored, masked), so a stored
+// header is never sent along to a changed endpoint or provider. A masked
+// header with no stored value, or with a stored value that is itself the
+// placeholder, is an error too. The caller answers 400 to an error.
+func restoreMaskedTelemetryHeaders(incoming, stored *config.V1TelemetryConfig) error {
+	if incoming == nil || incoming.Cloud == nil {
+		return nil
+	}
+	var names []string
+	for k, v := range incoming.Cloud.Headers {
+		if v == maskedValue {
+			names = append(names, k)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+	var storedCloud config.V1TelemetryCloudConfig
+	if stored != nil && stored.Cloud != nil {
+		storedCloud = *stored.Cloud
+	}
+	shown := maskedTelemetry(&config.V1TelemetryConfig{Cloud: &storedCloud}).Cloud
+	if !sentMembersEqual(incoming.Cloud, shown, "headers") {
+		return fmt.Errorf("telemetry.cloud.headers.%s is the masked placeholder %q but other fields of telemetry.cloud changed; send the real value", names[0], maskedValue)
+	}
+	headers := make(map[string]string, len(incoming.Cloud.Headers))
+	for k, v := range incoming.Cloud.Headers {
+		if v == maskedValue {
+			sv, ok := storedCloud.Headers[k]
+			var sp *string
+			if ok {
+				sp = &sv
+			}
+			if err := checkStoredSecret("telemetry.cloud.headers."+k, sp); err != nil {
+				return err
+			}
+			v = sv
+		}
+		headers[k] = v
+	}
+	incoming.Cloud.Headers = headers
+	return nil
+}
+
+// sentMembersEqual reports whether every member of a's JSON object other
+// than skip equals the same member of b's JSON object. Members a leaves
+// out (omitted, or zero values dropped by omitempty) are not compared.
+func sentMembersEqual(a, b any, skip string) bool {
+	av, err1 := toJSONValue(a)
+	bv, err2 := toJSONValue(b)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	am, _ := av.(map[string]any)
+	bm, _ := bv.(map[string]any)
+	for k, v := range am {
+		if k == skip {
+			continue
+		}
+		if !reflect.DeepEqual(v, bm[k]) {
+			return false
+		}
+	}
+	return true
 }
 
 // maskedCopy returns a deep copy of s with GET's masking applied.
@@ -436,6 +547,24 @@ func serverConfigFromRaw(raw map[string]interface{}) (*config.V1ServerConfig, er
 		return nil, err
 	}
 	var out config.V1ServerConfig
+	if err := yamlv3.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// telemetryConfigFromRaw decodes the telemetry section of an already-parsed
+// settings.yaml map, the way GET decodes it (nil when absent).
+func telemetryConfigFromRaw(raw map[string]interface{}) (*config.V1TelemetryConfig, error) {
+	t, ok := raw["telemetry"]
+	if !ok || t == nil {
+		return nil, nil
+	}
+	data, err := yamlv3.Marshal(t)
+	if err != nil {
+		return nil, err
+	}
+	var out config.V1TelemetryConfig
 	if err := yamlv3.Unmarshal(data, &out); err != nil {
 		return nil, err
 	}
