@@ -24,7 +24,13 @@
 import { LitElement, html, css, nothing, unsafeCSS } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import type { Agent, AgentPhase, AgentActivity, ExposedPort } from '../../shared/types.js';
+import type {
+  Agent,
+  AgentPhase,
+  AgentActivity,
+  ExposedPort,
+  SharedDir,
+} from '../../shared/types.js';
 import {
   TerminalSessionRegistry,
   type TerminalSession,
@@ -50,6 +56,9 @@ type FitAddon = import('@xterm/addon-fit').FitAddon;
 
 /** Which tmux window is active */
 type TmuxWindow = 'agent' | 'shell';
+
+/** Where captured harness credentials are stored. */
+type CaptureAuthScope = 'project' | 'user';
 
 // The terminal viewport stays dark in both app themes: it renders TUI output
 // that is generally authored against a dark background. The viewport wrapper
@@ -164,7 +173,7 @@ export class ScionTerminalPane extends LitElement {
 
   /** Remembers the scope chosen in the scope dialog so force-update reuses it. */
   @state()
-  private captureAuthSelectedScope: 'project' | 'user' = 'project';
+  private captureAuthSelectedScope: CaptureAuthScope = 'project';
 
   /**
    * Hub admin policy (agent_secrets.user_scope_only), fetched fresh from
@@ -1411,12 +1420,8 @@ export class ScionTerminalPane extends LitElement {
         this.uploadDisabledReason = 'Could not determine shared directories for file upload';
         return;
       }
-      const data = await resp.json();
-      const dirs = (data.sharedDirs ?? []) as Array<{
-        name: string;
-        read_only?: boolean;
-        in_workspace?: boolean;
-      }>;
+      const data = (await resp.json()) as { sharedDirs?: SharedDir[] };
+      const dirs = data.sharedDirs ?? [];
       // Filter: writable, non-in_workspace
       const candidates = dirs.filter((d) => !d.read_only && !d.in_workspace);
       const target = candidates.find((d) => d.name === 'scratchpad') || candidates[0];
@@ -2235,8 +2240,9 @@ export class ScionTerminalPane extends LitElement {
         <sl-radio-group
           id="capture-scope-group"
           .value=${this.captureAuthSelectedScope}
-          @sl-change=${(e: any) => {
-            this.captureAuthSelectedScope = e.target.value;
+          @sl-change=${(e: Event) => {
+            this.captureAuthSelectedScope = (e.target as HTMLInputElement)
+              .value as CaptureAuthScope;
           }}
         >
           <sl-radio
