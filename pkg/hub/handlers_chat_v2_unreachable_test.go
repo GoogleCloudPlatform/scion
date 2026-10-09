@@ -609,7 +609,8 @@ func dmRefusal(t *testing.T, srv *Server, s store.Store, d *brokerMockDispatcher
 // A DM to a soft-deleted agent is recorded and reported as undelivered. A
 // DM to an agent whose record is gone (hard-deleted) is refused exactly
 // like a DM to an agent ID that never existed: the DM peer check refuses
-// a missing peer with the uniform non-participant 403 and stores nothing.
+// a missing peer with the uniform non-participant answer (404, as for a
+// missing thread) and stores nothing.
 func TestUnreachableNC_DM_DeletedAndMissingAgentSameOutcome(t *testing.T) {
 	d := &brokerMockDispatcher{}
 	srv, s, _, proj, _ := setupSendTest(t)
@@ -634,7 +635,7 @@ func TestUnreachableNC_DM_DeletedAndMissingAgentSameOutcome(t *testing.T) {
 	require.Equal(t, want, softOut, "soft-deleted agent")
 
 	missingCode, missingBody := dmRefusal(t, srv, s, d, tid("dm-never-existed"))
-	require.Equal(t, http.StatusForbidden, missingCode, missingBody)
+	require.Equal(t, http.StatusNotFound, missingCode, missingBody)
 	hardCode, hardBody := dmRefusal(t, srv, s, d, hard.ID)
 	require.Equal(t, missingCode, hardCode, "hard-deleted agent must match missing agent")
 	require.Equal(t, missingBody, hardBody, "hard-deleted agent must match missing agent")

@@ -324,7 +324,7 @@ func TestAgentCreateDeliverIDs_MissingParentEdge(t *testing.T) {
 		require.Empty(t, activeEdgesFor(t, f.store, parent.ID))
 
 		rec := f.createAsParent(t, f.agentToken(t, parent.ID), CreateAgentRequest{Name: "chain-missing-c"})
-		assert.Equal(t, agentTokenDenialMessage(DenyCauseCeilingOrphaned), assertCeilingDenial(t, rec))
+		assert.Equal(t, agentTokenDenialMessage(DenyCauseCeilingOrphaned, false), assertCeilingDenial(t, rec))
 		_, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "chain-missing-c")
 		assert.ErrorIs(t, err, store.ErrNotFound, "no agent row")
 

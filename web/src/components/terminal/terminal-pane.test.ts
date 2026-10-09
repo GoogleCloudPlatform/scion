@@ -2,6 +2,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ScionTerminalPane } from './terminal-pane.js';
 import { TerminalSessionRegistry } from '../../client/terminal-sessions.js';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 /**
  * The automatic reconnect after a 4503 close waits a full-jitter delay;
@@ -238,7 +239,7 @@ it('two panes share registry SSE and preserve metadata across transport notifica
   fetcher.mockImplementation((url) =>
     Promise.resolve(
       json({
-        id: String(url).includes(otherId) ? otherId : agentId,
+        id: requestUrl(url).includes(otherId) ? otherId : agentId,
         name: 'test',
         phase: 'running',
       })
@@ -507,8 +508,7 @@ describe('initial-load preflight refusal', () => {
       // Answer by URL, so the order of the agent, metadata and preflight
       // requests does not matter.
       fetcher.mockImplementation((input) => {
-        const url = input instanceof Request ? input.url : String(input);
-        if (url.endsWith('/pty')) return Promise.resolve(json(body, status));
+        if (requestUrl(input).endsWith('/pty')) return Promise.resolve(json(body, status));
         return Promise.resolve(json({ id: agentId, name: 'test', phase: 'running' }));
       });
       page.open(registry, agentId);

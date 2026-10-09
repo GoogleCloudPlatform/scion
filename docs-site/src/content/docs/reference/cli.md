@@ -102,6 +102,7 @@ ptone/scion#1855.
     - `--no-auth`: Disable authentication propagation (also sent to the Hub in Hub mode; applies when the agent is created).
     - `-d, --detached`: Run in detached mode (default true).
     - `--config <path>`: Path to inline agent config file (YAML/JSON) for Just-In-Time (JIT) overrides, or `-` for stdin.
+    - `--task-file <path>`: Read the task from a file, or `-` for stdin, up to 96 KiB. See [Long tasks and task files](#long-tasks-and-task-files).
     - `--harness-config <string>`: Named harness configuration to use.
     - `--thinking-level <value>`: Thinking level to inject into the agent config: an integer from 0 to 100, or a case-insensitive shorthand: `low` (25), `medium` (50), `high` (75), `max` (100). The level is stored as an integer; each harness maps it to its own tiers (see [Thinking Level Map](/scion/reference/harness-settings/#thinking-level-map-thinking)).
     - `--harness-auth <string>`: Override auth method for the harness. Universal types: `api-key`, `oauth-token`, `vertex-ai`, `auth-file` (each harness accepts a subset — see [Harness Authentication](/scion/local/agent-credentials/)).
@@ -121,29 +122,65 @@ going instead of rolling the agent back. Each dispatch attempt is bounded at
 120 seconds, so a slow cold start (for example on Kubernetes) can still fail on
 a synchronous launch; enable [asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create) for those. While waiting, each launch step is printed to stderr (nothing
 extra under `--format json`). If the wait times out, or you press Ctrl-C, only
-the wait stops: the launch continues on the Hub, and re-running
-`scion start <agent-name>` resumes waiting. Ctrl-C exits with status 130 and
-SIGTERM with 143; a failed launch or a timeout exits 1. Network errors and
-Hub answers of 5xx, 408 or 429 are retried while waiting; any other 4xx (for
-example 401 or 403) stops the wait at once with the Hub's error, and the launch
-continues on the Hub. One exception: until the agent's status has been read
-once, a 403 or 404 is retried for up to 5 seconds while the Hub is still
-launching the agent (an asynchronous launch, or a start after a workspace
-upload). If an agent launcher still cannot read the new agent's status after
-that, the wait reports that the launch was accepted and its status is not
-readable with this credential's scope, and exits 1; the launch continues on the
-Hub. When the Hub has already finished the start and you wait with `--attach`,
-there is no retry: an agent launcher's 404 gives the same not-readable report
-at once. The agent is reported as deleted only on a 404 after its status was
-read, or, for a user's login, on a 404 before that: after the 5-second retry
-while the Hub is still launching the agent, and at once otherwise. If the
-agent's create did not complete (for example the image could not be pulled),
-the error shows the stored template and task. Delete the agent and create it
-again (`scion delete <agent-name>`, then `scion start` with the same template
-and task). If soft-delete retention is enabled on the Hub, the name stays
-reserved until the agent is deleted with force=true or purged; until then, use
-a new name. With `--format json`, `--attach` after a workspace upload attaches
+the wait stops: the launch continues on the Hub, and re-running `scion start
+<agent-name>` resumes waiting. When the Hub accepted the launch and the wait
+times out, `start` reports the agent as accepted and launching, says why it
+stopped following the launch, suggests `scion list` to check on it, and exits
+0, so a caller does not retry a launch that is under way (under `--format json`
+the result has status `success` and a `launchNote` detail). With `--attach`,
+which needs a running agent, a timeout exits 1. Ctrl-C exits with status 130
+and SIGTERM with 143; a rejected create, a failed launch or an agent deleted
+while launching exits 1. Network errors and Hub answers of 5xx, 408 or 429 are
+retried while waiting; any other 4xx (for example 401 or 403) stops the wait at
+once with the Hub's error, and the launch continues on the Hub. One exception:
+until the agent's status has been read once, a 403 or 404 is retried for up to
+5 seconds while the Hub is still launching the agent (an asynchronous launch,
+or a start after a workspace upload). If an agent launcher still cannot read
+the new agent's status after that, `start` reports that the launch was accepted
+and its status is not readable with this credential's scope, and exits 0 like a
+timeout (1 with `--attach`); the launch continues on the Hub. When the Hub has
+already finished the start and you wait with `--attach`, there is no retry: an
+agent launcher's 404 gives the same not-readable report at once, and exits 1.
+The agent is reported as deleted only on a 404 after its status was read that
+persists through a 5-second retry (or until the wait ends, if that is sooner),
+or, for a user's login, on a 404 before that: after the 5-second retry while
+the Hub is still launching the agent, and at once otherwise. If the agent's
+create did not complete (for example the image could not be pulled), the error
+shows the stored template and task. Delete the agent and create it again
+(`scion delete <agent-name>`, then `scion start` with the same template and
+task). If soft-delete retention is enabled on the Hub, the name stays reserved
+until the agent is deleted with force=true or purged; until then, use a new
+name. With `--format json`, `--attach` after a workspace upload attaches
 without printing the JSON result.
+
+#### Long tasks and task files
+
+`--task-file <path>` on `scion start` and `scion create` reads the task from a
+file (`-` reads stdin). Use it for long briefs that are too big for a command
+line or a message. Any `[task]` arguments come first, followed by a blank line
+and then the file. The file must be UTF-8 text and not empty or whitespace
+only. The whole task, arguments included, can be at most 96 KiB (98304 bytes).
+The CLI checks this before it contacts the Hub, and anything larger is
+rejected. The Hub forwards the create request to the runtime broker as JSON in
+a control channel message of at most 1 MiB. Even a task made only of characters
+that JSON escapes to six bytes, such as `<`, `>` and `&`, fits in that message
+with room for the rest of the request. The task goes in the create request like
+any other task. The Hub stores it with the agent, so this works for agents a
+Hub runs on any runtime, including Kubernetes agents without access to a
+storage bucket. It also works when an agent launches another agent: the agent's
+CLI reads the file from the agent's own filesystem.
+
+Whenever an agent starts with a task, from arguments, `--task-file` or
+`prompt.md`, the full text is written to `~/.scion/task.md` in the agent's home
+directory (mode 0644). Each start that has a task replaces that file; a
+symbolic link at that path is replaced, never written through, and the start
+fails if `~/.scion` is a symbolic link. The task starts the harness inside a
+tmux command, and tmux rejects commands larger than about 16 KB. The harness
+gets a task inline, as before, when it takes at most 8 KiB (8192 bytes) in that
+command once quoted for the shell. Each single quote (`'`) takes 13 bytes
+there, so a task with many quotes is passed as a file at a smaller size. A
+larger task is replaced by a short task that names `~/.scion/task.md` and its
+size and asks the agent to read the whole file.
 
 ### `scion create`
 
@@ -175,6 +212,7 @@ failed start.
     - `-b, --branch <string>`: Git branch to use for the agent workspace.
     - `-w, --workspace <string>`: Host path or project-relative subdirectory to mount as `/workspace`.
     - `--config <path>`: Path to inline agent config file (YAML/JSON), or `-` for stdin.
+    - `--task-file <path>`: Read the task from a file, or `-` for stdin, up to 96 KiB. See [Long tasks and task files](#long-tasks-and-task-files).
     - `--harness-config <string>` (alias `--harness`): Named harness configuration to use.
     - `--harness-auth <string>`: Override auth method for the harness (`api-key`, `oauth-token`, `auth-file`, `vertex-ai`).
     - `--broker <string>`: Preferred runtime broker ID or name.
@@ -606,10 +644,25 @@ To reincarnate another principal's agent you must be able to delegate the agent'
 keeps its existing delegator unless you change its role with `--role`; then you become its recorded
 delegator (refused with `403` if you descend from the agent, since that would close a delegation
 loop). If you are an agent, the agent then depends on your delegation chain, so prefer a user for role
-changes on long-lived agents. An agent whose delegator was changed by an earlier reincarnation by
-another agent (for example, one that now gets `403` when creating agents) is not repaired by this rule;
-recreate it. Two role changes by a signed-in user (for example to `baseline` and back) also re-point
-its edge to that user, but recreating is recommended. A caller who cannot delegate the role, for
+changes on long-lived agents.
+
+One exception repairs agents left without recorded provenance, for example after a hub upgrade. When
+a user reincarnates an agent without changing its role, and the agent's own delegation edge is
+missing or has no recorded provenance, or an edge further up its chain has no recorded provenance
+and every edge between it and the agent is accepted on this hub, the user becomes the agent's
+recorded delegator. This clears the
+`ceiling_unrecorded` denial, which blocks service-account assignment among other actions. The
+**Reincarnate** button in the web UI does the same. A reincarnation by the agent itself or by another
+agent keeps the edge, and so does a user's reincarnation of an agent whose chain is fully recorded,
+or whose first problem walking up from the agent is an edge this hub does not accept (for example
+one recorded with local development credentials on a hub without dev auth); recreate such an agent.
+An agent whose chain has a missing ancestor edge or a loop is suspended, and a reincarnation of it is
+refused with `409`.
+
+An agent whose delegator was changed by an earlier reincarnation by another agent (for example, one
+that now gets `403` when creating agents) is not repaired by this rule, because its chain is
+recorded; recreate it. Two role changes by a signed-in user (for example to `baseline` and back) also
+re-point its edge to that user, but recreating is recommended. A caller who cannot delegate the role, for
 example a non-admin reincarnating an agent with a privileged role, gets `403` from this authority
 check. It runs before the workspace and capability checks (`400`, `412`), so expect the `403` first.
 

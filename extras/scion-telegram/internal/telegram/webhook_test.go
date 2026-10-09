@@ -135,6 +135,7 @@ func TestWebhookServer_MethodNotAllowed(t *testing.T) {
 	defer resp.Body.Close()
 
 	assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
+	assert.Equal(t, http.MethodPost, resp.Header.Get("Allow"))
 }
 
 func TestWebhookServer_NoSecretAllowsAll(t *testing.T) {
