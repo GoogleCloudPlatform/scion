@@ -39,7 +39,7 @@ import (
 const auditWriteTimeout = 1 * time.Second
 
 // noopDecisionAuditEmitter preserves the in-memory decision seam without persistence.
-type noopDecisionAuditEmitter struct{ identity byte }
+type noopDecisionAuditEmitter struct{ _ byte }
 
 var inertDecisionAuditTarget = &noopDecisionAuditEmitter{}
 

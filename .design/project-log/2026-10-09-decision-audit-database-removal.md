@@ -35,3 +35,15 @@ The corrected Hub and command tests remain uncompiled and unexecuted pending
 separate resource authorization or CI. Real PostgreSQL integration also remains
 unexecuted; its transaction command is covered by an isolated dialect test.
 No deployment or live migration is included in this change.
+
+The second conservation review aligns both performance-tracing references with
+in-memory record counts and emitter-call timing. The metrics test now checks a
+retained reaper instrument alongside absence of the retired instruments. Health
+coverage uses the server health surface, and migration tests provide mutation and
+history conservation evidence. Upgrade fixtures include the baseline's 25 columns,
+eight secondary indexes and populated rows, with index-removal checks. The inert
+target retains its singleton pointer and uses a blank byte field for nonzero size.
+Fresh focused migration tests passed for `pkg/ent/entc` and
+`pkg/store/entadapter`, including populated-table and named-index removal,
+reopening and mutation/history conservation. Hub, command and real PostgreSQL
+checks remain unexecuted for this revision.

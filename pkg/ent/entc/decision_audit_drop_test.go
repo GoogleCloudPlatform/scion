@@ -7,6 +7,7 @@ package entc
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -22,7 +23,7 @@ func requireNoDecisionTable(t *testing.T, client *ent.Client) {
 	t.Helper()
 	db := client.Driver().(*entsql.Driver).DB()
 	var count int
-	require.NoError(t, db.QueryRow("SELECT count(*) FROM sqlite_master WHERE name = 'decision_audits' OR name = 'legacy_decision_index'").Scan(&count))
+	require.NoError(t, db.QueryRow("SELECT count(*) FROM sqlite_master WHERE name = 'decision_audits' OR name IN ('decisionaudit_timestamp', 'decisionaudit_principal_kind_principal_id', 'decisionaudit_credential_id', 'decisionaudit_route', 'decisionaudit_resource_type_resource_id', 'decisionaudit_result', 'decisionaudit_correlation_id', 'decisionaudit_denied_by')").Scan(&count))
 	require.Zero(t, count)
 }
 
@@ -46,13 +47,8 @@ func TestDecisionAuditDrop_UpgradeRestart(t *testing.T) {
 	}
 	client := open()
 	db := client.Driver().(*entsql.Driver).DB()
-	_, err := db.Exec("CREATE TABLE decision_audits (id TEXT PRIMARY KEY, reason TEXT NOT NULL)")
-	require.NoError(t, err)
-	_, err = db.Exec("CREATE INDEX legacy_decision_index ON decision_audits(reason)")
-	require.NoError(t, err)
-	_, err = db.Exec("INSERT INTO decision_audits VALUES ('one','allow'), ('two','deny')")
-	require.NoError(t, err)
-	_, err = db.Exec("CREATE TABLE migration_sentinel (id TEXT PRIMARY KEY, payload BLOB)")
+	createLegacyDecisionAuditFixture(t, db)
+	_, err := db.Exec("CREATE TABLE migration_sentinel (id TEXT PRIMARY KEY, payload BLOB)")
 	require.NoError(t, err)
 	_, err = db.Exec("INSERT INTO migration_sentinel VALUES ('keep', X'000102FF')")
 	require.NoError(t, err)
@@ -142,4 +138,63 @@ func TestDecisionAuditDrop_PostgresDialect(t *testing.T) {
 	driver.name = "unsupported"
 	require.ErrorContains(t, dropDecisionAuditTable(context.Background(), client), "unsupported dialect")
 	require.Equal(t, 2, driver.begins)
+}
+
+// This disposable fixture follows all 25 columns and eight secondary indexes
+// in the immutable baseline schema; it has no foreign keys.
+func createLegacyDecisionAuditFixture(t *testing.T, db *sql.DB) {
+	t.Helper()
+	_, err := db.Exec(`CREATE TABLE decision_audits (
+ id UUID NOT NULL PRIMARY KEY,
+ timestamp DATETIME NOT NULL,
+ principal_kind VARCHAR(255) NOT NULL,
+ principal_id VARCHAR(255) NOT NULL,
+ credential_id VARCHAR(255),
+ credential_type VARCHAR(255),
+ route VARCHAR(255),
+ resource_type VARCHAR(255) NOT NULL,
+ resource_id VARCHAR(255),
+ permission VARCHAR(255) NOT NULL,
+ result VARCHAR(255) NOT NULL,
+ reason VARCHAR(255) NOT NULL,
+ matched_policy VARCHAR(255),
+ matched_grant VARCHAR(255),
+ policy_id VARCHAR(255),
+ correlation_id VARCHAR(255),
+ sampled BOOLEAN NOT NULL DEFAULT false,
+ permission_id VARCHAR(255),
+ credential_name VARCHAR(255),
+ credential_boundary_kind VARCHAR(255),
+ credential_boundary_project_id VARCHAR(255),
+ credential_labels VARCHAR(255),
+ executor_kind VARCHAR(255),
+ executor_id VARCHAR(255),
+ denied_by VARCHAR(255)
+)`)
+	require.NoError(t, err)
+	for _, statement := range []string{
+		"CREATE INDEX decisionaudit_timestamp ON decision_audits (timestamp)",
+		"CREATE INDEX decisionaudit_principal_kind_principal_id ON decision_audits (principal_kind, principal_id)",
+		"CREATE INDEX decisionaudit_credential_id ON decision_audits (credential_id)",
+		"CREATE INDEX decisionaudit_route ON decision_audits (route)",
+		"CREATE INDEX decisionaudit_resource_type_resource_id ON decision_audits (resource_type, resource_id)",
+		"CREATE INDEX decisionaudit_result ON decision_audits (result)",
+		"CREATE INDEX decisionaudit_correlation_id ON decision_audits (correlation_id)",
+		"CREATE INDEX decisionaudit_denied_by ON decision_audits (denied_by)",
+	} {
+		_, err := db.Exec(statement)
+		require.NoError(t, err)
+	}
+	_, err = db.Exec(`INSERT INTO decision_audits
+ (id, timestamp, principal_kind, principal_id, resource_type, permission, result, reason) VALUES
+ ('00000000-0000-4000-8000-000000000001', '2026-01-01T00:00:00Z', 'user', 'fixture-user', 'project', 'project.read', 'allow', 'fixture allow'),
+ ('00000000-0000-4000-8000-000000000002', '2026-01-01T00:00:00Z', 'user', 'fixture-user', 'project', 'project.read', 'deny', 'fixture deny')`)
+	require.NoError(t, err)
+	var rows, columns, indexes int
+	require.NoError(t, db.QueryRow("SELECT count(*) FROM decision_audits").Scan(&rows))
+	require.Equal(t, 2, rows)
+	require.NoError(t, db.QueryRow("SELECT count(*) FROM pragma_table_info('decision_audits')").Scan(&columns))
+	require.Equal(t, 25, columns)
+	require.NoError(t, db.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('decisionaudit_timestamp', 'decisionaudit_principal_kind_principal_id', 'decisionaudit_credential_id', 'decisionaudit_route', 'decisionaudit_resource_type_resource_id', 'decisionaudit_result', 'decisionaudit_correlation_id', 'decisionaudit_denied_by')").Scan(&indexes))
+	require.Equal(t, 8, indexes)
 }

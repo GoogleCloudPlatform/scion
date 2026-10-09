@@ -754,7 +754,7 @@ func TestDecisionAuditRouter_DisableDrainsCooperativeSlots(t *testing.T) {
 
 }
 
-func TestDecisionAuditRouter_CloseSeparatesLegacyDrain(t *testing.T) {
+func TestDecisionAuditRouter_CloseNewPreservesFallback(t *testing.T) {
 	for _, mode := range []string{"close-new", "server-cleanup", "server-http-drain"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newAuditFixture(t, auditFixtureActiveClose)

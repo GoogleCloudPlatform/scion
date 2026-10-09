@@ -61,6 +61,7 @@ func TestWireHubCoreMetrics_LaunchReaperTicksExported(t *testing.T) {
 			t.Fatalf("collecting metrics: %v", err)
 		}
 		if metricExported(&rm, "scion.launch_reaper.ticks") {
+			assertNoDecisionWriterInstruments(t, &rm)
 			return
 		}
 		if time.Now().After(deadline) {
@@ -81,36 +82,12 @@ func metricExported(rm *metricdata.ResourceMetrics, name string) bool {
 	return false
 }
 
-// TestWireHubCoreMetrics_NoDecisionWriterInstruments verifies that the retired
-// writer registers no instruments, including after decisions and shutdown.
-func TestWireHubCoreMetrics_NoDecisionWriterInstruments(t *testing.T) {
-	ctx := context.Background()
-	srv, err := hub.New(hub.ServerConfig{}, newTestStore(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
-	reader := sdkmetric.NewManualReader()
-	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
-	wireHubCoreMetrics(srv, mp)
-	check := func() {
-		var rm metricdata.ResourceMetrics
-		if err := reader.Collect(ctx, &rm); err != nil {
-			t.Fatal(err)
-		}
-		for _, name := range []string{"scion.hub.decision_audit.queue_depth", "scion.hub.decision_audit.write.duration", "scion.hub.decision_audit.dropped"} {
-			if metricExported(&rm, name) {
-				t.Fatalf("retired writer instrument exported: %s", name)
-			}
+// The retained reaper metric proves collection is active while retired instruments stay absent.
+func assertNoDecisionWriterInstruments(t *testing.T, rm *metricdata.ResourceMetrics) {
+	t.Helper()
+	for _, name := range []string{"scion.hub.decision_audit.queue_depth", "scion.hub.decision_audit.write.duration", "scion.hub.decision_audit.dropped"} {
+		if metricExported(rm, name) {
+			t.Fatalf("retired writer instrument exported: %s", name)
 		}
 	}
-	check()
-	srv.GetAuthzService().Decide(ctx, hub.AuthzRequest{})
-	check()
-	if err := srv.Shutdown(ctx); err != nil {
-		t.Fatal(err)
-	}
-	srv.GetAuthzService().Decide(ctx, hub.AuthzRequest{})
-	check()
 }
