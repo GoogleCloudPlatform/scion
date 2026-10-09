@@ -21,6 +21,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand"
 	"net/http"
@@ -638,7 +639,7 @@ func (v *versionedStorage) deleteIf(ctx context.Context, p string, gen int64) er
 	v.mu.Lock()
 	delete(v.gen, p)
 	v.mu.Unlock()
-	return v.LocalStorage.Delete(ctx, p)
+	return v.Delete(ctx, p)
 }
 
 // applyLate delivers the queued deletes.
@@ -1406,4 +1407,213 @@ func TestBlobSweepContinuesWhenTempCleanupFails(t *testing.T) {
 	if _, deleted, err := g.Sweep(ctx, f.store, fc, "hub-1", DefaultGCGrace, time.Now()); err != nil || deleted != 1 {
 		t.Fatalf("reclaim pass: deleted %d, %v", deleted, err)
 	}
+}
+
+// TestReclaimKeepsUndeletableBlobAndGoesOn: a blob whose bytes cannot be
+// deleted (here: a versioned store that gave no generation, which the
+// sweep never deletes unconditionally) keeps its mark, and the blobs after
+// it in the same pass are still reclaimed. The pass reports the kept blob.
+func TestReclaimKeepsUndeletableBlobAndGoesOn(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
+		ctx := context.Background()
+		stuck, a, b := sha([]byte("stuck")), sha([]byte("a")), sha([]byte("b"))
+		// stuck is the oldest mark, so the pass tries it first.
+		if err := st.MarkBlobs(ctx, []BlobMark{{Digest: stuck}}, time.Now().Add(-3*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.MarkBlobs(ctx, []BlobMark{{Digest: a, Generation: 4}, {Digest: b, Generation: 5}}, time.Now().Add(-2*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		var tried []string
+		del := func(d string, gen int64) error {
+			tried = append(tried, d)
+			if gen == 0 {
+				return errUnknownGeneration
+			}
+			return nil
+		}
+		n, err := st.ReclaimBlobs(ctx, time.Now().Add(-time.Hour), 10, del)
+		if n != 2 {
+			t.Errorf("reclaimed %d, want 2 (the blobs after the undeletable one)", n)
+		}
+		if !errors.Is(err, errUnknownGeneration) {
+			t.Errorf("pass error %v, want one reporting the kept blob", err)
+		}
+		if len(tried) != 3 || tried[0] != stuck {
+			t.Errorf("tried %v, want stuck first and then the others", tried)
+		}
+		// The kept blob's mark stays: the next pass tries it again, alone.
+		tried = nil
+		n, err = st.ReclaimBlobs(ctx, time.Now().Add(-time.Hour), 10, del)
+		if n != 0 || !errors.Is(err, errUnknownGeneration) || len(tried) != 1 || tried[0] != stuck {
+			t.Errorf("second pass: %d %v tried %v", n, err, tried)
+		}
+	})
+}
+
+// TestReclaimStoreErrorEndsPass: an error that is not a failed delete (the
+// store itself failing) still ends the pass.
+func TestReclaimStoreErrorEndsPass(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
+		ctx := context.Background()
+		a, b := sha([]byte("a")), sha([]byte("b"))
+		if err := st.MarkBlobs(ctx, []BlobMark{{Digest: a, Generation: 1}, {Digest: b, Generation: 2}}, time.Now().Add(-2*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		cctx, cancel := context.WithCancel(ctx)
+		calls := 0
+		_, err := st.ReclaimBlobs(cctx, time.Now().Add(-time.Hour), 10, func(string, int64) error {
+			calls++
+			cancel() // the next store call fails
+			return nil
+		})
+		if err == nil {
+			t.Error("a failing store did not end the pass")
+		}
+		if calls != 1 {
+			t.Errorf("del called %d times after the store failed, want 1", calls)
+		}
+	})
+}
+
+// markOld marks n blobs unreferenced, oldest first, and returns their
+// digests in that order. Each gets generation gen (0: unknown).
+func markOld(t *testing.T, st Store, prefix string, n int, gen int64) []string {
+	t.Helper()
+	var ds []string
+	for i := 0; i < n; i++ {
+		d := sha([]byte(prefix + strconv.Itoa(i)))
+		if err := st.MarkBlobs(context.Background(), []BlobMark{{Digest: d, Generation: gen}}, time.Now().Add(-time.Duration(10*n-i)*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		ds = append(ds, d)
+	}
+	return ds
+}
+
+// TestReclaimEndsPassOnDeleteTimeout: a delete that runs out of time means
+// the object store is not answering; the pass ends at once instead of
+// trying every candidate, and its marks stay.
+func TestReclaimEndsPassOnDeleteTimeout(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
+		markOld(t, st, "slow", 3, 7)
+		for _, cause := range []error{context.DeadlineExceeded, context.Canceled} {
+			calls := 0
+			n, err := st.ReclaimBlobs(context.Background(), time.Now().Add(-time.Hour), 10, func(string, int64) error {
+				calls++
+				return fmt.Errorf("delete: %w", cause)
+			})
+			if calls != 1 || n != 0 || !errors.Is(err, cause) {
+				t.Errorf("%v: del called %d times, reclaimed %d, error %v; want 1, 0 and the error", cause, calls, n, err)
+			}
+		}
+	})
+}
+
+// TestReclaimEndsPassAfterFailuresInRow: three deletes failing in a row end
+// the pass; a success in between starts the count again; blobs with an
+// unknown generation do not count.
+func TestReclaimEndsPassAfterFailuresInRow(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
+		ds := markOld(t, st, "down", 6, 7)
+		unavailable := errors.New("store unavailable")
+		calls := 0
+		n, err := st.ReclaimBlobs(context.Background(), time.Now().Add(-time.Hour), 10, func(string, int64) error {
+			calls++
+			return unavailable
+		})
+		if calls != maxDeleteFailuresInRow || n != 0 || !errors.Is(err, unavailable) {
+			t.Errorf("all failing: del called %d times, reclaimed %d, error %v; want %d, 0 and the error", calls, n, err, maxDeleteFailuresInRow)
+		}
+
+		// fail, fail, ok, fail, fail, ok: never three in a row.
+		var tried []string
+		n, err = st.ReclaimBlobs(context.Background(), time.Now().Add(-time.Hour), 10, func(d string, _ int64) error {
+			tried = append(tried, d)
+			if len(tried)%3 == 0 {
+				return nil
+			}
+			return unavailable
+		})
+		if len(tried) != len(ds) || n != 2 || !errors.Is(err, unavailable) {
+			t.Errorf("interleaved: tried %d, reclaimed %d, error %v; want %d, 2 and the first failure", len(tried), n, err, len(ds))
+		}
+	})
+}
+
+// TestReclaimUnknownGenerationsDoNotEndPass: however many blobs with an
+// unknown generation come first, the blobs after them are reclaimed.
+func TestReclaimUnknownGenerationsDoNotEndPass(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
+		markOld(t, st, "nogen", maxDeleteFailuresInRow+2, 0)
+		good := sha([]byte("good"))
+		if err := st.MarkBlobs(context.Background(), []BlobMark{{Digest: good, Generation: 3}}, time.Now().Add(-2*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		var deleted []string
+		n, err := st.ReclaimBlobs(context.Background(), time.Now().Add(-time.Hour), 10, func(d string, gen int64) error {
+			if gen == 0 {
+				return errUnknownGeneration
+			}
+			deleted = append(deleted, d)
+			return nil
+		})
+		if n != 1 || len(deleted) != 1 || deleted[0] != good || !errors.Is(err, errUnknownGeneration) {
+			t.Errorf("reclaimed %d %v, error %v; want only the blob with a generation", n, deleted, err)
+		}
+	})
+}
+
+// TestReclaimStoppedPassKeepsMarksAndResumes: a pass that stops on a delete
+// timeout has deleted only the blobs before it, keeps the marks of the
+// blob it stopped on and of those it did not reach, holds no lock once it
+// returns (a write goes through at once), and the next pass reclaims the
+// rest.
+func TestReclaimStoppedPassKeepsMarksAndResumes(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
+		ds := markOld(t, st, "resume", 3, 7)
+		var deleted []string
+		n, err := st.ReclaimBlobs(context.Background(), time.Now().Add(-time.Hour), 10, func(d string, _ int64) error {
+			if d == ds[1] {
+				return context.DeadlineExceeded
+			}
+			deleted = append(deleted, d)
+			return nil
+		})
+		if n != 1 || len(deleted) != 1 || deleted[0] != ds[0] || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("stopped pass: reclaimed %d %v, error %v; want only the first blob", n, deleted, err)
+		}
+		marked := map[string]bool{}
+		rows, err := db.Query(`SELECT sha256 FROM artifact_blob WHERE unreferenced_since IS NOT NULL`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var d string
+			if err := rows.Scan(&d); err != nil {
+				t.Fatal(err)
+			}
+			marked[d] = true
+		}
+		_ = rows.Close()
+		if len(marked) != 2 || !marked[ds[1]] || !marked[ds[2]] {
+			t.Errorf("marks after the stopped pass: %v; want the blob it stopped on and the unreached one", marked)
+		}
+		// No transaction is left open: a write succeeds well within the
+		// store's lock wait.
+		wctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := st.TouchBlob(wctx, sha([]byte("writer")), time.Now()); err != nil {
+			t.Errorf("a write after the stopped pass: %v", err)
+		}
+		// The next pass retries the blob it stopped on and reaches the rest.
+		deleted = nil
+		n, err = st.ReclaimBlobs(context.Background(), time.Now().Add(-time.Hour), 10, func(d string, _ int64) error {
+			deleted = append(deleted, d)
+			return nil
+		})
+		if err != nil || n != 2 || len(deleted) != 2 || deleted[0] != ds[1] || deleted[1] != ds[2] {
+			t.Errorf("next pass: reclaimed %d %v, error %v; want the two remaining blobs in order", n, deleted, err)
+		}
+	})
 }

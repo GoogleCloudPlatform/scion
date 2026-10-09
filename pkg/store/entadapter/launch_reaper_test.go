@@ -129,7 +129,7 @@ func shiftLaunchReaperArmedSince(t *testing.T, ctx context.Context, s *AgentStor
 // setups.
 func readStoreNow(t *testing.T, ctx context.Context, s *AgentStore) time.Time {
 	t.Helper()
-	isPG := s.dialect(ctx) == dialect.Postgres
+	isPG := s.dialect() == dialect.Postgres
 	if !isPG {
 		return time.Now()
 	}

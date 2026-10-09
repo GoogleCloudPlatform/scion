@@ -50,6 +50,9 @@ interface RailEntry {
 /** The parts of a rail entry the bulk-action eligibility rules read. */
 type RailEntryStatus = Pick<RailEntry, 'state' | 'metadata'>;
 
+/** The pane status message shown while no terminal is selected. */
+const NO_TERMINAL_SELECTED = 'No terminal selected.';
+
 /**
  * Whether the per-row Reconnect action applies: the session has dropped
  * (disconnected or unavailable) and was not ended by an agent deletion.
@@ -378,7 +381,7 @@ export class TerminalWorkspaceRoot {
     // Pane host: CSS Grid container
     this.paneHost.className = 'terminal-pane-host';
     this.status.className = 'terminal-status';
-    this.status.textContent = 'No terminal selected.';
+    this.status.textContent = NO_TERMINAL_SELECTED;
     this.paneHost.append(this.empty, this.status);
     // Aria-live region for placement announcements
     this.ariaLive.className = 'terminal-aria-live';
@@ -685,7 +688,7 @@ export class TerminalWorkspaceRoot {
     // Sets single[0] without changing the active preset (#1701).
     // Navigation of an already-open agent must not trigger overflow.
     this.layoutManager.select(session.state.key);
-    this.status.textContent = '';
+    this.status.textContent = NO_TERMINAL_SELECTED;
     this.show(true);
     this.refresh();
   }
@@ -1180,15 +1183,19 @@ export class TerminalWorkspaceRoot {
     // neither full-size overlay is shown there: both would cover the
     // placeholders and hide the drop targets, whether or not any terminal
     // is open yet. Narrow and zoomed views render a single slot with no
-    // placeholder and keep the status message.
+    // placeholder, so they keep the empty state when no terminal is open
+    // and the status message otherwise. With no terminal open, the default
+    // status message would repeat the empty state, so only a message set
+    // through setStatus is shown alongside it.
     const isMultiPane = layoutState.active !== 'single';
     const showsPlaceholders =
       isMultiPane &&
       !(this.narrowQuery?.matches ?? false) &&
       this.layoutManager.getZoomed() === null;
-    this.empty.hidden = total > 0 || isMultiPane;
+    this.empty.hidden = total > 0 || showsPlaceholders;
+    const hasStatusMessage = this.status.textContent !== NO_TERMINAL_SELECTED;
     this.status.hidden =
-      (total > 0 && hasSelected) || (total === 0 && isMultiPane) || showsPlaceholders;
+      showsPlaceholders || (total > 0 ? hasSelected : isMultiPane || !hasStatusMessage);
 
     // Rail rendering
     this.railList.replaceChildren(...entries.map((entry) => this.renderRailEntry(entry)));

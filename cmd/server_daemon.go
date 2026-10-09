@@ -737,7 +737,7 @@ func probeServerStatus(client *http.Client, webBaseURL, hubBaseURL, brokerBaseUR
 		}
 	}
 
-	// Check broker on the default broker port.
+	// Check the broker on brokerBaseURL (the server's broker port).
 	if resp, err := client.Get(brokerBaseURL + "/healthz"); err == nil {
 		body, readErr := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
@@ -783,7 +783,10 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	client := &http.Client{Timeout: 2 * time.Second}
-	probed := probeServerStatus(client, "http://127.0.0.1:8080", "http://127.0.0.1:9810", "http://127.0.0.1:9800")
+	// The broker is probed on the server's configured broker port
+	// (--runtime-broker-port or server.broker.port), not always 9800.
+	brokerURL := fmt.Sprintf("http://127.0.0.1:%d", serverBrokerPort(globalDir))
+	probed := probeServerStatus(client, "http://127.0.0.1:8080", "http://127.0.0.1:9810", brokerURL)
 	status.HubRunning = probed.HubRunning
 	status.BrokerRunning = probed.BrokerRunning
 	status.WebRunning = probed.WebRunning

@@ -17,6 +17,7 @@ package artifacts
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -138,20 +139,67 @@ func (s *sqlStore) ReclaimBlobs(ctx context.Context, cutoff time.Time, limit int
 		return 0, fmt.Errorf("artifacts: find reclaimable blobs: %w", err)
 	}
 	n := 0
+	var firstKept error
+	keptN, failedInRow := 0, 0
 	for _, d := range found {
 		if reclaimCandidateHook != nil {
 			reclaimCandidateHook(d)
 		}
 		ok, err := s.reclaimOne(ctx, d, at, del)
+		var de *blobDeleteError
+		if errors.As(err, &de) {
+			// This blob stays, with its mark.
+			keptN++
+			if firstKept == nil {
+				firstKept = err
+			}
+			// A delete that ran out of time, or a run of failing deletes,
+			// means the object store is unavailable: end the pass rather
+			// than hold a transaction per blob through each delete's
+			// timeout.
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				return n, fmt.Errorf("artifacts: blob delete did not finish; reclaim pass ended: %w", err)
+			}
+			// A blob with no known generation is refused without a request
+			// to the store, so it costs nothing and does not count.
+			if !errors.Is(err, errUnknownGeneration) {
+				failedInRow++
+				if failedInRow >= maxDeleteFailuresInRow {
+					return n, fmt.Errorf("artifacts: %d blob deletes failed in a row; reclaim pass ended: %w", failedInRow, err)
+				}
+			}
+			continue
+		}
 		if err != nil {
 			return n, err
 		}
+		failedInRow = 0
 		if ok {
 			n++
 		}
 	}
+	if keptN > 0 {
+		return n, fmt.Errorf("artifacts: %d of %d reclaimable blobs kept: %w", keptN, len(found), firstKept)
+	}
 	return n, nil
 }
+
+// maxDeleteFailuresInRow is how many blob deletes in a row may fail (for a
+// reason other than an unknown generation) before a reclaim pass ends.
+const maxDeleteFailuresInRow = 3
+
+// blobDeleteError is a failure to delete one blob's bytes. Its transaction
+// rolls back, so the blob and its mark stay; the pass goes on.
+type blobDeleteError struct {
+	digest string
+	err    error
+}
+
+func (e *blobDeleteError) Error() string {
+	return "artifacts: delete blob " + e.digest + ": " + e.err.Error()
+}
+
+func (e *blobDeleteError) Unwrap() error { return e.err }
 
 // reclaimOne deletes one blob if, under its state row's lock, it is still
 // marked unreferenced since at or before cutoff, untouched since cutoff (a
@@ -189,7 +237,7 @@ func (s *sqlStore) reclaimOne(ctx context.Context, digest string, cutoff any, de
 		return false, fmt.Errorf("artifacts: read blob generation: %w", err)
 	}
 	if err := del(digest, gen.Int64); err != nil {
-		return false, fmt.Errorf("artifacts: delete blob: %w", err)
+		return false, &blobDeleteError{digest: digest, err: err}
 	}
 	if _, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM artifact_blob WHERE sha256 = ?`), digest); err != nil {
 		return false, fmt.Errorf("artifacts: clear blob state: %w", err)

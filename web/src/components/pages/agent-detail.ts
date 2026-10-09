@@ -59,6 +59,7 @@ import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
 import { AgentSeedEpoch } from '../../client/agent-seed-epoch.js';
 import '../shared/status-badge.js';
+import '../shared/detail-header.js';
 import { DeletionLeaseController } from '../shared/deletion-badge.js';
 import '../shared/deletion-banner.js';
 import { runAgentDelete, lifecycleActionErrorMessage } from '../../client/agent-delete.js';
@@ -259,49 +260,7 @@ export class ScionPageAgentDetail extends LitElement {
       color: var(--scion-primary, #3b82f6);
     }
 
-    /* ---- Header ---- */
-    .header {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      margin-bottom: 1.5rem;
-      gap: 1rem;
-    }
-    .header-info {
-      flex: 1;
-    }
-    .header-title {
-      display: flex;
-      align-items: flex-start;
-      gap: 0.75rem;
-      margin-bottom: 0.5rem;
-    }
-    .header-title > sl-icon {
-      flex-shrink: 0;
-      color: var(--scion-primary, #3b82f6);
-      font-size: 1.5rem;
-      /* Centre the icon on the first line of the name: (1.95rem h1 line box
-         - 1.5rem icon) / 2. */
-      margin-top: 0.225rem;
-    }
-    /* A long name wraps on its own line; the badges then follow on the next
-       line instead of floating beside a multi-line name. */
-    .header-title-text {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 0.5rem 0.75rem;
-      min-width: 0;
-    }
-    .header h1 {
-      font-size: 1.5rem;
-      font-weight: 700;
-      line-height: 1.3;
-      color: var(--scion-text, #1e293b);
-      margin: 0;
-      min-width: 0;
-      overflow-wrap: anywhere;
-    }
+    /* ---- Header (layout in scion-detail-header) ---- */
     .header-meta {
       display: flex;
       flex-wrap: wrap;
@@ -344,28 +303,6 @@ export class ScionPageAgentDetail extends LitElement {
     .broker-link:hover {
       color: var(--scion-primary, #3b82f6);
     }
-    .header-actions {
-      display: flex;
-      gap: 0.5rem;
-      flex-shrink: 0;
-    }
-    /* On a phone the actions drop below the title and wrap, rather than
-       pushing the last of them off the right edge. */
-    @media (max-width: 640px) {
-      .header {
-        flex-wrap: wrap;
-      }
-      .header-info {
-        min-width: 0;
-        flex-basis: 100%;
-      }
-      .header-actions {
-        flex-wrap: wrap;
-        flex-shrink: 1;
-        min-width: 0;
-      }
-    }
-
     /* ---- Error banner ---- */
     scion-deletion-banner.deletion-banner {
       margin-bottom: 1.5rem;
@@ -1455,47 +1392,37 @@ export class ScionPageAgentDetail extends LitElement {
     const deleting = this.deletionLease.isDeleting(agent);
     const lifecycleOk = canLifecycle(agent._capabilities) && !deleting;
     return html`
-      <div class="header">
-        <div class="header-info">
-          <div class="header-title">
-            <sl-icon name="cpu"></sl-icon>
-            <div class="header-title-text">
-              <h1>${agent.name}</h1>
-              ${agentStatusBadge(agent)}
-              <scion-deletion-badge
-                .deletion=${this.deletingView(agent)}
-                live
-              ></scion-deletion-badge>
-              <scion-message-mode-badge
-                mode=${agent.messageMode || 'project'}
-                size="medium"
-              ></scion-message-mode-badge>
-            </div>
-          </div>
-          <div class="header-meta">
-            <span class="template-badge">
-              <sl-icon name="code-square"></sl-icon>
-              ${agent.template}
-            </span>
-            ${this.project
-              ? html`
-                  <a href="/projects/${this.project.id}" class="project-link">
-                    <sl-icon name="folder"></sl-icon>
-                    ${this.project.name}
-                  </a>
-                `
-              : ''}
-            ${agent.runtimeBrokerId
-              ? html`
-                  <a href="/brokers/${agent.runtimeBrokerId}" class="broker-link">
-                    <sl-icon name="hdd-rack"></sl-icon>
-                    ${agent.runtimeBrokerName || agent.runtimeBrokerId}
-                  </a>
-                `
-              : ''}
-          </div>
+      <scion-detail-header heading=${agent.name}>
+        <sl-icon slot="icon" name="cpu"></sl-icon>
+        ${agentStatusBadge(agent)}
+        <scion-deletion-badge .deletion=${this.deletingView(agent)} live></scion-deletion-badge>
+        <scion-message-mode-badge
+          mode=${agent.messageMode || 'project'}
+          size="medium"
+        ></scion-message-mode-badge>
+        <div slot="meta" class="header-meta">
+          <span class="template-badge">
+            <sl-icon name="code-square"></sl-icon>
+            ${agent.template}
+          </span>
+          ${this.project
+            ? html`
+                <a href="/projects/${this.project.id}" class="project-link">
+                  <sl-icon name="folder"></sl-icon>
+                  ${this.project.name}
+                </a>
+              `
+            : ''}
+          ${agent.runtimeBrokerId
+            ? html`
+                <a href="/brokers/${agent.runtimeBrokerId}" class="broker-link">
+                  <sl-icon name="hdd-rack"></sl-icon>
+                  ${agent.runtimeBrokerName || agent.runtimeBrokerId}
+                </a>
+              `
+            : ''}
         </div>
-        <div class="header-actions">
+        <div slot="actions" class="header-actions">
           <sl-tooltip content="See this agent in graph">
             <a
               href="/agents/graph?project=${encodeURIComponent(
@@ -1651,7 +1578,7 @@ export class ScionPageAgentDetail extends LitElement {
               `
             : nothing}
         </div>
-      </div>
+      </scion-detail-header>
     `;
   }
 

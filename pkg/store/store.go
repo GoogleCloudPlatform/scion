@@ -159,6 +159,13 @@ type Store interface {
 	// Must not be called from inside WithTx.
 	FinalizeAgentDeletion(ctx context.Context, id string, pred DeletionPredicate, mode DeletionFinalizeMode, set DeletionFields, hook DeletionFinalizeHook) (affected int, err error)
 
+	// PurgeDeletedAgents permanently removes soft-deleted agents older than
+	// cutoff, together with the rows that reference them (group memberships,
+	// identity keys), in one transaction. Returns the number of agents
+	// purged. It is a Store method rather than an AgentStore one because the
+	// cascade spans several sub-stores.
+	PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error)
+
 	// Agent operations
 	AgentStore
 
@@ -458,12 +465,15 @@ type AgentStore interface {
 	// soft-deleted (a soft-deleted row is never written).
 	SetAgentWorkspacePlacement(ctx context.Context, agentID, placement string) error
 
+	// SetAgentAnnotation sets one annotation on the agent, or removes it
+	// when value is empty, leaving every other annotation as it is. Like
+	// SetAgentWorkspacePlacement it is a narrow write that neither checks
+	// nor bumps state_version. Returns ErrNotFound if the agent doesn't
+	// exist or is soft-deleted.
+	SetAgentAnnotation(ctx context.Context, agentID, key, value string) error
+
 	// UpdateAgentExposedPorts updates only exposed port registrations.
 	UpdateAgentExposedPorts(ctx context.Context, id string, ports []ExposedPort) error
-
-	// PurgeDeletedAgents permanently removes soft-deleted agents older than cutoff.
-	// Returns the number of agents purged.
-	PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error)
 
 	// MarkStaleAgentsOffline marks agents whose last heartbeat is older
 	// than threshold as offline. Only affects agents with phase=running whose
@@ -478,14 +488,14 @@ type AgentStore interface {
 	// Returns the updated agent records for event publishing.
 	MarkStalledAgents(ctx context.Context, activityThreshold, heartbeatRecency time.Time) ([]Agent, error)
 
-	// MarkAgentContainerMissing moves a running agent whose container its
-	// runtime broker no longer reports to phase=error with exit reason
+	// MarkAgentContainerMissing moves a running (or stopping) agent whose
+	// container its runtime broker no longer reports to phase=error with exit reason
 	// container_missing. An exit reason that is more specific about why the
 	// container went away (preempted, evicted) is kept, with its message and
 	// exit code. The write is conditional (every check is in the
 	// UPDATE's WHERE clause): the agent must still exist and not be
-	// soft-deleted, still be assigned to brokerID, still be in phase running,
-	// have no reincarnation in flight, and not have been seen (last_seen) at
+	// soft-deleted, still be assigned to brokerID, still be in phase running
+	// or stopping, have no reincarnation in flight, and not have been seen (last_seen) at
 	// or after cutoff. When any check fails it changes nothing and returns
 	// (nil, nil), so a concurrent start,
 	// restart, stop or heartbeat always wins. On success it returns the
@@ -496,10 +506,10 @@ type AgentStore interface {
 	// caller that read the agent before a broker call and learned from that
 	// call that the container is gone (ptone/scion#3470). On top of every
 	// MarkAgentContainerMissing guard, the conditional UPDATE also requires
-	// that the row's state_version and run_id still equal pre's (so a start,
-	// restart or other versioned write since the read wins) and that no
-	// start claim of any kind (start, restart, stop) is held. Returns
-	// (nil, nil) when any check fails.
+	// phase running (not stopping), that the row's state_version and run_id
+	// still equal pre's (so a start, restart or other versioned write since
+	// the read wins) and that no start claim of any kind (start, restart,
+	// stop) is held. Returns (nil, nil) when any check fails.
 	MarkAgentContainerMissingIfUnchanged(ctx context.Context, id, brokerID string, cutoff time.Time, pre ContainerMissingPrecondition, message string) (*Agent, error)
 
 	// ClearAgentRuntimeTarget removes the runtime target and any runtime
@@ -2099,6 +2109,11 @@ type NotificationStore interface {
 	//
 	// Results are ordered by created_at ASC (oldest first), limited to 100.
 	GetUndispatchedAgentNotifications(ctx context.Context, brokerID string) ([]Notification, error)
+
+	// PurgeOrphanedNotifications deletes acknowledged notifications whose
+	// agent and subscription rows are both gone, and returns how many it
+	// deleted. Unacknowledged notifications are kept.
+	PurgeOrphanedNotifications(ctx context.Context) (int, error)
 
 	// CreateSubscriptionTemplate creates a new subscription template.
 	CreateSubscriptionTemplate(ctx context.Context, tmpl *SubscriptionTemplate) error

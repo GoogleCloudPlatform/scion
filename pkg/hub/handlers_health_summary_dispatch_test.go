@@ -178,7 +178,9 @@ func TestHandleHealthSummary_DispatchThresholds(t *testing.T) {
 }
 
 // TestHandleHealthSummary_DispatchNullOnStoreError: if either count fails,
-// dispatch is null ("not reported", never zeros) and the status degrades.
+// dispatch is null ("not reported", never zeros). Like a null agents
+// section, it adds a "Dispatch data not available" warning and does not
+// change the status (design 5.5 has no rule for it).
 func TestHandleHealthSummary_DispatchNullOnStoreError(t *testing.T) {
 	for _, tc := range []struct {
 		name                       string
@@ -194,7 +196,12 @@ func TestHandleHealthSummary_DispatchNullOnStoreError(t *testing.T) {
 			resp, raw := getHealthSummary(t, srv)
 			assert.Equal(t, "null", string(raw["dispatch"]))
 			assert.Nil(t, resp.Dispatch)
-			assert.Equal(t, HealthStatusDegraded, resp.Status)
+			assert.Equal(t, HealthStatusHealthy, resp.Status)
+			assert.Contains(t, resp.Attention, HealthAttentionItem{
+				Severity: HealthAttentionWarning, Kind: HealthAttentionDispatch,
+				Subject: HealthAttentionSubject{Type: HealthSubjectDispatch},
+				Message: "Dispatch data not available",
+			})
 			assert.NotNil(t, resp.Agents, "a dispatch failure must not drop other sections")
 		})
 	}

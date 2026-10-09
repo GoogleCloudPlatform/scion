@@ -34,8 +34,11 @@ import {
   cancelScheduledMessage,
   conversationSupportsScheduledSend,
   createScheduledMessage,
+  dismissScheduledMessage,
   listScheduledMessages,
   scheduledFailureText,
+  scheduledSendNowAllowed,
+  sendNowScheduledMessage,
   sortScheduled,
   type ScheduledMessage,
 } from './chat-scheduled.js';
@@ -61,9 +64,10 @@ beforeEach(() => {
 });
 
 describe('conversationSupportsScheduledSend', () => {
-  it('allows topics only', () => {
+  it('allows topics and direct messages', () => {
     expect(conversationSupportsScheduledSend('3f2b9c1e-0000-0000-0000-000000000000')).toBe(true);
-    expect(conversationSupportsScheduledSend('dm:agent:a:user:u')).toBe(false);
+    expect(conversationSupportsScheduledSend('dm:agent:a:user:u')).toBe(true);
+    expect(conversationSupportsScheduledSend('dm:user:a:user:b')).toBe(true);
     expect(conversationSupportsScheduledSend('')).toBe(false);
   });
 });
@@ -144,6 +148,45 @@ describe('API helpers', () => {
 
     apiFetch.mockResolvedValueOnce(new Response('{}', { status: 409 }));
     await expect(cancelScheduledMessage('t1', 'a')).rejects.toThrow('already being sent');
+  });
+});
+
+describe('send now and dismiss', () => {
+  it('posts to the row actions and returns the requeued row', async () => {
+    apiFetch.mockResolvedValueOnce(
+      new Response(JSON.stringify(sm('a/b', '2026-10-08T08:00:00Z')), { status: 200 })
+    );
+    const row = await sendNowScheduledMessage('dm:user:x', 'a/b');
+    expect(row.status).toBe('pending');
+    let [path, init] = apiFetch.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe('/api/v1/chat/conversations/dm%3Auser%3Ax/scheduled/a%2Fb/send-now');
+    expect(init.method).toBe('POST');
+
+    apiFetch.mockResolvedValueOnce(new Response(null, { status: 204 }));
+    await dismissScheduledMessage('t1', 'a');
+    [path, init] = apiFetch.mock.calls[1] as [string, RequestInit];
+    expect(path).toBe('/api/v1/chat/conversations/t1/scheduled/a/dismiss');
+    expect(init.method).toBe('POST');
+
+    apiFetch.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: { message: 'only a missed message' } }), { status: 409 })
+    );
+    await expect(sendNowScheduledMessage('t1', 'a')).rejects.toThrow('only a missed message');
+    apiFetch.mockResolvedValueOnce(new Response('{}', { status: 404 }));
+    await expect(dismissScheduledMessage('t1', 'a')).rejects.toThrow('Failed to dismiss');
+  });
+
+  it('allows Send now for missed and interrupted only', () => {
+    const failed = (failureReason: string): ScheduledMessage => ({
+      ...sm('a', '2026-10-08T08:00:00Z', 'failed'),
+      failureReason,
+    });
+    expect(scheduledSendNowAllowed(failed('missed'))).toBe(true);
+    expect(scheduledSendNowAllowed(failed('interrupted'))).toBe(true);
+    for (const r of ['no_access', 'conversation_gone', 'recipient_gone', 'delivery_error']) {
+      expect(scheduledSendNowAllowed(failed(r))).toBe(false);
+    }
+    expect(scheduledSendNowAllowed({ ...failed('missed'), status: 'pending' })).toBe(false);
   });
 });
 

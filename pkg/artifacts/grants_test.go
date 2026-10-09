@@ -454,7 +454,7 @@ type moveFirstStore struct {
 }
 
 func (m *moveFirstStore) PutGrant(ctx context.Context, g *Grant, max int, cross bool) (bool, error) {
-	if _, err := m.Store.UpdateArtifact(ctx, g.ArtifactID, ArtifactUpdate{
+	if _, err := m.UpdateArtifact(ctx, g.ArtifactID, ArtifactUpdate{
 		HomeGrant: &Grant{ID: "moved-" + g.ID, ArtifactID: g.ArtifactID, SubjectKind: SubjectScope, SubjectRef: m.to,
 			Permission: GrantRead, CreatedAt: time.Now()}, MaxGrants: max}); err != nil {
 		return false, err

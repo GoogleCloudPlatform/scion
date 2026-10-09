@@ -418,7 +418,7 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 
 	// ── Step 15: Auto-link providers (best-effort) ───────────────────────
 
-	s.autoLinkProviders(ctx, clone)
+	s.autoLinkClonedProviders(ctx, clone)
 
 	// ── Step 16: Ensure the #general chat topic (best-effort) ────────────
 	// Runs after every step that can fail and roll the clone back, so a
@@ -1160,6 +1160,33 @@ func isGitSourceLabel(k string) bool {
 		return true
 	}
 	return false
+}
+
+// autoLinkClonedProviders auto-links the auto-provide brokers to a new clone
+// and settles its default runtime broker. A default runtime broker must be
+// a provider of the project: the default copied from the source is kept
+// only when the clone has that provider row after auto-linking; otherwise
+// the first auto-linked broker becomes the default, or the default is
+// cleared when there is none. The stored default is read back and written
+// whenever it differs from the settled one, so the store and the returned
+// clone agree. Best-effort: store errors are logged.
+func (s *Server) autoLinkClonedProviders(ctx context.Context, clone *store.Project) {
+	copied := clone.DefaultRuntimeBrokerID
+	clone.DefaultRuntimeBrokerID = ""
+	s.autoLinkProviders(ctx, clone)
+	if copied != "" {
+		if _, err := s.store.GetProjectProvider(ctx, clone.ID, copied); err == nil {
+			clone.DefaultRuntimeBrokerID = copied
+		}
+	}
+	if current, err := s.store.GetProject(ctx, clone.ID); err == nil &&
+		current.DefaultRuntimeBrokerID == clone.DefaultRuntimeBrokerID {
+		return
+	}
+	if err := s.store.UpdateProject(ctx, clone); err != nil {
+		slog.Warn("project clone: failed to settle default runtime broker",
+			"clone_id", clone.ID, "error", err)
+	}
 }
 
 // validateCloneURLLabelValue checks the clone-url label in labels (if any)

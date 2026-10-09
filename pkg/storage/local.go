@@ -436,9 +436,13 @@ func createTemp(dir, prefix string) (*os.File, string, error) {
 // syncDirHook, when set (by tests), is called with each directory synced.
 var syncDirHook func(dir string)
 
+// dirSync syncs an open directory; tests replace it to inject results.
+var dirSync = func(d *os.File) error { return d.Sync() }
+
 // syncDir fsyncs a directory, so a rename or a new entry in it is
-// durable. Platforms and file systems that cannot sync a directory are
-// skipped.
+// durable. Windows cannot sync a directory and is skipped. A file system
+// that does not support syncing a directory (see syncUnsupported) is not
+// an error; any other failure is.
 func syncDir(dir string) error {
 	if syncDirHook != nil {
 		syncDirHook(dir)
@@ -451,10 +455,18 @@ func syncDir(dir string) error {
 		return err
 	}
 	defer func() { _ = d.Close() }()
-	if err := d.Sync(); err != nil && !errors.Is(err, syscall.EINVAL) && !errors.Is(err, syscall.ENOTSUP) {
+	if err := dirSync(d); err != nil && !syncUnsupported(err) {
 		return err
 	}
 	return nil
+}
+
+// syncUnsupported reports whether a directory sync failed only because the
+// file system does not support it: EINVAL (Linux, for file systems without
+// directory fsync), ENOTSUP and EOPNOTSUPP (distinct values on macOS and
+// the BSDs, for example on network mounts; the same value on Linux).
+func syncUnsupported(err error) bool {
+	return errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.EOPNOTSUPP)
 }
 
 // mkdirAllSynced is os.MkdirAll that also syncs the parent of each

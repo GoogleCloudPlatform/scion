@@ -353,6 +353,109 @@ describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
   });
 
   it.each(presets)(
+    'swaps the %s empty state for placeholders when a narrow viewport widens',
+    async (preset, count) => {
+      let onChange: (() => void) | null = null;
+      const query = {
+        matches: true,
+        addEventListener: vi.fn((_type: string, cb: () => void) => {
+          onChange = cb;
+        }),
+        removeEventListener: vi.fn(),
+      };
+      const realMatchMedia = window.matchMedia.bind(window);
+      vi.spyOn(window, 'matchMedia').mockImplementation((q: string) =>
+        q === '(max-width: 760px)' ? (query as unknown as MediaQueryList) : realMatchMedia(q)
+      );
+      root.dispose();
+      root.element.remove();
+      root = new WorkspaceRoot();
+      document.body.append(root.element);
+
+      root.layoutManager.setLayout(preset);
+      await flush();
+      expect(placeholders()).toEqual([]);
+      expect(visibleOverlays().map((el) => el.className)).toEqual(['terminal-empty']);
+
+      query.matches = false;
+      expect(onChange).not.toBeNull();
+      onChange!();
+      await flush();
+      expect(getPaneHost(root).dataset.effectiveLayout).toBe(preset);
+      expect(placeholders()).toHaveLength(count);
+      expect(visibleOverlays()).toEqual([]);
+    }
+  );
+
+  it.each(presets)(
+    'shows the empty state for %s on a narrow viewport with no terminals open',
+    async (preset) => {
+      mockNarrowViewport();
+      root.dispose();
+      root.element.remove();
+      root = new WorkspaceRoot();
+      document.body.append(root.element);
+
+      root.layoutManager.setLayout(preset);
+      await flush();
+      expect(getPaneHost(root).dataset.effectiveLayout).toBe('single');
+      expect(placeholders()).toEqual([]);
+      const overlays = visibleOverlays();
+      expect(overlays.map((el) => el.className)).toEqual(['terminal-empty']);
+      expect(overlays[0].textContent).toBe('No terminals are open.');
+    }
+  );
+
+  it('shows only the empty state in the single layout with no terminals open', async () => {
+    await flush();
+    const overlays = visibleOverlays();
+    expect(overlays.map((el) => el.className)).toEqual(['terminal-empty']);
+    expect(overlays[0].textContent).toBe('No terminals are open.');
+  });
+
+  it('shows the status message when terminals are open but none is selected', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'test',
+    });
+    root.withAutoSelectSuspended(() => root.create(registry, AGENT_ID, { deferConnect: true }));
+    await flush();
+
+    expect(root.layoutManager.getVisibleSlots()).toEqual([null]);
+    const overlays = visibleOverlays();
+    expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
+    expect(overlays[0].textContent).toBe('No terminal selected.');
+  });
+
+  it('shows the status message again after the selected terminal is closed', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'test',
+    });
+    const session = root.create(registry, AGENT_ID);
+    root.select(session);
+    await flush();
+    root.withAutoSelectSuspended(() =>
+      root.create(registry, '22222222-2222-4222-8222-222222222222', { deferConnect: true })
+    );
+    root.withAutoSelectSuspended(() => session.close());
+    await flush();
+
+    expect(root.layoutManager.getVisibleSlots()).toEqual([null]);
+    const overlays = visibleOverlays();
+    expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
+    expect(overlays[0].textContent).toBe('No terminal selected.');
+  });
+
+  it('keeps a message set through setStatus visible with no terminals open', async () => {
+    root.setStatus('Terminal selected in its owning tab.');
+    await flush();
+    const overlays = visibleOverlays();
+    expect(overlays.map((el) => el.className)).toEqual(['terminal-empty', 'terminal-status']);
+    expect(overlays[1].textContent).toBe('Terminal selected in its owning tab.');
+  });
+
+  it.each(presets)(
     'shows %s placeholders that accept a drop when no slot is filled',
     async (preset, count) => {
       const registry = new TerminalSessionRegistry({
