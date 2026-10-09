@@ -36,6 +36,8 @@
 # terminal-workspace, chat-palette, terminal-entrypoints and
 # terminal-hidden), plus roughly 2-3 minutes of setup per job, so about
 # 50-60 runner-minutes across 12 jobs; retries of failing tests add to that.
+# The terminal-workspace job also runs a Vite production build first, which
+# adds about 1 minute (that job takes about 4 minutes in total).
 # Wall clock is bounded by the slowest job, about 8-10 minutes.
 
 name: Web E2E (advisory)
@@ -139,8 +141,12 @@ jobs:
         run: npx playwright install-deps chromium
 
       # CHROMIUM_EXECUTABLE / TERMINAL_OWNER_CHROMIUM point every suite at
-      # the Playwright headless shell; some configs otherwise default to
-      # /usr/bin/chromium. chromium.executablePath() returns the full
+      # the Playwright headless shell. Four configs otherwise default to
+      # /usr/bin/chromium: agent-store-count, terminal-entrypoints and
+      # terminal-workspace read CHROMIUM_EXECUTABLE, while
+      # terminal-coordinator reads TERMINAL_OWNER_CHROMIUM (as does
+      # terminal-owner, which has no such default), so both variables are
+      # exported. chromium.executablePath() returns the full
       # Chromium path (not installed here), so the headless shell path is
       # derived from it: same browsers directory and revision, x64 Linux
       # layout.
@@ -154,7 +160,7 @@ jobs:
           CHROMIUM_REVISION="${CHROMIUM_DIR##*/chromium-}"
           CHROMIUM_EXECUTABLE="$(dirname "$CHROMIUM_DIR")/chromium_headless_shell-${CHROMIUM_REVISION}/chrome-headless-shell-linux64/chrome-headless-shell"
           if [ ! -x "$CHROMIUM_EXECUTABLE" ]; then
-            echo "::error::Chromium headless shell not found at $CHROMIUM_EXECUTABLE"
+            echo "::error::Chromium headless shell not found at $CHROMIUM_EXECUTABLE (derived from $FULL_CHROMIUM)"
             exit 1
           fi
           export CHROMIUM_EXECUTABLE
