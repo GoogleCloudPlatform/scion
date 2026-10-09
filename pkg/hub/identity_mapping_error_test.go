@@ -179,8 +179,8 @@ func TestDispatchCreateErrorResponse_ValidationErrorNotTranslated(t *testing.T) 
 	assert.Nil(t, resp.Error.Details)
 }
 
-// A typed nil *brokerStatusError wrapped in a non-nil error is not an
-// identity refusal and does not panic.
+// A typed nil *brokerStatusError, direct or wrapped in a non-nil error, is
+// not an identity refusal and does not panic.
 func TestIdentityMappingDispatchError_TypedNil(t *testing.T) {
 	var se *brokerStatusError
 	err := fmt.Errorf("dispatch: %w", se)
@@ -189,6 +189,14 @@ func TestIdentityMappingDispatchError_TypedNil(t *testing.T) {
 	w := httptest.NewRecorder()
 	assert.False(t, relayIdentityMappingError(w, err))
 	assert.Equal(t, 0, w.Body.Len())
+
+	// dispatchFailureText must not call Error on the nil pointer, whether
+	// the typed nil is the error itself or wrapped.
+	var direct error = se
+	assert.NotPanics(t, func() {
+		assert.Equal(t, "", dispatchFailureText(direct))
+		assert.Equal(t, "", dispatchFailureText(err))
+	})
 }
 
 // A 400 with another code is not an identity refusal.
