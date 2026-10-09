@@ -17,6 +17,7 @@ package wsclient
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -39,6 +40,7 @@ func runAgainstCloseServer(t *testing.T, sendData bool, code int, reason string)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = r.Close(); _ = w.Close() })
 
+	attempt := 0
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -46,7 +48,10 @@ func runAgainstCloseServer(t *testing.T, sendData bool, code int, reason string)
 			return
 		}
 		defer func() { _ = conn.Close() }()
-		if sendData {
+		attempt++
+		// Only the first connection sends data, so a code that triggers the
+		// one automatic reconnect sees that reconnect fail and end Run.
+		if sendData && attempt == 1 {
 			_ = conn.WriteJSON(wsprotocol.NewPTYDataMessage([]byte("hello")))
 		}
 		if code == 0 {
@@ -59,6 +64,8 @@ func runAgainstCloseServer(t *testing.T, sendData bool, code int, reason string)
 
 	client := NewPTYClient(PTYClientConfig{Endpoint: srv.URL, Slug: "a1"})
 	client.stdin = r
+	client.notice = io.Discard
+	client.jitter = func(time.Duration) time.Duration { return 0 }
 	require.NoError(t, client.Connect(context.Background()))
 	return client.Run()
 }

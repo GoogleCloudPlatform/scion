@@ -179,14 +179,14 @@ scion list --project acme-backend
 
 **A terminal is required.** Attach needs an interactive terminal on both stdin and stdout. From a script or a coding harness it fails at once with a non-zero exit. Use `scion look <agent>` to see the screen and `scion message <agent>` to send input instead.
 
-**No reconnect.** The CLI does not reconnect today. If the Hub restarts, the network drops, the Runtime Broker disconnects, or the agent's session ends, `scion attach` exits with a message that names the cause and the next command to run. (The web terminal does reconnect on its own.) The messages follow the [PTY close codes](/scion/reference/api/#pty-close-codes):
+**Reconnect.** When the Hub closes the session with `4503` (a planned restart, or the Runtime Broker connection dropped) or `4504` (a transient failure), `scion attach` reconnects once by itself and the screen redraws. For `4503` it waits a random delay of up to 5 seconds first, so many clients closed at once do not all reconnect at the same moment. If that reconnect fails, or the network drops, the Hub restarts without a close message, or the agent's session ends, `scion attach` exits with a message that names the cause and the next command to run. (The web terminal also reconnects on its own.) The messages follow the [PTY close codes](/scion/reference/api/#pty-close-codes):
 
 | Close code | What the CLI tells you | What to do |
 | :--- | :--- | :--- |
 | `1000` | Nothing; this is a normal detach. | |
 | `4410` | The agent's terminal session has ended (the agent exited, or its container stopped or was removed). | Check with `scion list`, then `scion resume <agent> --attach`. |
 | `4404` | The Runtime Broker cannot find the agent or its container. | Check with `scion list`. |
-| `4503` | The Hub lost its connection to the Runtime Broker, or the session is not ready yet. | Run `scion attach <agent>` again. |
+| `4503` | The Hub lost its connection to the Runtime Broker, or the session is not ready yet, and the automatic reconnect also failed. | Run `scion attach <agent>` again. |
 | `1006` | The connection to the Hub dropped without a close message. | Run `scion attach <agent>` again. |
 | `1011` | The Hub or the Runtime Broker hit an internal error. | Run `scion attach <agent>` again. |
 
@@ -194,4 +194,4 @@ Other codes get a generic message that includes the code and its reason, so you 
 
 **Known limit.** On a Hub that runs several replicas behind a load balancer, attach may fail with `503` if the request reaches a replica that does not hold the broker's control channel. Retrying may reach the right replica.
 
-**Coming change.** Attach is moving to a new transport layer, the conduit relay. That change is planned to add automatic reconnect to `scion attach` and to remove the multi-replica limit above. You won't need to do anything: `scion attach` and the web terminal keep working the same way.
+**Coming change.** Attach is moving to a new transport layer, the conduit relay. That change is planned to remove the multi-replica limit above. You won't need to do anything: `scion attach` and the web terminal keep working the same way.
