@@ -465,17 +465,14 @@ export class ScionPageBrokerDetail extends LitElement {
       stateManager.setScope({ type: 'broker-detail', brokerId: this.brokerId });
     }
 
-    stateManager.addEventListener('brokers-updated', this.boundOnBrokersUpdated as EventListener);
+    stateManager.addEventListener('brokers-updated', this.boundOnBrokersUpdated);
 
     this.relativeTimeInterval = setInterval(() => this.requestUpdate(), 15_000);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    stateManager.removeEventListener(
-      'brokers-updated',
-      this.boundOnBrokersUpdated as EventListener
-    );
+    stateManager.removeEventListener('brokers-updated', this.boundOnBrokersUpdated);
     if (this.relativeTimeInterval) {
       clearInterval(this.relativeTimeInterval);
       this.relativeTimeInterval = null;

@@ -26,6 +26,11 @@ file paths from two primary variables:
 | `REGION` | `us-central1` | GCP region for GKE and resource locations |
 | `ZONE` | `us-central1-a` | GCP zone for the GCE VM instance |
 | `MACHINE_TYPE` | *(derived)* | Compute machine type to use (overrides `SIZE_CHOICE`) |
+| `CERT_EMAIL` | *(none, required)* | Contact address Let's Encrypt uses for certificate notices, for example `admin@example.com`. `gce-certs.sh` and `gce-demo-deploy.sh` stop with an error if it is empty (unless `SKIP_TLS=true`). |
+| `DNS_ZONE_DESCRIPTION` | `Scion Hub zone for <CERT_DOMAIN>` | Description `gce-certs.sh` sets on a new Cloud DNS zone |
+| `SKIP_TLS` | `false` | Set to `true` for an internal deployment without certificates: `gce-demo-deploy.sh` skips `gce-certs.sh`, and `gce-start-hub.sh` skips the Caddy/TLS step (same as `--no-tls`). Nothing then creates a DNS record, so `HUB_DOMAIN` must resolve to the VM through your own DNS, or set `HUB_BASE_URL` to an address agents can reach. |
+| `HUB_BASE_URL` | `https://<HUB_DOMAIN>`, or `http://<HUB_DOMAIN>:8080` with `SKIP_TLS=true` | Base URL `gce-start-hub.sh --full` writes into the systemd unit as `SCION_SERVER_BASE_URL`. A `SCION_SERVER_BASE_URL` in `hub.env` takes precedence. Behind an upstream TLS terminator, use the `https://` URL that clients use. |
+| `HEALTH_CHECK_INSECURE` | `false` | Set to `true` to skip TLS certificate verification in the final HTTPS health check (same as `--insecure-health-check`). Only for a self-signed or test certificate. |
 
 To stand up a second hub (e.g., "staging"):
 
@@ -92,10 +97,30 @@ To also re-upload config files, update systemd/Caddy, and refresh GKE credential
 ./scripts/starter-hub/gce-start-hub.sh --full
 ```
 
+For an internal deployment without certificates, skip the Caddy/TLS step
+(no Caddyfile, no Caddy install, no HTTPS health check):
+
+```bash
+./scripts/starter-hub/gce-start-hub.sh --full --no-tls
+```
+
+The final health check verifies the TLS certificate of `https://<HUB_DOMAIN>`.
+For a self-signed or test certificate only, add `--insecure-health-check`.
+Run `gce-start-hub.sh --help` for all options.
+
 To wipe the hub database on restart:
 
 ```bash
 ./scripts/starter-hub/gce-start-hub.sh --reset-db
+```
+
+## Tests
+
+`tests/run.sh` runs the script tests against stub `gcloud`, `curl`, and
+`sleep` commands. It never contacts GCP and needs only bash:
+
+```bash
+./scripts/starter-hub/tests/run.sh
 ```
 
 ## Teardown

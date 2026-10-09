@@ -23,6 +23,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { ScionArtifactMoveDialog } from './artifact-move-dialog.js';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 const ID = '00000000-0000-4000-8000-000000000009';
 const ARTIFACT = { id: ID, title: 'Onboarding guide draft', scopeRef: 'gone-1' };
@@ -55,7 +56,7 @@ function mockFetch(
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, opts?: RequestInit) => {
-      const url = String(input);
+      const url = requestUrl(input);
       const method = opts?.method ?? 'GET';
       const body = typeof opts?.body === 'string' ? JSON.parse(opts.body) : undefined;
       m.calls.push({ method, url, body });

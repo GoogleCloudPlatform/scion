@@ -26,7 +26,6 @@
 
 import { describe, it, expect } from 'vitest';
 import type {
-  AccessBoundarySummary,
   AccessBoundaryDetail,
   AccessBoundaryPreview,
   AccessBoundaryPreviewJob,
@@ -34,8 +33,6 @@ import type {
   AccessBoundaryAuditPage,
   AffectedPrincipalsPage,
   AccessBoundaryCommitResponse,
-  AccessBoundaryAuditEvent,
-  AffectedPrincipal,
   ConstraintSubject,
   ConstraintScope,
   AccessBoundaryStatus,

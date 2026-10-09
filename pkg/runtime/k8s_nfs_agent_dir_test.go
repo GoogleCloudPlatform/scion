@@ -15,17 +15,13 @@
 package runtime
 
 import (
-	"context"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	k8sfake "k8s.io/client-go/kubernetes/fake"
 )
 
 // nfsAgentDirConfig is nfsBaseConfig for a clone-per-agent agent.
@@ -97,11 +93,10 @@ func TestBuildPod_NFSAgentDir_SharedDirs(t *testing.T) {
 	assert.Equal(t, "projects/proj-123/agents/agent-1", ic.VolumeMounts[0].SubPath)
 }
 
-// Each pod prepares its own agent directory, so a broker lock loser gets
-// the provisioning init container rather than the wait-only one.
-func TestBuildPod_NFSAgentDir_LockLoserProvisions(t *testing.T) {
-	cfg := nfsAgentDirConfig("cpa-loser")
-	cfg.nfsProvisionLockLost = true
+// Each pod prepares its own agent directory: the init container runs as
+// root and, for a pre-created workspace, chowns best effort.
+func TestBuildPod_NFSAgentDir_PreCreatedProvisions(t *testing.T) {
+	cfg := nfsAgentDirConfig("cpa-precreated")
 	cfg.NFSWorkspacePreCreated = true
 	pod, err := newNFSTestK8sRuntime().buildPod("default", cfg)
 	require.NoError(t, err)
@@ -114,42 +109,17 @@ func TestBuildPod_NFSAgentDir_LockLoserProvisions(t *testing.T) {
 	assert.Equal(t, "1", v)
 }
 
-// Run: a broker lock loser in clone-per-agent mode creates a pod whose init
-// container prepares the agent directory.
-func TestRun_NFSAgentDirLockLost_CreatesProvisioningPod(t *testing.T) {
-	r := newNFSTestK8sRuntime()
-	cfg := nfsAgentDirConfig("scion-cpa-lock-lost")
-	cfg.Locker = &alwaysLoseLocker{}
-	// Run creates the pod, then fails readiness at its first poll (see
-	// failPodReadiness), which keeps the pod for inspection.
-	failPodReadiness(r.Client.Clientset.(*k8sfake.Clientset))
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	r.Run(ctx, cfg) //nolint:errcheck
-
-	pods, err := r.Client.Clientset.CoreV1().Pods("default").List(context.Background(), metav1.ListOptions{})
-	require.NoError(t, err)
-	require.Len(t, pods.Items, 1)
-	ic := pods.Items[0].Spec.InitContainers[0]
-	assert.False(t, hasFlag(ic.Command, "--wait-for-sentinel"))
-	v, _ := envValue(ic.Env, "SCION_WORKSPACE_MODE")
-	assert.Equal(t, "clone-per-agent", v)
-}
-
 // The shared-plain pod is unchanged by the branch field alone, and without
 // the NFS init container the agent directory fields are ignored.
 func TestBuildPod_NFSAgentDir_OtherModesUnchanged(t *testing.T) {
-	for _, lockLost := range []bool{false, true} {
-		cfg := nfsBaseConfig("plain")
-		cfg.nfsProvisionLockLost = lockLost
-		pod, err := newNFSTestK8sRuntime().buildPod("default", cfg)
-		require.NoError(t, err)
-		withBranch := cfg
-		withBranch.NFSAgentBranch = "scion/agent-1"
-		pod2, err := newNFSTestK8sRuntime().buildPod("default", withBranch)
-		require.NoError(t, err)
-		assert.Equal(t, pod.Spec, pod2.Spec, "lockLost=%v", lockLost)
-	}
+	cfg := nfsBaseConfig("plain")
+	pod, err := newNFSTestK8sRuntime().buildPod("default", cfg)
+	require.NoError(t, err)
+	withBranch := cfg
+	withBranch.NFSAgentBranch = "scion/agent-1"
+	pod2, err := newNFSTestK8sRuntime().buildPod("default", withBranch)
+	require.NoError(t, err)
+	assert.Equal(t, pod.Spec, pod2.Spec)
 
 	for _, mutate := range []func(*RunConfig){
 		func(c *RunConfig) { c.WorkspaceBackendName = "" },
