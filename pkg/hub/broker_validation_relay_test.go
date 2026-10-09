@@ -33,9 +33,9 @@ import (
 
 const brokerValidationMessage = `GCP identity mode "block" is not supported on the Kubernetes runtime`
 
-// fakeBroker is a runtime broker HTTP endpoint that answers every request
+// fakeValidationBroker is a runtime broker HTTP endpoint that answers every request
 // with status and body.
-func fakeBroker(t *testing.T, status int, body string) *httptest.Server {
+func fakeValidationBroker(t *testing.T, status int, body string) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -61,7 +61,7 @@ func brokerErrorBody(code, message string) string {
 // fake broker answers a create with status and body.
 func fakeBrokerCreateErr(t *testing.T, status int, body string) error {
 	t.Helper()
-	broker := fakeBroker(t, status, body)
+	broker := fakeValidationBroker(t, status, body)
 	_, err := NewHTTPRuntimeBrokerClient().CreateAgent(context.Background(), tid("broker-1"), broker.URL,
 		&RemoteCreateAgentRequest{ID: "hub-uuid-1", Slug: tid("agent-1"), Name: "agent-1", ProjectID: tid("project-1")})
 	require.Error(t, err)
@@ -72,14 +72,14 @@ func fakeBrokerCreateErr(t *testing.T, status int, body string) error {
 // fake broker answers a start with status and body.
 func fakeBrokerStartErr(t *testing.T, status int, body string) error {
 	t.Helper()
-	broker := fakeBroker(t, status, body)
+	broker := fakeValidationBroker(t, status, body)
 	_, err := NewHTTPRuntimeBrokerClient().StartAgent(context.Background(), tid("broker-1"), broker.URL,
 		"agent-1", "", "", "", "", "", "", "", nil, nil, nil, nil, false, false, StartExtras{})
 	require.Error(t, err)
 	return err
 }
 
-func decodeErrorResponse(t *testing.T, rec *httptest.ResponseRecorder) ErrorResponse {
+func decodeRelayErrorResponse(t *testing.T, rec *httptest.ResponseRecorder) ErrorResponse {
 	t.Helper()
 	var resp ErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
@@ -125,7 +125,7 @@ func TestDispatchCreateErrorResponse_FakeBrokerOtherStatusesUnchanged(t *testing
 			dispatchCreateErrorResponse(w, err, "")
 
 			require.Equal(t, tc.wantCode, w.Code, w.Body.String())
-			assert.Equal(t, tc.wantErr, decodeErrorResponse(t, w).Error.Code)
+			assert.Equal(t, tc.wantErr, decodeRelayErrorResponse(t, w).Error.Code)
 		})
 	}
 }
@@ -154,12 +154,12 @@ func TestAgentLifecycle_StartFakeBroker500Stays502(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
 
 	require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
-	assert.Equal(t, ErrCodeRuntimeError, decodeErrorResponse(t, rec).Error.Code)
+	assert.Equal(t, ErrCodeRuntimeError, decodeRelayErrorResponse(t, rec).Error.Code)
 }
 
 func TestCreateAgent_FakeBrokerValidationErrorBecomes400(t *testing.T) {
 	createErr := fakeBrokerCreateErr(t, http.StatusBadRequest, brokerErrorBody("validation_error", brokerValidationMessage))
-	disp := &skillFailDispatcher{createErr: createErr}
+	disp := &failingCreateDispatcher{createErr: createErr}
 	srv, _, project := setupCreateAgentServer(t, disp)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
@@ -169,4 +169,5 @@ func TestCreateAgent_FakeBrokerValidationErrorBecomes400(t *testing.T) {
 	})
 
 	assertHarnessConfigRelayed(t, rec, http.StatusBadRequest, ErrCodeValidationError, brokerValidationMessage)
+	assert.True(t, disp.deleteCalled, "the failed create is still cleaned up on the broker")
 }
