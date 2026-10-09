@@ -396,6 +396,7 @@ func TestSectionBodyPresence(t *testing.T) {
 	assert.Equal(t, []string{"stalled_threshold"}, keys("lifecycle"))
 	assert.Equal(t, []string{"notification_channels"}, keys("notifications"))
 	assert.Equal(t, []string{"algorithms", "enabled"}, keys("federation"))
+	assert.Equal(t, "server.notification_channels", sectionKeyKoanfPath("notifications", "notification_channels"))
 	assert.Empty(t, keys("quotas"))
 	assert.Empty(t, keys("agent_secrets"))
 }
