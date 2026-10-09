@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/delegationadoption"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -57,6 +58,7 @@ func (w *adoptionWorld) updatedText(edgeID string) string {
 // A legacy edge whose stored updated text is not in canonical form, but
 // names the same instant, is adopted on boot, and so is its child.
 func TestProvenanceAdoptionNonCanonicalUpdatedText(t *testing.T) {
+	enttest.SkipOnPostgres(t, "writes non-canonical SQLite TEXT timestamps; Postgres stores timestamptz")
 	inst := time.Date(2026, 9, 18, 1, 24, 24, 503338758, time.UTC)
 	for name, form := range nonCanonicalUpdatedForms {
 		t.Run(name, func(t *testing.T) {
