@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"runtime"
 	"testing"
 	"time"
 
@@ -92,7 +93,11 @@ func newTemplateRepairFixture(t *testing.T) *templateRepairFixture {
 	// Global first, then project A: a "newest by name" lookup would pick the
 	// project-A record for everyone.
 	f.global = mk("tmpl-global", store.TemplateScopeGlobal, "", "tmpl/global/worker")
-	time.Sleep(10 * time.Millisecond)
+	// Wait only until the clock has moved past the global record's creation
+	// time, so the project-A record is strictly newer without a fixed sleep.
+	for !time.Now().After(f.global.Created) {
+		runtime.Gosched()
+	}
 	f.inA = mk("tmpl-proj-a", store.TemplateScopeProject, f.projectA.ID, "tmpl/project-a/worker")
 	return f
 }
@@ -176,6 +181,36 @@ func TestHTTPDispatcher_RepairTemplatePassesIDAndProject(t *testing.T) {
 	err := d.repairTemplate(context.Background(), agent)
 	require.NoError(t, err)
 	assert.Equal(t, TemplateRepairRef{ID: "tmpl-id-1", Name: "worker", ProjectID: "proj-1"}, got)
+}
+
+// With no stamped template ID (no applied config, or an empty TemplateID),
+// the dispatcher falls back to a name-only reference scoped to the agent's
+// project.
+func TestHTTPDispatcher_RepairTemplateNameOnlyFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		applied *store.AgentAppliedConfig
+	}{
+		{name: "no applied config"},
+		{name: "empty template ID", applied: &store.AgentAppliedConfig{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := NewHTTPAgentDispatcherWithClient(nil, nil, false, slog.Default())
+			var got TemplateRepairRef
+			d.SetTemplateRepairer(func(_ context.Context, ref TemplateRepairRef) error {
+				got = ref
+				return nil
+			})
+			agent := &store.Agent{
+				Slug:          "a",
+				ProjectID:     "proj-1",
+				Template:      "worker",
+				AppliedConfig: tc.applied,
+			}
+			require.NoError(t, d.repairTemplate(context.Background(), agent))
+			assert.Equal(t, TemplateRepairRef{Name: "worker", ProjectID: "proj-1"}, got)
+		})
+	}
 }
 
 func TestHTTPDispatcher_RepairTemplateNoReference(t *testing.T) {
