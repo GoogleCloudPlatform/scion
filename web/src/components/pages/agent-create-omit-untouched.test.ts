@@ -58,6 +58,8 @@ let projectDefaultMode = '';
 let projectDefaultAccount = 'sa-a';
 /** The project's per-profile defaults (profile name to account ID). */
 let projectProfileDefaults: Record<string, string> = {};
+/** What /gcp-service-accounts returns. */
+let serviceAccounts: unknown[] = [];
 let hubTelemetry = false;
 let bodies: Array<Record<string, unknown>> = [];
 
@@ -108,7 +110,7 @@ function stubFetch(): void {
         }
         body = settings;
       } else if (url.includes('/gcp-service-accounts')) {
-        body = { items: [verifiedServiceAccount] };
+        body = { items: serviceAccounts };
       }
       return Promise.resolve({ ok: true, status: 200, json: async () => body } as Response);
     })
@@ -125,6 +127,7 @@ afterEach(() => {
   projectDefaultMode = '';
   projectDefaultAccount = 'sa-a';
   projectProfileDefaults = {};
+  serviceAccounts = [verifiedServiceAccount];
   hubTelemetry = false;
 });
 
@@ -208,25 +211,31 @@ const noBrokerTarget: TargetFixture = {
 const dockerTarget = singleTypeTarget('docker');
 const k8sTarget = singleTypeTarget('kubernetes');
 
-/** A broker with two docker profiles, so a profile can be chosen explicitly. */
-function twoProfileDockerTarget(profile: string): TargetFixture {
+/** A broker with two profiles of one type, so a profile can be chosen explicitly. */
+function twoProfileTarget(type: string, profile: string): TargetFixture {
   return {
-    label: profile ? `a docker broker with profile ${profile} chosen` : 'a docker broker',
+    label: profile
+      ? `a ${type} broker with profile ${profile} chosen`
+      : `a two-profile ${type} broker`,
     brokers: [
       {
-        id: 'broker-two',
-        name: 'two-profile-broker',
+        id: `broker-two-${type}`,
+        name: `two-profile-${type}-broker`,
         status: 'online',
         profiles: [
-          { name: 'small', type: 'docker', available: true },
-          { name: 'large', type: 'docker', available: true },
+          { name: 'small', type, available: true },
+          { name: 'large', type, available: true },
         ],
       },
     ],
-    brokerId: 'broker-two',
+    brokerId: `broker-two-${type}`,
     profile,
-    kubernetesOnly: false,
+    kubernetesOnly: type === 'kubernetes',
   };
+}
+
+function twoProfileDockerTarget(profile: string): TargetFixture {
+  return twoProfileTarget('docker', profile);
 }
 
 /** The target runtime selections the omission must hold for. */
@@ -263,6 +272,12 @@ function gcpIdentityHint(c: CreatePrivate): string {
     (f) => f.querySelector('label')?.textContent?.trim() === 'GCP Identity'
   );
   return (field?.querySelector('.hint')?.textContent ?? '').replace(/\s+/g, ' ').trim();
+}
+
+/** The account select, found by the fixture account's option. */
+function accountSelect(c: CreatePrivate): (HTMLElement & { value: string }) | null {
+  const option = c.shadowRoot?.querySelector('sl-option[value="sa-a"]');
+  return (option?.closest('sl-select') as (HTMLElement & { value: string }) | null) ?? null;
 }
 
 /** Operates the GCP Identity select the way a user pick does. */
@@ -395,14 +410,75 @@ describe('Create Agent: gcp_identity is sent only when the user chose it', () =>
 
   it('notes per-profile precedence on an applied project default while no profile is chosen', async () => {
     projectDefaultMode = 'passthrough';
+    projectProfileDefaults = { large: 'sa-a' };
     const c = await mount();
     await selectTarget(c, twoProfileDockerTarget(''));
     expect(gcpIdentitySelect(c).value).toBe('passthrough');
     expect(gcpIdentityHint(c).endsWith(profilePrecedence)).toBe(true);
   });
 
+  it('does not note per-profile precedence when the project has no per-profile defaults', async () => {
+    projectDefaultMode = 'passthrough';
+    const c = await mount();
+    await selectTarget(c, twoProfileDockerTarget(''));
+    expect(gcpIdentitySelect(c).value).toBe('passthrough');
+    expect(gcpIdentityHint(c)).not.toContain(profilePrecedence);
+  });
+
+  // Kubernetes-only broker, no profile chosen, applied passthrough default:
+  // the hint is the docker hint for the same state (mode text plus the
+  // precedence note) followed only by the Block note.
+  it('notes per-profile precedence then only the Block note on a kubernetes broker with no profile chosen', async () => {
+    projectDefaultMode = 'passthrough';
+    projectProfileDefaults = { large: 'sa-a' };
+    const c = await mount();
+    await selectTarget(c, twoProfileDockerTarget(''));
+    const dockerHint = gcpIdentityHint(c);
+    expect(dockerHint.endsWith(` ${profilePrecedence}`)).toBe(true);
+
+    await selectTarget(c, twoProfileTarget('kubernetes', ''));
+    expect(gcpIdentitySelect(c).value).toBe('passthrough');
+    expect(gcpIdentityHint(c)).toBe(`${dockerHint} ${blockUnavailable}`);
+  });
+
+  // Kubernetes-only broker, no profile chosen, block default: submit is held
+  // for an explicit choice, so the precedence note is not shown.
+  it('omits the precedence note while a block default holds submit on a kubernetes broker with no profile chosen', async () => {
+    projectDefaultMode = 'block';
+    projectProfileDefaults = { large: 'sa-a' };
+    serviceAccounts = [];
+    const c = await mount();
+    await selectTarget(c, twoProfileTarget('kubernetes', ''));
+    expect(gcpIdentitySelect(c).value).toBe('');
+    expect(gcpIdentityHint(c)).toBe(
+      "No GCP identity is selected yet. This project's default GCP identity is Block, which " +
+        'the Kubernetes runtime rejects at dispatch; creating this agent is blocked until you ' +
+        'explicitly choose Passthrough.'
+    );
+  });
+
+  // An outranked assign default leaves the internal mode on assign; the
+  // account picker stays hidden until the user picks a mode.
+  it('hides the account picker while the picker is blank, and shows it after picking assign', async () => {
+    projectDefaultMode = 'assign';
+    projectProfileDefaults = { large: 'sa-a' };
+    const c = await mount();
+    await selectTarget(c, twoProfileDockerTarget('large'));
+    expect(c.gcpMetadataMode).toBe('assign');
+    expect(gcpIdentitySelect(c).value).toBe('');
+    expect(accountSelect(c)).toBeNull();
+
+    await chooseIdentity(c, 'assign');
+    expect(accountSelect(c)?.value).toBe('sa-a');
+    expect((await submit(c)).gcp_identity).toEqual({
+      metadata_mode: 'assign',
+      service_account_id: 'sa-a',
+    });
+  });
+
   it('does not note per-profile precedence once the user picks a mode', async () => {
     projectDefaultMode = 'passthrough';
+    projectProfileDefaults = { large: 'sa-a' };
     const c = await mount();
     await selectTarget(c, twoProfileDockerTarget(''));
     await chooseIdentity(c, 'block');

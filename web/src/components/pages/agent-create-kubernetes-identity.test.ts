@@ -510,15 +510,18 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     expect(select!.querySelector('sl-option[value="block"]')).toBeNull();
   });
 
-  // The untouched hint must name the real effective identity. Omitting
-  // gcp_identity falls through to this project's own default (not
-  // Kubernetes' bare default) when one exists.
-  it('names the project default in the untouched hint when the project has one configured', async () => {
+  // With a project default applied, the picker shows that default and the
+  // Kubernetes suffix only notes that Block is not offered.
+  it('shows the applied project default with only the Block note in the untouched hint', async () => {
     stubFetchForKubernetesProjectDefault('passthrough');
     const el = await mountAgentCreate();
 
-    expect(gcpIdentityHint(el)).toContain("this project's own default GCP identity applies");
+    expect((gcpIdentitySelect(el) as HTMLElement & { value: string }).value).toBe('passthrough');
+    expect(
+      gcpIdentityHint(el).endsWith('Block is not available for a Kubernetes runtime target.')
+    ).toBe(true);
     expect(gcpIdentityHint(el)).not.toContain('hub-wide default');
+    expect(gcpIdentityHint(el)).not.toContain('applies instead');
   });
 
   // When the project's own default is itself "block", omitting gcp_identity

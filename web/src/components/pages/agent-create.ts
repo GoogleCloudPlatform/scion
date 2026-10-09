@@ -60,7 +60,7 @@ const NO_IDENTITY_MODE_HINT =
   "No mode chosen: the server applies this project's per-profile or project default, " +
   'then the hub-wide default, then the runtime default.';
 
-/** Appended to an applied project default's hint while no profile is selected. */
+/** Appended to an applied project default's hint; see showProfileDefaultPrecedence. */
 const PROFILE_DEFAULT_PRECEDENCE_HINT =
   'A per-profile default for the chosen profile, if set, takes precedence.';
 
@@ -207,7 +207,7 @@ export class ScionPageAgentCreate extends LitElement {
   @state() private projectGCPIdentityDefaultApplied = false;
   /**
    * This project's per-profile GCP identity defaults (profile name to
-   * service account ID), or {} when none. Set in loadGCPServiceAccounts. On
+   * account ID), or {} when none. Set in loadGCPServiceAccounts. On
    * the server a per-profile default outranks the project default, so when
    * the explicitly selected profile has an entry the applied project default
    * is not the outcome (see projectDefaultIsOutcome). The server's profile
@@ -291,7 +291,7 @@ export class ScionPageAgentCreate extends LitElement {
     return (
       this.targetRuntimeIsKubernetesOnly &&
       this.projectGCPIdentityDefaultMode === 'block' &&
-      !this.selectedProfileHasProjectDefault &&
+      !this.selectedProfileHasPerProfileDefault &&
       !this.gcpIdentityUserSet
     );
   }
@@ -301,7 +301,7 @@ export class ScionPageAgentCreate extends LitElement {
    * default in this project, which the server applies ahead of the project
    * default. False with no profile selected.
    */
-  private get selectedProfileHasProjectDefault(): boolean {
+  private get selectedProfileHasPerProfileDefault(): boolean {
     return !!this.profile && !!this.projectGCPIdentityProfileDefaults[this.profile];
   }
 
@@ -311,7 +311,7 @@ export class ScionPageAgentCreate extends LitElement {
    * explicitly selected profile has no per-profile default outranking it.
    */
   private get projectDefaultIsOutcome(): boolean {
-    return this.projectGCPIdentityDefaultApplied && !this.selectedProfileHasProjectDefault;
+    return this.projectGCPIdentityDefaultApplied && !this.selectedProfileHasPerProfileDefault;
   }
 
   /**
@@ -330,36 +330,38 @@ export class ScionPageAgentCreate extends LitElement {
   }
 
   /**
-   * The Kubernetes-specific portion of the GCP Identity hint, naming the
-   * actual effective identity rather than overclaiming the broker's own
-   * default applies. Three cases:
-   *  - the user explicitly picked a mode here, or no applied project default
-   *    is the outcome (noIdentityModeChosen; NO_IDENTITY_MODE_HINT already
-   *    names the server precedence): just name that Block isn't an option;
-   *  - untouched, and this project's own default is itself "block": there is
-   *    no identity that is safe to leave unset here (see
-   *    blockDefaultNeedsExplicitChoice), so say that creation is blocked
-   *    until an explicit choice is made, and name Assign Service Account
-   *    only when the project actually has a service account to offer;
-   *  - untouched, with some other project default applied: omitting
-   *    gcp_identity resolves to *that* default, not to Kubernetes' own
-   *    default — say so.
+   * The Kubernetes-specific portion of the GCP Identity hint. When this
+   * project's own default is "block" and nothing has been chosen, there is
+   * no identity that is safe to leave unset here (see
+   * blockDefaultNeedsExplicitChoice): say that creation is blocked until an
+   * explicit choice is made, naming the assign option only when the
+   * project has a verified account to offer. Otherwise just name that Block is
+   * not offered; the rest of the hint already names what applies.
    */
   private get kubernetesIdentityHintSuffix(): string {
-    if (this.gcpIdentityUserSet || this.noIdentityModeChosen) {
-      return 'Block is not available for a Kubernetes runtime target.';
-    }
-    if (this.projectGCPIdentityDefaultMode === 'block') {
+    if (this.blockDefaultNeedsExplicitChoice) {
       return (
         "This project's default GCP identity is Block, which the Kubernetes runtime rejects at " +
         'dispatch; creating this agent is blocked until you explicitly choose Passthrough' +
         (this.verifiedGCPServiceAccounts.length > 0 ? ' or Assign Service Account.' : '.')
       );
     }
+    return 'Block is not available for a Kubernetes runtime target.';
+  }
+
+  /**
+   * True when the hint should note that a per-profile default outranks the
+   * applied project default: nothing chosen, the applied default is the
+   * outcome, no profile selected, the project has per-profile defaults, and
+   * submit is not already held for an explicit choice.
+   */
+  private get showProfileDefaultPrecedence(): boolean {
     return (
-      'Block is not available for a Kubernetes runtime target. No explicit identity has been ' +
-      "chosen here, so this project's own default GCP identity applies instead; choosing " +
-      'Passthrough or Assign here sends that choice explicitly instead of the project default.'
+      !this.gcpIdentityUserSet &&
+      this.projectDefaultIsOutcome &&
+      !this.profile &&
+      Object.keys(this.projectGCPIdentityProfileDefaults).length > 0 &&
+      !this.blockDefaultNeedsExplicitChoice
     );
   }
 
@@ -2153,14 +2155,12 @@ export class ScionPageAgentCreate extends LitElement {
                 : this.gcpMetadataMode === 'assign'
                   ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
                   : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership."}
-          ${!this.gcpIdentityUserSet && this.projectDefaultIsOutcome && !this.profile
-            ? ` ${PROFILE_DEFAULT_PRECEDENCE_HINT}`
-            : ''}
+          ${this.showProfileDefaultPrecedence ? ` ${PROFILE_DEFAULT_PRECEDENCE_HINT}` : ''}
           ${this.targetRuntimeIsKubernetesOnly ? ` ${this.kubernetesIdentityHintSuffix}` : ''}
         </div>
       </div>
 
-      <!-- GCP Service Account (conditional; hidden while the picker is blank) -->
+      <!-- Account picker (conditional; hidden while the picker is blank) -->
       ${this.gcpMetadataMode === 'assign' && !this.noIdentityModeChosen
         ? html`
             <div class="form-field">
