@@ -1895,7 +1895,6 @@ func (s *Server) requireWritePermissionForRoleBinding(w http.ResponseWriter, r *
 	return user, true
 }
 
-// validatePermissionIDs checks that all provided IDs exist in the permissions registry.
 // validateRolePermissionIDs validates the permission list of a custom role
 // definition (create, update, duplicate, import). Beyond
 // validatePermissionIDs it rejects Reserved permissions: nothing checks
@@ -1920,6 +1919,7 @@ func validateRolePermissionIDs(ids []string) error {
 	return nil
 }
 
+// validatePermissionIDs checks that all provided IDs exist in the permissions registry.
 func validatePermissionIDs(ids []string) error {
 	valid := make(map[string]bool, len(permissions.Registry))
 	for _, p := range permissions.Registry {
