@@ -55,11 +55,25 @@ type ptyScriptServer struct {
 	queries  []url.Values
 	received map[int][]map[string]any
 	notify   chan struct{}
+	closed   map[int]chan struct{}
+}
+
+// connClosed returns a channel closed once connection idx's reader sees
+// the connection end (the client closed it).
+func (s *ptyScriptServer) connClosed(idx int) chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ch, ok := s.closed[idx]
+	if !ok {
+		ch = make(chan struct{})
+		s.closed[idx] = ch
+	}
+	return ch
 }
 
 func newPTYScriptServer(t *testing.T, refuse func(idx int) bool, script func(idx int, s *ptyScriptServer, conn *websocket.Conn)) *ptyScriptServer {
 	t.Helper()
-	s := &ptyScriptServer{t: t, refuse: refuse, script: script, received: map[int][]map[string]any{}, notify: make(chan struct{}, 64)}
+	s := &ptyScriptServer{t: t, refuse: refuse, script: script, received: map[int][]map[string]any{}, notify: make(chan struct{}, 64), closed: map[int]chan struct{}{}}
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	s.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
@@ -76,7 +90,9 @@ func newPTYScriptServer(t *testing.T, refuse func(idx int) bool, script func(idx
 			return
 		}
 		defer func() { _ = conn.Close() }()
+		closed := s.connClosed(idx)
 		go func() {
+			defer close(closed)
 			for {
 				_, data, err := conn.ReadMessage()
 				if err != nil {
@@ -718,26 +734,27 @@ func TestRun_KeysDuringRedial(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dialing := make(chan struct{})
 			release := make(chan struct{})
-			var once sync.Once
+			var dialOnce, releaseOnce sync.Once
+			releaseDial := func() { releaseOnce.Do(func() { close(release) }) }
 			s := newPTYScriptServer(t, func(idx int) bool {
 				if idx == 0 {
 					return false
 				}
-				once.Do(func() { close(dialing) })
+				dialOnce.Do(func() { close(dialing) })
 				<-release
-				return false // let the abandoned dial complete; the client closes it
+				return false // let the abandoned dial complete; the client must close it
 			}, func(idx int, s *ptyScriptServer, conn *websocket.Conn) {
 				sendData(conn)
 				if idx == 0 {
 					sendClose(conn, wsprotocol.ClosePTYUpstreamTimeout, "")
 					return
 				}
-				// Hold the late connection open until the test ends. (The
-				// server's recorder goroutine is this connection's only reader.)
-				<-release
+				// Keep the late connection until the client closes it. (The
+				// recorder goroutine is this connection's only reader.)
+				<-s.connClosed(idx)
 			})
 			// Registered after the server, so it runs before the server closes.
-			t.Cleanup(func() { close(release) })
+			t.Cleanup(releaseDial)
 			ft := &fakeTiming{}
 			sc := newScriptedClient(t, s, ft)
 			ch := sc.runAsync()
@@ -753,6 +770,10 @@ func TestRun_KeysDuringRedial(t *testing.T) {
 				var re *PTYReconnectError
 				assert.False(t, errors.As(err, &re))
 			}
+			// Let the abandoned dial complete: the client must close it,
+			// without sending anything on it.
+			releaseDial()
+			waitSignal(t, s.connClosed(1), "the client closing the abandoned connection")
 			assert.Empty(t, s.messagesOfType(1, wsprotocol.TypeData), "nothing typed reaches the new connection")
 			sc.assertRestoredOnce(t)
 		})

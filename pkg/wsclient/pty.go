@@ -591,8 +591,28 @@ func (c *PTYClient) reconnect(delay time.Duration, stdinCh <-chan stdinResult, c
 			}
 		}(results)
 	}
-	timer := c.after(delay)
 	prevCtrlB := false
+	// handleInput applies the key handling to one stdin read. stop reports
+	// that the reconnect must end, with err as Run's result.
+	handleInput := func(in stdinResult) (stop bool, err error) {
+		if in.err != nil {
+			if in.err == io.EOF {
+				return true, closeErr
+			}
+			return true, in.err
+		}
+		for _, b := range in.data {
+			switch {
+			case b == keyCtrlC, b == keyCtrlD:
+				return true, closeErr
+			case prevCtrlB && b == keyDetach:
+				return true, nil
+			}
+			prevCtrlB = b == keyCtrlB
+		}
+		return false, nil
+	}
+	timer := c.after(delay)
 	for {
 		select {
 		case <-timer:
@@ -616,6 +636,17 @@ func (c *PTYClient) reconnect(delay time.Duration, stdinCh <-chan stdinResult, c
 				}
 				return nil, false, r.err
 			}
+			// Input that arrived together with the dial result was
+			// typed before the new session existed: handle it here, so
+			// it never reaches the new session.
+			select {
+			case in := <-stdinCh:
+				if stop, err := handleInput(in); stop {
+					_ = r.conn.Close()
+					return nil, true, err
+				}
+			default:
+			}
 			c.writeMu.Lock()
 			old := c.conn
 			c.conn = r.conn
@@ -628,23 +659,9 @@ func (c *PTYClient) reconnect(delay time.Duration, stdinCh <-chan stdinResult, c
 			abandon()
 			return nil, true, c.ctx.Err()
 		case in := <-stdinCh:
-			if in.err != nil {
+			if stop, err := handleInput(in); stop {
 				abandon()
-				if in.err == io.EOF {
-					return nil, true, closeErr
-				}
-				return nil, true, in.err
-			}
-			for _, b := range in.data {
-				switch {
-				case b == keyCtrlC, b == keyCtrlD:
-					abandon()
-					return nil, true, closeErr
-				case prevCtrlB && b == keyDetach:
-					abandon()
-					return nil, true, nil
-				}
-				prevCtrlB = b == keyCtrlB
+				return nil, true, err
 			}
 		}
 	}
