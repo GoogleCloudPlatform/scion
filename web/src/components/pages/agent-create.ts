@@ -51,6 +51,7 @@ import { MESSAGE_MODE_DISPLAY } from '../../shared/message-mode.js';
 import { defaultTriggersHint } from '../../shared/notification-triggers.js';
 import { apiFetch, apiFetchAllPages, parseApiError } from '../../client/api.js';
 import { navigateTo } from '../../client/navigation.js';
+import { showToast } from '../../utils/toast.js';
 import type { EnvEntry } from '../shared/env-editor.js';
 import '../shared/env-editor.js';
 import '../shared/status-badge.js';
@@ -1460,7 +1461,13 @@ export class ScionPageAgentCreate extends LitElement {
           credentials: 'include',
         });
         if (!startResp.ok) {
-          console.warn('Agent created but failed to start:', startResp.status);
+          // The agent exists, so report the failed start and still open its
+          // page, where the user can start it again without creating a
+          // second agent. The toast stack outlives the navigation.
+          const fallback = `HTTP ${startResp.status}`;
+          const startErr = await parseApiError(startResp, fallback);
+          console.warn('Agent created but failed to start:', startErr.message);
+          showToast(`Agent was created but did not start: ${startErr.message}`, 'danger');
         }
       }
 
