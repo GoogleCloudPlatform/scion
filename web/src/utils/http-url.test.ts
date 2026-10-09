@@ -22,6 +22,7 @@ describe('isHttpUrl', () => {
     'https://console.cloud.google.com/monitoring/dashboards/builder/x?project=p',
     'http://grafana.internal:3000/d/hub#panel',
     'HTTPS://dash.example.com',
+    'https://dash.example.com/d/caf\u00e9',
   ])('accepts %s', (v) => {
     expect(isHttpUrl(v)).toBe(true);
   });
@@ -39,6 +40,22 @@ describe('isHttpUrl', () => {
     'https://user:pw@dash.example.com/',
     ' https://dash.example.com',
     'https://dash.example.com/a b',
+    'https://dash.example.com/\u007f',
+    'https://dash.example.com/\u0085',
+    'https://dash.example.com/\u009f',
+    'https://dash.example.com/\u00a0',
+    'https://dash.example.com\u00a0',
+    'https://dash.example.com/\u2028',
+    'https://dash.example.com/\u2029',
+    'https://dash.example.com/?q=\u3000',
+    'https://dash.example.com/\u061c',
+    'https://dash.example.com/\u200e',
+    'https://dash.example.com/\u200f',
+    'https://dash.example.com/\u202a',
+    'https://dash.example.com/\u202e',
+    'https://dash.example.com/#\u2066',
+    'https://dash.example.com/\u2069',
+    'https://dash.example.com/\ufeff',
   ])('rejects %j', (v) => {
     expect(isHttpUrl(v)).toBe(false);
   });

@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // MonitoringDashboardURLKey is the settings key of the monitoring dashboard
@@ -31,10 +33,14 @@ const MonitoringDashboardURLMaxLength = 2048
 
 // ValidateMonitoringDashboardURL reports whether raw is an acceptable
 // server.hub.monitoring_dashboard_url: "" (unset), or an absolute http or
-// https URL with a host, no user credentials, no whitespace or control
-// characters, and at most MonitoringDashboardURLMaxLength bytes. A path,
-// query and fragment are allowed, since dashboard links commonly carry
-// them.
+// https URL with a host, no user credentials, and at most
+// MonitoringDashboardURLMaxLength bytes, that contains no whitespace (any
+// Unicode White_Space, e.g. U+00A0, U+2028, U+2029), no control character
+// (C0, DEL or C1, e.g. U+0085), no bidirectional formatting character
+// (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069) and no
+// U+FEFF. A path, query and fragment are allowed, since dashboard links
+// commonly carry them. This is the rule of record;
+// web/src/utils/http-url.ts mirrors it for display.
 //
 // Like ValidateAgentEndpoint, no error message echoes any part of raw.
 func ValidateMonitoringDashboardURL(raw string) error {
@@ -44,9 +50,12 @@ func ValidateMonitoringDashboardURL(raw string) error {
 	if len(raw) > MonitoringDashboardURLMaxLength {
 		return fmt.Errorf("%s: must be at most %d characters", MonitoringDashboardURLKey, MonitoringDashboardURLMaxLength)
 	}
+	if !utf8.ValidString(raw) {
+		return fmt.Errorf("%s: must be valid UTF-8", MonitoringDashboardURLKey)
+	}
 	for _, r := range raw {
-		if r <= 0x20 || r == 0x7f {
-			return fmt.Errorf("%s: must not contain whitespace or control characters", MonitoringDashboardURLKey)
+		if isDisallowedMonitoringURLRune(r) {
+			return fmt.Errorf("%s: must not contain whitespace, control or bidirectional formatting characters", MonitoringDashboardURLKey)
 		}
 	}
 	u, err := url.Parse(raw)
@@ -75,4 +84,13 @@ func MonitoringDashboardURLOrEmpty(raw string) string {
 		return ""
 	}
 	return raw
+}
+
+// isDisallowedMonitoringURLRune reports whether r may not appear anywhere in
+// a monitoring dashboard URL (see ValidateMonitoringDashboardURL).
+func isDisallowedMonitoringURLRune(r rune) bool {
+	return unicode.IsSpace(r) ||
+		unicode.IsControl(r) ||
+		unicode.Is(unicode.Bidi_Control, r) ||
+		r == '\uFEFF'
 }

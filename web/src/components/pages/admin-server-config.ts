@@ -2244,13 +2244,6 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   /**
-   * The PUT body for the current hub: hosted DB-backed hubs get Layer-1
-   * keys only; workstation hubs get the Layer-1 payload plus the Layer-0 /
-   * file-only part, both with explicit empties ("", false, []) so a cleared
-   * field is cleared rather than kept. A hub without DB-backed settings
-   * keeps the legacy file payload.
-   */
-  /**
    * Adds server.hub.monitoring_dashboard_url to a hub payload block only
    * when the user edited the field and the trimmed value differs from the
    * loaded one. A cleared field is sent as "", which clears the setting.
@@ -2265,6 +2258,13 @@ export class ScionPageAdminServerConfig extends LitElement {
     hub.monitoring_dashboard_url = value;
   }
 
+  /**
+   * The PUT body for the current hub: hosted DB-backed hubs get Layer-1
+   * keys only; workstation hubs get the Layer-1 payload plus the Layer-0 /
+   * file-only part, both with explicit empties ("", false, []) so a cleared
+   * field is cleared rather than kept. A hub without DB-backed settings
+   * keeps the legacy file payload.
+   */
   private buildSavePayload(): Record<string, unknown> {
     if (this.settingsTier !== 'db') return this.buildFilePayload();
     const payload = this.buildLayer1Payload();

@@ -128,6 +128,11 @@ func TestMonitoringDashboardURL_InvalidRejected(t *testing.T) {
 		"no scheme":         "dash.example.com/d",
 		"ftp scheme":        "ftp://dash.example.com/",
 		"credentials":       "https://u:p@dash.example.com/",
+		"C1 NEL U+0085":     "https://dash.example.com/\u0085",
+		"no-break space":    "https://dash.example.com/\u00a0",
+		"line separator":    "https://dash.example.com/\u2028",
+		"bidi override":     "https://dash.example.com/\u202e",
+		"bidi isolate":      "https://dash.example.com/\u2066",
 		"too long":          "https://dash.example.com/" + strings.Repeat("a", config.MonitoringDashboardURLMaxLength),
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -179,6 +184,39 @@ func TestMonitoringDashboardURL_BootstrapAppliesAndIsKept(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, testDashboardURL, got)
 	assert.Equal(t, testDashboardURL, srv.monitoringDashboardURL())
+}
+
+// An explicit "" over a bootstrap value leaves the key UNSET: the new row
+// owns its keys and the bootstrap value is not applied again, also after a
+// refresh and on a fresh OperationalSettings (a restart).
+func TestMonitoringDashboardURL_ClearOverBootstrapStaysUnset(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	bootstrapK := newFileKoanf(t, map[string]interface{}{config.MonitoringDashboardURLKey: testDashboardURL})
+	ops := NewOperationalSettings(fakeStore, bootstrapK, emptyKoanf())
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv.SetOperationalSettings(ops)
+	ops.server = srv
+	ApplySnapshot(srv, ops.Snapshot())
+	require.Equal(t, testDashboardURL, srv.monitoringDashboardURL())
+
+	rr := putMonitoringConfig(t, srv, ops, `{"server":{"hub":{"monitoring_dashboard_url":""}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	_, err = ops.Refresh(context.Background())
+	require.NoError(t, err)
+
+	got, ok := storedMonitoringURL(t, fakeStore)
+	require.True(t, ok, "the clear writes an endpoints row")
+	assert.Empty(t, got)
+	assert.Empty(t, ops.Snapshot().MonitoringDashboardURL, "the bootstrap value is not re-applied")
+	assert.Empty(t, srv.monitoringDashboardURL())
+	assert.Nil(t, srv.healthSummaryLinks())
+
+	restarted := NewOperationalSettings(fakeStore, bootstrapK, emptyKoanf())
+	_, err = restarted.Refresh(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, restarted.Snapshot().MonitoringDashboardURL, "still unset after a restart")
 }
 
 // A node-local SCION_SERVER_ value shows as an env override and is not

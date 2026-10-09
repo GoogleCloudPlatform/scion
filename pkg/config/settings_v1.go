@@ -3622,8 +3622,8 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		HubName:                gc.Hub.HubName,
 		PublicURL:              gc.Hub.Endpoint,
 		AgentEndpoint:          gc.Hub.AgentEndpoint,
-		ReadTimeout:            gc.Hub.ReadTimeout.String(),
 		MonitoringDashboardURL: gc.Hub.MonitoringDashboardURL,
+		ReadTimeout:            gc.Hub.ReadTimeout.String(),
 		WriteTimeout:           gc.Hub.WriteTimeout.String(),
 		AdminEmails:            gc.Hub.AdminEmails,
 		CORS: &V1CORSConfig{
