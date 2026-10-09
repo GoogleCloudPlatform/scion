@@ -867,6 +867,7 @@ jobs:
     # the harness runs anyway.
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.single_node_vm == 'true') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -887,6 +888,7 @@ jobs:
     # the tests run anyway.
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.starter_hub == 'true') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
