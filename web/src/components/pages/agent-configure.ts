@@ -1612,7 +1612,9 @@ export class ScionPageAgentConfigure extends LitElement {
         <label>Branch</label>
         <sl-input
           data-testid="branch-input"
-          placeholder="Default branch"
+          placeholder=${this.agent?.slug
+            ? `Agent's own branch (scion/${this.agent.slug})`
+            : "Agent's own branch"}
           .value=${this.branch}
           readonly
         ></sl-input>
