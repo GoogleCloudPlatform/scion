@@ -75,6 +75,10 @@ When an agent runs `scion start` inside its container, the CLI reads the Hub end
 | 3 | **Creating agent's broker and profile** | The `hub.agent_create_inherit_placement` [experiment](/scion/reference/experiments/) is on, the creating agent runs on a Kubernetes profile (see below), and its broker serves the target project. |
 | 4 | **The regular cascade above**, then the project's active profile and the broker's default profile | Everything else. This is unchanged for users, and for agents unless tier 2 or 3 applies. |
 
+:::note[Tier 3 and custom runtime keys]
+Tier 3 matches on the profile type that the broker registered, which is currently the profile's runtime key. A profile whose runtime key is not `kubernetes` (for example, key `gke` with `type: kubernetes`) does not get creator inheritance. For such profiles, use the project's agent-create profile and broker settings (tier 2) until [ptone/scion#4110](https://github.com/ptone/scion/issues/4110) lands.
+:::
+
 Rules that apply across the tiers:
 
 - The creating agent's profile is inherited only when the selected broker is the creating agent's own broker. An explicit `--broker` that names a different broker does not carry the profile with it.
