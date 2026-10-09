@@ -600,9 +600,6 @@ func RunInit(args []string, opts InitRunOptions) int {
 		} else {
 			telemetryPipeline = pipeline
 			log.Info("Telemetry pipeline started")
-			// Natively derived usage also feeds the session metrics
-			// state, so session reports include model calls and tokens.
-			telemetryPipeline.SetSessionUsageSink(sessionUsageRecorder(agentHome))
 			defer func() {
 				if err := stopTelemetryWithTimeout(telemetryPipeline.Stop, telemetryStopBudget); err != nil {
 					log.Error("Failed to stop telemetry: %v", err)
@@ -611,6 +608,11 @@ func RunInit(args []string, opts InitRunOptions) int {
 			}()
 		}
 	}
+
+	// Natively derived usage also feeds the session metrics state, so
+	// session reports include model calls and tokens. A nil pipeline is a
+	// no-op.
+	runWireSessionUsage(telemetryPipeline, agentHome)
 
 	// Initialize lifecycle hooks manager. newLifecycleManager also reports
 	// the value this run wants hub.EnforceTokenFileOwnerChecks called with —

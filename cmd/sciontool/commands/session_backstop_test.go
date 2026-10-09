@@ -270,9 +270,50 @@ func TestSessionUsageRecorder_NativeUsageReachesSessionReport(t *testing.T) {
 		t.Errorf("turns %d, tools %+v, want 1 turn and 2 Bash calls", p.Session.TurnCount, p.Tools)
 	}
 
-	// After the report the state is gone; later usage is dropped quietly.
+	// After the report the state is gone; later usage is dropped quietly:
+	// it neither recreates the state nor causes another report.
 	record(telemetry.SessionUsage{Calls: 1})
+	if _, err := os.Stat(handlers.NewFileSessionState(home).Path); !os.IsNotExist(err) {
+		t.Errorf("state file after the report: %v, want it absent", err)
+	}
+	if n := len(fake.Reports()); n != 1 {
+		t.Errorf("got %d reports after late usage, want 1", n)
+	}
 	if sessionUsageRecorder("") != nil {
 		t.Error("recorder without an agent home should be nil")
 	}
+}
+
+// fakeSinkSetter captures the sink wireSessionUsage installs.
+type fakeSinkSetter struct {
+	sinks []telemetry.SessionUsageSink
+}
+
+func (f *fakeSinkSetter) SetSessionUsageSink(sink telemetry.SessionUsageSink) {
+	f.sinks = append(f.sinks, sink)
+}
+
+// wireSessionUsage installs a sink that writes into the agent's session
+// state, so usage it receives reaches the SessionEnd report. A nil pipeline
+// is a no-op.
+func TestWireSessionUsage_InstallsStateRecorder(t *testing.T) {
+	home, fake, _ := backstopEnv(t)
+	t.Setenv("SCION_USAGE_SOURCE", "native")
+
+	setter := &fakeSinkSetter{}
+	wireSessionUsage(setter, home)
+	if len(setter.sinks) != 1 || setter.sinks[0] == nil {
+		t.Fatalf("installed sinks = %d (nil: %v), want one non-nil", len(setter.sinks), len(setter.sinks) == 1 && setter.sinks[0] == nil)
+	}
+
+	runHooks(t, openSessionEvents...)
+	setter.sinks[0](telemetry.SessionUsage{Calls: 1, TokensInput: 7, TokensOutput: 4})
+	runHooks(t, lateSessionEnd)
+	reports := fake.Reports()
+	if len(reports) != 1 || reports[0].Tokens.Input != 7 || reports[0].Tokens.Output != 4 {
+		t.Errorf("reports = %+v, want one with input 7, output 4", reports)
+	}
+
+	wireSessionUsage(nil, home)
+	wireSessionUsage((*telemetry.Pipeline)(nil), home)
 }

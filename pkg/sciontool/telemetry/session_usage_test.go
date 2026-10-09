@@ -16,6 +16,7 @@ package telemetry
 
 import (
 	"context"
+	"sync"
 	"testing"
 )
 
@@ -118,5 +119,65 @@ func TestAggregatorRecordUsageAccumulatesAcrossRestore(t *testing.T) {
 	}
 	if s.TurnCount != 1 || s.ToolCalls["Bash"].Calls != 1 {
 		t.Errorf("turns %d, tools %+v, want 1 turn and 1 Bash call", s.TurnCount, s.ToolCalls)
+	}
+}
+
+// feedClaudeRequest pushes one native Claude api_request through the
+// pipeline's current deriver, the way handleLogs does.
+func feedClaudeRequest(p *Pipeline, requestID string) {
+	p.usageDeriver.Load().ProcessResourceLogs(context.Background(), claudeAPIRequestLogs(requestID))
+}
+
+// The deriver Pipeline.Start builds forwards derived usage to the
+// pipeline's session usage sink, including a sink set after Start.
+func TestPipelineStartDeriverForwardsToSessionUsageSink(t *testing.T) {
+	t.Setenv("SCION_HARNESS", "claude")
+	t.Setenv("SCION_USAGE_SOURCE", "native")
+	p := NewWithConfig(&Config{Enabled: true, GRPCPort: availableTCPPort(t)})
+	if err := p.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Stop(context.Background()) }()
+
+	var mu sync.Mutex
+	var got []SessionUsage
+	p.SetSessionUsageSink(func(u SessionUsage) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, u)
+	})
+	feedClaudeRequest(p, "start-req-1")
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := SessionUsage{Calls: 1, TokensInput: 2, TokensOutput: 3}
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("sink received %+v, want one %+v", got, want)
+	}
+}
+
+// The deriver ActivateUsageSource builds (native usage selected only by the
+// provisioner's overlay) forwards to the sink too, including a sink set
+// before activation.
+func TestPipelineActivatedDeriverForwardsToSessionUsageSink(t *testing.T) {
+	p := startPipelineWithoutUsageSource(t, "claude")
+
+	var mu sync.Mutex
+	var got []SessionUsage
+	p.SetSessionUsageSink(func(u SessionUsage) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, u)
+	})
+	if outcome, err := p.ActivateUsageSource(context.Background(), UsageSourceNative); err != nil || outcome != UsageActivated {
+		t.Fatalf("ActivateUsageSource = %q, %v; want %q", outcome, err, UsageActivated)
+	}
+	feedClaudeRequest(p, "activate-req-1")
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := SessionUsage{Calls: 1, TokensInput: 2, TokensOutput: 3}
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("sink received %+v, want one %+v", got, want)
 	}
 }

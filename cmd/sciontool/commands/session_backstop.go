@@ -29,6 +29,7 @@ import (
 var (
 	runClearSessionTombstoneAtStartup = clearSessionTombstoneAtStartup
 	runReportOpenSessionAtShutdown    = reportOpenSessionAtShutdown
+	runWireSessionUsage               = wireSessionUsage
 )
 
 // reportOpenSessionAtShutdown is the init daemon's backstop for session
@@ -119,4 +120,25 @@ func sessionUsageRecorder(agentHome string) telemetry.SessionUsageSink {
 			log.Debug("Session metrics: no open session for native usage (%d calls), not added", u.Calls)
 		}
 	}
+}
+
+// sessionUsageSinkSetter is the part of *telemetry.Pipeline that
+// wireSessionUsage needs; a test substitutes a fake.
+type sessionUsageSinkSetter interface {
+	SetSessionUsageSink(telemetry.SessionUsageSink)
+}
+
+// wireSessionUsage installs sessionUsageRecorder(agentHome) as the
+// pipeline's session usage sink, so natively derived usage reaches the
+// session metrics state. RunInit calls it (through runWireSessionUsage)
+// once the telemetry pipeline has started, before the harness starts. A nil
+// pipeline (telemetry disabled or failed to start) is a no-op.
+func wireSessionUsage(p sessionUsageSinkSetter, agentHome string) {
+	if p == nil {
+		return
+	}
+	if pipeline, ok := p.(*telemetry.Pipeline); ok && pipeline == nil {
+		return
+	}
+	p.SetSessionUsageSink(sessionUsageRecorder(agentHome))
 }
