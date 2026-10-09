@@ -3444,13 +3444,11 @@ func TestSanitizeFilename(t *testing.T) {
 // the test if the registry has none.
 func reservedTestPermission(t *testing.T) string {
 	t.Helper()
-	for _, p := range permissions.Registry {
-		if p.IsReserved() {
-			return p.ID
-		}
+	ids := permissions.ReservedIDs()
+	if len(ids) == 0 {
+		t.Fatal("the permission registry has no Reserved row")
 	}
-	t.Fatal("the permission registry has no Reserved row")
-	return ""
+	return ids[0]
 }
 
 func TestRolesAPI_CreateRoleDefinition_RejectsReservedPermission(t *testing.T) {

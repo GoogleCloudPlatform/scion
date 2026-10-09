@@ -118,18 +118,7 @@ var recordedProvenanceRequired = toPermissionSet(recordedProvenanceRequiredIDs)
 // while it is reserved: when you un-reserve a row, decide whether
 // unrecorded chains may hold it, and if not, cover it with a
 // ceiling-optional scope or add it to this set explicitly.
-var legacyChainExcludedPermissions = toPermissionSet(append(agentScopeCoverage(sortedOptionalRoleScopes()), reservedPermissionIDs()...))
-
-// reservedPermissionIDs returns the IDs of the Reserved registry rows.
-func reservedPermissionIDs() []string {
-	var out []string
-	for _, p := range permissions.Registry {
-		if p.IsReserved() {
-			out = append(out, p.ID)
-		}
-	}
-	return out
-}
+var legacyChainExcludedPermissions = toPermissionSet(append(agentScopeCoverage(sortedOptionalRoleScopes()), permissions.ReservedIDs()...))
 
 // sortedOptionalRoleScopes returns the keys of ceilingOptionalRoleScopes in
 // sorted order.

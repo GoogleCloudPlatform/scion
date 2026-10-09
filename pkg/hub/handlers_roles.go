@@ -1906,10 +1906,8 @@ func validateRolePermissionIDs(ids []string) error {
 		return err
 	}
 	reserved := make(map[string]bool)
-	for _, p := range permissions.Registry {
-		if p.IsReserved() {
-			reserved[p.ID] = true
-		}
+	for _, id := range permissions.ReservedIDs() {
+		reserved[id] = true
 	}
 	for _, id := range ids {
 		if reserved[id] {

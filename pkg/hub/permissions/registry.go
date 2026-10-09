@@ -386,6 +386,18 @@ func (p Permission) IsReserved() bool {
 	return strings.TrimSpace(p.Reserved) != ""
 }
 
+// ReservedIDs returns the IDs of the Reserved registry rows, in registry
+// order.
+func ReservedIDs() []string {
+	var out []string
+	for _, p := range Registry {
+		if p.IsReserved() {
+			out = append(out, p.ID)
+		}
+	}
+	return out
+}
+
 // ResourceActions returns item-level capability actions keyed by resource type.
 func ResourceActions() map[string][]string {
 	return actionsByKind(CapabilityResource)
