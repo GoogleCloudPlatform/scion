@@ -649,29 +649,7 @@ func TestBuildPod_NFSProvision_InjectsCloneInitContainer(t *testing.T) {
 	}
 }
 
-func TestBuildPod_NFSNoLocker_InjectsCloneInitContainer(t *testing.T) {
-	r := newNFSTestK8sRuntime()
-	config := nfsBaseConfig("test-no-locker")
-	// Locker is nil → clone init container
-
-	pod, err := r.buildPod("default", config)
-	if err != nil {
-		t.Fatalf("buildPod failed: %v", err)
-	}
-
-	if len(pod.Spec.InitContainers) != 1 {
-		t.Fatalf("expected 1 init container, got %d", len(pod.Spec.InitContainers))
-	}
-
-	ic := pod.Spec.InitContainers[0]
-	// No-locker: should get clone init command (provision without --wait-for-sentinel)
-	assert.Equal(t, "sciontool", ic.Command[0])
-	assert.Equal(t, "provision", ic.Command[1])
-	assert.False(t, hasFlag(ic.Command, "--wait-for-sentinel"),
-		"no-locker: should get clone init command (sentinel-only fallback)")
-}
-
-func TestBuildPod_NFSConcurrentProjects_IndependentLocks(t *testing.T) {
+func TestBuildPod_NFSConcurrentProjects_Independent(t *testing.T) {
 	// Two pods for DIFFERENT projects should both get clone init containers
 	// (no contention across projects).
 	r := newNFSTestK8sRuntime()

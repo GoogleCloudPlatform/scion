@@ -186,9 +186,10 @@ type RunConfig struct {
 	// would come from the store's AdvisoryLocker capability.
 	//
 	// May be nil — no production caller sets it today, and without it the
-	// NFS-home start is guarded by the termination wait only. NFS workspace
-	// provisioning does not use it: sciontool provision serializes
-	// provisioners with a file lock on the export.
+	// NFS-home start is guarded by the termination wait only. The
+	// Kubernetes runtime's NFS workspace provisioning does not use it:
+	// sciontool provision serializes provisioners with a file lock on the
+	// export.
 	Locker store.AdvisoryLocker
 
 	// Checkpoint and OnResourceCreated are an async launch's runtime hooks
