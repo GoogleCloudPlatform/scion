@@ -198,11 +198,24 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 				}
 			}
 			post := *cur
-			post.DeletionState = store.DeletionStateDeleting
-			if deleteClaimStopping(cur) {
-				stopping := string(state.PhaseStopping)
-				f.Phase = &stopping
-				post.Phase = stopping
+			if cur.DeletionState == store.DeletionStateFinalizing {
+				// A re-claim of an abandoned finalizing row: teardown
+				// already ran (skipDispatch). Keep it finalizing so it
+				// keeps holding the row (DeletionHoldsRow) even if this
+				// engine dies too, and leave the phase alone
+				// (ptone/scion#2890).
+				finalizing := store.DeletionStateFinalizing
+				f.State = &finalizing
+				f.Phase = nil
+				post.DeletionState = store.DeletionStateFinalizing
+			} else {
+				f.State = &deleting
+				post.DeletionState = store.DeletionStateDeleting
+				if deleteClaimStopping(cur) {
+					stopping := string(state.PhaseStopping)
+					f.Phase = &stopping
+					post.Phase = stopping
+				}
 			}
 			// Soft unless force, no retention, or an incomplete async create
 			// (T1 §0c, evaluated on the post-claim row): those are always
