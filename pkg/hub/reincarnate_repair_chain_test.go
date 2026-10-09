@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -204,7 +205,12 @@ func (f *repairFixture) assertRealSAAssignCreate(t *testing.T) {
 	require.Equal(t, 1, checker.CallCount(), "the actAs checker is consulted")
 	assert.Equal(t, sa.ID, checker.Calls()[0].TargetSAID)
 
-	child, err := f.s.GetAgentBySlug(ctx, f.project.ID, slug)
+	// The server slugifies the name (and caps its length), so read the
+	// child's ID from the response rather than looking it up by slug.
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Agent)
+	child, err := f.s.GetAgent(ctx, resp.Agent.ID)
 	require.NoError(t, err)
 	require.NotNil(t, child.AppliedConfig)
 	require.NotNil(t, child.AppliedConfig.GCPIdentity)
