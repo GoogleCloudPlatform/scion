@@ -381,7 +381,7 @@ async function expectTypingRightAfterOpenFilters(
   await page.keyboard.type('gam');
 
   await expect(paletteDialog(page)).toBeVisible();
-  expect(await paletteInputHasFocus(page)).toBe(true);
+  await expect.poll(() => paletteInputHasFocus(page)).toBe(true);
   await expect(page.locator('scion-quick-palette #palette-query-input')).toHaveValue('gam');
   await expect(page.locator('scion-quick-palette .palette-option')).toHaveText([/gamma-target/]);
 }
