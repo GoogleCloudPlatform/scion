@@ -1099,6 +1099,16 @@ type AgentStatusUpdate struct {
 	// the hub's deleteWonAfterLanding check answers. A status report
 	// (heartbeat) keeps the lease-aware rule. Internal to the hub — json:"-".
 	StartWrite bool `json:"-"`
+	// GuardReincarnation marks an agent's own status report. When set, the
+	// store re-checks the reincarnation guard (the hub's Guard 0b) on the
+	// row read inside the update's transaction: while a reincarnation is in
+	// flight (ReincarnationState is not none or failed), Phase, Activity,
+	// ExitCode, ExitReason and Message are dropped, and the other fields
+	// (ContainerStatus, heartbeat, ...) still apply. This covers a
+	// reincarnation that starts after the hub read the agent. It is opt-in
+	// because hub-internal writers, including the reincarnation worker,
+	// must keep writing the phase. Internal to the hub — json:"-".
+	GuardReincarnation bool `json:"-"`
 }
 
 // ProjectStore defines project-related persistence operations.

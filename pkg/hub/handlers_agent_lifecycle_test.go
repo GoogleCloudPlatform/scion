@@ -309,10 +309,13 @@ func TestStatusUpdateIsEmpty_EveryFieldCounts(t *testing.T) {
 	// IfPhase, like IfRunID, is a precondition on the write
 	// (ptone/scion#3414); on its own it writes nothing.
 	require.True(t, statusUpdateIsEmpty(store.AgentStatusUpdate{IfPhase: "x"}), "an update with only IfPhase is empty")
+	// GuardReincarnation only turns on the store's reincarnation guard for
+	// the write (ptone/scion#2887); on its own it writes nothing.
+	require.True(t, statusUpdateIsEmpty(store.AgentStatusUpdate{GuardReincarnation: true}), "an update with only GuardReincarnation is empty")
 
 	// statusUpdatePreconditionFields are AgentStatusUpdate fields that only
 	// condition the write and so do not make an update non-empty.
-	statusUpdatePreconditionFields := map[string]bool{"IfPhase": true, "IfRunID": true, "StartWrite": true}
+	statusUpdatePreconditionFields := map[string]bool{"IfPhase": true, "IfRunID": true, "StartWrite": true, "GuardReincarnation": true}
 
 	typ := reflect.TypeOf(store.AgentStatusUpdate{})
 	for i := 0; i < typ.NumField(); i++ {
@@ -343,4 +346,60 @@ func TestStatusUpdateIsEmpty_EveryFieldCounts(t *testing.T) {
 				"statusUpdateIsEmpty must report false when AgentStatusUpdate.%s is set", field.Name)
 		})
 	}
+}
+
+// reincarnateBeforeStatusStore sets the agent's ReincarnationState just
+// before the first UpdateAgentStatus reaches the store, as if a
+// reincarnation started after the status handler read the agent.
+type reincarnateBeforeStatusStore struct {
+	store.Store
+	t    *testing.T
+	done bool
+}
+
+func (r *reincarnateBeforeStatusStore) UpdateAgentStatus(ctx context.Context, id string, su store.AgentStatusUpdate) error {
+	if !r.done {
+		r.done = true
+		a, err := r.Store.GetAgent(ctx, id)
+		require.NoError(r.t, err)
+		a.ReincarnationState = store.ReincarnationStateStopping
+		require.NoError(r.t, r.Store.UpdateAgent(ctx, a))
+	}
+	return r.Store.UpdateAgentStatus(ctx, id, su)
+}
+
+// TestAgentStatusUpdate_ReincarnationStartedAfterRead covers the window
+// between the status handler's read of the agent and its store write
+// (ptone/scion#2887): a reincarnation that starts in between still keeps
+// the report from moving the phase, because the handler marks the write
+// GuardReincarnation and the store re-checks on the row it locks. The
+// fields the reincarnation does not own still apply.
+func TestAgentStatusUpdate_ReincarnationStartedAfterRead(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: tid("proj-reinc-race"), Name: "Reinc Race Project", Slug: "reinc-race-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	agent := &store.Agent{
+		ID: tid("agent-reinc-race"), Slug: "reinc-race-slug", Name: "Reinc Race Agent",
+		ProjectID: project.ID, Phase: string(state.PhaseRunning), Activity: string(state.ActivityWorking),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	wrapped := &reincarnateBeforeStatusStore{Store: s, t: t}
+	srv.store = wrapped
+
+	rec := postAgentStatusAsAgent(t, srv, agent,
+		`{"phase":"error","activity":"crashed","message":"boom","exitCode":1,"exitReason":"crashed","containerStatus":"Exited (1)"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.True(t, wrapped.done, "the store wrapper must have run")
+
+	after, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ReincarnationStateStopping, after.ReincarnationState)
+	assert.Equal(t, string(state.PhaseRunning), after.Phase, "the phase must not change")
+	assert.Equal(t, string(state.ActivityWorking), after.Activity)
+	assert.Empty(t, after.Message)
+	assert.Nil(t, after.ExitCode)
+	assert.Empty(t, after.ExitReason)
+	assert.Equal(t, "Exited (1)", after.ContainerStatus, "the unguarded field must be written")
 }

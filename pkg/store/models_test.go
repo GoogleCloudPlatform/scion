@@ -380,3 +380,18 @@ func TestIsProjectMembersGroup(t *testing.T) {
 		})
 	}
 }
+
+func TestReincarnationInFlight(t *testing.T) {
+	for state, want := range map[string]bool{
+		ReincarnationStateNone:         false,
+		ReincarnationStateFailed:       false,
+		ReincarnationStatePending:      true,
+		ReincarnationStateStopping:     true,
+		ReincarnationStateProvisioning: true,
+		ReincarnationStateStarting:     true,
+	} {
+		if got := ReincarnationInFlight(state); got != want {
+			t.Errorf("ReincarnationInFlight(%q) = %v, want %v", state, got, want)
+		}
+	}
+}

@@ -149,8 +149,9 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		// Best effort: {"applied":true} means "not guarded when the handler
 		// read the agent". A delete or reincarnation claimed between that
 		// read and the write can make it inaccurate. The persisted state is
-		// still correct for a delete (the store repeats Guard 0c inside the
-		// UpdateAgentStatus transaction); Guard 0b has no store-side twin.
+		// still correct: the store repeats Guard 0c, and Guard 0b for a
+		// report marked GuardReincarnation, inside the UpdateAgentStatus
+		// transaction.
 		if reason := statusGuardNoopReason(agent); reason != "" && statusUpdateIsEmpty(status) {
 			writeJSON(w, http.StatusOK, statusUpdateResult{Applied: false, Reason: reason})
 			return
@@ -162,6 +163,9 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		s.reconcileBrokerQuotaOnPhaseChange(ctx, agent, oldPhase, status.Phase)
 	}
 
+	// A reincarnation that starts after the read above must still win: the
+	// store re-checks Guard 0b on the row it locks (ptone/scion#2887).
+	status.GuardReincarnation = true
 	if err := s.store.UpdateAgentStatus(ctx, id, status); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -232,9 +236,10 @@ func statusUpdateTouchesGuardedFields(su store.AgentStatusUpdate) bool {
 // Every field counts, including the internal json:"-" ones a decoded status
 // POST never sets (ClearExit, ClearMessageIf, ClearTerminalRemnants):
 // erring towards "not empty" only means the store write runs.
-// The exceptions are the preconditions IfPhase, IfRunID and StartWrite:
-// they only condition the write (StartWrite selects the delete guard) and
-// persist nothing themselves, so they deliberately do not count.
+// The exceptions are the preconditions IfPhase, IfRunID, StartWrite and
+// GuardReincarnation: they only condition the write (StartWrite selects the
+// delete guard; GuardReincarnation turns on the store's reincarnation guard)
+// and persist nothing themselves, so they deliberately do not count.
 // TestStatusUpdateIsEmpty_EveryFieldCounts catches a field missing here.
 func statusUpdateIsEmpty(su store.AgentStatusUpdate) bool {
 	return !statusUpdateTouchesGuardedFields(su) &&
