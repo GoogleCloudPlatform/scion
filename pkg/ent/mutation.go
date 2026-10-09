@@ -21,6 +21,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentrecovery"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentserviceaccountassignment"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentsessionmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/allowlistentry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/apikey"
@@ -100,79 +101,80 @@ const (
 	OpUpdateOne = ent.OpUpdateOne
 
 	// Node types.
-	TypeAccessConstraint         = "AccessConstraint"
-	TypeAccessConstraintHistory  = "AccessConstraintHistory"
-	TypeAccessPolicy             = "AccessPolicy"
-	TypeAgent                    = "Agent"
-	TypeAgentCredential          = "AgentCredential"
-	TypeAgentHold                = "AgentHold"
-	TypeAgentIdentityKey         = "AgentIdentityKey"
-	TypeAgentRecovery            = "AgentRecovery"
-	TypeAgentReincarnation       = "AgentReincarnation"
-	TypeAgentSessionMetrics      = "AgentSessionMetrics"
-	TypeAllowListEntry           = "AllowListEntry"
-	TypeApiKey                   = "ApiKey"
-	TypeBrokerDispatch           = "BrokerDispatch"
-	TypeBrokerJoinToken          = "BrokerJoinToken"
-	TypeBrokerSecret             = "BrokerSecret"
-	TypeBrokerSetting            = "BrokerSetting"
-	TypeBrokerTargetInventory    = "BrokerTargetInventory"
-	TypeChatLinkCode             = "ChatLinkCode"
-	TypeConduitPrincipalEpoch    = "ConduitPrincipalEpoch"
-	TypeConduitSession           = "ConduitSession"
-	TypeConversation             = "Conversation"
-	TypeConversationParticipant  = "ConversationParticipant"
-	TypeDecisionAudit            = "DecisionAudit"
-	TypeDelegationAdoption       = "DelegationAdoption"
-	TypeDelegationEdge           = "DelegationEdge"
-	TypeEntitlementBinding       = "EntitlementBinding"
-	TypeEnvVar                   = "EnvVar"
-	TypeExternalIdentity         = "ExternalIdentity"
-	TypeGCPServiceAccount        = "GCPServiceAccount"
-	TypeGitHubResolutionCache    = "GitHubResolutionCache"
-	TypeGithubInstallation       = "GithubInstallation"
-	TypeGroup                    = "Group"
-	TypeGroupMembership          = "GroupMembership"
-	TypeHarnessConfig            = "HarnessConfig"
-	TypeHubSetting               = "HubSetting"
-	TypeIntegrationConfig        = "IntegrationConfig"
-	TypeIntegrationUpdate        = "IntegrationUpdate"
-	TypeInviteCode               = "InviteCode"
-	TypeLaunchReaperState        = "LaunchReaperState"
-	TypeLifecycleHook            = "LifecycleHook"
-	TypeLifecycleHookAgentPhase  = "LifecycleHookAgentPhase"
-	TypeLimitDefinition          = "LimitDefinition"
-	TypeMaintenanceOperation     = "MaintenanceOperation"
-	TypeMaintenanceOperationRun  = "MaintenanceOperationRun"
-	TypeMembershipLossCheck      = "MembershipLossCheck"
-	TypeMessage                  = "Message"
-	TypeMessageAddressee         = "MessageAddressee"
-	TypeMutationAudit            = "MutationAudit"
-	TypeNonceCache               = "NonceCache"
-	TypeNotification             = "Notification"
-	TypeNotificationSubscription = "NotificationSubscription"
-	TypePolicyBinding            = "PolicyBinding"
-	TypeProject                  = "Project"
-	TypeProjectContributor       = "ProjectContributor"
-	TypeProjectPreStartHook      = "ProjectPreStartHook"
-	TypeProjectSyncState         = "ProjectSyncState"
-	TypeRelayInstance            = "RelayInstance"
-	TypeRoleBinding              = "RoleBinding"
-	TypeRoleDefinition           = "RoleDefinition"
-	TypeRuntimeBroker            = "RuntimeBroker"
-	TypeSchedule                 = "Schedule"
-	TypeScheduledEvent           = "ScheduledEvent"
-	TypeSecret                   = "Secret"
-	TypeSkill                    = "Skill"
-	TypeSkillInjection           = "SkillInjection"
-	TypeSkillRegistry            = "SkillRegistry"
-	TypeSkillVersion             = "SkillVersion"
-	TypeSubscriptionTemplate     = "SubscriptionTemplate"
-	TypeTemplate                 = "Template"
-	TypeUsageReservation         = "UsageReservation"
-	TypeUser                     = "User"
-	TypeUserAccessToken          = "UserAccessToken"
-	TypeUserTerminalWorkspace    = "UserTerminalWorkspace"
+	TypeAccessConstraint              = "AccessConstraint"
+	TypeAccessConstraintHistory       = "AccessConstraintHistory"
+	TypeAccessPolicy                  = "AccessPolicy"
+	TypeAgent                         = "Agent"
+	TypeAgentCredential               = "AgentCredential"
+	TypeAgentHold                     = "AgentHold"
+	TypeAgentIdentityKey              = "AgentIdentityKey"
+	TypeAgentRecovery                 = "AgentRecovery"
+	TypeAgentReincarnation            = "AgentReincarnation"
+	TypeAgentServiceAccountAssignment = "AgentServiceAccountAssignment"
+	TypeAgentSessionMetrics           = "AgentSessionMetrics"
+	TypeAllowListEntry                = "AllowListEntry"
+	TypeApiKey                        = "ApiKey"
+	TypeBrokerDispatch                = "BrokerDispatch"
+	TypeBrokerJoinToken               = "BrokerJoinToken"
+	TypeBrokerSecret                  = "BrokerSecret"
+	TypeBrokerSetting                 = "BrokerSetting"
+	TypeBrokerTargetInventory         = "BrokerTargetInventory"
+	TypeChatLinkCode                  = "ChatLinkCode"
+	TypeConduitPrincipalEpoch         = "ConduitPrincipalEpoch"
+	TypeConduitSession                = "ConduitSession"
+	TypeConversation                  = "Conversation"
+	TypeConversationParticipant       = "ConversationParticipant"
+	TypeDecisionAudit                 = "DecisionAudit"
+	TypeDelegationAdoption            = "DelegationAdoption"
+	TypeDelegationEdge                = "DelegationEdge"
+	TypeEntitlementBinding            = "EntitlementBinding"
+	TypeEnvVar                        = "EnvVar"
+	TypeExternalIdentity              = "ExternalIdentity"
+	TypeGCPServiceAccount             = "GCPServiceAccount"
+	TypeGitHubResolutionCache         = "GitHubResolutionCache"
+	TypeGithubInstallation            = "GithubInstallation"
+	TypeGroup                         = "Group"
+	TypeGroupMembership               = "GroupMembership"
+	TypeHarnessConfig                 = "HarnessConfig"
+	TypeHubSetting                    = "HubSetting"
+	TypeIntegrationConfig             = "IntegrationConfig"
+	TypeIntegrationUpdate             = "IntegrationUpdate"
+	TypeInviteCode                    = "InviteCode"
+	TypeLaunchReaperState             = "LaunchReaperState"
+	TypeLifecycleHook                 = "LifecycleHook"
+	TypeLifecycleHookAgentPhase       = "LifecycleHookAgentPhase"
+	TypeLimitDefinition               = "LimitDefinition"
+	TypeMaintenanceOperation          = "MaintenanceOperation"
+	TypeMaintenanceOperationRun       = "MaintenanceOperationRun"
+	TypeMembershipLossCheck           = "MembershipLossCheck"
+	TypeMessage                       = "Message"
+	TypeMessageAddressee              = "MessageAddressee"
+	TypeMutationAudit                 = "MutationAudit"
+	TypeNonceCache                    = "NonceCache"
+	TypeNotification                  = "Notification"
+	TypeNotificationSubscription      = "NotificationSubscription"
+	TypePolicyBinding                 = "PolicyBinding"
+	TypeProject                       = "Project"
+	TypeProjectContributor            = "ProjectContributor"
+	TypeProjectPreStartHook           = "ProjectPreStartHook"
+	TypeProjectSyncState              = "ProjectSyncState"
+	TypeRelayInstance                 = "RelayInstance"
+	TypeRoleBinding                   = "RoleBinding"
+	TypeRoleDefinition                = "RoleDefinition"
+	TypeRuntimeBroker                 = "RuntimeBroker"
+	TypeSchedule                      = "Schedule"
+	TypeScheduledEvent                = "ScheduledEvent"
+	TypeSecret                        = "Secret"
+	TypeSkill                         = "Skill"
+	TypeSkillInjection                = "SkillInjection"
+	TypeSkillRegistry                 = "SkillRegistry"
+	TypeSkillVersion                  = "SkillVersion"
+	TypeSubscriptionTemplate          = "SubscriptionTemplate"
+	TypeTemplate                      = "Template"
+	TypeUsageReservation              = "UsageReservation"
+	TypeUser                          = "User"
+	TypeUserAccessToken               = "UserAccessToken"
+	TypeUserTerminalWorkspace         = "UserTerminalWorkspace"
 )
 
 // AccessConstraintMutation represents an operation that mutates the AccessConstraint nodes in the graph.
@@ -15477,6 +15479,1977 @@ func (m *AgentReincarnationMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *AgentReincarnationMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown AgentReincarnation edge %s", name)
+}
+
+// AgentServiceAccountAssignmentMutation represents an operation that mutates the AgentServiceAccountAssignment nodes in the graph.
+type AgentServiceAccountAssignmentMutation struct {
+	config
+	op                               Op
+	typ                              string
+	id                               *uuid.UUID
+	provenance_version               *int
+	addprovenance_version            *int
+	source_principal_kind            *string
+	source_principal_id              *string
+	source_credential_kind           *string
+	source_credential_id             *string
+	source_event_id                  *string
+	source_schedule_id               *string
+	source_authorization_revision    *int
+	addsource_authorization_revision *int
+	initiator_principal_kind         *string
+	initiator_principal_id           *string
+	initiator_credential_kind        *string
+	initiator_credential_id          *string
+	ceiling_kind                     *string
+	ceiling_version                  *int32
+	addceiling_version               *int32
+	ceiling_permission_ids           *string
+	ceiling_boundary_kind            *string
+	ceiling_boundary_project_id      *string
+	ceiling_source_expires_at        *time.Time
+	deactivation_cause               *string
+	deactivated_at                   *time.Time
+	deactivation_op_id               *string
+	agent_id                         *string
+	project_id                       *string
+	service_account_id               *string
+	origin                           *string
+	active                           *bool
+	created                          *time.Time
+	updated                          *time.Time
+	clearedFields                    map[string]struct{}
+	done                             bool
+	oldValue                         func(context.Context) (*AgentServiceAccountAssignment, error)
+	predicates                       []predicate.AgentServiceAccountAssignment
+}
+
+var _ ent.Mutation = (*AgentServiceAccountAssignmentMutation)(nil)
+
+// agentserviceaccountassignmentOption allows management of the mutation configuration using functional options.
+type agentserviceaccountassignmentOption func(*AgentServiceAccountAssignmentMutation)
+
+// newAgentServiceAccountAssignmentMutation creates new mutation for the AgentServiceAccountAssignment entity.
+func newAgentServiceAccountAssignmentMutation(c config, op Op, opts ...agentserviceaccountassignmentOption) *AgentServiceAccountAssignmentMutation {
+	m := &AgentServiceAccountAssignmentMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeAgentServiceAccountAssignment,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withAgentServiceAccountAssignmentID sets the ID field of the mutation.
+func withAgentServiceAccountAssignmentID(id uuid.UUID) agentserviceaccountassignmentOption {
+	return func(m *AgentServiceAccountAssignmentMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *AgentServiceAccountAssignment
+		)
+		m.oldValue = func(ctx context.Context) (*AgentServiceAccountAssignment, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().AgentServiceAccountAssignment.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withAgentServiceAccountAssignment sets the old AgentServiceAccountAssignment of the mutation.
+func withAgentServiceAccountAssignment(node *AgentServiceAccountAssignment) agentserviceaccountassignmentOption {
+	return func(m *AgentServiceAccountAssignmentMutation) {
+		m.oldValue = func(context.Context) (*AgentServiceAccountAssignment, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m AgentServiceAccountAssignmentMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m AgentServiceAccountAssignmentMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of AgentServiceAccountAssignment entities.
+func (m *AgentServiceAccountAssignmentMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *AgentServiceAccountAssignmentMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *AgentServiceAccountAssignmentMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().AgentServiceAccountAssignment.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetProvenanceVersion sets the "provenance_version" field.
+func (m *AgentServiceAccountAssignmentMutation) SetProvenanceVersion(i int) {
+	m.provenance_version = &i
+	m.addprovenance_version = nil
+}
+
+// ProvenanceVersion returns the value of the "provenance_version" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) ProvenanceVersion() (r int, exists bool) {
+	v := m.provenance_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldProvenanceVersion returns the old "provenance_version" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldProvenanceVersion(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldProvenanceVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldProvenanceVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldProvenanceVersion: %w", err)
+	}
+	return oldValue.ProvenanceVersion, nil
+}
+
+// AddProvenanceVersion adds i to the "provenance_version" field.
+func (m *AgentServiceAccountAssignmentMutation) AddProvenanceVersion(i int) {
+	if m.addprovenance_version != nil {
+		*m.addprovenance_version += i
+	} else {
+		m.addprovenance_version = &i
+	}
+}
+
+// AddedProvenanceVersion returns the value that was added to the "provenance_version" field in this mutation.
+func (m *AgentServiceAccountAssignmentMutation) AddedProvenanceVersion() (r int, exists bool) {
+	v := m.addprovenance_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetProvenanceVersion resets all changes to the "provenance_version" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetProvenanceVersion() {
+	m.provenance_version = nil
+	m.addprovenance_version = nil
+}
+
+// SetSourcePrincipalKind sets the "source_principal_kind" field.
+func (m *AgentServiceAccountAssignmentMutation) SetSourcePrincipalKind(s string) {
+	m.source_principal_kind = &s
+}
+
+// SourcePrincipalKind returns the value of the "source_principal_kind" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) SourcePrincipalKind() (r string, exists bool) {
+	v := m.source_principal_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSourcePrincipalKind returns the old "source_principal_kind" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldSourcePrincipalKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSourcePrincipalKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSourcePrincipalKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSourcePrincipalKind: %w", err)
+	}
+	return oldValue.SourcePrincipalKind, nil
+}
+
+// ResetSourcePrincipalKind resets all changes to the "source_principal_kind" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetSourcePrincipalKind() {
+	m.source_principal_kind = nil
+}
+
+// SetSourcePrincipalID sets the "source_principal_id" field.
+func (m *AgentServiceAccountAssignmentMutation) SetSourcePrincipalID(s string) {
+	m.source_principal_id = &s
+}
+
+// SourcePrincipalID returns the value of the "source_principal_id" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) SourcePrincipalID() (r string, exists bool) {
+	v := m.source_principal_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSourcePrincipalID returns the old "source_principal_id" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldSourcePrincipalID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSourcePrincipalID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSourcePrincipalID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSourcePrincipalID: %w", err)
+	}
+	return oldValue.SourcePrincipalID, nil
+}
+
+// ResetSourcePrincipalID resets all changes to the "source_principal_id" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetSourcePrincipalID() {
+	m.source_principal_id = nil
+}
+
+// SetSourceCredentialKind sets the "source_credential_kind" field.
+func (m *AgentServiceAccountAssignmentMutation) SetSourceCredentialKind(s string) {
+	m.source_credential_kind = &s
+}
+
+// SourceCredentialKind returns the value of the "source_credential_kind" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) SourceCredentialKind() (r string, exists bool) {
+	v := m.source_credential_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSourceCredentialKind returns the old "source_credential_kind" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldSourceCredentialKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSourceCredentialKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSourceCredentialKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSourceCredentialKind: %w", err)
+	}
+	return oldValue.SourceCredentialKind, nil
+}
+
+// ResetSourceCredentialKind resets all changes to the "source_credential_kind" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetSourceCredentialKind() {
+	m.source_credential_kind = nil
+}
+
+// SetSourceCredentialID sets the "source_credential_id" field.
+func (m *AgentServiceAccountAssignmentMutation) SetSourceCredentialID(s string) {
+	m.source_credential_id = &s
+}
+
+// SourceCredentialID returns the value of the "source_credential_id" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) SourceCredentialID() (r string, exists bool) {
+	v := m.source_credential_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSourceCredentialID returns the old "source_credential_id" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldSourceCredentialID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSourceCredentialID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSourceCredentialID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSourceCredentialID: %w", err)
+	}
+	return oldValue.SourceCredentialID, nil
+}
+
+// ResetSourceCredentialID resets all changes to the "source_credential_id" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetSourceCredentialID() {
+	m.source_credential_id = nil
+}
+
+// SetSourceEventID sets the "source_event_id" field.
+func (m *AgentServiceAccountAssignmentMutation) SetSourceEventID(s string) {
+	m.source_event_id = &s
+}
+
+// SourceEventID returns the value of the "source_event_id" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) SourceEventID() (r string, exists bool) {
+	v := m.source_event_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSourceEventID returns the old "source_event_id" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldSourceEventID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSourceEventID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSourceEventID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSourceEventID: %w", err)
+	}
+	return oldValue.SourceEventID, nil
+}
+
+// ResetSourceEventID resets all changes to the "source_event_id" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetSourceEventID() {
+	m.source_event_id = nil
+}
+
+// SetSourceScheduleID sets the "source_schedule_id" field.
+func (m *AgentServiceAccountAssignmentMutation) SetSourceScheduleID(s string) {
+	m.source_schedule_id = &s
+}
+
+// SourceScheduleID returns the value of the "source_schedule_id" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) SourceScheduleID() (r string, exists bool) {
+	v := m.source_schedule_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSourceScheduleID returns the old "source_schedule_id" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldSourceScheduleID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSourceScheduleID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSourceScheduleID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSourceScheduleID: %w", err)
+	}
+	return oldValue.SourceScheduleID, nil
+}
+
+// ClearSourceScheduleID clears the value of the "source_schedule_id" field.
+func (m *AgentServiceAccountAssignmentMutation) ClearSourceScheduleID() {
+	m.source_schedule_id = nil
+	m.clearedFields[agentserviceaccountassignment.FieldSourceScheduleID] = struct{}{}
+}
+
+// SourceScheduleIDCleared returns if the "source_schedule_id" field was cleared in this mutation.
+func (m *AgentServiceAccountAssignmentMutation) SourceScheduleIDCleared() bool {
+	_, ok := m.clearedFields[agentserviceaccountassignment.FieldSourceScheduleID]
+	return ok
+}
+
+// ResetSourceScheduleID resets all changes to the "source_schedule_id" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetSourceScheduleID() {
+	m.source_schedule_id = nil
+	delete(m.clearedFields, agentserviceaccountassignment.FieldSourceScheduleID)
+}
+
+// SetSourceAuthorizationRevision sets the "source_authorization_revision" field.
+func (m *AgentServiceAccountAssignmentMutation) SetSourceAuthorizationRevision(i int) {
+	m.source_authorization_revision = &i
+	m.addsource_authorization_revision = nil
+}
+
+// SourceAuthorizationRevision returns the value of the "source_authorization_revision" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) SourceAuthorizationRevision() (r int, exists bool) {
+	v := m.source_authorization_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSourceAuthorizationRevision returns the old "source_authorization_revision" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldSourceAuthorizationRevision(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSourceAuthorizationRevision is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSourceAuthorizationRevision requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSourceAuthorizationRevision: %w", err)
+	}
+	return oldValue.SourceAuthorizationRevision, nil
+}
+
+// AddSourceAuthorizationRevision adds i to the "source_authorization_revision" field.
+func (m *AgentServiceAccountAssignmentMutation) AddSourceAuthorizationRevision(i int) {
+	if m.addsource_authorization_revision != nil {
+		*m.addsource_authorization_revision += i
+	} else {
+		m.addsource_authorization_revision = &i
+	}
+}
+
+// AddedSourceAuthorizationRevision returns the value that was added to the "source_authorization_revision" field in this mutation.
+func (m *AgentServiceAccountAssignmentMutation) AddedSourceAuthorizationRevision() (r int, exists bool) {
+	v := m.addsource_authorization_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetSourceAuthorizationRevision resets all changes to the "source_authorization_revision" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetSourceAuthorizationRevision() {
+	m.source_authorization_revision = nil
+	m.addsource_authorization_revision = nil
+}
+
+// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
+func (m *AgentServiceAccountAssignmentMutation) SetInitiatorPrincipalKind(s string) {
+	m.initiator_principal_kind = &s
+}
+
+// InitiatorPrincipalKind returns the value of the "initiator_principal_kind" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) InitiatorPrincipalKind() (r string, exists bool) {
+	v := m.initiator_principal_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInitiatorPrincipalKind returns the old "initiator_principal_kind" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldInitiatorPrincipalKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInitiatorPrincipalKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInitiatorPrincipalKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInitiatorPrincipalKind: %w", err)
+	}
+	return oldValue.InitiatorPrincipalKind, nil
+}
+
+// ResetInitiatorPrincipalKind resets all changes to the "initiator_principal_kind" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetInitiatorPrincipalKind() {
+	m.initiator_principal_kind = nil
+}
+
+// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
+func (m *AgentServiceAccountAssignmentMutation) SetInitiatorPrincipalID(s string) {
+	m.initiator_principal_id = &s
+}
+
+// InitiatorPrincipalID returns the value of the "initiator_principal_id" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) InitiatorPrincipalID() (r string, exists bool) {
+	v := m.initiator_principal_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInitiatorPrincipalID returns the old "initiator_principal_id" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldInitiatorPrincipalID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInitiatorPrincipalID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInitiatorPrincipalID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInitiatorPrincipalID: %w", err)
+	}
+	return oldValue.InitiatorPrincipalID, nil
+}
+
+// ResetInitiatorPrincipalID resets all changes to the "initiator_principal_id" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetInitiatorPrincipalID() {
+	m.initiator_principal_id = nil
+}
+
+// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
+func (m *AgentServiceAccountAssignmentMutation) SetInitiatorCredentialKind(s string) {
+	m.initiator_credential_kind = &s
+}
+
+// InitiatorCredentialKind returns the value of the "initiator_credential_kind" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) InitiatorCredentialKind() (r string, exists bool) {
+	v := m.initiator_credential_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInitiatorCredentialKind returns the old "initiator_credential_kind" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldInitiatorCredentialKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInitiatorCredentialKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInitiatorCredentialKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInitiatorCredentialKind: %w", err)
+	}
+	return oldValue.InitiatorCredentialKind, nil
+}
+
+// ResetInitiatorCredentialKind resets all changes to the "initiator_credential_kind" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetInitiatorCredentialKind() {
+	m.initiator_credential_kind = nil
+}
+
+// SetInitiatorCredentialID sets the "initiator_credential_id" field.
+func (m *AgentServiceAccountAssignmentMutation) SetInitiatorCredentialID(s string) {
+	m.initiator_credential_id = &s
+}
+
+// InitiatorCredentialID returns the value of the "initiator_credential_id" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) InitiatorCredentialID() (r string, exists bool) {
+	v := m.initiator_credential_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInitiatorCredentialID returns the old "initiator_credential_id" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldInitiatorCredentialID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInitiatorCredentialID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInitiatorCredentialID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInitiatorCredentialID: %w", err)
+	}
+	return oldValue.InitiatorCredentialID, nil
+}
+
+// ResetInitiatorCredentialID resets all changes to the "initiator_credential_id" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetInitiatorCredentialID() {
+	m.initiator_credential_id = nil
+}
+
+// SetCeilingKind sets the "ceiling_kind" field.
+func (m *AgentServiceAccountAssignmentMutation) SetCeilingKind(s string) {
+	m.ceiling_kind = &s
+}
+
+// CeilingKind returns the value of the "ceiling_kind" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) CeilingKind() (r string, exists bool) {
+	v := m.ceiling_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCeilingKind returns the old "ceiling_kind" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldCeilingKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCeilingKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCeilingKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCeilingKind: %w", err)
+	}
+	return oldValue.CeilingKind, nil
+}
+
+// ResetCeilingKind resets all changes to the "ceiling_kind" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetCeilingKind() {
+	m.ceiling_kind = nil
+}
+
+// SetCeilingVersion sets the "ceiling_version" field.
+func (m *AgentServiceAccountAssignmentMutation) SetCeilingVersion(i int32) {
+	m.ceiling_version = &i
+	m.addceiling_version = nil
+}
+
+// CeilingVersion returns the value of the "ceiling_version" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) CeilingVersion() (r int32, exists bool) {
+	v := m.ceiling_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCeilingVersion returns the old "ceiling_version" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldCeilingVersion(ctx context.Context) (v int32, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCeilingVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCeilingVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCeilingVersion: %w", err)
+	}
+	return oldValue.CeilingVersion, nil
+}
+
+// AddCeilingVersion adds i to the "ceiling_version" field.
+func (m *AgentServiceAccountAssignmentMutation) AddCeilingVersion(i int32) {
+	if m.addceiling_version != nil {
+		*m.addceiling_version += i
+	} else {
+		m.addceiling_version = &i
+	}
+}
+
+// AddedCeilingVersion returns the value that was added to the "ceiling_version" field in this mutation.
+func (m *AgentServiceAccountAssignmentMutation) AddedCeilingVersion() (r int32, exists bool) {
+	v := m.addceiling_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetCeilingVersion resets all changes to the "ceiling_version" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetCeilingVersion() {
+	m.ceiling_version = nil
+	m.addceiling_version = nil
+}
+
+// SetCeilingPermissionIds sets the "ceiling_permission_ids" field.
+func (m *AgentServiceAccountAssignmentMutation) SetCeilingPermissionIds(s string) {
+	m.ceiling_permission_ids = &s
+}
+
+// CeilingPermissionIds returns the value of the "ceiling_permission_ids" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) CeilingPermissionIds() (r string, exists bool) {
+	v := m.ceiling_permission_ids
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCeilingPermissionIds returns the old "ceiling_permission_ids" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldCeilingPermissionIds(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCeilingPermissionIds is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCeilingPermissionIds requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCeilingPermissionIds: %w", err)
+	}
+	return oldValue.CeilingPermissionIds, nil
+}
+
+// ClearCeilingPermissionIds clears the value of the "ceiling_permission_ids" field.
+func (m *AgentServiceAccountAssignmentMutation) ClearCeilingPermissionIds() {
+	m.ceiling_permission_ids = nil
+	m.clearedFields[agentserviceaccountassignment.FieldCeilingPermissionIds] = struct{}{}
+}
+
+// CeilingPermissionIdsCleared returns if the "ceiling_permission_ids" field was cleared in this mutation.
+func (m *AgentServiceAccountAssignmentMutation) CeilingPermissionIdsCleared() bool {
+	_, ok := m.clearedFields[agentserviceaccountassignment.FieldCeilingPermissionIds]
+	return ok
+}
+
+// ResetCeilingPermissionIds resets all changes to the "ceiling_permission_ids" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetCeilingPermissionIds() {
+	m.ceiling_permission_ids = nil
+	delete(m.clearedFields, agentserviceaccountassignment.FieldCeilingPermissionIds)
+}
+
+// SetCeilingBoundaryKind sets the "ceiling_boundary_kind" field.
+func (m *AgentServiceAccountAssignmentMutation) SetCeilingBoundaryKind(s string) {
+	m.ceiling_boundary_kind = &s
+}
+
+// CeilingBoundaryKind returns the value of the "ceiling_boundary_kind" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) CeilingBoundaryKind() (r string, exists bool) {
+	v := m.ceiling_boundary_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCeilingBoundaryKind returns the old "ceiling_boundary_kind" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldCeilingBoundaryKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCeilingBoundaryKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCeilingBoundaryKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCeilingBoundaryKind: %w", err)
+	}
+	return oldValue.CeilingBoundaryKind, nil
+}
+
+// ResetCeilingBoundaryKind resets all changes to the "ceiling_boundary_kind" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetCeilingBoundaryKind() {
+	m.ceiling_boundary_kind = nil
+}
+
+// SetCeilingBoundaryProjectID sets the "ceiling_boundary_project_id" field.
+func (m *AgentServiceAccountAssignmentMutation) SetCeilingBoundaryProjectID(s string) {
+	m.ceiling_boundary_project_id = &s
+}
+
+// CeilingBoundaryProjectID returns the value of the "ceiling_boundary_project_id" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) CeilingBoundaryProjectID() (r string, exists bool) {
+	v := m.ceiling_boundary_project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCeilingBoundaryProjectID returns the old "ceiling_boundary_project_id" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldCeilingBoundaryProjectID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCeilingBoundaryProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCeilingBoundaryProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCeilingBoundaryProjectID: %w", err)
+	}
+	return oldValue.CeilingBoundaryProjectID, nil
+}
+
+// ResetCeilingBoundaryProjectID resets all changes to the "ceiling_boundary_project_id" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetCeilingBoundaryProjectID() {
+	m.ceiling_boundary_project_id = nil
+}
+
+// SetCeilingSourceExpiresAt sets the "ceiling_source_expires_at" field.
+func (m *AgentServiceAccountAssignmentMutation) SetCeilingSourceExpiresAt(t time.Time) {
+	m.ceiling_source_expires_at = &t
+}
+
+// CeilingSourceExpiresAt returns the value of the "ceiling_source_expires_at" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) CeilingSourceExpiresAt() (r time.Time, exists bool) {
+	v := m.ceiling_source_expires_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCeilingSourceExpiresAt returns the old "ceiling_source_expires_at" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldCeilingSourceExpiresAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCeilingSourceExpiresAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCeilingSourceExpiresAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCeilingSourceExpiresAt: %w", err)
+	}
+	return oldValue.CeilingSourceExpiresAt, nil
+}
+
+// ClearCeilingSourceExpiresAt clears the value of the "ceiling_source_expires_at" field.
+func (m *AgentServiceAccountAssignmentMutation) ClearCeilingSourceExpiresAt() {
+	m.ceiling_source_expires_at = nil
+	m.clearedFields[agentserviceaccountassignment.FieldCeilingSourceExpiresAt] = struct{}{}
+}
+
+// CeilingSourceExpiresAtCleared returns if the "ceiling_source_expires_at" field was cleared in this mutation.
+func (m *AgentServiceAccountAssignmentMutation) CeilingSourceExpiresAtCleared() bool {
+	_, ok := m.clearedFields[agentserviceaccountassignment.FieldCeilingSourceExpiresAt]
+	return ok
+}
+
+// ResetCeilingSourceExpiresAt resets all changes to the "ceiling_source_expires_at" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetCeilingSourceExpiresAt() {
+	m.ceiling_source_expires_at = nil
+	delete(m.clearedFields, agentserviceaccountassignment.FieldCeilingSourceExpiresAt)
+}
+
+// SetDeactivationCause sets the "deactivation_cause" field.
+func (m *AgentServiceAccountAssignmentMutation) SetDeactivationCause(s string) {
+	m.deactivation_cause = &s
+}
+
+// DeactivationCause returns the value of the "deactivation_cause" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) DeactivationCause() (r string, exists bool) {
+	v := m.deactivation_cause
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeactivationCause returns the old "deactivation_cause" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldDeactivationCause(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeactivationCause is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeactivationCause requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeactivationCause: %w", err)
+	}
+	return oldValue.DeactivationCause, nil
+}
+
+// ResetDeactivationCause resets all changes to the "deactivation_cause" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetDeactivationCause() {
+	m.deactivation_cause = nil
+}
+
+// SetDeactivatedAt sets the "deactivated_at" field.
+func (m *AgentServiceAccountAssignmentMutation) SetDeactivatedAt(t time.Time) {
+	m.deactivated_at = &t
+}
+
+// DeactivatedAt returns the value of the "deactivated_at" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) DeactivatedAt() (r time.Time, exists bool) {
+	v := m.deactivated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeactivatedAt returns the old "deactivated_at" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldDeactivatedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeactivatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeactivatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeactivatedAt: %w", err)
+	}
+	return oldValue.DeactivatedAt, nil
+}
+
+// ClearDeactivatedAt clears the value of the "deactivated_at" field.
+func (m *AgentServiceAccountAssignmentMutation) ClearDeactivatedAt() {
+	m.deactivated_at = nil
+	m.clearedFields[agentserviceaccountassignment.FieldDeactivatedAt] = struct{}{}
+}
+
+// DeactivatedAtCleared returns if the "deactivated_at" field was cleared in this mutation.
+func (m *AgentServiceAccountAssignmentMutation) DeactivatedAtCleared() bool {
+	_, ok := m.clearedFields[agentserviceaccountassignment.FieldDeactivatedAt]
+	return ok
+}
+
+// ResetDeactivatedAt resets all changes to the "deactivated_at" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetDeactivatedAt() {
+	m.deactivated_at = nil
+	delete(m.clearedFields, agentserviceaccountassignment.FieldDeactivatedAt)
+}
+
+// SetDeactivationOpID sets the "deactivation_op_id" field.
+func (m *AgentServiceAccountAssignmentMutation) SetDeactivationOpID(s string) {
+	m.deactivation_op_id = &s
+}
+
+// DeactivationOpID returns the value of the "deactivation_op_id" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) DeactivationOpID() (r string, exists bool) {
+	v := m.deactivation_op_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeactivationOpID returns the old "deactivation_op_id" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldDeactivationOpID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeactivationOpID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeactivationOpID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeactivationOpID: %w", err)
+	}
+	return oldValue.DeactivationOpID, nil
+}
+
+// ResetDeactivationOpID resets all changes to the "deactivation_op_id" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetDeactivationOpID() {
+	m.deactivation_op_id = nil
+}
+
+// SetAgentID sets the "agent_id" field.
+func (m *AgentServiceAccountAssignmentMutation) SetAgentID(s string) {
+	m.agent_id = &s
+}
+
+// AgentID returns the value of the "agent_id" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) AgentID() (r string, exists bool) {
+	v := m.agent_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAgentID returns the old "agent_id" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldAgentID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAgentID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAgentID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAgentID: %w", err)
+	}
+	return oldValue.AgentID, nil
+}
+
+// ResetAgentID resets all changes to the "agent_id" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetAgentID() {
+	m.agent_id = nil
+}
+
+// SetProjectID sets the "project_id" field.
+func (m *AgentServiceAccountAssignmentMutation) SetProjectID(s string) {
+	m.project_id = &s
+}
+
+// ProjectID returns the value of the "project_id" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) ProjectID() (r string, exists bool) {
+	v := m.project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldProjectID returns the old "project_id" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldProjectID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldProjectID: %w", err)
+	}
+	return oldValue.ProjectID, nil
+}
+
+// ResetProjectID resets all changes to the "project_id" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetProjectID() {
+	m.project_id = nil
+}
+
+// SetServiceAccountID sets the "service_account_id" field.
+func (m *AgentServiceAccountAssignmentMutation) SetServiceAccountID(s string) {
+	m.service_account_id = &s
+}
+
+// ServiceAccountID returns the value of the "service_account_id" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) ServiceAccountID() (r string, exists bool) {
+	v := m.service_account_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldServiceAccountID returns the old "service_account_id" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldServiceAccountID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldServiceAccountID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldServiceAccountID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldServiceAccountID: %w", err)
+	}
+	return oldValue.ServiceAccountID, nil
+}
+
+// ResetServiceAccountID resets all changes to the "service_account_id" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetServiceAccountID() {
+	m.service_account_id = nil
+}
+
+// SetOrigin sets the "origin" field.
+func (m *AgentServiceAccountAssignmentMutation) SetOrigin(s string) {
+	m.origin = &s
+}
+
+// Origin returns the value of the "origin" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) Origin() (r string, exists bool) {
+	v := m.origin
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOrigin returns the old "origin" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldOrigin(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOrigin is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOrigin requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOrigin: %w", err)
+	}
+	return oldValue.Origin, nil
+}
+
+// ResetOrigin resets all changes to the "origin" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetOrigin() {
+	m.origin = nil
+}
+
+// SetActive sets the "active" field.
+func (m *AgentServiceAccountAssignmentMutation) SetActive(b bool) {
+	m.active = &b
+}
+
+// Active returns the value of the "active" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) Active() (r bool, exists bool) {
+	v := m.active
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldActive returns the old "active" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldActive(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldActive is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldActive requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldActive: %w", err)
+	}
+	return oldValue.Active, nil
+}
+
+// ResetActive resets all changes to the "active" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetActive() {
+	m.active = nil
+}
+
+// SetCreated sets the "created" field.
+func (m *AgentServiceAccountAssignmentMutation) SetCreated(t time.Time) {
+	m.created = &t
+}
+
+// Created returns the value of the "created" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) Created() (r time.Time, exists bool) {
+	v := m.created
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreated returns the old "created" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldCreated(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreated is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreated requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreated: %w", err)
+	}
+	return oldValue.Created, nil
+}
+
+// ResetCreated resets all changes to the "created" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetCreated() {
+	m.created = nil
+}
+
+// SetUpdated sets the "updated" field.
+func (m *AgentServiceAccountAssignmentMutation) SetUpdated(t time.Time) {
+	m.updated = &t
+}
+
+// Updated returns the value of the "updated" field in the mutation.
+func (m *AgentServiceAccountAssignmentMutation) Updated() (r time.Time, exists bool) {
+	v := m.updated
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdated returns the old "updated" field's value of the AgentServiceAccountAssignment entity.
+// If the AgentServiceAccountAssignment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentServiceAccountAssignmentMutation) OldUpdated(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdated is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdated requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdated: %w", err)
+	}
+	return oldValue.Updated, nil
+}
+
+// ResetUpdated resets all changes to the "updated" field.
+func (m *AgentServiceAccountAssignmentMutation) ResetUpdated() {
+	m.updated = nil
+}
+
+// Where appends a list predicates to the AgentServiceAccountAssignmentMutation builder.
+func (m *AgentServiceAccountAssignmentMutation) Where(ps ...predicate.AgentServiceAccountAssignment) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the AgentServiceAccountAssignmentMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *AgentServiceAccountAssignmentMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.AgentServiceAccountAssignment, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *AgentServiceAccountAssignmentMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *AgentServiceAccountAssignmentMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (AgentServiceAccountAssignment).
+func (m *AgentServiceAccountAssignmentMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *AgentServiceAccountAssignmentMutation) Fields() []string {
+	fields := make([]string, 0, 28)
+	if m.provenance_version != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldProvenanceVersion)
+	}
+	if m.source_principal_kind != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldSourcePrincipalKind)
+	}
+	if m.source_principal_id != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldSourcePrincipalID)
+	}
+	if m.source_credential_kind != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldSourceCredentialKind)
+	}
+	if m.source_credential_id != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldSourceCredentialID)
+	}
+	if m.source_event_id != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldSourceEventID)
+	}
+	if m.source_schedule_id != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldSourceScheduleID)
+	}
+	if m.source_authorization_revision != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldSourceAuthorizationRevision)
+	}
+	if m.initiator_principal_kind != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldInitiatorPrincipalKind)
+	}
+	if m.initiator_principal_id != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldInitiatorPrincipalID)
+	}
+	if m.initiator_credential_kind != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldInitiatorCredentialKind)
+	}
+	if m.initiator_credential_id != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldInitiatorCredentialID)
+	}
+	if m.ceiling_kind != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldCeilingKind)
+	}
+	if m.ceiling_version != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldCeilingVersion)
+	}
+	if m.ceiling_permission_ids != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldCeilingPermissionIds)
+	}
+	if m.ceiling_boundary_kind != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldCeilingBoundaryKind)
+	}
+	if m.ceiling_boundary_project_id != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldCeilingBoundaryProjectID)
+	}
+	if m.ceiling_source_expires_at != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldCeilingSourceExpiresAt)
+	}
+	if m.deactivation_cause != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldDeactivationCause)
+	}
+	if m.deactivated_at != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldDeactivatedAt)
+	}
+	if m.deactivation_op_id != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldDeactivationOpID)
+	}
+	if m.agent_id != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldAgentID)
+	}
+	if m.project_id != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldProjectID)
+	}
+	if m.service_account_id != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldServiceAccountID)
+	}
+	if m.origin != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldOrigin)
+	}
+	if m.active != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldActive)
+	}
+	if m.created != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldCreated)
+	}
+	if m.updated != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldUpdated)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *AgentServiceAccountAssignmentMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case agentserviceaccountassignment.FieldProvenanceVersion:
+		return m.ProvenanceVersion()
+	case agentserviceaccountassignment.FieldSourcePrincipalKind:
+		return m.SourcePrincipalKind()
+	case agentserviceaccountassignment.FieldSourcePrincipalID:
+		return m.SourcePrincipalID()
+	case agentserviceaccountassignment.FieldSourceCredentialKind:
+		return m.SourceCredentialKind()
+	case agentserviceaccountassignment.FieldSourceCredentialID:
+		return m.SourceCredentialID()
+	case agentserviceaccountassignment.FieldSourceEventID:
+		return m.SourceEventID()
+	case agentserviceaccountassignment.FieldSourceScheduleID:
+		return m.SourceScheduleID()
+	case agentserviceaccountassignment.FieldSourceAuthorizationRevision:
+		return m.SourceAuthorizationRevision()
+	case agentserviceaccountassignment.FieldInitiatorPrincipalKind:
+		return m.InitiatorPrincipalKind()
+	case agentserviceaccountassignment.FieldInitiatorPrincipalID:
+		return m.InitiatorPrincipalID()
+	case agentserviceaccountassignment.FieldInitiatorCredentialKind:
+		return m.InitiatorCredentialKind()
+	case agentserviceaccountassignment.FieldInitiatorCredentialID:
+		return m.InitiatorCredentialID()
+	case agentserviceaccountassignment.FieldCeilingKind:
+		return m.CeilingKind()
+	case agentserviceaccountassignment.FieldCeilingVersion:
+		return m.CeilingVersion()
+	case agentserviceaccountassignment.FieldCeilingPermissionIds:
+		return m.CeilingPermissionIds()
+	case agentserviceaccountassignment.FieldCeilingBoundaryKind:
+		return m.CeilingBoundaryKind()
+	case agentserviceaccountassignment.FieldCeilingBoundaryProjectID:
+		return m.CeilingBoundaryProjectID()
+	case agentserviceaccountassignment.FieldCeilingSourceExpiresAt:
+		return m.CeilingSourceExpiresAt()
+	case agentserviceaccountassignment.FieldDeactivationCause:
+		return m.DeactivationCause()
+	case agentserviceaccountassignment.FieldDeactivatedAt:
+		return m.DeactivatedAt()
+	case agentserviceaccountassignment.FieldDeactivationOpID:
+		return m.DeactivationOpID()
+	case agentserviceaccountassignment.FieldAgentID:
+		return m.AgentID()
+	case agentserviceaccountassignment.FieldProjectID:
+		return m.ProjectID()
+	case agentserviceaccountassignment.FieldServiceAccountID:
+		return m.ServiceAccountID()
+	case agentserviceaccountassignment.FieldOrigin:
+		return m.Origin()
+	case agentserviceaccountassignment.FieldActive:
+		return m.Active()
+	case agentserviceaccountassignment.FieldCreated:
+		return m.Created()
+	case agentserviceaccountassignment.FieldUpdated:
+		return m.Updated()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *AgentServiceAccountAssignmentMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case agentserviceaccountassignment.FieldProvenanceVersion:
+		return m.OldProvenanceVersion(ctx)
+	case agentserviceaccountassignment.FieldSourcePrincipalKind:
+		return m.OldSourcePrincipalKind(ctx)
+	case agentserviceaccountassignment.FieldSourcePrincipalID:
+		return m.OldSourcePrincipalID(ctx)
+	case agentserviceaccountassignment.FieldSourceCredentialKind:
+		return m.OldSourceCredentialKind(ctx)
+	case agentserviceaccountassignment.FieldSourceCredentialID:
+		return m.OldSourceCredentialID(ctx)
+	case agentserviceaccountassignment.FieldSourceEventID:
+		return m.OldSourceEventID(ctx)
+	case agentserviceaccountassignment.FieldSourceScheduleID:
+		return m.OldSourceScheduleID(ctx)
+	case agentserviceaccountassignment.FieldSourceAuthorizationRevision:
+		return m.OldSourceAuthorizationRevision(ctx)
+	case agentserviceaccountassignment.FieldInitiatorPrincipalKind:
+		return m.OldInitiatorPrincipalKind(ctx)
+	case agentserviceaccountassignment.FieldInitiatorPrincipalID:
+		return m.OldInitiatorPrincipalID(ctx)
+	case agentserviceaccountassignment.FieldInitiatorCredentialKind:
+		return m.OldInitiatorCredentialKind(ctx)
+	case agentserviceaccountassignment.FieldInitiatorCredentialID:
+		return m.OldInitiatorCredentialID(ctx)
+	case agentserviceaccountassignment.FieldCeilingKind:
+		return m.OldCeilingKind(ctx)
+	case agentserviceaccountassignment.FieldCeilingVersion:
+		return m.OldCeilingVersion(ctx)
+	case agentserviceaccountassignment.FieldCeilingPermissionIds:
+		return m.OldCeilingPermissionIds(ctx)
+	case agentserviceaccountassignment.FieldCeilingBoundaryKind:
+		return m.OldCeilingBoundaryKind(ctx)
+	case agentserviceaccountassignment.FieldCeilingBoundaryProjectID:
+		return m.OldCeilingBoundaryProjectID(ctx)
+	case agentserviceaccountassignment.FieldCeilingSourceExpiresAt:
+		return m.OldCeilingSourceExpiresAt(ctx)
+	case agentserviceaccountassignment.FieldDeactivationCause:
+		return m.OldDeactivationCause(ctx)
+	case agentserviceaccountassignment.FieldDeactivatedAt:
+		return m.OldDeactivatedAt(ctx)
+	case agentserviceaccountassignment.FieldDeactivationOpID:
+		return m.OldDeactivationOpID(ctx)
+	case agentserviceaccountassignment.FieldAgentID:
+		return m.OldAgentID(ctx)
+	case agentserviceaccountassignment.FieldProjectID:
+		return m.OldProjectID(ctx)
+	case agentserviceaccountassignment.FieldServiceAccountID:
+		return m.OldServiceAccountID(ctx)
+	case agentserviceaccountassignment.FieldOrigin:
+		return m.OldOrigin(ctx)
+	case agentserviceaccountassignment.FieldActive:
+		return m.OldActive(ctx)
+	case agentserviceaccountassignment.FieldCreated:
+		return m.OldCreated(ctx)
+	case agentserviceaccountassignment.FieldUpdated:
+		return m.OldUpdated(ctx)
+	}
+	return nil, fmt.Errorf("unknown AgentServiceAccountAssignment field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *AgentServiceAccountAssignmentMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case agentserviceaccountassignment.FieldProvenanceVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetProvenanceVersion(v)
+		return nil
+	case agentserviceaccountassignment.FieldSourcePrincipalKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSourcePrincipalKind(v)
+		return nil
+	case agentserviceaccountassignment.FieldSourcePrincipalID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSourcePrincipalID(v)
+		return nil
+	case agentserviceaccountassignment.FieldSourceCredentialKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSourceCredentialKind(v)
+		return nil
+	case agentserviceaccountassignment.FieldSourceCredentialID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSourceCredentialID(v)
+		return nil
+	case agentserviceaccountassignment.FieldSourceEventID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSourceEventID(v)
+		return nil
+	case agentserviceaccountassignment.FieldSourceScheduleID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSourceScheduleID(v)
+		return nil
+	case agentserviceaccountassignment.FieldSourceAuthorizationRevision:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSourceAuthorizationRevision(v)
+		return nil
+	case agentserviceaccountassignment.FieldInitiatorPrincipalKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInitiatorPrincipalKind(v)
+		return nil
+	case agentserviceaccountassignment.FieldInitiatorPrincipalID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInitiatorPrincipalID(v)
+		return nil
+	case agentserviceaccountassignment.FieldInitiatorCredentialKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInitiatorCredentialKind(v)
+		return nil
+	case agentserviceaccountassignment.FieldInitiatorCredentialID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInitiatorCredentialID(v)
+		return nil
+	case agentserviceaccountassignment.FieldCeilingKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCeilingKind(v)
+		return nil
+	case agentserviceaccountassignment.FieldCeilingVersion:
+		v, ok := value.(int32)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCeilingVersion(v)
+		return nil
+	case agentserviceaccountassignment.FieldCeilingPermissionIds:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCeilingPermissionIds(v)
+		return nil
+	case agentserviceaccountassignment.FieldCeilingBoundaryKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCeilingBoundaryKind(v)
+		return nil
+	case agentserviceaccountassignment.FieldCeilingBoundaryProjectID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCeilingBoundaryProjectID(v)
+		return nil
+	case agentserviceaccountassignment.FieldCeilingSourceExpiresAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCeilingSourceExpiresAt(v)
+		return nil
+	case agentserviceaccountassignment.FieldDeactivationCause:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeactivationCause(v)
+		return nil
+	case agentserviceaccountassignment.FieldDeactivatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeactivatedAt(v)
+		return nil
+	case agentserviceaccountassignment.FieldDeactivationOpID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeactivationOpID(v)
+		return nil
+	case agentserviceaccountassignment.FieldAgentID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAgentID(v)
+		return nil
+	case agentserviceaccountassignment.FieldProjectID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetProjectID(v)
+		return nil
+	case agentserviceaccountassignment.FieldServiceAccountID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetServiceAccountID(v)
+		return nil
+	case agentserviceaccountassignment.FieldOrigin:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOrigin(v)
+		return nil
+	case agentserviceaccountassignment.FieldActive:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetActive(v)
+		return nil
+	case agentserviceaccountassignment.FieldCreated:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreated(v)
+		return nil
+	case agentserviceaccountassignment.FieldUpdated:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdated(v)
+		return nil
+	}
+	return fmt.Errorf("unknown AgentServiceAccountAssignment field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *AgentServiceAccountAssignmentMutation) AddedFields() []string {
+	var fields []string
+	if m.addprovenance_version != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldProvenanceVersion)
+	}
+	if m.addsource_authorization_revision != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldSourceAuthorizationRevision)
+	}
+	if m.addceiling_version != nil {
+		fields = append(fields, agentserviceaccountassignment.FieldCeilingVersion)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *AgentServiceAccountAssignmentMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case agentserviceaccountassignment.FieldProvenanceVersion:
+		return m.AddedProvenanceVersion()
+	case agentserviceaccountassignment.FieldSourceAuthorizationRevision:
+		return m.AddedSourceAuthorizationRevision()
+	case agentserviceaccountassignment.FieldCeilingVersion:
+		return m.AddedCeilingVersion()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *AgentServiceAccountAssignmentMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case agentserviceaccountassignment.FieldProvenanceVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddProvenanceVersion(v)
+		return nil
+	case agentserviceaccountassignment.FieldSourceAuthorizationRevision:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddSourceAuthorizationRevision(v)
+		return nil
+	case agentserviceaccountassignment.FieldCeilingVersion:
+		v, ok := value.(int32)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddCeilingVersion(v)
+		return nil
+	}
+	return fmt.Errorf("unknown AgentServiceAccountAssignment numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *AgentServiceAccountAssignmentMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(agentserviceaccountassignment.FieldSourceScheduleID) {
+		fields = append(fields, agentserviceaccountassignment.FieldSourceScheduleID)
+	}
+	if m.FieldCleared(agentserviceaccountassignment.FieldCeilingPermissionIds) {
+		fields = append(fields, agentserviceaccountassignment.FieldCeilingPermissionIds)
+	}
+	if m.FieldCleared(agentserviceaccountassignment.FieldCeilingSourceExpiresAt) {
+		fields = append(fields, agentserviceaccountassignment.FieldCeilingSourceExpiresAt)
+	}
+	if m.FieldCleared(agentserviceaccountassignment.FieldDeactivatedAt) {
+		fields = append(fields, agentserviceaccountassignment.FieldDeactivatedAt)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *AgentServiceAccountAssignmentMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *AgentServiceAccountAssignmentMutation) ClearField(name string) error {
+	switch name {
+	case agentserviceaccountassignment.FieldSourceScheduleID:
+		m.ClearSourceScheduleID()
+		return nil
+	case agentserviceaccountassignment.FieldCeilingPermissionIds:
+		m.ClearCeilingPermissionIds()
+		return nil
+	case agentserviceaccountassignment.FieldCeilingSourceExpiresAt:
+		m.ClearCeilingSourceExpiresAt()
+		return nil
+	case agentserviceaccountassignment.FieldDeactivatedAt:
+		m.ClearDeactivatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown AgentServiceAccountAssignment nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *AgentServiceAccountAssignmentMutation) ResetField(name string) error {
+	switch name {
+	case agentserviceaccountassignment.FieldProvenanceVersion:
+		m.ResetProvenanceVersion()
+		return nil
+	case agentserviceaccountassignment.FieldSourcePrincipalKind:
+		m.ResetSourcePrincipalKind()
+		return nil
+	case agentserviceaccountassignment.FieldSourcePrincipalID:
+		m.ResetSourcePrincipalID()
+		return nil
+	case agentserviceaccountassignment.FieldSourceCredentialKind:
+		m.ResetSourceCredentialKind()
+		return nil
+	case agentserviceaccountassignment.FieldSourceCredentialID:
+		m.ResetSourceCredentialID()
+		return nil
+	case agentserviceaccountassignment.FieldSourceEventID:
+		m.ResetSourceEventID()
+		return nil
+	case agentserviceaccountassignment.FieldSourceScheduleID:
+		m.ResetSourceScheduleID()
+		return nil
+	case agentserviceaccountassignment.FieldSourceAuthorizationRevision:
+		m.ResetSourceAuthorizationRevision()
+		return nil
+	case agentserviceaccountassignment.FieldInitiatorPrincipalKind:
+		m.ResetInitiatorPrincipalKind()
+		return nil
+	case agentserviceaccountassignment.FieldInitiatorPrincipalID:
+		m.ResetInitiatorPrincipalID()
+		return nil
+	case agentserviceaccountassignment.FieldInitiatorCredentialKind:
+		m.ResetInitiatorCredentialKind()
+		return nil
+	case agentserviceaccountassignment.FieldInitiatorCredentialID:
+		m.ResetInitiatorCredentialID()
+		return nil
+	case agentserviceaccountassignment.FieldCeilingKind:
+		m.ResetCeilingKind()
+		return nil
+	case agentserviceaccountassignment.FieldCeilingVersion:
+		m.ResetCeilingVersion()
+		return nil
+	case agentserviceaccountassignment.FieldCeilingPermissionIds:
+		m.ResetCeilingPermissionIds()
+		return nil
+	case agentserviceaccountassignment.FieldCeilingBoundaryKind:
+		m.ResetCeilingBoundaryKind()
+		return nil
+	case agentserviceaccountassignment.FieldCeilingBoundaryProjectID:
+		m.ResetCeilingBoundaryProjectID()
+		return nil
+	case agentserviceaccountassignment.FieldCeilingSourceExpiresAt:
+		m.ResetCeilingSourceExpiresAt()
+		return nil
+	case agentserviceaccountassignment.FieldDeactivationCause:
+		m.ResetDeactivationCause()
+		return nil
+	case agentserviceaccountassignment.FieldDeactivatedAt:
+		m.ResetDeactivatedAt()
+		return nil
+	case agentserviceaccountassignment.FieldDeactivationOpID:
+		m.ResetDeactivationOpID()
+		return nil
+	case agentserviceaccountassignment.FieldAgentID:
+		m.ResetAgentID()
+		return nil
+	case agentserviceaccountassignment.FieldProjectID:
+		m.ResetProjectID()
+		return nil
+	case agentserviceaccountassignment.FieldServiceAccountID:
+		m.ResetServiceAccountID()
+		return nil
+	case agentserviceaccountassignment.FieldOrigin:
+		m.ResetOrigin()
+		return nil
+	case agentserviceaccountassignment.FieldActive:
+		m.ResetActive()
+		return nil
+	case agentserviceaccountassignment.FieldCreated:
+		m.ResetCreated()
+		return nil
+	case agentserviceaccountassignment.FieldUpdated:
+		m.ResetUpdated()
+		return nil
+	}
+	return fmt.Errorf("unknown AgentServiceAccountAssignment field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *AgentServiceAccountAssignmentMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *AgentServiceAccountAssignmentMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *AgentServiceAccountAssignmentMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *AgentServiceAccountAssignmentMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *AgentServiceAccountAssignmentMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *AgentServiceAccountAssignmentMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *AgentServiceAccountAssignmentMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown AgentServiceAccountAssignment unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *AgentServiceAccountAssignmentMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown AgentServiceAccountAssignment edge %s", name)
 }
 
 // AgentSessionMetricsMutation represents an operation that mutates the AgentSessionMetrics nodes in the graph.

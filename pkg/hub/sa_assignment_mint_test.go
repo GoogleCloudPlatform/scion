@@ -209,14 +209,14 @@ func mintDevUser(t *testing.T, s store.Store, status string) {
 	require.NoError(t, s.CreateUser(ctx, &store.User{ID: DevUserID, Email: "dev@localhost", DisplayName: "Dev", Role: "admin", Status: status}))
 }
 
-// countingUserStore counts GetUser calls for DevUserID and can fail them.
-type countingUserStore struct {
+// devUserLookupStore counts GetUser calls for DevUserID and can fail them.
+type devUserLookupStore struct {
 	store.Store
 	devCalls int
 	fail     bool
 }
 
-func (s *countingUserStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+func (s *devUserLookupStore) GetUser(ctx context.Context, id string) (*store.User, error) {
 	if id == DevUserID {
 		s.devCalls++
 		if s.fail {
@@ -237,7 +237,7 @@ func TestSAParentCeiling_DevLocalAssignmentWithheldAtMintWhenDevAuthDisabled(t *
 			mintDevUser(t, f.store, store.UserStatusActive)
 			ag := assignModeChild(t, f, "devoff", ceilPrincip)
 			mintRow(t, f.store, ag.ID, f.userID, row)
-			counting := &countingUserStore{Store: f.store, fail: name == "GetUser errors"}
+			counting := &devUserLookupStore{Store: f.store, fail: name == "GetUser errors"}
 			a := f.authz(counting, false, false)
 			assertGCPScope(t, a, ag, false)
 			assert.Zero(t, counting.devCalls, "dev authority off decides before any user lookup")
@@ -282,7 +282,7 @@ func TestSAParentCeiling_DevLocalAssignmentWithheldAtMintWhenDevUserInactive(t *
 		mintDevUser(t, f.store, store.UserStatusActive)
 		ag := assignModeChild(t, f, "deverr", ceilPrincip)
 		mintRow(t, f.store, ag.ID, f.userID, devLocalMintRow)
-		a := f.authz(&countingUserStore{Store: f.store, fail: true}, true, false)
+		a := f.authz(&devUserLookupStore{Store: f.store, fail: true}, true, false)
 		_, err := a.ceilingFilteredAgentScopes(context.Background(), ag, a.mintCandidateScopes(ag))
 		require.Error(t, err)
 		assert.ErrorIs(t, err, errSPCInjected)

@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentrecovery"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentserviceaccountassignment"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentsessionmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/allowlistentry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/apikey"
@@ -114,6 +115,8 @@ type Client struct {
 	AgentRecovery *AgentRecoveryClient
 	// AgentReincarnation is the client for interacting with the AgentReincarnation builders.
 	AgentReincarnation *AgentReincarnationClient
+	// AgentServiceAccountAssignment is the client for interacting with the AgentServiceAccountAssignment builders.
+	AgentServiceAccountAssignment *AgentServiceAccountAssignmentClient
 	// AgentSessionMetrics is the client for interacting with the AgentSessionMetrics builders.
 	AgentSessionMetrics *AgentSessionMetricsClient
 	// AllowListEntry is the client for interacting with the AllowListEntry builders.
@@ -262,6 +265,7 @@ func (c *Client) init() {
 	c.AgentIdentityKey = NewAgentIdentityKeyClient(c.config)
 	c.AgentRecovery = NewAgentRecoveryClient(c.config)
 	c.AgentReincarnation = NewAgentReincarnationClient(c.config)
+	c.AgentServiceAccountAssignment = NewAgentServiceAccountAssignmentClient(c.config)
 	c.AgentSessionMetrics = NewAgentSessionMetricsClient(c.config)
 	c.AllowListEntry = NewAllowListEntryClient(c.config)
 	c.ApiKey = NewApiKeyClient(c.config)
@@ -416,81 +420,82 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 	cfg := c.config
 	cfg.driver = tx
 	return &Tx{
-		ctx:                      ctx,
-		config:                   cfg,
-		AccessConstraint:         NewAccessConstraintClient(cfg),
-		AccessConstraintHistory:  NewAccessConstraintHistoryClient(cfg),
-		AccessPolicy:             NewAccessPolicyClient(cfg),
-		Agent:                    NewAgentClient(cfg),
-		AgentCredential:          NewAgentCredentialClient(cfg),
-		AgentHold:                NewAgentHoldClient(cfg),
-		AgentIdentityKey:         NewAgentIdentityKeyClient(cfg),
-		AgentRecovery:            NewAgentRecoveryClient(cfg),
-		AgentReincarnation:       NewAgentReincarnationClient(cfg),
-		AgentSessionMetrics:      NewAgentSessionMetricsClient(cfg),
-		AllowListEntry:           NewAllowListEntryClient(cfg),
-		ApiKey:                   NewApiKeyClient(cfg),
-		BrokerDispatch:           NewBrokerDispatchClient(cfg),
-		BrokerJoinToken:          NewBrokerJoinTokenClient(cfg),
-		BrokerSecret:             NewBrokerSecretClient(cfg),
-		BrokerSetting:            NewBrokerSettingClient(cfg),
-		BrokerTargetInventory:    NewBrokerTargetInventoryClient(cfg),
-		ChatLinkCode:             NewChatLinkCodeClient(cfg),
-		ConduitPrincipalEpoch:    NewConduitPrincipalEpochClient(cfg),
-		ConduitSession:           NewConduitSessionClient(cfg),
-		Conversation:             NewConversationClient(cfg),
-		ConversationParticipant:  NewConversationParticipantClient(cfg),
-		DecisionAudit:            NewDecisionAuditClient(cfg),
-		DelegationAdoption:       NewDelegationAdoptionClient(cfg),
-		DelegationEdge:           NewDelegationEdgeClient(cfg),
-		EntitlementBinding:       NewEntitlementBindingClient(cfg),
-		EnvVar:                   NewEnvVarClient(cfg),
-		ExternalIdentity:         NewExternalIdentityClient(cfg),
-		GCPServiceAccount:        NewGCPServiceAccountClient(cfg),
-		GitHubResolutionCache:    NewGitHubResolutionCacheClient(cfg),
-		GithubInstallation:       NewGithubInstallationClient(cfg),
-		Group:                    NewGroupClient(cfg),
-		GroupMembership:          NewGroupMembershipClient(cfg),
-		HarnessConfig:            NewHarnessConfigClient(cfg),
-		HubSetting:               NewHubSettingClient(cfg),
-		IntegrationConfig:        NewIntegrationConfigClient(cfg),
-		IntegrationUpdate:        NewIntegrationUpdateClient(cfg),
-		InviteCode:               NewInviteCodeClient(cfg),
-		LaunchReaperState:        NewLaunchReaperStateClient(cfg),
-		LifecycleHook:            NewLifecycleHookClient(cfg),
-		LifecycleHookAgentPhase:  NewLifecycleHookAgentPhaseClient(cfg),
-		LimitDefinition:          NewLimitDefinitionClient(cfg),
-		MaintenanceOperation:     NewMaintenanceOperationClient(cfg),
-		MaintenanceOperationRun:  NewMaintenanceOperationRunClient(cfg),
-		MembershipLossCheck:      NewMembershipLossCheckClient(cfg),
-		Message:                  NewMessageClient(cfg),
-		MessageAddressee:         NewMessageAddresseeClient(cfg),
-		MutationAudit:            NewMutationAuditClient(cfg),
-		NonceCache:               NewNonceCacheClient(cfg),
-		Notification:             NewNotificationClient(cfg),
-		NotificationSubscription: NewNotificationSubscriptionClient(cfg),
-		PolicyBinding:            NewPolicyBindingClient(cfg),
-		Project:                  NewProjectClient(cfg),
-		ProjectContributor:       NewProjectContributorClient(cfg),
-		ProjectPreStartHook:      NewProjectPreStartHookClient(cfg),
-		ProjectSyncState:         NewProjectSyncStateClient(cfg),
-		RelayInstance:            NewRelayInstanceClient(cfg),
-		RoleBinding:              NewRoleBindingClient(cfg),
-		RoleDefinition:           NewRoleDefinitionClient(cfg),
-		RuntimeBroker:            NewRuntimeBrokerClient(cfg),
-		Schedule:                 NewScheduleClient(cfg),
-		ScheduledEvent:           NewScheduledEventClient(cfg),
-		Secret:                   NewSecretClient(cfg),
-		Skill:                    NewSkillClient(cfg),
-		SkillInjection:           NewSkillInjectionClient(cfg),
-		SkillRegistry:            NewSkillRegistryClient(cfg),
-		SkillVersion:             NewSkillVersionClient(cfg),
-		SubscriptionTemplate:     NewSubscriptionTemplateClient(cfg),
-		Template:                 NewTemplateClient(cfg),
-		UsageReservation:         NewUsageReservationClient(cfg),
-		User:                     NewUserClient(cfg),
-		UserAccessToken:          NewUserAccessTokenClient(cfg),
-		UserTerminalWorkspace:    NewUserTerminalWorkspaceClient(cfg),
+		ctx:                           ctx,
+		config:                        cfg,
+		AccessConstraint:              NewAccessConstraintClient(cfg),
+		AccessConstraintHistory:       NewAccessConstraintHistoryClient(cfg),
+		AccessPolicy:                  NewAccessPolicyClient(cfg),
+		Agent:                         NewAgentClient(cfg),
+		AgentCredential:               NewAgentCredentialClient(cfg),
+		AgentHold:                     NewAgentHoldClient(cfg),
+		AgentIdentityKey:              NewAgentIdentityKeyClient(cfg),
+		AgentRecovery:                 NewAgentRecoveryClient(cfg),
+		AgentReincarnation:            NewAgentReincarnationClient(cfg),
+		AgentServiceAccountAssignment: NewAgentServiceAccountAssignmentClient(cfg),
+		AgentSessionMetrics:           NewAgentSessionMetricsClient(cfg),
+		AllowListEntry:                NewAllowListEntryClient(cfg),
+		ApiKey:                        NewApiKeyClient(cfg),
+		BrokerDispatch:                NewBrokerDispatchClient(cfg),
+		BrokerJoinToken:               NewBrokerJoinTokenClient(cfg),
+		BrokerSecret:                  NewBrokerSecretClient(cfg),
+		BrokerSetting:                 NewBrokerSettingClient(cfg),
+		BrokerTargetInventory:         NewBrokerTargetInventoryClient(cfg),
+		ChatLinkCode:                  NewChatLinkCodeClient(cfg),
+		ConduitPrincipalEpoch:         NewConduitPrincipalEpochClient(cfg),
+		ConduitSession:                NewConduitSessionClient(cfg),
+		Conversation:                  NewConversationClient(cfg),
+		ConversationParticipant:       NewConversationParticipantClient(cfg),
+		DecisionAudit:                 NewDecisionAuditClient(cfg),
+		DelegationAdoption:            NewDelegationAdoptionClient(cfg),
+		DelegationEdge:                NewDelegationEdgeClient(cfg),
+		EntitlementBinding:            NewEntitlementBindingClient(cfg),
+		EnvVar:                        NewEnvVarClient(cfg),
+		ExternalIdentity:              NewExternalIdentityClient(cfg),
+		GCPServiceAccount:             NewGCPServiceAccountClient(cfg),
+		GitHubResolutionCache:         NewGitHubResolutionCacheClient(cfg),
+		GithubInstallation:            NewGithubInstallationClient(cfg),
+		Group:                         NewGroupClient(cfg),
+		GroupMembership:               NewGroupMembershipClient(cfg),
+		HarnessConfig:                 NewHarnessConfigClient(cfg),
+		HubSetting:                    NewHubSettingClient(cfg),
+		IntegrationConfig:             NewIntegrationConfigClient(cfg),
+		IntegrationUpdate:             NewIntegrationUpdateClient(cfg),
+		InviteCode:                    NewInviteCodeClient(cfg),
+		LaunchReaperState:             NewLaunchReaperStateClient(cfg),
+		LifecycleHook:                 NewLifecycleHookClient(cfg),
+		LifecycleHookAgentPhase:       NewLifecycleHookAgentPhaseClient(cfg),
+		LimitDefinition:               NewLimitDefinitionClient(cfg),
+		MaintenanceOperation:          NewMaintenanceOperationClient(cfg),
+		MaintenanceOperationRun:       NewMaintenanceOperationRunClient(cfg),
+		MembershipLossCheck:           NewMembershipLossCheckClient(cfg),
+		Message:                       NewMessageClient(cfg),
+		MessageAddressee:              NewMessageAddresseeClient(cfg),
+		MutationAudit:                 NewMutationAuditClient(cfg),
+		NonceCache:                    NewNonceCacheClient(cfg),
+		Notification:                  NewNotificationClient(cfg),
+		NotificationSubscription:      NewNotificationSubscriptionClient(cfg),
+		PolicyBinding:                 NewPolicyBindingClient(cfg),
+		Project:                       NewProjectClient(cfg),
+		ProjectContributor:            NewProjectContributorClient(cfg),
+		ProjectPreStartHook:           NewProjectPreStartHookClient(cfg),
+		ProjectSyncState:              NewProjectSyncStateClient(cfg),
+		RelayInstance:                 NewRelayInstanceClient(cfg),
+		RoleBinding:                   NewRoleBindingClient(cfg),
+		RoleDefinition:                NewRoleDefinitionClient(cfg),
+		RuntimeBroker:                 NewRuntimeBrokerClient(cfg),
+		Schedule:                      NewScheduleClient(cfg),
+		ScheduledEvent:                NewScheduledEventClient(cfg),
+		Secret:                        NewSecretClient(cfg),
+		Skill:                         NewSkillClient(cfg),
+		SkillInjection:                NewSkillInjectionClient(cfg),
+		SkillRegistry:                 NewSkillRegistryClient(cfg),
+		SkillVersion:                  NewSkillVersionClient(cfg),
+		SubscriptionTemplate:          NewSubscriptionTemplateClient(cfg),
+		Template:                      NewTemplateClient(cfg),
+		UsageReservation:              NewUsageReservationClient(cfg),
+		User:                          NewUserClient(cfg),
+		UserAccessToken:               NewUserAccessTokenClient(cfg),
+		UserTerminalWorkspace:         NewUserTerminalWorkspaceClient(cfg),
 	}, nil
 }
 
@@ -508,81 +513,82 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 	cfg := c.config
 	cfg.driver = &txDriver{tx: tx, drv: c.driver}
 	return &Tx{
-		ctx:                      ctx,
-		config:                   cfg,
-		AccessConstraint:         NewAccessConstraintClient(cfg),
-		AccessConstraintHistory:  NewAccessConstraintHistoryClient(cfg),
-		AccessPolicy:             NewAccessPolicyClient(cfg),
-		Agent:                    NewAgentClient(cfg),
-		AgentCredential:          NewAgentCredentialClient(cfg),
-		AgentHold:                NewAgentHoldClient(cfg),
-		AgentIdentityKey:         NewAgentIdentityKeyClient(cfg),
-		AgentRecovery:            NewAgentRecoveryClient(cfg),
-		AgentReincarnation:       NewAgentReincarnationClient(cfg),
-		AgentSessionMetrics:      NewAgentSessionMetricsClient(cfg),
-		AllowListEntry:           NewAllowListEntryClient(cfg),
-		ApiKey:                   NewApiKeyClient(cfg),
-		BrokerDispatch:           NewBrokerDispatchClient(cfg),
-		BrokerJoinToken:          NewBrokerJoinTokenClient(cfg),
-		BrokerSecret:             NewBrokerSecretClient(cfg),
-		BrokerSetting:            NewBrokerSettingClient(cfg),
-		BrokerTargetInventory:    NewBrokerTargetInventoryClient(cfg),
-		ChatLinkCode:             NewChatLinkCodeClient(cfg),
-		ConduitPrincipalEpoch:    NewConduitPrincipalEpochClient(cfg),
-		ConduitSession:           NewConduitSessionClient(cfg),
-		Conversation:             NewConversationClient(cfg),
-		ConversationParticipant:  NewConversationParticipantClient(cfg),
-		DecisionAudit:            NewDecisionAuditClient(cfg),
-		DelegationAdoption:       NewDelegationAdoptionClient(cfg),
-		DelegationEdge:           NewDelegationEdgeClient(cfg),
-		EntitlementBinding:       NewEntitlementBindingClient(cfg),
-		EnvVar:                   NewEnvVarClient(cfg),
-		ExternalIdentity:         NewExternalIdentityClient(cfg),
-		GCPServiceAccount:        NewGCPServiceAccountClient(cfg),
-		GitHubResolutionCache:    NewGitHubResolutionCacheClient(cfg),
-		GithubInstallation:       NewGithubInstallationClient(cfg),
-		Group:                    NewGroupClient(cfg),
-		GroupMembership:          NewGroupMembershipClient(cfg),
-		HarnessConfig:            NewHarnessConfigClient(cfg),
-		HubSetting:               NewHubSettingClient(cfg),
-		IntegrationConfig:        NewIntegrationConfigClient(cfg),
-		IntegrationUpdate:        NewIntegrationUpdateClient(cfg),
-		InviteCode:               NewInviteCodeClient(cfg),
-		LaunchReaperState:        NewLaunchReaperStateClient(cfg),
-		LifecycleHook:            NewLifecycleHookClient(cfg),
-		LifecycleHookAgentPhase:  NewLifecycleHookAgentPhaseClient(cfg),
-		LimitDefinition:          NewLimitDefinitionClient(cfg),
-		MaintenanceOperation:     NewMaintenanceOperationClient(cfg),
-		MaintenanceOperationRun:  NewMaintenanceOperationRunClient(cfg),
-		MembershipLossCheck:      NewMembershipLossCheckClient(cfg),
-		Message:                  NewMessageClient(cfg),
-		MessageAddressee:         NewMessageAddresseeClient(cfg),
-		MutationAudit:            NewMutationAuditClient(cfg),
-		NonceCache:               NewNonceCacheClient(cfg),
-		Notification:             NewNotificationClient(cfg),
-		NotificationSubscription: NewNotificationSubscriptionClient(cfg),
-		PolicyBinding:            NewPolicyBindingClient(cfg),
-		Project:                  NewProjectClient(cfg),
-		ProjectContributor:       NewProjectContributorClient(cfg),
-		ProjectPreStartHook:      NewProjectPreStartHookClient(cfg),
-		ProjectSyncState:         NewProjectSyncStateClient(cfg),
-		RelayInstance:            NewRelayInstanceClient(cfg),
-		RoleBinding:              NewRoleBindingClient(cfg),
-		RoleDefinition:           NewRoleDefinitionClient(cfg),
-		RuntimeBroker:            NewRuntimeBrokerClient(cfg),
-		Schedule:                 NewScheduleClient(cfg),
-		ScheduledEvent:           NewScheduledEventClient(cfg),
-		Secret:                   NewSecretClient(cfg),
-		Skill:                    NewSkillClient(cfg),
-		SkillInjection:           NewSkillInjectionClient(cfg),
-		SkillRegistry:            NewSkillRegistryClient(cfg),
-		SkillVersion:             NewSkillVersionClient(cfg),
-		SubscriptionTemplate:     NewSubscriptionTemplateClient(cfg),
-		Template:                 NewTemplateClient(cfg),
-		UsageReservation:         NewUsageReservationClient(cfg),
-		User:                     NewUserClient(cfg),
-		UserAccessToken:          NewUserAccessTokenClient(cfg),
-		UserTerminalWorkspace:    NewUserTerminalWorkspaceClient(cfg),
+		ctx:                           ctx,
+		config:                        cfg,
+		AccessConstraint:              NewAccessConstraintClient(cfg),
+		AccessConstraintHistory:       NewAccessConstraintHistoryClient(cfg),
+		AccessPolicy:                  NewAccessPolicyClient(cfg),
+		Agent:                         NewAgentClient(cfg),
+		AgentCredential:               NewAgentCredentialClient(cfg),
+		AgentHold:                     NewAgentHoldClient(cfg),
+		AgentIdentityKey:              NewAgentIdentityKeyClient(cfg),
+		AgentRecovery:                 NewAgentRecoveryClient(cfg),
+		AgentReincarnation:            NewAgentReincarnationClient(cfg),
+		AgentServiceAccountAssignment: NewAgentServiceAccountAssignmentClient(cfg),
+		AgentSessionMetrics:           NewAgentSessionMetricsClient(cfg),
+		AllowListEntry:                NewAllowListEntryClient(cfg),
+		ApiKey:                        NewApiKeyClient(cfg),
+		BrokerDispatch:                NewBrokerDispatchClient(cfg),
+		BrokerJoinToken:               NewBrokerJoinTokenClient(cfg),
+		BrokerSecret:                  NewBrokerSecretClient(cfg),
+		BrokerSetting:                 NewBrokerSettingClient(cfg),
+		BrokerTargetInventory:         NewBrokerTargetInventoryClient(cfg),
+		ChatLinkCode:                  NewChatLinkCodeClient(cfg),
+		ConduitPrincipalEpoch:         NewConduitPrincipalEpochClient(cfg),
+		ConduitSession:                NewConduitSessionClient(cfg),
+		Conversation:                  NewConversationClient(cfg),
+		ConversationParticipant:       NewConversationParticipantClient(cfg),
+		DecisionAudit:                 NewDecisionAuditClient(cfg),
+		DelegationAdoption:            NewDelegationAdoptionClient(cfg),
+		DelegationEdge:                NewDelegationEdgeClient(cfg),
+		EntitlementBinding:            NewEntitlementBindingClient(cfg),
+		EnvVar:                        NewEnvVarClient(cfg),
+		ExternalIdentity:              NewExternalIdentityClient(cfg),
+		GCPServiceAccount:             NewGCPServiceAccountClient(cfg),
+		GitHubResolutionCache:         NewGitHubResolutionCacheClient(cfg),
+		GithubInstallation:            NewGithubInstallationClient(cfg),
+		Group:                         NewGroupClient(cfg),
+		GroupMembership:               NewGroupMembershipClient(cfg),
+		HarnessConfig:                 NewHarnessConfigClient(cfg),
+		HubSetting:                    NewHubSettingClient(cfg),
+		IntegrationConfig:             NewIntegrationConfigClient(cfg),
+		IntegrationUpdate:             NewIntegrationUpdateClient(cfg),
+		InviteCode:                    NewInviteCodeClient(cfg),
+		LaunchReaperState:             NewLaunchReaperStateClient(cfg),
+		LifecycleHook:                 NewLifecycleHookClient(cfg),
+		LifecycleHookAgentPhase:       NewLifecycleHookAgentPhaseClient(cfg),
+		LimitDefinition:               NewLimitDefinitionClient(cfg),
+		MaintenanceOperation:          NewMaintenanceOperationClient(cfg),
+		MaintenanceOperationRun:       NewMaintenanceOperationRunClient(cfg),
+		MembershipLossCheck:           NewMembershipLossCheckClient(cfg),
+		Message:                       NewMessageClient(cfg),
+		MessageAddressee:              NewMessageAddresseeClient(cfg),
+		MutationAudit:                 NewMutationAuditClient(cfg),
+		NonceCache:                    NewNonceCacheClient(cfg),
+		Notification:                  NewNotificationClient(cfg),
+		NotificationSubscription:      NewNotificationSubscriptionClient(cfg),
+		PolicyBinding:                 NewPolicyBindingClient(cfg),
+		Project:                       NewProjectClient(cfg),
+		ProjectContributor:            NewProjectContributorClient(cfg),
+		ProjectPreStartHook:           NewProjectPreStartHookClient(cfg),
+		ProjectSyncState:              NewProjectSyncStateClient(cfg),
+		RelayInstance:                 NewRelayInstanceClient(cfg),
+		RoleBinding:                   NewRoleBindingClient(cfg),
+		RoleDefinition:                NewRoleDefinitionClient(cfg),
+		RuntimeBroker:                 NewRuntimeBrokerClient(cfg),
+		Schedule:                      NewScheduleClient(cfg),
+		ScheduledEvent:                NewScheduledEventClient(cfg),
+		Secret:                        NewSecretClient(cfg),
+		Skill:                         NewSkillClient(cfg),
+		SkillInjection:                NewSkillInjectionClient(cfg),
+		SkillRegistry:                 NewSkillRegistryClient(cfg),
+		SkillVersion:                  NewSkillVersionClient(cfg),
+		SubscriptionTemplate:          NewSubscriptionTemplateClient(cfg),
+		Template:                      NewTemplateClient(cfg),
+		UsageReservation:              NewUsageReservationClient(cfg),
+		User:                          NewUserClient(cfg),
+		UserAccessToken:               NewUserAccessTokenClient(cfg),
+		UserTerminalWorkspace:         NewUserTerminalWorkspaceClient(cfg),
 	}, nil
 }
 
@@ -614,22 +620,23 @@ func (c *Client) Use(hooks ...Hook) {
 	for _, n := range []interface{ Use(...Hook) }{
 		c.AccessConstraint, c.AccessConstraintHistory, c.AccessPolicy, c.Agent,
 		c.AgentCredential, c.AgentHold, c.AgentIdentityKey, c.AgentRecovery,
-		c.AgentReincarnation, c.AgentSessionMetrics, c.AllowListEntry, c.ApiKey,
-		c.BrokerDispatch, c.BrokerJoinToken, c.BrokerSecret, c.BrokerSetting,
-		c.BrokerTargetInventory, c.ChatLinkCode, c.ConduitPrincipalEpoch,
-		c.ConduitSession, c.Conversation, c.ConversationParticipant, c.DecisionAudit,
-		c.DelegationAdoption, c.DelegationEdge, c.EntitlementBinding, c.EnvVar,
-		c.ExternalIdentity, c.GCPServiceAccount, c.GitHubResolutionCache,
-		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
-		c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate, c.InviteCode,
-		c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
-		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
-		c.MembershipLossCheck, c.Message, c.MessageAddressee, c.MutationAudit,
-		c.NonceCache, c.Notification, c.NotificationSubscription, c.PolicyBinding,
-		c.Project, c.ProjectContributor, c.ProjectPreStartHook, c.ProjectSyncState,
-		c.RelayInstance, c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.Schedule,
-		c.ScheduledEvent, c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry,
-		c.SkillVersion, c.SubscriptionTemplate, c.Template, c.UsageReservation, c.User,
+		c.AgentReincarnation, c.AgentServiceAccountAssignment, c.AgentSessionMetrics,
+		c.AllowListEntry, c.ApiKey, c.BrokerDispatch, c.BrokerJoinToken,
+		c.BrokerSecret, c.BrokerSetting, c.BrokerTargetInventory, c.ChatLinkCode,
+		c.ConduitPrincipalEpoch, c.ConduitSession, c.Conversation,
+		c.ConversationParticipant, c.DecisionAudit, c.DelegationAdoption,
+		c.DelegationEdge, c.EntitlementBinding, c.EnvVar, c.ExternalIdentity,
+		c.GCPServiceAccount, c.GitHubResolutionCache, c.GithubInstallation, c.Group,
+		c.GroupMembership, c.HarnessConfig, c.HubSetting, c.IntegrationConfig,
+		c.IntegrationUpdate, c.InviteCode, c.LaunchReaperState, c.LifecycleHook,
+		c.LifecycleHookAgentPhase, c.LimitDefinition, c.MaintenanceOperation,
+		c.MaintenanceOperationRun, c.MembershipLossCheck, c.Message,
+		c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
+		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
+		c.ProjectPreStartHook, c.ProjectSyncState, c.RelayInstance, c.RoleBinding,
+		c.RoleDefinition, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
+		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
+		c.SubscriptionTemplate, c.Template, c.UsageReservation, c.User,
 		c.UserAccessToken, c.UserTerminalWorkspace,
 	} {
 		n.Use(hooks...)
@@ -642,22 +649,23 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 	for _, n := range []interface{ Intercept(...Interceptor) }{
 		c.AccessConstraint, c.AccessConstraintHistory, c.AccessPolicy, c.Agent,
 		c.AgentCredential, c.AgentHold, c.AgentIdentityKey, c.AgentRecovery,
-		c.AgentReincarnation, c.AgentSessionMetrics, c.AllowListEntry, c.ApiKey,
-		c.BrokerDispatch, c.BrokerJoinToken, c.BrokerSecret, c.BrokerSetting,
-		c.BrokerTargetInventory, c.ChatLinkCode, c.ConduitPrincipalEpoch,
-		c.ConduitSession, c.Conversation, c.ConversationParticipant, c.DecisionAudit,
-		c.DelegationAdoption, c.DelegationEdge, c.EntitlementBinding, c.EnvVar,
-		c.ExternalIdentity, c.GCPServiceAccount, c.GitHubResolutionCache,
-		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
-		c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate, c.InviteCode,
-		c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
-		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
-		c.MembershipLossCheck, c.Message, c.MessageAddressee, c.MutationAudit,
-		c.NonceCache, c.Notification, c.NotificationSubscription, c.PolicyBinding,
-		c.Project, c.ProjectContributor, c.ProjectPreStartHook, c.ProjectSyncState,
-		c.RelayInstance, c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.Schedule,
-		c.ScheduledEvent, c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry,
-		c.SkillVersion, c.SubscriptionTemplate, c.Template, c.UsageReservation, c.User,
+		c.AgentReincarnation, c.AgentServiceAccountAssignment, c.AgentSessionMetrics,
+		c.AllowListEntry, c.ApiKey, c.BrokerDispatch, c.BrokerJoinToken,
+		c.BrokerSecret, c.BrokerSetting, c.BrokerTargetInventory, c.ChatLinkCode,
+		c.ConduitPrincipalEpoch, c.ConduitSession, c.Conversation,
+		c.ConversationParticipant, c.DecisionAudit, c.DelegationAdoption,
+		c.DelegationEdge, c.EntitlementBinding, c.EnvVar, c.ExternalIdentity,
+		c.GCPServiceAccount, c.GitHubResolutionCache, c.GithubInstallation, c.Group,
+		c.GroupMembership, c.HarnessConfig, c.HubSetting, c.IntegrationConfig,
+		c.IntegrationUpdate, c.InviteCode, c.LaunchReaperState, c.LifecycleHook,
+		c.LifecycleHookAgentPhase, c.LimitDefinition, c.MaintenanceOperation,
+		c.MaintenanceOperationRun, c.MembershipLossCheck, c.Message,
+		c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
+		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
+		c.ProjectPreStartHook, c.ProjectSyncState, c.RelayInstance, c.RoleBinding,
+		c.RoleDefinition, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
+		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
+		c.SubscriptionTemplate, c.Template, c.UsageReservation, c.User,
 		c.UserAccessToken, c.UserTerminalWorkspace,
 	} {
 		n.Intercept(interceptors...)
@@ -685,6 +693,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.AgentRecovery.mutate(ctx, m)
 	case *AgentReincarnationMutation:
 		return c.AgentReincarnation.mutate(ctx, m)
+	case *AgentServiceAccountAssignmentMutation:
+		return c.AgentServiceAccountAssignment.mutate(ctx, m)
 	case *AgentSessionMetricsMutation:
 		return c.AgentSessionMetrics.mutate(ctx, m)
 	case *AllowListEntryMutation:
@@ -2140,6 +2150,139 @@ func (c *AgentReincarnationClient) mutate(ctx context.Context, m *AgentReincarna
 		return (&AgentReincarnationDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown AgentReincarnation mutation op: %q", m.Op())
+	}
+}
+
+// AgentServiceAccountAssignmentClient is a client for the AgentServiceAccountAssignment schema.
+type AgentServiceAccountAssignmentClient struct {
+	config
+}
+
+// NewAgentServiceAccountAssignmentClient returns a client for the AgentServiceAccountAssignment from the given config.
+func NewAgentServiceAccountAssignmentClient(c config) *AgentServiceAccountAssignmentClient {
+	return &AgentServiceAccountAssignmentClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `agentserviceaccountassignment.Hooks(f(g(h())))`.
+func (c *AgentServiceAccountAssignmentClient) Use(hooks ...Hook) {
+	c.hooks.AgentServiceAccountAssignment = append(c.hooks.AgentServiceAccountAssignment, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `agentserviceaccountassignment.Intercept(f(g(h())))`.
+func (c *AgentServiceAccountAssignmentClient) Intercept(interceptors ...Interceptor) {
+	c.inters.AgentServiceAccountAssignment = append(c.inters.AgentServiceAccountAssignment, interceptors...)
+}
+
+// Create returns a builder for creating a AgentServiceAccountAssignment entity.
+func (c *AgentServiceAccountAssignmentClient) Create() *AgentServiceAccountAssignmentCreate {
+	mutation := newAgentServiceAccountAssignmentMutation(c.config, OpCreate)
+	return &AgentServiceAccountAssignmentCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of AgentServiceAccountAssignment entities.
+func (c *AgentServiceAccountAssignmentClient) CreateBulk(builders ...*AgentServiceAccountAssignmentCreate) *AgentServiceAccountAssignmentCreateBulk {
+	return &AgentServiceAccountAssignmentCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *AgentServiceAccountAssignmentClient) MapCreateBulk(slice any, setFunc func(*AgentServiceAccountAssignmentCreate, int)) *AgentServiceAccountAssignmentCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &AgentServiceAccountAssignmentCreateBulk{err: fmt.Errorf("calling to AgentServiceAccountAssignmentClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*AgentServiceAccountAssignmentCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &AgentServiceAccountAssignmentCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for AgentServiceAccountAssignment.
+func (c *AgentServiceAccountAssignmentClient) Update() *AgentServiceAccountAssignmentUpdate {
+	mutation := newAgentServiceAccountAssignmentMutation(c.config, OpUpdate)
+	return &AgentServiceAccountAssignmentUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *AgentServiceAccountAssignmentClient) UpdateOne(_m *AgentServiceAccountAssignment) *AgentServiceAccountAssignmentUpdateOne {
+	mutation := newAgentServiceAccountAssignmentMutation(c.config, OpUpdateOne, withAgentServiceAccountAssignment(_m))
+	return &AgentServiceAccountAssignmentUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *AgentServiceAccountAssignmentClient) UpdateOneID(id uuid.UUID) *AgentServiceAccountAssignmentUpdateOne {
+	mutation := newAgentServiceAccountAssignmentMutation(c.config, OpUpdateOne, withAgentServiceAccountAssignmentID(id))
+	return &AgentServiceAccountAssignmentUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for AgentServiceAccountAssignment.
+func (c *AgentServiceAccountAssignmentClient) Delete() *AgentServiceAccountAssignmentDelete {
+	mutation := newAgentServiceAccountAssignmentMutation(c.config, OpDelete)
+	return &AgentServiceAccountAssignmentDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *AgentServiceAccountAssignmentClient) DeleteOne(_m *AgentServiceAccountAssignment) *AgentServiceAccountAssignmentDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *AgentServiceAccountAssignmentClient) DeleteOneID(id uuid.UUID) *AgentServiceAccountAssignmentDeleteOne {
+	builder := c.Delete().Where(agentserviceaccountassignment.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &AgentServiceAccountAssignmentDeleteOne{builder}
+}
+
+// Query returns a query builder for AgentServiceAccountAssignment.
+func (c *AgentServiceAccountAssignmentClient) Query() *AgentServiceAccountAssignmentQuery {
+	return &AgentServiceAccountAssignmentQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeAgentServiceAccountAssignment},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a AgentServiceAccountAssignment entity by its id.
+func (c *AgentServiceAccountAssignmentClient) Get(ctx context.Context, id uuid.UUID) (*AgentServiceAccountAssignment, error) {
+	return c.Query().Where(agentserviceaccountassignment.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *AgentServiceAccountAssignmentClient) GetX(ctx context.Context, id uuid.UUID) *AgentServiceAccountAssignment {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *AgentServiceAccountAssignmentClient) Hooks() []Hook {
+	return c.hooks.AgentServiceAccountAssignment
+}
+
+// Interceptors returns the client interceptors.
+func (c *AgentServiceAccountAssignmentClient) Interceptors() []Interceptor {
+	return c.inters.AgentServiceAccountAssignment
+}
+
+func (c *AgentServiceAccountAssignmentClient) mutate(ctx context.Context, m *AgentServiceAccountAssignmentMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&AgentServiceAccountAssignmentCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&AgentServiceAccountAssignmentUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&AgentServiceAccountAssignmentUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&AgentServiceAccountAssignmentDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown AgentServiceAccountAssignment mutation op: %q", m.Op())
 	}
 }
 
@@ -11108,12 +11251,13 @@ type (
 	hooks struct {
 		AccessConstraint, AccessConstraintHistory, AccessPolicy, Agent, AgentCredential,
 		AgentHold, AgentIdentityKey, AgentRecovery, AgentReincarnation,
-		AgentSessionMetrics, AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken,
-		BrokerSecret, BrokerSetting, BrokerTargetInventory, ChatLinkCode,
-		ConduitPrincipalEpoch, ConduitSession, Conversation, ConversationParticipant,
-		DecisionAudit, DelegationAdoption, DelegationEdge, EntitlementBinding, EnvVar,
-		ExternalIdentity, GCPServiceAccount, GitHubResolutionCache, GithubInstallation,
-		Group, GroupMembership, HarnessConfig, HubSetting, IntegrationConfig,
+		AgentServiceAccountAssignment, AgentSessionMetrics, AllowListEntry, ApiKey,
+		BrokerDispatch, BrokerJoinToken, BrokerSecret, BrokerSetting,
+		BrokerTargetInventory, ChatLinkCode, ConduitPrincipalEpoch, ConduitSession,
+		Conversation, ConversationParticipant, DecisionAudit, DelegationAdoption,
+		DelegationEdge, EntitlementBinding, EnvVar, ExternalIdentity,
+		GCPServiceAccount, GitHubResolutionCache, GithubInstallation, Group,
+		GroupMembership, HarnessConfig, HubSetting, IntegrationConfig,
 		IntegrationUpdate, InviteCode, LaunchReaperState, LifecycleHook,
 		LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
 		MaintenanceOperationRun, MembershipLossCheck, Message, MessageAddressee,
@@ -11127,12 +11271,13 @@ type (
 	inters struct {
 		AccessConstraint, AccessConstraintHistory, AccessPolicy, Agent, AgentCredential,
 		AgentHold, AgentIdentityKey, AgentRecovery, AgentReincarnation,
-		AgentSessionMetrics, AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken,
-		BrokerSecret, BrokerSetting, BrokerTargetInventory, ChatLinkCode,
-		ConduitPrincipalEpoch, ConduitSession, Conversation, ConversationParticipant,
-		DecisionAudit, DelegationAdoption, DelegationEdge, EntitlementBinding, EnvVar,
-		ExternalIdentity, GCPServiceAccount, GitHubResolutionCache, GithubInstallation,
-		Group, GroupMembership, HarnessConfig, HubSetting, IntegrationConfig,
+		AgentServiceAccountAssignment, AgentSessionMetrics, AllowListEntry, ApiKey,
+		BrokerDispatch, BrokerJoinToken, BrokerSecret, BrokerSetting,
+		BrokerTargetInventory, ChatLinkCode, ConduitPrincipalEpoch, ConduitSession,
+		Conversation, ConversationParticipant, DecisionAudit, DelegationAdoption,
+		DelegationEdge, EntitlementBinding, EnvVar, ExternalIdentity,
+		GCPServiceAccount, GitHubResolutionCache, GithubInstallation, Group,
+		GroupMembership, HarnessConfig, HubSetting, IntegrationConfig,
 		IntegrationUpdate, InviteCode, LaunchReaperState, LifecycleHook,
 		LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
 		MaintenanceOperationRun, MembershipLossCheck, Message, MessageAddressee,
