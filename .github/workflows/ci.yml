@@ -928,3 +928,42 @@ jobs:
             echo "::error title=Chat mobile E2E failed::One or more chat-mobile shards did not succeed (result: ${RESULT})."
             exit 1
           fi
+
+  # Browser counter budgets for the project agent page (grid, list and
+  # graph): DOM element count and long-task count at 100 seeded agents,
+  # against mocked API responses recorded from the hub's own fixture
+  # (web/e2e-perf/budgets; baselines and margins are in budgets.pw.ts). The
+  # hub-side counter budgets (store calls, decisions, response bytes) run in
+  # pkg/hub SQLite Tests (TestPerfBudget_AgentEndpoints). Chromium only, one
+  # worker, no Go build. Path-gated on web/ like the chat-mobile suite.
+  perf-budgets-web:
+    name: Web perf budgets
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.web == 'true') }}
+    runs-on: ubuntu-latest
+    # Above the config's CI globalTimeout (8m) plus setup.
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24' # Node.js 24 (LTS)
+          cache: 'npm'
+          cache-dependency-path: 'web/package-lock.json'
+
+      - name: Install web dependencies
+        working-directory: ./web
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        working-directory: ./web
+        run: npx playwright install --with-deps --only-shell chromium
+
+      - name: Run web perf budgets
+        working-directory: ./web
+        run: npm run test:e2e:perf-budgets
