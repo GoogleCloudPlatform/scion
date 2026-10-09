@@ -386,7 +386,8 @@ func TestAgentConfigPatch_FixedKeysRefused(t *testing.T) {
 				"config": map[string]interface{}{"max_turns": 8, "harness": "claude", "branch": "", "config_dir": "", "detached": nil},
 			})
 			require.Equal(t, http.StatusOK, code, body)
-			assert.Contains(t, resp.Disposition.Applied, "config.max_turns")
+			assert.Equal(t, []string{"config.max_turns"}, resp.Disposition.Applied, "echoed fixed keys are ignored, not applied")
+			assert.Empty(t, resp.Warnings, "an echo changes nothing to warn about")
 			assert.Equal(t, 8, resp.AppliedConfig.InlineConfig.MaxTurns)
 		})
 	}
@@ -558,4 +559,137 @@ func TestAgentEditGoldens(t *testing.T) {
 			tc.check(t, after.AppliedConfig.InlineConfig)
 		})
 	}
+}
+
+// TestAgentPatch_RefusalPrecedence pins the order in which a PATCH is
+// refused (lockedPatchKeys, writePatchRefusal): a deleted agent (409), then
+// config in a phase that takes none, whatever the keys (409, the phase
+// message), then a fixed key that would change (400), then field
+// validation.
+func TestAgentPatch_RefusalPrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		phase   state.Phase
+		deleted bool
+		config  map[string]interface{}
+		code    int
+		message string
+		fields  []string
+	}{
+		{
+			name: "deleted beats phase and fixed", phase: state.PhaseRunning, deleted: true,
+			config: map[string]interface{}{"branch": "x", "max_turns": 2},
+			code:   http.StatusConflict, message: "The agent is deleted and cannot be edited",
+			fields: []string{"config.branch", "config.max_turns"},
+		},
+		{
+			name: "phase beats fixed: changed fixed key only", phase: state.PhaseRunning,
+			config: map[string]interface{}{"branch": "x"},
+			code:   http.StatusConflict, message: configPatchPhaseMessage, fields: []string{"config.branch"},
+		},
+		{
+			name: "phase beats fixed: echoed fixed key only", phase: state.PhaseStarting,
+			config: map[string]interface{}{"harness": "claude"},
+			code:   http.StatusConflict, message: configPatchPhaseMessage, fields: []string{"config.harness"},
+		},
+		{
+			name: "fixed beats field validation", phase: state.PhaseStopped,
+			config: map[string]interface{}{"harness": "generic", "thinking_level": 500},
+			code:   http.StatusBadRequest, message: "Some fields are set when the agent is created and cannot be changed",
+			fields: []string{"config.harness"},
+		},
+		{
+			name: "field validation last", phase: state.PhaseStopped,
+			config: map[string]interface{}{"thinking_level": 500},
+			code:   http.StatusBadRequest, message: "thinking_level must be between 0 and 100",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+				a.Phase = string(tc.phase)
+				if tc.deleted {
+					a.DeletedAt = time.Now()
+				}
+				a.AppliedConfig.InlineConfig = &api.ScionConfig{Harness: "claude", MaxTurns: 3}
+			})
+			_, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{"config": tc.config})
+			require.Equal(t, tc.code, code, body)
+			assert.Contains(t, body, tc.message)
+			_, fields := patchErrorBody(t, body)
+			if tc.fields == nil {
+				assert.Empty(t, fields)
+			} else {
+				assert.Equal(t, tc.fields, sortedFieldKeys(fields))
+			}
+			after, err := s.GetAgent(context.Background(), agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, agent.StateVersion, after.StateVersion, "nothing is written")
+		})
+	}
+}
+
+// TestAgentConfigPatch_FixedKeyEchoOfAppliedValue: a fixed key equal to the
+// agent's applied value (what GET shows), not only its inline value, is an
+// unchanged echo and is ignored; a different value is refused.
+func TestAgentConfigPatch_FixedKeyEchoOfAppliedValue(t *testing.T) {
+	disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseStopped)
+		a.AppliedConfig.Branch = "scion/live"
+		a.AppliedConfig.HarnessConfig = "hc-live"
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{Harness: "claude", MaxTurns: 3}
+	})
+
+	resp, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{
+		"config": map[string]interface{}{"branch": "scion/live", "harness_config": "hc-live", "max_turns": 4},
+	})
+	require.Equal(t, http.StatusOK, code, body)
+	assert.Equal(t, []string{"config.max_turns"}, resp.Disposition.Applied)
+
+	_, code, body = patchAgentBody(t, srv, agent.ID, map[string]interface{}{
+		"config": map[string]interface{}{"branch": "scion/other"},
+	})
+	require.Equal(t, http.StatusBadRequest, code, body)
+	_, fields := patchErrorBody(t, body)
+	assert.Equal(t, []string{"config.branch"}, sortedFieldKeys(fields))
+}
+
+// TestAgentConfigPatch_NoWarningsForUnchangedValues: the Configure page's
+// untouched body, sent to an agent whose prompts, limits and user are
+// already empty, changes nothing and so warns about nothing; a real clear
+// does warn.
+func TestAgentConfigPatch_NoWarningsForUnchangedValues(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "configure-untouched-body.json"))
+	require.NoError(t, err)
+	var cfg map[string]interface{}
+	require.NoError(t, json.Unmarshal(raw, &cfg))
+
+	disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseCreated)
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{Harness: "claude", Model: "golden-model"}
+	})
+
+	resp, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{"config": cfg})
+	require.Equal(t, http.StatusOK, code, body)
+	assert.Empty(t, resp.Warnings)
+
+	resp, code, body = patchAgentBody(t, srv, agent.ID, map[string]interface{}{
+		"config": map[string]interface{}{"model": nil, "system_prompt": "be brief"},
+	})
+	require.Equal(t, http.StatusOK, code, body)
+	require.Len(t, resp.Warnings, 2, "%v", resp.Warnings)
+	assert.Contains(t, resp.Warnings[0], "config.system_prompt: stored now")
+	assert.Contains(t, resp.Warnings[1], "config.model: cleared now")
+
+	// Resending the stored prompt is no change.
+	resp, code, body = patchAgentBody(t, srv, agent.ID, map[string]interface{}{
+		"config": map[string]interface{}{"system_prompt": "be brief"},
+	})
+	require.Equal(t, http.StatusOK, code, body)
+	assert.Empty(t, resp.Warnings)
 }

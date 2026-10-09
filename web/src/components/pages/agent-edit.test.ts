@@ -34,10 +34,11 @@ import type { ScionPageAgentEdit } from './agent-edit.js';
 import { buildAgentEditPatchBody } from './agent-edit.js';
 
 /**
- * Shared golden bodies: pkg/hub's agent_edit_golden_test.go sends the SAME
- * files to the real PATCH handler, so a body the form emits that the hub
- * cannot accept fails there, and a change to what the form emits fails
- * here until the files are updated.
+ * Shared golden bodies: TestAgentEditGoldens in
+ * pkg/hub/agent_config_mutability_http_test.go sends the SAME files to the
+ * real PATCH handler, so a body the form emits that the hub cannot accept
+ * fails there, and a change to what the form emits fails here until the
+ * files are updated.
  */
 function golden(name: string): Record<string, unknown> {
   const file = path.join(

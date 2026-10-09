@@ -4086,7 +4086,12 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 	// Refuse, before anything is written, a request that names a key the
 	// mutability table locks for this agent (agent_config_mutability.go):
 	// the same rule GET editability reports.
-	if ref := lockedPatchKeys(agent, presentAgentPatchKeys(updates.Name, updates.Labels, updates.Annotations, updates.TaskSummary, updates.GCPIdentity != nil, updates.ExplicitTimezone != nil), rawFields, updates.Config); ref != nil {
+	var appliedFixed *api.ScionConfig
+	if updates.Config != nil {
+		resolvedHarness, _ := s.resolveAgentHarnessCapabilities(ctx, agent)
+		appliedFixed = appliedFixedValues(agent, resolvedHarness)
+	}
+	if ref := lockedPatchKeys(agent, presentAgentPatchKeys(updates.Name, updates.Labels, updates.Annotations, updates.TaskSummary, updates.GCPIdentity != nil, updates.ExplicitTimezone != nil), rawFields, updates.Config, appliedFixed); ref != nil {
 		writePatchRefusal(w, agent, ref, updates.Config != nil)
 		return
 	}
@@ -4247,7 +4252,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		// sends, and kept keys are left as they were.
 		merged := mergePresentInlineFields(old.InlineConfig, cfg, presentConfigKeys)
 		agent.AppliedConfig.InlineConfig = merged
-		warnings = append(warnings, reincarnateOnlyEditWarnings(rawFields)...)
+		warnings = append(warnings, reincarnateOnlyEditWarnings(rawFields, cfg, old.InlineConfig)...)
 		if w := removedEnvKeysWarning(old.InlineConfig, cfg, presentConfigKeys["env"], canViewAgentEnv(ctx, s, agent)); w != "" {
 			warnings = append(warnings, w)
 		}
@@ -4447,9 +4452,11 @@ func presentAgentPatchKeys(name string, lbls, annotations map[string]string, tas
 	return keys
 }
 
-// writePatchRefusal answers an agent PATCH that names locked keys: 409 when
-// a lock comes from the agent's phase or its deletion, 400 when every
-// refused key is fixed. details.fields maps each refused key to the reason.
+// writePatchRefusal answers an agent PATCH that names locked keys, by the
+// precedence lockedPatchKeys documents: a deleted agent (409), then config
+// in a phase that takes none (409, the phase message), then any other phase
+// lock (409), then fixed keys that would change (400). details.fields maps
+// each refused key to the reason.
 func writePatchRefusal(w http.ResponseWriter, agent *store.Agent, ref *patchRefusal, hasConfig bool) {
 	details := map[string]interface{}{"fields": ref.Fields}
 	switch {
@@ -4525,6 +4532,11 @@ func agentUpdateAppliedKeys(name string, lbls, annotations map[string]string, ta
 	}
 	if hasConfig {
 		for _, f := range configPatchKeys(rawConfig) {
+			// A fixed key reaches here only as an unchanged echo
+			// (lockedPatchKeys refuses a change), which is ignored.
+			if f.Tier == EditTierImmutable {
+				continue
+			}
 			applied = append(applied, f.Key)
 		}
 	}

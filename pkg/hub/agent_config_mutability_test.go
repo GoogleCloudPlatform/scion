@@ -319,18 +319,36 @@ func rawConfigOf(t *testing.T, body string) map[string]json.RawMessage {
 }
 
 func TestReincarnateOnlyConfigEdits(t *testing.T) {
-	raw := rawConfigOf(t, `{"model":"m","Max_Turns":0,"max_duration":null,"thinking_level":50,"image":"","system_prompt":"p","skills":[],"not_a_key":1,"env":{}}`)
-	provision, cleared := reincarnateOnlyConfigEdits(raw)
+	body := `{"model":"m","Max_Turns":0,"max_duration":null,"thinking_level":50,"image":"","system_prompt":"p","skills":[],"not_a_key":1,"env":{}}`
+	var req api.ScionConfig
+	require.NoError(t, json.Unmarshal([]byte(body), &req))
+	raw := rawConfigOf(t, body)
+	stored := &api.ScionConfig{
+		MaxTurns: 3, MaxDuration: "1h", Image: "img", Env: map[string]string{"A": "1"},
+		Skills: []api.SkillReference{{URI: "s"}},
+	}
+	provision, cleared := reincarnateOnlyConfigEdits(raw, &req, stored)
 	assert.Equal(t, []string{"config.skills", "config.system_prompt"}, provision)
 	assert.Equal(t, []string{"config.env", "config.image", "config.max_duration", "config.max_turns"}, cleared)
 
-	warnings := reincarnateOnlyEditWarnings(raw)
+	warnings := reincarnateOnlyEditWarnings(raw, &req, stored)
 	require.Len(t, warnings, 2)
 	assert.Contains(t, warnings[0], "config.skills, config.system_prompt: stored now; rendered at the next reincarnation")
 	assert.Contains(t, warnings[1], "config.env, config.image, config.max_duration, config.max_turns: cleared now")
 
-	assert.Empty(t, reincarnateOnlyEditWarnings(rawConfigOf(t, `{"model":"m","max_turns":5}`)))
-	assert.Empty(t, reincarnateOnlyEditWarnings(nil))
+	t.Run("unchanged values are not reported", func(t *testing.T) {
+		// Clearing what is already empty, and resending a stored prompt,
+		// change nothing.
+		same := &api.ScionConfig{SystemPrompt: "p"}
+		provision, cleared := reincarnateOnlyConfigEdits(raw, &req, same)
+		assert.Empty(t, provision)
+		assert.Empty(t, cleared)
+		assert.Empty(t, reincarnateOnlyEditWarnings(raw, &req, nil), "nothing stored: only the new system prompt would count")
+	})
+
+	five := rawConfigOf(t, `{"model":"m","max_turns":5}`)
+	assert.Empty(t, reincarnateOnlyEditWarnings(five, &api.ScionConfig{Model: "m", MaxTurns: 5}, stored))
+	assert.Empty(t, reincarnateOnlyEditWarnings(nil, nil, stored))
 }
 
 func TestRawJSONIsEmpty(t *testing.T) {
@@ -379,12 +397,12 @@ func TestLockedPatchKeys(t *testing.T) {
 
 	t.Run("container and provision keys are writable with no container", func(t *testing.T) {
 		body := `{"model":"m","max_turns":0,"system_prompt":"p","bogus_key":1}`
-		assert.Nil(t, lockedPatchKeys(stopped, []string{"name", "labels", "explicitTimezone"}, raw(body), decode(body)))
+		assert.Nil(t, lockedPatchKeys(stopped, []string{"name", "labels", "explicitTimezone"}, raw(body), decode(body), nil))
 	})
 
 	t.Run("a fixed key that would change is refused as fixed", func(t *testing.T) {
 		body := `{"harness":"generic","branch":"main","clone_depth":"full","model":"m"}`
-		ref := lockedPatchKeys(stopped, nil, raw(body), decode(body))
+		ref := lockedPatchKeys(stopped, nil, raw(body), decode(body), nil)
 		require.NotNil(t, ref)
 		assert.False(t, ref.Conflict)
 		assert.Equal(t, map[string]string{
@@ -395,13 +413,13 @@ func TestLockedPatchKeys(t *testing.T) {
 
 	t.Run("an empty fixed key where none is stored is ignored", func(t *testing.T) {
 		body := `{"config_dir":"","detached":null,"hub":null,"user":""}`
-		assert.Nil(t, lockedPatchKeys(stopped, nil, raw(body), decode(body)))
+		assert.Nil(t, lockedPatchKeys(stopped, nil, raw(body), decode(body), nil))
 	})
 
 	t.Run("the task of a suspended agent is a phase conflict", func(t *testing.T) {
 		suspended := &store.Agent{Phase: string(state.PhaseSuspended)}
 		body := `{"task":"next","max_turns":3}`
-		ref := lockedPatchKeys(suspended, nil, raw(body), decode(body))
+		ref := lockedPatchKeys(suspended, nil, raw(body), decode(body), nil)
 		require.NotNil(t, ref)
 		assert.True(t, ref.Conflict)
 		assert.Equal(t, map[string]string{"config.task": editReasonNotOnResume}, ref.Fields)
@@ -410,15 +428,51 @@ func TestLockedPatchKeys(t *testing.T) {
 	t.Run("config of a running agent is a phase conflict", func(t *testing.T) {
 		running := &store.Agent{Phase: string(state.PhaseRunning)}
 		body := `{"max_turns":3}`
-		ref := lockedPatchKeys(running, []string{"name"}, raw(body), decode(body))
+		ref := lockedPatchKeys(running, []string{"name"}, raw(body), decode(body), nil)
 		require.NotNil(t, ref)
 		assert.True(t, ref.Conflict)
 		assert.Equal(t, map[string]string{"config.max_turns": editReasonRunning}, ref.Fields, "a rename stays allowed")
 	})
 
+	t.Run("a fixed key of a running agent is locked by the phase, echo or not", func(t *testing.T) {
+		running := &store.Agent{Phase: string(state.PhaseRunning), AppliedConfig: &store.AgentAppliedConfig{
+			InlineConfig: &api.ScionConfig{Harness: "claude"},
+		}}
+		for _, body := range []string{`{"branch":"x"}`, `{"harness":"claude"}`} {
+			ref := lockedPatchKeys(running, nil, raw(body), decode(body), nil)
+			require.NotNil(t, ref, body)
+			assert.True(t, ref.Conflict, body)
+			for _, reason := range ref.Fields {
+				assert.Equal(t, editReasonRunning, reason, body)
+			}
+		}
+	})
+
+	t.Run("a fixed key equal to the applied value is unchanged", func(t *testing.T) {
+		live := &store.Agent{Phase: string(state.PhaseStopped), AppliedConfig: &store.AgentAppliedConfig{
+			Branch: "scion/live", HarnessConfig: "hc-live", InlineConfig: &api.ScionConfig{CloneDepth: "full"},
+		}}
+		applied := appliedFixedValues(live, "claude")
+		echo := `{"branch":"scion/live","harness_config":"hc-live","harness":"claude"}`
+		assert.Nil(t, lockedPatchKeys(live, nil, raw(echo), decode(echo), applied))
+
+		changed := `{"branch":"other","harness_config":"hc-other","harness":"generic"}`
+		ref := lockedPatchKeys(live, nil, raw(changed), decode(changed), applied)
+		require.NotNil(t, ref)
+		assert.False(t, ref.Conflict)
+		assert.Len(t, ref.Fields, 3)
+
+		// An empty value clears a stored inline value even though no applied
+		// value is set for the key: that is a change.
+		clear := `{"clone_depth":""}`
+		ref = lockedPatchKeys(live, nil, raw(clear), decode(clear), applied)
+		require.NotNil(t, ref)
+		assert.Equal(t, map[string]string{"config.clone_depth": editReasonFixedPatch}, ref.Fields)
+	})
+
 	t.Run("anything on a deleted agent is a conflict", func(t *testing.T) {
 		deleted := &store.Agent{Phase: string(state.PhaseStopped), DeletedAt: time.Now()}
-		ref := lockedPatchKeys(deleted, []string{"name", "annotations"}, nil, nil)
+		ref := lockedPatchKeys(deleted, []string{"name", "annotations"}, nil, nil, nil)
 		require.NotNil(t, ref)
 		assert.True(t, ref.Conflict)
 		assert.Equal(t, map[string]string{"name": editReasonDeleted, "annotations": editReasonDeleted}, ref.Fields)

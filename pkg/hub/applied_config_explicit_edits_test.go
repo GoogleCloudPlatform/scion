@@ -749,13 +749,13 @@ func TestApplyAgentUpdate_UntouchedSavePreservesInlineBranch(t *testing.T) {
 		"an absent branch key must keep the stored inline branch, not blank it")
 }
 
-// TestApplyAgentUpdate_PresentBranchKeyIsApplied pins the other half of
+// TestApplyAgentUpdate_PresentBranchKeyRefusedUnlessEcho pins the other half of
 // mergePresentInlineFields for branch: only an ABSENT key keeps the stored
 // value silently. The branch is fixed at creation (ptone/scion#3972), so a
 // present key that would change it, to a new value or to empty, is refused
 // with 400 and stored nowhere; a present key equal to the stored branch is
 // an echo and changes nothing.
-func TestApplyAgentUpdate_PresentBranchKeyIsApplied(t *testing.T) {
+func TestApplyAgentUpdate_PresentBranchKeyRefusedUnlessEcho(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		branch string

@@ -364,28 +364,51 @@ type patchRefusal struct {
 // lockedPatchKeys checks the keys an agent PATCH names against the
 // mutability table, with the same rule GET editability reports: top are the
 // present top-level wire keys, rawConfig the request's raw config object and
-// cfg its decoded form. A fixed (TX) config key is refused only when its
-// value would change: an echo of the stored value, or an empty value where
-// none is stored, is ignored. Config keys the table does not know are
-// ignored, as encoding/json ignores them. It returns nil when nothing is
-// locked.
-func lockedPatchKeys(agent *store.Agent, top []string, rawConfig map[string]json.RawMessage, cfg *api.ScionConfig) *patchRefusal {
+// cfg its decoded form. applied carries the agent's applied values of the
+// fixed keys that have one (branch, harness_config, and harness as the hub
+// resolves it). It returns nil when nothing is locked.
+//
+// Precedence, highest first (writePatchRefusal answers by it):
+//  1. A deleted agent: every present key is locked (409).
+//  2. A phase that takes no config (running, transitional): every present
+//     config key is locked, a fixed key's echo included (409).
+//  3. A fixed (TX) config key that would change, in a phase that takes
+//     config (400). Unchanged means equal to the agent's stored inline value
+//     or, for a non-empty request value, its applied value; an empty value
+//     where no inline value is stored is ignored.
+//
+// Config keys the table does not know are ignored, as encoding/json ignores
+// them.
+func lockedPatchKeys(agent *store.Agent, top []string, rawConfig map[string]json.RawMessage, cfg, applied *api.ScionConfig) *patchRefusal {
 	ed := buildAgentEditability(agent, agentEditAccess{CanUpdate: true, CanChangeRole: true})
 	var stored *api.ScionConfig
 	if agent.AppliedConfig != nil {
 		stored = agent.AppliedConfig.InlineConfig
 	}
+	deleted := !agent.DeletedAt.IsZero()
+	configPhase := configPatchPhase(agent.Phase)
 	ref := &patchRefusal{Fields: map[string]string{}}
 	check := func(f agentEditField) {
+		k, isConfig := strings.CutPrefix(f.Key, agentConfigKeyPrefix)
+		switch {
+		case deleted:
+			ref.Conflict = true
+			ref.Fields[f.Key] = editReasonDeleted
+			return
+		case isConfig && !configPhase:
+			ref.Conflict = true
+			ref.Fields[f.Key] = editReasonNoConfigPhase(agent.Phase)
+			return
+		}
 		st, ok := ed.Fields[f.Key]
 		if !ok || st.Disposition != EditLocked {
 			return
 		}
-		if f.Tier == EditTierImmutable && agent.DeletedAt.IsZero() {
-			k, isConfig := strings.CutPrefix(f.Key, agentConfigKeyPrefix)
+		if f.Tier == EditTierImmutable {
 			// A fixed top-level key (template, profile, ...) has no PATCH
 			// surface, so nothing decodes or writes it.
-			if !isConfig || configFieldUnchanged(k, cfg, stored) {
+			if !isConfig || configFieldUnchanged(k, cfg, stored) ||
+				(!configFieldZero(k, cfg) && configFieldUnchanged(k, cfg, applied)) {
 				return
 			}
 			ref.Fields[f.Key] = editReasonFixedPatch
@@ -406,6 +429,28 @@ func lockedPatchKeys(agent *store.Agent, top []string, rawConfig map[string]json
 		return nil
 	}
 	return ref
+}
+
+// editReasonNoConfigPhase is the lock reason of a config key in a phase that
+// takes no config.
+func editReasonNoConfigPhase(phase string) string {
+	if phaseHasLiveOrTransitionalContainer(phase) {
+		return editReasonRunning
+	}
+	return editReasonUnknownPhase
+}
+
+// appliedFixedValues returns, as a config, the agent's applied values of the
+// fixed config keys that have one: branch, harness_config, and harness, the
+// harness the hub resolves for the agent. lockedPatchKeys treats a request
+// value equal to one of them as unchanged.
+func appliedFixedValues(agent *store.Agent, resolvedHarness string) *api.ScionConfig {
+	out := &api.ScionConfig{Harness: resolvedHarness}
+	if agent != nil && agent.AppliedConfig != nil {
+		out.Branch = agent.AppliedConfig.Branch
+		out.HarnessConfig = agent.AppliedConfig.HarnessConfig
+	}
+	return out
 }
 
 // scionConfigFieldByJSONKey indexes api.ScionConfig's fields by json key.
@@ -434,6 +479,12 @@ func scionConfigJSONKey(f reflect.StructField) string {
 		return f.Name
 	}
 	return tag
+}
+
+// configFieldZero reports whether the config key key is empty or unset in
+// cfg.
+func configFieldZero(key string, cfg *api.ScionConfig) bool {
+	return configFieldUnchanged(key, cfg, nil)
 }
 
 // configFieldUnchanged reports whether the config key key has the same
@@ -494,15 +545,20 @@ func configPatchKeys(rawConfig map[string]json.RawMessage) []agentEditField {
 // takes effect only at the next reincarnation into provision, the T2 keys
 // (rendered into files at provision; a plain start does not re-render
 // them), and cleared, the T1 keys the request clears or zeroes (the
-// broker's start-time merge keeps the previous non-empty value). Both are
-// sorted wire keys.
-func reincarnateOnlyConfigEdits(rawConfig map[string]json.RawMessage) (provision, cleared []string) {
+// broker's start-time merge keeps the previous non-empty value). A key
+// whose value does not change from stored (req is the decoded request) is
+// not counted. Both are sorted wire keys.
+func reincarnateOnlyConfigEdits(rawConfig map[string]json.RawMessage, req, stored *api.ScionConfig) (provision, cleared []string) {
 	for _, f := range configPatchKeys(rawConfig) {
+		k := strings.TrimPrefix(f.Key, agentConfigKeyPrefix)
+		if configFieldUnchanged(k, req, stored) {
+			continue
+		}
 		switch f.Tier {
 		case EditTierProvision:
 			provision = append(provision, f.Key)
 		case EditTierContainer:
-			if rawJSONIsEmpty(rawValueCaseInsensitive(rawConfig, strings.TrimPrefix(f.Key, agentConfigKeyPrefix))) {
+			if rawJSONIsEmpty(rawValueCaseInsensitive(rawConfig, k)) {
 				cleared = append(cleared, f.Key)
 			}
 		}
@@ -512,8 +568,8 @@ func reincarnateOnlyConfigEdits(rawConfig map[string]json.RawMessage) (provision
 
 // reincarnateOnlyEditWarnings returns the PATCH warnings for the config
 // keys reincarnateOnlyConfigEdits reports.
-func reincarnateOnlyEditWarnings(rawConfig map[string]json.RawMessage) []string {
-	provision, cleared := reincarnateOnlyConfigEdits(rawConfig)
+func reincarnateOnlyEditWarnings(rawConfig map[string]json.RawMessage, req, stored *api.ScionConfig) []string {
+	provision, cleared := reincarnateOnlyConfigEdits(rawConfig, req, stored)
 	var out []string
 	if len(provision) > 0 {
 		out = append(out, strings.Join(provision, ", ")+": stored now; rendered at the next reincarnation (a plain start does not re-render prompts, skills or services)")
