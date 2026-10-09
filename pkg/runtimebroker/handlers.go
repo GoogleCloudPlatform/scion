@@ -41,7 +41,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -1710,11 +1709,6 @@ var errInvalidWorkspaceDir = errors.New("invalid workspace directory")
 // (ptone/scion#3422).
 var errWorkspaceStorageUnconfigured = errors.New("storage bucket not configured for workspace bootstrap")
 
-// syncWorkspaceFromGCS downloads a workspace upload (the create-time
-// bootstrap and handleWorkspaceApply, through Server.workspaceDownloader);
-// a variable so tests can substitute a fake for real GCS.
-var syncWorkspaceFromGCS = gcp.SyncFromGCS
-
 // workspaceStorageUnconfiguredMessage is the user-facing text for
 // errWorkspaceStorageUnconfigured.
 const workspaceStorageUnconfiguredMessage = "Cannot download the uploaded workspace: the create request names no storage bucket and this runtime broker has no storage bucket configured. " +
@@ -1728,6 +1722,15 @@ const (
 	opDownloadWorkspace  = "download workspace from GCS"
 )
 
+// opValidateWorkspaceDir is the op logged when the GCS workspace bootstrap
+// directory fails validation. The client gets invalidWorkspaceDirMessage
+// (400), without the validation error, which names the broker's workspace
+// path; that error is logged at the broker (ptone/scion#3855).
+const opValidateWorkspaceDir = "validate workspace directory"
+
+// invalidWorkspaceDirMessage is the client text for errInvalidWorkspaceDir.
+const invalidWorkspaceDirMessage = "Invalid workspace directory"
+
 // workspaceBootstrapFailed logs a runtime failure of the GCS workspace
 // bootstrap step op and returns downloadWorkspaceFromGCS's error triple for
 // it: the attempt status, the fixed client text, and cause wrapped for span
@@ -1739,9 +1742,15 @@ func (s *Server) workspaceBootstrapFailed(req CreateAgentRequest, op string, cau
 
 // logWorkspaceBootstrapFailure records a GCS workspace bootstrap failure's
 // cause at the broker, which the client text leaves out. It names the
-// agent, project and run, never the request's credentials.
+// agent, project and run, never the request's credentials. An invalid
+// workspace directory is a 400 for the request, so it is logged at Warn;
+// every other step failure is logged at Error.
 func (s *Server) logWorkspaceBootstrapFailure(req CreateAgentRequest, op string, cause error) {
-	s.agentLifecycleLog.Error("GCS workspace bootstrap failed", "op", op,
+	level := slog.LevelError
+	if op == opValidateWorkspaceDir {
+		level = slog.LevelWarn
+	}
+	s.agentLifecycleLog.Log(context.Background(), level, "GCS workspace bootstrap failed", "op", op,
 		"agent_id", req.ID, "project_id", req.ProjectID, "run_id", req.RunID, "error", cause)
 }
 
@@ -1889,7 +1898,8 @@ func (s *Server) resolveGCSWorkspaceDir(req CreateAgentRequest) (resolvedDir str
 	// returns, not the original join.
 	resolvedWorkspaceDir, verr := scionrt.ValidateWorkspaceSource(workspaceDir, workspaceRoot)
 	if verr != nil {
-		return "", "invalid workspace directory", "Invalid workspace directory: " + verr.Error(),
+		s.logWorkspaceBootstrapFailure(req, opValidateWorkspaceDir, verr)
+		return "", "invalid workspace directory", invalidWorkspaceDirMessage,
 			fmt.Errorf("%w: %w", errInvalidWorkspaceDir, verr)
 	}
 	return resolvedWorkspaceDir, "", "", nil
