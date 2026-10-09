@@ -399,6 +399,12 @@ describe('peer-agent-resolved', () => {
   });
 
   it('is reported again from the cached read when the thread comes back to the DM', async () => {
+    const base = apiFetch.getMockImplementation()!;
+    apiFetch.mockImplementation((path, init) =>
+      path === '/api/v1/agents/coder'
+        ? Promise.resolve(json({ id: 'coder', name: 'name-coder', projectId: 'proj-coder' }))
+        : base(path, init)
+    );
     const seen = listen();
     const el = await openDM('coder');
     expect(seen).toHaveLength(1);
@@ -410,9 +416,9 @@ describe('peer-agent-resolved', () => {
     for (let i = 0; i < 10; i++) await new Promise((resolve) => setTimeout(resolve, 0));
     await openDM('coder', el);
 
-    expect(seen.map((d) => [d.conversationKey, d.projectId])).toEqual([
-      ['dm:agent:coder:user:u1', 'proj-coder'],
-      ['dm:agent:coder:user:u1', 'proj-coder'],
+    expect(seen.map((d) => [d.conversationKey, d.name, d.projectId])).toEqual([
+      ['dm:agent:coder:user:u1', 'name-coder', 'proj-coder'],
+      ['dm:agent:coder:user:u1', 'name-coder', 'proj-coder'],
     ]);
     expect(singleAgentReads()).toBe(1);
   });
