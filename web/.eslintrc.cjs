@@ -48,6 +48,10 @@ module.exports = {
             parserOptions: { project: './e2e/agent-store-count/tsconfig.json' },
         },
         {
+            files: ['src/utils/playwright-forbid-only.test.ts'],
+            parserOptions: { project: './tsconfig.e2e-configs.json' },
+        },
+        {
             files: ['src/client/terminal-*.test.ts'],
             parserOptions: { project: './src/client/tsconfig.terminal-tests.json' },
         },

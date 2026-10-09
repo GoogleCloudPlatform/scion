@@ -5,6 +5,7 @@ export default defineConfig({
   testMatch: '*.pw.ts',
   timeout: 15_000,
   workers: 1,
+  forbidOnly: !!process.env.CI,
   reporter: 'list',
   outputDir: '../../test-results/terminal-coordinator',
   use: {

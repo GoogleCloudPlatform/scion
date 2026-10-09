@@ -8,7 +8,12 @@
     "types": ["node"]
   },
   // Type-checks the Playwright config files, which the root project does
-  // not include. Run by the typecheck script.
-  "include": ["playwright.config.ts", "e2e/**/playwright*.config.ts"],
+  // not include, and the unit test that checks them. Run by the typecheck
+  // script.
+  "include": [
+    "playwright.config.ts",
+    "e2e/**/playwright*.config.ts",
+    "src/utils/playwright-forbid-only.test.ts"
+  ],
   "exclude": []
 }
