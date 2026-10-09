@@ -185,6 +185,36 @@ var deepMergeSections = map[string]bool{"telemetry": true}
 // the keys sent inside it when its object was merged key by key.
 type sentTree map[string]sentTree
 
+// add records key as sent with the keys sent inside it (nil when its value
+// was applied whole). When key was already recorded (the body sent it under
+// two spellings that resolve to the same field, for example "cloud" and
+// "Cloud"), the two records are combined (unionSentTrees), so a key sent
+// under either spelling counts as sent.
+func (t sentTree) add(key string, sub sentTree) {
+	if prev, dup := t[key]; dup {
+		t[key] = unionSentTrees(prev, sub)
+		return
+	}
+	t[key] = sub
+}
+
+// unionSentTrees combines two records of the keys sent inside one key. A
+// value applied whole (nil) in either record makes the combined value
+// whole: nothing inside it counts as carried.
+func unionSentTrees(a, b sentTree) sentTree {
+	if a == nil || b == nil {
+		return nil
+	}
+	out := make(sentTree, len(a)+len(b))
+	for k, v := range a {
+		out[k] = v
+	}
+	for k, v := range b {
+		out.add(k, v)
+	}
+	return out
+}
+
 // keys returns the keys of t as a set.
 func (t sentTree) keys() map[string]bool {
 	out := make(map[string]bool, len(t))
@@ -218,12 +248,12 @@ func patchSection(section string, base, next map[string]json.RawMessage, fp *fie
 		if deep && model != nil && isJSONObject(raw) {
 			if f, ok := structFieldByJSONName(model, key); ok {
 				if st, ok := structTypeOf(f.Type); ok {
-					sent[key] = mergeObjectKey(base, next, key, st, raw)
+					sent.add(key, mergeObjectKey(base, next, key, st, raw))
 					continue
 				}
 			}
 		}
-		sent[key] = nil
+		sent.add(key, nil)
 		// requestDoc is a marshalled section struct for the sections wired
 		// today, so it holds no null; the check keeps a raw request doc
 		// (a future section) from storing an explicit null as a value.
@@ -262,10 +292,10 @@ func mergeObjectKey(obj, next map[string]json.RawMessage, key string, t reflect.
 	for _, sf := range fields {
 		k := jsonFieldName(sf.field)
 		if st, ok := structTypeOf(sf.field.Type); ok && isJSONObject(sf.val) {
-			sent[k] = mergeObjectKey(cur, nx, k, st, sf.val)
+			sent.add(k, mergeObjectKey(cur, nx, k, st, sf.val))
 			continue
 		}
-		sent[k] = nil
+		sent.add(k, nil)
 		if v, ok := nx[k]; ok && !isJSONNull(v) {
 			cur[k] = v
 		} else {
@@ -301,10 +331,10 @@ func jsonFieldName(f reflect.StructField) string {
 }
 
 // sectionModelType returns the struct type of a section's document
-// (opsettings.Section.New), or nil when the section has none. A struct
-// that only embeds another struct (TelemetrySettings embeds
-// config.V1TelemetryConfig) resolves to the embedded type, whose fields
-// are the section's top-level keys.
+// (opsettings.Section.New), or nil when the section has none. Fields
+// promoted from an embedded struct (TelemetrySettings embeds
+// config.V1TelemetryConfig) are found through structFieldByJSONName, which
+// follows encoding/json's embedding rule.
 func sectionModelType(section string) reflect.Type {
 	sec := opsettings.SectionByName(section)
 	if sec == nil || sec.New == nil {
@@ -313,11 +343,6 @@ func sectionModelType(section string) reflect.Type {
 	t, ok := structTypeOf(reflect.TypeOf(sec.New()))
 	if !ok {
 		return nil
-	}
-	if t.NumField() == 1 && t.Field(0).Anonymous {
-		if et, ok := structTypeOf(t.Field(0).Type); ok {
-			return et
-		}
 	}
 	return t
 }
@@ -512,7 +537,11 @@ func sectionKeyKoanfPath(section, key string) string {
 // koanf key is overridden by a node-local env var. In a deep-merge section
 // an env var can pin a nested key (SCION_SERVER_TELEMETRY_CLOUD_ENABLED
 // pins telemetry.cloud.enabled); only that nested key is removed, and the
-// object holding it keeps its other keys.
+// object holding it keeps its other keys. This holds for an entry of a
+// free-form map too: a pin on telemetry.cloud.headers.<name> removes only
+// that header, although a sent map replaces the stored one whole. A map
+// key that contains a dot cannot be named by a koanf path, so it is never
+// removed this way.
 func dropEnvOverriddenSectionKeys(base map[string]json.RawMessage, section string, envKeys []string) {
 	if len(envKeys) == 0 {
 		return

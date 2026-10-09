@@ -519,7 +519,7 @@ func compileSchemas() {
 				"default_max_duration":                    getSchemaProperty(root, "default_max_duration"),
 				"default_resources":                       getSchemaProperty(root, "default_resources"),
 				"default_model":                           map[string]interface{}{"type": "string"},
-				"default_thinking_level":                  map[string]interface{}{"type": "integer"},
+				"default_thinking_level":                  getSchemaProperty(root, "default_thinking_level"),
 				"default_max_agent_role":                  getSchemaProperty(root, "default_max_agent_role"),
 				"default_agent_role":                      getSchemaProperty(root, "default_agent_role"),
 				"default_runtime_broker":                  getSchemaProperty(root, "default_runtime_broker"),

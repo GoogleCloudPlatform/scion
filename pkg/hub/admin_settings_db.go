@@ -1768,9 +1768,10 @@ func appendPresenceAwareKeys(keys []string, rawBody []byte) []string {
 		keys = append(keys, "server.hub.hub_name")
 	}
 
-	// agent_defaults keys: present as null → add the key, so a lone
-	// explicit clear builds the agent_defaults doc and clears the key
-	// instead of being kept by the merge (ptone/scion#3719).
+	// agent_defaults keys: any sent agent_defaults key (including an
+	// explicit null) → add the key, so a lone explicit clear builds the
+	// agent_defaults doc and clears the key instead of being kept by the
+	// merge (ptone/scion#3719). Keys already present are deduplicated.
 	for k := range agentDefaultsPresence(fp).sentKeys() {
 		if key, ok := modelledSectionKey("agent_defaults", k); ok && !keySet[key] {
 			keySet[key] = true

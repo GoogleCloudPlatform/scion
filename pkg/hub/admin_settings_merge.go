@@ -20,7 +20,10 @@ import (
 	"errors"
 	"iter"
 	"reflect"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	yamlv3 "gopkg.in/yaml.v3"
@@ -124,7 +127,7 @@ func sentStructFields(t reflect.Type, raw json.RawMessage) (fields []sentField, 
 	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
 		return nil, false
 	}
-	index := make(map[int]int)
+	index := make(map[string]int) // field index path (indexKey) -> entry of fields
 	// dups holds, per entry of fields, the values sent for it in body
 	// order when the field was sent more than once; they are combined
 	// once at the end so a body with many duplicates stays linear.
@@ -143,7 +146,8 @@ func sentStructFields(t reflect.Type, raw json.RawMessage) (fields []sentField, 
 		if !found {
 			continue
 		}
-		if i, dup := index[f.Index[0]]; dup {
+		fk := indexKey(f.Index)
+		if i, dup := index[fk]; dup {
 			if dups == nil {
 				dups = make(map[int][]json.RawMessage)
 			}
@@ -153,7 +157,7 @@ func sentStructFields(t reflect.Type, raw json.RawMessage) (fields []sentField, 
 			dups[i] = append(dups[i], val)
 			continue
 		}
-		index[f.Index[0]] = len(fields)
+		index[fk] = len(fields)
 		fields = append(fields, sentField{field: f, val: val})
 	}
 	for i, vals := range dups {
@@ -270,8 +274,10 @@ func mergeSettingsStruct(existing map[string]interface{}, t reflect.Type, sent [
 // is name, with the matchJSONKey rule: an exact match wins, otherwise the
 // first case-insensitive match in field order is used, so a key that
 // decoded into the request is also found here (the strict unknown-key
-// check folds case the same way). Only the direct exported fields of t
-// are candidates; a field tagged "-" (including "-,") is not one.
+// check folds case the same way). The candidates are the fields
+// encoding/json encodes and decodes for t (structJSONNames), including the
+// fields promoted from an embedded struct; a field tagged "-" (including
+// "-,") is not one.
 func structFieldByJSONName(t reflect.Type, name string) (reflect.StructField, bool) {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
@@ -282,27 +288,151 @@ func structFieldByJSONName(t reflect.Type, name string) (reflect.StructField, bo
 	return matchJSONKey(structJSONNames(t), name)
 }
 
-// structJSONNames yields the JSON name and field of each direct exported
-// field of struct type t, in field order, for structFieldByJSONName.
+// structJSONNames yields the JSON name and field of each field encoding/json
+// uses for struct type t, in field order, for structFieldByJSONName. As in
+// encoding/json, the fields of an embedded struct (or pointer to struct)
+// without a JSON name in its tag are promoted, at any depth: for a name
+// claimed at several depths the shallowest field wins, and of several at
+// the same depth the only tagged one wins, or none when that is not
+// unique. A promoted field's Index is its full index path from t.
 func structJSONNames(t reflect.Type) iter.Seq2[string, reflect.StructField] {
+	var keep []jsonNamedField
+	if v, ok := structJSONNamesCache.Load(t); ok {
+		keep = v.([]jsonNamedField)
+	} else {
+		keep = resolveStructJSONNames(t)
+		structJSONNamesCache.Store(t, keep)
+	}
 	return func(yield func(string, reflect.StructField) bool) {
-		for i := 0; i < t.NumField(); i++ {
-			f := t.Field(i)
-			if !f.IsExported() {
-				continue
-			}
-			jn := strings.Split(f.Tag.Get("json"), ",")[0]
-			if jn == "-" {
-				continue
-			}
-			if jn == "" {
-				jn = f.Name
-			}
-			if !yield(jn, f) {
+		for _, c := range keep {
+			if !yield(c.name, c.field) {
 				return
 			}
 		}
 	}
+}
+
+// jsonNamedField is a field of a struct type with the JSON name
+// encoding/json uses for it.
+type jsonNamedField struct {
+	name  string
+	field reflect.StructField
+}
+
+// structJSONNamesCache holds resolveStructJSONNames results by struct type;
+// a type's fields never change, and the merge looks names up per body key.
+var structJSONNamesCache sync.Map // reflect.Type -> []jsonNamedField
+
+// resolveStructJSONNames computes the fields structJSONNames yields for t.
+func resolveStructJSONNames(t reflect.Type) []jsonNamedField {
+	type candidate struct {
+		name   string
+		field  reflect.StructField
+		depth  int
+		tagged bool
+	}
+	var cands []candidate
+	var walk func(t reflect.Type, index []int, depth int, onPath map[reflect.Type]bool)
+	walk = func(t reflect.Type, index []int, depth int, onPath map[reflect.Type]bool) {
+		if onPath[t] {
+			return
+		}
+		onPath[t] = true
+		defer delete(onPath, t)
+		for i := 0; i < t.NumField(); i++ {
+			f := t.Field(i)
+			jn := strings.Split(f.Tag.Get("json"), ",")[0]
+			if jn == "-" {
+				continue
+			}
+			path := append(append([]int{}, index...), i)
+			if f.Anonymous {
+				ft := f.Type
+				isPtr := ft.Kind() == reflect.Pointer
+				if isPtr {
+					ft = ft.Elem()
+				}
+				if !f.IsExported() && (isPtr || ft.Kind() != reflect.Struct) {
+					continue
+				}
+				if jn == "" && ft.Kind() == reflect.Struct {
+					walk(ft, path, depth+1, onPath)
+					continue
+				}
+			} else if !f.IsExported() {
+				continue
+			}
+			tagged := jn != ""
+			if jn == "" {
+				jn = f.Name
+			}
+			f.Index = path
+			cands = append(cands, candidate{name: jn, field: f, depth: depth, tagged: tagged})
+		}
+	}
+	walk(t, nil, 0, map[reflect.Type]bool{})
+
+	// Resolve each name to its dominant field, then keep field order.
+	byName := map[string][]int{}
+	for i, c := range cands {
+		byName[c.name] = append(byName[c.name], i)
+	}
+	dominant := func(group []int) int {
+		minDepth := cands[group[0]].depth
+		for _, j := range group {
+			minDepth = min(minDepth, cands[j].depth)
+		}
+		winner, count, taggedWinner, taggedCount := -1, 0, -1, 0
+		for _, j := range group {
+			if cands[j].depth != minDepth {
+				continue
+			}
+			count++
+			winner = j
+			if cands[j].tagged {
+				taggedCount++
+				taggedWinner = j
+			}
+		}
+		switch {
+		case count == 1:
+			return winner
+		case taggedCount == 1:
+			return taggedWinner
+		}
+		return -1
+	}
+	var keep []jsonNamedField
+	for i, c := range cands {
+		if dominant(byName[c.name]) == i {
+			keep = append(keep, jsonNamedField{name: c.name, field: c.field})
+		}
+	}
+	sort.SliceStable(keep, func(a, b int) bool { return indexLess(keep[a].field.Index, keep[b].field.Index) })
+	return keep
+}
+
+// indexKey returns a map key for a field index path.
+func indexKey(index []int) string {
+	var b strings.Builder
+	for i, n := range index {
+		if i > 0 {
+			b.WriteByte('.')
+		}
+		b.WriteString(strconv.Itoa(n))
+	}
+	return b.String()
+}
+
+// indexLess orders two field index paths the way encoding/json orders
+// fields: by index sequence.
+func indexLess(a, b []int) bool {
+	for i := 0; i < len(a) && i < len(b); i++ {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return len(a) < len(b)
 }
 
 // yamlFieldName returns the key yaml.v3 uses for f.

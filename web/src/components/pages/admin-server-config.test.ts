@@ -1666,6 +1666,16 @@ describe('scion-page-admin-server-config', () => {
       expect(el.buildLayer1Payload()).toHaveProperty('default_thinking_level', 30);
     });
 
+    it('treats a loaded thinking level of 0 as unset', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'db', default_thinking_level: 0 }))
+      );
+      const el = element as any;
+      el.layer1Keys = new Set(KEYS);
+      expect(el.defaultThinkingLevel).toBeNull();
+      expect(el.buildLayer1Payload()).toHaveProperty('default_thinking_level', null);
+    });
+
     it('buildFilePayload sends null for an unset thinking level, never 0', async () => {
       element = await createComponent(
         createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))

@@ -22,10 +22,12 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"reflect"
 	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -452,4 +454,134 @@ func TestPutServerConfigDB_TelemetryAndAgentDefaultsMerge_ConcurrentWrite409(t *
 			assert.Equal(t, jsonMap(t, tc.other), sectionRowRaw(t, fake, tc.section))
 		})
 	}
+}
+
+// agentDefaultsReadOnlyKeys are the agent_defaults keys a server-config PUT
+// never writes (see agentDefaultsRequestKeys).
+var agentDefaultsReadOnlyKeys = map[string]bool{
+	"default_max_agent_role": true,
+	"default_agent_role":     true,
+	"default_harness_auth":   true,
+}
+
+// Every agent_defaults key is either written by the PUT
+// (agentDefaultsRequestKeys) or listed as read-only, and every written key
+// has a request field that buildSingleSectionDoc copies into the section
+// doc. A field added to the section or the request without updating
+// agentDefaultsRequestKeys fails here instead of being ignored by the
+// merge on every save.
+func TestAgentDefaultsRequestKeys_Parity(t *testing.T) {
+	sectionKeys := map[string]bool{}
+	for name := range structJSONNames(reflect.TypeOf(opsettings.AgentDefaultsSettings{})) {
+		sectionKeys[name] = true
+		assert.True(t, agentDefaultsRequestKeys[name] || agentDefaultsReadOnlyKeys[name],
+			"agent_defaults key %q is neither in agentDefaultsRequestKeys nor read-only", name)
+		assert.False(t, agentDefaultsRequestKeys[name] && agentDefaultsReadOnlyKeys[name],
+			"agent_defaults key %q is both written and read-only", name)
+	}
+	reqType := reflect.TypeOf(ServerConfigUpdateRequest{})
+	for key := range agentDefaultsRequestKeys {
+		require.True(t, sectionKeys[key], "agentDefaultsRequestKeys has %q, which the section does not model", key)
+		f, ok := structFieldByJSONName(reqType, key)
+		require.True(t, ok, "no ServerConfigUpdateRequest field for %q", key)
+		require.Equal(t, key, jsonFieldName(f))
+
+		var sample string
+		switch ft := f.Type.Elem(); {
+		case ft.Kind() == reflect.String:
+			sample = `"x"`
+		case ft.Kind() == reflect.Int:
+			sample = `5`
+		default:
+			sample = `{"requests": {"cpu": "1"}}`
+		}
+		body := `{"` + key + `": ` + sample + `}`
+		var req ServerConfigUpdateRequest
+		require.NoError(t, json.Unmarshal([]byte(body), &req))
+		fp, err := parseFieldPresence([]byte(body))
+		require.NoError(t, err)
+		doc, err := buildSingleSectionDoc(&req, "agent_defaults", fp)
+		require.NoError(t, err)
+		assert.Contains(t, jsonMap(t, string(doc)), key, "buildSingleSectionDoc does not write %q", key)
+	}
+}
+
+// A stored default_thinking_level of 0 (a legacy or hand-edited value) is
+// invalid under the section schema, so a save that leaves it out drops it
+// instead of failing.
+func TestPutServerConfigDB_StoredZeroThinkingLevelDoesNotBlockSave(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv, fakeStore, ops := newTestDBServer(t)
+	fakeStore.seedWithOrigin("agent_defaults", json.RawMessage(`{"default_model":"m0","default_thinking_level":0}`), "managed")
+
+	assert.NotEmpty(t, opsettings.Validate("agent_defaults", json.RawMessage(`{"default_thinking_level":0}`)))
+	rr := putServerConfigDB(t, srv, ops, `{"default_model": "m1"}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.Equal(t, map[string]interface{}{"default_model": "m1"}, sectionRowRaw(t, fakeStore, "agent_defaults"))
+}
+
+// The telemetry section type exposes the fields of the config struct it
+// embeds, so deep merge and case-insensitive matching find them.
+func TestSectionModelType_TelemetryExposesEmbeddedFields(t *testing.T) {
+	model := sectionModelType("telemetry")
+	require.NotNil(t, model)
+	for _, key := range []string{"cloud", "Cloud"} {
+		f, ok := structFieldByJSONName(model, key)
+		require.True(t, ok, key)
+		assert.Equal(t, reflect.TypeOf(&config.V1TelemetryCloudConfig{}), f.Type)
+	}
+	key, ok := modelledSectionKey("telemetry", "FILTER")
+	assert.True(t, ok)
+	assert.Equal(t, "filter", key)
+}
+
+// A stored default_timezone that validateDefaultTimezone rejects ("Local"
+// passes the schema) does not block a save that leaves it out; sending it
+// is still rejected (ptone/scion#2720).
+func TestPutServerConfigDB_AgentDefaultsUnsentTimezoneNotRechecked(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv, fakeStore, ops := newTestDBServer(t)
+	fakeStore.seedWithOrigin("agent_defaults", json.RawMessage(`{"default_model":"m0","default_timezone":"Local"}`), "managed")
+
+	rr := putServerConfigDB(t, srv, ops, `{"default_model": "m1"}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	row := sectionRowRaw(t, fakeStore, "agent_defaults")
+	assert.Equal(t, "m1", row["default_model"])
+	assert.Equal(t, "Local", row["default_timezone"])
+
+	rr = putServerConfigDB(t, srv, ops, `{"default_timezone": "Local"}`)
+	assert.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+}
+
+// An env pin on an entry of a free-form map drops only that entry from a
+// seeded row; the map's other entries are kept.
+func TestMergeSectionOnCurrent_TelemetryEnvPinnedMapEntry(t *testing.T) {
+	_, fakeStore, ops := newTestDBServer(t)
+	ops.envOverrides = map[string]bool{"telemetry.cloud.headers.authorization": true}
+	fakeStore.seedWithOrigin("telemetry",
+		json.RawMessage(`{"cloud":{"endpoint":"e1","headers":{"authorization":"a","x-tenant":"t"}}}`), "seeded")
+
+	got, _ := mergeTelemetry(t, ops, `{"telemetry": {"enabled": true}}`)
+	assert.Equal(t, jsonMap(t, `{"enabled":true,"cloud":{"endpoint":"e1","headers":{"x-tenant":"t"}}}`), got)
+}
+
+// Two spellings of one key ("cloud" and "Cloud") both count as sent: the
+// keys sent under either are recorded, so neither is treated as carried.
+func TestPatchSection_CaseVariantKeysUnionSentKeys(t *testing.T) {
+	body := `{"cloud": {"endpoint": "e2"}, "Cloud": {"protocol": "grpc"}}`
+	var tel config.V1TelemetryConfig
+	require.NoError(t, json.Unmarshal([]byte(body), &tel))
+	reqDoc, err := json.Marshal(tel)
+	require.NoError(t, err)
+	var next map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(reqDoc, &next))
+	fp, err := parseFieldPresence([]byte(body))
+	require.NoError(t, err)
+
+	base := map[string]json.RawMessage{"cloud": json.RawMessage(`{"endpoint":"e1","protocol":"http","provider":"p"}`)}
+	tree := patchSection("telemetry", base, next, fp)
+	assert.Equal(t, sentTree{"cloud": sentTree{"endpoint": nil, "protocol": nil}}, tree)
+	assert.JSONEq(t, `{"endpoint":"e2","protocol":"grpc","provider":"p"}`, string(base["cloud"]))
+
+	assert.Nil(t, unionSentTrees(sentTree{"a": nil}, nil), "a value applied whole stays whole")
 }

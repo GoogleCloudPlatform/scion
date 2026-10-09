@@ -1716,7 +1716,9 @@ export class ScionPageAdminServerConfig extends LitElement {
       this.defaultModelSelection = '';
       this.defaultCustomModelId = '';
     }
-    this.defaultThinkingLevel = data.default_thinking_level ?? null;
+    // A stored 0 is not a valid level (the server rejects it); show it as
+    // unset so a save sends null instead of failing (ptone/scion#3898).
+    this.defaultThinkingLevel = data.default_thinking_level || null;
     this.defaultMaxAgentRole = data.default_max_agent_role || '';
     this.defaultAgentRole = data.default_agent_role || '';
     this.defaultRuntimeBroker = data.default_runtime_broker || '';
