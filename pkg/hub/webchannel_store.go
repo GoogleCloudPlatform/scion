@@ -258,7 +258,8 @@ type WebChatStore interface {
 	// Returns the number of rows affected.
 	UpdateThreadID(ctx context.Context, oldThreadID, newThreadID string) (int, error)
 
-	// DeleteDM removes all webchat_dm rows for the given conversation key.
+	// DeleteDM removes all webchat_dm rows for the given conversation key,
+	// and the scheduled messages of that conversation.
 	DeleteDM(ctx context.Context, conversationKey string) error
 
 	// MigrateReadState re-keys all webchat_read_state rows from oldKey to newKey.
@@ -2518,11 +2519,16 @@ func (s *sqliteWebChatStore) UpdateThreadID(ctx context.Context, oldThreadID, ne
 	return int(n), nil
 }
 
-// DeleteDM removes all webchat_dm rows for the given conversation key.
+// DeleteDM removes all webchat_dm rows for the given conversation key,
+// and the scheduled messages of that conversation.
 func (s *sqliteWebChatStore) DeleteDM(ctx context.Context, conversationKey string) error {
 	const query = `DELETE FROM webchat_dm WHERE conversation_key = ?`
 	_, err := s.db.ExecContext(ctx, query, conversationKey)
 	if err != nil {
+		return fmt.Errorf("webchat store: delete DM: %w", err)
+	}
+	// The conversation's scheduled messages go with it.
+	if _, err := s.DeleteScheduledMessagesForConversation(ctx, conversationKey); err != nil {
 		return fmt.Errorf("webchat store: delete DM: %w", err)
 	}
 	return nil

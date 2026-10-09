@@ -143,6 +143,8 @@ telemetry:
   cloud:
     enabled: true
     provider: "gcp"
+    # Project the hub queries for the metrics dashboard
+    gcp_project_id: "${PROJECT_ID}"
     endpoint: "cloudtrace.googleapis.com:443"
     protocol: "grpc"
     batch:

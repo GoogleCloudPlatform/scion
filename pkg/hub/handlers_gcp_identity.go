@@ -170,11 +170,7 @@ func (s *Server) gcpServiceAccountVerdict(ctx context.Context, sa *store.GCPServ
 		if err != nil {
 			return gcpSAVerdict{}, err
 		}
-		decision := s.authzService.CheckAccess(ctx, user, Resource{
-			Type:    "project",
-			ID:      project.ID,
-			OwnerID: project.OwnerID,
-		}, ActionManage)
+		decision := s.projectGCPServiceAccountManageDecision(ctx, user, project)
 		if !decision.Allowed {
 			return gcpSAVerdict{
 				reason: "You don't have permission to manage GCP service accounts in this project",
@@ -198,6 +194,93 @@ func (s *Server) gcpServiceAccountVerdict(ctx context.Context, sa *store.GCPServ
 	}
 
 	return gcpSAVerdict{allowed: true}, nil
+}
+
+// projectGCPServiceAccountManageDecision is the one authorization decision
+// behind registering, minting, deleting and verifying a project-scoped GCP
+// service account: project ActionManage on the owning project. The create
+// and mint handlers, the project arm of gcpServiceAccountVerdict, and the
+// capability report (projectGCPServiceAccountCapabilities) all call it, so
+// the actions the UI offers are the actions the handlers allow.
+func (s *Server) projectGCPServiceAccountManageDecision(ctx context.Context, user UserIdentity, project *store.Project) Decision {
+	return s.authzService.CheckAccess(ctx, user, Resource{
+		Type:    "project",
+		ID:      project.ID,
+		OwnerID: project.OwnerID,
+	}, ActionManage)
+}
+
+// projectGCPServiceAccountCapabilities makes the capabilities a list reports
+// for project-scoped GCP service accounts agree with the handlers that act on
+// them. The generic capability computation evaluates gcp_service_account
+// permissions on the account, but the project register, mint, delete and
+// verify handlers authorize with projectGCPServiceAccountManageDecision, so
+// on its own it hid those actions from project owners and admins and showed
+// delete and verify to a member who registered an account without being able
+// to use them.
+//
+// Each of those four actions is therefore re-decided here by the exact call
+// its handler makes: gcpServiceAccountVerdict for delete and verify on every
+// project-scoped item, and projectGCPServiceAccountManageDecision for create
+// and mint on a project-scope collection (mint additionally only when minting
+// is configured, which the mint handler requires before it authorizes). Every
+// other action keeps the value the generic computation produced, and hub- and
+// user-scoped items are left untouched.
+//
+// scopeProject is the project ID when the collection is a project's, or ""
+// when it is not (in which case scopeCap is left untouched).
+func (s *Server) projectGCPServiceAccountCapabilities(ctx context.Context, items []GCPServiceAccountWithCapabilities, scopeCap *Capabilities, scopeProject string) {
+	for i := range items {
+		sa := &items[i].GCPServiceAccount
+		if sa.Scope != store.ScopeProject || items[i].Cap == nil {
+			continue
+		}
+		items[i].Cap = overrideCapabilities(ResourceActions["gcp_service_account"], items[i].Cap, func(action Action) (bool, bool) {
+			if action != ActionDelete && action != ActionVerify {
+				return false, false
+			}
+			verdict, err := s.gcpServiceAccountVerdict(ctx, sa, action)
+			return err == nil && verdict.allowed, true
+		})
+	}
+
+	if scopeCap == nil || scopeProject == "" {
+		return
+	}
+	user := GetUserIdentityFromContext(ctx)
+	manage := false
+	if user != nil {
+		if project, err := s.store.GetProject(ctx, scopeProject); err == nil {
+			manage = s.projectGCPServiceAccountManageDecision(ctx, user, project).Allowed
+		}
+	}
+	mintConfigured := s.gcpIAMAdmin != nil && s.config.GCPProjectID != ""
+	*scopeCap = *overrideCapabilities(ScopeActions["gcp_service_account"], scopeCap, func(action Action) (bool, bool) {
+		switch action {
+		case ActionCreate:
+			return manage, true
+		case ActionMint:
+			return manage && mintConfigured, true
+		}
+		return false, false
+	})
+}
+
+// overrideCapabilities rebuilds cap in the canonical order of actions. For
+// each action, decide returns (allowed, true) to set the value, or
+// (_, false) to keep whatever cap already reported.
+func overrideCapabilities(actions []Action, cap *Capabilities, decide func(Action) (bool, bool)) *Capabilities {
+	out := make([]string, 0, len(actions))
+	for _, action := range actions {
+		allowed, decided := decide(action)
+		if !decided {
+			allowed = capabilityAllows(cap, action)
+		}
+		if allowed {
+			out = append(out, string(action))
+		}
+	}
+	return &Capabilities{Actions: out}
 }
 
 // authorizeGCPServiceAccount renders a verdict for the PROJECT-NESTED routes:
@@ -326,11 +409,7 @@ func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Authorization: project owners and admins can manage GCP service accounts
-	decision := s.authzService.CheckAccess(r.Context(), user, Resource{
-		Type:    "project",
-		ID:      project.ID,
-		OwnerID: project.OwnerID,
-	}, ActionManage)
+	decision := s.projectGCPServiceAccountManageDecision(r.Context(), user, project)
 	if !decision.Allowed {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"You don't have permission to manage GCP service accounts in this project", nil)
@@ -462,6 +541,7 @@ func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, 
 	var scopeCap *Capabilities
 	if identity != nil {
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "project", projectID, "gcp_service_account")
+		s.projectGCPServiceAccountCapabilities(ctx, items, scopeCap, projectID)
 	}
 
 	// Include mint quota info when minting is configured
@@ -791,11 +871,7 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 	}
 
 	// Authorization: project owners and admins can mint GCP service accounts
-	decision := s.authzService.CheckAccess(r.Context(), user, Resource{
-		Type:    "project",
-		ID:      project.ID,
-		OwnerID: project.OwnerID,
-	}, ActionManage)
+	decision := s.projectGCPServiceAccountManageDecision(r.Context(), user, project)
 	if !decision.Allowed {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"You don't have permission to manage GCP service accounts in this project", nil)

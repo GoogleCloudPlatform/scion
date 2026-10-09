@@ -186,11 +186,26 @@ var projectOperations = []OperationSpec{
 		Credentials:      []CredentialKind{CredentialSessionJWT},
 		ResourceResolver: "hub-scoped",
 		BasePermission:   "project.create",
-		Effects:          []SecurityEffect{EffectCreateResource},
-		DelegationKind:   DelegationNone,
-		AuthorityEval:    AuthorityEvalNone,
-		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		Effects:          []SecurityEffect{EffectCreateResource, EffectGrantAuthority},
+		DelegationKind:   DelegationNonAmplification,
+		DelegationDescription: "The creator is bound to the project-owner role on the project the call creates. " +
+			"A credential with a permission ceiling must cover every permission of that role before any write (projectOwnerGrantDenial); " +
+			"for other callers project.create gates the grant",
+		AuthorityEval: AuthorityEvalNone,
+		// createProjectWithOwner writes the project row, the owner binding
+		// and this record in one transaction.
+		AuditObligation: &AuditObligation{
+			EventType:     "project_member_add",
+			ContextFields: []string{"actor_id", "project_id"},
+			AfterFields:   []string{"user_id", "role"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestOwnerGrantCoverageCheck"},
+			{Package: "pkg/hub", Function: "TestOwnerBindingAuditFailureRollsBack"},
+		},
 	},
 	{
 		ID:          "project.lifecycle.delete",
@@ -334,11 +349,27 @@ var projectOperations = []OperationSpec{
 		Credentials:      []CredentialKind{CredentialSessionJWT},
 		ResourceResolver: "project-from-body",
 		BasePermission:   "project.register",
-		Effects:          []SecurityEffect{EffectCreateResource},
-		DelegationKind:   DelegationNone,
-		AuthorityEval:    AuthorityEvalNone,
-		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		Effects:          []SecurityEffect{EffectCreateResource, EffectGrantAuthority},
+		DelegationKind:   DelegationNonAmplification,
+		DelegationDescription: "When the call creates the project, the creator is bound to the project-owner role on it; " +
+			"registering an existing project binds no owner. " +
+			"A credential with a permission ceiling must cover every permission of that role before any write (projectOwnerGrantDenial); " +
+			"for other callers project.register gates the grant",
+		AuthorityEval: AuthorityEvalNone,
+		// createProjectWithOwner writes the project row, the owner binding
+		// and this record in one transaction.
+		AuditObligation: &AuditObligation{
+			EventType:     "project_member_add",
+			ContextFields: []string{"actor_id", "project_id"},
+			AfterFields:   []string{"user_id", "role"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestOwnerGrantCoverageCheck"},
+			{Package: "pkg/hub", Function: "TestOwnerBindingAuditFailureRollsBack"},
+		},
 	},
 
 	// =====================================================================
@@ -398,12 +429,25 @@ var projectOperations = []OperationSpec{
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialAgentJWT},
 		ResourceResolver: "project-from-url",
 		BasePermission:   "scheduled_event.create",
-		Effects:          []SecurityEffect{EffectCreateResource},
-		DelegationKind:   DelegationNone,
+		Effects:          []SecurityEffect{EffectCreateResource, EffectGrantAuthority},
+		DelegationKind:   DelegationNonAmplification,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestScheduledMessageAuthoring_RefusesTokensBeforeTargetLookup"}},
 		Bearer:           SessionOnly(ReasonGovernancePending),
+		DelegationDescription: "Only the dispatch_agent event type grants authority. Authoring any event type records the author's frozen effect ceiling " +
+			"(revisionAuthorityCeiling); a dispatch_agent event or schedule then creates an agent at fire time, with a delegation edge from the recorded principal, " +
+			"after CanDelegate for that principal. A message event or schedule grants no authority. " +
+			"Effects are listed per operation, not per event type, so grant-authority is listed for the whole operation",
+		AuditObligation: &AuditObligation{
+			EventType:     "agent_delegation",
+			ContextFields: []string{"actor_id"},
+			AfterFields:   []string{"agent_id", "can_delegate_result"},
+			Atomic:        false,
+			NonAtomicJustification: "The authoring write records no mutation audit record: it stores the initiator attribution and the frozen effect ceiling " +
+				"on the event or schedule row in the same insert. The agent_delegation record is written when a dispatch_agent event fires, " +
+				"in the agent-create transaction with the agent row and its delegation edge. A message event writes none",
+		},
 	},
 	{
 		ID:          "schedule.event.update",

@@ -221,6 +221,11 @@ func (s *Server) listGCPServiceAccountsScoped(w http.ResponseWriter, r *http.Req
 	var scopeCap *Capabilities
 	if identity != nil {
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, req.scope, req.scopeID, "gcp_service_account")
+		scopeProject := ""
+		if req.scope == store.ScopeProject {
+			scopeProject = req.scopeID
+		}
+		s.projectGCPServiceAccountCapabilities(ctx, items, scopeCap, scopeProject)
 	}
 
 	// Include MintQuota when listing at hub scope and minting is configured.
