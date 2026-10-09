@@ -468,10 +468,27 @@ const (
 	DenyCauseCeilingEffectExceeded DenyCause = "ceiling_effect_exceeded"
 
 	// DenyCauseCeilingResourceMissing marks a deny where a resource a
-	// frozen ceiling refers to does not resolve. Reserved for the
-	// service-account parent-ceiling evaluator: no code path in this
-	// package emits it.
+	// frozen ceiling refers to does not resolve, or does not pass the
+	// resource's own usability rules. The service-account parent-ceiling
+	// evaluator emits it for an account that does not load, is not
+	// reachable from the agent's project, is not verified, or is hub-scoped
+	// while the IAM check is not enforced.
 	DenyCauseCeilingResourceMissing DenyCause = "ceiling_resource_missing"
+
+	// DenyCauseCeilingProvenanceMissing marks a deny where the record that
+	// carries the authorizing source is absent, or is unrecorded or of a
+	// provenance version this binary does not understand.
+	DenyCauseCeilingProvenanceMissing DenyCause = "ceiling_provenance_missing"
+
+	// DenyCauseCeilingProvenanceAmbiguous marks a deny where more than one
+	// active record could carry the authorizing source.
+	DenyCauseCeilingProvenanceAmbiguous DenyCause = "ceiling_provenance_ambiguous"
+
+	// DenyCauseCeilingProvenanceStale marks a deny where the recorded
+	// authority does not refer to the resource now in use: the recorded
+	// service account, the agent's applied service account and the
+	// requested one are not all the same.
+	DenyCauseCeilingProvenanceStale DenyCause = "ceiling_provenance_stale"
 
 	// DenyCauseCeilingSourceNotAllowed marks a deny where the source
 	// credential is not accepted as an authority source on this server.
@@ -546,6 +563,13 @@ type AuthzService struct {
 	// construction from ServerConfig.DevAuthToken != "". It is separate
 	// from devLocalEnabled and is read only by mintCandidateScopes.
 	mintDevAuthOverride bool
+
+	// saIAMCheckMode returns the server's current gcpIamCheckMode for
+	// service-account assignment, read by the service-account parent
+	// ceiling's shared rules (saAssignPolicyPreconditions). Set once at
+	// server construction. Nil reads as "", which is not enforce, so an
+	// AuthzService built without that wiring refuses hub-scoped accounts.
+	saIAMCheckMode func() string
 }
 
 // NewAuthzService creates a new AuthzService.
