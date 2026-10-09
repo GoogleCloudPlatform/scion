@@ -34,11 +34,12 @@ import (
 // backfill marker set.
 func newUserReissueFixture(t *testing.T, name string) *reissueFixture {
 	t.Helper()
-	f := newMintFixture(t, name)
+	f, faults := newReissueMintFixture(t, name)
 	setBackfillCompleted(t, f.store)
 	f.srv.authzService.mintDevAuthOverride = false
 	return &reissueFixture{
 		mintFixture: f,
+		faults:      faults,
 		operator:    reissueOperator{UserID: DevUserID, CredentialKind: store.InitiatorCredentialKindSession},
 	}
 }
@@ -194,6 +195,15 @@ func TestScopeReissue_UserDelegatorFailClosed(t *testing.T) {
 			_, c := f.legacyUAT(t, "rsu-fc-missing")
 			f.edge(t, store.DelegationPrincipalUser, f.userID, a.ID, c, uatProv(f.userID, tid("no-such-token")))
 		}, string(DenyCauseCeilingSourceNotAllowed)},
+		{"expired token", func(t *testing.T, f *reissueFixture, a *store.Agent) {
+			ctx := context.Background()
+			tok, c := f.legacyUAT(t, "rsu-fc-expired")
+			f.edge(t, store.DelegationPrincipalUser, f.userID, a.ID, c, uatProv(f.userID, tok.ID))
+			past := time.Now().Add(-time.Hour)
+			tok.ExpiresAt = &past
+			require.NoError(t, f.store.DeleteUserAccessToken(ctx, tok.ID))
+			require.NoError(t, f.store.CreateUserAccessToken(ctx, tok))
+		}, string(DenyCauseCeilingSourceNotAllowed)},
 		{"inactive user", func(t *testing.T, f *reissueFixture, a *store.Agent) {
 			f.edge(t, store.DelegationPrincipalUser, f.userID, a.ID, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, sessionProv(f.userID))
 			u, err := f.store.GetUser(context.Background(), f.userID)
@@ -201,22 +211,24 @@ func TestScopeReissue_UserDelegatorFailClosed(t *testing.T) {
 			u.Status = store.UserStatusSuspended
 			require.NoError(t, f.store.UpdateUser(context.Background(), u))
 		}, string(DenyCauseCeilingDelegatorLacksPermission)},
+		{"inactive local development user", func(t *testing.T, f *reissueFixture, a *store.Agent) {
+			ctx := context.Background()
+			f.edge(t, store.DelegationPrincipalUser, DevUserID, a.ID, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, store.AuthorityProvenance{
+				ProvenanceVersion: 1, SourcePrincipalKind: store.DelegationPrincipalUser,
+				SourcePrincipalID: DevUserID, SourceCredentialKind: store.SourceCredentialDevLocal,
+			})
+			u, err := f.store.GetUser(ctx, DevUserID)
+			require.NoError(t, err)
+			u.Status = store.UserStatusSuspended
+			require.NoError(t, f.store.UpdateUser(ctx, u))
+		}, string(DenyCauseCeilingDelegatorLacksPermission)},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newUserReissueFixture(t, "rsu-fc-"+itoa(i))
 			a := f.agent(t, "rsu-fc-agent-"+itoa(i), AgentRoleFull, state.PhaseRunning)
 			tc.setup(t, f, a)
-			edges := f.allEdges(t, a)
-
-			_, err := f.srv.runScopeReissue(context.Background(), f.reload(t, a), f.operator, false)
-			require.Error(t, err)
-			rec := httptest.NewRecorder()
-			writeScopeReissueError(rec, err)
-			assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-			assert.Equal(t, edges, f.allEdges(t, a))
-			assert.Empty(t, reissueAudits(t, f.store, a.ID, mutationTypeAgentScopesReissued))
-			assertIssueDeniedAudit(t, f.store, a.ID, mintSiteReissue, tc.cause)
+			assertUserRefusalWritesNothing(t, f, a, http.StatusForbidden, tc.cause)
 		})
 	}
 }
@@ -289,4 +301,92 @@ func TestScopeReissue_SessionRootedEqualsCreateToday(t *testing.T) {
 	siblingCeiling, agentCeiling := f.activeEdge(t, sibling).EffectCeiling, f.activeEdge(t, a).EffectCeiling
 	assert.True(t, effectCeilingsEqual(siblingCeiling, agentCeiling), "created %+v, re-issued %+v", siblingCeiling, agentCeiling)
 	assert.Equal(t, store.SourceCredentialSession, f.activeEdge(t, sibling).SourceCredentialKind)
+}
+
+// assertUserRefusalWritesNothing runs a re-issue of a that must be refused
+// with code and cause, and checks that it changed nothing: no edge change,
+// the agent's credential still active, the stored role unchanged, no
+// agent_scopes_reissued row, and one scope-free denial row.
+func assertUserRefusalWritesNothing(t *testing.T, f *reissueFixture, a *store.Agent, code int, cause string) {
+	t.Helper()
+	jti := a.ID + "-jti"
+	insertTestAgentCredential(t, f.store, a.ID, f.projectID, jti)
+	credBefore := getTestAgentCredential(t, f.store, jti)
+	edges := f.allEdges(t, a)
+	roleBefore, _ := agentRoleAndScopes(f.reload(t, a))
+	child := f.reload(t, a)
+	if f.faults != nil && (f.faults.failUserID != "" || f.faults.uatReadErr) {
+		f.faults.arm()
+	}
+
+	_, err := f.srv.runScopeReissue(context.Background(), child, f.operator, false)
+	require.Error(t, err)
+	rec := httptest.NewRecorder()
+	writeScopeReissueError(rec, err)
+	assert.Equal(t, code, rec.Code, rec.Body.String())
+	assert.Equal(t, edges, f.allEdges(t, a), "no edge change")
+	assertCredentialUnrevoked(t, f.store, jti, credBefore)
+	roleAfter, _ := agentRoleAndScopes(f.reload(t, a))
+	assert.Equal(t, roleBefore, roleAfter, "stored role unchanged")
+	assert.False(t, f.client.resetAuthCalled, "nothing pushed")
+	assert.Empty(t, reissueAudits(t, f.store, a.ID, mutationTypeAgentScopesReissued))
+	assertIssueDeniedAudit(t, f.store, a.ID, mintSiteReissue, cause)
+}
+
+// A lookup error on the user path (the delegator user or the recorded
+// access token) refuses with 503 and writes nothing.
+func TestScopeReissue_UserDelegatorLookupFault(t *testing.T) {
+	t.Run("user lookup", func(t *testing.T) {
+		f := newUserReissueFixture(t, "rsu-lf-user")
+		a := f.agent(t, "rsu-lf-user-agent", AgentRoleFull, state.PhaseRunning)
+		f.edge(t, store.DelegationPrincipalUser, f.userID, a.ID, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, sessionProv(f.userID))
+		f.faults.failUserID = f.userID
+		assertUserRefusalWritesNothing(t, f, a, http.StatusServiceUnavailable, mintErrorClassLookup)
+	})
+	t.Run("access token lookup", func(t *testing.T) {
+		f := newUserReissueFixture(t, "rsu-lf-uat")
+		a := f.agent(t, "rsu-lf-uat-agent", AgentRoleFull, state.PhaseRunning)
+		tok, c := f.legacyUAT(t, "rsu-lf-uat-tok")
+		f.edge(t, store.DelegationPrincipalUser, f.userID, a.ID, c, uatProv(f.userID, tok.ID))
+		f.faults.uatReadErr = true
+		assertUserRefusalWritesNothing(t, f, a, http.StatusServiceUnavailable, mintErrorClassLookup)
+	})
+}
+
+// A session-rooted re-issue that changes the agent (the project maximum
+// was lowered to baseline) still equals what the same user's create issues
+// today at that role.
+func TestScopeReissue_SessionRootedEqualsCreateTodayAfterChange(t *testing.T) {
+	f := newUserReissueFixture(t, "rsu-eqc")
+	ctx := context.Background()
+	a := f.agent(t, "rsu-eqc-agent", AgentRoleFull, state.PhaseRunning)
+	f.edge(t, store.DelegationPrincipalUser, f.userID, a.ID, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, sessionProv(f.userID))
+	project, err := f.store.GetProject(ctx, f.projectID)
+	require.NoError(t, err)
+	if project.Annotations == nil {
+		project.Annotations = map[string]string{}
+	}
+	project.Annotations[projectSettingMaxAgentRole] = string(AgentRoleBaseline)
+	require.NoError(t, f.store.UpdateProject(ctx, project))
+
+	resp := f.run(t, a, false)
+	require.False(t, resp.Noop)
+	assert.Equal(t, "baseline", resp.RoleAfter)
+	reissued := f.grant(t, a)
+
+	user, err := f.store.GetUser(ctx, f.userID)
+	require.NoError(t, err)
+	rec := doRequestAsUser(t, f.srv, user, http.MethodPost, "/api/v1/projects/"+f.projectID+"/agents",
+		CreateAgentRequest{Name: "rsu-eqc-sibling", AgentRole: string(AgentRoleBaseline)})
+	require.Less(t, rec.Code, 300, rec.Body.String())
+	sibling, err := f.store.GetAgentBySlug(ctx, f.projectID, "rsu-eqc-sibling")
+	require.NoError(t, err)
+	siblingRole, _ := agentRoleAndScopes(sibling)
+	assert.Equal(t, AgentRoleBaseline, siblingRole)
+
+	assert.ElementsMatch(t, f.grant(t, sibling), reissued, "re-issue equals create-today after the change")
+	assert.NotContains(t, scopeStrings(reissued), string(ScopeAgentCreate), "full-only scopes removed")
+	siblingCeiling, agentCeiling := f.activeEdge(t, sibling).EffectCeiling, f.activeEdge(t, a).EffectCeiling
+	assert.True(t, effectCeilingsEqual(siblingCeiling, agentCeiling), "created %+v, re-issued %+v", siblingCeiling, agentCeiling)
+	assert.Equal(t, string(AgentRoleBaseline), f.activeEdge(t, a).Role)
 }
