@@ -33,6 +33,10 @@
 #   --skip-build    reuse the binaries and web build from a previous run in
 #                   the same --workdir and checkout.
 #   --port N        hub web/API port on 127.0.0.1 (default 18080).
+#   --api-runs N, --api-warmup N, --browser-runs N, --min-trials N
+#                   override the trial counts (defaults 15, 2, 11, 10). Only
+#                   for a setup smoke run; a baseline or a check must use the
+#                   defaults.
 #
 # Exit status: 0 within budget (or baseline written), 1 over budget or too
 # few trials, 2 usage or setup error.
@@ -51,6 +55,7 @@ RUNNER=""
 WORKDIR=""
 SKIP_BUILD=0
 PORT=18080
+MIN_TRIALS=""
 
 die() { echo "wallclock: $*" >&2; exit 2; }
 
@@ -62,6 +67,10 @@ while [ $# -gt 0 ]; do
     --workdir) WORKDIR=$2; shift 2 ;;
     --skip-build) SKIP_BUILD=1; shift ;;
     --port) PORT=$2; shift 2 ;;
+    --api-runs) API_RUNS=$2; shift 2 ;;
+    --api-warmup) API_WARMUP=$2; shift 2 ;;
+    --browser-runs) BROWSER_RUNS=$2; shift 2 ;;
+    --min-trials) MIN_TRIALS=$2; shift 2 ;;
     -h|--help) awk '/^# wallclock.sh/{p=1} p&&!/^#/{exit} p' "$0"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
@@ -143,12 +152,14 @@ kill "$HUB_PID" 2>/dev/null || true
 
 step "median ratio"
 cd "$REPO/web"
+MR_OPTS=()
+[ -z "$MIN_TRIALS" ] || MR_OPTS+=(--min-trials "$MIN_TRIALS")
 if [ "$MODE" = write ]; then
-  node e2e-perf/median-ratio.mjs --write-baseline "$BASELINE" --api "$API_OUT" --browser "$BROWSER_OUT" \
+  node e2e-perf/median-ratio.mjs "${MR_OPTS[@]}" --write-baseline "$BASELINE" --api "$API_OUT" --browser "$BROWSER_OUT" \
     --commit "$(git -C "$REPO" rev-parse --short HEAD)" --runner "$RUNNER"
 else
   set +e
-  node e2e-perf/median-ratio.mjs --baseline "$BASELINE" --api "$API_OUT" --browser "$BROWSER_OUT" |
+  node e2e-perf/median-ratio.mjs "${MR_OPTS[@]}" --baseline "$BASELINE" --api "$API_OUT" --browser "$BROWSER_OUT" |
     tee "$WORKDIR/median-ratio.txt"
   rc=${PIPESTATUS[0]}
   set -e
