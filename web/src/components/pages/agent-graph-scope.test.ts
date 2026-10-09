@@ -41,7 +41,6 @@ import {
   FakeEventSource,
   fakeFetch,
   holdable,
-  isGlobalAgentsList,
   jsonResponse,
   makeAgent,
   SCOPE_CAPS,

@@ -24,6 +24,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 interface AgentCreateInternals extends HTMLElement {
   updateComplete: Promise<unknown>;
@@ -34,7 +35,7 @@ interface AgentCreateInternals extends HTMLElement {
 }
 
 function jsonResponse(body: unknown): Response {
-  return { ok: true, status: 200, json: async () => body } as Response;
+  return { ok: true, status: 200, json: () => Promise.resolve(body) } as Response;
 }
 
 /** Resolvers for the project B requests, held until the test releases them. */
@@ -45,7 +46,7 @@ function stubFetch(): void {
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL) => {
-      const url = typeof input === 'string' ? input : input.toString();
+      const url = requestUrl(input);
       const respond = (body: unknown): Promise<Response> => Promise.resolve(jsonResponse(body));
       const held = (body: unknown): Promise<Response> =>
         new Promise((resolve) => releaseB.push(() => resolve(jsonResponse(body))));

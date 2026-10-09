@@ -24,7 +24,7 @@
  *   - Detail page: single-role export
  */
 
-import { describe, it, expect, vi, afterEach, beforeAll, beforeEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeAll } from 'vitest';
 
 // ---------------------------------------------------------------------------
 // Mock data
