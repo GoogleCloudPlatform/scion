@@ -510,20 +510,23 @@ func TestScopeReissue_T3a_ParentLookupErrorRefuses(t *testing.T) {
 // transaction.
 type auditFailTxStore struct {
 	store.Store
+	fired atomic.Int32
 }
 
 func (s *auditFailTxStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
 	return s.Store.WithTx(ctx, func(tx store.Store) error {
-		return fn(&auditFailStore{Store: tx})
+		return fn(&auditFailStore{Store: tx, fired: &s.fired})
 	})
 }
 
 type auditFailStore struct {
 	store.Store
+	fired *atomic.Int32
 }
 
 func (s *auditFailStore) CreateMutationAudit(ctx context.Context, r *store.MutationAuditRecord) error {
 	if r.MutationType == mutationTypeAgentScopesReissued {
+		s.fired.Add(1)
 		return errors.New("injected audit write fault")
 	}
 	return s.Store.CreateMutationAudit(ctx, r)
@@ -547,11 +550,13 @@ func TestScopeReissue_AuditFailureRollsBack(t *testing.T) {
 	require.NoError(t, f.store.UpdateProject(ctx, project))
 	edgesBefore := f.allEdges(t, f.child)
 
-	f.srv.store = &auditFailTxStore{Store: f.store}
+	failing := &auditFailTxStore{Store: f.store}
+	f.srv.store = failing
 	f.client.resetAuthCalled = false
 	resp, err := f.srv.runScopeReissue(ctx, f.reload(t, f.child), f.operator, false)
 	f.srv.store = f.store
-	require.Error(t, err)
+	require.Equal(t, int32(1), failing.fired.Load(), "the audit write inside the transaction was reached and failed")
+	require.ErrorContains(t, err, "injected audit write fault", "the run failed because of the audit write")
 	assert.Nil(t, resp)
 
 	assert.Equal(t, edgesBefore, f.allEdges(t, f.child), "edge change rolled back")
