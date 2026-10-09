@@ -62,12 +62,12 @@ const noTerminalNote = "answered No (stdin is not a terminal; re-run with --yes 
 // An end of input at the prompt is No.
 func ConfirmAction(prompt string, defaultYes bool, autoConfirm bool) bool {
 	if autoConfirm {
-		fmt.Fprintf(promptOut, "%s: auto-confirmed Yes\n", prompt)
+		_, _ = fmt.Fprintf(promptOut, "%s: auto-confirmed Yes\n", prompt)
 		return true
 	}
 
 	if !stdinIsTerminal() {
-		fmt.Fprintf(promptOut, "%s: %s\n", prompt, noTerminalNote)
+		_, _ = fmt.Fprintf(promptOut, "%s: %s\n", prompt, noTerminalNote)
 		return false
 	}
 
@@ -76,13 +76,13 @@ func ConfirmAction(prompt string, defaultYes bool, autoConfirm bool) bool {
 		suffix = " (y/N): "
 	}
 
-	fmt.Fprint(promptOut, prompt+suffix)
+	_, _ = fmt.Fprint(promptOut, prompt+suffix)
 
 	reader := bufio.NewReader(promptIn)
 	input, err := reader.ReadString('\n')
 	if err != nil && (input == "" || !errors.Is(err, io.EOF)) {
 		// End of input or a read error is not an answer: decline.
-		fmt.Fprintln(promptOut)
+		_, _ = fmt.Fprintln(promptOut)
 		return false
 	}
 
@@ -103,60 +103,60 @@ func ShowSyncPlan(result *SyncResult, autoConfirm bool) bool {
 		return true // Nothing to sync
 	}
 
-	fmt.Fprintln(promptOut)
-	fmt.Fprintln(promptOut, "Hub Agent Sync Required")
-	fmt.Fprintln(promptOut, "=======================")
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut, "Hub Agent Sync Required")
+	_, _ = fmt.Fprintln(promptOut, "=======================")
 
 	if len(result.ToRegister) > 0 {
-		fmt.Fprintln(promptOut, "Agents to register on Hub:")
+		_, _ = fmt.Fprintln(promptOut, "Agents to register on Hub:")
 		for _, name := range result.ToRegister {
-			fmt.Fprintf(promptOut, "  + %s\n", name)
+			_, _ = fmt.Fprintf(promptOut, "  + %s\n", name)
 		}
 	}
 
 	if len(result.ToRemove) > 0 {
-		fmt.Fprintln(promptOut, "Agents to remove from Hub (not on this broker):")
+		_, _ = fmt.Fprintln(promptOut, "Agents to remove from Hub (not on this broker):")
 		for _, ref := range result.ToRemove {
-			fmt.Fprintf(promptOut, "  - %s\n", ref.Name)
+			_, _ = fmt.Fprintf(promptOut, "  - %s\n", ref.Name)
 		}
 	}
 
 	// Show pending agents for visibility (they don't require action)
 	if len(result.Pending) > 0 {
-		fmt.Fprintln(promptOut)
-		fmt.Fprintln(promptOut, "Agents pending on Hub (awaiting start):")
+		_, _ = fmt.Fprintln(promptOut)
+		_, _ = fmt.Fprintln(promptOut, "Agents pending on Hub (awaiting start):")
 		for _, ref := range result.Pending {
-			fmt.Fprintf(promptOut, "  ~ %s\n", ref.Name)
+			_, _ = fmt.Fprintf(promptOut, "  ~ %s\n", ref.Name)
 		}
 	}
 
 	// Show remote-only agents for visibility (they don't require action)
 	if len(result.RemoteOnly) > 0 {
-		fmt.Fprintln(promptOut)
-		fmt.Fprintln(promptOut, "Agents on Hub from other brokers (no action needed):")
+		_, _ = fmt.Fprintln(promptOut)
+		_, _ = fmt.Fprintln(promptOut, "Agents on Hub from other brokers (no action needed):")
 		for _, ref := range result.RemoteOnly {
-			fmt.Fprintf(promptOut, "  ~ %s\n", ref.Name)
+			_, _ = fmt.Fprintf(promptOut, "  ~ %s\n", ref.Name)
 		}
 	}
 
 	// Show stale-local agents for visibility (they don't require action)
 	if len(result.StaleLocal) > 0 {
-		fmt.Fprintln(promptOut)
-		fmt.Fprintln(promptOut, "Stale local agent artifacts (no action needed):")
+		_, _ = fmt.Fprintln(promptOut)
+		_, _ = fmt.Fprintln(promptOut, "Stale local agent artifacts (no action needed):")
 		for _, name := range result.StaleLocal {
-			fmt.Fprintf(promptOut, "  ~ %s\n", name)
+			_, _ = fmt.Fprintf(promptOut, "  ~ %s\n", name)
 		}
 	}
 
-	fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut)
 	return ConfirmAction("Proceed with sync?", true, autoConfirm)
 }
 
 // ShowLinkPrompt displays the project link prompt.
 // Returns true if the user confirms, false otherwise.
 func ShowLinkPrompt(projectName string, autoConfirm bool) bool {
-	fmt.Fprintln(promptOut)
-	fmt.Fprintf(promptOut, "Project '%s' is not linked to the Hub.\n", projectName)
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintf(promptOut, "Project '%s' is not linked to the Hub.\n", projectName)
 	return ConfirmAction("Link project with Hub?", true, autoConfirm)
 }
 
@@ -169,7 +169,7 @@ func ShowInitLinkPrompt(autoConfirm bool) bool {
 // ShowInitProvidePrompt displays a confirmation to add this broker as a provider.
 // Returns true if the user confirms, false otherwise.
 func ShowInitProvidePrompt(brokerName, projectName string, autoConfirm bool) bool {
-	fmt.Fprintf(promptOut, "This host (%s) is registered as a broker.\n", brokerName)
+	_, _ = fmt.Fprintf(promptOut, "This host (%s) is registered as a broker.\n", brokerName)
 	return ConfirmAction(fmt.Sprintf("Add as provider for '%s'?", projectName), true, autoConfirm)
 }
 
@@ -207,7 +207,14 @@ type ProjectMatch struct {
 //
 // nonInteractive implies autoConfirm in the CLI, so a single match still links
 // under --non-interactive.
+//
+// An empty matches list returns ProjectChoiceRegisterNew without prompting.
 func ShowMatchingProjectsPrompt(projectName string, matches []ProjectMatch, nextSlug string, autoConfirm, nonInteractive bool) (ProjectChoice, string, error) {
+	if len(matches) == 0 {
+		// Nothing to link to: registering a new project is the only choice.
+		return ProjectChoiceRegisterNew, "", nil
+	}
+
 	if nonInteractive && len(matches) > 1 {
 		ids := make([]string, 0, len(matches))
 		for _, m := range matches {
@@ -218,27 +225,27 @@ func ShowMatchingProjectsPrompt(projectName string, matches []ProjectMatch, next
 			ErrAmbiguousProject, len(matches), projectName, strings.Join(ids, ", "))
 	}
 
-	fmt.Fprintln(promptOut)
-	fmt.Fprintf(promptOut, "Found %d existing project(s) with the name '%s' on the Hub:\n", len(matches), projectName)
-	fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintf(promptOut, "Found %d existing project(s) with the name '%s' on the Hub:\n", len(matches), projectName)
+	_, _ = fmt.Fprintln(promptOut)
 
 	for i, m := range matches {
 		if m.GitRemote != "" {
-			fmt.Fprintf(promptOut, "  [%d] %s (ID: %s, remote: %s)\n", i+1, m.Name, m.ID, m.GitRemote)
+			_, _ = fmt.Fprintf(promptOut, "  [%d] %s (ID: %s, remote: %s)\n", i+1, m.Name, m.ID, m.GitRemote)
 		} else {
-			fmt.Fprintf(promptOut, "  [%d] %s (ID: %s)\n", i+1, m.Name, m.ID)
+			_, _ = fmt.Fprintf(promptOut, "  [%d] %s (ID: %s)\n", i+1, m.Name, m.ID)
 		}
 	}
 	if nextSlug != "" {
-		fmt.Fprintf(promptOut, "  [%d] Register as a new project (will be created as '%s')\n", len(matches)+1, nextSlug)
+		_, _ = fmt.Fprintf(promptOut, "  [%d] Register as a new project (will be created as '%s')\n", len(matches)+1, nextSlug)
 	} else {
-		fmt.Fprintf(promptOut, "  [%d] Register as a new project\n", len(matches)+1)
+		_, _ = fmt.Fprintf(promptOut, "  [%d] Register as a new project\n", len(matches)+1)
 	}
-	fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut)
 
 	if autoConfirm {
 		// Auto-confirm defaults to linking to the first match
-		fmt.Fprintf(promptOut, "Auto-linking to: %s (ID: %s)\n", matches[0].Name, matches[0].ID)
+		_, _ = fmt.Fprintf(promptOut, "Auto-linking to: %s (ID: %s)\n", matches[0].Name, matches[0].ID)
 		return ProjectChoiceLink, matches[0].ID, nil
 	}
 
@@ -250,7 +257,7 @@ func ShowMatchingProjectsPrompt(projectName string, matches []ProjectMatch, next
 
 	reader := bufio.NewReader(promptIn)
 	for {
-		fmt.Fprint(promptOut, "Enter choice (or 'c' to cancel): ")
+		_, _ = fmt.Fprint(promptOut, "Enter choice (or 'c' to cancel): ")
 		input, err := reader.ReadString('\n')
 		if err != nil {
 			return ProjectChoiceCancel, "", nil
@@ -263,12 +270,12 @@ func ShowMatchingProjectsPrompt(projectName string, matches []ProjectMatch, next
 
 		choice := 0
 		if _, err := fmt.Sscanf(input, "%d", &choice); err != nil {
-			fmt.Fprintln(promptOut, "Invalid choice. Please enter a number.")
+			_, _ = fmt.Fprintln(promptOut, "Invalid choice. Please enter a number.")
 			continue
 		}
 
 		if choice < 1 || choice > maxChoice {
-			fmt.Fprintf(promptOut, "Invalid choice. Please enter 1-%d.\n", maxChoice)
+			_, _ = fmt.Fprintf(promptOut, "Invalid choice. Please enter 1-%d.\n", maxChoice)
 			continue
 		}
 
@@ -311,15 +318,15 @@ func NextSlugFromMatches(baseSlug string, matches []ProjectMatch) string {
 // ShowBrokerRegistrationPrompt displays the broker registration confirmation.
 // Returns true if the user confirms, false otherwise.
 func ShowBrokerRegistrationPrompt(endpoint string, autoConfirm bool) bool {
-	fmt.Fprintln(promptOut)
-	fmt.Fprintln(promptOut, "This will register this host as a Runtime Broker with the Hub.")
-	fmt.Fprintf(promptOut, "Hub endpoint: %s\n", endpoint)
-	fmt.Fprintln(promptOut)
-	fmt.Fprintln(promptOut, "The broker will be able to:")
-	fmt.Fprintln(promptOut, "  - Execute agents on behalf of authorized Hub users")
-	fmt.Fprintln(promptOut, "  - Open long lived control channel to receive Hub commands")
-	fmt.Fprintln(promptOut, "  - Update agent lifecycle status on the Hub")
-	fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut, "This will register this host as a Runtime Broker with the Hub.")
+	_, _ = fmt.Fprintf(promptOut, "Hub endpoint: %s\n", endpoint)
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut, "The broker will be able to:")
+	_, _ = fmt.Fprintln(promptOut, "  - Execute agents on behalf of authorized Hub users")
+	_, _ = fmt.Fprintln(promptOut, "  - Open long lived control channel to receive Hub commands")
+	_, _ = fmt.Fprintln(promptOut, "  - Update agent lifecycle status on the Hub")
+	_, _ = fmt.Fprintln(promptOut)
 	return ConfirmAction("Continue with broker registration?", true, autoConfirm)
 }
 
@@ -327,21 +334,21 @@ func ShowBrokerRegistrationPrompt(endpoint string, autoConfirm bool) bool {
 // Shows list of projects the broker contributes to.
 // Returns true if the user confirms, false otherwise.
 func ShowBrokerDeregistrationPrompt(brokerID string, projects []string, autoConfirm bool) bool {
-	fmt.Fprintln(promptOut)
-	fmt.Fprintln(promptOut, "This will remove this host's broker registration from the Hub.")
-	fmt.Fprintf(promptOut, "Broker ID: %s\n", brokerID)
-	fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut, "This will remove this host's broker registration from the Hub.")
+	_, _ = fmt.Fprintf(promptOut, "Broker ID: %s\n", brokerID)
+	_, _ = fmt.Fprintln(promptOut)
 
 	if len(projects) > 0 {
-		fmt.Fprintf(promptOut, "This broker contributes to %d project(s):\n", len(projects))
+		_, _ = fmt.Fprintf(promptOut, "This broker contributes to %d project(s):\n", len(projects))
 		for _, p := range projects {
-			fmt.Fprintf(promptOut, "  - %s\n", p)
+			_, _ = fmt.Fprintf(promptOut, "  - %s\n", p)
 		}
-		fmt.Fprintln(promptOut)
-		fmt.Fprintln(promptOut, "The broker will be removed from ALL projects it contributes to.")
+		_, _ = fmt.Fprintln(promptOut)
+		_, _ = fmt.Fprintln(promptOut, "The broker will be removed from ALL projects it contributes to.")
 	}
 
-	fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut)
 	// Default NO for safety - destructive operation
 	return ConfirmAction("Continue with deregistration?", false, autoConfirm)
 }
@@ -349,27 +356,27 @@ func ShowBrokerDeregistrationPrompt(brokerID string, projects []string, autoConf
 // ShowProjectLinkPrompt displays the project link confirmation.
 // Returns true if the user confirms, false otherwise.
 func ShowProjectLinkPrompt(projectName, endpoint string, autoConfirm bool) bool {
-	fmt.Fprintln(promptOut)
-	fmt.Fprintf(promptOut, "This will link project '%s' to the Hub.\n", projectName)
-	fmt.Fprintf(promptOut, "Hub endpoint: %s\n", endpoint)
-	fmt.Fprintln(promptOut)
-	fmt.Fprintln(promptOut, "When linked:")
-	fmt.Fprintln(promptOut, "  - Agent operations will be coordinated through the Hub")
-	fmt.Fprintln(promptOut, "  - Agents can be managed from any connected broker")
-	fmt.Fprintln(promptOut, "  - Local agents will be synced to the Hub")
-	fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintf(promptOut, "This will link project '%s' to the Hub.\n", projectName)
+	_, _ = fmt.Fprintf(promptOut, "Hub endpoint: %s\n", endpoint)
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut, "When linked:")
+	_, _ = fmt.Fprintln(promptOut, "  - Agent operations will be coordinated through the Hub")
+	_, _ = fmt.Fprintln(promptOut, "  - Agents can be managed from any connected broker")
+	_, _ = fmt.Fprintln(promptOut, "  - Local agents will be synced to the Hub")
+	_, _ = fmt.Fprintln(promptOut)
 	return ConfirmAction("Continue with linking?", true, autoConfirm)
 }
 
 // ShowProjectUnlinkPrompt displays the project unlink confirmation.
 // Returns true if the user confirms, false otherwise.
 func ShowProjectUnlinkPrompt(projectName string, autoConfirm bool) bool {
-	fmt.Fprintln(promptOut)
-	fmt.Fprintf(promptOut, "This will unlink project '%s' from the Hub locally.\n", projectName)
-	fmt.Fprintln(promptOut)
-	fmt.Fprintln(promptOut, "The project and its agents will remain on the Hub for other brokers.")
-	fmt.Fprintln(promptOut, "You can re-link this project later with 'scion hub link'.")
-	fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintf(promptOut, "This will unlink project '%s' from the Hub locally.\n", projectName)
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut, "The project and its agents will remain on the Hub for other brokers.")
+	_, _ = fmt.Fprintln(promptOut, "You can re-link this project later with 'scion hub link'.")
+	_, _ = fmt.Fprintln(promptOut)
 	// Default NO - user should be sure they want to unlink
 	return ConfirmAction("Continue with unlinking?", false, autoConfirm)
 }
@@ -390,28 +397,28 @@ const (
 // Returns the user's choice. Without a terminal (and without autoConfirm) it
 // does not read stdin and returns LinkOrDisableCancel.
 func ShowProjectLinkOrDisablePrompt(projectName string, autoConfirm bool) LinkOrDisableChoice {
-	fmt.Fprintln(promptOut)
-	fmt.Fprintln(promptOut, "Hub is enabled but this project is not linked.")
-	fmt.Fprintln(promptOut)
-	fmt.Fprintln(promptOut, "Choose an option:")
-	fmt.Fprintln(promptOut, "  [1] Link and sync project now")
-	fmt.Fprintln(promptOut, "  [2] Disable Hub for this project")
-	fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut, "Hub is enabled but this project is not linked.")
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut, "Choose an option:")
+	_, _ = fmt.Fprintln(promptOut, "  [1] Link and sync project now")
+	_, _ = fmt.Fprintln(promptOut, "  [2] Disable Hub for this project")
+	_, _ = fmt.Fprintln(promptOut)
 
 	if autoConfirm {
 		// Auto-confirm defaults to linking
-		fmt.Fprintln(promptOut, "Auto-selecting: Link and sync project")
+		_, _ = fmt.Fprintln(promptOut, "Auto-selecting: Link and sync project")
 		return LinkOrDisableLink
 	}
 
 	if !stdinIsTerminal() {
-		fmt.Fprintln(promptOut, "No choice made (stdin is not a terminal; re-run with --yes to link and sync).")
+		_, _ = fmt.Fprintln(promptOut, "No choice made (stdin is not a terminal; re-run with --yes to link and sync).")
 		return LinkOrDisableCancel
 	}
 
 	reader := bufio.NewReader(promptIn)
 	for {
-		fmt.Fprint(promptOut, "Enter choice (or 'c' to cancel): ")
+		_, _ = fmt.Fprint(promptOut, "Enter choice (or 'c' to cancel): ")
 		input, err := reader.ReadString('\n')
 		if err != nil {
 			return LinkOrDisableCancel
@@ -424,7 +431,7 @@ func ShowProjectLinkOrDisablePrompt(projectName string, autoConfirm bool) LinkOr
 
 		choice := 0
 		if _, err := fmt.Sscanf(input, "%d", &choice); err != nil {
-			fmt.Fprintln(promptOut, "Invalid choice. Please enter 1 or 2.")
+			_, _ = fmt.Fprintln(promptOut, "Invalid choice. Please enter 1 or 2.")
 			continue
 		}
 
@@ -434,7 +441,7 @@ func ShowProjectLinkOrDisablePrompt(projectName string, autoConfirm bool) LinkOr
 		case 2:
 			return LinkOrDisableDisable
 		default:
-			fmt.Fprintln(promptOut, "Invalid choice. Please enter 1 or 2.")
+			_, _ = fmt.Fprintln(promptOut, "Invalid choice. Please enter 1 or 2.")
 		}
 	}
 }
@@ -448,52 +455,52 @@ func ShowSyncAfterLinkPrompt(autoConfirm bool) bool {
 // ShowLinkBeforeRegisterPrompt asks if user wants to link project before registering broker.
 // Returns true if the user confirms, false otherwise.
 func ShowLinkBeforeRegisterPrompt(projectName string, autoConfirm bool) bool {
-	fmt.Fprintln(promptOut)
-	fmt.Fprintf(promptOut, "Project '%s' is not linked to the Hub.\n", projectName)
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintf(promptOut, "Project '%s' is not linked to the Hub.\n", projectName)
 	return ConfirmAction("Link it first?", true, autoConfirm)
 }
 
 // ShowProjectProviderPrompt asks if user wants to add the broker as a provider to the project.
 // Returns true if the user confirms, false otherwise.
 func ShowProjectProviderPrompt(projectName string, autoConfirm bool) bool {
-	fmt.Fprintln(promptOut)
-	fmt.Fprintf(promptOut, "Add this broker as a provider to project '%s'?\n", projectName)
-	fmt.Fprintln(promptOut, "This will allow the broker to execute agents for this project.")
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintf(promptOut, "Add this broker as a provider to project '%s'?\n", projectName)
+	_, _ = fmt.Fprintln(promptOut, "This will allow the broker to execute agents for this project.")
 	return ConfirmAction("Continue?", true, autoConfirm)
 }
 
 // ShowCheckHubAnywayPrompt asks if user wants to check Hub even though it's disabled.
 // Returns true if the user wants to check, false otherwise.
 func ShowCheckHubAnywayPrompt(autoConfirm bool) bool {
-	fmt.Fprintln(promptOut)
-	fmt.Fprintln(promptOut, "Hub integration is disabled for this project.")
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut, "Hub integration is disabled for this project.")
 	return ConfirmAction("Check Hub status anyway?", false, autoConfirm)
 }
 
 // ShowCleanUnlinkPrompt asks if user wants to unlink from Hub before cleaning.
 // Returns true if the user confirms, false otherwise.
 func ShowCleanUnlinkPrompt(projectName string, autoConfirm bool) bool {
-	fmt.Fprintln(promptOut)
-	fmt.Fprintln(promptOut, "The project will be unlinked from the Hub locally.")
-	fmt.Fprintln(promptOut, "The project and its agents will remain on the Hub for other brokers.")
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut, "The project will be unlinked from the Hub locally.")
+	_, _ = fmt.Fprintln(promptOut, "The project and its agents will remain on the Hub for other brokers.")
 	return ConfirmAction("Unlink from Hub before cleaning?", true, autoConfirm)
 }
 
 // ShowCleanConfirmPrompt displays the final confirmation for cleaning a project.
 // Returns true if the user confirms, false otherwise.
 func ShowCleanConfirmPrompt(projectName, projectPath string, isGlobal bool, autoConfirm bool) bool {
-	fmt.Fprintln(promptOut)
-	fmt.Fprintln(promptOut, "This will permanently remove the scion configuration:")
-	fmt.Fprintf(promptOut, "  Project: %s\n", projectName)
-	fmt.Fprintf(promptOut, "  Path:    %s\n", projectPath)
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut, "This will permanently remove the scion configuration:")
+	_, _ = fmt.Fprintf(promptOut, "  Project: %s\n", projectName)
+	_, _ = fmt.Fprintf(promptOut, "  Path:    %s\n", projectPath)
 	if isGlobal {
-		fmt.Fprintln(promptOut, "  Type:  global")
+		_, _ = fmt.Fprintln(promptOut, "  Type:  global")
 	} else {
-		fmt.Fprintln(promptOut, "  Type:  project")
+		_, _ = fmt.Fprintln(promptOut, "  Type:  project")
 	}
-	fmt.Fprintln(promptOut)
-	fmt.Fprintln(promptOut, "This action cannot be undone. Agent configurations will be lost.")
-	fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut, "This action cannot be undone. Agent configurations will be lost.")
+	_, _ = fmt.Fprintln(promptOut)
 	// Default NO for safety - destructive operation
 	return ConfirmAction("Remove scion project?", false, autoConfirm)
 }
@@ -501,31 +508,31 @@ func ShowCleanConfirmPrompt(projectName, projectPath string, isGlobal bool, auto
 // ShowProvidePrompt asks if user wants to add the broker as a provider for a project.
 // Returns true if the user confirms, false otherwise.
 func ShowProvidePrompt(projectName, brokerName string, autoConfirm bool) bool {
-	fmt.Fprintln(promptOut)
-	fmt.Fprintf(promptOut, "Add broker '%s' as a provider for project '%s'?\n", brokerName, projectName)
-	fmt.Fprintln(promptOut)
-	fmt.Fprintln(promptOut, "This will allow the broker to execute agents for this project.")
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintf(promptOut, "Add broker '%s' as a provider for project '%s'?\n", brokerName, projectName)
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut, "This will allow the broker to execute agents for this project.")
 	return ConfirmAction("Continue?", true, autoConfirm)
 }
 
 // ShowChangeDefaultBrokerPrompt asks if user wants to change the default broker for a project.
 // Returns true if the user confirms, false otherwise.
 func ShowChangeDefaultBrokerPrompt(projectName, currentBrokerName, newBrokerName string, autoConfirm bool) bool {
-	fmt.Fprintln(promptOut)
-	fmt.Fprintf(promptOut, "Project '%s' already has a default broker: '%s'\n", projectName, currentBrokerName)
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintf(promptOut, "Project '%s' already has a default broker: '%s'\n", projectName, currentBrokerName)
 	return ConfirmAction(fmt.Sprintf("Change default broker to '%s'?", newBrokerName), false, autoConfirm)
 }
 
 // ShowWithdrawPrompt asks if user wants to remove the broker as a provider from a project.
 // Returns true if the user confirms, false otherwise.
 func ShowWithdrawPrompt(projectName, brokerName string, autoConfirm bool) bool {
-	fmt.Fprintln(promptOut)
-	fmt.Fprintf(promptOut, "Remove broker '%s' as a provider from project '%s'?\n", brokerName, projectName)
-	fmt.Fprintln(promptOut)
-	fmt.Fprintln(promptOut, "The broker will no longer be able to execute agents for this project.")
-	fmt.Fprintln(promptOut, "Existing agents on this broker will continue running but cannot be")
-	fmt.Fprintln(promptOut, "managed through the Hub until the broker is re-added as a provider.")
-	fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintf(promptOut, "Remove broker '%s' as a provider from project '%s'?\n", brokerName, projectName)
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut, "The broker will no longer be able to execute agents for this project.")
+	_, _ = fmt.Fprintln(promptOut, "Existing agents on this broker will continue running but cannot be")
+	_, _ = fmt.Fprintln(promptOut, "managed through the Hub until the broker is re-added as a provider.")
+	_, _ = fmt.Fprintln(promptOut)
 	// Default NO for safety - could disrupt running agents
 	return ConfirmAction("Continue?", false, autoConfirm)
 }
@@ -539,24 +546,24 @@ type ProjectProviders interface {
 // ShowProjectDeletePrompt displays the project deletion confirmation.
 // Returns true if the user confirms, false otherwise.
 func ShowProjectDeletePrompt(projectName string, agentCount int, providers ProjectProviders, autoConfirm bool) bool {
-	fmt.Fprintln(promptOut)
-	fmt.Fprintf(promptOut, "This will permanently delete project '%s' from the Hub.\n", projectName)
-	fmt.Fprintln(promptOut)
-	fmt.Fprintln(promptOut, "The following will be removed:")
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintf(promptOut, "This will permanently delete project '%s' from the Hub.\n", projectName)
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut, "The following will be removed:")
 	if agentCount > 0 {
-		fmt.Fprintf(promptOut, "  - %d agent(s) (will be stopped and deleted)\n", agentCount)
+		_, _ = fmt.Fprintf(promptOut, "  - %d agent(s) (will be stopped and deleted)\n", agentCount)
 	} else {
-		fmt.Fprintln(promptOut, "  - 0 agents")
+		_, _ = fmt.Fprintln(promptOut, "  - 0 agents")
 	}
 	if providers != nil && providers.ProviderCount() > 0 {
-		fmt.Fprintf(promptOut, "  - %d broker provider association(s):\n", providers.ProviderCount())
+		_, _ = fmt.Fprintf(promptOut, "  - %d broker provider association(s):\n", providers.ProviderCount())
 		for _, name := range providers.ProviderNames() {
-			fmt.Fprintf(promptOut, "      %s\n", name)
+			_, _ = fmt.Fprintf(promptOut, "      %s\n", name)
 		}
 	}
-	fmt.Fprintln(promptOut)
-	fmt.Fprintln(promptOut, "This action cannot be undone.")
-	fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut, "This action cannot be undone.")
+	_, _ = fmt.Fprintln(promptOut)
 	// Default NO for safety - destructive operation
 	return ConfirmAction("Delete this project?", false, autoConfirm)
 }
@@ -565,22 +572,22 @@ func ShowProjectDeletePrompt(projectName string, agentCount int, providers Proje
 // projectNames is a list of project names the broker provides for.
 // Returns true if the user confirms, false otherwise.
 func ShowBrokerDeletePrompt(brokerName string, projectNames []string, autoConfirm bool) bool {
-	fmt.Fprintln(promptOut)
-	fmt.Fprintf(promptOut, "This will permanently delete broker '%s' from the Hub.\n", brokerName)
-	fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintf(promptOut, "This will permanently delete broker '%s' from the Hub.\n", brokerName)
+	_, _ = fmt.Fprintln(promptOut)
 
 	if len(projectNames) > 0 {
-		fmt.Fprintf(promptOut, "This broker provides for %d project(s):\n", len(projectNames))
+		_, _ = fmt.Fprintf(promptOut, "This broker provides for %d project(s):\n", len(projectNames))
 		for _, name := range projectNames {
-			fmt.Fprintf(promptOut, "  - %s\n", name)
+			_, _ = fmt.Fprintf(promptOut, "  - %s\n", name)
 		}
-		fmt.Fprintln(promptOut)
-		fmt.Fprintln(promptOut, "The broker will be removed as a provider from all projects.")
+		_, _ = fmt.Fprintln(promptOut)
+		_, _ = fmt.Fprintln(promptOut, "The broker will be removed as a provider from all projects.")
 	}
 
-	fmt.Fprintln(promptOut)
-	fmt.Fprintln(promptOut, "This action cannot be undone.")
-	fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut)
+	_, _ = fmt.Fprintln(promptOut, "This action cannot be undone.")
+	_, _ = fmt.Fprintln(promptOut)
 	// Default NO for safety - destructive operation
 	return ConfirmAction("Delete this broker?", false, autoConfirm)
 }

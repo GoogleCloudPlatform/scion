@@ -1738,8 +1738,10 @@ func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, pr
 			return nil, err
 		}
 
-		// Only prompt if interactive and not auto-confirm
-		if autoConfirm || !util.IsTerminal() {
+		// Only prompt if interactive and not auto-confirm. Without a
+		// terminal, stdin is never read (an idle open stdin would hang);
+		// the error names --broker so the caller can pick one.
+		if autoConfirm || !isInteractiveTerminal() {
 			return nil, &hubError{msg: nonInteractiveBrokerMessage(apiErr.Message, availableBrokers), err: apiErr}
 		}
 

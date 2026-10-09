@@ -44,7 +44,7 @@ func TestColorForStripsWhenNotTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	in := Bold + Yellow + "warning" + Reset
 	if got := ColorFor(f, in); got != "warning" {

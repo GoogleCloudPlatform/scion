@@ -174,12 +174,24 @@ func TestRunHubProjectsDelete_ConfirmationUnchanged(t *testing.T) {
 		assert.Empty(t, hub.deletes)
 	})
 
+	// Stdin under go test is not a terminal, so the prompt is not read and
+	// confirmation is given the non-interactive way, with --yes.
 	t.Run("accepted", func(t *testing.T) {
-		hub := setupProjectsDeleteTest(t, false)
-		withStdin(t, "y\n")
+		hub := setupProjectsDeleteTest(t, true)
 
 		require.NoError(t, runHubProjectsDelete(hubProjectsDeleteCmd, []string{deleteTestIDA}))
 		assert.Equal(t, []string{deleteTestIDA}, hub.deletes)
+	})
+
+	// A piped "y" without a terminal is not an answer: the prompt answers No.
+	t.Run("piped yes without terminal is declined", func(t *testing.T) {
+		hub := setupProjectsDeleteTest(t, false)
+		withStdin(t, "y\n")
+
+		err := runHubProjectsDelete(hubProjectsDeleteCmd, []string{deleteTestIDA})
+		require.Error(t, err)
+		assert.Equal(t, "deletion cancelled", err.Error())
+		assert.Empty(t, hub.deletes)
 	})
 }
 

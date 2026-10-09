@@ -182,3 +182,29 @@ func TestShowMatchingProjectsPrompt_TerminalChoice(t *testing.T) {
 		t.Errorf("got (%v, %q), want (ProjectChoiceLink, \"id-2\")", choice, id)
 	}
 }
+
+// An empty matches list must not index matches[0]: there is nothing to link
+// to, so every mode returns the register-new choice.
+func TestShowMatchingProjectsPrompt_NoMatchesRegistersNew(t *testing.T) {
+	for _, tc := range []struct {
+		name                        string
+		autoConfirm, nonInteractive bool
+		isTTY                       bool
+	}{
+		{"autoConfirm", true, false, false},
+		{"nonInteractive", true, true, false},
+		{"noTerminal", false, false, false},
+		{"terminal", false, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withPromptIO(t, strings.NewReader(""), tc.isTTY)
+			choice, id, err := ShowMatchingProjectsPrompt("widgets", nil, "", tc.autoConfirm, tc.nonInteractive)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if choice != ProjectChoiceRegisterNew || id != "" {
+				t.Errorf("got (%v, %q), want (ProjectChoiceRegisterNew, \"\")", choice, id)
+			}
+		})
+	}
+}

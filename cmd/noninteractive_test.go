@@ -175,7 +175,7 @@ func TestRunHubLink_NonInteractiveAmbiguousProject(t *testing.T) {
 func TestFormatCLIError_PlainWhenNotTerminal(t *testing.T) {
 	f, err := os.Create(filepath.Join(t.TempDir(), "stderr"))
 	require.NoError(t, err)
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// The error text itself may carry colour (the agent-container banner).
 	got := formatCLIError(f, errors.New(util.Yellow+"boom"+util.Reset))
