@@ -248,6 +248,58 @@ That makes them usable as regression budgets on any CI runner:
 
 Keep the limits in mind. Only request-path reads are counted (see the reference's [Counted scope](/scion/reference/server-config/#request-performance-tracing)), and `audit_records` equals the decision count only while every decision emits one audit record, which is the default. As an example of scale, the run shown above made 88 authorization store calls and 255 decisions for one 25-agent project list. Those numbers come from one machine (SQLite, member caller) at one commit and are an illustration only, not targets.
 
+## Regression budgets in CI
+
+Two CI checks hold the agent-list counts at their current values. Both use a fixed, seeded fixture of 100 agents in one project, as a non-admin project member. Both fail when a count goes over its budget, and the failure message says which count it was and what its budget is.
+
+| Check | Where | What it bounds |
+|---|---|---|
+| Hub counter budgets | `TestPerfBudget_AgentEndpoints` in `pkg/hub/perf_budget_test.go`, run by the **pkg/hub SQLite Tests** job | authorization store calls, authorization decisions, agent-row DB reads and response bytes for the project list (first page, next page, graph), the global list (first page, legacy full, compact) and the agent endpoints |
+| Web counter budgets | `web/e2e-perf/budgets/budgets.pw.ts`, run by the **Web perf budgets** job | DOM element count (including shadow roots) and long-task count for the project page's grid, list and graph views |
+
+Each budget is a baseline, measured on `main`, plus a margin. The baselines and margins are written next to the test that uses them:
+
+- Hub counts: the baseline plus 2%, or plus 2, whichever is larger. Response bytes: the baseline plus 1%. These margins are tight on purpose. The seed is deterministic, so the counts repeat exactly on every run, and response bytes vary by under 0.01% between runs. A single extra read or decision per request sits inside the +2 floor and passes. An N+1 regression (one more read or decision per returned agent) is over every budget.
+- DOM elements: the baseline plus 10 elements. Every measured load must stay within it.
+- Long tasks: the baseline plus 50%, or plus 3, whichever is larger, applied to the median of three loads. This is the one counter that depends on the runner's CPU and load. The wide margin and the median are there so that one slow load cannot fail CI.
+
+The web test mocks the API with responses from a small deterministic generator, `web/e2e-perf/budgets/fixture.mjs`. It builds the same 100-agent shape with fixed IDs and times. To keep the generator on the hub's real response shape, the hub test writes the field names of the hub's responses for the page's requests to `web/e2e-perf/budgets/fixture-schema.json`. Two checks hold the three in step:
+
+- The hub test fails with "does not match the field names of the hub's current responses" when the hub's fields change.
+- `npm run test:e2e-perf` (`fixture.test.mjs`) fails when the generator's fields differ from the schema file.
+
+The web test also fails when the page sends a request that the generator does not answer.
+
+### Updating a budget for an intended change
+
+If a change is meant to raise a count, update the baseline in the same change and give the reason in the commit message. If a change lowers a count on purpose, lower the baseline too, so the improvement is held. Because the hub margins are tight (see above), even a small intended change can need a new baseline; a single extra read per request fits inside the +2 floor, but anything per agent does not.
+
+1. **Hub counts.** Run the test verbosely and read the `measured:` line for each request:
+
+   ```sh
+   go test -run '^TestPerfBudget_AgentEndpoints$' -v ./pkg/hub/
+   ```
+
+   Then set that request's `baseline` in `perfBudgets` to the new values. Also update `perfBudgetBaseline`, the commit the baselines were taken on.
+
+2. **Web fixture.** If the change adds, renames or removes a field in a response the project page reads, refresh the schema file and commit it:
+
+   ```sh
+   SCION_PERF_BUDGET_WRITE_WEB_SCHEMA=1 go test -run '^TestPerfBudget_AgentEndpoints$' ./pkg/hub/
+   ```
+
+   Then update `fixture.mjs` until `npm run test:e2e-perf` passes (from `web/`). If the page starts sending a new request, add it to `buildFixture()` and to `perfBudgetWebRequests` in `pkg/hub/perf_budget_test.go`, then refresh.
+
+3. **Web counts.** From `web/`, run the suite and read the `measured` line for each view:
+
+   ```sh
+   npm run test:e2e:perf-budgets
+   ```
+
+   Then set the view's `baseline` in `VIEWS` in `budgets.pw.ts`, and update `BASELINE_COMMIT`. Base the long-task baseline on several runs, not one.
+
+Wall-clock times are not checked in CI. They are compared as a median ratio against a stored baseline, only on a quiet runner booked for the run. See "Wall-clock budgets" in the perf/bench README.
+
 ## Readiness marks
 
 The web client can write [User Timing](https://developer.mozilla.org/en-US/docs/Web/API/Performance/mark) marks that time when a page became usable, measured in the browser rather than from the outside. They are **off by default** and are controlled by the hub's `profiling.readiness_marks` operational setting (see the [setting reference](/scion/reference/admin-settings/#profiling)). Off, the client makes no `performance.mark` calls and the page shell is unchanged.
