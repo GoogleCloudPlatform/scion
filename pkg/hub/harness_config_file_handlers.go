@@ -23,12 +23,14 @@ import (
 	"io"
 	"log/slog"
 	"mime"
+	"mime/multipart"
 	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -238,6 +240,9 @@ func (s *Server) handleHarnessConfigFileWrite(w http.ResponseWriter, r *http.Req
 	}
 
 	content := []byte(req.Content)
+	if filePath == "config.yaml" && refuseUnusableProvisionerYAML(w, hc.Name, content) {
+		return
+	}
 	objectPath := hc.StoragePath + "/" + filePath
 	_, err := stor.Upload(ctx, objectPath, strings.NewReader(req.Content), storage.UploadOptions{
 		ContentType: "text/plain; charset=utf-8",
@@ -318,6 +323,19 @@ func (s *Server) handleHarnessConfigFileUpload(w http.ResponseWriter, r *http.Re
 	if stor == nil {
 		RuntimeError(w, "Storage not configured")
 		return
+	}
+
+	// Check an uploaded config.yaml before any part is written, so a refused
+	// upload leaves storage and the record unchanged.
+	if headers := r.MultipartForm.File["config.yaml"]; len(headers) > 0 {
+		data, err := readMultipartFile(headers[0])
+		if err != nil {
+			BadRequest(w, "Failed to read multipart file: "+err.Error())
+			return
+		}
+		if refuseUnusableProvisionerYAML(w, hc.Name, data) {
+			return
+		}
 	}
 
 	files := hc.Files
@@ -407,6 +425,40 @@ func (s *Server) handleHarnessConfigFileUpload(w http.ResponseWriter, r *http.Re
 		Files: entries,
 		Hash:  hc.ContentHash,
 	})
+}
+
+// refuseUnusableProvisionerYAML writes 422 harness_config_unusable and returns
+// true when configYAML parses and declares a provisioner block that could
+// never provision an agent (builtin type, or no command). This is the same
+// check and response as harness-config finalize (ptone/scion#3133). Content
+// that does not parse is left to the existing handling.
+func refuseUnusableProvisionerYAML(w http.ResponseWriter, name string, configYAML []byte) bool {
+	entry, err := config.ParseHarnessConfigYAML(configYAML)
+	if err != nil {
+		return false
+	}
+	if perr := harness.CheckProvisionerUsable(name, nil, entry); perr != nil {
+		writeError(w, http.StatusUnprocessableEntity, harnessConfigUnusableErrorCode, perr.PublicMessage(), nil)
+		return true
+	}
+	return false
+}
+
+// readMultipartFile reads one multipart file part fully.
+func readMultipartFile(fh *multipart.FileHeader) ([]byte, error) {
+	src, err := fh.Open()
+	if err != nil {
+		return nil, fmt.Errorf("open: %w", err)
+	}
+	data, err := io.ReadAll(src)
+	closeErr := src.Close()
+	if err != nil {
+		return nil, fmt.Errorf("read: %w", err)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("close: %w", closeErr)
+	}
+	return data, nil
 }
 
 func (s *Server) handleHarnessConfigFileDelete(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig, filePath string) {
