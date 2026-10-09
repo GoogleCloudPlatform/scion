@@ -27,6 +27,8 @@ ZONE_NAME="${DNS_ZONE_NAME}"
 GCE_ZONE="${ZONE}"
 EMAIL="${CERT_EMAIL}"
 
+require_cert_email
+
 if [[ -z "$PROJECT_ID" ]]; then
     echo "Error: PROJECT_ID is not set and could not be determined from gcloud config."
     exit 1
@@ -39,7 +41,7 @@ if ! gcloud dns managed-zones describe "${ZONE_NAME}" &>/dev/null; then
     echo "Creating Cloud DNS managed zone: ${ZONE_NAME}..."
     gcloud dns managed-zones create "${ZONE_NAME}" \
         --dns-name="${DOMAIN}." \
-        --description="Managed zone for scion-ai.dev sub-domain" \
+        --description="${DNS_ZONE_DESCRIPTION}" \
         --visibility="public"
 else
     echo "DNS zone ${ZONE_NAME} already exists."
