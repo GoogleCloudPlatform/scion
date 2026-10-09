@@ -27,6 +27,12 @@ const DISALLOWED =
   /[\s\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufffd]/;
 
 /**
+ * Longest accepted URL in characters (Unicode code points), as the hub's
+ * MonitoringDashboardURLMaxLength and the settings schema's maxLength.
+ */
+export const HTTP_URL_MAX_LENGTH = 2048;
+
+/**
  * Whether value is an absolute http:// or https:// URL with a host and no
  * user credentials, whose port (if any) is 1 to 65535, at most
  * HTTP_URL_MAX_LENGTH characters long. Used to decide
@@ -34,12 +40,6 @@ const DISALLOWED =
  * validates the same rule when the setting is saved, so this is a second
  * check on the display side.
  */
-/**
- * Longest accepted URL in characters (Unicode code points), as the hub's
- * MonitoringDashboardURLMaxLength and the settings schema's maxLength.
- */
-export const HTTP_URL_MAX_LENGTH = 2048;
-
 export function isHttpUrl(value: string | null | undefined): value is string {
   if (typeof value !== 'string' || value === '' || DISALLOWED.test(value)) return false;
   // Count code points, not UTF-16 units, so the limit matches the hub's.
