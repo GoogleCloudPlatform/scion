@@ -173,6 +173,12 @@ type startContextInputs struct {
 	// and hydration precede it, since resolution reads their results.
 	PolicyPreflight bool
 
+	// PinnedRuntime is the runtime a restart found the agent's container
+	// on. With no saved or provisioned profile, the runtime selection uses
+	// it instead of the project's active profile, so the start lands on
+	// the runtime the stop acts on. Zero value: no pin.
+	PinnedRuntime pinnedRuntime
+
 	// Prehydrated carries hydration results createAgent's preflights
 	// already obtained, so launch provisions the same bundle they evaluated
 	// instead of hydrating again. Zero value (startAgent, restartAgent):
@@ -457,11 +463,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// 503 as start/restart's own later resolution, rather than classifying
 	// the dispatch against the default runtime first (ptone/scion#2709).
 	// Create and a start without a saved profile stay non-strict.
-	mgr, dispatchRuntimeType, err := s.resolveManagerForOptsStrict(api.StartOptions{
+	mgr, dispatchRuntimeType, err := s.resolveExistingAgentManager(api.StartOptions{
 		Name:        in.Name,
 		ProjectPath: in.ProjectPath,
 		Profile:     gcpIdentityProfile,
-	}, profileMode, slog.LevelWarn)
+	}, profileMode, slog.LevelWarn, in.PinnedRuntime)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err

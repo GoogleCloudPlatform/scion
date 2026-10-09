@@ -3749,6 +3749,14 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		}
 		projectPath = match.entry.ProjectPath
 	}
+	// The runtime the stop below acts on. Without a saved profile the start
+	// is pinned to it rather than to the project's active profile, so a
+	// restart does not stop the agent on one runtime and start it on
+	// another.
+	var pin pinnedRuntime
+	if matchErr == nil && match.containerID != "" && match.manager != nil {
+		pin = pinnedRuntimeOf(match.manager, match.runtime, s.runtimeOfManager(match.manager))
+	}
 
 	sc, err := s.buildStartContext(ctx, startContextInputs{
 		Name:                     agentName,
@@ -3763,9 +3771,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		// The Hub-supplied project ID (the request's projectId) locates a
 		// shared-workspace agent's broker-side external state root, as on
 		// start; never the project-id marker inside the workspace.
-		ProjectID:   projectID,
-		HTTPRequest: r,
-		Operation:   opHTTPRestart,
+		ProjectID:     projectID,
+		HTTPRequest:   r,
+		Operation:     opHTTPRestart,
+		PinnedRuntime: pin,
 	})
 	if err != nil {
 		s.writeStartContextError(w, err, "restart agent")
@@ -3797,7 +3806,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// agent-info.json by opts.Name (the container's name). If they differ
 	// the fallback cannot fire and the 503 is returned, which fails safe.
 	// buildStartContext already logged any fallback at Warn; Debug here.
-	mgr, resolvedRuntimeType, err := s.resolveManagerForOptsStrict(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned), slog.LevelDebug)
+	mgr, resolvedRuntimeType, err := s.resolveExistingAgentManager(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned), slog.LevelDebug, pin)
 	if err != nil {
 		writeSavedProfileUnresolved(w, err)
 		return
@@ -5868,6 +5877,37 @@ func (s *Server) resolveRuntimeNameForOpts(opts api.StartOptions) string {
 func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, string) {
 	mgr, runtimeType, _ := s.resolveManagerForOptsStrict(opts, profileLenient, slog.LevelWarn)
 	return mgr, runtimeType
+}
+
+// pinnedRuntime is the runtime an existing agent's container was found
+// on, as a manager and its runtime name. The zero value pins nothing.
+type pinnedRuntime struct {
+	mgr  agent.Manager
+	name string
+}
+
+// pinnedRuntimeOf returns the pin for mgr, named after the first non-nil
+// runtime given; the zero value when none is.
+func pinnedRuntimeOf(mgr agent.Manager, runtimes ...scionrt.Runtime) pinnedRuntime {
+	for _, rt := range runtimes {
+		if rt != nil {
+			return pinnedRuntime{mgr: mgr, name: rt.Name()}
+		}
+	}
+	return pinnedRuntime{}
+}
+
+// resolveExistingAgentManager is resolveManagerForOptsStrict for an
+// existing agent's start or restart. When the agent has no saved or
+// provisioned profile (opts.Profile is empty) and its container was found
+// on a runtime (pin), that runtime is used instead of the project's active
+// profile, so the agent starts where it was found. A forced runtime
+// (ServerConfig.ForceRuntime) still takes precedence.
+func (s *Server) resolveExistingAgentManager(opts api.StartOptions, mode profileResolution, fallbackLevel slog.Level, pin pinnedRuntime) (agent.Manager, string, error) {
+	if opts.Profile == "" && pin.mgr != nil && pin.name != "" && s.config.ForceRuntime == "" {
+		return pin.mgr, pin.name, nil
+	}
+	return s.resolveManagerForOptsStrict(opts, mode, fallbackLevel)
 }
 
 // profileResolution selects how resolveManagerForOptsStrict treats a
