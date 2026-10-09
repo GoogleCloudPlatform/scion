@@ -802,6 +802,10 @@ func (p *eventBuilder) PublishInviteChanged(_ context.Context, action, inviteID,
 //     (only when the recipient is a user)
 //   - agent.<agentID>.message — per-agent conversation streams (both
 //     directions; subscribers filter by user participation themselves)
+//
+// DM messages (a "dm:" thread id) on the agent and project subjects are
+// delivered by the web events stream only to DM participants; see
+// sseEventVisible in web.go.
 func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message, attachments []AttachmentRef) {
 	evt := UserMessageEvent{
 		ID:            msg.ID,

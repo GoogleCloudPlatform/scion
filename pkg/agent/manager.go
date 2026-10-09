@@ -492,6 +492,12 @@ func (m *AgentManager) deleteResolved(ctx context.Context, agentName string, ref
 		util.Debugf("delete: starting filesystem cleanup for agent %s", agentName)
 		branchDeleted, err := DeleteAgentFiles(agentName, projectPath, removeBranch)
 		util.Debugf("delete: filesystem cleanup completed for agent %s", agentName)
+		if errors.Is(err, ErrAgentProjectUnresolved) {
+			// No project directory: none of the agent's files remain
+			// there, so the delete has nothing more to do.
+			util.Debugf("delete: no project directory for agent %s; no files to remove", agentName)
+			return false, nil
+		}
 		return branchDeleted, err
 	}
 	return false, nil
