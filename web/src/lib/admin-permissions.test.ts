@@ -27,6 +27,7 @@ import {
   ROUTE_PERMISSION_MAP,
   canEditHubEnvVars,
   hasAnyPermission,
+  TAB_PERMISSION_MAP,
   isSettingsTabVisible,
   type AdminStatus,
 } from './admin-permissions.js';
@@ -135,7 +136,7 @@ describe('hasAnyPermission: access_constraint permissions', () => {
 // Settings tab gating: each tab is gated on the permission its data needs
 // ---------------------------------------------------------------------------
 
-describe('admin-permissions: settings environment variables and secrets tabs', () => {
+describe('admin-permissions: settings environment variables and hub settings tabs', () => {
   // System-scope permissions of the built-in roles relevant to these tabs.
   const hubAdmin = adminWithPermissions(
     'hub.settings.read',
@@ -147,6 +148,7 @@ describe('admin-permissions: settings environment variables and secrets tabs', (
     isSuperAdmin: false,
     permissions: ['hub.settings.read', 'template.read'],
   };
+  const hubViewer = adminWithPermissions('hub.settings.read');
   const superAdmin: AdminStatus = { isAdmin: true, isSuperAdmin: true, permissions: [] };
 
   it('shows the environment variables tab read-only to a hub admin', () => {
@@ -154,9 +156,24 @@ describe('admin-permissions: settings environment variables and secrets tabs', (
     expect(canEditHubEnvVars(hubAdmin)).toBe(false);
   });
 
-  it('keeps the secrets tab gated on hub.settings.read for a hub admin', () => {
-    expect(isSettingsTabVisible(hubAdmin, 'secrets')).toBe(true);
+  // The hub settings tab must match its list call, which admits only a
+  // legacy admin (isSuperAdmin); hub roles get a 403 from it even though
+  // they all hold hub.settings.read.
+  it('shows the hub settings tab to a legacy hub admin (super-admin)', () => {
+    expect(isSettingsTabVisible(superAdmin, 'secrets')).toBe(true);
+  });
+
+  it('hides the hub settings tab from hub-admin, member and viewer roles', () => {
+    expect(isSettingsTabVisible(hubAdmin, 'secrets')).toBe(false);
+    expect(isSettingsTabVisible(hubMember, 'secrets')).toBe(false);
+    expect(isSettingsTabVisible(hubViewer, 'secrets')).toBe(false);
     expect(isSettingsTabVisible(adminWithPermissions('hub.env_vars.read'), 'secrets')).toBe(false);
+  });
+
+  it('keeps the environment variables tab visible to the hub roles that hold its permission', () => {
+    expect(isSettingsTabVisible(hubAdmin, 'env-vars')).toBe(true);
+    expect(isSettingsTabVisible(hubMember, 'env-vars')).toBe(false);
+    expect(isSettingsTabVisible(hubViewer, 'env-vars')).toBe(false);
   });
 
   it('hides the environment variables tab without hub.env_vars.read', () => {
@@ -173,6 +190,33 @@ describe('admin-permissions: settings environment variables and secrets tabs', (
     const readOnly = adminWithPermissions('hub.env_vars.read');
     expect(hasAnyPermission(readOnly, NAV_PERMISSION_MAP['/settings']!)).toBe(true);
     expect(hasAnyPermission(readOnly, ROUTE_PERMISSION_MAP['scion-page-settings']!)).toBe(true);
+  });
+
+  // The Settings nav item (nav.ts) and the settings route guard (main.ts)
+  // both check hasAnyPermission against these entries. A permission that
+  // shows no settings tab must not show the nav item either.
+  const settingsNav = NAV_PERMISSION_MAP['/settings']!;
+  const settingsRoute = ROUTE_PERMISSION_MAP['scion-page-settings']!;
+
+  it('hides the Settings nav item and route from a holder of hub.settings.read only', () => {
+    expect(hasAnyPermission(hubViewer, settingsNav)).toBe(false);
+    expect(hasAnyPermission(hubViewer, settingsRoute)).toBe(false);
+  });
+
+  it('shows the Settings nav item and route to a hub member with a tab permission', () => {
+    expect(hasAnyPermission(hubMember, settingsNav)).toBe(true);
+    expect(hasAnyPermission(hubMember, settingsRoute)).toBe(true);
+  });
+
+  it('shows the Settings nav item and route to a super-admin', () => {
+    expect(hasAnyPermission(superAdmin, settingsNav)).toBe(true);
+    expect(hasAnyPermission(superAdmin, settingsRoute)).toBe(true);
+  });
+
+  it('shows the Settings nav item for exactly the permissions that show a tab', () => {
+    const tabPerms = [...new Set(Object.values(TAB_PERMISSION_MAP).flat())].sort();
+    expect([...settingsNav].sort()).toEqual(tabPerms);
+    expect([...settingsRoute].sort()).toEqual(tabPerms);
   });
 
   it('denies everything for a null admin status', () => {

@@ -15,14 +15,20 @@
 package hub
 
 import (
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -43,13 +49,296 @@ func TestPermissionRegistryEntriesDeclareCurrentUse(t *testing.T) {
 		if permission.Action == "" {
 			t.Fatalf("%s has empty action", permission.ID)
 		}
-		if len(permission.Enforcement) == 0 && len(permission.NonRouteUse) == 0 {
-			t.Fatalf("%s must declare route enforcement or explicit non-route use", permission.ID)
+		if len(permission.Enforcement) == 0 && len(permission.NonRouteUse) == 0 && !permission.IsReserved() {
+			t.Fatalf("%s must declare route enforcement, explicit non-route use, or Reserved", permission.ID)
 		}
 		for _, enforcement := range permission.Enforcement {
 			assertEnforcementReferenceExists(t, permission.ID, enforcement)
 		}
 	}
+}
+
+// TestPermissionRegistryRowsEnforcedOrReserved requires every registry row
+// to be exactly one of: used (Enforcement or NonRouteUse) or Reserved. A
+// row that is neither is a published permission nothing checks, and one
+// that is both makes it unclear whether the check exists. Nothing may grant
+// a reserved permission: no agent scope bundle, no built-in role, no manage
+// alias and no scope picker list may carry it.
+func TestPermissionRegistryRowsEnforcedOrReserved(t *testing.T) {
+	content, err := os.ReadFile(webTokenListPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", webTokenListPath, err)
+	}
+	aliases := map[string][]string{}
+	for alias, resource := range permissions.UATManageAliases {
+		aliases[alias] = permissions.UATManageScopesFor(resource)
+	}
+	surfaces := grantSurfaces{
+		Roles:   BuiltInRoles(),
+		Aliases: aliases,
+		Pickers: map[string][]string{
+			"UATScopeOptions":                     registryUATScopes(true),
+			webTokenListPath + " FALLBACK_SCOPES": extractWebTokenScopes(t, webTokenListPath, string(content)),
+		},
+	}
+	if err := checkRowsEnforcedOrReserved(permissions.Registry, surfaces); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const webTokenListPath = "../../web/src/components/shared/token-list.ts"
+
+// grantSurfaces are the places a permission can be granted or offered:
+// built-in roles (permission IDs), manage aliases (alias to UAT scopes) and
+// scope picker lists (surface name to UAT scopes).
+type grantSurfaces struct {
+	Roles   []BuiltInRole
+	Aliases map[string][]string
+	Pickers map[string][]string
+}
+
+func checkRowsEnforcedOrReserved(registry []permissions.Permission, s grantSurfaces) error {
+	var problems []string
+	reserved := map[string]bool{}
+	reservedScope := map[string]string{} // UAT scope -> reserved permission ID
+	for _, p := range registry {
+		used := len(p.Enforcement) > 0 || len(p.NonRouteUse) > 0
+		switch {
+		case p.Reserved != "" && !p.IsReserved():
+			problems = append(problems, p.ID+": Reserved is blank; give the reason")
+		case !used && !p.IsReserved():
+			problems = append(problems, p.ID+": no Enforcement or NonRouteUse and not Reserved")
+		case used && p.IsReserved():
+			problems = append(problems, p.ID+": Reserved but also declares Enforcement or NonRouteUse")
+		}
+		if !p.IsReserved() {
+			continue
+		}
+		reserved[p.ID] = true
+		if p.UATScope != "" {
+			reservedScope[p.UATScope] = p.ID
+		}
+		if len(p.AgentScopes) > 0 {
+			problems = append(problems, fmt.Sprintf("%s: reserved permission is in agent scope bundle(s) %v", p.ID, p.AgentScopes))
+		}
+	}
+	for _, role := range s.Roles {
+		for _, id := range role.Permissions {
+			if reserved[id] {
+				problems = append(problems, fmt.Sprintf("role %s holds reserved permission %s", role.Name, id))
+			}
+		}
+	}
+	for _, alias := range sortedSurfaceKeys(s.Aliases) {
+		for _, scope := range s.Aliases[alias] {
+			if id, ok := reservedScope[scope]; ok {
+				problems = append(problems, fmt.Sprintf("manage alias %s expands to %s (reserved permission %s)", alias, scope, id))
+			}
+		}
+	}
+	for _, picker := range sortedSurfaceKeys(s.Pickers) {
+		for _, scope := range s.Pickers[picker] {
+			if id, ok := reservedScope[scope]; ok {
+				problems = append(problems, fmt.Sprintf("scope picker %s offers %s (reserved permission %s)", picker, scope, id))
+			}
+		}
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("permission registry rows must be enforced or reserved:\n  %s", strings.Join(problems, "\n  "))
+	}
+	return nil
+}
+
+func sortedSurfaceKeys(m map[string][]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// TestCheckRowsEnforcedOrReserved_RejectsBadRows pins the checker against
+// the mutations it exists to catch, one per rule and grant surface.
+func TestCheckRowsEnforcedOrReserved_RejectsBadRows(t *testing.T) {
+	enforced := permissions.Permission{ID: "x.read", UATScope: "x:read", Enforcement: []string{"pkg/hub/x.go"}}
+	reserved := permissions.Permission{ID: "x.delete", UATScope: "x:delete", Reserved: "nothing checks it yet"}
+	rows := []permissions.Permission{enforced, reserved}
+	role := func(scope string, ids ...string) BuiltInRole {
+		return BuiltInRole{Name: "role-" + scope, ScopeType: scope, Permissions: ids}
+	}
+	cases := []struct {
+		name string
+		rows []permissions.Permission
+		s    grantSurfaces
+		want string
+	}{
+		{"enforcement removed", []permissions.Permission{{ID: "x.read"}}, grantSurfaces{}, "x.read: no Enforcement"},
+		{"reserved mark removed", []permissions.Permission{{ID: "x.delete"}}, grantSurfaces{}, "x.delete: no Enforcement"},
+		{"blank reserved reason", []permissions.Permission{{ID: "x.delete", Reserved: "  "}}, grantSurfaces{}, "x.delete: Reserved is blank"},
+		{"blank reserved reason on used row", []permissions.Permission{{ID: "x.read", Enforcement: []string{"pkg/hub/x.go"}, Reserved: " "}}, grantSurfaces{}, "x.read: Reserved is blank"},
+		{"both", []permissions.Permission{{ID: "x.read", Enforcement: []string{"pkg/hub/x.go"}, Reserved: "r"}}, grantSurfaces{}, "x.read: Reserved but also"},
+		{"agent scope bundle", []permissions.Permission{enforced, {ID: "x.delete", Reserved: "r", AgentScopes: []string{"project:x:write"}}}, grantSurfaces{}, "x.delete: reserved permission is in agent scope bundle"},
+		{"project role", rows, grantSurfaces{Roles: []BuiltInRole{role(store.RoleScopeProject, "x.read", "x.delete")}}, "role role-project holds reserved permission x.delete"},
+		{"system role", rows, grantSurfaces{Roles: []BuiltInRole{role(store.RoleScopeSystem, "x.delete")}}, "role role-system holds reserved permission x.delete"},
+		{"manage alias", rows, grantSurfaces{Aliases: map[string][]string{"x:manage": {"x:read", "x:delete"}}}, "manage alias x:manage expands to x:delete"},
+		{"scope picker", rows, grantSurfaces{Pickers: map[string][]string{"web": {"x:read", "x:delete"}}}, "scope picker web offers x:delete"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkRowsEnforcedOrReserved(tc.rows, tc.s)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %v, want an error containing %q", err, tc.want)
+			}
+		})
+	}
+	ok := grantSurfaces{
+		Roles:   []BuiltInRole{role(store.RoleScopeProject, "x.read"), role(store.RoleScopeSystem, "x.read")},
+		Aliases: map[string][]string{"x:manage": {"x:read"}},
+		Pickers: map[string][]string{"web": {"x:read"}},
+	}
+	if err := checkRowsEnforcedOrReserved(rows, ok); err != nil {
+		t.Fatalf("valid rows rejected: %v", err)
+	}
+}
+
+// TestArtifactPermissionsConsumedUnlessReserved closes the gap a shared
+// dispatcher leaves: every artifact row names artifactHost.Authorize, which
+// exists whether or not anything passes it that permission. So a non-reserved
+// artifact row must be used, and a reserved row must be unused, so wiring
+// one up forces clearing Reserved. A use is, in non-test files: the
+// pkg/artifacts constant inside pkg/artifacts, an artifacts.Permission<X>
+// selector in pkg/hub, or the permission ID as a string literal in either
+// package. The constant declarations themselves do not count, nor do the
+// role tables in pkg/hub/seed.go (BuiltInRoles and the *PermissionIDs
+// functions): a role listing a permission is a grant, not a check, and
+// TestPermissionRegistryRowsEnforcedOrReserved fails any role holding a
+// reserved one. The rest of seed.go is scanned. The registry and
+// applicability tables live in pkg/hub/permissions, which is not scanned.
+func TestArtifactPermissionsConsumedUnlessReserved(t *testing.T) {
+	constants := map[string]string{
+		"PermissionRead":   artifacts.PermissionRead,
+		"PermissionCreate": artifacts.PermissionCreate,
+		"PermissionUpdate": artifacts.PermissionUpdate,
+		"PermissionDelete": artifacts.PermissionDelete,
+		"PermissionManage": artifacts.PermissionManage,
+	}
+	uses := artifactPermissionUses(t, constants, isSeedRoleTable)
+	seen := map[string]bool{}
+	for _, p := range permissions.Registry {
+		if p.Resource != permissions.ResourceArtifact {
+			continue
+		}
+		seen[p.ID] = true
+		switch {
+		case !p.IsReserved() && uses[p.ID] == 0:
+			t.Errorf("%s is not Reserved but nothing in pkg/artifacts or pkg/hub uses it; mark it Reserved or wire the check", p.ID)
+		case p.IsReserved() && uses[p.ID] > 0:
+			t.Errorf("%s is Reserved but pkg/artifacts or pkg/hub uses it %d time(s); clear Reserved and record the check in Enforcement", p.ID, uses[p.ID])
+		}
+	}
+	for name, id := range constants {
+		if !seen[id] {
+			t.Errorf("pkg/artifacts constant %s (%s) has no artifact row in the permission registry", name, id)
+		}
+	}
+}
+
+// isSeedRoleTable reports whether function fn in pkg/hub file is one of the
+// built-in role tables in seed.go.
+func isSeedRoleTable(file, fn string) bool {
+	return file == "seed.go" && (fn == "BuiltInRoles" || strings.HasSuffix(fn, "PermissionIDs"))
+}
+
+// artifactPermissionUses counts uses of each artifact permission ID (see
+// TestArtifactPermissionsConsumedUnlessReserved) across the non-test Go
+// files of pkg/artifacts and pkg/hub. constants maps each pkg/artifacts
+// constant name to its permission ID; skipHubFunc reports which pkg/hub
+// function bodies (by file and function name) to skip.
+func artifactPermissionUses(t *testing.T, constants map[string]string, skipHubFunc func(file, fn string) bool) map[string]int {
+	t.Helper()
+	ids := map[string]bool{}
+	for _, id := range constants {
+		ids[id] = true
+	}
+	counts := map[string]int{}
+	countFile := func(file *ast.File, fileName string, inArtifacts bool) {
+		// Identifiers and literals that make up a Permission constant's own
+		// declaration are not uses, nor is anything in a skipped function.
+		skip := map[ast.Node]bool{}
+		ast.Inspect(file, func(n ast.Node) bool {
+			if fd, ok := n.(*ast.FuncDecl); ok && !inArtifacts && skipHubFunc(fileName, fd.Name.Name) {
+				skip[fd] = true
+				return false
+			}
+			if vs, ok := n.(*ast.ValueSpec); ok {
+				for i, name := range vs.Names {
+					if _, isConst := constants[name.Name]; isConst && inArtifacts {
+						skip[name] = true
+						if i < len(vs.Values) {
+							skip[vs.Values[i]] = true
+						}
+					}
+				}
+			}
+			return true
+		})
+		ast.Inspect(file, func(n ast.Node) bool {
+			if n == nil {
+				return true
+			}
+			if skip[n] {
+				return false
+			}
+			switch x := n.(type) {
+			case *ast.SelectorExpr:
+				if pkg, ok := x.X.(*ast.Ident); ok && pkg.Name == "artifacts" && !inArtifacts {
+					if id, ok := constants[x.Sel.Name]; ok {
+						counts[id]++
+						return false
+					}
+				}
+			case *ast.Ident:
+				if id, ok := constants[x.Name]; ok && inArtifacts {
+					counts[id]++
+				}
+			case *ast.BasicLit:
+				if x.Kind == token.STRING {
+					if v, err := strconv.Unquote(x.Value); err == nil && ids[v] {
+						counts[v]++
+					}
+				}
+			}
+			return true
+		})
+	}
+	for _, dir := range []struct {
+		path        string
+		inArtifacts bool
+	}{{filepath.Join("..", "artifacts"), true}, {".", false}} {
+		entries, err := os.ReadDir(dir.path)
+		if err != nil {
+			t.Fatalf("read %s: %v", dir.path, err)
+		}
+		fset := token.NewFileSet()
+		files := 0
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			file, err := parser.ParseFile(fset, filepath.Join(dir.path, name), nil, 0)
+			if err != nil {
+				t.Fatalf("parse %s: %v", name, err)
+			}
+			files++
+			countFile(file, name, dir.inArtifacts)
+		}
+		if files == 0 {
+			t.Fatalf("no Go files found in %s", dir.path)
+		}
+	}
+	return counts
 }
 
 func TestCapabilityActionMapsAreRegistryDerived(t *testing.T) {
@@ -143,9 +432,9 @@ func TestAgentTokenScopesMapToRegistry(t *testing.T) {
 		// Deliberately excludes template.delete - see the scope declaration.
 		ScopeProjectTemplateWrite: {"template.create", "template.update"},
 		// Publishing artifacts (and new versions) homed in the agent's own
-		// project. Deliberately excludes artifact.delete and artifact.manage.
-		// Not yet minted into any agent token (see the scope declaration).
-		ScopeProjectArtifactWrite: {"artifact.create", "artifact.update"},
+		// project. Deliberately excludes artifact.delete and artifact.manage,
+		// and the Reserved artifact.update (ptone/scion#3652).
+		ScopeProjectArtifactWrite: {"artifact.create"},
 		// Reading artifacts has its own ceiling-optional scope rather than
 		// riding on project:read, so ceilings frozen before artifacts existed
 		// keep admitting project:read (see ceilingOptionalRoleScopes).
@@ -180,7 +469,7 @@ func TestTokenScopeSurfacesDoNotExposeStaleUATScopes(t *testing.T) {
 		}
 	}
 
-	for _, path := range []string{"../../web/src/components/shared/token-list.ts"} {
+	for _, path := range []string{webTokenListPath} {
 		content, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)

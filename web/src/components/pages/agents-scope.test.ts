@@ -28,6 +28,7 @@ import './agents.js';
 import type { ScionPageAgents } from './agents.js';
 import { stateManager } from '../../client/state.js';
 import type { Agent } from '../../shared/types.js';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 beforeAll(() => {
   const store = new Map<string, string>();
@@ -66,7 +67,7 @@ describe('scion-page-agents loadedScope tracking', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((input: string | URL | Request) => {
-        const url = typeof input === 'string' ? input : input.toString();
+        const url = requestUrl(input);
         if (url.includes('scope=mine')) {
           // Held open until the test explicitly resolves it, so the
           // in-flight window (agentScope already 'mine', loadedScope not yet

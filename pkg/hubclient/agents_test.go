@@ -582,3 +582,28 @@ func TestCreateAgentRequest_GCPIdentity_JSONRoundTrip(t *testing.T) {
 	assert.Equal(t, "assign", decoded.GCPIdentity.MetadataMode)
 	assert.Equal(t, "sa-123", decoded.GCPIdentity.ServiceAccountID)
 }
+
+// ReissueScopes posts the re-issue body to the agent's reset-auth route and
+// decodes the result.
+func TestProjectAgentService_ReissueScopes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/api/v1/projects/project-123/agents/agent-1/reset-auth", r.URL.Path)
+		var body map[string]bool
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		assert.Equal(t, map[string]bool{"reissue_scopes": true, "dry_run": true}, body)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"op_id":"op-1","dry_run":true,"added":["project:artifact:read"],"removed":[],"role_before":"full","role_after":"full"}`))
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	require.NoError(t, err)
+	reissuer, ok := client.ProjectAgents("project-123").(ScopeReissuer)
+	require.True(t, ok)
+	res, err := reissuer.ReissueScopes(context.Background(), "agent-1", true)
+	require.NoError(t, err)
+	assert.True(t, res.DryRun)
+	assert.Equal(t, []string{"project:artifact:read"}, res.Added)
+	assert.Equal(t, "op-1", res.OpID)
+}

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import type { ScionPageAdminIntegrations } from './admin-integrations.js';
 
 // ── Mock data builders ──
 
@@ -86,9 +87,6 @@ function createFetchHandler(
   };
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let ScionPageAdminIntegrations: any;
-
 async function createComponent(
   fetchHandler: (url: string | URL | Request, init?: RequestInit) => Promise<Response>
 ) {
@@ -118,10 +116,6 @@ function queryAll(el: HTMLElement, selector: string): Element[] {
   return Array.from(el.shadowRoot?.querySelectorAll(selector) ?? []);
 }
 
-function query(el: HTMLElement, selector: string): Element | null {
-  return el.shadowRoot?.querySelector(selector) ?? null;
-}
-
 // ── Tests ──
 
 describe('scion-page-admin-integrations — Discord guild_ids', () => {
@@ -133,8 +127,7 @@ describe('scion-page-admin-integrations — Discord guild_ids', () => {
       value: { pathname: '/admin/integrations/discord' },
       writable: true,
     });
-    const mod = await import('./admin-integrations.js');
-    ScionPageAdminIntegrations = mod.ScionPageAdminIntegrations;
+    await import('./admin-integrations.js');
   });
 
   afterEach(() => {

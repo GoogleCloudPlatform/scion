@@ -94,7 +94,8 @@ func TestStructFieldByJSONNameMatching(t *testing.T) {
 		{"-", ""}, // a "-," tag is not a candidate here
 		{"DashComma", ""},
 		{"unexported", ""},
-		{"inner", ""}, // embedded struct fields are not flattened here
+		{"inner", "Inner"}, // embedded struct fields are promoted, as in encoding/json
+		{"INNER", "Inner"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.key, func(t *testing.T) {
