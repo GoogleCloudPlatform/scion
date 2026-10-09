@@ -1047,7 +1047,7 @@ spec:
       - image: IMAGE_URL                 # keep the existing container entry
         volumeMounts:
         - name: VOLUME_NAME
-          mountPath: /mnt/VOLUME_NAME    # must be exactly /mnt/<volume_name>
+          mountPath: /mnt/VOLUME_NAME    # must be /mnt/ + volume_name in settings.yaml
       volumes:
       - name: VOLUME_NAME
         nfs:
@@ -1056,8 +1056,9 @@ spec:
           readOnly: false
 ```
 
-The mount path must equal `/mnt/VOLUME_NAME`, with the same name as the
-volume and as `volume_name` below. NFS volumes require the second
+The mount path must equal `/mnt/VOLUME_NAME`, where `VOLUME_NAME` is the
+`volume_name` setting below. The Cloud Run volume's own `name` can
+differ; using the same name for both just keeps it simple. NFS volumes require the second
 generation (`gen2`) execution environment. Do not use an in-memory
 volume here: it is local to each instance and not shared between
 replicas, even though the readiness check passes because the path is
