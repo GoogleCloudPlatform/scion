@@ -42,7 +42,11 @@ import (
 // carry-over stays within the agent home. Only regular files and directories
 // are copied; a symbolic link anywhere (the skills directories themselves, a
 // parent component of either, or an entry inside a skill) is not followed
-// and is skipped.
+// and is skipped. Python bytecode artifacts (__pycache__ directories and
+// .pyc files) are skipped, as util.CopyDir does.
+//
+// If the copy fails partway, what this call wrote is removed again (the new
+// directory itself when this call created it), so a later call retries.
 func carryOverSkillsDir(agentHome, oldSkillsDir, newSkillsDir string) ([]string, error) {
 	if oldSkillsDir == "" || newSkillsDir == "" {
 		return nil, nil
@@ -70,9 +74,12 @@ func carryOverSkillsDir(agentHome, oldSkillsDir, newSkillsDir string) ([]string,
 		return nil, err
 	}
 
+	newMissing := false
 	if entries, err := readRootDir(root, newRel); err == nil && len(entries) > 0 {
 		return nil, nil
-	} else if err != nil && !os.IsNotExist(err) {
+	} else if os.IsNotExist(err) {
+		newMissing = true
+	} else if err != nil {
 		return nil, fmt.Errorf("read skills dir %s: %w", newRel, err)
 	}
 
@@ -85,20 +92,47 @@ func carryOverSkillsDir(agentHome, oldSkillsDir, newSkillsDir string) ([]string,
 	}
 
 	var copied []string
+	// undo removes what this call wrote after a failure, so the new directory
+	// is again missing or empty and a later Start retries the carry-over
+	// instead of skipping it as non-empty. A new directory that existed
+	// before (empty) is kept; only the skills written into it are removed.
+	undo := func(partial string) {
+		if newMissing {
+			_ = root.RemoveAll(newRel)
+			return
+		}
+		for _, name := range append(copied, partial) {
+			if name != "" {
+				_ = root.RemoveAll(filepath.Join(newRel, name))
+			}
+		}
+	}
 	for _, e := range entries {
 		// Only real skill directories; a symlinked entry is not followed.
-		if !e.IsDir() || e.Type()&os.ModeSymlink != 0 {
+		if !e.IsDir() || e.Type()&os.ModeSymlink != 0 || skipCopyEntry(e) {
 			continue
 		}
 		if err := root.MkdirAll(newRel, 0755); err != nil {
-			return copied, fmt.Errorf("create skills dir %s: %w", newRel, err)
+			undo("")
+			return nil, fmt.Errorf("create skills dir %s: %w", newRel, err)
 		}
 		if err := copyRootTree(root, filepath.Join(oldRel, e.Name()), filepath.Join(newRel, e.Name())); err != nil {
-			return copied, fmt.Errorf("copy skill %s to %s: %w", e.Name(), newRel, err)
+			undo(e.Name())
+			return nil, fmt.Errorf("copy skill %s to %s: %w", e.Name(), newRel, err)
 		}
 		copied = append(copied, e.Name())
 	}
 	return copied, nil
+}
+
+// skipCopyEntry reports whether the carry-over leaves out e: Python bytecode
+// artifacts (__pycache__ directories and .pyc files). It mirrors the skip
+// rule in util.CopyDir (pkg/util/fs.go); keep the two in step.
+func skipCopyEntry(e os.DirEntry) bool {
+	if e.IsDir() {
+		return e.Name() == "__pycache__"
+	}
+	return strings.HasSuffix(e.Name(), ".pyc")
 }
 
 // realDirChain reports whether every existing component of rel inside root is
@@ -134,8 +168,8 @@ func readRootDir(root *os.Root, rel string) ([]os.DirEntry, error) {
 }
 
 // copyRootTree copies the directory src to dst, both inside root, keeping
-// only regular files and directories. Symbolic links and other special files
-// are skipped.
+// only regular files and directories. Symbolic links, other special files
+// and the entries skipCopyEntry reports are skipped.
 func copyRootTree(root *os.Root, src, dst string) error {
 	fi, err := root.Lstat(src)
 	if err != nil {
@@ -159,7 +193,7 @@ func copyRootTree(root *os.Root, src, dst string) error {
 	for _, e := range entries {
 		s, d := filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())
 		switch {
-		case e.Type()&os.ModeSymlink != 0:
+		case e.Type()&os.ModeSymlink != 0, skipCopyEntry(e):
 			continue
 		case e.IsDir():
 			if err := copyRootTree(root, s, d); err != nil {

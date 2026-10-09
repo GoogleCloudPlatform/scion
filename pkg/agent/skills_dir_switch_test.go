@@ -401,3 +401,107 @@ profiles:
 		})
 	}
 }
+
+func TestCarryOverSkillsDir_FailurePartwayIsRetried(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("file permissions are not enforced for root")
+	}
+	for _, tc := range []struct {
+		name      string
+		newExists bool
+	}{
+		{"new dir missing", false},
+		{"new dir empty", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			oldDir, newDir := filepath.Join(home, ".a/skills"), filepath.Join(home, ".b/skills")
+			// Entries are listed in name order: "a-good" copies, then "b-bad" fails.
+			writeSkill(t, oldDir, "a-good", "good")
+			writeSkill(t, oldDir, "b-bad", "bad")
+			unreadable := filepath.Join(oldDir, "b-bad", "SKILL.md")
+			if err := os.Chmod(unreadable, 0); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(unreadable, 0644) })
+			if tc.newExists {
+				if err := os.MkdirAll(newDir, 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if _, err := carryOverSkillsDir(home, ".a/skills", ".b/skills"); err == nil {
+				t.Fatal("want an error for the unreadable skill file")
+			}
+			if tc.newExists {
+				entries, err := os.ReadDir(newDir)
+				if err != nil {
+					t.Fatalf("pre-existing new dir removed: %v", err)
+				}
+				if len(entries) != 0 {
+					t.Fatalf("new dir holds %d entries after the failed copy, want 0", len(entries))
+				}
+			} else if _, err := os.Lstat(newDir); !os.IsNotExist(err) {
+				t.Fatalf("new dir left behind after the failed copy (err=%v)", err)
+			}
+
+			if err := os.Chmod(unreadable, 0644); err != nil {
+				t.Fatal(err)
+			}
+			copied, err := carryOverSkillsDir(home, ".a/skills", ".b/skills")
+			if err != nil {
+				t.Fatal(err)
+			}
+			sort.Strings(copied)
+			if len(copied) != 2 || copied[0] != "a-good" || copied[1] != "b-bad" {
+				t.Fatalf("retry copied = %v, want [a-good b-bad]", copied)
+			}
+			for name, want := range map[string]string{"a-good": "good", "b-bad": "bad"} {
+				if got, ok := readSkill(t, newDir, name); !ok || got != want {
+					t.Errorf("skill %s = %q (present %v), want %q", name, got, ok, want)
+				}
+			}
+		})
+	}
+}
+
+func TestCarryOverSkillsDir_SkipsPythonBytecode(t *testing.T) {
+	home := t.TempDir()
+	oldDir, newDir := filepath.Join(home, ".a/skills"), filepath.Join(home, ".b/skills")
+	writeSkill(t, oldDir, "one", "1")
+	for _, d := range []string{"one/__pycache__", "one/lib", "__pycache__"} {
+		if err := os.MkdirAll(filepath.Join(oldDir, d), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []string{"one/__pycache__/x.cpython-311.pyc", "one/lib/mod.pyc", "one/lib/mod.py", "__pycache__/y.pyc"} {
+		if err := os.WriteFile(filepath.Join(oldDir, f), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	copied, err := carryOverSkillsDir(home, ".a/skills", ".b/skills")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(copied) != 1 || copied[0] != "one" {
+		t.Fatalf("copied = %v, want [one]", copied)
+	}
+	got := snapshotSkillsTree(t, newDir)
+	want := map[string]string{
+		".":              "dir",
+		"one":            "dir",
+		"one/SKILL.md":   "file:1",
+		"one/lib":        "dir",
+		"one/lib/mod.py": "file:x",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("new dir = %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if gv, ok := got[k]; !ok || gv != v {
+			t.Errorf("new dir = %v, want %v", got, want)
+			break
+		}
+	}
+}
