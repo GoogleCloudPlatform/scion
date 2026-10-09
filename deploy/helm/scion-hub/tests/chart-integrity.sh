@@ -419,7 +419,8 @@ else
     echo "        IF YOU JUST LANDED THE SETTINGS ConfigMap OR SCION_SERVER_BASE_URL:"
     echo "          this is the intended red. Set DELIVERS_BASE_URL_CHANNEL=${_chan}, bump"
     echo "          EXPECTED_TOTAL nowhere (the count is unchanged), and edit BOTH prose"
-    echo "          sites - _helpers.tpl:835 and :1089 - IN THE SAME DIFF. Bumping the"
+    echo "          sites - the \$ownedByConfig header and the hub.args reservation in"
+    echo "          _helpers.tpl - IN THE SAME DIFF. Bumping the"
     echo "          constant alone leaves the chart lying to operators in its own error text."
   fi
 fi
@@ -528,7 +529,7 @@ if printf '%s\n' '  # --session-secret, SCION_SERVER_SESSION_SECRET and bare SES
   echo "  Every limb below would read the chart's own documentation as a secret source." >&2
   echo "  E5 and E7 would then score green on a chart that renders NO session secret at" >&2
   echo "  all - the deleted-template regression, invisible, with the default still true" >&2
-  echo "  and every pod hitting log.Fatalf at cmd/server_foreground.go:259 on first boot." >&2
+  echo "  and every pod hitting log.Fatalf in runServerStart (cmd/server_foreground.go) on first boot." >&2
   exit 2
 fi
 # CONTROL 2 - the apparatus does not over-fire. A stripper that deleted
@@ -675,7 +676,7 @@ if [ -n "$_e5_src" ] && [ "$_e4_flag" = "false" ]; then
 elif [ -z "$_e5_src" ] && [ "$_e4_flag" = "true" ]; then
   fail "THE SESSION SECRET STOPPED RENDERING AND THE DEFAULT IS STILL true."
   echo "        the default render carries no session-secret source at all, so every pod"
-  echo "        would log.Fatalf at cmd/server_foreground.go:259 on first boot - the whole"
+  echo "        would log.Fatalf in runServerStart (cmd/server_foreground.go) on first boot - the whole"
   echo "        release dead, not degraded. Either restore the rendered secret or set"
   echo "        auth.requireStableSigningKey back to false IN THE SAME DIFF."
 else

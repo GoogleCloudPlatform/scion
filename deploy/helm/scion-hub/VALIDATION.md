@@ -293,8 +293,9 @@ enumeration of the source rather than an inference from one comment. For
 `harness-configs/` the three non-CLI readers are `bootstrapWorkstationResources`
 (`cmd/server_foreground.go`, the `else` arm above) and
 `Server.computeOnboardingStatus` and `Server.cleanupUnselectedHarnessConfigs`
-(`pkg/hub/system_handlers.go`), both behind `/api/v1/system/*` routes classified
-`RouteWorkstation` (`pkg/hub/route_metadata.go`), which `Server.routeGuard`
+(`pkg/hub/system_handlers.go`), both gated through route metadata: their
+`/api/v1/system/*` routes are classified `RouteWorkstation`
+(`pkg/hub/route_metadata.go`), which `Server.routeGuard`
 hands to `Server.requireWorkstation` (`pkg/hub/server.go`), which returns 404
 whenever `Workstation` is false — and `buildHubServerConfig`
 (`cmd/server_foreground.go`) sets `Workstation: !hostedMode`. For `agents/`
@@ -331,10 +332,13 @@ the question is actually about.
 Two things would be findings rather than local fixes: any hub log line about a
 missing `agents/` or `harness-configs/` directory, or about templates it could
 not find; and the **absence** of the `cache/` tree, which would mean the state
-directory is not writable. That failure is silent — `templatecache.New` failing
-is handled with `slog.Warn` and the broker continues without a template cache
-(`New` logs the `Server.initHubIntegration` error, `pkg/runtimebroker/server.go`) — so it degrades rather than crashing, and
-nothing else will tell you.
+directory is not writable. That failure is silent, and it degrades more than
+the cache: a `templatecache.New` error returns from `Server.initHubIntegration`
+(`pkg/runtimebroker/server.go`) before any hub connection is created, so the
+whole hub-integration init fails, not just the template cache. `New` in the same
+file logs that error with `slog.Warn` and the broker keeps running without hub
+integration — so it degrades rather than crashing, and nothing else will tell
+you.
 
 #### 3. What silently does not persist, until ptone/scion#1091
 
