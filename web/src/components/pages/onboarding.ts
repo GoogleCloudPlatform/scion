@@ -1307,7 +1307,7 @@ export class ScionPageOnboarding extends LitElement {
     es.addEventListener('update', (event: Event) => {
       lastEventTime = Date.now();
       try {
-        const wrapper = JSON.parse((event as MessageEvent).data) as {
+        const wrapper = JSON.parse((event as MessageEvent<string>).data) as {
           subject: string;
           data?: Record<string, unknown>;
         };
