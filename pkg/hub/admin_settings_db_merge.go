@@ -74,8 +74,12 @@ import (
 // the typed request decode follows (structFieldByJSONName).
 //
 // The row is read fresh from the store (the ops cache can be stale in HA).
-// With no row the base is empty, so absent keys fall back to the bootstrap
-// value. For a non-managed (seeded) row, stored keys overridden by a
+// With no row, the base is empty and the save creates the row from the
+// sent keys only; from then on the row owns every key in the section. In
+// practice the no-row path is rare: startup seeding (syncHubSettings in
+// cmd/server_foreground.go) creates a seeded row from bootstrap material
+// for every registered section on boot, so the base is normally that
+// seeded row. For a non-managed (seeded) row, stored keys overridden by a
 // node-local env var are dropped, so one node's env value is not pinned
 // into the shared row (see buildAccessDocOnCurrent).
 //
