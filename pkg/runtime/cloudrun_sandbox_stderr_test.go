@@ -308,6 +308,14 @@ func TestEntrypointLogTail(t *testing.T) {
 	if got := entrypointLogTail(path, 0, 10); got != "" {
 		t.Errorf("missing file: got %q, want empty", got)
 	}
+	if err := os.WriteFile(path, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, offset := range []int64{0, 5} {
+		if got := entrypointLogTail(path, offset, 10); got != "" {
+			t.Errorf("empty file (offset=%d): got %q, want empty", offset, got)
+		}
+	}
 	if err := os.WriteFile(path, []byte("0123456789abcdef"), 0644); err != nil {
 		t.Fatal(err)
 	}

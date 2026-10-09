@@ -158,11 +158,12 @@ func tailEntrypointLogWithHooks(ctx context.Context, logPath, slug, agentID, pro
 	)
 	eofCount := 0
 
-	// drainAndFlush reads to the file size seen at cancellation before the
-	// final flush. On cancellation (Delete) the bytes written since the
-	// last poll are usually the lines naming the cause of death; without
-	// the drain they were dropped. Bytes written after the cancel are not
-	// read, so a sandbox that keeps writing cannot stall the drain.
+	// drainAndFlush reads up to the file size observed when the drain
+	// starts (the Stat below), then does the final flush. On cancellation
+	// (Delete) the bytes written since the last poll are usually the lines
+	// naming the cause of death; without the drain they were dropped.
+	// Bytes written after the drain starts are not read, so a sandbox that
+	// keeps writing cannot stall the drain.
 	drainAndFlush := func() {
 		defer func() { flushPartial(lineBuf, emit) }()
 		info, err := f.Stat()
