@@ -82,8 +82,8 @@ func syncDispatch(ctx context.Context, fn func(context.Context) error) error {
 
 // syncDispatchWriteSlack is the time a synchronous create response may take
 // after its dispatch wait, for the post-dispatch store writes and the
-// response write itself.
-const syncDispatchWriteSlack = 30 * time.Second
+// response write itself. A var so tests can shrink it.
+var syncDispatchWriteSlack = 30 * time.Second
 
 // syncDispatchWriteBudget is the write deadline, from the start of the
 // dispatch, of a request that waits on one synchronous dispatch: the
@@ -106,9 +106,10 @@ func servingWriteTimeout(ctx context.Context, configured time.Duration) time.Dur
 }
 
 // restartWriteBudget is the write deadline, from the start of the restart's
-// stop leg, of a lifecycle restart: the ephemeral workspace check before the
-// stop, then two synchronous dispatches (the stop leg and the start leg),
-// each bounded by syncDispatchTimeout, plus syncDispatchWriteSlack.
+// broker work (taken right after the restart detaches from the client), of
+// a lifecycle restart: the ephemeral workspace check before the stop, then
+// two synchronous dispatches (the stop leg and the start leg), each bounded
+// by syncDispatchTimeout, plus syncDispatchWriteSlack.
 func restartWriteBudget() time.Duration {
 	return workspaceCheckTimeout + 2*syncDispatchTimeout + syncDispatchWriteSlack
 }

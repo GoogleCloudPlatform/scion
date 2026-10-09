@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -129,9 +130,40 @@ func serveThroughSlowListener(t *testing.T, srv *Server, method, path string, bo
 
 func setupSlowLaunchServer(t *testing.T) (*Server, store.Store, *store.Project) {
 	t.Helper()
+	return setupSlowLaunchServerWithDelay(t, slowPathDelay)
+}
+
+func setupSlowLaunchServerWithDelay(t *testing.T, delay time.Duration) (*Server, store.Store, *store.Project) {
+	t.Helper()
 	shortenSyncDispatchTimeout(t, 3*time.Second)
-	require.Greater(t, slowPathDelay, slowPathWriteTimeout)
-	return setupCreateAgentServer(t, &slowLaunchDispatcher{delay: slowPathDelay})
+	require.Greater(t, delay, slowPathWriteTimeout)
+	return setupCreateAgentServer(t, &slowLaunchDispatcher{delay: delay})
+}
+
+// setSyncDispatchWriteSlack sets syncDispatchWriteSlack for one test. The
+// production slack (30s) dwarfs the scaled waits, so a test that must tell
+// the per-path budgets apart shrinks it.
+func setSyncDispatchWriteSlack(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := syncDispatchWriteSlack
+	syncDispatchWriteSlack = d
+	t.Cleanup(func() { syncDispatchWriteSlack = prev })
+}
+
+// setHubWorkspaceUploadTimeout sets hubWorkspaceUploadTimeout for one test.
+func setHubWorkspaceUploadTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := hubWorkspaceUploadTimeout
+	hubWorkspaceUploadTimeout = d
+	t.Cleanup(func() { hubWorkspaceUploadTimeout = prev })
+}
+
+// setWorkspaceCheckTimeout sets workspaceCheckTimeout for one test.
+func setWorkspaceCheckTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := workspaceCheckTimeout
+	workspaceCheckTimeout = d
+	t.Cleanup(func() { workspaceCheckTimeout = prev })
 }
 
 func requireAgentRunning(t *testing.T, s store.Store, id string) {
@@ -151,13 +183,23 @@ func TestSlowLifecycleStart_AfterWriteTimeout_GetsResponse(t *testing.T) {
 	requireAgentRunning(t, s, agent.ID)
 }
 
-// The restart waits on two legs, each slower than the WriteTimeout.
+// The restart waits on two legs, each slower than the WriteTimeout. The
+// timeouts are set so the two legs together outlast every other path's
+// budget but not the restart's own: the restart site must pass
+// restartWriteBudget.
 func TestSlowLifecycleRestart_AfterWriteTimeout_GetsResponse(t *testing.T) {
-	srv, s, project := setupSlowLaunchServer(t)
+	const legDelay = 300 * time.Millisecond
+	srv, s, project := setupSlowLaunchServerWithDelay(t, legDelay)
+	shortenSyncDispatchTimeout(t, 400*time.Millisecond)
+	setSyncDispatchWriteSlack(t, 50*time.Millisecond)
+	setHubWorkspaceUploadTimeout(t, 10*time.Millisecond)
+	require.Less(t, syncDispatchWriteBudget(), 2*legDelay, "fixture check: the one-dispatch budget must not cover both legs")
+	require.Less(t, hubWorkspaceUploadWriteBudget(), 2*legDelay, "fixture check: the upload budget must not cover both legs")
+	require.Greater(t, restartWriteBudget(), 2*legDelay+time.Second, "fixture check: the restart budget must cover both legs")
 	setAgentQuotaLimits(t, s)
 	agent := createSiteAgent(t, s, project, "slow-restart", state.PhaseRunning, store.RunIntentRunning)
 
-	code, body := serveThroughSlowListener(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/restart", nil, 2*slowPathDelay)
+	code, body := serveThroughSlowListener(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/restart", nil, 2*legDelay)
 	assert.Equal(t, http.StatusOK, code, string(body))
 	requireAgentRunning(t, s, agent.ID)
 }
@@ -205,7 +247,7 @@ func TestSlowCreateExistingAgent_AfterWriteTimeout_GetsResponse(t *testing.T) {
 			req := tc.req
 			req.Name, req.ProjectID, req.Task = name, project.ID, "work"
 			code, body := serveThroughSlowListener(t, srv, http.MethodPost, "/api/v1/agents", req, slowPathDelay)
-			assert.Less(t, code, 300, string(body))
+			assert.Equal(t, http.StatusOK, code, string(body))
 			requireAgentRunning(t, s, agent.ID)
 		})
 	}
@@ -213,14 +255,20 @@ func TestSlowCreateExistingAgent_AfterWriteTimeout_GetsResponse(t *testing.T) {
 
 // A create-time workspace upload that runs out of its own budget, after the
 // WriteTimeout, is answered with its failure instead of a dropped
-// connection.
+// connection. The timeouts are set so the upload outlasts every other
+// path's budget but not its own: the upload site must pass
+// hubWorkspaceUploadWriteBudget.
 func TestSlowHubWorkspaceUpload_BudgetExpiredAfterWriteTimeout_GetsResponse(t *testing.T) {
+	const uploadTimeout = 600 * time.Millisecond
 	t.Setenv("HOME", t.TempDir())
-	prevBudget := hubWorkspaceUploadTimeout
-	hubWorkspaceUploadTimeout = slowPathDelay
-	t.Cleanup(func() { hubWorkspaceUploadTimeout = prevBudget })
 
 	srv, s, project := setupSlowLaunchServer(t) // hub-managed: no GitRemote.
+	setHubWorkspaceUploadTimeout(t, uploadTimeout)
+	shortenSyncDispatchTimeout(t, 50*time.Millisecond)
+	setWorkspaceCheckTimeout(t, 10*time.Millisecond)
+	setSyncDispatchWriteSlack(t, 300*time.Millisecond)
+	require.Less(t, syncDispatchWriteBudget(), uploadTimeout, "fixture check: the one-dispatch budget must not cover the upload")
+	require.Less(t, restartWriteBudget(), uploadTimeout, "fixture check: the restart budget must not cover the upload")
 	srv.SetStorage(newGCSContentMockStorage("test-bucket"))
 	setAgentQuotaLimits(t, s)
 	t.Cleanup(func() {
@@ -228,10 +276,10 @@ func TestSlowHubWorkspaceUpload_BudgetExpiredAfterWriteTimeout_GetsResponse(t *t
 			_ = os.RemoveAll(p)
 		}
 	})
-	var uploadCalled bool
+	var uploadCalled atomic.Bool
 	prev := syncToGCSForWorkspaceUpload
 	syncToGCSForWorkspaceUpload = func(uctx context.Context, _, _, _ string) error {
-		uploadCalled = true
+		uploadCalled.Store(true)
 		<-uctx.Done()
 		return uctx.Err()
 	}
@@ -239,8 +287,8 @@ func TestSlowHubWorkspaceUpload_BudgetExpiredAfterWriteTimeout_GetsResponse(t *t
 
 	code, body := serveThroughSlowListener(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name: "slow-upload", ProjectID: project.ID, Task: "work",
-	}, slowPathDelay)
-	require.True(t, uploadCalled, "fixture check: the upload branch must be reached")
+	}, uploadTimeout)
+	require.True(t, uploadCalled.Load(), "fixture check: the upload branch must be reached")
 	// The hub's own answer (RuntimeError, 502 with a JSON body), not an
 	// empty response from a dropped connection.
 	assert.Equal(t, http.StatusBadGateway, code, string(body))
