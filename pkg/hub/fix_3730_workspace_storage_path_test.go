@@ -54,6 +54,9 @@ var errWorkspaceRecordWrite = errors.New("workspace record write failed")
 //     the real store: a hook that bumps state_version (a delete claim, a
 //     status write) makes it a real ErrVersionConflict. firstErr, when set,
 //     is returned instead.
+//   - rereadErr, when set, is returned by the first GetAgent after the
+//     first record write failed (a failed re-read), instead of reading the
+//     row.
 //   - beforeSecond runs just before the retry; secondErr, when set, is
 //     returned by it instead.
 //
@@ -64,6 +67,7 @@ type workspaceRecordStore struct {
 	mu           sync.Mutex
 	beforeFirst  func(agentID string)
 	firstErr     error
+	rereadErr    error
 	beforeSecond func(agentID string)
 	secondErr    error
 
@@ -106,6 +110,19 @@ func (s *workspaceRecordStore) UpdateAgent(ctx context.Context, a *store.Agent) 
 		s.mu.Unlock()
 	}
 	return err
+}
+
+func (s *workspaceRecordStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	s.mu.Lock()
+	var injected error
+	if s.firstFailed {
+		injected, s.rereadErr = s.rereadErr, nil
+	}
+	s.mu.Unlock()
+	if injected != nil {
+		return nil, injected
+	}
+	return s.Store.GetAgent(ctx, id)
 }
 
 func (s *workspaceRecordStore) snapshot() (agentID string, writes int, retried bool) {
@@ -356,6 +373,33 @@ func TestWorkspaceRecord_RetryFails_RollsBack(t *testing.T) {
 			assert.Zero(t, pub.count("created"), "no created: %v", pub.kinds())
 		})
 	}
+}
+
+// The record write conflicts and the re-read fails: no retry, the create
+// rolls back at workspace_record with the conflict as the cause and answers
+// 500, with nothing dispatched or published.
+func TestWorkspaceRecord_RereadFails_RollsBack(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	useHubWorkspaceUpload(t, srv, project)
+	pub := recordCreatedEvents(t, srv)
+	fs := &workspaceRecordStore{
+		Store:       s,
+		beforeFirst: func(id string) { bumpPhase(t, s, id, string(state.PhaseCreated), "") },
+		rereadErr:   errors.New("re-read failed"),
+	}
+	srv.store = fs
+
+	rec := brokerCreate(t, srv, project.ID, "ws-record-reread-fail")
+	requireWorkspaceRecordFailed(t, rec)
+
+	agentID, writes, retried := fs.snapshot()
+	require.NotEmpty(t, agentID)
+	assert.False(t, retried, "no retry after a failed re-read")
+	assert.Equal(t, 1, writes, "only the conflicting write")
+	assertWorkspaceRecordRolledBack(t, s, project, agentID, store.ErrVersionConflict.Error())
+	assert.Nil(t, disp.capturedAgent, "nothing dispatched")
+	assert.Zero(t, pub.count("created"), "no created: %v", pub.kinds())
 }
 
 // Managed create: a conflicting record write is retried, which leaves the
