@@ -481,7 +481,7 @@ func (s *Server) createRoleDefinition(w http.ResponseWriter, r *http.Request, us
 	}
 
 	// Validate permissions against registry.
-	if err := validatePermissionIDs(req.Permissions); err != nil {
+	if err := validateRolePermissionIDs(req.Permissions); err != nil {
 		BadRequest(w, err.Error())
 		return
 	}
@@ -553,7 +553,7 @@ func (s *Server) updateRoleDefinition(w http.ResponseWriter, r *http.Request, id
 	}
 
 	// Validate permissions against registry.
-	if err := validatePermissionIDs(req.Permissions); err != nil {
+	if err := validateRolePermissionIDs(req.Permissions); err != nil {
 		BadRequest(w, err.Error())
 		return
 	}
@@ -655,7 +655,7 @@ func (s *Server) duplicateRoleDefinition(w http.ResponseWriter, r *http.Request,
 
 	// Validate permissions against registry (source may reference
 	// permissions that were removed since seeding; reject if so).
-	if err := validatePermissionIDs(source.Permissions); err != nil {
+	if err := validateRolePermissionIDs(source.Permissions); err != nil {
 		BadRequest(w, err.Error())
 		return
 	}
@@ -895,7 +895,7 @@ func (s *Server) importRoleDefinitions(w http.ResponseWriter, r *http.Request, u
 		}
 
 		// Validate permissions against registry.
-		if err := validatePermissionIDs(role.Permissions); err != nil {
+		if err := validateRolePermissionIDs(role.Permissions); err != nil {
 			item.Status = "error"
 			item.Reason = err.Error()
 			resp.Errors++
@@ -1893,6 +1893,28 @@ func (s *Server) requireWritePermissionForRoleBinding(w http.ResponseWriter, r *
 		return nil, false
 	}
 	return user, true
+}
+
+// validateRolePermissionIDs validates the permission list of a custom role
+// definition (create, update, duplicate, import). Beyond
+// validatePermissionIDs it rejects Reserved permissions: nothing checks
+// them yet, so no role may hold one (see permissions.Permission.Reserved).
+// Access constraint ceilings keep using validatePermissionIDs: a ceiling
+// listing a reserved permission restricts rather than grants.
+func validateRolePermissionIDs(ids []string) error {
+	if err := validatePermissionIDs(ids); err != nil {
+		return err
+	}
+	reserved := make(map[string]bool)
+	for _, id := range permissions.ReservedIDs() {
+		reserved[id] = true
+	}
+	for _, id := range ids {
+		if reserved[id] {
+			return fmt.Errorf("permission %s is reserved: nothing checks it yet", id)
+		}
+	}
+	return nil
 }
 
 // validatePermissionIDs checks that all provided IDs exist in the permissions registry.
