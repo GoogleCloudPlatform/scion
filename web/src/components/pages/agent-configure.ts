@@ -1656,9 +1656,9 @@ export class ScionPageAgentConfigure extends LitElement {
           `
         : nothing}
 
-      <!-- Message Mode: read-only here in every phase. The agent PATCH does not
-           carry it; it changes only through the set_message_mode endpoint
-           (agent detail page or CLI), which applies its own authorization. -->
+      <!-- Message Mode: read-only. The agent PATCH does not carry it; it
+           changes only through the set_message_mode endpoint (agent detail
+           page or CLI), which applies its own authorization. -->
       ${this.agent?.messageMode
         ? html`
             <div class="form-field" data-testid="message-mode-readonly">
@@ -1675,8 +1675,8 @@ export class ScionPageAgentConfigure extends LitElement {
                   data-testid="message-mode-detail-link"
                   href="/agents/${this.agent.id || this.agentId}"
                   >agent detail page</a
-                > to change
-                it.
+                >
+                to change it.
               </div>
             </div>
           `
