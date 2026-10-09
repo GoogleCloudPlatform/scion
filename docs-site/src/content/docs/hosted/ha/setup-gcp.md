@@ -421,6 +421,8 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 
 Without this permission, Policy Troubleshooter checks will return an indeterminate or unknown status (such as ACCESS_STATE_UNKNOWN_INFO_DENIED), which results in a **fail-closed** denial of service account assignment in Scion.
 
+The Hub's identity needs access to run the assignment check for each target service account; until it has that access, service account assignment is denied. If the check cannot run because of the Hub's identity, the admin health summary reports it (see [Hub Identity Access for the Assignment Check](/scion/hosted/ha/permissions/#hub-identity-access-for-the-assignment-check)).
+
 ### 2f. Transport SA — IAP Access
 
 The transport SA's identity is used in the IAP token. IAP must allow this identity to access

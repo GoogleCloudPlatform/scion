@@ -1623,6 +1623,11 @@ type Server struct {
 	// denyUnknownFailOpen is written with saAssignCheckMode under s.mu
 	// (applyGCPIAMSettingsLocked) and read lock-free by the checker.
 	denyUnknownFailOpen atomic.Bool
+	// saAssignCheckDiag is set while the assignment check cannot run because
+	// the hub's identity lacks the access it needs, and cleared once a
+	// check call succeeds or the check stops being enforced. Updated only
+	// by NoteSAAssignCheckCall. Shown on the admin health summary.
+	saAssignCheckDiag atomic.Pointer[saAssignCheckDiagnostic]
 	// gcpIAMStartup is the deploy-time pair of GCP permission-check
 	// settings, resolved once in New. A stored value that is absent or
 	// cannot be used resolves to it (resolveGCPIAMSettings).
