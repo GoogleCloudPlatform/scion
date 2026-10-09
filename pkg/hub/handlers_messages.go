@@ -516,7 +516,7 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 	// holders too. The stream applies the same limit by conversation id.
 	// A DM that does not exist yet is looked up again when the first
 	// message the caller takes part in arrives.
-	conv := agentStreamConversation{}
+	conv := agentStreamConversation{agentID: agent.ID, userID: user.ID()}
 	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() {
 		conv.enabled = true
 		conv.resolve = func() (string, error) {
@@ -613,6 +613,8 @@ type agentStreamConversation struct {
 	enabled bool
 	id      string
 	resolve func() (string, error)
+	// agentID and userID are for logging only.
+	agentID, userID string
 }
 
 // includes reports whether a message in conversation msgConvID belongs on
@@ -625,7 +627,8 @@ func (c *agentStreamConversation) includes(msgConvID string, participant bool) b
 	if c.id == "" && participant && msgConvID != "" {
 		id, err := c.resolve()
 		if err != nil {
-			slog.Warn("read-switch: DM conversation lookup failed on messages stream", "error", err)
+			slog.Warn("read-switch: DM conversation lookup failed on messages stream",
+				"agent_id", c.agentID, "user_id", c.userID, "error", err)
 		}
 		c.id = id
 	}

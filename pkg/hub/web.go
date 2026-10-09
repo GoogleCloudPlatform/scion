@@ -1556,16 +1556,12 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		logPerfTraceLine(perfTraceLogger(), r, trace.Snapshot, slog.String("sse_stage", "connect"))
 	}
 
-	// DM messages are also published on agent and project subjects that
-	// any reader of the agent or project may subscribe to. Deliver them only
-	// to DM participants, matching the REST DM reads (see sseEventVisible).
-	sessionUserID := ""
-	if su := getWebSessionUser(r.Context()); su != nil {
-		sessionUserID = su.UserID
-	}
-	// Agent messages follow the agent message history rule: callers with
-	// attach on the agent see all of them, other readers only the ones
-	// they sent or received (see sseMessageViewer).
+	// User messages are also published on agent and project subjects that
+	// any reader of the agent or project may subscribe to. DM messages go
+	// only to DM participants, matching the REST DM reads; other agent
+	// messages follow the agent message history rule: callers with attach
+	// on the agent see all of them, other readers only the ones they sent
+	// or received (see sseMessageViewer).
 	viewer := ws.newSSEMessageViewer(r)
 
 	eventID := 0
@@ -1588,7 +1584,7 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 				// Publisher closed
 				return
 			}
-			if !sseEventVisible(evt, sessionUserID) || !viewer.visible(evt) {
+			if !viewer.visible(evt) {
 				continue
 			}
 			eventID++
@@ -1633,37 +1629,64 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 // "dm:" thread id) are delivered only to users named in the DM key — the
 // same rule the REST DM reads apply (isDMParticipant). Participants also
 // receive every DM message on user.<id>.chat.dm. All other events pass
-// through here; non-DM agent messages are then checked by sseMessageViewer.
+// through here. The events stream applies this rule through
+// sseMessageViewer.visible, which then also applies the agent message
+// history rule.
 func sseEventVisible(evt Event, userID string) bool {
 	if !sseSubjectMayCarryDM(evt.Subject) {
 		return true
 	}
-	var payload struct {
-		ThreadID string `json:"threadId"`
-	}
-	if err := json.Unmarshal(evt.Data, &payload); err != nil {
-		// Fail closed: a message payload that cannot be read cannot be
-		// shown not to be a DM.
-		return false
-	}
-	if !strings.HasPrefix(payload.ThreadID, "dm:") {
-		return true
-	}
-	return userID != "" && isDMParticipant(payload.ThreadID, userID)
+	msg, ok := decodeSSEUserMessage(evt.Data)
+	return ok && sseDMRuleAllows(msg, userID)
 }
 
 // sseSubjectMayCarryDM matches the subjects onto which PublishUserMessage
 // publishes DM messages that are not already scoped to a participant:
 // agent.<id>.message and project.<id>.user.message.
 func sseSubjectMayCarryDM(subject string) bool {
+	_, ok := sseUserMessageSubject(subject)
+	return ok
+}
+
+// sseUserMessageSubject matches agent.<id>.message and
+// project.<id>.user.message, the subjects on which PublishUserMessage
+// publishes user messages to every reader of the agent or project. For an
+// agent subject it also returns the agent id; for a project subject that
+// id is empty.
+func sseUserMessageSubject(subject string) (subjectAgentID string, ok bool) {
 	tokens := strings.Split(subject, ".")
 	switch {
 	case len(tokens) == 3 && tokens[0] == "agent" && tokens[2] == "message":
-		return true
+		return tokens[1], true
 	case len(tokens) == 4 && tokens[0] == "project" && tokens[2] == "user" && tokens[3] == "message":
+		return "", true
+	}
+	return "", false
+}
+
+// sseUserMessage holds the UserMessageEvent fields the visibility rules
+// read.
+type sseUserMessage struct {
+	ThreadID    string `json:"threadId"`
+	AgentID     string `json:"agentId"`
+	SenderID    string `json:"senderId"`
+	RecipientID string `json:"recipientId"`
+}
+
+// decodeSSEUserMessage decodes a user message payload. ok is false when it
+// cannot be read; callers fail closed, since such a message cannot be
+// shown not to be a DM.
+func decodeSSEUserMessage(data []byte) (msg sseUserMessage, ok bool) {
+	return msg, json.Unmarshal(data, &msg) == nil
+}
+
+// sseDMRuleAllows applies the DM rule: a "dm:" thread goes only to users
+// named in the DM key; any other thread passes.
+func sseDMRuleAllows(msg sseUserMessage, userID string) bool {
+	if !strings.HasPrefix(msg.ThreadID, "dm:") {
 		return true
 	}
-	return false
+	return userID != "" && isDMParticipant(msg.ThreadID, userID)
 }
 
 // sseMessageViewer applies the agent message history rule
@@ -1674,8 +1697,8 @@ func sseSubjectMayCarryDM(subject string) bool {
 // received. A row with no agent (human to human) is shown to its
 // participants only. The rule keys on sender and recipient, not on the
 // thread id, so legacy agent:<slug> threads and DMs relayed from other
-// channels are covered the same way. DM threads ("dm:") are scoped to
-// participants by sseEventVisible before this runs.
+// channels are covered the same way. DM threads ("dm:") are first scoped
+// to participants by the DM rule (sseDMRuleAllows, see sseEventVisible).
 //
 // Attach is decided at most once per agent per connection, when the first
 // message event for that agent arrives, and then cached. Like the subject
@@ -1714,31 +1737,27 @@ func (ws *WebServer) newSSEMessageViewer(r *http.Request) *sseMessageViewer {
 	return v
 }
 
-// visible reports whether evt may be written to the caller's stream.
-// Events other than user message events pass through.
+// visible reports whether evt may be written to the caller's stream. On
+// the user message subjects it matches the subject and decodes the payload
+// once, then applies the DM rule and the attach-or-participant rule, in
+// that order. Other events pass through.
 func (v *sseMessageViewer) visible(evt Event) bool {
-	tokens := strings.Split(evt.Subject, ".")
-	agentMessage := len(tokens) == 3 && tokens[0] == "agent" && tokens[2] == "message"
-	projectMessage := len(tokens) == 4 && tokens[0] == "project" && tokens[2] == "user" && tokens[3] == "message"
-	if !agentMessage && !projectMessage {
+	subjectAgentID, ok := sseUserMessageSubject(evt.Subject)
+	if !ok {
 		return true
 	}
-	var payload struct {
-		AgentID     string `json:"agentId"`
-		SenderID    string `json:"senderId"`
-		RecipientID string `json:"recipientId"`
+	msg, ok := decodeSSEUserMessage(evt.Data)
+	if !ok || !sseDMRuleAllows(msg, v.userID) {
+		return false
 	}
-	if err := json.Unmarshal(evt.Data, &payload); err != nil {
-		return false // fail closed, as sseEventVisible does
-	}
-	if v.userID != "" && (payload.SenderID == v.userID || payload.RecipientID == v.userID) {
+	if v.userID != "" && (msg.SenderID == v.userID || msg.RecipientID == v.userID) {
 		return true
 	}
 	// The subject names the agent the caller was authorized for; on the
 	// project subject only the payload names it.
-	agentID := payload.AgentID
-	if agentMessage {
-		agentID = tokens[1]
+	agentID := msg.AgentID
+	if subjectAgentID != "" {
+		agentID = subjectAgentID
 	}
 	return agentID != "" && v.hasAttach(agentID)
 }
