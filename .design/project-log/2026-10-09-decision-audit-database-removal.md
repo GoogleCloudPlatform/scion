@@ -47,3 +47,5 @@ Fresh focused migration tests passed for `pkg/ent/entc` and
 `pkg/store/entadapter`, including populated-table and named-index removal,
 reopening and mutation/history conservation. Hub, command and real PostgreSQL
 checks remain unexecuted for this revision.
+
+Final emitter and failed-start cleanup comments now match retained behavior; static diff and stale-text checks passed.
