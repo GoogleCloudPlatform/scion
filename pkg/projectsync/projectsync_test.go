@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rclone/rclone/fs/filter"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -104,10 +105,40 @@ func TestDefaultExcludePatterns(t *testing.T) {
 	expected := []string{
 		".git/**",
 		".scion/**",
+		"/.scion",
 		"node_modules/**",
 		"*.env",
 	}
 	assert.Equal(t, expected, DefaultExcludePatterns)
+}
+
+func TestDefaultExcludeRules_Matching(t *testing.T) {
+	// Run paths through the same rclone filter that Sync builds, so the test
+	// checks how the patterns match rather than just the pattern list.
+	fi, err := filter.NewFilter(nil)
+	require.NoError(t, err)
+	require.NoError(t, addExcludeRules(fi, nil))
+
+	tests := []struct {
+		remote   string
+		included bool
+	}{
+		{".scion", false},               // bare marker file at the root
+		{".scion/settings.yaml", false}, // contents of a .scion directory
+		{".scion/templates/a/b.md", false},
+		{".git/HEAD", false},
+		{"node_modules/pkg/index.js", false},
+		{"config/.env", false},
+		{"main.go", true},
+		{"docs/readme.md", true},
+		{"sub/.scion", true}, // the hub only hides a top-level .scion entry
+		{".scionrc", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.remote, func(t *testing.T) {
+			assert.Equal(t, tt.included, fi.IncludeRemote(tt.remote))
+		})
+	}
 }
 
 func TestDirection_Values(t *testing.T) {
