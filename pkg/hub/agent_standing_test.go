@@ -430,10 +430,18 @@ func TestStandingGates_HeldAgent(t *testing.T) {
 		assert.Equal(t, ReasonDeniedByPolicy, reason)
 	})
 	t.Run("scheduledMessageToHeldTarget", func(t *testing.T) {
-		err := f.srv.messageEventHandler()(ctx, store.ScheduledEvent{
+		// The event carries a recorded session revision for the owner, so
+		// the fire resolves its authority and reaches the target checks.
+		evt := withSessionRevision(store.ScheduledEvent{
 			ID: tid("ms-held-msg-evt"), ProjectID: f.projectID, EventType: "message",
 			Payload: `{"agentId":"` + f.agentA.ID + `","message":"hello"}`, CreatedBy: f.ownerID,
-		})
+		}, f.ownerID)
+		// Control: every precondition other than the hold admits the send,
+		// so the refusal below comes from the held target.
+		auth, identity, err := f.srv.resolveScheduledAuthority(ctx, evt)
+		require.NoError(t, err)
+		require.NoError(t, f.srv.authorizeScheduledMessageFire(ctx, evt, auth, identity, f.agentA))
+		err = f.srv.messageEventHandler()(ctx, evt)
 		require.Error(t, err)
 		assert.Equal(t, errScheduledMessageRefused.Error(), err.Error())
 	})

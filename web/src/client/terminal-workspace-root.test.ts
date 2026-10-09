@@ -353,6 +353,60 @@ describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
   });
 
   it.each(presets)(
+    'swaps the %s empty state for placeholders when a narrow viewport widens',
+    async (preset, count) => {
+      let onChange: (() => void) | null = null;
+      const query = {
+        matches: true,
+        addEventListener: vi.fn((_type: string, cb: () => void) => {
+          onChange = cb;
+        }),
+        removeEventListener: vi.fn(),
+      };
+      const realMatchMedia = window.matchMedia.bind(window);
+      vi.spyOn(window, 'matchMedia').mockImplementation((q: string) =>
+        q === '(max-width: 760px)' ? (query as unknown as MediaQueryList) : realMatchMedia(q)
+      );
+      root.dispose();
+      root.element.remove();
+      root = new WorkspaceRoot();
+      document.body.append(root.element);
+
+      root.layoutManager.setLayout(preset);
+      await flush();
+      expect(placeholders()).toEqual([]);
+      expect(visibleOverlays().map((el) => el.className)).toEqual(['terminal-empty']);
+
+      query.matches = false;
+      expect(onChange).not.toBeNull();
+      onChange!();
+      await flush();
+      expect(getPaneHost(root).dataset.effectiveLayout).toBe(preset);
+      expect(placeholders()).toHaveLength(count);
+      expect(visibleOverlays()).toEqual([]);
+    }
+  );
+
+  it.each(presets)(
+    'shows the empty state for %s on a narrow viewport with no terminals open',
+    async (preset) => {
+      mockNarrowViewport();
+      root.dispose();
+      root.element.remove();
+      root = new WorkspaceRoot();
+      document.body.append(root.element);
+
+      root.layoutManager.setLayout(preset);
+      await flush();
+      expect(getPaneHost(root).dataset.effectiveLayout).toBe('single');
+      expect(placeholders()).toEqual([]);
+      const overlays = visibleOverlays();
+      expect(overlays.map((el) => el.className)).toEqual(['terminal-empty']);
+      expect(overlays[0].textContent).toBe('No terminals are open.');
+    }
+  );
+
+  it.each(presets)(
     'shows %s placeholders that accept a drop when no slot is filled',
     async (preset, count) => {
       const registry = new TerminalSessionRegistry({

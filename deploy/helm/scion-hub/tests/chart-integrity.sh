@@ -432,11 +432,12 @@ fi
 # Phase 1 wrote this section while auth.requireStableSigningKey defaulted to
 # false and true was UNSATISFIABLE: the hub resolves a stable key from a
 # pre-configured key, SharedSigningSecret, a secret backend or its store
-# (pkg/hub/server.go:1445); SharedSigningSecret comes only from --session-secret,
-# SCION_SERVER_SESSION_SECRET or bare SESSION_SECRET
-# (cmd/server_foreground.go:1452-1462); and the chart rendered none of the three.
-# With true and no key, pkg/hub/server.go:1634 errors, pkg/hub/server.go:1008
-# makes it fatal, cmd/server_foreground.go:259 calls log.Fatalf. So E2 asserted a
+# (Server.ensureSigningKey, pkg/hub/server.go); SharedSigningSecret comes only
+# from --session-secret, SCION_SERVER_SESSION_SECRET or bare SESSION_SECRET
+# (resolveSessionSecret, cmd/server_foreground.go); and the chart rendered none
+# of the three. With true and no key, Server.ensureSigningKey refuses under
+# RequireStableSigningKey, hub.New (pkg/hub/server.go) returns that error, and
+# runServerStart (cmd/server_foreground.go) calls log.Fatalf via initHubServer. So E2 asserted a
 # `fail` in configmap-env.yaml that REFUSED true, and E5 was a tripwire waiting
 # for the day the Secret landed and nobody flipped the default back.
 #
@@ -606,7 +607,7 @@ fi
 # --- E2. INVERTED. The input Phase 1 refused is the input that must render. --
 # Phase 1 asserted here that `--set auth.requireStableSigningKey=true` WITHOUT
 # config.existingSecret was rejected by a `fail` in configmap-env.yaml citing
-# cmd/server_foreground.go:259. That `fail` is deleted and this asserts its
+# runServerStart's log.Fatalf (cmd/server_foreground.go). That `fail` is deleted and this asserts its
 # absence by asserting the success it blocked - the same input, the opposite
 # verdict, which is what makes a bad merge reinstating the guard visible.
 #

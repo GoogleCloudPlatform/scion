@@ -19,15 +19,12 @@ import { render, type TemplateResult } from 'lit';
 
 import type { Agent } from '../../shared/types.js';
 import { PROVISIONED_ONLY_LABEL } from '../../shared/agent-state-display.js';
-import { styleRules } from './__fixtures__/card-layout.js';
+import { styleRules } from './__fixtures__/css-rules.js';
 
 // chat-thread (imported by agent-detail) pulls in the app entry point,
 // which bootstraps the SPA on load; stub it as the header tests do.
 // Remove once chat-thread stops importing client/main (chat lane, ptone/scion#3118).
-vi.mock('../../client/main.js', () => ({
-  navigateTo: vi.fn(),
-  stateManager: new EventTarget(),
-}));
+vi.mock('../../client/main.js', () => import('../../client/__fixtures__/main-stub.js'));
 
 describe('agent detail layout', () => {
   let rules: Map<string, string>;

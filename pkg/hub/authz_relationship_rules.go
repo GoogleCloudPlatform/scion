@@ -28,8 +28,9 @@ package hub
 //     user's live admission to the agent's project;
 //     2c. project_access — a local user's owner or ancestor relationship on
 //     a project-scoped target requires the user's active access to that
-//     project (Decide only, for interactive and UAT requests; not the
-//     delegation-ceiling walk; see relationshipProjectAccessStage);
+//     project (Decide, for interactive and UAT requests, and the
+//     delegation-ceiling walk for a user delegator; see
+//     relationshipProjectAccess and relationshipProjectAccessStage);
 //  3. relationship_fact    — the rule's store fact holds (hub membership, a
 //     progeny sharing source); a lookup failure rejects the candidate;
 //  4. source_inactive      — the sharing source's owner is still active;
