@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 179
+**Operations:** 180
 
 ## Table of Contents
 
@@ -185,6 +185,7 @@
 - [gcp.identity.read](#gcpidentityread) — Read GCP service account details or list accounts
 - [gcp.identity.verify](#gcpidentityverify) — Verify a GCP service account's IAM configuration
 - [env.read](#envread) — Read project environment variables
+- [env.hub.list](#envhublist) — List hub-level environment variables (scope=hub), without secret entries
 
 ---
 
@@ -3489,11 +3490,11 @@
 
 **Base Permission:** `project.read`
 
-**Resource Resolver:** project-from-url
+**Resource Resolver:** project-from-row
 
 **Effects:** `read-one`, `list-scoped`
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `not_found`
 
 ### Tests
 
@@ -6710,6 +6711,36 @@
 **Resource Resolver:** project-from-url
 
 **Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## env.hub.list
+
+**Domain:** env
+
+**Description:** List hub-level environment variables (scope=hub), without secret entries
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/env` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `hub.env_vars.read`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `list-scoped`
 
 **Denial Codes:** `forbidden`
 

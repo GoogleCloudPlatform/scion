@@ -135,6 +135,12 @@ type ServerConfig struct {
 	// open user streams (conduit.authz_recheck_interval; 0 = 60s). Only
 	// used behind the hub.conduit experiment.
 	ConduitAuthzRecheckInterval time.Duration
+	// ConduitUserStreamAuthzMax is the authorization interval of
+	// user-originated streams (conduit.stream_authz_max.user; 0 = 8h,
+	// negative disables the deadline, for tests): when a stream reaches
+	// it, the hub re-checks the user and renews or closes the stream.
+	// Only used behind the hub.conduit experiment.
+	ConduitUserStreamAuthzMax time.Duration
 	// AuthMode is the exclusive human auth mode: "oauth" (default), "proxy", "dev".
 	AuthMode string
 	// ProxyAuthenticator is the configured proxy authenticator (when AuthMode == "proxy").
@@ -1530,6 +1536,9 @@ type Server struct {
 
 	// Artifact store for the artifact_* tables (pkg/artifacts) — nil = artifacts unavailable.
 	artifactStore artifacts.Store
+	// artifactBlobSweeper keeps the blob sweep's position between passes
+	// of the artifact maintenance loop (its only user).
+	artifactBlobSweeper artifacts.BlobSweeper
 
 	// Chat notifier for human mention + DM received notifications (W6). Nil-safe.
 	chatNotifier *ChatNotifier
@@ -1620,6 +1629,11 @@ type Server struct {
 	// denyUnknownFailOpen is written with saAssignCheckMode under s.mu
 	// (applyGCPIAMSettingsLocked) and read lock-free by the checker.
 	denyUnknownFailOpen atomic.Bool
+	// saAssignCheckDiag is set while the assignment check cannot run because
+	// the hub's identity lacks the access it needs, and cleared once a
+	// check call succeeds or the check stops being enforced. Updated only
+	// by NoteSAAssignCheckCall. Shown on the admin health summary.
+	saAssignCheckDiag atomic.Pointer[saAssignCheckDiagnostic]
 	// gcpIAMStartup is the deploy-time pair of GCP permission-check
 	// settings, resolved once in New. A stored value that is absent or
 	// cannot be used resolves to it (resolveGCPIAMSettings).
@@ -1748,6 +1762,11 @@ type Server struct {
 	// perfTraceLog receives the per-request perf_trace lines. Set only when
 	// server.hub.perf_trace is on; nil otherwise.
 	perfTraceLog *slog.Logger
+
+	// hubWorkspaceDownload replaces gcp.SyncFromGCS for downloads of a
+	// workspace upload into a hub workspace when set (tests only). Guarded
+	// by mu; see setHubWorkspaceDownloader and hubWorkspaceDownloader.
+	hubWorkspaceDownload func(ctx context.Context, bucket, prefix, localPath string) error
 
 	// templateSourceFetcher downloads template sources for reimport. nil
 	// selects the default fetcher (newTemplateSourceFetcher); tests replace it.
@@ -3790,11 +3809,25 @@ func (s *Server) SetGEExchangeMetrics(m GEExchangeMetricsRecorder) {
 
 // SetLocalImageChecker wires a local container runtime into the image
 // checker so it can verify images via the local Docker/Podman daemon.
+// imagecheck.Checker.SetLocal is itself safe to call while checks run.
 func (s *Server) SetLocalImageChecker(l imagecheck.LocalImageExister) {
 	s.imageChecker.SetLocal(l)
 	if mgr, ok := l.(imageManager); ok {
+		// Under s.mu: this also runs after serving has started (broker
+		// startup, the system-runtime PUT handler and the runtime reload
+		// func), while handlers read the field through getImageManager.
+		s.mu.Lock()
 		s.imageManager = mgr
+		s.mu.Unlock()
 	}
+}
+
+// getImageManager returns the co-located runtime's image manager, or nil.
+// Callers take one snapshot and use it for the whole operation.
+func (s *Server) getImageManager() imageManager {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.imageManager
 }
 
 // GetMaintenanceState returns the runtime maintenance state.
@@ -3910,9 +3943,6 @@ func (s *Server) SetCommandBus(cb CommandBus) {
 		})
 	}
 }
-
-// CommandBus returns the configured command bus, or nil.
-func (s *Server) CommandBus() CommandBus { return s.commandBus }
 
 // StartNotificationDispatcher creates and starts the notification dispatcher
 // if a subscription-capable EventPublisher is available. It uses a lazy getter for the
@@ -5530,7 +5560,14 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	if s.config.SchedulerMaxConcurrency != nil {
 		schedOpts = append(schedOpts, WithMaxConcurrency(*s.config.SchedulerMaxConcurrency))
 	}
-	s.scheduler = NewScheduler(s.store, logging.Subsystem("hub.scheduler"), schedOpts...)
+	// Written under s.mu: in combined mode the CleanupResources goroutine
+	// (cmd/server_foreground.go) is already running and reads s.scheduler
+	// under s.mu.RLock. The reads in registerSchedulerHandlers below run on
+	// this goroutine, after this write, so they need no lock.
+	sched := NewScheduler(s.store, logging.Subsystem("hub.scheduler"), schedOpts...)
+	s.mu.Lock()
+	s.scheduler = sched
+	s.mu.Unlock()
 	s.registerSchedulerHandlers()
 
 	// Report non-canonical stored timestamps (SQLite). It runs in the
@@ -5682,9 +5719,24 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 		if s.decisionAuditRouter != nil {
 			_ = s.decisionAuditRouter.CloseNew(ctx)
 		}
+		// Fields whose setters take s.mu.Lock are snapshotted once here
+		// and only the locals are used below. Those setters
+		// (StartBackgroundServices, StartNotificationDispatcher,
+		// StartLifecycleHookEvaluator, StartMessageBroker,
+		// InitPresenceManager, SetEventPublisher, SetCommandBus) can run
+		// on the startup goroutine while this runs on shutdown during
+		// startup, and cleanupOnce does not order them. The other fields
+		// used below are set in New(), before any caller can reach this.
 		s.mu.RLock()
 		cc := s.controlChannel
 		stopPoolSampler := s.stopPoolSampler
+		scheduler := s.scheduler
+		notificationDispatcher := s.notificationDispatcher
+		lifecycleHookEvaluator := s.lifecycleHookEvaluator
+		messageBrokerProxy := s.messageBrokerProxy
+		presenceManager := s.presenceManager
+		events := s.events
+		commandBus := s.commandBus
 		s.mu.RUnlock()
 
 		slog.Info("Cleaning up Hub resources...")
@@ -5724,17 +5776,17 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 		if s.brokerAuthService != nil {
 			s.brokerAuthService.Close()
 		}
-		if s.scheduler != nil {
-			s.scheduler.Stop()
+		if scheduler != nil {
+			scheduler.Stop()
 		}
-		if s.notificationDispatcher != nil {
-			s.notificationDispatcher.Stop()
+		if notificationDispatcher != nil {
+			notificationDispatcher.Stop()
 		}
-		if s.lifecycleHookEvaluator != nil {
-			s.lifecycleHookEvaluator.Stop()
+		if lifecycleHookEvaluator != nil {
+			lifecycleHookEvaluator.Stop()
 		}
-		if s.messageBrokerProxy != nil {
-			s.messageBrokerProxy.Stop()
+		if messageBrokerProxy != nil {
+			messageBrokerProxy.Stop()
 		}
 		if s.telegramLinkService != nil {
 			s.telegramLinkService.Close()
@@ -5750,14 +5802,14 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 			s.previewService.Close()
 		}
 		// Stop presence manager before closing event publisher
-		if s.presenceManager != nil {
-			s.presenceManager.Stop()
+		if presenceManager != nil {
+			presenceManager.Stop()
 		}
-		if s.events != nil {
-			s.events.Close()
+		if events != nil {
+			events.Close()
 		}
-		if s.commandBus != nil {
-			s.commandBus.Close()
+		if commandBus != nil {
+			commandBus.Close()
 		}
 		if s.logQueryService != nil {
 			_ = s.logQueryService.Close()
