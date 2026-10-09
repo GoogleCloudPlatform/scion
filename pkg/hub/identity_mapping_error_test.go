@@ -135,7 +135,9 @@ func TestDispatchCreateErrorResponse_TranslatesIdentityMappingRefusal(t *testing
 
 // TestDispatchCreateErrorResponse_IdentityCodeOnlyAt400 keeps the
 // translation narrow: the codes are honoured only on a 400, the broker's
-// text alone is never matched, and other broker errors keep the 502.
+// text alone is never matched, and broker 5xx and transport errors keep the
+// 502. A broker 400 validation_error is relayed as a 400 instead; see
+// TestDispatchCreateErrorResponse_ValidationErrorNotIdentityMapping.
 func TestDispatchCreateErrorResponse_IdentityCodeOnlyAt400(t *testing.T) {
 	tests := []struct {
 		name string
@@ -145,7 +147,6 @@ func TestDispatchCreateErrorResponse_IdentityCodeOnlyAt400(t *testing.T) {
 		{name: "500 runtime_error", err: brokerIdentityMappingErr(http.StatusInternalServerError, "runtime_error", nil)},
 		{name: "text only", err: &brokerStatusError{StatusCode: http.StatusInternalServerError,
 			Body: `{"error":{"code":"runtime_error","message":"has no Kubernetes ServiceAccount mapped for \"x\""}}`}},
-		{name: "400 validation_error", err: brokerIdentityMappingErr(http.StatusBadRequest, "validation_error", nil)},
 		{name: "transport error", err: errors.New("dial tcp: connection refused")},
 	}
 	for _, tc := range tests {
@@ -155,6 +156,18 @@ func TestDispatchCreateErrorResponse_IdentityCodeOnlyAt400(t *testing.T) {
 			require.Equal(t, http.StatusBadGateway, w.Code, w.Body.String())
 		})
 	}
+}
+
+// A broker 400 validation_error carrying identity details is relayed as the
+// broker's 400 validation_error (relayHarnessConfigRefusal, ptone/scion#2666),
+// not translated into an identity mapping refusal: no identity details, docs
+// link or hub identity message reach the client.
+func TestDispatchCreateErrorResponse_ValidationErrorNotIdentityMapping(t *testing.T) {
+	w := httptest.NewRecorder()
+	dispatchCreateErrorResponse(w, brokerIdentityMappingErr(http.StatusBadRequest, ErrCodeValidationError, nil), "")
+	assertHarnessConfigRelayed(t, w, http.StatusBadRequest, ErrCodeValidationError, "broker operator text")
+	assert.NotContains(t, w.Body.String(), kubernetesIdentityMappingDocsURL)
+	assert.NotContains(t, w.Body.String(), testMappingAccount)
 }
 
 // A 400 with another code is not an identity refusal.
