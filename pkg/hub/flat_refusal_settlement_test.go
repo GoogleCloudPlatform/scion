@@ -132,16 +132,21 @@ func TestFlatLifecycle_RefusalSettlesMessage(t *testing.T) {
 	}
 }
 
-// stopLegFaultStore fails the Runtime Broker read for brokerID once the
-// mock client has seen a stop: the restart's start-leg placement check
-// then fails after the stop leg ran, with the restart's claim held.
+// stopLegFaultStore fails the Runtime Broker read for brokerID once armed
+// and once the mock client has seen a stop: the restart's start-leg
+// placement check then fails after the stop leg ran, with the restart's
+// claim held. Until armed it delegates.
 type stopLegFaultStore struct {
 	store.Store
+	fault    *storeFaultSwitch
 	client   *mockRuntimeBrokerClient
 	brokerID string
 }
 
 func (s *stopLegFaultStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {
+	if !s.fault.Active() {
+		return s.Store.GetRuntimeBroker(ctx, id)
+	}
 	if id == s.brokerID && s.client.stopCalled {
 		return nil, errors.New("injected broker read failure")
 	}
@@ -154,18 +159,25 @@ func (s *stopLegFaultStore) GetRuntimeBroker(ctx context.Context, id string) (*s
 // claim and a following start is not refused with start_in_progress.
 func TestFlatRestart_StartLegPlacementRefusalReleasesClaim(t *testing.T) {
 	ctx := context.Background()
-	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true,
+		storeWrap: func(inner store.Store, fault *storeFaultSwitch) store.Store {
+			return &stopLegFaultStore{Store: inner, fault: fault}
+		}})
 	require.True(t, f.srv.startClaimsEnabled())
 	a := f.pinnedAgent(t, "restart-claim", string(state.PhaseRunning))
-	real := f.srv.store
-	f.srv.store = &stopLegFaultStore{Store: real, client: f.client, brokerID: f.flat.ID}
+	real := f.s
+	stopLeg := f.storeWrapper.(*stopLegFaultStore)
+	stopLeg.client = f.client
+	stopLeg.brokerID = f.flat.ID
+	f.storeFault.Arm()
 
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/restart", nil)
 	require.True(t, f.client.stopCalled, "the stop leg ran")
 	assert.False(t, f.client.startCalled, "the start leg was refused before dispatch")
 	assert.GreaterOrEqual(t, rec.Code, 400, rec.Body.String())
 
-	f.srv.store = real
+	// The fault stays armed but no longer fires: it needs a seen stop, and
+	// the flag is cleared before the following start.
 	got, err := real.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
 	assert.Empty(t, got.StartClaimID, "the restart's claim is released")

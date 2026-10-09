@@ -53,6 +53,10 @@ import (
 type flatHubOpts struct {
 	experimentOn bool
 	linkFlat     bool // flat row is a provider of the project
+	// storeWrap, when set, is installed as srv.store right after the server
+	// is built (installStoreFault), before any setup; the wrapper must
+	// delegate until the test arms the fixture's storeFault switch.
+	storeWrap func(inner store.Store, fault *storeFaultSwitch) store.Store
 }
 
 type flatHubFixture struct {
@@ -62,6 +66,9 @@ type flatHubFixture struct {
 	flat    *store.RuntimeBroker // flat Runtime Broker (docker target)
 	legacy  *store.RuntimeBroker // legacy, profile-based Runtime Broker
 	client  *mockRuntimeBrokerClient
+	// storeWrapper and storeFault are set when flatHubOpts.storeWrap is.
+	storeWrapper store.Store
+	storeFault   *storeFaultSwitch
 }
 
 func setFlatExperiment(t *testing.T, srv *Server, enabled bool) {
@@ -77,6 +84,11 @@ func setFlatExperiment(t *testing.T, srv *Server, enabled bool) {
 func newFlatHubFixture(t *testing.T, opts flatHubOpts) *flatHubFixture {
 	t.Helper()
 	srv, s := testServer(t)
+	var storeWrapper store.Store
+	var storeFault *storeFaultSwitch
+	if opts.storeWrap != nil {
+		storeWrapper, storeFault = installStoreFault(t, srv, opts.storeWrap)
+	}
 	ctx := context.Background()
 
 	project := &store.Project{ID: tid("flat-project-" + t.Name()), Name: "Flat Project", Slug: "flat-project-" + tidSlugSafe(t.Name())}
@@ -120,7 +132,8 @@ func newFlatHubFixture(t *testing.T, opts flatHubOpts) *flatHubFixture {
 	require.NoError(t, err)
 	legacy, err = s.GetRuntimeBroker(ctx, legacy.ID)
 	require.NoError(t, err)
-	return &flatHubFixture{srv: srv, s: s, project: project, flat: flat, legacy: legacy, client: client}
+	return &flatHubFixture{srv: srv, s: s, project: project, flat: flat, legacy: legacy, client: client,
+		storeWrapper: storeWrapper, storeFault: storeFault}
 }
 
 // create POSTs a raw-JSON create body to the project's agents endpoint as
@@ -321,11 +334,15 @@ func (c *countingTokenGen) SignAgentToken(grant AgentTokenGrant, runID string) (
 // own SetAgentPinnedRuntimeTarget, so the handler loses the compare-and-set.
 type racingPinStore struct {
 	store.Store
+	fault     *storeFaultSwitch
 	competing store.PinnedPlacement
 	raced     bool
 }
 
 func (r *racingPinStore) SetAgentPinnedRuntimeTarget(ctx context.Context, agentID string, expected, next store.PinnedPlacement) (*store.Agent, error) {
+	if !r.fault.Active() {
+		return r.Store.SetAgentPinnedRuntimeTarget(ctx, agentID, expected, next)
+	}
 	if !r.raced {
 		r.raced = true
 		if _, err := r.Store.SetAgentPinnedRuntimeTarget(ctx, agentID, expected, r.competing); err != nil {
@@ -640,7 +657,10 @@ func TestFlatCreate_DeleteAndRecreateChecksBeforeDelete(t *testing.T) {
 
 func TestFlatCreate_ExistingAgentWithoutBrokerTreatedAsNewCreate(t *testing.T) {
 	ctx := context.Background()
-	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true,
+		storeWrap: func(inner store.Store, fault *storeFaultSwitch) store.Store {
+			return &racingPinStore{Store: inner, fault: fault}
+		}})
 
 	// The new-create checks run: with the experiment off the first placement
 	// is refused and nothing is pinned or dispatched.
@@ -684,7 +704,9 @@ func TestFlatCreate_ExistingAgentWithoutBrokerTreatedAsNewCreate(t *testing.T) {
 		Endpoint: "http://racing.invalid", RuntimeTarget: &api.RuntimeTargetDescriptor{ID: tid("racing-target-" + t.Name()), Type: "docker"}}
 	require.NoError(t, f.s.CreateRuntimeBroker(ctx, other))
 	c := f.unpinnedAgentOn(t, "no-broker-race", "", string(state.PhaseCreated))
-	f.srv.store = &racingPinStore{Store: f.s, competing: store.PinnedPlacement{RuntimeBrokerID: other.ID, RuntimeTargetID: other.RuntimeTarget.ID, RuntimeTargetType: "docker"}}
+	racing := f.storeWrapper.(*racingPinStore)
+	racing.competing = store.PinnedPlacement{RuntimeBrokerID: other.ID, RuntimeTargetID: other.RuntimeTarget.ID, RuntimeTargetType: "docker"}
+	f.storeFault.Arm()
 	f.client.startCalled = false
 	rec = f.create(t, map[string]interface{}{"name": "no-broker-race", "runtimeBrokerId": f.flat.ID, "task": "t"})
 	requireAPIError(t, rec, http.StatusConflict, ErrCodeConflict)
