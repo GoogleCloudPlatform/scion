@@ -189,7 +189,15 @@ func normalizeErrorText(text string, maxBytes int) string {
 // request to a login page) is returned as a non-200 refusal rather than
 // followed to a page that answers 200.
 func (c *PTYClient) httpClient() *http.Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// Start from the default transport's settings when it is the standard
+	// *http.Transport; if something has replaced it with another
+	// RoundTripper, use a plain transport rather than wrapping it.
+	var transport *http.Transport
+	if t, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = t.Clone()
+	} else {
+		transport = &http.Transport{}
+	}
 	transport.Proxy = nil // websocket.Dialer{} in dial has no Proxy either
 	// One request per client: do not leave an idle connection (and its
 	// goroutines) behind after the preflight.

@@ -293,3 +293,31 @@ func TestAttachToAgent_PreflightTransportFailure(t *testing.T) {
 	assert.EqualValues(t, 0, h.upgrades.Load())
 	assert.EqualValues(t, 0, h.gets.Load())
 }
+
+// roundTripperFunc is a RoundTripper that is not an *http.Transport.
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestPreflight_ClientPolicyWithReplacedDefaultTransport: when
+// http.DefaultTransport is not an *http.Transport, building the preflight
+// client does not panic and the same policy applies.
+func TestPreflight_ClientPolicyWithReplacedDefaultTransport(t *testing.T) {
+	orig := http.DefaultTransport
+	http.DefaultTransport = roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("replaced default transport must not be used")
+	})
+	t.Cleanup(func() { http.DefaultTransport = orig })
+
+	h := newPreflightHub(t, http.StatusOK, `{}`)
+	c := NewPTYClient(PTYClientConfig{Endpoint: h.srv.URL, Slug: "a1"})
+	var hc *http.Client
+	require.NotPanics(t, func() { hc = c.httpClient() })
+	tr, ok := hc.Transport.(*http.Transport)
+	require.True(t, ok)
+	assert.Nil(t, tr.Proxy)
+	assert.True(t, tr.DisableKeepAlives)
+	require.NotNil(t, hc.CheckRedirect)
+	assert.ErrorIs(t, hc.CheckRedirect(nil, nil), http.ErrUseLastResponse)
+	require.NoError(t, c.Preflight(context.Background()), "the preflight still works")
+}
