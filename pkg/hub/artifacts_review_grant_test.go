@@ -38,6 +38,7 @@ type reviewGrantFixture struct {
 	otherAdmin             string
 	agent, child           *store.Agent
 	noEdge                 *store.Agent
+	sibling                *store.Agent
 }
 
 // newReviewGrantFixture builds project home with a member user that
@@ -85,6 +86,9 @@ func newReviewGrantFixture(t *testing.T) reviewGrantFixture {
 	f.child = newAgent("child")
 	edge(store.DelegationPrincipalAgent, f.agent.ID, f.child.ID, store.SourceCredentialAgent)
 	f.noEdge = newAgent("no-edge")
+	// sibling is delegated by member, a second user in the same project.
+	f.sibling = newAgent("sibling")
+	edge(store.DelegationPrincipalUser, f.member, f.sibling.ID, store.SourceCredentialSession)
 	return f
 }
 
@@ -121,7 +125,16 @@ func TestArtifactHostMayGrantReview(t *testing.T) {
 		{"plain project member", f.user(f.member), f.agent.ID, f.home, false},
 		{"user from another project", f.user(f.outside), f.agent.ID, f.home, false},
 		{"admin of another project", f.user(f.otherAdmin), f.agent.ID, f.home, false},
-		{"home admin, artifact homed elsewhere", f.user(f.admin), f.agent.ID, f.other, false},
+		// After a move the home-admin path follows the current home (D24
+		// clarification): the old home's admin is refused, the new one's
+		// admin allowed.
+		{"old-home admin after a move", f.user(f.admin), f.agent.ID, f.other, false},
+		{"new-home admin after a move", f.user(f.otherAdmin), f.agent.ID, f.other, true},
+		// Two users each delegating in the project: each is the
+		// delegating user only of their own chain.
+		{"another user's delegate", f.user(f.member), f.sibling.ID, f.home, true},
+		{"delegating user of a sibling chain", f.user(f.member), f.child.ID, f.home, false},
+		{"first user for the second user's delegate", f.user(f.delegator), f.sibling.ID, f.home, false},
 		{"creator of an agent with no edge", f.user(f.delegator), f.noEdge.ID, f.home, false},
 		{"unknown agent", f.user(f.delegator), tid("rg-missing"), f.home, false},
 		{"empty agent", f.user(f.admin), "", f.home, false},
