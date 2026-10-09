@@ -2,12 +2,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ScionTerminalPane } from './terminal-pane.js';
 import { TerminalSessionRegistry } from '../../client/terminal-sessions.js';
-
-/** The URL string a fetch mock was called with. */
-function requestUrl(input: RequestInfo | URL): string {
-  if (typeof input === 'string') return input;
-  return input instanceof URL ? input.href : input.url;
-}
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 const showToast = vi.fn();
 vi.mock('../../utils/toast.js', () => ({ showToast }));

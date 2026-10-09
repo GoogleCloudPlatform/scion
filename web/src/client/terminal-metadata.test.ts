@@ -2,12 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TerminalMetadata } from './terminal-metadata.js';
 import { StateManager } from './state.js';
-
-/** The URL string a fetch mock was called with. */
-function requestUrl(input: RequestInfo | URL): string {
-  if (typeof input === 'string') return input;
-  return input instanceof URL ? input.href : input.url;
-}
+import { requestUrl } from './__fixtures__/request-url.js';
 
 const id = (n: number) => `11111111-1111-4111-8111-${String(n).padStart(12, '0')}`;
 const agent = (n = 1) => ({ id: id(n), name: `agent-${n}`, phase: 'running', activity: 'idle' });

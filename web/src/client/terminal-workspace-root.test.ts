@@ -29,12 +29,7 @@ import type { PaletteCandidate } from './palette-types.js';
 import { AgentStore } from './agent-store.js';
 import { FakeEventSource } from './__fixtures__/agent-store-harness.js';
 import { TOUCH_PRIMARY_QUERY } from '../utils/input-modality.js';
-
-/** The URL string a fetch mock was called with. */
-function requestUrl(input: RequestInfo | URL): string {
-  if (typeof input === 'string') return input;
-  return input instanceof URL ? input.href : input.url;
-}
+import { requestUrl } from './__fixtures__/request-url.js';
 
 // Mock terminal-pane custom element before importing workspace root
 vi.mock('@xterm/xterm', () => ({
