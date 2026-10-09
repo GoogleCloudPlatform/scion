@@ -261,11 +261,42 @@ func TestMergeProjectSettingsPut_CaseInsensitiveNames(t *testing.T) {
 }
 
 func TestMergeProjectSettingsPut_RejectsInvalidBody(t *testing.T) {
-	for _, body := range []string{
-		`[]`, `"x"`, `{"defaultMaxTurns":"ten"}`, `{`,
-		`{"defaultModel":"a","DefaultModel":null}`,
-	} {
+	for _, body := range []string{`[]`, `"x"`, `{"defaultMaxTurns":"ten"}`, `{`} {
 		_, _, err := mergeProjectSettingsPut(&hubclient.ProjectSettings{}, []byte(body))
 		assert.Error(t, err, "body %s", body)
 	}
+}
+
+// Two keys that name the same field are refused, whichever way they fold,
+// and the error names both keys in a fixed (sorted) order.
+func TestMergeProjectSettingsPut_RejectsDuplicateFields(t *testing.T) {
+	tests := []struct {
+		body string
+		want string
+	}{
+		{
+			body: `{"defaultModel":"a","DefaultModel":null}`,
+			want: `duplicate field "defaultModel": keys "DefaultModel" and "defaultModel" both name it`,
+		},
+		{
+			// U+017F (long s) folds to "s", as encoding/json folds it.
+			body: "{\"defaultMaxTurns\":4,\"defaultMaxTurn\u017f\":5}",
+			want: "duplicate field \"defaultMaxTurns\": keys \"defaultMaxTurns\" and \"defaultMaxTurn\u017f\" both name it",
+		},
+	}
+	for _, tc := range tests {
+		for range 20 { // map order varies run to run; the error must not
+			_, _, err := mergeProjectSettingsPut(&hubclient.ProjectSettings{}, []byte(tc.body))
+			require.Error(t, err, "body %s", tc.body)
+			assert.Equal(t, tc.want, err.Error())
+		}
+	}
+}
+
+// A key that matches a field only under Unicode case folding is seen as
+// present, so the merge applies exactly what the decoder decoded.
+func TestMergeProjectSettingsPut_UnicodeFoldedName(t *testing.T) {
+	got, present := runPutMerge(t, "{\"defaultMaxTurn\u017f\":5}")
+	assert.Equal(t, "5", got[projectSettingDefaultMaxTurns])
+	assert.True(t, present["defaultMaxTurns"])
 }

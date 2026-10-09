@@ -384,10 +384,11 @@ func (s *projectService) GetSettings(ctx context.Context, projectID string) (*Pr
 // UpdateSettings updates project settings. The server merges the PUT
 // field by field: a field left out of the body, or sent as null, keeps its
 // stored value, and a field's empty value clears it. ProjectSettings drops
-// zero values (omitempty), so through this type only activeProfile ("")
-// and DefaultGCPIdentityServiceAccountIDByProfile ({}) can be cleared;
-// other fields cannot be cleared, and the tri-state fields cannot be reset
-// to inherit.
+// zero values (omitempty), so through this type only ActiveProfile
+// (pointer to ""), DefaultResources (pointer to an empty spec, sent as {})
+// and DefaultGCPIdentityServiceAccountIDByProfile (empty map, sent as {})
+// can be cleared; other fields cannot be cleared, and the tri-state fields
+// cannot be reset to inherit.
 func (s *projectService) UpdateSettings(ctx context.Context, projectID string, settings *ProjectSettings) (*ProjectSettings, error) {
 	resp, err := s.c.put(ctx, "/api/v1/projects/"+projectID+"/settings", settings, nil)
 	if err != nil {

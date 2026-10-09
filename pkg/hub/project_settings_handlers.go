@@ -21,9 +21,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -633,9 +635,9 @@ var projectSettingsNullClearsFields = map[string]bool{
 //     (defaultResources, the per-profile map) are replaced as a whole, not
 //     merged key by key.
 //
-// Field names are matched case-insensitively, as encoding/json does when it
-// decodes the same body into the struct. Two keys that differ only in case
-// are rejected. The merge walks the struct by
+// Field names are matched as encoding/json matches them when it decodes the
+// same body into the struct: exactly, or else under Unicode case folding.
+// Two keys that name the same field are rejected. The merge walks the struct by
 // reflection, so a field added to hubclient.ProjectSettings gets the same
 // rule without further code here.
 func mergeProjectSettingsPut(stored *hubclient.ProjectSettings, body []byte) (*hubclient.ProjectSettings, map[string]bool, error) {
@@ -647,44 +649,66 @@ func mergeProjectSettingsPut(stored *hubclient.ProjectSettings, body []byte) (*h
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, nil, err
 	}
-	folded := make(map[string]json.RawMessage, len(raw))
-	for k, v := range raw {
-		// Two keys that differ only in case would make the result depend
-		// on map iteration order, so they are refused.
-		lk := strings.ToLower(k)
-		if _, dup := folded[lk]; dup {
-			return nil, nil, fmt.Errorf("duplicate field %q", k)
-		}
-		folded[lk] = v
-	}
-
 	merged := *stored
-	present := make(map[string]bool)
 	mv := reflect.ValueOf(&merged).Elem()
 	rv := reflect.ValueOf(req)
 	t := mv.Type()
-	for i := 0; i < t.NumField(); i++ {
-		name := jsonFieldName(t.Field(i))
-		if name == "" {
+	names := make([]string, t.NumField())
+	for i := range names {
+		names[i] = jsonFieldName(t.Field(i))
+	}
+
+	// Map each body key to the field encoding/json decodes it into. Keys
+	// are visited in sorted order so a duplicate is reported the same way
+	// every time. Two keys naming one field would make the result depend
+	// on map iteration order, so they are refused. Unknown keys are
+	// ignored, as the decoder ignores them.
+	byField := make(map[int]string, len(raw))
+	for _, k := range slices.Sorted(maps.Keys(raw)) {
+		i := projectSettingsFieldIndex(names, k)
+		if i < 0 {
 			continue
 		}
-		msg, ok := folded[strings.ToLower(name)]
-		if !ok {
-			continue
+		if prev, dup := byField[i]; dup {
+			return nil, nil, fmt.Errorf("duplicate field %q: keys %q and %q both name it", names[i], prev, k)
 		}
+		byField[i] = k
+	}
+
+	present := make(map[string]bool, len(byField))
+	for i, k := range byField {
 		// encoding/json stores map values without surrounding whitespace,
 		// so the shared isJSONNull literal check is exact here.
-		if isJSONNull(msg) {
-			if !projectSettingsNullClearsFields[name] {
+		if isJSONNull(raw[k]) {
+			if !projectSettingsNullClearsFields[names[i]] {
 				continue
 			}
 			mv.Field(i).Set(reflect.Zero(t.Field(i).Type))
 		} else {
 			mv.Field(i).Set(rv.Field(i))
 		}
-		present[name] = true
+		present[names[i]] = true
 	}
 	return &merged, present, nil
+}
+
+// projectSettingsFieldIndex returns the index in names of the field a body
+// key decodes into, or -1 for an unknown key. Like encoding/json, it
+// prefers an exact match and otherwise matches under Unicode case folding
+// (strings.EqualFold), so a key such as "defaultMaxTurn\u017f" (long s)
+// names defaultMaxTurns here exactly as it does for the decoder.
+func projectSettingsFieldIndex(names []string, key string) int {
+	for i, name := range names {
+		if name != "" && name == key {
+			return i
+		}
+	}
+	for i, name := range names {
+		if name != "" && strings.EqualFold(name, key) {
+			return i
+		}
+	}
+	return -1
 }
 
 // jsonFieldName returns the JSON name of an exported struct field, or ""
