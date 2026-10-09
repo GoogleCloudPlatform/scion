@@ -306,10 +306,13 @@ func TestStatusUpdateIsEmpty_EveryFieldCounts(t *testing.T) {
 	// StartWrite only selects which delete guard applies to the write
 	// (GoogleCloudPlatform/scion#2679); on its own it writes nothing.
 	require.True(t, statusUpdateIsEmpty(store.AgentStatusUpdate{StartWrite: true}), "an update with only StartWrite is empty")
+	// IfPhase, like IfRunID, is a precondition on the write
+	// (ptone/scion#3414); on its own it writes nothing.
+	require.True(t, statusUpdateIsEmpty(store.AgentStatusUpdate{IfPhase: "x"}), "an update with only IfPhase is empty")
 
 	// statusUpdatePreconditionFields are AgentStatusUpdate fields that only
 	// condition the write and so do not make an update non-empty.
-	statusUpdatePreconditionFields := map[string]bool{"IfRunID": true, "StartWrite": true}
+	statusUpdatePreconditionFields := map[string]bool{"IfPhase": true, "IfRunID": true, "StartWrite": true}
 
 	typ := reflect.TypeOf(store.AgentStatusUpdate{})
 	for i := 0; i < typ.NumField(); i++ {
