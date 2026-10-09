@@ -173,8 +173,25 @@ func TestFetchFloor(t *testing.T) {
 		}
 	})
 	t.Run("all fetched", func(t *testing.T) {
-		if d := publishWith(t, "![a]("+good+")", nil); d >= floor {
-			t.Fatalf("took %v, want well under the floor %v", d, floor)
+		// Make any floor wait last the whole fetch budget: a floor far
+		// longer than the budget, and the longest budget allowed. A
+		// publish that returns well inside the budget then shows the wait
+		// was not entered at all, however slow the store or the runner.
+		f := newFixture(t, false)
+		f.svc.fetchFloor = time.Hour
+		f.useFetcher(&fakeFetcher{bodies: map[string][]byte{good: testPNG}})
+		lim := DefaultRemoteImageLimits()
+		lim.TotalBudget = MaxRemoteFetchBudget
+		f.svc.SetLimits(func(context.Context) Limits {
+			return Limits{MaxFileBytes: 1 << 20, RemoteImages: lim}
+		})
+		start := time.Now()
+		resp := f.publish(agentA, "doc.md", []byte("![a]("+good+")"), "")
+		if d := time.Since(start); d >= lim.TotalBudget/2 {
+			t.Fatalf("took %v; the floor wait was entered (it holds the publish for the %v budget)", d, lim.TotalBudget)
+		}
+		if len(resp.Warnings) != 0 {
+			t.Fatalf("warnings %q, want the image fetched", resp.Warnings)
 		}
 	})
 	t.Run("floor stays within the fetch budget", func(t *testing.T) {
