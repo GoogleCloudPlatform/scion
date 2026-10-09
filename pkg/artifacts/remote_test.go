@@ -184,9 +184,10 @@ func TestFetchFloor(t *testing.T) {
 	})
 	t.Run("many refused cost one floor", func(t *testing.T) {
 		// 100 refused images, fetched remoteFetchConcurrency at a time: a
-		// floor per image would hold the publish for about 25 floors
-		// (7.5s), far above the 10-floor bound, which leaves headroom for
-		// a slow runner.
+		// floor per image would hold the publish for at least about 25
+		// floors (7.5s), above the 20-floor (6s) bound. A slow runner only
+		// makes that case slower, and the bound leaves wide headroom for
+		// the single floor.
 		const n = 100
 		var md strings.Builder
 		reasons := map[string]remotefetch.Reason{}
@@ -205,7 +206,7 @@ func TestFetchFloor(t *testing.T) {
 		})
 		start := time.Now()
 		resp := f.publish(agentA, "doc.md", []byte(md.String()), "")
-		if d := time.Since(start); d < floor || d >= 10*floor {
+		if d := time.Since(start); d < floor || d >= 20*floor {
 			t.Fatalf("took %v, want one floor (%v), not one per image", d, floor)
 		}
 		if len(resp.Warnings) != n {
