@@ -19,9 +19,12 @@
  *
  * Route: /artifacts. Lists the artifacts the user owns, those shared with
  * them, and those published in their projects (GET /api/v1/artifacts?mine=1),
- * newest first, with search, a review-pending filter and an "Owned by me"
- * filter. Rows open the artifact page. Owner and project names are looked up
- * best-effort; the ids are shown when a lookup is not allowed.
+ * newest first, with search, a review-pending filter and "Owned by me" and
+ * "Shared with me" filters. Each row says why the user sees it (Owned,
+ * Project, Shared with you); a row whose home project was deleted says so
+ * and, for its owner or an admin, offers Move…. Rows open the artifact page.
+ * Owner and project names are looked up best-effort; the ids are shown when
+ * a lookup is not allowed.
  */
 
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
@@ -34,13 +37,23 @@ import {
   ARTIFACTS_FLAG,
   artifactListUrl,
   artifactPagePath,
+  type Artifact,
+  type ArtifactAccess,
   type ArtifactListItem,
   type ArtifactListResponse,
 } from '../../client/artifacts.js';
 import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import { formatRelative, formatInstant } from '../../utils/time.js';
 import { listPageStyles } from '../shared/resource-styles.js';
+import '../shared/artifact-move-dialog.js';
 import './not-found.js';
+
+/** How each access value is shown in the Access column. */
+const ACCESS_BADGES: Record<ArtifactAccess, { label: string; variant: string; icon?: string }> = {
+  owned: { label: 'Owned', variant: 'primary' },
+  project: { label: 'Project', variant: 'neutral' },
+  shared: { label: 'Shared with you', variant: 'success', icon: 'people' },
+};
 
 /** The reference page for artifacts on the documentation site. */
 export const ARTIFACTS_DOCS_URL =
@@ -63,6 +76,9 @@ export class ScionPageArtifacts extends LitElement {
   @state() private search = '';
   @state() private reviewPending = false;
   @state() private ownedOnly = false;
+  @state() private sharedOnly = false;
+  /** The row whose Move dialog is open. */
+  @state() private moving: ArtifactListItem | null = null;
   /** Display names by "kind:id" (owners) or "project:id"; '' while unknown. */
   @state() private names = new Map<string, string>();
 
@@ -92,6 +108,17 @@ export class ScionPageArtifacts extends LitElement {
       }
       .muted {
         color: var(--scion-text-muted, #64748b);
+      }
+      .deleted {
+        font-style: italic;
+        color: var(--scion-text-muted, #64748b);
+      }
+      .move {
+        margin-left: 0.375rem;
+        font-size: 0.8125rem;
+      }
+      sl-badge sl-icon {
+        vertical-align: -0.125em;
       }
       .count {
         margin-left: auto;
@@ -129,7 +156,7 @@ export class ScionPageArtifacts extends LitElement {
   }
 
   private get filtered(): boolean {
-    return this.search.trim() !== '' || this.reviewPending || this.ownedOnly;
+    return this.search.trim() !== '' || this.reviewPending || this.ownedOnly || this.sharedOnly;
   }
 
   /**
@@ -183,7 +210,12 @@ export class ScionPageArtifacts extends LitElement {
 
   private async fetchPage(cursor?: string): Promise<ArtifactListResponse> {
     const url = artifactListUrl(
-      { q: this.search, reviewPending: this.reviewPending, ownedOnly: this.ownedOnly },
+      {
+        q: this.search,
+        reviewPending: this.reviewPending,
+        ownedOnly: this.ownedOnly,
+        sharedOnly: this.sharedOnly,
+      },
       cursor
     );
     const res = await apiFetch(url);
@@ -205,7 +237,7 @@ export class ScionPageArtifacts extends LitElement {
       if (!isMe && (a.ownerKind === 'agent' || a.ownerKind === 'user')) {
         this.lookup(ownerKey, a.ownerKind === 'agent' ? 'agents' : 'users', a.ownerRef);
       }
-      if (a.scopeKind === 'project' && a.scopeRef) {
+      if (a.scopeKind === 'project' && a.scopeRef && !a.scopeDeleted) {
         this.lookup(`project:${a.scopeRef}`, 'projects', a.scopeRef);
       }
     }
@@ -254,7 +286,24 @@ export class ScionPageArtifacts extends LitElement {
 
   private onOwnedChange(e: Event): void {
     this.ownedOnly = (e.target as HTMLElement & { checked: boolean }).checked;
+    // An owned artifact is never shared with its owner: the filters exclude each other.
+    if (this.ownedOnly) this.sharedOnly = false;
     void this.load();
+  }
+
+  private onSharedChange(e: Event): void {
+    this.sharedOnly = (e.target as HTMLElement & { checked: boolean }).checked;
+    if (this.sharedOnly) this.ownedOnly = false;
+    void this.load();
+  }
+
+  private onMoved(e: CustomEvent<Artifact>): void {
+    const moved = e.detail;
+    this.moving = null;
+    this.items = this.items.map((a) =>
+      a.id === moved.id ? { ...a, ...moved, scopeDeleted: false, canManage: false } : a
+    );
+    this.resolveNames(this.items.filter((a) => a.id === moved.id));
   }
 
   override render(): TemplateResult {
@@ -297,6 +346,12 @@ export class ScionPageArtifacts extends LitElement {
           ?checked=${this.ownedOnly}
           @sl-change=${(e: Event): void => this.onOwnedChange(e)}
           >Owned by me</sl-checkbox
+        >
+        <sl-checkbox
+          size="small"
+          ?checked=${this.sharedOnly}
+          @sl-change=${(e: Event): void => this.onSharedChange(e)}
+          >Shared with me</sl-checkbox
         >
         ${this.loading && this.items.length > 0
           ? html`<sl-spinner class="inline-loading" aria-label="Loading artifacts"></sl-spinner>`
@@ -406,6 +461,7 @@ export class ScionPageArtifacts extends LitElement {
           <thead>
             <tr>
               <th>Title</th>
+              <th>Access</th>
               <th>Owner</th>
               <th class="hide-mobile">Home project</th>
               <th>Updated</th>
@@ -417,6 +473,14 @@ export class ScionPageArtifacts extends LitElement {
           </tbody>
         </table>
       </div>
+      <scion-artifact-move-dialog
+        .artifact=${this.moving}
+        ?open=${!!this.moving}
+        @artifact-moved=${(e: CustomEvent<Artifact>): void => this.onMoved(e)}
+        @artifact-move-closed=${(): void => {
+          this.moving = null;
+        }}
+      ></scion-artifact-move-dialog>
     `;
   }
 
@@ -431,14 +495,9 @@ export class ScionPageArtifacts extends LitElement {
           </span>
           ${a.key ? html`<span class="key">${a.key}</span>` : nothing}
         </td>
+        <td>${this.renderAccess(a)}</td>
         <td>${this.renderOwner(a)}</td>
-        <td class="hide-mobile">
-          <a
-            href=${`/projects/${encodeURIComponent(a.scopeRef)}`}
-            @click=${(e: Event): void => e.stopPropagation()}
-            >${this.names.get(`project:${a.scopeRef}`) || a.scopeRef}</a
-          >
-        </td>
+        <td class="hide-mobile">${this.renderProject(a)}</td>
         <td title=${formatInstant(a.updatedAt)}>${formatRelative(a.updatedAt)}</td>
         <td>
           ${a.reviewPending
@@ -447,6 +506,36 @@ export class ScionPageArtifacts extends LitElement {
         </td>
       </tr>
     `;
+  }
+
+  private renderAccess(a: ArtifactListItem): TemplateResult | typeof nothing {
+    const badge = a.access ? ACCESS_BADGES[a.access] : undefined;
+    if (!badge) return nothing;
+    return html`<sl-badge variant=${badge.variant} pill>
+      ${badge.icon ? html`<sl-icon name=${badge.icon}></sl-icon>` : nothing} ${badge.label}
+    </sl-badge>`;
+  }
+
+  private renderProject(a: ArtifactListItem): TemplateResult {
+    if (a.scopeDeleted) {
+      return html`<span class="deleted">Deleted project</span> ${a.canManage
+          ? html`<a
+              href="#"
+              class="move"
+              @click=${(e: Event): void => {
+                e.preventDefault();
+                e.stopPropagation();
+                this.moving = a;
+              }}
+              >Move…</a
+            >`
+          : nothing}`;
+    }
+    return html`<a
+      href=${`/projects/${encodeURIComponent(a.scopeRef)}`}
+      @click=${(e: Event): void => e.stopPropagation()}
+      >${this.names.get(`project:${a.scopeRef}`) || a.scopeRef}</a
+    >`;
   }
 
   private renderOwner(a: ArtifactListItem): TemplateResult {

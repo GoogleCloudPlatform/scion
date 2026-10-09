@@ -139,3 +139,52 @@ func TestArtifactsRetentionAndSweepOnRoutes(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, exists, "the blob is kept for the grace period")
 }
+
+// TestArtifactsListMarksDeletedProject: through the real hub, once an
+// artifact's home project is deleted the owner's list marks the row and
+// says the owner may move it; a row in a live project is not marked.
+func TestArtifactsListMarksDeletedProject(t *testing.T) {
+	srv, s := testServer(t)
+	enableArtifactsForTest(t, srv)
+	ctx := context.Background()
+	p1 := artifactProject(t, s, "deleted-p1")
+	p2 := artifactProject(t, s, "deleted-p2")
+	createTestUserWithProjectRole(t, s, tid("deleted-owner"), "deleted-owner@test.com", p1.ID, store.ProjectRoleMember)
+	createTestUserWithProjectRole(t, s, tid("deleted-owner"), "deleted-owner@test.com", p2.ID, store.ProjectRoleMember)
+	owner, err := s.GetUser(ctx, tid("deleted-owner"))
+	require.NoError(t, err)
+
+	publish := func(scope string) string {
+		rec := userArtifactRequest(t, srv, owner, http.MethodPost, "/api/v1/artifacts?name=d.md&scope="+scope, []byte("# d\n"))
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		return decodeArtifactID(t, rec)
+	}
+	gone, live := publish(p1.ID), publish(p2.ID)
+	require.NoError(t, s.DeleteProject(ctx, p1.ID))
+
+	list := func() map[string]artifacts.ArtifactListItem {
+		rec := userArtifactRequest(t, srv, owner, http.MethodGet, "/api/v1/artifacts?mine=1", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp artifacts.ArtifactListResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		out := map[string]artifacts.ArtifactListItem{}
+		for _, a := range resp.Artifacts {
+			out[a.ID] = a
+		}
+		return out
+	}
+	// Moves need cross-project sharing: while it is off, no move is offered.
+	byID := list()
+	require.Contains(t, byID, gone)
+	assert.True(t, byID[gone].ScopeDeleted)
+	assert.False(t, byID[gone].CanManage)
+
+	srv.SetOperationalSettings(artifactsOpsWith(t, "", `{"cross_project_messaging_enabled": true}`))
+	byID = list()
+	require.Contains(t, byID, gone)
+	require.Contains(t, byID, live)
+	assert.True(t, byID[gone].ScopeDeleted)
+	assert.True(t, byID[gone].CanManage)
+	assert.False(t, byID[live].ScopeDeleted)
+	assert.False(t, byID[live].CanManage)
+}
