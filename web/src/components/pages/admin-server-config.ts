@@ -31,6 +31,7 @@ import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-ut
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import type { RuntimeBroker, GCPServiceAccount } from '../../shared/types.js';
 import { formatInstantWithZone, isValidTimeZone } from '../../utils/time.js';
+import { isHttpUrl } from '../../utils/http-url.js';
 import '../shared/timezone-picker.js';
 import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
@@ -115,6 +116,7 @@ interface V1ServerHubConfig {
   port?: number;
   host?: string;
   public_url?: string;
+  monitoring_dashboard_url?: string;
   read_timeout?: string;
   write_timeout?: string;
   cors?: V1CORSConfig;
@@ -534,6 +536,7 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   default_gcp_identity_service_account_id: 'Default GCP Identity Service Account',
   // endpoints section
   'server.hub.public_url': 'Public URL',
+  'server.hub.monitoring_dashboard_url': 'Monitoring Dashboard URL',
   image_registry: 'Image Registry',
   // github_app section
   'server.github_app': 'GitHub App',
@@ -672,6 +675,14 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private hubPort = 0;
   @state() private hubHost = '';
   @state() private hubPublicUrl = '';
+  @state() private hubMonitoringDashboardUrl = '';
+  /**
+   * The monitoring dashboard URL as loaded, and whether the user edited the
+   * field: a save sends the key only when it was edited and changed, so an
+   * untouched form never writes (or materialises) it.
+   */
+  private loadedMonitoringDashboardUrl = '';
+  private monitoringDashboardUrlTouched = false;
   @state() private hubReadTimeout = '';
   @state() private hubWriteTimeout = '';
   @state() private hubAdminEmails = '';
@@ -1737,6 +1748,9 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.hubPort = srv.hub.port || 0;
         this.hubHost = srv.hub.host || '';
         this.hubPublicUrl = srv.hub.public_url || '';
+        this.hubMonitoringDashboardUrl = srv.hub.monitoring_dashboard_url || '';
+        this.loadedMonitoringDashboardUrl = this.hubMonitoringDashboardUrl;
+        this.monitoringDashboardUrlTouched = false;
         this.hubReadTimeout = srv.hub.read_timeout || '';
         this.hubWriteTimeout = srv.hub.write_timeout || '';
         this.hubAdminEmails = (srv.hub.admin_emails || []).join(', ');
@@ -2102,6 +2116,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     // Hub — only Layer-1 hub fields
     const hub: Record<string, unknown> = {};
     if (ok('server.hub.public_url')) hub.public_url = this.hubPublicUrl;
+    this.addMonitoringDashboardUrl(hub, ok);
     if (ok('server.hub.admin_emails')) {
       hub.admin_emails = this.hubAdminEmails
         ? this.hubAdminEmails
@@ -2235,6 +2250,21 @@ export class ScionPageAdminServerConfig extends LitElement {
    * field is cleared rather than kept. A hub without DB-backed settings
    * keeps the legacy file payload.
    */
+  /**
+   * Adds server.hub.monitoring_dashboard_url to a hub payload block only
+   * when the user edited the field and the trimmed value differs from the
+   * loaded one. A cleared field is sent as "", which clears the setting.
+   */
+  private addMonitoringDashboardUrl(
+    hub: Record<string, unknown>,
+    ok: (key: string) => boolean
+  ): void {
+    if (!ok('server.hub.monitoring_dashboard_url') || !this.monitoringDashboardUrlTouched) return;
+    const value = this.hubMonitoringDashboardUrl.trim();
+    if (value === this.loadedMonitoringDashboardUrl) return;
+    hub.monitoring_dashboard_url = value;
+  }
+
   private buildSavePayload(): Record<string, unknown> {
     if (this.settingsTier !== 'db') return this.buildFilePayload();
     const payload = this.buildLayer1Payload();
@@ -2430,6 +2460,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.hub.port')) hub.port = this.hubPort || 0;
     if (ok('server.hub.host')) hub.host = this.hubHost || '';
     if (ok('server.hub.public_url')) hub.public_url = this.hubPublicUrl || '';
+    this.addMonitoringDashboardUrl(hub, ok);
     if (ok('server.hub.read_timeout')) hub.read_timeout = this.hubReadTimeout || '';
     if (ok('server.hub.write_timeout')) hub.write_timeout = this.hubWriteTimeout || '';
     if (ok('server.hub.admin_emails')) {
@@ -4152,6 +4183,30 @@ export class ScionPageAdminServerConfig extends LitElement {
                     this.hubPublicUrl = (e.target as HTMLInputElement).value;
                   }}
                 ></sl-input>`
+            )}
+          </div>
+          <div class="form-field full-width">
+            <label>Monitoring Dashboard URL</label>
+            <span class="hint"
+              >Optional. The Health page links to this dashboard; leave empty for no link</span
+            >
+            ${this.renderFieldValue(
+              'server.hub.monitoring_dashboard_url',
+              this.hubMonitoringDashboardUrl,
+              html`${this.renderEnvBadge('server.hub.monitoring_dashboard_url')}<sl-input
+                  value=${this.hubMonitoringDashboardUrl}
+                  placeholder="https://console.cloud.google.com/monitoring/dashboards/..."
+                  @sl-input=${(e: Event) => {
+                    this.hubMonitoringDashboardUrl = (e.target as HTMLInputElement).value;
+                    this.monitoringDashboardUrlTouched = true;
+                  }}
+                ></sl-input>
+                ${isHttpUrl(this.hubMonitoringDashboardUrl.trim()) ||
+                this.hubMonitoringDashboardUrl.trim() === ''
+                  ? nothing
+                  : html`<span class="hint monitoring-url-invalid"
+                      >Must be an absolute http:// or https:// URL</span
+                    >`}`
             )}
           </div>
           <div class="form-field">
