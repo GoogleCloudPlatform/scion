@@ -81,7 +81,7 @@ func commandRequiresProject(cmd *cobra.Command) bool {
 	if parentName == "auth" && commandInSubtree(cmd, "hub") {
 		return false
 	}
-	if cmd.Parent() == hubCmd && hubUserLevelCommands[cmdName] {
+	if parentName == "hub" && isTopLevel(cmd.Parent()) && hubUserLevelCommands[cmdName] {
 		return false
 	}
 	// Broker process and registration commands (ptone/scion#3317).
@@ -108,6 +108,13 @@ func commandRequiresProject(cmd *cobra.Command) bool {
 	return true
 }
 
+// isTopLevel reports whether c is a direct child of the root command.
+// (Names are compared rather than package variables such as hubCmd, which
+// would make rootCmd's initializer refer back to itself.)
+func isTopLevel(c *cobra.Command) bool {
+	return c != nil && c.Parent() != nil && c.Parent().Parent() == nil
+}
+
 // subcommandGlobalFlagSet reports whether cmd is a config subcommand whose
 // own --global flag (which shadows the root --global) is set. Cobra parses
 // every --global on the command line, before or after the subcommand name,
@@ -118,7 +125,7 @@ func subcommandGlobalFlagSet(cmd *cobra.Command) bool {
 		return false
 	}
 	f := cmd.Flags().Lookup("global")
-	if f == nil || f == rootCmd.PersistentFlags().Lookup("global") {
+	if f == nil || f == cmd.Root().PersistentFlags().Lookup("global") {
 		return false
 	}
 	return f.Changed && f.Value.String() == "true"

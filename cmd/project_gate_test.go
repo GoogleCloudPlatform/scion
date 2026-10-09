@@ -156,7 +156,7 @@ func unsetEnvForTest(t *testing.T, key string) {
 	require.NoError(t, os.Unsetenv(key))
 }
 
-func writeGlobalSettings(t *testing.T, home, content string) {
+func writeGateGlobalSettings(t *testing.T, home, content string) {
 	t.Helper()
 	require.NoError(t, os.WriteFile(filepath.Join(home, ".scion", "settings.yaml"), []byte(content), 0o644))
 }
@@ -176,14 +176,14 @@ func TestRegistryCheckSkippedForHubDispatch(t *testing.T) {
 
 	t.Run("endpoint from --hub flag", func(t *testing.T) {
 		home := setupProjectWithoutRegistry(t)
-		writeGlobalSettings(t, home, "schema_version: \"1\"\nhub:\n  enabled: true\n")
+		writeGateGlobalSettings(t, home, "schema_version: \"1\"\nhub:\n  enabled: true\n")
 		hubEndpoint = "https://hub.example.test"
 		assert.NoError(t, rootCmd.PersistentPreRunE(newListCmd(), []string{}))
 	})
 
 	t.Run("endpoint from settings", func(t *testing.T) {
 		home := setupProjectWithoutRegistry(t)
-		writeGlobalSettings(t, home, "schema_version: \"1\"\nhub:\n  enabled: true\n  endpoint: https://hub.example.test\n")
+		writeGateGlobalSettings(t, home, "schema_version: \"1\"\nhub:\n  enabled: true\n  endpoint: https://hub.example.test\n")
 		assert.NoError(t, rootCmd.PersistentPreRunE(newListCmd(), []string{}))
 	})
 
@@ -209,7 +209,7 @@ func TestRegistryCheckSkippedForHubDispatch(t *testing.T) {
 
 	t.Run("--no-hub keeps the check", func(t *testing.T) {
 		home := setupProjectWithoutRegistry(t)
-		writeGlobalSettings(t, home, "schema_version: \"1\"\nhub:\n  enabled: true\n  endpoint: https://hub.example.test\n")
+		writeGateGlobalSettings(t, home, "schema_version: \"1\"\nhub:\n  enabled: true\n  endpoint: https://hub.example.test\n")
 		noHub = true
 		err := rootCmd.PersistentPreRunE(newListCmd(), []string{})
 		require.Error(t, err)
