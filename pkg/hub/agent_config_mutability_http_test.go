@@ -520,6 +520,9 @@ func TestAgentEditGoldens(t *testing.T) {
 		applied  []string
 		check    func(t *testing.T, inline *api.ScionConfig)
 		warnings int
+		// notWarned are keys no warning may name: Unlimited on Max duration
+		// ("0") applies at the next start, so it is not "cleared".
+		notWarned []string
 	}{
 		{name: "untouched", applied: []string{}, check: func(t *testing.T, inline *api.ScionConfig) {
 			assert.Equal(t, "old-model", inline.Model)
@@ -530,7 +533,7 @@ func TestAgentEditGoldens(t *testing.T) {
 			assert.Zero(t, inline.MaxTurns)
 			assert.Empty(t, inline.MaxDuration)
 		}},
-		{name: "unlimited", applied: []string{"config.max_duration", "config.max_turns"}, warnings: 1, check: func(t *testing.T, inline *api.ScionConfig) {
+		{name: "unlimited", applied: []string{"config.max_duration", "config.max_turns"}, warnings: 1, notWarned: []string{"config.max_duration"}, check: func(t *testing.T, inline *api.ScionConfig) {
 			assert.Zero(t, inline.MaxTurns)
 			assert.Equal(t, "0", inline.MaxDuration)
 			assert.Zero(t, inline.ParseMaxDuration(), `"0" is no duration limit`)
@@ -556,6 +559,11 @@ func TestAgentEditGoldens(t *testing.T) {
 			require.Equal(t, http.StatusOK, code, respBody)
 			assert.Equal(t, tc.applied, resp.Disposition.Applied)
 			assert.Len(t, resp.Warnings, tc.warnings, "%v", resp.Warnings)
+			for _, w := range resp.Warnings {
+				for _, k := range tc.notWarned {
+					assert.NotContains(t, w, k)
+				}
+			}
 			after, err := s.GetAgent(context.Background(), agent.ID)
 			require.NoError(t, err)
 			tc.check(t, after.AppliedConfig.InlineConfig)
@@ -650,6 +658,20 @@ func TestAgentConfigPatch_FixedKeyEchoOfAppliedValue(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, code, body)
 	assert.Equal(t, []string{"config.max_turns"}, resp.Disposition.Applied)
+
+	// An ignored echo writes nothing: not into the inline config, and not
+	// into CreateInputs, where a reincarnation would replay it as a pin.
+	after, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 4, after.AppliedConfig.InlineConfig.MaxTurns)
+	assert.Empty(t, after.AppliedConfig.InlineConfig.Branch)
+	assert.Empty(t, after.AppliedConfig.InlineConfig.HarnessConfig)
+	assert.Equal(t, "scion/live", after.AppliedConfig.Branch)
+	assert.Equal(t, "hc-live", after.AppliedConfig.HarnessConfig)
+	if ci := after.AppliedConfig.CreateInputs; ci != nil && ci.InlineConfig != nil {
+		assert.Empty(t, ci.InlineConfig.Branch, "an echo is not an explicit edit")
+		assert.Empty(t, ci.InlineConfig.HarnessConfig)
+	}
 
 	_, code, body = patchAgentBody(t, srv, agent.ID, map[string]interface{}{
 		"config": map[string]interface{}{"branch": "scion/other"},

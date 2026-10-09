@@ -15,7 +15,6 @@
 package hub
 
 import (
-	"bytes"
 	"encoding/json"
 	"reflect"
 	"sort"
@@ -431,6 +430,29 @@ func lockedPatchKeys(agent *store.Agent, top []string, rawConfig map[string]json
 	return ref
 }
 
+// dropFixedConfigKeys removes every fixed (TX) config key from an agent
+// PATCH request that lockedPatchKeys accepted, which can only be an
+// unchanged echo: it zeroes the key in cfg and deletes it from rawConfig and
+// from present (the request's lower-cased present keys).
+func dropFixedConfigKeys(cfg *api.ScionConfig, rawConfig map[string]json.RawMessage, present map[string]bool) {
+	for _, f := range configPatchKeys(rawConfig) {
+		if f.Tier != EditTierImmutable {
+			continue
+		}
+		k := strings.TrimPrefix(f.Key, agentConfigKeyPrefix)
+		for rk := range rawConfig {
+			if strings.EqualFold(rk, k) {
+				delete(rawConfig, rk)
+			}
+		}
+		delete(present, strings.ToLower(k))
+		if i, ok := scionConfigFieldByJSONKey[k]; ok && cfg != nil {
+			field := reflect.ValueOf(cfg).Elem().Field(i)
+			field.Set(reflect.Zero(field.Type()))
+		}
+	}
+}
+
 // editReasonNoConfigPhase is the lock reason of a config key in a phase that
 // takes no config.
 func editReasonNoConfigPhase(phase string) string {
@@ -547,7 +569,9 @@ func configPatchKeys(rawConfig map[string]json.RawMessage) []agentEditField {
 // them), and cleared, the T1 keys the request clears or zeroes (the
 // broker's start-time merge keeps the previous non-empty value). A key
 // whose value does not change from stored (req is the decoded request) is
-// not counted. Both are sorted wire keys.
+// not counted. A T1 key counts as cleared when the broker's start-time merge
+// would keep the base value for it (startMergeKeepsBase). Both are sorted
+// wire keys.
 func reincarnateOnlyConfigEdits(rawConfig map[string]json.RawMessage, req, stored *api.ScionConfig) (provision, cleared []string) {
 	for _, f := range configPatchKeys(rawConfig) {
 		k := strings.TrimPrefix(f.Key, agentConfigKeyPrefix)
@@ -558,7 +582,7 @@ func reincarnateOnlyConfigEdits(rawConfig map[string]json.RawMessage, req, store
 		case EditTierProvision:
 			provision = append(provision, f.Key)
 		case EditTierContainer:
-			if rawJSONIsEmpty(rawValueCaseInsensitive(rawConfig, k)) {
+			if startMergeKeepsBase(k, req) {
 				cleared = append(cleared, f.Key)
 			}
 		}
@@ -575,46 +599,42 @@ func reincarnateOnlyEditWarnings(rawConfig map[string]json.RawMessage, req, stor
 		out = append(out, strings.Join(provision, ", ")+": stored now; rendered at the next reincarnation (a plain start does not re-render prompts, skills or services)")
 	}
 	if len(cleared) > 0 {
-		out = append(out, strings.Join(cleared, ", ")+": cleared now; the agent keeps its previous value until the next reincarnation (a plain start does not apply a cleared or zero value)")
+		out = append(out, strings.Join(cleared, ", ")+": cleared now; the agent keeps its previous value until the next reincarnation (a plain start does not apply a cleared value)")
 	}
 	return out
 }
 
-// rawValueCaseInsensitive returns the value of key in raw, matching the key
-// case-insensitively as encoding/json does.
-func rawValueCaseInsensitive(raw map[string]json.RawMessage, key string) json.RawMessage {
-	if v, ok := raw[key]; ok {
-		return v
-	}
-	for k, v := range raw {
-		if strings.EqualFold(k, key) {
-			return v
-		}
-	}
-	return nil
-}
-
-// rawJSONIsEmpty reports whether v is null, "", 0, false, [] or {}.
-func rawJSONIsEmpty(v json.RawMessage) bool {
-	t := bytes.TrimSpace(v)
-	switch string(t) {
-	case "", "null", `""`, "false", "[]", "{}":
+// startMergeKeepsBase reports whether the broker's start-time merge of the
+// hub's inline config into the agent's persisted config
+// (config.MergeScionConfig) would keep the persisted value of the config key
+// key, given req's value for it: a string applies only when non-empty, the
+// count limits only when greater than zero, the thinking level whenever it
+// is set (0 included), a map or list only when non-empty (maps are united
+// and volumes appended, so an empty one changes nothing), and a struct
+// (resources, kubernetes, telemetry) is merged field by field, so null or
+// an empty one changes nothing. A duration of "0" (no limit) is non-empty
+// and so applies.
+func startMergeKeepsBase(key string, req *api.ScionConfig) bool {
+	i, ok := scionConfigFieldByJSONKey[key]
+	if !ok || req == nil {
 		return true
 	}
-	var n json.Number
-	dec := json.NewDecoder(bytes.NewReader(t))
-	dec.UseNumber()
-	if err := dec.Decode(&n); err == nil {
-		f, err := n.Float64()
-		return err == nil && f == 0
-	}
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(t, &m); err == nil {
-		return len(m) == 0
-	}
-	var a []json.RawMessage
-	if err := json.Unmarshal(t, &a); err == nil {
-		return len(a) == 0
+	v := reflect.ValueOf(*req).Field(i)
+	switch v.Kind() {
+	case reflect.String:
+		return v.Len() == 0
+	case reflect.Int, reflect.Int64, reflect.Int32:
+		return v.Int() <= 0
+	case reflect.Map, reflect.Slice:
+		return v.Len() == 0
+	case reflect.Ptr:
+		if v.IsNil() {
+			return true
+		}
+		if v.Elem().Kind() == reflect.Struct {
+			return v.Elem().IsZero()
+		}
+		return false
 	}
 	return false
 }

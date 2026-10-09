@@ -257,17 +257,27 @@ describe('scion-agent-config-form mutability display', () => {
     expect(field(stopped, 'config.max_turns').textContent).toContain('Applies at next start');
   });
 
-  it('warns that a clear or Unlimited applies at the next reincarnation', async () => {
+  it('warns that a clear or Unlimited turns applies at the next reincarnation', async () => {
     const el = await mount();
     expect(el.shadowRoot!.querySelector('[data-testid="clear-note"]')).toBeNull();
     await clear(el, 'config.max_turns');
     expect(
       field(el, 'config.max_turns').querySelector('[data-testid="clear-note"]')
     ).not.toBeNull();
+    await setUnlimited(el, 'config.max_turns', true);
+    expect(
+      field(el, 'config.max_turns').querySelector('[data-testid="clear-note"]')!.textContent
+    ).toContain('Unlimited takes effect at the next reincarnation');
+  });
+
+  it('does not warn for Unlimited duration, which applies at the next start', async () => {
+    const el = await mount();
     await setUnlimited(el, 'config.max_duration', true);
+    expect(field(el, 'config.max_duration').querySelector('[data-testid="clear-note"]')).toBeNull();
+    await clear(el, 'config.max_duration');
     expect(
       field(el, 'config.max_duration').querySelector('[data-testid="clear-note"]')!.textContent
-    ).toContain('Unlimited takes effect at the next reincarnation');
+    ).toContain('Clearing takes effect at the next reincarnation');
   });
 
   it('summarizes the fields by disposition', async () => {

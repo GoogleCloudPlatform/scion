@@ -357,8 +357,12 @@ export class ScionAgentConfigForm extends LitElement {
         </div>`;
       default: {
         const session = st.note === 'session' ? ' (the conversation continues)' : '';
+        // A start keeps the previous value for a clear, and for a count
+        // limit of 0 (the broker applies limits only when greater than 0).
+        // Unlimited on a duration ("0") is applied at the next start.
+        const keptByStart = !!d && (d.cleared || (d.unlimited && f.control === 'limit-count'));
         const clearNote =
-          st.clearNeedsReincarnate && d && (d.cleared || d.unlimited)
+          st.clearNeedsReincarnate && d && keptByStart
             ? html`<span class="clear-note" data-testid="clear-note">
                 ${d.cleared ? 'Clearing' : 'Unlimited'} takes effect at the next reincarnation; a
                 plain start keeps the previous value.</span

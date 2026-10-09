@@ -4095,6 +4095,11 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		writePatchRefusal(w, agent, ref, updates.Config != nil)
 		return
 	}
+	// A fixed config key that got past lockedPatchKeys is an unchanged echo,
+	// which is ignored: drop it before anything below reads the request, so
+	// it is neither merged into InlineConfig nor recorded as an explicit
+	// edit that later reincarnations would replay.
+	dropFixedConfigKeys(updates.Config, rawFields, presentConfigKeys)
 
 	if updates.ExplicitTimezone != nil {
 		if !agent.DeletedAt.IsZero() {

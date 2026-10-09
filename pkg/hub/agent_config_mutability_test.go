@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -350,18 +351,22 @@ func TestReincarnateOnlyConfigEdits(t *testing.T) {
 		assert.Empty(t, cleared)
 	})
 
+	t.Run("values the start merge applies are not reported as cleared", func(t *testing.T) {
+		body := `{"max_duration":"0","thinking_level":0,"telemetry":{"enabled":false}}`
+		var req api.ScionConfig
+		require.NoError(t, json.Unmarshal([]byte(body), &req))
+		tl := 40
+		on := true
+		stored := &api.ScionConfig{MaxDuration: "1h", ThinkingLevel: &tl, Telemetry: &api.TelemetryConfig{Enabled: &on}}
+		provision, cleared := reincarnateOnlyConfigEdits(rawConfigOf(t, body), &req, stored)
+		assert.Empty(t, provision)
+		assert.Empty(t, cleared)
+		assert.Empty(t, reincarnateOnlyEditWarnings(rawConfigOf(t, body), &req, stored))
+	})
+
 	five := rawConfigOf(t, `{"model":"m","max_turns":5}`)
 	assert.Empty(t, reincarnateOnlyEditWarnings(five, &api.ScionConfig{Model: "m", MaxTurns: 5}, stored))
 	assert.Empty(t, reincarnateOnlyEditWarnings(nil, nil, stored))
-}
-
-func TestRawJSONIsEmpty(t *testing.T) {
-	for _, v := range []string{``, `null`, `""`, `0`, `0.0`, `false`, `[]`, `{}`, ` [ ] `, `{ }`} {
-		assert.True(t, rawJSONIsEmpty(json.RawMessage(v)), v)
-	}
-	for _, v := range []string{`1`, `"x"`, `true`, `[1]`, `{"a":1}`, `-1`} {
-		assert.False(t, rawJSONIsEmpty(json.RawMessage(v)), v)
-	}
 }
 
 func TestAgentUpdateAppliedKeys(t *testing.T) {
@@ -481,4 +486,75 @@ func TestLockedPatchKeys(t *testing.T) {
 		assert.True(t, ref.Conflict)
 		assert.Equal(t, map[string]string{"name": editReasonDeleted, "annotations": editReasonDeleted}, ref.Fields)
 	})
+}
+
+// TestStartMergeKeepsBase_MatchesBrokerMerge pins the "cleared now; keeps its
+// previous value until the next reincarnation" warning to what the broker's
+// start-time merge (config.MergeScionConfig) really does: for each request
+// value, startMergeKeepsBase must say "kept" exactly when merging the
+// request into a fully populated persisted config leaves that key as it was.
+func TestStartMergeKeepsBase_MatchesBrokerMerge(t *testing.T) {
+	enabled, disabled := true, false
+	tl := 60
+	base := &api.ScionConfig{
+		Model: "old", Image: "img", User: "u", AuthSelectedType: "api-key", Task: "t", TaskFlag: "--task",
+		MaxTurns: 9, MaxModelCalls: 9, MaxDuration: "1h", ThinkingLevel: &tl,
+		Env: map[string]string{"A": "1"}, Volumes: []api.VolumeMount{{Source: "/a", Target: "/b"}},
+		CommandArgs: []string{"--x"}, MCPServers: map[string]api.MCPServerConfig{"m": {Transport: "stdio"}},
+		Resources: &api.ResourceSpec{Disk: "10Gi"}, Kubernetes: &api.KubernetesConfig{Namespace: "ns"},
+		Telemetry: &api.TelemetryConfig{Enabled: &enabled},
+	}
+	zero := 0
+	for _, tc := range []struct {
+		name string
+		key  string
+		req  api.ScionConfig
+		kept bool
+	}{
+		{name: "max_turns 0 (Unlimited)", key: "max_turns", req: api.ScionConfig{MaxTurns: 0}, kept: true},
+		{name: "max_model_calls 0", key: "max_model_calls", req: api.ScionConfig{}, kept: true},
+		{name: `max_duration "0" (Unlimited)`, key: "max_duration", req: api.ScionConfig{MaxDuration: "0"}, kept: false},
+		{name: "max_duration cleared", key: "max_duration", req: api.ScionConfig{}, kept: true},
+		{name: "thinking_level 0", key: "thinking_level", req: api.ScionConfig{ThinkingLevel: &zero}, kept: false},
+		{name: "thinking_level null", key: "thinking_level", req: api.ScionConfig{}, kept: true},
+		{name: "model cleared", key: "model", req: api.ScionConfig{}, kept: true},
+		{name: "model set", key: "model", req: api.ScionConfig{Model: "new"}, kept: false},
+		{name: "image cleared", key: "image", req: api.ScionConfig{}, kept: true},
+		{name: "user cleared", key: "user", req: api.ScionConfig{}, kept: true},
+		{name: "env emptied", key: "env", req: api.ScionConfig{Env: map[string]string{}}, kept: true},
+		{name: "volumes emptied", key: "volumes", req: api.ScionConfig{Volumes: []api.VolumeMount{}}, kept: true},
+		{name: "command_args emptied", key: "command_args", req: api.ScionConfig{CommandArgs: []string{}}, kept: true},
+		{name: "mcp_servers emptied", key: "mcp_servers", req: api.ScionConfig{MCPServers: map[string]api.MCPServerConfig{}}, kept: true},
+		{name: "resources null", key: "resources", req: api.ScionConfig{}, kept: true},
+		{name: "resources empty", key: "resources", req: api.ScionConfig{Resources: &api.ResourceSpec{}}, kept: true},
+		{name: "kubernetes empty", key: "kubernetes", req: api.ScionConfig{Kubernetes: &api.KubernetesConfig{}}, kept: true},
+		{name: "telemetry null", key: "telemetry", req: api.ScionConfig{}, kept: true},
+		{name: "telemetry disabled", key: "telemetry", req: api.ScionConfig{Telemetry: &api.TelemetryConfig{Enabled: &disabled}}, kept: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := tc.req
+			merged := config.MergeScionConfig(base, &req)
+			i := scionConfigFieldByJSONKey[tc.key]
+			keptByMerge := reflect.DeepEqual(reflect.ValueOf(*merged).Field(i).Interface(), reflect.ValueOf(*base).Field(i).Interface())
+			require.Equal(t, tc.kept, keptByMerge, "the broker merge itself (test expectation is stale)")
+			assert.Equal(t, tc.kept, startMergeKeepsBase(tc.key, &req))
+		})
+	}
+}
+
+func TestDropFixedConfigKeys(t *testing.T) {
+	body := `{"Branch":"b","harness":"claude","max_turns":4,"bogus":1}`
+	raw := rawConfigOf(t, body)
+	var cfg api.ScionConfig
+	require.NoError(t, json.Unmarshal([]byte(body), &cfg))
+	present := map[string]bool{"branch": true, "harness": true, "max_turns": true, "bogus": true}
+
+	dropFixedConfigKeys(&cfg, raw, present)
+	assert.Empty(t, cfg.Branch)
+	assert.Empty(t, cfg.Harness)
+	assert.Equal(t, 4, cfg.MaxTurns)
+	assert.Equal(t, map[string]bool{"max_turns": true, "bogus": true}, present)
+	assert.Len(t, raw, 2)
+	assert.Contains(t, raw, "max_turns")
+	assert.Contains(t, raw, "bogus")
 }
