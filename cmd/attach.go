@@ -389,6 +389,12 @@ func describeAttachPreflight(err error, agentName string) error {
 	if !errors.As(err, &pe) {
 		return err
 	}
+	// A refusal at a reconnect is described with the close that led to it,
+	// by describeAttachClose.
+	var reconnectErr *wsclient.PTYReconnectError
+	if errors.As(err, &reconnectErr) {
+		return err
+	}
 	// The summaries are the preflight's own (this is often the first
 	// attach, and the Hub answered, not the broker); the hints are the
 	// close-code ones.
@@ -536,10 +542,21 @@ func describeAttachClose(err error, agentName string) error {
 	// code if it has one (its hint is the one that applies now), otherwise by
 	// the reconnect error.
 	note := ""
+	hintOverride := ""
 	var reconnectErr *wsclient.PTYReconnectError
 	if errors.As(err, &reconnectErr) && reconnectErr.Err != nil {
 		var second *wsclient.PTYCloseError
-		if errors.Is(reconnectErr.Err, wsclient.ErrPTYReconnectLimit) {
+		var refusal *wsclient.PTYPreflightError
+		if errors.As(reconnectErr.Err, &refusal) {
+			// The Hub refused the reconnect at its preflight: give its reason,
+			// and the next step for that refusal.
+			reason := refusal.Message
+			if refusal.NoPath() {
+				reason = wsclient.AttachUnsupportedMessage + ", and the agent has no session that serves a terminal"
+				hintOverride = ptyCloseTerminalHint
+			}
+			note = fmt.Sprintf("\nThe Hub refused the automatic reconnect: %s (%s).", reason, refusal.Detail())
+		} else if errors.Is(reconnectErr.Err, wsclient.ErrPTYReconnectLimit) {
 			note = "\nscion attach " + wsclient.ErrPTYReconnectLimit.Error() + "."
 		} else if errors.As(reconnectErr.Err, &second) {
 			note = "\nThis close came on the automatic reconnect after " + ptyCloseCodeText(closeErr) + "."
@@ -560,6 +577,9 @@ func describeAttachClose(err error, agentName string) error {
 		} else {
 			hint = ptyCloseTerminalHint
 		}
+	}
+	if hintOverride != "" {
+		hint = hintOverride
 	}
 	return &attachCloseError{
 		msg: fmt.Sprintf("attach to agent '%s' ended: %s (%s)%s\n\n%s",

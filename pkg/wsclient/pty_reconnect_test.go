@@ -52,6 +52,12 @@ type ptyScriptServer struct {
 
 	mu       sync.Mutex
 	attempts int
+	// preflight, if set, answers the n-th preflight (status, body); the
+	// default is 200. Set it with setPreflight.
+	preflight  func(n int) (int, string)
+	preflights int
+	// events records preflights and dials in arrival order.
+	events   []string
 	queries  []url.Values
 	received map[int][]map[string]any
 	notify   chan struct{}
@@ -76,10 +82,29 @@ func newPTYScriptServer(t *testing.T, refuse func(idx int) bool, script func(idx
 	s := &ptyScriptServer{t: t, refuse: refuse, script: script, received: map[int][]map[string]any{}, notify: make(chan struct{}, 64), closed: map[int]chan struct{}{}}
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	s.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !websocket.IsWebSocketUpgrade(r) {
+			// The Hub preflight (a plain GET): answered separately and not
+			// counted as a connection attempt.
+			s.mu.Lock()
+			n := s.preflights
+			s.preflights++
+			s.events = append(s.events, "preflight")
+			answer := s.preflight
+			s.mu.Unlock()
+			status, body := http.StatusOK, `{}`
+			if answer != nil {
+				status, body = answer(n)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(body))
+			return
+		}
 		s.mu.Lock()
 		idx := s.attempts
 		s.attempts++
 		s.queries = append(s.queries, r.URL.Query())
+		s.events = append(s.events, fmt.Sprintf("dial %d", idx))
 		s.mu.Unlock()
 		if s.refuse != nil && s.refuse(idx) {
 			http.Error(w, "no session", http.StatusServiceUnavailable)
@@ -114,6 +139,24 @@ func newPTYScriptServer(t *testing.T, refuse func(idx int) bool, script func(idx
 	}))
 	t.Cleanup(s.srv.Close)
 	return s
+}
+
+func (s *ptyScriptServer) setPreflight(f func(n int) (int, string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.preflight = f
+}
+
+func (s *ptyScriptServer) eventLog() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.events...)
+}
+
+func (s *ptyScriptServer) preflightCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.preflights
 }
 
 func (s *ptyScriptServer) attemptCount() int {
@@ -634,6 +677,7 @@ func TestRun_KeysDuringReconnectWait(t *testing.T) {
 				assert.Equal(t, wsprotocol.ClosePTYUpstreamTimeout, ce.Code, "the original close is reported")
 			}
 			assert.Equal(t, 1, s.attemptCount(), "no reconnect")
+			assert.Equal(t, 0, s.preflightCount(), "no preflight either")
 			sc.assertRestoredOnce(t)
 		})
 	}
@@ -806,4 +850,164 @@ func TestRun_CancelDuringRedialDialError(t *testing.T) {
 		require.False(t, errors.As(err, &re), "iteration %d: got %v", i, err)
 		sc.assertRestoredOnce(t)
 	}
+}
+
+// TestRun_PreflightBeforeEachReconnect: every reconnect asks the Hub
+// preflight before it dials.
+func TestRun_PreflightBeforeEachReconnect(t *testing.T) {
+	s := newPTYScriptServer(t, nil, func(idx int, s *ptyScriptServer, conn *websocket.Conn) {
+		sendData(conn)
+		if idx < 2 {
+			sendClose(conn, wsprotocol.ClosePTYUpstreamUnavailable, "relay_restart")
+			return
+		}
+		sendClose(conn, wsprotocol.ClosePTYNormal, "")
+	})
+	ft := &fakeTiming{}
+	sc := newScriptedClient(t, s, ft)
+
+	require.NoError(t, sc.Run())
+	// The first dial is Connect's (the test calls Connect directly; in the
+	// CLI, AttachToAgent runs the first preflight).
+	assert.Equal(t, []string{"dial 0", "preflight", "dial 1", "preflight", "dial 2"}, s.eventLog())
+	sc.assertRestoredOnce(t)
+}
+
+// TestRun_PreflightRefusalAtReconnectEndsWithHubReason: a Hub refusal at a
+// reconnect ends the loop, with no dial, reporting the Hub's reason.
+func TestRun_PreflightRefusalAtReconnectEndsWithHubReason(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		noPath bool
+	}{
+		{name: "no path", status: 503, noPath: true,
+			body: `{"error":{"code":"runtime_attach_unsupported","message":"No path to the terminal","details":{"reason":"agent_pty_unavailable"}}}`},
+		{name: "denied", status: 403, body: `{"error":{"code":"forbidden","message":"no access"}}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newPTYScriptServer(t, nil, func(idx int, s *ptyScriptServer, conn *websocket.Conn) {
+				sendData(conn)
+				sendClose(conn, wsprotocol.ClosePTYUpstreamUnavailable, "relay_restart")
+			})
+			s.setPreflight(func(int) (int, string) { return tc.status, tc.body })
+			ft := &fakeTiming{}
+			sc := newScriptedClient(t, s, ft)
+
+			err := sc.Run()
+			var re *PTYReconnectError
+			require.True(t, errors.As(err, &re), "got %T: %v", err, err)
+			assert.Equal(t, wsprotocol.ClosePTYUpstreamUnavailable, re.Close.Code)
+			var pe *PTYPreflightError
+			require.True(t, errors.As(re.Err, &pe), "the Hub's refusal is the reconnect error")
+			assert.Equal(t, tc.status, pe.Status)
+			assert.Equal(t, tc.noPath, pe.NoPath())
+			assert.NotEmpty(t, pe.Message)
+			assert.Equal(t, 1, s.preflightCount(), "one preflight, no retry")
+			assert.Equal(t, 1, s.attemptCount(), "no dial after the refusal")
+			sc.assertRestoredOnce(t)
+		})
+	}
+}
+
+// TestRun_PreflightTransportFailureIsRetried: a preflight that gets no
+// answer is retried after the normal backoff, then the reconnect proceeds.
+func TestRun_PreflightTransportFailureIsRetried(t *testing.T) {
+	s := newPTYScriptServer(t, nil, func(idx int, s *ptyScriptServer, conn *websocket.Conn) {
+		sendData(conn)
+		if idx == 0 {
+			sendClose(conn, wsprotocol.ClosePTYUpstreamUnavailable, "relay_restart")
+			return
+		}
+		sendClose(conn, wsprotocol.ClosePTYNormal, "")
+	})
+	ft := &fakeTiming{}
+	sc := newScriptedClient(t, s, ft)
+	var calls atomic.Int32
+	preflight := sc.preflightFn
+	sc.preflightFn = func(ctx context.Context) error {
+		if calls.Add(1) == 1 {
+			return errors.New("dial tcp: connection refused")
+		}
+		return preflight(ctx)
+	}
+
+	require.NoError(t, sc.Run())
+	assert.EqualValues(t, 2, calls.Load())
+	assert.Equal(t, 2, s.attemptCount())
+	// The 4503 wait, then one backoff before the retried preflight.
+	assert.Equal(t, []time.Duration{wsprotocol.PTYPromptReconnectMaxDelay, reconnectBackoffBase}, ft.jitterWindows())
+	sc.assertRestoredOnce(t)
+}
+
+// TestRun_PreflightTransportFailuresAreBounded: preflights that keep
+// failing to reach the Hub stop under the bound on consecutive short-lived
+// attempts.
+func TestRun_PreflightTransportFailuresAreBounded(t *testing.T) {
+	s := newPTYScriptServer(t, nil, func(idx int, s *ptyScriptServer, conn *websocket.Conn) {
+		sendData(conn)
+		sendClose(conn, wsprotocol.ClosePTYUpstreamUnavailable, "relay_restart")
+	})
+	ft := &fakeTiming{}
+	sc := newScriptedClient(t, s, ft)
+	var calls atomic.Int32
+	sc.preflightFn = func(context.Context) error {
+		calls.Add(1)
+		return errors.New("dial tcp: connection refused")
+	}
+
+	err := sc.Run()
+	assert.ErrorIs(t, err, ErrPTYReconnectLimit)
+	var re *PTYReconnectError
+	require.True(t, errors.As(err, &re))
+	assert.Equal(t, wsprotocol.ClosePTYUpstreamUnavailable, re.Close.Code)
+	// The close is the first short-lived attempt; the bound allows
+	// maxShortReconnects in a row, so the preflight runs that many times.
+	assert.EqualValues(t, maxShortReconnects, calls.Load())
+	assert.Equal(t, 1, s.attemptCount(), "never dialed")
+	sc.assertRestoredOnce(t)
+}
+
+// TestRun_CtrlCArrivesWithTheRedialResult: Ctrl-C typed while the redial
+// completes (here, consumed by the client after the dial and before
+// redialFn returns its connection) cancels the reconnect: the original
+// close is reported and the new connection is closed.
+func TestRun_CtrlCArrivesWithTheRedialResult(t *testing.T) {
+	s := newPTYScriptServer(t, nil, func(idx int, s *ptyScriptServer, conn *websocket.Conn) {
+		sendData(conn)
+		if idx == 0 {
+			sendClose(conn, wsprotocol.ClosePTYUpstreamUnavailable, "relay_restart")
+			return
+		}
+		<-s.connClosed(idx) // until the client closes it
+	})
+	ft := &fakeTiming{}
+	sc := newScriptedClient(t, s, ft)
+	dial := sc.redialFn
+	sc.redialFn = func(ctx context.Context) (*websocket.Conn, error) {
+		conn, err := dial(ctx) // the new connection is established...
+		if err == nil {
+			// ...and Ctrl-C arrives before it is handed back. Wait until the
+			// client has taken the key from the stdin goroutine (the next
+			// Read starts only then), so the order is deterministic.
+			for len(sc.in.reads) > 0 {
+				<-sc.in.reads
+			}
+			sc.in.chunks <- []byte{keyCtrlC}
+			<-sc.in.reads
+		}
+		return conn, err
+	}
+
+	err := sc.Run()
+	var ce *PTYCloseError
+	require.True(t, errors.As(err, &ce), "got %T: %v", err, err)
+	assert.Equal(t, wsprotocol.ClosePTYUpstreamUnavailable, ce.Code, "the original close is reported")
+	var re *PTYReconnectError
+	assert.False(t, errors.As(err, &re))
+	waitSignal(t, s.connClosed(1), "the client closing the new connection")
+	assert.Empty(t, s.messagesOfType(1, wsprotocol.TypeData), "nothing typed reaches the new connection")
+	sc.assertRestoredOnce(t)
 }

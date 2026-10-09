@@ -194,6 +194,9 @@ type PTYClient struct {
 	restoreTerm func(fd int, state *term.State) error
 	// redialFn opens a replacement connection; NewPTYClient sets it to dial.
 	redialFn func(ctx context.Context) (*websocket.Conn, error)
+	// preflightFn runs the Hub preflight before each reconnect dial;
+	// NewPTYClient sets it to Preflight.
+	preflightFn func(ctx context.Context) error
 }
 
 // NewPTYClient creates a new PTY client.
@@ -210,6 +213,7 @@ func NewPTYClient(config PTYClientConfig) *PTYClient {
 	}
 	c.termSize = c.localTermSize
 	c.redialFn = c.dial
+	c.preflightFn = c.Preflight
 	return c
 }
 
@@ -383,11 +387,15 @@ func joinEndpointPath(prefix, apiPath string) string {
 // wsprotocol.PTYReconnectTiming allows (4503, 4504, 1011), Run makes one reconnect
 // attempt for that close: after a full-jitter delay of up to
 // wsprotocol.PTYPromptReconnectMaxDelay for 4503, or after the normal
-// exponential backoff with full jitter for 4504 and 1011. A successful reconnect
-// sends the current terminal size so the remote tmux redraws at the right
-// size. If the reconnect fails (dial error, or the new session closes before
-// it delivers any data), Run returns a *PTYReconnectError and does not try
-// again. Every other close ends Run. The terminal stays in raw mode across a
+// exponential backoff with full jitter for 4504 and 1011. Each reconnect
+// first asks the Hub's preflight, as AttachToAgent does for the first
+// connection: a refusal ends the reconnect with a *PTYReconnectError whose
+// Err is the *PTYPreflightError (the Hub's reason); a preflight that gets no
+// answer is retried under the backoff, within the same bound on consecutive
+// short-lived attempts. A successful reconnect sends the current terminal
+// size so the remote tmux redraws at the right size. If the reconnect fails
+// (dial error, or the new session closes before it delivers any data), Run
+// returns a *PTYReconnectError and does not try again. Every other close ends Run. The terminal stays in raw mode across a
 // reconnect and is restored once, when Run returns, on every path.
 func (c *PTYClient) Run() error {
 	conn := c.currentConn()
@@ -487,14 +495,36 @@ func (c *PTYClient) Run() error {
 		_, _ = fmt.Fprintf(c.notice, "\r\n%v; reconnecting (press Ctrl-C to stop)...\r\n", closeErr)
 		slog.Debug("PTY client reconnecting", "code", closeErr.Code, "reason", closeErr.Reason, "delay", delay)
 
-		newConn, stop, reconnErr := c.reconnect(delay, stdinCh, closeErr)
-		if stop {
-			runErr = reconnErr
-			return runErr
-		}
-		if reconnErr != nil {
-			runErr = &PTYReconnectError{Close: closeErr, Err: reconnErr}
-			return runErr
+		var newConn *websocket.Conn
+		for {
+			var stop bool
+			var reconnErr error
+			newConn, stop, reconnErr = c.reconnect(delay, stdinCh, closeErr)
+			if stop {
+				runErr = reconnErr
+				return runErr
+			}
+			if reconnErr == nil {
+				break
+			}
+			var transport *preflightTransportError
+			if !errors.As(reconnErr, &transport) {
+				// A Hub refusal (*PTYPreflightError) or a failed dial ends the
+				// reconnect: report it with the close that triggered it.
+				runErr = &PTYReconnectError{Close: closeErr, Err: reconnErr}
+				return runErr
+			}
+			// The Hub could not be reached for the preflight: a transient
+			// failure. Wait the normal backoff and try again, under the same
+			// bound on consecutive short-lived attempts.
+			shortCloses++
+			if shortCloses > maxShortReconnects {
+				runErr = &PTYReconnectError{Close: closeErr, Err: ErrPTYReconnectLimit}
+				return runErr
+			}
+			delay = c.jitter(backoffCeiling(backoffAttempt))
+			backoffAttempt++
+			slog.Debug("PTY client: preflight unreachable, retrying", "error", transport.err, "delay", delay)
 		}
 		conn = newConn
 		pendingClose = closeErr
@@ -625,6 +655,17 @@ func (c *PTYClient) reconnect(delay time.Duration, stdinCh <-chan stdinResult, c
 			}
 			results = make(chan dialResult, 1)
 			go func(results chan<- dialResult) {
+				// Ask the Hub first, as AttachToAgent does for the first
+				// connection: the path to the agent's terminal may have
+				// changed (or gone) since then.
+				if err := c.preflightFn(c.ctx); err != nil {
+					var refusal *PTYPreflightError
+					if !errors.As(err, &refusal) {
+						err = &preflightTransportError{err: err}
+					}
+					results <- dialResult{nil, err}
+					return
+				}
 				conn, err := c.redialFn(c.ctx)
 				results <- dialResult{conn, err}
 			}(results)
