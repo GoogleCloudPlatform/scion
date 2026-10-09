@@ -14,7 +14,14 @@ const showToast = vi.fn();
 vi.mock('../../utils/toast.js', () => ({ showToast }));
 
 const terminal = vi.hoisted(() => ({
-  instances: [] as Array<Record<'dispose' | 'reset' | 'focus' | 'blur', ReturnType<typeof vi.fn>>>,
+  instances: [] as Array<{
+    dispose: ReturnType<typeof vi.fn>;
+    reset: ReturnType<typeof vi.fn>;
+    focus: ReturnType<typeof vi.fn>;
+    blur: ReturnType<typeof vi.fn>;
+    element: HTMLElement | undefined;
+    _core: { coreMouseService: { areMouseEventsActive: boolean; activeEncoding: string } };
+  }>,
 }));
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
@@ -28,7 +35,12 @@ vi.mock('@xterm/xterm', () => ({
     refresh = vi.fn();
     parser = { registerOscHandler: vi.fn() };
     loadAddon = vi.fn();
-    open = vi.fn();
+    element: HTMLElement | undefined;
+    _core = { coreMouseService: { areMouseEventsActive: false, activeEncoding: 'DEFAULT' } };
+    open = vi.fn((parent: HTMLElement): void => {
+      this.element = document.createElement('div');
+      parent.append(this.element);
+    });
     onData = vi.fn();
     onBinary = vi.fn();
     attachCustomKeyEventHandler = vi.fn();
@@ -1276,5 +1288,66 @@ describe('pane navigation', () => {
       document.removeEventListener('nav-click', onNav);
     }
     expect(paths).toEqual([`/agents/graph?project=proj%201&focus=${agentId}`]);
+  });
+});
+
+describe('touch-to-wheel scrolling', () => {
+  function touch(type: string, y: number, fingers = 1): Event {
+    const ev = new Event(type, { cancelable: true, bubbles: true });
+    const list = Array.from({ length: fingers }, () => ({ clientX: 0, clientY: y }));
+    Object.defineProperty(ev, 'touches', { value: list });
+    return ev;
+  }
+
+  it('sends SGR wheel reports only while SGR mouse reporting is active', async () => {
+    await mountConnected();
+    const xt = terminal.instances[0];
+    const el = xt.element!;
+    const socket = FakeSocket.instances[0];
+    socket.send.mockClear();
+    const sent = (): string[] =>
+      socket.send.mock.calls.map(([raw]) =>
+        atob((JSON.parse(raw as string) as { data: string }).data)
+      );
+
+    // Mouse reporting off: xterm scrolls its own viewport; nothing is sent.
+    el.dispatchEvent(touch('touchstart', 300));
+    el.dispatchEvent(touch('touchmove', 200));
+    expect(socket.send).not.toHaveBeenCalled();
+
+    xt._core.coreMouseService = { areMouseEventsActive: true, activeEncoding: 'SGR' };
+    el.dispatchEvent(touch('touchstart', 300));
+    expect(el.style.touchAction).toBe('none');
+    const move = touch('touchmove', 250);
+    el.dispatchEvent(move);
+    expect(move.defaultPrevented).toBe(true);
+    // A 50px upward drag at ~20.8px per row is two wheel-down notches at row 12.
+    expect(sent()).toEqual(['\x1b[<65;1;12M', '\x1b[<65;1;12M']);
+
+    // A second finger belongs to the browser (pinch-zoom).
+    socket.send.mockClear();
+    el.dispatchEvent(touch('touchmove', 100, 2));
+    el.dispatchEvent(touch('touchmove', 50));
+    expect(socket.send).not.toHaveBeenCalled();
+    expect(el.style.touchAction).toBe('');
+
+    // Non-SGR encodings are never sent a CSI they did not negotiate.
+    xt._core.coreMouseService = { areMouseEventsActive: true, activeEncoding: 'DEFAULT' };
+    el.dispatchEvent(touch('touchstart', 300));
+    el.dispatchEvent(touch('touchmove', 200));
+    expect(socket.send).not.toHaveBeenCalled();
+  });
+
+  it('removes its listeners when the terminal is disposed', async () => {
+    await mountConnected();
+    const xt = terminal.instances[0];
+    const el = xt.element!;
+    xt._core.coreMouseService = { areMouseEventsActive: true, activeEncoding: 'SGR' };
+    page.dispose();
+    const move = touch('touchmove', 100);
+    el.dispatchEvent(touch('touchstart', 300));
+    el.dispatchEvent(move);
+    expect(move.defaultPrevented).toBe(false);
+    expect(el.style.touchAction).toBe('');
   });
 });

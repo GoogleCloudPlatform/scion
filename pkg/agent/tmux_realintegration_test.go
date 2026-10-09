@@ -217,3 +217,98 @@ func TestRealTmuxLoadBufferDeliversLargePayload(t *testing.T) {
 		}
 	}
 }
+
+// TestRealTmuxDeliversIntoCopyMode checks against a real tmux server that a
+// message delivered while the pane is in copy-mode (left there by an
+// operator's scroll) is both pasted and submitted. A send-keys Enter would be
+// dispatched through copy-mode's key table and never reach the pane; the
+// pasted-CR submit must arrive, and must leave the pane in copy-mode.
+func TestRealTmuxDeliversIntoCopyMode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-tmux integration test in short mode")
+	}
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux not installed; skipping real-tmux integration test")
+	}
+
+	dir, err := os.MkdirTemp("", "tmx")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "sock")
+	outFile := filepath.Join(dir, "out")
+
+	runTmux := func(args ...string) (string, error) {
+		out, err := exec.Command(tmuxPath, append([]string{"-S", sock}, args...)...).CombinedOutput()
+		if err != nil {
+			return string(out), fmt.Errorf("tmux %v failed: %w (%s)", args, err, out)
+		}
+		return string(out), nil
+	}
+	t.Cleanup(func() { _, _ = runTmux("kill-server") })
+
+	// "cat" in canonical tty mode only writes a line once it is submitted,
+	// so the message text reaching outFile proves the CR arrived too.
+	if _, err := runTmux("-f", "/dev/null", "new-session", "-d", "-s", "scion", "-x", "120", "-y", "30", "cat > "+outFile); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runTmux("copy-mode", "-t", "scion:0"); err != nil {
+		t.Fatal(err)
+	}
+
+	shim := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{
+				{ContainerID: "local", Name: "test-agent", Labels: map[string]string{"scion.name": "test-agent"}},
+			}, nil
+		},
+		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+			return runTmux(cmd[1:]...)
+		},
+		ExecWithStdinFunc: func(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+			c := exec.Command(tmuxPath, append([]string{"-S", sock}, cmd[1:]...)...)
+			c.Stdin = stdin
+			out, err := c.CombinedOutput()
+			if err != nil {
+				return string(out), fmt.Errorf("tmux %v failed: %w (%s)", cmd[1:], err, out)
+			}
+			return string(out), nil
+		},
+	}
+	mgr := &AgentManager{Runtime: shim}
+	if err := mgr.deliverImmediate(context.Background(), "test-agent", "", "hello from copy-mode", false); err != nil {
+		t.Fatalf("deliverImmediate failed: %v", err)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		got, _ := os.ReadFile(outFile)
+		if strings.Contains(string(got), "hello from copy-mode\n") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("message was not submitted from copy-mode; pane output %q", got)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	inMode, err := runTmux("display-message", "-p", "-t", "scion:0", "#{pane_in_mode}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(inMode) != "1" {
+		t.Errorf("delivery left copy-mode; the operator's scroll position would be lost (pane_in_mode=%q)", inMode)
+	}
+
+	bufs, err := runTmux("list-buffers", "-F", "#{buffer_name}")
+	if err != nil && !strings.Contains(err.Error(), "no buffers") {
+		t.Fatal(err)
+	}
+	for _, name := range strings.Fields(bufs) {
+		if strings.HasPrefix(name, msgBufferPrefix) || strings.HasPrefix(name, submitBufferPrefix) {
+			t.Errorf("delivery left buffer %q behind", name)
+		}
+	}
+}

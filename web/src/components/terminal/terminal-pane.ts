@@ -40,6 +40,7 @@ import {
 } from '../../client/terminal-sessions.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
+import { clampCell, sgrWheel, wheelNotches } from '../../shared/terminal-wheel.js';
 import type { TerminalAgentMetadata } from '../../client/terminal-metadata.js';
 import '../shared/status-badge.js';
 import { showToast } from '../../utils/toast.js';
@@ -231,6 +232,8 @@ export class ScionTerminalPane extends LitElement {
   private _errorTimer: ReturnType<typeof setTimeout> | null = null;
   private _windowDragOver: ((e: DragEvent) => void) | null = null;
   private _windowDrop: ((e: DragEvent) => void) | null = null;
+  /** Aborts the touch-scroll listeners installed on the xterm element. */
+  private _touchScrollAbort: AbortController | null = null;
 
   // Theme: the pane chrome (toolbar, buttons, dialogs, loading/error states)
   // follows the app theme through --scion-* tokens. The terminal viewport and
@@ -1129,6 +1132,7 @@ export class ScionTerminalPane extends LitElement {
     this.terminal.open(container);
     const terminal = this.terminal;
     this.enableShiftSelectionOnMac();
+    this.enableTouchWheelScroll();
 
     // Detect active tmux window from OSC 7337 sequence sent by the broker
     // on connect. Format: \033]7337;tmuxwindow=<name>\007
@@ -1399,6 +1403,122 @@ export class ScionTerminalPane extends LitElement {
     };
   }
 
+  /**
+   * Translates a vertical touch drag into wheel events, so an application
+   * holding the wheel (tmux with `mouse on`) has reachable scrollback on a
+   * device that has no wheel to turn and no Ctrl key for copy-mode.
+   *
+   * Only while mouse reporting is ACTIVE: with it off xterm.js already scrolls
+   * its own viewport on touch, and synthesising here would both duplicate that
+   * and inject escape sequences into an application that never asked for them.
+   *
+   * Listeners are bound to an AbortController released in disposeTerminal(),
+   * so they live exactly as long as this pane's xterm element.
+   */
+  private enableTouchWheelScroll(): void {
+    const el = this.terminal?.element;
+    if (!el) return;
+    this._touchScrollAbort?.abort();
+    const abort = new AbortController();
+    this._touchScrollAbort = abort;
+    const { signal } = abort;
+
+    // One notch per row of travel keeps the content under the finger.
+    const rowHeight = (): number => {
+      const rows = this.terminal?.rows ?? 24;
+      return Math.max(8, el.clientHeight / rows);
+    };
+
+    let lastY: number | null = null;
+    let carry = 0;
+    // Decided at touchstart, not on the first move that crosses a row: the
+    // browser begins its own scroll from the very first touchmove.
+    let consuming = false;
+
+    // areMouseEventsActive is true for ANY active protocol and says nothing
+    // about encoding, but sgrWheel only speaks SGR: an app that enabled
+    // mouse reporting without it would be handed a CSI it never negotiated.
+    const mouseActive = (): boolean => {
+      if (!this.terminal) return false;
+      const svc = (
+        this.terminal as Terminal & {
+          _core?: {
+            coreMouseService?: { areMouseEventsActive?: boolean; activeEncoding?: string };
+          };
+        }
+      )._core?.coreMouseService;
+      return Boolean(svc?.areMouseEventsActive) && svc?.activeEncoding === 'SGR';
+    };
+
+    const wheel = (up: boolean, touch: Touch): void => {
+      const rect = el.getBoundingClientRect();
+      const cols = this.terminal?.cols ?? 80;
+      const rows = this.terminal?.rows ?? 24;
+      const col = clampCell((touch.clientX - rect.left) / (rect.width / cols), cols);
+      const row = clampCell((touch.clientY - rect.top) / rowHeight(), rows);
+      this.sendData(sgrWheel(up, col, row));
+    };
+
+    el.addEventListener(
+      'touchstart',
+      (ev: TouchEvent): void => {
+        consuming = ev.touches.length === 1 && mouseActive();
+        // touch-action is read when a gesture BEGINS, so this governs the
+        // NEXT one; preventDefault below handles the current one.
+        el.style.touchAction = consuming ? 'none' : '';
+        if (!consuming) return;
+        lastY = ev.touches[0].clientY;
+        carry = 0;
+      },
+      { passive: true, signal }
+    );
+
+    el.addEventListener(
+      'touchmove',
+      (ev: TouchEvent): void => {
+        // A second finger means pinch-zoom, which belongs to the browser.
+        if (ev.touches.length !== 1) {
+          consuming = false;
+          el.style.touchAction = '';
+          return;
+        }
+        if (!consuming || lastY === null) return;
+        // Re-checked per move: an app can drop mouse reporting mid-drag, and
+        // the reports would then land on whatever owns the tty (a shell).
+        if (!mouseActive()) {
+          consuming = false;
+          el.style.touchAction = '';
+          return;
+        }
+
+        // The whole gesture, not just the part that crosses a row: this is
+        // what stops the page moving underneath. Guarded: the first gesture
+        // after mouse reporting turns on can arrive with the browser scroll
+        // already committed, and cancelling that one only logs a warning.
+        if (ev.cancelable) ev.preventDefault();
+
+        const touch = ev.touches[0];
+        carry += lastY - touch.clientY;
+        lastY = touch.clientY;
+
+        const { notches, up, remainder } = wheelNotches(carry, rowHeight());
+        carry = remainder;
+        for (let i = 0; i < notches; i++) wheel(up, touch);
+      },
+      { passive: false, signal }
+    );
+
+    const end = (): void => {
+      lastY = null;
+      carry = 0;
+      consuming = false;
+      // Left set while reporting is on, so it governs the NEXT gesture too.
+      el.style.touchAction = mouseActive() ? 'none' : '';
+    };
+    el.addEventListener('touchend', end, { passive: true, signal });
+    el.addEventListener('touchcancel', end, { passive: true, signal });
+  }
+
   private sendData(data: string): void {
     this.session?.sendData(data);
   }
@@ -1624,6 +1744,8 @@ export class ScionTerminalPane extends LitElement {
   }
 
   private disposeTerminal(): void {
+    this._touchScrollAbort?.abort();
+    this._touchScrollAbort = null;
     this.terminalStyle?.remove();
     this.terminalStyle = null;
     if (this.terminal) {
