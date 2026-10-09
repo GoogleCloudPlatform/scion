@@ -24,6 +24,8 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -3940,10 +3942,35 @@ func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, a
 			resp.Messageability = s.ComputeMessageability(ctx, identity, agent)
 		}
 	}
+	resp.Editability = buildAgentEditability(agent, s.agentEditAccessFor(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
 
 	resp.AppliedConfig = redactAppliedConfigEnvForResponse(resp.AppliedConfig, s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// agentEditAccessFor computes what the caller may edit on agent, for the
+// GET response's editability: caps are the caller's capabilities on the
+// agent. Changing the role needs what a role-changing reincarnation needs:
+// agent.lifecycle and authority to delegate the agent's current role.
+func (s *Server) agentEditAccessFor(ctx context.Context, identity Identity, agent *store.Agent, caps *Capabilities) agentEditAccess {
+	if identity == nil || caps == nil {
+		return agentEditAccess{}
+	}
+	access := agentEditAccess{CanUpdate: slices.Contains(caps.Actions, string(ActionUpdate))}
+	if !access.CanUpdate || !slices.Contains(caps.Actions, string(ActionLifecycle)) || s.authzService == nil {
+		return access
+	}
+	role, _ := agentRoleAndScopes(agent)
+	decision := s.authzService.CanDelegate(ctx, identity, GrantDescriptor{
+		Type:      GrantTypeAgentDelegation,
+		AgentRole: string(role),
+		ProjectID: agent.ProjectID,
+		ScopeType: store.RoleScopeProject,
+		ScopeID:   agent.ProjectID,
+	})
+	access.CanChangeRole = decision.Allowed
+	return access
 }
 
 func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) {
@@ -4022,12 +4049,12 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 	// request would decode the field but be read as "absent" and silently
 	// dropped from CreateInputs.
 	var presentConfigKeys map[string]bool
+	var rawFields map[string]json.RawMessage
 	if updates.Config != nil {
 		var rawTop struct {
 			Config json.RawMessage `json:"config"`
 		}
 		if err := json.Unmarshal(body, &rawTop); err == nil && len(rawTop.Config) > 0 {
-			var rawFields map[string]json.RawMessage
 			if err := json.Unmarshal(rawTop.Config, &rawFields); err == nil {
 				presentConfigKeys = make(map[string]bool, len(rawFields))
 				for k := range rawFields {
@@ -4085,15 +4112,20 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		agent.TaskSummary = updates.TaskSummary
 	}
 
-	// Apply config updates (only allowed for non-deleted agents in 'created' or 'stopped' phase;
-	// starting a stopped agent always recreates its container from AppliedConfig).
+	// Apply config updates. Allowed for a non-deleted agent with no
+	// container: created, stopped, error or suspended. Every start of such
+	// an agent -- a first start, a fresh start of a stopped or failed
+	// agent, and a resume of a suspended one -- creates a new container
+	// from AppliedConfig, so the edit is dispatched with it. Agents with a
+	// live container, or one being created or removed, are refused until
+	// held edits exist (see agent_config_mutability.go).
 	if updates.Config != nil {
 		if !agent.DeletedAt.IsZero() {
 			Conflict(w, "Config cannot be updated for deleted agents")
 			return
 		}
-		if agent.Phase != string(state.PhaseCreated) && agent.Phase != string(state.PhaseStopped) {
-			Conflict(w, "Config can only be updated for agents in 'created' or 'stopped' phase")
+		if !configPatchPhase(agent.Phase) {
+			Conflict(w, "Config can only be updated for agents in 'created', 'stopped', 'error' or 'suspended' phase")
 			return
 		}
 		resolvedHarness, harnessCaps := s.resolveAgentHarnessCapabilities(ctx, agent)
@@ -4208,6 +4240,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			}
 		}
 		agent.AppliedConfig.InlineConfig = merged
+		warnings = append(warnings, reincarnateOnlyEditWarnings(rawFields)...)
 	}
 
 	// Apply GCP identity update (only allowed for agents in 'created' phase)
@@ -4375,7 +4408,52 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		ResolvedTimezone: tz.TZ,
 		TimezoneSource:   tz.Source,
 		Warnings:         warnings,
+		Disposition:      agentUpdateAppliedKeys(updates.Name, updates.Labels, updates.Annotations, updates.TaskSummary, updates.Config != nil, rawFields, updates.GCPIdentity != nil, updates.ExplicitTimezone != nil),
 	})
+}
+
+// configPatchPhase reports whether an agent PATCH may write config in
+// phase: the phases with no container, whose next start creates one from
+// AppliedConfig.
+func configPatchPhase(phase string) bool {
+	switch state.Phase(phase) {
+	case state.PhaseCreated, state.PhaseStopped, state.PhaseError, state.PhaseSuspended:
+		return true
+	}
+	return false
+}
+
+// agentUpdateAppliedKeys builds the PATCH response's disposition: the wire
+// keys the request wrote. The arguments mirror the request fields that
+// applyAgentUpdate writes when present (name and task summary when
+// non-empty, labels and annotations when non-nil).
+func agentUpdateAppliedKeys(name string, lbls, annotations map[string]string, taskSummary string, hasConfig bool, rawConfig map[string]json.RawMessage, hasGCPIdentity, hasTimezone bool) AgentUpdateDisposition {
+	applied := []string{}
+	if name != "" {
+		applied = append(applied, "name")
+	}
+	if lbls != nil {
+		applied = append(applied, "labels")
+	}
+	if annotations != nil {
+		applied = append(applied, "annotations")
+	}
+	if taskSummary != "" {
+		applied = append(applied, "taskSummary")
+	}
+	if hasConfig {
+		for _, f := range configPatchKeys(rawConfig) {
+			applied = append(applied, f.Key)
+		}
+	}
+	if hasGCPIdentity {
+		applied = append(applied, "gcp_identity")
+	}
+	if hasTimezone {
+		applied = append(applied, "explicitTimezone")
+	}
+	sort.Strings(applied)
+	return AgentUpdateDisposition{Applied: applied}
 }
 
 // agentUpdateResponse is the agent PATCH response: the updated agent plus
@@ -4387,6 +4465,8 @@ type agentUpdateResponse struct {
 	ResolvedTimezone string   `json:"resolvedTimezone"`
 	TimezoneSource   string   `json:"timezoneSource"`
 	Warnings         []string `json:"warnings,omitempty"`
+	// Disposition names the keys the request wrote.
+	Disposition AgentUpdateDisposition `json:"disposition"`
 }
 
 // checkBrokerAvailability verifies the agent's runtime broker is reachable.

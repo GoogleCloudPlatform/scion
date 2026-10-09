@@ -136,6 +136,11 @@ const ChatScheduledSend = "web.chat_scheduled_send"
 // Registration alone never grants production admission.
 const AuthorizationDecisionAuditV2 = "hub.authorization_decision_audit_v2"
 
+// AgentEdit gates the web Edit agent page (/agents/{id}/edit) and the Edit
+// button on the agent page. It is web-only for now: the hub's config PATCH
+// accepts edits of agents with no container whether or not it is on.
+const AgentEdit = "web.agent_edit"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
@@ -216,6 +221,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#3666",
 		Owner:       "native-chat",
 		ReviewBy:    "2027-01-31",
+	},
+	{
+		Name:        AgentEdit,
+		Title:       "Edit agent",
+		Description: "Adds an Edit button on the agent page and the Edit page at /agents/{id}/edit, which edits a created, stopped, failed or suspended agent's model and limits, and shows for every field whether it applies at the next start or resume, needs a reincarnation, or is fixed.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#3952",
+		Owner:       "web",
+		ReviewBy:    "2027-01-07",
 	},
 }
 

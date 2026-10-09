@@ -1,0 +1,323 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import (
+	"encoding/json"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// wantEditTier is the expected tier of every key in the mutability table.
+// It is written out key by key, independently of agentEditFields, so a
+// change of tier fails here and has to be made deliberately.
+var wantEditTier = map[string]EditTier{
+	"name":        EditTierMetadata,
+	"labels":      EditTierMetadata,
+	"annotations": EditTierMetadata,
+	"taskSummary": EditTierMetadata,
+	"messageMode": EditTierMetadata,
+
+	"config.model":             EditTierContainer,
+	"config.thinking_level":    EditTierContainer,
+	"config.auth_selectedType": EditTierContainer,
+	"config.image":             EditTierContainer,
+	"config.user":              EditTierContainer,
+	"config.max_turns":         EditTierContainer,
+	"config.max_model_calls":   EditTierContainer,
+	"config.max_duration":      EditTierContainer,
+	"config.resources":         EditTierContainer,
+	"config.env":               EditTierContainer,
+	"config.telemetry":         EditTierContainer,
+	"config.mcp_servers":       EditTierContainer,
+	"config.volumes":           EditTierContainer,
+	"config.kubernetes":        EditTierContainer,
+	"config.command_args":      EditTierContainer,
+	"config.task_flag":         EditTierContainer,
+	"config.task":              EditTierContainer,
+	"explicitTimezone":         EditTierContainer,
+
+	"config.system_prompt":      EditTierProvision,
+	"config.agent_instructions": EditTierProvision,
+	"config.skills":             EditTierProvision,
+	"config.services":           EditTierProvision,
+	"config.secrets":            EditTierProvision,
+
+	"agentRole":    EditTierPrincipal,
+	"gcp_identity": EditTierPrincipal,
+
+	"projectId":                        EditTierImmutable,
+	"template":                         EditTierImmutable,
+	"harnessConfig":                    EditTierImmutable,
+	"runtimeBrokerId":                  EditTierImmutable,
+	"profile":                          EditTierImmutable,
+	"branch":                           EditTierImmutable,
+	"config.branch":                    EditTierImmutable,
+	"config.clone_depth":               EditTierImmutable,
+	"config.explicit_workspace":        EditTierImmutable,
+	"config.empty_per_agent_workspace": EditTierImmutable,
+	"config.harness":                   EditTierImmutable,
+	"config.harness_config":            EditTierImmutable,
+	"config.default_harness_config":    EditTierImmutable,
+	"config.config_dir":                EditTierImmutable,
+	"config.detached":                  EditTierImmutable,
+	"config.hub":                       EditTierImmutable,
+}
+
+// wantSessionSensitive lists the keys a resume applies but whose effect on
+// a continued conversation depends on the harness.
+var wantSessionSensitive = map[string]bool{
+	"config.model":             true,
+	"config.thinking_level":    true,
+	"config.auth_selectedType": true,
+}
+
+// wantTierDisposition is the design's phase rule per tier (design s4.1),
+// before the per-key exceptions in wantDispositionException.
+var wantTierDisposition = map[EditTier]map[state.Phase]EditDisposition{
+	EditTierMetadata: {
+		state.PhaseCreated: EditImmediate, state.PhaseStopped: EditImmediate, state.PhaseError: EditImmediate,
+		state.PhaseSuspended: EditImmediate, state.PhaseRunning: EditImmediate, state.PhaseProvisioning: EditImmediate,
+		state.PhaseCloning: EditImmediate, state.PhaseStarting: EditImmediate, state.PhaseStopping: EditImmediate,
+	},
+	EditTierContainer: {
+		state.PhaseCreated: EditNow, state.PhaseStopped: EditNow, state.PhaseError: EditNow,
+		state.PhaseSuspended: EditNow, state.PhaseRunning: EditHeld, state.PhaseProvisioning: EditHeld,
+		state.PhaseCloning: EditHeld, state.PhaseStarting: EditHeld, state.PhaseStopping: EditHeld,
+	},
+	EditTierProvision: {
+		state.PhaseCreated: EditReincarnate, state.PhaseStopped: EditReincarnate, state.PhaseError: EditReincarnate,
+		state.PhaseSuspended: EditReincarnate, state.PhaseRunning: EditReincarnate, state.PhaseProvisioning: EditReincarnate,
+		state.PhaseCloning: EditReincarnate, state.PhaseStarting: EditReincarnate, state.PhaseStopping: EditReincarnate,
+	},
+	EditTierPrincipal: {
+		state.PhaseCreated: EditReincarnate, state.PhaseStopped: EditReincarnate, state.PhaseError: EditReincarnate,
+		state.PhaseSuspended: EditReincarnate, state.PhaseRunning: EditReincarnate, state.PhaseProvisioning: EditReincarnate,
+		state.PhaseCloning: EditReincarnate, state.PhaseStarting: EditReincarnate, state.PhaseStopping: EditReincarnate,
+	},
+	EditTierImmutable: {
+		state.PhaseCreated: EditLocked, state.PhaseStopped: EditLocked, state.PhaseError: EditLocked,
+		state.PhaseSuspended: EditLocked, state.PhaseRunning: EditLocked, state.PhaseProvisioning: EditLocked,
+		state.PhaseCloning: EditLocked, state.PhaseStarting: EditLocked, state.PhaseStopping: EditLocked,
+	},
+}
+
+// wantDispositionException lists the cells where a key departs from its
+// tier's rule (design s4.2).
+var wantDispositionException = map[string]map[state.Phase]EditDisposition{
+	// The hub already stores the timezone pin in every phase and applies it
+	// at the next start.
+	"explicitTimezone": {
+		state.PhaseRunning: EditNow, state.PhaseProvisioning: EditNow, state.PhaseCloning: EditNow,
+		state.PhaseStarting: EditNow, state.PhaseStopping: EditNow,
+	},
+	// A resume does not send the task again.
+	"config.task": {state.PhaseSuspended: EditLocked},
+	// GCP identity is written through before the first start.
+	"gcp_identity": {state.PhaseCreated: EditNow},
+	// The role cannot change before the first start.
+	"agentRole": {state.PhaseCreated: EditLocked},
+}
+
+// TestAgentEditTable_CoversEveryScionConfigKey fails when an api.ScionConfig
+// key has no row in the mutability table.
+func TestAgentEditTable_CoversEveryScionConfigKey(t *testing.T) {
+	typ := reflect.TypeOf(api.ScionConfig{})
+	for i := 0; i < typ.NumField(); i++ {
+		tag := strings.Split(typ.Field(i).Tag.Get("json"), ",")[0]
+		if tag == "" || tag == "-" {
+			continue
+		}
+		key := agentConfigKeyPrefix + tag
+		_, ok := agentEditFieldByKey[key]
+		assert.True(t, ok, "api.ScionConfig key %q has no row in agentEditFields (agent_config_mutability.go); give it a tier", key)
+	}
+}
+
+// TestAgentEditTable_EveryKeyEveryPhase enumerates every key and every
+// phase and asserts the tier, the session-sensitivity flag and the
+// disposition of each cell, and that a deleted agent locks every key.
+func TestAgentEditTable_EveryKeyEveryPhase(t *testing.T) {
+	require.Len(t, agentEditFields, len(wantEditTier), "every table row must have an expected tier, and the reverse")
+	require.Len(t, agentEditFieldByKey, len(agentEditFields), "table keys must be unique")
+	require.Len(t, state.Phases(), 9, "a new phase needs a column in wantTierDisposition")
+
+	for _, f := range agentEditFields {
+		want, ok := wantEditTier[f.Key]
+		require.True(t, ok, "unexpected table key %q", f.Key)
+		assert.Equal(t, want, f.Tier, "tier of %s", f.Key)
+		assert.Equal(t, wantSessionSensitive[f.Key], f.SessionSensitive, "session sensitivity of %s", f.Key)
+
+		for _, phase := range state.Phases() {
+			wantD, ok := wantDispositionException[f.Key][phase]
+			if !ok {
+				wantD, ok = wantTierDisposition[f.Tier][phase]
+				require.True(t, ok, "no expected disposition for tier %s in phase %s", f.Tier, phase)
+			}
+			got, reason := editDisposition(f, string(phase), false)
+			assert.Equal(t, wantD, got, "disposition of %s in %s", f.Key, phase)
+			if got == EditLocked {
+				assert.NotEmpty(t, reason, "a locked cell needs a reason: %s in %s", f.Key, phase)
+			}
+
+			got, reason = editDisposition(f, string(phase), true)
+			assert.Equal(t, EditLocked, got, "a deleted agent locks %s in %s", f.Key, phase)
+			assert.Equal(t, editReasonDeleted, reason)
+		}
+
+		got, _ := editDisposition(f, "", false)
+		assert.Equal(t, EditLocked, got, "an unknown phase locks %s", f.Key)
+	}
+}
+
+// TestBuildAgentEditability_HeldIsNotAvailableYet: a held edit of a
+// running or transitional agent is not available yet, so the editability
+// served to the UI reports those cells locked with a reason, while the
+// cells the design marks now or immediate in those phases stay so.
+func TestBuildAgentEditability_HeldIsNotAvailableYet(t *testing.T) {
+	full := agentEditAccess{CanUpdate: true, CanChangeRole: true}
+	for _, phase := range []state.Phase{state.PhaseRunning, state.PhaseProvisioning, state.PhaseCloning, state.PhaseStarting, state.PhaseStopping} {
+		ed := buildAgentEditability(&store.Agent{Phase: string(phase)}, full)
+		for _, key := range []string{"config.model", "config.max_turns", "config.max_duration"} {
+			assert.Equal(t, FieldEditState{
+				Tier:                  EditTierContainer,
+				Disposition:           EditLocked,
+				SessionSensitive:      wantSessionSensitive[key],
+				ClearNeedsReincarnate: true,
+				Reason:                editReasonRunning,
+			}, ed.Fields[key], "%s in %s", key, phase)
+		}
+		assert.Equal(t, EditNow, ed.Fields["explicitTimezone"].Disposition, "timezone in %s", phase)
+		assert.Equal(t, EditImmediate, ed.Fields["name"].Disposition, "name in %s", phase)
+		assert.Equal(t, EditReincarnate, ed.Fields["config.system_prompt"].Disposition, "system prompt in %s", phase)
+		assert.Equal(t, EditReincarnate, ed.Fields["agentRole"].Disposition, "role in %s", phase)
+	}
+}
+
+func TestBuildAgentEditability_NoContainerPhases(t *testing.T) {
+	full := agentEditAccess{CanUpdate: true, CanChangeRole: true}
+	for _, phase := range []state.Phase{state.PhaseCreated, state.PhaseStopped, state.PhaseError, state.PhaseSuspended} {
+		ed := buildAgentEditability(&store.Agent{Phase: string(phase)}, full)
+		require.Equal(t, string(phase), ed.Phase)
+		require.Len(t, ed.Fields, len(agentEditFields))
+		assert.Equal(t, EditNow, ed.Fields["config.max_turns"].Disposition, phase)
+		assert.True(t, ed.Fields["config.max_turns"].ClearNeedsReincarnate, phase)
+		assert.False(t, ed.Fields["config.system_prompt"].ClearNeedsReincarnate, "a T2 key is reincarnate-only anyway")
+		// T2 keys are written through in these phases today, but they only
+		// take effect at a reincarnation, which is their disposition.
+		assert.Equal(t, EditReincarnate, ed.Fields["config.system_prompt"].Disposition, phase)
+		assert.Equal(t, EditTierImmutable, ed.Fields["template"].Tier)
+		assert.Equal(t, EditLocked, ed.Fields["template"].Disposition)
+		assert.NotEmpty(t, ed.Fields["template"].Reason)
+	}
+
+	suspended := buildAgentEditability(&store.Agent{Phase: string(state.PhaseSuspended)}, full)
+	assert.Equal(t, "session", suspended.Fields["config.model"].Note)
+	assert.Equal(t, "session", suspended.Fields["config.thinking_level"].Note)
+	assert.Empty(t, suspended.Fields["config.max_turns"].Note)
+	assert.Equal(t, EditLocked, suspended.Fields["config.task"].Disposition)
+	assert.Equal(t, editReasonNotOnResume, suspended.Fields["config.task"].Reason)
+
+	stopped := buildAgentEditability(&store.Agent{Phase: string(state.PhaseStopped)}, full)
+	assert.Empty(t, stopped.Fields["config.model"].Note, "a fresh start begins a new conversation")
+	assert.True(t, stopped.Fields["config.model"].SessionSensitive)
+
+	created := buildAgentEditability(&store.Agent{Phase: string(state.PhaseCreated)}, full)
+	assert.Equal(t, EditNow, created.Fields["gcp_identity"].Disposition)
+	assert.Equal(t, EditLocked, created.Fields["agentRole"].Disposition)
+	assert.Equal(t, editReasonRoleCreated, created.Fields["agentRole"].Reason)
+}
+
+func TestBuildAgentEditability_CallerAccess(t *testing.T) {
+	agent := &store.Agent{Phase: string(state.PhaseStopped)}
+
+	t.Run("cannot delegate locks the role only", func(t *testing.T) {
+		ed := buildAgentEditability(agent, agentEditAccess{CanUpdate: true})
+		assert.Equal(t, EditLocked, ed.Fields["agentRole"].Disposition)
+		assert.Equal(t, editReasonCannotDelegate, ed.Fields["agentRole"].Reason)
+		assert.Equal(t, EditNow, ed.Fields["config.model"].Disposition)
+		assert.Equal(t, EditReincarnate, ed.Fields["gcp_identity"].Disposition)
+	})
+
+	t.Run("no update locks everything", func(t *testing.T) {
+		ed := buildAgentEditability(agent, agentEditAccess{})
+		for key, st := range ed.Fields {
+			assert.Equal(t, EditLocked, st.Disposition, key)
+			assert.NotEmpty(t, st.Reason, key)
+		}
+		assert.Equal(t, editReasonNoUpdate, ed.Fields["config.model"].Reason)
+		assert.Equal(t, editReasonImmutable, ed.Fields["template"].Reason, "a fixed field keeps its own reason")
+	})
+
+	t.Run("deleted agent locks everything", func(t *testing.T) {
+		deleted := &store.Agent{Phase: string(state.PhaseStopped), DeletedAt: time.Now()}
+		ed := buildAgentEditability(deleted, agentEditAccess{CanUpdate: true, CanChangeRole: true})
+		for key, st := range ed.Fields {
+			assert.Equal(t, EditLocked, st.Disposition, key)
+			assert.Equal(t, editReasonDeleted, st.Reason, key)
+		}
+	})
+
+	assert.Nil(t, buildAgentEditability(nil, agentEditAccess{}))
+}
+
+func rawConfigOf(t *testing.T, body string) map[string]json.RawMessage {
+	t.Helper()
+	var m map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(body), &m))
+	return m
+}
+
+func TestReincarnateOnlyConfigEdits(t *testing.T) {
+	raw := rawConfigOf(t, `{"model":"m","Max_Turns":0,"max_duration":null,"thinking_level":50,"image":"","system_prompt":"p","skills":[],"not_a_key":1,"env":{}}`)
+	provision, cleared := reincarnateOnlyConfigEdits(raw)
+	assert.Equal(t, []string{"config.skills", "config.system_prompt"}, provision)
+	assert.Equal(t, []string{"config.env", "config.image", "config.max_duration", "config.max_turns"}, cleared)
+
+	warnings := reincarnateOnlyEditWarnings(raw)
+	require.Len(t, warnings, 2)
+	assert.Contains(t, warnings[0], "config.skills, config.system_prompt: stored now; rendered at the next reincarnation")
+	assert.Contains(t, warnings[1], "config.env, config.image, config.max_duration, config.max_turns: cleared now")
+
+	assert.Empty(t, reincarnateOnlyEditWarnings(rawConfigOf(t, `{"model":"m","max_turns":5}`)))
+	assert.Empty(t, reincarnateOnlyEditWarnings(nil))
+}
+
+func TestRawJSONIsEmpty(t *testing.T) {
+	for _, v := range []string{``, `null`, `""`, `0`, `0.0`, `false`, `[]`, `{}`, ` [ ] `, `{ }`} {
+		assert.True(t, rawJSONIsEmpty(json.RawMessage(v)), v)
+	}
+	for _, v := range []string{`1`, `"x"`, `true`, `[1]`, `{"a":1}`, `-1`} {
+		assert.False(t, rawJSONIsEmpty(json.RawMessage(v)), v)
+	}
+}
+
+func TestAgentUpdateAppliedKeys(t *testing.T) {
+	got := agentUpdateAppliedKeys("n", map[string]string{}, nil, "", true,
+		rawConfigOf(t, `{"max_turns":3,"Model":"m","bogus":1}`), false, true)
+	assert.Equal(t, []string{"config.max_turns", "config.model", "explicitTimezone", "labels", "name"}, got.Applied)
+
+	empty := agentUpdateAppliedKeys("", nil, nil, "", false, nil, false, false)
+	require.NotNil(t, empty.Applied, "applied is an empty list, not null")
+	assert.Empty(t, empty.Applied)
+}
