@@ -752,6 +752,39 @@ func isDisallowedSourceURLRune(r rune) bool {
 	return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r)
 }
 
+// invalidSourceURLMessage is the validation error for a sourceUrl that fails
+// validRecordedSourceURL (finalize) or validReimportSourceURL (reimport).
+var invalidSourceURLMessage = fmt.Sprintf(
+	"sourceUrl must be a single-line remote URI (http://, https://, or rclone) of at most %d bytes",
+	maxRecordedSourceURLBytes)
+
+// validRecordedSourceURL reports whether s may be recorded as a harness
+// config's source URL: a single-line remote URI (http://, https://, or an
+// rclone URI) of at most maxRecordedSourceURLBytes, with no control or
+// invisible formatting characters. Finalize and the reimport override share
+// it.
+func validRecordedSourceURL(s string) bool {
+	return len(s) <= maxRecordedSourceURLBytes && config.IsRemoteURI(s) &&
+		!strings.ContainsFunc(s, isDisallowedSourceURLRune)
+}
+
+// validReimportSourceURL reports whether a reimport sourceUrl override is
+// acceptable. It applies validRecordedSourceURL, and additionally accepts the
+// documented scheme-less "github.com/..." shorthand when its https:// form
+// passes the same check (NormalizeTemplateSourceURL adds the scheme).
+func validReimportSourceURL(s string) bool {
+	if len(s) > maxRecordedSourceURLBytes {
+		return false
+	}
+	if validRecordedSourceURL(s) {
+		return true
+	}
+	if len(s) >= len("github.com/") && strings.EqualFold(s[:len("github.com/")], "github.com/") {
+		return validRecordedSourceURL("https://" + s)
+	}
+	return false
+}
+
 // handleHarnessConfigFinalize finalizes a harness config after file upload.
 func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodPost {
@@ -785,9 +818,8 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 	}
 
 	sourceURL := strings.TrimSpace(req.SourceURL)
-	if sourceURL != "" && (!config.IsRemoteURI(sourceURL) || strings.ContainsFunc(sourceURL, isDisallowedSourceURLRune) ||
-		len(sourceURL) > maxRecordedSourceURLBytes) {
-		ValidationError(w, fmt.Sprintf("sourceUrl must be a single-line remote URI (http://, https://, or rclone) of at most %d bytes", maxRecordedSourceURLBytes), nil)
+	if sourceURL != "" && !validRecordedSourceURL(sourceURL) {
+		ValidationError(w, invalidSourceURLMessage, nil)
 		return
 	}
 
@@ -1231,7 +1263,13 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	sourceURL := req.SourceURL
+	// A sourceUrl override gets the same validation as finalize, before it
+	// is normalized or fetched.
+	sourceURL := strings.TrimSpace(req.SourceURL)
+	if sourceURL != "" && !validReimportSourceURL(sourceURL) {
+		ValidationError(w, invalidSourceURLMessage, nil)
+		return
+	}
 	if sourceURL == "" {
 		sourceURL = hc.SourceURL
 	}

@@ -267,6 +267,33 @@ func (h *artifactHost) CrossScopeSharingAllowed(context.Context) bool {
 	return ops != nil && ops.CrossProjectMessagingEnabled()
 }
 
+var _ artifacts.ScopeChecker = (*artifactHost)(nil)
+
+// ScopesExist implements artifacts.ScopeChecker: a project exists while the
+// store has it. The hub deletes projects outright, so a missing one is
+// gone. One store query covers the page: refs holds at most one id per
+// row of a list page (artifacts.MaxListLimit), well under the store's
+// project list limit. A store error fails the call.
+func (h *artifactHost) ScopesExist(ctx context.Context, refs []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(refs))
+	if h.server == nil || len(refs) == 0 {
+		return out, nil
+	}
+	res, err := h.server.store.ListProjectSummaries(ctx, store.ProjectFilter{MemberProjectIDs: refs},
+		store.ListOptions{Limit: len(refs), SkipTotalCount: true})
+	if err != nil {
+		return nil, err
+	}
+	found := make(map[string]bool, len(res.Items))
+	for _, p := range res.Items {
+		found[strings.ToLower(p.ID)] = true
+	}
+	for _, ref := range refs {
+		out[ref] = found[strings.ToLower(ref)]
+	}
+	return out, nil
+}
+
 var _ artifacts.ScopeExplainer = (*artifactHost)(nil)
 
 // MissingScope implements artifacts.ScopeExplainer. Only an agent that

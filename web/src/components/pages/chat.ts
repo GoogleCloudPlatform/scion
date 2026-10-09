@@ -670,7 +670,9 @@ export class ScionPageChat extends LitElement {
     agents: { status: 'loading', candidates: [] },
   };
   /** Agents/DM data controller for the palette: pagination, DM join, cancellation. */
-  private _paletteDataController = new ChatPaletteDataController();
+  private _paletteDataController = new ChatPaletteDataController(agentStore, (projectId) =>
+    this._projectIdToSlug.get(projectId)
+  );
   /** Epoch ms a group last finished loading successfully — the basis for the 30s per-group cache. */
   private _paletteGroupCacheAt: Partial<Record<PaletteGroup, number>> = {};
   /** Groups invalidated by an SSE event since their last successful load — forces a refetch even inside the 30s cache window. */
@@ -1926,8 +1928,11 @@ export class ScionPageChat extends LitElement {
           this._projectIdToSlug.set(s.projectId, s.projectSlug);
         }
       }
-      // The maps are not reactive; an agent DM's project crumb reads them.
-      if (slugsChanged) this.requestUpdate();
+      if (slugsChanged) {
+        this._refreshPaletteAgentRows();
+        // The maps are not reactive; an agent DM's project crumb reads them.
+        this.requestUpdate();
+      }
       // Re-resolve the route now that slug data is available (handles deep-link on first load)
       this.parseV2Route();
     }
@@ -2317,6 +2322,7 @@ export class ScionPageChat extends LitElement {
           const project = data.items[0];
           this._slugToProjectId.set(project.slug, project.id);
           this._projectIdToSlug.set(project.id, project.slug);
+          this._refreshPaletteAgentRows();
           return project.id;
         }
       }
@@ -2868,7 +2874,9 @@ export class ScionPageChat extends LitElement {
     // Cache the mapping if we received a slug
     if (slug && detail.projectId) {
       this._slugToProjectId.set(slug, detail.projectId);
+      const slugChanged = this._projectIdToSlug.get(detail.projectId) !== slug;
       this._projectIdToSlug.set(detail.projectId, slug);
+      if (slugChanged) this._refreshPaletteAgentRows();
     }
 
     // Set up conversation state directly (avoid page recreation from navigateTo
@@ -4589,6 +4597,17 @@ export class ScionPageChat extends LitElement {
     const candidates = this._paletteDataController.deriveAgentCandidates(snapshot);
     if (!candidates) return;
     this.v2PaletteGroups = { ...this.v2PaletteGroups, agents: { status: 'ready', candidates } };
+  }
+
+  /**
+   * Rebuild the open palette's Agents rows from the store's current hub
+   * snapshot after the project ID to slug map changed, so a row whose
+   * project slug just became known shows it. Same guards as
+   * {@link _handlePaletteAgentSnapshot}.
+   */
+  private _refreshPaletteAgentRows(): void {
+    const snapshot = agentStore.peek(HUB_AGENTS_QUERY);
+    if (snapshot) this._handlePaletteAgentSnapshot(snapshot);
   }
 
   /**

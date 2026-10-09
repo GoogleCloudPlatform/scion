@@ -138,7 +138,7 @@ Generate a new token with the Scion CLI:
 scion hub token create \
   --project my-project \
   --name "github-actions" \
-  --scopes agent:create,agent:read,agent:attach \
+  --scopes project:read,agent:create,agent:read,agent:attach \
   --expires 90d
 ```
 
@@ -219,8 +219,43 @@ export SCION_HUB_TOKEN="scion_pat_..."
 scion list --project my-project
 ```
 
-When this variable is set, the CLI bypasses the browser-based OAuth flow and uses the token for
-all communication with the Hub.
+When no stored interactive login exists, the CLI uses the token for all communication with the
+Hub.
+
+:::caution[A stored login takes precedence]
+A stored interactive login (from `scion hub auth login`) takes precedence over
+`SCION_HUB_TOKEN`. To run the CLI under a scoped token, use an environment with no stored login:
+a dedicated OS user, an isolated `HOME`, or log out first (`scion hub auth logout`).
+:::
+
+### Scopes for CLI use
+
+Most CLI commands that run in a project look the project up on the Hub first, which needs
+`project:read`. Include `project:read` in every token you use with the CLI. Scopes common CLI
+flows need:
+
+| Flow | Scopes |
+|------|--------|
+| Any command run in a project | `project:read` |
+| `scion list` | `project:read`, `agent:list` |
+| `scion look`, `scion logs` | `project:read`, `agent:read` |
+| `scion start` / `scion create` | `project:read`, `agent:create`, `agent:read` |
+| `scion message` | `project:read`, `agent:message` |
+| `scion attach` | `project:read`, `agent:attach` |
+| `scion stop`, `scion suspend`, `scion resume`, `scion restore` | `project:read`, `agent:lifecycle` |
+| `scion delete` | `project:read`, `agent:delete` |
+
+A token without `project:read` gets `404 Not Found` on the project lookup. The CLI reports this
+as a likely missing `project:read` scope and stops. A user access token cannot register a new
+project, so the CLI does not try to link or register the project under one. Link the project
+once with an interactive login (`scion hub link`), then use the token.
+
+Token scopes limit what the CLI can do on the Hub. Local actions, such as `scion clean` and any
+command run with `--no-hub` (for example `scion delete --no-hub`), act on the local machine with
+the user's file permissions, and token scopes don't limit them.
+
+To use the CLI from a coding agent running on your machine, see
+[Using the scion CLI from a coding agent](/scion/hosted/user/coding-agent-cli/).
 
 ### What scoped tokens cannot do
 

@@ -53,6 +53,7 @@ module.exports = {
         },
         {
             files: [
+                'src/client/agent-palette-candidate.test.ts',
                 'src/client/agent-store.test.ts',
                 'src/client/agent-store-feed.test.ts',
                 'src/client/agent-store-probe.test.ts',

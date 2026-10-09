@@ -1121,6 +1121,13 @@ type VersionedSettings struct {
 
 	// AgentSecrets controls hub-level policy for secrets written by agents.
 	AgentSecrets *AgentSecretsSettings `json:"agent_secrets,omitempty" yaml:"agent_secrets,omitempty" koanf:"agent_secrets"`
+
+	// ProjectID is the top-level project ID of a migrated legacy settings
+	// file, kept verbatim. hub.project_id is the canonical v1 key and takes
+	// precedence when set.
+	ProjectID string `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
+	// HubConnections holds named Hub connections for a Runtime Broker.
+	HubConnections map[string]V1HubConnectionConfig `json:"hub_connections,omitempty" yaml:"hub_connections,omitempty" koanf:"hub_connections"`
 }
 
 // AutoExposePortsSettings holds the auto-expose ports configuration.
@@ -1490,6 +1497,10 @@ type V1ServerHubConduitConfig struct {
 	// AuthzRecheckInterval is the period of the re-check sweep of open
 	// user streams (e.g. "60s"; default "60s", 1s-10m).
 	AuthzRecheckInterval string `json:"authz_recheck_interval,omitempty" yaml:"authz_recheck_interval,omitempty" koanf:"authz_recheck_interval"`
+	// LifetimeCap is the platform lifetime cap of a conduit session
+	// (e.g. "3500s"; default "3500s", 90s-24h). The relay sends GoAway
+	// 60s before it.
+	LifetimeCap string `json:"lifetime_cap,omitempty" yaml:"lifetime_cap,omitempty" koanf:"lifetime_cap"`
 	// StreamAuthzMax is the authorization interval of open streams per
 	// originating principal kind: when a stream reaches it, the hub
 	// re-checks the principal and renews or closes the stream (defaults
@@ -2100,12 +2111,29 @@ type V1HubClientConfig struct {
 	Endpoint  string `json:"endpoint,omitempty" yaml:"endpoint,omitempty" koanf:"endpoint"`
 	ProjectID string `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
 	LocalOnly *bool  `json:"local_only,omitempty" yaml:"local_only,omitempty" koanf:"local_only"`
+	// Transport is the transport-layer auth for reaching a Hub behind a
+	// platform guard (IAP, Cloud Run invoker IAM).
+	Transport *V1HubTransportConfig `json:"transport,omitempty" yaml:"transport,omitempty" koanf:"transport"`
+}
+
+// V1HubTransportConfig is hub.transport in versioned settings (the legacy
+// HubTransportConfig).
+type V1HubTransportConfig struct {
+	Mode     string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
+	Audience string `json:"audience,omitempty" yaml:"audience,omitempty" koanf:"audience"`
+}
+
+// V1HubConnectionConfig is one entry of hub_connections in versioned
+// settings (the legacy HubConnectionConfig).
+type V1HubConnectionConfig struct {
+	Endpoint string `json:"endpoint,omitempty" yaml:"endpoint,omitempty" koanf:"endpoint"`
 }
 
 // V1CLIConfig defines CLI behavior settings for versioned config.
 type V1CLIConfig struct {
-	AutoHelp            *bool `json:"autohelp,omitempty" yaml:"autohelp,omitempty" koanf:"autohelp"`
-	InteractiveDisabled *bool `json:"interactive_disabled,omitempty" yaml:"interactive_disabled,omitempty" koanf:"interactive_disabled"`
+	AutoHelp            *bool  `json:"autohelp,omitempty" yaml:"autohelp,omitempty" koanf:"autohelp"`
+	InteractiveDisabled *bool  `json:"interactive_disabled,omitempty" yaml:"interactive_disabled,omitempty" koanf:"interactive_disabled"`
+	Mode                string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
 }
 
 // V1TelemetryConfig holds telemetry/observability settings.
@@ -2876,6 +2904,7 @@ var knownCompoundFields = []string{
 	"reconnect_window",
 	"internal_listen",
 	"peer_audience",
+	"lifetime_cap",
 	"instance_id",
 	"peer_auth",
 	"authorized_domains",
@@ -3223,6 +3252,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				ReconnectWindow:      c.ReconnectWindow,
 				InstanceID:           c.InstanceID,
 				AuthzRecheckInterval: c.AuthzRecheckInterval,
+				LifetimeCap:          c.LifetimeCap,
 			}
 			if m := c.StreamAuthzMax; m != nil {
 				gc.Hub.Conduit.StreamAuthzMax = HubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
@@ -3564,6 +3594,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			ReconnectWindow:      c.ReconnectWindow,
 			InstanceID:           c.InstanceID,
 			AuthzRecheckInterval: c.AuthzRecheckInterval,
+			LifetimeCap:          c.LifetimeCap,
 		}
 		if m := c.StreamAuthzMax; !m.IsZero() {
 			v1Hub.Conduit.StreamAuthzMax = &V1ServerHubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
@@ -3796,6 +3827,14 @@ func AdaptLegacySettings(legacy *Settings) (*VersionedSettings, []string) {
 		SchemaVersion:   "1",
 		ActiveProfile:   legacy.ActiveProfile,
 		DefaultTemplate: legacy.DefaultTemplate,
+		WorkspacePath:   legacy.WorkspacePath,
+		ProjectID:       legacy.ProjectID,
+	}
+	if legacy.HubConnections != nil {
+		vs.HubConnections = make(map[string]V1HubConnectionConfig, len(legacy.HubConnections))
+		for name, hc := range legacy.HubConnections {
+			vs.HubConnections[name] = V1HubConnectionConfig(hc)
+		}
 	}
 
 	// Adapt Hub config
@@ -3806,6 +3845,12 @@ func AdaptLegacySettings(legacy *Settings) (*VersionedSettings, []string) {
 			Endpoint:  legacy.Hub.Endpoint,
 			ProjectID: legacy.Hub.ProjectID,
 			LocalOnly: legacy.Hub.LocalOnly,
+		}
+		if legacy.Hub.Transport != nil {
+			vs.Hub.Transport = &V1HubTransportConfig{
+				Mode:     legacy.Hub.Transport.Mode,
+				Audience: legacy.Hub.Transport.Audience,
+			}
 		}
 		if legacy.Hub.Token != "" {
 			warnings = append(warnings, "hub.token is deprecated; use server.auth.dev_token for dev mode authentication")
@@ -3842,6 +3887,7 @@ func AdaptLegacySettings(legacy *Settings) (*VersionedSettings, []string) {
 	if legacy.CLI != nil {
 		vs.CLI = &V1CLIConfig{
 			AutoHelp: legacy.CLI.AutoHelp,
+			Mode:     legacy.CLI.Mode,
 		}
 	}
 
@@ -5372,8 +5418,9 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 	result.Warnings = warnings
 
 	// 4a. Top-level keys the legacy struct does not decode (v1-only keys
-	// such as server and image_registry) are carried through unchanged
-	// (ptone/scion#3497).
+	// such as server and image_registry, ptone/scion#3497) are carried
+	// through unchanged. Legacy keys are not: AdaptLegacySettings maps each
+	// of them once (ptone/scion#3885).
 	carried, err := legacyCarriedTopLevelKeys(data, result.WasJSON)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse settings: %w", err)

@@ -29,35 +29,70 @@ export interface AgentCandidateSource {
   id: string;
   name?: string;
   slug?: string;
+  projectId?: string;
+  /** The project's display name, as the hub resolves it on agent rows. */
   project?: string;
 }
 
 /**
- * Builds the Agents-group row for `agent`, with an `agent` target carrying
- * its ID.
+ * Resolves a project ID to its slug, or `undefined` while the slug is not
+ * known on this surface.
+ */
+export type ProjectSlugLookup = (projectId: string) => string | undefined;
+
+/** The text of an Agents-group row: what it shows and what a query matches. */
+export interface AgentRowText {
+  label: string;
+  secondaryLabel: string;
+  searchFields: string[];
+}
+
+/**
+ * The text of the Agents-group row for `agent`.
  *
  * The label is the name, falling back to the slug, then the ID. The
- * secondary label is the project name, falling back to the slug unless the
- * slug is already the label. Name, slug and project are all searchable.
+ * secondary label names the agent's project, since same-named agents in
+ * different projects are otherwise indistinguishable: the project slug when
+ * `projectSlug` knows it, else the project name, else the agent slug unless
+ * the slug is already the label. Name, agent slug, project slug and project
+ * name are all searchable.
+ */
+export function agentRowText(
+  agent: AgentCandidateSource,
+  projectSlug?: ProjectSlugLookup
+): AgentRowText {
+  const label = agent.name || agent.slug || agent.id;
+  const slugHint = agent.slug && agent.slug !== label ? agent.slug : '';
+  const knownProjectSlug = agent.projectId ? projectSlug?.(agent.projectId) || '' : '';
+  const secondaryLabel = knownProjectSlug || agent.project || slugHint;
+  const searchFields = [
+    ...new Set(
+      [label, agent.slug, knownProjectSlug, agent.project].filter((f): f is string => !!f)
+    ),
+  ];
+  return { label, secondaryLabel, searchFields };
+}
+
+/**
+ * Builds the Agents-group row for `agent`, with an `agent` target carrying
+ * its ID. The row text is {@link agentRowText}.
  *
  * `activityMs` is always 0: there is no conversation recency here, so
  * ranking falls back to match tier, then label, then ID — see
  * `utils/chat-palette-match.ts`.
  */
-export function buildAgentCandidate(agent: AgentCandidateSource): PaletteCandidate {
-  const displayName = agent.name || agent.slug || agent.id;
-  const slugHint = agent.slug && agent.slug !== displayName ? agent.slug : '';
-  const secondaryLabel = agent.project || slugHint;
-  const searchFields = [
-    ...new Set([displayName, agent.slug, agent.project].filter((f): f is string => !!f)),
-  ];
+export function buildAgentCandidate(
+  agent: AgentCandidateSource,
+  projectSlug?: ProjectSlugLookup
+): PaletteCandidate {
+  const { label, secondaryLabel, searchFields } = agentRowText(agent, projectSlug);
   return {
     id: agentCandidateId(agent.id),
     group: 'agents',
-    label: displayName,
+    label,
     secondaryLabel,
     searchFields,
     activityMs: 0,
-    target: { kind: 'agent', agentId: agent.id, displayName },
+    target: { kind: 'agent', agentId: agent.id, displayName: label },
   };
 }
