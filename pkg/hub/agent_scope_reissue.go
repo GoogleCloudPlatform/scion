@@ -411,11 +411,6 @@ func (s *Server) planAgentDelegatorReissue(ctx context.Context, plan *scopeReiss
 	if err != nil {
 		return reissueErrorFromChain(err)
 	}
-	parentChain, err := a.chainEffectCeiling(ctx, parent)
-	if err != nil {
-		return reissueErrorFromChain(err)
-	}
-
 	// The live check of P's chain, per permission, narrows the ceiling:
 	// a permission the chain no longer supports is removed from E' so
 	// refresh after the re-issue issues exactly the re-issued set.
@@ -470,10 +465,11 @@ func (s *Server) planAgentDelegatorReissue(ctx context.Context, plan *scopeReiss
 		}
 	}
 
-	// The projected chain ceiling after E' commits: E' folded with P's
-	// chain. It is what chainEffectCeiling(agent) returns then.
-	projected := foldWithChain(ceiling, parentChain)
-	after := filterScopes(candidates, projected, ScopeCeilings{})
+	// The scopes a mint issues once E' commits: E' folded with P's chain.
+	after, err := a.reissueFilteredScopes(ctx, candidates, ceiling, parent)
+	if err != nil {
+		return reissueErrorFromChain(err)
+	}
 	afterSet := scopeSet(after)
 	var withheld []reissueWithheldScope
 	for _, scope := range candidates {
@@ -807,6 +803,25 @@ func reissueWithholdCause(scope AgentTokenScope, liveDenied map[string]string) s
 		}
 	}
 	return reissueWithheldCeiling
+}
+
+// reissueFilteredScopes returns the candidates a mint issues once the
+// agent's edge carries edgeCeiling: the mint filter (filterScopes) over the
+// fold of edgeCeiling with the delegator agent's chain, loaded through
+// loadScopeCeilings like every other mint. A nil delegator is a user: the
+// edge is the whole chain.
+func (a *AuthzService) reissueFilteredScopes(ctx context.Context, candidates []AgentTokenScope, edgeCeiling store.EffectCeiling, delegator *store.Agent) ([]AgentTokenScope, error) {
+	chain := ChainCeiling{Ceiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal}}
+	var sc ScopeCeilings
+	if delegator != nil {
+		var err error
+		sc, err = a.loadScopeCeilings(ctx, delegator)
+		if err != nil {
+			return nil, err
+		}
+		chain = sc.Chain
+	}
+	return filterScopes(candidates, foldWithChain(edgeCeiling, chain), sc), nil
 }
 
 // foldWithChain folds a bounded edge ceiling with the chain ceiling above
