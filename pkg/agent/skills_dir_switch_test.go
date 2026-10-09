@@ -18,9 +18,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -111,6 +113,219 @@ func TestCarryOverSkillsDir(t *testing.T) {
 	})
 }
 
+// snapshotSkillsTree records every path under dir (relative, with "/" separators)
+// and the content of each regular file, without following symbolic links.
+func snapshotSkillsTree(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	err := filepath.Walk(dir, func(p string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(dir, p)
+		rel = filepath.ToSlash(rel)
+		switch {
+		case fi.Mode()&os.ModeSymlink != 0:
+			target, _ := os.Readlink(p)
+			out[rel] = "link:" + target
+		case fi.Mode().IsRegular():
+			data, rerr := os.ReadFile(p)
+			if rerr != nil {
+				return rerr
+			}
+			out[rel] = "file:" + string(data)
+		default:
+			out[rel] = "dir"
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func symlink(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(link), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+}
+
+// TestCarryOverSkillsDir_StaysWithinAgentHome verifies that the carry-over
+// only reads and writes inside the agent home: a symbolic link for the old
+// skills dir, for a file inside a skill, or for a parent component of the
+// new skills dir is not followed, while the regular files still copy.
+func TestCarryOverSkillsDir_StaysWithinAgentHome(t *testing.T) {
+	t.Run("old skills dir is a symbolic link", func(t *testing.T) {
+		base := t.TempDir()
+		home, outside := filepath.Join(base, "home"), filepath.Join(base, "outside")
+		writeSkill(t, filepath.Join(outside, "skills"), "elsewhere", "outside")
+		symlink(t, filepath.Join(outside, "skills"), filepath.Join(home, ".a/skills"))
+		before := snapshotSkillsTree(t, outside)
+
+		copied, err := carryOverSkillsDir(home, ".a/skills", ".b/skills")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(copied) != 0 {
+			t.Errorf("copied = %v through a symbolic link, want nothing", copied)
+		}
+		if _, err := os.Lstat(filepath.Join(home, ".b")); !os.IsNotExist(err) {
+			t.Errorf("new skills dir created from a symbolic-link source (err=%v)", err)
+		}
+		if after := snapshotSkillsTree(t, outside); len(after) != len(before) {
+			t.Errorf("outside dir changed: %v -> %v", before, after)
+		}
+	})
+
+	t.Run("old skills dir has a symbolic-link parent", func(t *testing.T) {
+		base := t.TempDir()
+		home, outside := filepath.Join(base, "home"), filepath.Join(base, "outside")
+		writeSkill(t, filepath.Join(outside, "skills"), "elsewhere", "outside")
+		symlink(t, outside, filepath.Join(home, ".a"))
+
+		copied, err := carryOverSkillsDir(home, ".a/skills", ".b/skills")
+		if err != nil || len(copied) != 0 {
+			t.Errorf("copied=%v err=%v through a symbolic-link parent, want nothing", copied, err)
+		}
+		if _, err := os.Lstat(filepath.Join(home, ".b")); !os.IsNotExist(err) {
+			t.Errorf("new skills dir created from a symbolic-link parent (err=%v)", err)
+		}
+	})
+
+	t.Run("file inside a skill is a symbolic link", func(t *testing.T) {
+		base := t.TempDir()
+		home, outside := filepath.Join(base, "home"), filepath.Join(base, "outside")
+		if err := os.MkdirAll(outside, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("outside"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		writeSkill(t, filepath.Join(home, ".a/skills"), "one", "1")
+		symlink(t, filepath.Join(outside, "secret.txt"), filepath.Join(home, ".a/skills/one/linked.txt"))
+		symlink(t, outside, filepath.Join(home, ".a/skills/one/linked-dir"))
+
+		copied, err := carryOverSkillsDir(home, ".a/skills", ".b/skills")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(copied) != 1 {
+			t.Fatalf("copied = %v, want the one skill", copied)
+		}
+		if got, ok := readSkill(t, filepath.Join(home, ".b/skills"), "one"); !ok || got != "1" {
+			t.Errorf("regular SKILL.md not copied (got %q, %v)", got, ok)
+		}
+		for _, n := range []string{"linked.txt", "linked-dir"} {
+			if _, err := os.Lstat(filepath.Join(home, ".b/skills/one", n)); !os.IsNotExist(err) {
+				t.Errorf("symbolic link %s carried over (err=%v)", n, err)
+			}
+		}
+	})
+
+	t.Run("parent component of the new skills dir is a symbolic link", func(t *testing.T) {
+		base := t.TempDir()
+		home, outside := filepath.Join(base, "home"), filepath.Join(base, "outside")
+		if err := os.MkdirAll(outside, 0755); err != nil {
+			t.Fatal(err)
+		}
+		writeSkill(t, filepath.Join(home, ".a/skills"), "one", "1")
+		symlink(t, outside, filepath.Join(home, ".b"))
+
+		copied, err := carryOverSkillsDir(home, ".a/skills", ".b/skills")
+		if err != nil {
+			t.Logf("carry-over returned %v", err)
+		}
+		if len(copied) != 0 {
+			t.Errorf("copied = %v through a symbolic-link parent, want nothing", copied)
+		}
+		if after := snapshotSkillsTree(t, outside); len(after) != 1 {
+			t.Errorf("wrote outside the agent home: %v", after)
+		}
+		if _, ok := readSkill(t, filepath.Join(home, ".a/skills"), "one"); !ok {
+			t.Error("old skill removed")
+		}
+	})
+
+	t.Run("new skills dir is a symbolic link to an empty dir", func(t *testing.T) {
+		base := t.TempDir()
+		home, outside := filepath.Join(base, "home"), filepath.Join(base, "outside")
+		if err := os.MkdirAll(outside, 0755); err != nil {
+			t.Fatal(err)
+		}
+		writeSkill(t, filepath.Join(home, ".a/skills"), "one", "1")
+		symlink(t, outside, filepath.Join(home, ".b/skills"))
+
+		if copied, _ := carryOverSkillsDir(home, ".a/skills", ".b/skills"); len(copied) != 0 {
+			t.Errorf("copied = %v through a symbolic link, want nothing", copied)
+		}
+		if after := snapshotSkillsTree(t, outside); len(after) != 1 {
+			t.Errorf("wrote outside the agent home: %v", after)
+		}
+	})
+}
+
+// TestPreviousHarnessSkillsDir_MatchesResolve pins previousHarnessSkillsDir
+// to the SkillsDir of the harness harness.Resolve builds for the same
+// harness-config, for each harness type and config shape, so the two cannot
+// drift apart silently.
+func TestPreviousHarnessSkillsDir_MatchesResolve(t *testing.T) {
+	const provisioner = "provisioner:\n  type: container-script\n  interface_version: 1\n  command: [\"python3\", \"/home/scion/.scion/harness/provision.py\"]\n"
+	shapes := map[string]string{
+		"container-script with skills_dir":    "skills_dir: .native/skills\n" + provisioner,
+		"container-script without skills_dir": provisioner,
+		"declarative with skills_dir":         "skills_dir: .decl/skills\n",
+		"declarative without skills_dir":      "command:\n  base: [\"run-agent\"]\n",
+		"plain generic":                       "",
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(home)
+
+	type row struct{ name, implementation string }
+	var rows []row
+	for _, harnessType := range []string{"claude", "gemini", "codex", "opencode", "generic"} {
+		names := make([]string, 0, len(shapes))
+		for shape := range shapes {
+			names = append(names, shape)
+		}
+		sort.Strings(names)
+		for i, shape := range names {
+			name := harnessType + "-" + string(rune('a'+i))
+			hcDir := filepath.Join(home, ".scion", "harness-configs", name)
+			if err := os.MkdirAll(hcDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			body := "harness: " + harnessType + "\nimage: test-image:latest\nuser: scion\n" + shapes[shape]
+			if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte(body), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(hcDir, "provision.py"), []byte("#!/usr/bin/env python3\n"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			rows = append(rows, row{name: name, implementation: harnessType + "/" + shape})
+		}
+	}
+
+	for _, r := range rows {
+		t.Run(r.implementation, func(t *testing.T) {
+			resolved, err := harness.Resolve(context.Background(), harness.ResolveOptions{Name: r.name})
+			if err != nil {
+				t.Fatalf("harness.Resolve(%q): %v", r.name, err)
+			}
+			want := resolved.Harness.SkillsDir()
+			if got := previousHarnessSkillsDir(r.name, "", nil, nil, ""); got != want {
+				t.Errorf("previousHarnessSkillsDir(%q) = %q, harness.Resolve (%s) SkillsDir = %q",
+					r.name, got, resolved.Implementation, want)
+			}
+		})
+	}
+}
+
 // TestStart_HarnessConfigSwitchCarriesSkillsOver verifies that starting an
 // existing agent with a --harness-config whose skills_dir differs from the
 // provisioned harness-config's copies the provisioned skills into the new
@@ -127,9 +342,7 @@ func TestStart_HarnessConfigSwitchCarriesSkillsOver(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tmpDir := t.TempDir()
-			oldWd, _ := os.Getwd()
-			_ = os.Chdir(tmpDir)
-			defer func() { _ = os.Chdir(oldWd) }()
+			t.Chdir(tmpDir)
 			t.Setenv("HOME", tmpDir)
 
 			globalScionDir := filepath.Join(tmpDir, ".scion")
