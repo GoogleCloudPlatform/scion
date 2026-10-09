@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -39,12 +40,12 @@ func TestConfigureDebugOutput(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Cleanup(func() { configureDebugOutput(false); util.SetAgentDebugPolicy(false) })
+			t.Cleanup(func() { util.SetExplicitDebug(false); util.SetAgentDebugPolicy(false) })
 			t.Setenv("SCION_CLI_MODE", tt.mode)
 			t.Setenv("SCION_DEBUG", tt.scionDebug)
 			t.Setenv("SCION_LOG_LEVEL", tt.logLevel)
 
-			configureDebugOutput(tt.explicit)
+			configureDebugOutput(resolveMode(), tt.explicit)
 
 			if got := util.DebugEnabled(); got != tt.want {
 				t.Errorf("util.DebugEnabled() = %v, want %v", got, tt.want)
@@ -54,15 +55,50 @@ func TestConfigureDebugOutput(t *testing.T) {
 }
 
 func TestConfigureDebugOutput_ClearsEarlierExplicitDebug(t *testing.T) {
-	t.Cleanup(func() { configureDebugOutput(false); util.SetAgentDebugPolicy(false) })
+	t.Cleanup(func() { util.SetExplicitDebug(false); util.SetAgentDebugPolicy(false) })
 	t.Setenv("SCION_CLI_MODE", "agent")
 	t.Setenv("SCION_DEBUG", "1")
 	t.Setenv("SCION_LOG_LEVEL", "")
 
-	configureDebugOutput(true)
-	configureDebugOutput(false)
+	configureDebugOutput(ModeAgent, true)
+	configureDebugOutput(ModeAgent, false)
 
 	if util.DebugEnabled() {
 		t.Error("debug output still enabled after an invocation without --debug")
+	}
+}
+
+// TestRootPreRun_AgentModeIgnoresInheritedSCIONDebug runs the real root
+// command so that removing the configureDebugOutput call from the
+// persistent pre-run hook fails a test.
+func TestRootPreRun_AgentModeIgnoresInheritedSCIONDebug(t *testing.T) {
+	restoreAllSilenceUsage(t)
+	origNonInteractive, origAutoConfirm, origDebug := nonInteractive, autoConfirm, debugMode
+	t.Cleanup(func() {
+		nonInteractive, autoConfirm, debugMode = origNonInteractive, origAutoConfirm, origDebug
+		util.SetExplicitDebug(false)
+		util.SetAgentDebugPolicy(false)
+		rootCmd.SetArgs(nil)
+		rootCmd.SetOut(nil)
+		rootCmd.SetErr(nil)
+	})
+	t.Setenv("SCION_CLI_MODE", "agent")
+	t.Setenv("SCION_DEBUG", "1")
+	t.Setenv("SCION_LOG_LEVEL", "")
+	t.Setenv("SCION_HOST_UID", "")
+
+	// Simulate state left over from an earlier explicit request.
+	util.EnableDebug()
+
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	rootCmd.SetArgs([]string{"version"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("scion version: %v", err)
+	}
+
+	if util.DebugEnabled() {
+		t.Error("debug output enabled in agent mode with only an inherited SCION_DEBUG")
 	}
 }

@@ -111,13 +111,14 @@ func TestBestEffortFailure_PrintsWarningWithDebugOff(t *testing.T) {
 	}
 }
 
-func TestWarnf_DefaultsToStderr(t *testing.T) {
-	if warnOut != io.Writer(os.Stderr) {
-		t.Error("warnOut should default to os.Stderr")
-	}
-	warnings := captureWarnings(t)
-	warnf("probe %d", 1)
-	if got := warnings.String(); got != "Warning: probe 1\n" {
-		t.Errorf("warnf output = %q, want %q", got, "Warning: probe 1\n")
+func TestWarnf_DefaultsToCurrentStderr(t *testing.T) {
+	orig := warnOut
+	warnOut = nil
+	t.Cleanup(func() { warnOut = orig })
+
+	out := captureStderr(t, func() { warnf("probe %d", 1) })
+
+	if out != "Warning: probe 1\n" {
+		t.Errorf("warnf output = %q, want %q", out, "Warning: probe 1\n")
 	}
 }

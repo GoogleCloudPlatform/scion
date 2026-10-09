@@ -43,14 +43,19 @@ func debugf(format string, args ...interface{}) {
 	util.DebugfTagged("hubsync", format, args...)
 }
 
-// warnOut is where warnf writes. Tests replace it to capture output.
-var warnOut io.Writer = os.Stderr
+// warnOut is where warnf writes. When nil, warnf writes to the current
+// os.Stderr. Tests set it to capture output.
+var warnOut io.Writer
 
 // warnf reports a best-effort hubsync step that failed but did not stop
 // the command. Unlike debugf it is always shown, on stderr so it never
 // mixes with structured stdout output.
 func warnf(format string, args ...interface{}) {
-	fmt.Fprintf(warnOut, "Warning: "+format+"\n", args...)
+	out := warnOut
+	if out == nil {
+		out = os.Stderr
+	}
+	fmt.Fprintf(out, "Warning: "+format+"\n", args...)
 }
 
 // AgentRef holds both name and ID for an agent.
@@ -433,7 +438,8 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 			// No ID match - fall back to name-based matching
 			matches, err := findMatchingProjects(ctx, hubCtx, projectName)
 			if err != nil {
-				warnf("failed to search for matching projects: %v", err)
+				// The error already reads "failed to search for matching projects: ...".
+				warnf("%v", err)
 				// Continue with registration - the hub will handle matching
 			}
 
@@ -545,7 +551,10 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		if len(effectiveSyncResult.ToRegister) > 0 {
 			hasOnlineBroker, err := checkBrokerAvailability(context.Background(), hubCtx)
 			if err != nil {
-				warnf("failed to check broker availability: %v", err)
+				// Kept at debug: this uses the same provider listing as
+				// ensureProviderPath, so hosts that cannot list providers
+				// would otherwise warn on every command.
+				debugf("Warning: failed to check broker availability: %v", err)
 				// Continue with sync attempt - the error will surface during ExecuteSync
 			} else if !hasOnlineBroker {
 				// No brokers available - print warning and skip sync

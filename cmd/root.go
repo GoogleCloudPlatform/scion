@@ -111,7 +111,10 @@ return an error instead of blocking.`,
 
 		// Enable debug mode if --debug flag is set; otherwise pick the
 		// environment variable that controls debug output for this mode.
-		configureDebugOutput(debugMode)
+		// The CLI mode depends only on the environment and global
+		// settings, so it is resolved once here and reused below.
+		mode := resolveMode()
+		configureDebugOutput(mode, debugMode)
 
 		// Detect agent container context without a reachable Hub endpoint.
 		// SCION_HOST_UID is set by the runtime when launching agent containers.
@@ -211,7 +214,7 @@ return an error instead of blocking.`,
 
 		// Agent mode implies non-interactive: prompts that require stdin
 		// will hang indefinitely inside an unattended agent container.
-		if !nonInteractive && resolveMode() == ModeAgent {
+		if !nonInteractive && mode == ModeAgent {
 			nonInteractive = true
 			autoConfirm = true
 			util.Debugf("agent mode detected, non-interactive mode auto-enabled")
@@ -267,10 +270,14 @@ func Execute() {
 	target, _, _ := rootCmd.Find(cliArgs)
 	maybeWarnRemovedLegacyEnv(target)
 
-	// Decide early whether an inherited SCION_DEBUG applies, so debug
-	// lines emitted before PersistentPreRunE follow the same policy. This
-	// loads settings, so it runs after the legacy-env warning above.
-	configureDebugOutput(false)
+	// Decide early whether an inherited SCION_DEBUG applies. This call is
+	// load-bearing: the settings loads below and anything else that runs
+	// before PersistentPreRunE can emit debug lines, and without it they
+	// would still follow the inherited SCION_DEBUG inside an agent.
+	// Resolving the mode loads settings, so it runs after the legacy-env
+	// warning above.
+	mode := resolveMode()
+	configureDebugOutput(mode, false)
 
 	// Early settings load to determine autoHelp behavior
 	// This handles cases where ExecuteC fails during flag parsing or unknown commands
@@ -295,10 +302,9 @@ func Execute() {
 
 	applyModeRestrictions(rootCmd)
 
-	// Suppress ASCII banner in agent mode. This runs after early flag
-	// parsing so resolveMode() can safely load settings and the project
-	// path is available — unlike init(), where flags haven't been parsed.
-	if resolveMode() == ModeAgent {
+	// Suppress ASCII banner in agent mode. This runs in Execute rather
+	// than init(), where the mode cannot yet be resolved safely.
+	if mode == ModeAgent {
 		rootCmd.Long = ""
 	}
 
@@ -321,8 +327,8 @@ func Execute() {
 // SCION_DEBUG value inherited from the agent's environment (it is meant
 // for in-container tooling and agent logs) and enables debug output only
 // for SCION_LOG_LEVEL=debug; outside agent mode SCION_DEBUG still works.
-func configureDebugOutput(explicitDebug bool) {
-	util.SetAgentDebugPolicy(resolveMode() == ModeAgent)
+func configureDebugOutput(mode CLIMode, explicitDebug bool) {
+	util.SetAgentDebugPolicy(mode == ModeAgent)
 	util.SetExplicitDebug(explicitDebug)
 }
 
