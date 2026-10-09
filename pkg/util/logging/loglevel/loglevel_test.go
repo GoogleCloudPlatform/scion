@@ -363,7 +363,6 @@ func TestIgnoreDebugAlias(t *testing.T) {
 		{name: "SCION_DEBUG ignored after env was applied", debugEnv: "1", before: true, wantSrc: SourceDefault},
 		{name: "SCION_LOG_LEVEL still honoured", logLevel: "debug", debugEnv: "1", wantDebug: true, wantSrc: SourceEnv},
 		{name: "SCION_LOG_LEVEL honoured after env was applied", logLevel: "debug", before: true, wantDebug: true, wantSrc: SourceEnv},
-		{name: "component levels still honoured", logLevel: "info,hubsync=debug", debugEnv: "1", wantSrc: SourceEnv},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

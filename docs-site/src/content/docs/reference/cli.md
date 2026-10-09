@@ -26,8 +26,6 @@ These flags are available on all commands:
 
 Human-readable times use a 24-hour clock and always include a zone. `--tz` and `--utc` only change human-readable output: JSON output (`--format json`) keeps the API's UTC values.
 
-**Debug output.** Outside an agent, setting `SCION_DEBUG` to any non-empty value also turns on CLI debug output. Inside an agent container (agent CLI mode), the CLI ignores the inherited `SCION_DEBUG`, so `[hubsync]` and `[DEBUG]` lines stay out of normal command output. To see them there, pass `--debug` or set `SCION_LOG_LEVEL=debug`.
-
 **Debug output.** `SCION_LOG_LEVEL` controls the CLI's `[DEBUG]` and tagged lines such as `[hubsync]`; see [Controlling the Log Level](/scion/hosted/single-node/observability/#controlling-the-log-level). Inside an agent container (agent CLI mode), the CLI ignores the deprecated `SCION_DEBUG`, which older brokers set in every agent, so use `SCION_LOG_LEVEL=debug` or `--debug` there. Best-effort Hub sync steps that fail without stopping the command are reported as `Warning:` lines on stderr whatever the log level.
 
 **Project resolution order.** The CLI picks the project in this order:

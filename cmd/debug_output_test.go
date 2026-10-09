@@ -16,7 +16,10 @@ package cmd
 
 import (
 	"bytes"
+	"fmt"
 	"os"
+	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
@@ -119,5 +122,78 @@ func TestRootPreRun_AgentModeIgnoresInheritedSCIONDebug(t *testing.T) {
 	}
 	if warn.Len() != 0 {
 		t.Errorf("unexpected deprecation warning in agent mode: %q", warn.String())
+	}
+}
+
+// Environment for TestExecuteHelperProcess. TestMain clears inherited
+// SCION_* variables except SCION_TEST_*, so the child gets its settings
+// through these and sets the real variables itself.
+const (
+	executeHelperEnv = "SCION_TEST_EXECUTE_HELPER"
+	executeArgsEnv   = "SCION_TEST_EXECUTE_ARGS"
+	executeResultTag = "debug-enabled="
+)
+
+// TestExecuteHelperProcess is not a real test: TestExecute_AgentModeQuiet
+// runs the test binary again with only this test selected, and here it
+// calls Execute() like main does. Execute changes the global command tree
+// (agent mode removes commands) and may exit the process, so it only runs
+// in that child process.
+func TestExecuteHelperProcess(t *testing.T) {
+	if os.Getenv(executeHelperEnv) != "1" {
+		t.Skip("helper process for TestExecute_AgentModeQuiet")
+	}
+	if err := os.Setenv("SCION_CLI_MODE", "agent"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Setenv("SCION_DEBUG", "1"); err != nil {
+		t.Fatal(err)
+	}
+	loglevel.Reset(true)
+	os.Args = append([]string{"scion"}, strings.Fields(os.Getenv(executeArgsEnv))...)
+
+	Execute()
+
+	// Reading the level here applies the environment if nothing did yet,
+	// so an unguarded SCION_DEBUG would also print its warning now.
+	fmt.Fprintf(os.Stdout, "\n%s%v\n", executeResultTag, loglevel.DebugEnabled(""))
+	os.Exit(0)
+}
+
+// TestExecute_AgentModeQuiet runs Execute() as main does, in agent mode
+// with an inherited SCION_DEBUG, and checks that no debug output or
+// SCION_DEBUG deprecation warning appears. With --help, cobra skips the
+// persistent pre-run hook, so only the early configureDebugOutput call in
+// Execute can keep SCION_DEBUG out; removing it fails that case.
+func TestExecute_AgentModeQuiet(t *testing.T) {
+	for _, args := range []string{"version", "--help"} {
+		t.Run(args, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestExecuteHelperProcess$", "-test.count=1")
+			env := []string{executeHelperEnv + "=1", executeArgsEnv + "=" + args, "HOME=" + t.TempDir()}
+			for _, kv := range os.Environ() {
+				name, _, _ := strings.Cut(kv, "=")
+				if name == "HOME" || strings.HasPrefix(name, "SCION_") {
+					continue
+				}
+				env = append(env, kv)
+			}
+			cmd.Env = env
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("scion %s: %v\nstdout:\n%s\nstderr:\n%s", args, err, stdout.String(), stderr.String())
+			}
+
+			if !strings.Contains(stdout.String(), executeResultTag+"false") {
+				t.Errorf("scion %s: debug output enabled in agent mode with only SCION_DEBUG; stdout:\n%s", args, stdout.String())
+			}
+			for _, unwanted := range []string{"SCION_DEBUG is deprecated", "[DEBUG]", "[hubsync]"} {
+				if strings.Contains(stderr.String(), unwanted) {
+					t.Errorf("scion %s: stderr contains %q:\n%s", args, unwanted, stderr.String())
+				}
+			}
+		})
 	}
 }
