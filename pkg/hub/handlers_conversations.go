@@ -163,6 +163,15 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 	if cls == inboxCredentialToken {
 		tokenCheck = s.newSelfScopeCheck(ctx, token, permInboxRead)
 	}
+	// The list shows only group conversations the caller can read now: a
+	// participant row is an index, not a grant. A token is checked as its
+	// user here; the token boundary is checked below.
+	var readerIdentity Identity = identity
+	if token != nil {
+		readerIdentity = token.UserIdentity
+	}
+	groupReads := newGroupReadMemo(s, readerIdentity)
+	droppedGroups := 0
 	var filtered []store.Conversation
 	for _, conv := range conversations {
 		if kindFilter != "" && conv.Kind != kindFilter {
@@ -175,6 +184,10 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 			if conv.ProjectID == nil || *conv.ProjectID != projectFilter {
 				continue
 			}
+		}
+		if conv.Kind != "direct" && !groupReads.canRead(ctx, &conv) {
+			droppedGroups++
+			continue
 		}
 		// For direct conversations, verify the caller is named in the canonical
 		// DM key. A stale participant row that does not match the key must not
@@ -196,6 +209,10 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 			}
 		}
 		filtered = append(filtered, conv)
+	}
+	if droppedGroups > 0 {
+		slog.DebugContext(ctx, "conversation list omitted group conversations the caller cannot read",
+			"count", droppedGroups)
 	}
 
 	// Review round 2 finding #1: GetConversationsForPrincipal returns the

@@ -341,3 +341,92 @@ func TestAgentMessage_NonIntegrationCallerCannotMoveProjectlessConversation(t *t
 	assert.Equal(t, before.ParentRef, after.ParentRef, "parent_ref unchanged")
 	assert.True(t, before.LastActivityAt.Equal(after.LastActivityAt), "conversation not touched")
 }
+
+func addUserParticipant(t *testing.T, s store.Store, convID, userID string) {
+	t.Helper()
+	require.NoError(t, s.EnsureParticipant(context.Background(), &store.ConversationParticipant{
+		ConversationID: convID, PrincipalKind: "user", PrincipalID: userID, Role: "member",
+	}))
+}
+
+// seedAgentDM creates the direct conversation between agent and user, with
+// both as participants, and returns its ID.
+func seedAgentDM(t *testing.T, s store.Store, agent *store.Agent, user *store.User) string {
+	t.Helper()
+	key, err := messages.DMConversationKey("agent", agent.ID, "user", user.ID)
+	require.NoError(t, err)
+	conv, err := s.UpsertConversationByExternalRef(context.Background(), &store.Conversation{
+		Kind: "direct", Surface: "native", ExternalRef: key, DriftState: "active",
+	})
+	require.NoError(t, err)
+	addUserParticipant(t, s, conv.ID, user.ID)
+	require.NoError(t, s.EnsureParticipant(context.Background(), &store.ConversationParticipant{
+		ConversationID: conv.ID, PrincipalKind: "agent", PrincipalID: agent.ID, Role: "member",
+	}))
+	return conv.ID
+}
+
+// TestConversationList_OmitsGroupsOfUnreadableProject: once a user can no
+// longer read a project, its group conversations leave their list even
+// though their participant rows remain; their direct conversation with the
+// project's agent stays listed.
+func TestConversationList_OmitsGroupsOfUnreadableProject(t *testing.T) {
+	f := newRefFixture(t)
+
+	groupA := seedGroupConversation(t, f.st, f.projA.ID, "list-general")
+	addUserParticipant(t, f.st, groupA, f.ua.ID)
+	dm := seedAgentDM(t, f.st, f.aa, f.ua)
+
+	before := listConversationIDsAsUser(t, f.srv, f.ua)
+	require.Contains(t, before, groupA, "listed while the user reads the project")
+	require.Contains(t, before, dm)
+
+	f.revokeProjectAccess(t, f.ua, f.projA)
+
+	after := listConversationIDsAsUser(t, f.srv, f.ua)
+	assert.NotContains(t, after, groupA, "the group leaves the list")
+	assert.Contains(t, after, dm, "the direct conversation stays listed")
+}
+
+// projectLookupFaultStore fails GetProject for one project ID.
+type projectLookupFaultStore struct {
+	store.Store
+	failProjectID string
+}
+
+func (p *projectLookupFaultStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
+	if id == p.failProjectID {
+		return nil, errRefStoreFault
+	}
+	return p.Store.GetProject(ctx, id)
+}
+
+// TestConversationList_GroupReadLookupErrorOmitsRow: when the read check for
+// one project fails, that project's groups are omitted and the rest of the
+// list is still returned.
+func TestConversationList_GroupReadLookupErrorOmitsRow(t *testing.T) {
+	f := newRefFixture(t)
+	ctx := context.Background()
+
+	projC := &store.Project{
+		ID: tid("ref-project-c"), Name: "Project C", Slug: "project-c",
+		OwnerID: f.ua.ID, CreatedBy: f.ua.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, f.st.CreateProject(ctx, projC))
+	f.srv.seedProjectCreatorMembership(ctx, projC)
+
+	groupA1 := seedGroupConversation(t, f.st, f.projA.ID, "fault-one")
+	groupA2 := seedGroupConversation(t, f.st, f.projA.ID, "fault-two")
+	groupC := seedGroupConversation(t, f.st, projC.ID, "fault-other")
+	for _, id := range []string{groupA1, groupA2, groupC} {
+		addUserParticipant(t, f.st, id, f.ua.ID)
+	}
+	require.Subset(t, listConversationIDsAsUser(t, f.srv, f.ua), []string{groupA1, groupA2, groupC},
+		"all listed while the lookups work")
+
+	f.srv.store = &projectLookupFaultStore{Store: f.srv.store, failProjectID: f.projA.ID}
+	got := listConversationIDsAsUser(t, f.srv, f.ua)
+	assert.NotContains(t, got, groupA1)
+	assert.NotContains(t, got, groupA2)
+	assert.Contains(t, got, groupC, "groups of other projects are still listed")
+}

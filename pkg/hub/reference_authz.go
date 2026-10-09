@@ -309,3 +309,40 @@ func (s *Server) senderCanReadGroup(ctx context.Context, projectID string) bool 
 	}
 	return false
 }
+
+// groupReadMemo answers "may identity read this group conversation now" for
+// one request. The answer for a group with a project is the project read
+// rule (canReadGroupConversation), looked up once per project; a group with
+// no project uses the participant rule and is checked on its own. A lookup
+// error answers no and is never cached.
+type groupReadMemo struct {
+	s         *Server
+	identity  Identity
+	byProject map[string]bool
+}
+
+func newGroupReadMemo(s *Server, identity Identity) *groupReadMemo {
+	return &groupReadMemo{s: s, identity: identity, byProject: map[string]bool{}}
+}
+
+func (m *groupReadMemo) canRead(ctx context.Context, conv *store.Conversation) bool {
+	projectID := ""
+	if conv.ProjectID != nil {
+		projectID = *conv.ProjectID
+	}
+	if projectID != "" {
+		if allowed, ok := m.byProject[projectID]; ok {
+			return allowed
+		}
+	}
+	allowed, err := m.s.canReadGroupConversation(ctx, m.identity, conv)
+	if err != nil {
+		slog.DebugContext(ctx, "group conversation read check failed; row omitted",
+			"conversation_id", conv.ID, "project_id", projectID, "error", err)
+		return false
+	}
+	if projectID != "" {
+		m.byProject[projectID] = allowed
+	}
+	return allowed
+}
