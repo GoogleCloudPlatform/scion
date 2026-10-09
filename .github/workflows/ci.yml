@@ -214,6 +214,20 @@ jobs:
       - name: Check Conversation Upsert Guard
         run: ./hack/check-conversation-upsert-guard.sh
 
+      - name: Check Hub Store Reassignment Guard
+        run: |
+          ./hack/check-hub-store-reassign.sh --self-test
+          set +e
+          ./hack/check-hub-store-reassign.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 1 ]; then
+            echo "::error title=Hub store reassignment::pkg/hub test srv.store reassignments do not match hack/hub-store-reassign-baseline.txt (ptone/scion#3435). For a new reassignment, use installStoreFault / testServerWithStoreFault from pkg/hub/store_fault_helpers_test.go; if call sites were removed, lower the baseline. Details are in the step log."
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error title=Hub store reassignment NOT checked::check-hub-store-reassign could not run (exit $rc) — nothing was analysed."
+          fi
+          exit "$rc"
+
       - name: Check Harness Coverage in Cloud Build Configs
         run: |
           # Invoked directly rather than via a Makefile target, for the same
