@@ -180,24 +180,17 @@ type RunConfig struct {
 	// that clones/provisions the workspace before the main container starts.
 	GitCloneForInit *api.GitCloneConfig
 
-	// Locker provides the per-project advisory lock for NFS workspace
-	// provisioning (N2-2b, design §7, risk RN1). When set and backend=nfs,
-	// the K8s runtime acquires the lock before building the pod to determine
-	// whether this pod should clone (lock winner) or wait for the sentinel
-	// (lock loser). This prevents concurrent first-clone corruption when
-	// two pods for the same project are scheduled on different nodes.
+	// Locker provides the per-agent start lock of an NFS-home agent
+	// (acquireHomeStartLock): it keeps two starts of the same agent from
+	// running at once across brokers. On Postgres-backed deployments it
+	// would come from the store's AdvisoryLocker capability.
 	//
-	// May be nil — when absent, all pods get the cloning init container
-	// (sentinel-only guard, correct for single-node but unsafe for
-	// multi-node). On Postgres-backed deployments this is wired from
-	// the store's AdvisoryLocker capability.
+	// May be nil — no production caller sets it today, and without it the
+	// NFS-home start is guarded by the termination wait only. The
+	// Kubernetes runtime's NFS workspace provisioning does not use it:
+	// sciontool provision serializes provisioners with a file lock on the
+	// export.
 	Locker store.AdvisoryLocker
-
-	// nfsProvisionLockLost is set internally by Run() after a failed
-	// advisory lock acquisition attempt. When true, buildPod injects a
-	// wait-for-sentinel init container instead of the cloning one.
-	// Callers should not set this field.
-	nfsProvisionLockLost bool
 
 	// Checkpoint and OnResourceCreated are an async launch's runtime hooks
 	// (design t1-async-create-v11.md §3.8.3, §3.8.4), copied from
