@@ -53,6 +53,44 @@ func TestLoadAndReconcileConfig_RejectsUnknownServerMode(t *testing.T) {
 	}
 }
 
+// --enable-debug-endpoints is refused when the server runs in hosted mode,
+// and accepted otherwise.
+func TestLoadAndReconcileConfig_RefusesDebugEndpointsInHostedMode(t *testing.T) {
+	savedHosted, savedEndpoints := hostedMode, enableDebugEndpoints
+	t.Cleanup(func() { hostedMode, enableDebugEndpoints = savedHosted, savedEndpoints })
+	hostedMode, enableDebugEndpoints = false, true
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".scion")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte("schema_version: \"1\"\nserver:\n  mode: hosted\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadAndReconcileConfig(serverStartCmd)
+	if err == nil || !strings.Contains(err.Error(), "--enable-debug-endpoints is not allowed in hosted mode") {
+		t.Fatalf("loadAndReconcileConfig err = %v, want a hosted-mode refusal", err)
+	}
+}
+
+func TestValidateDebugEndpoints(t *testing.T) {
+	for _, tc := range []struct {
+		hosted, enabled, wantErr bool
+	}{
+		{hosted: false, enabled: false},
+		{hosted: false, enabled: true},
+		{hosted: true, enabled: false},
+		{hosted: true, enabled: true, wantErr: true},
+	} {
+		err := validateDebugEndpoints(tc.hosted, tc.enabled)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("validateDebugEndpoints(hosted=%v, enabled=%v) err = %v, wantErr %v", tc.hosted, tc.enabled, err, tc.wantErr)
+		}
+	}
+}
+
 // The daemon path reads server.mode from settings.yaml through
 // LoadServerMode; the same validation applies to its result.
 func TestLoadServerMode_TypoFailsValidation(t *testing.T) {

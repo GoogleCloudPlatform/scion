@@ -3002,7 +3002,7 @@ When `SCION_DEBUG=true`, the web frontend enables:
    - Session info (exists, isNew, keys)
    - Cookie presence and names
    - OAuth configuration status
-3. **Debug Endpoint:** `GET /auth/debug` returns JSON with full auth state
+3. **Debug Endpoint:** `GET /auth/debug` returns JSON with full auth state. It is not controlled by `SCION_DEBUG`: it is served only when the server is started with `--enable-debug-endpoints` (local development; refused in hosted mode).
 
 All fetch() calls to `/api/*` endpoints include `credentials: 'include'` to ensure session cookies are always sent.
 

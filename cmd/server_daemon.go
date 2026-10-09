@@ -83,6 +83,7 @@ func buildDaemonStartArgs(cmd *cobra.Command) []string {
 	// unless forwarded. appendDaemonBoolFlag omits them when unset.
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "no-auto-migrate", noAutoMigrate)
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "enable-test-login", enableTestLogin)
+	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "enable-debug-endpoints", enableDebugEndpoints)
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "simulate-remote-broker", simulateRemoteBroker)
 	// Only forward --host when explicitly set. The parent never loads config, so
 	// hubHost holds a default here; forwarding it unconditionally would make the
