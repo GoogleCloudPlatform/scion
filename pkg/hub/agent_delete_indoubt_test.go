@@ -147,6 +147,9 @@ func TestInDoubtDelete_IntentSucceedsFinalizesHard(t *testing.T) {
 		}
 		out, err := f.store.HasOutstandingBrokerDispatch(context.Background(), f.agent.ID, brokerDispatchOpDelete)
 		assert.NoError(t, err)
+		// The drain's own broker delete already ran; the finalize must not
+		// send another.
+		f.client.deleteCalled = false
 		mu.Lock()
 		reclaims++
 		outstandingAtReclaim = append(outstandingAtReclaim, out)
@@ -162,6 +165,8 @@ func TestInDoubtDelete_IntentSucceedsFinalizesHard(t *testing.T) {
 	defer mu.Unlock()
 	require.Equal(t, 1, reclaims, "one re-claim")
 	assert.Equal(t, []bool{true}, outstandingAtReclaim, "the re-claim lands before the intent completes")
+	assert.False(t, f.client.deleteCalled, "teardown ran; the finalize skips the dispatch")
+	assert.Empty(t, f.pendingDeleteIntents(t), "and writes no new intent")
 }
 
 // A soft delete stays soft, from the stored request: the soft-delete
@@ -385,6 +390,12 @@ func TestInDoubtDelete_EngineRecheckFinalizes(t *testing.T) {
 	assert.True(t, agentGone(t, f.store, f.agent.ID))
 	requireDeletedOnce(t, f)
 	assert.True(t, f.client.deleteCalled, "the recheck re-dispatches the delete")
+	for _, ev := range f.pub.snapshot() {
+		if ev.kind == "status" && ev.deletion != nil {
+			assert.NotEqual(t, store.DeletionCodeInDoubt, ev.deletion.Code,
+				"no in_doubt status when the recheck takes over: %+v", ev)
+		}
+	}
 }
 
 // The recheck uses the agent-wide rule (no outstanding delete intent, one
@@ -459,6 +470,7 @@ func TestInDoubtDelete_RequestMismatchStaysInDoubt(t *testing.T) {
 		{"unreadable request", "?deleteFiles=false&removeBranch=false", "{"},
 		{"soft differs", "", `{"deleteFiles":true,"removeBranch":true,"soft":true}`},
 		{"delete files differ", "", `{"removeBranch":true}`},
+		{"remove branch differs", "", `{"deleteFiles":true}`},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

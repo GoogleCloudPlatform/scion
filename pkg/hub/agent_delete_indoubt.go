@@ -59,12 +59,23 @@ func (s *Server) reclaimInDoubtDeletion(ctx context.Context, agentID string, cla
 	// row finalizing with no engine until the lease lapses.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deleteShortStep)
 	defer cancel()
+	// The one predicate for both the read below and the CAS: the delete
+	// is still failed/in_doubt under claim and not soft-deleted.
+	pred := store.DeletionPredicate{
+		Claim:         &claim,
+		States:        []string{store.DeletionStateFailed},
+		Codes:         []string{store.DeletionCodeInDoubt},
+		DeletedAtNull: true,
+	}
 	cur, err := s.store.GetAgent(ctx, agentID)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, nil // already finalized
 	}
 	if err != nil {
 		return nil, err
+	}
+	if !pred.Matches(cur) {
+		return nil, nil
 	}
 	// The finalize is soft or hard as the original claim decided, never
 	// as recomputed now: without that decision, leave the row in_doubt.
@@ -98,12 +109,6 @@ func (s *Server) reclaimInDoubtDeletion(ctx context.Context, agentID string, cla
 		// only intents completed after it.
 		set.StartedAt = &now
 	}
-	pred := store.DeletionPredicate{
-		Claim:         &claim,
-		States:        []string{store.DeletionStateFailed},
-		Codes:         []string{store.DeletionCodeInDoubt},
-		DeletedAtNull: true,
-	}
 	n, err := s.store.UpdateAgentDeletion(ctx, agentID, pred, set)
 	if err != nil || n == 0 {
 		return nil, err
@@ -128,7 +133,8 @@ func (s *Server) reclaimInDoubtDeletion(ctx context.Context, agentID string, cla
 // finalizeInDoubtDelete runs after a claimed delete intent succeeded on
 // this node, before the drain marks it done: if the row still reads
 // failed/in_doubt under the intent's claim, it re-claims the delete and
-// waits for the engine to finish it. A claimless intent is not tied to a
+// waits for the engine to finish it. The stored request must match what
+// the intent ran (soft, delete-files, remove-branch). A claimless intent is not tied to a
 // delete's claim and never finalizes one. Errors are logged; the row then
 // stays in_doubt, and a retry or force still works.
 func (s *Server) finalizeInDoubtDelete(ctx context.Context, agentID string, args *DeleteDispatchArgs) {
@@ -136,7 +142,7 @@ func (s *Server) finalizeInDoubtDelete(ctx context.Context, agentID string, args
 		return
 	}
 	plan, err := s.reclaimInDoubtDeletion(ctx, agentID, args.Claim, false, func(req store.DeletionRequestInfo) bool {
-		return req.Soft == args.SoftDelete && req.DeleteFiles == args.DeleteFiles
+		return req.Soft == args.SoftDelete && req.DeleteFiles == args.DeleteFiles && req.RemoveBranch == args.RemoveBranch
 	})
 	if err != nil {
 		s.agentLifecycleLog.Error("in_doubt delete: re-claim after the intent succeeded failed",

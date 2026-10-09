@@ -927,13 +927,16 @@ func (e *deletionEngine) failInDoubt() deletionOutcome {
 	if n == 0 {
 		return e.lost()
 	}
-	e.publishStatus(ctx)
 	if h := inDoubtWrittenHook; h != nil {
 		h(e.agentID())
 	}
 	if out, ok := e.recheckInDoubt(); ok {
+		// No in_doubt status: watchers see the re-claim's delete instead.
 		return out
 	}
+	pctx, pcancel := context.WithTimeout(e.base, deleteStepTimeout)
+	defer pcancel()
+	e.publishStatus(pctx)
 	return deletionOutcome{kind: deletionOutcomeFailed, code: code, message: msg}
 }
 
