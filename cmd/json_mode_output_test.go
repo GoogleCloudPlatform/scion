@@ -81,6 +81,15 @@ func TestConfirmStopAllRm_JSONModeKeepsStdoutClean(t *testing.T) {
 		assert.False(t, ok, "the default is no")
 		assert.Empty(t, stdout)
 	})
+	t.Run("json/prompt y at EOF without newline", func(t *testing.T) {
+		setJSONOutput(t)
+		autoConfirm = false
+		withStdin(t, "y")
+		var ok bool
+		stdout, _ := captureStdIO(t, func() { ok = confirmStopAllRm([]string{"alpha"}) })
+		assert.False(t, ok, "a read error, including EOF, means the default (no)")
+		assert.Empty(t, stdout)
+	})
 	t.Run("text", func(t *testing.T) {
 		orig := outputFormat
 		outputFormat = ""
@@ -134,6 +143,27 @@ func TestDeleteLocal_JSONStdoutIsOnlyTheDocument(t *testing.T) {
 	require.Len(t, results, 2)
 	assert.Equal(t, "success", results[0].(map[string]interface{})["status"])
 	assert.Equal(t, "error", results[1].(map[string]interface{})["status"])
+}
+
+// Text mode is unchanged: local scion delete still prints its progress
+// lines on stdout.
+func TestDeleteLocal_TextModeProgressOnStdout(t *testing.T) {
+	projectDir := localDeleteProject(t)
+	agentDir := createAgentDir(t, projectDir, "real-agent")
+	orig := outputFormat
+	outputFormat = ""
+	t.Cleanup(func() { outputFormat = orig })
+
+	var err error
+	stdout, stderr := captureStdIO(t, func() {
+		err = deleteCmd.RunE(deleteCmd, []string{"real-agent"})
+	})
+	require.NoError(t, err)
+	assert.NoDirExists(t, agentDir)
+	assert.Contains(t, stdout, "Deleting agent 'real-agent'...")
+	assert.Contains(t, stdout, "No container found, removing agent definition...")
+	assert.Contains(t, stdout, "Agent 'real-agent' deleted.")
+	assert.NotContains(t, stderr, "Deleting agent 'real-agent'...")
 }
 
 // stoppedAgentsRuntime is a mock runtime listing stopped agents; deleting

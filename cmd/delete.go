@@ -456,7 +456,7 @@ func deleteStoppedLocal(mgr agent.Manager, resolvedProjectPath string) error {
 	}
 
 	results := []map[string]interface{}{}
-	var failed int
+	var deleted, failed int
 	for _, a := range agents {
 		if a.ContainerID == "" {
 			continue // No container
@@ -499,6 +499,7 @@ func deleteStoppedLocal(mgr agent.Manager, resolvedProjectPath string) error {
 			statusf("Git branch associated with agent '%s' deleted.\n", agentName)
 		}
 		statusf("Agent '%s' deleted.\n", agentName)
+		deleted++
 		results = append(results, map[string]interface{}{
 			"agent":  agentName,
 			"status": "success",
@@ -519,17 +520,27 @@ func deleteStoppedLocal(mgr agent.Manager, resolvedProjectPath string) error {
 		return outputJSONResult(doc, failed > 0, "failed to delete some stopped agents")
 	}
 
-	if len(results) == 0 {
+	if deleted == 0 {
 		statusln("No stopped agents found.")
 	}
 	return nil
+}
+
+// textOutf prints a local delete progress line to stdout in text mode, as
+// scion delete always has, and prints nothing in JSON mode so stdout holds
+// only the JSON document.
+func textOutf(format string, a ...interface{}) {
+	if isJSONOutput() {
+		return
+	}
+	fmt.Printf(format, a...)
 }
 
 func deleteAgentLocal(agentName string) error {
 	rt := runtime.GetRuntime(projectPath, profile)
 	mgr := agent.NewManager(rt)
 
-	statusf("Deleting agent '%s'...\n", agentName)
+	textOutf("Deleting agent '%s'...\n", agentName)
 
 	// We check if it exists in List to provide better feedback
 	util.Debugf("delete: listing containers for %s", agentName)
@@ -562,7 +573,7 @@ func deleteAgentLocal(agentName string) error {
 		if !agentDirExists {
 			return fmt.Errorf("agent '%s' not found", agentName)
 		}
-		statusln("No container found, removing agent definition...")
+		textOutf("No container found, removing agent definition...\n")
 	}
 
 	branchDeleted, err := mgr.Delete(context.Background(), agentName, true, projectPath, !preserveBranch)
@@ -571,10 +582,10 @@ func deleteAgentLocal(agentName string) error {
 	}
 
 	if branchDeleted {
-		statusf("Git branch associated with agent '%s' deleted.\n", agentName)
+		textOutf("Git branch associated with agent '%s' deleted.\n", agentName)
 	}
 
-	statusf("Agent '%s' deleted.\n", agentName)
+	textOutf("Agent '%s' deleted.\n", agentName)
 	return nil
 }
 

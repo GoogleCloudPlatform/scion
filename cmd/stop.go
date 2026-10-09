@@ -184,6 +184,7 @@ func stopAllAgents() error {
 			names[i] = ra.Name
 		}
 		if !confirmStopAllRm(names) {
+			// Declined: nothing is stopped; in JSON mode stdout stays empty.
 			return nil
 		}
 	}
@@ -305,7 +306,12 @@ func confirmStopAllRm(names []string) bool {
 		fmt.Fprintf(os.Stderr, "  - %s\n", n)
 	}
 	fmt.Fprint(os.Stderr, "\nContinue? (y/N): ")
-	input, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	input, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil {
+		// Like hubsync.ConfirmAction: any read error, including EOF
+		// without a trailing newline, means the default (No).
+		return false
+	}
 	input = strings.ToLower(strings.TrimSpace(input))
 	return input == "y" || input == "yes"
 }
@@ -355,6 +361,7 @@ func stopAllAgentsViaHub(hubCtx *HubContext) error {
 			names[i] = a.Name
 		}
 		if !confirmStopAllRm(names) {
+			// Declined: nothing is stopped; in JSON mode stdout stays empty.
 			return nil
 		}
 	}
