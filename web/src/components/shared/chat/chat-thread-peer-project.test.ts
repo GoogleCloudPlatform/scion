@@ -398,6 +398,25 @@ describe('peer-agent-resolved', () => {
     expect(singleAgentReads()).toBe(0);
   });
 
+  it('is reported again from the cached read when the thread comes back to the DM', async () => {
+    const seen = listen();
+    const el = await openDM('coder');
+    expect(seen).toHaveLength(1);
+
+    // Over to a space thread, then back to the same DM.
+    el.isDM = false;
+    el.conversationKey = 'topic-1';
+    await el.updateComplete;
+    for (let i = 0; i < 10; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    await openDM('coder', el);
+
+    expect(seen.map((d) => [d.conversationKey, d.projectId])).toEqual([
+      ['dm:agent:coder:user:u1', 'proj-coder'],
+      ['dm:agent:coder:user:u1', 'proj-coder'],
+    ]);
+    expect(singleAgentReads()).toBe(1);
+  });
+
   it('is not reported for a failed read', async () => {
     const seen = listen();
     peerStatus = 500;

@@ -836,7 +836,14 @@ export class ScionChatThread extends LitElement {
    * (see {@link resolvePeerAgentProject}). Kept for one conversation: a read
    * for another conversation key is not used.
    */
-  private _peerAgentProject: { conversationKey: string; projectId: string } | null = null;
+  private _peerAgentProject: {
+    conversationKey: string;
+    projectId: string;
+    /** The peer's name (or slug) from the read, for reporting it again. */
+    name: string;
+    /** Whether the read has answered; until then it reports on its own. */
+    done: boolean;
+  } | null = null;
 
   /** Current user ID, cached from the stateManager scope once it exists. */
   private _currentUserId = '';
@@ -4765,8 +4772,16 @@ export class ScionChatThread extends LitElement {
       this.reportPeerAgent(conversationKey, peerAgentId, known, known.projectId || '');
       return;
     }
-    if (this._peerAgentProject?.conversationKey === conversationKey) return;
-    const read = { conversationKey, projectId: '' };
+    const cached = this._peerAgentProject;
+    if (cached?.conversationKey === conversationKey) {
+      // Back on a conversation already read (after a switch away, say): the
+      // page that asked may be showing it again, so report it again.
+      if (cached.done) {
+        this.reportPeerAgent(conversationKey, peerAgentId, { name: cached.name }, cached.projectId);
+      }
+      return;
+    }
+    const read = { conversationKey, projectId: '', name: '', done: false };
     this._peerAgentProject = read;
     try {
       const res = await apiFetch(`/api/v1/agents/${encodeURIComponent(peerAgentId)}`, {
@@ -4775,6 +4790,8 @@ export class ScionChatThread extends LitElement {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const agent = (await res.json()) as Partial<Agent>;
       read.projectId = agent.projectId || '';
+      read.name = agent.name || agent.slug || '';
+      read.done = true;
       if (this._peerAgentProject === read && this.conversationKey === conversationKey) {
         this.reportPeerAgent(conversationKey, peerAgentId, agent, read.projectId);
       }
