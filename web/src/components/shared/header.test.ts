@@ -1044,6 +1044,110 @@ describe('view mode shortcuts', () => {
     });
   });
 
+  describe('with the setting changed in another tab', () => {
+    /** Writes the store directly and fires the storage event another tab's write would. */
+    function writeFromOtherTab(value: string | null): void {
+      if (value === null) {
+        localStorage.removeItem('scion-view-mode-shortcuts');
+      } else {
+        localStorage.setItem('scion-view-mode-shortcuts', value);
+      }
+      window.dispatchEvent(
+        new StorageEvent('storage', {
+          key: 'scion-view-mode-shortcuts',
+          newValue: value,
+          storageArea: localStorage,
+        })
+      );
+    }
+
+    it('updates a mounted header both ways without a remount', async () => {
+      await mountHeader({ currentPath: '/projects/p1' });
+
+      writeFromOtherTab('false');
+      const off = press(document.body, { code: 'Digit3', key: '3', ctrlKey: true });
+      await settled();
+      expect(off.defaultPrevented).toBe(false);
+      expect(navTargets).toEqual([]);
+
+      writeFromOtherTab(null);
+      const on = press(document.body, { code: 'Digit3', key: '3', ctrlKey: true });
+      await settled();
+      expect(on.defaultPrevented).toBe(true);
+      expect(navTargets).toEqual(['/terminals']);
+    });
+
+    it('updates the hints in a mounted header', async () => {
+      const el = await mountHeader({ currentPath: '/projects/p1' });
+      const hints = (): number => el.shadowRoot?.querySelectorAll('.mode-shortcut').length ?? 0;
+      expect(hints()).toBe(3);
+
+      writeFromOtherTab('false');
+      await el.updateComplete;
+      expect(hints()).toBe(0);
+    });
+
+    it('stops listening for storage events once the header is removed', async () => {
+      const el = await mountHeader({ currentPath: '/projects/p1' });
+      const removeSpy = vi.spyOn(window, 'removeEventListener');
+      try {
+        el.remove();
+        expect(removeSpy.mock.calls.some(([type]) => type === 'storage')).toBe(true);
+      } finally {
+        removeSpy.mockRestore();
+      }
+    });
+  });
+
+  describe('with a modal dialog', () => {
+    function dialog(open: boolean): HTMLElement {
+      const el = document.createElement('sl-dialog') as HTMLElement & { open: boolean };
+      el.open = open;
+      return el;
+    }
+
+    it('leaves the key to an open dialog and does not switch', async () => {
+      await mountHeader({ currentPath: '/projects/p1' });
+      const dlg = dialog(true);
+      const input = document.createElement('input');
+      const seen = vi.fn();
+      input.addEventListener('keydown', seen);
+      dlg.appendChild(input);
+      document.body.appendChild(dlg);
+
+      const e = press(input, { code: 'Digit3', key: '3', ctrlKey: true });
+      await settled();
+
+      expect(e.defaultPrevented).toBe(false);
+      expect(seen).toHaveBeenCalledTimes(1);
+      expect(navTargets).toEqual([]);
+    });
+
+    it('sees an open dialog inside a shadow root', async () => {
+      await mountHeader({ currentPath: '/projects/p1' });
+      const host = document.createElement('div');
+      host.attachShadow({ mode: 'open' }).appendChild(dialog(true));
+      document.body.appendChild(host);
+
+      const e = press(document.body, { code: 'Digit2', key: '2', ctrlKey: true });
+      await settled();
+
+      expect(e.defaultPrevented).toBe(false);
+      expect(navTargets).toEqual([]);
+    });
+
+    it('switches when the dialog is closed', async () => {
+      await mountHeader({ currentPath: '/projects/p1' });
+      document.body.appendChild(dialog(false));
+
+      const e = press(document.body, { code: 'Digit3', key: '3', ctrlKey: true });
+      await settled();
+
+      expect(e.defaultPrevented).toBe(true);
+      expect(navTargets).toEqual(['/terminals']);
+    });
+  });
+
   describe('hints', () => {
     function modeTooltips(el: ScionHeader): string[] {
       // The switch renders once per layout tier; the first is representative.
@@ -1071,9 +1175,9 @@ describe('view mode shortcuts', () => {
       const el = await mountHeader({ currentPath: '/projects/p1' });
 
       expect(modeTooltips(el)).toEqual([
-        'Dashboard (Ctrl+1)',
-        'Chat (Ctrl+2)',
-        'Terminals (0) (Ctrl+3)',
+        'Dashboard · Ctrl+1',
+        'Chat · Ctrl+2',
+        'Terminals (0) · Ctrl+3',
       ]);
       expect(modeButtons(el)).toEqual(['Control+1', 'Control+2', 'Control+3']);
       expect(menuHints(el)).toEqual(['Ctrl+1', 'Ctrl+2', 'Ctrl+3']);
@@ -1083,7 +1187,7 @@ describe('view mode shortcuts', () => {
       setPlatform('MacIntel');
       const el = await mountHeader({ currentPath: '/projects/p1' });
 
-      expect(modeTooltips(el)).toEqual(['Dashboard (⌘1)', 'Chat (⌘2)', 'Terminals (0) (⌘3)']);
+      expect(modeTooltips(el)).toEqual(['Dashboard · ⌘1', 'Chat · ⌘2', 'Terminals (0) · ⌘3']);
       expect(modeButtons(el)).toEqual(['Meta+1', 'Meta+2', 'Meta+3']);
       expect(menuHints(el)).toEqual(['⌘1', '⌘2', '⌘3']);
     });

@@ -56,9 +56,11 @@ import { touchMenuItemStyles } from './touch-styles.js';
 import './notification-tray.js';
 import './inbox-tray.js';
 import { isMacPlatform } from '../../utils/platform.js';
+import { hasOpenModalDescendant } from './open-modal.js';
 import {
   areViewModeShortcutsEnabled,
   isInHiddenSubtree,
+  isViewModeShortcutsStorageEvent,
   VIEW_MODE_SHORTCUTS_CHANGED_EVENT,
   viewModeAriaKeyshortcuts,
   viewModeForShortcut,
@@ -66,9 +68,22 @@ import {
   type ViewModeTarget,
 } from '../../client/view-mode-shortcuts.js';
 
-/** Appends a shortcut hint to a tooltip label, e.g. "Chat (⌘2)". */
+/** Appends a shortcut hint to a tooltip label, e.g. "Chat · ⌘2". */
 function withHint(label: string, hint: { label: string } | null): string {
-  return hint ? `${label} (${hint.label})` : label;
+  return hint ? `${label} · ${hint.label}` : label;
+}
+
+/**
+ * The view modes the mode switch offers besides Dashboard, or null when
+ * neither Chat nor Terminal is on and the switch is not shown at all. The
+ * switch, the narrow-layout menu and the keyboard shortcuts all read this,
+ * so a shortcut only ever reaches a mode the switch shows.
+ */
+function offeredViewModes(): { chat: boolean; terminals: boolean } | null {
+  const chat = isFeatureEnabled(NATIVE_CHAT_FLAG);
+  const terminals = isFeatureEnabled(TERMINAL_WORKSPACE_FLAG);
+  if (!chat && !terminals) return null;
+  return { chat, terminals };
 }
 
 // ---------------------------------------------------------------------------
@@ -988,9 +1003,9 @@ export class ScionHeader extends LitElement {
    * alternative modes are feature-flagged on.
    */
   private renderModeSwitch(): TemplateResult | typeof nothing {
-    const chatEnabled = isFeatureEnabled(NATIVE_CHAT_FLAG);
-    const terminalsEnabled = isFeatureEnabled(TERMINAL_WORKSPACE_FLAG);
-    if (!chatEnabled && !terminalsEnabled) return nothing;
+    const offered = offeredViewModes();
+    if (!offered) return nothing;
+    const { chat: chatEnabled, terminals: terminalsEnabled } = offered;
 
     const isChat = this.isChatView();
     const isTerminal = this.isTerminalView();
@@ -1061,9 +1076,9 @@ export class ScionHeader extends LitElement {
    * Returns nothing when no alternative modes are feature-flagged on.
    */
   private renderModeDropdown(): TemplateResult | typeof nothing {
-    const chatEnabled = isFeatureEnabled(NATIVE_CHAT_FLAG);
-    const terminalsEnabled = isFeatureEnabled(TERMINAL_WORKSPACE_FLAG);
-    if (!chatEnabled && !terminalsEnabled) return nothing;
+    const offered = offeredViewModes();
+    if (!offered) return nothing;
+    const { chat: chatEnabled, terminals: terminalsEnabled } = offered;
 
     const { icon, label } = this.getCurrentMode();
     const isChat = this.isChatView();
@@ -1455,6 +1470,7 @@ export class ScionHeader extends LitElement {
 
     this.viewModeShortcutsEnabled = areViewModeShortcutsEnabled();
     window.addEventListener(VIEW_MODE_SHORTCUTS_CHANGED_EVENT, this.handleViewModeShortcutsChanged);
+    window.addEventListener('storage', this.handleViewModeShortcutsStorage);
     window.addEventListener('keydown', this.handleViewModeShortcut, true);
   }
 
@@ -1473,6 +1489,7 @@ export class ScionHeader extends LitElement {
       VIEW_MODE_SHORTCUTS_CHANGED_EVENT,
       this.handleViewModeShortcutsChanged
     );
+    window.removeEventListener('storage', this.handleViewModeShortcutsStorage);
     window.removeEventListener('keydown', this.handleViewModeShortcut, true);
   }
 
@@ -1524,14 +1541,21 @@ export class ScionHeader extends LitElement {
     this.viewModeShortcutsEnabled = areViewModeShortcutsEnabled();
   };
 
+  /** Picks up the preference when another tab of this browser changes it. */
+  private readonly handleViewModeShortcutsStorage = (e: StorageEvent): void => {
+    if (!isViewModeShortcutsStorageEvent(e)) return;
+    this.viewModeShortcutsEnabled = areViewModeShortcutsEnabled();
+  };
+
   /**
    * Cmd+1/2/3 (macOS) or Ctrl+1/2/3 switches view mode exactly as the mode
    * switch does. Registered on window in the capture phase so it runs
    * before a focused text field or terminal sees the key; a handled chord
    * is neither typed nor sent to the terminal. Does nothing when the
    * preference is off, when this header is hidden (another header is on
-   * screen), or when the requested mode is not offered, so the browser
-   * keeps the key. A held chord switches once.
+   * screen), when the requested mode is not offered, or while a modal
+   * dialog is open, so the browser or the dialog keeps the key. A held
+   * chord switches once.
    */
   private readonly handleViewModeShortcut = (e: KeyboardEvent): void => {
     if (e.defaultPrevented) return;
@@ -1539,6 +1563,8 @@ export class ScionHeader extends LitElement {
     const mode = viewModeForShortcut(e, isMacPlatform());
     if (!mode || !this.isModeOffered(mode)) return;
     if (isInHiddenSubtree(this)) return;
+    // An open dialog keeps the key, so a half-filled form is not left behind.
+    if (hasOpenModalDescendant(document, null)) return;
     e.preventDefault();
     e.stopPropagation();
     if (e.repeat) return;
@@ -1547,11 +1573,10 @@ export class ScionHeader extends LitElement {
 
   /** Whether the mode switch currently offers `mode`. */
   private isModeOffered(mode: ViewModeTarget): boolean {
-    const chatEnabled = isFeatureEnabled(NATIVE_CHAT_FLAG);
-    const terminalsEnabled = isFeatureEnabled(TERMINAL_WORKSPACE_FLAG);
-    if (!chatEnabled && !terminalsEnabled) return false;
-    if (mode === 'chat') return chatEnabled;
-    if (mode === 'terminals') return terminalsEnabled;
+    const offered = offeredViewModes();
+    if (!offered) return false;
+    if (mode === 'chat') return offered.chat;
+    if (mode === 'terminals') return offered.terminals;
     return true;
   }
 

@@ -70,6 +70,20 @@ export function setViewModeShortcutsEnabled(on: boolean): void {
 }
 
 /**
+ * Whether a `storage` event may have changed the on/off preference. The
+ * event fires in every other tab of this browser when one tab writes
+ * localStorage; a null key means the whole store was cleared.
+ */
+export function isViewModeShortcutsStorageEvent(e: StorageEvent): boolean {
+  if (e.key !== null && e.key !== STORAGE_KEY) return false;
+  try {
+    return e.storageArea === null || e.storageArea === localStorage;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The view mode a keydown asks for, or null when it is not a view-mode
  * shortcut. Key repeat still matches, so the caller can keep a held chord
  * from reaching the browser; IME composition never matches.

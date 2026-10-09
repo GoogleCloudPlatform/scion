@@ -21,6 +21,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   areViewModeShortcutsEnabled,
   isInHiddenSubtree,
+  isViewModeShortcutsStorageEvent,
   setViewModeShortcutsEnabled,
   VIEW_MODE_SHORTCUTS_CHANGED_EVENT,
   viewModeAriaKeyshortcuts,
@@ -136,6 +137,28 @@ describe('view mode shortcuts preference', () => {
     } finally {
       window.removeEventListener(VIEW_MODE_SHORTCUTS_CHANGED_EVENT, listener);
     }
+  });
+});
+
+describe('isViewModeShortcutsStorageEvent', () => {
+  it('matches a change to the preference key or a cleared store', () => {
+    const own = new StorageEvent('storage', {
+      key: 'scion-view-mode-shortcuts',
+      storageArea: localStorage,
+    });
+    const cleared = new StorageEvent('storage', { key: null, storageArea: localStorage });
+    expect(isViewModeShortcutsStorageEvent(own)).toBe(true);
+    expect(isViewModeShortcutsStorageEvent(cleared)).toBe(true);
+  });
+
+  it('ignores other keys and session storage', () => {
+    const other = new StorageEvent('storage', { key: 'scion-chime', storageArea: localStorage });
+    const session = new StorageEvent('storage', {
+      key: 'scion-view-mode-shortcuts',
+      storageArea: sessionStorage,
+    });
+    expect(isViewModeShortcutsStorageEvent(other)).toBe(false);
+    expect(isViewModeShortcutsStorageEvent(session)).toBe(false);
   });
 });
 
