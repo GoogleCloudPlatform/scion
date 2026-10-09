@@ -258,7 +258,7 @@ func seedHealthSummaryIntegrations(srv *Server, s store.Store, t *testing.T) {
 // TestHandleHealthSummary_IntegrationIdentityRequiresIntegrationsRead: a
 // caller with hub.health.read but not hub.integrations.read gets only the
 // aggregate (counts and status), with no integration names, platforms,
-// versions or links anywhere in the payload. A caller with both sees the
+// versions or links anywhere in the response. A caller with both sees the
 // full detail.
 func TestHandleHealthSummary_IntegrationIdentityRequiresIntegrationsRead(t *testing.T) {
 	srv, s := testServer(t)
@@ -272,7 +272,7 @@ func TestHandleHealthSummary_IntegrationIdentityRequiresIntegrationsRead(t *test
 	t.Run("health.read only: aggregate", func(t *testing.T) {
 		resp, body := healthSummaryAsUser(t, srv, healthOnly)
 		for _, frag := range identity {
-			assert.NotContains(t, strings.ToLower(body), strings.ToLower(frag), "identity %q in the restricted payload", frag)
+			assert.NotContains(t, strings.ToLower(body), strings.ToLower(frag), "identity %q in the restricted response", frag)
 		}
 		assert.Contains(t, body, `"integrations":[]`)
 		assert.False(t, resp.IntegrationsDetail)
@@ -327,7 +327,7 @@ func TestHandleHealthSummary_RestrictedIntegrationsMatchEmptyHub(t *testing.T) {
 			mgr.health["telegram"] = "unhealthy"
 			srv.SetPluginManager(mgr)
 		}
-		u := healthSummaryRoleUser(t, s, "hs-anti-oracle", []string{"hub.health.read"})
+		u := healthSummaryRoleUser(t, s, "hs-restricted-view", []string{"hub.health.read"})
 		rr := doRequestAsUser(t, srv, u, http.MethodGet, "/api/v1/admin/health/summary", nil)
 		require.Equal(t, http.StatusOK, rr.Code)
 		var v integrationView

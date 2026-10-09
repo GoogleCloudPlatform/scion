@@ -326,7 +326,7 @@ func TestSendGroupMessage3510_PartialJSONOutput(t *testing.T) {
 	assert.Equal(t, 1, got.Failed)
 	assert.Equal(t, 1, got.Unknown)
 	require.Len(t, got.Results, 3)
-	assert.Equal(t, groupRecipientResult{Recipient: "agent:agent-a", Status: "delivered"}, got.Results[0])
+	assert.Equal(t, groupRecipientResult{Recipient: "agent:agent-a", Status: "delivered", MessageID: "m-agent-a"}, got.Results[0])
 	assert.Equal(t, "failed", got.Results[1].Status)
 	assert.Contains(t, got.Results[1].Error, "boom for agent-b")
 	assert.Equal(t, "unknown", got.Results[2].Status, "a gateway timeout does not prove the message was not delivered")

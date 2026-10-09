@@ -32,11 +32,11 @@ export function scheduledSendEnabled(): boolean {
 }
 
 /**
- * Whether a conversation supports scheduled send. Topics only for now;
- * direct messages are refused by the hub.
+ * Whether a conversation supports scheduled send: topics and direct
+ * messages (with an agent or another user).
  */
 export function conversationSupportsScheduledSend(conversationKey: string): boolean {
-  return conversationKey !== '' && !conversationKey.startsWith('dm:');
+  return conversationKey !== '';
 }
 
 export type ScheduledMessageStatus = 'pending' | 'sending' | 'sent' | 'cancelled' | 'failed';
@@ -57,8 +57,20 @@ export interface ScheduledMessage {
 
 /** The payload of a `user.<id>.chat.scheduled` SSE event. */
 export interface ScheduledMessageEvent {
-  /** `released`: the hub handed a claimed message back to pending (a transient error). */
-  action: 'created' | 'cancelled' | 'sending' | 'released' | 'sent' | 'failed';
+  /**
+   * `released`: the hub handed a claimed message back to pending (a transient error).
+   * `requeued`: a missed or interrupted message is pending again, due now (Send now).
+   * `dismissed`: a failed message was removed from the list.
+   */
+  action:
+    | 'created'
+    | 'cancelled'
+    | 'sending'
+    | 'released'
+    | 'sent'
+    | 'failed'
+    | 'requeued'
+    | 'dismissed';
   scheduledMessage: ScheduledMessage;
 }
 
@@ -74,12 +86,23 @@ export function scheduledFailureText(reason: string | undefined): string {
     case 'recipient_gone':
       return 'Not sent: the recipient no longer exists.';
     case 'missed':
-      return 'Not sent: the scheduled time passed while the hub was unavailable.';
+      return 'Not sent: it was found more than an hour after its time.';
     case 'interrupted':
       return 'Delivery was interrupted. Check the thread before sending it again.';
     default:
       return 'Not sent: delivery failed.';
   }
+}
+
+/**
+ * Whether a failed message can be sent now: only one that was missed
+ * (found more than an hour after its time) or whose delivery was
+ * interrupted.
+ */
+export function scheduledSendNowAllowed(m: ScheduledMessage): boolean {
+  return (
+    m.status === 'failed' && (m.failureReason === 'missed' || m.failureReason === 'interrupted')
+  );
 }
 
 function scheduledPath(conversationKey: string): string {
@@ -152,6 +175,36 @@ export async function cancelScheduledMessage(conversationKey: string, id: string
     const fallback =
       res.status === 409 ? 'This message is already being sent' : 'Failed to cancel message';
     throw new ScheduledSendError(await extractApiError(res, fallback), res.status);
+  }
+}
+
+function scheduledRowPath(conversationKey: string, id: string, action: string): string {
+  return `${scheduledPath(conversationKey)}/${encodeURIComponent(id)}/${action}`;
+}
+
+/**
+ * Send a missed or interrupted message now: the hub checks again that it
+ * may be sent and makes it pending, due now.
+ */
+export async function sendNowScheduledMessage(
+  conversationKey: string,
+  id: string
+): Promise<ScheduledMessage> {
+  const res = await apiFetch(scheduledRowPath(conversationKey, id, 'send-now'), { method: 'POST' });
+  if (!res.ok) {
+    throw new ScheduledSendError(await extractApiError(res, 'Failed to send message'), res.status);
+  }
+  return (await res.json()) as ScheduledMessage;
+}
+
+/** Remove a failed scheduled message from the list. */
+export async function dismissScheduledMessage(conversationKey: string, id: string): Promise<void> {
+  const res = await apiFetch(scheduledRowPath(conversationKey, id, 'dismiss'), { method: 'POST' });
+  if (!res.ok) {
+    throw new ScheduledSendError(
+      await extractApiError(res, 'Failed to dismiss message'),
+      res.status
+    );
   }
 }
 

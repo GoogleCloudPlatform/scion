@@ -1627,8 +1627,11 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// A provider path that is the broker's global directory is only valid
-	// for the global project. Checked before any project or provider write.
+	// A provider path must be absolute and outside the restricted system
+	// directories, and a path that is the broker's global directory is only
+	// valid for the global project (checkProviderLocalPath, shared with
+	// POST /projects/{id}/providers). Checked before any project or
+	// provider write.
 	if req.Path != "" && (req.BrokerID != "" || req.Broker != nil) {
 		// A project created by this request is the global project only when
 		// it takes the reserved global slug, which only a register without a
@@ -1641,10 +1644,12 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		if project != nil {
 			targetName, targetSlug = project.Name, project.Slug
 		}
-		if err := validateProviderLocalPath(targetName, targetSlug, req.Path); err != nil {
+		cleanPath, err := checkProviderLocalPath("path", targetName, targetSlug, req.Path)
+		if err != nil {
 			ValidationError(w, err.Error(), map[string]interface{}{"field": "path"})
 			return
 		}
+		req.Path = cleanPath
 	}
 
 	// SECURITY-GATE: CheckAccess — resolve the deprecated embedded-broker
@@ -1707,18 +1712,14 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if embeddedBroker != nil {
+			// Same target rule as a POST /brokers re-registration: the
+			// caller's user must be the matched broker's creator, or a
+			// super-admin presenting an interactive session or dev
+			// credential.
 			matched := embeddedBroker
-			callerUser := GetUserIdentityFromContext(ctx)
-			brokerIdent := GetBrokerIdentityFromContext(ctx)
-			allowed, err := s.authorizedForBrokerRotate(ctx, callerUser, brokerIdent, matched.ID,
-				func() (*store.RuntimeBroker, error) { return matched, nil })
-			if err != nil {
-				writeErrorFromErr(w, err, "")
-				return
-			}
-			if !allowed {
+			if !s.brokerRemintTargetAuthorized(ctx, GetUserIdentityFromContext(ctx), matched) {
 				logAuthzDenial(r, GetIdentityFromContext(ctx), Resource{Type: "broker", ID: matched.ID}, ActionUpdate,
-					"caller is not the broker's creator, the broker itself, or a super-admin")
+					"caller is not the broker's creator or a super-admin with an interactive or dev credential")
 				if embeddedBrokerMatchedByID {
 					// The caller named an explicit broker ID they do not
 					// own: hard deny, before any project mutation.
@@ -1733,6 +1734,34 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 				embeddedBroker = nil
 			}
 		}
+	}
+
+	// SECURITY-GATE: broker-side consent for the brokerId branch below.
+	// Linking an existing broker to the project requires broker.update on
+	// that broker (its owner or a super-admin, see authorizeBrokerProvide)
+	// in addition to project-side authority: an existing project already
+	// passed the project-update gate above, and a new project is owned by
+	// the caller. The lookup and decision run here, before any project
+	// creation or mutation, so a denial leaves no project, quota slot or
+	// group behind.
+	var providedBroker *store.RuntimeBroker
+	if req.BrokerID != "" {
+		b, err := s.store.GetRuntimeBroker(ctx, req.BrokerID)
+		if err != nil {
+			if err == store.ErrNotFound {
+				ValidationError(w, "brokerId not found: broker must be registered via POST /brokers and /brokers/join first", map[string]interface{}{
+					"field":    "brokerId",
+					"brokerId": req.BrokerID,
+				})
+				return
+			}
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if !s.authorizeBrokerProvide(w, r, b) {
+			return
+		}
+		providedBroker = b
 	}
 
 	// Create new project if not found
@@ -1872,39 +1901,39 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 	var secretKey string
 
 	if req.BrokerID != "" {
-		// NEW FLOW: Link to existing broker registered via two-phase /brokers + /brokers/join
-		existingBroker, err := s.store.GetRuntimeBroker(ctx, req.BrokerID)
+		// NEW FLOW: Link to existing broker registered via two-phase /brokers + /brokers/join.
+		// The broker was looked up and authorized (authorizeBrokerProvide)
+		// before the project was created or mutated; see the SECURITY-GATE
+		// block preceding "Create new project if not found".
+		broker = providedBroker
+
+		// Add as project provider.
+		localPath, err := s.registerProviderLocalPath(ctx, project, broker.ID, req.Path, created)
 		if err != nil {
-			if err == store.ErrNotFound {
-				ValidationError(w, "brokerId not found: broker must be registered via POST /brokers and /brokers/join first", map[string]interface{}{
-					"field":    "brokerId",
-					"brokerId": req.BrokerID,
-				})
-				return
-			}
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		broker = existingBroker
-
-		// Add as project provider.
-		localPath := s.registerProviderLocalPath(ctx, project, broker.ID, req.Path, created)
 		provider := &store.ProjectProvider{
 			ProjectID:  project.ID,
 			BrokerID:   broker.ID,
 			BrokerName: broker.Name,
 			LocalPath:  localPath,
 			Status:     broker.Status,
+			LinkedBy:   linkedByForProvider(GetUserIdentityFromContext(ctx)),
 		}
 
 		if err := s.store.AddProjectProvider(ctx, provider); err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
+		LogLinkEvent(ctx, s.auditLogger, broker.ID, broker.Name, project.ID, provider.LinkedBy, getClientIP(r),
+			mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), "path", "project_register"))
 
-		// For linked projects (local directory), initialize the .scion
-		// directory structure so agents and templates directories exist.
-		if localPath != "" {
+		// For linked projects (local directory) on the embedded broker,
+		// initialize the .scion directory structure so agents and templates
+		// directories exist. Only the embedded broker shares the hub's
+		// filesystem; other brokers manage their own.
+		if localPath != "" && s.isEmbeddedBroker(broker.ID) {
 			scionDir := filepath.Join(localPath, ".scion")
 			if err := initLinkedProjectDir(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
 				s.projectsLogger().Warn("failed to initialize .scion in linked project",
@@ -1935,8 +1964,10 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		// name was cleared to nil there so it falls through to the create
 		// branch below, leaving the matched broker untouched.
 		existingBroker := embeddedBroker
+		registerOperation := "register"
 
 		if existingBroker != nil {
+			registerOperation = "reregister"
 			// Update existing broker
 			broker = existingBroker
 			broker.Name = req.Broker.Name
@@ -1981,21 +2012,35 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		LogRegistrationEvent(ctx, s.auditLogger, broker.ID, broker.Name, linkedByForProvider(callerUser), getClientIP(r),
+			mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), "operation", registerOperation, "path", "embedded"))
 
 		// Add as project provider.
-		localPath := s.registerProviderLocalPath(ctx, project, broker.ID, req.Path, created)
+		localPath, err := s.registerProviderLocalPath(ctx, project, broker.ID, req.Path, created)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		// The embedded path does not call authorizeBrokerProvide: the caller
+		// either created this broker (and owns it) or passed
+		// brokerRemintTargetAuthorized above (creator, or super-admin with an
+		// interactive or dev credential), which
+		// is at least as strict as the broker.update consent check.
 		provider := &store.ProjectProvider{
 			ProjectID:  project.ID,
 			BrokerID:   broker.ID,
 			BrokerName: broker.Name,
 			LocalPath:  localPath,
 			Status:     store.BrokerStatusOnline,
+			LinkedBy:   linkedByForProvider(callerUser),
 		}
 
 		if err := s.store.AddProjectProvider(ctx, provider); err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
+		LogLinkEvent(ctx, s.auditLogger, broker.ID, broker.Name, project.ID, provider.LinkedBy, getClientIP(r),
+			mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), "path", "embedded"))
 
 		// Set as default runtime broker if project doesn't have one
 		// (first broker to register becomes the default)
@@ -3042,6 +3087,24 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 	if err := readJSON(r, &updates); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
+	}
+
+	// A default runtime broker must already be associated with the project
+	// (a provider); associating one goes through the provider endpoints,
+	// which require the broker owner's consent. Keeping the current default
+	// needs no check.
+	if updates.DefaultRuntimeBrokerID != "" && updates.DefaultRuntimeBrokerID != project.DefaultRuntimeBrokerID {
+		if _, err := s.store.GetProjectProvider(ctx, project.ID, updates.DefaultRuntimeBrokerID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				ValidationError(w, "broker must be a provider of this project; provide it first", map[string]interface{}{
+					"field":                  "defaultRuntimeBrokerId",
+					"defaultRuntimeBrokerId": updates.DefaultRuntimeBrokerID,
+				})
+				return
+			}
+			writeErrorFromErr(w, err, "")
+			return
+		}
 	}
 
 	oldSlug := project.Slug

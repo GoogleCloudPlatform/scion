@@ -107,30 +107,23 @@ func (s *Server) handleAgentPTY(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The broker checks run for both WebSocket and preflight requests.
-	// Browsers cannot read the HTTP status of a failed WebSocket handshake
-	// (they only observe 1006), so the preflight is where a web client learns
-	// "no broker, stop" (422) versus "broker down, retry" (503).
-
-	// Check if agent has a runtime broker
-	if agent.RuntimeBrokerID == "" {
-		writeError(w, http.StatusUnprocessableEntity, ErrCodeNoRuntimeBroker,
-			"Agent has no runtime broker", nil)
+	// The path checks run for both WebSocket and preflight requests, through
+	// the one decision (resolvePTYPath), so a preflight 200 names the path
+	// the attach takes. Browsers cannot read the HTTP status of a failed
+	// WebSocket handshake (they only observe 1006), so the preflight is
+	// where a web client learns "no broker, stop" (422) versus "broker
+	// down, retry" (503).
+	decision := s.resolvePTYPath(ctx, identity, agent)
+	if decision.Path == ptyPathNone {
+		writeError(w, decision.Status, decision.Code, decision.Message, decision.details())
 		return
 	}
 
-	// Check if broker is connected via control channel
-	if s.controlChannel == nil || !s.controlChannel.IsConnected(agent.RuntimeBrokerID) {
-		writeError(w, http.StatusServiceUnavailable, ErrCodeRuntimeBrokerUnavail,
-			"Runtime broker not connected", nil)
-		return
-	}
-
-	// An authorized non-WS request whose broker is connected is a preflight
+	// An authorized non-WS request with an available path is a preflight
 	// check: return 200 to signal "you have permission and the agent is
 	// attachable". Auth errors are already handled above for both kinds.
 	if !isWebSocketUpgrade(r) {
-		w.WriteHeader(http.StatusOK)
+		writePTYPreflightOK(w, decision)
 		return
 	}
 
@@ -138,6 +131,11 @@ func (s *Server) handleAgentPTY(w http.ResponseWriter, r *http.Request) {
 	conn, err := ptyUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Error("WebSocket upgrade failed for agent", "agent_id", agentID, "error", err)
+		return
+	}
+
+	if decision.Path == ptyPathAgent {
+		s.runAgentPTY(ctx, conn, identity, agent, r.URL.Query())
 		return
 	}
 
@@ -154,7 +152,9 @@ func (s *Server) handleAgentPTY(w http.ResponseWriter, r *http.Request) {
 	// Create PTY session
 	// Use agent.Slug for the stream since that's what the broker uses to look up containers
 	// (containers are labeled with scion.name=<slug>)
-	session := newPTYSession(ctx, agent.Slug, agent.ProjectID, agent.RuntimeBrokerID, conn, s.controlChannel, cols, rows)
+	up := &brokerPTYUpstream{cc: s.controlChannel, brokerID: agent.RuntimeBrokerID, agentSlug: agent.Slug, projectID: agent.ProjectID}
+	up.open = s.brokerPTYOpener(agent)
+	session := newPTYSessionWithUpstream(ctx, agent.Slug, conn, up, cols, rows)
 	defer session.Close()
 
 	logPTYSessionStarted(agentID, agent.Slug, agent.RuntimeBrokerID, identity.ID())
@@ -213,16 +213,15 @@ func (s *Server) validatePTYTicket(ctx context.Context, ticket string) Identity 
 	return nil
 }
 
-// PTYSession manages a PTY WebSocket session.
+// PTYSession manages a PTY WebSocket session: it bridges the client leaf
+// protocol (JSON data/resize/ping/pong) to an upstream PTY stream, either
+// the broker's control channel or the agent's conduit session.
 type PTYSession struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	agentID     string
-	projectID   string
-	brokerID    string
 	conn        *websocket.Conn
-	controlChan *ControlChannelManager
-	stream      *StreamProxy
+	up          ptyUpstream
 	cols        int
 	rows        int
 	writeMu     sync.Mutex
@@ -230,6 +229,71 @@ type PTYSession struct {
 	closeCode   int
 	closeReason string
 	closeMu     sync.Mutex
+}
+
+// ptyUpstream is the stream a PTYSession bridges the client to. Errors
+// returned by Write and Read are already in the form ptyCloseCause
+// classifies.
+type ptyUpstream interface {
+	// Open opens the stream with the initial terminal size.
+	Open(ctx context.Context, cols, rows int) error
+	// Read returns the next chunk of terminal output. The slice is valid
+	// until the next Read.
+	Read(ctx context.Context) ([]byte, error)
+	// Write forwards client input.
+	Write(data []byte) error
+	// Resize forwards a terminal resize.
+	Resize(cols, rows int) error
+	// Close ends the stream. It is called once, and also when Open failed.
+	Close()
+}
+
+// brokerPTYUpstream is a PTY stream on the broker's control channel.
+type brokerPTYUpstream struct {
+	cc        *ControlChannelManager
+	brokerID  string
+	agentSlug string
+	projectID string
+	// open opens the stream; nil means the broker's current control
+	// channel (ControlChannelManager.OpenStream).
+	open   func(ctx context.Context, cols, rows int) (*StreamProxy, error)
+	stream *StreamProxy
+}
+
+func (u *brokerPTYUpstream) Open(ctx context.Context, cols, rows int) error {
+	open := u.open
+	if open == nil {
+		open = func(ctx context.Context, cols, rows int) (*StreamProxy, error) {
+			return u.cc.OpenStream(ctx, u.brokerID, wsprotocol.StreamTypePTY, u.agentSlug, u.projectID, cols, rows)
+		}
+	}
+	st, err := open(ctx, cols, rows)
+	if err != nil {
+		return err
+	}
+	u.stream = st
+	return nil
+}
+
+func (u *brokerPTYUpstream) Read(ctx context.Context) ([]byte, error) {
+	return u.stream.Read(ctx)
+}
+
+func (u *brokerPTYUpstream) Write(data []byte) error {
+	if err := u.cc.SendStreamData(u.brokerID, u.stream.streamID, data); err != nil {
+		return &ptyBrokerWriteError{err: err}
+	}
+	return nil
+}
+
+func (u *brokerPTYUpstream) Resize(cols, rows int) error {
+	return u.cc.ResizeStream(u.brokerID, u.stream.streamID, cols, rows)
+}
+
+func (u *brokerPTYUpstream) Close() {
+	if u.stream != nil {
+		_ = u.cc.CloseStream(u.brokerID, u.stream.streamID, "session closed")
+	}
 }
 
 // Session-ending errors, classified by Run into a close code.
@@ -313,32 +377,36 @@ func isExpectedPTYEnd(err error) bool {
 	return errors.As(err, &ce)
 }
 
-// newPTYSession creates a new PTY session.
+// newPTYSession creates a PTY session on the broker's current control
+// channel.
 func newPTYSession(ctx context.Context, agentID, projectID, brokerID string, conn *websocket.Conn, cc *ControlChannelManager, cols, rows int) *PTYSession {
+	return newPTYSessionWithUpstream(ctx, agentID, conn, &brokerPTYUpstream{
+		cc: cc, brokerID: brokerID, agentSlug: agentID, projectID: projectID,
+	}, cols, rows)
+}
+
+// newPTYSessionWithUpstream creates a PTY session bridging conn to up.
+func newPTYSessionWithUpstream(ctx context.Context, agentID string, conn *websocket.Conn, up ptyUpstream, cols, rows int) *PTYSession {
 	ctx, cancel := context.WithCancel(ctx)
 	return &PTYSession{
-		ctx:         ctx,
-		cancel:      cancel,
-		agentID:     agentID,
-		projectID:   projectID,
-		brokerID:    brokerID,
-		conn:        conn,
-		controlChan: cc,
-		cols:        cols,
-		rows:        rows,
+		ctx:     ctx,
+		cancel:  cancel,
+		agentID: agentID,
+		conn:    conn,
+		up:      up,
+		cols:    cols,
+		rows:    rows,
 	}
 }
 
 // Run starts the PTY session and blocks until it ends.
 func (s *PTYSession) Run() error {
-	// Open stream to broker
-	stream, err := s.controlChan.OpenStream(s.ctx, s.brokerID, wsprotocol.StreamTypePTY, s.agentID, s.projectID, s.cols, s.rows)
-	if err != nil {
+	// Open the upstream stream
+	if err := s.up.Open(s.ctx, s.cols, s.rows); err != nil {
 		err = &ptyStreamOpenError{err: err}
 		s.closeWith(ptyCloseCause(err))
 		return err
 	}
-	s.stream = stream
 
 	// Arm the read deadline, install the pong handler, and start the ping
 	// loop. Keepalive writes share writeMu with the data-plane writes in
@@ -363,7 +431,7 @@ func (s *PTYSession) Run() error {
 	}()
 
 	// Wait for either direction to fail; the first error decides the code.
-	err = <-errCh
+	err := <-errCh
 	s.closeWith(ptyCloseCause(err))
 	return err
 }
@@ -396,9 +464,9 @@ func (s *PTYSession) readFromClient() error {
 			if err := json.Unmarshal(data, &msg); err != nil {
 				continue
 			}
-			// Forward data to broker via stream
-			if err := s.controlChan.SendStreamData(s.brokerID, s.stream.streamID, msg.Data); err != nil {
-				return &ptyBrokerWriteError{err: err}
+			// Forward data upstream
+			if err := s.up.Write(msg.Data); err != nil {
+				return err
 			}
 
 		case wsprotocol.TypeResize:
@@ -406,8 +474,8 @@ func (s *PTYSession) readFromClient() error {
 			if err := json.Unmarshal(data, &msg); err != nil {
 				continue
 			}
-			// Forward resize to broker via control channel
-			if err := s.controlChan.ResizeStream(s.brokerID, s.stream.streamID, msg.Cols, msg.Rows); err != nil {
+			// Forward resize upstream
+			if err := s.up.Resize(msg.Cols, msg.Rows); err != nil {
 				slog.Debug("PTY Resize forward failed", "agent_id", s.agentID, "error", err)
 			}
 
@@ -422,10 +490,11 @@ func (s *PTYSession) readFromClient() error {
 	}
 }
 
-// readFromBroker reads data from the broker stream and forwards to client.
+// readFromBroker reads data from the upstream stream and forwards to
+// client.
 func (s *PTYSession) readFromBroker() error {
 	for {
-		data, err := s.stream.Read(s.ctx)
+		data, err := s.up.Read(s.ctx)
 		if err != nil {
 			return err
 		}
@@ -486,10 +555,8 @@ func (s *PTYSession) closeWith(code int, reason string) {
 
 	s.cancel()
 
-	// Close stream to broker
-	if s.stream != nil {
-		_ = s.controlChan.CloseStream(s.brokerID, s.stream.streamID, "session closed")
-	}
+	// Close the upstream stream
+	s.up.Close()
 
 	// Close client WebSocket
 	s.writeMu.Lock()

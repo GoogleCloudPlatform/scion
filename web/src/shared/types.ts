@@ -117,6 +117,8 @@ export interface PageData {
   user?: User | undefined;
   /** Additional page-specific data */
   data?: Record<string, unknown> | undefined;
+  /** Hub profiling readiness_marks setting; present (true) only when on, for a signed-in user */
+  readinessMarks?: boolean | undefined;
 }
 
 /**
@@ -777,6 +779,8 @@ export interface Template {
   scope: string;
   scopeId?: string;
   contentHash?: string;
+  /** URL the template was imported from, when it was imported. */
+  sourceUrl?: string;
   files?: TemplateFileInfo[];
   config?: TemplateConfig;
   /** Creation and last-update times, as the hub sends them. */
