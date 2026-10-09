@@ -307,6 +307,39 @@ describe('scion-agent-config-form mutability display', () => {
   });
 });
 
+describe('scion-agent-config-form stored Unlimited', () => {
+  it('shows a stored "0" duration as Unlimited, untouched', async () => {
+    const el = await mount({ values: { max_duration: '0', max_turns: 5 } });
+    const f = field(el, 'config.max_duration');
+    const input = f.querySelector('sl-input') as HTMLInputElement;
+    expect(input.value).toBe('');
+    expect(input.getAttribute('placeholder')).toBe('Unlimited');
+    expect(input.hasAttribute('disabled')).toBe(true);
+    expect(f.querySelector('sl-checkbox')!.hasAttribute('checked')).toBe(true);
+    expect(f.querySelector('[data-testid="edited"]')).toBeNull();
+    expect(el.collectConfigPatch()).toEqual({});
+    expect(el.validate()).toEqual([]);
+  });
+
+  it('unchecking a stored Unlimited clears it (inherit)', async () => {
+    const el = await mount({ values: { max_duration: '0' } });
+    await setUnlimited(el, 'config.max_duration', false);
+    expect(el.collectConfigPatch()).toEqual({ max_duration: null });
+    const input = field(el, 'config.max_duration').querySelector('sl-input') as HTMLInputElement;
+    expect(input.hasAttribute('disabled')).toBe(false);
+  });
+
+  it('a stored count limit is shown as its number', async () => {
+    const el = await mount({ values: { max_turns: 5 } });
+    expect(
+      (field(el, 'config.max_turns').querySelector('sl-input') as HTMLInputElement).value
+    ).toBe('5');
+    expect(
+      field(el, 'config.max_turns').querySelector('sl-checkbox')!.hasAttribute('checked')
+    ).toBe(false);
+  });
+});
+
 describe('scion-agent-config-form placeholders', () => {
   it('shows an unset field blank with a source-labelled placeholder', async () => {
     const el = await mount({

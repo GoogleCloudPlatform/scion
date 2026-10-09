@@ -270,7 +270,17 @@ export class ScionAgentConfigForm extends LitElement {
   private storedText(f: AgentConfigFieldDef): string {
     const v = this.values?.[f.configKey];
     if (v === undefined || v === null || v === '' || v === 0) return '';
+    if (this.storedUnlimited(f)) return '';
     return String(v);
+  }
+
+  /**
+   * Whether the stored value of a limit is Unlimited. Only a duration can
+   * show it: "0" is stored, while a count limit of 0 is indistinguishable
+   * from unset once saved.
+   */
+  private storedUnlimited(f: AgentConfigFieldDef): boolean {
+    return f.control === 'limit-duration' && this.values?.[f.configKey] === '0';
   }
 
   private editField(key: string, patch: Partial<FieldDraft>, f: AgentConfigFieldDef): void {
@@ -391,6 +401,7 @@ export class ScionAgentConfigForm extends LitElement {
       st.disposition === 'locked' || st.disposition === 'held' || st.disposition === 'reincarnate';
     const off = this.disabled || locked;
     const text = d ? d.text : this.storedText(f);
+    const unlimited = d ? d.unlimited : this.storedUnlimited(f);
     const isLimit = f.control === 'limit-count' || f.control === 'limit-duration';
     const placeholder = d?.cleared
       ? `Cleared — ${this.placeholderText(f)}`
@@ -408,10 +419,10 @@ export class ScionAgentConfigForm extends LitElement {
           <sl-input
             id="input-${f.configKey}"
             size="small"
-            .value=${d?.unlimited ? '' : text}
-            placeholder=${d?.unlimited ? 'Unlimited' : placeholder}
+            .value=${unlimited ? '' : text}
+            placeholder=${unlimited ? 'Unlimited' : placeholder}
             inputmode=${f.control === 'limit-count' ? 'numeric' : 'text'}
-            ?disabled=${off || !!d?.unlimited}
+            ?disabled=${off || unlimited}
             @sl-input=${(e: Event) =>
               this.editField(
                 f.key,
@@ -423,14 +434,15 @@ export class ScionAgentConfigForm extends LitElement {
             ? html`<sl-checkbox
                 size="small"
                 class="unlimited"
-                ?checked=${!!d?.unlimited}
+                ?checked=${unlimited}
                 ?disabled=${off}
-                @sl-change=${(e: Event) =>
-                  this.editField(
-                    f.key,
-                    { unlimited: (e.target as HTMLInputElement).checked, cleared: false },
-                    f
-                  )}
+                @sl-change=${(e: Event) => {
+                  const checked = (e.target as HTMLInputElement).checked;
+                  // Unchecking a stored Unlimited, with nothing typed,
+                  // removes it: the field reverts to its inherited value.
+                  const removesStored = !checked && this.storedUnlimited(f) && !d?.typed;
+                  this.editField(f.key, { unlimited: checked, cleared: removesStored }, f);
+                }}
                 >Unlimited</sl-checkbox
               >`
             : nothing}

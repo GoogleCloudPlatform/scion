@@ -22,6 +22,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -607,34 +608,85 @@ func reincarnateOnlyEditWarnings(rawConfig map[string]json.RawMessage, req, stor
 // startMergeKeepsBase reports whether the broker's start-time merge of the
 // hub's inline config into the agent's persisted config
 // (config.MergeScionConfig) would keep the persisted value of the config key
-// key, given req's value for it: a string applies only when non-empty, the
-// count limits only when greater than zero, the thinking level whenever it
-// is set (0 included), a map or list only when non-empty (maps are united
-// and volumes appended, so an empty one changes nothing), and a struct
-// (resources, kubernetes, telemetry) is merged field by field, so null or
-// an empty one changes nothing. A duration of "0" (no limit) is non-empty
-// and so applies.
+// key, given req's value for it. It runs the merge itself: req's value for
+// key alone is merged into a persisted config whose every field, nested
+// ones included, holds a non-empty value, and the key is kept when the
+// merge leaves it as it was. That is done against two different populated
+// configs, so a request value that happens to equal one of them is not
+// mistaken for "kept". So it follows the merge's rules exactly: a string
+// applies only when non-empty, the count limits only when greater than
+// zero, the thinking level whenever it is set (0 included), maps are united
+// and volumes appended (so an empty one changes nothing), and resources,
+// kubernetes and telemetry are merged field by field (so an empty one, or
+// one with only empty fields, changes nothing). A duration of "0" (no
+// limit) is non-empty and so applies.
 func startMergeKeepsBase(key string, req *api.ScionConfig) bool {
 	i, ok := scionConfigFieldByJSONKey[key]
 	if !ok || req == nil {
 		return true
 	}
-	v := reflect.ValueOf(*req).Field(i)
+	override := &api.ScionConfig{}
+	reflect.ValueOf(override).Elem().Field(i).Set(reflect.ValueOf(*req).Field(i))
+	for variant := 0; variant < 2; variant++ {
+		merged := config.MergeScionConfig(populatedScionConfig(variant), override)
+		if !reflect.DeepEqual(reflect.ValueOf(*merged).Field(i).Interface(),
+			reflect.ValueOf(*populatedScionConfig(variant)).Field(i).Interface()) {
+			return false
+		}
+	}
+	return true
+}
+
+// populatedScionConfig returns an api.ScionConfig in which every json field,
+// recursively, holds a non-empty placeholder value, as the persisted config
+// startMergeKeepsBase merges into. The two variants use different values.
+func populatedScionConfig(variant int) *api.ScionConfig {
+	c := &api.ScionConfig{}
+	v := reflect.ValueOf(c).Elem()
+	for i := 0; i < v.NumField(); i++ {
+		if scionConfigJSONKey(v.Type().Field(i)) != "" {
+			fillNonEmpty(v.Field(i), variant, 0)
+		}
+	}
+	return c
+}
+
+// fillNonEmpty sets v, and everything under it, to a non-empty value that
+// depends on variant.
+func fillNonEmpty(v reflect.Value, variant, depth int) {
+	if depth > 6 || !v.CanSet() {
+		return
+	}
 	switch v.Kind() {
 	case reflect.String:
-		return v.Len() == 0
-	case reflect.Int, reflect.Int64, reflect.Int32:
-		return v.Int() <= 0
-	case reflect.Map, reflect.Slice:
-		return v.Len() == 0
+		v.SetString("\x00populated-" + string(rune('a'+variant)))
+	case reflect.Bool:
+		v.SetBool(variant == 0)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		v.SetInt(int64(7919 + variant))
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		v.SetUint(uint64(7919 + variant))
+	case reflect.Float32, reflect.Float64:
+		v.SetFloat(0.25 + 0.5*float64(variant))
 	case reflect.Pointer:
-		if v.IsNil() {
-			return true
+		p := reflect.New(v.Type().Elem())
+		fillNonEmpty(p.Elem(), variant, depth+1)
+		v.Set(p)
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			fillNonEmpty(v.Field(i), variant, depth+1)
 		}
-		if v.Elem().Kind() == reflect.Struct {
-			return v.Elem().IsZero()
-		}
-		return false
+	case reflect.Slice:
+		s := reflect.MakeSlice(v.Type(), 1, 1)
+		fillNonEmpty(s.Index(0), variant, depth+1)
+		v.Set(s)
+	case reflect.Map:
+		m := reflect.MakeMap(v.Type())
+		k := reflect.New(v.Type().Key()).Elem()
+		fillNonEmpty(k, variant, depth+1)
+		e := reflect.New(v.Type().Elem()).Elem()
+		fillNonEmpty(e, variant, depth+1)
+		m.SetMapIndex(k, e)
+		v.Set(m)
 	}
-	return false
 }

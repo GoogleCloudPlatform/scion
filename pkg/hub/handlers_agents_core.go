@@ -4272,9 +4272,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		merged := mergePresentInlineFields(old.InlineConfig, cfg, presentConfigKeys)
 		agent.AppliedConfig.InlineConfig = merged
 		warnings = append(warnings, reincarnateOnlyEditWarnings(rawFields, cfg, old.InlineConfig)...)
-		if w := removedEnvKeysWarning(old.InlineConfig, cfg, presentConfigKeys["env"], canViewAgentEnv(ctx, s, agent)); w != "" {
-			warnings = append(warnings, w)
-		}
+		warnings = append(warnings, removedEntriesWarnings(old.InlineConfig, cfg, presentConfigKeys, canViewAgentEnv(ctx, s, agent))...)
 	}
 
 	// Apply GCP identity update (only allowed for agents in 'created' phase)
@@ -4494,30 +4492,62 @@ func writePatchRefusal(w http.ResponseWriter, agent *store.Agent, ref *patchRefu
 // has, or is creating or removing, a container.
 const configPatchPhaseMessage = "Config can only be updated for agents in 'created', 'stopped', 'error' or 'suspended' phase"
 
-// removedEnvKeysWarning returns a PATCH warning naming the env keys a
-// present config.env drops from the agent's inline env: the broker's
-// start-time merge keeps env keys it already has, so a removal applies only
-// at the next reincarnation. An empty env is reported by
-// reincarnateOnlyEditWarnings instead. Auto-expose keys, which the PATCH
+// removedEntriesWarnings returns the PATCH warnings naming the entries a
+// present, non-empty config key drops from the agent's inline config where
+// the broker's start-time merge would keep them: it unites env and
+// mcp_servers with the persisted maps and appends volumes to the persisted
+// list, so a removal applies only at the next reincarnation. An emptied key
+// is reported by reincarnateOnlyEditWarnings instead. present holds the
+// request's lower-cased config keys. Auto-expose env keys, which the PATCH
 // treats as untouched when absent, and TZ, which config.env never sets, are
-// not counted. canViewEnv gates it: a caller who cannot see the agent's env
-// must not learn its key names.
-func removedEnvKeysWarning(old, req *api.ScionConfig, envPresent, canViewEnv bool) string {
-	if !envPresent || !canViewEnv || old == nil || req == nil || len(req.Env) == 0 {
-		return ""
+// not counted. Volumes are named by target. canViewEnv gates the env
+// warning: a caller who cannot see the agent's env must not learn its key
+// names.
+func removedEntriesWarnings(old, req *api.ScionConfig, present map[string]bool, canViewEnv bool) []string {
+	if old == nil || req == nil {
+		return nil
 	}
-	var removed []string
-	for k := range old.Env {
-		if _, kept := req.Env[k]; kept || autoExposeEnvKeys[k] || k == agentTZEnvKey {
-			continue
+	var out []string
+	warn := func(key string, removed []string, what string) {
+		if len(removed) == 0 {
+			return
 		}
-		removed = append(removed, k)
+		sort.Strings(removed)
+		out = append(out, "config."+key+": removed "+strings.Join(removed, ", ")+" now; the agent keeps those "+what+" until the next reincarnation (a plain start does not remove them)")
 	}
-	if len(removed) == 0 {
-		return ""
+	if present["env"] && canViewEnv && len(req.Env) > 0 {
+		var removed []string
+		for k := range old.Env {
+			if _, kept := req.Env[k]; kept || autoExposeEnvKeys[k] || k == agentTZEnvKey {
+				continue
+			}
+			removed = append(removed, k)
+		}
+		warn("env", removed, "variables")
 	}
-	sort.Strings(removed)
-	return "config.env: removed " + strings.Join(removed, ", ") + " now; the agent keeps those variables until the next reincarnation (a plain start does not remove an env variable)"
+	if present["mcp_servers"] && len(req.MCPServers) > 0 {
+		var removed []string
+		for k := range old.MCPServers {
+			if _, kept := req.MCPServers[k]; !kept {
+				removed = append(removed, k)
+			}
+		}
+		warn("mcp_servers", removed, "MCP servers")
+	}
+	if present["volumes"] && len(req.Volumes) > 0 {
+		targets := make(map[string]bool, len(req.Volumes))
+		for _, v := range req.Volumes {
+			targets[v.Target] = true
+		}
+		var removed []string
+		for _, v := range old.Volumes {
+			if !targets[v.Target] {
+				removed = append(removed, v.Target)
+			}
+		}
+		warn("volumes", removed, "volumes")
+	}
+	return out
 }
 
 // configPatchPhase reports whether an agent PATCH may write config in

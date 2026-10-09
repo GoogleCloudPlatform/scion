@@ -717,3 +717,33 @@ func TestAgentConfigPatch_NoWarningsForUnchangedValues(t *testing.T) {
 	require.Equal(t, http.StatusOK, code, body)
 	assert.Empty(t, resp.Warnings)
 }
+
+// TestAgentConfigPatch_RemovedEntriesWarnings: dropping an MCP server or a
+// volume from a non-empty list warns, like an env key, because the start
+// merge unites MCP servers and appends volumes; the warning names the
+// removed entries (volumes by target).
+func TestAgentConfigPatch_RemovedEntriesWarnings(t *testing.T) {
+	disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseStopped)
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{
+			Harness: "claude",
+			MCPServers: map[string]api.MCPServerConfig{
+				"docs": {Transport: "stdio", Command: "docs"}, "search": {Transport: "stdio", Command: "search"},
+			},
+			Volumes: []api.VolumeMount{{Source: "/h/a", Target: "/a"}, {Source: "/h/b", Target: "/b"}},
+		}
+	})
+
+	resp, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{
+		"config": map[string]interface{}{
+			"mcp_servers": map[string]interface{}{"docs": map[string]string{"transport": "stdio", "command": "docs"}},
+			"volumes":     []map[string]string{{"source": "/h/a", "target": "/a"}},
+		},
+	})
+	require.Equal(t, http.StatusOK, code, body)
+	require.Len(t, resp.Warnings, 2, "%v", resp.Warnings)
+	assert.Contains(t, resp.Warnings[0], "config.mcp_servers: removed search now; the agent keeps those MCP servers until the next reincarnation")
+	assert.Contains(t, resp.Warnings[1], "config.volumes: removed /b now; the agent keeps those volumes until the next reincarnation")
+}

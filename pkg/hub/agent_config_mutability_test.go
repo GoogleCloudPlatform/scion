@@ -501,11 +501,12 @@ func TestStartMergeKeepsBase_MatchesBrokerMerge(t *testing.T) {
 		MaxTurns: 9, MaxModelCalls: 9, MaxDuration: "1h", ThinkingLevel: &tl,
 		Env: map[string]string{"A": "1"}, Volumes: []api.VolumeMount{{Source: "/a", Target: "/b"}},
 		CommandArgs: []string{"--x"}, MCPServers: map[string]api.MCPServerConfig{"m": {Transport: "stdio"}},
-		Resources: &api.ResourceSpec{Disk: "10Gi"}, Kubernetes: &api.KubernetesConfig{Namespace: "ns"},
-		Telemetry: &api.TelemetryConfig{Enabled: &enabled},
+		Resources:  &api.ResourceSpec{Disk: "10Gi", Requests: api.ResourceList{CPU: "1"}},
+		Kubernetes: &api.KubernetesConfig{Namespace: "ns", NodeSelector: map[string]string{"pool": "a"}},
+		Telemetry:  &api.TelemetryConfig{Enabled: &enabled, Cloud: &api.TelemetryCloudConfig{Endpoint: "e"}},
 	}
 	zero := 0
-	for _, tc := range []struct {
+	cases := []struct {
 		name string
 		key  string
 		req  api.ScionConfig
@@ -530,7 +531,31 @@ func TestStartMergeKeepsBase_MatchesBrokerMerge(t *testing.T) {
 		{name: "kubernetes empty", key: "kubernetes", req: api.ScionConfig{Kubernetes: &api.KubernetesConfig{}}, kept: true},
 		{name: "telemetry null", key: "telemetry", req: api.ScionConfig{}, kept: true},
 		{name: "telemetry disabled", key: "telemetry", req: api.ScionConfig{Telemetry: &api.TelemetryConfig{Enabled: &disabled}}, kept: false},
-	} {
+		{name: "telemetry with only an empty cloud block", key: "telemetry", req: api.ScionConfig{Telemetry: &api.TelemetryConfig{Cloud: &api.TelemetryCloudConfig{}}}, kept: true},
+		{name: "kubernetes with only an empty node selector", key: "kubernetes", req: api.ScionConfig{Kubernetes: &api.KubernetesConfig{NodeSelector: map[string]string{}}}, kept: true},
+		{name: "kubernetes namespace set", key: "kubernetes", req: api.ScionConfig{Kubernetes: &api.KubernetesConfig{Namespace: "other"}}, kept: false},
+		{name: "resources with only empty requests", key: "resources", req: api.ScionConfig{Resources: &api.ResourceSpec{Requests: api.ResourceList{}}}, kept: true},
+		{name: "resources disk set", key: "resources", req: api.ScionConfig{Resources: &api.ResourceSpec{Disk: "20Gi"}}, kept: false},
+		{name: "auth_selectedType cleared", key: "auth_selectedType", req: api.ScionConfig{}, kept: true},
+		{name: "task cleared", key: "task", req: api.ScionConfig{}, kept: true},
+		{name: "task_flag cleared", key: "task_flag", req: api.ScionConfig{}, kept: true},
+		{name: "env with a new key", key: "env", req: api.ScionConfig{Env: map[string]string{"B": "2"}}, kept: false},
+		{name: "volumes with an entry", key: "volumes", req: api.ScionConfig{Volumes: []api.VolumeMount{{Source: "/c", Target: "/d"}}}, kept: false},
+		{name: "mcp_servers with an entry", key: "mcp_servers", req: api.ScionConfig{MCPServers: map[string]api.MCPServerConfig{"n": {Transport: "http"}}}, kept: false},
+		{name: "command_args set", key: "command_args", req: api.ScionConfig{CommandArgs: []string{"--y"}}, kept: false},
+	}
+	covered := map[string]bool{}
+	for _, tc := range cases {
+		covered[tc.key] = true
+	}
+	// Every T1 config key needs at least one case, so a new one cannot get
+	// the cleared warning wrong unnoticed.
+	for _, f := range agentEditFields {
+		if k, ok := strings.CutPrefix(f.Key, agentConfigKeyPrefix); ok && f.Tier == EditTierContainer {
+			assert.True(t, covered[k], "T1 key %s has no case in this test", f.Key)
+		}
+	}
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			req := tc.req
 			merged := config.MergeScionConfig(base, &req)
@@ -557,4 +582,53 @@ func TestDropFixedConfigKeys(t *testing.T) {
 	assert.Len(t, raw, 2)
 	assert.Contains(t, raw, "max_turns")
 	assert.Contains(t, raw, "bogus")
+}
+
+func TestRemovedEntriesWarnings(t *testing.T) {
+	old := &api.ScionConfig{
+		Env:        map[string]string{"KEEP": "1", "GONE": "2", "SCION_AUTO_EXPOSE_PORTS": "true", "TZ": "UTC"},
+		MCPServers: map[string]api.MCPServerConfig{"a": {}, "b": {}},
+		Volumes:    []api.VolumeMount{{Target: "/x"}, {Target: "/y"}},
+	}
+	req := &api.ScionConfig{
+		Env:        map[string]string{"KEEP": "1"},
+		MCPServers: map[string]api.MCPServerConfig{"a": {}},
+		Volumes:    []api.VolumeMount{{Target: "/y"}},
+	}
+	all := map[string]bool{"env": true, "mcp_servers": true, "volumes": true}
+
+	got := removedEntriesWarnings(old, req, all, true)
+	require.Len(t, got, 3)
+	assert.Contains(t, got[0], "config.env: removed GONE now")
+	assert.Contains(t, got[1], "config.mcp_servers: removed b now")
+	assert.Contains(t, got[2], "config.volumes: removed /x now")
+
+	assert.Len(t, removedEntriesWarnings(old, req, all, false), 2, "env key names are hidden from a caller who cannot see the env")
+	assert.Empty(t, removedEntriesWarnings(old, req, map[string]bool{}, true), "keys the request does not name are not removals")
+	emptied := &api.ScionConfig{Env: map[string]string{}, MCPServers: map[string]api.MCPServerConfig{}, Volumes: []api.VolumeMount{}}
+	assert.Empty(t, removedEntriesWarnings(old, emptied, all, true), "an emptied key is the cleared warning's case")
+	assert.Empty(t, removedEntriesWarnings(nil, req, all, true))
+}
+
+// TestStartMergeKeepsBase_ValuesThatApply: a value the start merge applies is
+// never reported as kept, including one equal to a placeholder of the
+// populated config the check merges into (it merges into two different
+// ones for that reason).
+func TestStartMergeKeepsBase_ValuesThatApply(t *testing.T) {
+	on := true
+	turns := 7919
+	for _, tc := range []struct {
+		key string
+		req api.ScionConfig
+	}{
+		{key: "telemetry", req: api.ScionConfig{Telemetry: &api.TelemetryConfig{Enabled: &on}}},
+		{key: "max_turns", req: api.ScionConfig{MaxTurns: turns}},
+		{key: "thinking_level", req: api.ScionConfig{ThinkingLevel: &turns}},
+		{key: "max_duration", req: api.ScionConfig{MaxDuration: "0"}},
+		{key: "model", req: api.ScionConfig{Model: "\x00populated-a"}},
+	} {
+		assert.False(t, startMergeKeepsBase(tc.key, &tc.req), "%s %+v applies at the next start", tc.key, tc.req)
+	}
+	assert.True(t, startMergeKeepsBase("not_a_key", &api.ScionConfig{}))
+	assert.True(t, startMergeKeepsBase("model", nil))
 }
