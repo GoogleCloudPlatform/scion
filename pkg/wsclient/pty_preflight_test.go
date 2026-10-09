@@ -19,9 +19,11 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
@@ -217,4 +219,43 @@ func TestPreflight_ClientPolicy(t *testing.T) {
 	assert.True(t, tr.DisableKeepAlives, "no idle connection left behind")
 	require.NotNil(t, hc.CheckRedirect)
 	assert.ErrorIs(t, hc.CheckRedirect(nil, nil), http.ErrUseLastResponse)
+}
+
+// TestPreflight_NonJSONBodyIsSummarised: an HTML or other non-JSON error
+// page is cut to its first line, without control characters, and capped.
+func TestPreflight_NonJSONBodyIsSummarised(t *testing.T) {
+	long := strings.Repeat("x", 500)
+	body := "\n\n  <html>\x1b[31m" + long + "</html>  \nsecond line\n"
+	h := newPreflightHub(t, http.StatusBadGateway, body)
+	c := NewPTYClient(PTYClientConfig{Endpoint: h.srv.URL, Slug: "a1"})
+	err := c.Preflight(context.Background())
+	var pe *PTYPreflightError
+	require.True(t, errors.As(err, &pe), "got %T: %v", err, err)
+	assert.True(t, strings.HasPrefix(pe.Message, "<html>[31m"), "control characters dropped: %q", pe.Message)
+	assert.LessOrEqual(t, len(pe.Message), maxPlainBodySummary)
+	assert.NotContains(t, pe.Message, "second line")
+	assert.NotContains(t, pe.Message, "\x1b")
+}
+
+func TestPlainBodySummary_UTF8Boundary(t *testing.T) {
+	got := plainBodySummary([]byte(strings.Repeat("é", 150))) // 300 bytes
+	assert.LessOrEqual(t, len(got), maxPlainBodySummary)
+	assert.True(t, utf8.ValidString(got))
+}
+
+// TestAttachToAgent_PreflightTransportFailure: when the Hub cannot be
+// reached at all, the error is a transport error (not a
+// *PTYPreflightError) and no WebSocket dial follows.
+func TestAttachToAgent_PreflightTransportFailure(t *testing.T) {
+	h := newPreflightHub(t, http.StatusOK, `{}`)
+	endpoint := h.srv.URL
+	h.srv.Close()
+
+	err := AttachToAgent(context.Background(), endpoint, "tok", "a1")
+	require.Error(t, err)
+	var pe *PTYPreflightError
+	assert.False(t, errors.As(err, &pe), "a transport failure is not a Hub refusal")
+	assert.Contains(t, err.Error(), "attach preflight failed")
+	assert.EqualValues(t, 0, h.upgrades.Load())
+	assert.EqualValues(t, 0, h.gets.Load())
 }

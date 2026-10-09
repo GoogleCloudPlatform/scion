@@ -33,8 +33,9 @@ import (
 // (pkg/wsprotocol.ClosePTYAttachUnsupported): a broker that refuses attach
 // after the WebSocket has already been upgraded (the control-channel gate's
 // StreamClose, passed through unchanged by the Hub) must surface as the
-// same explicit, actionable error attachUnsupportedErr gives pre-dial in
-// cmd/attach.go — not the raw "websocket: close 4501 (unknown): ..." a
+// same explicit, actionable error as the other attach-unsupported paths
+// (AttachUnsupportedMessage; before dialing, the Hub preflight decides) —
+// not the raw "websocket: close 4501 (unknown): ..." a
 // caller would otherwise see — and Run() must return a non-nil error so the
 // CLI exits non-zero.
 func TestReadFromWebSocket_AttachUnsupportedCloseCode_MapsToExplicitError(t *testing.T) {

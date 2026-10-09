@@ -23,6 +23,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
@@ -138,9 +140,42 @@ func (c *PTYClient) Preflight(ctx context.Context) error {
 		perr.Reason = parsed.Error.Details.Reason
 		perr.Message = parsed.Error.Message
 	} else {
-		perr.Message = strings.TrimSpace(string(body))
+		perr.Message = plainBodySummary(body)
 	}
 	return perr
+}
+
+// maxPlainBodySummary bounds how much of a non-JSON error body (for
+// example an HTML error page from a load balancer or proxy) reaches the
+// error message.
+const maxPlainBodySummary = 200
+
+// plainBodySummary returns the first non-empty line of a non-JSON body,
+// with control characters removed and cut to maxPlainBodySummary bytes
+// (on a UTF-8 boundary).
+func plainBodySummary(body []byte) string {
+	text := strings.ToValidUTF8(string(body), "")
+	line := ""
+	for _, l := range strings.Split(text, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			line = l
+			break
+		}
+	}
+	line = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, line)
+	if len(line) > maxPlainBodySummary {
+		cut := maxPlainBodySummary
+		for cut > 0 && !utf8.RuneStart(line[cut]) {
+			cut--
+		}
+		line = line[:cut]
+	}
+	return line
 }
 
 // httpClient returns the client used for the preflight. Like the
@@ -149,9 +184,6 @@ func (c *PTYClient) Preflight(ctx context.Context) error {
 // request to a login page) is returned as a non-200 refusal rather than
 // followed to a page that answers 200.
 func (c *PTYClient) httpClient() *http.Client {
-	if c.preflightClient != nil {
-		return c.preflightClient
-	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil // websocket.Dialer{} in dial has no Proxy either
 	// One request per client: do not leave an idle connection (and its

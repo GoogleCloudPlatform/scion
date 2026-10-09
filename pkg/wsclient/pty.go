@@ -116,10 +116,6 @@ type PTYClient struct {
 	// swapping os.Stdin back out from under it would be a data race, not
 	// just a functional risk.
 	stdin io.Reader
-
-	// preflightClient, if set, is used for Preflight instead of
-	// http.DefaultClient.
-	preflightClient *http.Client
 }
 
 // NewPTYClient creates a new PTY client.

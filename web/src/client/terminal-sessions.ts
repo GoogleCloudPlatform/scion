@@ -499,10 +499,14 @@ class Session implements TerminalSession {
       // it already disarms itself (autoArmed = false) and re-arms only via
       // noteAgentAvailable(), so it must not also set reconnectFailed, which
       // would block that re-arm until a manual click or the 2-min reset.
+      // Likewise a preflight that says there is no path to the terminal
+      // ('attach-unsupported') is a final answer, shown with the hub's
+      // message, not a failed reconnect.
       if (
         !controller.signal.aborted &&
         this.state.generation === generation &&
         wasEverConnected &&
+        this.state.disconnectReason !== 'attach-unsupported' &&
         (this.state.connection === 'disconnected' ||
           (this.state.connection === 'unavailable' &&
             !AGENT_UNAVAILABLE_REASONS.has(this.state.disconnectReason)))
