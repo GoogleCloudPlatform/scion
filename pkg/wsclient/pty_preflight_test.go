@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
@@ -92,13 +93,19 @@ func TestPreflight_Refusals(t *testing.T) {
 	}{
 		{name: "no path", status: 503, body: noPathBody, wantNoPath: true,
 			wantCode: wsprotocol.ErrCodeRuntimeAttachUnsupported, wantReason: "agent_pty_unavailable",
-			wantText: "status 503 (runtime_attach_unsupported, reason agent_pty_unavailable): The agent's runtime does not support attach"},
+			wantText: "(status 503, runtime_attach_unsupported, reason agent_pty_unavailable): The agent's runtime does not support attach"},
 		{name: "broker not connected", status: 503,
 			body:     `{"error":{"code":"runtime_broker_unavailable","message":"Runtime broker not connected","details":{"reason":"broker_not_connected","path":"none"}}}`,
-			wantCode: "runtime_broker_unavailable", wantReason: "broker_not_connected", wantText: "status 503"},
+			wantCode: "runtime_broker_unavailable", wantReason: "broker_not_connected", wantText: "status 503, runtime_broker_unavailable"},
+		{name: "unauthorized", status: 401, body: `{"error":{"code":"unauthorized","message":"Authentication required"}}`,
+			wantCode: "unauthorized", wantText: "(status 401, unauthorized): Authentication required"},
+		{name: "not found", status: 404, body: `{"error":{"code":"not_found","message":"Agent not found"}}`,
+			wantCode: "not_found", wantText: "(status 404, not_found): Agent not found"},
+		{name: "no runtime broker", status: 422, body: `{"error":{"code":"no_runtime_broker","message":"Agent has no runtime broker"}}`,
+			wantCode: "no_runtime_broker", wantText: "(status 422, no_runtime_broker)"},
 		{name: "forbidden", status: 403, body: `{"error":{"code":"forbidden","message":"no"}}`,
-			wantCode: "forbidden", wantText: "status 403 (forbidden): no"},
-		{name: "plain text body", status: 502, body: "bad gateway\n", wantText: "status 502: bad gateway"},
+			wantCode: "forbidden", wantText: "(status 403, forbidden): no"},
+		{name: "plain text body", status: 502, body: "bad gateway\n", wantText: "(status 502): bad gateway"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -136,4 +143,77 @@ func TestAttachToAgent_PreflightOKDials(t *testing.T) {
 	require.NoError(t, c.Connect(context.Background()))
 	t.Cleanup(func() { _ = c.Close() })
 	assert.EqualValues(t, 1, h.upgrades.Load())
+}
+
+// TestPreflight_KeepsEndpointPathPrefix: a Hub served under a path prefix
+// gets the preflight under that prefix, as the WebSocket dial does.
+func TestPreflight_KeepsEndpointPathPrefix(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	c := NewPTYClient(PTYClientConfig{Endpoint: srv.URL + "/scion/", Slug: "a1"})
+	require.NoError(t, c.Preflight(context.Background()))
+	assert.Equal(t, "/scion/api/v1/agents/a1/pty", gotPath)
+}
+
+// TestPreflight_SendsTransportHeaders: the preflight carries the same
+// transport (IAP) credentials as the WebSocket dial.
+func TestPreflight_SendsTransportHeaders(t *testing.T) {
+	var gotAuth, gotProxy string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotProxy = r.Header.Get("Proxy-Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	c := NewPTYClient(PTYClientConfig{
+		Endpoint:        srv.URL,
+		Token:           "scion-user-token",
+		Slug:            "a1",
+		TransportSource: &fakeTokenSource{token: "oidc-transport-token"},
+		TransportMode:   transportauth.HeaderProxyAuthorization,
+	})
+	require.NoError(t, c.Preflight(context.Background()))
+	assert.Equal(t, "Bearer scion-user-token", gotAuth)
+	assert.Equal(t, "Bearer oidc-transport-token", gotProxy)
+}
+
+// TestPreflight_RedirectIsNotFollowed: a redirect (for example an auth
+// proxy's login page) is not followed and is not a success.
+func TestPreflight_RedirectIsNotFollowed(t *testing.T) {
+	var loginHits atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
+		loginHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/v1/agents/a1/pty", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/login", http.StatusFound)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c := NewPTYClient(PTYClientConfig{Endpoint: srv.URL, Slug: "a1"})
+	err := c.Preflight(context.Background())
+	var pe *PTYPreflightError
+	require.True(t, errors.As(err, &pe), "got %T: %v", err, err)
+	assert.Equal(t, http.StatusFound, pe.Status)
+	assert.EqualValues(t, 0, loginHits.Load(), "the redirect target is never requested")
+}
+
+// TestPreflight_ClientPolicy: like the WebSocket dialer, the preflight
+// client uses no proxy from the environment. (Go never proxies loopback
+// requests, so this checks the transport directly rather than through a
+// local proxy server.)
+func TestPreflight_ClientPolicy(t *testing.T) {
+	c := NewPTYClient(PTYClientConfig{Endpoint: "http://hub.invalid", Slug: "a1"})
+	hc := c.httpClient()
+	tr, ok := hc.Transport.(*http.Transport)
+	require.True(t, ok)
+	assert.Nil(t, tr.Proxy, "no environment proxy, matching the WebSocket dialer")
+	require.NotNil(t, hc.CheckRedirect)
+	assert.ErrorIs(t, hc.CheckRedirect(nil, nil), http.ErrUseLastResponse)
 }

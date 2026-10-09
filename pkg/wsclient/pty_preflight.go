@@ -46,18 +46,24 @@ type PTYPreflightError struct {
 }
 
 func (e *PTYPreflightError) Error() string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "attach refused by the Hub with status %d", e.Status)
-	switch {
-	case e.Code != "" && e.Reason != "":
-		fmt.Fprintf(&b, " (%s, reason %s)", e.Code, e.Reason)
-	case e.Code != "":
-		fmt.Fprintf(&b, " (%s)", e.Code)
-	}
+	text := "attach refused by the Hub (" + e.Detail() + ")"
 	if e.Message != "" {
-		b.WriteString(": " + e.Message)
+		text += ": " + e.Message
 	}
-	return b.String()
+	return text
+}
+
+// Detail formats the status, code and reason, skipping empty parts:
+// "status 503, runtime_attach_unsupported, reason agent_pty_unavailable".
+func (e *PTYPreflightError) Detail() string {
+	parts := []string{fmt.Sprintf("status %d", e.Status)}
+	if e.Code != "" {
+		parts = append(parts, e.Code)
+	}
+	if e.Reason != "" {
+		parts = append(parts, "reason "+e.Reason)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // NoPath reports whether the Hub found no way to attach a terminal to the
@@ -137,10 +143,21 @@ func (c *PTYClient) Preflight(ctx context.Context) error {
 	return perr
 }
 
-// httpClient returns the client used for the preflight.
+// httpClient returns the client used for the preflight. Like the
+// WebSocket dialer it uses no proxy from the environment, and it does not
+// follow redirects: a redirect (for example an auth proxy sending the
+// request to a login page) is returned as a non-200 refusal rather than
+// followed to a page that answers 200.
 func (c *PTYClient) httpClient() *http.Client {
 	if c.preflightClient != nil {
 		return c.preflightClient
 	}
-	return http.DefaultClient
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil // websocket.Dialer{} in dial has no Proxy either
+	return &http.Client{
+		Transport: transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }

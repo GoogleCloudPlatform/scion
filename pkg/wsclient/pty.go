@@ -46,7 +46,7 @@ const (
 	initialDataTimeout = 30 * time.Second
 )
 
-// attachUnsupportedMessage is the one fixed, actionable error text a caller
+// AttachUnsupportedMessage is the one fixed, actionable error text a caller
 // sees when the target runtime has no exec/attach/TTY primitive at all,
 // regardless of which of the two points where the broker can learn that
 // rejects the attempt: the pre-upgrade HTTP 501/runtime_attach_unsupported
@@ -54,7 +54,7 @@ const (
 // 4501/attach_unsupported close code readFromWebSocket checks for. Kept as
 // one constant so the two call sites can never drift into two different
 // wordings for the same outcome.
-const attachUnsupportedMessage = "attach is not supported for this agent's runtime"
+const AttachUnsupportedMessage = "attach is not supported for this agent's runtime"
 
 // PTYCloseError reports that the server ended a PTY session with a close
 // code other than a clean detach (1000). Callers classify Code with
@@ -177,7 +177,7 @@ func (c *PTYClient) Connect(ctx context.Context) error {
 		if resp != nil && resp.StatusCode >= 400 {
 			code, detail := parseAttachFailureBody(resp, err)
 			if resp.StatusCode == http.StatusNotImplemented && code == wsprotocol.ErrCodeRuntimeAttachUnsupported {
-				return errors.New(attachUnsupportedMessage)
+				return errors.New(AttachUnsupportedMessage)
 			}
 			return fmt.Errorf("connection failed with status %d: %s", resp.StatusCode, detail)
 		}
@@ -515,7 +515,7 @@ func (c *PTYClient) readFromWebSocket() error {
 					return nil
 				}
 				if closeErr.Code == wsprotocol.ClosePTYAttachUnsupported {
-					return errors.New(attachUnsupportedMessage)
+					return errors.New(AttachUnsupportedMessage)
 				}
 				return &PTYCloseError{Code: closeErr.Code, Reason: closeErr.Text}
 			}

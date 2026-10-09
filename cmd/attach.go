@@ -371,29 +371,50 @@ func attachHubSession(ctx context.Context, hubCtx *HubContext, target hubAttachT
 	return nil
 }
 
-// describeAttachPreflight turns a 503 *wsclient.PTYPreflightError into an
-// actionable message for agentName: the Hub's reason, and what to do next.
-// The CLI does not retry either case. Any other error is returned
-// unchanged (a 401/403 keeps its status text for attachErrorWithUATHint).
+// describeAttachPreflight turns a *wsclient.PTYPreflightError into an
+// actionable message for agentName: what the Hub said and what to do next.
+// 401, 403 and 404 reuse the messages for the matching close codes (4401,
+// 4403, 4404); 422 means the agent has no runtime broker; 503 is the Hub's
+// reason (final when there is no path to the terminal, otherwise
+// presented as temporary). The CLI retries none of them. The text keeps
+// the "status N" detail, which attachErrorWithUATHint looks for. Any
+// other error, or another status, is returned unchanged.
 func describeAttachPreflight(err error, agentName string) error {
 	var pe *wsclient.PTYPreflightError
-	if !errors.As(err, &pe) || pe.Status != http.StatusServiceUnavailable {
+	if !errors.As(err, &pe) {
 		return err
 	}
-	summary := pe.Message
-	if summary == "" {
-		summary = "the Hub cannot attach to this agent right now"
-	}
-	detail := pe.Code
-	if pe.Reason != "" {
-		detail += ", reason " + pe.Reason
-	}
-	hint := fmt.Sprintf("This may be temporary; try again with: scion attach %s", agentName)
-	if pe.NoPath() {
-		hint = "The agent's runtime has no attach, and the agent has no session that serves a terminal.\nCheck the agent with: scion list"
+	var msg ptyCloseMessage
+	switch pe.Status {
+	case http.StatusUnauthorized:
+		msg = ptyCloseMessages[wsprotocol.ClosePTYAuthRequired]
+	case http.StatusForbidden:
+		msg = ptyCloseMessages[wsprotocol.ClosePTYForbidden]
+	case http.StatusNotFound:
+		msg = ptyCloseMessages[wsprotocol.ClosePTYAgentNotFound]
+	case http.StatusUnprocessableEntity:
+		msg = ptyCloseMessage{
+			Summary: "the agent has no runtime broker",
+			Hint:    "Check the agent with: scion list",
+		}
+	case http.StatusServiceUnavailable:
+		if pe.NoPath() {
+			msg = ptyCloseMessage{
+				Summary: wsclient.AttachUnsupportedMessage + ", and the agent has no session that serves a terminal",
+				Hint:    ptyCloseTerminalHint,
+			}
+		} else {
+			msg = ptyCloseMessage{Summary: pe.Message, Hint: ptyCloseRetryHint}
+			if msg.Summary == "" {
+				msg.Summary = "the Hub cannot attach to this agent right now"
+			}
+		}
+	default:
+		return err
 	}
 	return &attachPreflightError{
-		msg: fmt.Sprintf("cannot attach to agent '%s': %s (%d %s)\n\n%s", agentName, summary, pe.Status, detail, hint),
+		msg: fmt.Sprintf("cannot attach to agent '%s': %s (%s)\n\n%s",
+			agentName, msg.Summary, pe.Detail(), strings.ReplaceAll(msg.Hint, "{agent}", agentName)),
 		err: err,
 	}
 }

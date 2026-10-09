@@ -30,6 +30,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
@@ -418,36 +419,71 @@ func TestAttachViaHub_NoPath_ExitsWithReasonWithoutRetry(t *testing.T) {
 
 	err = attachViaHub(&HubContext{Client: client, Endpoint: h.srv.URL, ProjectID: "proj-no-path"}, "no-path")
 	assertNoPathRefusal(t, err, "no-path")
-	assert.Contains(t, err.Error(), "The agent's runtime does not support attach")
+	assert.Contains(t, err.Error(), wsclient.AttachUnsupportedMessage)
 	assert.EqualValues(t, 1, h.preflights.Load(), "one preflight, no retry")
 	assert.EqualValues(t, 0, h.upgrades.Load(), "no WebSocket dial")
 }
 
 // TestDescribeAttachPreflight covers the CLI's wording for preflight
-// refusals: a no-path 503 is final, another 503 is presented as temporary,
-// and other statuses pass through unchanged.
+// refusals: 401, 403 and 404 reuse the close-code messages, 422 says the
+// agent has no runtime broker, a no-path 503 is final, another 503 is
+// presented as temporary, and the "status N" detail is always kept.
 func TestDescribeAttachPreflight(t *testing.T) {
-	t.Run("other 503", func(t *testing.T) {
-		in := &wsclient.PTYPreflightError{Status: 503, Code: "runtime_broker_unavailable",
-			Reason: "broker_not_connected", Message: "Runtime broker not connected"}
-		err := describeAttachPreflight(in, "a1")
-		assert.Equal(t, "cannot attach to agent 'a1': Runtime broker not connected "+
-			"(503 runtime_broker_unavailable, reason broker_not_connected)\n\n"+
-			"This may be temporary; try again with: scion attach a1", err.Error())
-		assert.ErrorIs(t, err, in)
-	})
-	t.Run("503 without a body", func(t *testing.T) {
-		err := describeAttachPreflight(&wsclient.PTYPreflightError{Status: 503}, "a1")
-		assert.Contains(t, err.Error(), "the Hub cannot attach to this agent right now")
-	})
-	t.Run("403 unchanged", func(t *testing.T) {
-		in := &wsclient.PTYPreflightError{Status: 403, Code: "forbidden", Message: "no"}
+	tests := []struct {
+		name     string
+		in       *wsclient.PTYPreflightError
+		contains []string
+		excludes []string
+	}{
+		{name: "401", in: &wsclient.PTYPreflightError{Status: 401, Code: "unauthorized", Message: "Authentication required"},
+			contains: []string{"cannot attach to agent 'a1': your Hub credentials are no longer valid (status 401, unauthorized)", "scion hub auth login"}},
+		{name: "403", in: &wsclient.PTYPreflightError{Status: 403, Code: "forbidden", Message: "no"},
+			contains: []string{"permission to attach to this agent (status 403, forbidden)", "attach access to agent 'a1'"}},
+		{name: "404", in: &wsclient.PTYPreflightError{Status: 404, Code: "not_found", Message: "Agent not found"},
+			contains: []string{"cannot find the agent or its container (status 404, not_found)", "scion list"}},
+		{name: "422", in: &wsclient.PTYPreflightError{Status: 422, Code: "no_runtime_broker", Message: "Agent has no runtime broker"},
+			contains: []string{"the agent has no runtime broker (status 422, no_runtime_broker)", "Check the agent with: scion list"}},
+		{name: "no path", in: &wsclient.PTYPreflightError{Status: 503, Code: wsprotocol.ErrCodeRuntimeAttachUnsupported, Reason: "agent_pty_unavailable"},
+			contains: []string{wsclient.AttachUnsupportedMessage + ", and the agent has no session that serves a terminal",
+				"(status 503, runtime_attach_unsupported, reason agent_pty_unavailable)", "Check the agent with: scion list"},
+			excludes: []string{"try again"}},
+		{name: "other 503", in: &wsclient.PTYPreflightError{Status: 503, Code: "runtime_broker_unavailable",
+			Reason: "broker_not_connected", Message: "Runtime broker not connected"},
+			contains: []string{"Runtime broker not connected (status 503, runtime_broker_unavailable, reason broker_not_connected)",
+				"try again with: scion attach a1"}},
+		{name: "503 without a body", in: &wsclient.PTYPreflightError{Status: 503},
+			contains: []string{"the Hub cannot attach to this agent right now (status 503)"},
+			excludes: []string{"(503 )", "status 503, )"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := describeAttachPreflight(tc.in, "a1")
+			for _, want := range tc.contains {
+				assert.Contains(t, err.Error(), want)
+			}
+			for _, not := range tc.excludes {
+				assert.NotContains(t, err.Error(), not)
+			}
+			assert.NotContains(t, err.Error(), "{agent}")
+			assert.ErrorIs(t, err, tc.in)
+		})
+	}
+	t.Run("other statuses unchanged", func(t *testing.T) {
+		in := &wsclient.PTYPreflightError{Status: 502, Message: "bad gateway"}
 		assert.Same(t, error(in), describeAttachPreflight(in, "a1"))
 	})
 	t.Run("other errors unchanged", func(t *testing.T) {
 		in := errors.New("x")
 		assert.Same(t, in, describeAttachPreflight(in, "a1"))
 	})
+}
+
+// TestDescribeAttachPreflight_403KeepsUATHint: the described 403 still
+// carries "status 403", so a user access token gets the scope hint.
+func TestDescribeAttachPreflight_403KeepsUATHint(t *testing.T) {
+	in := &wsclient.PTYPreflightError{Status: 403, Code: "forbidden", Message: "no"}
+	err := attachErrorWithUATHint(describeAttachPreflight(in, "a1"), store.UATPrefix+"abc")
+	assert.Contains(t, err.Error(), "may lack agent:attach")
 }
 
 func TestAttachHubSession_CleanDetachReturnsNil(t *testing.T) {

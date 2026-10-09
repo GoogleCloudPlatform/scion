@@ -50,7 +50,7 @@ export type TerminalDisconnectReason =
   | 'agent-stopped' // SSE reported agent stopped (phase change)
   | 'agent-deleted' // SSE reported agent deleted
   | 'server-error' // 5xx or unclassified HTTP error
-  | 'attach-unsupported' // Preflight 503 runtime_attach_unsupported: no path to the terminal
+  | 'attach-unsupported' // Preflight 503 runtime_attach_unsupported (no path to the terminal)
   | 'connect-error' // WebSocket onerror before open
   | null; // No disconnect (connected, loading, or clean close)
 
@@ -215,8 +215,7 @@ const FIRST_FRAME_TIMEOUT_MS = 10_000;
  * a 4503 close (a planned relay restart or drain). Many panes are closed
  * together in that case; a delay drawn uniformly from [0, this] spreads
  * their redials instead of sending them all at once. Matches the relay's
- * default GoAway.reconnect_after_ms and the CLI's
- * wsprotocol.PTYPromptReconnectMaxDelay.
+ * default GoAway.reconnect_after_ms.
  */
 export const PROMPT_RECONNECT_MAX_DELAY_MS = 5_000;
 /**
