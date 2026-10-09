@@ -1904,8 +1904,10 @@ func dropEnvOverriddenAccessFields(base *opsettings.AccessSettings, envKeys []st
 //     encoding in this doc leaves the sent value out: an explicit null, and
 //     for omitempty fields their zero value. A *bool field such as
 //     github_app webhooks_enabled carries an explicit false as a value, so
-//     false is stored, not cleared. A cleared key falls back to the
-//     bootstrap value, if there is one.
+//     false is stored, not cleared. A cleared key is removed from the
+//     stored row; because a section with a stored row owns all of its
+//     keys, the key is then unset (bootstrap values from settings.yaml or
+//     env are not re-applied).
 //   - The write is a CAS against the row revision the merge read, so a
 //     concurrent write to the section yields a 409, not a lost update.
 //

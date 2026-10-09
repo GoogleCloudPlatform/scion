@@ -43,8 +43,10 @@ import (
 // are not merged), restricted to the sent keys:
 //
 //   - A sent key with a value in requestDoc takes that value.
-//   - A sent key that requestDoc leaves out is removed from the row, so
-//     the bootstrap value applies again, if there is one. Which sent
+//   - A sent key that requestDoc leaves out is removed from the row;
+//     because a section with a stored row owns all of its keys, the key
+//     is then unset (bootstrap values from settings.yaml or env are not
+//     re-applied). Which sent
 //     values are left out follows each field's encoding in requestDoc: an
 //     explicit null, and for omitempty fields their zero value ("", 0, []).
 //     A *bool field carries an explicit false as a value.
