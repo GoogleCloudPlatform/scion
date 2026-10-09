@@ -206,6 +206,12 @@ The same per-request checks apply, with these limits:
   matching selector, for example `hub_lifecycle_hooks:update` to change hub pre-start hooks.
   Hub pre-start hook scripts are redacted in read responses for every credential other than an
   interactive sign-in, so a token sees hub hook metadata but not the script.
+- **Integrations, GitHub App and metrics.** Chat integration, GitHub App and metrics and
+  diagnostics operations admit only a hub token carrying the matching selector (for example
+  `hub_integrations:update` or `hub_metrics:read`). Some of these operations need an interactive
+  sign-in, and every token is refused for them: writing integration secrets or integration
+  settings that configure credentials, authentication, endpoints or host paths; installing or
+  updating an integration; and changing the GitHub App configuration.
 - **Runtime Broker registration.** The `broker:create` scope can be selected only on a hub token.
   A project token cannot create or re-register a Runtime Broker (see
   [Hub-boundary tokens for broker registration](#hub-boundary-tokens-for-broker-registration)).

@@ -66,7 +66,8 @@ They enter through the koanf environment layer in `LoadVersionedSettings`
 (`pkg/config/settings_v1.go`), which is loaded **last** — after the embedded defaults, the global
 `~/.scion/settings.yaml`, the in-repo `.scion/settings.yaml`, and any external project config.
 Loaded last means **highest priority**: a `SCION_*` variable in the broker's process environment
-overrides every settings file.
+overrides every settings file. An exported but empty `SCION_*` variable counts as unset, so it never
+blanks a value from a settings file.
 
 ```
 embedded defaults  <  ~/.scion/settings.yaml  <  .scion/settings.yaml

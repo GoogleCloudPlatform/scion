@@ -263,6 +263,8 @@ The Hub stores agent templates and other artifacts.
 
 For Hub-managed workspaces, the Hub uploads the workspace to its GCS bucket and sends that bucket name to the Runtime Broker in the agent create request, so the Runtime Broker downloads from the same bucket (the bucket is also kept across reincarnation). A Runtime Broker that receives no bucket falls back to its own GCS storage bucket setting. With neither, the create request fails up front with `422 workspace_storage_unconfigured` instead of a generic gateway error.
 
+This upload works only with GCS Hub storage. On any other storage provider, a Hub-managed project that has a git remote still works on a remote Runtime Broker, because the Runtime Broker builds the workspace from the remote. A project with no git remote does not: creating an agent for it on a remote Runtime Broker that has no local path for the project fails up front with `412 unsupported_capability`. Use GCS Hub storage, add a git remote to the project, or link the project at a local path on that Runtime Broker.
+
 ## Deployment
 
 ### GCE VM
