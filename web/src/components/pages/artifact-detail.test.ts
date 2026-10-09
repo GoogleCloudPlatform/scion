@@ -67,6 +67,8 @@ interface MockOptions {
   viewExpiresAt?: string;
   /** Answers POST/PUT requests other than the view mint. */
   write?: (method: string, url: string) => Response;
+  /** File body at the time of the read (overrides body). */
+  bodyFn?: () => string;
 }
 
 const VIEW_URL = `/api/v1/artifacts/view/${ID}.1.9999999999.c2lnbmF0dXJl/`;
@@ -116,7 +118,7 @@ function mockFetch(
         const status = opts.fileStatus ?? 200;
         return Promise.resolve(
           status === 200
-            ? new Response(body, { status })
+            ? new Response(opts.bodyFn ? opts.bodyFn() : body, { status })
             : new Response('{"error":{"code":"internal","message":"boom"}}', { status })
         );
       }
@@ -736,5 +738,778 @@ describe('artifact page', () => {
     await el.updateComplete;
     expect(dialog.open).toBe(false);
     expect(dialog.artifact).toMatchObject({ expiresAt: '2026-12-01T00:00:00Z' });
+  });
+  /** A review version (current) of a markdown artifact owned by an agent. */
+  function reviewMeta(): ArtifactResponse {
+    const meta = artifact('plan.md', 'text/markdown');
+    meta.artifact.ownerKind = 'agent';
+    meta.artifact.ownerRef = 'agent-1';
+    meta.artifact.currentSeq = 2;
+    meta.version = {
+      ...meta.version!,
+      seq: 2,
+      ref: `scion://artifact/${ID}@2`,
+      kind: 'review',
+      createdByKind: 'user',
+      createdByRef: 'u-2',
+    };
+    return meta;
+  }
+  const MARKED = 'We {~~ship~>launch~~} in Q3.{>>date?<<}\n';
+
+  function buttons(el: ScionPageArtifactDetail, sel: string): HTMLElement[] {
+    return Array.from(el.shadowRoot!.querySelectorAll(sel));
+  }
+  function button(el: ScionPageArtifactDetail, sel: string, text: string): HTMLElement | undefined {
+    return buttons(el, sel).find((b) => b.textContent!.includes(text));
+  }
+  async function settle(el: ScionPageArtifactDetail, n = 30): Promise<void> {
+    for (let i = 0; i < n; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+    }
+  }
+
+  it('shows a current review as pending, with its marks and a Marks / Clean / Accepted switch', async () => {
+    const meta = reviewMeta();
+    mockFetch(meta, MARKED, {
+      versions: [
+        { ...meta.version!, files: [] },
+        { ...meta.version!, seq: 1, kind: 'publish', files: [] },
+      ],
+    });
+    const el = await mount(true);
+    const badge = el.shadowRoot!.querySelector('scion-detail-header > sl-badge');
+    expect(badge?.textContent).toContain('Review pending');
+    const banner = el.shadowRoot!.querySelector('sl-alert.review-banner');
+    expect(banner?.textContent).toContain('1 comment and 1 suggestion on v1');
+    expect(banner?.textContent).toContain('was notified');
+    const frame = el.shadowRoot!.querySelector('scion-artifact-markdown-frame') as HTMLElement & {
+      critic: string;
+    };
+    expect(frame.critic).toBe('marks');
+    const toggle = el.shadowRoot!.querySelector('sl-radio-group.critic-toggle') as HTMLElement & {
+      value: string;
+    };
+    expect(toggle).not.toBeNull();
+    toggle.value = 'clean';
+    toggle.dispatchEvent(new Event('sl-change'));
+    await el.updateComplete;
+    expect(frame.critic).toBe('clean');
+  });
+
+  it('shows no review state for a published version and offers Review for markdown only', async () => {
+    mockFetch(artifact('plan.md', 'text/markdown'), 'We ship in Q3.\n');
+    const el = await mount(true);
+    expect(el.shadowRoot!.querySelector('scion-detail-header > sl-badge')).toBeNull();
+    expect(el.shadowRoot!.querySelector('sl-alert.review-banner')).toBeNull();
+    expect(el.shadowRoot!.querySelector('sl-radio-group.critic-toggle')).toBeNull();
+    const frame = el.shadowRoot!.querySelector('scion-artifact-markdown-frame') as HTMLElement & {
+      critic: string;
+    };
+    expect(frame.critic).toBe('off');
+    expect(button(el, '.header-actions sl-button', 'Review')).toBeDefined();
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+    mockFetch(artifact('notes.txt', 'text/plain'), 'hello');
+    const txt = await mount(true);
+    expect(button(txt, '.header-actions sl-button', 'Edit')).toBeDefined();
+    expect(button(txt, '.header-actions sl-button', 'Review')).toBeUndefined();
+  });
+
+  it('saves a review of marks only as a version of kind review', async () => {
+    window.history.replaceState({}, '', `/projects/p-1/artifacts/${ID}`);
+    const meta = artifact('plan.md', 'text/markdown');
+    const bodies: string[] = [];
+    const finalizeBodies: string[] = [];
+    const urls = mockFetch(meta, 'We ship in Q3.\n', {
+      write: (method, url) => {
+        if (url.endsWith('/finalize')) {
+          meta.artifact.currentSeq = 2;
+          meta.version = {
+            ...meta.version!,
+            seq: 2,
+            kind: 'review',
+            ref: `scion://artifact/${ID}@2`,
+          };
+          return new Response(JSON.stringify(meta), { status: 200 });
+        }
+        if (method === 'PUT') return new Response(null, { status: 204 });
+        return new Response(
+          JSON.stringify({
+            artifact: meta.artifact,
+            version: { seq: 2 },
+            upload: { required: ['plan.md'] },
+          }),
+          { status: 201 }
+        );
+      },
+    });
+    const realFetch = globalThis.fetch;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === 'POST' && String(input).endsWith('/versions'))
+          bodies.push(String(init.body));
+        if (init?.method === 'POST' && String(input).endsWith('/finalize'))
+          finalizeBodies.push(String(init.body));
+        return realFetch(input, init);
+      })
+    );
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    // While reviewing, Edit and Review are hidden.
+    expect(button(el, '.header-actions sl-button', 'Edit')).toBeUndefined();
+    const save = (): HTMLElement & { disabled: boolean } =>
+      button(el, '.edit-footer sl-button', 'Save review') as HTMLElement & { disabled: boolean };
+    expect(save().hasAttribute('disabled')).toBe(true);
+    // Empty state: the hint replaces the counts and the preview margin
+    // shows the placeholder.
+    expect(el.shadowRoot!.querySelector('.review-toolbar .counts')!.textContent).toContain(
+      'Select text and choose Comment or Suggest.'
+    );
+    const reviewFrame = el.shadowRoot!.querySelector(
+      '.review-panes scion-artifact-markdown-frame'
+    ) as HTMLElement & { sideNote: string; noteAuthor: string; sideNoteEmpty: boolean };
+    expect(reviewFrame.sideNote).toBe('No comments or suggestions yet.');
+    expect(reviewFrame.sideNoteEmpty).toBe(true);
+    expect(reviewFrame.noteAuthor).toBe('You');
+    const editor = el.shadowRoot!.querySelector('scion-code-editor.review-editor')!;
+    // An edit outside marks is flagged and cannot be saved.
+    editor.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: 'We ship in Q4.{>>x<<}\n' } })
+    );
+    await el.updateComplete;
+    expect(save().hasAttribute('disabled')).toBe(true);
+    expect(
+      buttons(el, 'sl-alert').some((a) => a.textContent!.includes('Text outside marks has changed'))
+    ).toBe(true);
+    editor.dispatchEvent(new CustomEvent('content-changed', { detail: { content: MARKED } }));
+    await el.updateComplete;
+    expect(save().hasAttribute('disabled')).toBe(false);
+    save().click();
+    await settle(el);
+    expect(bodies).toHaveLength(1);
+    expect(JSON.parse(bodies[0]!).kind).toBe('review');
+    // The review names the version it was made against.
+    expect(finalizeBodies.map((b) => JSON.parse(b) as { base: number })).toEqual([{ base: 1 }]);
+    expect(urls.some((u) => u.startsWith('PUT ') && u.includes('/versions/2/files/plan.md'))).toBe(
+      true
+    );
+    expect(el.shadowRoot!.querySelector('scion-detail-header > sl-badge')?.textContent).toContain(
+      'Review pending'
+    );
+  });
+
+  it('explains a review the hub refused for unmarked changes', async () => {
+    const meta = artifact('plan.md', 'text/markdown');
+    mockFetch(meta, 'We ship in Q3.\n', {
+      write: (method, url) => {
+        if (url.endsWith('/finalize')) {
+          return new Response(
+            JSON.stringify({
+              error: {
+                code: 'unmarked_changes',
+                message: 'x',
+                details: { files: [{ path: 'plan.md', change: 'modified', hunks: [{ line: 1 }] }] },
+              },
+            }),
+            { status: 422 }
+          );
+        }
+        if (method === 'PUT') return new Response(null, { status: 204 });
+        return new Response(
+          JSON.stringify({
+            artifact: meta.artifact,
+            version: { seq: 2 },
+            upload: { required: ['plan.md'] },
+          }),
+          { status: 201 }
+        );
+      },
+    });
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: MARKED } })
+    );
+    await el.updateComplete;
+    button(el, '.edit-footer sl-button', 'Save review')!.click();
+    await settle(el);
+    const alert = buttons(el, 'sl-alert').find((a) =>
+      a.textContent!.includes('outside marks: plan.md (line 1)')
+    );
+    expect(alert).toBeDefined();
+    expect(alert!.textContent).not.toContain('Publish again');
+    expect(alert!.textContent).not.toContain('Edit');
+  });
+  /** Mocks a review flow whose finalize answers with status and body. */
+  function reviewWrites(meta: ArtifactResponse, finalize: () => Response, creates: string[]) {
+    return (method: string, url: string): Response => {
+      if (url.endsWith('/finalize')) return finalize();
+      if (method === 'PUT') return new Response(null, { status: 204 });
+      creates.push(url);
+      return new Response(
+        JSON.stringify({
+          artifact: meta.artifact,
+          version: { seq: 2 + creates.length - 1 },
+          upload: { required: ['plan.md'] },
+        }),
+        { status: 201 }
+      );
+    };
+  }
+
+  it('restarts a stale review from the current text and keeps the discarded text read-only', async () => {
+    const meta = artifact('plan.md', 'text/markdown');
+    const creates: string[] = [];
+    let text = 'We ship in Q3.\n';
+    // Meanwhile another reviewer's review (v2) became current.
+    const othersReview = 'We ship in Q3.{>>someone else<<}\n';
+    const urls = mockFetch(meta, '', {
+      bodyFn: () => text,
+      write: reviewWrites(
+        meta,
+        () => {
+          meta.artifact.currentSeq = 2;
+          meta.version = {
+            ...meta.version!,
+            seq: 2,
+            kind: 'review',
+            ref: `scion://artifact/${ID}@2`,
+          };
+          text = othersReview;
+          return new Response(
+            JSON.stringify({ error: { code: 'stale_review', message: 'stale' } }),
+            {
+              status: 409,
+            }
+          );
+        },
+        creates
+      ),
+    });
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    const editor = (): HTMLElement & { content: string } =>
+      el.shadowRoot!.querySelector('scion-code-editor.review-editor') as HTMLElement & {
+        content: string;
+      };
+    editor().dispatchEvent(new CustomEvent('content-changed', { detail: { content: MARKED } }));
+    await el.updateComplete;
+    const metaLoads = (): number => urls.filter((u) => u === `/api/v1/artifacts/${ID}`).length;
+    const before = metaLoads();
+    button(el, '.edit-footer sl-button', 'Save review')!.click();
+    await settle(el);
+    const alert = buttons(el, 'sl-alert').find((a) => a.textContent!.includes('was not saved'));
+    expect(alert).toBeDefined();
+    expect(alert!.textContent).toContain('newer version');
+    expect(alert!.textContent).not.toContain('Edit');
+    expect(metaLoads()).toBe(before + 1);
+    // The buffer is the new current text, with the other reviewer's marks;
+    // the discarded text is shown read-only.
+    expect(editor().content).toBe(othersReview);
+    expect(el.shadowRoot!.querySelector('.discarded-review pre')!.textContent).toBe(MARKED);
+    const save = (): HTMLElement => button(el, '.edit-footer sl-button', 'Save review')!;
+    expect(save().hasAttribute('disabled')).toBe(true);
+    // New marks on the current text can be saved, as a new version.
+    editor().dispatchEvent(
+      new CustomEvent('content-changed', {
+        detail: { content: 'We {~~ship~>launch~~} in Q3.{>>someone else<<}\n' },
+      })
+    );
+    await el.updateComplete;
+    expect(save().hasAttribute('disabled')).toBe(false);
+    save().click();
+    await settle(el);
+    expect(creates).toHaveLength(2);
+  });
+
+  it('leaves Review mode with a notice when the current version cannot be reviewed after a stale review', async () => {
+    const meta = artifact('plan.md', 'text/markdown');
+    const creates: string[] = [];
+    mockFetch(meta, 'We ship in Q3.\n', {
+      write: reviewWrites(
+        meta,
+        () => {
+          meta.artifact.currentSeq = 2;
+          meta.version = {
+            ...meta.version!,
+            seq: 2,
+            entryPath: 'plan.txt',
+            files: [{ path: 'plan.txt', size: 5, sha256: 'cd', mediaType: 'text/plain' }],
+          };
+          return new Response(
+            JSON.stringify({ error: { code: 'stale_review', message: 'stale' } }),
+            {
+              status: 409,
+            }
+          );
+        },
+        creates
+      ),
+    });
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: MARKED } })
+    );
+    await el.updateComplete;
+    button(el, '.edit-footer sl-button', 'Save review')!.click();
+    await settle(el);
+    expect(el.shadowRoot!.querySelector('.review-editor')).toBeNull();
+    expect(el.shadowRoot!.querySelector('sl-alert.review-notice')!.textContent).toContain(
+      'cannot be reviewed here'
+    );
+    // The discarded text stays readable, with Copy, outside Review mode.
+    expect(el.shadowRoot!.querySelector('.discarded-review pre')!.textContent).toBe(MARKED);
+    expect(button(el, '.discarded-review sl-button', 'Copy')).toBeDefined();
+  });
+
+  it('keeps the discarded text and says so when the reload after a stale review fails', async () => {
+    const meta = artifact('plan.md', 'text/markdown');
+    const creates: string[] = [];
+    let fileStatus = 200;
+    const urls = mockFetch(meta, 'We ship in Q3.\n', {
+      write: reviewWrites(
+        meta,
+        () => {
+          fileStatus = 500;
+          return new Response(
+            JSON.stringify({ error: { code: 'stale_review', message: 'stale' } }),
+            {
+              status: 409,
+            }
+          );
+        },
+        creates
+      ),
+    });
+    const inner = globalThis.fetch;
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) =>
+      fileStatus !== 200 && String(input).includes('/files/')
+        ? Promise.resolve(
+            new Response('{"error":{"code":"internal","message":"boom"}}', { status: 500 })
+          )
+        : inner(input, init)
+    );
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: MARKED } })
+    );
+    await el.updateComplete;
+    button(el, '.edit-footer sl-button', 'Save review')!.click();
+    await settle(el);
+    expect(urls.length).toBeGreaterThan(0);
+    expect(el.shadowRoot!.querySelector('.review-editor')).toBeNull();
+    const notice = el.shadowRoot!.querySelector('sl-alert.review-notice')!;
+    expect(notice.textContent).toContain('could not be loaded');
+    expect(notice.textContent).not.toContain('newer version was published');
+    expect(el.shadowRoot!.querySelector('.discarded-review pre')!.textContent).toBe(MARKED);
+    expect(el.shadowRoot!.querySelector('.error-state')).not.toBeNull();
+  });
+
+  it('shows the margin placeholder only while the review has no marks at all', async () => {
+    mockFetch(artifact('plan.md', 'text/markdown'), 'We ship in Q3.\n');
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    const frame = el.shadowRoot!.querySelector(
+      '.review-panes scion-artifact-markdown-frame'
+    ) as HTMLElement & { sideNote: string };
+    expect(frame.sideNote).toBe('No comments or suggestions yet.');
+    // A suggestion without any comment: no placeholder.
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: 'We {~~ship~>launch~~} in Q3.\n' } })
+    );
+    await new Promise((r) => setTimeout(r, 300));
+    await el.updateComplete;
+    expect(frame.sideNote).toBe('');
+  });
+
+  it('clears the pending preview update on Cancel', async () => {
+    mockFetch(artifact('plan.md', 'text/markdown'), 'We ship in Q3.\n');
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: MARKED } })
+    );
+    const cleared = vi.spyOn(globalThis, 'clearTimeout');
+    button(el, '.edit-footer sl-button', 'Cancel')!.click();
+    await el.updateComplete;
+    expect(cleared).toHaveBeenCalled();
+    cleared.mockRestore();
+    expect(el.shadowRoot!.querySelector('.review-editor')).toBeNull();
+  });
+
+  it('shows Review pending while the current version is a review, also on an older version', async () => {
+    const meta = reviewMeta();
+    const old = {
+      ...meta,
+      version: { ...meta.version!, seq: 1, kind: 'publish', ref: `scion://artifact/${ID}@1` },
+    };
+    mockFetch(old, 'We ship in Q3.\n', {
+      versions: [
+        { ...meta.version!, files: [] },
+        { ...meta.version!, seq: 1, kind: 'publish', files: [] },
+      ],
+    });
+    const el = await mount(true, `/projects/p-1/artifacts/${ID}/v/1`);
+    expect(el.shadowRoot!.querySelector('scion-detail-header > sl-badge')?.textContent).toContain(
+      'Review pending'
+    );
+  });
+
+  it('does not claim the owner was notified of its own review', async () => {
+    const meta = reviewMeta();
+    meta.version!.createdByKind = 'agent';
+    meta.version!.createdByRef = 'agent-1';
+    mockFetch(meta, MARKED);
+    const el = await mount(true);
+    const banner = el.shadowRoot!.querySelector('sl-alert.review-banner')!;
+    expect(banner.textContent).toContain('Review pending');
+    expect(banner.textContent).not.toContain('was notified');
+  });
+
+  it('labels a review with its base, its notes with the reviewer, and Clean with a side note', async () => {
+    const meta = reviewMeta();
+    mockFetch(meta, MARKED, {
+      versions: [
+        { ...meta.version!, files: [] },
+        { ...meta.version!, seq: 1, kind: 'publish', files: [] },
+      ],
+    });
+    const el = await mount(true);
+    expect(el.shadowRoot!.querySelector('.entry-bar')!.textContent).toContain('review of v1');
+    const frame = el.shadowRoot!.querySelector('scion-artifact-markdown-frame') as HTMLElement & {
+      noteAuthor: string;
+      sideNote: string;
+    };
+    expect(frame.noteAuthor).not.toBe('');
+    expect(frame.sideNote).toBe('');
+    const toggle = el.shadowRoot!.querySelector('sl-radio-group.critic-toggle') as HTMLElement & {
+      value: string;
+    };
+    toggle.value = 'clean';
+    toggle.dispatchEvent(new Event('sl-change'));
+    await el.updateComplete;
+    expect(frame.sideNote).toBe(
+      'Clean: all marks rejected. Matches the version under review (v1).'
+    );
+  });
+
+  it('shows the kind of each version in History, with the review note', async () => {
+    const meta = reviewMeta();
+    mockFetch(meta, MARKED, {
+      versions: [
+        { ...meta.version!, files: [] },
+        { ...meta.version!, seq: 1, kind: 'publish', files: [] },
+      ],
+    });
+    const el = await mount(true);
+    const heads = buttons(el, 'th').map((th) => th.textContent!.trim());
+    expect(heads).toContain('Kind');
+    const kinds = buttons(el, 'sl-badge.kind-review, sl-badge.kind-publish').map(
+      (b) => b.className
+    );
+    expect(kinds).toEqual(['kind-review', 'kind-publish']);
+    expect(
+      el.shadowRoot!.querySelector('.history-note')!.textContent!.replace(/\s+/g, ' ')
+    ).toContain('Publishing after a review resolves it and clears the badge.');
+  });
+
+  it('lays notes out in a margin from 1100px on the page and from 1400px in the Review pane', async () => {
+    for (const width of [1000, 1200, 1500]) {
+      vi.stubGlobal('matchMedia', (q: string) => ({
+        matches: Number(/min-width: (\d+)px/.exec(q)?.[1] ?? Infinity) <= width,
+        addEventListener: (): void => {},
+        removeEventListener: (): void => {},
+      }));
+      mockFetch(reviewMeta(), MARKED);
+      const el = await mount(true);
+      const page = el.shadowRoot!.querySelector('scion-artifact-markdown-frame') as HTMLElement & {
+        marginNotes: boolean;
+      };
+      expect(page.marginNotes, `page at ${width}`).toBe(width >= 1100);
+      button(el, '.header-actions sl-button', 'Review')!.click();
+      await el.updateComplete;
+      const pane = el.shadowRoot!.querySelector(
+        '.review-panes scion-artifact-markdown-frame'
+      ) as HTMLElement & { marginNotes: boolean };
+      expect(pane.marginNotes, `review pane at ${width}`).toBe(width >= 1400);
+      document.body.innerHTML = '';
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('updates the Review preview after typing pauses, the counts at once', async () => {
+    mockFetch(artifact('plan.md', 'text/markdown'), 'We ship in Q3.\n');
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: MARKED } })
+    );
+    await el.updateComplete;
+    const frame = el.shadowRoot!.querySelector(
+      '.review-panes scion-artifact-markdown-frame'
+    ) as HTMLElement & { content: string };
+    expect(
+      el.shadowRoot!.querySelector('.review-toolbar .counts')!.textContent!.replace(/\s+/g, ' ')
+    ).toContain('1 suggestion · 1 comment');
+    expect(frame.content).toBe('We ship in Q3.\n');
+    await new Promise((r) => setTimeout(r, 300));
+    await el.updateComplete;
+    expect(frame.content).toBe(MARKED);
+  });
+
+  it('applies toolbar marks to plain text and refuses a selection inside a mark', async () => {
+    mockFetch(artifact('plan.md', 'text/markdown'), 'We ship in Q3.\n');
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    const editor = el.shadowRoot!.querySelector(
+      'scion-code-editor.review-editor'
+    ) as HTMLElement & {
+      getSelection: () => { from: number; to: number; text: string } | null;
+      replaceRange: (...args: unknown[]) => void;
+    };
+    const replaced: unknown[][] = [];
+    editor.replaceRange = (...args: unknown[]): void => {
+      replaced.push(args);
+    };
+    editor.getSelection = (): { from: number; to: number; text: string } => ({
+      from: 3,
+      to: 7,
+      text: 'ship',
+    });
+    button(el, '.review-toolbar sl-button', 'Comment')!.click();
+    await el.updateComplete;
+    expect(replaced).toEqual([[3, 7, '{==ship==}{>>comment<<}', 16, 23]]);
+    // Inside an existing mark: refused with a hint, nothing inserted.
+    editor.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: 'We {--ship--} in Q3.\n' } })
+    );
+    await el.updateComplete;
+    editor.getSelection = (): { from: number; to: number; text: string } => ({
+      from: 6,
+      to: 10,
+      text: 'ship',
+    });
+    button(el, '.review-toolbar sl-button', 'Suggest')!.click();
+    await el.updateComplete;
+    expect(replaced).toHaveLength(1);
+    expect(el.shadowRoot!.querySelector('.review-toolbar .hint')!.textContent).toContain(
+      'inside or across a mark'
+    );
+  });
+
+  /** The Review editor with its selection and replace stubbed. */
+  function stubEditor(el: ScionPageArtifactDetail): {
+    editor: HTMLElement & { content: string };
+    replaced: unknown[][];
+    select: (from: number, to: number) => void;
+  } {
+    const editor = el.shadowRoot!.querySelector(
+      'scion-code-editor.review-editor'
+    ) as HTMLElement & {
+      content: string;
+      getSelection: () => { from: number; to: number; text: string };
+      replaceRange: (...args: unknown[]) => void;
+      getContent: () => string;
+    };
+    const replaced: unknown[][] = [];
+    editor.replaceRange = (...args: unknown[]): void => {
+      replaced.push(args);
+    };
+    const select = (from: number, to: number): void => {
+      editor.getSelection = () => ({ from, to, text: editor.getContent().slice(from, to) });
+    };
+    return { editor, replaced, select };
+  }
+
+  it('reviews a CRLF file in LF form, so toolbar offsets match the editor', async () => {
+    mockFetch(artifact('plan.md', 'text/markdown'), 'We ship.\r\nLine two Q3.\r\n');
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    const { editor, replaced, select } = stubEditor(el);
+    expect(editor.content).toBe('We ship.\nLine two Q3.\n');
+    expect(button(el, '.edit-footer sl-button', 'Save review')!.hasAttribute('disabled')).toBe(
+      true
+    );
+    const at = editor.content.indexOf('Q3');
+    select(at, at + 2);
+    button(el, '.review-toolbar sl-button', 'Comment')!.click();
+    await el.updateComplete;
+    expect(replaced).toHaveLength(1);
+  });
+
+  it('refuses a mark an opener would swallow in a CRLF file', async () => {
+    mockFetch(artifact('plan.md', 'text/markdown'), '{\r\n{\r\n{++-');
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    const { editor, replaced, select } = stubEditor(el);
+    const at = editor.content.indexOf('++');
+    select(at, at + 2);
+    button(el, '.review-toolbar sl-button', 'Insert')!.click();
+    await el.updateComplete;
+    expect(replaced).toHaveLength(0);
+    expect(el.shadowRoot!.querySelector('.review-toolbar .hint')!.textContent).toContain(
+      'unclosed'
+    );
+  });
+
+  it("checks toolbar actions against the editor's content", async () => {
+    mockFetch(artifact('plan.md', 'text/markdown'), 'We ship in Q3.\n');
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    const { editor, replaced, select } = stubEditor(el);
+    // The editor holds text whose change event has not reached the page.
+    editor.content = '{\n{\n{++-';
+    select(5, 7);
+    button(el, '.review-toolbar sl-button', 'Insert')!.click();
+    await el.updateComplete;
+    expect(replaced).toHaveLength(0);
+  });
+
+  it('keeps the discarded text and Copy above the not-found page when the reload after a stale review answers 404', async () => {
+    const meta = artifact('plan.md', 'text/markdown');
+    const creates: string[] = [];
+    let gone = false;
+    mockFetch(meta, 'We ship in Q3.\n', {
+      write: reviewWrites(
+        meta,
+        () => {
+          gone = true;
+          return new Response(
+            JSON.stringify({ error: { code: 'stale_review', message: 'stale' } }),
+            {
+              status: 409,
+            }
+          );
+        },
+        creates
+      ),
+    });
+    const inner = globalThis.fetch;
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) =>
+      gone && String(input) === `/api/v1/artifacts/${ID}` && (init?.method ?? 'GET') === 'GET'
+        ? Promise.resolve(
+            new Response('{"error":{"code":"not_found","message":"not found"}}', { status: 404 })
+          )
+        : inner(input, init)
+    );
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: MARKED } })
+    );
+    await el.updateComplete;
+    button(el, '.edit-footer sl-button', 'Save review')!.click();
+    await settle(el);
+    expect(el.shadowRoot!.querySelector('scion-page-404')).not.toBeNull();
+    expect(el.shadowRoot!.querySelector('sl-alert.review-notice')!.textContent).toContain(
+      'could not be loaded'
+    );
+    expect(el.shadowRoot!.querySelector('.discarded-review pre')!.textContent).toBe(MARKED);
+    expect(button(el, '.discarded-review sl-button', 'Copy')).toBeDefined();
+  });
+
+  it('does not offer to save an unchanged review of a CRLF review version', async () => {
+    mockFetch(reviewMeta(), MARKED.replace(/\n/g, '\r\n'));
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    // The marks are there and only marks differ from the baseline, but
+    // nothing was changed: Save stays disabled.
+    expect(button(el, '.edit-footer sl-button', 'Save review')!.hasAttribute('disabled')).toBe(
+      true
+    );
+  });
+
+  it('restarts a stale review on a CRLF current version in LF form, with Save disabled', async () => {
+    const meta = artifact('plan.md', 'text/markdown');
+    const creates: string[] = [];
+    let text = 'We ship in Q3.\n';
+    // Another reviewer's review, stored with CRLF line endings, became current.
+    const othersReview = 'We ship in Q3.{>>someone else<<}\r\nOwners: docs.\r\n';
+    mockFetch(meta, '', {
+      bodyFn: () => text,
+      write: reviewWrites(
+        meta,
+        () => {
+          meta.artifact.currentSeq = 2;
+          meta.version = {
+            ...meta.version!,
+            seq: 2,
+            kind: 'review',
+            ref: `scion://artifact/${ID}@2`,
+          };
+          text = othersReview;
+          return new Response(
+            JSON.stringify({ error: { code: 'stale_review', message: 'stale' } }),
+            {
+              status: 409,
+            }
+          );
+        },
+        creates
+      ),
+    });
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: MARKED } })
+    );
+    await el.updateComplete;
+    button(el, '.edit-footer sl-button', 'Save review')!.click();
+    await settle(el);
+    const editor = el.shadowRoot!.querySelector(
+      'scion-code-editor.review-editor'
+    ) as HTMLElement & {
+      content: string;
+    };
+    expect(editor.content).toBe(othersReview.replace(/\r\n/g, '\n'));
+    expect(button(el, '.edit-footer sl-button', 'Save review')!.hasAttribute('disabled')).toBe(
+      true
+    );
+  });
+
+  it('describes the marks of a pending review by kind, leaving out kinds it has none of', async () => {
+    const { describeMarks } = await import('./artifact-detail.js');
+    expect(describeMarks({ comments: 2, suggestions: 3, highlights: 0 })).toBe(
+      '2 comments and 3 suggestions'
+    );
+    expect(describeMarks({ comments: 0, suggestions: 0, highlights: 1 })).toBe('1 highlight');
+    expect(describeMarks({ comments: 1, suggestions: 1, highlights: 2 })).toBe(
+      '1 comment, 1 suggestion and 2 highlights'
+    );
+    expect(describeMarks({ comments: 0, suggestions: 0, highlights: 0 })).toBe('marks');
+    // In the banner: a review with only a highlight.
+    const meta = reviewMeta();
+    mockFetch(meta, 'We {==ship==} in Q3.\n', {
+      versions: [
+        { ...meta.version!, files: [] },
+        { ...meta.version!, seq: 1, kind: 'publish', files: [] },
+      ],
+    });
+    const el = await mount(true);
+    const banner = el
+      .shadowRoot!.querySelector('sl-alert.review-banner')!
+      .textContent!.replace(/\s+/g, ' ');
+    expect(banner).toContain('left 1 highlight on v1');
+    expect(banner).not.toContain('0 comments');
   });
 });

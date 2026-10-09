@@ -102,6 +102,7 @@ export interface CreateVersionRequest {
   title?: string;
   key?: string;
   scope?: string;
+  kind?: 'publish' | 'review';
   entry: string;
   note?: string;
   files: ManifestFile[];
@@ -299,6 +300,14 @@ export interface PublishRequest {
   title?: string | undefined;
   key?: string | undefined;
   note?: string | undefined;
+  /** Version kind; unset publishes. A review needs artifactId and base. */
+  kind?: 'publish' | 'review' | undefined;
+  /**
+   * For a review, the version it was made against. The hub checks the
+   * review against that version only and refuses it (409 stale_review)
+   * unless it is still the current version.
+   */
+  base?: number | undefined;
   entry: string;
   files: PublishFile[];
   /** Called after each upload with the number of files uploaded so far. */
@@ -331,7 +340,9 @@ export interface PendingPublish {
 export class PublishError extends Error {
   constructor(
     message: string,
-    readonly pending: PendingPublish | null
+    readonly pending: PendingPublish | null,
+    /** The hub's error code, when it answered with one. */
+    readonly code = ''
   ) {
     super(message);
     this.name = 'PublishError';
@@ -361,6 +372,7 @@ export async function publishFiles(req: PublishRequest): Promise<ArtifactRespons
   if (req.title) body.title = req.title;
   if (req.key) body.key = req.key;
   if (req.note) body.note = req.note;
+  if (req.kind === 'review') body.kind = 'review';
   if (!req.artifactId && req.scope) body.scope = req.scope;
   const fingerprint = JSON.stringify([req.artifactId ?? '', body]);
 
@@ -402,12 +414,23 @@ export async function publishFiles(req: PublishRequest): Promise<ArtifactRespons
       // Not JSON; the status decides.
     }
     const code = body.error?.code ?? '';
+    // A review the hub refused is discarded: say why in this page's terms.
+    if (code === 'unmarked_changes') {
+      throw new PublishError(reviewRejectedMessage(body), null, code);
+    }
+    if (code === 'stale_review') {
+      throw new PublishError(
+        'Your review was not saved: a newer version was published, or is being published. The review now starts from the current version; your discarded text is kept read-only to copy from.',
+        null,
+        code
+      );
+    }
     const message = prefix + (await extractApiError(res, `HTTP ${res.status}`));
     // The version is gone (404), no longer pending (409 conflict), or not
     // the caller's (403): another attempt must start a new version.
     const gone =
       res.status === 404 || res.status === 403 || (res.status === 409 && code === 'conflict');
-    if (gone) throw new PublishError(message, null);
+    if (gone) throw new PublishError(message, null, code);
     // Finalize found files missing: upload those next time. The hub lists
     // at most a few; when it lists fewer than are missing, upload them all.
     const missing = body.error?.details?.missing;
@@ -418,7 +441,7 @@ export async function publishFiles(req: PublishRequest): Promise<ArtifactRespons
           : pending.all;
       remaining = all.filter((p) => byPath.has(p));
     }
-    throw new PublishError(message, left());
+    throw new PublishError(message, left(), code);
   };
   let done = 0;
   for (const path of required) {
@@ -447,12 +470,51 @@ export async function publishFiles(req: PublishRequest): Promise<ArtifactRespons
   }
   let res: Response;
   try {
-    res = await apiFetch(`${artifactPath(id)}/versions/${seq}/finalize`, { method: 'POST' });
+    res = await apiFetch(
+      `${artifactPath(id)}/versions/${seq}/finalize`,
+      req.kind === 'review'
+        ? {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ base: req.base }),
+          }
+        : { method: 'POST' }
+    );
   } catch (err) {
     throw new PublishError(err instanceof Error ? err.message : 'finalize failed', left());
   }
   if (!res.ok) await fail(res, '');
   return (await res.json()) as ArtifactResponse;
+}
+
+/** A file of a review the hub refused (code unmarked_changes). */
+interface UnmarkedFile {
+  path?: string;
+  change?: string;
+  hunks?: { line?: number }[];
+}
+
+/** Explains an unmarked_changes refusal: where the review changed text. */
+export function reviewRejectedMessage(body: { error?: { details?: unknown } }): string {
+  const details = (body.error?.details ?? {}) as { files?: unknown };
+  const files = Array.isArray(details.files) ? (details.files as UnmarkedFile[]) : [];
+  const where = files
+    .slice(0, 3)
+    .map((f) => {
+      const lines = (f.hunks ?? [])
+        .map((h) => h.line)
+        .filter((n): n is number => typeof n === 'number');
+      if (f.change === 'modified' && lines.length > 0) {
+        return `${f.path ?? ''} (line ${lines.slice(0, 5).join(', ')})`;
+      }
+      return `${f.path ?? ''} (${f.change ?? 'changed'})`;
+    })
+    .join('; ');
+  return (
+    'Your review changes text outside marks' +
+    (where ? `: ${where}` : '') +
+    '. A review may only add marks: mark every change with the toolbar. The review was not saved.'
+  );
 }
 
 /** The message to show for a failed publish. */
