@@ -387,6 +387,33 @@ func TestConversationListToken_FilteredToBoundary(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, f.call(t, unrelated, http.MethodGet, "/api/v1/conversations", nil).Code)
 }
 
+// TestConversationListToken_UserWithoutProjectReadNotListed lists a group
+// for a hub token only while the token's user can read the group's project:
+// once the user's role in the project is removed, the group leaves the list
+// although it is inside the token boundary and the participant row remains.
+func TestConversationListToken_UserWithoutProjectReadNotListed(t *testing.T) {
+	f := newInboxFixture(t)
+	ctx := context.Background()
+	gA := f.group(t, f.projA, f.owner)
+	hubTok := f.mint(t, f.owner, hubBoundary(), "inbox:read")
+	require.Contains(t, listConversationIDs(t, f.call(t, hubTok, http.MethodGet, "/api/v1/conversations", nil)), gA.ID,
+		"listed while the user reads the project")
+
+	bindings, err := f.s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, f.owner)
+	require.NoError(t, err)
+	removed := 0
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeProject && b.ScopeID == f.projA {
+			require.NoError(t, f.s.DeleteRoleBinding(ctx, b.ID))
+			removed++
+		}
+	}
+	require.Equal(t, 1, removed)
+
+	assert.NotContains(t, listConversationIDs(t, f.call(t, hubTok, http.MethodGet, "/api/v1/conversations", nil)), gA.ID,
+		"the group leaves the list once the user cannot read the project")
+}
+
 // TestDirectConversationToken_PeerAgentMustBeInsideBoundary requires a
 // token reading a direct conversation to carry inbox:read for the peer
 // agent's project and agent:read on the peer agent, and a direct

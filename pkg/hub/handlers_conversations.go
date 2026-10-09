@@ -167,7 +167,7 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 	// The list shows only group conversations the caller can read now: a
 	// participant row is an index, not a grant. A token is checked as its
 	// user here; the token boundary is checked below.
-	var readerIdentity Identity = identity
+	readerIdentity := identity
 	if token != nil {
 		readerIdentity = token.UserIdentity
 	}
@@ -977,22 +977,6 @@ func (s *Server) handleAddParticipant(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	var req addParticipantRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body")
-		return
-	}
-
-	if req.PrincipalKind == "" || req.PrincipalID == "" {
-		BadRequest(w, "principalKind and principalId are required")
-		return
-	}
-
-	if req.PrincipalKind != "user" && req.PrincipalKind != "agent" {
-		BadRequest(w, "principalKind must be 'user' or 'agent'")
-		return
-	}
-
 	// Reject participant addition for direct conversations. DM membership is
 	// immutable: it is derived from the canonical two-principal key. Adding a
 	// third principal would not grant them read access (key-based auth denies
@@ -1020,6 +1004,25 @@ func (s *Server) handleAddParticipant(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 	if !s.authorizeGroupConversationReadAsNotFound(w, r, conv) {
+		return
+	}
+
+	// The body is read only after every check on the conversation, so a
+	// caller who cannot use the conversation gets the same answer whatever
+	// the body holds.
+	var req addParticipantRequest
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "Invalid request body")
+		return
+	}
+
+	if req.PrincipalKind == "" || req.PrincipalID == "" {
+		BadRequest(w, "principalKind and principalId are required")
+		return
+	}
+
+	if req.PrincipalKind != "user" && req.PrincipalKind != "agent" {
+		BadRequest(w, "principalKind must be 'user' or 'agent'")
 		return
 	}
 

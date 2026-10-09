@@ -389,19 +389,6 @@ func TestConversationList_OmitsGroupsOfUnreadableProject(t *testing.T) {
 	assert.Contains(t, after, dm, "the direct conversation stays listed")
 }
 
-// projectLookupFaultStore fails GetProject for one project ID.
-type projectLookupFaultStore struct {
-	store.Store
-	failProjectID string
-}
-
-func (p *projectLookupFaultStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
-	if id == p.failProjectID {
-		return nil, errRefStoreFault
-	}
-	return p.Store.GetProject(ctx, id)
-}
-
 // TestConversationList_GroupReadLookupErrorOmitsRow: when the read check for
 // one project fails, that project's groups are omitted and the rest of the
 // list is still returned.
@@ -425,7 +412,8 @@ func TestConversationList_GroupReadLookupErrorOmitsRow(t *testing.T) {
 	require.Subset(t, listConversationIDsAsUser(t, f.srv, f.ua), []string{groupA1, groupA2, groupC},
 		"all listed while the lookups work")
 
-	f.srv.store = &projectLookupFaultStore{Store: f.srv.store, failProjectID: f.projA.ID}
+	f.faults.failGetProjectID = f.projA.ID
+	f.fault.Arm()
 	got := listConversationIDsAsUser(t, f.srv, f.ua)
 	assert.NotContains(t, got, groupA1)
 	assert.NotContains(t, got, groupA2)
@@ -478,6 +466,11 @@ func TestConversationAddParticipant_UnreadableGroupMatchesUnknownConversation(t 
 	require.Equal(t, http.StatusNotFound, unknown.status, unknown.body)
 	requireSameAnswer(t, unknown, got)
 	assert.Equal(t, before, participantCount(t, f.st, groupA), "no participant row is written")
+
+	// The answer does not depend on the body: a malformed principal kind
+	// still gets the unknown-conversation answer.
+	malformed := f.addParticipantAnswer(t, f.ub, groupA, "group", f.uc.ID)
+	requireSameAnswer(t, f.addParticipantAnswer(t, f.ub, tid("add-unknown-conversation"), "group", f.uc.ID), malformed)
 }
 
 // TestConversationAddParticipant_AgentOfOtherProjectMatchesUnknownAgent: an
@@ -701,4 +694,137 @@ func TestScheduledMessageFire_UnreadableTargetRefused(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, events.Items, 1)
 	assert.Error(t, authorizeScheduledMessageFireFor(srv, events.Items[0], agentB), "refused at fire time")
+}
+
+// TestAgentMessage_ChatIntegrationRefOfOtherProjectNotReused: on
+// /agents/{id}/message, a chat integration naming a thread reference that
+// already belongs to another project's conversation gets the same 409 as
+// any other resolution failure, with or without write-deny, and nothing is
+// delivered or stored.
+func TestAgentMessage_ChatIntegrationRefOfOtherProjectNotReused(t *testing.T) {
+	f := newRefFixture(t)
+	dispatcher := &recordingDispatcher{}
+	f.srv.SetDispatcher(dispatcher)
+	ctx := context.Background()
+	alice := NewAuthenticatedUser(f.ua.ID, f.ua.Email, f.ua.DisplayName, f.ua.Role, string(ClientTypeWeb))
+	withBroker := func(c context.Context) context.Context {
+		return contextWithIdentity(contextWithBrokerIdentity(c, NewBrokerIdentity("test-broker")), alice)
+	}
+
+	const surface, ref = "slack", "C0OTHERPROJ:1.1"
+	projB := f.projB.ID
+	owned, err := f.st.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind: "group", Surface: surface, ExternalRef: ref, ParentRef: "C0OTHERPROJ",
+		DisplayName: "project B thread", DriftState: "active", ProjectID: &projB,
+	})
+	require.NoError(t, err)
+	before, err := f.st.GetConversation(ctx, owned.ID)
+	require.NoError(t, err)
+
+	enableWriteDenySwitch(t, f.srv)
+	unresolved := postAgentMessageAs(t, f.srv, withBroker, f.aa, externalRefMessage(f.aa, surface, "thread:bad", ""))
+	require.Equal(t, http.StatusConflict, unresolved.status, unresolved.body)
+
+	for _, writeDeny := range []bool{true, false} {
+		if !writeDeny {
+			disableWriteDenySwitch(t, f.srv)
+		}
+		got := postAgentMessageAs(t, f.srv, withBroker, f.aa, externalRefMessage(f.aa, surface, ref, "C0OTHERPROJ"))
+		requireSameAnswer(t, unresolved, got)
+	}
+
+	assert.Empty(t, dispatcher.getCalls(), "nothing dispatched")
+	msgs, err := f.st.ListMessages(ctx, store.MessageFilter{AgentID: f.aa.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, msgs.Items, "no message stored")
+	after, err := f.st.GetConversation(ctx, owned.ID)
+	require.NoError(t, err)
+	require.NotNil(t, after.ProjectID)
+	assert.Equal(t, f.projB.ID, *after.ProjectID, "conversation keeps its project")
+	assert.Nil(t, after.DefaultAgentID, "default agent unchanged")
+	assert.True(t, before.LastActivityAt.Equal(after.LastActivityAt), "conversation not touched")
+}
+
+// grantLookupFaultStore fails the group and role-binding lookups the
+// authorization service uses to decide a user's access.
+type grantLookupFaultStore struct {
+	store.Store
+}
+
+func (grantLookupFaultStore) GetEffectiveGroups(context.Context, string) ([]string, error) {
+	return nil, errRefStoreFault
+}
+
+func (grantLookupFaultStore) ListRoleBindingsForPrincipal(context.Context, string, string) ([]*store.RoleBinding, error) {
+	return nil, errRefStoreFault
+}
+
+func (grantLookupFaultStore) ListRoleBindingsForPrincipals(context.Context, []store.PrincipalRef, []string, []string) ([]*store.RoleBinding, error) {
+	return nil, errRefStoreFault
+}
+
+// TestScheduledTargetReadable_LookupErrorTreatedAsUnreadable: when the read
+// decision for a scheduled-message target cannot be made, the target counts
+// as not readable, and the authoring check answers exactly as for an unknown
+// agent ID (accepted, nothing written to the response) without naming the
+// agent.
+func TestScheduledTargetReadable_LookupErrorTreatedAsUnreadable(t *testing.T) {
+	srv, s, projectA, _, ownerA, _, agentA, _ := cpmSetup(t)
+	author := authUser(ownerA)
+	ctx := context.Background()
+	require.True(t, srv.scheduledTargetReadable(ctx, author, agentA), "precondition: the owner reads its own agent")
+
+	authoring := func(agentID string) (bool, *httptest.ResponseRecorder) {
+		rec := httptest.NewRecorder()
+		req := authoredRequest(t, author, http.MethodPost, "/api/v1/projects/"+projectA+"/scheduled-events", nil)
+		ok := srv.authorizeScheduledMessageAuthoring(rec, req, projectA, `{"agentId":"`+agentID+`","message":"later"}`, "", "")
+		return ok, rec
+	}
+	unknownOK, unknown := authoring(tid("sched-fault-unknown-agent"))
+	require.True(t, unknownOK, unknown.Body.String())
+
+	srv.authzService = NewAuthzService(grantLookupFaultStore{Store: s}, srv.authzService.logger)
+	assert.False(t, srv.scheduledTargetReadable(ctx, author, agentA), "a failed decision is not readable")
+	gotOK, got := authoring(agentA.ID)
+	assert.Equal(t, unknownOK, gotOK, got.Body.String())
+	assert.Equal(t, unknown.Code, got.Code)
+	assert.Equal(t, unknown.Body.String(), got.Body.String())
+	assert.NotContains(t, got.Body.String(), agentA.Slug, "the answer does not name the agent")
+}
+
+// TestBrokerInbound_ThreadKeyOfOtherProjectNotResolved: a chat integration
+// naming a native thread key of another project for an agent of this project
+// gets the same answer as any other resolution failure, and nothing is
+// delivered, stored or linked to the other project's thread.
+func TestBrokerInbound_ThreadKeyOfOtherProjectNotResolved(t *testing.T) {
+	setup := func(t *testing.T) (externalRefFixture, string) {
+		f := newExternalRefFixture(t)
+		topicID := tid("extref-other-topic")
+		require.NoError(t, f.webChatStore.CreateTopic(context.Background(), WebChatTopic{
+			ID: topicID, ProjectID: f.otherProject.ID, Name: "other-topic",
+			ConversationID: f.otherConv.ID, CreatedBy: f.user.ID, CreatedAt: time.Now().UTC(),
+		}))
+		conv, err := f.store.GetConversation(context.Background(), f.otherConv.ID)
+		require.NoError(t, err)
+		f.otherConv = conv
+		return f, "thread:" + f.otherProject.ID + ":" + topicID
+	}
+	t.Run("inbound", func(t *testing.T) {
+		f, key := setup(t)
+		unresolved := f.postLegacyInbound(t, "native", "thread:bad")
+		require.Equal(t, http.StatusConflict, unresolved.Code, unresolved.Body.String())
+		rec := f.postLegacyInbound(t, "native", key)
+		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Equal(t, unresolved.Body.String(), rec.Body.String())
+		f.requireNothingDelivered(t)
+	})
+	t.Run("routed", func(t *testing.T) {
+		f, key := setup(t)
+		unresolved := f.postRoutedInbound(t, "native", "thread:bad")
+		require.Equal(t, http.StatusConflict, unresolved.Code, unresolved.Body.String())
+		rec := f.postRoutedInbound(t, "native", key)
+		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Equal(t, routedBodyWithoutMessageIDs(t, unresolved), routedBodyWithoutMessageIDs(t, rec))
+		f.requireNothingDelivered(t)
+	})
 }

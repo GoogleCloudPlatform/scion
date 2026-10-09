@@ -771,6 +771,15 @@ func TestUpsertConversationByExternalRef_KeepsOwningProject(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, created.ID, same.ID)
 	assert.Equal(t, "Thread A2", same.DisplayName)
+
+	none, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind: "group", Surface: "slack", ExternalRef: ref, DisplayName: "Thread A3",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, created.ID, none.ID)
+	assert.Equal(t, "Thread A3", none.DisplayName)
+	require.NotNil(t, none.ProjectID)
+	assert.Equal(t, projectA, *none.ProjectID, "no project in the request keeps the stored one")
 }
 
 // TestUpsertConversationByExternalRef_ProjectlessRowStaysProjectless: a

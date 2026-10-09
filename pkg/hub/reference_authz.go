@@ -316,6 +316,11 @@ func (s *Server) senderCanReadGroup(ctx context.Context, projectID string) bool 
 // rule (canReadGroupConversation), looked up once per project; a group with
 // no project uses the participant rule and is checked on its own. A lookup
 // error answers no and is never cached.
+//
+// A group with no project runs its own participant query even when the row
+// came from the caller's own participant rows: the rule stays in one place
+// (canReadGroupConversation), and such groups are few, so the extra query
+// per row costs little.
 type groupReadMemo struct {
 	s         *Server
 	identity  Identity

@@ -130,6 +130,32 @@ func grantAgentProjectAccess(t *testing.T, s store.Store, agentID, projectID str
 	require.NoError(t, err)
 }
 
+// grantUserProjectAccess gives a user the project-member role on a project,
+// so it can read the project's group conversations.
+func grantUserProjectAccess(t *testing.T, s store.Store, userID, projectID string) {
+	t.Helper()
+	ctx := context.Background()
+	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err, "project-member role definition not found")
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+}
+
+// listReaderAgentContext is an agent caller that can read its project's
+// group conversations: the list shows a group only to a current reader.
+func listReaderAgentContext(t *testing.T, s store.Store, agentID, projectID string) context.Context {
+	t.Helper()
+	grantAgentProjectAccess(t, s, agentID, projectID)
+	return agentContextWithScopes(agentID, projectID, []AgentTokenScope{ScopeProjectRead})
+}
+
 // wireSharedWebChatStore wires a WebChatStore onto srv that shares the test
 // store's underlying SQLite DB. Group creation now routes through
 // WebChatStore.CreateTopic (chat-thread-bridge), so every test that creates
@@ -158,7 +184,7 @@ func TestListConversations_HappyPath(t *testing.T) {
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations", nil)
-	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	req = req.WithContext(listReaderAgentContext(t, s, agent.ID, convProjectID(conv)))
 	rr := httptest.NewRecorder()
 	srv.handleListConversations(rr, req)
 
@@ -194,9 +220,11 @@ func TestListConversations_WithFilters(t *testing.T) {
 	require.NoError(t, s.CreateConversation(context.Background(), conv2))
 	addConvParticipant(t, s, conv2.ID, "agent", agent.ID)
 
+	readerCtx := listReaderAgentContext(t, s, agent.ID, project.ID)
+
 	// Filter by surface=native — should only return the first conversation.
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations?surface=native", nil)
-	req = req.WithContext(agentContext(agent.ID, project.ID))
+	req = req.WithContext(readerCtx)
 	rr := httptest.NewRecorder()
 	srv.handleListConversations(rr, req)
 
@@ -208,7 +236,7 @@ func TestListConversations_WithFilters(t *testing.T) {
 
 	// Filter by surface=discord — should only return the second conversation.
 	req = httptest.NewRequest(http.MethodGet, "/api/v1/conversations?surface=discord", nil)
-	req = req.WithContext(agentContext(agent.ID, project.ID))
+	req = req.WithContext(readerCtx)
 	rr = httptest.NewRecorder()
 	srv.handleListConversations(rr, req)
 
@@ -247,7 +275,7 @@ func TestListConversations_WithLimit(t *testing.T) {
 	require.Len(t, convs, 3) // agent was only added to 3 new ones
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations?limit=2", nil)
-	req = req.WithContext(agentContext(agent.ID, project.ID))
+	req = req.WithContext(listReaderAgentContext(t, s, agent.ID, project.ID))
 	rr := httptest.NewRecorder()
 	srv.handleListConversations(rr, req)
 
@@ -758,10 +786,14 @@ func TestConversationRoutes_MethodNotAllowed(t *testing.T) {
 
 func TestListConversations_AsUser(t *testing.T) {
 	srv, s := testServer(t)
-	_, _, conv := setupConvTestData(t, s)
+	project, _, conv := setupConvTestData(t, s)
 
-	// Create a user identity and add as participant.
+	// Create a user who can read the project and add them as participant.
 	userID := api.NewUUID()
+	require.NoError(t, s.CreateUser(context.Background(), &store.User{
+		ID: userID, Email: "testuser@example.com", DisplayName: "Test User", Role: "member", Status: "active",
+	}))
+	grantUserProjectAccess(t, s, userID, project.ID)
 	addConvParticipant(t, s, conv.ID, "user", userID)
 
 	// Use user identity directly
@@ -1082,7 +1114,7 @@ func TestMux_ListConversations(t *testing.T) {
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations", nil)
-	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	req = req.WithContext(listReaderAgentContext(t, s, agent.ID, convProjectID(conv)))
 	rr := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rr, req)
 
@@ -1296,7 +1328,7 @@ func TestAddParticipant_InvalidPrincipalKind(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conv.ID+"/participants", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(agentContext(agent.ID, convProjectID(conv)))
+	req = req.WithContext(listReaderAgentContext(t, s, agent.ID, convProjectID(conv)))
 	rr := httptest.NewRecorder()
 	srv.handleAddParticipant(rr, req, conv.ID)
 
