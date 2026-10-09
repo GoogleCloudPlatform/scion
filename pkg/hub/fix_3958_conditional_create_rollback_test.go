@@ -38,18 +38,23 @@ import (
 // failed create's row only if no delete holds it, on the HTTP create's
 // non-managed failure paths and on the scheduler's dispatch_agent rollback
 // too. A delete holds the row with a live deleting claim or while
-// finalizing (even with its lease expired), and a row already removed is
-// the delete's as well: the row, its edge and its quotas are then left to
-// that delete. A failed delete, or a deleting row whose lease lapsed, does
-// not hold it, and the create is rolled back. Either way the HTTP answer and
-// the scheduler event error are the ones the failure gave before.
+// finalizing (even with its lease expired), and a row already removed or
+// soft-deleted is the delete's as well: the row, its edge and its quotas
+// are then left to that delete. A failed delete, or a deleting row whose
+// lease lapsed, does not hold it, and the create is rolled back. Either way
+// the HTTP answer and the scheduler event error are the ones the failure
+// gave before.
 
-// rollbackClaimStore runs onFinalize before every FinalizeAgentDeletion
-// (the rollback's compensation is call 1, the fallback's conditional row
-// deletes follow) and counts store.DeleteAgent calls outside a
-// transaction.
+// rollbackClaimStore observes a create's rollback once its switch is armed.
+// It runs onFinalize before every FinalizeAgentDeletion (the rollback's
+// compensation is call 1, the fallback's conditional row deletes follow),
+// returns finalizeErr from every FinalizeAgentDeletion when set, and counts
+// store.DeleteAgent calls, inside a transaction or not. The agent ID is
+// taken from the first row delete of either kind.
 type rollbackClaimStore struct {
 	store.Store
+	fault         *storeFaultSwitch
+	finalizeErr   error
 	mu            sync.Mutex
 	onFinalize    func(call int, agentID string)
 	finalizeCalls int
@@ -57,32 +62,101 @@ type rollbackClaimStore struct {
 	agentID       string
 }
 
-func (s *rollbackClaimStore) FinalizeAgentDeletion(ctx context.Context, id string, pred store.DeletionPredicate, mode store.DeletionFinalizeMode, set store.DeletionFields, hook store.DeletionFinalizeHook) (int, error) {
+func (s *rollbackClaimStore) noteDelete(id string, finalize bool) (call int) {
 	s.mu.Lock()
-	s.finalizeCalls++
-	call := s.finalizeCalls
+	defer s.mu.Unlock()
 	if s.agentID == "" {
 		s.agentID = id
 	}
+	if !finalize {
+		s.deleteCalls++
+		return 0
+	}
+	s.finalizeCalls++
+	return s.finalizeCalls
+}
+
+func (s *rollbackClaimStore) FinalizeAgentDeletion(ctx context.Context, id string, pred store.DeletionPredicate, mode store.DeletionFinalizeMode, set store.DeletionFields, hook store.DeletionFinalizeHook) (int, error) {
+	if !s.fault.Active() {
+		return s.Store.FinalizeAgentDeletion(ctx, id, pred, mode, set, hook)
+	}
+	call := s.noteDelete(id, true)
+	s.mu.Lock()
 	on := s.onFinalize
 	s.mu.Unlock()
 	if on != nil {
 		on(call, id)
 	}
+	if s.finalizeErr != nil {
+		return 0, s.finalizeErr
+	}
 	return s.Store.FinalizeAgentDeletion(ctx, id, pred, mode, set, hook)
 }
 
 func (s *rollbackClaimStore) DeleteAgent(ctx context.Context, id string) error {
-	s.mu.Lock()
-	s.deleteCalls++
-	s.mu.Unlock()
+	if s.fault.Active() {
+		s.noteDelete(id, false)
+	}
 	return s.Store.DeleteAgent(ctx, id)
+}
+
+func (s *rollbackClaimStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return s.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&rollbackClaimTx{Store: tx, parent: s})
+	})
+}
+
+// rollbackClaimTx counts a transaction's DeleteAgent calls on its parent.
+type rollbackClaimTx struct {
+	store.Store
+	parent *rollbackClaimStore
+}
+
+func (tx *rollbackClaimTx) DeleteAgent(ctx context.Context, id string) error {
+	if tx.parent.fault.Active() {
+		tx.parent.noteDelete(id, false)
+	}
+	return tx.Store.DeleteAgent(ctx, id)
 }
 
 func (s *rollbackClaimStore) snapshot() (agentID string, finalizeCalls, deleteCalls int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.agentID, s.finalizeCalls, s.deleteCalls
+}
+
+// rollbackFaults are the store faults of one failed create: the run-intent
+// write fails (runIntentErrStore), the compensation's audit insert fails so
+// the fallback runs (createTxFaultStore), or every conditional row delete
+// gives up (finalizeErr). onFinalize runs before each rollback row delete.
+type rollbackFaults struct {
+	runIntent    bool
+	compensation bool
+	finalizeErr  error
+	onFinalize   func(t *testing.T, s store.Store, call int, id string)
+}
+
+// installRollbackStore installs the wrappers of faults on srv, innermost
+// first: runIntentErrStore, createTxFaultStore, rollbackClaimStore. The
+// fixtures that call it (setupCreateAgentServer, newSchedFire) write their
+// setup through the raw store only and start nothing that reads srv.store,
+// so no goroutine reads the field across the install. The switch is armed
+// by the caller right before the create.
+func installRollbackStore(t *testing.T, srv *Server, s store.Store, faults rollbackFaults) (*rollbackClaimStore, *storeFaultSwitch) {
+	t.Helper()
+	cs, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *rollbackClaimStore {
+		if faults.runIntent {
+			inner = runIntentErrStore{inner}
+		}
+		if faults.compensation {
+			inner = &createTxFaultStore{Store: inner, auditErrFor: mutationTypeAgentCreateDispatchFailed}
+		}
+		return &rollbackClaimStore{Store: inner, fault: f, finalizeErr: faults.finalizeErr}
+	})
+	if faults.onFinalize != nil {
+		cs.onFinalize = func(call int, id string) { faults.onFinalize(t, s, call, id) }
+	}
+	return cs, fault
 }
 
 // rollbackDelete is a delete's state applied to the failed create's row
@@ -97,6 +171,8 @@ type rollbackDelete struct {
 	rowState string
 	// softDeleted: the delete already soft-deleted the row.
 	softDeleted bool
+	// removed: the delete already hard-deleted the row.
+	removed bool
 }
 
 func rollbackDeletes() []rollbackDelete {
@@ -113,25 +189,47 @@ func rollbackDeletes() []rollbackDelete {
 			a.DeletedAt = time.Now()
 			require.NoError(t, s.UpdateAgent(context.Background(), a))
 		}, held: true, softDeleted: true},
+		{name: "hard deleted", apply: func(t *testing.T, s store.Store, id string) {
+			require.NoError(t, s.DeleteAgent(context.Background(), id))
+		}, held: true, removed: true},
 		{name: "delete failed", apply: claim(store.DeletionStateFailed, time.Minute)},
 		{name: "delete lease lapsed", apply: claim(store.DeletionStateDeleting, -time.Minute)},
 	}
 }
 
-// httpRollbackSites are the non-managed HTTP create failure sites covered
-// here: one per answer family (502 runtime_error, the run-intent answer,
-// the dispatch answer, 422 missing_env_vars).
-func httpRollbackSites(t *testing.T) []createRollbackSite {
+// httpRollbackSite is a non-managed HTTP create failure site covered here.
+type httpRollbackSite struct {
+	name      string
+	runIntent bool
+}
+
+// httpRollbackSites are one site per answer family: storage (502
+// runtime_error), run intent (the run-intent answer), dispatch (the
+// dispatch answer), missing env (422 missing_env_vars).
+func httpRollbackSites() []httpRollbackSite {
+	return []httpRollbackSite{
+		{name: "storage"},
+		{name: "run intent", runIntent: true},
+		{name: "dispatch"},
+		{name: "missing env"},
+	}
+}
+
+// rollbackSite returns a fresh createRollbackSites entry for site. Its
+// store fault, if any, is installed by installRollbackStore instead of its
+// setup.
+func (site httpRollbackSite) rollbackSite(t *testing.T) createRollbackSite {
 	t.Helper()
-	want := map[string]bool{"storage": true, "run intent": true, "dispatch": true, "missing env": true}
-	var out []createRollbackSite
-	for _, site := range createRollbackSites() {
-		if want[site.name] {
-			out = append(out, site)
+	for _, s := range createRollbackSites() {
+		if s.name == site.name {
+			if !site.runIntent {
+				require.Nil(t, s.setup, "site %q has no setup to replace", site.name)
+			}
+			return s
 		}
 	}
-	require.Len(t, out, len(want), "every covered site is still in createRollbackSites")
-	return out
+	t.Fatalf("site %q is not in createRollbackSites", site.name)
+	return createRollbackSite{}
 }
 
 // httpRollbackRun is the outcome of one failed HTTP create.
@@ -142,35 +240,19 @@ type httpRollbackRun struct {
 	finalizeCalls int
 	deleteCalls   int
 	s             store.Store
-	project       *store.Project
 }
 
-// runHTTPRollbackSite runs one create that fails at site. faultCompensation
-// makes the rollback's compensation transaction fail (its audit insert), so
-// the fallback row delete runs. onFinalize runs before each rollback row
-// delete.
-func runHTTPRollbackSite(t *testing.T, site createRollbackSite, faultCompensation bool, onFinalize func(t *testing.T, s store.Store, call int, id string)) httpRollbackRun {
+// runHTTPRollbackSite runs one create that fails at site, with faults.
+func runHTTPRollbackSite(t *testing.T, site httpRollbackSite, faults rollbackFaults) httpRollbackRun {
 	t.Helper()
-	// A fresh dispatcher per run: the site's dispatcher records state.
-	for _, fresh := range createRollbackSites() {
-		if fresh.name == site.name {
-			site = fresh
-		}
-	}
-	srv, s, project := setupCreateAgentServer(t, site.disp)
-	if site.setup != nil {
-		site.setup(t, srv)
-	}
-	if faultCompensation {
-		srv.store = &createTxFaultStore{Store: srv.store, auditErrFor: mutationTypeAgentCreateDispatchFailed}
-	}
-	cs := &rollbackClaimStore{Store: srv.store}
-	if onFinalize != nil {
-		cs.onFinalize = func(call int, id string) { onFinalize(t, s, call, id) }
-	}
-	srv.store = cs
+	rs := site.rollbackSite(t)
+	srv, s, project := setupCreateAgentServer(t, rs.disp)
+	setAgentQuotaLimits(t, s)
+	faults.runIntent = site.runIntent
+	cs, fault := installRollbackStore(t, srv, s, faults)
+	fault.Arm()
 
-	req := site.req
+	req := rs.req
 	req.Name = "r3958-" + tidSlugSafe(site.name)
 	req.ProjectID = project.ID
 	req.Task = "do something"
@@ -184,36 +266,51 @@ func runHTTPRollbackSite(t *testing.T, site createRollbackSite, faultCompensatio
 		finalizeCalls: finalizeCalls,
 		deleteCalls:   deleteCalls,
 		s:             s,
-		project:       project,
 	}
 }
 
 // assertRowLeftToDelete checks a held row was not touched by the rollback:
-// it keeps its deletion state, its phase is not marked failed, its edge
-// stays active, no compensation was recorded, and its quotas are held.
-func assertRowLeftToDelete(t *testing.T, s store.Store, brokerID, agentID string, del rollbackDelete) {
+// it keeps its deletion state (or stays removed), its phase is not marked
+// failed, its edge stays active, no compensation was recorded, and, when
+// quotas is set, both quota reservations are still held.
+func assertRowLeftToDelete(t *testing.T, s store.Store, agentID string, del rollbackDelete, quotas bool) {
 	t.Helper()
-	row, err := s.GetAgent(context.Background(), agentID)
-	require.NoError(t, err, "the delete's row is kept")
-	assert.Equal(t, del.rowState, row.DeletionState, "the delete's state is kept")
-	assert.Equal(t, del.softDeleted, !row.DeletedAt.IsZero(), "the row's soft delete is the delete's own")
-	assert.NotEqual(t, string(state.PhaseError), row.Phase, "no phase-error write")
-	assert.NotEqual(t, createRowRemoveFailedMessage, row.Message)
-	assert.Len(t, activeEdgesFor(t, s, agentID), 1, "the edge is left to the delete")
+	if del.removed {
+		assert.True(t, agentGone(t, s, agentID), "the delete removed the row")
+	} else {
+		row, err := s.GetAgent(context.Background(), agentID)
+		require.NoError(t, err, "the delete's row is kept")
+		assert.Equal(t, del.rowState, row.DeletionState, "the delete's state is kept")
+		assert.Equal(t, del.softDeleted, !row.DeletedAt.IsZero(), "the row's soft delete is the delete's own")
+		assert.NotEqual(t, string(state.PhaseError), row.Phase, "no phase-error write")
+		assert.NotEqual(t, createRowRemoveFailedMessage, row.Message)
+		assert.Len(t, activeEdgesFor(t, s, agentID), 1, "the edge is left to the delete")
+	}
 	assert.Empty(t, agentAudits(t, s, mutationTypeAgentCreateDispatchFailed, agentID), "no compensation was written")
-	if brokerID != "" {
-		assert.EqualValues(t, 1, brokerReservationCount(t, s, brokerID), "the quotas are left to the delete")
+	if quotas {
+		held := observeReservations(t, s, agentID)
+		assert.True(t, held.broker, "the per-broker reservation is left to the delete")
+		assert.True(t, held.project, "the per-project reservation is left to the delete")
 	}
 }
 
-// assertRolledBack checks the create was rolled back at stage.
-func assertRolledBack(t *testing.T, s store.Store, brokerID, agentID, stage string) {
+// assertQuotasReleased checks both quota reservations of agentID are gone.
+func assertQuotasReleased(t *testing.T, s store.Store, agentID string) {
+	t.Helper()
+	held := observeReservations(t, s, agentID)
+	assert.False(t, held.broker, "the per-broker reservation is released")
+	assert.False(t, held.project, "the per-project reservation is released")
+}
+
+// assertRolledBack checks the create was rolled back at stage and, when
+// quotas is set, its quota reservations released.
+func assertRolledBack(t *testing.T, s store.Store, agentID, stage string, quotas bool) {
 	t.Helper()
 	assert.True(t, agentGone(t, s, agentID), "the agent row is rolled back")
 	sum := assertCompensated(t, s, agentID)
 	assert.Equal(t, stage, sum.Stage)
-	if brokerID != "" {
-		assert.EqualValues(t, 0, brokerReservationCount(t, s, brokerID), "the quotas are released")
+	if quotas {
+		assertQuotasReleased(t, s, agentID)
 	}
 }
 
@@ -222,31 +319,32 @@ func assertRolledBack(t *testing.T, s store.Store, brokerID, agentID, stage stri
 // same failure with no delete; a failed or lapsed delete does not hold it,
 // and the create is rolled back with the same answer.
 func TestFix3958_HTTPCreateRollback_DeferToHeldRow(t *testing.T) {
-	for _, site := range httpRollbackSites(t) {
+	for _, site := range httpRollbackSites() {
 		t.Run(site.name, func(t *testing.T) {
-			plain := runHTTPRollbackSite(t, site, false, nil)
+			stage := site.rollbackSite(t).wantStage
+			plain := runHTTPRollbackSite(t, site, rollbackFaults{})
 			require.GreaterOrEqual(t, plain.status, 400, plain.body)
 			require.NotContains(t, plain.body, "correlation_id", "the plain rollback completed")
-			assertRolledBack(t, plain.s, plain.project.DefaultRuntimeBrokerID, plain.agentID, site.wantStage)
+			assertRolledBack(t, plain.s, plain.agentID, stage, true)
 			assert.Zero(t, plain.deleteCalls, "no unconditional row delete")
 			assert.Equal(t, 1, plain.finalizeCalls, "one conditional compensation")
 
 			for _, del := range rollbackDeletes() {
 				t.Run(del.name, func(t *testing.T) {
-					run := runHTTPRollbackSite(t, site, false, func(t *testing.T, s store.Store, call int, id string) {
+					run := runHTTPRollbackSite(t, site, rollbackFaults{onFinalize: func(t *testing.T, s store.Store, call int, id string) {
 						if call == 1 {
 							del.apply(t, s, id)
 						}
-					})
+					}})
 					assert.Equal(t, plain.status, run.status, "the answer's status is unchanged")
 					assert.Equal(t, plain.body, run.body, "the answer's body is unchanged")
 					assert.Zero(t, run.deleteCalls, "no unconditional row delete")
 					if del.held {
-						assertRowLeftToDelete(t, run.s, run.project.DefaultRuntimeBrokerID, run.agentID, del)
+						assertRowLeftToDelete(t, run.s, run.agentID, del, true)
 						assert.Equal(t, 1, run.finalizeCalls, "the refused compensation, and no fallback")
 						return
 					}
-					assertRolledBack(t, run.s, run.project.DefaultRuntimeBrokerID, run.agentID, site.wantStage)
+					assertRolledBack(t, run.s, run.agentID, stage, true)
 				})
 			}
 		})
@@ -254,39 +352,64 @@ func TestFix3958_HTTPCreateRollback_DeferToHeldRow(t *testing.T) {
 }
 
 // (A) The fallback row delete, after a failed compensation, is conditional
-// too: a delete that claims the row before it keeps the row, and the answer
+// too: a delete that holds the row before it keeps the row, and the answer
 // is the same 500 with a correlation ID as when the fallback removes the
 // row.
 func TestFix3958_HTTPCreateRollback_FallbackDefersToHeldRow(t *testing.T) {
-	for _, site := range httpRollbackSites(t) {
+	for _, site := range httpRollbackSites() {
 		t.Run(site.name, func(t *testing.T) {
-			plain := runHTTPRollbackSite(t, site, true, nil)
+			plain := runHTTPRollbackSite(t, site, rollbackFaults{compensation: true})
 			requireRollbackIncomplete500(t, plain)
 			assert.True(t, agentGone(t, plain.s, plain.agentID), "the fallback removes the row")
-			assert.EqualValues(t, 0, brokerReservationCount(t, plain.s, plain.project.DefaultRuntimeBrokerID), "the quotas are released")
+			assertQuotasReleased(t, plain.s, plain.agentID)
 			assert.Zero(t, plain.deleteCalls, "no unconditional row delete")
+			assert.Equal(t, 2, plain.finalizeCalls, "the failed compensation, then one fallback delete")
 
 			for _, del := range rollbackDeletes() {
 				t.Run(del.name, func(t *testing.T) {
-					run := runHTTPRollbackSite(t, site, true, func(t *testing.T, s store.Store, call int, id string) {
+					run := runHTTPRollbackSite(t, site, rollbackFaults{compensation: true, onFinalize: func(t *testing.T, s store.Store, call int, id string) {
 						if call == 2 {
 							del.apply(t, s, id)
 						}
-					})
+					}})
 					requireRollbackIncomplete500(t, run)
 					assert.Equal(t, normalizeCorrelationID(plain.body), normalizeCorrelationID(run.body), "the answer is unchanged")
 					assert.Zero(t, run.deleteCalls, "no unconditional row delete")
 					if del.held {
-						assertRowLeftToDelete(t, run.s, run.project.DefaultRuntimeBrokerID, run.agentID, del)
+						assertRowLeftToDelete(t, run.s, run.agentID, del, true)
 						assert.Equal(t, 2, run.finalizeCalls, "the failed compensation, then one refused fallback delete")
 						return
 					}
 					assert.True(t, agentGone(t, run.s, run.agentID), "the fallback removes the row")
-					assert.EqualValues(t, 0, brokerReservationCount(t, run.s, run.project.DefaultRuntimeBrokerID), "the quotas are released")
+					assertQuotasReleased(t, run.s, run.agentID)
 				})
 			}
 		})
 	}
+}
+
+// (A) At a site that does not ask for DeleteWon (dispatch), when every
+// conditional row delete gives up because the row keeps changing
+// (store.ErrVersionConflict), the row is left to whatever is writing it:
+// it is kept, its phase is not marked failed, no compensation is recorded
+// and its quotas stay held. The answer is the 500 with a correlation ID, as
+// for any incomplete rollback.
+func TestFix3958_HTTPCreateRollback_RowContendedLeavesRow(t *testing.T) {
+	site := httpRollbackSite{name: "dispatch"}
+	run := runHTTPRollbackSite(t, site, rollbackFaults{finalizeErr: fmt.Errorf("finalize agent deletion: %w", store.ErrVersionConflict)})
+	requireRollbackIncomplete500(t, run)
+
+	row, err := run.s.GetAgent(context.Background(), run.agentID)
+	require.NoError(t, err, "the row is kept")
+	assert.NotEqual(t, string(state.PhaseError), row.Phase, "no phase-error write")
+	assert.NotEqual(t, createRowRemoveFailedMessage, row.Message)
+	assert.Empty(t, agentAudits(t, run.s, mutationTypeAgentCreateDispatchFailed, run.agentID), "no compensation was written")
+	held := observeReservations(t, run.s, run.agentID)
+	assert.True(t, held.broker, "the per-broker reservation stays held")
+	assert.True(t, held.project, "the per-project reservation stays held")
+	assert.Zero(t, run.deleteCalls, "no unconditional row delete")
+	assert.Equal(t, 1+createCleanupDeleteAttempts, run.finalizeCalls,
+		"the compensation, then the fallback's conditional deletes")
 }
 
 // requireRollbackIncomplete500 checks run answered the 500 that carries a
@@ -319,16 +442,14 @@ func (d *schedFailingDispatcher) DispatchAgentCreate(_ context.Context, agent *s
 
 // schedRollbackStage is one scheduler rollback site.
 type schedRollbackStage struct {
-	name  string
-	stage string
-	setup func(srv *Server)
+	name      string
+	stage     string
+	runIntent bool
 }
 
 func schedRollbackStages() []schedRollbackStage {
 	return []schedRollbackStage{
-		{name: "run intent", stage: createStageRunIntent, setup: func(srv *Server) {
-			srv.store = runIntentErrStore{srv.store}
-		}},
+		{name: "run intent", stage: createStageRunIntent, runIntent: true},
 		{name: "dispatch", stage: createStageDispatch},
 	}
 }
@@ -343,21 +464,13 @@ type schedRollbackRun struct {
 }
 
 // runSchedRollback fires one dispatch_agent event that fails at st.
-func runSchedRollback(t *testing.T, st schedRollbackStage, faultCompensation bool, onFinalize func(t *testing.T, s store.Store, call int, id string)) schedRollbackRun {
+func runSchedRollback(t *testing.T, st schedRollbackStage, faults rollbackFaults) schedRollbackRun {
 	t.Helper()
 	f := newSchedFire(t, "s3958-"+tidSlugSafe(st.name))
 	f.srv.SetDispatcher(&schedFailingDispatcher{failingCreateDispatcher{createErr: errors.New("broker unavailable")}})
-	if st.setup != nil {
-		st.setup(f.srv)
-	}
-	if faultCompensation {
-		f.srv.store = &createTxFaultStore{Store: f.srv.store, auditErrFor: mutationTypeAgentCreateDispatchFailed}
-	}
-	cs := &rollbackClaimStore{Store: f.srv.store}
-	if onFinalize != nil {
-		cs.onFinalize = func(call int, id string) { onFinalize(t, f.store, call, id) }
-	}
-	f.srv.store = cs
+	faults.runIntent = st.runIntent
+	cs, fault := installRollbackStore(t, f.srv, f.store, faults)
+	fault.Arm()
 
 	slug := "s3958-child"
 	err := f.fire(t, withSessionRevision(f.event(slug), f.creator.ID))
@@ -381,27 +494,28 @@ func runSchedRollback(t *testing.T, st schedRollbackStage, faultCompensation boo
 func TestFix3958_SchedDispatchRollback_DeferToHeldRow(t *testing.T) {
 	for _, st := range schedRollbackStages() {
 		t.Run(st.name, func(t *testing.T) {
-			plain := runSchedRollback(t, st, false, nil)
+			plain := runSchedRollback(t, st, rollbackFaults{})
 			assert.True(t, strings.HasPrefix(plain.errText, `failed to dispatch agent "s3958-child": `), plain.errText)
 			assert.NotContains(t, plain.errText, "rollback incomplete")
-			assertRolledBack(t, plain.s, "", plain.agentID, st.stage)
+			assertRolledBack(t, plain.s, plain.agentID, st.stage, false)
 			assert.Zero(t, plain.deleteCalls, "no unconditional row delete")
+			assert.Equal(t, 1, plain.finalizeCalls, "one conditional compensation")
 
 			for _, del := range rollbackDeletes() {
 				t.Run(del.name, func(t *testing.T) {
-					run := runSchedRollback(t, st, false, func(t *testing.T, s store.Store, call int, id string) {
+					run := runSchedRollback(t, st, rollbackFaults{onFinalize: func(t *testing.T, s store.Store, call int, id string) {
 						if call == 1 {
 							del.apply(t, s, id)
 						}
-					})
+					}})
 					assert.Equal(t, plain.errText, run.errText, "the event error is unchanged")
 					assert.Zero(t, run.deleteCalls, "no unconditional row delete")
 					if del.held {
-						assertRowLeftToDelete(t, run.s, "", run.agentID, del)
+						assertRowLeftToDelete(t, run.s, run.agentID, del, false)
 						assert.Equal(t, 1, run.finalizeCalls, "the refused compensation, and no fallback")
 						return
 					}
-					assertRolledBack(t, run.s, "", run.agentID, st.stage)
+					assertRolledBack(t, run.s, run.agentID, st.stage, false)
 				})
 			}
 		})
@@ -412,21 +526,23 @@ func TestFix3958_SchedDispatchRollback_DeferToHeldRow(t *testing.T) {
 func TestFix3958_SchedDispatchRollback_FallbackDefersToHeldRow(t *testing.T) {
 	for _, st := range schedRollbackStages() {
 		t.Run(st.name, func(t *testing.T) {
-			plain := runSchedRollback(t, st, true, nil)
+			plain := runSchedRollback(t, st, rollbackFaults{compensation: true})
 			assert.Contains(t, plain.errText, "(rollback incomplete, correlation ID <correlation-id>)")
 			assert.True(t, agentGone(t, plain.s, plain.agentID), "the fallback removes the row")
+			assert.Zero(t, plain.deleteCalls, "no unconditional row delete")
+			assert.Equal(t, 2, plain.finalizeCalls, "the failed compensation, then one fallback delete")
 
 			for _, del := range rollbackDeletes() {
 				t.Run(del.name, func(t *testing.T) {
-					run := runSchedRollback(t, st, true, func(t *testing.T, s store.Store, call int, id string) {
+					run := runSchedRollback(t, st, rollbackFaults{compensation: true, onFinalize: func(t *testing.T, s store.Store, call int, id string) {
 						if call == 2 {
 							del.apply(t, s, id)
 						}
-					})
+					}})
 					assert.Equal(t, plain.errText, run.errText, "the event error is unchanged")
 					assert.Zero(t, run.deleteCalls, "no unconditional row delete")
 					if del.held {
-						assertRowLeftToDelete(t, run.s, "", run.agentID, del)
+						assertRowLeftToDelete(t, run.s, run.agentID, del, false)
 						assert.Equal(t, 2, run.finalizeCalls, "the failed compensation, then one refused fallback delete")
 						return
 					}
@@ -459,12 +575,12 @@ func TestFix3958_CleanupFailedCreate_ReportsDeleteWon(t *testing.T) {
 				Agent:           agent,
 				RuntimeBrokerID: agent.RuntimeBrokerID,
 				Stage:           createStageDispatch,
-				Cause:           fmt.Errorf("dispatch failed"),
+				Cause:           errors.New("dispatch failed"),
 				DeleteWon:       &deleteWon,
 			})
 			assert.Empty(t, corrID)
 			assert.Equal(t, del.held, deleteWon, "DeleteWon reports whether a delete owns the row")
-			assert.Equal(t, !del.held, agentGone(t, s, agent.ID), "only a row no delete holds is removed")
+			assert.Equal(t, !del.held || del.removed, agentGone(t, s, agent.ID), "only a row no delete holds is removed")
 		})
 	}
 }

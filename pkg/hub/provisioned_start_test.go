@@ -116,27 +116,18 @@ func TestProvisionedStart_RunningContainerHealsCreatedRow(t *testing.T) {
 	assert.Equal(t, store.RunIntentRunning, got.RunIntent)
 }
 
-// failingDeleteStore fails every agent row delete, and every transaction
-// (so a create's compensation fails too). A create rollback deletes the
-// row with FinalizeAgentDeletion (the compensation, then each fallback
-// attempt), so each of those calls counts as a row delete.
+// failingDeleteStore fails every agent row delete. A create rollback
+// deletes the row with FinalizeAgentDeletion (the compensation, then each
+// fallback attempt), so failing it fails the compensation and the fallback,
+// and each call counts as a row delete.
 type failingDeleteStore struct {
 	store.Store
 	deletes *atomic.Int32
 }
 
-func (s failingDeleteStore) DeleteAgent(context.Context, string) error {
-	s.deletes.Add(1)
-	return errors.New("database is locked")
-}
-
 func (s failingDeleteStore) FinalizeAgentDeletion(context.Context, string, store.DeletionPredicate, store.DeletionFinalizeMode, store.DeletionFields, store.DeletionFinalizeHook) (int, error) {
 	s.deletes.Add(1)
 	return 0, errors.New("database is locked")
-}
-
-func (failingDeleteStore) WithTx(context.Context, func(tx store.Store) error) error {
-	return errors.New("database is locked")
 }
 
 // A failed create whose compensation fails and whose row then still cannot
