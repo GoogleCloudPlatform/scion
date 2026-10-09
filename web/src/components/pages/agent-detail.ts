@@ -255,6 +255,10 @@ export class ScionPageAgentDetail extends LitElement {
   @state()
   private gcpServiceAccount: GCPServiceAccount | null = null;
 
+  /** True while the record above is being fetched. */
+  @state()
+  private gcpServiceAccountLoading = false;
+
   /** `projectId/serviceAccountId` the record above was requested for; '' for none. */
   private gcpServiceAccountKey = '';
 
@@ -892,6 +896,7 @@ export class ScionPageAgentDetail extends LitElement {
     if (key === this.gcpServiceAccountKey) return;
     this.gcpServiceAccountKey = key;
     this.gcpServiceAccount = null;
+    this.gcpServiceAccountLoading = Boolean(key);
     if (key) void this.loadGCPServiceAccount(projectId, saId, key);
   }
 
@@ -904,14 +909,19 @@ export class ScionPageAgentDetail extends LitElement {
    */
   private async loadGCPServiceAccount(projectId: string, saId: string, key: string): Promise<void> {
     try {
+      // A refused lookup is shown inline as Unknown, so it must not also
+      // raise the global access-denied toast.
       const res = await apiFetch(
-        `/api/v1/projects/${encodeURIComponent(projectId)}/gcp-service-accounts/${encodeURIComponent(saId)}`
+        `/api/v1/projects/${encodeURIComponent(projectId)}/gcp-service-accounts/${encodeURIComponent(saId)}`,
+        { suppressAccessDeniedToast: true }
       );
       if (!res.ok) return;
       const account = (await res.json()) as GCPServiceAccount;
       if (key === this.gcpServiceAccountKey) this.gcpServiceAccount = account;
     } catch {
       // Optional: the card shows verification as unknown.
+    } finally {
+      if (key === this.gcpServiceAccountKey) this.gcpServiceAccountLoading = false;
     }
   }
 
@@ -2037,7 +2047,11 @@ export class ScionPageAgentDetail extends LitElement {
       ></scion-effective-access-boundary-notice>
       ${this.renderMessagingCard()} ${this.renderLabelsCard(agent)}
       ${this.renderHarnessModelCard(agent, cfg, inline)} ${this.renderRuntimeCard(agent, inline)}
-      ${this.renderGCPIdentityCard(cfg?.gcpIdentity, this.gcpServiceAccount)}
+      ${this.renderGCPIdentityCard(
+        cfg?.gcpIdentity,
+        this.gcpServiceAccount,
+        this.gcpServiceAccountLoading
+      )}
       ${this.renderConfigLimitsCard(inline)} ${this.renderTelemetryCard(inline?.telemetry)}
       ${this.renderInitialTaskCard(cfg)}
     `;
@@ -2535,11 +2549,12 @@ export class ScionPageAgentDetail extends LitElement {
    * service account, when it could be loaded; it supplies the display name
    * and the verification status (ptone/scion#4017). Without it the card
    * falls back to the email from the agent payload and shows verification
-   * as unknown.
+   * as unknown; `accountLoading` says the record is still being fetched.
    */
   private renderGCPIdentityCard(
     gcpIdentity: GCPIdentityConfig | undefined,
-    account: GCPServiceAccount | null = null
+    account: GCPServiceAccount | null = null,
+    accountLoading = false
   ) {
     if (!gcpIdentity) return nothing;
 
@@ -2548,7 +2563,7 @@ export class ScionPageAgentDetail extends LitElement {
     const email = gcpIdentity.serviceAccountEmail || record?.email || '';
     const displayName = record?.displayName?.trim() || '';
     const hasAccount = mode === 'assign' && Boolean(gcpIdentity.serviceAccountId || email);
-    const verification = gcpVerificationDisplay(record);
+    const verification = gcpVerificationDisplay(record, accountLoading);
     const verificationBadge = html`<sl-badge
       class="gcp-verification"
       data-state=${verification.state}

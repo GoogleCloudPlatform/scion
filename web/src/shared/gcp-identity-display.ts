@@ -70,10 +70,18 @@ export function matchingAccount(
   return account.id === identity.serviceAccountId ? account : null;
 }
 
-/** Verification status of the assigned account, from its registered record. */
+/**
+ * Verification status of the assigned account, from its registered record.
+ * While the record is still loading the status is unknown with no
+ * explanation, rather than one claiming the load failed.
+ */
 export function gcpVerificationDisplay(
-  account: GCPServiceAccount | null
+  account: GCPServiceAccount | null,
+  loading = false
 ): GCPIdentityVerificationDisplay {
+  if (!account && loading) {
+    return { state: 'unknown', label: 'Unknown', variant: 'neutral' };
+  }
   if (!account) {
     return {
       state: 'unknown',

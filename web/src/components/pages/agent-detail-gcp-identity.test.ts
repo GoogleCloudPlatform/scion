@@ -70,17 +70,19 @@ const ASSIGNED: GCPIdentityConfig = {
 type CardHost = {
   renderGCPIdentityCard(
     identity: GCPIdentityConfig | undefined,
-    account?: GCPServiceAccount | null
+    account?: GCPServiceAccount | null,
+    accountLoading?: boolean
   ): TemplateResult | typeof nothing;
 };
 
 function renderCard(
   identity: GCPIdentityConfig | undefined,
-  account: GCPServiceAccount | null = null
+  account: GCPServiceAccount | null = null,
+  accountLoading = false
 ): HTMLElement {
   const el = document.createElement('scion-page-agent-detail') as unknown as CardHost;
   const host = document.createElement('div');
-  render(el.renderGCPIdentityCard(identity, account), host);
+  render(el.renderGCPIdentityCard(identity, account, accountLoading), host);
   return host;
 }
 
@@ -156,6 +158,19 @@ describe('agent detail GCP Identity card', () => {
     expect(badge?.textContent?.trim()).toBe('Unknown');
   });
 
+  it('shows unknown without a load-failure tooltip while the record is loading', () => {
+    const host = renderCard(ASSIGNED, null, true);
+    expect(host.querySelector('.gcp-verification')?.getAttribute('data-state')).toBe('unknown');
+    expect(host.querySelector('sl-tooltip')).toBeNull();
+  });
+
+  it('explains unknown once loading has finished without a record', () => {
+    const host = renderCard(ASSIGNED, null, false);
+    expect(host.querySelector('sl-tooltip')?.getAttribute('content')).toBe(
+      'The registered service account record could not be loaded.'
+    );
+  });
+
   it('ignores a record that belongs to a different account', () => {
     const host = renderCard(ASSIGNED, makeAccount({ id: 'sa-other', displayName: 'Other' }));
     expect(host.querySelector('.gcp-sa-name')).toBeNull();
@@ -185,6 +200,7 @@ describe('agent detail GCP Identity card', () => {
 type SyncHost = {
   agent: Agent | null;
   gcpServiceAccount: GCPServiceAccount | null;
+  gcpServiceAccountLoading: boolean;
   syncGCPServiceAccount(): void;
 };
 
@@ -223,8 +239,14 @@ describe('agent detail GCP service account lookup', () => {
     const el = newHost();
     el.agent = makeAgent(ASSIGNED);
     el.syncGCPServiceAccount();
+    expect(el.gcpServiceAccountLoading).toBe(true);
     await vi.waitFor(() => expect(el.gcpServiceAccount?.id).toBe('sa-1'));
-    expect(apiFetch).toHaveBeenCalledWith('/api/v1/projects/p-1/gcp-service-accounts/sa-1');
+    expect(el.gcpServiceAccountLoading).toBe(false);
+    // A refused lookup is shown inline as Unknown, so it must not also raise
+    // the global access-denied toast.
+    expect(apiFetch).toHaveBeenCalledWith('/api/v1/projects/p-1/gcp-service-accounts/sa-1', {
+      suppressAccessDeniedToast: true,
+    });
   });
 
   it('does not refetch while the assignment is unchanged', async () => {
@@ -246,6 +268,7 @@ describe('agent detail GCP service account lookup', () => {
     el.syncGCPServiceAccount();
     expect(apiFetch).not.toHaveBeenCalled();
     expect(el.gcpServiceAccount).toBeNull();
+    expect(el.gcpServiceAccountLoading).toBe(false);
   });
 
   it('leaves the record empty when the hub refuses the lookup', async () => {
@@ -253,8 +276,8 @@ describe('agent detail GCP service account lookup', () => {
     const el = newHost();
     el.agent = makeAgent(ASSIGNED);
     el.syncGCPServiceAccount();
-    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(1));
-    await Promise.resolve();
+    await vi.waitFor(() => expect(el.gcpServiceAccountLoading).toBe(false));
+    expect(apiFetch).toHaveBeenCalledTimes(1);
     expect(el.gcpServiceAccount).toBeNull();
   });
 
