@@ -231,6 +231,7 @@ func TestAgentMessage_GroupConversationRequiresSenderReadAccess(t *testing.T) {
 	// A user with no role in project B gets the same answer.
 	userA := NewAuthenticatedUser(f.ownerA.ID, f.ownerA.Email, f.ownerA.DisplayName, f.ownerA.Role, string(ClientTypeWeb))
 	missingForUser := postMessageWithConv(t, f.srv, userA, f.hubAgentB, tid("group-ref-unknown-conv"))
+	require.Equal(t, http.StatusBadRequest, missingForUser.status, missingForUser.body)
 	requireSameAnswer(t, missingForUser, postMessageWithConv(t, f.srv, userA, f.hubAgentB, groupB))
 	assert.Equal(t, before, participantCount(t, f.store, groupB), "no participant row is written")
 
