@@ -20,6 +20,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 )
 
 // RunInit calls the startup clear and the shutdown backstop through these
@@ -94,5 +95,28 @@ func clearSessionTombstoneAtStartup(agentHome string) {
 	}
 	if cleared {
 		log.Debug("Session metrics: cleared the previous shutdown's tombstone")
+	}
+}
+
+// sessionUsageRecorder returns the sink that adds the telemetry pipeline's
+// natively derived usage to the open session in the agent's session metrics
+// state file (handlers.FileSessionState.AddUsage). For harnesses whose usage
+// source is native, this is the only way model calls and tokens reach the
+// session report: their hook events carry no usage. It returns nil when no
+// agent home is known. Failures are logged and dropped.
+func sessionUsageRecorder(agentHome string) telemetry.SessionUsageSink {
+	if agentHome == "" {
+		return nil
+	}
+	store := handlers.NewFileSessionState(agentHome)
+	return func(u telemetry.SessionUsage) {
+		added, err := store.AddUsage(u)
+		if err != nil {
+			log.Error("Session metrics: cannot add native usage to %s: %v", store.Path, err)
+			return
+		}
+		if !added {
+			log.Debug("Session metrics: no open session for native usage (%d calls), not added", u.Calls)
+		}
 	}
 }

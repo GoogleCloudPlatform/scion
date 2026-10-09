@@ -600,6 +600,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 		} else {
 			telemetryPipeline = pipeline
 			log.Info("Telemetry pipeline started")
+			// Natively derived usage also feeds the session metrics
+			// state, so session reports include model calls and tokens.
+			telemetryPipeline.SetSessionUsageSink(sessionUsageRecorder(agentHome))
 			defer func() {
 				if err := stopTelemetryWithTimeout(telemetryPipeline.Stop, telemetryStopBudget); err != nil {
 					log.Error("Failed to stop telemetry: %v", err)

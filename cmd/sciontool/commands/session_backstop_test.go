@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 )
 
 // backstopEnv sets up an agent home, a fake Hub and the environment that
@@ -240,5 +241,38 @@ func TestReportOpenSessionAtShutdown_RestartResumeReportedAgain(t *testing.T) {
 		if p.Session.ID != "sess-resume-1" || p.Session.TurnCount != 1 || p.Tools["Bash"].Calls != 1 {
 			t.Errorf("report %d = %+v, want one segment's counts", i, p)
 		}
+	}
+}
+
+// Claude's hook events carry no usage, so with native usage the init
+// daemon's sink adds it to the session state between the hook processes,
+// and the SessionEnd hook's report includes it.
+func TestSessionUsageRecorder_NativeUsageReachesSessionReport(t *testing.T) {
+	home, fake, _ := backstopEnv(t)
+	t.Setenv("SCION_USAGE_SOURCE", "native")
+	record := sessionUsageRecorder(home)
+
+	runHooks(t, openSessionEvents[:2]...)
+	record(telemetry.SessionUsage{Calls: 1, TokensInput: 100, TokensOutput: 20, TokensCached: 300})
+	runHooks(t, openSessionEvents[2:]...)
+	record(telemetry.SessionUsage{Calls: 1, TokensInput: 50, TokensOutput: 5})
+	runHooks(t, lateSessionEnd)
+
+	reports := fake.Reports()
+	if len(reports) != 1 {
+		t.Fatalf("got %d reports, want 1: %+v", len(reports), reports)
+	}
+	p := reports[0]
+	if p.Tokens.Input != 150 || p.Tokens.Output != 25 || p.Tokens.Cached != 300 {
+		t.Errorf("tokens = %+v, want input 150, output 25, cached 300", p.Tokens)
+	}
+	if p.Session.TurnCount != 1 || p.Tools["Bash"].Calls != 2 {
+		t.Errorf("turns %d, tools %+v, want 1 turn and 2 Bash calls", p.Session.TurnCount, p.Tools)
+	}
+
+	// After the report the state is gone; later usage is dropped quietly.
+	record(telemetry.SessionUsage{Calls: 1})
+	if sessionUsageRecorder("") != nil {
+		t.Error("recorder without an agent home should be nil")
 	}
 }
