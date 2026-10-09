@@ -19,6 +19,7 @@ package relay_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -33,8 +34,12 @@ import (
 
 // lifetimeNode starts a relay whose sessions run on the node's fake clock
 // (so the lifetime timer and the drain deadline share one time base and
-// nothing waits in real time), with keepalive pushed out of the way and
-// the given lifetime cap and session drain deadline (0 = default).
+// nothing waits in real time), with the given lifetime cap and session
+// drain deadline (0 = default). Keepalive and the per-write deadline are
+// pushed beyond any Advance in these tests: the session arms a WriteWait
+// timer on this clock around every frame it writes, so a large Advance
+// while a frame (a window update, say) is still being written would end
+// the session with a write timeout.
 func lifetimeNode(t *testing.T, w *relaytest.World, lifetimeCap, drain time.Duration) *relaytest.Node {
 	t.Helper()
 	return w.StartNode("relay-a", func(c *relay.Config) {
@@ -42,6 +47,7 @@ func lifetimeNode(t *testing.T, w *relaytest.World, lifetimeCap, drain time.Dura
 		c.Session.Clock = c.Clock
 		c.Session.PingInterval = 24 * time.Hour
 		c.Session.PongWait = 48 * time.Hour
+		c.Session.WriteWait = 7 * 24 * time.Hour
 		c.Session.DrainDeadline = drain
 	})
 }
@@ -84,17 +90,42 @@ func openEcho(t *testing.T, n *relaytest.Node, sessionID string) (conduit.LocalS
 	return ls, st
 }
 
+// echo writes s on st and reads it back, failing the test if the round
+// trip does not complete within relaytest.Wait's limit.
 func echo(t *testing.T, st conduit.Stream, s string) {
 	t.Helper()
-	if _, err := st.Write([]byte(s)); err != nil {
-		t.Fatalf("write: %v", err)
+	res := make(chan error, 1)
+	go func() {
+		if _, err := st.Write([]byte(s)); err != nil {
+			res <- fmt.Errorf("write: %w", err)
+			return
+		}
+		buf := make([]byte, len(s))
+		if _, err := io.ReadFull(st, buf); err != nil {
+			res <- fmt.Errorf("read: %w", err)
+			return
+		}
+		if string(buf) != s {
+			res <- fmt.Errorf("echo = %q, want %q", buf, s)
+			return
+		}
+		res <- nil
+	}()
+	if err := relaytest.Wait(t, res, "echo round trip"); err != nil {
+		t.Fatal(err)
 	}
-	buf := make([]byte, len(s))
-	if _, err := io.ReadFull(st, buf); err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if string(buf) != s {
-		t.Fatalf("echo = %q, want %q", buf, s)
+}
+
+// waitTimer waits until the relay has armed a timer due at at (the
+// lifetime GoAway or a drain deadline) before the test advances the clock
+// past it. Serve arms the lifetime timer after the session is visible to
+// Local, and a Shutdown drain arms its deadline after the GoAway frame
+// is queued, so neither is guaranteed to be armed when the test sees the
+// session or the GoAway.
+func waitTimer(t *testing.T, n *relaytest.Node, at time.Time, what string) {
+	t.Helper()
+	if !n.Clock.WaitForTimer(10*time.Second, at) {
+		t.Fatalf("%s timer (due at +%s) not armed", what, at.Sub(n.Clock.Now()))
 	}
 }
 
@@ -147,6 +178,7 @@ func TestLifetimeCap_GoAwayLeadAndDrainDeadline(t *testing.T) {
 		t.Fatalf("Welcome.lifetime_hint_s = %d, want 30 (seconds until GoAway)", got)
 	}
 	ls, st := openEcho(t, n, wel.GetSessionId())
+	waitTimer(t, n, t0.Add(30*time.Second), "lifetime GoAway")
 
 	n.Clock.Advance(30*time.Second - time.Millisecond)
 	if ls.Info().Draining {
@@ -178,6 +210,7 @@ func TestLifetimeCap_GoAwayLeadAndDrainDeadline(t *testing.T) {
 		t.Fatalf("OpenStream after GoAway = %v, want ErrDraining", err)
 	}
 	echo(t, st, "during drain")
+	waitTimer(t, n, t0.Add(60*time.Second), "drain deadline")
 
 	n.Clock.Advance(30*time.Second - time.Millisecond)
 	if isClosed(ls.Done()) {
@@ -205,11 +238,13 @@ func TestLifetimeCap_StreamOpenAfterGoAwayRefused(t *testing.T) {
 	w := relaytest.NewWorld(t)
 	n := lifetimeNode(t, w, 90*time.Second, 0)
 	w.SetPrincipal("a", agentPrincipal("L1", 1))
+	t0 := n.Clock.Now()
 	cfg := echoConfig()
 	var goAways <-chan *conduitv1.GoAway
 	cfg.Interceptor, goAways = goAwayRecorder(true)
 	target, wel := n.MustDial("a", relaytest.AgentHello(agentID, "L1", "", "pty"), cfg)
 	ls, _ := openEcho(t, n, wel.GetSessionId())
+	waitTimer(t, n, t0.Add(30*time.Second), "lifetime GoAway")
 
 	n.Clock.Advance(30 * time.Second)
 	if !ls.Info().Draining {
@@ -242,12 +277,14 @@ func TestLifetimeCap_DrainDeadlineBoundedByCap(t *testing.T) {
 	cfg.Interceptor, goAways = goAwayRecorder(false)
 	_, wel := n.MustDial("a", relaytest.AgentHello(agentID, "L1", "", "pty"), cfg)
 	ls, st := openEcho(t, n, wel.GetSessionId())
+	waitTimer(t, n, t0.Add(60*time.Second), "lifetime GoAway")
 
 	n.Clock.Advance(60 * time.Second)
 	g := relaytest.Wait(t, goAways, "GoAway")
 	if g.GetDrainDeadlineMs() != 60000 {
 		t.Fatalf("drain_deadline_ms = %d, want 60000 (ends at the cap)", g.GetDrainDeadlineMs())
 	}
+	waitTimer(t, n, t0.Add(120*time.Second), "drain deadline")
 	n.Clock.Advance(60*time.Second - time.Millisecond)
 	if isClosed(ls.Done()) {
 		t.Fatal("session closed before the drain deadline")
@@ -276,11 +313,11 @@ func TestLifetimeCap_ShutdownDrainNotExtended(t *testing.T) {
 	cfg.Interceptor, goAways = goAwayRecorder(false)
 	target, wel := n.MustDial("a", relaytest.AgentHello(agentID, "L1", "", "pty"), cfg)
 	ls, st := openEcho(t, n, wel.GetSessionId())
+	waitTimer(t, n, t0.Add(60*time.Second), "lifetime GoAway")
 
 	n.Clock.Advance(50 * time.Second) // lifetime GoAway would be at +60s
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	armed := n.Clock.Pending()
 	result := make(chan error, 1)
 	go func() { result <- n.Relay.Shutdown(ctx) }()
 	g := relaytest.Wait(t, goAways, "drain GoAway")
@@ -289,9 +326,7 @@ func TestLifetimeCap_ShutdownDrainNotExtended(t *testing.T) {
 	}
 	// The GoAway frame goes out before the drain timer is armed; advance
 	// only once it is, so the deadline is counted from +50s.
-	if !n.Clock.WaitFor(10*time.Second, func(p int) bool { return p > armed }) {
-		t.Fatal("drain deadline timer not armed")
-	}
+	waitTimer(t, n, t0.Add(80*time.Second), "Shutdown drain deadline")
 
 	n.Clock.Advance(10 * time.Second) // +60s: the lifetime timer fires
 	n.Clock.Advance(20*time.Second - time.Millisecond)
@@ -364,15 +399,14 @@ func TestLifetimeCap_SessionEndedBeforeGoAway(t *testing.T) {
 	n := lifetimeNode(t, w, 90*time.Second, 0)
 	w.SetPrincipal("a", agentPrincipal("L1", 1))
 	baseline := n.Clock.Pending() // relay heartbeat only
+	t0 := n.Clock.Now()
 	target, wel := n.MustDial("a", relaytest.AgentHello(agentID, "L1", "", "pty"), echoConfig())
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, _, ok := n.Relay.Local(ctx, wel.GetSessionId()); !ok { // registered: lifetime timer armed
+	if _, _, ok := n.Relay.Local(ctx, wel.GetSessionId()); !ok {
 		t.Fatal("session not registered")
 	}
-	if p := n.Clock.Pending(); p <= baseline {
-		t.Fatalf("pending timers %d with a live session, want more than %d", p, baseline)
-	}
+	waitTimer(t, n, t0.Add(30*time.Second), "lifetime GoAway")
 	_ = target.Close()
 	_ = relaytest.Wait(t, n.Served, "Serve to return")
 	if !n.Clock.WaitFor(10*time.Second, func(p int) bool { return p == baseline }) {
@@ -398,9 +432,11 @@ func TestLifetimeCap_SupersedeDuringDrainNotExtended(t *testing.T) {
 	cfg.Interceptor, goAways = goAwayRecorder(false)
 	target, wel := n.MustDial("a", relaytest.AgentHello(agentID, "L1", "", "pty"), cfg)
 	ls, st := openEcho(t, n, wel.GetSessionId())
+	waitTimer(t, n, t0.Add(60*time.Second), "lifetime GoAway")
 
 	n.Clock.Advance(60 * time.Second) // lifetime GoAway; deadline at +90s
 	_ = relaytest.Wait(t, goAways, "lifetime GoAway")
+	waitTimer(t, n, t0.Add(90*time.Second), "lifetime drain deadline")
 	if _, err := w.Registry.RegisterRelay(context.Background(), registry.RelayInstance{InstanceID: "relay-a"}); err != nil {
 		t.Fatal(err)
 	}
