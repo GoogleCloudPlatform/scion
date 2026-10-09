@@ -158,8 +158,11 @@ func TestHandleHarnessConfigFileWrite_RejectsUnusableProvisionerUncleanPath(t *t
 
 // The multipart upload refuses an unusable provisioner block in a
 // config.yaml part before writing any part. Parts are written in sorted
-// order and "aaa-first.txt" sorts before "config.yaml", so a check made
-// inside the write loop instead of before it always records an upload.
+// order. "aaa-first.txt" sorts before "config.yaml" and "sub/../config.yaml",
+// so for those two variants a check made inside the write loop instead of
+// before it records an upload and fails the zero-uploads assertion. The
+// "./config.yaml" variant sorts before the filler part, so it does not catch
+// that ordering mistake; the other two variants do.
 func TestHandleHarnessConfigFileUpload_RejectsUnusableProvisioner(t *testing.T) {
 	for _, configPart := range []string{"config.yaml", "./config.yaml", "sub/../config.yaml"} {
 		for _, tc := range provisionerUploadCases {
