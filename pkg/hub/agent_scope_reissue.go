@@ -651,9 +651,9 @@ func (s *Server) reissueUATIdentity(ctx context.Context, edge *store.DelegationE
 		return nil, refuse("has an invalid boundary")
 	}
 	boundary := TokenBoundary{Kind: BoundaryKind(tok.BoundaryKind), ProjectID: tok.ProjectID}
-	return NewScopedUserIdentityWithBoundaryAndDecoration(
+	return NewScopedUserIdentityWithBoundary(
 		NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, string(ClientTypeAPI)),
-		boundary, tok.Scopes, tok.ID, tok.NormalizedCeiling(), nil,
+		boundary, tok.Scopes, tok.ID, tok.NormalizedCeiling(),
 	), nil
 }
 
