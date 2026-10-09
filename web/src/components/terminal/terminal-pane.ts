@@ -1936,6 +1936,8 @@ export class ScionTerminalPane extends LitElement {
         return 'AGENT UNAVAILABLE';
       case 'agent-deleted':
         return 'AGENT DELETED';
+      case 'attach-unsupported':
+        return 'ATTACH NOT SUPPORTED';
       default:
         return 'DISCONNECTED';
     }
