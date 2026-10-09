@@ -231,6 +231,11 @@ func isJSONObject(v json.RawMessage) bool {
 // from it was a zero value dropped by omitempty, and is deleted.
 // Unknown keys were rejected before the merge; anything left (a read-only
 // echo) was dropped by sentStructFields and is not persisted.
+// sentStructFields promotes the fields of an embedded struct the way
+// encoding/json does, and each is written here at this YAML level, which
+// matches yaml.v3 only for an embedded struct tagged yaml:",inline"; the
+// server config types embed none without it
+// (TestV1ServerConfig_EmbeddedStructsAreYAMLInline).
 func mergeSettingsStruct(existing map[string]interface{}, t reflect.Type, sent []sentField, typed map[string]interface{}) {
 	for _, sf := range sent {
 		f, val := sf.field, sf.val
@@ -294,7 +299,11 @@ func structFieldByJSONName(t reflect.Type, name string) (reflect.StructField, bo
 // without a JSON name in its tag are promoted, at any depth: for a name
 // claimed at several depths the shallowest field wins, and of several at
 // the same depth the only tagged one wins, or none when that is not
-// unique. A promoted field's Index is its full index path from t.
+// unique. A promoted field's Index is its full index path from t. One
+// exception: an unexported embedded pointer to a struct is skipped.
+// encoding/json lists its fields when encoding but cannot decode into
+// them (the pointer cannot be allocated), and the callers match request
+// keys for decoding.
 func structJSONNames(t reflect.Type) iter.Seq2[string, reflect.StructField] {
 	var keep []jsonNamedField
 	if v, ok := structJSONNamesCache.Load(t); ok {
