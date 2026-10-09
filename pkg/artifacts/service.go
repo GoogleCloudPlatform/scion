@@ -560,7 +560,11 @@ func writeNotFound(w http.ResponseWriter) {
 	writeError(w, http.StatusNotFound, "not_found", "not found")
 }
 
-func writeMethodNotAllowed(w http.ResponseWriter, allowed ...string) {
+// writeMethodNotAllowed answers 405 with the Allow header RFC 9110 §15.5.6
+// requires. The signature requires at least one method, so a call that
+// would send an empty Allow does not compile.
+func writeMethodNotAllowed(w http.ResponseWriter, allowedMethod string, otherMethods ...string) {
+	allowed := append([]string{allowedMethod}, otherMethods...)
 	w.Header().Set("Allow", strings.Join(allowed, ", "))
 	writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 }

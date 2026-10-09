@@ -565,8 +565,8 @@ func (s *Server) handleGCSObject(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		event.Decision = "deny"
 		event.Reason = GCSLinkReasonBadRequest
-		status = http.StatusMethodNotAllowed
 		MethodNotAllowed(w, http.MethodGet)
+		status = http.StatusMethodNotAllowed
 		emitAudit()
 		return
 	}
