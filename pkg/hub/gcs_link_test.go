@@ -384,6 +384,13 @@ type gcsFixture struct {
 func newGCSFixture(t *testing.T) *gcsFixture {
 	t.Helper()
 	srv, s := attachmentTestServer(t)
+	return gcsFixtureFor(t, srv, s)
+}
+
+// gcsFixtureFor wires the gs:// link fakes onto an already built server; s
+// is the raw store setup writes through.
+func gcsFixtureFor(t *testing.T, srv *Server, s store.Store) *gcsFixture {
+	t.Helper()
 	gen := &fakeGCSTokenGenerator{}
 	source := newFakeGCSSource()
 	audit := newGCSAuditRecorder()

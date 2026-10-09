@@ -122,18 +122,30 @@ func gcsHubScopedSA(t *testing.T, f *gcsFixture, seed string) func(*store.Projec
 	}
 }
 
-// gcsSALookupFaultStore fails GetGCPServiceAccount for one account ID with a
-// store error (not ErrNotFound).
+// gcsSALookupFaultStore fails GetGCPServiceAccount with a store error (not
+// ErrNotFound) once its switch is armed.
 type gcsSALookupFaultStore struct {
 	store.Store
-	saID string
+	fault *storeFaultSwitch
 }
 
 func (s *gcsSALookupFaultStore) GetGCPServiceAccount(ctx context.Context, id string) (*store.GCPServiceAccount, error) {
-	if id == s.saID {
-		return nil, errors.New("gcs test: store fault for test")
+	if !s.fault.Active() {
+		return s.Store.GetGCPServiceAccount(ctx, id)
 	}
-	return s.Store.GetGCPServiceAccount(ctx, id)
+	return nil, errors.New("gcs test: store fault for test")
+}
+
+// newGCSFixtureWithSALookupFault is newGCSFixture with a gcsSALookupFaultStore
+// installed right after the server is built; Arm the returned switch to make
+// service account lookups fail.
+func newGCSFixtureWithSALookupFault(t *testing.T) (*gcsFixture, *storeFaultSwitch) {
+	t.Helper()
+	srv, s := attachmentTestServer(t)
+	_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *gcsSALookupFaultStore {
+		return &gcsSALookupFaultStore{Store: inner, fault: f}
+	})
+	return gcsFixtureFor(t, srv, s), fault
 }
 
 func TestGCSLink_Deny_UnverifiedServiceAccount(t *testing.T) {
@@ -166,12 +178,12 @@ func TestGCSLink_Deny_HubServiceAccountWhenEnforceModeOff(t *testing.T) {
 }
 
 func TestGCSLink_Deny_ServiceAccountLookupFaultAnswersUniform404(t *testing.T) {
-	f := newGCSFixture(t)
+	f, fault := newGCSFixtureWithSALookupFault(t)
 	sc := gcsSAAdmissionScenario(t, f, "salookupfault", func(project *store.Project) *store.GCPServiceAccount {
 		return gcsTestSA(t, f.store, project, "salookupfault-sa", "sa-salookupfault@test.iam.gserviceaccount.com")
 	})
 	logs := gcsUseLoggingAuditRecorder(f)
-	f.srv.store = &gcsSALookupFaultStore{Store: f.srv.store, saID: sc.sa.ID}
+	fault.Arm()
 
 	rec := sc.fetch(t, f)
 	requireGCSUniformDeny(t, f, rec, GCSLinkReasonSALookupFailed)
@@ -218,10 +230,10 @@ func TestGCSLink_Allowed_VerifiedProjectServiceAccount(t *testing.T) {
 func TestGCSLink_DenyBodiesIdenticalAcrossServiceAccountStates(t *testing.T) {
 	type state struct {
 		name  string
-		setup func(t *testing.T, f *gcsFixture) gcsSAScenario
+		setup func(t *testing.T, f *gcsFixture, fault *storeFaultSwitch) gcsSAScenario
 	}
 	states := []state{
-		{"no service account", func(t *testing.T, f *gcsFixture) gcsSAScenario {
+		{"no service account", func(t *testing.T, f *gcsFixture, _ *storeFaultSwitch) gcsSAScenario {
 			project := gcsTestProject(t, f, "bodies-nosa-project")
 			agent := gcsTestAgent(t, f.store, project, "bodies-nosa-agent", nil)
 			conv := gcsTestTopic(t, f.store, project, "bodies-nosa-topic")
@@ -233,29 +245,29 @@ func TestGCSLink_DenyBodiesIdenticalAcrossServiceAccountStates(t *testing.T) {
 			addProjectMemberWithRole(t, f.store, project, viewer.ID, store.GroupMemberRoleMember)
 			return gcsSAScenario{viewer: viewer, msg: msg}
 		}},
-		{"unverified", func(t *testing.T, f *gcsFixture) gcsSAScenario {
+		{"unverified", func(t *testing.T, f *gcsFixture, _ *storeFaultSwitch) gcsSAScenario {
 			return gcsSAAdmissionScenario(t, f, "bodies-unverified", gcsUnverifiedSA(t, f, "bodies-unverified"))
 		}},
-		{"other project", func(t *testing.T, f *gcsFixture) gcsSAScenario {
+		{"other project", func(t *testing.T, f *gcsFixture, _ *storeFaultSwitch) gcsSAScenario {
 			return gcsSAAdmissionScenario(t, f, "bodies-otherproj", gcsOtherProjectSA(t, f, "bodies-otherproj"))
 		}},
-		{"hub scoped without enforce", func(t *testing.T, f *gcsFixture) gcsSAScenario {
+		{"hub scoped without enforce", func(t *testing.T, f *gcsFixture, _ *storeFaultSwitch) gcsSAScenario {
 			setMode(f.srv, SAAssignCheckOff)
 			return gcsSAAdmissionScenario(t, f, "bodies-hubmode", gcsHubScopedSA(t, f, "bodies-hubmode"))
 		}},
-		{"lookup fault", func(t *testing.T, f *gcsFixture) gcsSAScenario {
+		{"lookup fault", func(t *testing.T, f *gcsFixture, fault *storeFaultSwitch) gcsSAScenario {
 			sc := gcsSAAdmissionScenario(t, f, "bodies-fault", func(project *store.Project) *store.GCPServiceAccount {
 				return gcsTestSA(t, f.store, project, "bodies-fault-sa", "sa-bodies-fault@test.iam.gserviceaccount.com")
 			})
-			f.srv.store = &gcsSALookupFaultStore{Store: f.srv.store, saID: sc.sa.ID}
+			fault.Arm()
 			return sc
 		}},
 	}
 
 	var base *httptest.ResponseRecorder
 	for _, st := range states {
-		f := newGCSFixture(t)
-		rec := st.setup(t, f).fetch(t, f)
+		f, fault := newGCSFixtureWithSALookupFault(t)
+		rec := st.setup(t, f, fault).fetch(t, f)
 		require.Equal(t, http.StatusNotFound, rec.Code, st.name)
 		require.Zero(t, f.gen.mintCount(), st.name)
 		if base == nil {
