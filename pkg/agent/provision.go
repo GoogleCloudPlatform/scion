@@ -790,12 +790,6 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 		return cfg, err
 	}
 
-	if sdChange != nil {
-		if err := sdChange.record(opts, cfg); err != nil {
-			return cfg, err
-		}
-	}
-
 	// prompt.md must never hold the previous generation's task once the
 	// disk is re-rendered for the new one (ptone/scion#3985). The new
 	// generation's first task (the hub-built preamble plus handoff) is
@@ -808,9 +802,19 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 	// Staging does not deliver the task: prompt.md is only read by Start as
 	// a fallback when its request has no task, and a start that carries
 	// the same task overwrites the file with it and delivers it once.
+	// This runs before the shared dir backend change is recorded, so that
+	// record stays the last step that can fail ("recorded only after
+	// provisioning succeeds").
 	if err := writeReprovisionPrompt(agentDir, opts.Task); err != nil {
 		return cfg, err
 	}
+
+	if sdChange != nil {
+		if err := sdChange.record(opts, cfg); err != nil {
+			return cfg, err
+		}
+	}
+
 	return withProvisionedImage(opts, agentDir, cfg)
 }
 
