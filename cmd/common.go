@@ -479,6 +479,9 @@ func isHubFailure(err error) bool {
 //     timeout) and 5xx responses: the "scion hub disable" local-only hint is
 //     appended, since the hub being down is the case where falling back to
 //     local mode can help.
+//   - A runtime broker failure relayed by the Hub ("runtime broker returned
+//     error ..."): rendered as a short failure category with the broker's
+//     code and the request ID, without the local-only hint.
 //   - Other API errors (4xx such as 400/403/404/409/422): returned as-is. The
 //     hub answered and the message is about the request, so suggesting that
 //     the user disable the hub would be misleading noise.
@@ -509,6 +512,12 @@ func wrapHubError(err error) error {
 			return &hubError{msg: "hub rejected this agent's credentials: " + err.Error(), err: err}
 		}
 		return &hubError{msg: "authentication failed, login to hub with 'scion hub auth login'", err: err}
+	}
+	// A failure the Hub relays from the runtime broker: the Hub is up, so
+	// local-only mode is no remedy; show a short category instead of the
+	// broker's raw response (ptone/scion#3323).
+	if msg, ok := renderBrokerFailure(err); ok {
+		return &hubError{msg: msg, err: err}
 	}
 	if config.IsHubManagedAgent() || !shouldSuggestLocalOnly(err) {
 		return &hubError{msg: err.Error(), err: err}
