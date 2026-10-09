@@ -539,9 +539,9 @@ async function mapWithConcurrency<T, R>(
 ): Promise<
   Array<{ item: T; index: number; result: R } | { item: T; index: number; error: unknown }>
 > {
-  const results: Array<
+  const results = new Array<
     { item: T; index: number; result: R } | { item: T; index: number; error: unknown }
-  > = new Array(items.length);
+  >(items.length);
   let nextIndex = 0;
 
   async function worker(): Promise<void> {

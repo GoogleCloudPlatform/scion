@@ -36,6 +36,7 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 // Shared golden fixture (ptone/scion#2493 R2-2): the Go hub test
 // (pkg/hub/applied_config_explicit_edits_test.go) loads the SAME file as its
@@ -108,8 +109,8 @@ function stubFetch(): void {
       Promise.resolve({
         ok: false,
         status: 404,
-        json: async () => ({}),
-        text: async () => 'not found',
+        json: () => Promise.resolve({}),
+        text: () => Promise.resolve('not found'),
       } as Response)
     )
   );
@@ -130,30 +131,31 @@ function stubFetchWithLoadedAgent(appliedConfig?: Record<string, unknown>): void
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL) => {
-      const url = typeof input === 'string' ? input : input.toString();
+      const url = requestUrl(input);
       if (url.includes('/settings/public')) {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({ telemetryEnabled: false, autoExposePortsEnabled: false }),
+          json: () => Promise.resolve({ telemetryEnabled: false, autoExposePortsEnabled: false }),
         } as Response);
       }
       return Promise.resolve({
         ok: true,
         status: 200,
-        json: async () => ({
-          id: 'agent-1',
-          name: 'agent-1',
-          projectId: 'project-1',
-          phase: 'created',
-          appliedConfig: appliedConfig ?? {
-            model: 'claude-opus',
-            inlineConfig: {
-              env: { EXPLICIT_KEY: 'explicit-value' },
-              telemetry: { enabled: true },
+        json: () =>
+          Promise.resolve({
+            id: 'agent-1',
+            name: 'agent-1',
+            projectId: 'project-1',
+            phase: 'created',
+            appliedConfig: appliedConfig ?? {
+              model: 'claude-opus',
+              inlineConfig: {
+                env: { EXPLICIT_KEY: 'explicit-value' },
+                telemetry: { enabled: true },
+              },
             },
-          },
-        }),
+          }),
       } as Response);
     })
   );
