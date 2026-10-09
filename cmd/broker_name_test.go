@@ -33,10 +33,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// registerHub is a fake hub for 'runtime-broker register': it answers the
+// brokerNameHub is a fake hub for 'runtime-broker register': it answers the
 // health check, broker creation and join, and the broker lookup, and
 // records the name each broker creation and join asked for.
-type registerHub struct {
+type brokerNameHub struct {
 	*httptest.Server
 	mu          sync.Mutex
 	createNames []string
@@ -50,9 +50,9 @@ type registerHub struct {
 	matchedID string
 }
 
-func newRegisterHub(t *testing.T) *registerHub {
+func newBrokerNameHub(t *testing.T) *brokerNameHub {
 	t.Helper()
-	h := &registerHub{}
+	h := &brokerNameHub{}
 	h.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
@@ -98,7 +98,7 @@ func newRegisterHub(t *testing.T) *registerHub {
 	return h
 }
 
-func (h *registerHub) names() (create, join []string) {
+func (h *brokerNameHub) names() (create, join []string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return append([]string(nil), h.createNames...), append([]string(nil), h.joinNames...)
@@ -106,7 +106,7 @@ func (h *registerHub) names() (create, join []string) {
 
 // setupRegisterTest points HOME at a temp dir with a hub-enabled project
 // for hub, runs a fake broker for the health check and enables --yes.
-func setupRegisterTest(t *testing.T, hub *registerHub) (globalDir string) {
+func setupRegisterTest(t *testing.T, hub *brokerNameHub) (globalDir string) {
 	t.Helper()
 	isolateJoinEnv(t)
 	home, globalDir := brokerTestHome(t)
@@ -146,7 +146,7 @@ func TestBrokerRegister_BrokerNameFlagIsNotName(t *testing.T) {
 // TestBrokerRegister_DefaultNameIsHostname: without --broker-name, register
 // uses the hostname and saves no broker name.
 func TestBrokerRegister_DefaultNameIsHostname(t *testing.T) {
-	hub := newRegisterHub(t)
+	hub := newBrokerNameHub(t)
 	setupRegisterTest(t, hub)
 
 	out := runRegisterForTest(t)
@@ -163,7 +163,7 @@ func TestBrokerRegister_DefaultNameIsHostname(t *testing.T) {
 // saved, and a later register without the flag keeps it instead of going
 // back to the hostname (which would match another broker on the hub).
 func TestBrokerRegister_BrokerNameFlag(t *testing.T) {
-	hub := newRegisterHub(t)
+	hub := newBrokerNameHub(t)
 	setupRegisterTest(t, hub)
 
 	setBrokerFlagForTest(t, brokerRegisterCmd, "broker-name", "rig-broker-2")
@@ -191,7 +191,7 @@ func TestBrokerRegister_BrokerNameFlag(t *testing.T) {
 // TestBrokerRegister_BrokerNameKeptByHub: when the hub keeps an existing
 // broker's name, register reports and saves that name, not the requested one.
 func TestBrokerRegister_BrokerNameKeptByHub(t *testing.T) {
-	hub := newRegisterHub(t)
+	hub := newBrokerNameHub(t)
 	hub.hubName = "old-name"
 	hub.reregistered = true
 	setupRegisterTest(t, hub)
@@ -212,7 +212,7 @@ func TestBrokerRegister_BrokerNameKeptByHub(t *testing.T) {
 // a re-registration still reports the name the hub kept, without a warning
 // and without saving it.
 func TestBrokerRegister_ReregisterReadbackWithoutFlag(t *testing.T) {
-	hub := newRegisterHub(t)
+	hub := newBrokerNameHub(t)
 	hub.hubName = "old-name"
 	hub.reregistered = true
 	setupRegisterTest(t, hub)
@@ -230,7 +230,7 @@ func TestBrokerRegister_ReregisterReadbackWithoutFlag(t *testing.T) {
 // to a broker other than this host's broker ID, register warns that this
 // host takes over that broker's identity (it still registers).
 func TestBrokerRegister_NameMatchesOtherBroker(t *testing.T) {
-	hub := newRegisterHub(t)
+	hub := newBrokerNameHub(t)
 	hub.reregistered = true
 	hub.matchedID = "99999999-8888-7777-6666-555555555555"
 	setupRegisterTest(t, hub)
@@ -246,7 +246,7 @@ func TestBrokerRegister_NameMatchesOtherBroker(t *testing.T) {
 // TestBrokerRegister_NameMatchesOtherBroker_SavedID: with a saved broker ID,
 // the takeover warning names it.
 func TestBrokerRegister_NameMatchesOtherBroker_SavedID(t *testing.T) {
-	hub := newRegisterHub(t)
+	hub := newBrokerNameHub(t)
 	hub.reregistered = true
 	hub.matchedID = "99999999-8888-7777-6666-555555555555"
 	globalDir := setupRegisterTest(t, hub)
