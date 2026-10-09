@@ -265,3 +265,28 @@ func TestScopeReissue_UserDelegatorPerScopeWithhold(t *testing.T) {
 	assert.NotContains(t, edge.PermissionIDs, "artifact.create")
 	assert.NotContains(t, scopeStrings(f.grant(t, a)), string(ScopeProjectArtifactWrite))
 }
+
+// The re-issued set equals what agent creation by the same user issues
+// today, for a session-rooted agent: same scopes and same ceiling.
+func TestScopeReissue_SessionRootedEqualsCreateToday(t *testing.T) {
+	f := newUserReissueFixture(t, "rsu-eq")
+	ctx := context.Background()
+	a := f.agent(t, "rsu-eq-agent", AgentRoleFull, state.PhaseRunning)
+	f.edge(t, store.DelegationPrincipalUser, f.userID, a.ID, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, sessionProv(f.userID))
+	f.run(t, a, false)
+	reissued := f.grant(t, a)
+
+	user, err := f.store.GetUser(ctx, f.userID)
+	require.NoError(t, err)
+	rec := doRequestAsUser(t, f.srv, user, http.MethodPost, "/api/v1/projects/"+f.projectID+"/agents",
+		CreateAgentRequest{Name: "rsu-eq-sibling", AgentRole: string(AgentRoleFull)})
+	require.Less(t, rec.Code, 300, rec.Body.String())
+	sibling, err := f.store.GetAgentBySlug(ctx, f.projectID, "rsu-eq-sibling")
+	require.NoError(t, err)
+
+	assert.ElementsMatch(t, f.grant(t, sibling), reissued, "re-issue equals create-today")
+	assert.Contains(t, scopeStrings(reissued), string(ScopeProjectArtifactWrite))
+	siblingCeiling, agentCeiling := f.activeEdge(t, sibling).EffectCeiling, f.activeEdge(t, a).EffectCeiling
+	assert.True(t, effectCeilingsEqual(siblingCeiling, agentCeiling), "created %+v, re-issued %+v", siblingCeiling, agentCeiling)
+	assert.Equal(t, store.SourceCredentialSession, f.activeEdge(t, sibling).SourceCredentialKind)
+}
