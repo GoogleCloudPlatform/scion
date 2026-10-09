@@ -8,7 +8,10 @@ export default defineConfig({
   use: {
     baseURL: 'http://127.0.0.1:4534',
     viewport: { width: 1100, height: 700 },
-    launchOptions: { executablePath: '/usr/bin/chromium', args: ['--no-sandbox'] },
+    launchOptions: {
+      executablePath: process.env.CHROMIUM_EXECUTABLE || '/usr/bin/chromium',
+      args: ['--no-sandbox'],
+    },
   },
   webServer: {
     command: 'npm run dev -- --host 127.0.0.1 --port 4534',
