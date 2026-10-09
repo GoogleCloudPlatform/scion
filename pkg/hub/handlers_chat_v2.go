@@ -64,6 +64,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/google/uuid"
 )
 
@@ -824,6 +825,7 @@ func (s *Server) handleTopicDelete(w http.ResponseWriter, r *http.Request, topic
 	}
 
 	s.events.PublishChatTopicEvent(r.Context(), topic.ProjectID, "deleted", *topic)
+	s.deleteScheduledMessagesOfConversation(r.Context(), topicID)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
@@ -1010,7 +1012,7 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 
 	// Validated before the idempotency lookup, so an invalid body is never
 	// answered with a replay. sendChatMessage validates again.
-	content, _, serr := s.validateChatSendInput(ctx, target, in)
+	content, _, serr := s.validateChatSendInput(ctx, user, target, in)
 	if serr != nil {
 		serr.write(w)
 		return
@@ -1092,6 +1094,53 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		s.chatIdempotency.Record(user.ID(), body.IdempotencyKey, resp.ID)
 		idempotencyRecorded = true
 	}
+}
+
+// stageChatAttachments returns the agent-visible file paths of a message's
+// attachments (same pattern as the Discord plugin — agents receive []string
+// of paths). The attachment store lives on the hub host, which agent
+// containers cannot read, so each file is staged into the project's
+// scratchpad shared dir first. Staging is best-effort: when it is
+// unavailable the hub-local path is sent, which host-process agents can
+// still read. Call it only after the message is authorized and stored.
+func (s *Server) stageChatAttachments(ctx context.Context, projectID string, attachmentRefs []AttachmentRef) []string {
+	if len(attachmentRefs) == 0 {
+		return nil
+	}
+	s.mu.RLock()
+	as := s.attachmentStore
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	localAS, ok := as.(*LocalDiskAttachmentStore)
+	if !ok {
+		return nil
+	}
+	var paths []string
+	staging := s.resolveAttachmentStaging(ctx, projectID)
+	for _, ref := range attachmentRefs {
+		// A file lives under the project it was uploaded to, which is not
+		// this message's project when it was uploaded from a DM — those
+		// uploads carry no project at all.
+		storedIn := projectID
+		if wcs != nil {
+			if meta, err := wcs.GetAttachment(ctx, ref.ID); err == nil && meta != nil {
+				storedIn = meta.ProjectID
+			}
+		}
+		hostPath := localAS.FilePath(storedIn, ref.ID, ref.Name)
+		agentPath := hostPath
+		if staging != nil {
+			staged, err := staging.stage(hostPath, ref.ID, ref.Name)
+			if err != nil {
+				s.messageLog.Error("Failed to stage attachment for agent",
+					"attachment", ref.ID, "error", err)
+			} else {
+				agentPath = staged
+			}
+		}
+		paths = append(paths, agentPath)
+	}
+	return paths
 }
 
 // resolveReplyTarget resolves the reply-to agent override (nc-reply-recipient)
@@ -1220,17 +1269,32 @@ var unreachablePhases = map[string]bool{
 	string(state.PhaseError):     true,
 }
 
+// agentGoneReason is the failure reason recorded when the primary agent no
+// longer resolves to a live agent. A soft-deleted agent and an agent whose
+// record is missing get this same reason, so the two cases read alike.
+const agentGoneReason = "Agent unreachable"
+
+// agentUnreachableReason returns the failure reason for an unreachable
+// primary given the suffix from isAgentUnreachable.
+func agentUnreachableReason(suffix string) string {
+	if suffix == "" {
+		return agentGoneReason
+	}
+	return fmt.Sprintf("Agent unreachable (%s)", suffix)
+}
+
 // isAgentUnreachable reports whether agent is unreachable for chat v2 primary
 // dispatch: soft-deleted, or in a phase whose container cannot accept a
 // buffered message (suspended, stopping, stopped, error). The returned string
-// is a short reason suffix for the "Agent unreachable (<reason>)" message
-// (e.g. "deleted" or the phase name); it is empty when reachable.
+// is a short reason suffix for agentUnreachableReason: the phase name, or
+// empty for a soft-deleted agent (reported like a missing one) and when
+// reachable.
 func isAgentUnreachable(agent *store.Agent) (bool, string) {
 	if agent == nil {
 		return false, ""
 	}
 	if !agent.DeletedAt.IsZero() {
-		return true, "deleted"
+		return true, ""
 	}
 	if unreachablePhases[agent.Phase] {
 		return true, agent.Phase
@@ -1293,6 +1357,13 @@ func chatWakeWriteBudget(recipients int) time.Duration {
 	}
 	return chatWakeResumeBudget + time.Duration(recipients)*chatWakeDeliveryBudget + chatWakeWriteSlack
 }
+
+// chatWakeSendBudget is the overall deadline of a wake send once it is
+// detached from the request: the wake, persistence, every dispatch and
+// the store and event calls in between. It matches the write deadline,
+// so the send ends no later than the connection can still answer.
+// A variable so tests can shorten it.
+var chatWakeSendBudget = chatWakeWriteBudget
 
 // extendWriteDeadlineForWake moves the connection's write deadline past
 // the server-wide WriteTimeout to chatWakeWriteBudget(recipients) from
@@ -1399,43 +1470,8 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		}
 		refsJSON, _ := json.Marshal(attachmentRefs)
 		msg.Metadata[attachmentsMetadataKey] = string(refsJSON)
-
-		// For agent dispatch: pass container-visible file paths in Attachments
-		// (same pattern as Discord plugin — agents receive []string of paths).
-		// The attachment store lives on the hub host, which agent containers
-		// cannot read, so each file is staged into the project's scratchpad
-		// shared dir first. Staging is best-effort: when it is unavailable the
-		// hub-local path is sent, which host-process agents can still read.
-		s.mu.RLock()
-		as := s.attachmentStore
-		wcs := s.webChatStore
-		s.mu.RUnlock()
-		if localAS, ok := as.(*LocalDiskAttachmentStore); ok {
-			staging := s.resolveAttachmentStaging(ctx, projectID)
-			for _, ref := range attachmentRefs {
-				// A file lives under the project it was uploaded to, which is not
-				// this message's project when it was uploaded from a DM — those
-				// uploads carry no project at all.
-				storedIn := projectID
-				if wcs != nil {
-					if meta, err := wcs.GetAttachment(ctx, ref.ID); err == nil && meta != nil {
-						storedIn = meta.ProjectID
-					}
-				}
-				hostPath := localAS.FilePath(storedIn, ref.ID, ref.Name)
-				agentPath := hostPath
-				if staging != nil {
-					staged, err := staging.stage(hostPath, ref.ID, ref.Name)
-					if err != nil {
-						s.messageLog.Error("Failed to stage attachment for agent",
-							"attachment", ref.ID, "error", err)
-					} else {
-						agentPath = staged
-					}
-				}
-				msg.Attachments = append(msg.Attachments, agentPath)
-			}
-		}
+		// The files themselves are staged for the agent only once the
+		// message is authorized and stored (stageChatAttachments below).
 	}
 
 	// Phase 3 msg-authz: Check message authorization on the primary agent.
@@ -1562,7 +1598,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		// Not a failure: the message is saved for catch-up, not dropped.
 		storeMsg.DispatchState = store.MessageDispatchDeferred
 	} else if primaryUnreachable {
-		unreachableReason := fmt.Sprintf("Agent unreachable (%s)", primaryUnreachableReason)
+		unreachableReason := agentUnreachableReason(primaryUnreachableReason)
 		storeMsg.DispatchState = store.MessageDispatchFailed
 		storeMsg.DispatchFailureReason = &unreachableReason
 		dispatchFailureCode = dispatchFailureCodeAgentUnreachable
@@ -1634,12 +1670,15 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		// abort a wake in progress, nor the persist and dispatch after it.
 		// The send then runs to its end with its idempotency key in flight
 		// (a retry is told send_in_progress), so the client's retry finds
-		// the finished outcome. Only some steps carry a deadline: the wake
-		// (chatWakeResumeBudget), each dispatch (30s) and markFailed (its
-		// finalization timeout). The store and event calls after the wake
-		// have none, as on the request context, which had no deadline
-		// either.
-		ctx = context.WithoutCancel(ctx)
+		// the finished outcome. The detached context carries one overall
+		// deadline (chatWakeSendBudget), so a stalled store or event call
+		// ends the send instead of keeping the key in flight forever.
+		// Within it the wake (chatWakeResumeBudget) and each dispatch
+		// (30s) have their own bounds; markFailed uses its finalization
+		// timeout and still runs after the deadline.
+		var cancelSend context.CancelFunc
+		ctx, cancelSend = context.WithTimeout(context.WithoutCancel(ctx), chatWakeSendBudget(len(agents)))
+		defer cancelSend()
 		wakeCtx, cancelWake := context.WithTimeout(ctx, chatWakeResumeBudget)
 		// wakeAgentForDM reports managed runtimes, a missing broker, the
 		// start gate and readiness failures as typed errors.
@@ -1670,6 +1709,11 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		opts.OnPersisted(storeMsg.ID)
 	}
 	s.recordMessageArtifacts(ctx, storeMsg.ID, artifactRefs)
+
+	// Attachment files are copied to the agent's scratchpad only now: every
+	// check that can refuse the send (authorization, validation, wake,
+	// conversation resolution, persistence) has passed.
+	msg.Attachments = append(msg.Attachments, s.stageChatAttachments(ctx, projectID, attachmentRefs)...)
 
 	// The row was stored with the optimistic "dispatched" state, which the
 	// primary dispatch below confirms or replaces. If the function exits
@@ -2099,7 +2143,7 @@ func groupCoAddressees(agents []*store.Agent) []messaging.Addressee {
 type unreachableAgentOverride struct {
 	AgentSlug string // resolved or best-effort slug of the named agent
 	AgentID   string // resolved agent ID, or "" if it never resolved at all
-	Reason    string // e.g. "Agent unreachable (deleted)"
+	Reason    string // e.g. agentGoneReason
 	Code      string // dispatchFailureCode, e.g. dispatchFailureCodeAgentUnreachable
 }
 
@@ -2110,9 +2154,10 @@ type unreachableAgentOverride struct {
 // message type, and response differ, but conversation resolution, SSE
 // publish, watermark updates, and notification firing (including
 // fireHumanMentionNotifications) are shared with the ordinary human-to-human
-// path. unreachable is only ever used for the topic case (isDM is always
-// false alongside it). It returns the response body of the persisted
-// message, or the error the send handler answers with.
+// path. With isDM (an agent DM whose agent record is gone) the DM is
+// registered as usual but no DM notification is sent. It returns the
+// response body of the persisted message, or the error the send handler
+// answers with.
 func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, user UserIdentity,
 	content, senderLabel string, isDM, noRecipient bool, mentionNames []string, attachmentRefs []AttachmentRef, now time.Time, replyToID string,
 	unreachable *unreachableAgentOverride) (*chatMessageResponse, *chatSendError) {
@@ -2298,7 +2343,7 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 	// that topic.
 	if cn := s.getChatNotifier(); cn != nil {
 		// DM received notification: notify the peer when a DM is sent.
-		if isDM && recipientID != "" && recipientID != user.ID() {
+		if isDM && unreachable == nil && recipientID != "" && recipientID != user.ID() {
 			go cn.NotifyDMReceived(context.Background(), recipientID, ChatMessageContext{
 				SenderID:        user.ID(),
 				SenderName:      senderLabel,
@@ -2588,7 +2633,9 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		if !isDMParticipant(key, user.ID()) {
-			Forbidden(w)
+			// Answered as a missing thread; the reason is logged.
+			logReferenceRefused(ctx, logging.RequestPath(r), "caller is not a participant of this DM", user)
+			NotFound(w, "Thread")
 			return
 		}
 	} else {
@@ -2608,10 +2655,13 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 		project, err := s.store.GetProject(ctx, topic.ProjectID)
 		if err != nil {
-			NotFound(w, "Project")
+			logReferenceRefused(ctx, logging.RequestPath(r), "topic project lookup failed: "+err.Error(), user)
+			NotFound(w, "Thread")
 			return
 		}
-		if !s.authorize(w, r, projectResource(project), ActionRead) {
+		// A caller who may not read the project gets the same answer as
+		// for a missing thread; authorizeRead logs the denial.
+		if !s.authorizeRead(w, r, projectResource(project), "Thread") {
 			return
 		}
 	}
@@ -2630,6 +2680,9 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 	// G3: fallback to channel+thread is REMOVED. Unresolved conversations
 	// return a typed 409 error so failures are observable, not silent.
 	var filter store.MessageFilter
+	// historyConvID is the conversation the page is listed by, when the
+	// envelope switch resolved one; reply previews are matched against it.
+	var historyConvID string
 	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() {
 		var convResult *messaging.ConversationResult
 		if isDM {
@@ -2676,6 +2729,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 				Channel:        "web",
 				ConversationID: convResult.ConversationID,
 			}
+			historyConvID = convResult.ConversationID
 		} else if isDM {
 			// DEF-127: a never-used DM is a normal first-use state, not a
 			// defect. Authorization already passed (key-based, line 1825-1832),
@@ -2853,6 +2907,12 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 				if err == nil && len(refMsgs) > 0 {
 					replyPreviews = make(map[string]chatReplyPreview, len(refMsgs))
 					for id, refMsg := range refMsgs {
+						// A preview shows only a message of this
+						// conversation, also for reply rows stored
+						// before the send-time check existed.
+						if !sameConversation(refMsg, key, historyConvID) {
+							continue
+						}
 						content := refMsg.Msg
 						// If the referenced message is deleted, show
 						// "[deleted]" instead of leaking the original text.
@@ -3150,22 +3210,40 @@ func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Reject IDs that aren't persisted messages: clients must never set a
-	// client-local placeholder as the watermark. Existence only, not also
-	// same-conversation membership — history lists by ConversationID, and a
-	// visible row's ThreadID may differ from key.
+	// The watermark must be a persisted message of this conversation:
+	// clients must never set a client-local placeholder, and a message of
+	// another conversation gets the same answer as a missing one. History
+	// lists by ConversationID when the envelope switch is on, and a visible
+	// row's ThreadID may then differ from key, so a match on either counts
+	// (sameConversation).
+	const watermarkNotInConversation = "messageId does not refer to a message in this conversation"
 	targetMsg, err := s.store.GetMessage(ctx, body.MessageID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			ValidationError(w, "messageId does not refer to a known message", nil)
+			ValidationError(w, watermarkNotInConversation, nil)
 		} else {
 			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to look up message", nil)
 		}
 		return
 	}
 	if targetMsg == nil {
-		ValidationError(w, "messageId does not refer to a known message", nil)
+		ValidationError(w, watermarkNotInConversation, nil)
 		return
+	}
+	if !sameConversation(targetMsg, key, "") {
+		convID := ""
+		if targetMsg.ConversationID != "" {
+			convID, err = s.conversationIDForKey(ctx, wcs, key)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to look up message", nil)
+				return
+			}
+		}
+		if !sameConversation(targetMsg, key, convID) {
+			logReferenceRefused(ctx, logging.RequestPath(r), "read marker is not a message of this conversation", user)
+			ValidationError(w, watermarkNotInConversation, nil)
+			return
+		}
 	}
 	// Monotonic: a stale advance must never roll the watermark backward;
 	// ties break by ID, matching ListMessages' (CreatedAt, ID) ordering.
@@ -3381,7 +3459,8 @@ func (s *Server) authorizeConversationAccess(
 			return false
 		}
 		if !isDMParticipant(key, userID) {
-			Forbidden(w)
+			logReferenceRefused(r.Context(), logging.RequestPath(r), "caller is not a participant of this DM", GetIdentityFromContext(r.Context()))
+			NotFound(w, "Thread")
 			return false
 		}
 		return true
@@ -3395,10 +3474,14 @@ func (s *Server) authorizeConversationAccess(
 	}
 	project, err := s.store.GetProject(ctx, topic.ProjectID)
 	if err != nil {
-		NotFound(w, "Project")
+		logReferenceRefused(ctx, logging.RequestPath(r), "topic project lookup failed: "+err.Error(), GetIdentityFromContext(ctx))
+		NotFound(w, "Thread")
 		return false
 	}
-	return s.authorize(w, r, projectResource(project), ActionRead)
+	// Mute, pin and read state are per-user settings on a conversation the
+	// caller can read, so read access is the check; a caller without it gets
+	// the same answer as for a missing thread.
+	return s.authorizeRead(w, r, projectResource(project), "Thread")
 }
 
 // handleConversationMute handles PUT /api/v1/chat/conversations/{key}/mute.
@@ -5517,19 +5600,14 @@ func (s *Server) handleAttachmentDownload(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Authorize: user must have read access to the project. An attachment
-	// uploaded from a DM has no project (see handleAttachmentUpload); the
-	// authenticated identity plus the unguessable attachment ID is all there is
-	// to check, so the download proceeds.
-	if meta.ProjectID != "" {
-		project, err := s.store.GetProject(ctx, meta.ProjectID)
-		if err != nil {
-			NotFound(w, "Project")
-			return
-		}
-		if !s.authorize(w, r, projectResource(project), ActionRead) {
-			return
-		}
+	// Authorize (canReadAttachment): a file downloads for its uploader, for
+	// readers of its project, and for anyone who can read a message it is
+	// attached to. Anyone else gets the same answer as for an unknown
+	// attachment; the reason is logged.
+	if !s.canReadAttachment(ctx, user, meta) {
+		logReferenceRefused(ctx, logging.RequestPath(r), "caller may not read this attachment", user)
+		NotFound(w, "Attachment")
+		return
 	}
 
 	// Get file from storage.

@@ -266,7 +266,9 @@ func newIntegrationTestServer(t *testing.T, hub *mockHubServer, scheme, apiKey s
 			Streaming:         true,
 			PushNotifications: false,
 		}),
-		a2asrv.WithAgentInactivityTimeout(2*time.Second),
+		// Test-only: generous inactivity headroom so slow or busy (-race) runners
+		// do not hit the SDK watcher before the bridge executor finishes.
+		a2asrv.WithAgentInactivityTimeout(10*time.Second),
 		a2asrv.WithTaskStore(scopedStore),
 	)
 	b.SetSDKRequestHandler(sdkRequestHandler)
@@ -1330,7 +1332,9 @@ func newSnapshotIntegrationTestServer(t *testing.T, hub *mockHubServer, geOpts .
 		executor,
 		a2asrv.WithLogger(log),
 		a2asrv.WithCapabilityChecks(&a2a.AgentCapabilities{Streaming: true}),
-		a2asrv.WithAgentInactivityTimeout(2*time.Second),
+		// Test-only: generous inactivity headroom so slow or busy (-race) runners
+		// do not hit the SDK watcher before the bridge executor finishes.
+		a2asrv.WithAgentInactivityTimeout(10*time.Second),
 		a2asrv.WithTaskStore(scopedStore),
 	)
 	b.SetSDKRequestHandler(sdkRequestHandler)

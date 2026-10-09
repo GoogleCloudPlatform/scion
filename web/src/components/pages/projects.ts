@@ -24,7 +24,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, Project, Capabilities } from '../../shared/types.js';
-import { can } from '../../shared/types.js';
+import { can, projectWorkspaceModeIcon } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
 import { listPageStyles } from '../shared/resource-styles.js';
@@ -444,8 +444,11 @@ export class ScionPageProjects extends LitElement {
     `;
   }
 
-  private renderProjectIcon() {
-    return html`<sl-icon name="folder-fill"></sl-icon>`;
+  private renderProjectIcon(project: Project) {
+    const { icon, label } = projectWorkspaceModeIcon(project);
+    return html`<sl-tooltip content=${label}
+      ><sl-icon class="workspace-mode-icon" name=${icon} label=${label}></sl-icon
+    ></sl-tooltip>`;
   }
 
   private renderLinkedBadge(project: Project) {
@@ -464,7 +467,7 @@ export class ScionPageProjects extends LitElement {
         <div class="project-header">
           <div>
             <h3 class="resource-name">
-              ${this.renderProjectIcon()}
+              ${this.renderProjectIcon(project)}
               <span>${project.name}${this.renderLinkedBadge(project)}</span>
             </h3>
             <div class="project-path">
@@ -521,7 +524,7 @@ export class ScionPageProjects extends LitElement {
       >
         <td>
           <span class="name-cell">
-            ${this.renderProjectIcon()} ${project.name}${this.renderLinkedBadge(project)}
+            ${this.renderProjectIcon(project)} ${project.name}${this.renderLinkedBadge(project)}
           </span>
         </td>
         <td class="mono-cell">

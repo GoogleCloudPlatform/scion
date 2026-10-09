@@ -255,11 +255,13 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"broker.update":   "Broker-HMAC only, not user-facing",
 		"broker.delete":   "Broker-HMAC only, not user-facing",
 		"broker.dispatch": "Broker-HMAC dispatch, not user-facing",
+		// Checked in the broker registration handler when a request turns
+		// auto-provide on; no route declares it.
+		"broker.auto_provide": "Broker registration handler check, no route declaration",
 
 		// Hub admin permissions — NonRouteUse only (no route declaration)
 		"hub.settings.read":         "NonRouteUse only, no route declaration",
 		"hub.admin_mode.read":       "NonRouteUse only, no route declaration",
-		"hub.integrations.update":   "NonRouteUse only, no route declaration",
 		"hub.allow_list.read":       "NonRouteUse only, no route declaration",
 		"hub.scheduler.update":      "NonRouteUse only, no route declaration",
 		"hub.federation.read":       "NonRouteUse only, no route declaration",
@@ -1251,7 +1253,7 @@ var domainResourceCompatibility = map[string][]string{
 	"quota":              {"ResourceQuota"},
 	"schedule":           {"ResourceScheduledEvent"},
 	"chat":               {"ResourceProject"},
-	"env":                {"ResourceProject"},
+	"env":                {"ResourceProject", "ResourceHub"},
 	"artifact":           {"ResourceArtifact"},
 	"inbox":              {"ResourceInbox"},
 }

@@ -305,11 +305,11 @@ type topicLookupFailingStore struct {
 	WebChatStore
 }
 
-func (topicLookupFailingStore) GetTopicConversationID(context.Context, string) (string, error) {
+func (topicLookupFailingStore) GetTopicConversationIDInProject(context.Context, string, string) (string, error) {
 	return "", errors.New("injected topic lookup failure: secret-detail")
 }
 
-func (topicLookupFailingStore) GetTopicConversationIDIncludingDeleted(context.Context, string) (string, error) {
+func (topicLookupFailingStore) GetTopicConversationIDIncludingDeletedInProject(context.Context, string, string) (string, error) {
 	return "", errors.New("injected topic lookup failure: secret-detail")
 }
 
@@ -386,11 +386,11 @@ type fakeTopicLookup struct {
 	liveErr, allErr error
 }
 
-func (f fakeTopicLookup) GetTopicConversationID(context.Context, string) (string, error) {
+func (f fakeTopicLookup) GetTopicConversationIDInProject(context.Context, string, string) (string, error) {
 	return f.liveID, f.liveErr
 }
 
-func (f fakeTopicLookup) GetTopicConversationIDIncludingDeleted(context.Context, string) (string, error) {
+func (f fakeTopicLookup) GetTopicConversationIDIncludingDeletedInProject(context.Context, string, string) (string, error) {
 	return f.allID, f.allErr
 }
 
@@ -430,7 +430,7 @@ func TestOutboundThreadConversationState(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := outboundThreadConversationState(context.Background(), tc.cr, tc.tl, "thread:p:t", "t")
+			got, err := outboundThreadConversationState(context.Background(), tc.cr, tc.tl, "p", "thread:p:t", "t")
 			if tc.wantErr {
 				require.Error(t, err)
 				return
@@ -455,4 +455,44 @@ func TestOutboundThreadGateApplies(t *testing.T) {
 	} {
 		assert.Equal(t, want, outboundThreadGateApplies(channel), "channel %q", channel)
 	}
+}
+
+// An outbound threaded send on an external channel stores its conversation
+// under the channel's surface, so an inbound reply on the same thread
+// resolves to the same conversation and no native one is created.
+func TestOutbound_ExternalChannelThread_SharesInboundConversation(t *testing.T) {
+	srv, s, project, agent, user := def138Setup(t)
+	setupThreadTestChannels(t, srv, s, project, "web", "slack")
+
+	const threadID = "C999:1700000000.000200"
+	rr := postOutboundRequest(t, srv, project.ID, agent.ID, OutboundMessageRequest{
+		Recipient: "user:" + user.Email,
+		Msg:       "outbound to a slack thread",
+		ThreadID:  threadID,
+		Channel:   "slack",
+	})
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	var body map[string]interface{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body))
+	outboundConvID, _ := body["conversation_id"].(string)
+	require.NotEmpty(t, outboundConvID)
+
+	extRef, err := messaging.ThreadConversationExternalRef(project.ID, threadID)
+	require.NoError(t, err)
+	_, err = s.GetConversationByExternalRef(context.Background(), "native", extRef)
+	assert.ErrorIs(t, err, store.ErrNotFound, "no native conversation for an external thread")
+
+	inbound, err := srv.resolvePhase5Conversation(context.Background(), threadID, project.ID, user.ID, agent.ID, "slack")
+	require.NoError(t, err)
+	require.NotNil(t, inbound)
+	assert.Equal(t, outboundConvID, inbound.ConversationID, "inbound reply must reuse the outbound conversation")
+	assert.Equal(t, "slack", inbound.Surface)
+}
+
+func TestOutboundThreadSurface(t *testing.T) {
+	assert.Equal(t, "slack", outboundThreadSurface("group", "slack"))
+	assert.Equal(t, "", outboundThreadSurface("group", "web"))
+	assert.Equal(t, "", outboundThreadSurface("group", ""))
+	assert.Equal(t, "", outboundThreadSurface("group", "no-such-channel"))
+	assert.Equal(t, "", outboundThreadSurface("direct", "slack"))
 }

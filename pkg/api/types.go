@@ -483,6 +483,12 @@ type ScionConfig struct {
 	Hub           *AgentHubConfig            `json:"hub,omitempty" yaml:"hub,omitempty"`
 	Telemetry     *TelemetryConfig           `json:"telemetry,omitempty" yaml:"telemetry,omitempty"`
 
+	// CloneDepth sets the git clone depth for a clone-per-agent
+	// workspace: "full" or a positive integer. It overrides a profile's
+	// clone_depth. Empty keeps the profile value, else the default
+	// shallow clone of depth 1.
+	CloneDepth CloneDepth `json:"clone_depth,omitempty" yaml:"clone_depth,omitempty"`
+
 	Secrets []RequiredSecret `json:"secrets,omitempty" yaml:"secrets,omitempty"`
 
 	// Skills declares skill references to resolve at provision time.
@@ -684,8 +690,9 @@ type AgentInfo struct {
 	HubEndpoint       string `json:"hubEndpoint,omitempty"`       // Scion Hub URL if connected
 	WebPTYEnabled     bool   `json:"webPtyEnabled,omitempty"`     // Whether web terminal access is available
 	TaskSummary       string `json:"taskSummary,omitempty"`       // Current task description (for dashboard)
-	// ProvisionedOnly: the Hub reports the agent provisioned but not
-	// started (ptone/scion#2929). No omitempty: an explicit false lets a
+	// ProvisionedOnly: the agent was provisioned but not started. The Hub
+	// computes it (ptone/scion#2929); local List sets it for a
+	// container-less agent in phase "created" (ptone/scion#2875). No omitempty: an explicit false lets a
 	// client that merges responses clear a previously seen true.
 	ProvisionedOnly bool `json:"provisionedOnly"`
 

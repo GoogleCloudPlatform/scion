@@ -507,7 +507,7 @@ func TestScheduledSend_SenderLosesProjectRead_FailsNoAccess(t *testing.T) {
 	_, err = f.store.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, f.bob.ID)
 	require.NoError(t, err)
 	rec := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, f.scheduledPath(), nil)
-	require.Equal(t, http.StatusForbidden, rec.Code, "bob has lost read access")
+	require.Equal(t, http.StatusNotFound, rec.Code, "bob has lost read access: answered as a missing thread")
 
 	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, fireAt.Add(time.Second)))
 	row := f.row(t, f.bob, sm.ID)
@@ -655,18 +655,6 @@ func TestScheduledSend_FireAtWithOffsetStoredUTC(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), fireAt.UTC().Format("2006-01-02T15:04:05")+"Z")
 }
 
-func TestScheduledSend_DMRejected(t *testing.T) {
-	f := newScheduledSendFixture(t)
-	dmKey := "dm:agent:" + f.agent.ID + ":user:" + f.bob.ID
-	path := "/api/v1/chat/conversations/" + dmKey + "/scheduled"
-	rec := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, path, map[string]interface{}{
-		"content": "dm later", "fire_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
-	})
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	rec = doRequestAsUser(t, f.srv, f.bob, http.MethodGet, path, nil)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-}
-
 func TestScheduledSend_OutsiderRefused(t *testing.T) {
 	f := newScheduledSendFixture(t)
 	outsider := &store.User{
@@ -677,9 +665,9 @@ func TestScheduledSend_OutsiderRefused(t *testing.T) {
 	rec := doRequestAsUser(t, f.srv, outsider, http.MethodPost, f.scheduledPath(), map[string]interface{}{
 		"content": "x", "fire_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
 	})
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "an outsider gets the missing-thread answer")
 	rec = doRequestAsUser(t, f.srv, outsider, http.MethodGet, f.scheduledPath(), nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "an outsider gets the missing-thread answer")
 }
 
 func TestScheduledSend_ScopedTokenRefused(t *testing.T) {
@@ -804,7 +792,7 @@ func testScheduledStoreTransitions(t *testing.T, sms ScheduledMessageStore) {
 	ok, err = sms.ClaimScheduledMessage(ctx, early.ID, base)
 	require.NoError(t, err)
 	assert.False(t, ok)
-	require.NoError(t, sms.ReleaseScheduledMessage(ctx, early.ID, base))
+	mustApply(t)(sms.ReleaseScheduledMessage(ctx, early.ID, base, base))
 	got, err = sms.GetScheduledMessage(ctx, "user-a", early.ID)
 	require.NoError(t, err)
 	assert.Equal(t, ScheduledMessagePending, got.Status)
@@ -813,7 +801,7 @@ func testScheduledStoreTransitions(t *testing.T, sms ScheduledMessageStore) {
 	ok, err = sms.ClaimScheduledMessage(ctx, early.ID, base)
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.NoError(t, sms.MarkScheduledMessageSent(ctx, early.ID, "msg-1", base))
+	mustApply(t)(sms.MarkScheduledMessageSent(ctx, early.ID, "msg-1", base, base))
 	next, err := sms.NextDueScheduledMessage(ctx, "user-a", base.Add(250*time.Millisecond))
 	require.NoError(t, err)
 	require.NotNil(t, next)
@@ -829,7 +817,7 @@ func testScheduledStoreTransitions(t *testing.T, sms ScheduledMessageStore) {
 	ok, err = sms.ClaimScheduledMessage(ctx, late.ID, base)
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.NoError(t, sms.MarkScheduledMessageFailed(ctx, late.ID, ScheduledFailureNoAccess, base))
+	mustApply(t)(sms.MarkScheduledMessageFailed(ctx, late.ID, ScheduledFailureNoAccess, base, base))
 	got, err = sms.GetScheduledMessage(ctx, "user-a", late.ID)
 	require.NoError(t, err)
 	assert.Equal(t, ScheduledMessageFailed, got.Status)
@@ -897,6 +885,8 @@ func TestScheduledStore_Postgres(t *testing.T) {
 		sms[i] = scheduledMessageStoreFrom(wcs)
 	}
 	testScheduledStoreTransitions(t, sms[0])
+	testScheduledStorePhase2Transitions(t, sms[0])
+	testScheduledDMDeleteRemovesScheduled(t, sms[0])
 	testScheduledStoreDuePerSender(t, sms[0])
 	testCancelClaimRace(t, sms[0], sms[1], "pg-race")
 	testOneSenderTwoReplicas(t, sms[0], sms[1], "pg-one-sender", 30)
@@ -1352,10 +1342,12 @@ func TestScheduledSend_ExperimentTurnedOffMidBatch_RestHeld(t *testing.T) {
 	assert.Equal(t, ScheduledMessagePending, held.Status)
 }
 
-// A 404 from sendChatMessage at fire time is a delivery error: the checks
-// just before it proved the conversation exists.
+// A 404 from sendChatMessage at fire time is a delivery error (the checks
+// just before it proved the conversation exists), unless it is a refusal of
+// the sender's access answered as not found, which is no_access.
 func TestScheduledSend_FailureMapping(t *testing.T) {
 	assert.Equal(t, ScheduledFailureNoAccess, scheduledFailureFromSendError(chatSendForbidden()))
+	assert.Equal(t, ScheduledFailureNoAccess, scheduledFailureFromSendError(chatSendRefusedAsNotFound("Thread")))
 	assert.Equal(t, ScheduledFailureDeliveryError, scheduledFailureFromSendError(chatSendNotFound("Thread")))
 	assert.Equal(t, ScheduledFailureDeliveryError, scheduledFailureFromSendError(
 		newChatSendError(http.StatusInternalServerError, "INTERNAL", "x", nil)))

@@ -141,13 +141,14 @@ func refusalOf(rr *httptest.ResponseRecorder) refusal {
 	return refusal{code: rr.Code, contentType: rr.Header().Get("Content-Type"), body: rr.Body.String()}
 }
 
-// nonParticipantRefusal is the existing response for a sender who is not
-// one of the two participants of the key.
+// nonParticipantRefusal is the response for a sender who is not one of the
+// two participants of the key: the same answer as for a missing thread.
 func (e *dmPeerEnv) nonParticipantRefusal(t *testing.T, send func(*testing.T, *store.User, string) *httptest.ResponseRecorder) refusal {
 	t.Helper()
 	key := userDMKey(t, e.bob.ID, tid("dm-peer-someone-else"))
 	rr := send(t, e.alice, key)
-	require.Equal(t, http.StatusForbidden, rr.Code, rr.Body.String())
+	require.Equal(t, http.StatusNotFound, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), "Thread not found")
 	return refusalOf(rr)
 }
 

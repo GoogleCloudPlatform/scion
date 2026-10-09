@@ -1944,3 +1944,35 @@ func TestAgentStore_SetAgentWorkspacePlacementSkipsSoftDeleted(t *testing.T) {
 
 	assert.ErrorIs(t, s.SetAgentWorkspacePlacement(ctx, uuid.NewString(), "export"), store.ErrNotFound)
 }
+
+// SetAgentAnnotation sets and removes one key, keeps the others, does not
+// bump state_version, and leaves a soft-deleted row untouched.
+func TestAgentStore_SetAgentAnnotation(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	a := makeAgent(projectID, "annotation-narrow")
+	a.Annotations = map[string]string{"keep": "me"}
+	require.NoError(t, s.CreateAgent(ctx, a))
+	before, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+
+	require.NoError(t, s.SetAgentAnnotation(ctx, a.ID, "scion.dev/test", `{"commits":2}`))
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"keep": "me", "scion.dev/test": `{"commits":2}`}, got.Annotations)
+	assert.Equal(t, before.StateVersion, got.StateVersion, "a narrow write does not bump state_version")
+
+	require.NoError(t, s.SetAgentAnnotation(ctx, a.ID, "scion.dev/test", ""))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"keep": "me"}, got.Annotations)
+
+	// Removing an absent key is a no-op.
+	require.NoError(t, s.SetAgentAnnotation(ctx, a.ID, "absent", ""))
+
+	got.DeletedAt = time.Now()
+	require.NoError(t, s.UpdateAgent(ctx, got))
+	assert.ErrorIs(t, s.SetAgentAnnotation(ctx, a.ID, "scion.dev/test", "x"), store.ErrNotFound)
+	assert.ErrorIs(t, s.SetAgentAnnotation(ctx, uuid.NewString(), "k", "v"), store.ErrNotFound)
+}

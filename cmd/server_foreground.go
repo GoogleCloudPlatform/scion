@@ -209,12 +209,12 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if projectDir, ok := config.FindProjectRoot(); ok {
 		if projectDir != globalDir {
 			parentDir := filepath.Dir(projectDir)
-			fmt.Fprintf(os.Stderr, "\n%s%s WARNING: Server is running from a project directory context (%s)%s\n",
-				util.Bold, util.Yellow, parentDir, util.Reset)
-			fmt.Fprintf(os.Stderr, "%s%s          The runtime broker will use this project's templates and settings.%s\n",
-				util.Bold, util.Yellow, util.Reset)
-			fmt.Fprintf(os.Stderr, "%s%s          For machine-wide operation, run the server from outside any project directory.%s\n\n",
-				util.Bold, util.Yellow, util.Reset)
+			fmt.Fprint(os.Stderr, util.ColorFor(os.Stderr, fmt.Sprintf("\n%s%s WARNING: Server is running from a project directory context (%s)%s\n",
+				util.Bold, util.Yellow, parentDir, util.Reset)))
+			fmt.Fprint(os.Stderr, util.ColorFor(os.Stderr, fmt.Sprintf("%s%s          The runtime broker will use this project's templates and settings.%s\n",
+				util.Bold, util.Yellow, util.Reset)))
+			fmt.Fprint(os.Stderr, util.ColorFor(os.Stderr, fmt.Sprintf("%s%s          For machine-wide operation, run the server from outside any project directory.%s\n\n",
+				util.Bold, util.Yellow, util.Reset)))
 		}
 	}
 
@@ -1938,6 +1938,7 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		ConduitTCPAllowedPorts:       append([]int(nil), cfg.Hub.Conduit.TCPAllowedPorts...),
 		ConduitGrantKeyActivation:    conduitGrantKeyActivationSetting(cfg),
 		ConduitAuthzRecheckInterval:  conduitAuthzRecheckIntervalSetting(cfg),
+		ConduitUserStreamAuthzMax:    conduitUserStreamAuthzMaxSetting(cfg),
 		AgentRunScope:                agentRunScopeSetting(cfg),
 		AdminMode:                    adminMode,
 		MaintenanceMessage:           maintenanceMessage,
@@ -2280,6 +2281,9 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 			checker := hub.NewPolicyTroubleshooterChecker(ptClient, hubSAEmail, hubSrv.DenyUnknownFailOpen())
 			// Follow reloads of the deny-unknown fallback policy.
 			checker.SetDenyUnknownPolicySource(hubSrv.DenyUnknownFailOpen)
+			// Report real API calls, not cached results, to the admin
+			// diagnostic for the assignment check.
+			checker.SetCallObserver(hubSrv.NoteSAAssignCheckCall)
 			cached := hub.NewCachedCallerPermissionChecker(checker,
 				60*time.Second, // allowTTL
 				10*time.Second, // denyTTL
@@ -2824,6 +2828,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		hubSrv.SetEventPublisher(eventPub)
 		startSettingsPropagation(ctx, hubSrv, eventPub)
 		webSrv.SetAccessSettingsProvider(hubSrv)
+		webSrv.SetProfilingSettingsProvider(hubSrv)
 		webSrv.SetOAuthService(hubSrv.GetOAuthService())
 		webSrv.SetStore(hubSrv.GetStore())
 		webSrv.SetUserTokenService(hubSrv.GetUserTokenService())

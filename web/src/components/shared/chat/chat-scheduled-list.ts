@@ -17,10 +17,14 @@
 /**
  * The current user's scheduled messages in one conversation, shown at the
  * bottom of the thread as dimmed bubbles with a banner: the send time and a
- * Cancel button while pending, the reason when delivery failed. Only the
+ * Cancel button while pending; when delivery failed, the reason with Send
+ * now (missed or interrupted only), Copy to composer and Dismiss. Only the
  * sender ever receives these (GET and the user-scoped SSE subject). When a
  * message is sent its bubble goes away; the real message arrives on the
  * ordinary chat stream.
+ *
+ * Cancel and Copy to composer hand the text to the composer with a
+ * `chat-scheduled-restore` event (see ScheduledRestoreDetail).
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -31,8 +35,11 @@ import { stateManager } from '../../../client/state.js';
 import {
   applyScheduledUpdate,
   cancelScheduledMessage,
+  dismissScheduledMessage,
   listScheduledMessages,
   scheduledFailureText,
+  scheduledSendNowAllowed,
+  sendNowScheduledMessage,
   sortScheduled,
   type ScheduledMessage,
   type ScheduledMessageEvent,
@@ -43,6 +50,16 @@ import { showToast } from '../../../utils/toast.js';
 
 /** How often relative times ("in 14 hours") are refreshed. */
 const RELATIVE_REFRESH_MS = 30_000;
+
+/**
+ * `detail` of the `chat-scheduled-restore` event: put `text` into the
+ * composer. A cancelled message sets `onlyIfEmpty`, so an unsent draft is
+ * never replaced; Copy to composer does not.
+ */
+export interface ScheduledRestoreDetail {
+  text: string;
+  onlyIfEmpty: boolean;
+}
 
 @customElement('scion-chat-scheduled-list')
 export class ScionChatScheduledList extends LitElement {
@@ -55,7 +72,8 @@ export class ScionChatScheduledList extends LitElement {
   enabled = false;
 
   @state() private messages: ScheduledMessage[] = [];
-  @state() private cancelling = new Set<string>();
+  /** Messages with a Cancel, Send now or Dismiss request in flight. */
+  @state() private busy = new Set<string>();
 
   readonly _zone = new DisplayZoneController(this);
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -119,7 +137,14 @@ export class ScionChatScheduledList extends LitElement {
     .banner .when {
       flex: 1;
     }
-    .cancel-btn {
+    .actions {
+      display: flex;
+      gap: 0.75rem;
+      padding: 0.25rem 0.75rem 0;
+      font-size: var(--chat-fs-sm, 0.75rem);
+    }
+    .cancel-btn,
+    .action-btn {
       background: none;
       border: none;
       padding: 0;
@@ -128,7 +153,11 @@ export class ScionChatScheduledList extends LitElement {
       cursor: pointer;
       text-decoration: underline;
     }
-    .cancel-btn[disabled] {
+    .actions .action-btn {
+      color: var(--sl-color-danger-700, #b91c1c);
+    }
+    .cancel-btn[disabled],
+    .action-btn[disabled] {
       cursor: default;
       opacity: 0.5;
     }
@@ -206,20 +235,61 @@ export class ScionChatScheduledList extends LitElement {
     this.applyUpdate(m);
   };
 
-  private async cancel(m: ScheduledMessage): Promise<void> {
-    if (this.cancelling.has(m.id)) return;
-    this.cancelling = new Set([...this.cancelling, m.id]);
+  /**
+   * Run one row action, at most one at a time per message. On failure the
+   * hub's message is shown and the list reloaded, since the row may have
+   * changed under it (for example sent while being cancelled).
+   */
+  private async runAction(
+    m: ScheduledMessage,
+    fallback: string,
+    action: () => Promise<void>
+  ): Promise<void> {
+    if (this.busy.has(m.id)) return;
+    this.busy = new Set([...this.busy, m.id]);
     try {
-      await cancelScheduledMessage(this.conversationKey, m.id);
-      this.applyUpdate({ ...m, status: 'cancelled' });
+      await action();
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to cancel message', 'danger');
+      showToast(err instanceof Error ? err.message : fallback, 'danger');
       void this.load();
     } finally {
-      const next = new Set(this.cancelling);
+      const next = new Set(this.busy);
       next.delete(m.id);
-      this.cancelling = next;
+      this.busy = next;
     }
+  }
+
+  private cancel(m: ScheduledMessage): Promise<void> {
+    return this.runAction(m, 'Failed to cancel message', async () => {
+      await cancelScheduledMessage(this.conversationKey, m.id);
+      this.applyUpdate({ ...m, status: 'cancelled' });
+      // Edit = cancel, change, schedule again: the text goes back into an
+      // empty composer.
+      this.restoreText(m.content, true);
+    });
+  }
+
+  private sendNow(m: ScheduledMessage): Promise<void> {
+    return this.runAction(m, 'Failed to send message', async () => {
+      this.applyUpdate(await sendNowScheduledMessage(this.conversationKey, m.id));
+    });
+  }
+
+  private dismiss(m: ScheduledMessage): Promise<void> {
+    return this.runAction(m, 'Failed to dismiss message', async () => {
+      await dismissScheduledMessage(this.conversationKey, m.id);
+      this.applyUpdate({ ...m, status: 'cancelled' });
+    });
+  }
+
+  private restoreText(text: string, onlyIfEmpty: boolean): void {
+    this.dispatchEvent(
+      new CustomEvent<ScheduledRestoreDetail>('chat-scheduled-restore', {
+        detail: { text, onlyIfEmpty },
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   override render() {
@@ -245,11 +315,39 @@ export class ScionChatScheduledList extends LitElement {
   }
 
   private renderBanner(m: ScheduledMessage) {
+    const busy = this.busy.has(m.id);
     if (m.status === 'failed') {
       return html`<div class="banner failed" role="status">
-        <sl-icon name="exclamation-triangle"></sl-icon>
-        <span class="when">${scheduledFailureText(m.failureReason)}</span>
-      </div>`;
+          <sl-icon name="exclamation-triangle"></sl-icon>
+          <span class="when">${scheduledFailureText(m.failureReason)}</span>
+        </div>
+        <div class="actions">
+          ${scheduledSendNowAllowed(m)
+            ? html`<button
+                class="action-btn send-now-btn"
+                type="button"
+                ?disabled=${busy}
+                @click=${() => void this.sendNow(m)}
+              >
+                Send now
+              </button>`
+            : nothing}
+          <button
+            class="action-btn copy-btn"
+            type="button"
+            @click=${() => this.restoreText(m.content, false)}
+          >
+            Copy to composer
+          </button>
+          <button
+            class="action-btn dismiss-btn"
+            type="button"
+            ?disabled=${busy}
+            @click=${() => void this.dismiss(m)}
+          >
+            Dismiss
+          </button>
+        </div>`;
     }
     if (m.status === 'sending') {
       return html`<div class="banner" role="status">
@@ -257,7 +355,6 @@ export class ScionChatScheduledList extends LitElement {
         <span class="when">Sending…</span>
       </div>`;
     }
-    const busy = this.cancelling.has(m.id);
     return html`<div class="banner">
       <sl-icon name="clock"></sl-icon>
       <span class="when"

@@ -35,14 +35,15 @@ import (
 
 // Scheduled send in native web chat (ptone/scion#3666).
 //
-// A user schedules a message in a topic; the hub keeps it in
+// A user schedules a message in a topic or direct message; the hub keeps it in
 // webchat_scheduled_message (visible only to that user) and a sweeper on
 // every hub replica sends it at fire time through sendChatMessage, the same
 // function the live send handler uses, as an ordinary message from the
 // user. A compare-and-set claim (pending -> sending) makes exactly one
 // replica deliver each row. Nothing is decided from what was true at
-// schedule time: the sender, the topic, its project and the sender's access
-// are all checked again at fire time.
+// schedule time: the sender, the conversation (a topic and its project, or
+// a DM and its peer) and the sender's access are all checked again at fire
+// time.
 //
 // Everything here is gated by the web.chat_scheduled_send experiment: while
 // it is off the routes answer 404 and the sweeper holds pending rows.
@@ -74,6 +75,17 @@ const (
 	scheduledMaxIdempotencyKeyLen = 255
 )
 
+// scheduledLateCutoff is how late a message may still be sent. A message
+// found due later than this (the hub was down, or the experiment was off)
+// fails as missed instead, and the sender may ask to send it now.
+const scheduledLateCutoff = 60 * time.Minute
+
+// scheduledMissed reports whether m is more than scheduledLateCutoff past
+// its fire time at now.
+func scheduledMissed(m *ScheduledChatMessage, now time.Time) bool {
+	return now.Sub(m.FireAt) > scheduledLateCutoff
+}
+
 // scheduledDeliveryBudget bounds the fire-time checks and the send of one
 // claimed message. A send dispatches to the primary agent and each
 // @mentioned agent one after another, each bounded by chatWakeDeliveryBudget
@@ -91,7 +103,8 @@ const ErrCodeScheduledLimit = "scheduled_limit_reached"
 // user.<id>.chat.scheduled when one of their scheduled messages changes.
 type ChatScheduledEvent struct {
 	// Action is created, cancelled, sending, released (back to pending
-	// after a transient error), sent or failed.
+	// after a transient error), sent, failed, requeued (pending again,
+	// due now, at the sender's request) or dismissed.
 	Action           string                   `json:"action"`
 	ScheduledMessage scheduledMessageResponse `json:"scheduledMessage"`
 }
@@ -128,25 +141,6 @@ func newScheduledMessageResponse(m *ScheduledChatMessage) scheduledMessageRespon
 // scheduledSendLog returns the logger for scheduled-send audit records.
 func scheduledSendLog() *slog.Logger {
 	return logging.Subsystem("hub.chat.scheduled-send")
-}
-
-// auditScheduledMessage records a create, cancel or fire of a scheduled
-// message, with the sender as principal and scheduled-send as executor.
-// The outcome is the row's resulting status, with the failure reason in its
-// own field.
-func auditScheduledMessage(ctx context.Context, action string, m *ScheduledChatMessage) {
-	scheduledSendLog().Info("scheduled chat message",
-		"audit_action", "chat.scheduled."+action,
-		"principal_type", "user",
-		"principal_id", m.SenderUserID,
-		"executor", scheduledSendClientType,
-		"scheduled_message_id", m.ID,
-		"conversation_key", m.ConversationKey,
-		"status", m.Status,
-		"failure_reason", m.FailureReason,
-		"message_id", m.MessageID,
-		"request_id", logging.RequestIDFromContext(ctx),
-	)
 }
 
 func (s *Server) publishScheduledMessage(ctx context.Context, action string, m *ScheduledChatMessage) {
@@ -196,6 +190,18 @@ func (s *Server) handleConversationScheduledRoutes(w http.ResponseWriter, r *htt
 				return
 			}
 			s.handleScheduledCancel(w, r, key, id)
+		case strings.HasSuffix(id, "/send-now") && scheduledRowID(id, "/send-now") != "":
+			if r.Method != http.MethodPost {
+				MethodNotAllowed(w, http.MethodPost)
+				return
+			}
+			s.handleScheduledSendNow(w, r, key, scheduledRowID(id, "/send-now"))
+		case strings.HasSuffix(id, "/dismiss") && scheduledRowID(id, "/dismiss") != "":
+			if r.Method != http.MethodPost {
+				MethodNotAllowed(w, http.MethodPost)
+				return
+			}
+			s.handleScheduledDismiss(w, r, key, scheduledRowID(id, "/dismiss"))
 		default:
 			http.NotFound(w, r)
 		}
@@ -237,20 +243,10 @@ func scheduledSendCaller(w http.ResponseWriter, r *http.Request, action Action) 
 	return user
 }
 
-// scheduledSendRejectDM refuses direct-message keys: scheduled send is
-// available in topics only for now.
-func scheduledSendRejectDM(w http.ResponseWriter, key string) bool {
-	if strings.HasPrefix(key, "dm:") {
-		BadRequest(w, "scheduled send is not available in direct messages")
-		return true
-	}
-	return false
-}
-
 // handleScheduledCreate implements POST …/{key}/scheduled.
 func (s *Server) handleScheduledCreate(w http.ResponseWriter, r *http.Request, key string) {
 	user := scheduledSendCaller(w, r, ActionCreate)
-	if user == nil || scheduledSendRejectDM(w, key) {
+	if user == nil {
 		return
 	}
 	ctx := r.Context()
@@ -296,7 +292,7 @@ func (s *Server) handleScheduledCreate(w http.ResponseWriter, r *http.Request, k
 		ValidationError(w, fmt.Sprintf("idempotency_key exceeds %d characters", scheduledMaxIdempotencyKeyLen), nil)
 		return
 	}
-	content, _, serr := s.validateChatSendInput(ctx, target, chatSendInput{Content: body.Content})
+	content, _, serr := s.validateChatSendInput(ctx, user, target, chatSendInput{Content: body.Content})
 	if serr != nil {
 		serr.write(w)
 		return
@@ -346,11 +342,17 @@ func (s *Server) handleScheduledCreate(w http.ResponseWriter, r *http.Request, k
 		return
 	}
 
+	// The stored project is for cleanup and filtering only: the topic's
+	// project, or an agent DM's agent's project (user DMs have none).
+	projectID := target.ProjectID
+	if target.IsDM {
+		projectID = resolveProjectFromDMKey(ctx, s, key)
+	}
 	row, existed, err := sms.CreateScheduledMessage(ctx, &ScheduledChatMessage{
 		ID:              api.NewUUID(),
 		SenderUserID:    user.ID(),
 		ConversationKey: key,
-		ProjectID:       target.ProjectID,
+		ProjectID:       projectID,
 		Content:         content,
 		ReplyToID:       body.ReplyToID,
 		IdempotencyKey:  idemKey,
@@ -369,7 +371,7 @@ func (s *Server) handleScheduledCreate(w http.ResponseWriter, r *http.Request, k
 		s.writeScheduledReplay(w, row, key)
 		return
 	}
-	auditScheduledMessage(ctx, "create", row)
+	s.auditScheduledMessage(ctx, ScheduledAuditCreate, row)
 	s.publishScheduledMessage(ctx, "created", row)
 	writeJSON(w, http.StatusCreated, newScheduledMessageResponse(row))
 }
@@ -388,19 +390,37 @@ func (s *Server) writeScheduledReplay(w http.ResponseWriter, row *ScheduledChatM
 
 // handleScheduledList implements GET …/{key}/scheduled: the caller's own
 // pending, sending and failed messages in the conversation, only while the
-// caller can still access it.
+// caller can still read the topic, or is a participant of the DM.
 func (s *Server) handleScheduledList(w http.ResponseWriter, r *http.Request, key string) {
 	user := scheduledSendCaller(w, r, ActionRead)
-	if user == nil || scheduledSendRejectDM(w, key) {
+	if user == nil {
 		return
 	}
 	ctx := r.Context()
-	target, serr := s.authorizeChatSend(ctx, user, key)
-	if serr != nil {
-		serr.write(w)
-		return
+	var sms ScheduledMessageStore
+	if strings.HasPrefix(key, "dm:") {
+		// A DM lists for its participants with the first two steps of
+		// authorizeChatSend (the same helper), so the responses for an
+		// invalid key or a caller who is not a participant match a live
+		// send. The peer check is not run: a message that failed because
+		// the peer changed stays visible to its sender so it can be
+		// dismissed or copied. A well-formed but non-canonical key lists
+		// nothing, since rows exist only under canonical keys (create runs
+		// the full check), and the rows are the caller's own, as for
+		// cancel and dismiss.
+		if serr := authorizeDMKeyParticipant(ctx, user, key, logging.RequestPath(r)); serr != nil {
+			serr.write(w)
+			return
+		}
+		sms = s.scheduledMessageStore()
+	} else {
+		target, serr := s.authorizeChatSend(ctx, user, key)
+		if serr != nil {
+			serr.write(w)
+			return
+		}
+		sms = scheduledMessageStoreFrom(target.wcs)
 	}
-	sms := scheduledMessageStoreFrom(target.wcs)
 	if sms == nil {
 		writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
 		return
@@ -423,7 +443,7 @@ func (s *Server) handleScheduledList(w http.ResponseWriter, r *http.Request, key
 // sent or was sent answers 409.
 func (s *Server) handleScheduledCancel(w http.ResponseWriter, r *http.Request, key, id string) {
 	user := scheduledSendCaller(w, r, ActionDelete)
-	if user == nil || scheduledSendRejectDM(w, key) {
+	if user == nil {
 		return
 	}
 	ctx := r.Context()
@@ -466,8 +486,162 @@ func (s *Server) handleScheduledCancel(w http.ResponseWriter, r *http.Request, k
 	}
 	row.Status = ScheduledMessageCancelled
 	row.UpdatedAt = now
-	auditScheduledMessage(ctx, "cancel", row)
+	s.auditScheduledMessage(ctx, ScheduledAuditCancel, row)
 	s.publishScheduledMessage(ctx, "cancelled", row)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// scheduledRowID returns the row ID of a "{id}{suffix}" path segment, or
+// "" when it is not one.
+func scheduledRowID(rest, suffix string) string {
+	id := strings.TrimSuffix(rest, suffix)
+	if id == "" || strings.Contains(id, "/") {
+		return ""
+	}
+	return id
+}
+
+// handleScheduledSendNow implements POST …/{key}/scheduled/{id}/send-now:
+// the sender asks again for a message that failed as missed or interrupted.
+// It is handled like a new schedule: the same caller and conversation
+// access checks, send allowance, content validation and pending cap as
+// POST …/scheduled. The row then becomes pending, due now, and the sweeper
+// runs the full set of fire-time checks before sending it.
+func (s *Server) handleScheduledSendNow(w http.ResponseWriter, r *http.Request, key, id string) {
+	user := scheduledSendCaller(w, r, ActionUpdate)
+	if user == nil {
+		return
+	}
+	ctx := r.Context()
+
+	target, serr := s.authorizeChatSend(ctx, user, key)
+	if serr != nil {
+		serr.write(w)
+		return
+	}
+	sms := scheduledMessageStoreFrom(target.wcs)
+	if sms == nil {
+		writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
+		return
+	}
+	if !s.allowChatSend(w, user.ID(), chatSenderHuman) {
+		return
+	}
+
+	row, err := sms.GetScheduledMessage(ctx, user.ID(), id)
+	if err != nil {
+		slog.Error("scheduled send: get failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to send scheduled message", nil)
+		return
+	}
+	if row == nil || row.ConversationKey != key {
+		NotFound(w, "Scheduled message")
+		return
+	}
+	if !scheduledSendNowAllowed(row) {
+		writeError(w, http.StatusConflict, ErrCodeConflict,
+			"only a missed or interrupted message can be sent now",
+			map[string]interface{}{"status": row.Status, "failureReason": row.FailureReason})
+		return
+	}
+	if _, _, serr := s.validateChatSendInput(ctx, user, target, chatSendInput{Content: row.Content}); serr != nil {
+		serr.write(w)
+		return
+	}
+	active, err := sms.CountActiveScheduledMessages(ctx, user.ID())
+	if err != nil {
+		slog.Error("scheduled send: count failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to send scheduled message", nil)
+		return
+	}
+	if active >= scheduledMaxActivePerSender {
+		writeError(w, http.StatusConflict, ErrCodeScheduledLimit,
+			fmt.Sprintf("you already have %d scheduled messages; cancel one or wait for it to be sent", scheduledMaxActivePerSender),
+			map[string]interface{}{"limit": scheduledMaxActivePerSender})
+		return
+	}
+
+	now := time.Now().UTC()
+	ok, err := sms.SendNowScheduledMessage(ctx, user.ID(), id, now, now)
+	if err != nil {
+		slog.Error("scheduled send: send now failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to send scheduled message", nil)
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusConflict, ErrCodeConflict,
+			"only a missed or interrupted message can be sent now", nil)
+		return
+	}
+	updated, err := sms.GetScheduledMessage(ctx, user.ID(), id)
+	if err != nil || updated == nil {
+		slog.Error("scheduled send: reading row after send now failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to send scheduled message", nil)
+		return
+	}
+	s.auditScheduledMessage(ctx, ScheduledAuditSendNow, updated)
+	s.publishScheduledMessage(ctx, "requeued", updated)
+	writeJSON(w, http.StatusOK, newScheduledMessageResponse(updated))
+}
+
+// scheduledSendNowAllowed reports whether the sender may ask for m to be
+// sent now: only a message that failed as missed or interrupted.
+func scheduledSendNowAllowed(m *ScheduledChatMessage) bool {
+	return m.Status == ScheduledMessageFailed &&
+		(m.FailureReason == ScheduledFailureMissed || m.FailureReason == ScheduledFailureInterrupted)
+}
+
+// handleScheduledDismiss implements POST …/{key}/scheduled/{id}/dismiss:
+// the sender removes a failed message from the thread (it becomes
+// cancelled and is purged with the other final rows). Like cancel, it
+// needs no conversation access, so a message that failed for lack of
+// access can still be dismissed.
+func (s *Server) handleScheduledDismiss(w http.ResponseWriter, r *http.Request, key, id string) {
+	user := scheduledSendCaller(w, r, ActionUpdate)
+	if user == nil {
+		return
+	}
+	ctx := r.Context()
+	sms := s.scheduledMessageStore()
+	if sms == nil {
+		writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
+		return
+	}
+	row, err := sms.GetScheduledMessage(ctx, user.ID(), id)
+	if err != nil {
+		slog.Error("scheduled send: get failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to dismiss scheduled message", nil)
+		return
+	}
+	if row == nil || row.ConversationKey != key {
+		NotFound(w, "Scheduled message")
+		return
+	}
+	now := time.Now().UTC()
+	dismissed, err := sms.DismissScheduledMessage(ctx, user.ID(), id, now)
+	if err != nil {
+		slog.Error("scheduled send: dismiss failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to dismiss scheduled message", nil)
+		return
+	}
+	if !dismissed {
+		current, err := sms.GetScheduledMessage(ctx, user.ID(), id)
+		if err == nil && current != nil && current.Status == ScheduledMessageCancelled {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		status := ""
+		if current != nil {
+			status = current.Status
+		}
+		writeError(w, http.StatusConflict, ErrCodeConflict,
+			"only a failed scheduled message can be dismissed", map[string]interface{}{"status": status})
+		return
+	}
+	row.Status = ScheduledMessageCancelled
+	row.UpdatedAt = now
+	s.auditScheduledMessage(ctx, ScheduledAuditDismiss, row)
+	s.publishScheduledMessage(ctx, "dismissed", row)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -524,6 +698,10 @@ type scheduledSendRuntime struct {
 	// progress are cut short, then finalized on their own contexts.
 	abortCtx context.Context
 	abort    context.CancelFunc
+	// upkeepBusy is set while an upkeep pass runs (scheduledUpkeep);
+	// lastPurge, under mu, is when this replica last purged old rows.
+	upkeepBusy atomic.Bool
+	lastPurge  time.Time
 	// afterAbort registers the cut-short of one delivery on abortCtx; nil
 	// means context.AfterFunc. Test-only: tests set it to stall that
 	// propagation; it is never set in production.
@@ -599,11 +777,16 @@ func (s *Server) startScheduledSendSweeper(ctx context.Context) {
 					rt.mu.Unlock()
 					return
 				}
-				rt.running.Add(1)
+				rt.running.Add(2)
 				rt.mu.Unlock()
+				now := time.Now().UTC()
 				go func() {
 					defer rt.running.Done()
-					s.sweepScheduledMessages(loopCtx, time.Now().UTC())
+					s.sweepScheduledMessages(loopCtx, now)
+				}()
+				go func() {
+					defer rt.running.Done()
+					s.scheduledUpkeep(loopCtx, now)
 				}()
 			}
 		}
@@ -824,7 +1007,8 @@ func (s *Server) claimAndFire(ctx context.Context, sms ScheduledMessageStore, ro
 	// The claim, once started, is not cut short by shutdown either: a
 	// claim that commits must be followed by delivery or release.
 	claimCtx, cancelClaim := context.WithTimeout(context.WithoutCancel(ctx), scheduledClaimTimeout)
-	ok, err := sms.ClaimScheduledMessage(claimCtx, row.ID, time.Now().UTC())
+	claimedAt := time.Now().UTC()
+	ok, err := sms.ClaimScheduledMessage(claimCtx, row.ID, claimedAt)
 	cancelClaim()
 	if err != nil {
 		scheduledSendLog().Warn("scheduled send: claim failed", "id", row.ID, "error", err)
@@ -834,6 +1018,7 @@ func (s *Server) claimAndFire(ctx context.Context, sms ScheduledMessageStore, ro
 		return false, scheduledNotClaimed
 	}
 	row.Status = ScheduledMessageSending
+	row.ClaimedAt = &claimedAt
 	s.publishScheduledMessage(ctx, "sending", row)
 	if s.fireScheduledMessage(ctx, sms, row) {
 		return true, scheduledReleased
@@ -853,11 +1038,18 @@ type scheduledFireCheck struct {
 }
 
 // checkScheduledFire runs the fire-time checks of a claimed row, in order:
-// the sender exists and is active; the topic exists and its current
-// project exists and grants the sender read access; and the reply-to
-// message is still in the same conversation (if not, the message is sent
-// without it). Nothing stored at schedule time is used to grant access.
+// the row is not more than scheduledLateCutoff late; the sender exists and
+// is active; the conversation checks (checkScheduledDMFire for a direct
+// message, checkScheduledTopicFire for a topic); and the reply-to message
+// is still in the same conversation (if not, the message is sent without
+// it). Nothing stored at schedule time is used to grant access.
 func (s *Server) checkScheduledFire(ctx context.Context, m *ScheduledChatMessage) scheduledFireCheck {
+	// Too late: sending now could surprise everyone in the conversation,
+	// so it is not sent; the sender can still ask to send it now.
+	if scheduledMissed(m, time.Now()) {
+		return scheduledFireCheck{reason: ScheduledFailureMissed}
+	}
+
 	// Sender: the identity is rebuilt from the current user record, never
 	// more privileged than a live session for that user.
 	u, err := s.store.GetUser(ctx, m.SenderUserID)
@@ -873,32 +1065,11 @@ func (s *Server) checkScheduledFire(ctx context.Context, m *ScheduledChatMessage
 	user := NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, scheduledSendClientType)
 
 	if strings.HasPrefix(m.ConversationKey, "dm:") {
-		// Not schedulable in this version; never sent.
-		return scheduledFireCheck{reason: ScheduledFailureNoAccess}
-	}
-
-	s.mu.RLock()
-	wcs := s.webChatStore
-	s.mu.RUnlock()
-	if wcs == nil {
-		return scheduledFireCheck{transient: true}
-	}
-	topic, err := wcs.GetTopic(ctx, m.ConversationKey)
-	if err != nil {
-		return scheduledFireCheck{transient: true}
-	}
-	if topic == nil {
-		return scheduledFireCheck{reason: ScheduledFailureConversationGone}
-	}
-	project, err := s.store.GetProject(ctx, topic.ProjectID)
-	if errors.Is(err, store.ErrNotFound) {
-		return scheduledFireCheck{reason: ScheduledFailureConversationGone}
-	}
-	if err != nil || project == nil {
-		return scheduledFireCheck{transient: true}
-	}
-	if !s.authzService.CheckAccess(ctx, user, projectResource(project), ActionRead).Allowed {
-		return scheduledFireCheck{reason: ScheduledFailureNoAccess}
+		if check, done := s.checkScheduledDMFire(ctx, user, m); done {
+			return check
+		}
+	} else if check, done := s.checkScheduledTopicFire(ctx, user, m); done {
+		return check
 	}
 
 	replyToID := m.ReplyToID
@@ -914,13 +1085,80 @@ func (s *Server) checkScheduledFire(ctx context.Context, m *ScheduledChatMessage
 	return scheduledFireCheck{user: user, replyToID: replyToID}
 }
 
+// checkScheduledTopicFire runs the topic checks of a claimed row: the
+// topic exists, and its current project exists and grants the sender read
+// access. done is false when every check passed.
+func (s *Server) checkScheduledTopicFire(ctx context.Context, user UserIdentity, m *ScheduledChatMessage) (scheduledFireCheck, bool) {
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	if wcs == nil {
+		return scheduledFireCheck{transient: true}, true
+	}
+	topic, err := wcs.GetTopic(ctx, m.ConversationKey)
+	if err != nil {
+		return scheduledFireCheck{transient: true}, true
+	}
+	if topic == nil {
+		return scheduledFireCheck{reason: ScheduledFailureConversationGone}, true
+	}
+	project, err := s.store.GetProject(ctx, topic.ProjectID)
+	if errors.Is(err, store.ErrNotFound) {
+		return scheduledFireCheck{reason: ScheduledFailureConversationGone}, true
+	}
+	if err != nil || project == nil {
+		return scheduledFireCheck{transient: true}, true
+	}
+	if !s.authzService.CheckAccess(ctx, user, projectResource(project), ActionRead).Allowed {
+		return scheduledFireCheck{reason: ScheduledFailureNoAccess}, true
+	}
+	return scheduledFireCheck{}, false
+}
+
+// checkScheduledDMFire runs the direct-message checks of a claimed row
+// with the same conversation access check as a live send
+// (authorizeChatSend): a well-formed key naming the sender, and a peer
+// that still exists and that the sender may still message. A refusal is
+// no_access, whichever check refused it, as on the live path. An agent
+// peer that was deleted but can still be addressed is recipient_gone:
+// nothing is sent to it. done is false when every check passed.
+func (s *Server) checkScheduledDMFire(ctx context.Context, user UserIdentity, m *ScheduledChatMessage) (scheduledFireCheck, bool) {
+	if _, serr := s.authorizeChatSend(ctx, user, m.ConversationKey); serr != nil {
+		// A refusal of the sender's access is answered as not found but
+		// marked accessRefused; it is no_access, like a 403.
+		switch {
+		case serr.Status == http.StatusServiceUnavailable:
+			return scheduledFireCheck{transient: true}, true
+		case serr.Status == http.StatusForbidden || serr.accessRefused:
+			return scheduledFireCheck{reason: ScheduledFailureNoAccess}, true
+		default:
+			return scheduledFireCheck{reason: ScheduledFailureConversationGone}, true
+		}
+	}
+	if agentID := parseAgentDMKey(m.ConversationKey); agentID != "" {
+		agent, err := s.store.GetAgent(ctx, agentID)
+		if errors.Is(err, store.ErrNotFound) || (err == nil && agent == nil) {
+			return scheduledFireCheck{reason: ScheduledFailureNoAccess}, true
+		}
+		if err != nil {
+			return scheduledFireCheck{transient: true}, true
+		}
+		if !agent.DeletedAt.IsZero() {
+			return scheduledFireCheck{reason: ScheduledFailureRecipientGone}, true
+		}
+	}
+	return scheduledFireCheck{}, false
+}
+
 // scheduledFailureFromSendError maps a sendChatMessage error at fire time
-// to a failure reason. A 404 is a delivery error, not conversation_gone:
-// checkScheduledFire has just shown that the topic and its project exist,
-// and sendChatMessage also answers 404 for a store error while reading
-// them.
+// to a failure reason. sendChatMessage answers a refusal of the sender's
+// access as not found (404); such a refusal is marked accessRefused and is
+// no_access, like a 403. Any other 404 is a delivery error, not
+// conversation_gone: the conversation checks have just passed, and
+// sendChatMessage also answers 404 for a store error while reading the
+// conversation.
 func scheduledFailureFromSendError(serr *chatSendError) string {
-	if serr.Status == http.StatusForbidden {
+	if serr.Status == http.StatusForbidden || serr.accessRefused {
 		return ScheduledFailureNoAccess
 	}
 	return ScheduledFailureDeliveryError
@@ -977,8 +1215,13 @@ func (s *Server) fireScheduledMessage(ctx context.Context, sms ScheduledMessageS
 		fctx, fcancel := finalizeContext(base)
 		defer fcancel()
 		now := time.Now().UTC()
-		if err := sms.ReleaseScheduledMessage(fctx, m.ID, now); err != nil {
+		ok, err := sms.ReleaseScheduledMessage(fctx, m.ID, scheduledClaimOf(m), now)
+		if err != nil {
 			scheduledSendLog().Warn("scheduled send: release failed", "id", m.ID, "error", err)
+			return
+		}
+		if !ok {
+			scheduledSendLog().Warn("scheduled send: row changed before release; not released", "id", m.ID)
 			return
 		}
 		m.Status = ScheduledMessagePending
@@ -1022,15 +1265,31 @@ func (s *Server) fireScheduledMessage(ctx context.Context, sms ScheduledMessageS
 	now := time.Now().UTC()
 	fctx, fcancel := finalizeContext(base)
 	defer fcancel()
-	if err := sms.MarkScheduledMessageSent(fctx, m.ID, resp.ID, now); err != nil {
+	ok, err := sms.MarkScheduledMessageSent(fctx, m.ID, resp.ID, scheduledClaimOf(m), now)
+	if err != nil {
 		scheduledSendLog().Error("scheduled send: recording sent state failed", "id", m.ID, "message_id", resp.ID, "error", err)
+	} else if !ok {
+		// The row is no longer this delivery's (marked interrupted,
+		// deleted or claimed again): leave it as it is.
+		scheduledSendLog().Warn("scheduled send: row changed during delivery; sent state not recorded",
+			"id", m.ID, "message_id", resp.ID)
+		return false
 	}
 	m.Status = ScheduledMessageSent
 	m.MessageID = resp.ID
 	m.UpdatedAt = now
-	auditScheduledMessage(base, "fire", m)
+	s.auditScheduledMessage(base, ScheduledAuditFire, m)
 	s.publishScheduledMessage(base, "sent", m)
 	return false
+}
+
+// scheduledClaimOf returns the claim a final write of m is fenced by (the
+// zero time, which matches no row, if m carries none).
+func scheduledClaimOf(m *ScheduledChatMessage) time.Time {
+	if m.ClaimedAt == nil {
+		return time.Time{}
+	}
+	return *m.ClaimedAt
 }
 
 // failScheduledMessage records a claimed row as failed, on a fresh context
@@ -1039,12 +1298,17 @@ func (s *Server) failScheduledMessage(base context.Context, sms ScheduledMessage
 	ctx, cancel := finalizeContext(base)
 	defer cancel()
 	now := time.Now().UTC()
-	if err := sms.MarkScheduledMessageFailed(ctx, m.ID, reason, now); err != nil {
+	ok, err := sms.MarkScheduledMessageFailed(ctx, m.ID, reason, scheduledClaimOf(m), now)
+	if err != nil {
 		scheduledSendLog().Error("scheduled send: recording failed state failed", "id", m.ID, "error", err)
+	} else if !ok {
+		scheduledSendLog().Warn("scheduled send: row changed during delivery; failed state not recorded",
+			"id", m.ID, "failure_reason", reason)
+		return
 	}
 	m.Status = ScheduledMessageFailed
 	m.FailureReason = reason
 	m.UpdatedAt = now
-	auditScheduledMessage(ctx, "fire", m)
+	s.auditScheduledMessage(ctx, ScheduledAuditFire, m)
 	s.publishScheduledMessage(ctx, "failed", m)
 }

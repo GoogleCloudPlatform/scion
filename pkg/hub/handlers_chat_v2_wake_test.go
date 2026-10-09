@@ -641,18 +641,27 @@ func TestChatV2Wake_PanicAfterPersist_KeepsGateState(t *testing.T) {
 			f.srv.mu.RUnlock()
 			f.srv.SetWebChatStore(panickingReplyStore{WebChatStore: wcs})
 
+			// A human-sent message of this topic: a reply to it keeps the
+			// default agent as primary but still stores the reply link,
+			// which panics.
+			replyTarget := tid("chat-wake-reply-target-" + tc.name)
+			require.NoError(t, f.s.CreateMessage(t.Context(), &store.Message{
+				ID: replyTarget, ProjectID: f.proj.ID, Sender: "user:dev", SenderID: DevUserID, Recipient: "thread:" + f.topic,
+				Msg: "earlier", Type: "instruction", Channel: "web", ThreadID: f.topic,
+				CreatedAt: time.Now().Add(-time.Minute).UTC(),
+			}))
+
 			func() {
 				defer func() { _ = recover() }()
-				// An unknown reply_to_id keeps the default agent as primary
-				// but still stores the reply link, which panics.
 				_ = doRequest(t, f.srv, http.MethodPost, f.path(),
-					map[string]any{"content": "hello", "reply_to_id": "no-such-message"})
+					map[string]any{"content": "hello", "reply_to_id": replyTarget})
 			}()
 
 			res, err := f.s.ListMessages(t.Context(), store.MessageFilter{ThreadID: f.topic}, store.ListOptions{Limit: 10})
 			require.NoError(t, err)
-			require.Len(t, res.Items, 1, "the row was stored before the panic")
+			require.Len(t, res.Items, 2, "the row was stored before the panic")
 			m := res.Items[0]
+			require.NotEqual(t, replyTarget, m.ID, "newest row first")
 			assert.Equal(t, tc.wantState, m.DispatchState, "the gate's state must survive the panic")
 			if tc.wantReason != "" {
 				require.NotNil(t, m.DispatchFailureReason)
@@ -741,4 +750,46 @@ func TestChatV2Wake_ClientCancelDuringWake_ReplayGetsOutcome(t *testing.T) {
 	assert.Equal(t, store.MessageDispatchDispatched, res.Items[0].DispatchState)
 	assert.Len(t, f.disp.getStartCalls(), 1, "one wake")
 	assert.Len(t, f.disp.getMessageCalls(), 1, "one dispatch")
+}
+
+// stallCreateMessageStore blocks CreateMessage until its context ends, or
+// for at most stallFor, simulating a store call that hangs.
+type stallCreateMessageStore struct {
+	store.Store
+	stallFor time.Duration
+}
+
+func (s *stallCreateMessageStore) CreateMessage(ctx context.Context, m *store.Message) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(s.stallFor):
+		return context.DeadlineExceeded
+	}
+}
+
+// A store call that stalls after the wake ends the send at the overall
+// deadline with a failure, and releases the idempotency key.
+func TestChatV2Wake_StalledStoreAfterWake_EndsAtDeadline(t *testing.T) {
+	budget := 3 * time.Second
+	orig := chatWakeSendBudget
+	chatWakeSendBudget = func(int) time.Duration { return budget }
+	t.Cleanup(func() { chatWakeSendBudget = orig })
+
+	f := chatWakeSetup(t, string(state.PhaseSuspended))
+	f.markReadySoon()
+	f.srv.store = &stallCreateMessageStore{Store: f.s, stallFor: 20 * time.Second}
+
+	start := time.Now()
+	rec := doRequest(t, f.srv, http.MethodPost, f.path(),
+		map[string]any{"content": "hello", "wake": true, "idempotency_key": "key-stall"})
+	elapsed := time.Since(start)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code, "body=%s", rec.Body.String())
+	assert.Less(t, elapsed, budget+5*time.Second, "send must end at the overall deadline")
+	assert.Len(t, f.disp.getStartCalls(), 1, "the wake ran before the stall")
+	assert.Empty(t, f.disp.getMessageCalls())
+
+	_, begin := f.srv.chatIdempotency.Begin(DevUserID, "key-stall")
+	assert.Equal(t, IdempotencyNew, begin, "the key must be released after the failed send")
 }

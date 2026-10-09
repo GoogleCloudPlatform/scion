@@ -90,6 +90,7 @@ var ProjectTargetApplicability = map[string]bool{
 	// broker.* — user-owned hub resource, not project-contained.
 	"broker.create": false, "broker.read": false, "broker.update": false,
 	"broker.delete": false, "broker.list": false, "broker.dispatch": false,
+	"broker.auto_provide": false,
 
 	// gcp_service_account.* — create/list/mint are CapabilityScope: create
 	// has no existing SA yet, list is the hub collection view, and mint (a
@@ -133,6 +134,7 @@ var ProjectTargetApplicability = map[string]bool{
 	"hub.teams_manifest.read": false, "hub.teams_manifest.update": false,
 	"hub.validate.execute": false, "hub.github_app.read": false, "hub.github_app.update": false,
 	"hub.metrics.read": false, "hub.audit.read": false,
+	"hub.env_vars.read": false,
 
 	// quota.* — every live route (handlers_quota.go) authorizes against
 	// Resource{Type:"quota", ID:"hub"}, matching this family's own
@@ -249,6 +251,14 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	// schedules. Authoring (scheduled_event.create) has no selector.
 	"scheduled_event.read": {BoundaryKindProject, BoundaryKindHub}, "scheduled_event.list": {BoundaryKindProject, BoundaryKindHub},
 	"scheduled_event.update": {BoundaryKindProject, BoundaryKindHub}, "scheduled_event.delete": {BoundaryKindProject, BoundaryKindHub},
+
+	// hub.* integration and observability permissions act on the hub
+	// itself, so their selectors are hub-only.
+	"hub.scheduler.read": {BoundaryKindHub}, "hub.health.read": {BoundaryKindHub},
+	"hub.validate.execute": {BoundaryKindHub}, "hub.metrics.read": {BoundaryKindHub},
+	"hub.integrations.read": {BoundaryKindHub}, "hub.integrations.update": {BoundaryKindHub},
+	"hub.teams_manifest.read": {BoundaryKindHub}, "hub.diagnostics.read": {BoundaryKindHub},
+	"hub.github_app.read": {BoundaryKindHub}, "hub.github_app.update": {BoundaryKindHub},
 }
 
 // SelectorAllowedBoundaries returns the reviewed boundary kinds for a single
@@ -418,6 +428,14 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	// scheduled_event.* target a project's schedules.
 	"scheduled_event.read": {TargetClassKindProjectScoped}, "scheduled_event.list": {TargetClassKindProjectScoped},
 	"scheduled_event.update": {TargetClassKindProjectScoped}, "scheduled_event.delete": {TargetClassKindProjectScoped},
+
+	// hub.* integration and observability permissions target the hub
+	// instance.
+	"hub.scheduler.read": {TargetClassKindHubResource}, "hub.health.read": {TargetClassKindHubResource},
+	"hub.validate.execute": {TargetClassKindHubResource}, "hub.metrics.read": {TargetClassKindHubResource},
+	"hub.integrations.read": {TargetClassKindHubResource}, "hub.integrations.update": {TargetClassKindHubResource},
+	"hub.teams_manifest.read": {TargetClassKindHubResource}, "hub.diagnostics.read": {TargetClassKindHubResource},
+	"hub.github_app.read": {TargetClassKindHubResource}, "hub.github_app.update": {TargetClassKindHubResource},
 }
 
 // SupportedTargetClassesFor returns the reviewed classes for permissionID.

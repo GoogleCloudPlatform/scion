@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-launch-store-postgres test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-launch-store-postgres test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -218,6 +218,12 @@ space := $(empty) $(empty)
 # "enttest-sqlite-only: <test name> <reason>". A skipped test is allowed only
 # if its own skip message carries that marker, so there is no name list here
 # and any other skip still fails the target.
+#
+# The entadapter run has a 60m go test timeout. On green main runs it took
+# ~774s and ~1259s, but GoogleCloudPlatform/scion#2855 hit the old 40m
+# (2400s) limit on a runner 2-3x slower than usual, with no failing or hung
+# test (ptone/scion#3945). A timeout there also stops the storetest and
+# pkg/hub runs below, so the headroom is kept generous.
 test-launch-store-postgres:
 	@echo "Running launch store tests against Postgres..."
 	@if [ -z "$$SCION_TEST_POSTGRES_URL" ]; then \
@@ -234,7 +240,7 @@ test-launch-store-postgres:
 		echo "ERROR: one or more Postgres-only integration tests were skipped -- see '--- SKIP' lines above." >&2; \
 		exit 1; \
 	fi
-	@go test -tags integration -count=1 -timeout 40m -v \
+	@go test -tags integration -count=1 -timeout 60m -v \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \
@@ -479,6 +485,10 @@ check-setenv-guard:
 check-conversation-upsert-guard:
 	@./hack/check-conversation-upsert-guard.sh
 
+## check-hub-store-reassign: Flag new direct srv.store reassignments in pkg/hub tests (baseline: hack/hub-store-reassign-baseline.txt)
+check-hub-store-reassign:
+	@./hack/check-hub-store-reassign.sh
+
 ## check-security-marker-gates: Verify security symbols (authenticatedSender, validateDefaultAgent, ActionAttach) remain in handler code
 check-security-marker-gates:
 	@./hack/check-security-marker-gates.sh
@@ -512,7 +522,7 @@ check-authorization-catalog:
 check-route-authz-manifest:
 	@./hack/check-route-authz-manifest.sh
 
-## check-method-not-allowed: Flag bare MethodNotAllowed(w) calls (405 without Allow) in pkg/hub and pkg/runtimebroker
+## check-method-not-allowed: Flag 405 responses without Allow (bare MethodNotAllowed(w) in pkg/hub and pkg/runtimebroker; direct StatusMethodNotAllowed writes in pkg/sciontool and extras)
 # NOTE: same caveat as check-authz-guards above -- make collapses the
 # script's exit 1 (violations) and exit 3/4 (nothing was analysed) into one
 # code. CI invokes the script directly to tell those apart.
@@ -520,7 +530,7 @@ check-method-not-allowed:
 	@./hack/check-method-not-allowed.sh
 
 ## check-custom: Run all custom CI lint checks (see hack/LINT-CONVENTIONS.md)
-check-custom: compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog check-route-authz-manifest cli-time-zones time-literals check-method-not-allowed
+check-custom: compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates check-authorization-catalog check-route-authz-manifest cli-time-zones time-literals check-method-not-allowed
 	@echo "All custom checks passed."
 
 ## golangci-lint: Run golangci-lint on new issues only (install via: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)

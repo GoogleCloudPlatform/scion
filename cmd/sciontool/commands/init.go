@@ -950,6 +950,10 @@ func RunInit(args []string, opts InitRunOptions) int {
 		}
 	}
 
+	// Before the harness starts, drop the session-metrics tombstone the
+	// previous shutdown may have left, so a resumed session is counted.
+	runClearSessionTombstoneAtStartup(agentHome)
+
 	// Create supervisor with configuration
 	config := harnessSupervisorConfig(opts, gracePeriod, targetUID, targetGID, rootless, harnessEnvOverlay, nativeTelemetryPolicy, secretOverrides)
 	sup := supervisor.New(config)
@@ -1275,7 +1279,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 			log.Info("Limits initialized: max_turns=%d, max_model_calls=%d", maxTurns, maxModelCalls)
 		}
 		// Remove stale trigger file from a previous run
-		_ = os.Remove(handlers.LimitsTriggerFile)
+		_ = os.Remove(limitsTriggerPath)
 	}
 
 	// Watch for limits-exceeded trigger file (works across UID boundaries).
@@ -1313,7 +1317,7 @@ waitLoop:
 			if err := sup.Signal(syscall.SIGTERM); err != nil {
 				log.Error("Failed to send SIGTERM to child: %v", err)
 			}
-			reportHookLimitsExceeded(handlers.NewHubHandler(), handlers.LimitsTriggerFile)
+			runReportHookLimitsExceeded(handlers.NewHubHandler(), limitsTriggerPath)
 			result = <-exitChan
 			break waitLoop
 		case <-usr2Chan:
@@ -1327,7 +1331,7 @@ waitLoop:
 			if err := sup.Signal(syscall.SIGTERM); err != nil {
 				log.Error("Failed to send SIGTERM to child: %v", err)
 			}
-			reportHookLimitsExceeded(handlers.NewHubHandler(), handlers.LimitsTriggerFile)
+			runReportHookLimitsExceeded(handlers.NewHubHandler(), limitsTriggerPath)
 			result = <-exitChan
 			break waitLoop
 		}
@@ -1350,49 +1354,13 @@ waitLoop:
 		log.Debug("Heartbeat loop stopped")
 	}
 
-	// Clean up the GitHub token file on exit
-	if hub.IsGitHubAppEnabled() {
-		tokenPath := hub.GitHubTokenPath()
-		if err := os.Remove(tokenPath); err != nil && !os.IsNotExist(err) {
-			log.Error("Failed to clean up GitHub token file: %v", err)
-		} else {
-			log.Debug("Cleaned up GitHub token file: %s", tokenPath)
-		}
-	}
-
-	// Report shutting down to Hub if in hosted mode
-	if hubClient := hub.NewClient(); hubClient != nil && hubClient.IsConfigured() {
-		hubCtx, hubCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := hubClient.ReportState(hubCtx, state.PhaseStopping, "", "Agent shutting down"); err != nil {
-			log.Error("Failed to report shutdown status to Hub: %v", err)
-		}
-		hubCancel()
-	}
-
-	// Stop metadata server
-	if metadataServer != nil {
-		metadataServer.Stop()
-		log.Info("GCP metadata server stopped")
-	}
-
-	// Stop sidecar services before session-end hooks
-	if svcManager != nil {
-		log.Info("Stopping sidecar services...")
-		svcShutdownCtx, svcShutdownCancel := context.WithTimeout(context.Background(), gracePeriod)
-		if err := svcManager.Shutdown(svcShutdownCtx); err != nil {
-			log.Error("Failed to stop services: %v", err)
-		}
-		svcShutdownCancel()
-	}
-
-	// Run session-end hooks (graceful shutdown)
-	log.Info("Running session-end hooks...")
-	if err := lifecycleManager.RunSessionEnd(); err != nil {
-		log.Error("Session-end hooks failed: %v", err)
-	}
-
-	// Determine the final exit code and whether this was a crash.
-	// Also recognize ExitCodeLimitsExceeded from the child process itself
+	// The supervised child has exited. On a natural exit the harness has
+	// too. On a stop it may not have: the child is the tmux client, which
+	// alone receives the SIGTERM, and the harness keeps running under the
+	// tmux server (its own session) until this process exits, so its hooks
+	// may still fire. Determine the final exit code and whether this was a
+	// crash; the session-metrics backstop below needs it, and it is a local
+	// read only. Also recognize ExitCodeLimitsExceeded from the child process itself
 	// (e.g., the harness detected limits before the supervisor signal).
 	if !limitsExceeded && result.code == handlers.ExitCodeLimitsExceeded {
 		limitsExceeded = true
@@ -1405,12 +1373,61 @@ waitLoop:
 	// or OOM-killed before the harness could write), fall back to result.code.
 	harnessCode := readHarnessExitCode()
 	if harnessCode != nil {
-		log.Info("Recovered harness exit code %d from %s", *harnessCode, state.HarnessExitCodeFile)
+		log.Info("Recovered harness exit code %d from %s", *harnessCode, harnessExitCodePath)
 	}
 
 	outcome := classifyExit(result.code, result.err, harnessCode, limitsExceeded, requestedShutdown.Load())
 	finalCode := outcome.exitCode
 	limitsExceeded = outcome.limitsExceeded
+
+	// Report a session whose session-end hook has not run (the agent is
+	// being stopped, or the harness has no session-end hook). The session
+	// is tombstoned, so hook events that still arrive from a running
+	// harness, a late session-end included, are ignored rather than
+	// reported again; the report may miss those last events. Once the wait
+	// loop has ended, this is the first Hub call: it runs before the slower
+	// steps below, so it fits inside the runtime's stop grace period. (On
+	// the hook-triggered limit paths, trigger file and SIGUSR1, the wait
+	// loop has already made the limits_exceeded report; init started that
+	// shutdown itself, so no stop grace period was running.) It is bounded
+	// (2s lock wait plus shutdownSessionReportTimeout) and deliberately
+	// runs ahead of the stopping and final status reports.
+	runReportOpenSessionAtShutdown(agentHome, outcome, hub.NewClient)
+
+	// Clean up the GitHub token file on exit
+	if hub.IsGitHubAppEnabled() {
+		tokenPath := hub.GitHubTokenPath()
+		if err := os.Remove(tokenPath); err != nil && !os.IsNotExist(err) {
+			log.Error("Failed to clean up GitHub token file: %v", err)
+		} else {
+			log.Debug("Cleaned up GitHub token file: %s", tokenPath)
+		}
+	}
+
+	// Report shutting down to Hub if in hosted mode
+	runReportStoppingToHub()
+
+	// Stop metadata server
+	if metadataServer != nil {
+		metadataServer.Stop()
+		log.Info("GCP metadata server stopped")
+	}
+
+	// Stop sidecar services before session-end hooks
+	if svcManager != nil {
+		log.Info("Stopping sidecar services...")
+		svcShutdownCtx, svcShutdownCancel := context.WithTimeout(context.Background(), gracePeriod)
+		if err := runServicesShutdown(svcShutdownCtx, svcManager); err != nil {
+			log.Error("Failed to stop services: %v", err)
+		}
+		svcShutdownCancel()
+	}
+
+	// Run session-end hooks (graceful shutdown)
+	log.Info("Running session-end hooks...")
+	if err := lifecycleManager.RunSessionEnd(); err != nil {
+		log.Error("Session-end hooks failed: %v", err)
+	}
 
 	// Update local agent-info.json BEFORE the Hub report so the broker
 	// heartbeat can relay crash/limits state even if the Hub call is slow
@@ -1577,6 +1594,31 @@ func registerLifecycleTelemetryHandler(manager *hooks.LifecycleManager, provider
 	return handler
 }
 
+// reportStoppingToHub reports the stopping phase to the Hub, if one is
+// configured, with a 5s bound.
+func reportStoppingToHub() {
+	if hubClient := hub.NewClient(); hubClient != nil && hubClient.IsConfigured() {
+		hubCtx, hubCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := hubClient.ReportState(hubCtx, state.PhaseStopping, "", "Agent shutting down"); err != nil {
+			log.Error("Failed to report shutdown status to Hub: %v", err)
+		}
+		hubCancel()
+	}
+}
+
+// RunInit's shutdown sequence calls the stopping report and the sidecar
+// shutdown through these seams so a test can pin the order of the shutdown
+// steps; production never reassigns them.
+var (
+	runReportStoppingToHub = reportStoppingToHub
+	runServicesShutdown    = func(ctx context.Context, m *services.Manager) error { return m.Shutdown(ctx) }
+)
+
+// harnessExitCodePath is the harness exit-code file readHarnessExitCode
+// reads. It is a variable only so a RunInit test can point it at a temp
+// file instead of the host's fixed path; production never changes it.
+var harnessExitCodePath = state.HarnessExitCodeFile
+
 // harnessExitCodeMaxBytes bounds the read in readHarnessExitCode: the file
 // only ever holds a small decimal exit code, so any read this long has
 // already found something other than what the harness wrapper writes.
@@ -1594,7 +1636,7 @@ const harnessExitCodeMaxBytes = 32
 // unrelated file's contents as an exit code. O_NONBLOCK is what keeps a
 // FIFO's open() itself from blocking on a reader when there is no writer.
 func readHarnessExitCode() *int {
-	dirFd, leaf, err := dirfd.OpenParentNoFollow(state.HarnessExitCodeFile)
+	dirFd, leaf, err := dirfd.OpenParentNoFollow(harnessExitCodePath)
 	if err != nil {
 		return nil
 	}
@@ -1712,6 +1754,17 @@ func handleLimitsExceeded(sup *supervisor.Supervisor, limitType, message string)
 		log.Error("Failed to send SIGTERM to child: %v", err)
 	}
 }
+
+// limitsTriggerPath is the trigger file init watches for, removes at startup
+// and passes to reportHookLimitsExceeded: handlers.LimitsTriggerFile, the
+// path the hook processes write. It and runReportHookLimitsExceeded are
+// variables only so a RunInit test can use a temp file (a fixed /tmp path
+// could be acted on by a real init on the same host) and record the
+// report; production never reassigns them.
+var (
+	limitsTriggerPath           = handlers.LimitsTriggerFile
+	runReportHookLimitsExceeded = reportHookLimitsExceeded
+)
 
 // reportHookLimitsExceeded reports to the Hub a limit that a hook process
 // detected and signalled (trigger file or SIGUSR1). The hook no longer makes
@@ -1924,7 +1977,7 @@ func watchLimitsTriggerFile(ctx context.Context, ch chan<- struct{}) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if _, err := os.Stat(handlers.LimitsTriggerFile); err == nil {
+			if _, err := os.Stat(limitsTriggerPath); err == nil {
 				ch <- struct{}{}
 				return
 			}
@@ -3127,12 +3180,18 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 		gitPath, rerr := rootexec.Resolve("git")
 		if rerr != nil {
 			log.Error("Failed to resolve a trusted git binary: %v", rerr)
+			if gitConfigFailureHook != nil {
+				gitConfigFailureHook(args, rerr)
+			}
 			return
 		}
 		cmd := exec.CommandContext(ctx, gitPath, append([]string{"config", "--file", gitconfigPath}, args...)...)
 		configureCmd(cmd)
 		if out, cerr := procreap.CombinedOutputManaged(cmd); cerr != nil {
 			log.Error("Failed to run git config %v: %s %v", args, string(out), cerr)
+			if gitConfigFailureHook != nil {
+				gitConfigFailureHook(args, cerr)
+			}
 		}
 	}
 
@@ -3163,6 +3222,14 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 	}
 	return nil
 }
+
+// gitConfigFailureHook is a test-only seam: production never assigns it, so
+// it stays nil and configureSharedWorkspaceGit's runGitConfig only logs a
+// failed `git config` call, as before. Tests set it to observe failures that
+// runGitConfig otherwise has no way to report (it has no error return). It
+// may be called from concurrent configureSharedWorkspaceGit calls, so a
+// test's hook must be safe for concurrent use.
+var gitConfigFailureHook func(args []string, err error)
 
 // configureGitCommandGetuid is a test-only seam: production never reassigns
 // it. Tests stub it to 0 to reach configureGitCommand's root-init branch

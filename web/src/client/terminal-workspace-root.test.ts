@@ -25,10 +25,11 @@ import {
 import type { ScionQuickPalette } from '../components/shared/palette/quick-palette.js';
 import type { ScionTerminalPane } from '../components/terminal/terminal-pane.js';
 import type { TerminalPaletteAgentsLoadOptions } from './terminal-palette-data.js';
-import type { PaletteCandidate } from './chat-palette-types.js';
+import type { PaletteCandidate } from './palette-types.js';
 import { AgentStore } from './agent-store.js';
 import { FakeEventSource } from './__fixtures__/agent-store-harness.js';
 import { TOUCH_PRIMARY_QUERY } from '../utils/input-modality.js';
+import { requestUrl } from './__fixtures__/request-url.js';
 
 // Mock terminal-pane custom element before importing workspace root
 vi.mock('@xterm/xterm', () => ({
@@ -406,6 +407,55 @@ describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
     }
   );
 
+  it('shows only the empty state in the single layout with no terminals open', async () => {
+    await flush();
+    const overlays = visibleOverlays();
+    expect(overlays.map((el) => el.className)).toEqual(['terminal-empty']);
+    expect(overlays[0].textContent).toBe('No terminals are open.');
+  });
+
+  it('shows the status message when terminals are open but none is selected', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'test',
+    });
+    root.withAutoSelectSuspended(() => root.create(registry, AGENT_ID, { deferConnect: true }));
+    await flush();
+
+    expect(root.layoutManager.getVisibleSlots()).toEqual([null]);
+    const overlays = visibleOverlays();
+    expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
+    expect(overlays[0].textContent).toBe('No terminal selected.');
+  });
+
+  it('shows the status message again after the selected terminal is closed', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'test',
+    });
+    const session = root.create(registry, AGENT_ID);
+    root.select(session);
+    await flush();
+    root.withAutoSelectSuspended(() =>
+      root.create(registry, '22222222-2222-4222-8222-222222222222', { deferConnect: true })
+    );
+    root.withAutoSelectSuspended(() => session.close());
+    await flush();
+
+    expect(root.layoutManager.getVisibleSlots()).toEqual([null]);
+    const overlays = visibleOverlays();
+    expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
+    expect(overlays[0].textContent).toBe('No terminal selected.');
+  });
+
+  it('keeps a message set through setStatus visible with no terminals open', async () => {
+    root.setStatus('Terminal selected in its owning tab.');
+    await flush();
+    const overlays = visibleOverlays();
+    expect(overlays.map((el) => el.className)).toEqual(['terminal-empty', 'terminal-status']);
+    expect(overlays[1].textContent).toBe('Terminal selected in its owning tab.');
+  });
+
   it.each(presets)(
     'shows %s placeholders that accept a drop when no slot is filled',
     async (preset, count) => {
@@ -761,7 +811,9 @@ describe('URL layout sync (#1715)', () => {
     replaceStateSpy.mockClear();
     root.layoutManager.setLayout('two-columns');
     // Subscriber triggers syncUrlFromLayout synchronously
-    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) => String(c[2] ?? ''));
+    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) =>
+      String((c[2] as string | URL | null | undefined) ?? '')
+    );
     const layoutCall = urls.find((u: string) => u.includes('lv=1'));
     expect(layoutCall).toBeTruthy();
     expect(layoutCall).toContain('lp=two-columns');
@@ -773,7 +825,9 @@ describe('URL layout sync (#1715)', () => {
     replaceStateSpy.mockClear();
     root.layoutManager.setLayout('single');
     // In single mode, URL should not contain layout params
-    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) => String(c[2] ?? ''));
+    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) =>
+      String((c[2] as string | URL | null | undefined) ?? '')
+    );
     const lastUrl = urls[urls.length - 1];
     if (lastUrl) {
       expect(lastUrl).not.toContain('lv=1');
@@ -786,7 +840,9 @@ describe('URL layout sync (#1715)', () => {
     root.setSuppressUrlSync(true);
     root.layoutManager.setLayout('four');
     // Subscriber was called but syncUrlFromLayout should have been a no-op
-    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) => String(c[2] ?? ''));
+    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) =>
+      String((c[2] as string | URL | null | undefined) ?? '')
+    );
     const layoutCall = urls.find((u: string) => u.includes('lp=four'));
     expect(layoutCall).toBeUndefined();
     root.setSuppressUrlSync(false);
@@ -797,7 +853,9 @@ describe('URL layout sync (#1715)', () => {
     root.layoutManager.setLayout('two-columns');
     await flush();
     // Should have been called at least once with two-columns
-    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) => String(c[2] ?? ''));
+    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) =>
+      String((c[2] as string | URL | null | undefined) ?? '')
+    );
     expect(urls.length).toBeGreaterThan(0);
     const layoutCall = urls.find((u: string) => u.includes('lp=two-columns'));
     expect(layoutCall).toBeTruthy();
@@ -2321,8 +2379,9 @@ function agentCandidate(agentId: string, label = agentId): PaletteCandidate {
 
 /** Counts the palette's own agent-list fetches. */
 function agentListLoads(): number {
-  return vi.mocked(fetch).mock.calls.filter(([url]) => String(url).startsWith('/api/v1/agents?'))
-    .length;
+  return vi
+    .mocked(fetch)
+    .mock.calls.filter(([url]) => requestUrl(url).startsWith('/api/v1/agents?')).length;
 }
 
 describe('"Jump to agent" palette: palette and focus lifecycle', () => {
@@ -3114,14 +3173,14 @@ describe('"Jump to agent" palette: keyboard shortcut', () => {
     press({ key: 'k', metaKey: true });
     const palette = await expectOpened();
     const agentLoads = fetchMock.mock.calls.filter(([url]) =>
-      String(url).startsWith('/api/v1/agents?')
+      requestUrl(url).startsWith('/api/v1/agents?')
     ).length;
 
     expect(press({ key: 'k', ctrlKey: true })).toBe(false);
 
     expect(palette.open).toBe(false);
     expect(
-      fetchMock.mock.calls.filter(([url]) => String(url).startsWith('/api/v1/agents?')).length
+      fetchMock.mock.calls.filter(([url]) => requestUrl(url).startsWith('/api/v1/agents?')).length
     ).toBe(agentLoads);
   });
 

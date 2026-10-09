@@ -58,6 +58,7 @@ var migrations = []migration{
 	{name: migrationVersionUploads, sqlite: sqliteVersionUploads, postgres: postgresVersionUploads},
 	{name: migrationFinalizeClaims, sqlite: sqliteFinalizeClaims, postgres: postgresFinalizeClaims},
 	{name: migrationLinkTokens, sqlite: sqliteLinkTokens, postgres: postgresLinkTokens},
+	{name: migrationBlobGC, sqlite: sqliteBlobGC, postgres: postgresBlobGC},
 }
 
 const ledgerSQLite = `CREATE TABLE IF NOT EXISTS artifact_migrations (
@@ -366,23 +367,45 @@ func (s *sqlStore) GetArtifactByKey(ctx context.Context, scopeKind, scopeRef, ow
 }
 
 // MarkReceived implements Store.
-func (s *sqlStore) MarkReceived(ctx context.Context, versionID, path, mediaType string) error {
-	res, err := s.db.ExecContext(ctx, s.rebind(`UPDATE artifact_file SET received = ?, media_type = ?
+func (s *sqlStore) MarkReceived(ctx context.Context, versionID, path, mediaType string, siblings map[string]string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("artifacts: begin mark received: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_file SET received = ?, media_type = ?
 		WHERE version_id = ? AND path = ? AND origin = ?
 		AND EXISTS (SELECT 1 FROM artifact_version WHERE id = ? AND state = ?)`),
 		true, mediaType, versionID, path, FileOriginUpload, versionID, VersionStatePending)
 	if err != nil {
 		return fmt.Errorf("artifacts: mark received: %w", err)
 	}
-	if n, err := res.RowsAffected(); err != nil {
+	n, err := res.RowsAffected()
+	if err != nil {
 		return fmt.Errorf("artifacts: mark received: %w", err)
-	} else if n == 1 {
-		return nil
 	}
-	if _, err := s.GetFile(ctx, versionID, path); err != nil {
-		return err
+	if n != 1 {
+		_ = tx.Rollback()
+		if _, err := s.GetFile(ctx, versionID, path); err != nil {
+			return err
+		}
+		return ErrConflict
 	}
-	return ErrConflict
+	// Files of the same version with the same digest share the one stored
+	// object, so they arrive together (one upload per digest), each with
+	// the media type the caller detected for its own path.
+	for p, mt := range siblings {
+		if p == path {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_file SET received = ?, media_type = ?
+			WHERE version_id = ? AND path = ? AND origin = ? AND received = ?
+			AND sha256 = (SELECT sha256 FROM artifact_file WHERE version_id = ? AND path = ?)`),
+			true, mt, versionID, p, FileOriginUpload, false, versionID, path); err != nil {
+			return fmt.Errorf("artifacts: mark same-digest file received: %w", err)
+		}
+	}
+	return commit(tx)
 }
 
 // FinalizeVersion implements Store.
@@ -948,8 +971,24 @@ func (s *sqlStore) writeCandidateFilters(b *strings.Builder, args *[]any, q Cand
 		*args = append(*args, VersionKindReview)
 	}
 	if q.HomeScope != "" {
-		b.WriteString(" AND a.scope_kind = ? AND a.scope_ref = ?")
-		*args = append(*args, ScopeKindProject, q.HomeScope)
+		// Shared with the project: an unexpired scope grant to it, found
+		// through the (artifact_id, subject_kind, subject_ref) unique index.
+		shared := `EXISTS (SELECT 1 FROM artifact_grant sg WHERE sg.artifact_id = a.id AND sg.subject_kind = ?
+			AND sg.subject_ref = ? AND (sg.expires_at IS NULL OR sg.expires_at > ?) AND sg.permission IN (?, ?, ?))`
+		sharedArgs := []any{SubjectScope, q.HomeScope, now, GrantRead, GrantWrite, GrantAdmin}
+		switch {
+		case q.ScopeShares && q.SharedOnly:
+			b.WriteString(" AND a.scope_kind = ? AND a.scope_ref <> ? AND " + shared)
+			*args = append(*args, ScopeKindProject, q.HomeScope)
+			*args = append(*args, sharedArgs...)
+		case q.ScopeShares:
+			b.WriteString(" AND a.scope_kind = ? AND (a.scope_ref = ? OR " + shared + ")")
+			*args = append(*args, ScopeKindProject, q.HomeScope)
+			*args = append(*args, sharedArgs...)
+		default:
+			b.WriteString(" AND a.scope_kind = ? AND a.scope_ref = ?")
+			*args = append(*args, ScopeKindProject, q.HomeScope)
+		}
 	}
 	if q.After != nil {
 		at := s.timeArg(q.After.UpdatedAt)

@@ -146,6 +146,9 @@ CREATE TABLE IF NOT EXISTS webchat_message_attachment (
 CREATE INDEX IF NOT EXISTS idx_webchat_message_attachment_message
     ON webchat_message_attachment (message_id);
 
+CREATE INDEX IF NOT EXISTS idx_webchat_message_attachment_attachment
+    ON webchat_message_attachment (attachment_id);
+
 -- Phase-3: message extension data (reply-to, edit, delete)
 CREATE TABLE IF NOT EXISTS webchat_message_ext (
     message_id TEXT PRIMARY KEY,
@@ -1201,6 +1204,37 @@ func (s *pgWebChatStore) GetTopicConversationID(ctx context.Context, topicID str
 	return convID, nil
 }
 
+// GetTopicConversationIDInProject is GetTopicConversationID for a topic of
+// projectID only: a topic of another project answers store.ErrNotFound.
+func (s *pgWebChatStore) GetTopicConversationIDInProject(ctx context.Context, projectID, topicID string) (string, error) {
+	const query = `SELECT COALESCE(conversation_id, '') FROM webchat_topic WHERE id = $1 AND project_id = $2 AND deleted_at IS NULL`
+	var convID string
+	err := s.db.QueryRowContext(ctx, query, topicID, projectID).Scan(&convID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("topic not found %s: %w", topicID, store.ErrNotFound)
+		}
+		return "", fmt.Errorf("webchat store: get topic conversation_id in project: %w", err)
+	}
+	return convID, nil
+}
+
+// GetTopicConversationIDIncludingDeletedInProject is
+// GetTopicConversationIDIncludingDeleted for a topic of projectID only: a
+// topic of another project answers store.ErrNotFound.
+func (s *pgWebChatStore) GetTopicConversationIDIncludingDeletedInProject(ctx context.Context, projectID, topicID string) (string, error) {
+	const query = `SELECT COALESCE(conversation_id, '') FROM webchat_topic WHERE id = $1 AND project_id = $2`
+	var convID string
+	err := s.db.QueryRowContext(ctx, query, topicID, projectID).Scan(&convID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("topic not found %s: %w", topicID, store.ErrNotFound)
+		}
+		return "", fmt.Errorf("webchat store: get topic conversation_id in project (including deleted): %w", err)
+	}
+	return convID, nil
+}
+
 // GetTopicConversationIDIncludingDeleted returns the conversation_id for a
 // webchat topic regardless of its deletion state.
 //
@@ -1640,6 +1674,34 @@ ON CONFLICT (message_id, attachment_id) DO NOTHING
 	return nil
 }
 
+// ListMessageIDsForAttachment returns up to limit IDs of messages the
+// attachment is linked to, in ID order.
+func (s *pgWebChatStore) ListMessageIDsForAttachment(ctx context.Context, attachmentID string, limit int) ([]string, error) {
+	const query = `
+SELECT message_id FROM webchat_message_attachment
+WHERE attachment_id = $1
+ORDER BY message_id
+LIMIT $2
+`
+	rows, err := s.db.QueryContext(ctx, query, attachmentID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: list messages for attachment: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("webchat store: scan message for attachment: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("webchat store: list messages for attachment: %w", err)
+	}
+	return ids, nil
+}
+
 // GetAttachmentsByMessage returns all attachments linked to a message.
 func (s *pgWebChatStore) GetAttachmentsByMessage(ctx context.Context, messageID string) ([]AttachmentMeta, error) {
 	const query = `
@@ -1859,11 +1921,16 @@ func (s *pgWebChatStore) UpdateThreadID(ctx context.Context, oldThreadID, newThr
 	return int(n), nil
 }
 
-// DeleteDM removes all webchat_dm rows for the given conversation key.
+// DeleteDM removes all webchat_dm rows for the given conversation key,
+// and the scheduled messages of that conversation.
 func (s *pgWebChatStore) DeleteDM(ctx context.Context, conversationKey string) error {
 	const query = `DELETE FROM webchat_dm WHERE conversation_key = $1`
 	_, err := s.db.ExecContext(ctx, query, conversationKey)
 	if err != nil {
+		return fmt.Errorf("webchat store: delete DM: %w", err)
+	}
+	// The conversation's scheduled messages go with it.
+	if _, err := s.DeleteScheduledMessagesForConversation(ctx, conversationKey); err != nil {
 		return fmt.Errorf("webchat store: delete DM: %w", err)
 	}
 	return nil

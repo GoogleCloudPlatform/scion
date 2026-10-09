@@ -30,8 +30,8 @@ import {
   normalizeQuery,
   mergeAdjacent,
   type HighlightRange,
-} from './chat-palette-match.js';
-import { dmCandidateId, type PaletteCandidate } from '../client/chat-palette-types.js';
+} from './palette-match.js';
+import { dmCandidateId, type PaletteCandidate } from '../client/palette-types.js';
 
 function agentCandidate(
   overrides: Partial<PaletteCandidate> & { id: string; label: string }
