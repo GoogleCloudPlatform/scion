@@ -2940,7 +2940,7 @@ describe('scion-chat-thread initial scroll position', () => {
       disconnect(): void {}
     } as unknown as typeof ResizeObserver;
     try {
-      const el = await mountWithHistory();
+      await mountWithHistory();
       expect(observed.some((t) => t.classList.contains('messages-list'))).toBe(true);
       scrollWrites = [];
       for (const cb of callbacks) cb([], {} as ResizeObserver);
@@ -5202,7 +5202,7 @@ describe('scion-chat-thread path-link project context fallback', () => {
     el.projectId = '';
     const internals = el as unknown as Internals;
 
-    await internals.handlePathLinkClick(
+    internals.handlePathLinkClick(
       new CustomEvent('path-link-click', {
         detail: { path: '/scion-volumes/scratchpad/projects/visibility-removal/scoping.md' },
       }),
@@ -5229,7 +5229,7 @@ describe('scion-chat-thread path-link project context fallback', () => {
     } as unknown as Response);
     const internals = el as unknown as Internals;
 
-    await internals.handlePathLinkClick(
+    internals.handlePathLinkClick(
       new CustomEvent('path-link-click', {
         detail: { path: '/scion-volumes/scratchpad/projects/visibility-removal/scoping.md' },
       }),
@@ -5258,7 +5258,7 @@ describe('scion-chat-thread path-link project context fallback', () => {
     } as unknown as Response);
     const internals = el as unknown as Internals;
 
-    await internals.handlePathLinkClick(
+    internals.handlePathLinkClick(
       new CustomEvent('path-link-click', {
         detail: { path: '/scion-volumes/scratchpad/projects/visibility-removal/scoping.md' },
       }),
@@ -5283,7 +5283,7 @@ describe('scion-chat-thread path-link project context fallback', () => {
     } as unknown as Response);
     const internals = el as unknown as Internals;
 
-    await internals.handlePathLinkClick(
+    internals.handlePathLinkClick(
       new CustomEvent('path-link-click', {
         detail: { path: '/scion-volumes/scratchpad/projects/visibility-removal/scoping.md' },
       }),
@@ -5310,7 +5310,7 @@ describe('scion-chat-thread path-link project context fallback', () => {
 
     // handleAgentOutboundMessage stamps ProjectID on the message but never
     // sets SenderProjectID, so this is the real shape of an agent DM.
-    await internals.handlePathLinkClick(
+    internals.handlePathLinkClick(
       new CustomEvent('path-link-click', {
         detail: { path: '/scion-volumes/scratchpad/notes.md' },
       }),
@@ -5333,7 +5333,7 @@ describe('scion-chat-thread path-link project context fallback', () => {
     } as unknown as Response);
     const internals = el as unknown as Internals;
 
-    await internals.handlePathLinkClick(
+    internals.handlePathLinkClick(
       new CustomEvent('path-link-click', {
         detail: { path: '/scion-volumes/scratchpad/notes.md' },
       }),
@@ -5350,7 +5350,7 @@ describe('scion-chat-thread path-link project context fallback', () => {
     el.projectId = '';
     const internals = el as unknown as Internals;
 
-    await internals.handlePathLinkClick(
+    internals.handlePathLinkClick(
       new CustomEvent('path-link-click', { detail: { path: 'not-a-path' } }),
       makeMessage({ senderProjectId: 'proj-visibility-removal' })
     );
@@ -5373,7 +5373,7 @@ describe('scion-chat-thread path-link project context fallback', () => {
     } as unknown as Response);
     const internals = el as unknown as Internals;
 
-    await internals.handlePathLinkClick(
+    internals.handlePathLinkClick(
       new CustomEvent('path-link-click', {
         detail: { path: '/scion-volumes/scratchpad/projects/visibility-removal/scoping.md' },
       }),
@@ -5418,7 +5418,7 @@ describe('scion-chat-thread path-link project context fallback', () => {
     } as unknown as Response);
     const internals = el as unknown as Internals;
 
-    await internals.handlePathLinkClick(
+    internals.handlePathLinkClick(
       new CustomEvent('path-link-click', {
         detail: { path: '/scion-volumes/scratchpad/notes.md' },
       }),
@@ -5458,7 +5458,7 @@ describe('scion-chat-thread path-link project context fallback', () => {
     } as unknown as Response);
     const internals = el as unknown as Internals;
 
-    await internals.handlePathLinkClick(
+    internals.handlePathLinkClick(
       new CustomEvent('path-link-click', {
         detail: { path: '/scion-volumes/scratchpad/notes.md' },
       }),
@@ -5487,7 +5487,7 @@ describe('scion-chat-thread path-link project context fallback', () => {
     await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
     const internals = el as unknown as Internals;
 
-    await internals.handlePathLinkClick(
+    internals.handlePathLinkClick(
       new CustomEvent('path-link-click', {
         detail: { path: '/scion-volumes/scratchpad/notes.md' },
       }),

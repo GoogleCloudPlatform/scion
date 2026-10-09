@@ -36,6 +36,7 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
+import type { ScionEffectiveRoleProvenance } from './effective-role-provenance.js';
 
 // Mock confirm-dialog at module level so showConfirm auto-confirms in all tests.
 vi.mock('./confirm-dialog.js', () => ({
@@ -223,9 +224,6 @@ describe('Boundary-notice loaded-flag pattern', () => {
 /* buttons/events rather than asserting on source strings.                     */
 /* ========================================================================== */
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let EffectiveRoleProvenance: any;
-
 /** Wait for async loads + Lit update cycle. */
 async function tick(el: { updateComplete: Promise<boolean> }, ms = 250): Promise<void> {
   await new Promise((r) => setTimeout(r, ms));
@@ -345,7 +343,7 @@ async function createEl(
 ) {
   vi.stubGlobal('fetch', vi.fn(fetchHandler));
   const el = document.createElement('scion-effective-role-provenance') as InstanceType<
-    typeof EffectiveRoleProvenance
+    typeof ScionEffectiveRoleProvenance
   >;
   el.principalType = (props?.principalType ?? 'user') as 'user' | 'agent';
   el.principalId = props?.principalId ?? 'user-1';
@@ -355,8 +353,7 @@ async function createEl(
 }
 
 beforeAll(async () => {
-  const mod = await import('./effective-role-provenance.js');
-  EffectiveRoleProvenance = mod.ScionEffectiveRoleProvenance;
+  await import('./effective-role-provenance.js');
 });
 
 afterEach(() => {
@@ -558,7 +555,7 @@ describe('Behavioral: pending probes', () => {
 
     vi.stubGlobal('fetch', vi.fn(neverResolve));
     const el = document.createElement('scion-effective-role-provenance') as InstanceType<
-      typeof EffectiveRoleProvenance
+      typeof ScionEffectiveRoleProvenance
     >;
     el.principalType = 'user';
     el.principalId = 'user-1';

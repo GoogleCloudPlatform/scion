@@ -39,9 +39,7 @@
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let ScionGCPServiceAccountList: any;
+import type { ScionGCPServiceAccountList } from './gcp-service-account-list.js';
 
 interface FetchCall {
   url: string;
@@ -132,8 +130,7 @@ function iconButtons(el: HTMLElement, name: string): Element[] {
 
 describe('scion-gcp-service-account-list', () => {
   beforeAll(async () => {
-    const mod = await import('./gcp-service-account-list.js');
-    ScionGCPServiceAccountList = mod.ScionGCPServiceAccountList;
+    await import('./gcp-service-account-list.js');
   });
 
   afterEach(() => {

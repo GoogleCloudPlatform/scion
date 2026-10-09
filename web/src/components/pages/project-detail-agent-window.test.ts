@@ -2188,7 +2188,7 @@ describe('project-detail — agent list window', () => {
               try {
                 check(el, agents);
               } catch (err) {
-                throw new Error(`step "${name}": ${(err as Error).message}`);
+                throw new Error(`step "${name}": ${(err as Error).message}`, { cause: err });
               }
             }
           }
@@ -4194,6 +4194,7 @@ describe('project-detail — agent list window', () => {
       const id = win.items[0].id;
       expect(stateManager.getAgent(id)?.taskSummary).toBe('old task');
       agents = agents.map((a) => {
+        /* eslint-disable-next-line @typescript-eslint/no-unused-vars -- rest-omit idiom: bind and drop the key so `...rest` excludes it */
         const { taskSummary: _dropped, ...rest } = a;
         return rest as Agent;
       });

@@ -111,7 +111,8 @@ function trackAsyncCalls(
   return {
     call: (i: number): Promise<void> => {
       const result = calls[i];
-      if (!result) throw new Error(`no call #${i} of ${names.join(', ')} was recorded`);
+      if (result === undefined)
+        throw new Error(`no call #${i} of ${names.join(', ')} was recorded`);
       return result;
     },
     // Waits for every recorded call, including calls that the awaited ones

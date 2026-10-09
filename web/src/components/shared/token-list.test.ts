@@ -26,9 +26,8 @@
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
+import type { ScionTokenList } from './token-list.js';
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let ScionTokenList: any;
 let formatEligibilityReason: (reason?: string) => string;
 let relationshipBadgeText: (scope: string) => string;
 
@@ -181,7 +180,6 @@ function baseFetch(
 describe('scion-token-list — project eligibility (ptone/scion#2122)', () => {
   beforeAll(async () => {
     const mod = await import('./token-list.js');
-    ScionTokenList = mod.ScionTokenList;
     formatEligibilityReason = mod.formatEligibilityReason;
     relationshipBadgeText = mod.relationshipBadgeText;
   });

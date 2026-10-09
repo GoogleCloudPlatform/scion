@@ -248,7 +248,7 @@ describe('notification tray: desktop notification toggle', () => {
 describe('notification tray: loading for the signed-in user', () => {
   const POLL_MS = 5 * 60_000;
   const LIST_URL = '/api/v1/notifications?acknowledged=false';
-  const fetchMock = apiFetch as unknown as ReturnType<typeof vi.fn>;
+  const fetchMock = vi.mocked(apiFetch);
   let server: any[] = [];
   let trays: any[] = [];
 

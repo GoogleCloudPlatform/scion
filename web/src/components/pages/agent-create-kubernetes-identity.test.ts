@@ -1707,7 +1707,7 @@ describe('Create Agent: GCP identity defaults do not race', () => {
    * test resolves it; a plain object is returned immediately. Anything
    * unmatched gets an empty list response.
    */
-  function stubRoutes(routes: Record<string, Deferred | unknown>): void {
+  function stubRoutes(routes: Record<string, unknown>): void {
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo | URL) => {

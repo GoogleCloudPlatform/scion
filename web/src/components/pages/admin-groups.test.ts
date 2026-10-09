@@ -30,6 +30,8 @@
  */
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'fs';
+import { resolve as resolvePath } from 'path';
 
 import { canGroup } from '../../shared/groups.js';
 import type { Capabilities } from '../../shared/groups.js';
@@ -662,10 +664,11 @@ describe('Tab switching', () => {
 /* ========================================================================== */
 
 describe('Accessibility (G6 sweep)', () => {
-  const { readFileSync } = require('fs');
-  const { resolve } = require('path');
-  const LIST_SOURCE = readFileSync(resolve(__dirname, './admin-groups.ts'), 'utf-8');
-  const FORM_SOURCE = readFileSync(resolve(__dirname, '../shared/group-form-dialog.ts'), 'utf-8');
+  const LIST_SOURCE = readFileSync(resolvePath(__dirname, './admin-groups.ts'), 'utf-8');
+  const FORM_SOURCE = readFileSync(
+    resolvePath(__dirname, '../shared/group-form-dialog.ts'),
+    'utf-8'
+  );
 
   it('groups table has role="table" and aria-label', () => {
     expect(LIST_SOURCE).toContain('role="table"');
