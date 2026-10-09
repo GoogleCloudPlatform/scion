@@ -30,6 +30,7 @@ import type { PageData, HarnessConfig } from '../../shared/types.js';
 import { can } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
+import '../shared/detail-header.js';
 import '../shared/file-browser.js';
 import '../shared/file-editor.js';
 import { HarnessConfigFileBrowserDataSource } from '../shared/file-browser.js';
@@ -185,49 +186,6 @@ export class ScionPageHarnessConfigDetail extends LitElement {
       color: var(--sl-color-primary-600);
     }
 
-    .resource-header {
-      margin-bottom: 1.5rem;
-    }
-    /* The actions share this row; a name too long to fit beside them pushes
-       them onto the next line. */
-    .resource-title {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 0.75rem;
-      margin: 0 0 0.5rem;
-    }
-    .resource-title-main {
-      display: flex;
-      align-items: flex-start;
-      gap: 0.75rem;
-      min-width: 0;
-    }
-    .resource-title-main > sl-icon {
-      flex-shrink: 0;
-      color: var(--sl-color-neutral-500);
-      font-size: 1.25rem;
-      /* Centre the icon on the first line of the name: (1.95rem h1 line box
-         - 1.25rem icon) / 2. */
-      margin-top: 0.35rem;
-    }
-    /* A long name wraps on its own line; the badges then follow on the next
-       line instead of floating beside a multi-line name. */
-    .header-title-text {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 0.5rem 0.75rem;
-      min-width: 0;
-    }
-    .resource-title h1 {
-      margin: 0;
-      font-size: 1.5rem;
-      font-weight: 600;
-      line-height: 1.3;
-      min-width: 0;
-      overflow-wrap: anywhere;
-    }
     .harness-badge {
       display: inline-block;
       padding: 0.15rem 0.5rem;
@@ -267,10 +225,6 @@ export class ScionPageHarnessConfigDetail extends LitElement {
 
     .editor-back-row {
       margin-bottom: 0.5rem;
-    }
-
-    .header-actions {
-      margin-left: auto;
     }
 
     .build-log-section {
@@ -678,51 +632,15 @@ export class ScionPageHarnessConfigDetail extends LitElement {
 
   private renderHeader() {
     const hc = this.harnessConfig!;
+    const canDelete = can(hc._capabilities, 'delete') || can(hc._capabilities, 'manage');
     return html`
-      <div class="resource-header">
-        <div class="resource-title">
-          <div class="resource-title-main">
-            <sl-icon name="sliders"></sl-icon>
-            <div class="header-title-text">
-              <h1>${hc.displayName || hc.name}</h1>
-              ${hc.harness ? html`<span class="harness-badge">${hc.harness}</span>` : ''}
-            </div>
-          </div>
-          <div class="header-actions">
-            ${hc.sourceUrl
-              ? html`
-                  <sl-button
-                    size="small"
-                    variant="default"
-                    @click=${this.startReimport}
-                    ?disabled=${this.reimportRunning}
-                    ?loading=${this.reimportRunning}
-                  >
-                    <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
-                    Refresh from Source
-                  </sl-button>
-                `
-              : nothing}
-            ${can(hc._capabilities, 'delete') || can(hc._capabilities, 'manage')
-              ? html`
-                  <sl-button
-                    size="small"
-                    variant="danger"
-                    outline
-                    @click=${() => {
-                      this.deleteDialogOpen = true;
-                      this.deleteError = '';
-                    }}
-                  >
-                    <sl-icon slot="prefix" name="trash"></sl-icon>
-                    Delete
-                  </sl-button>
-                `
-              : nothing}
-          </div>
-        </div>
-        ${hc.description ? html`<p class="resource-description">${hc.description}</p>` : ''}
-        <div class="resource-meta-row">
+      <scion-detail-header heading=${hc.displayName || hc.name}>
+        <sl-icon slot="icon" name="sliders"></sl-icon>
+        ${hc.harness ? html`<span class="harness-badge">${hc.harness}</span>` : ''}
+        ${hc.description
+          ? html`<p slot="meta" class="resource-description">${hc.description}</p>`
+          : ''}
+        <div slot="meta" class="resource-meta-row">
           <span>Scope: ${hc.scope}</span>
           <span>Status: ${hc.status}</span>
           ${hc.contentHash
@@ -734,12 +652,48 @@ export class ScionPageHarnessConfigDetail extends LitElement {
           ${this.renderSourceUrl(hc.sourceUrl)}
         </div>
         ${this.reimportStatus
-          ? html`<p class="reimport-status success">${this.reimportStatus}</p>`
+          ? html`<p slot="meta" class="reimport-status success">${this.reimportStatus}</p>`
           : ''}
         ${this.reimportError
-          ? html`<p class="reimport-status error">${this.reimportError}</p>`
+          ? html`<p slot="meta" class="reimport-status error">${this.reimportError}</p>`
           : ''}
-      </div>
+        ${hc.sourceUrl || canDelete
+          ? html`
+              <div slot="actions" class="header-actions">
+                ${hc.sourceUrl
+                  ? html`
+                      <sl-button
+                        size="small"
+                        variant="default"
+                        @click=${this.startReimport}
+                        ?disabled=${this.reimportRunning}
+                        ?loading=${this.reimportRunning}
+                      >
+                        <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
+                        Refresh from Source
+                      </sl-button>
+                    `
+                  : nothing}
+                ${canDelete
+                  ? html`
+                      <sl-button
+                        size="small"
+                        variant="danger"
+                        outline
+                        @click=${() => {
+                          this.deleteDialogOpen = true;
+                          this.deleteError = '';
+                        }}
+                      >
+                        <sl-icon slot="prefix" name="trash"></sl-icon>
+                        Delete
+                      </sl-button>
+                    `
+                  : nothing}
+              </div>
+            `
+          : nothing}
+      </scion-detail-header>
     `;
   }
 
