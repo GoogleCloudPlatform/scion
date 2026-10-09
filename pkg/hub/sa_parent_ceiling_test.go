@@ -280,41 +280,124 @@ func TestSAParentCeiling_UserSourceDeletedDenies(t *testing.T) {
 }
 
 func TestSAParentCeiling_AgentSourceDeletedDenies(t *testing.T) {
-	f := newSPCFixture(t)
-	f.record(t, func(a *store.AgentServiceAccountAssignment) {
-		a.SourcePrincipalKind = store.DelegationPrincipalAgent
-		a.SourcePrincipalID = tid("spc-gone-agent")
-		a.SourceCredentialKind = store.SourceCredentialAgent
-		a.EffectCeiling = boundedCeiling("gcp_service_account.assign")
+	t.Run("never existed", func(t *testing.T) {
+		f := newSPCFixture(t)
+		f.record(t, func(a *store.AgentServiceAccountAssignment) {
+			a.SourcePrincipalKind = store.DelegationPrincipalAgent
+			a.SourcePrincipalID = tid("spc-gone-agent")
+			a.SourceCredentialKind = store.SourceCredentialAgent
+			a.EffectCeiling = boundedCeiling("gcp_service_account.assign")
+		})
+		assertParentCeilingDenied(t, f.eval(t), DenyCauseCeilingOrphaned)
 	})
+
+	// The source agent's row is marked deleted while its edge stays
+	// active, so only the source deletion check can deny.
+	t.Run("soft deleted", func(t *testing.T) {
+		f := newSPCFixture(t)
+		parent := f.assignModeAgent(t, "spc-parent", f.sa.ID, f.assigner)
+		f.record(t, func(a *store.AgentServiceAccountAssignment) {
+			a.SourcePrincipalKind = store.DelegationPrincipalAgent
+			a.SourcePrincipalID = parent.ID
+			a.SourceCredentialKind = store.SourceCredentialAgent
+			a.SourceCredentialID = "jti-1"
+			a.EffectCeiling = boundedCeiling("agent.create", "gcp_service_account.assign")
+		})
+		assertParentCeilingAllowed(t, f.eval(t))
+		markAgentDeleted(t, f.s, parent.ID)
+		require.NotEmpty(t, activeEdgesFor(t, f.s, parent.ID), "precondition: the source's edge stays active")
+		assertParentCeilingDenied(t, f.eval(t), DenyCauseCeilingOrphaned)
+	})
+}
+
+// markAgentDeleted sets the agent row's DeletedAt and nothing else: its
+// edges and assignment stay active.
+func markAgentDeleted(t *testing.T, s store.Store, agentID string) {
+	t.Helper()
+	agent := mustGetAgent(t, s, agentID)
+	agent.DeletedAt = time.Now()
+	require.NoError(t, s.UpdateAgent(context.Background(), agent))
+	require.False(t, mustGetAgent(t, s, agentID).DeletedAt.IsZero(), "precondition: the row reads as deleted")
+}
+
+// TestSAParentCeiling_DeletedAgentDenies: the evaluated agent's row is
+// marked deleted while its assignment stays active, so only the agent
+// deletion check can deny.
+func TestSAParentCeiling_DeletedAgentDenies(t *testing.T) {
+	f := newSPCFixture(t)
+	f.record(t, nil)
+	assertParentCeilingAllowed(t, f.eval(t))
+	markAgentDeleted(t, f.s, f.agent.ID)
+	require.Len(t, activeAssignments(t, f.s, f.agent.ID), 1, "precondition: the assignment stays active")
 	assertParentCeilingDenied(t, f.eval(t), DenyCauseCeilingOrphaned)
 }
 
 // ---- stale and missing provenance ------------------------------------------
 
-func TestSAParentCeiling_AssignmentSAMismatchDenies(t *testing.T) {
+// spcMismatchedIDs returns account IDs that differ from the fixture
+// account: the unrelated account newMismatchFixture registers, and two that
+// share a strict prefix with it (one it extends, one that extends it), so
+// only an exact comparison refuses them. Account IDs are UUIDs, so the
+// prefix-shaped IDs cannot be registered.
+func spcMismatchedIDs() map[string]string {
+	id := tid("spc-sa")
+	return map[string]string{
+		"other account":         tid("spc-sa2"),
+		"prefix of the account": id[:len(id)-1],
+		"account with a suffix": id + "0",
+	}
+}
+
+// newMismatchFixture is newSPCFixture plus a second registered, verified
+// account in the project (spcMismatchedIDs' "other account").
+func newMismatchFixture(t *testing.T) *spcFixture {
+	t.Helper()
 	f := newSPCFixture(t)
-	sa2 := spcServiceAccount(t, f.s, "spc-sa2", store.ScopeProject, f.projectID, true)
-	f.record(t, func(a *store.AgentServiceAccountAssignment) { a.ServiceAccountID = sa2.ID })
-	assertParentCeilingDenied(t, f.eval(t), DenyCauseCeilingProvenanceStale)
+	require.Equal(t, tid("spc-sa"), f.sa.ID)
+	spcServiceAccount(t, f.s, "spc-sa2", store.ScopeProject, f.projectID, true)
+	return f
+}
+
+// setAppliedSA points the agent's applied identity at saID.
+func (f *spcFixture) setAppliedSA(t *testing.T, saID string) {
+	t.Helper()
+	agent := mustGetAgent(t, f.s, f.agent.ID)
+	agent.AppliedConfig.GCPIdentity.ServiceAccountID = saID
+	require.NoError(t, f.s.UpdateAgent(context.Background(), agent))
+}
+
+func TestSAParentCeiling_AssignmentSAMismatchDenies(t *testing.T) {
+	for name, id := range spcMismatchedIDs() {
+		t.Run(name, func(t *testing.T) {
+			f := newMismatchFixture(t)
+			f.record(t, func(a *store.AgentServiceAccountAssignment) { a.ServiceAccountID = id })
+			assertParentCeilingDenied(t, f.eval(t), DenyCauseCeilingProvenanceStale)
+		})
+	}
 }
 
 func TestSAParentCeiling_AppliedConfigSAMismatchDenies(t *testing.T) {
-	f := newSPCFixture(t)
-	ctx := context.Background()
-	f.record(t, nil)
-	sa2 := spcServiceAccount(t, f.s, "spc-sa2", store.ScopeProject, f.projectID, true)
-	f.agent.AppliedConfig.GCPIdentity.ServiceAccountID = sa2.ID
-	require.NoError(t, f.s.UpdateAgent(ctx, f.agent))
-	assertParentCeilingDenied(t, f.eval(t), DenyCauseCeilingProvenanceStale)
+	for name, id := range spcMismatchedIDs() {
+		t.Run(name, func(t *testing.T) {
+			f := newMismatchFixture(t)
+			f.record(t, nil)
+			assertParentCeilingAllowed(t, f.eval(t))
+			f.setAppliedSA(t, id)
+			assertParentCeilingDenied(t, f.eval(t), DenyCauseCeilingProvenanceStale)
+		})
+	}
 }
 
 func TestSAParentCeiling_RequestedSAMismatchDenies(t *testing.T) {
-	f := newSPCFixture(t)
-	f.record(t, nil)
-	sa2 := spcServiceAccount(t, f.s, "spc-sa2", store.ScopeProject, f.projectID, true)
-	d := f.srv.authzService.EvaluateServiceAccountParentCeiling(context.Background(), f.agent.ID, sa2.ID)
-	assertParentCeilingDenied(t, d, DenyCauseCeilingProvenanceStale)
+	for name, id := range spcMismatchedIDs() {
+		t.Run(name, func(t *testing.T) {
+			f := newMismatchFixture(t)
+			f.record(t, nil)
+			assertParentCeilingAllowed(t, f.eval(t))
+			d := f.srv.authzService.EvaluateServiceAccountParentCeiling(context.Background(), f.agent.ID, id)
+			assertParentCeilingDenied(t, d, DenyCauseCeilingProvenanceStale)
+		})
+	}
 }
 
 func TestSAParentCeiling_AssignmentInactiveDenies(t *testing.T) {
