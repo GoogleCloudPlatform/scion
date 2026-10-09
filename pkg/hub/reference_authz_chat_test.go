@@ -725,3 +725,23 @@ func TestChatSendRefusal_MarkedAsAccessRefusal(t *testing.T) {
 	assert.Equal(t, ScheduledFailureNoAccess, scheduledFailureFromSendError(refused))
 	assert.Equal(t, ScheduledFailureDeliveryError, scheduledFailureFromSendError(missing))
 }
+
+// With no user, the DM participant check gives the same refusal as
+// authorizeChatSend gives a request with no user.
+func TestAuthorizeDMKeyParticipant_NoUserRefused(t *testing.T) {
+	key := dmKeyFor(t, "user", tid("dm-no-user-a"), "user", tid("dm-no-user-b"))
+	want := chatSendForbidden()
+
+	got := authorizeDMKeyParticipant(context.Background(), nil, key, chatSendPath(key))
+	require.NotNil(t, got)
+	assert.Equal(t, *want, *got)
+
+	var typedNil *AuthenticatedUser
+	got = authorizeDMKeyParticipant(context.Background(), typedNil, key, chatSendPath(key))
+	require.NotNil(t, got)
+	assert.Equal(t, *want, *got)
+
+	_, fromSend := (&Server{}).authorizeChatSend(context.Background(), nil, key)
+	require.NotNil(t, fromSend)
+	assert.Equal(t, *fromSend, *got, "same answer as authorizeChatSend with no user")
+}

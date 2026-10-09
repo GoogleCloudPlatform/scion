@@ -213,6 +213,11 @@ func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key s
 // participant gets the same answer as for a missing thread; the reason is
 // logged against route, the path of the request being answered.
 func authorizeDMKeyParticipant(ctx context.Context, user UserIdentity, key, route string) *chatSendError {
+	// No caller: the same refusal authorizeChatSend gives a request with no
+	// user.
+	if isNilIdentity(user) {
+		return chatSendForbidden()
+	}
 	// Validate DM key format before any further processing.
 	if !validDMKey(key) {
 		return chatSendBadRequest("invalid DM key format")
