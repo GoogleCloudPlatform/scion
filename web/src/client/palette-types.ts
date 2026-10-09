@@ -204,16 +204,16 @@ export function documentCandidateId(fileKey: string): string {
 }
 
 /**
- * The agent fields palette candidate building reads. `phase`, `activity`
- * and `project` are for the terminal view's own agents-only candidate
- * source; chat's candidate building (`buildAgentCandidates` and
- * `isPaletteAgentViable` in `chat-palette-data.ts`) reads none of the
- * three.
+ * The agent fields palette candidate building reads. `phase` and `activity`
+ * are for the terminal view's own agents-only candidate source; chat's
+ * candidate building (`buildAgentCandidates` and `isPaletteAgentViable` in
+ * `chat-palette-data.ts`) reads neither.
  */
 export interface RawPaletteAgent {
   id: string;
   name?: string;
   slug?: string;
+  projectId?: string;
   project?: string;
   phase?: AgentPhase;
   activity?: AgentActivity;

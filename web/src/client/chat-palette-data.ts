@@ -38,6 +38,7 @@ import { formatFileSize } from '../utils/chat-file-links.js';
 import { formatInstant } from '../utils/time.js';
 import type { PaletteCandidate, PaletteThreadTarget, RawPaletteAgent } from './palette-types.js';
 import { dmCandidateId, documentCandidateId, threadCandidateId } from './palette-types.js';
+import { agentRowText, type ProjectSlugLookup } from './agent-palette-candidate.js';
 import type { RecentFile } from './chat-recent-files.js';
 
 /** Users page size. The server default is 50; 100 keeps pages small enough to show progress. */
@@ -191,10 +192,14 @@ export function isPaletteAgentViable(agent: RawPaletteAgent): boolean {
  * candidates. A viable agent with no DM yet still appears, with
  * `activityMs=0` — its DM is created deterministically on first message, no
  * API call needed (see `openDM` in chat.ts).
+ *
+ * Row text is the shared {@link agentRowText}: the secondary line names the
+ * agent's project, by slug when `projectSlug` knows it.
  */
 export function buildAgentCandidates(
   agents: readonly RawPaletteAgent[],
-  dms: readonly RawPaletteDm[]
+  dms: readonly RawPaletteDm[],
+  projectSlug?: ProjectSlugLookup
 ): PaletteCandidate[] {
   const dmByAgentId = new Map<string, RawPaletteDm>();
   for (const dm of dms) {
@@ -206,16 +211,14 @@ export function buildAgentCandidates(
   const candidates: PaletteCandidate[] = [];
   for (const agent of agents) {
     if (!agent.id || !isPaletteAgentViable(agent)) continue;
-    const displayName = agent.name || agent.slug || agent.id;
+    const { label: displayName, secondaryLabel, searchFields } = agentRowText(agent, projectSlug);
     const dm = dmByAgentId.get(agent.id);
-    const searchFields = [displayName];
-    if (agent.slug && agent.slug !== displayName) searchFields.push(agent.slug);
 
     candidates.push({
       id: dmCandidateId('agent', agent.id),
       group: 'agents',
       label: displayName,
-      secondaryLabel: agent.slug ?? '',
+      secondaryLabel,
       searchFields,
       activityMs: activityMsFromTimestamp(dm?.lastActivityAt),
       target: {
@@ -639,7 +642,15 @@ export class ChatPaletteDataController {
     this.threadsAbort = null;
   }
 
-  constructor(private readonly agents: PaletteAgentSource = agentStore) {}
+  /**
+   * `projectSlug` resolves an agent's project ID to the slug the page
+   * already knows; rows of a project whose slug it does not know show the
+   * project name.
+   */
+  constructor(
+    private readonly agents: PaletteAgentSource = agentStore,
+    private readonly projectSlug: ProjectSlugLookup = () => undefined
+  ) {}
 
   /**
    * Load the Agents group. Resolves to the candidate list, or rejects with
@@ -679,7 +690,8 @@ export class ChatPaletteDataController {
         ...(onProgress
           ? {
               onProgress: (progress: AgentListSnapshot): void => {
-                if (isCurrent()) onProgress(buildAgentCandidates(progress.agents, []));
+                if (isCurrent())
+                  onProgress(buildAgentCandidates(progress.agents, [], this.projectSlug));
               },
             }
           : {}),
@@ -711,7 +723,8 @@ export class ChatPaletteDataController {
       const latest = this.agents.peek(PALETTE_AGENT_QUERY);
       return buildAgentCandidates(
         latest?.status === 'ready' ? latest.agents : snapshot.agents,
-        dms
+        dms,
+        this.projectSlug
       );
     } catch (err) {
       if (
@@ -736,7 +749,7 @@ export class ChatPaletteDataController {
    */
   deriveAgentCandidates(snapshot: AgentListSnapshot): PaletteCandidate[] | null {
     if (!this.agentDms || this.agentsAbort) return null;
-    return buildAgentCandidates(snapshot.agents, this.agentDms);
+    return buildAgentCandidates(snapshot.agents, this.agentDms, this.projectSlug);
   }
 
   /**
@@ -748,7 +761,7 @@ export class ChatPaletteDataController {
     const dms = this.freshAgentDms();
     const snapshot = this.agents.peek(PALETTE_AGENT_QUERY);
     if (!dms || snapshot?.status !== 'ready') return null;
-    return buildAgentCandidates(snapshot.agents, dms);
+    return buildAgentCandidates(snapshot.agents, dms, this.projectSlug);
   }
 
   /** A chat or DM change may have moved recency: the next Agents load fetches the DM list. */

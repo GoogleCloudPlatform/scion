@@ -42,6 +42,7 @@ const sharedRules = {
 // excepted): other files in the same directories are not lint-clean.
 const terminalTests = ['src/client/terminal-*.test.ts'];
 const clientTests = [
+  'src/client/agent-palette-candidate.test.ts',
   'src/client/agent-store.test.ts',
   'src/client/agent-store-feed.test.ts',
   'src/client/agent-store-probe.test.ts',
