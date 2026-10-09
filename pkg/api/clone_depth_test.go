@@ -71,6 +71,12 @@ func TestCloneDepth_GitDepth(t *testing.T) {
 	}
 }
 
+func TestCloneDepth_GitDepthErrorNamesRange(t *testing.T) {
+	_, _, err := CloneDepth("1000000000").GitDepth()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "999999999")
+}
+
 func TestCloneDepth_DecodeIntegerOrString(t *testing.T) {
 	type wrapper struct {
 		CloneDepth CloneDepth `json:"clone_depth,omitempty" yaml:"clone_depth,omitempty"`

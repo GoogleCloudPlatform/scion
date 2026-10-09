@@ -61,7 +61,7 @@ func (d *CloneDepth) UnmarshalJSON(b []byte) error {
 		}
 		v = s
 	} else if err := yaml.Unmarshal(b, &v); err != nil {
-		return fmt.Errorf("clone_depth: want \"full\" or a positive integer, got %s", string(b))
+		return fmt.Errorf("clone_depth: want \"full\" or an integer from 1 to %d, got %s", MaxCloneDepth, string(b))
 	}
 	cd, err := CloneDepthFromValue(v)
 	if err != nil {
@@ -112,7 +112,7 @@ func CloneDepthFromValue(v interface{}) (CloneDepth, error) {
 	case bool:
 		return CloneDepth(strconv.FormatBool(n)), nil
 	default:
-		return "", fmt.Errorf("clone_depth: want \"full\" or a positive integer, got %T", v)
+		return "", fmt.Errorf("clone_depth: want \"full\" or an integer from 1 to %d, got %T", MaxCloneDepth, v)
 	}
 }
 
@@ -132,7 +132,7 @@ func (d CloneDepth) GitDepth() (depth int, ok bool, err error) {
 		return 0, true, nil
 	}
 	if !isPositiveDecimal(s) {
-		return 0, false, fmt.Errorf("invalid clone_depth %q: want %q or a positive integer", s, CloneDepthFull)
+		return 0, false, fmt.Errorf("invalid clone_depth %q: want %q or an integer from 1 to %d", s, CloneDepthFull, MaxCloneDepth)
 	}
 	n, convErr := strconv.Atoi(s)
 	if convErr != nil {
