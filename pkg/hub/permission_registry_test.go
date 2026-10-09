@@ -129,14 +129,14 @@ func checkRowsEnforcedOrReserved(registry []permissions.Permission, s grantSurfa
 			}
 		}
 	}
-	for _, alias := range sortedKeys(s.Aliases) {
+	for _, alias := range sortedSurfaceKeys(s.Aliases) {
 		for _, scope := range s.Aliases[alias] {
 			if id, ok := reservedScope[scope]; ok {
 				problems = append(problems, fmt.Sprintf("manage alias %s expands to %s (reserved permission %s)", alias, scope, id))
 			}
 		}
 	}
-	for _, picker := range sortedKeys(s.Pickers) {
+	for _, picker := range sortedSurfaceKeys(s.Pickers) {
 		for _, scope := range s.Pickers[picker] {
 			if id, ok := reservedScope[scope]; ok {
 				problems = append(problems, fmt.Sprintf("scope picker %s offers %s (reserved permission %s)", picker, scope, id))
@@ -149,7 +149,7 @@ func checkRowsEnforcedOrReserved(registry []permissions.Permission, s grantSurfa
 	return nil
 }
 
-func sortedKeys(m map[string][]string) []string {
+func sortedSurfaceKeys(m map[string][]string) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)

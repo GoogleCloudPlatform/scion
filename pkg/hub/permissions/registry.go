@@ -155,7 +155,10 @@ type Permission struct {
 	// UATScope stays valid (UATValidScopes) so existing tokens that carry
 	// it keep working. TestPermissionRegistryRowsEnforcedOrReserved in
 	// pkg/hub enforces all of this. When code starts checking a reserved
-	// permission, clear Reserved and record the check in Enforcement.
+	// permission, clear Reserved and record the check in Enforcement. The
+	// permission then reaches super-admin automatically (allPermissionIDs
+	// takes every non-reserved row); granting it to any other role, agent
+	// scope bundle or picker is a separate, deliberate change.
 	Reserved string
 	// ExcludeFromManageAlias keeps this permission's UAT scope out of the
 	// resource's "<resource>:manage" convenience alias. Used for observation
