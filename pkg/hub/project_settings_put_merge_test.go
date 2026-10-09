@@ -260,8 +260,11 @@ func TestMergeProjectSettingsPut_CaseInsensitiveNames(t *testing.T) {
 	assert.True(t, present[projectSettingsFieldGCPIdentityMode])
 }
 
-func TestMergeProjectSettingsPut_RejectsNonObjectBody(t *testing.T) {
-	for _, body := range []string{`[]`, `"x"`, `{"defaultMaxTurns":"ten"}`, `{`} {
+func TestMergeProjectSettingsPut_RejectsInvalidBody(t *testing.T) {
+	for _, body := range []string{
+		`[]`, `"x"`, `{"defaultMaxTurns":"ten"}`, `{`,
+		`{"defaultModel":"a","DefaultModel":null}`,
+	} {
 		_, _, err := mergeProjectSettingsPut(&hubclient.ProjectSettings{}, []byte(body))
 		assert.Error(t, err, "body %s", body)
 	}

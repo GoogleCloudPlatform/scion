@@ -634,7 +634,8 @@ var projectSettingsNullClearsFields = map[string]bool{
 //     merged key by key.
 //
 // Field names are matched case-insensitively, as encoding/json does when it
-// decodes the same body into the struct. The merge walks the struct by
+// decodes the same body into the struct. Two keys that differ only in case
+// are rejected. The merge walks the struct by
 // reflection, so a field added to hubclient.ProjectSettings gets the same
 // rule without further code here.
 func mergeProjectSettingsPut(stored *hubclient.ProjectSettings, body []byte) (*hubclient.ProjectSettings, map[string]bool, error) {
@@ -648,7 +649,13 @@ func mergeProjectSettingsPut(stored *hubclient.ProjectSettings, body []byte) (*h
 	}
 	folded := make(map[string]json.RawMessage, len(raw))
 	for k, v := range raw {
-		folded[strings.ToLower(k)] = v
+		// Two keys that differ only in case would make the result depend
+		// on map iteration order, so they are refused.
+		lk := strings.ToLower(k)
+		if _, dup := folded[lk]; dup {
+			return nil, nil, fmt.Errorf("duplicate field %q", k)
+		}
+		folded[lk] = v
 	}
 
 	merged := *stored
