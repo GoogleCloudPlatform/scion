@@ -101,7 +101,9 @@ import (
 // for every registered section on boot, so the base is normally that
 // seeded row. For a non-managed (seeded) row, stored keys overridden by a
 // node-local env var are dropped, so one node's env value is not pinned
-// into the shared row (see buildAccessDocOnCurrent). In a deep-merge
+// into the shared row as managed (ptone/scion#2068; only this node's env
+// keys are known, so a row seeded by another node may still carry that
+// node's env values). In a deep-merge
 // section only the overridden nested key is dropped (for example
 // telemetry.cloud.enabled), never the object that holds it.
 //
