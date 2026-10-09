@@ -17,9 +17,11 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
 )
 
@@ -33,7 +35,16 @@ This is useful when an agent's token has expired and cannot be refreshed
 on the Hub, pushes it into the agent's container, and signals the agent
 to restart its token refresh loop.
 
-The agent must be running — stopped agents get a fresh token on next start.`,
+The agent must be running — stopped agents get a fresh token on next start.
+
+With --reissue-scopes, the Hub instead re-issues the agent's role scopes
+from its delegator's current authority: the agent's delegation record is
+re-recorded through the same checks agent creation applies, the agent's
+current credentials are revoked, and a new token is pushed to a running
+agent. Scopes the delegator no longer supports are removed. The operation
+requires a hub super-admin session and is audited. Use --dry-run to see the
+change without applying it. Descendant agents are not changed; re-issue
+them one by one, parents first.`,
 	Args: cobra.ExactArgs(1),
 	ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return getAgentNames(cmd, args, toComplete)
@@ -49,12 +60,82 @@ The agent must be running — stopped agents get a fresh token on next start.`,
 			return fmt.Errorf("reset-auth requires Hub connectivity (hub not configured)")
 		}
 
+		if resetAuthReissueScopes {
+			return reissueScopesViaHub(hubCtx, agentName, resetAuthDryRun)
+		}
+		if resetAuthDryRun {
+			return fmt.Errorf("--dry-run applies only with --reissue-scopes")
+		}
 		return resetAuthViaHub(hubCtx, agentName)
 	},
 }
 
+var (
+	resetAuthReissueScopes bool
+	resetAuthDryRun        bool
+)
+
 func init() {
+	resetAuthCmd.Flags().BoolVar(&resetAuthReissueScopes, "reissue-scopes", false,
+		"Re-issue the agent's role scopes from its delegator's current authority (hub super-admin only)")
+	resetAuthCmd.Flags().BoolVar(&resetAuthDryRun, "dry-run", false,
+		"With --reissue-scopes: show the change without applying it")
 	rootCmd.AddCommand(resetAuthCmd)
+}
+
+func reissueScopesViaHub(hubCtx *HubContext, agentName string, dryRun bool) error {
+	PrintUsingHub(hubCtx.Endpoint)
+	if dryRun {
+		statusf("Computing scope re-issue for agent '%s' (dry run)...\n", agentName)
+	} else {
+		statusf("Re-issuing scopes for agent '%s'...\n", agentName)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	projectID, err := GetProjectID(hubCtx)
+	if err != nil {
+		return wrapHubError(err)
+	}
+	reissuer, ok := hubCtx.Client.ProjectAgents(projectID).(hubclient.ScopeReissuer)
+	if !ok {
+		return fmt.Errorf("this Hub client does not support scope re-issue")
+	}
+	res, err := reissuer.ReissueScopes(ctx, agentName, dryRun)
+	if err != nil {
+		return wrapHubError(fmt.Errorf("failed to re-issue scopes via Hub: %w", err))
+	}
+	printScopeReissueResult(res)
+	if res.DispatchError != "" {
+		return fmt.Errorf("scopes re-issued, but the new token was not delivered: %s", res.DispatchError)
+	}
+	return nil
+}
+
+func printScopeReissueResult(res *hubclient.ScopeReissueResult) {
+	statusf("%s\n", res.Message)
+	statusf("  role:     %s -> %s\n", res.RoleBefore, res.RoleAfter)
+	statusf("  source:   %s %s (%s ceiling)\n", res.CeilingSource.DelegatorKind, res.CeilingSource.DelegatorID, res.CeilingSource.CeilingKind)
+	printScopeList("added", res.Added)
+	printScopeList("removed", res.Removed)
+	if len(res.Withheld) > 0 {
+		statusf("  withheld:\n")
+		for _, w := range res.Withheld {
+			statusf("    %s (%s)\n", w.Scope, w.Cause)
+		}
+	}
+	if !res.DryRun && !res.Noop {
+		statusf("  credentials revoked: %d; token dispatched: %t\n", res.CredentialsRevoked, res.Dispatched)
+	}
+}
+
+func printScopeList(label string, scopes []string) {
+	if len(scopes) == 0 {
+		statusf("  %-9s (none)\n", label+":")
+		return
+	}
+	statusf("  %-9s %s\n", label+":", strings.Join(scopes, ", "))
 }
 
 func resetAuthViaHub(hubCtx *HubContext, agentName string) error {

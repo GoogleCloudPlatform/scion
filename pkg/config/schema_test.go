@@ -1517,3 +1517,32 @@ runtimes:
 	require.NoError(t, err)
 	assert.NotEmpty(t, errors, "unknown key in the substrate object should fail validation")
 }
+
+func TestValidateSettings_KubernetesBlockServiceAccount(t *testing.T) {
+	valid := []byte(`
+schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    kubernetes_block_service_account: scion-block
+  k8s-unset:
+    type: kubernetes
+    kubernetes_block_service_account: ""
+profiles:
+  prod:
+    runtime: k8s
+    kubernetes_block_service_account: prod-block
+`)
+	errors, err := ValidateSettings(valid, "1")
+	require.NoError(t, err)
+	assert.Empty(t, errors, "kubernetes_block_service_account on runtimes and profiles, or empty for unset, should pass schema validation")
+
+	for _, doc := range []string{
+		"runtimes:\n  k8s:\n    type: kubernetes\n    kubernetes_block_service_account: Not_Valid\n",
+		"profiles:\n  prod:\n    runtime: k8s\n    kubernetes_block_service_account: Not_Valid\n",
+	} {
+		errors, err := ValidateSettings([]byte("schema_version: \"1\"\n"+doc), "1")
+		require.NoError(t, err)
+		assert.NotEmpty(t, errors, "an invalid ServiceAccount name should fail schema validation: %s", doc)
+	}
+}

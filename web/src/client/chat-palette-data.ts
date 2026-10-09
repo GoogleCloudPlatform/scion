@@ -539,9 +539,9 @@ async function mapWithConcurrency<T, R>(
 ): Promise<
   Array<{ item: T; index: number; result: R } | { item: T; index: number; error: unknown }>
 > {
-  const results: Array<
+  const results = new Array<
     { item: T; index: number; result: R } | { item: T; index: number; error: unknown }
-  > = new Array(items.length);
+  >(items.length);
   let nextIndex = 0;
 
   async function worker(): Promise<void> {
@@ -938,7 +938,7 @@ export class ChatPaletteDataController {
     const outcomes = await mapWithConcurrency(spaces, MAX_CONCURRENT_THREAD_REQUESTS, (space) =>
       fetchPaletteThreadsForSpace(space.projectId, signal)
     );
-    return outcomes.map(ChatPaletteDataController.toThreadFetchResult);
+    return outcomes.map((outcome) => ChatPaletteDataController.toThreadFetchResult(outcome));
   }
 
   /** Apply {@link fetchThreadsForSpaces}'s results to the shared per-space state. Only call this after confirming the load is still current. */

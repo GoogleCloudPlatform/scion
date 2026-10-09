@@ -2141,7 +2141,7 @@ test_deploy_create_tier_on_settings_writes_parse_as_yaml() {
   log="$(gcloud_log)"
   transport_sa="$(hybrid_transport_sa_name "$HUB")@demo-project.iam.gserviceaccount.com"
   assert_eq "2" "$(echo "$log" | grep -c "<< 'SETTINGSEOF'" || true)" \
-    "a create through Phase 5 must write settings.yaml twice (dev mode, then proxy mode)"
+    "a create through Phase 5 must write settings.yaml twice (Phase 3 bootstrap, then proxy mode)"
   for n in 1 2; do
     if [[ "$n" == 1 ]]; then mode="dev"; else mode="proxy"; fi
     yaml="$(_settings_heredoc_nth "$log" "$n")"

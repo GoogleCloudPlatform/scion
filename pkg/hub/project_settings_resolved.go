@@ -251,7 +251,7 @@ var resolvedSettingDescriptors = map[string]resolvedSettingDescriptor{
 	projectSettingDefaultThinkingLevel: {
 		source:            hubSourceAgentDefaults,
 		path:              []string{"default_thinking_level"},
-		absentWhenMissing: true, // *int with omitempty; 0 is the clear sentinel and deletes the key, so absence is unambiguous
+		absentWhenMissing: true, // *int with omitempty; a clear (null) deletes the key and 0 is rejected, so absence is unambiguous
 	},
 	projectSettingTelemetryEnabled: {
 		source: hubSourceTelemetryDefault,

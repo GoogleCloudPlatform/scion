@@ -138,10 +138,8 @@ export const DENIAL_REASON_COPY: Record<MessageDenialReason, string> = {
   mode_lineage_agent_to_agent:
     '{sender} is in lineage mode: it can message lineage users but not other agents.',
   missing_permission: 'You do not have permission to message this agent.',
-  cross_project_disabled:
-    'Cross-project messaging is disabled by the Hub administrator.',
-  cross_project_sender_mode:
-    '{sender} must be in Hub mode to send messages across projects.',
+  cross_project_disabled: 'Cross-project messaging is disabled by the Hub administrator.',
+  cross_project_sender_mode: '{sender} must be in Hub mode to send messages across projects.',
   cross_project_target_mode:
     '{recipient} must be in Project or Hub mode to receive cross-project messages.',
   cross_project_inbound_none:
