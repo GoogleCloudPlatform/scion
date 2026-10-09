@@ -1540,6 +1540,15 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 	}
 
 	finalAgent := resp.Agent
+	// notFollowed is set when the Hub accepted the launch but the wait could
+	// not follow it to running (status not readable, or still launching at
+	// the wait deadline). The start is then reported as accepted and exits
+	// 0, so a caller does not retry a launch that is going on. --attach
+	// needs a running agent, so it keeps the error.
+	notFollowed := ""
+	// launchReportable is false when finalAgent's launch is not the start
+	// being reported (the create answer predates a workspace finalize).
+	launchReportable := true
 	if needWait {
 		statusf("Waiting for agent '%s' to start...\n", agentName)
 		var progress io.Writer
@@ -1562,10 +1571,11 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 		}
 		// Ctrl-C (or SIGTERM) stops waiting only; the launch continues on
 		// the Hub.
+		accepted := launchActive(resp.Agent) || workspaceFinalized
 		waited, err := waitForAgentLaunchWithSignals(launchWaitOptions{
 			AgentName:  agentName,
 			BudgetFrom: budgetFrom,
-			Accepted:   launchActive(resp.Agent) || workspaceFinalized,
+			Accepted:   accepted,
 			LaunchID:   launchID,
 			Get: func(ctx context.Context) (*hubclient.Agent, error) {
 				return hubCtx.Client.ProjectAgents(projectID).Get(ctx, agentName)
@@ -1573,18 +1583,30 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 			Timeout:  startWaitTimeout,
 			Progress: progress,
 		})
-		if err != nil {
+		note, ok := acceptedLaunchNotFollowed(err)
+		switch {
+		case err == nil:
+			finalAgent = waited
+		case ok && accepted && !attach:
+			notFollowed = note
+			if waited != nil {
+				finalAgent = waited
+			} else if workspaceFinalized {
+				launchReportable = false
+			}
+		default:
 			for _, w := range textWarnings {
 				fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
 			}
 			return err
 		}
-		finalAgent = waited
 	}
 
+	// A status that was never read leaves only the create answer, whose
+	// phase predates the launch.
+	phaseKnown := notFollowed == "" || finalAgent != resp.Agent
 	// After a finalize without waiting, the create answer predates the
 	// dispatched start; report the agent's current state instead.
-	phaseKnown := true
 	if workspaceFinalized && !needWait {
 		getCtx, getCancel := context.WithTimeout(context.Background(), launchFetchTimeout)
 		current, getErr := hubCtx.Client.ProjectAgents(projectID).Get(getCtx, agentName)
@@ -1605,6 +1627,9 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 	}
 	launching := !needWait && launchActive(finalAgent)
 	if workspaceFinalized && !needWait && !agentIsRunning(finalAgent, phaseKnown) {
+		launching = true
+	}
+	if notFollowed != "" {
 		launching = true
 	}
 	message := fmt.Sprintf("Agent '%s' %s via Hub.", agentName, displayStatus)
@@ -1635,7 +1660,10 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 			if finalAgent.RuntimeBrokerID != "" {
 				result.Details["runtimeBrokerId"] = finalAgent.RuntimeBrokerID
 			}
-			if launching && finalAgent.Launch != nil {
+			if notFollowed != "" {
+				result.Details["launchNote"] = notFollowed
+			}
+			if launching && launchReportable && finalAgent.Launch != nil {
 				result.Details["launchId"] = finalAgent.Launch.ID
 				if finalAgent.Launch.Deadline != nil {
 					result.Details["launchDeadline"] = finalAgent.Launch.Deadline.UTC().Format(time.RFC3339)
@@ -1653,7 +1681,11 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 			statusf("Phase: %s\n", phase)
 		}
 	}
-	if launching {
+	switch {
+	case notFollowed != "":
+		statusf("%s\n", notFollowed)
+		statusf("Check its status with: scion list\n")
+	case launching:
 		statusf("Follow the launch with: scion start %s (waits until it is running)\n", agentName)
 	}
 	for _, w := range textWarnings {
