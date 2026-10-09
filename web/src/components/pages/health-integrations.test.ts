@@ -100,7 +100,7 @@ describe('scion-health-integrations without identity', () => {
     );
   });
 
-  it('renders nothing when there are no integrations', async () => {
+  it('shows the section only when it has rows or counts, and renders nothing with no integrations', async () => {
     expect(integrationsSectionVisible(false, [integration()], null)).toBe(false);
     expect(
       integrationsSectionVisible(false, [], {
