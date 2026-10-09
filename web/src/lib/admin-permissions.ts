@@ -151,7 +151,11 @@ export const TAB_PERMISSION_MAP: Record<string, string[]> = {
   // The hub-level environment variable list needs its own read permission;
   // hub.settings.read alone does not grant it.
   'env-vars': ['hub.env_vars.read'],
-  secrets: ['hub.settings.read'],
+  // The hub settings tab lists hub-scoped entries, and that list call
+  // returns 403 for anyone but a legacy admin (user role 'admin'), so
+  // hub.settings.read is not enough: every hub role holds it. No gate
+  // permission means the tab is shown to super-admins only.
+  secrets: [],
   templates: ['template.list', 'template.read'],
   'harness-configs': ['harness_config.list', 'harness_config.read'],
   'pre-start-hooks': ['hub.lifecycle_hooks.read'],

@@ -399,7 +399,7 @@ export class ScionPageMetrics extends LitElement {
   override updated(changedProperties: Map<string, unknown>): void {
     super.updated(changedProperties);
     for (const key of changedProperties.keys()) {
-      if (ScionPageMetrics.CHART_PROPERTIES.has(key as string)) {
+      if (ScionPageMetrics.CHART_PROPERTIES.has(key)) {
         this.updateCharts();
         break;
       }

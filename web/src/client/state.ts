@@ -213,7 +213,7 @@ function mergeAgentDelta(
     delta = promoteDetailFields(delta);
   }
   // Ensure id is always set
-  const updated = { ...base, ...delta, id: agentId } as Agent;
+  const updated = { ...base, ...delta, id: agentId };
   // Preserve _capabilities from existing state when the delta doesn't
   // provide valid capabilities (SSE status deltas typically omit them).
   if (!delta._capabilities && base._capabilities) {
@@ -1128,7 +1128,7 @@ export class StateManager extends EventTarget {
     const existing = this.dirty.unknown.get(agentId) ?? {};
     const next: UnknownAgentDelta = { ...existing };
     if (delta.phase !== undefined) next.phase = delta.phase;
-    if (delta.activity !== undefined) next.activity = delta.activity as string;
+    if (delta.activity !== undefined) next.activity = delta.activity;
     if (delta.lastActivityEvent !== undefined) next.lastActivityEvent = delta.lastActivityEvent;
     this.dirty.unknown.set(agentId, next);
   }
@@ -1196,7 +1196,7 @@ export class StateManager extends EventTarget {
       if (!summaryData._capabilities && existing._capabilities) {
         updated._capabilities = existing._capabilities;
       }
-      this.state.projects.set(id, updated as Project);
+      this.state.projects.set(id, updated);
     } else {
       // Project lifecycle events: created, updated
       const projectData = data as Partial<Project> & { projectId?: string };
@@ -1206,7 +1206,7 @@ export class StateManager extends EventTarget {
       if (!projectData._capabilities && existing._capabilities) {
         updated._capabilities = existing._capabilities;
       }
-      this.state.projects.set(id, updated as Project);
+      this.state.projects.set(id, updated);
     }
     this.notify('projects-updated');
   }
@@ -1221,7 +1221,7 @@ export class StateManager extends EventTarget {
       // Map brokerId field from event payload to id
       const id = ((delta as Record<string, unknown>).brokerId as string) || brokerId;
       const updated = { ...existing, ...delta, id };
-      this.state.brokers.set(id, updated as RuntimeBroker);
+      this.state.brokers.set(id, updated);
     }
     this.notify('brokers-updated');
   }
@@ -1359,7 +1359,7 @@ export class StateManager extends EventTarget {
       let toStore: Agent = agent;
       if (partial) {
         const existing = this.state.agents.get(agent.id);
-        toStore = existing ? ({ ...existing, ...agent, id: agent.id } as Agent) : agent;
+        toStore = existing ? { ...existing, ...agent, id: agent.id } : agent;
       }
       const recorded = recordedDeltas?.get(agent.id);
       if (recorded) {
