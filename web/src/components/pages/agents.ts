@@ -622,7 +622,7 @@ export class ScionPageAgents extends LitElement {
     const storedSort = localStorage.getItem('scion-sort-agents');
     if (storedSort) {
       try {
-        const parsed = JSON.parse(storedSort);
+        const parsed = JSON.parse(storedSort) as { field?: unknown; dir?: unknown } | null;
         if (
           parsed &&
           (parsed.field === 'name' ||

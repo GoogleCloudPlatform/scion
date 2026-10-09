@@ -332,7 +332,7 @@ export class ScionPageMetrics extends LitElement {
         throw new Error(await extractApiError(response, `HTTP ${response.status}`));
       }
 
-      const data = await response.json();
+      const data: unknown = await response.json();
       if (this.latestRequestByView.get(view) !== seq) return;
 
       switch (view) {
