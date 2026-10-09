@@ -90,17 +90,11 @@ func assertInitHasNoGitToken(t *testing.T, pod *corev1.Pod) {
 	assertTokenNotInPodSpec(t, pod)
 }
 
-// Shared-plain lock winner and worktree-per-agent (winner and loser, which
-// both provision) get the agent's git token reference.
+// Shared-plain and worktree-per-agent get the agent's git token reference.
 func TestBuildPod_NFSGitToken_CloningInitContainer(t *testing.T) {
 	for name, cfg := range map[string]RunConfig{
-		"shared-plain winner": nfsBaseConfig("gt-plain"),
-		"worktree winner":     nfsWorktreeConfig("gt-wt"),
-		"worktree loser": func() RunConfig {
-			c := nfsWorktreeConfig("gt-wt-loser")
-			c.nfsProvisionLockLost = true
-			return c
-		}(),
+		"shared-plain": nfsBaseConfig("gt-plain"),
+		"worktree":     nfsWorktreeConfig("gt-wt"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg.ResolvedSecrets = []api.ResolvedSecret{gitTokenSecret()}
@@ -127,16 +121,11 @@ func TestBuildPod_NFSGitToken_GKEPath(t *testing.T) {
 	assertInitGitTokenLikeAgent(t, pod, "GITHUB_TOKEN")
 }
 
-// A container that does not clone gets no git token: the shared-plain
-// wait-for-sentinel container, clone-per-agent and empty-per-agent (the
-// agent container clones), and a project without clone settings.
+// A container that does not clone gets no git token: clone-per-agent and
+// empty-per-agent (the agent container clones), and a project without clone
+// settings.
 func TestBuildPod_NFSGitToken_NonCloningInitContainers(t *testing.T) {
 	for name, cfg := range map[string]RunConfig{
-		"shared-plain loser": func() RunConfig {
-			c := nfsBaseConfig("gt-loser")
-			c.nfsProvisionLockLost = true
-			return c
-		}(),
 		"clone-per-agent": nfsAgentDirConfig("gt-cpa"),
 		"empty-per-agent": func() RunConfig {
 			c := nfsAgentDirConfig("gt-epa")
