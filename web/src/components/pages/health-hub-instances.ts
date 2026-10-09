@@ -21,8 +21,10 @@
  * One row per hub instance (process) from the summary's hub_instances
  * section, which the hub reads from its registry table only. State is
  * computed by the hub when it builds the summary: live, stale (no write for
- * 45 s) or stopped. Uptime and "last seen" are computed from the summary's
- * generated_at, so they use one clock (the hub's), not the browser's.
+ * 45 s) or stopped. Uptime and "last seen" are computed from the section's
+ * as_of, the database clock that also wrote started_at and last_seen, so
+ * they use one clock, neither the browser's nor the serving hub's. A
+ * section without as_of falls back to the summary's generated_at.
  *
  * The section is absent when an older hub replica served the summary
  * (during a rollout): the dashboard then hides this table. A null section
@@ -58,6 +60,8 @@ export interface HealthHubInstance {
 
 /** The summary's hub_instances block. */
 export interface HealthSummaryHubInstances {
+  /** RFC 3339; the database clock the section was computed at. */
+  as_of?: string;
   items: HealthHubInstance[];
   /** Live instances, including any past the row cap. */
   live: number;
@@ -93,15 +97,15 @@ function diffMs(
 }
 
 /**
- * Uptime of a live instance: generated_at minus started_at. Empty for a
- * stale or stopped instance, whose uptime is not known.
+ * Uptime of a live instance: the reference time (as_of) minus started_at.
+ * Empty for a stale or stopped instance, whose uptime is not known.
  */
 export function instanceUptime(i: HealthHubInstance, generatedAt: string): string {
   if (i.state !== 'live') return '';
   return formatDuration(diffMs(generatedAt, i.started_at));
 }
 
-/** "12s ago" from generated_at and last_seen; empty when unknown. */
+/** "12s ago" from the reference time (as_of) and last_seen; empty when unknown. */
 export function instanceLastSeen(i: HealthHubInstance, generatedAt: string): string {
   const d = formatDuration(Math.max(0, diffMs(generatedAt, i.last_seen)));
   return d ? `${d} ago` : '';
@@ -125,7 +129,7 @@ export class ScionHealthHubInstances extends LitElement {
   @property({ attribute: false })
   instances: HealthSummaryHubInstances | null = null;
 
-  /** The summary's generated_at, the reference time for uptime and age. */
+  /** The summary's generated_at; used for uptime and age only when as_of is missing. */
   @property({ attribute: false })
   generatedAt = '';
 
@@ -263,9 +267,15 @@ export class ScionHealthHubInstances extends LitElement {
     `;
   }
 
+  /** The reference time for uptime and age: as_of, else generated_at. */
+  private referenceTime(): string {
+    return this.instances?.as_of || this.generatedAt;
+  }
+
   private renderRow(i: HealthHubInstance): TemplateResult {
-    const uptime = instanceUptime(i, this.generatedAt);
-    const lastSeen = instanceLastSeen(i, this.generatedAt);
+    const ref = this.referenceTime();
+    const uptime = instanceUptime(i, ref);
+    const lastSeen = instanceLastSeen(i, ref);
     const live = i.state === 'live';
     return html`
       <tr data-instance-id=${i.id} data-state=${i.state}>

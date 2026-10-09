@@ -55,9 +55,12 @@ func setHubInstanceTimes(t *testing.T, client *ent.Client, id string, lastSeen t
 	require.NoError(t, u.Exec(context.Background()))
 }
 
+// hubInstanceListAll is a window that lists every row a test writes.
+const hubInstanceListAll = 10 * 365 * 24 * time.Hour
+
 func getHubInstance(t *testing.T, s *HubInstanceStore, id string) store.HubInstance {
 	t.Helper()
-	rows, _, err := s.ListHubInstances(context.Background(), time.Time{})
+	rows, _, err := s.ListHubInstances(context.Background(), hubInstanceListAll)
 	require.NoError(t, err)
 	for _, r := range rows {
 		if r.ID == id {
@@ -163,7 +166,7 @@ func TestHubInstanceStore_ListAppliesWindow(t *testing.T) {
 	for _, id := range []string{"hub-live", "hub-old", "hub-stopped-recent", "hub-stopped-old"} {
 		require.NoError(t, s.UpsertHubInstance(ctx, store.HubInstance{ID: id, Label: id, Status: "healthy"}))
 	}
-	_, now, err := s.ListHubInstances(ctx, time.Time{})
+	_, now, err := s.ListHubInstances(ctx, hubInstanceListAll)
 	require.NoError(t, err)
 
 	recent := now.Add(-30 * time.Minute)
@@ -172,7 +175,9 @@ func TestHubInstanceStore_ListAppliesWindow(t *testing.T) {
 	setHubInstanceTimes(t, client, "hub-stopped-recent", old, &recent)
 	setHubInstanceTimes(t, client, "hub-stopped-old", old, &old)
 
-	rows, listNow, err := s.ListHubInstances(ctx, now.Add(-time.Hour))
+	// The cut is taken from the store clock read inside the call, so the
+	// caller passes only the window.
+	rows, listNow, err := s.ListHubInstances(ctx, time.Hour)
 	require.NoError(t, err)
 	assert.False(t, listNow.IsZero())
 	assert.WithinDuration(t, time.Now(), listNow, time.Minute, "store clock is close to the wall clock")

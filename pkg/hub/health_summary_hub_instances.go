@@ -26,6 +26,12 @@ import (
 // §5.6). It is read from the hub_instances table only: the serving replica
 // runs no live probe for it, and its own entry is its DB row like every
 // other replica's, marked serving.
+//
+// One clock: the display cut, every state and AsOf all come from the store
+// clock that ListHubInstances reads, the same clock that wrote started_at
+// and last_seen. The serving hub's local clock is never mixed in, so a hub
+// whose clock is off from the database's still shows correct states and
+// ages. The dashboard computes uptime and "last seen" from AsOf.
 
 const (
 	// hubInstanceStaleAfter is how long a row may go without a write before
@@ -51,6 +57,9 @@ const (
 // summary: every hub instance that wrote its registry row within the last
 // hour.
 type HealthSummaryHubInstances struct {
+	// AsOf is the store clock the section was computed at (UTC). State,
+	// the display window and the dashboard's uptime and age all use it.
+	AsOf time.Time `json:"as_of"`
 	// Items lists live instances first (the serving one first), then
 	// stale, then stopped; each group ordered by label, then ID. Capped at
 	// healthSummaryHubInstanceLimit.
@@ -114,11 +123,12 @@ func hubInstanceStateRank(state string) int {
 	}
 }
 
-// healthSummaryHubInstances reads the hub_instances section. It returns nil
+// healthSummaryHubInstances reads the hub_instances section. The store cuts
+// the list at its own clock minus hubInstanceDisplayWindow. It returns nil
 // and the error when the registry cannot be read; the summary then reports
 // the section as null ("not reported").
-func (s *Server) healthSummaryHubInstances(ctx context.Context, now time.Time) (*HealthSummaryHubInstances, error) {
-	rows, storeNow, err := s.store.ListHubInstances(ctx, now.Add(-hubInstanceDisplayWindow))
+func (s *Server) healthSummaryHubInstances(ctx context.Context) (*HealthSummaryHubInstances, error) {
+	rows, storeNow, err := s.store.ListHubInstances(ctx, hubInstanceDisplayWindow)
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +139,11 @@ func (s *Server) healthSummaryHubInstances(ctx context.Context, now time.Time) (
 // store clock now, marks the serving instance, orders the items and applies
 // the cap. A pure function of its inputs.
 func buildHealthSummaryHubInstances(rows []store.HubInstance, now time.Time, servingID string) *HealthSummaryHubInstances {
-	out := &HealthSummaryHubInstances{Items: make([]HealthHubInstance, 0, len(rows)), Total: len(rows)}
+	out := &HealthSummaryHubInstances{
+		AsOf:  now.UTC(),
+		Items: make([]HealthHubInstance, 0, len(rows)),
+		Total: len(rows),
+	}
 	for _, r := range rows {
 		item := HealthHubInstance{
 			ID:        r.ID,

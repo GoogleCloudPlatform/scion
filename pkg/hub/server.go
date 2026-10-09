@@ -5597,7 +5597,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	if registryCtx == nil {
 		registryCtx = ctx
 	}
-	s.startHubInstanceRegistry(registryCtx)
+	// The returned done channel is not joined yet: nothing runs after the
+	// loop on shutdown until a clean-stop write is added.
+	_ = s.startHubInstanceRegistry(registryCtx)
 }
 
 func (s *Server) Start(ctx context.Context) error {

@@ -17,7 +17,7 @@ package api
 // HubInstanceMaxCheckNameChars caps the length of a hub instance check name.
 // It matches BrokerHealthMaxNameChars, so every existing hub check name
 // (for example workspace_storage_mount_verification, 36 characters) fits.
-const HubInstanceMaxCheckNameChars = 64
+const HubInstanceMaxCheckNameChars = BrokerHealthMaxNameChars
 
 // NormalizeHubInstanceChecks returns a bounded copy of a hub instance's check
 // map for the hub-instance registry, or nil when no check is kept. It uses

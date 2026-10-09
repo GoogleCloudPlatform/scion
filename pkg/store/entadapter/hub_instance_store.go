@@ -155,13 +155,15 @@ func (s *HubInstanceStore) TouchHubInstance(ctx context.Context, id string) (boo
 }
 
 // ListHubInstances implements store.HubInstanceStore. The cut is
-// coalesce(stopped_at, last_seen) >= seenSince, written as two predicates
-// so it needs no dialect-specific SQL.
-func (s *HubInstanceStore) ListHubInstances(ctx context.Context, seenSince time.Time) ([]store.HubInstance, time.Time, error) {
+// coalesce(stopped_at, last_seen) >= now - window, with now the store
+// clock, bound as a parameter and written as two predicates so it needs no
+// dialect-specific SQL.
+func (s *HubInstanceStore) ListHubInstances(ctx context.Context, window time.Duration) ([]store.HubInstance, time.Time, error) {
 	now, err := s.now(ctx)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
+	seenSince := now.Add(-window)
 	rows, err := s.client.HubInstance.Query().
 		Where(hubinstance.Or(
 			hubinstance.And(hubinstance.StoppedAtIsNil(), hubinstance.LastSeenGTE(seenSince)),

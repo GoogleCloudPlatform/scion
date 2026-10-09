@@ -161,6 +161,24 @@ describe('scion-health-hub-instances', () => {
     expect(cell(b, 'last-seen')).toBe('1m 0s ago');
   });
 
+  it('computes uptime and last seen from as_of (the database clock), not generated_at', async () => {
+    // generatedAt is GENERATED_AT (12:00:00); the database clock is 11:00:00.
+    const root = await mount(
+      list(
+        [
+          instance({
+            started_at: '2026-10-09T10:30:00Z',
+            last_seen: '2026-10-09T10:59:50Z',
+          }),
+        ],
+        { as_of: '2026-10-09T11:00:00Z' }
+      )
+    );
+    const row = rows(root)[0];
+    expect(cell(row, 'uptime')).toBe('30m 0s');
+    expect(cell(row, 'last-seen')).toBe('10s ago');
+  });
+
   it('falls back to the ID when the label is empty', async () => {
     const root = await mount(list([instance({ label: '' })]));
     expect(cell(rows(root)[0], 'label')).toBe('hub-a-0123');

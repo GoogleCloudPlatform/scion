@@ -336,7 +336,7 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 
 	// Hub instances, from the registry table only. A failed read leaves
 	// the section nil ("not reported").
-	hubInstances, err := s.healthSummaryHubInstances(ctx, now)
+	hubInstances, err := s.healthSummaryHubInstances(ctx)
 	if err != nil {
 		slog.Error("health summary: failed to list hub instances", "error", err)
 	}

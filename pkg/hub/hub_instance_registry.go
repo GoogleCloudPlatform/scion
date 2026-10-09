@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"math/rand/v2"
 	"os"
@@ -124,29 +125,45 @@ func hubInstanceSnapshotFromChecks(label, ver string, raw map[string]string) hub
 	}
 }
 
-// startHubInstanceRegistry starts the registry loop on its own goroutine
-// and waits for its first tick, at most hubInstanceStartWait, so the
-// serving replica's row usually exists before the listener serves the
-// first summary. The loop stops when ctx is cancelled.
-func (s *Server) startHubInstanceRegistry(ctx context.Context) {
-	reg := s.newHubInstanceRegistry()
+// startHubInstanceRegistry starts this server's registry loop on the
+// server-lifetime context ctx and waits for its first tick, at most
+// hubInstanceStartWait, so the serving replica's row usually exists before
+// the listener serves the first summary. It returns the loop's done
+// channel, closed when the loop goroutine has exited.
+func (s *Server) startHubInstanceRegistry(ctx context.Context) <-chan struct{} {
+	return startHubInstanceRegistryLoop(ctx, s.newHubInstanceRegistry(), hubInstanceStartWait)
+}
+
+// startHubInstanceRegistryLoop starts reg's loop on its own goroutine and
+// returns once the first tick has ended, wait has passed, or ctx is
+// cancelled, whichever comes first; a slow first tick keeps running in the
+// background. The returned channel is closed when the goroutine exits
+// (after ctx is cancelled and any in-flight tick has returned), so a caller
+// can join the loop on shutdown.
+func startHubInstanceRegistryLoop(ctx context.Context, reg *hubInstanceRegistry, wait time.Duration) <-chan struct{} {
 	first := make(chan struct{})
-	go reg.run(ctx, first)
-	timer := time.NewTimer(hubInstanceStartWait)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		reg.run(ctx, first)
+	}()
+	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	select {
 	case <-first:
 	case <-timer.C:
-		slog.Warn("hub instance registry: first write still running; serving anyway", "wait", hubInstanceStartWait)
+		reg.log.Warn("hub instance registry: first write still running; serving anyway", "wait", wait)
 	case <-ctx.Done():
 	}
+	return done
 }
 
-// run ticks once immediately (closing first when that tick ends), then once per
-// interval until ctx is cancelled. A tick runs to completion before the
-// next interval starts, so ticks never overlap.
+// run ticks once immediately (closing first when that tick ends), then once
+// per interval until ctx is cancelled. A tick runs to completion before the
+// next interval starts, so ticks never overlap. A panicking tick is
+// recovered by safeTick and the loop keeps running.
 func (r *hubInstanceRegistry) run(ctx context.Context, first chan<- struct{}) {
-	r.tick(ctx)
+	r.safeTick(ctx)
 	close(first)
 	for {
 		timer := time.NewTimer(r.interval())
@@ -155,9 +172,25 @@ func (r *hubInstanceRegistry) run(ctx context.Context, first chan<- struct{}) {
 			timer.Stop()
 			return
 		case <-timer.C:
-			r.tick(ctx)
+			r.safeTick(ctx)
 		}
 	}
+}
+
+// safeTick runs one tick and recovers a panic from it (for example from a
+// health check), so a fault in a background tick cannot stop the hub
+// process. The panic is logged at error, and the tick counts as a failed
+// write, so the next tick upserts.
+func (r *hubInstanceRegistry) safeTick(ctx context.Context) {
+	defer func() {
+		if p := recover(); p != nil {
+			r.mu.Lock()
+			r.lastWritten = nil
+			r.mu.Unlock()
+			r.log.Error("hub instance registry: tick panicked; continuing", "instance_id", r.id, "panic", fmt.Sprint(p))
+		}
+	}()
+	r.tick(ctx)
 }
 
 // jitteredHubInstanceInterval returns hubInstanceTickInterval ± 10%.

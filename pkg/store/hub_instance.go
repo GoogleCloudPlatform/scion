@@ -64,9 +64,11 @@ type HubInstanceStore interface {
 	// caller can upsert instead.
 	TouchHubInstance(ctx context.Context, id string) (found bool, err error)
 
-	// ListHubInstances returns the rows whose last write (stopped_at when
-	// set, otherwise last_seen) is at or after seenSince, together with the
-	// store clock read for the call, so the caller can compute staleness
-	// against the same clock. Rows are returned in ID order.
-	ListHubInstances(ctx context.Context, seenSince time.Time) (rows []HubInstance, now time.Time, err error)
+	// ListHubInstances reads the store clock once and returns the rows
+	// whose last write (stopped_at when set, otherwise last_seen) is at or
+	// after now - window, together with that now. The caller computes
+	// state and ages against the same clock, so the cut, the states and
+	// the ages never mix the database clock with a hub's local clock. Rows
+	// are returned in ID order.
+	ListHubInstances(ctx context.Context, window time.Duration) (rows []HubInstance, now time.Time, err error)
 }

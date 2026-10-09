@@ -76,7 +76,7 @@ func (c *countingHubInstanceStore) TouchHubInstance(_ context.Context, id string
 	return ok, nil
 }
 
-func (c *countingHubInstanceStore) ListHubInstances(context.Context, time.Time) ([]store.HubInstance, time.Time, error) {
+func (c *countingHubInstanceStore) ListHubInstances(context.Context, time.Duration) ([]store.HubInstance, time.Time, error) {
 	return nil, time.Now(), nil
 }
 
@@ -245,7 +245,7 @@ func TestHubInstanceRegistry_TickRunsNoCountQueries(t *testing.T) {
 	assert.Zero(t, counting.brokers, "tick must not list runtime brokers")
 	counting.mu.Unlock()
 
-	rows, _, err := s.ListHubInstances(ctx, time.Time{})
+	rows, _, err := s.ListHubInstances(ctx, time.Hour)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	assert.Equal(t, srv.InstanceID(), rows[0].ID)
@@ -300,16 +300,152 @@ func TestHubInstanceLabel(t *testing.T) {
 }
 
 // startHubInstanceRegistry returns after the first tick, so this replica's
-// row exists before the listener serves.
+// row exists before the listener serves; cancelling the context ends the
+// loop and closes its done channel.
 func TestStartHubInstanceRegistry_FirstTickBeforeReturn(t *testing.T) {
 	srv, s := testServer(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	srv.startHubInstanceRegistry(ctx)
+	done := srv.startHubInstanceRegistry(ctx)
 
-	rows, _, err := s.ListHubInstances(context.Background(), time.Time{})
+	rows, _, err := s.ListHubInstances(context.Background(), time.Hour)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	assert.Equal(t, srv.InstanceID(), rows[0].ID)
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("registry loop did not exit after its context was cancelled")
+	}
+}
+
+// Cancelling the context makes the loop exit and close done.
+func TestStartHubInstanceRegistryLoop_CancelClosesDone(t *testing.T) {
+	st := newCountingHubInstanceStore()
+	reg := newTestHubInstanceRegistry(st, quietSnapshot())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := startHubInstanceRegistryLoop(ctx, reg, time.Second)
+	upserts, _ := st.counts()
+	assert.Equal(t, 1, upserts, "the first tick ran before the start returned")
+	select {
+	case <-done:
+		t.Fatal("done closed while the context is still live")
+	default:
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("registry loop did not exit after its context was cancelled")
+	}
+}
+
+// When the first tick hangs, the start returns at the wait bound and the
+// tick keeps running in the background.
+func TestStartHubInstanceRegistryLoop_StartReturnsAtBoundWhenFirstTickHangs(t *testing.T) {
+	st := newCountingHubInstanceStore()
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	reg := newTestHubInstanceRegistry(st, quietSnapshot())
+	reg.snapshot = func(context.Context) hubInstanceSnapshot {
+		close(entered)
+		<-release
+		return *quietSnapshot()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var done <-chan struct{}
+	t.Cleanup(func() {
+		cancel()
+		close(release)
+		if done != nil {
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Error("registry loop did not exit after release and cancel")
+			}
+		}
+	})
+
+	const wait = 50 * time.Millisecond
+	began := time.Now()
+	done = startHubInstanceRegistryLoop(ctx, reg, wait)
+	elapsed := time.Since(began)
+
+	<-entered
+	assert.GreaterOrEqual(t, elapsed, wait)
+	assert.Less(t, elapsed, 2*time.Second, "start must return at the bound, not wait for the tick")
+	upserts, touches := st.counts()
+	assert.Zero(t, upserts+touches, "the first tick is still blocked")
+	select {
+	case <-done:
+		t.Fatal("done closed while the first tick is still running")
+	default:
+	}
+}
+
+// A panicking tick is recovered: the goroutine keeps running, and the next
+// tick upserts because the panicked tick counts as a failed write.
+func TestHubInstanceRegistry_PanickingTickIsRecovered(t *testing.T) {
+	st := newCountingHubInstanceStore()
+	snap := quietSnapshot()
+	reg := newTestHubInstanceRegistry(st, snap)
+	panicNext := false
+	reg.snapshot = func(context.Context) hubInstanceSnapshot {
+		if panicNext {
+			panicNext = false
+			panic("health check fault")
+		}
+		return *snap
+	}
+	ctx := context.Background()
+
+	reg.safeTick(ctx) // tick 0: upsert
+	panicNext = true
+	assert.NotPanics(t, func() { reg.safeTick(ctx) }) // tick 1: panics, recovered
+	reg.safeTick(ctx)                                 // tick 2: upsert, not touch
+	reg.safeTick(ctx)                                 // tick 3: touch
+
+	upserts, touches := st.counts()
+	assert.Equal(t, 2, upserts)
+	assert.Equal(t, 1, touches)
+}
+
+// The loop survives a panicking first tick and closes done on cancel.
+func TestStartHubInstanceRegistryLoop_SurvivesPanic(t *testing.T) {
+	st := newCountingHubInstanceStore()
+	reg := newTestHubInstanceRegistry(st, quietSnapshot())
+	var mu sync.Mutex
+	calls := 0
+	reg.snapshot = func(context.Context) hubInstanceSnapshot {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		if n == 1 {
+			panic("health check fault")
+		}
+		return *quietSnapshot()
+	}
+	reg.interval = func() time.Duration { return time.Millisecond }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := startHubInstanceRegistryLoop(ctx, reg, time.Second)
+	require.Eventually(t, func() bool {
+		upserts, _ := st.counts()
+		return upserts >= 1
+	}, 2*time.Second, time.Millisecond, "the loop keeps ticking after a panic")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("registry loop did not exit after its context was cancelled")
+	}
 }

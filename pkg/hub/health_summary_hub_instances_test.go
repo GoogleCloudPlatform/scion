@@ -37,14 +37,14 @@ var hubInstanceT0 = time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
 // from fixed rows and a fixed store clock.
 type fakeClockHubInstanceStore struct {
 	store.Store
-	rows      []store.HubInstance
-	now       time.Time
-	err       error
-	seenSince time.Time
+	rows   []store.HubInstance
+	now    time.Time
+	err    error
+	window time.Duration
 }
 
-func (f *fakeClockHubInstanceStore) ListHubInstances(_ context.Context, seenSince time.Time) ([]store.HubInstance, time.Time, error) {
-	f.seenSince = seenSince
+func (f *fakeClockHubInstanceStore) ListHubInstances(_ context.Context, window time.Duration) ([]store.HubInstance, time.Time, error) {
+	f.window = window
 	if f.err != nil {
 		return nil, time.Time{}, f.err
 	}
@@ -104,8 +104,40 @@ func TestHandleHealthSummary_HubInstancesFakeClockStale(t *testing.T) {
 	assert.Equal(t, 1, resp.HubInstances.Live)
 	assert.Equal(t, 2, resp.HubInstances.Total)
 
-	// The list is cut at one hour before the serving replica's clock.
-	assert.WithinDuration(t, time.Now().Add(-hubInstanceDisplayWindow), fake.seenSince, time.Minute)
+	// The store makes the one-hour cut at its own clock; the section
+	// reports that clock as as_of.
+	assert.Equal(t, hubInstanceDisplayWindow, fake.window)
+	assert.True(t, resp.HubInstances.AsOf.Equal(hubInstanceT0))
+}
+
+// A serving hub whose clock is far from the database's still shows correct
+// states: the state rule, the window and as_of all use the store clock, and
+// the dashboard computes ages from as_of. Here the store clock is two hours
+// behind the hub's, which on the hub's clock would put every row outside
+// the one-hour window.
+func TestHandleHealthSummary_HubInstancesSkewedStoreClock(t *testing.T) {
+	storeNow := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
+	srv, _, fake, _ := testServerWithStoreFault(t, func(inner store.Store, _ *storeFaultSwitch) *fakeClockHubInstanceStore {
+		return &fakeClockHubInstanceStore{Store: inner, now: storeNow}
+	})
+	fake.rows = []store.HubInstance{
+		{ID: srv.InstanceID(), Label: "hub-a", Version: "v1", Status: "healthy", StartedAt: storeNow.Add(-30 * time.Minute), LastSeen: storeNow.Add(-10 * time.Second)},
+		{ID: "hub-b-1", Label: "hub-b", Version: "v1", Status: "healthy", StartedAt: storeNow.Add(-30 * time.Minute), LastSeen: storeNow.Add(-50 * time.Second)},
+	}
+
+	resp, raw := getHubInstancesSummary(t, srv)
+	require.NotNil(t, resp.HubInstances)
+	got := resp.HubInstances
+	require.Len(t, got.Items, 2)
+	assert.Equal(t, HubInstanceStateLive, got.Items[0].State, "10 s old on the store clock is live")
+	assert.Equal(t, HubInstanceStateStale, got.Items[1].State, "50 s old on the store clock is stale")
+	assert.True(t, got.AsOf.Equal(storeNow), "as_of is the store clock: got %v want %v", got.AsOf, storeNow)
+	assert.Equal(t, hubInstanceDisplayWindow, fake.window, "the cut is a window applied by the store")
+	assert.False(t, got.AsOf.Equal(resp.GeneratedAt), "as_of differs from generated_at when the clocks differ")
+
+	var section map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw["hub_instances"], &section))
+	assert.Contains(t, section, "as_of")
 }
 
 // Two instances on one store: the summary lists both from the database,
@@ -122,7 +154,7 @@ func TestHandleHealthSummary_HubInstancesTwoInstances(t *testing.T) {
 		ID: "hub-b-0123", Label: "hub-b", Version: "v1.1.0", Status: "degraded",
 		Checks: map[string]string{"database": "healthy", "colocated_broker": "unhealthy"},
 	}))
-	stored, _, err := s.ListHubInstances(ctx, time.Time{})
+	stored, _, err := s.ListHubInstances(ctx, time.Hour)
 	require.NoError(t, err)
 	byID := map[string]store.HubInstance{}
 	for _, r := range stored {
