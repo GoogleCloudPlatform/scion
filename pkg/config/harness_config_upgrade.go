@@ -15,6 +15,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -52,6 +53,23 @@ type HarnessConfigUpgradeAction struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+// ErrHarnessConfigNotBundled is returned by UpgradeHarnessConfig when the
+// harness type has no bundled harness-config to upgrade from (neither
+// compiled-in embeds nor a harnesses/<type> directory in HarnessesFS).
+var ErrHarnessConfigNotBundled = errors.New("harness type has no bundled harness-config")
+
+// hasBundledHarnessConfig reports whether an upgrade source exists for h.
+func hasBundledHarnessConfig(h api.Harness, harnessesFS fs.FS) bool {
+	if _, basePath := h.GetHarnessEmbedsFS(); basePath != "" {
+		return true
+	}
+	if harnessesFS == nil {
+		return false
+	}
+	_, err := fs.Stat(harnessesFS, h.Name()+"/config.yaml")
+	return err == nil
+}
+
 func UpgradeHarnessConfig(targetDir string, h api.Harness, opts HarnessConfigUpgradeOptions) (*HarnessConfigUpgradePlan, error) {
 	if opts.Now == nil {
 		opts.Now = time.Now
@@ -67,6 +85,13 @@ func UpgradeHarnessConfig(targetDir string, h api.Harness, opts HarnessConfigUpg
 		Path:    absTarget,
 		Harness: h.Name(),
 		DryRun:  opts.DryRun,
+	}
+
+	// Without a bundled source there is nothing to merge from or reset to;
+	// say so rather than returning an empty plan (also under Force, which
+	// would otherwise report a reset that never happens).
+	if !hasBundledHarnessConfig(h, opts.HarnessesFS) {
+		return nil, fmt.Errorf("%w: %q (upgrade applies only to bundled harness types)", ErrHarnessConfigNotBundled, h.Name())
 	}
 
 	if opts.Force {

@@ -15,6 +15,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,40 +28,71 @@ func fixedTime() time.Time {
 	return time.Date(2026, 6, 6, 0, 0, 0, 0, time.UTC)
 }
 
-func TestUpgradeHarnessConfig_ContainerScriptUnchanged(t *testing.T) {
-	tmpDir := t.TempDir()
-	hcDir := filepath.Join(tmpDir, "opencode")
-	if err := os.MkdirAll(hcDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Already on container-script — should be a no-op.
-	configYAML := `harness: opencode
-image: scion-opencode:latest
+// A harness type with no bundled harness-config (no embeds, no harnesses/
+// entry) has nothing to upgrade from: UpgradeHarnessConfig must say so
+// instead of returning an empty plan, with and without Force, and must not
+// touch the directory (ptone/scion#3133).
+func TestUpgradeHarnessConfig_NotBundledReturnsError(t *testing.T) {
+	configYAML := `harness: custom
+image: scion-custom:latest
 user: scion
 provisioner:
   type: container-script
   interface_version: 1
 `
-	if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte(configYAML), 0644); err != nil {
-		t.Fatal(err)
+	for _, tc := range []struct {
+		name string
+		fsys fstest.MapFS
+	}{
+		{name: "no harnesses fs"},
+		{name: "harnesses fs without entry", fsys: fstest.MapFS{
+			"myh/config.yaml": &fstest.MapFile{Data: []byte(upgradeFixtureConfig)},
+		}},
+	} {
+		for _, force := range []bool{false, true} {
+			hcDir := filepath.Join(t.TempDir(), "custom")
+			if err := os.MkdirAll(hcDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte(configYAML), 0644); err != nil {
+				t.Fatal(err)
+			}
+			opts := HarnessConfigUpgradeOptions{Now: fixedTime, Force: force}
+			if tc.fsys != nil {
+				opts.HarnessesFS = tc.fsys
+			}
+			plan, err := UpgradeHarnessConfig(hcDir, &MockHarness{NameVal: "generic"}, opts)
+			if !errors.Is(err, ErrHarnessConfigNotBundled) {
+				t.Fatalf("%s force=%v: err = %v, want ErrHarnessConfigNotBundled", tc.name, force, err)
+			}
+			if plan != nil {
+				t.Errorf("%s force=%v: expected nil plan, got %+v", tc.name, force, plan)
+			}
+			assertFileContents(t, hcDir, map[string]string{"config.yaml": configYAML})
+		}
 	}
-	if err := os.WriteFile(filepath.Join(hcDir, "provision.py"), []byte("#!/usr/bin/env python3\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
+}
 
-	h := &MockHarness{NameVal: "generic"}
-	plan, err := UpgradeHarnessConfig(hcDir, h, HarnessConfigUpgradeOptions{
-		Now: func() time.Time { return fixedTime() },
+// An up-to-date bundled harness-config already on container-script is a
+// no-op.
+func TestUpgradeHarnessConfig_ContainerScriptUnchanged(t *testing.T) {
+	configYAML := upgradeFixtureConfig + "provisioner:\n  type: container-script\n  interface_version: 1\n"
+	hcDir, harnessesFS := upgradeFixture(t, "myh", map[string]string{
+		"config.yaml":      configYAML,
+		"provision.py":     "# bundled provision v2",
+		"scion_harness.py": "# bundled lib v2",
+		"capture_auth.py":  "# bundled capture v2",
+		"dialect.yaml":     "# bundled dialect",
+	})
+	plan, err := UpgradeHarnessConfig(hcDir, &MockHarness{NameVal: "myh"}, HarnessConfigUpgradeOptions{
+		Now:         fixedTime,
+		HarnessesFS: harnessesFS,
 	})
 	if err != nil {
 		t.Fatalf("UpgradeHarnessConfig failed: %v", err)
 	}
-	if plan.Changed {
-		t.Error("container-script config should not be changed")
-	}
-	if len(plan.Actions) != 0 {
-		t.Errorf("expected no actions, got %d", len(plan.Actions))
+	if plan.Changed || len(plan.Actions) != 0 {
+		t.Errorf("container-script config should not be changed, got %+v", plan.Actions)
 	}
 }
 
