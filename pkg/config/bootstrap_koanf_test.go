@@ -800,23 +800,34 @@ func TestLoadBootstrapKoanfWithConfigPath_LegacyFileInGlobalDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	link := filepath.Join(tmpDir, "scion-link")
-	paths := []string{filepath.Join(scionDir, "custom.yaml")}
+	// A named file is layered over the global server.yaml; naming the
+	// global server.yaml itself re-loads it, which changes nothing.
+	type tc struct {
+		path string
+		want int
+	}
+	cases := []tc{
+		{filepath.Join(scionDir, "custom.yaml"), 2222},
+		{filepath.Join(scionDir, "server.yaml"), 1111},
+	}
 	if err := os.Symlink(scionDir, link); err == nil {
-		paths = append(paths, filepath.Join(link, "custom.yaml"))
+		cases = append(cases,
+			tc{filepath.Join(link, "custom.yaml"), 2222},
+			tc{filepath.Join(link, "server.yaml"), 1111})
 	} else {
 		t.Logf("symlinks unavailable, skipping the symlinked spelling: %v", err)
 	}
 
-	for _, path := range paths {
-		gc, err := LoadGlobalConfig(path)
+	for _, c := range cases {
+		gc, err := LoadGlobalConfig(c.path)
 		if err != nil {
-			t.Fatalf("LoadGlobalConfig(%q): %v", path, err)
+			t.Fatalf("LoadGlobalConfig(%q): %v", c.path, err)
 		}
-		if gc.Hub.Port != 2222 {
-			t.Errorf("LoadGlobalConfig(%q): hub.port = %d, want 2222", path, gc.Hub.Port)
+		if gc.Hub.Port != c.want {
+			t.Errorf("LoadGlobalConfig(%q): hub.port = %d, want %d", c.path, gc.Hub.Port, c.want)
 		}
-		if got := LoadBootstrapKoanfWithConfigPath(path).Int("hub.port"); got != gc.Hub.Port {
-			t.Errorf("LoadBootstrapKoanfWithConfigPath(%q): hub.port = %d, LoadGlobalConfig = %d; want them to agree", path, got, gc.Hub.Port)
+		if got := LoadBootstrapKoanfWithConfigPath(c.path).Int("hub.port"); got != gc.Hub.Port {
+			t.Errorf("LoadBootstrapKoanfWithConfigPath(%q): hub.port = %d, LoadGlobalConfig = %d; want them to agree", c.path, got, gc.Hub.Port)
 		}
 	}
 }

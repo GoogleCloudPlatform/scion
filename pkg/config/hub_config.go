@@ -1079,7 +1079,7 @@ func loadGlobalConfigFromSettings(configPath string) (*GlobalConfig, bool) {
 	if hasServerYAML(globalDir) {
 		fmt.Fprintf(os.Stderr, "Warning: Both settings.yaml (server key) and server.yaml exist in %s. Using settings.yaml. server.yaml is deprecated; move its contents under the server key in settings.yaml and remove it (ptone/scion#3116).\n", globalDir)
 	}
-	if dir := src.configDir; dir != "" && (globalDir == "" || !sameDir(dir, globalDir)) && hasServerYAML(dir) {
+	if dir := src.configDir; dir != "" && !sameDir(dir, globalDir) && hasServerYAML(dir) {
 		fmt.Fprintf(os.Stderr, "Warning: Both settings.yaml (server key) and server.yaml exist in %s. Using settings.yaml. server.yaml is deprecated.\n", dir)
 	}
 
