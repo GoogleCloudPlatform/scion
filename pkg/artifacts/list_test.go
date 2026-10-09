@@ -799,3 +799,95 @@ func TestListMarksDeletedProjects(t *testing.T) {
 		t.Errorf("failed check: %d, want 500", rec.Code)
 	}
 }
+
+// grantReadsStore counts per-artifact grant reads and records batched ones.
+type grantReadsStore struct {
+	Store
+	mu      sync.Mutex
+	single  int
+	batches [][]string
+	// failIDs, when set, makes a batched read of exactly these ids fail.
+	failIDs map[string]bool
+}
+
+func (s *grantReadsStore) ListGrants(ctx context.Context, id string) ([]Grant, error) {
+	s.mu.Lock()
+	s.single++
+	s.mu.Unlock()
+	return s.Store.ListGrants(ctx, id)
+}
+
+func (s *grantReadsStore) ListGrantsFor(ctx context.Context, ids []string) (map[string][]Grant, error) {
+	s.mu.Lock()
+	s.batches = append(s.batches, slices.Clone(ids))
+	fail := s.failIDs != nil && len(ids) == len(s.failIDs)
+	for _, id := range ids {
+		fail = fail && s.failIDs[id]
+	}
+	s.mu.Unlock()
+	if fail {
+		return nil, errors.New("grants unavailable")
+	}
+	return s.Store.ListGrantsFor(ctx, ids)
+}
+
+// TestListDeletedProjectGrantsReadOnce: the grants that decide whether the
+// caller may move the page's deleted-project rows are read with one store
+// query for the whole page, not one per row; the decisions stay per row,
+// and a failed read fails the request.
+func TestListDeletedProjectGrantsReadOnce(t *testing.T) {
+	f := newFixture(t, false)
+	var admin, read []string
+	for i := 0; i < 3; i++ {
+		id := f.publish(agentA, "a"+strconv.Itoa(i)+".md", []byte{byte(i)}, "").Artifact.ID // homed in project-1
+		admin = append(admin, id)
+		if _, err := f.db.Exec(`INSERT INTO artifact_grant (id, artifact_id, subject_kind, subject_ref, permission, created_at)
+			VALUES (?, ?, 'principal', ?, 'admin', ?)`, "g-admin-"+id, id, PrincipalRef(PrincipalKindUser, userU.ref),
+			time.Now().UTC().Format(sqliteTimeLayout)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read = append(read, f.publish(agentA, "r.md", []byte("r"), "").Artifact.ID) // userU reads it through project-1 only
+	own := f.publish(userU, "own.md", []byte("o"), "scope=project-1").Artifact.ID
+	f.host.mu.Lock()
+	f.host.crossScope = true
+	f.host.mu.Unlock()
+	f.svc.host = &scopeCheckHost{fakeHost: f.host, gone: map[string]bool{"project-1": true}}
+	rs := &grantReadsStore{Store: f.store}
+	f.svc.SetStore(rs)
+
+	before := len(rs.batches)
+	got := f.list(&userU, listPath)
+	for _, id := range admin {
+		if a := listItem(t, got, id); !a.ScopeDeleted || !a.CanManage {
+			t.Errorf("%s (admin grant): %+v", id, a)
+		}
+	}
+	if a := listItem(t, got, read[0]); !a.ScopeDeleted || a.CanManage {
+		t.Errorf("%s (reader): %+v", read[0], a)
+	}
+	if a := listItem(t, got, own); !a.ScopeDeleted || !a.CanManage {
+		t.Errorf("%s (owned): %+v", own, a)
+	}
+	if rs.single != 0 {
+		t.Errorf("%d per-artifact grant reads, want 0", rs.single)
+	}
+	var deletedBatches [][]string
+	for _, b := range rs.batches[before:] {
+		if slices.Contains(b, own) {
+			deletedBatches = append(deletedBatches, b)
+		}
+	}
+	if len(deletedBatches) != 1 || len(deletedBatches[0]) != 5 {
+		t.Errorf("batched reads of the deleted rows: %v, want one covering all 5", deletedBatches)
+	}
+
+	// The batched read failing fails the request.
+	rs.failIDs = map[string]bool{own: true, read[0]: true}
+	for _, id := range admin {
+		rs.failIDs[id] = true
+	}
+	if rec := f.do(&userU, http.MethodGet, listPath, nil, nil); rec.Code != http.StatusInternalServerError {
+		t.Errorf("failed grants read: %d, want 500", rec.Code)
+	}
+}

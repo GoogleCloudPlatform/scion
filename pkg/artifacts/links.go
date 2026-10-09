@@ -172,6 +172,12 @@ func (l Limits) linkLifetimes() (def, maxTTL time.Duration) {
 // A failed grant read is an error, never a refusal, so the caller answers
 // 500 rather than a 403 that a working read would not give.
 func (s *Service) canAdminister(ctx context.Context, b backend, a *Artifact) (bool, error) {
+	return s.canAdministerWith(ctx, a, func() ([]Grant, error) { return b.store.ListGrants(ctx, a.ID) })
+}
+
+// canAdministerWith is canAdminister with a's grants read through grants,
+// which is called only when the decision needs them.
+func (s *Service) canAdministerWith(ctx context.Context, a *Artifact, grants func() ([]Grant, error)) (bool, error) {
 	kind, ref, _, ok := s.host.Principal(ctx)
 	if !ok || kind != PrincipalKindUser {
 		return false, nil
@@ -182,11 +188,11 @@ func (s *Service) canAdminister(ctx context.Context, b backend, a *Artifact) (bo
 	if kind == a.OwnerKind && ref == a.OwnerRef {
 		return true, nil
 	}
-	grants, err := b.store.ListGrants(ctx, a.ID)
+	gs, err := grants()
 	if err != nil {
 		return false, err
 	}
-	return grantAllows(ctx, s.host, a, grants, time.Now(), kind, ref, grantsForAdmin, PermissionManage, false), nil
+	return grantAllows(ctx, s.host, a, gs, time.Now(), kind, ref, grantsForAdmin, PermissionManage, false), nil
 }
 
 // adminArtifact loads an artifact the caller may administer (see

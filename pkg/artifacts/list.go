@@ -457,8 +457,10 @@ func listAccess(ctx context.Context, host Host, a *Artifact) string {
 // markDeletedScopes sets ScopeDeleted on the items whose home project no
 // longer exists, when the host can tell (ScopeChecker), and CanManage on
 // those the caller may move. While cross-project sharing is off no move
-// can succeed, so CanManage stays false rather than offer one. It asks the host once per page and reads the
-// grants of deleted-project rows not owned by the caller, at most one page.
+// can succeed, so CanManage stays false rather than offer one. It asks the
+// host once per page, and reads the grants of the page's deleted-project
+// rows with one store query, only if a row's decision needs them (the
+// caller does not own it). A failed read fails the request.
 func (s *Service) markDeletedScopes(ctx context.Context, b backend, items []ArtifactListItem) error {
 	checker, ok := s.host.(ScopeChecker)
 	if !ok || len(items) == 0 {
@@ -476,7 +478,7 @@ func (s *Service) markDeletedScopes(ctx context.Context, b backend, items []Arti
 	if err != nil {
 		return err
 	}
-	movable := s.crossScopeAllowed(ctx)
+	var deleted []int
 	for i := range items {
 		it := &items[i]
 		if it.ScopeKind != ScopeKindProject {
@@ -486,10 +488,31 @@ func (s *Service) markDeletedScopes(ctx context.Context, b backend, items []Arti
 			continue
 		}
 		it.ScopeDeleted = true
-		if !movable {
-			continue
+		deleted = append(deleted, i)
+	}
+	if len(deleted) == 0 || !s.crossScopeAllowed(ctx) {
+		return nil
+	}
+	// One page holds at most MaxListLimit rows, below MaxGrantsForIDs.
+	var byID map[string][]Grant
+	var loadErr error
+	loaded := false
+	grantsOf := func(id string) func() ([]Grant, error) {
+		return func() ([]Grant, error) {
+			if !loaded {
+				loaded = true
+				ids := make([]string, 0, len(deleted))
+				for _, i := range deleted {
+					ids = append(ids, items[i].ID)
+				}
+				byID, loadErr = b.store.ListGrantsFor(ctx, ids)
+			}
+			return byID[id], loadErr
 		}
-		if it.CanManage, err = s.canAdminister(ctx, b, it.src); err != nil {
+	}
+	for _, i := range deleted {
+		it := &items[i]
+		if it.CanManage, err = s.canAdministerWith(ctx, it.src, grantsOf(it.ID)); err != nil {
 			return err
 		}
 	}

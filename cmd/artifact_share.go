@@ -70,22 +70,45 @@ func init() {
 	artifactCmd.AddCommand(artifactShareCmd)
 }
 
-// parseShareTTL parses a link lifetime: whole hours ("24h") or days
-// ("7d"), returned in hours; "" is 0 (the hub's default).
+// maxShareTTLHours bounds what parseShareTTL accepts, far above any hub
+// maximum: the hub rejects a lifetime above its own maximum (30 days
+// unless changed) with ttl_too_long.
+const maxShareTTLHours = 1 << 20
+
+// parseShareTTL parses a link lifetime: a whole number of hours ("24h") or
+// days ("7d"), with the unit in either case and surrounding spaces
+// ignored, returned in hours; "" is 0 (the hub's default). Signs, decimals
+// and other units are refused, and so is a number without a unit.
 func parseShareTTL(v string) (int, error) {
+	v = strings.TrimSpace(v)
 	if v == "" {
 		return 0, nil
 	}
-	unit := v[len(v)-1]
-	n, err := strconv.Atoi(v[:len(v)-1])
-	if err != nil || n <= 0 || (unit != 'h' && unit != 'd') {
-		return 0, fmt.Errorf("--ttl must be a positive number of hours or days, such as 24h or 7d")
+	const form = "--ttl must be a whole number of hours or days, such as 24h or 7d"
+	digits, unit := v[:len(v)-1], strings.ToLower(v[len(v)-1:])
+	if unit >= "0" && unit <= "9" && len(unit) == 1 {
+		return 0, fmt.Errorf("--ttl %q needs a unit: h for hours or d for days, such as 24h or 7d", v)
 	}
-	if unit == 'd' {
-		if n > 1<<20 {
-			return 0, fmt.Errorf("--ttl is too long")
+	if digits == "" || (unit != "h" && unit != "d") {
+		return 0, fmt.Errorf("%s, not %q", form, v)
+	}
+	for _, c := range digits {
+		if c < '0' || c > '9' {
+			return 0, fmt.Errorf("%s, not %q", form, v)
 		}
+	}
+	if len(digits) > 7 {
+		return 0, fmt.Errorf("--ttl %q is too long", v)
+	}
+	n, err := strconv.Atoi(digits)
+	if err != nil || n == 0 {
+		return 0, fmt.Errorf("--ttl must be at least 1h, not %q", v)
+	}
+	if unit == "d" {
 		n *= 24
+	}
+	if n > maxShareTTLHours {
+		return 0, fmt.Errorf("--ttl %q is too long", v)
 	}
 	return n, nil
 }

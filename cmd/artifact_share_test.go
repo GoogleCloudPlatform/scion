@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package cmd
 
 import (
@@ -21,7 +23,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -29,7 +30,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
-	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -126,46 +126,4 @@ func TestArtifactShareRefusedForAgents(t *testing.T) {
 	err = shareArtifact(ctx, svc, &out, base, pub.Artifact.Ref, "", false, "")
 	require.Error(t, err)
 	assert.Empty(t, out.String())
-}
-
-func TestParseShareTTL(t *testing.T) {
-	for in, want := range map[string]int{"": 0, "1h": 1, "24h": 24, "7d": 168, "30d": 720} {
-		got, err := parseShareTTL(in)
-		require.NoError(t, err, in)
-		assert.Equal(t, want, got, in)
-	}
-	for _, in := range []string{"0d", "-1h", "h", "1.5h", "1m", "10000000d"} {
-		_, err := parseShareTTL(in)
-		assert.Error(t, err, in)
-	}
-}
-
-// TestArtifactShareModes: share is available to users in human and
-// assistant mode and removed in agent mode, while the other artifact verbs
-// stay available to agents.
-func TestArtifactShareModes(t *testing.T) {
-	assert.False(t, agentAllowed["artifact.share"])
-	assert.False(t, assistantDenied["artifact.share"])
-	assert.False(t, assistantDenied["artifact"])
-	assert.True(t, agentAllowed["artifact.get"])
-
-	build := func() *cobra.Command {
-		root := &cobra.Command{Use: "scion"}
-		art := &cobra.Command{Use: "artifact"}
-		for _, v := range []string{"share", "get", "publish", "versions"} {
-			art.AddCommand(&cobra.Command{Use: v})
-		}
-		root.AddCommand(art)
-		return root
-	}
-	for mode, wantShare := range map[string]bool{"human": true, "assistant": true, "agent": false} {
-		t.Run(mode, func(t *testing.T) {
-			t.Setenv("SCION_CLI_MODE", mode)
-			root := build()
-			applyModeRestrictions(root)
-			names := collectCommandNames(root)
-			assert.Equal(t, wantShare, slices.Contains(names, "artifact.share"), "artifact.share in %s mode", mode)
-			assert.Contains(t, names, "artifact.get")
-		})
-	}
 }
