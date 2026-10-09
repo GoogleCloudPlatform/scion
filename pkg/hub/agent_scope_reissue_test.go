@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -434,14 +435,21 @@ func (s *duplicateEdgeStore) GetDelegationEdgesForDelegate(ctx context.Context, 
 	return append(edges, &dup), nil
 }
 
-// parentLookupErrStore fails GetAgent for one agent ID.
+// parentLookupErrStore fails the first GetAgent for one agent ID after it is
+// armed, and passes every later read through. A one-shot fault makes the
+// refusal depend on the first parent read: code that swallowed that error
+// (for example by falling back to a default role) would go on to compute a
+// result from the later, successful reads.
 type parentLookupErrStore struct {
 	store.Store
 	failID string
+	armed  atomic.Bool
+	fired  atomic.Int32
 }
 
 func (s *parentLookupErrStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
-	if id == s.failID {
+	if id == s.failID && s.armed.CompareAndSwap(true, false) {
+		s.fired.Add(1)
 		return nil, errors.New("injected agent read fault")
 	}
 	return s.Store.GetAgent(ctx, id)
@@ -451,31 +459,108 @@ func (s *parentLookupErrStore) GetAgent(ctx context.Context, id string) (*store.
 // fault; it never computes from a default role.
 func TestScopeReissue_T3a_ParentLookupErrorRefuses(t *testing.T) {
 	f := newReissueFixture(t, "rs-t3a", store.ProjectRoleOwner)
+	jti := "rs-t3a-jti"
+	insertTestAgentCredential(t, f.store, f.child.ID, f.projectID, jti)
+	credBefore := getTestAgentCredential(t, f.store, jti)
 	edgesBefore := f.allEdges(t, f.child)
 	child := f.reload(t, f.child)
 	w := &parentLookupErrStore{Store: f.store, failID: f.parent.ID}
 	f.srv.store = w
 	f.srv.authzService.store = w
+	restore := func() {
+		f.srv.store = f.store
+		f.srv.authzService.store = f.store
+	}
+	defer restore()
 
+	w.armed.Store(true)
 	_, err := f.srv.computeScopeReissue(context.Background(), child)
-	require.Error(t, err)
+	require.Equal(t, int32(1), w.fired.Load(), "the fault hit the parent read")
+	require.Error(t, err, "a parent lookup error refuses; it is never computed past")
 	var issueErr *agentTokenIssueError
 	require.ErrorAs(t, err, &issueErr)
 	assert.True(t, issueErr.Lookup, "lookup fault, not a computed result")
 	assert.Equal(t, mintSiteReissue, issueErr.Site)
 
+	// The real run: the fault hits only the first parent read again.
+	w.armed.Store(true)
 	resp, err := f.srv.runScopeReissue(context.Background(), child, f.operator, false, "")
+	require.Equal(t, int32(2), w.fired.Load())
 	require.Error(t, err)
-	assert.Nil(t, resp, "no result: never a baseline-role computation")
-	f.srv.store = f.store
-	f.srv.authzService.store = f.store
+	assert.Nil(t, resp, "no result: never a default-role computation")
+	restore()
 
 	rec := httptest.NewRecorder()
 	writeScopeReissueError(rec, err)
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
-	assert.Equal(t, edgesBefore, f.allEdges(t, f.child))
-	assertIssueDeniedAudit(t, f.store, f.child.ID, mintSiteReissue, mintErrorClassLookup)
-	assert.Equal(t, AgentRoleFull, func() AgentRole { r, _ := agentRoleAndScopes(f.reload(t, f.child)); return r }())
+	assert.Equal(t, edgesBefore, f.allEdges(t, f.child), "no edge change")
+	assertCredentialUnrevoked(t, f.store, jti, credBefore)
+	recs := issueDeniedAudits(t, f.store, f.child.ID)
+	require.Len(t, recs, 1, "the refused run records one scope-free denial")
+	for _, r := range recs {
+		assert.JSONEq(t, `{"site":"reissue","deny_cause":"lookup_error"}`, r.AfterSummary)
+	}
+	role, _ := agentRoleAndScopes(f.reload(t, f.child))
+	assert.Equal(t, AgentRoleFull, role, "stored role unchanged")
+	assert.Empty(t, reissueAudits(t, f.store, f.child.ID, mutationTypeAgentScopesReissued))
+}
+
+// auditFailTxStore fails the agent_scopes_reissued audit write inside a
+// transaction, after the edge, role and revocation writes of the same
+// transaction.
+type auditFailTxStore struct {
+	store.Store
+}
+
+func (s *auditFailTxStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return s.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&auditFailStore{Store: tx})
+	})
+}
+
+type auditFailStore struct {
+	store.Store
+}
+
+func (s *auditFailStore) CreateMutationAudit(ctx context.Context, r *store.MutationAuditRecord) error {
+	if r.MutationType == mutationTypeAgentScopesReissued {
+		return errors.New("injected audit write fault")
+	}
+	return s.Store.CreateMutationAudit(ctx, r)
+}
+
+// CR2: the record, the role, the revocation and the audit row commit
+// together. When the audit row cannot be written, nothing else is kept.
+func TestScopeReissue_AuditFailureRollsBack(t *testing.T) {
+	f := newReissueFixture(t, "rs-cr2", store.ProjectRoleOwner)
+	ctx := context.Background()
+	jti := "rs-cr2-jti"
+	insertTestAgentCredential(t, f.store, f.child.ID, f.projectID, jti)
+	credBefore := getTestAgentCredential(t, f.store, jti)
+	// Lower the project maximum so the run would change the role too.
+	project, err := f.store.GetProject(ctx, f.projectID)
+	require.NoError(t, err)
+	if project.Annotations == nil {
+		project.Annotations = map[string]string{}
+	}
+	project.Annotations[projectSettingMaxAgentRole] = string(AgentRoleReadOnly)
+	require.NoError(t, f.store.UpdateProject(ctx, project))
+	edgesBefore := f.allEdges(t, f.child)
+
+	f.srv.store = &auditFailTxStore{Store: f.store}
+	f.client.resetAuthCalled = false
+	resp, err := f.srv.runScopeReissue(ctx, f.reload(t, f.child), f.operator, false, "")
+	f.srv.store = f.store
+	require.Error(t, err)
+	assert.Nil(t, resp)
+
+	assert.Equal(t, edgesBefore, f.allEdges(t, f.child), "edge change rolled back")
+	role, _ := agentRoleAndScopes(f.reload(t, f.child))
+	assert.Equal(t, AgentRoleFull, role, "role change rolled back")
+	assertCredentialUnrevoked(t, f.store, jti, credBefore)
+	assert.False(t, f.client.resetAuthCalled, "nothing pushed")
+	assert.Empty(t, reissueAudits(t, f.store, f.child.ID, mutationTypeAgentScopesReissued))
+	assert.Empty(t, reissueAudits(t, f.store, f.child.ID, mutationTypeAgentScopesReissueDispatch))
 }
 
 // T4: a lookup fault for one permission withholds only the scopes covering
@@ -576,6 +661,13 @@ func TestScopeReissue_OperatorRefusals(t *testing.T) {
 	grantSuperAdmin(t, f.store, tid("rs-op-admin"))
 	admin := NewAuthenticatedUser(tid("rs-op-admin"), "admin@test.com", "Admin", "admin", "")
 	member := NewAuthenticatedUser(f.userID, "owner@test.com", "Owner", "member", "")
+	hubAdminID := tid("rs-op-hub-admin")
+	require.NoError(t, f.store.CreateUser(context.Background(), &store.User{
+		ID: hubAdminID, Email: "hub-admin@test.com", DisplayName: "Hub Admin", Role: "member", Status: "active",
+	}))
+	grantSystemRole(t, f.store, hubAdminID, store.SystemRoleHubAdmin)
+	require.False(t, f.srv.authzService.IsSystemAdmin(context.Background(), hubAdminID), "hub-admin is not super-admin")
+	hubAdmin := NewAuthenticatedUser(hubAdminID, "hub-admin@test.com", "Hub Admin", "member", "")
 	selfClaims := &AgentTokenClaims{ProjectID: f.projectID, Scopes: ScopesForRole(AgentRoleFull), Ancestry: f.child.Ancestry}
 	selfClaims.Subject = f.child.ID
 	parentClaims := &AgentTokenClaims{ProjectID: f.projectID, Scopes: ScopesForRole(AgentRoleFull), Ancestry: f.parent.Ancestry}
@@ -592,6 +684,7 @@ func TestScopeReissue_OperatorRefusals(t *testing.T) {
 		{"parent agent", &agentIdentityWrapper{parentClaims}, CredentialContext{Kind: CredentialKindAgentJWT}},
 		{"super-admin user access token", uat, credentialContextForIdentity(uat)},
 		{"project owner session", member, CredentialContext{Kind: CredentialKindInteractive}},
+		{"hub-admin session without super-admin", hubAdmin, CredentialContext{Kind: CredentialKindInteractive}},
 	}
 	for _, tc := range refused {
 		t.Run(tc.name, func(t *testing.T) {
@@ -786,16 +879,16 @@ func TestScopeReissue_EqualsCreateToday(t *testing.T) {
 	assert.ElementsMatch(t, created, reissued, "re-issue equals create-today")
 	assert.Contains(t, scopeStrings(reissued), string(ScopeProjectArtifactWrite))
 	assert.Contains(t, scopeStrings(reissued), string(ScopeProjectSecretRead))
-	assert.Equal(t, effectCeilingsWithoutBoundary(f.activeEdge(t, sibling).EffectCeiling).PermissionIDs,
-		effectCeilingsWithoutBoundary(f.activeEdge(t, f.child).EffectCeiling).PermissionIDs, "same ceiling as creation")
+	siblingCeiling := f.activeEdge(t, sibling).EffectCeiling
+	childCeiling := f.activeEdge(t, f.child).EffectCeiling
+	assert.True(t, effectCeilingsEqual(siblingCeiling, childCeiling),
+		"same ceiling as creation (kind, version, permissions, boundary): created %+v, re-issued %+v", siblingCeiling, childCeiling)
+	assert.Equal(t, store.EffectCeilingBounded, childCeiling.Kind)
+	assert.Equal(t, f.projectID, childCeiling.BoundaryProjectID)
 }
 
-func effectCeilingsWithoutBoundary(c store.EffectCeiling) store.EffectCeiling {
-	c.PermissionIDs = sortedUniqueIDs(c.PermissionIDs)
-	return c
-}
-
-// grantSuperAdmin binds the system super-admin role to userID.
+// grantSuperAdmin binds the system super-admin role to userID, as the
+// system reconciler does (only it may create super-admin bindings).
 func grantSuperAdmin(t *testing.T, s store.Store, userID string) {
 	t.Helper()
 	ctx := context.Background()
