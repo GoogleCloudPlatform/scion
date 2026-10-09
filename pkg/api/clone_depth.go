@@ -18,9 +18,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"math/big"
+	"math"
 	"strconv"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -29,110 +28,89 @@ import (
 // (no --depth flag).
 const CloneDepthFull = "full"
 
+// MaxCloneDepth is the largest numeric clone_depth. The bound keeps every
+// accepted value inside int range and matches the schemas, which allow at
+// most 9 digits ("maximum": 999999999).
+const MaxCloneDepth = 999999999
+
 // CloneDepth is the clone_depth setting on a profile or template: "full"
-// for a full clone, or a positive integer N for a clone of depth N. The
-// empty value means "not set", which keeps the default shallow clone.
+// for a full clone, or an integer N from 1 to MaxCloneDepth for a clone of
+// depth N. The empty value means "not set", which keeps the default
+// shallow clone.
 //
-// It decodes from either a JSON/YAML string ("full", "50") or a bare
-// integer (50), so `clone_depth: 50` works in YAML and JSON alike. A bare
-// number is stored in canonical decimal form when it is whole-valued
-// (5.0, 1e2 and YAML 0x10 become "5", "100" and "16"), which matches the
-// schemas: they count any whole-valued number as an integer.
+// It decodes from either a string ("full", "50") or a bare number (50), so
+// `clone_depth: 50` works in YAML and JSON alike. Every decoder (JSON,
+// YAML and the settings loader) turns the raw value into a Go value the
+// way yaml.v3 does, which is how the schema validator reads both JSON and
+// YAML, and then applies CloneDepthFromValue. So the schemas and GitDepth
+// see the same value: 5.0, 1e2 and YAML 0x10 are "5", "100" and "16", and
+// a string (even a tagged one such as !!binary) is kept as decoded.
 type CloneDepth string
 
 // UnmarshalJSON accepts a JSON string or a JSON number.
 func (d *CloneDepth) UnmarshalJSON(b []byte) error {
 	b = bytes.TrimSpace(b)
-	if bytes.Equal(b, []byte("null")) {
-		*d = ""
-		return nil
-	}
+	var v interface{}
 	if len(b) > 0 && b[0] == '"' {
 		var s string
 		if err := json.Unmarshal(b, &s); err != nil {
 			return err
 		}
-		*d = CloneDepth(s)
-		return nil
-	}
-	var n json.Number
-	if err := json.Unmarshal(b, &n); err != nil {
+		v = s
+	} else if err := yaml.Unmarshal(b, &v); err != nil {
 		return fmt.Errorf("clone_depth: want \"full\" or a positive integer, got %s", string(b))
 	}
-	raw := n.String()
-	*d = CloneDepth(raw)
-	if !smallExponent(raw) {
-		// Too large to be a usable depth; keep the text so validation
-		// rejects it, without expanding a huge power of ten.
-		return nil
+	cd, err := CloneDepthFromValue(v)
+	if err != nil {
+		return err
 	}
-	if r, ok := new(big.Rat).SetString(raw); ok {
-		*d = canonicalNumber(r, raw)
-	}
+	*d = cd
 	return nil
 }
 
-// maxCloneDepthExponent bounds the exponent of a JSON number that is
-// converted exactly; any larger value is far outside the int range.
-const maxCloneDepthExponent = 64
-
-// smallExponent reports whether the JSON number raw has no exponent, or
-// one whose magnitude is at most maxCloneDepthExponent.
-func smallExponent(raw string) bool {
-	i := strings.IndexAny(raw, "eE")
-	if i < 0 {
-		return true
-	}
-	exp, err := strconv.Atoi(raw[i+1:])
-	return err == nil && exp >= -maxCloneDepthExponent && exp <= maxCloneDepthExponent
-}
-
-// UnmarshalYAML accepts a YAML string or a YAML number. A number is
-// decoded the way yaml.v3 decodes it into an untyped value (the form the
-// schema validator sees), so 0x10 is 16 and 1e2 is 100.
+// UnmarshalYAML accepts a YAML string or a YAML number.
 func (d *CloneDepth) UnmarshalYAML(node *yaml.Node) error {
-	if node.Kind == yaml.AliasNode && node.Alias != nil {
-		node = node.Alias
-	}
-	if node.Kind != yaml.ScalarNode {
-		return fmt.Errorf("clone_depth: want \"full\" or a positive integer, got %s", node.ShortTag())
-	}
 	var v interface{}
 	if err := node.Decode(&v); err != nil {
 		return err
 	}
-	r := new(big.Rat)
-	switch n := v.(type) {
-	case nil:
-		*d = ""
-		return nil
-	case int:
-		r.SetInt64(int64(n))
-	case int64:
-		r.SetInt64(n)
-	case uint64:
-		r.SetUint64(n)
-	case float64:
-		if r.SetFloat64(n) == nil {
-			// NaN or an infinity: keep the text so validation rejects it.
-			*d = CloneDepth(node.Value)
-			return nil
-		}
-	default:
-		*d = CloneDepth(node.Value)
-		return nil
+	cd, err := CloneDepthFromValue(v)
+	if err != nil {
+		return err
 	}
-	*d = canonicalNumber(r, node.Value)
+	*d = cd
 	return nil
 }
 
-// canonicalNumber returns r in decimal form when it is whole-valued, else
-// raw (which GitDepth then rejects).
-func canonicalNumber(r *big.Rat, raw string) CloneDepth {
-	if !r.IsInt() {
-		return CloneDepth(raw)
+// CloneDepthFromValue converts a clone_depth value decoded by yaml.v3 (or
+// by a loader that produces the same Go types) to a CloneDepth. nil is
+// unset; a string is kept as is; a whole-valued number becomes decimal
+// text. Any other scalar (a fraction, NaN, an infinity, a bool) becomes
+// its text form, which GitDepth rejects. A map or list is an error.
+func CloneDepthFromValue(v interface{}) (CloneDepth, error) {
+	switch n := v.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return CloneDepth(n), nil
+	case int:
+		return CloneDepth(strconv.Itoa(n)), nil
+	case int64:
+		return CloneDepth(strconv.FormatInt(n, 10)), nil
+	case uint64:
+		return CloneDepth(strconv.FormatUint(n, 10)), nil
+	case float64:
+		// Whole values within int64 range print exactly; anything
+		// larger is far above MaxCloneDepth and keeps its %v text.
+		if n == math.Trunc(n) && math.Abs(n) < 1e18 {
+			return CloneDepth(strconv.FormatInt(int64(n), 10)), nil
+		}
+		return CloneDepth(fmt.Sprint(n)), nil
+	case bool:
+		return CloneDepth(strconv.FormatBool(n)), nil
+	default:
+		return "", fmt.Errorf("clone_depth: want \"full\" or a positive integer, got %T", v)
 	}
-	return CloneDepth(r.Num().String())
 }
 
 // GitDepth converts the setting to a GitCloneConfig.Depth value. ok is
@@ -140,7 +118,8 @@ func canonicalNumber(r *big.Rat, raw string) CloneDepth {
 // a positive integer N yields N. Any other value is an error: 0 and
 // negative numbers are rejected so that "full" is the only way to ask for
 // a full clone. The accepted forms match the schemas exactly: lowercase
-// "full" or ^[1-9][0-9]*$ (no sign, spaces or leading zeros).
+// "full" or ^[1-9][0-9]{0,8}$ (no sign, spaces or leading zeros, at most
+// MaxCloneDepth).
 func (d CloneDepth) GitDepth() (depth int, ok bool, err error) {
 	s := string(d)
 	if s == "" {
@@ -159,10 +138,10 @@ func (d CloneDepth) GitDepth() (depth int, ok bool, err error) {
 	return n, true, nil
 }
 
-// isPositiveDecimal reports whether s matches ^[1-9][0-9]*$, the same
+// isPositiveDecimal reports whether s matches ^[1-9][0-9]{0,8}$, the same
 // form the settings and agent schemas accept.
 func isPositiveDecimal(s string) bool {
-	if s == "" || s[0] < '1' || s[0] > '9' {
+	if s == "" || len(s) > len(strconv.Itoa(MaxCloneDepth)) || s[0] < '1' || s[0] > '9' {
 		return false
 	}
 	for i := 1; i < len(s); i++ {
