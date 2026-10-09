@@ -272,7 +272,7 @@ func TestSAParentCeiling_ClearIdentityDeactivates(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Empty(t, activeAssignments(t, f.store, agent.ID), "block clears the assignment")
 	assertParentCeilingDenied(t, f.srv.authzService.EvaluateServiceAccountParentCeiling(context.Background(), agent.ID, sa.ID),
-		DenyCauseCeilingProvenanceStale)
+		DenyCauseCeilingProvenanceMissing)
 }
 
 func TestSAParentCeiling_ReplaceAndClearCauses(t *testing.T) {

@@ -55,6 +55,9 @@ func TestSAAssignGate_BeforeAfterTable(t *testing.T) {
 	ctx := context.Background()
 	s := f.store
 
+	// The member holds the project member role, which carries
+	// gcp_service_account.assign.
+	grantProjectRole(t, s, f.member.ID, f.project.ID, store.ProjectRoleMember)
 	projectSA := wiringSA(t, s, store.ScopeProject, f.project.ID, "gate-table-project@proj.iam.gserviceaccount.com")
 	hubSA := mkHubScopedSA(t, s, tid("gate-table-stranger"))
 
@@ -208,6 +211,7 @@ func TestSAAssignGate_DefaultLadderBeforeAfterTable(t *testing.T) {
 	ctx := contextWithIdentity(context.Background(),
 		NewAuthenticatedUser(f.member.ID, f.member.Email, f.member.DisplayName, "member", "api"))
 	s := f.store
+	grantProjectRole(t, s, f.member.ID, f.project.ID, store.ProjectRoleMember)
 	setMode(f.srv, SAAssignCheckOff)
 
 	otherProjectSA := wiringSA(t, s, store.ScopeProject, tid("gate-ladder-other-project"), "gate-ladder-other@proj.iam.gserviceaccount.com")

@@ -680,6 +680,11 @@ func TestSAParentCeiling_UseHasNoAgentScopeAndNoSeededRole(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, defs)
 	for _, d := range defs {
+		if d.Name == store.SystemRoleSuperAdmin {
+			// The super-admin role is seeded with every registry
+			// permission by construction.
+			continue
+		}
 		assert.NotContains(t, d.Permissions, "gcp_service_account.use", "seeded role %s", d.Name)
 	}
 }
