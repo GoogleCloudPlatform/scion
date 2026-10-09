@@ -138,8 +138,8 @@ func hubDeleteFailure(agentName string, o hubDeleteOutcome, what string) error {
 			// admins only (ptone/scion#3122). Without them the outcome is
 			// still a failure, but which kind is unknown, so start may be
 			// blocked.
-			return fmt.Errorf("delete failed on the Hub; %s. Retry with 'scion delete %s', or force-delete it from the web UI. Starting the agent may stay blocked until a retry succeeds or force is used",
-				what, agentName)
+			return fmt.Errorf("delete failed on the Hub; %s. Retry with 'scion delete %s', or force it with 'scion delete --force %s'. Starting the agent may stay blocked until a retry succeeds or force is used",
+				what, agentName, agentName)
 		}
 		if msg != "" {
 			msg = ": " + msg
