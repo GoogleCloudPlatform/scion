@@ -247,6 +247,23 @@ func TestDescribeAttachClose_ReconnectFailed(t *testing.T) {
 	assert.ErrorIs(t, err, dialErr)
 }
 
+// When the automatic reconnect itself ended with a close code, the message
+// and hint follow that close, and mention the close that triggered it.
+func TestDescribeAttachClose_ReconnectEndedWithClose(t *testing.T) {
+	orig := &wsclient.PTYCloseError{Code: wsprotocol.ClosePTYUpstreamUnavailable, Reason: "relay_restart"}
+	second := &wsclient.PTYCloseError{Code: wsprotocol.ClosePTYSessionGone, Reason: wsprotocol.CloseReasonAgentStopped}
+	err := describeAttachClose(&wsclient.PTYReconnectError{Close: orig, Err: second}, "a1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "terminal session has ended")
+	assert.Contains(t, err.Error(), "close code 4410: agent_stopped")
+	assert.Contains(t, err.Error(), "on the automatic reconnect after close code 4503: relay_restart")
+	assert.Contains(t, err.Error(), "scion resume a1 --attach")
+	assert.NotContains(t, err.Error(), "This may be temporary")
+	var ce *wsclient.PTYCloseError
+	require.True(t, errors.As(err, &ce))
+	assert.Same(t, orig, ce, "the original close stays reachable first")
+}
+
 func TestDescribeAttachClose_OtherErrorsUnchanged(t *testing.T) {
 	in := errors.New("connection failed with status 403: forbidden")
 	assert.Same(t, in, describeAttachClose(in, "a1"))

@@ -179,7 +179,7 @@ scion list --project acme-backend
 
 **A terminal is required.** Attach needs an interactive terminal on both stdin and stdout. From a script or a coding harness it fails at once with a non-zero exit. Use `scion look <agent>` to see the screen and `scion message <agent>` to send input instead.
 
-**Reconnect.** When the Hub closes the session with `4503` (a planned restart, or the Runtime Broker connection dropped), `4504` (a transient failure) or `1011` (an internal error), `scion attach` reconnects once by itself and the screen redraws. For `4503` it waits a random delay of up to 5 seconds first, so many clients closed at once do not all reconnect at the same moment. If that reconnect fails, or the network drops, the Hub restarts without a close message, or the agent's session ends, `scion attach` exits with a message that names the cause and the next command to run. (The web terminal also reconnects on its own.) The messages follow the [PTY close codes](/scion/reference/api/#pty-close-codes):
+**Reconnect.** When the Hub closes the session with `4503` (a planned restart, or the Runtime Broker connection dropped), `4504` (a transient failure) or `1011` (an internal error), `scion attach` reconnects by itself, once per close, and the screen redraws. It stops after 3 reconnects in a row whose sessions each ended within a minute; press Ctrl-C during the wait to stop it. For `4503` it waits a random delay of up to 5 seconds first, so many clients closed at once do not all reconnect at the same moment. If that reconnect fails, or the network drops, the Hub restarts without a close message, or the agent's session ends, `scion attach` exits with a message that names the cause and the next command to run. (The web terminal also reconnects on its own.) The messages follow the [PTY close codes](/scion/reference/api/#pty-close-codes):
 
 | Close code | What the CLI tells you | What to do |
 | :--- | :--- | :--- |
@@ -187,6 +187,7 @@ scion list --project acme-backend
 | `4410` | The agent's terminal session has ended (the agent exited, or its container stopped or was removed). | Check with `scion list`, then `scion resume <agent> --attach`. |
 | `4404` | The Runtime Broker cannot find the agent or its container. | Check with `scion list`. |
 | `4503` | The Hub lost its connection to the Runtime Broker, or the session is not ready yet, and the automatic reconnect also failed. | Run `scion attach <agent>` again. |
+| `4504` | A transient failure (for example the agent's session was lost), and the automatic reconnect also failed. | Run `scion attach <agent>` again. |
 | `1006` | The connection to the Hub dropped without a close message. | Run `scion attach <agent>` again. |
 | `1011` | The Hub or the Runtime Broker hit an internal error, and the automatic reconnect also failed. | Run `scion attach <agent>` again. |
 

@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,7 +41,7 @@ func runAgainstCloseServer(t *testing.T, sendData bool, code int, reason string)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = r.Close(); _ = w.Close() })
 
-	attempt := 0
+	var attempt atomic.Int32
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -48,10 +49,10 @@ func runAgainstCloseServer(t *testing.T, sendData bool, code int, reason string)
 			return
 		}
 		defer func() { _ = conn.Close() }()
-		attempt++
+		n := attempt.Add(1)
 		// Only the first connection sends data, so a code that triggers the
 		// one automatic reconnect sees that reconnect fail and end Run.
-		if sendData && attempt == 1 {
+		if sendData && n == 1 {
 			_ = conn.WriteJSON(wsprotocol.NewPTYDataMessage([]byte("hello")))
 		}
 		if code == 0 {

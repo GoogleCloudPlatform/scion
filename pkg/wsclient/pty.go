@@ -105,6 +105,22 @@ const (
 	reconnectBackoffResetAfter = 60 * time.Second
 )
 
+// maxShortReconnects bounds a run of automatic reconnects: after this many
+// consecutive retry closes of sessions that each lived less than
+// reconnectBackoffResetAfter, Run stops instead of reconnecting again. It
+// keeps a server that accepts, sends some output and closes again from
+// holding the client in a reconnect loop.
+const maxShortReconnects = 3
+
+// Bytes that stop a pending reconnect when typed during the wait: Ctrl-C
+// and Ctrl-D cancel it, and the tmux detach sequence (Ctrl-b d) detaches.
+const (
+	keyCtrlC  = 0x03
+	keyCtrlD  = 0x04
+	keyCtrlB  = 0x02
+	keyDetach = 'd'
+)
+
 // writeFailGrace bounds how long a failed stdin write waits for the
 // WebSocket reader to report the server's close code, so a write that races
 // a server close still reports (and reconnects on) the close code.
@@ -170,18 +186,21 @@ type PTYClient struct {
 	// termSize reports the local terminal size; ok is false when stdin is
 	// not a terminal.
 	termSize func() (cols, rows int, ok bool)
+	// restoreTerm restores the terminal state, like term.Restore.
+	restoreTerm func(fd int, state *term.State) error
 }
 
 // NewPTYClient creates a new PTY client.
 func NewPTYClient(config PTYClientConfig) *PTYClient {
 	c := &PTYClient{
-		config: config,
-		oldFd:  int(os.Stdin.Fd()),
-		stdin:  os.Stdin,
-		notice: os.Stderr,
-		jitter: fullJitter,
-		after:  time.After,
-		now:    time.Now,
+		config:      config,
+		oldFd:       int(os.Stdin.Fd()),
+		stdin:       os.Stdin,
+		notice:      os.Stderr,
+		jitter:      fullJitter,
+		after:       time.After,
+		now:         time.Now,
+		restoreTerm: term.Restore,
 	}
 	c.termSize = c.localTermSize
 	return c
@@ -402,20 +421,25 @@ func (c *PTYClient) Run() error {
 		}
 	}()
 
+	// Stop the resize and signal goroutines when Run returns.
+	defer c.cancel()
+
 	stdinCh := c.startStdinReader()
 
 	// pendingClose is the close that triggered the reconnect now in
-	// progress; it is cleared once the new connection delivers data.
+	// progress; the new connection must deliver data before it is live.
 	var pendingClose *PTYCloseError
-	// pendingInput is stdin read while waiting to reconnect, sent once the
-	// new connection is up.
-	var pendingInput []byte
 	backoffAttempt := 0
+	shortCloses := 0
 	for {
 		started := c.now()
-		err := c.runConnection(conn, stdinCh, pendingInput)
-		pendingInput = nil
-		if pendingClose != nil && !c.connLive.Load() && err != nil && c.ctx.Err() == nil {
+		err := c.runConnection(conn, stdinCh)
+		if c.ctx.Err() != nil {
+			// Interrupted: report that, not whatever the connection saw.
+			runErr = c.ctx.Err()
+			return runErr
+		}
+		if pendingClose != nil && !c.connLive.Load() && err != nil {
 			// The reconnected session ended before it was live. One
 			// reconnect per close: do not try again.
 			runErr = &PTYReconnectError{Close: pendingClose, Err: err}
@@ -436,6 +460,14 @@ func (c *PTYClient) Run() error {
 
 		if c.now().Sub(started) >= reconnectBackoffResetAfter {
 			backoffAttempt = 0
+			shortCloses = 0
+		} else {
+			shortCloses++
+		}
+		if shortCloses > maxShortReconnects {
+			slog.Debug("PTY client: too many short-lived sessions, not reconnecting", "closes", shortCloses)
+			runErr = err
+			return err
 		}
 		var delay time.Duration
 		if timing == wsprotocol.ReconnectPrompt {
@@ -444,22 +476,20 @@ func (c *PTYClient) Run() error {
 			delay = c.jitter(backoffCeiling(backoffAttempt))
 			backoffAttempt++
 		}
-		_, _ = fmt.Fprintf(c.notice, "\r\n%v; reconnecting...\r\n", closeErr)
+		_, _ = fmt.Fprintf(c.notice, "\r\n%v; reconnecting (press Ctrl-C to stop)...\r\n", closeErr)
 		slog.Debug("PTY client reconnecting", "code", closeErr.Code, "reason", closeErr.Reason, "delay", delay)
 
-		input, stop, waitErr := c.waitToReconnect(delay, stdinCh)
-		if stop {
-			// Interrupted, or stdin ended, while waiting: report the close.
-			if waitErr == nil {
-				waitErr = closeErr
-			}
+		if stop, waitErr := c.waitToReconnect(delay, stdinCh, closeErr); stop {
 			runErr = waitErr
 			return runErr
 		}
-		pendingInput = input
 
 		newConn, dialErr := c.redial()
 		if dialErr != nil {
+			if c.ctx.Err() != nil {
+				runErr = c.ctx.Err()
+				return runErr
+			}
 			runErr = &PTYReconnectError{Close: closeErr, Err: dialErr}
 			return runErr
 		}
@@ -530,26 +560,37 @@ func (c *PTYClient) startStdinReader() <-chan stdinResult {
 	return ch
 }
 
-// waitToReconnect waits for delay before a reconnect. Input typed meanwhile
-// is returned to be sent on the new connection. stop is true when the wait
-// was interrupted (context cancelled, or stdin ended or failed), with err
-// set to the reason (nil for a clean stdin EOF).
-func (c *PTYClient) waitToReconnect(delay time.Duration, stdinCh <-chan stdinResult) (input []byte, stop bool, err error) {
+// waitToReconnect waits for delay before a reconnect. Input typed during
+// the wait is not sent to the new session: Ctrl-C or Ctrl-D stops the
+// reconnect and returns closeErr, the tmux detach sequence (Ctrl-b d)
+// stops it as a clean detach (nil error), and anything else is discarded.
+// stop is true when the wait ended without a reconnect: one of those keys,
+// stdin ending (closeErr) or failing, or the context being cancelled.
+func (c *PTYClient) waitToReconnect(delay time.Duration, stdinCh <-chan stdinResult, closeErr *PTYCloseError) (stop bool, err error) {
 	timer := c.after(delay)
+	prevCtrlB := false
 	for {
 		select {
 		case <-timer:
-			return input, false, nil
+			return false, nil
 		case <-c.ctx.Done():
-			return nil, true, c.ctx.Err()
+			return true, c.ctx.Err()
 		case r := <-stdinCh:
 			if r.err != nil {
 				if r.err == io.EOF {
-					return nil, true, nil
+					return true, closeErr
 				}
-				return nil, true, r.err
+				return true, r.err
 			}
-			input = append(input, r.data...)
+			for _, b := range r.data {
+				switch {
+				case b == keyCtrlC, b == keyCtrlD:
+					return true, closeErr
+				case prevCtrlB && b == keyDetach:
+					return true, nil
+				}
+				prevCtrlB = b == keyCtrlB
+			}
 		}
 	}
 }
@@ -562,9 +603,33 @@ func (c *PTYClient) redial() (*websocket.Conn, error) {
 			c.config.Cols, c.config.Rows = cols, rows
 		}
 	}
-	conn, err := c.dial(c.ctx)
-	if err != nil {
-		return nil, err
+	// The WebSocket handshake does not stop when the context is cancelled
+	// (only its deadline applies), so wait for the dial and the context
+	// together: an interrupt during the redial returns at once, and a dial
+	// that completes afterwards is closed.
+	type dialResult struct {
+		conn *websocket.Conn
+		err  error
+	}
+	results := make(chan dialResult, 1)
+	go func() {
+		conn, err := c.dial(c.ctx)
+		results <- dialResult{conn, err}
+	}()
+	var conn *websocket.Conn
+	select {
+	case r := <-results:
+		if r.err != nil {
+			return nil, r.err
+		}
+		conn = r.conn
+	case <-c.ctx.Done():
+		go func() {
+			if r := <-results; r.conn != nil {
+				_ = r.conn.Close()
+			}
+		}()
+		return nil, c.ctx.Err()
 	}
 	c.writeMu.Lock()
 	old := c.conn
@@ -579,7 +644,7 @@ func (c *PTYClient) redial() (*websocket.Conn, error) {
 // runConnection pumps one connection: stdin to the WebSocket in this
 // goroutine, the WebSocket to stdout in another. It returns when either
 // direction ends, after sending a normal close frame.
-func (c *PTYClient) runConnection(conn *websocket.Conn, stdinCh <-chan stdinResult, pendingInput []byte) error {
+func (c *PTYClient) runConnection(conn *websocket.Conn, stdinCh <-chan stdinResult) error {
 	c.connLive.Store(false)
 	wsErrCh := make(chan error, 1)
 	go func() {
@@ -589,7 +654,7 @@ func (c *PTYClient) runConnection(conn *websocket.Conn, stdinCh <-chan stdinResu
 		wsErrCh <- err
 	}()
 
-	err := c.pumpStdin(stdinCh, wsErrCh, pendingInput)
+	err := c.pumpStdin(stdinCh, wsErrCh)
 	slog.Debug("PTY client connection ended", "error", err)
 
 	// Close connection
@@ -605,7 +670,7 @@ func (c *PTYClient) runConnection(conn *websocket.Conn, stdinCh <-chan stdinResu
 
 // pumpStdin forwards stdin to the current connection until the connection's
 // reader ends, stdin ends, or the context is cancelled.
-func (c *PTYClient) pumpStdin(stdinCh <-chan stdinResult, wsErrCh <-chan error, pendingInput []byte) error {
+func (c *PTYClient) pumpStdin(stdinCh <-chan stdinResult, wsErrCh <-chan error) error {
 	send := func(data []byte) error {
 		if err := c.writeToWebSocket(wsprotocol.NewPTYDataMessage(data)); err != nil {
 			slog.Debug("PTY stdin reader: write error", "error", err)
@@ -622,11 +687,6 @@ func (c *PTYClient) pumpStdin(stdinCh <-chan stdinResult, wsErrCh <-chan error, 
 			return err
 		}
 		return nil
-	}
-	if len(pendingInput) > 0 {
-		if err := send(pendingInput); err != nil {
-			return err
-		}
 	}
 	for {
 		select {
@@ -695,7 +755,11 @@ func (c *PTYClient) restoreTerminal(writeResetSeqs bool) {
 			// modes are already off is harmless.
 			_, _ = os.Stdout.Write([]byte(terminalResetSequences))
 		}
-		_ = term.Restore(c.oldFd, c.termState)
+		restore := c.restoreTerm
+		if restore == nil {
+			restore = term.Restore
+		}
+		_ = restore(c.oldFd, c.termState)
 		c.termState = nil
 	}
 }
@@ -739,6 +803,7 @@ func (c *PTYClient) handleResize() {
 
 // readFromWebSocket reads from conn and writes to stdout.
 func (c *PTYClient) readFromWebSocket(conn *websocket.Conn) error {
+	gotMessage := false
 	// Set initial read deadline to detect if server-side PTY fails to start
 	if err := conn.SetReadDeadline(time.Now().Add(initialDataTimeout)); err != nil {
 		return fmt.Errorf("failed to set read deadline: %w", err)
@@ -767,7 +832,7 @@ func (c *PTYClient) readFromWebSocket(conn *websocket.Conn) error {
 				return &PTYCloseError{Code: closeErr.Code, Reason: closeErr.Text}
 			}
 			// Check if this is a timeout on initial data
-			if !c.connLive.Load() {
+			if !gotMessage {
 				if netErr, ok := err.(interface{ Timeout() bool }); ok && netErr.Timeout() {
 					return fmt.Errorf("timed out waiting for PTY data (server may have failed to start the session)")
 				}
@@ -775,11 +840,10 @@ func (c *PTYClient) readFromWebSocket(conn *websocket.Conn) error {
 			return err
 		}
 
-		// Clear read deadline after receiving first data
-		if !c.connLive.Load() {
-			c.connLive.Store(true)
-			c.receivedData.Store(true)
-			slog.Debug("PTY websocket reader: received first data, clearing deadline")
+		// Clear the read deadline after the first message from the server.
+		if !gotMessage {
+			gotMessage = true
+			slog.Debug("PTY websocket reader: received first message, clearing deadline")
 			if err := conn.SetReadDeadline(time.Time{}); err != nil {
 				return fmt.Errorf("failed to clear read deadline: %w", err)
 			}
@@ -796,6 +860,10 @@ func (c *PTYClient) readFromWebSocket(conn *websocket.Conn) error {
 			if err := json.Unmarshal(data, &msg); err != nil {
 				continue
 			}
+			// Only a data frame makes the connection live: a session that
+			// sends anything else and closes did not serve the terminal.
+			c.connLive.Store(true)
+			c.receivedData.Store(true)
 			_, _ = os.Stdout.Write(msg.Data)
 
 		case wsprotocol.TypeError:
