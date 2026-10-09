@@ -1326,6 +1326,28 @@ func (r *CloudRunSandboxRuntime) deletePlain(ctx context.Context, id string) err
 	return nil
 }
 
+// sandboxFilterLabels returns the label set List filters on: the entry's
+// labels plus the project name and ID resolved from their legacy label
+// spellings when the canonical label is absent. The entry's own map is not
+// modified.
+func sandboxFilterLabels(labels map[string]string) map[string]string {
+	effective := make(map[string]string, len(labels)+2)
+	for k, v := range labels {
+		effective[k] = v
+	}
+	if effective[projectkeys.LabelProject] == "" {
+		if name := projectkeys.ProjectNameFromLabels(labels); name != "" {
+			effective[projectkeys.LabelProject] = name
+		}
+	}
+	if effective[projectkeys.LabelProjectID] == "" {
+		if id := projectkeys.ProjectIDFromLabels(labels); id != "" {
+			effective[projectkeys.LabelProjectID] = id
+		}
+	}
+	return effective
+}
+
 // List returns agent info for all tracked sandboxes, applying an optional
 // label filter.
 func (r *CloudRunSandboxRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
@@ -1333,24 +1355,11 @@ func (r *CloudRunSandboxRuntime) List(ctx context.Context, labelFilter map[strin
 
 	var agents []api.AgentInfo
 	for _, entry := range entries {
-		// Label filtering (same pattern as docker.go:182-201).
-		match := true
-		for k, v := range labelFilter {
-			actual := entry.Labels[k]
-			if actual == "" {
-				switch k {
-				case projectkeys.LabelProject:
-					actual = projectkeys.ProjectNameFromLabels(entry.Labels)
-				case projectkeys.LabelProjectID:
-					actual = projectkeys.ProjectIDFromLabels(entry.Labels)
-				}
-			}
-			if actual != v {
-				match = false
-				break
-			}
-		}
-		if !match {
+		// Label filtering uses the shared LabelsMatchFilter, so the project
+		// path is compared as a resolved path, as on the other runtimes.
+		// The project name and ID keys fall back to their legacy label
+		// spellings when the canonical label is absent.
+		if !LabelsMatchFilter(sandboxFilterLabels(entry.Labels), labelFilter) {
 			continue
 		}
 
