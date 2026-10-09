@@ -186,12 +186,9 @@ func appendGoRuntimeEnvFromLimits(env []corev1.EnvVar, limits corev1.ResourceLis
 	// Both bounds are checked on the Quantity before Value is called,
 	// because Value wraps silently for quantities above math.MaxInt64.
 	if q, ok := limits[corev1.ResourceCPU]; ok && q.Sign() > 0 && q.Cmp(maxGoMaxProcs) <= 0 {
-		// Value rounds a fractional quantity up to the next whole number.
-		cores := q.Value()
-		if cores < 1 {
-			cores = 1
-		}
-		add("GOMAXPROCS", fmt.Sprintf("%d", cores))
+		// Value rounds a fractional quantity up to the next whole
+		// number, so any positive limit gives at least 1.
+		add("GOMAXPROCS", fmt.Sprintf("%d", q.Value()))
 	}
 	if q, ok := limits[corev1.ResourceMemory]; ok && q.Sign() > 0 && q.Cmp(maxGoMemLimitBytes) <= 0 {
 		bytes := q.Value()
