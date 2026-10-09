@@ -43,6 +43,18 @@ Scion features an interactive, top-level **Native Web Chat** interface in the We
 - **Install as an App**: The web UI ships an app logo, PWA icons and a web app manifest, so it can be added to a phone's home screen with its own icon.
 - **Config Toggle**: Top-level native chat can be turned on or off globally by administrators using a single configuration key (`web.native_chat` feature flag) or via the Admin interface.
 
+### Who Can See Chat Content
+
+- **Project spaces are visible to the whole project.** Every thread in a project space, and every message and attachment in it, can be read by everyone who has access to that project. There are no private threads, and access cannot be limited to individual threads.
+- **Direct messages are visible only to their participants.** A DM can be read only by the two participants: the two users in a human-to-human DM, or you and the agent in a human-to-agent DM. If you promote a DM into a shared space thread, its messages move into the space, and everyone with access to the project can then read them.
+- **Pick the right place:**
+  - Use a DM for a private exchange with one person or one agent.
+  - Use a separate project when a group needs its own access boundary. Chat access follows project access, so only that project's members can read its space.
+
+:::caution[Keep credentials out of space threads]
+Do not post credentials, tokens, keys or other sensitive material in a space thread, even in a thread that looks quiet or narrowly named. Everyone with access to the project can read it. To give an agent a credential, store it as a Hub secret instead (see [Secret & Environment Management](/scion/hosted/user/secrets/)) and refer to it by name in chat.
+:::
+
 ---
 
 ### Advanced Collaboration & Productivity
