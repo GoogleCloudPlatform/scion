@@ -162,6 +162,9 @@ type Layer1Snapshot struct {
 	// this replica's startup name. Every snapshot constructor must set it.
 	HubName       string
 	ImageRegistry string
+	// MonitoringDashboardURL is server.hub.monitoring_dashboard_url; ""
+	// means unset (no Health page link). Every snapshot constructor sets it.
+	MonitoringDashboardURL string
 
 	// GitHub App (non-secret fields only)
 	GitHubAppID           int64
@@ -1024,6 +1027,7 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	snap.PublicURL = k.String("server.hub.public_url")
 	snap.HubName = k.String("server.hub.hub_name")
 	snap.ImageRegistry = k.String("image_registry")
+	snap.MonitoringDashboardURL = k.String(config.MonitoringDashboardURLKey)
 
 	// GitHub App
 	snap.GitHubAppID = k.Int64("server.github_app.app_id")
@@ -1115,6 +1119,9 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 		// The configured hub_name ("" when unset); ApplySnapshot resolves
 		// "" to the startup default, as at startup.
 		HubName: gc.Hub.HubName,
+		// Applied live in file mode too, so a settings.yaml edit followed
+		// by a reload changes the Health page link without a restart.
+		MonitoringDashboardURL: gc.Hub.MonitoringDashboardURL,
 	}
 
 	if gc.TelemetryConfig != nil {
@@ -1368,6 +1375,19 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	if s.config.HubName != hubName {
 		s.config.HubName = hubName
 		applied = append(applied, "hub_name")
+	}
+
+	// Monitoring dashboard link: written unconditionally so that clearing
+	// the key removes the link. A value that fails validation (one that
+	// did not come through the admin API) is not applied.
+	monitoringURL := snap.MonitoringDashboardURL
+	if monitoringURL != "" && config.ValidateMonitoringDashboardURL(monitoringURL) != nil {
+		slog.Warn("ignoring invalid server.hub.monitoring_dashboard_url; the Health page shows no monitoring link")
+		monitoringURL = ""
+	}
+	if s.config.MonitoringDashboardURL != monitoringURL {
+		s.config.MonitoringDashboardURL = monitoringURL
+		applied = append(applied, "monitoring_dashboard_url")
 	}
 
 	// Image registry (#985) — wire DB value to the consumption path.
