@@ -1496,9 +1496,6 @@ type Server struct {
 	// users' user-scope data ends (startUserScopedDataSweep).
 	userScopedDataSweepDone <-chan struct{}
 
-	// decisionAuditRouter preserves the in-memory decision emission seam.
-	decisionAuditRouter *decisionAuditRouter
-
 	// githubWebhookNoSecretWarnOnce ensures the "no webhook secret configured"
 	// rejection is logged at most once per process, so a hub being repeatedly
 	// probed on the GitHub webhook endpoint does not fill its log.
@@ -1986,8 +1983,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		agentMetricsLog:   logging.Subsystem("hub.agent-metrics"),
 	}
 	// A New that fails part-way must not leak what it already started: the
-	// link-service and preview cleanup loops, the decision router,
-	// the OIDC key loops. The caller gets no *Server to shut down, so tear
+	// link-service and preview cleanup loops, the OIDC key loops. The caller gets no *Server to shut down, so tear
 	// it down here (ptone/scion#3641). Cleanup is idempotent and
 	// nil-safe on a partly built Server.
 	defer func() {
@@ -2292,12 +2288,6 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	srv.authzService.setDevLocalAuthorityEnabled(cfg.DevAuthToken != "")
 	srv.authzService.mintDevAuthOverride = cfg.DevAuthToken != ""
 
-	// Wire decision audit emitter
-	auditEmitter := inertDecisionAuditTarget
-	srv.decisionAuditRouter = newDecisionAuditRouter(auditEmitter, srv)
-	// With server.hub.perf_trace on, records pass through a counting
-	// decorator on their way to the same emitter (perftrace_audit.go).
-	srv.authzService.SetDecisionAuditEmitter(wrapAuditEmitterForPerfTrace(srv.decisionAuditRouter, cfg.PerfTrace))
 	if cfg.PerfTrace {
 		srv.perfTraceLog = perfTraceLogger()
 		slog.Warn("Request performance tracing is on (server.hub.perf_trace); per-request perf_trace lines are logged")
@@ -3454,10 +3444,6 @@ func (s *Server) IsPostgres() bool {
 // server. This is called during hub startup (any DB driver) after seeding and
 // initial refresh (settings-db §3.5/§3.9). Safe for concurrent use.
 func (s *Server) SetOperationalSettings(ops *OperationalSettings) {
-	if s.decisionAuditRouter != nil {
-		s.decisionAuditRouter.setSource(ops)
-		return
-	}
 	s.operationalSettings.Store(ops)
 }
 
@@ -5660,12 +5646,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // where the Hub API is mounted on the WebServer and has no listener of its own.
 // It is also called internally by Shutdown, and is safe to call more than
 // once, including after Shutdown: the teardown below runs at most once.
-// It closes the NEW admission side.
 func (s *Server) CleanupResources(ctx context.Context) error {
 	s.cleanupOnce.Do(func() {
-		if s.decisionAuditRouter != nil {
-			_ = s.decisionAuditRouter.CloseNew(ctx)
-		}
 		// Fields whose setters take s.mu.Lock are snapshotted once here
 		// and only the locals are used below. Those setters
 		// (StartBackgroundServices, StartNotificationDispatcher,

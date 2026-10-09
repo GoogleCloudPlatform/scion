@@ -263,12 +263,6 @@ func TestPerfTrace_OffInstallsNothing(t *testing.T) {
 
 	srv := newPerfServer(t, p.store, false)
 	assert.Same(t, p.store, srv.authzService.store, "off: authorization store must be the original")
-	require.NotNil(t, srv.decisionAuditRouter)
-	assert.True(t, sameDecisionAuditReference(inertDecisionAuditTarget, srv.decisionAuditRouter.legacy))
-	assert.Same(t, srv.decisionAuditRouter, srv.authzService.decisionAuditEmitter, "off: decorator must return the exact router")
-	assert.Nil(t, srv.decisionAuditRouter.admission)
-	assert.Nil(t, srv.decisionAuditRouter.contract.handler)
-	assert.Nil(t, srv.decisionAuditRouter.contract.clock)
 	assert.Nil(t, srv.perfTraceLog)
 	assert.False(t, DefaultServerConfig().PerfTrace, "default must be off")
 
@@ -276,12 +270,6 @@ func TestPerfTrace_OffInstallsNothing(t *testing.T) {
 	assert.IsType(t, perfAuthzStore{}, srvOn.authzService.store)
 	require.IsType(t, perfAuditEmitter{}, srvOn.authzService.decisionAuditEmitter)
 	decorator := srvOn.authzService.decisionAuditEmitter.(perfAuditEmitter)
-	require.NotNil(t, srvOn.decisionAuditRouter)
-	assert.True(t, sameDecisionAuditReference(inertDecisionAuditTarget, srvOn.decisionAuditRouter.legacy))
-	assert.Same(t, srvOn.decisionAuditRouter, decorator.next, "on: decorator must retain the exact router")
-	assert.Nil(t, srvOn.decisionAuditRouter.admission)
-	assert.Nil(t, srvOn.decisionAuditRouter.contract.handler)
-	assert.Nil(t, srvOn.decisionAuditRouter.contract.clock)
 	assert.NotNil(t, srvOn.perfTraceLog)
 
 	// Probe the off server as the one caller that would get headers if the

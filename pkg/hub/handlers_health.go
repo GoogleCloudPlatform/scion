@@ -158,8 +158,6 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 	// Check co-located broker registration when this Hub expects one
 	s.checkColocatedBrokerHealth(checks)
 
-	s.checkDecisionAuditHealth(checks)
-
 	// Get stats
 	stats := &HealthStats{}
 	if agentResult, err := s.store.ListAgents(ctx, store.AgentFilter{Phase: string(state.PhaseRunning)}, store.ListOptions{Limit: 1}); err == nil {
@@ -433,16 +431,4 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, combined)
-}
-
-// A NEW fault is a CRITICAL audit/logging warning. Its effect on Hub service
-// availability is degraded-but-serving: these keys are outside the availability-
-// failure set, and readiness remains independent. No legacy writer health is
-// reported. No sink call or positive persistence proof is used here.
-func (s *Server) checkDecisionAuditHealth(checks map[string]string) {
-	if s.decisionAuditRouter == nil {
-		return
-	}
-	newHealth := s.decisionAuditRouter.healthProjection()
-	checks[decisionAuditNewHealthKey] = newHealth
 }
