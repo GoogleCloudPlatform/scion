@@ -763,10 +763,12 @@ func (s *Server) reloadSettings() map[string]interface{} {
 	snap := BuildLayer1SnapshotFromFile(gc)
 	results = ApplySnapshot(s, snap)
 
-	// Log level is a Layer-0 setting (per design §3.1) — only applied in
-	// file mode via reloadSettings, not through OperationalSettings.
+	// Log level is a Layer-0 setting (per design §3.1): the server applies
+	// it at startup, and live changes come only in file mode via
+	// reloadSettings, not through OperationalSettings. It is applied even
+	// when empty so that clearing it reverts to the default.
+	applySnapshotLogLevel(gc.LogLevel)
 	if gc.LogLevel != "" {
-		applySnapshotLogLevel(gc.LogLevel)
 		applied := results["applied"].([]string)
 		applied = append(applied, "log_level")
 		results["applied"] = applied
