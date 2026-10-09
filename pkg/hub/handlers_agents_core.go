@@ -2468,8 +2468,33 @@ func (s *Server) createAgentInProject(
 						// the provider check before it means stor is GCS, so
 						// stor.Bucket() names the bucket uploaded to.
 						agent.AppliedConfig.WorkspaceStorageBucket = stor.Bucket()
-						if err := s.store.UpdateAgent(detachLaunchFromClient(ctx), agent); err != nil {
-							s.agentLifecycleLog.Warn("Failed to update agent with workspace storage path", "agent_id", agent.ID, "error", err)
+						// The swap must be on the row before anything is
+						// dispatched: later dispatches (restart, env
+						// finalize, provision then start) are built from
+						// the stored row, and the remote broker cannot use
+						// the hub-local path (ptone/scion#3730). A failed
+						// write fails the create. Nothing was dispatched
+						// and no credential minted yet, so the rollback has
+						// no DeleteRuntime and no revoke. The row is removed
+						// only if no delete holds it (DeleteWon); a delete
+						// that holds or removed it answers 409.
+						if err := s.recordHubWorkspaceStorage(detachLaunchFromClient(ctx), agent); err != nil {
+							s.agentLifecycleLog.Warn("Failed to record workspace storage path; failing agent create",
+								"agent_id", agent.ID, "project_id", project.ID, "error", err)
+							ucancel()
+							deleteWon := false
+							corrID := cleanup(createRollback{Stage: createStageWorkspaceRecord, Cause: err, DeleteWon: &deleteWon})
+							if deleteWon {
+								writeDeletedDuringCreate(w, agent.ID, nil)
+								return
+							}
+							// A failed hub store write, not a broker fault: 500
+							// internal_error, as the managed-record rollback
+							// answers (writeManagedCreateUnrecorded).
+							writeCreateFailure(w, corrID, func() {
+								writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to record workspace storage path", nil)
+							})
+							return
 						}
 					}
 				}
@@ -3051,7 +3076,10 @@ func (s *Server) updateManagedAgentAfterCreate(ctx context.Context, agent *store
 // than the create's assumed running and is kept, as mergeDispatchedAgent
 // does; the Runtime and annotations are still written, so a later stop or
 // delete can find the interaction, and the create then stops the
-// interaction itself, since that writer's stop could not find it.
+// interaction itself, since that writer's stop could not find it. The
+// hub-managed workspace swap (copyHubWorkspaceStorage) is copied as well,
+// so a retry cannot drop a storage path the create recorded
+// (ptone/scion#3730).
 func mergeManagedCreate(dst, src *store.Agent) {
 	dst.Runtime = src.Runtime
 	for _, key := range []string{annotationCloudProvider, annotationInteractionID, annotationEnvironmentID} {
@@ -3064,11 +3092,67 @@ func mergeManagedCreate(dst, src *store.Agent) {
 		}
 		dst.Annotations[key] = v
 	}
+	copyHubWorkspaceStorage(dst, src)
 	if isTerminalAgentPhase(dst.Phase) {
 		return
 	}
 	dst.Phase = src.Phase
 	dst.Activity = src.Activity
+}
+
+// recordHubWorkspaceStorage writes agent, which carries the hub-managed
+// workspace swap (Workspace cleared, WorkspaceStoragePath and
+// WorkspaceStorageBucket set), to the committed row (ptone/scion#3730).
+//
+// A version conflict gets one re-read and one retry, as
+// updateManagedAgentAfterCreate does: a delete that claimed the row and
+// then failed, or whose lease lapsed, bumps state_version but leaves the
+// agent live. The retry writes the re-read row with only the three
+// workspace fields re-applied, so the concurrent writer's fields are kept.
+// The retry is skipped, and the first conflict returned, when the re-read
+// cannot be used or shows that a delete won (deleteWonOnRead): the caller's
+// rollback then decides the answer. Any other first error, or any error of
+// the retry, is returned as is. There is no loop.
+//
+// On success after a retry, agent keeps its older StateVersion, so the
+// create's next write conflicts and goes through its own re-read and merge,
+// which carry the workspace fields (mergeDispatchedAgent,
+// mergeDispatchedConfig, mergeManagedCreate) and keep a terminal phase a
+// concurrent writer set.
+func (s *Server) recordHubWorkspaceStorage(ctx context.Context, agent *store.Agent) error {
+	err := s.store.UpdateAgent(ctx, agent)
+	if err == nil || !errors.Is(err, store.ErrVersionConflict) {
+		return err
+	}
+
+	fresh, getErr := s.store.GetAgent(ctx, agent.ID)
+	if deleteWonOnRead(fresh, getErr) {
+		return err
+	}
+	if getErr != nil {
+		s.agentLifecycleLog.Warn("failed to re-read agent after a conflicting workspace storage write",
+			"agent_id", agent.ID, "error", getErr)
+		return err
+	}
+
+	copyHubWorkspaceStorage(fresh, agent)
+	return s.store.UpdateAgent(ctx, fresh)
+}
+
+// copyHubWorkspaceStorage copies the hub-managed workspace swap from src
+// onto dst when src has one (a non-empty WorkspaceStoragePath): Workspace
+// (cleared by the swap), WorkspaceStoragePath and WorkspaceStorageBucket.
+// Other applied config on dst is kept.
+func copyHubWorkspaceStorage(dst, src *store.Agent) {
+	if src.AppliedConfig == nil || src.AppliedConfig.WorkspaceStoragePath == "" {
+		return
+	}
+	if dst.AppliedConfig == nil {
+		dst.AppliedConfig = &store.AgentAppliedConfig{}
+	}
+	dst.AppliedConfig.Workspace = src.AppliedConfig.Workspace
+	dst.AppliedConfig.WorkspaceStoragePath = src.AppliedConfig.WorkspaceStoragePath
+	dst.AppliedConfig.WorkspaceStorageBucket = src.AppliedConfig.WorkspaceStorageBucket
 }
 
 func isTerminalAgentPhase(phase string) bool {
