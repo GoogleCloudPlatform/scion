@@ -30,10 +30,16 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // modulePath marks goroutines running this module's code.
 const modulePath = "github.com/GoogleCloudPlatform/scion/"
+
+// eventuallyFrame marks the goroutines testify's EventuallyWithT runs its
+// condition on.
+const eventuallyFrame = "github.com/stretchr/testify/assert.EventuallyWithT"
 
 var (
 	goroutineHeaderRE = regexp.MustCompile(`^goroutine (\d+) \[`)
@@ -162,35 +168,59 @@ func TestTestServerCleanupStopsBackgroundGoroutines(t *testing.T) {
 			t.Run("server", func(t *testing.T) {
 				builderID := currentGoroutineID(t)
 				newServer(t)
-				live := liveGoroutines()
-				for changed := true; changed; {
-					changed = false
-					for id, g := range live {
-						if _, seen := attributed[id]; seen || id == builderID {
-							continue
-						}
-						if _, old := before[id]; old {
-							continue
-						}
-						_, parentAttributed := attributed[g.parent]
-						if g.parent == builderID || parentAttributed || strings.Contains(g.stack, modulePath) {
-							attributed[id] = g
-							changed = true
+				// A goroutine started with `go x.method()` shows only its
+				// creator's gowrap frame until it first runs, so a single
+				// sample taken right after newServer returns can miss loops
+				// the scheduler has not run yet (ptone/scion#4165). Re-sample
+				// until every expected loop has been seen at least once.
+				// seen[fn] holds the IDs of attributed goroutines whose stack
+				// has contained fn in any sample.
+				seen := map[string]map[int64]bool{}
+				for fn := range want {
+					seen[fn] = map[int64]bool{}
+				}
+				require.EventuallyWithT(t, func(c *assert.CollectT) {
+					live := liveGoroutines()
+					for changed := true; changed; {
+						changed = false
+						for id, g := range live {
+							if _, ok := attributed[id]; ok || id == builderID {
+								continue
+							}
+							if _, old := before[id]; old {
+								continue
+							}
+							// Skip the goroutines EventuallyWithT runs this
+							// condition on: they descend from the builder
+							// and run module code, but are not the server's.
+							if strings.Contains(g.stack, eventuallyFrame) {
+								continue
+							}
+							_, parentAttributed := attributed[g.parent]
+							if g.parent == builderID || parentAttributed || strings.Contains(g.stack, modulePath) {
+								attributed[id] = g
+								changed = true
+							}
 						}
 					}
-				}
+					for id := range attributed {
+						g, ok := live[id]
+						if !ok {
+							continue
+						}
+						for fn := range want {
+							if strings.Contains(g.stack, fn) {
+								seen[fn][id] = true
+							}
+						}
+					}
+					for fn, n := range want {
+						assert.GreaterOrEqual(c, len(seen[fn]), n,
+							"vacuity guard: saw %d goroutines in %s, want >= %d; the leak check is not observing the server's goroutines",
+							len(seen[fn]), fn, n)
+					}
+				}, 5*time.Second, 10*time.Millisecond)
 				t.Logf("attributed %d goroutines to the server", len(attributed))
-				for fn, want := range want {
-					got := 0
-					for _, g := range attributed {
-						if strings.Contains(g.stack, fn) {
-							got++
-						}
-					}
-					if got < want {
-						t.Errorf("vacuity guard: saw %d goroutines in %s, want >= %d; the leak check is not observing the server's goroutines", got, fn, want)
-					}
-				}
 			})
 			if t.Failed() {
 				return
