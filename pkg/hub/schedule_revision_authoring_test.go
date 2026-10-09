@@ -521,6 +521,23 @@ func TestResumeNonAdmittedDenied_Message(t *testing.T) {
 	assert.Equal(t, before, loadScheduleRevision(t, s, id))
 }
 
+// Updating a message schedule re-checks the caller against the existing
+// schedule's target, as resume does: a caller who may manage schedules but
+// may not message the target is refused and the stored revision is
+// unchanged.
+func TestUpdateNonAdmittedDenied_Message(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	owner := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("update-na-msg-owner"))
+	id := createOwnerSchedule(t, srv, owner, projectID, "update-na-msg", "message")
+	before := loadScheduleRevision(t, s, id)
+
+	outsider := scheduleOnlyUser(t, s, projectID, tid("update-na-msg-outsider"))
+	rec := doAuthoredScheduleRequest(t, srv, outsider, projectID, id, http.MethodPatch, UpdateScheduleRequest{Name: "update-na-msg-renamed"})
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "not authorized to message this agent", "the denial is the update's scheduled-message re-authorization")
+	assert.Equal(t, before, loadScheduleRevision(t, s, id))
+}
+
 // Resuming a dispatch_agent schedule requires agent creation in the project:
 // an agent without agent:create is denied even though it may update the
 // schedule; with agent:create it resumes and becomes the revision.

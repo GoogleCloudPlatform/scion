@@ -26,8 +26,48 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+// scheduledTargetMode says whether an authoring request names a new target
+// or re-authors a schedule whose target is already set.
+type scheduledTargetMode int
+
+const (
+	// scheduledTargetNew: the caller names the target (event or schedule
+	// create).
+	scheduledTargetNew scheduledTargetMode = iota
+	// scheduledTargetExisting: the caller edits or resumes a schedule whose
+	// target it can already see in the stored payload.
+	scheduledTargetExisting
+)
+
 // authorizeScheduledMessageAuthoring validates a scheduled-message event at
-// authoring time (create / update). It resolves the target agent from
+// authoring time for a caller naming a new target (event and schedule
+// create). See authorizeScheduledMessageTarget.
+func (s *Server) authorizeScheduledMessageAuthoring(
+	w http.ResponseWriter,
+	r *http.Request,
+	projectID string,
+	rawPayload string,
+	agentID string,
+	agentName string,
+) bool {
+	return s.authorizeScheduledMessageTarget(w, r, scheduledTargetNew, projectID, rawPayload, agentID, agentName)
+}
+
+// authorizeScheduledMessageReauthoring validates a schedule update or resume:
+// the same checks as authoring, but the target is the existing schedule's, so
+// a target the caller may not message is refused (403) rather than treated
+// like an unknown agent.
+func (s *Server) authorizeScheduledMessageReauthoring(
+	w http.ResponseWriter,
+	r *http.Request,
+	projectID string,
+	rawPayload string,
+) bool {
+	return s.authorizeScheduledMessageTarget(w, r, scheduledTargetExisting, projectID, rawPayload, "", "")
+}
+
+// authorizeScheduledMessageTarget validates a scheduled-message event at
+// authoring time (create / update / resume). It resolves the target agent from
 // convenience fields or raw payload and rejects when:
 //   - the request's credential may not author scheduled work
 //     (authorizeScheduleAuthoringCredential: every user access token is
@@ -37,8 +77,10 @@ import (
 //   - the caller is not currently authorized to message the target
 //     (fail-fast preview — the definitive check runs again at fire time).
 //
-// A target the caller cannot read and may not message is treated like an
-// unknown agent ID: authoring is accepted, and the fire-time check refuses.
+// When the caller names a new target (scheduledTargetNew), a target the
+// caller cannot read and may not message is treated like an unknown agent
+// ID: authoring is accepted, and the fire-time check refuses. An update or
+// resume (scheduledTargetExisting) keeps the refusal below.
 //
 // An admitted revision records its author's ceiling, and each fire
 // re-checks the recorded authority under resolveScheduledAuthority
@@ -46,9 +88,10 @@ import (
 //
 // Returns true when authoring is allowed; writes the HTTP error response and
 // returns false when denied.
-func (s *Server) authorizeScheduledMessageAuthoring(
+func (s *Server) authorizeScheduledMessageTarget(
 	w http.ResponseWriter,
 	r *http.Request,
+	mode scheduledTargetMode,
 	projectID string,
 	rawPayload string,
 	agentID string,
@@ -132,7 +175,7 @@ func (s *Server) authorizeScheduledMessageAuthoring(
 	// fire-time check refuses it. This runs before any answer that would
 	// describe the target. A target the caller can read keeps the answers
 	// below, which name nothing the caller cannot already see.
-	if !s.scheduledTargetReadable(ctx, identity, agent) {
+	if mode == scheduledTargetNew && !s.scheduledTargetReadable(ctx, identity, agent) {
 		if allowed, _, _ := s.authorizeAgentMessage(ctx, identity, agent, false); !allowed {
 			slog.InfoContext(ctx, "scheduled target not readable; treated as unknown",
 				"identity", identity.ID(), "identity_type", identity.Type(),
