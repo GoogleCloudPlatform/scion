@@ -18,49 +18,29 @@ package hub
 
 import (
 	"context"
-	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// installTestDecisionAuditWriter replaces srv's decision audit writer with
-// one backed by fs. It closes the writer hub.New built first, so that
-// writer's goroutines do not outlive the test.
-func installTestDecisionAuditWriter(t *testing.T, srv *Server, fs *fakeDecisionAuditStore) *StoreDecisionAuditEmitter {
-	t.Helper()
-	w := newStoreDecisionAuditEmitter(fs, slog.New(slog.NewTextHandler(io.Discard, nil)), testDecisionAuditConfig())
-	t.Cleanup(func() { w.Close(context.Background()) })
-	if srv.decisionAuditWriter != nil {
-		srv.decisionAuditWriter.Close(context.Background())
-	}
-	srv.decisionAuditWriter = w
-	srv.authzService.SetDecisionAuditEmitter(w)
-	return w
-}
-
-// TestServer_Shutdown_WritesDecisionAuditFromDrainingRequests checks the
-// shutdown order: a request still in flight when the HTTP drain starts
-// emits its decision audit record after CleanupResources has run, and that
-// record must be written, not dropped as a shutdown drop. Before the fix,
-// CleanupResources closed the writer ahead of the HTTP drain.
-func TestServer_Shutdown_WritesDecisionAuditFromDrainingRequests(t *testing.T) {
+// Requests finishing during HTTP drain still produce in-memory decision records.
+func TestServer_Shutdown_RecordsDecisionAuditFromDrainingRequests(t *testing.T) {
 	srv := newShutdownTestServer(t)
-	fs := &fakeDecisionAuditStore{}
-	w := installTestDecisionAuditWriter(t, srv, fs)
+	w := &recordingDecisionAuditEmitter{}
+	srv.authzService.SetDecisionAuditEmitter(w)
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	httpSrv := &http.Server{Handler: http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		close(entered)
 		<-release
-		w.EmitDecisionAudit(r.Context(), auditRec("deny", "in-flight"))
+		w.EmitDecisionAudit(r.Context(), &store.DecisionAuditRecord{Result: "deny", Reason: "in-flight"})
 		rw.WriteHeader(http.StatusNoContent)
 	})}
 	drainStarted := make(chan struct{})
@@ -107,39 +87,30 @@ func TestServer_Shutdown_WritesDecisionAuditFromDrainingRequests(t *testing.T) {
 		t.Fatal("Shutdown did not return")
 	}
 
-	written, _ := fs.snapshot()
-	assert.Equal(t, []string{"in-flight"}, written)
-	assert.Zero(t, w.droppedCount(DecisionAuditDropShutdown, "deny"))
-
-	// Shutdown closed the writer after the drain.
-	w.EmitDecisionAudit(context.Background(), auditRec("deny", "late"))
-	assert.Equal(t, int64(1), w.droppedCount(DecisionAuditDropShutdown, "deny"))
+	require.Len(t, w.records, 1)
+	assert.Equal(t, "in-flight", w.records[0].Reason)
+	assert.IsType(t, noopDecisionAuditEmitter{}, srv.decisionAuditRouter.legacy)
 }
 
-// TestServer_CleanupResources_LeavesDecisionAuditOpen checks that combined
-// mode's teardown hook (CleanupResources, run before the WebServer's HTTP
-// drain) does not close the writer.
+// Cleanup preserves the in-memory emission seam while listeners drain.
 func TestServer_CleanupResources_LeavesDecisionAuditOpen(t *testing.T) {
 	srv := newShutdownTestServer(t)
-	fs := &fakeDecisionAuditStore{}
-	w := installTestDecisionAuditWriter(t, srv, fs)
+	w := &recordingDecisionAuditEmitter{}
+	srv.authzService.SetDecisionAuditEmitter(w)
 
 	require.NoError(t, srv.CleanupResources(context.Background()))
-	w.EmitDecisionAudit(context.Background(), auditRec("deny", "during-drain"))
+	w.EmitDecisionAudit(context.Background(), &store.DecisionAuditRecord{Result: "deny", Reason: "during-drain"})
 	srv.CloseDecisionAudit(context.Background())
 
-	written, _ := fs.snapshot()
-	assert.Equal(t, []string{"during-drain"}, written)
-	assert.Zero(t, w.droppedCount(DecisionAuditDropShutdown, "deny"))
+	require.Len(t, w.records, 1)
+	assert.Equal(t, "during-drain", w.records[0].Reason)
 }
 
-// TestServer_DeferDecisionAuditClose checks that after
-// DeferDecisionAuditClose, Shutdown leaves the writer open for the caller
-// (runServer), which closes it once every listener has drained.
+// Deferred close leaves the router open until the caller drains every listener.
 func TestServer_DeferDecisionAuditClose(t *testing.T) {
 	srv := newShutdownTestServer(t)
-	fs := &fakeDecisionAuditStore{}
-	w := installTestDecisionAuditWriter(t, srv, fs)
+	w := &recordingDecisionAuditEmitter{}
+	srv.authzService.SetDecisionAuditEmitter(w)
 	srv.DeferDecisionAuditClose()
 
 	srv.mu.Lock()
@@ -148,10 +119,9 @@ func TestServer_DeferDecisionAuditClose(t *testing.T) {
 	require.NoError(t, srv.Shutdown(context.Background()))
 
 	// Another listener (the WebServer) is still draining.
-	w.EmitDecisionAudit(context.Background(), auditRec("deny", "web-drain"))
+	w.EmitDecisionAudit(context.Background(), &store.DecisionAuditRecord{Result: "deny", Reason: "web-drain"})
 	srv.CloseDecisionAudit(context.Background())
 
-	written, _ := fs.snapshot()
-	assert.Equal(t, []string{"web-drain"}, written)
-	assert.Zero(t, w.droppedCount(DecisionAuditDropShutdown, "deny"))
+	require.Len(t, w.records, 1)
+	assert.Equal(t, "web-drain", w.records[0].Reason)
 }

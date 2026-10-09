@@ -2074,13 +2074,6 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		hubSrv.SetReaperMetrics(reaperRec)
 	}
 
-	auditRec, auditErr := hub.NewOTelDecisionAuditMetrics(mp, hubSrv.DecisionAuditQueueDepth)
-	if auditErr != nil {
-		log.Printf("WARNING: hub decision audit metrics disabled: %v", auditErr)
-	} else {
-		hubSrv.SetDecisionAuditMetrics(auditRec)
-	}
-
 	if authzRec, err := hub.NewOTelConduitStreamAuthzMetrics(mp); err != nil {
 		log.Printf("WARNING: hub conduit stream authz metrics disabled: %v", err)
 	} else {

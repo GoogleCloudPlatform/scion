@@ -443,7 +443,6 @@ func (s *Server) checkDecisionAuditHealth(checks map[string]string) {
 	if s.decisionAuditRouter == nil {
 		return
 	}
-	newHealth, legacyHealth := s.decisionAuditRouter.healthProjection()
+	newHealth, _ := s.decisionAuditRouter.healthProjection()
 	checks[decisionAuditNewHealthKey] = newHealth
-	checks[decisionAuditLegacyHealthKey] = legacyHealth
 }

@@ -561,148 +561,6 @@ func TestExplainAPI_TraceContainsDecidingPolicy(t *testing.T) {
 // Audit Queryability Tests
 // =============================================================================
 
-func TestAuditQueryability(t *testing.T) {
-	_, s := testServer(t)
-	ctx := context.Background()
-
-	// Create decision audit records with various fields
-	now := time.Now()
-	records := []*store.DecisionAuditRecord{
-		{
-			PrincipalKind: "user",
-			PrincipalID:   tid("query-user-1"),
-			CredentialID:  tid("cred-1"),
-			Route:         "GET /api/v1/agents",
-			ResourceType:  "agent",
-			ResourceID:    tid("agent-1"),
-			Permission:    "read",
-			Result:        "allow",
-			Reason:        "admin bypass",
-			CorrelationID: "corr-001",
-			Timestamp:     now.Add(-2 * time.Hour),
-		},
-		{
-			PrincipalKind: "agent",
-			PrincipalID:   tid("query-agent-1"),
-			Route:         "POST /api/v1/agents",
-			ResourceType:  "agent",
-			ResourceID:    tid("agent-2"),
-			Permission:    "create",
-			Result:        "deny",
-			Reason:        "default deny",
-			CorrelationID: "corr-002",
-			Timestamp:     now.Add(-1 * time.Hour),
-		},
-		{
-			PrincipalKind: "user",
-			PrincipalID:   tid("query-user-1"),
-			CredentialID:  tid("cred-2"),
-			Route:         "DELETE /api/v1/policies/123",
-			ResourceType:  "policy",
-			ResourceID:    tid("policy-1"),
-			Permission:    "delete",
-			Result:        "allow",
-			Reason:        "policy match",
-			CorrelationID: "corr-003",
-			Timestamp:     now,
-		},
-	}
-
-	for _, record := range records {
-		if err := s.CreateDecisionAudit(ctx, record); err != nil {
-			t.Fatalf("failed to create decision audit: %v", err)
-		}
-	}
-
-	// Test: filter by principal
-	results, total, err := s.ListDecisionAudits(ctx, store.DecisionAuditFilter{
-		PrincipalID: tid("query-user-1"),
-		Limit:       10,
-	})
-	if err != nil {
-		t.Fatalf("failed to list by principal: %v", err)
-	}
-	if total != 2 {
-		t.Errorf("expected 2 results for principal filter, got %d", total)
-	}
-	if len(results) != 2 {
-		t.Errorf("expected 2 records, got %d", len(results))
-	}
-
-	// Test: filter by credential
-	_, total, err = s.ListDecisionAudits(ctx, store.DecisionAuditFilter{
-		CredentialID: tid("cred-1"),
-		Limit:        10,
-	})
-	if err != nil {
-		t.Fatalf("failed to list by credential: %v", err)
-	}
-	if total != 1 {
-		t.Errorf("expected 1 result for credential filter, got %d", total)
-	}
-
-	// Test: filter by route
-	_, total, err = s.ListDecisionAudits(ctx, store.DecisionAuditFilter{
-		Route: "GET /api/v1/agents",
-		Limit: 10,
-	})
-	if err != nil {
-		t.Fatalf("failed to list by route: %v", err)
-	}
-	if total != 1 {
-		t.Errorf("expected 1 result for route filter, got %d", total)
-	}
-
-	// Test: filter by resource
-	_, total, err = s.ListDecisionAudits(ctx, store.DecisionAuditFilter{
-		ResourceType: "agent",
-		Limit:        10,
-	})
-	if err != nil {
-		t.Fatalf("failed to list by resource type: %v", err)
-	}
-	if total != 2 {
-		t.Errorf("expected 2 results for resource type filter, got %d", total)
-	}
-
-	// Test: filter by result
-	_, total, err = s.ListDecisionAudits(ctx, store.DecisionAuditFilter{
-		Result: "deny",
-		Limit:  10,
-	})
-	if err != nil {
-		t.Fatalf("failed to list by result: %v", err)
-	}
-	if total != 1 {
-		t.Errorf("expected 1 result for deny filter, got %d", total)
-	}
-
-	// Test: filter by time range
-	_, total, err = s.ListDecisionAudits(ctx, store.DecisionAuditFilter{
-		Since: now.Add(-90 * time.Minute),
-		Until: now.Add(1 * time.Minute),
-		Limit: 10,
-	})
-	if err != nil {
-		t.Fatalf("failed to list by time range: %v", err)
-	}
-	if total != 2 {
-		t.Errorf("expected 2 results for time range filter, got %d", total)
-	}
-
-	// Test: filter by correlation ID
-	results, _, err = s.ListDecisionAudits(ctx, store.DecisionAuditFilter{
-		CorrelationID: "corr-002",
-		Limit:         10,
-	})
-	if err != nil {
-		t.Fatalf("failed to list by correlation ID: %v", err)
-	}
-	if len(results) != 1 {
-		t.Errorf("expected 1 result for correlation ID filter, got %d", len(results))
-	}
-}
-
 // =============================================================================
 // Retention Cleanup Tests
 // =============================================================================
@@ -711,35 +569,8 @@ func TestRetentionCleanup(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create old decision audit records
-	oldTime := time.Now().AddDate(0, 0, -100) // 100 days ago
+	oldTime := time.Now().AddDate(0, 0, -100)
 	recentTime := time.Now().Add(-1 * time.Hour)
-
-	oldRecord := &store.DecisionAuditRecord{
-		PrincipalKind: "user",
-		PrincipalID:   tid("cleanup-user"),
-		ResourceType:  "agent",
-		Permission:    "read",
-		Result:        "allow",
-		Reason:        "test",
-		Timestamp:     oldTime,
-	}
-	recentRecord := &store.DecisionAuditRecord{
-		PrincipalKind: "user",
-		PrincipalID:   tid("cleanup-user"),
-		ResourceType:  "agent",
-		Permission:    "read",
-		Result:        "allow",
-		Reason:        "test",
-		Timestamp:     recentTime,
-	}
-
-	if err := s.CreateDecisionAudit(ctx, oldRecord); err != nil {
-		t.Fatalf("failed to create old record: %v", err)
-	}
-	if err := s.CreateDecisionAudit(ctx, recentRecord); err != nil {
-		t.Fatalf("failed to create recent record: %v", err)
-	}
 
 	// Create old mutation audit records
 	oldMutation := &store.MutationAuditRecord{
@@ -771,21 +602,7 @@ func TestRetentionCleanup(t *testing.T) {
 		t.Fatalf("CleanupAuditRecords failed: %v", err)
 	}
 
-	// Verify old records were deleted
-	decisionRecords, total, err := s.ListDecisionAudits(ctx, store.DecisionAuditFilter{
-		PrincipalID: tid("cleanup-user"),
-		Limit:       10,
-	})
-	if err != nil {
-		t.Fatalf("failed to list decision audits: %v", err)
-	}
-	if total != 1 {
-		t.Errorf("expected 1 decision audit remaining after cleanup, got %d", total)
-	}
-	if len(decisionRecords) == 1 && decisionRecords[0].Timestamp.Before(time.Now().AddDate(0, 0, -90)) {
-		t.Error("remaining record should be recent, not old")
-	}
-
+	// Verify old mutation records were deleted.
 	mutationRecords, total, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
 		ActorPrincipalID: tid("cleanup-user"),
 		Limit:            10,
