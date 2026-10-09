@@ -356,9 +356,9 @@ var _ PerProfileInstancesRuntime = (*SubstrateRuntime)(nil)
 // succeeded, so callers report this up front instead of after the fact —
 // the broker's direct-connect and control-channel PTY handlers ask
 // HasAttachSupport on the live instance they already resolved
-// (pkg/runtimebroker), and the CLI reads the same answer secondhand from
-// the broker's own advertised metadata (cmd/attach.go's
-// attachSupportedByBroker), not from a compiled runtime-type table.
+// (pkg/runtimebroker), and the Hub reads the same answer secondhand from
+// the broker's stored metadata to choose the PTY path (and answers the
+// CLI's attach preflight with it), not from a compiled runtime-type table.
 func (r *SubstrateRuntime) SupportsAttach() bool { return false }
 
 var _ AttachCapableRuntime = (*SubstrateRuntime)(nil)

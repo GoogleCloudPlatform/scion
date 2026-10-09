@@ -662,6 +662,10 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// broker launch, the rollback or the final status write. The
 			// dispatch is bounded by syncDispatch (SyncDispatchBound).
 			ctx = detachLaunchFromClient(ctx)
+			// The response waits on that dispatch for up to
+			// syncDispatchTimeout: extend this request's write deadline to
+			// cover it (ptone/scion#3890, as ptone/scion#3850 did for create).
+			extendWriteDeadlineForSyncDispatch(ctx, w, s.config.WriteTimeout)
 			// The start runs under a start claim, which records run intent
 			// running (it stays running if the dispatch fails: a failed
 			// start is still a start the user asked for). startAgentCore
@@ -758,6 +762,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// client (ptone/scion#1961). Each leg is bounded by
 			// syncDispatch.
 			ctx = detachLaunchFromClient(ctx)
+			// The response waits on both legs: extend this request's write
+			// deadline to cover them (ptone/scion#3890).
+			extendWriteDeadline(ctx, w, s.config.WriteTimeout, restartWriteBudget())
 			// Refuse before the stop leg: otherwise a broker without
 			// the empty-per-agent capability would have the agent
 			// stopped and then the start refused (design #2703 D3).

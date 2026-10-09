@@ -87,6 +87,11 @@
       "disposition": "terminal"
     },
     {
+      "code": 4400,
+      "name": "protocol_error",
+      "disposition": "terminal"
+    },
+    {
       "code": 4401,
       "name": "pty_auth_required",
       "disposition": "terminal"
@@ -102,8 +107,18 @@
       "disposition": "terminal"
     },
     {
+      "code": 4409,
+      "name": "superseded_incarnation",
+      "disposition": "terminal"
+    },
+    {
       "code": 4410,
       "name": "pty_session_gone",
+      "disposition": "terminal"
+    },
+    {
+      "code": 4499,
+      "name": "cancelled",
       "disposition": "terminal"
     },
     {

@@ -583,6 +583,7 @@ func (s *Server) shutdownExisting() {
 // metadata server instance to reclaim the port from a stale server.
 func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}

@@ -233,15 +233,16 @@ profiles:
 | :--- | :--- | :--- |
 | `runtime` | string | **Required**. Name of a runtime defined in `runtimes`. |
 | `default_template` | string | Default template for agents created under this profile. |
-| `default_harness_config` | string | Default harness config to use. |
-| `default_harness_auth` | string | Default authentication type for new agents under this profile. |
+| `default_harness_config` | string | Default harness config name for agents created under this profile. |
 | `image_registry` | string | Profile-level registry override. Takes precedence over the top-level `image_registry`. |
+| `volumes` | list | Volume mounts for agents created under this profile, appended after the harness config's `volumes`. Each entry has `target` (required), `source`, `read_only`, `type`, `bucket` (GCS bucket name), `prefix` (GCS object prefix), `mode` (mount options), `server` (NFS server host or IP) and `volume_name` (Cloud Run or GKE volume name). `type` is `local` (default; host bind mount, requires `source`), `gcs` (GCS FUSE mount, requires `bucket`), `nfs` (NFS mount, requires `server` and `source`), `cloudrun-volume` (Cloud Run managed volume, requires `volume_name`) or `gke-shared-volume` (GKE-provided shared volume such as a Filestore CSI PVC, requires `volume_name`). |
 | `harness_overrides` | map | Per-harness-config overrides. Keys match `harness_configs` names. |
 | `secrets` | list | Required secrets for agents created under this profile. |
 | `resources` | object | Resource requests and limits for agents created under this profile. See [Resource Specification](#resource-specification-resources). |
 | `shared_dir_storage_class` | string | (Kubernetes) StorageClass for shared-dir PVCs created under this profile. Wins over the runtime entry's value; a template or agent `kubernetes.shared_dir_storage_class` wins over this. |
 | `shared_dir_size` | string | (Kubernetes) Size for each shared-dir PVC created under this profile. Same precedence as `shared_dir_storage_class`. |
 | `safe_to_evict` | bool | (Kubernetes) Safe-to-evict setting for agent pods created under this profile. Wins over the runtime entry's value; a template or agent `kubernetes.safeToEvict` wins over this. |
+| `clone_depth` | string or int | Git clone depth for clone-per-agent workspaces of agents under this profile: `full` for a full (non-shallow) clone, or an integer N from 1 to 999999999 for a clone of depth N. A template or agent `clone_depth` wins over this. Unset (absent, null or empty) keeps the default shallow (depth 1) clone. Applies only when the workspace is cloned (a new agent, or a recreated workspace). |
 | `shared_dir_storage_backend` | string | `local` or `nfs`. Overrides [`server.shared_dir_storage.backend`](/scion/reference/server-config/#per-profile-backend) for agents using this profile. Wins over the runtime entry's value. Read from global settings only. |
 | `shared_dir_storage_backends` | map | Shared directory name to `local` or `nfs`, for agents using this profile. A directory it does not name uses `shared_dir_storage_backend`. Wins over the runtime entry's values. See [per-directory backend](/scion/reference/server-config/#per-directory-backend). Read from global settings only. |
 | `home_storage_backend` | string | (Kubernetes) `local` or `nfs`. Overrides [`server.home_storage.backend`](/scion/reference/server-config/#agent-home-storage-serverhome_storage) for agents using this profile. Wins over the runtime entry's value. Read from global settings only. |
@@ -251,6 +252,15 @@ profiles:
 **Shared-dir PVC class and size (Kubernetes).** Each key is resolved separately, and the first source that sets it wins: the agent's or template's `kubernetes:` block, then the profile, then the profile's runtime entry, then the built-in default (the cluster's default class and `10Gi`). On GKE Autopilot, set an RWX class such as `standard-rwx`. See [Shared Directory PVCs](/scion/hosted/ha/kubernetes/#shared-directory-pvcs).
 
 **Safe-to-evict (Kubernetes).** The first source that sets `safe_to_evict` wins: the agent's or template's `kubernetes.safeToEvict`, then the agent's profile (`--profile`, or the profile the agent was created with, falling back to the active profile), then that profile's runtime entry. An explicit `true` at a higher level turns the annotation off even when a lower level sets `false`. On GKE Autopilot the annotation makes the pod an extended run time pod, which has its own limits and cost. See [Safe-to-Evict](/scion/hosted/ha/kubernetes/#safe-to-evict).
+
+**Clone depth.** The first source that sets `clone_depth` wins: the agent's or template's `clone_depth`, then the agent's profile (`--profile`, or the profile the agent was created with, falling back to the active profile). When neither sets it, a clone-per-agent workspace is a shallow clone of depth 1. `full` clones the whole history, so `git rev-parse --is-shallow-repository` prints `false` and rebase, merge-base, `git log` and blame work without `git fetch --unshallow`. `0`, values above 999999999 and other values are rejected; use `full` for a full clone. The setting applies only when the broker clones the repository per agent (clone-per-agent); on the Kubernetes runtime it reaches both the NFS provisioning init container and the in-container clone. It takes effect only when the workspace is cloned: a new agent, or an agent whose workspace is recreated. Restarting an agent whose workspace is already a shallow clone keeps it shallow; to deepen it in place, run `git fetch --unshallow` in the workspace. For example:
+
+```yaml
+profiles:
+  gke:
+    runtime: gke-autopilot
+    clone_depth: full
+```
 
 **Agent timezone.** Profiles do not set the `TZ` of a Hub-dispatched agent: a `TZ` in a profile's `harness_overrides` env is not used (profiles have no `env` key). The Hub-level default is `agent_defaults.default_timezone` (in `settings.yaml`, the top-level `default_timezone` key). For the full order, pins and local mode, see [Times and Timezones](/scion/reference/times-and-timezones/#agent-tz-hub-dispatched-agents).
 

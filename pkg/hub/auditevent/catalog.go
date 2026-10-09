@@ -14,6 +14,8 @@
 
 package auditevent
 
+import "slices"
+
 // PhaseOutcome is one exact phase/result pair declared by the catalog.
 type PhaseOutcome struct {
 	Phase   Phase
@@ -69,15 +71,16 @@ type ResourceScopeSchema struct {
 
 // CatalogEntry is the machine-readable schema for one action.
 type CatalogEntry struct {
-	Family                 string
-	Action                 string
-	AllowedPairs           []PhaseOutcome
-	ResourceKind           string
-	RequiredEnvelopeLeaves []string
-	ResourceScopes         []ResourceScopeSchema
-	RequiredPayloadLeaves  []PayloadLeafSchema
-	OptionalPayloadLeaves  []PayloadLeafSchema
-	Destinations           []Destination
+	Family                  string
+	Action                  string
+	AllowedPairs            []PhaseOutcome
+	ResourceKind            string
+	AdditionalResourceKinds []string
+	RequiredEnvelopeLeaves  []string
+	ResourceScopes          []ResourceScopeSchema
+	RequiredPayloadLeaves   []PayloadLeafSchema
+	OptionalPayloadLeaves   []PayloadLeafSchema
+	Destinations            []Destination
 }
 
 var catalog = []CatalogEntry{{
@@ -105,6 +108,22 @@ var catalog = []CatalogEntry{{
 		{Name: "changed_fields", Type: PayloadStringArray, MaxItems: 32, ItemMaxBytes: 256},
 	},
 	Destinations: []Destination{DestinationStructuredLog, DestinationHistory},
+}, {
+	Family:                  "authorization",
+	Action:                  "decide",
+	AllowedPairs:            []PhaseOutcome{{Phase: PhaseDecision, Outcome: OutcomeAllow}, {Phase: PhaseDecision, Outcome: OutcomeDeny}},
+	ResourceKind:            "project",
+	AdditionalResourceKinds: []string{"agent"},
+	RequiredEnvelopeLeaves:  []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource"},
+	ResourceScopes:          []ResourceScopeSchema{{Scope: ResourceScopeSystem, ProjectID: ResourceProjectIDOmitted}},
+	RequiredPayloadLeaves: []PayloadLeafSchema{
+		{Name: "permission_id", Type: PayloadString, MaxBytes: 128},
+		{Name: "permission", Type: PayloadString, MaxBytes: 128},
+		{Name: "reason", Type: PayloadString, MaxBytes: 256},
+		{Name: "sampled", Type: PayloadString, MaxBytes: 5, AllowedValues: []string{"true", "false"}},
+	},
+	OptionalPayloadLeaves: []PayloadLeafSchema{{Name: "denied_by", Type: PayloadString, MaxBytes: 64}},
+	Destinations:          []Destination{DestinationStructuredLog},
 }}
 
 // Catalog returns a defensive snapshot of the schemas implemented in this
@@ -113,6 +132,7 @@ func Catalog() []CatalogEntry {
 	result := make([]CatalogEntry, len(catalog))
 	for i, entry := range catalog {
 		result[i] = entry
+		result[i].AdditionalResourceKinds = slices.Clone(entry.AdditionalResourceKinds)
 		result[i].AllowedPairs = append([]PhaseOutcome(nil), entry.AllowedPairs...)
 		result[i].RequiredEnvelopeLeaves = append([]string(nil), entry.RequiredEnvelopeLeaves...)
 		result[i].ResourceScopes = append([]ResourceScopeSchema(nil), entry.ResourceScopes...)
@@ -135,6 +155,7 @@ func clonePayloadLeafSchemas(schemas []PayloadLeafSchema) []PayloadLeafSchema {
 func catalogEntry(family, action string) (CatalogEntry, bool) {
 	for _, entry := range catalog {
 		if entry.Family == family && entry.Action == action {
+			entry.AdditionalResourceKinds = slices.Clone(entry.AdditionalResourceKinds)
 			return entry, true
 		}
 	}

@@ -70,7 +70,8 @@ Commands:
   scion artifact publish <file|dir> --version-of <ref> [--note]
   scion artifact publish <file|dir> --review <ref> [--note]
   scion artifact get <ref> [--out <path>] [--clean|--accept] [--kind publish]
-  scion artifact versions <ref>                List an artifact's versions`,
+  scion artifact versions <ref>                List an artifact's versions
+  scion artifact share <ref> [--ttl 7d]        Create a share link (users only)`,
 }
 
 var artifactPublishCmd = &cobra.Command{

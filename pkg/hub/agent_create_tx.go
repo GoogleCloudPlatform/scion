@@ -152,6 +152,10 @@ const (
 	// createStageManagedRecord: the managed create's post-create write
 	// (managed Runtime, interaction ID) failed (ptone/scion#3557).
 	createStageManagedRecord = "managed_record"
+	// createStageWorkspaceRecord: the write that records the hub-managed
+	// workspace's storage path and bucket on the row failed
+	// (ptone/scion#3730).
+	createStageWorkspaceRecord = "workspace_record"
 )
 
 // createRowCompensable is the predicate of a conditional create
