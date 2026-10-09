@@ -201,11 +201,13 @@ func ApplyPlannedAdopt(ctx context.Context, tx store.Store, hop *Hop, opID strin
 // column is stored as text, and an exact match against the canonical form
 // fails for a row whose stored text is in another form (RFC3339 with Z, a
 // non-UTC offset, a monotonic clock suffix) but names the same instant.
-// Leaving it out loses no change detection. Delegator, delegate, scope, role
-// and grandfathered are never updated in place: every in-place write to an
-// edge either changes active (deactivation, reactivation) or rewrites only
-// the updated text (timestamp normalization). The guard catches the first;
-// the second is not a change. Callers also plan the hop inside the same
+// Delegator, delegate, scope, role and grandfathered are never updated in
+// place: every in-place write to an edge either changes active (deactivation,
+// reactivation) or rewrites only the updated text (timestamp normalization).
+// The guard catches a deactivation; normalization is not a change. What the
+// updated predicate added was detecting a deactivate/reactivate of the same
+// row between the read and this write. The content is identical, so adopting
+// it is acceptable. Callers also plan the hop inside the same
 // transaction, and ApplyAdopt checks the hop's fingerprint, which covers the
 // updated time as an instant, against the snapshot.
 func writeAdoption(ctx context.Context, tx store.Store, hop *Hop, opID string, actor Actor) (Result, error) {
