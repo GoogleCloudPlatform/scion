@@ -519,10 +519,19 @@ class Session implements TerminalSession {
       ) {
         this.markReconnectFailed();
       }
-      // `reconnecting` reads `pending`, which only just cleared: tell
-      // subscribers, or an attempt that settled without a socket (refused,
-      // unavailable, or an error) would leave them on "reconnecting".
-      if (wasPending && this.state.connection !== 'closed') this.update({});
+      // `reconnecting` reads `pending`, which only just cleared. An attempt
+      // that settled without a socket (refused, unavailable, or an error)
+      // must tell subscribers, or they stay on "reconnecting". An attempt
+      // that handed off to a socket ('connecting') does not: the socket's
+      // own events (data, close, error) notify next, and the pane already
+      // treats 'connecting' as an attempt, so a repeat notification would
+      // only duplicate the 'connecting' state.
+      if (
+        wasPending &&
+        this.state.connection !== 'closed' &&
+        this.state.connection !== 'connecting'
+      )
+        this.update({});
     });
     return attempt;
   }
