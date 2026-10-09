@@ -1854,6 +1854,8 @@ export class ScionChatMessage extends LitElement {
 
   /** Inject copy buttons on all code blocks inside rendered markdown. */
   private injectCopyButtons(): void {
+    /** A copy button that carries the timer that resets its label. */
+    type CopyButton = HTMLButtonElement & { _copyTimer?: ReturnType<typeof setTimeout> };
     this.shadowRoot?.querySelectorAll('.md-content pre').forEach((pre) => {
       if (pre.querySelector('.copy-btn')) return;
       const btn = document.createElement('button');
@@ -1863,9 +1865,9 @@ export class ScionChatMessage extends LitElement {
         const code = pre.querySelector('code')?.textContent ?? pre.textContent ?? '';
         void navigator.clipboard.writeText(code);
         btn.textContent = 'Copied!';
-        const prev = (btn as any)._copyTimer as ReturnType<typeof setTimeout> | undefined;
+        const prev = (btn as CopyButton)._copyTimer;
         if (prev) clearTimeout(prev);
-        (btn as any)._copyTimer = setTimeout(() => {
+        (btn as CopyButton)._copyTimer = setTimeout(() => {
           if (!this.isConnected) return;
           btn.textContent = 'Copy';
         }, 1500);
