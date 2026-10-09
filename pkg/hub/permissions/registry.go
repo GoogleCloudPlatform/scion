@@ -84,6 +84,7 @@ const (
 	ActionSetMessageMode = "set_message_mode"
 	ActionLifecycle      = "lifecycle"
 	ActionCreateGlobal   = "create_global"
+	ActionAutoProvide    = "auto_provide"
 	// ActionDeliver and ActionUse distinguish launch-time material delivery
 	// from an agent's own runtime retrieval or token-mint request over the
 	// same or a related resource (ptone/scion#2129). Neither is a read-only
@@ -226,13 +227,19 @@ var Registry = []Permission{
 	// broker.create is a hub-level permission: registration is gated by an
 	// explicit hub-member role grant (seed.go hubMemberPermissionIDs), not by
 	// mere authentication. Its UAT selector "broker:create" is mintable only
-	// on a hub-boundary token (PermissionAllowedBoundaries). Broker creation
-	// does not admit bearer credentials (authorizeBrokerCreate).
+	// on a hub-boundary token (PermissionAllowedBoundaries). Registration is
+	// admitted for interactive sessions, dev credentials and hub-boundary
+	// UATs carrying broker:create, through the bearer gate
+	// (authorizeBrokerCreate).
 	{ID: "broker.create", Resource: ResourceBroker, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "broker:create", Description: "Create brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go:authorizeBrokerCreate", "pkg/hub/handlers_projects_core.go"}},
 	{ID: "broker.read", Resource: ResourceBroker, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "broker:read", Description: "Read brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go"}},
 	{ID: "broker.update", Resource: ResourceBroker, Action: ActionUpdate, CapabilityKind: CapabilityResource, Description: "Update brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go"}},
 	{ID: "broker.delete", Resource: ResourceBroker, Action: ActionDelete, CapabilityKind: CapabilityResource, Description: "Delete brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go"}},
 	{ID: "broker.list", Resource: ResourceBroker, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "broker:list", Description: "List brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go"}},
+	// broker.auto_provide gates turning on a broker's auto-provide setting,
+	// which offers the broker to every project on the hub. It has no UAT
+	// selector, so a user access token never carries it.
+	{ID: "broker.auto_provide", Resource: ResourceBroker, Action: ActionAutoProvide, CapabilityKind: CapabilityScope, Description: "Offer a broker to every project (auto-provide)", Enforcement: []string{"pkg/hub/handlers_brokers.go:authorizeBrokerAutoProvide"}},
 	{ID: "broker.dispatch", Resource: ResourceBroker, Action: ActionDispatch, CapabilityKind: CapabilityResource, Description: "Dispatch through brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go"}},
 
 	{ID: "gcp_service_account.create", Resource: ResourceGCPServiceAccount, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create GCP service accounts", Enforcement: []string{"pkg/hub/handlers_gcp_identity.go"}},

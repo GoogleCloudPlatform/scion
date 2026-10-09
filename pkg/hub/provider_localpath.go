@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -90,22 +91,53 @@ func validateProviderLocalPath(projectName, projectSlug, localPath string) error
 		"or pass the project's own directory", localPath, projectName)
 }
 
+// restrictedProviderPathPrefixes are host system directories a provider
+// local path may not name or sit under.
+var restrictedProviderPathPrefixes = []string{"/etc", "/usr", "/bin", "/sbin", "/sys", "/proc", "/dev", "/boot", "/lib"}
+
+// checkProviderLocalPath validates a requested provider local path for the
+// named project and returns it cleaned. The path must be absolute, must not
+// name or sit under a restricted system directory, and must pass
+// validateProviderLocalPath. Every broker's path is checked the same way;
+// whether the directory exists is checked only for the embedded broker, by
+// the caller. field names the request field in error messages.
+func checkProviderLocalPath(field, projectName, projectSlug, localPath string) (string, error) {
+	clean := filepath.Clean(localPath)
+	if !filepath.IsAbs(clean) {
+		return "", fmt.Errorf("%s must be an absolute path", field)
+	}
+	for _, prefix := range restrictedProviderPathPrefixes {
+		if clean == prefix || strings.HasPrefix(clean, prefix+"/") {
+			return "", fmt.Errorf("%s points to a restricted system directory", field)
+		}
+	}
+	if err := validateProviderLocalPath(projectName, projectSlug, clean); err != nil {
+		return "", err
+	}
+	return clean, nil
+}
+
 // registerProviderLocalPath returns the local path to store for a provider
-// written by project register.
+// written by project register or by a provider-add.
 //
 //   - A new project, or a broker that is not yet a provider, takes the
 //     requested path. For a new project it is checked again against the
 //     slug actually assigned; a global-directory path it may not hold is
 //     dropped.
-//   - A stored path that is the broker's global directory for a project
-//     other than the global project is replaced by the requested path, or
-//     cleared when the request has none, so re-running provide repairs it.
+//   - A stored path that checkProviderLocalPath refuses for this project
+//     (not absolute, under a restricted system directory, or the broker's
+//     global directory for a project other than the global project) is
+//     replaced by the requested path, or cleared when the request has none,
+//     so re-running provide repairs it.
 //   - Otherwise the stored path is kept: an existing provider with no path
 //     keeps none, which avoids converting a hub-native project into a linked
 //     one, and a linked path is not dropped by a register that omits it.
 //
-// requestedPath must already have passed validateProviderLocalPath.
-func (s *Server) registerProviderLocalPath(ctx context.Context, project *store.Project, brokerID, requestedPath string, created bool) string {
+// An error reading the stored provider, other than store.ErrNotFound, is
+// returned so the caller fails the request without writing the provider.
+//
+// requestedPath must already have passed checkProviderLocalPath.
+func (s *Server) registerProviderLocalPath(ctx context.Context, project *store.Project, brokerID, requestedPath string, created bool) (string, error) {
 	if created {
 		// The request was checked against the slug register expected to
 		// assign. A concurrent register can take that slug first, so check
@@ -114,16 +146,23 @@ func (s *Server) registerProviderLocalPath(ctx context.Context, project *store.P
 		if err := validateProviderLocalPath(project.Name, project.Slug, requestedPath); err != nil {
 			s.projectsLogger().Warn("dropping provider local path for new project",
 				"project_id", project.ID, "slug", project.Slug, "error", err.Error())
-			return ""
+			return "", nil
 		}
-		return requestedPath
+		return requestedPath, nil
 	}
 	existing, err := s.store.GetProjectProvider(ctx, project.ID, brokerID)
+	if errors.Is(err, store.ErrNotFound) {
+		return requestedPath, nil
+	}
 	if err != nil {
-		return requestedPath
+		return "", err
 	}
-	if validateProviderLocalPath(project.Name, project.Slug, existing.LocalPath) != nil {
-		return requestedPath
+	if existing.LocalPath == "" {
+		return "", nil
 	}
-	return existing.LocalPath
+	clean, err := checkProviderLocalPath("localPath", project.Name, project.Slug, existing.LocalPath)
+	if err != nil {
+		return requestedPath, nil
+	}
+	return clean, nil
 }
