@@ -64,6 +64,10 @@ When starting an agent, the Hub resolves a broker through a priority cascade:
   ```
   On a broker machine, `scion runtime-broker status` shows that broker's own state.
 
+### Agents that start other agents
+
+When an agent runs `scion start` or `scion create` inside its container, the CLI reads the Hub endpoint from the agent's environment (`SCION_HUB_ENDPOINT`, then `SCION_HUB_URL`), so no `--hub` flag is needed. The Hub resolves the new agent's broker through the same cascade as any other create. The profile is resolved the same way too: `-p` first, then the project's active profile, then the selected broker's default profile. The creating agent's own broker and profile are never used unless they are passed with `--broker` or `-p`. To run agent-launched agents on a particular broker or profile, such as a Kubernetes profile, set the project's default broker and active profile, or pass the flags.
+
 ## Moving an Agent to Another Runtime Broker
 
 `scion reincarnate <agent> --broker <name|id>` moves an agent to another Runtime Broker, for example to drain a broker or to reach different hardware. The agent keeps its ID, slug, and generation chain, and its workspace, uncommitted and unpushed changes included. The move is a [reincarnation](/scion/reference/cli/#scion-reincarnate): the agent starts a new generation on the target with a Hub-built preamble and the handoff you provide.
