@@ -485,6 +485,10 @@ func (e *deletionEngine) abandonOutcome() deletionOutcome {
 // (or the executing hub node) refused the dispatch as stale.
 const staleDispatchMessage = "the broker received the delete after its deadline and did nothing; retry the delete"
 
+// managedDeleteFailedPrefix starts the runtime_error message of a managed
+// delete whose cloud cleanup failed; the backend error follows.
+const managedDeleteFailedPrefix = "Failed to delete managed agent cloud resources: "
+
 // abandonWith abandons the claim (see abandon) and returns failed{abandoned}
 // with msg.
 func (e *deletionEngine) abandonWith(msg string) deletionOutcome {
@@ -623,16 +627,24 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 	}()
 
 	// Managed agent: clean up cloud resources directly, skip the broker.
-	// Errors are logged, as before (follow-up 4).
+	// A failure (including no managed backend on this hub) fails the delete
+	// and restores the prior phase, as a broker error does; force=true logs
+	// it and continues (ptone/scion#2883).
 	if isManagedAgentRuntime(agent.Runtime) {
-		if err := s.managedAgentDelete(ctx, agent); err != nil {
-			s.agentLifecycleLog.Warn("Failed to delete managed agent cloud resources",
-				"agent_id", agent.ID, "error", err)
-		}
+		err := s.managedAgentDelete(ctx, agent)
 		if e.isLost() {
 			return e.lost(), false
 		}
-		return deletionOutcome{}, true
+		if err == nil {
+			return deletionOutcome{}, true
+		}
+		if req.Force {
+			s.agentLifecycleLog.Warn("Failed to delete managed agent cloud resources (force=true, continuing)",
+				"agent_id", agent.ID, "error", err)
+			return deletionOutcome{}, true
+		}
+		s.agentLifecycleLog.Error("Failed to delete managed agent cloud resources", "agent_id", agent.ID, "error", err)
+		return e.rollback(store.DeletionCodeRuntimeError, managedDeleteFailedPrefix+err.Error()), false
 	}
 
 	dispatcher := s.GetDispatcher()

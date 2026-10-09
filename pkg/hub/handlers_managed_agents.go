@@ -196,10 +196,20 @@ func (s *Server) managedAgentStop(ctx context.Context, agent *store.Agent) error
 	return nil
 }
 
-// managedAgentDelete deletes a managed agent's cloud resources.
+// managedAgentDelete deletes a managed agent's cloud resources: it cancels
+// the active interaction, if any. Unlike managedAgentStop it returns every
+// failure, including a hub with no managed backend configured, so the delete
+// engine can fail the delete instead of finalizing over a running interaction
+// (ptone/scion#2883); force=true still removes the record.
 func (s *Server) managedAgentDelete(ctx context.Context, agent *store.Agent) error {
-	// Stop first (best-effort) — cancels the active interaction.
-	_ = s.managedAgentStop(ctx, agent)
+	if _, err := getManagedBackend(); err != nil {
+		return fmt.Errorf("managed agent backend: %w", err)
+	}
+	if interactionID := agent.Annotations[annotationInteractionID]; interactionID != "" {
+		if err := stopManagedInteraction(ctx, interactionID); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -350,7 +360,7 @@ func writeManagedCreateUnrecorded(w http.ResponseWriter, agentID, correlationID 
 // interaction (its state is then unknown). An interaction that has already
 // ended needs no cancel. A read that returns no state is an error too: the
 // state is unknown. managedAgentStop calls it best-effort, logging and
-// swallowing these errors.
+// swallowing these errors; managedAgentDelete returns them.
 func stopManagedInteraction(ctx context.Context, interactionID string) error {
 	backend, err := getManagedBackend()
 	if err != nil {
