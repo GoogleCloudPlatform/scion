@@ -39,8 +39,8 @@ import (
 // WorkspaceStoragePath and WorkspaceStorageBucket set) must land on the row
 // before anything is dispatched. A version conflict gets one re-read and one
 // retry; a delete that won at the re-read, a failed retry or any other error
-// rolls the create back at stage workspace_record (500, or 409 when a delete
-// holds the row) with nothing dispatched and nothing published.
+// rolls the create back at stage workspace_record (500 internal_error, or 409
+// when a delete holds the row) with nothing dispatched and nothing published.
 
 const workspaceRecordTestBucket = "ws-record-bucket"
 
@@ -169,6 +169,7 @@ func requireWorkspaceRecordFailed(t *testing.T, rec *httptest.ResponseRecorder) 
 	assert.NotContains(t, raw, "agent", "the 500 carries no agent body")
 	var body ErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, ErrCodeInternalError, body.Error.Code)
 	assert.Equal(t, "Failed to record workspace storage path", body.Error.Message)
 }
 

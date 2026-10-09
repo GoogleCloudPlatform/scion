@@ -2486,7 +2486,12 @@ func (s *Server) createAgentInProject(
 								writeDeletedDuringCreate(w, agent.ID, nil)
 								return
 							}
-							writeCreateFailure(w, corrID, func() { RuntimeError(w, "Failed to record workspace storage path") })
+							// A failed hub store write, not a broker fault: 500
+							// internal_error, as the managed-record rollback
+							// answers (writeManagedCreateUnrecorded).
+							writeCreateFailure(w, corrID, func() {
+								writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to record workspace storage path", nil)
+							})
 							return
 						}
 					}
