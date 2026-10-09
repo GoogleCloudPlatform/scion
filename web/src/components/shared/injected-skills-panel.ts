@@ -815,9 +815,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
       );
       if (res.ok) {
         const data = (await res.json()) as { skills?: Skill[] } | Skill[];
-        this.dialogSkillResults = Array.isArray(data)
-          ? data
-          : (data as { skills?: Skill[] }).skills || [];
+        this.dialogSkillResults = Array.isArray(data) ? data : data.skills || [];
       }
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') return; // Stale request — discard

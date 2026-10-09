@@ -207,7 +207,7 @@ func TestDecisionAuditHealth_CriticalWarningIndependentOfSink(t *testing.T) {
 	checks := map[string]string{"database": "healthy"}
 	f.router.server.checkDecisionAuditHealth(checks)
 	assert.Equal(t, decisionAuditFaultWarning, checks[decisionAuditNewHealthKey])
-	assert.Equal(t, "healthy", checks[decisionAuditLegacyHealthKey])
+	assert.NotContains(t, checks, decisionAuditLegacyHealthKey)
 	assert.Equal(t, HealthStatusDegraded, deriveHealthStatus(checks))
 	assert.False(t, criticalHealthChecks[decisionAuditNewHealthKey])
 	assert.False(t, criticalHealthChecks[decisionAuditLegacyHealthKey])
@@ -219,21 +219,10 @@ func TestDecisionAuditHealth_CriticalWarningIndependentOfSink(t *testing.T) {
 	assert.Equal(t, HealthStatusUnhealthy, deriveHealthStatus(checks))
 }
 
-func TestDecisionAuditHealth_DistinguishesLegacyDrops(t *testing.T) {
+func TestDecisionAuditHealth_LegacyWriterCheckRemoved(t *testing.T) {
 	f := newAuditFixture(t, auditFixtureAccept)
-	// Read-only writer observation uses a finite inert instance, with no workers,
-	// metrics, store call or real-time close. This is historical state only.
-	writer := &StoreDecisionAuditEmitter{drops: map[decisionAuditDropKey]int64{{reason: DecisionAuditDropWriteFailed, decision: "allow"}: 1}}
-	f.router.server.decisionAuditWriter = writer
 	checks := map[string]string{"database": "healthy"}
 	f.router.server.checkDecisionAuditHealth(checks)
-	assert.Equal(t, "healthy", checks[decisionAuditNewHealthKey])
-	assert.Equal(t, "unhealthy: historical legacy decision audit drops", checks[decisionAuditLegacyHealthKey])
-	assert.Equal(t, HealthStatusDegraded, deriveHealthStatus(checks))
-	writer.mu.Lock()
-	writer.closed = true
-	writer.mu.Unlock()
-	f.router.server.checkDecisionAuditHealth(checks)
-	assert.Equal(t, "unhealthy: legacy decision audit writer closed", checks[decisionAuditLegacyHealthKey])
-	assert.Equal(t, "healthy", checks[decisionAuditNewHealthKey], "legacy state is not a NEW fault")
+	assert.NotContains(t, checks, decisionAuditLegacyHealthKey)
+	assert.Equal(t, HealthStatusHealthy, deriveHealthStatus(checks))
 }

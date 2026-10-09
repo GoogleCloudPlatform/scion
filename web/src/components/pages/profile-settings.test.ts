@@ -173,8 +173,7 @@ describe('scion-page-profile-settings — display timezone', () => {
   function userPatchCalls(): Array<[unknown, RequestInit]> {
     const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
     return (fetchMock.mock.calls as Array<[unknown, RequestInit | undefined]>).filter(
-      ([url, init]) =>
-        init?.method === 'PATCH' && /\/api\/v1\/users\/[^/]+$/.test(String(url))
+      ([url, init]) => init?.method === 'PATCH' && /\/api\/v1\/users\/[^/]+$/.test(String(url))
     ) as Array<[unknown, RequestInit]>;
   }
 
@@ -272,7 +271,7 @@ describe('scion-page-profile-settings — display timezone', () => {
   // assumption about the contract, which is exactly what round 2 found
   // wasn't enough (R2-2): a mismatch on the picker's side wouldn't fail a
   // test built from a synthetic event.
-  it('is wired to the picker\'s real timezone-change event with e.detail.timezone (review R1-2/R2-2)', async () => {
+  it("is wired to the picker's real timezone-change event with e.detail.timezone (review R1-2/R2-2)", async () => {
     let captured: Record<string, unknown> | null = null;
     element = await createComponent(
       createFetchHandler({}, undefined, { body: makeAuthMe() }, (body) => {

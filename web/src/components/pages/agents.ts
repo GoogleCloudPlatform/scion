@@ -679,17 +679,17 @@ export class ScionPageAgents extends LitElement {
     }
 
     // Listen for real-time agent updates
-    stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
-    stateManager.addEventListener('agents-resync', this.boundOnAgentsResync as EventListener);
-    stateManager.addEventListener('agent-created', this.boundOnAgentCreated as EventListener);
+    stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged);
+    stateManager.addEventListener('agents-resync', this.boundOnAgentsResync);
+    stateManager.addEventListener('agent-created', this.boundOnAgentCreated);
     this.agentWindow.addEventListener('change', this.boundOnWindowChange);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
-    stateManager.removeEventListener('agents-resync', this.boundOnAgentsResync as EventListener);
-    stateManager.removeEventListener('agent-created', this.boundOnAgentCreated as EventListener);
+    stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged);
+    stateManager.removeEventListener('agents-resync', this.boundOnAgentsResync);
+    stateManager.removeEventListener('agent-created', this.boundOnAgentCreated);
     this.agentWindow.removeEventListener('change', this.boundOnWindowChange);
     this.cancelAgentsLoad();
   }
