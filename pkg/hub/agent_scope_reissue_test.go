@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -41,6 +42,10 @@ import (
 // permissions existed, so neither is issued the artifact scopes.
 type reissueFixture struct {
 	*mintFixture
+	// faults is installed as the server's store (and the authorization
+	// service's) when the fixture is built; it is transparent until a test
+	// arms it.
+	faults              *reissueFaultStore
 	root, parent, child *store.Agent
 	operator            reissueOperator
 }
@@ -70,7 +75,7 @@ func agentProv(parentID string) store.AuthorityProvenance {
 
 func newReissueFixture(t *testing.T, name string, topRole string) *reissueFixture {
 	t.Helper()
-	f := newMintFixture(t, name)
+	f, faults := newReissueMintFixture(t, name)
 	setBackfillCompleted(t, f.store)
 	// The test server enables dev auth, which raises every mint to the
 	// full role; the re-issue is tested against production minting.
@@ -87,9 +92,169 @@ func newReissueFixture(t *testing.T, name string, topRole string) *reissueFixtur
 	p := f.childAgent(t, name+"-parent", r, AgentRoleFull)
 	a := f.childAgent(t, name+"-child", p, AgentRoleFull)
 	return &reissueFixture{
-		mintFixture: f, root: r, parent: p, child: a,
+		mintFixture: f, faults: faults, root: r, parent: p, child: a,
 		operator: reissueOperator{UserID: DevUserID, CredentialKind: store.InitiatorCredentialKindSession},
 	}
+}
+
+// newReissueMintFixture is newMintFixture with a reissueFaultStore installed
+// on the server (and its authorization service) right after the server is
+// built, before any audited setup (installStoreFault).
+func newReissueMintFixture(t *testing.T, name string) (*mintFixture, *reissueFaultStore) {
+	t.Helper()
+	srv, s := testServer(t)
+	faults, sw := installStoreFault(t, srv, func(inner store.Store, fault *storeFaultSwitch) *reissueFaultStore {
+		return &reissueFaultStore{Store: inner, fault: fault}
+	})
+	faults.sw = sw
+	srv.authzService.store = faults
+	project := setupProjectWithBroker(t, s, name, name)
+	client := &mintBrokerClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}}
+	disp := NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default())
+	disp.SetTokenGenerator(srv)
+	srv.SetDispatcher(disp)
+	userID := tid(name + "-user")
+	createDCUser(t, s, userID, name+"-user@test.com", project.ID, store.ProjectRoleOwner)
+	return &mintFixture{
+		srv: srv, store: s, disp: disp, client: client,
+		projectID: project.ID, brokerID: tid("broker-" + name), userID: userID,
+	}, faults
+}
+
+// reissueFaultStore injects the re-issue tests' store faults. It delegates
+// everything until its switch is armed; then each configured fault applies:
+//   - failParentOnce: the next GetAgent for failParentID fails (one shot,
+//     re-armed by the test before each call);
+//   - dupEdgeAgentID: that agent's active edge is reported twice;
+//   - edgeReadErr: every agent-delegate edge read fails;
+//   - auditFailInTx: the agent_scopes_reissued audit write inside a
+//     transaction fails.
+type reissueFaultStore struct {
+	store.Store
+	fault *storeFaultSwitch
+	sw    *storeFaultSwitch
+
+	failParentID   string
+	failParentOnce atomic.Bool
+	parentFired    atomic.Int32
+	dupEdgeAgentID string
+	edgeReadErr    bool
+	auditFailInTx  bool
+	auditFired     atomic.Int32
+	// nilAgentInTxID: inside a transaction, GetAgent for this ID answers
+	// no row and no error.
+	nilAgentInTxID string
+	// nilAgentAfterCommitID: once a transaction has committed, GetAgent for
+	// this ID answers no row and no error.
+	nilAgentAfterCommitID string
+	committed             atomic.Bool
+}
+
+// arm turns the configured faults on.
+func (s *reissueFaultStore) arm() { s.sw.Arm() }
+
+func (s *reissueFaultStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if s.fault.Active() && id == s.failParentID && s.failParentOnce.CompareAndSwap(true, false) {
+		s.parentFired.Add(1)
+		return nil, errors.New("injected agent read fault")
+	}
+	if s.fault.Active() && s.committed.Load() && id == s.nilAgentAfterCommitID {
+		return nil, nil
+	}
+	return s.Store.GetAgent(ctx, id)
+}
+
+func (s *reissueFaultStore) GetDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string) ([]*store.DelegationEdge, error) {
+	if s.fault.Active() && s.edgeReadErr && delegateType == store.DelegationPrincipalAgent {
+		return nil, errors.New("injected delegation edge read fault")
+	}
+	edges, err := s.Store.GetDelegationEdgesForDelegate(ctx, delegateType, delegateID)
+	if err != nil || !s.fault.Active() || delegateID != s.dupEdgeAgentID || len(edges) == 0 {
+		return edges, err
+	}
+	dup := *edges[0]
+	dup.ID = "duplicate"
+	return append(edges, &dup), nil
+}
+
+func (s *reissueFaultStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	if !s.fault.Active() {
+		return s.Store.WithTx(ctx, fn)
+	}
+	err := s.Store.WithTx(ctx, func(tx store.Store) error {
+		if s.auditFailInTx {
+			tx = &auditFailStore{Store: tx, fired: &s.auditFired}
+		}
+		if s.nilAgentInTxID != "" {
+			tx = &reissueNilAgentStore{Store: tx, id: s.nilAgentInTxID}
+		}
+		return fn(tx)
+	})
+	if err == nil {
+		s.committed.Store(true)
+	}
+	return err
+}
+
+// reissueNilAgentStore answers GetAgent for id with no row and no error.
+type reissueNilAgentStore struct {
+	store.Store
+	id string
+}
+
+func (s *reissueNilAgentStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if id == s.id {
+		return nil, nil
+	}
+	return s.Store.GetAgent(ctx, id)
+}
+
+// A store answering no row and no error for the agent inside the commit
+// refuses the re-issue: nothing is written, revoked or pushed.
+func TestScopeReissue_NilAgentInCommitRefuses(t *testing.T) {
+	f := newReissueFixture(t, "rs-nil-tx", store.ProjectRoleOwner)
+	f.run(t, f.parent, false)
+	jti := "rs-nil-tx-jti"
+	insertTestAgentCredential(t, f.store, f.child.ID, f.projectID, jti)
+	credBefore := getTestAgentCredential(t, f.store, jti)
+	edges := f.allEdges(t, f.child)
+	child := f.reload(t, f.child)
+	f.faults.nilAgentInTxID = f.child.ID
+	f.faults.arm()
+	f.client.resetAuthCalled = false
+
+	resp, err := f.srv.runScopeReissue(context.Background(), child, f.operator, false, "")
+	require.ErrorIs(t, err, errReissueConflict)
+	assert.Nil(t, resp)
+	rec := httptest.NewRecorder()
+	writeScopeReissueError(rec, err)
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	assert.Equal(t, edges, f.allEdges(t, f.child), "no edge change")
+	assertCredentialUnrevoked(t, f.store, jti, credBefore)
+	assert.False(t, f.client.resetAuthCalled)
+	assert.Empty(t, reissueAudits(t, f.store, f.child.ID, mutationTypeAgentScopesReissued))
+}
+
+// A store answering no row and no error when the agent is re-read after
+// the commit: the re-issue stands, no token is pushed, and the dispatch
+// record says why.
+func TestScopeReissue_NilAgentAfterCommitNotPushed(t *testing.T) {
+	f := newReissueFixture(t, "rs-nil-after", store.ProjectRoleOwner)
+	f.run(t, f.parent, false)
+	child := f.reload(t, f.child)
+	f.faults.nilAgentAfterCommitID = f.child.ID
+	f.faults.arm()
+	f.client.resetAuthCalled = false
+
+	resp, err := f.srv.runScopeReissue(context.Background(), child, f.operator, false, "")
+	require.NoError(t, err)
+	assert.NotEmpty(t, resp.EdgeNew, "the commit stands")
+	assert.False(t, resp.Dispatched)
+	assert.NotEmpty(t, resp.DispatchError)
+	assert.False(t, f.client.resetAuthCalled, "nothing pushed")
+	recs := reissueAudits(t, f.store, f.child.ID, mutationTypeAgentScopesReissueDispatch)
+	require.Len(t, recs, 1)
+	assert.Contains(t, recs[0].AfterSummary, `"error_class":"lookup_error"`)
 }
 
 // childAgent stores a running child of parent with a legacy bounded edge.
@@ -327,12 +492,11 @@ func TestScopeReissue_T2_Clawback(t *testing.T) {
 // records a scope-free denial.
 func TestScopeReissue_T3_FailClosed(t *testing.T) {
 	cases := []struct {
-		name     string
-		setup    func(t *testing.T, f *reissueFixture)
-		wrap     func(s store.Store, f *reissueFixture) store.Store
-		code     int
-		cause    string
-		agentErr bool
+		name  string
+		setup func(t *testing.T, f *reissueFixture)
+		fault func(f *reissueFixture)
+		code  int
+		cause string
 	}{
 		{
 			name: "deleted parent",
@@ -342,11 +506,9 @@ func TestScopeReissue_T3_FailClosed(t *testing.T) {
 			code: http.StatusForbidden, cause: string(DenyCauseCeilingOrphaned),
 		},
 		{
-			name: "two active edges",
-			wrap: func(s store.Store, f *reissueFixture) store.Store {
-				return &duplicateEdgeStore{Store: s, agentID: f.child.ID}
-			},
-			code: http.StatusForbidden, cause: string(DenyCauseCeilingOrphaned),
+			name:  "two active edges",
+			fault: func(f *reissueFixture) { f.faults.dupEdgeAgentID = f.child.ID },
+			code:  http.StatusForbidden, cause: string(DenyCauseCeilingOrphaned),
 		},
 		{
 			name: "migration sentinel",
@@ -363,11 +525,9 @@ func TestScopeReissue_T3_FailClosed(t *testing.T) {
 			code: http.StatusForbidden, cause: string(DenyCauseCeilingUnrecorded),
 		},
 		{
-			name: "injected edge read error",
-			wrap: func(s store.Store, _ *reissueFixture) store.Store {
-				return &edgeReadErrStore{Store: s}
-			},
-			code: http.StatusServiceUnavailable, cause: mintErrorClassLookup,
+			name:  "injected edge read error",
+			fault: func(f *reissueFixture) { f.faults.edgeReadErr = true },
+			code:  http.StatusServiceUnavailable, cause: mintErrorClassLookup,
 		},
 	}
 	for i, tc := range cases {
@@ -380,16 +540,14 @@ func TestScopeReissue_T3_FailClosed(t *testing.T) {
 			}
 			edgesBefore := f.allEdges(t, f.child)
 			credBefore := getTestAgentCredential(t, f.store, jti)
-			if tc.wrap != nil {
-				w := tc.wrap(f.store, f)
-				f.srv.authzService.store = w
-				f.srv.store = w
+			child := f.reload(t, f.child)
+			if tc.fault != nil {
+				tc.fault(f)
+				f.faults.arm()
 			}
 
-			_, err := f.srv.runScopeReissue(context.Background(), f.reload(t, f.child), f.operator, false, "")
+			_, err := f.srv.runScopeReissue(context.Background(), child, f.operator, false, "")
 			require.Error(t, err)
-			f.srv.authzService.store = f.store
-			f.srv.store = f.store
 
 			rec := httptest.NewRecorder()
 			writeScopeReissueError(rec, err)
@@ -419,42 +577,6 @@ func replaceActiveEdge(t *testing.T, f *reissueFixture, delegatorType, delegator
 	f.edge(t, delegatorType, delegatorID, f.child.ID, c, p)
 }
 
-// duplicateEdgeStore reports the child's active edge twice.
-type duplicateEdgeStore struct {
-	store.Store
-	agentID string
-}
-
-func (s *duplicateEdgeStore) GetDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string) ([]*store.DelegationEdge, error) {
-	edges, err := s.Store.GetDelegationEdgesForDelegate(ctx, delegateType, delegateID)
-	if err != nil || delegateID != s.agentID || len(edges) == 0 {
-		return edges, err
-	}
-	dup := *edges[0]
-	dup.ID = "duplicate"
-	return append(edges, &dup), nil
-}
-
-// parentLookupErrStore fails the first GetAgent for one agent ID after it is
-// armed, and passes every later read through. A one-shot fault makes the
-// refusal depend on the first parent read: code that swallowed that error
-// (for example by falling back to a default role) would go on to compute a
-// result from the later, successful reads.
-type parentLookupErrStore struct {
-	store.Store
-	failID string
-	armed  atomic.Bool
-	fired  atomic.Int32
-}
-
-func (s *parentLookupErrStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
-	if id == s.failID && s.armed.CompareAndSwap(true, false) {
-		s.fired.Add(1)
-		return nil, errors.New("injected agent read fault")
-	}
-	return s.Store.GetAgent(ctx, id)
-}
-
 // T3a (CR1): a parent lookup error refuses the operation with a lookup
 // fault; it never computes from a default role.
 func TestScopeReissue_T3a_ParentLookupErrorRefuses(t *testing.T) {
@@ -464,18 +586,16 @@ func TestScopeReissue_T3a_ParentLookupErrorRefuses(t *testing.T) {
 	credBefore := getTestAgentCredential(t, f.store, jti)
 	edgesBefore := f.allEdges(t, f.child)
 	child := f.reload(t, f.child)
-	w := &parentLookupErrStore{Store: f.store, failID: f.parent.ID}
-	f.srv.store = w
-	f.srv.authzService.store = w
-	restore := func() {
-		f.srv.store = f.store
-		f.srv.authzService.store = f.store
-	}
-	defer restore()
+	// A one-shot fault on the first parent read: code that swallowed it
+	// (for example by falling back to a default role) would go on to
+	// compute a result from the later, successful reads.
+	w := f.faults
+	w.failParentID = f.parent.ID
+	w.arm()
 
-	w.armed.Store(true)
+	w.failParentOnce.Store(true)
 	_, err := f.srv.computeScopeReissue(context.Background(), child)
-	require.Equal(t, int32(1), w.fired.Load(), "the fault hit the parent read")
+	require.Equal(t, int32(1), w.parentFired.Load(), "the fault hit the parent read")
 	require.Error(t, err, "a parent lookup error refuses; it is never computed past")
 	var issueErr *agentTokenIssueError
 	require.ErrorAs(t, err, &issueErr)
@@ -483,12 +603,11 @@ func TestScopeReissue_T3a_ParentLookupErrorRefuses(t *testing.T) {
 	assert.Equal(t, mintSiteReissue, issueErr.Site)
 
 	// The real run: the fault hits only the first parent read again.
-	w.armed.Store(true)
+	w.failParentOnce.Store(true)
 	resp, err := f.srv.runScopeReissue(context.Background(), child, f.operator, false, "")
-	require.Equal(t, int32(2), w.fired.Load())
+	require.Equal(t, int32(2), w.parentFired.Load())
 	require.Error(t, err)
 	assert.Nil(t, resp, "no result: never a default-role computation")
-	restore()
 
 	rec := httptest.NewRecorder()
 	writeScopeReissueError(rec, err)
@@ -505,20 +624,8 @@ func TestScopeReissue_T3a_ParentLookupErrorRefuses(t *testing.T) {
 	assert.Empty(t, reissueAudits(t, f.store, f.child.ID, mutationTypeAgentScopesReissued))
 }
 
-// auditFailTxStore fails the agent_scopes_reissued audit write inside a
-// transaction, after the edge, role and revocation writes of the same
-// transaction.
-type auditFailTxStore struct {
-	store.Store
-	fired atomic.Int32
-}
-
-func (s *auditFailTxStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
-	return s.Store.WithTx(ctx, func(tx store.Store) error {
-		return fn(&auditFailStore{Store: tx, fired: &s.fired})
-	})
-}
-
+// auditFailStore fails the agent_scopes_reissued audit write; the
+// reissueFaultStore wraps a transaction's store with it.
 type auditFailStore struct {
 	store.Store
 	fired *atomic.Int32
@@ -550,12 +657,12 @@ func TestScopeReissue_AuditFailureRollsBack(t *testing.T) {
 	require.NoError(t, f.store.UpdateProject(ctx, project))
 	edgesBefore := f.allEdges(t, f.child)
 
-	failing := &auditFailTxStore{Store: f.store}
-	f.srv.store = failing
+	child := f.reload(t, f.child)
+	f.faults.auditFailInTx = true
+	f.faults.arm()
 	f.client.resetAuthCalled = false
-	resp, err := f.srv.runScopeReissue(ctx, f.reload(t, f.child), f.operator, false, "")
-	f.srv.store = f.store
-	require.Equal(t, int32(1), failing.fired.Load(), "the audit write inside the transaction was reached and failed")
+	resp, err := f.srv.runScopeReissue(ctx, child, f.operator, false, "")
+	require.Equal(t, int32(1), f.faults.auditFired.Load(), "the audit write inside the transaction was reached and failed")
 	require.ErrorContains(t, err, "injected audit write fault", "the run failed because of the audit write")
 	assert.Nil(t, resp)
 
