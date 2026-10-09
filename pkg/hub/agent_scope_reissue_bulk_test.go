@@ -170,6 +170,7 @@ func (f *reissueFixture) adminSession(t *testing.T) UserIdentity {
 			ID: id, Email: id + "@test.com", DisplayName: "Admin", Role: "admin", Status: "active",
 		}))
 	}
+	grantSuperAdmin(t, f.store, id)
 	return NewAuthenticatedUser(id, id+"@test.com", "Admin", "admin", "")
 }
 
