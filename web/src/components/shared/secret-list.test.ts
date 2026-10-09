@@ -31,9 +31,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let ScionSecretList: any;
+import type { ScionSecretList } from './secret-list.js';
 
 /** Encode a string exactly as secret-list.ts encodes it. */
 function encodeValue(raw: string): string {
@@ -88,8 +86,7 @@ function makeBasicFetch(putSpy?: (body: Record<string, unknown>) => void) {
 
 describe('scion-secret-list — base64 encoding before send (issue #251)', () => {
   beforeAll(async () => {
-    const mod = await import('./secret-list.js');
-    ScionSecretList = mod.ScionSecretList;
+    await import('./secret-list.js');
   });
 
   afterEach(() => {
