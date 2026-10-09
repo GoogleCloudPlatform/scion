@@ -62,7 +62,9 @@ let popups: string[] = [];
 
 class FakeNotification {
   static permission: NotificationPermission = 'granted';
-  static requestPermission = vi.fn(async (): Promise<NotificationPermission> => 'granted');
+  static requestPermission = vi.fn(
+    (): Promise<NotificationPermission> => Promise.resolve('granted')
+  );
   constructor(_title: string, options: NotificationOptions = {}) {
     popups.push(options.tag ?? '');
   }
