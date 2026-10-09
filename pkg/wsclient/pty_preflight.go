@@ -75,6 +75,14 @@ func (e *PTYPreflightError) NoPath() bool {
 	return e.Status == http.StatusServiceUnavailable && e.Code == wsprotocol.ErrCodeRuntimeAttachUnsupported
 }
 
+// preflightTransportError wraps a preflight that got no answer from the
+// Hub (a network or transport failure, as opposed to a refusal). Before a
+// reconnect it is treated as transient and retried under the backoff.
+type preflightTransportError struct{ err error }
+
+func (e *preflightTransportError) Error() string { return e.err.Error() }
+func (e *preflightTransportError) Unwrap() error { return e.err }
+
 // preflightErrorBody is the Hub's JSON error envelope.
 type preflightErrorBody struct {
 	Error struct {

@@ -2182,7 +2182,7 @@ export class ScionChatComposer extends LitElement {
   /** Blur the composer's textarea, retracting the on-screen keyboard. */
   private blurTextarea(): void {
     const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
-    blurElement(slTextarea as HTMLElement | null);
+    blurElement(slTextarea);
   }
 
   /**
@@ -2209,7 +2209,7 @@ export class ScionChatComposer extends LitElement {
           // horizontal drift (overflow:clip + inert on the panels is), but it
           // stops the message list from jumping when this runs while the
           // composer's panel isn't the one on screen.
-          focusElement(slTextarea as HTMLElement, { preventScroll: true });
+          focusElement(slTextarea, { preventScroll: true });
         }
       });
     });
@@ -2258,7 +2258,7 @@ export class ScionChatComposer extends LitElement {
     }
     const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
     if (slTextarea) {
-      focusElement(slTextarea as HTMLElement, { preventScroll: true });
+      focusElement(slTextarea, { preventScroll: true });
     }
   }
 

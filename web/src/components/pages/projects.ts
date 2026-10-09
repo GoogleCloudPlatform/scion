@@ -200,15 +200,12 @@ export class ScionPageProjects extends LitElement {
     }
 
     // Listen for real-time project updates
-    stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated as EventListener);
+    stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    stateManager.removeEventListener(
-      'projects-updated',
-      this.boundOnProjectsUpdated as EventListener
-    );
+    stateManager.removeEventListener('projects-updated', this.boundOnProjectsUpdated);
   }
 
   private onProjectsUpdated(): void {
@@ -231,7 +228,7 @@ export class ScionPageProjects extends LitElement {
       if (!existing && this.projectScope !== 'all') {
         continue;
       }
-      const merged = { ...existing, ...project } as Project;
+      const merged = { ...existing, ...project };
       // Preserve _capabilities from existing state when the delta lacks them.
       if (!project._capabilities && existing?._capabilities) {
         merged._capabilities = existing._capabilities;

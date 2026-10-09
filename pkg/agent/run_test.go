@@ -7809,6 +7809,95 @@ runtimes:
 	}
 }
 
+// TestStart_KubernetesBlockIdentityReplacesServiceAccount covers GCP
+// identity "block" on Kubernetes (ptone/scion#4034) on create and on a
+// restart of an existing agent whose persisted scion-agent.json holds a
+// template serviceAccountName: the block ServiceAccount replaces it, an
+// empty block ServiceAccount clears it (the namespace default), and the
+// RunConfig is marked so the runtime turns off the token mount and adds the
+// Workload Identity node selector. Without the block identity the template
+// value is kept and the RunConfig is not marked.
+func TestStart_KubernetesBlockIdentityReplacesServiceAccount(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: generic\nuser: scion\nimage: file-default:latest\n"), 0644)
+
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness", "kubernetes": {"serviceAccountName": "template-ksa"}}`), 0644)
+
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: k8s
+profiles:
+  k8s:
+    runtime: kubernetes
+runtimes:
+  kubernetes:
+    type: kubernetes
+`), 0644)
+
+	projectScionDir := filepath.Join(tmpDir, "project", ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+			capturedConfig = cfg
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	saName := func() string {
+		if capturedConfig.Kubernetes == nil {
+			return ""
+		}
+		return capturedConfig.Kubernetes.ServiceAccountName
+	}
+	steps := []struct {
+		name      string
+		block     *api.KubernetesBlockIdentity
+		wantSA    string
+		wantBlock bool
+	}{
+		{"create with block service account", &api.KubernetesBlockIdentity{ServiceAccountName: "scion-block"}, "scion-block", true},
+		{"restart with namespace default", &api.KubernetesBlockIdentity{}, "", true},
+		{"restart without block", nil, "template-ksa", false},
+	}
+	for _, step := range steps {
+		if _, err := mgr.Start(context.Background(), api.StartOptions{
+			Name:                    "test-agent",
+			ProjectPath:             projectScionDir,
+			BrokerMode:              true,
+			NoAuth:                  true,
+			KubernetesBlockIdentity: step.block,
+		}); err != nil {
+			t.Fatalf("%s: Start failed: %v", step.name, err)
+		}
+		if got := saName(); got != step.wantSA {
+			t.Errorf("%s: ServiceAccountName = %q, want %q", step.name, got, step.wantSA)
+		}
+		if capturedConfig.KubernetesBlockIdentity != step.wantBlock {
+			t.Errorf("%s: RunConfig.KubernetesBlockIdentity = %v, want %v", step.name, capturedConfig.KubernetesBlockIdentity, step.wantBlock)
+		}
+	}
+}
+
 // TestStart_RestartAfterSettingsPullPolicyRemoved_ClearsStalePersistedValue
 // pins ptone/scion#2156: image_pull_policy must behave exactly like image on
 // a restart — removing a Hub settings harness_configs.<h>.image_pull_policy

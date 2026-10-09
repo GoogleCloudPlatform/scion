@@ -809,9 +809,11 @@ const (
 )
 
 // ResolveWorkspaceSharingMode maps a workspace mode label value (wire format) to
-// the canonical WorkspaceSharingMode. Empty or unknown values default to
-// SharingModeSharedPlain for backward compatibility (existing projects without
-// an explicit label are treated as shared).
+// the canonical WorkspaceSharingMode, without knowing the project's git-ness
+// (it is what brokers use on the dispatched value). Empty or unknown values
+// default to SharingModeSharedPlain. The hub resolves projects with
+// ResolveProjectSharingMode and sends a value that resolves here to the same
+// mode (see dispatchWorkspaceMode in pkg/hub).
 func ResolveWorkspaceSharingMode(label string) WorkspaceSharingMode {
 	switch label {
 	case WorkspaceModeShared, "shared-plain":
@@ -830,17 +832,24 @@ func ResolveWorkspaceSharingMode(label string) WorkspaceSharingMode {
 
 // ResolveProjectSharingMode is the single source of truth mapping a project's
 // workspace-mode label and git-ness to the canonical WorkspaceSharingMode.
-// For git projects it matches ResolveWorkspaceSharingMode, except that a raw
-// "empty-per-agent" label (a non-git-only mode) resolves to
-// SharingModeSharedPlain like any other unrecognized value. For non-git
+// For git projects, "shared" resolves to SharingModeSharedPlain,
+// "worktree-per-agent" to SharingModeWorktreePerAgent, and everything else,
+// including no label, an unknown value (even "shared-plain") and a raw
+// "empty-per-agent" (a non-git-only mode), to SharingModeClonePerAgent: agent
+// create gives such projects a per-agent git clone (only the "shared" label
+// selects the shared checkout, see Project.IsSharedWorkspace). For non-git
 // projects, "per-agent" (or the canonical "empty-per-agent") resolves to
 // SharingModeEmptyPerAgent and everything else to SharingModeSharedPlain.
 func ResolveProjectSharingMode(label string, isGit bool) WorkspaceSharingMode {
 	if isGit {
-		if label == string(SharingModeEmptyPerAgent) {
+		switch label {
+		case WorkspaceModeShared:
 			return SharingModeSharedPlain
+		case WorkspaceModeWorktreePerAgent:
+			return SharingModeWorktreePerAgent
+		default:
+			return SharingModeClonePerAgent
 		}
-		return ResolveWorkspaceSharingMode(label)
 	}
 	switch label {
 	case WorkspaceModePerAgent, string(SharingModeEmptyPerAgent):
@@ -3342,6 +3351,10 @@ const (
 	// EdgeDeactivationAdoptionReverted marks an adopted edge deactivated by
 	// an adoption revert.
 	EdgeDeactivationAdoptionReverted EdgeDeactivationCause = "adoption_reverted"
+	// EdgeDeactivationScopeReissueReplaced marks an edge replaced by an
+	// operator scope re-issue (ptone/scion#3652). The row is kept as
+	// evidence of the authority the agent held before.
+	EdgeDeactivationScopeReissueReplaced EdgeDeactivationCause = "scope_reissue_replaced"
 )
 
 // ValidEdgeDeactivationCause reports whether c is a cause that may be
@@ -3768,22 +3781,6 @@ type DecisionAuditRecord struct {
 	// on allow and on a deny not attributed to a named stage. The aggregated
 	// list-filter record (G) leaves it empty by agreement.
 	DeniedBy string
-}
-
-// DecisionAuditFilter defines query parameters for listing decision audit records.
-type DecisionAuditFilter struct {
-	PrincipalID   string
-	PrincipalKind string
-	CredentialID  string
-	Route         string
-	ResourceType  string
-	ResourceID    string
-	Result        string // "allow" or "deny"
-	Since         time.Time
-	Until         time.Time
-	CorrelationID string
-	Limit         int
-	Offset        int
 }
 
 // =============================================================================

@@ -71,3 +71,32 @@ func TestPutServerConfigDB_GitHubAppDropsInvalidCarriedValue(t *testing.T) {
 	assert.Contains(t, out, "github_app.app_id")
 	assert.False(t, strings.Contains(out, "not-a-number-value"), "the warning must not log the value")
 }
+
+// A stored telemetry leaf that fails the schema costs only that leaf: a
+// save that leaves it out drops it with a warning naming its path (not its
+// value), keeps its siblings, and succeeds (ptone/scion#3898). This holds
+// both inside an object the save merges (cloud) and in one it leaves out
+// (filter).
+func TestPutServerConfigDB_TelemetryDropsInvalidCarriedNestedValue(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	logs := captureSlogDefault(t)
+	srv, fakeStore, ops := newTestDBServer(t)
+	fakeStore.seedWithOrigin("telemetry", json.RawMessage(`{
+		"cloud": {"endpoint": "e1", "batch": {"max_size": "not-a-number-value", "timeout": "5s"}},
+		"filter": {"enabled": true, "sampling": {"default": "bad-sampling-value", "rates": {"x": 0.1}}}
+	}`), "managed")
+
+	rr := putServerConfigDB(t, srv, ops, `{"telemetry": {"cloud": {"endpoint": "e2"}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	row := sectionRowRaw(t, fakeStore, "telemetry")
+	assert.Equal(t, map[string]interface{}{
+		"cloud":  map[string]interface{}{"endpoint": "e2", "batch": map[string]interface{}{"timeout": "5s"}},
+		"filter": map[string]interface{}{"enabled": true, "sampling": map[string]interface{}{"rates": map[string]interface{}{"x": 0.1}}},
+	}, row)
+	out := logs.String()
+	assert.Contains(t, out, "telemetry.cloud.batch.max_size")
+	assert.Contains(t, out, "telemetry.filter.sampling.default")
+	assert.False(t, strings.Contains(out, "not-a-number-value"), "the warning must not log the value")
+	assert.False(t, strings.Contains(out, "bad-sampling-value"), "the warning must not log the value")
+}
