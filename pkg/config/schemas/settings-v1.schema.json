@@ -1966,13 +1966,13 @@
         },
         "file": {
           "type": "string",
-          "description": "File path for JSONL telemetry output. If empty, no file output.",
+          "description": "Accepted but ignored: no component reads this key today.",
           "x-since": "1"
         },
         "console": {
           "type": "boolean",
           "default": false,
-          "description": "Write telemetry debug output to stderr.",
+          "description": "Accepted but ignored: no component reads this key today.",
           "x-since": "1"
         }
       },

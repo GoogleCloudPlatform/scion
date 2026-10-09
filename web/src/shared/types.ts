@@ -535,7 +535,8 @@ export interface TelemetryHubConfig {
 }
 
 /**
- * Local debug telemetry output configuration.
+ * Local debug telemetry output configuration. Accepted but ignored: no
+ * component reads these keys today (ptone/scion#4103).
  */
 export interface TelemetryLocalConfig {
   enabled?: boolean;

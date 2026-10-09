@@ -2208,7 +2208,9 @@ type V1TelemetryHubConfig struct {
 	ReportInterval string `json:"report_interval,omitempty" yaml:"report_interval,omitempty" koanf:"report_interval"`
 }
 
-// V1TelemetryLocalConfig holds local debug telemetry output settings.
+// V1TelemetryLocalConfig holds local debug telemetry output settings. The
+// keys are accepted so existing settings files still load, but no component
+// reads them (ptone/scion#4103).
 type V1TelemetryLocalConfig struct {
 	Enabled *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
 	File    string `json:"file,omitempty" yaml:"file,omitempty" koanf:"file"`
@@ -2216,6 +2218,7 @@ type V1TelemetryLocalConfig struct {
 }
 
 // V1TelemetryFilterConfig holds event filtering and sampling settings.
+// RespectDebugMode is accepted but not read (ptone/scion#4103).
 type V1TelemetryFilterConfig struct {
 	Enabled          *bool                        `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
 	RespectDebugMode *bool                        `json:"respect_debug_mode,omitempty" yaml:"respect_debug_mode,omitempty" koanf:"respect_debug_mode"`
