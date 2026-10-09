@@ -35,12 +35,10 @@ import type {
   GCPIdentityConfig,
   GCPServiceAccount,
   HarnessAdvancedCapabilities,
-  MessageMode,
   RuntimeBroker,
 } from '../../shared/types.js';
 import { isTargetKubernetesOnly } from '../../shared/runtime-kind.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
-import { MESSAGE_MODE_DISPLAY } from '../../shared/message-mode.js';
 import { isValidTimeZone } from '../../utils/time.js';
 import type { EnvEntry } from '../shared/env-editor.js';
 import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
@@ -185,6 +183,8 @@ function envMapsEqual(a: Record<string, string>, b: Record<string, string>): boo
 
 interface AppliedConfig {
   image?: string;
+  /** The agent's git branch, fixed once the worktree is provisioned. */
+  branch?: string;
   model?: string;
   thinkingLevel?: number | null;
   harnessConfig?: string;
@@ -295,9 +295,6 @@ export class ScionPageAgentConfigure extends LitElement {
   @state() private tzNextStartWarned = false;
   /** Bumped to remount the picker with a fresh value when Pin… opens. */
   @state() private tzPickerRevision = 0;
-
-  // Form fields — Message Mode
-  @state() private messageMode = '';
 
   // Form fields — GCP Identity
   @state() private gcpMetadataMode: 'block' | 'passthrough' | 'assign' = 'block';
@@ -861,7 +858,9 @@ export class ScionPageAgentConfigure extends LitElement {
     this.customModelId = derived.customId;
     this.thinkingLevel = ac?.thinkingLevel ?? ic?.thinking_level ?? null;
     this.image = ac?.image || ic?.image || '';
-    this.branch = ic?.branch || '';
+    // Read-only display: the live branch (AppliedConfig.Branch) is what the
+    // provisioned worktree actually uses; fall back to the inline value.
+    this.branch = ac?.branch || ic?.branch || '';
     this.containerUser = ic?.user || '';
     this.authMethod = ac?.harnessAuth || ic?.auth_selectedType || '';
     this.harnessConfig = ac?.harnessConfig || ic?.harness_config || '';
@@ -911,9 +910,6 @@ export class ScionPageAgentConfigure extends LitElement {
 
     // Detect required keys that are empty (from env gathering)
     this.requiredEnvKeys = this.envEntries.filter((e) => e.key && !e.value).map((e) => e.key);
-
-    // Message Mode
-    this.messageMode = this.agent.messageMode || '';
 
     // GCP Identity
     const gcpId = ac?.gcpIdentity;
@@ -1045,7 +1041,12 @@ export class ScionPageAgentConfigure extends LitElement {
     // for `scion reincarnate` to restore. A harness-unsupported field is
     // still omitted entirely, since this page gives the user no way to view
     // or edit it in that case.
-    config.branch = this.branch;
+    //
+    // branch is deliberately never sent (ptone/scion#3984): this page only
+    // edits agents in "created" phase, which are already provisioned, so the
+    // worktree and its branch exist and no later transition would apply a
+    // changed value. The field is shown read-only instead, and the hub keeps
+    // the stored value when the key is absent.
     config.user = this.containerUser;
     config.agent_instructions = this.agentInstructions;
     if (!this.isUnsupported(caps?.prompts.system_prompt)) config.system_prompt = this.systemPrompt;
@@ -1203,11 +1204,6 @@ export class ScionPageAgentConfigure extends LitElement {
       const body: Record<string, unknown> = { config };
       const gcpIdentity = this.buildGCPIdentityPayload();
       if (gcpIdentity) body.gcp_identity = gcpIdentity;
-      // Always include messageMode for created-phase agents so "Default" can
-      // clear a previously set mode. Use null to signal "unset" to the backend.
-      if (this.agent?.phase === 'created') {
-        body.messageMode = this.messageMode || null;
-      }
       const res = await apiFetch(`/api/v1/agents/${this.agentId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -1274,11 +1270,6 @@ export class ScionPageAgentConfigure extends LitElement {
       const saveBody: Record<string, unknown> = { config };
       const gcpIdentity = this.buildGCPIdentityPayload();
       if (gcpIdentity) saveBody.gcp_identity = gcpIdentity;
-      // Always include messageMode for created-phase agents so "Default" can
-      // clear a previously set mode. Use null to signal "unset" to the backend.
-      if (this.agent?.phase === 'created') {
-        saveBody.messageMode = this.messageMode || null;
-      }
       const saveRes = await apiFetch(`/api/v1/agents/${this.agentId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -1602,12 +1593,16 @@ export class ScionPageAgentConfigure extends LitElement {
       <div class="form-field">
         <label>Branch</label>
         <sl-input
-          placeholder="Git branch for the agent"
+          data-testid="branch-input"
+          placeholder=${this.agent?.slug
+            ? `Agent's own branch (scion/${this.agent.slug})`
+            : "Agent's own branch"}
           .value=${this.branch}
-          @sl-input=${(e: Event) => {
-            this.branch = (e.target as HTMLElement & { value: string }).value;
-          }}
+          readonly
         ></sl-input>
+        <div class="hint" data-testid="branch-hint">
+          Set at creation; recreate the agent to change it.
+        </div>
       </div>
 
       <div class="form-field">
@@ -1674,66 +1669,31 @@ export class ScionPageAgentConfigure extends LitElement {
           `
         : nothing}
 
-      <!-- Message Mode -->
-      ${this.agent?.phase === 'created'
+      <!-- Message Mode: read-only. The agent PATCH does not carry it; it
+           changes only through the set_message_mode endpoint (agent detail
+           page or CLI), which applies its own authorization. -->
+      ${this.agent?.messageMode
         ? html`
-            <div class="form-field">
+            <div class="form-field" data-testid="message-mode-readonly">
               <label>Message Mode</label>
-              <sl-select
-                placeholder="Select a message mode..."
-                .value=${this.messageMode}
-                @sl-change=${(e: Event) => {
-                  this.messageMode = (e.target as HTMLElement & { value: string }).value;
-                }}
-              >
-                <sl-option value="">Default (inherit from parent)</sl-option>
-                ${(
-                  Object.entries(MESSAGE_MODE_DISPLAY) as [
-                    MessageMode,
-                    (typeof MESSAGE_MODE_DISPLAY)[MessageMode],
-                  ][]
-                ).map(
-                  ([mode, display]) => html`
-                    <sl-option value=${mode}>
-                      <sl-icon slot="prefix" name=${display.icon}></sl-icon>
-                      ${display.label} — ${display.description}
-                    </sl-option>
-                  `
-                )}
-              </sl-select>
-              ${this.messageMode === 'none'
-                ? html`<div class="hint" style="color: var(--sl-color-danger-600);">
-                    This agent is configured in sealed mode. It will not be able to send or receive
-                    messages.
-                  </div>`
-                : this.messageMode === 'hub'
-                  ? html`<div class="hint">
-                      Hub mode enables messaging with permitted agents in other projects on this
-                      Hub, in addition to all agents and users in this project. External reach
-                      requires the Hub cross-project switch to be enabled.
-                    </div>`
-                  : html`<div class="hint">
-                      Message authorization scope. Default inherits from the parent agent's mode.
-                    </div>`}
+              <div style="padding: 0.25rem 0;">
+                <scion-message-mode-badge
+                  mode=${this.agent.messageMode}
+                  size="medium"
+                ></scion-message-mode-badge>
+              </div>
+              <div class="hint">
+                Message mode cannot be changed here. Use the Configuration tab of the
+                <a
+                  data-testid="message-mode-detail-link"
+                  href="/agents/${this.agent.id || this.agentId}"
+                  >agent detail page</a
+                >
+                to change it (requires permission to set message mode).
+              </div>
             </div>
           `
-        : this.agent?.messageMode
-          ? html`
-              <div class="form-field">
-                <label>Message Mode</label>
-                <div style="padding: 0.25rem 0;">
-                  <scion-message-mode-badge
-                    mode=${this.agent.messageMode}
-                    size="medium"
-                  ></scion-message-mode-badge>
-                </div>
-                <div class="hint">
-                  Message mode is read-only for started agents. Use the agent detail page to change
-                  it.
-                </div>
-              </div>
-            `
-          : nothing}
+        : nothing}
 
       <div class="form-field">
         <label for="gcp-mode">GCP Identity</label>

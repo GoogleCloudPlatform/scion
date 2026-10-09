@@ -1210,7 +1210,7 @@ func (s *Server) routePermissionDecision(r *http.Request, meta RouteMetadata) ro
 	}
 	// D4 conversion: permission-based check via Decide. Routes that
 	// declare a Permission in their metadata are evaluated through the
-	// authorization pipeline, which preserves the super-admin bypass and
+	// authorization pipeline, which preserves super-admin access and
 	// enables scoped admin access through role bindings.
 	identity := GetIdentityFromContext(r.Context())
 	if identity == nil {

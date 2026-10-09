@@ -16,6 +16,7 @@ package artifacts
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -160,18 +161,23 @@ func (l Limits) linkLifetimes() (def, maxTTL time.Duration) {
 	return min(def, maxTTL), maxTTL
 }
 
-// canManageLinks reports whether the caller may create, list and revoke
-// the share links of a, an artifact it can read (so a is live and
-// unexpired: readableArtifact checked it). It must be a user (link
-// creation is user-only, design D15) whose credential permits
-// artifact.manage in the home scope, and it must own the artifact or hold
-// an unexpired admin grant (a principal grant for it, or a scope grant for
-// a scope the host authorizes it to manage in).
+// canAdminister reports whether the caller may administer a, an artifact
+// it can read (so a is live and unexpired: readableArtifact checked it):
+// manage its share links and grants, and change its expiry or home. It
+// must be a user (sharing is user-only, design D15) whose credential
+// permits artifact.manage in the home scope, and it must own the artifact
+// or hold an unexpired admin grant (a principal grant for it, or a scope
+// grant for a scope the host authorizes it to manage in).
 //
 // A failed grant read is an error, never a refusal, so the caller answers
 // 500 rather than a 403 that a working read would not give.
-func (s *Service) canManageLinks(r *http.Request, b backend, a *Artifact) (bool, error) {
-	ctx := r.Context()
+func (s *Service) canAdminister(ctx context.Context, b backend, a *Artifact) (bool, error) {
+	return s.canAdministerWith(ctx, a, func() ([]Grant, error) { return b.store.ListGrants(ctx, a.ID) })
+}
+
+// canAdministerWith is canAdminister with a's grants read through grants,
+// which is called only when the decision needs them.
+func (s *Service) canAdministerWith(ctx context.Context, a *Artifact, grants func() ([]Grant, error)) (bool, error) {
 	kind, ref, _, ok := s.host.Principal(ctx)
 	if !ok || kind != PrincipalKindUser {
 		return false, nil
@@ -182,37 +188,51 @@ func (s *Service) canManageLinks(r *http.Request, b backend, a *Artifact) (bool,
 	if kind == a.OwnerKind && ref == a.OwnerRef {
 		return true, nil
 	}
-	grants, err := b.store.ListGrants(ctx, a.ID)
+	gs, err := grants()
 	if err != nil {
 		return false, err
 	}
-	return grantAllows(ctx, s.host, a, grants, time.Now(), kind, ref, grantsForAdmin, PermissionManage, false), nil
+	return grantAllows(ctx, s.host, a, gs, time.Now(), kind, ref, grantsForAdmin, PermissionManage, false), nil
 }
 
-// linkAdminArtifact loads an artifact whose links the caller may manage.
-// An artifact the caller cannot read answers 404 like a missing one (the
-// read check runs first); one it can read but not manage answers 403.
-func (s *Service) linkAdminArtifact(w http.ResponseWriter, r *http.Request, id string) (backend, *Artifact, bool) {
+// adminArtifact loads an artifact the caller may administer (see
+// canAdminister). An artifact the caller cannot read answers 404 like a
+// missing one (the read check runs first); one it can read but not
+// administer answers 403.
+func (s *Service) adminArtifact(w http.ResponseWriter, r *http.Request, id string) (backend, *Artifact, bool) {
 	b, a, ok := s.readableArtifact(w, r, id)
 	if !ok {
 		return b, nil, false
 	}
-	allowed, err := s.canManageLinks(r, b, a)
+	allowed, err := s.canAdminister(r.Context(), b, a)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "artifacts: list grants failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the artifact's grants")
 		return b, nil, false
 	}
 	if !allowed {
-		writeError(w, http.StatusForbidden, "forbidden", "only the artifact's owner or an admin user may manage its share links")
+		writeError(w, http.StatusForbidden, "forbidden", "only the artifact's owner or an admin user may share or change it")
 		return b, nil, false
 	}
 	return b, a, true
 }
 
+// manageable reports whether the caller may administer a, which it can
+// read, for a response that offers sharing and changing it. A failed grants
+// read answers 500 and returns ok false.
+func (s *Service) manageable(w http.ResponseWriter, r *http.Request, b backend, a *Artifact) (canManage, ok bool) {
+	allowed, err := s.canAdminister(r.Context(), b, a)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "artifacts: list grants failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not read the artifact's grants")
+		return false, false
+	}
+	return allowed, true
+}
+
 // handleCreateLink implements POST /{id}/links.
 func (s *Service) handleCreateLink(w http.ResponseWriter, r *http.Request, id string) {
-	b, a, ok := s.linkAdminArtifact(w, r, id)
+	b, a, ok := s.adminArtifact(w, r, id)
 	if !ok {
 		return
 	}
@@ -302,7 +322,7 @@ func decodeLinkRequest(w http.ResponseWriter, r *http.Request) (*CreateLinkReque
 // handleListLinks implements GET /{id}/links: the unexpired links, oldest
 // first.
 func (s *Service) handleListLinks(w http.ResponseWriter, r *http.Request, id string) {
-	b, a, ok := s.linkAdminArtifact(w, r, id)
+	b, a, ok := s.adminArtifact(w, r, id)
 	if !ok {
 		return
 	}
@@ -331,7 +351,7 @@ func (s *Service) handleRevokeLink(w http.ResponseWriter, r *http.Request, id, l
 		writeNotFound(w)
 		return
 	}
-	b, a, ok := s.linkAdminArtifact(w, r, id)
+	b, a, ok := s.adminArtifact(w, r, id)
 	if !ok {
 		return
 	}

@@ -68,8 +68,11 @@ func (s *Server) startConduitStreamAuthz(ctx context.Context, clk clock.Clock, i
 		Check:           s.checkConduitUserStream,
 		Clock:           clk,
 		RecheckInterval: interval,
-		Metrics:         serverConduitAuthzMetrics{s},
-		Logger:          slog.Default().With("subsystem", "hub.conduit"),
+		// The deadline bounds every user stream for its whole life, so
+		// it is read from the server configuration (0 = 8h).
+		UserStreamAuthzMax: s.config.ConduitUserStreamAuthzMax,
+		Metrics:            serverConduitAuthzMetrics{s},
+		Logger:             slog.Default().With("subsystem", "hub.conduit"),
 	})
 	if !s.conduitAuthz.CompareAndSwap(nil, a) {
 		return nil, nil, errors.New("conduit stream re-check already started")

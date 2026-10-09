@@ -719,6 +719,7 @@ func TestRegistrationHTTP_MethodNotAllowed(t *testing.T) {
 	defer resp.Body.Close()
 
 	assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
+	assert.Equal(t, http.MethodGet+", "+http.MethodPost, resp.Header.Get("Allow"))
 }
 
 var _ = fmt.Sprintf

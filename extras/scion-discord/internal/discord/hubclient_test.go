@@ -3,6 +3,7 @@ package discord
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -445,4 +446,79 @@ func TestHTTPHubClient_ListProjectsForUser_NoOwnerQuery(t *testing.T) {
 	calls := rec.snapshot()
 	require.Len(t, calls, 1)
 	assert.Empty(t, calls[0].RawQuery, "projects are scoped by the linked user, not an ownerId filter")
+}
+
+// TestHTTPHubClient_CreateAgent_TypedErrors checks that every non-OK create
+// agent response is a typed hub error carrying the status and code, and
+// that the error text shown to users is unchanged.
+func TestHTTPHubClient_CreateAgent_TypedErrors(t *testing.T) {
+	cases := []struct {
+		name     string
+		status   int
+		body     string
+		wantCode string
+		wantText string
+	}{
+		{
+			name:     "not found",
+			status:   http.StatusNotFound,
+			body:     `{"error":{"code":"not_found","message":"template missing"}}`,
+			wantCode: "not_found",
+			wantText: "not found: template missing",
+		},
+		{
+			name:     "not found without envelope",
+			status:   http.StatusNotFound,
+			body:     ``,
+			wantText: "not found: Not Found",
+		},
+		{
+			name:     "bad request",
+			status:   http.StatusBadRequest,
+			body:     `{"error":{"code":"validation_error","message":"name is invalid"}}`,
+			wantCode: "validation_error",
+			wantText: "validation error: name is invalid",
+		},
+		{
+			name:     "server error",
+			status:   http.StatusInternalServerError,
+			body:     `{"error":{"code":"internal","message":"boom"}}`,
+			wantCode: "internal",
+			wantText: "create agent returned status 500: boom",
+		},
+		{
+			name:     "server error without code",
+			status:   http.StatusBadGateway,
+			body:     `{"error":{"message":"upstream"}}`,
+			wantText: "create agent returned status 502: Bad Gateway",
+		},
+		{
+			name:     "forbidden",
+			status:   http.StatusForbidden,
+			body:     `{"error":{"code":"forbidden","message":"denied"}}`,
+			wantCode: "forbidden",
+			wantText: "create agent returned status 403: denied",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			client := NewHTTPHubClient(srv.URL, "", "", nil)
+			_, err := client.CreateAgent(context.Background(), "p1", CreateAgentRequest{Name: "a"}, "user:a@example.com")
+			require.Error(t, err)
+
+			var he *HubError
+			require.True(t, errors.As(err, &he), "want *HubError, got %T", err)
+			assert.Equal(t, tc.status, he.StatusCode)
+			assert.Equal(t, tc.wantCode, he.Code)
+			assert.Equal(t, "create agent", he.Op)
+			assert.Equal(t, tc.wantText, err.Error())
+		})
+	}
 }

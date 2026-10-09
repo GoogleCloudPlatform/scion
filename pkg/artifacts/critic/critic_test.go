@@ -16,72 +16,55 @@ package critic
 
 import (
 	"bytes"
+	"encoding/json"
 	"math/rand"
+	"os"
 	"strings"
 	"testing"
 	"unicode/utf8"
 )
 
-func TestProjections(t *testing.T) {
-	cases := []struct {
-		name, in, clean, accept string
-	}{
-		{"plain", "no marks here", "no marks here", "no marks here"},
-		{"empty", "", "", ""},
-		{"insertion", "a {++big ++}dog", "a dog", "a big dog"},
-		{"deletion", "a {--big --}dog", "a big dog", "a dog"},
-		{"substitution", "a {~~cat~>dog~~}!", "a cat!", "a dog!"},
-		{"comment", "text{>>why?<<} more", "text more", "text more"},
-		{"highlight", "{==key==} point", "key point", "key point"},
-		{"highlight comment pair", "a {==b==}{>>note<<} c", "a b c", "a b c"},
-		{"adjacent marks", "{++a++}{--b--}{~~c~>d~~}", "bc", "ad"},
-		{"empty insertion", "x{++++}y", "xy", "xy"},
-		{"empty deletion", "x{----}y", "xy", "xy"},
-		{"empty comment", "x{>><<}y", "xy", "xy"},
-		{"substitution empty old", "x{~~~>new~~}y", "xy", "xnewy"},
-		{"substitution empty new", "x{~~old~>~~}y", "xoldy", "xy"},
-		{"substitution both empty", "x{~~~>~~}y", "xy", "xy"},
-		{"substitution first separator wins", "{~~a~>b~>c~~}", "a", "b~>c"},
-		{"substitution without separator is literal", "{~~old~~}", "{~~old~~}", "{~~old~~}"},
-		{"malformed substitution then valid one", "{~~a~~}{~~b~>c~~}", "{~~a~~}b", "{~~a~~}c"},
-		{"opener needs doubled char", "{+-a++}", "{+-a++}", "{+-a++}"},
-		{"substitution separator after closer is literal", "{~~a~~} b~>c", "{~~a~~} b~>c", "{~~a~~} b~>c"},
-		{"unterminated insertion is literal", "a {++b c", "a {++b c", "a {++b c"},
-		{"unterminated then valid", "{++a {--b--}", "{++a b", "{++a "},
-		{"unterminated comment", "x {>>note", "x {>>note", "x {>>note"},
-		{"wrong closer is literal", "{++a--}", "{++a--}", "{++a--}"},
-		{"nested opener is literal content", "{++a {++b++} c++}", " c++}", "a {++b c++}"},
-		{"other opener inside is content", "{++a {--b--} c++}", "", "a {--b--} c"},
-		{"braces inside marks", "{++f(){ return {} }++}", "", "f(){ return {} }"},
-		{"lone braces", "{ } {{ }} {+ +} {-}", "{ } {{ }} {+ +} {-}", "{ } {{ }} {+ +} {-}"},
-		{"mixed opener chars", "{+-a-+}", "{+-a-+}", "{+-a-+}"},
-		{"spans newlines", "a{++b\n\nc++}d", "ad", "ab\n\ncd"},
-		{"deletion spans newline", "a{--b\nc--}d", "ab\ncd", "ad"},
-		{"crlf preserved", "a\r\n{++b\r\n++}c\r\n", "a\r\nc\r\n", "a\r\nb\r\nc\r\n"},
-		{"code span not special", "`{++x++}`", "``", "`x`"},
-		{"fence not special", "```\n{--x--}\n```", "```\nx\n```", "```\n\n```"},
-		{"unicode around marks", "café {~~naïve~>naive~~} 日本", "café naïve 日本", "café naive 日本"},
-		{"trailing opener", "abc{++", "abc{++", "abc{++"},
-		{"trailing brace", "abc{", "abc{", "abc{"},
-		{"closer without opener", "a ++} b <<}", "a ++} b <<}", "a ++} b <<}"},
-		{"overlapping closer chars", "{+++}", "{+++}", "{+++}"},
-		{"four plus empty insertion", "{++++}", "", ""},
-		{"comment contains closer of other kind", "{>>a ++} b<<}", "", ""},
-		{"spec example", "Lorem {++ipsum ++}dolor{-- sit--} amet {~~is~>are~~} {==here==}{>>yes<<}.",
-			"Lorem dolor sit amet is here.", "Lorem ipsum dolor amet are here."},
+// corpusCase is one case of testdata/corpus.json, which the web twin of
+// this package (web/src/utils/critic.ts) is tested against too.
+type corpusCase struct {
+	Name   string `json:"name"`
+	In     string `json:"in"`
+	Clean  string `json:"clean"`
+	Accept string `json:"accept"`
+}
+
+func loadCorpus(t *testing.T) []corpusCase {
+	t.Helper()
+	raw, err := os.ReadFile("testdata/corpus.json")
+	if err != nil {
+		t.Fatal(err)
 	}
+	var doc struct {
+		Cases []corpusCase `json:"cases"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Cases) < 40 {
+		t.Fatalf("corpus has %d cases", len(doc.Cases))
+	}
+	return doc.Cases
+}
+
+func TestProjections(t *testing.T) {
+	cases := loadCorpus(t)
 	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := string(CleanText([]byte(c.in))); got != c.clean {
-				t.Errorf("Clean(%q) = %q, want %q", c.in, got, c.clean)
+		t.Run(c.Name, func(t *testing.T) {
+			if got := string(CleanText([]byte(c.In))); got != c.Clean {
+				t.Errorf("Clean(%q) = %q, want %q", c.In, got, c.Clean)
 			}
-			if got := string(AcceptText([]byte(c.in))); got != c.accept {
-				t.Errorf("Accept(%q) = %q, want %q", c.in, got, c.accept)
+			if got := string(AcceptText([]byte(c.In))); got != c.Accept {
+				t.Errorf("Accept(%q) = %q, want %q", c.In, got, c.Accept)
 			}
-			if got := string(Project([]byte(c.in), Raw)); got != c.in {
-				t.Errorf("Raw(%q) = %q", c.in, got)
+			if got := string(Project([]byte(c.In), Raw)); got != c.In {
+				t.Errorf("Raw(%q) = %q", c.In, got)
 			}
-			assertCovers(t, []byte(c.in))
+			assertCovers(t, []byte(c.In))
 		})
 	}
 }

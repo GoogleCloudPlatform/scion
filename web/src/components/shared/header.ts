@@ -56,6 +56,35 @@ import { touchMenuItemStyles } from './touch-styles.js';
 import './notification-tray.js';
 import './inbox-tray.js';
 import { isMacPlatform } from '../../utils/platform.js';
+import { hasOpenModalDescendant } from './open-modal.js';
+import {
+  areViewModeShortcutsEnabled,
+  isInHiddenSubtree,
+  isViewModeShortcutsStorageEvent,
+  VIEW_MODE_SHORTCUTS_CHANGED_EVENT,
+  viewModeAriaKeyshortcuts,
+  viewModeForShortcut,
+  viewModeShortcutLabel,
+  type ViewModeTarget,
+} from '../../client/view-mode-shortcuts.js';
+
+/** Appends a shortcut hint to a tooltip label, e.g. "Chat · ⌘2". */
+function withHint(label: string, hint: { label: string } | null): string {
+  return hint ? `${label} · ${hint.label}` : label;
+}
+
+/**
+ * The view modes the mode switch offers besides Dashboard, or null when
+ * neither Chat nor Terminal is on and the switch is not shown at all. The
+ * switch, the narrow-layout menu and the keyboard shortcuts all read this,
+ * so a shortcut only ever reaches a mode the switch shows.
+ */
+function offeredViewModes(): { chat: boolean; terminals: boolean } | null {
+  const chat = isFeatureEnabled(NATIVE_CHAT_FLAG);
+  const terminals = isFeatureEnabled(TERMINAL_WORKSPACE_FLAG);
+  if (!chat && !terminals) return null;
+  return { chat, terminals };
+}
 
 // ---------------------------------------------------------------------------
 // Project-context helpers for the dashboard <-> chat mode switch.
@@ -148,6 +177,10 @@ export class ScionHeader extends LitElement {
 
   /** The user id that inboxCount and notificationCount belong to. */
   private countsUserId: string | null = null;
+
+  /** Whether the Cmd/Ctrl+1/2/3 view-mode shortcuts are on (profile setting). */
+  @state()
+  private viewModeShortcutsEnabled = true;
 
   /** Whether the device's primary pointer is touch — hides keyboard-shortcut affordances on the palette button. */
   private touchPrimary = new TouchPrimaryController(this);
@@ -655,6 +688,14 @@ export class ScionHeader extends LitElement {
       line-height: 1;
     }
 
+    /* Mode-selector shortcut hint (e.g. "⌘2") */
+    .mode-shortcut {
+      margin-left: 0.5rem;
+      font-family: inherit;
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
     /* ------------------------------------------------------------------ */
     /* Sign-in link (when user is null)                                     */
     /* ------------------------------------------------------------------ */
@@ -962,22 +1003,27 @@ export class ScionHeader extends LitElement {
    * alternative modes are feature-flagged on.
    */
   private renderModeSwitch(): TemplateResult | typeof nothing {
-    const chatEnabled = isFeatureEnabled(NATIVE_CHAT_FLAG);
-    const terminalsEnabled = isFeatureEnabled(TERMINAL_WORKSPACE_FLAG);
-    if (!chatEnabled && !terminalsEnabled) return nothing;
+    const offered = offeredViewModes();
+    if (!offered) return nothing;
+    const { chat: chatEnabled, terminals: terminalsEnabled } = offered;
 
     const isChat = this.isChatView();
     const isTerminal = this.isTerminalView();
+    const terminalsLabel = `Terminals (${this.terminalSessionCount})`;
+    const dashboardHint = this.modeShortcutHint('dashboard');
+    const chatHint = this.modeShortcutHint('chat');
+    const terminalsHint = this.modeShortcutHint('terminals');
 
     return html`
       <div class="mode-switch" role="group" aria-label="Switch view">
-        <sl-tooltip content="Dashboard">
+        <sl-tooltip content=${withHint('Dashboard', dashboardHint)}>
           <button
             class=${!isChat && !isTerminal ? 'active' : ''}
             @click=${(): void => {
               void this.handleModeSwitch('dashboard');
             }}
             aria-label="Dashboard"
+            aria-keyshortcuts=${dashboardHint?.aria ?? nothing}
           >
             <sl-icon name="house"></sl-icon>
             <span class="mode-label">Dashboard</span>
@@ -985,13 +1031,14 @@ export class ScionHeader extends LitElement {
         </sl-tooltip>
         ${chatEnabled
           ? html`
-              <sl-tooltip content="Chat">
+              <sl-tooltip content=${withHint('Chat', chatHint)}>
                 <button
                   class=${isChat ? 'active' : ''}
                   @click=${(): void => {
                     void this.handleModeSwitch('chat');
                   }}
                   aria-label="Chat"
+                  aria-keyshortcuts=${chatHint?.aria ?? nothing}
                 >
                   <sl-icon name="chat-dots"></sl-icon>
                   <span class="mode-label">Chat</span>
@@ -1001,13 +1048,14 @@ export class ScionHeader extends LitElement {
           : ''}
         ${terminalsEnabled
           ? html`
-              <sl-tooltip content=${`Terminals (${this.terminalSessionCount})`}>
+              <sl-tooltip content=${withHint(terminalsLabel, terminalsHint)}>
                 <button
                   class=${isTerminal ? 'active' : ''}
                   @click=${(): void => {
                     void this.handleModeSwitch('terminals');
                   }}
-                  aria-label=${`Terminals (${this.terminalSessionCount})`}
+                  aria-label=${terminalsLabel}
+                  aria-keyshortcuts=${terminalsHint?.aria ?? nothing}
                 >
                   <sl-icon name="terminal"></sl-icon>
                   <span class="mode-label">Terminal</span>
@@ -1028,9 +1076,9 @@ export class ScionHeader extends LitElement {
    * Returns nothing when no alternative modes are feature-flagged on.
    */
   private renderModeDropdown(): TemplateResult | typeof nothing {
-    const chatEnabled = isFeatureEnabled(NATIVE_CHAT_FLAG);
-    const terminalsEnabled = isFeatureEnabled(TERMINAL_WORKSPACE_FLAG);
-    if (!chatEnabled && !terminalsEnabled) return nothing;
+    const offered = offeredViewModes();
+    if (!offered) return nothing;
+    const { chat: chatEnabled, terminals: terminalsEnabled } = offered;
 
     const { icon, label } = this.getCurrentMode();
     const isChat = this.isChatView();
@@ -1049,13 +1097,13 @@ export class ScionHeader extends LitElement {
         >
           <sl-menu-item value="dashboard" ?checked=${!isChat && !isTerminal}>
             <sl-icon slot="prefix" name="house"></sl-icon>
-            Dashboard
+            Dashboard ${this.renderMenuShortcutHint('dashboard')}
           </sl-menu-item>
           ${chatEnabled
             ? html`
                 <sl-menu-item value="chat" ?checked=${isChat}>
                   <sl-icon slot="prefix" name="chat-dots"></sl-icon>
-                  Chat
+                  Chat ${this.renderMenuShortcutHint('chat')}
                 </sl-menu-item>
               `
             : ''}
@@ -1069,12 +1117,20 @@ export class ScionHeader extends LitElement {
                         >${this.terminalSessionCount}</span
                       >`
                     : ''}
+                  ${this.renderMenuShortcutHint('terminals')}
                 </sl-menu-item>
               `
             : ''}
         </sl-menu>
       </sl-dropdown>
     `;
+  }
+
+  /** Shortcut hint shown at the end of a mode-selector menu item. */
+  private renderMenuShortcutHint(mode: ViewModeTarget): TemplateResult | typeof nothing {
+    const hint = this.modeShortcutHint(mode);
+    if (!hint) return nothing;
+    return html`<kbd slot="suffix" class="mode-shortcut">${hint.label}</kbd>`;
   }
 
   /** Icon and label for the currently active mode. */
@@ -1411,6 +1467,11 @@ export class ScionHeader extends LitElement {
     // The trays sit in this shadow root; their composed count events reach
     // the host.
     this.addEventListener(TRAY_COUNT_EVENT, this.handleTrayCount);
+
+    this.viewModeShortcutsEnabled = areViewModeShortcutsEnabled();
+    window.addEventListener(VIEW_MODE_SHORTCUTS_CHANGED_EVENT, this.handleViewModeShortcutsChanged);
+    window.addEventListener('storage', this.handleViewModeShortcutsStorage);
+    window.addEventListener('keydown', this.handleViewModeShortcut, true);
   }
 
   override disconnectedCallback(): void {
@@ -1424,6 +1485,12 @@ export class ScionHeader extends LitElement {
       this.handleGraphPaletteAvailability
     );
     this.removeEventListener(TRAY_COUNT_EVENT, this.handleTrayCount);
+    window.removeEventListener(
+      VIEW_MODE_SHORTCUTS_CHANGED_EVENT,
+      this.handleViewModeShortcutsChanged
+    );
+    window.removeEventListener('storage', this.handleViewModeShortcutsStorage);
+    window.removeEventListener('keydown', this.handleViewModeShortcut, true);
   }
 
   override firstUpdated(): void {
@@ -1469,6 +1536,62 @@ export class ScionHeader extends LitElement {
   private readonly handleGraphPaletteAvailability = (): void => {
     this.graphPaletteAvailable = isGraphPaletteAvailable();
   };
+
+  private readonly handleViewModeShortcutsChanged = (): void => {
+    this.viewModeShortcutsEnabled = areViewModeShortcutsEnabled();
+  };
+
+  /** Picks up the preference when another tab of this browser changes it. */
+  private readonly handleViewModeShortcutsStorage = (e: StorageEvent): void => {
+    if (!isViewModeShortcutsStorageEvent(e)) return;
+    this.viewModeShortcutsEnabled = areViewModeShortcutsEnabled();
+  };
+
+  /**
+   * Cmd+1/2/3 (macOS) or Ctrl+1/2/3 switches view mode exactly as the mode
+   * switch does. Registered on window in the capture phase so it runs
+   * before a focused text field or terminal sees the key; a handled chord
+   * is neither typed nor sent to the terminal. Does nothing when the
+   * preference is off, when this header is hidden (another header is on
+   * screen), when the requested mode is not offered, or while a modal
+   * dialog is open, so the browser or the dialog keeps the key. A held
+   * chord switches once.
+   */
+  private readonly handleViewModeShortcut = (e: KeyboardEvent): void => {
+    if (e.defaultPrevented) return;
+    if (!this.viewModeShortcutsEnabled) return;
+    const mode = viewModeForShortcut(e, isMacPlatform());
+    if (!mode || !this.isModeOffered(mode)) return;
+    if (isInHiddenSubtree(this)) return;
+    // An open dialog keeps the key, so a half-filled form is not left behind.
+    if (hasOpenModalDescendant(document, null)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.repeat) return;
+    void this.handleModeSwitch(mode);
+  };
+
+  /** Whether the mode switch currently offers `mode`. */
+  private isModeOffered(mode: ViewModeTarget): boolean {
+    const offered = offeredViewModes();
+    if (!offered) return false;
+    if (mode === 'chat') return offered.chat;
+    if (mode === 'terminals') return offered.terminals;
+    return true;
+  }
+
+  /**
+   * Shortcut hint for a mode, or null when hints should not show: the
+   * preference is off, or the primary pointer is touch.
+   */
+  private modeShortcutHint(mode: ViewModeTarget): { label: string; aria: string } | null {
+    if (!this.viewModeShortcutsEnabled || this.touchPrimary.isTouch) return null;
+    const isMac = isMacPlatform();
+    return {
+      label: viewModeShortcutLabel(mode, isMac),
+      aria: viewModeAriaKeyshortcuts(mode, isMac),
+    };
+  }
 
   private rememberModePath(): void {
     const path = this.currentPath || window.location.pathname;
