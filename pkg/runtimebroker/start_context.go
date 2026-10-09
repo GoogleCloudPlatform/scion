@@ -726,8 +726,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 
 	// 7. Debug: the broker's own debug setting is not propagated into agent
 	// environments (ptone/scion#4098). To debug an agent, set SCION_LOG_LEVEL
-	// explicitly (scion start --agent-log-level, or hub env scoped to the
-	// project or agent); it arrives through the request env merged above.
+	// explicitly (scion start --agent-log-level, hub env at user or project
+	// scope, or the agent's config env); it arrives through the request env
+	// merged above.
 
 	// 8. GCP identity metadata server configuration: write env vars for the
 	// mode resolved and validated earlier in this function, after the

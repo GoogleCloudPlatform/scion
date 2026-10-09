@@ -236,7 +236,10 @@ To debug an agent, set `SCION_LOG_LEVEL` for it explicitly. The value uses the s
   scion start my-agent --agent-log-level info,hubsync=debug
   ```
 
-  When a Hub reuses an agent that already exists (for example, resuming a suspended agent), it keeps the agent's stored configuration and does not apply `--agent-log-level`; `scion start` prints a warning in that case. Delete and re-create the agent to change it.
+  How long the setting lasts depends on the path:
+
+  - **Through a Hub**, the value is saved in the agent's applied configuration and kept on later restarts and resumes. To remove or change it, delete and re-create the agent. When the Hub reuses an agent that already exists (for example, resuming a suspended agent), it keeps the stored configuration and does not apply `--agent-log-level`; both `scion start` and `scion resume` print a warning in that case.
+  - **Locally**, the value applies to that launch only. A later `scion start` or `scion resume` without the flag starts the agent without it.
 
 - **Many agents, through the Hub**: store `SCION_LOG_LEVEL` as a Hub environment variable at the scope you want. Use `--always` so it is injected without a template requesting it.
 

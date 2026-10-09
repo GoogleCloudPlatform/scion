@@ -23,6 +23,10 @@ import (
 // level only reaches an agent through an explicit SCION_LOG_LEVEL in the
 // agent env. That value must arrive in the pod's container env unchanged,
 // and the runtime must not add either variable on its own.
+//
+// This is a pass-through check only: the removal of the broker's SCION_DEBUG
+// stamp itself is guarded by the runtimebroker start-context and create
+// handler tests.
 func TestK8sBuildPod_LogLevelEnv(t *testing.T) {
 	const unset = "<unset>"
 	tests := []struct {
