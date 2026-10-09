@@ -79,26 +79,6 @@ func setAfterLaunchHook(t *testing.T, hook func(name string)) {
 	t.Cleanup(func() { sandboxAfterLaunchHook = prev })
 }
 
-// The older run's sandbox is dead on arrival; while it was probing, the
-// newer run recorded its live sandbox under the same name (from outside
-// this process's Run lock). The older run's cleanup must not delete the
-// newer run's sandbox by name, nor touch its state entry.
-func TestCloudRunSandboxRun_DOACleanupSparesNewerRun(t *testing.T) {
-	rt, log := newFenceSandboxRuntime(t, 1)
-	setAfterLaunchHook(t, func(name string) { addSandboxEntry(rt, name, "run-b") })
-
-	_, err := rt.Run(context.Background(), fenceRunConfig(t, "run-a"))
-	if err == nil {
-		t.Fatal("Run A succeeded, want a dead-on-arrival error")
-	}
-	if calls := sandboxCalls(t, log); strings.Contains(calls, "delete") {
-		t.Errorf("run A's cleanup issued a delete of run B's sandbox; calls:\n%s", calls)
-	}
-	if e := rt.state.get("dev"); e == nil || e.Labels[api.LabelRunID] != "run-b" {
-		t.Errorf("state entry = %+v, want run B's untouched", e)
-	}
-}
-
 // Without another run's entry the dead-on-arrival cleanup still deletes.
 func TestCloudRunSandboxRun_DOACleanupDeletesOwn(t *testing.T) {
 	rt, log := newFenceSandboxRuntime(t, 1)
@@ -123,22 +103,6 @@ func TestCloudRunSandboxRun_DoesNotTakeOverNewerRun(t *testing.T) {
 	}
 	if calls := sandboxCalls(t, log); calls != "" {
 		t.Errorf("run A called the sandbox CLI:\n%s", calls)
-	}
-	if e := rt.state.get("dev"); e == nil || e.Labels[api.LabelRunID] != "run-b" {
-		t.Errorf("state entry = %+v, want run B's", e)
-	}
-}
-
-// The newer run recorded its sandbox while the older run was launching:
-// the older run's probe passes on it, but the older Run does not record it
-// as its own.
-func TestCloudRunSandboxRun_DoesNotRecordNewerRunAfterLaunch(t *testing.T) {
-	rt, _ := newFenceSandboxRuntime(t, 0)
-	setAfterLaunchHook(t, func(name string) { addSandboxEntry(rt, name, "run-b") })
-
-	_, err := rt.Run(context.Background(), fenceRunConfig(t, "run-a"))
-	if !errors.Is(err, ErrRunConflict) {
-		t.Fatalf("Run A = %v, want ErrRunConflict", err)
 	}
 	if e := rt.state.get("dev"); e == nil || e.Labels[api.LabelRunID] != "run-b" {
 		t.Errorf("state entry = %+v, want run B's", e)
@@ -189,15 +153,17 @@ func TestCloudRunSandboxRun_SameNameRunsSerialized(t *testing.T) {
 		}
 	})
 
+	cfgA := fenceRunConfig(t, "run-a")
+	cfgB := fenceRunConfig(t, "run-b")
+
 	errA := make(chan error, 1)
 	go func() {
-		_, err := rt.Run(context.Background(), fenceRunConfig(t, "run-a"))
+		_, err := rt.Run(context.Background(), cfgA)
 		errA <- err
 	}()
 	<-inWindow
 
 	errB := make(chan error, 1)
-	cfgB := fenceRunConfig(t, "run-b")
 	go func() {
 		_, err := rt.Run(context.Background(), cfgB)
 		errB <- err

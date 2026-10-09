@@ -918,11 +918,10 @@ func applySecretEnvOverrides(env map[string]string, cfgEnv []string, secretKeys 
 // from the launch through the probe and the state record or cleanup closes
 // that window.
 //
-// The lock is package-level so it covers every CloudRunSandboxRuntime in
-// the process (the factory builds one per call, ptone/scion#3951), but it
-// is in-process only: one broker per host is the deployment model, and a
-// second process on the same host is not fenced by it. The state-store
-// checks in Run (sandboxHeldByOtherRun) are the remaining guard there.
+// The lock is package-level, so same-name Runs are serialized within one
+// process across every CloudRunSandboxRuntime (the factory builds one per
+// call). A second process on the same host is NOT fenced: neither this lock
+// nor the per-instance state Run reads covers it (ptone/scion#3951).
 var sandboxNameLocks sync.Map // sandbox name -> *sync.Mutex
 
 // lockSandboxName takes the Run lock for a sandbox name and returns its
@@ -1189,19 +1188,10 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 
 		runtimeLog.Error("sandbox dead on arrival: all liveness probes failed",
 			"name", slug, "agentID", cfg.Name, "error", probeErr, "diagnostics", diagInfo)
-		// Attempt cleanup — sandbox may be in a broken state. The delete
-		// is by name, so it is skipped when the state shows a live
-		// sandbox of another run under this name (one recorded outside
-		// this process's Run lock): that sandbox is not this run's to
-		// remove.
-		if other := r.sandboxHeldByOtherRun(slug, runID); other != "" {
-			runtimeLog.Warn("Dead-on-arrival cleanup skipped: the sandbox name is held by another run",
-				"sandbox", slug, "run_id", runID, "sandbox_run_id", other)
-		} else {
-			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
-			_, _ = runSimpleCommand(cleanupCtx, r.bin, "delete", "--force", slug)
-			cleanupCancel()
-		}
+		// Attempt cleanup — sandbox may be in a broken state.
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, _ = runSimpleCommand(cleanupCtx, r.bin, "delete", "--force", slug)
+		cleanupCancel()
 
 		errMsg := fmt.Sprintf("cloudrun-sandbox: sandbox dead on arrival after run returned rc=0 — "+
 			"all liveness probes failed: %v", probeErr)
@@ -1209,15 +1199,6 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 			errMsg += diagInfo
 		}
 		return "", errors.New(errMsg)
-	}
-
-	// A live sandbox of another run recorded under this name during the
-	// launch (outside this process's Run lock) means the probe may have
-	// passed on that sandbox: do not record it as this run's.
-	if other := r.sandboxHeldByOtherRun(slug, runID); other != "" {
-		runtimeLog.Warn("Sandbox name taken by another run during launch; not recording it",
-			"sandbox", slug, "run_id", runID, "sandbox_run_id", other)
-		return "", fmt.Errorf("cloudrun-sandbox: sandbox %s belongs to run %q, not %q: %w", slug, other, runID, ErrRunConflict)
 	}
 
 	// Record in state store.

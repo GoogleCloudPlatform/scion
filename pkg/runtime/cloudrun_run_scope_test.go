@@ -573,8 +573,9 @@ func TestCloudRunRun_OverlappingRunsDoNotTakeOver(t *testing.T) {
 			s.put(name, "run-b") // run B's start lands between A's Get and Create
 		}
 		rt := newStatefulCloudRunRuntime(t, s)
-		if _, err := rt.Run(context.Background(), runCfgForRun("run-a")); err == nil {
-			t.Fatal("Run A succeeded over run B's instance, want an error")
+		_, err := rt.Run(context.Background(), runCfgForRun("run-a"))
+		if status.Code(err) != codes.AlreadyExists {
+			t.Fatalf("Run A = %v, want AlreadyExists", err)
 		}
 		if run, ok := s.runOf(crAgentName); !ok || run != "run-b" {
 			t.Errorf("instance: present=%v run=%q, want run B's untouched", ok, run)
