@@ -1133,6 +1133,78 @@ func TestV2_HandleGroupMessage_ReplyToBotMessage(t *testing.T) {
 	assert.Equal(t, "agent:reviewer", deliveredMsg.Recipient)
 }
 
+// TestV2_HandleGroupMessage_ReplyToBot_ConcurrentBotInfoRefresh checks
+// that the reply-to routing path reads the bot info under the broker lock
+// while the bot info is replaced concurrently. Run with -race.
+func TestV2_HandleGroupMessage_ReplyToBot_ConcurrentBotInfoRefresh(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	hub := newFakeHubClient()
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+
+	ctx := context.Background()
+	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "456",
+		ScionEmail:     "alice@example.com",
+		LinkedAt:       time.Now().UTC(),
+	}))
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID:       -200,
+		ProjectID:    "proj-1",
+		ProjectSlug:  "my-project",
+		DefaultAgent: "coder",
+		LinkedAt:     time.Now().UTC(),
+		Active:       true,
+	}))
+	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
+		ProjectID:   "proj-1",
+		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
+		RefreshedAt: time.Now(),
+	}))
+	b.InboundHandler = func(string, *messages.StructuredMessage) {}
+
+	b.mu.RLock()
+	bot := *b.botInfo
+	b.mu.RUnlock()
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			refreshed := bot
+			b.mu.Lock()
+			b.botInfo = &refreshed
+			b.mu.Unlock()
+		}
+	}()
+
+	for i := 0; i < 20; i++ {
+		b.handleGroupMessage(&TGMessage{
+			MessageID: int64(100 + i),
+			From:      &TGUser{ID: 456, Username: "alice"},
+			Chat:      TGChat{ID: -200, Type: "group"},
+			Date:      time.Now().Unix(),
+			Text:      "yes, looks good to me",
+			ReplyToMessage: &TGMessage{
+				MessageID: 50,
+				From:      &TGUser{ID: bot.ID, IsBot: true, Username: bot.Username},
+				Chat:      TGChat{ID: -200, Type: "group"},
+				Text:      "🤖 reviewer\n\nPlease review the PR",
+			},
+		})
+	}
+	close(stop)
+	wg.Wait()
+}
+
 func TestV2_HandleGroupMessage_ReplyToBotMessage_MentionTakesPriority(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
 	hub := newFakeHubClient()

@@ -368,8 +368,8 @@ describe('scion-agent-tree-view auto-fit scope detection (#2388 review N3)', () 
   beforeEach(async () => {
     el = document.createElement('scion-agent-tree-view');
     el.agents = [
-      { ...agent('r1', 'root', ['user-1']), projectId: 'p1' } as Agent,
-      { ...agent('k1', 'kid', ['user-1', 'r1']), projectId: 'p1' } as Agent,
+      { ...agent('r1', 'root', ['user-1']), projectId: 'p1' },
+      { ...agent('k1', 'kid', ['user-1', 'r1']), projectId: 'p1' },
     ];
     document.body.appendChild(el);
     await el.updateComplete;
@@ -401,8 +401,8 @@ describe('scion-agent-tree-view auto-fit scope detection (#2388 review N3)', () 
     // multi-project list changes the joined string even though the set of
     // projects is unchanged.
     el.agents = [
-      { ...agent('r1', 'root-1', ['user-1']), projectId: 'p1' } as Agent,
-      { ...agent('r2', 'root-2', ['user-2']), projectId: 'p2' } as Agent,
+      { ...agent('r1', 'root-1', ['user-1']), projectId: 'p1' },
+      { ...agent('r2', 'root-2', ['user-2']), projectId: 'p2' },
     ];
     await el.updateComplete;
     setDidAutoFit(true);
@@ -416,13 +416,13 @@ describe('scion-agent-tree-view auto-fit scope detection (#2388 review N3)', () 
   });
 
   it('resets auto-fit when the project scope changes entirely', async () => {
-    el.agents = [{ ...agent('r2', 'root-2', ['user-2']), projectId: 'p2' } as Agent];
+    el.agents = [{ ...agent('r2', 'root-2', ['user-2']), projectId: 'p2' }];
     await el.updateComplete;
     expect(didAutoFit()).toBe(false);
   });
 
   it('resets auto-fit when a new project is added to the scope', async () => {
-    el.agents = [...el.agents, { ...agent('r2', 'root-2', ['user-2']), projectId: 'p2' } as Agent];
+    el.agents = [...el.agents, { ...agent('r2', 'root-2', ['user-2']), projectId: 'p2' }];
     await el.updateComplete;
     expect(didAutoFit()).toBe(false);
   });
@@ -433,7 +433,7 @@ describe('scion-agent-tree-view auto-fit scope detection (#2388 review N3)', () 
     // cross-project variant of the same jarring reset a single-node delete
     // causes, just for the whole canvas instead of one node. Only a project
     // *entering* scope is worth re-fitting for.
-    el.agents = [...el.agents, { ...agent('r2', 'root-2', ['user-2']), projectId: 'p2' } as Agent];
+    el.agents = [...el.agents, { ...agent('r2', 'root-2', ['user-2']), projectId: 'p2' }];
     await el.updateComplete;
     setDidAutoFit(true);
     el.agents = el.agents.filter((a) => a.projectId !== 'p2');
@@ -699,10 +699,10 @@ describe('scion-agent-tree-view edge endpoint lookup via id map (#2388)', () => 
     // mixed up IDs across nodes, one of these edges would pick up the wrong
     // agent's messageMode and either gain or lose the mismatch styling.
     const agents: Agent[] = [
-      { ...agent('r1', 'root-1', ['user-1']), messageMode: 'project' } as Agent,
-      { ...agent('k1', 'kid-1', ['user-1', 'r1']), messageMode: 'branch' } as Agent,
-      { ...agent('r2', 'root-2', ['user-2']), messageMode: 'project' } as Agent,
-      { ...agent('k2', 'kid-2', ['user-2', 'r2']), messageMode: 'project' } as Agent,
+      { ...agent('r1', 'root-1', ['user-1']), messageMode: 'project' },
+      { ...agent('k1', 'kid-1', ['user-1', 'r1']), messageMode: 'branch' },
+      { ...agent('r2', 'root-2', ['user-2']), messageMode: 'project' },
+      { ...agent('k2', 'kid-2', ['user-2', 'r2']), messageMode: 'project' },
     ];
     el = document.createElement('scion-agent-tree-view');
     el.agents = agents;
@@ -1026,8 +1026,8 @@ describe('hover/relatedIds highlighting', () => {
     // Two separate root users, one root agent each, so there is exactly one
     // rendered user node per user.
     const fixture: Agent[] = [
-      { ...agent('p1', 'p1', ['user-1']), createdBy: 'alice' } as Agent,
-      { ...agent('p2', 'p2', ['user-2']), createdBy: 'bob' } as Agent,
+      { ...agent('p1', 'p1', ['user-1']), createdBy: 'alice' },
+      { ...agent('p2', 'p2', ['user-2']), createdBy: 'bob' },
     ];
 
     beforeEach(async () => {
@@ -1244,7 +1244,7 @@ describe('scion-agent-tree-view revealAgent and focusAgentNode', () => {
       .mockImplementation((elt: Element, pseudo?: string | null) => {
         const style = real(elt, pseudo);
         if (!(elt as HTMLElement).classList?.contains('name')) return style;
-        return { ...style, fontSize: '20px' } as CSSStyleDeclaration;
+        return { ...style, fontSize: '20px' };
       });
     try {
       internals().scale = 1.5;

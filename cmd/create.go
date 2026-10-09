@@ -55,6 +55,14 @@ The agent is provisioned but not started, even when a task is given. Run
 			return asUsageError(err)
 		}
 
+		if err := validateTaskFileStdin(); err != nil {
+			return err
+		}
+		task, err := applyTaskFile(task, taskFilePath, os.Stdin)
+		if err != nil {
+			return asUsageError(err)
+		}
+
 		// Validate --template-scope with the other flag checks, before any
 		// hub work (ResolveTemplateForHub keeps its own check as a guard).
 		if err := validateTemplateScope(templateScope); err != nil {
@@ -462,6 +470,7 @@ func init() {
 
 	// Inline config flag
 	createCmd.Flags().StringVar(&inlineConfigPath, "config", "", "Path to inline agent config file (YAML/JSON), or '-' for stdin")
+	createCmd.Flags().StringVar(&taskFilePath, "task-file", "", taskFileFlagUsage)
 
 	// Label flags
 	createCmd.Flags().StringArrayVar(&labelFlags, "label", nil, "Label in key=value format (repeatable)")
@@ -485,6 +494,7 @@ func skillResolverHubOptions(projectPath string) hubsync.EnsureHubReadyOptions {
 	return hubsync.EnsureHubReadyOptions{
 		NoHub:           noHub,
 		AutoConfirm:     true,
+		NonInteractive:  nonInteractive,
 		SkipSync:        true,
 		ExplicitProject: explicitProjectTargetFor(projectPath),
 	}

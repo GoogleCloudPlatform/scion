@@ -53,15 +53,15 @@ func init() {
 }
 
 func runDoctor() error {
-	fmt.Printf("%sScion Doctor%s\n\n", util.Bold, util.Reset)
+	fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("%sScion Doctor%s\n\n", util.Bold, util.Reset)))
 
 	// General checks
-	fmt.Printf("%sGeneral%s\n", util.Bold, util.Reset)
+	fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("%sGeneral%s\n", util.Bold, util.Reset)))
 	checkGit()
 	checkTmux()
 
 	// Hub Health checks
-	fmt.Printf("\n%sHub Health%s\n", util.Bold, util.Reset)
+	fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("\n%sHub Health%s\n", util.Bold, util.Reset)))
 	var hubChecks []scionruntime.CheckResult
 
 	// Resolve settings and hub endpoint
@@ -150,7 +150,7 @@ func runDoctor() error {
 	printCheck(d8.Name, d8.Status, d8.Message, d8.Remediation)
 
 	// Resolve the active runtime
-	fmt.Printf("\n%sRuntime%s\n", util.Bold, util.Reset)
+	fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("\n%sRuntime%s\n", util.Bold, util.Reset)))
 
 	resolved, err := resolveActiveProjectPath()
 	if err != nil {
@@ -184,7 +184,7 @@ func runDoctor() error {
 			GKEMode:   gkeMode,
 		}
 
-		fmt.Printf("\n%sRuntime Diagnostics (%s)%s\n", util.Bold, rtName, util.Reset)
+		fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("\n%sRuntime Diagnostics (%s)%s\n", util.Bold, rtName, util.Reset)))
 		report := diag.RunDiagnostics(opts)
 
 		if outputFormat == "json" {
@@ -210,16 +210,16 @@ func runDoctor() error {
 		}
 
 		if fails > 0 {
-			fmt.Printf("%s%d checks passed, %d warnings, %d failures%s\n",
-				util.Red, passes, warns, fails, util.Reset)
+			fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("%s%d checks passed, %d warnings, %d failures%s\n",
+				util.Red, passes, warns, fails, util.Reset)))
 			return fmt.Errorf("%d diagnostic check(s) failed", fails)
 		}
 		if warns > 0 {
-			fmt.Printf("%s%d checks passed, %d warnings%s\n",
-				util.Yellow, passes, warns, util.Reset)
+			fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("%s%d checks passed, %d warnings%s\n",
+				util.Yellow, passes, warns, util.Reset)))
 		} else {
-			fmt.Printf("%s%d checks passed%s\n",
-				util.Green, passes, util.Reset)
+			fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("%s%d checks passed%s\n",
+				util.Green, passes, util.Reset)))
 		}
 	} else {
 		// Non-diagnosable runtimes get basic checks
@@ -328,7 +328,7 @@ func printCheck(name, status, message, remediation string) {
 	case "skip":
 		icon = fmt.Sprintf("%s-%s", util.Gray, util.Reset)
 	}
-	fmt.Printf("  %s %s: %s\n", icon, name, message)
+	fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("  %s %s: %s\n", icon, name, message)))
 	if remediation != "" && status != "pass" {
 		fmt.Printf("    → %s\n", remediation)
 	}

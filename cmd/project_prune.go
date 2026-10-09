@@ -118,14 +118,14 @@ Use 'scion project reconnect' to fix a project whose workspace moved.`,
 			if !util.IsTerminal() {
 				return fmt.Errorf("orphaned project configs found; use --yes to confirm removal in non-terminal mode")
 			}
-			fmt.Print("Remove these orphaned configs? [y/N] ")
+			fmt.Fprint(os.Stderr, "Remove these orphaned configs? [y/N] ")
 			reader := bufio.NewReader(os.Stdin)
 			input, err := reader.ReadString('\n')
 			if err != nil {
 				return err
 			}
 			if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(input)), "y") {
-				fmt.Println("Aborted.")
+				fmt.Fprintln(os.Stderr, "Aborted.")
 				return nil
 			}
 		}

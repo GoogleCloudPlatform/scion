@@ -136,6 +136,9 @@ func TestReceiverHTTPExports(t *testing.T) {
 				if response.Code != http.StatusMethodNotAllowed || response.Body.String() != "Method not allowed\n" {
 					t.Fatalf("response = (%d, %q)", response.Code, response.Body.String())
 				}
+				if got := response.Header().Get("Allow"); got != http.MethodPost {
+					t.Fatalf("Allow = %q, want %q", got, http.MethodPost)
+				}
 				if called {
 					t.Fatal("signal handler called for rejected method")
 				}

@@ -413,6 +413,62 @@ func (q *QuotaStore) ReleaseReservationsByResource(ctx context.Context, resource
 	return mapError(err)
 }
 
+// ListActiveReservationsByScopeType returns active (non-released)
+// reservations for a limit across every scope ID of scopeType, ordered by
+// created_at ascending, in one query.
+func (q *QuotaStore) ListActiveReservationsByScopeType(ctx context.Context, limitDefinitionID, scopeType string) ([]*store.UsageReservation, error) {
+	ldUID, err := parseUUID(limitDefinitionID)
+	if err != nil {
+		return nil, err
+	}
+	urs, err := q.client.UsageReservation.Query().
+		Where(
+			usagereservation.LimitDefinitionIDEQ(ldUID),
+			usagereservation.ScopeTypeEQ(usagereservation.ScopeType(scopeType)),
+			usagereservation.ReleasedAtIsNil(),
+		).
+		Order(ent.Asc(usagereservation.FieldCreatedAt)).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	result := make([]*store.UsageReservation, len(urs))
+	for i, ur := range urs {
+		result[i] = entUsageReservationToStore(ur)
+	}
+	return result, nil
+}
+
+// CountActiveReservationsByScope returns active (non-released) reservation
+// counts for a limit and scopeType, grouped by scope ID, in one query.
+func (q *QuotaStore) CountActiveReservationsByScope(ctx context.Context, limitDefinitionID, scopeType string) (map[string]int64, error) {
+	ldUID, err := parseUUID(limitDefinitionID)
+	if err != nil {
+		return nil, err
+	}
+	var rows []struct {
+		ScopeID string `json:"scope_id"`
+		Count   int64  `json:"count"`
+	}
+	err = q.client.UsageReservation.Query().
+		Where(
+			usagereservation.LimitDefinitionIDEQ(ldUID),
+			usagereservation.ScopeTypeEQ(usagereservation.ScopeType(scopeType)),
+			usagereservation.ReleasedAtIsNil(),
+		).
+		GroupBy(usagereservation.FieldScopeID).
+		Aggregate(ent.Count()).
+		Scan(ctx, &rows)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	counts := make(map[string]int64, len(rows))
+	for _, r := range rows {
+		counts[r.ScopeID] = r.Count
+	}
+	return counts, nil
+}
+
 // ListActiveReservations returns active (non-released) reservations for a limit and scope.
 func (q *QuotaStore) ListActiveReservations(ctx context.Context, limitDefinitionID, scopeType, scopeID string) ([]*store.UsageReservation, error) {
 	ldUID, err := parseUUID(limitDefinitionID)
