@@ -25,12 +25,14 @@
 # flag is flagged too. Intentional mentions go in the commented ALLOWLIST below.
 #
 # Details. Matching is case-insensitive. A line is a comment when its first
-# non-blank character is '#'. `--debug` must be preceded by start of line,
-# whitespace, a quote, `[` or `,`, and followed by end of line, whitespace, a
-# quote, `]`, `,` or a backslash; so `--debug=false`, `--debug-port` and
-# `--debugx` pass, and so does a flag alone in markdown backticks
-# (`` `--debug` ``), while a backticked command such as
-# `scion server start --debug` is flagged. A value of `debug` must be followed
+# non-blank character is '#'. `--debug` must be preceded by start of line or
+# any character other than a letter, digit, `_`, `-` or backtick, and
+# followed by end of line or any character other than a letter, digit, `_`,
+# `=` or `-`. So shell forms such as `--debug;`, `$(... --debug)`, `--debug&`,
+# `--debug|tee` and `FLAGS=--debug` are flagged, and so is a backticked
+# command such as `scion server start --debug` or `<code>--debug</code>`;
+# `--debug=false`, `--debug-port` and `--debugx` pass, and so does a flag
+# alone in markdown backticks (`` `--debug` ``). A value of `debug` must be followed
 # by end of line or a character that is not a letter, digit, `_` or `-`, so
 # `debug_off` and `debugx` pass. Shell defaults covered:
 # ${SCION_LOG_LEVEL:-debug}, ${SCION_LOG_LEVEL:=debug}, and ${SCION_DEBUG:-1}
@@ -44,9 +46,11 @@
 #
 # LIMITATIONS
 # The check is textual and line-oriented. It does not detect:
-#   - a key and value split across lines, such as a Kubernetes env entry
-#     (`name: SCION_DEBUG` / `value: "1"`) or an HCL env block
-#     (`name = "SCION_LOG_LEVEL"` / `value = "debug"`)
+#   - a key and value held in separate fields, on one line or split across
+#     lines, such as a Kubernetes env entry (`name: SCION_DEBUG` /
+#     `value: "1"`, or `{name: SCION_LOG_LEVEL, value: debug}`), a JSON
+#     name/value pair, or an HCL env block (`name = "SCION_LOG_LEVEL"` /
+#     `value = "debug"`)
 #   - a value supplied through a variable (`SCION_DEBUG=$X`, `${X}`)
 #
 # Usage:
@@ -110,7 +114,10 @@ lvl="${q}?${dflt}debug(\$|[^A-Za-z0-9_-])" # the value debug, then a boundary
 set1="([^\"'[:space:]$}]|[$][{][A-Za-z0-9_]+:?[-=][^\"'[:space:]}])" # non-empty
 PATTERNS=(
   # The --debug token.
-  "(^|[[:space:]\"'[,])--debug(=(true|t|1))?(\$|[[:space:]\"',\\]|])"
+  # Delimiters are complement classes: left is start of line or any character
+  # other than a letter, digit, _, - or backtick; right is end of line or any
+  # character other than a letter, digit, _, = or -. (\` is a literal backtick.)
+  "(^|[^A-Za-z0-9_\`-])--debug(=(true|t|1))?(\$|[^A-Za-z0-9_=-])"
   # SCION_LOG_LEVEL / log_level / logLevel = or : debug.
   "(^|[^A-Za-z0-9_{])(SCION_LOG_LEVEL|log_?level)${q}?[[:space:]]*[=:][[:space:]]*${lvl}"
   # Shell default for the level: ${SCION_LOG_LEVEL:-debug}, ${SCION_LOG_LEVEL:=debug}.
@@ -248,6 +255,15 @@ SCION_DEBUG=${SCION_DEBUG:-1}
 : "${SCION_DEBUG:=1}"
 ENV SCION_LOG_LEVEL debug
 ENV SCION_DEBUG 1
+scion server start --debug;
+(scion server start --debug)
+out=$(scion server start --debug)
+scion server start --debug&
+scion server start --debug|tee log
+DEBUG_FLAG=--debug
+Environment=SCION_FLAGS=--debug
+Run `scion server start --debug` to troubleshoot.
+Pass <code>--debug</code> to the server.
 EOF
   # A tab between the words (heredoc tabs are easy to lose in an edit).
   printf 'scion server\tstart --debug\n' >>"$fx/scripts/starter-hub/bad.sh"
