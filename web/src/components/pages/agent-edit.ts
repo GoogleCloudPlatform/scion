@@ -37,7 +37,11 @@ import { agentStatusBadge } from '../../shared/agent-state-display.js';
 import { isFeatureEnabled, AGENT_EDIT_FLAG } from '../../utils/feature-flags.js';
 import { showToast } from '../../utils/toast.js';
 import type { Agent, AgentUpdateDisposition } from '../../shared/types.js';
-import type { AgentConfigPlaceholder, ScionAgentConfigForm } from '../shared/agent-config-form.js';
+import type {
+  AgentConfigPatch,
+  AgentConfigPlaceholder,
+  ScionAgentConfigForm,
+} from '../shared/agent-config-form.js';
 import '../shared/agent-config-form.js';
 import '../shared/detail-header.js';
 import '../shared/status-badge.js';
@@ -47,6 +51,12 @@ import './not-found.js';
 interface AgentPatchResponse {
   disposition?: AgentUpdateDisposition;
   warnings?: string[];
+}
+
+/** The agent PATCH body the page sends. */
+export interface AgentEditPatchBody {
+  stateVersion: number;
+  config?: AgentConfigPatch;
 }
 
 /** The start action the page offers for a phase, if any. */
@@ -68,10 +78,10 @@ export function editStartAction(phase: string | undefined): 'start' | 'resume' |
  * has touched fields.
  */
 export function buildAgentEditPatchBody(
-  config: Record<string, unknown>,
+  config: AgentConfigPatch,
   stateVersion: number | undefined
-): Record<string, unknown> {
-  const body: Record<string, unknown> = { stateVersion: stateVersion ?? 0 };
+): AgentEditPatchBody {
+  const body: AgentEditPatchBody = { stateVersion: stateVersion ?? 0 };
   if (Object.keys(config).length > 0) body.config = config;
   return body;
 }

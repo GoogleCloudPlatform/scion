@@ -24,10 +24,28 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 
 import type { Agent, AgentEditability, AgentFieldEditState } from '../../shared/types.js';
 import type { ScionAgentConfigForm } from '../shared/agent-config-form.js';
 import type { ScionPageAgentEdit } from './agent-edit.js';
+import { buildAgentEditPatchBody } from './agent-edit.js';
+
+/**
+ * Shared golden bodies: pkg/hub's agent_edit_golden_test.go sends the SAME
+ * files to the real PATCH handler, so a body the form emits that the hub
+ * cannot accept fails there, and a change to what the form emits fails
+ * here until the files are updated.
+ */
+function golden(name: string): Record<string, unknown> {
+  const file = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    `../../../../pkg/hub/testdata/agent-edit-${name}-body.json`
+  );
+  return JSON.parse(readFileSync(file, 'utf-8')) as Record<string, unknown>;
+}
 
 const toasts: string[] = [];
 vi.mock('../../utils/toast.js', () => ({
@@ -224,7 +242,7 @@ describe('agent edit page request bodies (golden)', () => {
     await editField(el, 'config.max_duration', 'unlimited');
     await click(el, 'save');
     expect(patches().map((c) => c.body)).toEqual([
-      { stateVersion: 5, config: { max_duration: 0 } },
+      { stateVersion: 5, config: { max_duration: '0' } },
     ]);
   });
 
@@ -243,6 +261,41 @@ describe('agent edit page request bodies (golden)', () => {
   it.each(['created', 'stopped', 'error'])('offers Save & Start for a %s agent', async (phase) => {
     const el = await mount(makeAgent(phase, 1));
     expect(button(el, 'save-start')!.textContent).toContain('Save & Start');
+  });
+});
+
+describe('agent edit page shared goldens (replayed by the hub tests)', () => {
+  it('untouched form', async () => {
+    const el = await mount(makeAgent('stopped', 5));
+    expect(buildAgentEditPatchBody(formOf(el)!.collectConfigPatch(), 5)).toEqual(
+      golden('untouched')
+    );
+  });
+
+  it('Clear on every field', async () => {
+    const el = await mount(makeAgent('stopped', 5), makeAgent('stopped', 6));
+    await editField(el, 'config.model', 'clear');
+    await editField(el, 'config.max_turns', 'clear');
+    await editField(el, 'config.max_duration', 'clear');
+    await click(el, 'save');
+    expect(patches().map((c) => c.body)).toEqual([golden('clear')]);
+  });
+
+  it('Unlimited on both limits', async () => {
+    const el = await mount(makeAgent('stopped', 5), makeAgent('stopped', 6));
+    await editField(el, 'config.max_turns', 'unlimited');
+    await editField(el, 'config.max_duration', 'unlimited');
+    await click(el, 'save');
+    expect(patches().map((c) => c.body)).toEqual([golden('unlimited')]);
+  });
+
+  it('typed values', async () => {
+    const el = await mount(makeAgent('stopped', 5), makeAgent('stopped', 6));
+    await editField(el, 'config.model', { type: 'claude-sonnet' });
+    await editField(el, 'config.max_turns', { type: '40' });
+    await editField(el, 'config.max_duration', { type: '2h' });
+    await click(el, 'save');
+    expect(patches().map((c) => c.body)).toEqual([golden('typed')]);
   });
 });
 

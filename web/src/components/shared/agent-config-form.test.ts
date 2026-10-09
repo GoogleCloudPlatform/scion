@@ -136,6 +136,12 @@ describe('scion-agent-config-form emission', () => {
     expect(el.collectConfigPatch()).toEqual({});
   });
 
+  it('sends "0" for Unlimited on a duration, which is a string field', async () => {
+    const el = await mount({ values: { max_duration: '1h' } });
+    await setUnlimited(el, 'config.max_duration', true);
+    expect(el.collectConfigPatch()).toEqual({ max_duration: '0' });
+  });
+
   it('typing after Clear sends the typed value', async () => {
     const el = await mount();
     await clear(el, 'config.max_turns');

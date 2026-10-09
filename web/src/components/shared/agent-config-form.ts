@@ -27,7 +27,8 @@
  *   the value already shown.
  * - treats Clear as "inherit": a cleared field is sent as an explicit null,
  *   and the hub reverts it to the inherited value. Limits also offer
- *   Unlimited, sent as 0; clearing never means unlimited.
+ *   Unlimited, sent as 0 (or "0" for a duration); clearing never means
+ *   unlimited.
  * - shows, per field, whether it is editable now, held, needs a
  *   reincarnation, or is locked (with the reason), from the hub's
  *   editability for the agent and the caller.
@@ -64,23 +65,45 @@ export const AGENT_CONFIG_TABS: ReadonlyArray<{ id: AgentConfigTab; label: strin
 ];
 
 /** How a field is edited and emitted. */
-export type AgentConfigControl = 'text' | 'limit-count' | 'limit-duration';
+export type AgentConfigControl = AgentConfigFieldDef['control'];
 
-/** One row of the field table. */
-export interface AgentConfigFieldDef {
+/** Keys of AgentInlineConfig whose value is a number. */
+type NumberConfigKey = {
+  [K in keyof AgentInlineConfig]-?: NonNullable<AgentInlineConfig[K]> extends number ? K : never;
+}[keyof AgentInlineConfig];
+
+/** Keys of AgentInlineConfig whose value is a string. */
+type StringConfigKey = {
+  [K in keyof AgentInlineConfig]-?: NonNullable<AgentInlineConfig[K]> extends string ? K : never;
+}[keyof AgentInlineConfig];
+
+/**
+ * The config object the form emits: a subset of AgentInlineConfig in which
+ * null means "clear, inherit". Typed so the compiler checks that each field
+ * emits its key's JSON type (a duration is a string, so Unlimited is "0").
+ */
+export type AgentConfigPatch = {
+  [K in keyof AgentInlineConfig]?: NonNullable<AgentInlineConfig[K]> | null;
+};
+
+interface AgentConfigFieldBase {
   /** Wire key, as in the hub's editability: "config.<json key>". */
   key: string;
-  /** The key inside the PATCH body's config object. */
-  configKey: keyof AgentInlineConfig;
   tab: AgentConfigTab;
   label: string;
-  control: AgentConfigControl;
   /** The field's tier; used when the hub sends no editability (create mode). */
   tier: AgentEditTier;
   help: string;
   /** The harness capability that gates the field, if any. */
   capability?: (caps: HarnessAdvancedCapabilities) => CapabilityField | undefined;
 }
+
+/** One row of the field table. control decides how it is edited and emitted. */
+export type AgentConfigFieldDef = AgentConfigFieldBase &
+  (
+    | { control: 'limit-count'; configKey: NumberConfigKey }
+    | { control: 'text' | 'limit-duration'; configKey: StringConfigKey }
+  );
 
 export const AGENT_CONFIG_FIELDS: ReadonlyArray<AgentConfigFieldDef> = [
   {
@@ -133,7 +156,7 @@ interface FieldDraft {
   unlimited: boolean;
 }
 
-function isTouched(d: FieldDraft | undefined): boolean {
+function isTouched(d: FieldDraft | undefined): d is FieldDraft {
   return !!d && (d.typed || d.cleared || d.unlimited);
 }
 
@@ -184,12 +207,16 @@ export class ScionAgentConfigForm extends LitElement {
    * The config object for a PATCH or create request: only touched fields,
    * an explicit null for a cleared field, 0 for Unlimited.
    */
-  collectConfigPatch(): Record<string, unknown> {
-    const out: Record<string, unknown> = {};
+  collectConfigPatch(): AgentConfigPatch {
+    const out: AgentConfigPatch = {};
     for (const f of this.fields) {
       const d = this.drafts[f.key];
       if (!isTouched(d) || !editableNow(this.fieldState(f))) continue;
-      out[f.configKey] = emitValue(f, d);
+      if (f.control === 'limit-count') {
+        out[f.configKey] = emitCount(d);
+      } else {
+        out[f.configKey] = emitString(f.control, d);
+      }
     }
     return out;
   }
@@ -517,14 +544,24 @@ function editableNow(st: AgentFieldEditState): boolean {
   return st.disposition === 'now' || st.disposition === 'immediate';
 }
 
-/** The PATCH value of a touched field. */
-function emitValue(f: AgentConfigFieldDef, d: FieldDraft): unknown {
+/** The PATCH value of a touched count limit: null clears, 0 is Unlimited. */
+function emitCount(d: FieldDraft): number | null {
   if (d.cleared) return null;
   if (d.unlimited) return 0;
   const text = d.text.trim();
-  if (text === '') return null;
-  if (f.control === 'limit-count') return Number.parseInt(text, 10);
-  return text;
+  return text === '' ? null : Number.parseInt(text, 10);
+}
+
+/**
+ * The PATCH value of a touched string field: null clears. Unlimited on a
+ * duration is "0", which the hub parses as no limit (a JSON number would
+ * not decode into the string field).
+ */
+function emitString(control: 'text' | 'limit-duration', d: FieldDraft): string | null {
+  if (d.cleared) return null;
+  if (d.unlimited && control === 'limit-duration') return '0';
+  const text = d.text.trim();
+  return text === '' ? null : text;
 }
 
 declare global {
