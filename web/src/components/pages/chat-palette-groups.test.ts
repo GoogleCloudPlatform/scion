@@ -36,7 +36,7 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { apiFetch } from '../../client/api.js';
 import { navigateTo, pushRoute } from '../../client/main.js';
-import type { PaletteCandidate, PaletteTarget } from '../../client/chat-palette-types.js';
+import type { PaletteCandidate, PaletteTarget } from '../../client/palette-types.js';
 import {
   AGENT_DMS_CACHE_MS,
   AGENTS_IDLE_TIMEOUT_MS,

@@ -1,0 +1,12 @@
+{
+  // Lint-only TS project: every src .ts/.tsx file, tests included, so
+  // typed ESLint rules can parse all of them. Not a typecheck config;
+  // npm run typecheck still uses tsconfig.json.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["vite/client"]
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx"],
+  "exclude": ["node_modules", "dist", "public"]
+}

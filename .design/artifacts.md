@@ -26,7 +26,7 @@ The feature is behind the `hub.artifacts` experiment (default off).
 | D16 | Deleting a project does not delete its artifacts; the home-scope grant may dangle. |
 | D17 | Web users can publish, edit and review. |
 | D18 | `current_seq` is the latest version of any kind. |
-| D19 | Default limits: 32 MiB/file, 256 MiB/bundle, 200 files/bundle, share-link TTL 7 days (max 30). |
+| D19 | Default limits: 32 MiB/file, 256 MiB/bundle, 200 files/bundle, share-link TTL 7 days (max 30; a longer request is rejected with `400 ttl_too_long`, not shortened; a link never outlives its artifact's own expiry, to which it is cut). |
 | D20 | A review version that changes text outside CriticMarkup is rejected at finalize (`422 unmarked_changes`). |
 | D21 | A hub-level *Artifacts* item in the management sidebar, beside *Skills*, ships as phase P1c and lists the artifacts the user owns or holds grants on; the project *Artifacts* tab stays in P2. Artifacts are principal-owned (D7), so the primary list is per user. |
 | D23 | Artifact chips and linkified `scion://artifact/` URLs in chat open an in-place preview dialog (as chat attachments do) with an *Open in artifact viewer* button; no side panel. |

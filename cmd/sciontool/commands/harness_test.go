@@ -479,3 +479,137 @@ func TestScrubSecrets_HarnessSecretsDir(t *testing.T) {
 		t.Errorf("rejected override: %q", got)
 	}
 }
+
+// A multi-line staged file is masked as a whole and line by line, so a
+// single line of it in the output is masked too.
+func TestScrubSecrets_MultiLineStagedFileMasksEachLine(t *testing.T) {
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	bundle := filepath.Join(t.TempDir(), ".scion", "harness")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "A"),
+		"placeholder-line-one-value\n  placeholder-line-two-value \r\n\n")
+	m := &containerProvisionManifest{HarnessBundleDir: bundle}
+
+	if got := scrubSecrets("found placeholder-line-two-value in config", m); got != "found [REDACTED] in config" {
+		t.Errorf("single line: %q", got)
+	}
+	whole := "placeholder-line-one-value\n  placeholder-line-two-value"
+	if got := scrubSecrets("dump: "+whole+" end", m); got != "dump: [REDACTED] end" {
+		t.Errorf("whole value: %q", got)
+	}
+}
+
+// A staged value shorter than minMaskLen cannot be masked in place, so the
+// output is omitted when it occurs there, and left alone when it does not.
+func TestScrubSecrets_ShortStagedValueOmitsOutput(t *testing.T) {
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	bundle := filepath.Join(t.TempDir(), ".scion", "harness")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "SHORT"), "plv-1x\n")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "LONG"), "placeholder-value-1")
+	m := &containerProvisionManifest{HarnessBundleDir: bundle}
+
+	if got := scrubSecrets("auth failed for plv-1x", m); got != provisionerOutputOmitted {
+		t.Errorf("short value present: %q", got)
+	}
+	if got := scrubSecrets("auth failed: placeholder-value-1", m); got != "auth failed: [REDACTED]" {
+		t.Errorf("short value absent: %q", got)
+	}
+}
+
+// A short line of a multi-line staged file is handled like a short value.
+func TestScrubSecrets_ShortLineOfMultiLineFileOmitsOutput(t *testing.T) {
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	bundle := filepath.Join(t.TempDir(), ".scion", "harness")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "A"), "placeholder-user-value\nplv-2y\n")
+	m := &containerProvisionManifest{HarnessBundleDir: bundle}
+
+	if got := scrubSecrets("password plv-2y rejected", m); got != provisionerOutputOmitted {
+		t.Errorf("short line present: %q", got)
+	}
+}
+
+// Punctuation-only lines of a pretty-printed JSON staged file are skipped:
+// a brace in the output does not omit it, and the lines holding the secret
+// are still masked.
+func TestScrubSecrets_JSONStagedFileSkipsPunctuationLines(t *testing.T) {
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	bundle := filepath.Join(t.TempDir(), ".scion", "harness")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "AUTH"),
+		"{\n  \"tokens\": {\n    \"access_token\": \"placeholder-token-value-1\"\n  },\n  \"items\": [\n    \"placeholder-item-value-2\"\n  ]\n}\n")
+	m := &containerProvisionManifest{HarnessBundleDir: bundle}
+
+	in := `parsed {"mode": 1} and [] then saw "access_token": "placeholder-token-value-1" and "placeholder-item-value-2"`
+	want := `parsed {"mode": 1} and [] then saw [REDACTED] and [REDACTED]`
+	if got := scrubSecrets(in, m); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// When one staged value contains another, the longer one is masked whole
+// rather than leaving the rest of it behind.
+func TestScrubSecrets_LongerStagedValueMaskedFirst(t *testing.T) {
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	bundle := filepath.Join(t.TempDir(), ".scion", "harness")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "A"), "placeholder-value-1")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "B"), "placeholder-value-1-extended")
+	m := &containerProvisionManifest{HarnessBundleDir: bundle}
+
+	if got := scrubSecrets("saw placeholder-value-1-extended here", m); got != "saw [REDACTED] here" {
+		t.Errorf("got %q", got)
+	}
+}
+
+// Staged values are trimmed like lines; a whitespace-only value is ignored
+// rather than omitting any output that contains a space.
+func TestScrubSecrets_StagedValuesAreTrimmed(t *testing.T) {
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	bundle := filepath.Join(t.TempDir(), ".scion", "harness")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "A"), "  placeholder-value-1 \n")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "B"), "   \n")
+	m := &containerProvisionManifest{HarnessBundleDir: bundle}
+
+	if got := scrubSecrets("saw placeholder-value-1.", m); got != "saw [REDACTED]." {
+		t.Errorf("got %q", got)
+	}
+}
+
+// A staged file whose lines are separated by lone CRs is masked line by
+// line too.
+func TestScrubSecrets_CROnlyStagedFileMasksEachLine(t *testing.T) {
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	bundle := filepath.Join(t.TempDir(), ".scion", "harness")
+	writeTestFile(t, filepath.Join(bundle, "secrets", "A"), "placeholder-line-one-value\rplaceholder-line-two-value\r")
+	m := &containerProvisionManifest{HarnessBundleDir: bundle}
+
+	if got := scrubSecrets("saw placeholder-line-one-value and placeholder-line-two-value", m); got != "saw [REDACTED] and [REDACTED]" {
+		t.Errorf("got %q", got)
+	}
+}
+
+// A staged value that mixes CRLF, lone CR and LF, including the \r\r\n and
+// \n\r edges, is split into each of its lines, none lost or merged, and is
+// also masked whole.
+func TestScrubSecrets_MixedLineEndingsStagedFileMasksEachLine(t *testing.T) {
+	t.Setenv("SCION_HARNESS_SECRETS_DIR", "")
+	bundle := filepath.Join(t.TempDir(), ".scion", "harness")
+	lines := []string{
+		"placeholder-line-one-value",
+		"placeholder-line-two-value",
+		"placeholder-line-three-value",
+		"placeholder-line-four-value",
+		"placeholder-line-five-value",
+		"placeholder-line-six-value",
+	}
+	value := lines[0] + "\r\n" + lines[1] + "\r" + lines[2] + "\n" + lines[3] + "\r\r\n" +
+		lines[4] + "\n\r" + "  },\r\n" + lines[5] + "\n"
+	writeTestFile(t, filepath.Join(bundle, "secrets", "A"), value)
+	m := &containerProvisionManifest{HarnessBundleDir: bundle}
+
+	in := "saw " + strings.Join(lines, " | ") + " | },"
+	want := "saw " + strings.TrimSuffix(strings.Repeat("[REDACTED] | ", len(lines)), " | ") + " | },"
+	if got := scrubSecrets(in, m); got != want {
+		t.Errorf("lines: got %q, want %q", got, want)
+	}
+	if got := scrubSecrets("dump: "+strings.TrimSpace(value)+" end", m); got != "dump: [REDACTED] end" {
+		t.Errorf("whole value: %q", got)
+	}
+}

@@ -102,6 +102,28 @@ func decodeJSON[T any](t *testing.T, rec *httptest.ResponseRecorder) T {
 	return v
 }
 
+func TestMethodNotAllowed_SetsAllow(t *testing.T) {
+	srv := NewServer(WithChownOwner(-1, -1))
+	cases := []struct {
+		method, path, allow string
+	}{
+		{http.MethodPost, "/scion/v1/healthz", http.MethodGet},
+		{http.MethodGet, "/scion/v1/bootstrap", http.MethodPost},
+		{http.MethodGet, "/scion/v1/exec", http.MethodPost},
+	}
+	for _, tc := range cases {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			rec := doJSON(t, srv.Handler(), tc.method, tc.path, "", nil)
+			if rec.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("status = %d, want 405", rec.Code)
+			}
+			if got := rec.Header().Get("Allow"); got != tc.allow {
+				t.Errorf("Allow = %q, want %q", got, tc.allow)
+			}
+		})
+	}
+}
+
 func TestHealthz_InitiallyAwaitingBootstrap(t *testing.T) {
 	srv := NewServer(WithChownOwner(-1, -1))
 	rec := doJSON(t, srv.Handler(), http.MethodGet, "/scion/v1/healthz", "", nil)
