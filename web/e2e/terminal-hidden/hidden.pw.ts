@@ -751,8 +751,11 @@ test('OSC 52 read response blocked after session reconnect (generation mismatch)
   ctx.write('\x1b]52;c;?\x07');
   await page.waitForTimeout(100);
 
-  // Close the WebSocket from server side to simulate disconnect
-  void ctx.peer().close();
+  // Close the WebSocket from server side to simulate disconnect. Use 1000
+  // (normal close), which the client does not retry: a retryable close would
+  // auto-reconnect, and the mock's first data frame would make the session
+  // 'connected' again before the poll below can observe 'disconnected'.
+  void ctx.peer().close({ code: 1000 });
 
   // Wait for disconnected state
   await expect
