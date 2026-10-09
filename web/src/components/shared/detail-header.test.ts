@@ -24,7 +24,7 @@ import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 
 import './detail-header.js';
 import type { ScionDetailHeader } from './detail-header.js';
-import { elementStyleRules } from '../pages/__fixtures__/card-layout.js';
+import { elementStyleRules } from '../pages/__fixtures__/css-rules.js';
 
 const LONG_NAME =
   'broker-01.a-very-long-unbroken-hostname-that-cannot-fit-beside-its-badges.internal';
