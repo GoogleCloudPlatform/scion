@@ -338,3 +338,44 @@ func TestDecisionAuditCounts_RecorderAndClosedLabelSet(t *testing.T) {
 	}
 	require.Len(t, seen, 10)
 }
+
+// The sampling policy is unchanged by decision logging: with an allow rate
+// of 0, an unmarked allow is skipped before it reaches the logger, while a
+// deny and either always-audit marker are logged. The Decision is never
+// modified.
+func TestDecisionLog_SamplingPolicyUnchanged(t *testing.T) {
+	ctx := decisionCtx()
+	sink := auditevent.NewCaptureSink()
+	counts := &decisionAuditCounts{}
+	service := &AuthzService{DecisionAuditSampleRate: 0}
+	service.SetDecisionAuditEmitter(&decisionAuditLogger{sink: sink, enabled: func() bool { return true }, counts: counts})
+	request := AuthzRequest{Resource: Resource{Type: "project", ID: "proj-1"}, Action: ActionRead}
+	allow := Decision{Allowed: true, Reason: "allow", PrincipalID: "user-1", PrincipalKind: PrincipalKindUser, principalDecorated: true, PermissionID: "project.read"}
+	before := allow
+
+	service.emitDecisionAudit(ctx, request, allow)
+	require.Empty(t, sink.Records(), "unsampled allow stays skipped")
+	require.Zero(t, counts.get(decisionAuditEnqueued, true)+counts.get(decisionAuditDisabled, true))
+
+	deny := allow
+	deny.Allowed, deny.Reason = false, "deny"
+	service.emitDecisionAudit(ctx, request, deny)
+	require.Len(t, sink.Records(), 1, "deny is always logged")
+
+	marked := request
+	marked.AlwaysAudit = true
+	service.emitDecisionAudit(ctx, marked, allow)
+	require.Len(t, sink.Records(), 2, "request AlwaysAudit is honored")
+
+	decisionMarked := allow
+	decisionMarked.AlwaysAudit = true
+	service.emitDecisionAudit(ctx, request, decisionMarked)
+	require.Len(t, sink.Records(), 3, "decision AlwaysAudit is honored")
+
+	require.Equal(t, before, allow, "decision unchanged")
+	require.Equal(t, uint64(2), counts.get(decisionAuditEnqueued, true))
+	require.Equal(t, uint64(1), counts.get(decisionAuditEnqueued, false))
+	var first map[string]any
+	require.NoError(t, json.Unmarshal(sink.Records()[0], &first))
+	require.Equal(t, "true", first["payload"].(map[string]any)["sampled"])
+}

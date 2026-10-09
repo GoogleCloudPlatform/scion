@@ -104,6 +104,8 @@ var expectedServerGoroutines = map[string]int{
 	"hub.(*chatLinkService).cleanupLoop(":  3, // telegram, discord, teams
 	"hub.(*NonceCache).cleanup(":           1, // broker auth nonce cache
 	"hub.(*PreviewService).cleanupNonces(": 1,
+	// The decision-log audit writer's single worker (remaining-audit P1).
+	"asyncwrite.(*Writer[...]).run(": 1,
 }
 
 // TestTestServerCleanupStopsBackgroundGoroutines guards the removal of

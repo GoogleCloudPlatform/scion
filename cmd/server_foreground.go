@@ -467,7 +467,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			go func() {
 				defer wg.Done()
 				<-ctx.Done()
-				_ = hubSrv.CleanupResources(context.Background())
+				// Background teardown only: the audit writer closes
+				// after every server has drained (awaitServerExit).
+				_ = hubSrv.CleanupBackgroundResources(context.Background())
 			}()
 		}
 	}
@@ -797,12 +799,34 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// 16. Wait for either an error or context cancellation
+	var closeAudit func(context.Context) error
+	if hubSrv != nil {
+		closeAudit = hubSrv.CloseAuditWriter
+	}
+	return awaitServerExit(ctx, errCh, cancel, &wg, closeAudit)
+}
+
+// awaitServerExit is step 16 of runServerStart. On cancellation it waits
+// for every server goroutine (each server's Start returns only after its
+// shutdown and HTTP drain), then closes the hub audit writer, so records
+// emitted by draining requests are written; this runs before
+// runServerStart's deferred log cleanups. On a server error it cancels and
+// closes the writer without waiting: requests still draining then have
+// their audit records counted as closed. closeAudit may be nil (no hub);
+// the close is bounded by the writer's own drain timeout.
+func awaitServerExit(ctx context.Context, errCh <-chan error, cancel context.CancelFunc, wg *sync.WaitGroup, closeAudit func(context.Context) error) error {
 	select {
 	case err := <-errCh:
 		cancel()
+		if closeAudit != nil {
+			_ = closeAudit(context.Background())
+		}
 		return err
 	case <-ctx.Done():
 		wg.Wait()
+		if closeAudit != nil {
+			_ = closeAudit(context.Background())
+		}
 		return nil
 	}
 }
@@ -2077,6 +2101,19 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		hubSrv.SetAgentRunScopeMetrics(runScopeRec)
 	}
 
+	// Decision logging (remaining-audit P1): the audit writer's
+	// scion.logging.* series and the decision-log disposition counter.
+	if writeRec, err := logging.NewWriteMetrics(mp); err != nil {
+		log.Printf("WARNING: hub audit log writer metrics disabled: %v", err)
+	} else {
+		hubSrv.SetAuditWriterMetrics(writeRec)
+	}
+	if decisionRec, err := hub.NewOTelDecisionAuditMetrics(mp); err != nil {
+		log.Printf("WARNING: hub decision audit metrics disabled: %v", err)
+	} else {
+		hubSrv.SetDecisionAuditMetrics(decisionRec)
+	}
+
 	return hubDBRec
 }
 
@@ -2817,7 +2854,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		webSrv.SetMaintenanceState(hubSrv.GetMaintenanceState())
 		webSrv.SetDemotionSafe(hubSrv.GetDemotionSafe())
 		webSrv.SetAuthzService(hubSrv.GetAuthzService())
-		webSrv.MountHubAPI(hubSrv.Handler(), hubSrv.CleanupResources)
+		webSrv.MountHubAPI(hubSrv.Handler(), hubSrv.CleanupBackgroundResources)
 
 		localHubSrv := hubSrv
 		webSrv.SetHubHealthProvider(func(ctx context.Context) interface{} {

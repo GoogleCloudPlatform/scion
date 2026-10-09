@@ -20,13 +20,16 @@ import (
 	"log/slog"
 	"strconv"
 	"sync/atomic"
+	"time"
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/asyncwrite"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
@@ -374,4 +377,72 @@ func (m *OTelDecisionAuditMetrics) RecordDecisionAudit(disposition, result strin
 		attribute.String("disposition", disposition),
 		attribute.String("result", result),
 	))
+}
+
+// auditWriterName is the bounded writer label of the audit writer.
+const auditWriterName = "audit"
+
+// auditLogWriterHealthKey is the non-critical /healthz key for the audit
+// writer. It is outside criticalHealthChecks: a degraded value makes the
+// composite status degraded (serving), never unhealthy, and readiness is
+// independent of it.
+const auditLogWriterHealthKey = "audit_log_writer"
+
+// initDecisionAuditLog builds the audit writer and the decision logger.
+// The inner handler is the process default handler captured now, as the
+// boundary services do (slog.SetDefault has already run in production).
+func (s *Server) initDecisionAuditLog() error {
+	w, err := logging.NewAsyncWriter(asyncwrite.Config{Name: auditWriterName})
+	if err != nil {
+		return err
+	}
+	h := logging.NewAsyncHandler(slog.Default().Handler(), w)
+	sink, err := auditevent.NewSlogSink(slog.New(h))
+	if err != nil {
+		_ = w.Close(context.Background())
+		return err
+	}
+	s.auditWriter = w
+	s.decisionAuditLogger = &decisionAuditLogger{
+		sink:    sink,
+		handler: h,
+		enabled: func() bool { return s.experimentEnabled(experiments.AuthorizationDecisionAuditV2) },
+		counts:  &decisionAuditCounts{},
+	}
+	return nil
+}
+
+// checkAuditWriterHealth reports the audit writer as a fixed string:
+// "healthy", "degraded: recent write failures" (a failure within the last
+// 5 minutes), "degraded: writer stalled" (a write in flight past its 2s
+// budget) or "degraded: writer closed".
+func (s *Server) checkAuditWriterHealth(checks map[string]string) {
+	if s.auditWriter == nil {
+		return
+	}
+	h := s.auditWriter.Health(time.Now())
+	if h.Healthy {
+		checks[auditLogWriterHealthKey] = HealthStatusHealthy
+		return
+	}
+	checks[auditLogWriterHealthKey] = HealthStatusDegraded + ": " + h.Reason.String()
+}
+
+// SetAuditWriterMetrics attaches the OTel logging write metrics to the
+// audit writer (failures, records, late returns, queue depth, stalled).
+func (s *Server) SetAuditWriterMetrics(m *logging.WriteMetrics) {
+	if m == nil || s.auditWriter == nil {
+		return
+	}
+	s.auditWriter.SetRecorder(m)
+	m.Observe(s.auditWriter)
+}
+
+// SetDecisionAuditMetrics attaches the OTel decision-log disposition
+// counter. In-process counts exist regardless.
+func (s *Server) SetDecisionAuditMetrics(m *OTelDecisionAuditMetrics) {
+	if m == nil || s.decisionAuditLogger == nil {
+		return
+	}
+	s.decisionAuditLogger.counts.setRecorder(m)
 }

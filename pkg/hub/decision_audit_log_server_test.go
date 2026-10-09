@@ -1,0 +1,458 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package hub
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/asyncwrite"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+)
+
+// Production-constructor tests for decision logging (remaining-audit P1,
+// ACs P1-3..P1-7, P1-9, P1-11). Each test installs a capturing handler
+// with slog.SetDefault before New (the production capture point), builds
+// the server through the real constructor, restores the previous default
+// immediately after New, and drives real HTTP requests. Records are
+// written asynchronously, so tests synchronize by closing the audit writer
+// (which drains it) or on the capture's entered channel; there are no
+// sleeps. These tests change the process default logger and must not run
+// in parallel.
+
+// newDecisionLogServer builds a full-chain server (live
+// OperationalSettings, request logger installed) whose audit writer wraps
+// capture.
+func newDecisionLogServer(t *testing.T, capture slog.Handler) (*Server, store.Store) {
+	t.Helper()
+	prev := slog.Default()
+	slog.SetDefault(slog.New(capture))
+	s := newBareTestStore(t)
+	srv := newTestServerFromStore(t, s, nil)
+	slog.SetDefault(prev) // the writer captured the handler at New
+	// Production always installs a request logger; it is what assigns the
+	// request ID used as the correlation ID.
+	srv.SetRequestLogger(slog.New(slog.DiscardHandler))
+	return srv, s
+}
+
+func setDecisionLogFlag(t *testing.T, srv *Server, on bool) {
+	t.Helper()
+	ops := srv.GetOperationalSettings()
+	require.NotNil(t, ops)
+	rev := ops.ExperimentsSnapshot().Revision
+	doc := fmt.Sprintf(`{"overrides":{%q:%t}}`, experiments.AuthorizationDecisionAuditV2, on)
+	_, err := ops.Update(context.Background(), "experiments", json.RawMessage(doc), "test", rev, "managed")
+	require.NoError(t, err)
+	require.Equal(t, on, srv.experimentEnabled(experiments.AuthorizationDecisionAuditV2))
+}
+
+// seedDecisionLogProject creates a project, a member with project read and
+// an outsider without it.
+func seedDecisionLogProject(t *testing.T, s store.Store) (member, outsider *store.User, projectID string) {
+	t.Helper()
+	projectID = tid("dl-project")
+	createDelegateTestProject(t, s, projectID, "dl-project", "test")
+	member = createTestUser(t, s, "dl-member", "dl-member@example.com")
+	createTestUserWithProjectRole(t, s, member.ID, member.Email, projectID, store.ProjectRoleMember)
+	outsider = createTestUser(t, s, "dl-outsider", "dl-outsider@example.com")
+	return member, outsider, projectID
+}
+
+// userRequest sends a request authenticated with a real user session token.
+func userRequest(t *testing.T, srv *Server, user *store.User, method, path string, body []byte, headers map[string]string) (*httptest.ResponseRecorder, string) {
+	t.Helper()
+	token, _, _, err := srv.userTokenService.GenerateTokenPair(user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb)
+	require.NoError(t, err)
+	req := httptest.NewRequest(method, path, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec, token
+}
+
+func membersPath(projectID string) string { return "/api/v1/projects/" + projectID + "/members" }
+
+func group(t *testing.T, line map[string]any, key string) map[string]any {
+	t.Helper()
+	g, ok := line[key].(map[string]any)
+	require.True(t, ok, "missing group %q in %v", key, line)
+	return g
+}
+
+// P1-3. Reports the real route that produces system-scoped records:
+// GET /api/v1/projects/{id}/members (s.authorize on Resource{Type:
+// "project", ID}), for both an allowed member and a denied outsider.
+func TestDecisionLog_P1_3_ProductionConstructorProjectRoute(t *testing.T) {
+	capture := &decisionLogCapture{}
+	srv, s := newDecisionLogServer(t, capture)
+	member, outsider, projectID := seedDecisionLogProject(t, s)
+	setDecisionLogFlag(t, srv, true)
+
+	allowRec, _ := userRequest(t, srv, member, http.MethodGet, membersPath(projectID), nil, nil)
+	require.Equal(t, http.StatusOK, allowRec.Code, allowRec.Body.String())
+	allowID := allowRec.Header().Get("X-Request-ID")
+	require.NotEmpty(t, allowID)
+
+	denyRec, _ := userRequest(t, srv, outsider, http.MethodGet, membersPath(projectID), nil, nil)
+	require.Equal(t, http.StatusForbidden, denyRec.Code, denyRec.Body.String())
+	denyID := denyRec.Header().Get("X-Request-ID")
+	require.NotEmpty(t, denyID)
+
+	require.NoError(t, srv.CloseAuditWriter(context.Background())) // drains
+
+	allow := capture.recordsFor(allowID)
+	require.Len(t, allow, 1, "exactly one scion.audit record for the allowed request; all: %v", capture.records())
+	line := allow[0]
+	assert.Equal(t, "authorization", line["family"])
+	assert.Equal(t, "decide", line["action"])
+	assert.Equal(t, "decision", line["phase"])
+	assert.Equal(t, "allow", line["outcome"])
+	assert.Equal(t, "info", line["severity"])
+	assert.Equal(t, "INFO", line["level"])
+	assert.Equal(t, allowID, line["correlation_id"])
+	assert.Equal(t, allowID, group(t, line, "request")["id"])
+	assert.Equal(t, map[string]any{"kind": "user", "id": member.ID}, group(t, line, "principal"))
+	assert.Equal(t, map[string]any{"kind": "project", "id": projectID}, group(t, line, "resource"))
+	payload := group(t, line, "payload")
+	assert.Equal(t, "project.read", payload["permission_id"])
+	assert.Equal(t, "read", payload["permission"])
+	assert.Equal(t, "false", payload["sampled"])
+	assert.NotEmpty(t, payload["reason"])
+	if cred, ok := line["credential"].(map[string]any); ok {
+		assert.NotContains(t, cred, "name")
+		assert.NotContains(t, cred, "labels")
+	}
+	for _, absent := range []string{"policy", "policy_id", "matched_policy", "matched_grant", "actor", "purpose"} {
+		assert.NotContains(t, line, absent)
+		assert.NotContains(t, payload, absent)
+	}
+
+	deny := capture.recordsFor(denyID)
+	require.Len(t, deny, 1, "exactly one scion.audit record for the denied request; all: %v", capture.records())
+	assert.Equal(t, "deny", deny[0]["outcome"])
+	assert.Equal(t, "warning", deny[0]["severity"])
+	assert.Equal(t, "WARN", deny[0]["level"])
+	assert.Equal(t, map[string]any{"kind": "user", "id": outsider.ID}, group(t, deny[0], "principal"))
+
+	counts := srv.decisionAuditLogger.counts
+	assert.GreaterOrEqual(t, counts.get(decisionAuditEnqueued, true), uint64(1))
+	assert.GreaterOrEqual(t, counts.get(decisionAuditEnqueued, false), uint64(1))
+	snap := srv.auditWriter.Snapshot()
+	assert.Equal(t, snap.Enqueued, snap.Written, "every enqueued record was written: %+v", snap)
+}
+
+// P1-4. Flag off (the default): zero records, disabled counted.
+func TestDecisionLog_P1_4_FlagOffRecordsNothing(t *testing.T) {
+	capture := &decisionLogCapture{}
+	srv, s := newDecisionLogServer(t, capture)
+	member, outsider, projectID := seedDecisionLogProject(t, s)
+	require.False(t, srv.experimentEnabled(experiments.AuthorizationDecisionAuditV2), "default must be off")
+
+	rec, _ := userRequest(t, srv, member, http.MethodGet, membersPath(projectID), nil, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec, _ = userRequest(t, srv, outsider, http.MethodGet, membersPath(projectID), nil, nil)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+
+	// Explicitly off after having been on behaves the same.
+	setDecisionLogFlag(t, srv, true)
+	setDecisionLogFlag(t, srv, false)
+	rec, _ = userRequest(t, srv, member, http.MethodGet, membersPath(projectID), nil, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.NoError(t, srv.CloseAuditWriter(context.Background()))
+	assert.Empty(t, capture.records())
+	counts := srv.decisionAuditLogger.counts
+	assert.GreaterOrEqual(t, counts.get(decisionAuditDisabled, true), uint64(2))
+	assert.GreaterOrEqual(t, counts.get(decisionAuditDisabled, false), uint64(1))
+	for d := decisionAuditDisposition(0); d < decisionAuditDispositionCount; d++ {
+		if d == decisionAuditDisabled {
+			continue
+		}
+		assert.Zero(t, counts.get(d, true)+counts.get(d, false), "disposition %s", d)
+	}
+	assert.Zero(t, srv.auditWriter.Snapshot().Enqueued)
+}
+
+// P1-5 production-constructor case: a decision outside the resource domain
+// is counted excluded_resource and not logged.
+func TestDecisionLog_P1_5_ExcludedResourceThroughServer(t *testing.T) {
+	capture := &decisionLogCapture{}
+	srv, s := newDecisionLogServer(t, capture)
+	member, _, _ := seedDecisionLogProject(t, s)
+	setDecisionLogFlag(t, srv, true)
+
+	identity := NewAuthenticatedUser(member.ID, member.Email, member.DisplayName, member.Role, "web")
+	ctx := logging.ContextWithRequestMeta(contextWithIdentity(context.Background(), identity),
+		&logging.RequestMeta{RequestID: "dl-excluded-resource"})
+	before := srv.decisionAuditLogger.counts.get(decisionAuditExcludedResource, false) +
+		srv.decisionAuditLogger.counts.get(decisionAuditExcludedResource, true)
+	srv.authzService.Decide(ctx, AuthzRequestFromContext(ctx, Resource{Type: "template", ID: "tpl-1"}, ActionRead))
+	after := srv.decisionAuditLogger.counts.get(decisionAuditExcludedResource, false) +
+		srv.decisionAuditLogger.counts.get(decisionAuditExcludedResource, true)
+	assert.Equal(t, before+1, after)
+
+	require.NoError(t, srv.CloseAuditWriter(context.Background()))
+	assert.Empty(t, capture.recordsFor("dl-excluded-resource"))
+	assert.Zero(t, srv.auditWriter.Snapshot().Enqueued)
+}
+
+// P1-6. Authorization outcomes and HTTP results are unchanged while the
+// audit writer is blocked (noncooperative inner handler) and full.
+func TestDecisionLog_P1_6_OutcomesUnchangedWithWriterBlockedAndFull(t *testing.T) {
+	capture := &decisionLogCapture{block: make(chan struct{}), entered: make(chan struct{}, 1)}
+	srv, s := newDecisionLogServer(t, capture)
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			close(capture.block)
+		}
+	}
+	t.Cleanup(release) // before Shutdown (cleanups are LIFO)
+	member, outsider, projectID := seedDecisionLogProject(t, s)
+
+	type probe struct {
+		who    *store.User
+		action Action
+	}
+	probes := []probe{{member, ActionRead}, {outsider, ActionRead}, {member, ActionDelete}, {outsider, ActionManage}}
+	decide := func(p probe, id string) Decision {
+		identity := NewAuthenticatedUser(p.who.ID, p.who.Email, p.who.DisplayName, p.who.Role, "web")
+		ctx := logging.ContextWithRequestMeta(contextWithIdentity(context.Background(), identity), &logging.RequestMeta{RequestID: id})
+		return srv.authzService.Decide(ctx, AuthzRequestFromContext(ctx, Resource{Type: "project", ID: projectID}, p.action))
+	}
+	statuses := func() (int, int) {
+		a, _ := userRequest(t, srv, member, http.MethodGet, membersPath(projectID), nil, nil)
+		b, _ := userRequest(t, srv, outsider, http.MethodGet, membersPath(projectID), nil, nil)
+		return a.Code, b.Code
+	}
+
+	// Baseline with the flag off.
+	var baseline []Decision
+	for i, p := range probes {
+		baseline = append(baseline, decide(p, fmt.Sprintf("dl-base-%d", i)))
+	}
+	baseA, baseB := statuses()
+
+	// Flag on; block the worker in the inner handler, then fill the queue.
+	setDecisionLogFlag(t, srv, true)
+	decide(probes[0], "dl-fill-0")
+	<-capture.entered // the worker is now blocked inside the inner handler
+	for i := 1; srv.auditWriter.Snapshot().DroppedFull == 0; i++ {
+		require.Less(t, i, 3*2048, "queue never filled")
+		decide(probes[0], fmt.Sprintf("dl-fill-%d", i))
+	}
+	snap := srv.auditWriter.Snapshot()
+	require.Equal(t, 2048, snap.Queued, "count bound reached: %+v", snap)
+
+	for i, p := range probes {
+		got := decide(p, fmt.Sprintf("dl-full-%d", i))
+		assert.Equal(t, baseline[i].Allowed, got.Allowed, "probe %d", i)
+		assert.Equal(t, baseline[i].Reason, got.Reason, "probe %d", i)
+		assert.Equal(t, baseline[i].PermissionID, got.PermissionID, "probe %d", i)
+		assert.Equal(t, baseline[i].DeniedBy, got.DeniedBy, "probe %d", i)
+	}
+	a, b := statuses()
+	assert.Equal(t, baseA, a)
+	assert.Equal(t, baseB, b)
+	assert.Greater(t, srv.decisionAuditLogger.counts.get(decisionAuditNotEnqueued, true), uint64(0))
+
+	release()
+	require.NoError(t, srv.CloseAuditWriter(context.Background()))
+	final := srv.auditWriter.Snapshot()
+	assert.Equal(t, final.Enqueued, final.Written+final.WriteErrors+final.WriteTimeouts+final.DroppedShutdown,
+		"conservation after drain: %+v", final)
+}
+
+// P1-7. Health: healthy, then degraded on a write failure; the composite
+// is degraded (never unhealthy), readiness is unaffected, and the retired
+// keys are absent.
+func TestDecisionLog_P1_7_HealthReportsWriterFailures(t *testing.T) {
+	capture := &decisionLogCapture{entered: make(chan struct{}, 4), fail: errors.New("inner handler down")}
+	srv, s := newDecisionLogServer(t, capture)
+	member, _, projectID := seedDecisionLogProject(t, s)
+
+	info := srv.GetHealthInfo(context.Background())
+	assert.Equal(t, "healthy", info.Checks[auditLogWriterHealthKey])
+	assert.Equal(t, HealthStatusHealthy, info.Status)
+	assert.False(t, criticalHealthChecks[auditLogWriterHealthKey])
+	for key := range info.Checks {
+		assert.False(t, strings.HasPrefix(key, "authorization_decision_audit_"), "retired key %s present", key)
+	}
+
+	setDecisionLogFlag(t, srv, true)
+	for i := 0; i < 2; i++ {
+		rec, _ := userRequest(t, srv, member, http.MethodGet, membersPath(projectID), nil, nil)
+		require.Equal(t, http.StatusOK, rec.Code, "outcome unaffected by the failing writer")
+	}
+	// The single worker counts record 1's outcome before it starts record 2.
+	<-capture.entered
+	<-capture.entered
+
+	info = srv.GetHealthInfo(context.Background())
+	assert.Equal(t, "degraded: recent write failures", info.Checks[auditLogWriterHealthKey])
+	assert.Equal(t, HealthStatusDegraded, info.Status)
+	health := httptest.NewRecorder()
+	srv.handleHealthz(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	assert.Equal(t, http.StatusOK, health.Code)
+	assert.Contains(t, health.Body.String(), `"audit_log_writer":"degraded: recent write failures"`)
+	ready := httptest.NewRecorder()
+	srv.handleReadyz(ready, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	assert.Equal(t, http.StatusOK, ready.Code)
+	assert.GreaterOrEqual(t, srv.auditWriter.Snapshot().WriteErrors, uint64(1))
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var summary HealthSummaryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &summary))
+	assert.Equal(t, HealthStatusDegraded, summary.Status)
+	assert.Equal(t, "degraded: recent write failures", summary.Hub.Checks[auditLogWriterHealthKey])
+	assert.Contains(t, summary.Hub.UnhealthyChecks, auditLogWriterHealthKey+": degraded: recent write failures")
+	assert.Equal(t, "healthy", summary.Database.Status)
+
+	// Closed while still serving.
+	require.NoError(t, srv.CloseAuditWriter(context.Background()))
+	info = srv.GetHealthInfo(context.Background())
+	assert.Equal(t, "degraded: writer closed", info.Checks[auditLogWriterHealthKey])
+	assert.Equal(t, HealthStatusDegraded, info.Status)
+}
+
+// P1-9 (architect ruling, msg e50dbb8d): Server.Shutdown closes the audit
+// writer after the HTTP drain, so a record emitted by a handler that is
+// still in flight during the drain is written, not dropped as closed.
+func TestDecisionLog_P1_9_ShutdownClosesWriterAfterDrain(t *testing.T) {
+	capture := &decisionLogCapture{}
+	srv, _ := newDecisionLogServer(t, capture)
+	setDecisionLogFlag(t, srv, true)
+
+	drainStarted := make(chan struct{})
+	inHandler := make(chan struct{})
+	hs := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(inHandler)
+		<-drainStarted // Shutdown is draining while this request is in flight
+		rec := inDomainDecisionRecord()
+		rec.CredentialType, rec.CredentialID = "", ""
+		rec.CredentialBoundaryKind, rec.CredentialBoundaryProjectID = "", ""
+		srv.decisionAuditLogger.EmitDecisionAudit(decisionCtx(), rec)
+		w.WriteHeader(http.StatusNoContent)
+	})}
+	hs.RegisterOnShutdown(func() { close(drainStarted) })
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = hs.Serve(ln) }()
+	srv.mu.Lock()
+	srv.httpServer = hs
+	srv.mu.Unlock()
+
+	respDone := make(chan int, 1)
+	go func() {
+		resp, err := http.Get("http://" + ln.Addr().String() + "/")
+		if err != nil {
+			respDone <- -1
+			return
+		}
+		_ = resp.Body.Close()
+		respDone <- resp.StatusCode
+	}()
+	<-inHandler
+	require.NoError(t, srv.Shutdown(context.Background()))
+	require.Equal(t, http.StatusNoContent, <-respDone)
+
+	snap := srv.auditWriter.Snapshot()
+	assert.True(t, snap.Closed)
+	assert.Equal(t, uint64(1), snap.Written, "%+v", snap)
+	assert.Zero(t, snap.DroppedClosed, "%+v", snap)
+	assert.Len(t, capture.recordsFor(testDecisionRequestID), 1)
+}
+
+// CleanupResources alone (direct callers, the New failure path) closes the
+// writer; CleanupBackgroundResources (combined mode's pre-drain hook)
+// leaves it open until CloseAuditWriter.
+func TestDecisionLog_P1_9_CleanupVariants(t *testing.T) {
+	t.Run("CleanupResources closes the writer", func(t *testing.T) {
+		srv, _ := newDecisionLogServer(t, &decisionLogCapture{})
+		require.NoError(t, srv.CleanupResources(context.Background()))
+		assert.True(t, srv.auditWriter.Snapshot().Closed)
+		assert.Equal(t, asyncwrite.HealthClosed, srv.auditWriter.Health(time.Now()).Reason)
+	})
+	t.Run("background-only cleanup leaves the writer open", func(t *testing.T) {
+		capture := &decisionLogCapture{}
+		srv, _ := newDecisionLogServer(t, capture)
+		setDecisionLogFlag(t, srv, true)
+		require.NoError(t, srv.CleanupBackgroundResources(context.Background()))
+		require.False(t, srv.auditWriter.Snapshot().Closed)
+		rec := inDomainDecisionRecord()
+		rec.CredentialType, rec.CredentialID = "", ""
+		rec.CredentialBoundaryKind, rec.CredentialBoundaryProjectID = "", ""
+		srv.decisionAuditLogger.EmitDecisionAudit(decisionCtx(), rec)
+		require.NoError(t, srv.CloseAuditWriter(context.Background()))
+		snap := srv.auditWriter.Snapshot()
+		assert.True(t, snap.Closed)
+		assert.Equal(t, uint64(1), snap.Written, "%+v", snap)
+		assert.Len(t, capture.records(), 1)
+		// Idempotent.
+		require.NoError(t, srv.CloseAuditWriter(context.Background()))
+		require.NoError(t, srv.CleanupResources(context.Background()))
+	})
+}
+
+// P1-11. Secret/token canaries in the body, headers and query never reach
+// the audit output, and neither does the bearer token.
+func TestDecisionLog_P1_11_BodyFreeAndSentinels(t *testing.T) {
+	capture := &decisionLogCapture{}
+	srv, s := newDecisionLogServer(t, capture)
+	member, outsider, projectID := seedDecisionLogProject(t, s)
+	setDecisionLogFlag(t, srv, true)
+
+	const canary = "CANARY-7f3a"
+	body := []byte(`{"secret":"` + canary + `-body","token":"` + canary + `-token"}`)
+	headers := map[string]string{"X-Api-Secret": canary + "-header", "Cookie": "session=" + canary + "-cookie"}
+	path := membersPath(projectID) + "?token=" + canary + "-query&secret=" + canary + "-query2"
+	var tokens []string
+	for _, who := range []*store.User{member, outsider} {
+		rec, token := userRequest(t, srv, who, http.MethodGet, path, body, headers)
+		require.NotEqual(t, http.StatusInternalServerError, rec.Code)
+		tokens = append(tokens, token)
+	}
+	require.NoError(t, srv.CloseAuditWriter(context.Background()))
+	lines := capture.records()
+	require.GreaterOrEqual(t, len(lines), 2, "the sentinel check must observe records")
+	raw, err := json.Marshal(lines)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), canary)
+	for _, token := range tokens {
+		assert.NotContains(t, string(raw), token)
+	}
+}

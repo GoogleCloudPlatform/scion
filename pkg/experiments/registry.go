@@ -132,8 +132,9 @@ const Artifacts = "hub.artifacts"
 // the delivery sweeper, which holds pending messages while it is off.
 const ChatScheduledSend = "web.chat_scheduled_send"
 
-// AuthorizationDecisionAuditV2 identifies the default-off decision-audit slice.
-// Registration alone never grants production admission.
+// AuthorizationDecisionAuditV2 gates decision logging (remaining-audit P1).
+// It is the only activation control and stays default-off; turning it on
+// needs explicit owner approval.
 const AuthorizationDecisionAuditV2 = "hub.authorization_decision_audit_v2"
 
 // compiled is the production experiment list. It is reachable only through
@@ -143,7 +144,7 @@ var compiled = []Experiment{
 	{
 		Name:        AuthorizationDecisionAuditV2,
 		Title:       "Authorization decision audit v2",
-		Description: "Routes admitted authorization decisions to the typed structured log sink; decisions are not persisted when admission, freshness or logging health fails.",
+		Description: "Records authorization decisions in the existing project/agent audit domain to the configured structured logger, asynchronously; losses are counted, not retried.",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,

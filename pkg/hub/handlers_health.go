@@ -158,6 +158,9 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 	// Check co-located broker registration when this Hub expects one
 	s.checkColocatedBrokerHealth(checks)
 
+	// Audit log writer (non-critical: degraded, never unhealthy).
+	s.checkAuditWriterHealth(checks)
+
 	// Get stats
 	stats := &HealthStats{}
 	if agentResult, err := s.store.ListAgents(ctx, store.AgentFilter{Phase: string(state.PhaseRunning)}, store.ListOptions{Limit: 1}); err == nil {
