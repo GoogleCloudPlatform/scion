@@ -300,7 +300,7 @@ func Execute() {
 		autoHelp = *settings.CLI.AutoHelp
 	}
 
-	applyModeRestrictions(rootCmd)
+	applyModeRestrictions(rootCmd, mode)
 
 	// Suppress ASCII banner in agent mode. This runs in Execute rather
 	// than init(), where the mode cannot yet be resolved safely.

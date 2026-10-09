@@ -55,7 +55,7 @@ func warnf(format string, args ...interface{}) {
 	if out == nil {
 		out = os.Stderr
 	}
-	fmt.Fprintf(out, "Warning: "+format+"\n", args...)
+	_, _ = fmt.Fprintf(out, "Warning: "+format+"\n", args...)
 }
 
 // AgentRef holds both name and ID for an agent.
