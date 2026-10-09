@@ -877,3 +877,38 @@ func TestClaudeContainerScriptResolveAuthShape(t *testing.T) {
 		t.Errorf("expected Claude auth file in Files mapping, got %#v", resolved.Files)
 	}
 }
+
+// TestClaudeContainerScriptResolveAuthLeavesVertexTranslationToScript
+// verifies that ResolveAuth forwards the GCP shared values for vertex-ai but
+// does not set the Claude-specific Vertex variables itself: provision.py
+// derives them in outputs/env.json, and builtin provisioners (which skipped
+// the script) are refused at resolve (ptone/scion#3133).
+func TestClaudeContainerScriptResolveAuthLeavesVertexTranslationToScript(t *testing.T) {
+	dir := seedClaudeDir(t)
+	hc, err := config.LoadHarnessConfigDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scripted, err := NewContainerScriptHarness(dir, hc.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, selected := range []string{"vertex-ai", ""} {
+		resolved, err := scripted.ResolveAuth(api.AuthConfig{
+			SelectedType:       selected,
+			GoogleCloudProject: "proj-1",
+			GoogleCloudRegion:  "us-east5",
+		})
+		if err != nil {
+			t.Fatalf("ResolveAuth(%q): %v", selected, err)
+		}
+		if resolved.EnvVars["GOOGLE_CLOUD_PROJECT"] != "proj-1" || resolved.EnvVars["GOOGLE_CLOUD_REGION"] != "us-east5" {
+			t.Errorf("selected=%q: GCP shared values not forwarded: %v", selected, resolved.EnvVars)
+		}
+		for _, k := range []string{"CLAUDE_CODE_USE_VERTEX", "ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION"} {
+			if v, ok := resolved.EnvVars[k]; ok {
+				t.Errorf("selected=%q: %s=%q set by ResolveAuth; provision.py owns it", selected, k, v)
+			}
+		}
+	}
+}

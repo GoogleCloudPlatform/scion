@@ -623,64 +623,6 @@ func TestContainerScriptHarness_ResolveAuth_NoLocationWhenRegionEmpty(t *testing
 	}
 }
 
-func TestContainerScriptHarness_ResolveAuth_VertexAICredentialTranslation(t *testing.T) {
-	// When the harness is "claude" and auth type is "vertex-ai", ResolveAuth
-	// must translate GCP env vars into Anthropic-specific env vars that Claude
-	// Code requires. This translation is normally done by the Python
-	// provisioner, but when provisioner type is "builtin" (no command), the
-	// Python script never runs and Go must handle it.
-	h := newClaudeHarness(t)
-
-	resolved, err := h.ResolveAuth(api.AuthConfig{
-		SelectedType:       "vertex-ai",
-		GoogleCloudProject: "my-project",
-		GoogleCloudRegion:  "us-central1",
-	})
-	if err != nil {
-		t.Fatalf("ResolveAuth: %v", err)
-	}
-
-	// Must set Anthropic-specific Vertex AI env vars.
-	if got := resolved.EnvVars["ANTHROPIC_VERTEX_PROJECT_ID"]; got != "my-project" {
-		t.Errorf("ANTHROPIC_VERTEX_PROJECT_ID=%q, want %q", got, "my-project")
-	}
-	if got := resolved.EnvVars["CLOUD_ML_REGION"]; got != "us-central1" {
-		t.Errorf("CLOUD_ML_REGION=%q, want %q", got, "us-central1")
-	}
-	if got := resolved.EnvVars["CLAUDE_CODE_USE_VERTEX"]; got != "1" {
-		t.Errorf("CLAUDE_CODE_USE_VERTEX=%q, want %q", got, "1")
-	}
-
-	// Must also still have the raw GCP env vars.
-	if got := resolved.EnvVars["GOOGLE_CLOUD_PROJECT"]; got != "my-project" {
-		t.Errorf("GOOGLE_CLOUD_PROJECT=%q, want %q", got, "my-project")
-	}
-	if got := resolved.EnvVars["GOOGLE_CLOUD_REGION"]; got != "us-central1" {
-		t.Errorf("GOOGLE_CLOUD_REGION=%q, want %q", got, "us-central1")
-	}
-}
-
-func TestContainerScriptHarness_ResolveAuth_VertexAIInferredFromProject(t *testing.T) {
-	// When SelectedType is empty but GoogleCloudProject is set, ResolveAuth
-	// should infer vertex-ai and apply the credential translation.
-	h := newClaudeHarness(t)
-
-	resolved, err := h.ResolveAuth(api.AuthConfig{
-		GoogleCloudProject: "inferred-project",
-		GoogleCloudRegion:  "europe-west1",
-	})
-	if err != nil {
-		t.Fatalf("ResolveAuth: %v", err)
-	}
-
-	if got := resolved.EnvVars["ANTHROPIC_VERTEX_PROJECT_ID"]; got != "inferred-project" {
-		t.Errorf("ANTHROPIC_VERTEX_PROJECT_ID=%q, want %q", got, "inferred-project")
-	}
-	if got := resolved.EnvVars["CLAUDE_CODE_USE_VERTEX"]; got != "1" {
-		t.Errorf("CLAUDE_CODE_USE_VERTEX=%q, want %q", got, "1")
-	}
-}
-
 func TestContainerScriptHarness_ResolveAuth_NoVertexTranslationForNonClaude(t *testing.T) {
 	// Vertex AI credential translation must NOT happen for non-Claude harnesses.
 	h, _ := newTestContainerScriptHarness(t) // harness name is "testharness"
