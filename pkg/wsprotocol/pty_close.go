@@ -47,7 +47,8 @@ const (
 	// synthesized by the client library. Retry.
 	ClosePTYAbnormal = 1006
 	// ClosePTYInternalError (1011): unexpected server error, or a broker close
-	// code the Hub does not recognise. Retry.
+	// code the Hub does not recognise. Retry once with normal backoff and full
+	// jitter (see PTYReconnectTiming).
 	ClosePTYInternalError = 1011
 	// ClosePTYServiceRestart (1012): reserved for a future graceful drain.
 	// Retry.
@@ -235,13 +236,13 @@ type ReconnectTiming int
 const (
 	// ReconnectNever means the client does not reconnect by itself. This
 	// covers every detached and terminal code, and the retry codes the
-	// client leaves to the user (1001, 1006, 1011, ...).
+	// client leaves to the user (1001, 1006, 1013, ...).
 	ReconnectNever ReconnectTiming = iota
 	// ReconnectPrompt means reconnect once after a delay drawn uniformly
 	// from [0, PTYPromptReconnectMaxDelay] (4503).
 	ReconnectPrompt
 	// ReconnectBackoff means reconnect once after the normal exponential
-	// backoff with full jitter (4504).
+	// backoff with full jitter (4504, 1011).
 	ReconnectBackoff
 )
 
@@ -253,8 +254,8 @@ const PTYPromptReconnectMaxDelay = 5 * time.Second
 
 // PTYReconnectTiming maps a PTY close code to the client's automatic
 // reconnect behaviour. It builds on ClassifyPTYClose: only a code that
-// classifies as DispositionRetry can reconnect, and of those only 4503 and
-// 4504 do so automatically. A client makes at most one reconnect attempt
+// classifies as DispositionRetry can reconnect, and of those only 4503, 4504
+// and 1011 do so automatically. A client makes at most one reconnect attempt
 // per such close.
 func PTYReconnectTiming(code int) ReconnectTiming {
 	if ClassifyPTYClose(code) != DispositionRetry {
@@ -263,7 +264,7 @@ func PTYReconnectTiming(code int) ReconnectTiming {
 	switch code {
 	case ClosePTYUpstreamUnavailable:
 		return ReconnectPrompt
-	case ClosePTYUpstreamTimeout:
+	case ClosePTYUpstreamTimeout, ClosePTYInternalError:
 		return ReconnectBackoff
 	default:
 		return ReconnectNever

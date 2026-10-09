@@ -101,6 +101,7 @@ func TestPTYReconnectTiming(t *testing.T) {
 	}{
 		{ClosePTYUpstreamUnavailable, ReconnectPrompt},
 		{ClosePTYUpstreamTimeout, ReconnectBackoff},
+		{ClosePTYInternalError, ReconnectBackoff},
 		// Terminal codes never reconnect.
 		{ClosePTYProtocolError, ReconnectNever},
 		{ClosePTYAuthRequired, ReconnectNever},
@@ -116,7 +117,6 @@ func TestPTYReconnectTiming(t *testing.T) {
 		// Other retry codes are left to the user.
 		{ClosePTYGoingAway, ReconnectNever},
 		{ClosePTYAbnormal, ReconnectNever},
-		{ClosePTYInternalError, ReconnectNever},
 		{ClosePTYTryAgainLater, ReconnectNever},
 	}
 	for _, tc := range cases {

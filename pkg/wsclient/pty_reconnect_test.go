@@ -209,10 +209,10 @@ func newScriptedClient(t *testing.T, s *ptyScriptServer, ft *fakeTiming) (*PTYCl
 	return c, notice
 }
 
-// TestRun_ReconnectsOncePerRetryClose: one reconnect per 4503 and per 4504
-// close. A reconnected session that goes live re-arms the next close.
+// TestRun_ReconnectsOncePerRetryClose: one reconnect per 4503, 4504 and
+// 1011 close. A reconnected session that goes live re-arms the next close.
 func TestRun_ReconnectsOncePerRetryClose(t *testing.T) {
-	for _, code := range []int{wsprotocol.ClosePTYUpstreamUnavailable, wsprotocol.ClosePTYUpstreamTimeout} {
+	for _, code := range []int{wsprotocol.ClosePTYUpstreamUnavailable, wsprotocol.ClosePTYUpstreamTimeout, wsprotocol.ClosePTYInternalError} {
 		t.Run(fmt.Sprint(code), func(t *testing.T) {
 			s := newPTYScriptServer(t, func(idx int, s *ptyScriptServer, conn *websocket.Conn) {
 				sendData(conn)
@@ -262,6 +262,10 @@ func TestRun_ReconnectDelay(t *testing.T) {
 		ft := run(t, wsprotocol.ClosePTYUpstreamTimeout, 0)
 		assert.Equal(t, []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}, ft.jitterWindows())
 	})
+	t.Run("1011 exponential backoff", func(t *testing.T) {
+		ft := run(t, wsprotocol.ClosePTYInternalError, 0)
+		assert.Equal(t, []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}, ft.jitterWindows())
+	})
 	t.Run("4504 backoff resets after a long session", func(t *testing.T) {
 		ft := run(t, wsprotocol.ClosePTYUpstreamTimeout, reconnectBackoffResetAfter)
 		assert.Equal(t, []time.Duration{time.Second, time.Second, time.Second}, ft.jitterWindows())
@@ -279,7 +283,7 @@ func TestBackoffCeiling(t *testing.T) {
 // TestRun_FailedReconnectDoesNotLoop: a second consecutive close after a
 // failed reconnect ends Run; there is no further attempt.
 func TestRun_FailedReconnectDoesNotLoop(t *testing.T) {
-	for _, code := range []int{wsprotocol.ClosePTYUpstreamUnavailable, wsprotocol.ClosePTYUpstreamTimeout} {
+	for _, code := range []int{wsprotocol.ClosePTYUpstreamUnavailable, wsprotocol.ClosePTYUpstreamTimeout, wsprotocol.ClosePTYInternalError} {
 		t.Run(fmt.Sprintf("%d closed before live", code), func(t *testing.T) {
 			s := newPTYScriptServer(t, func(idx int, s *ptyScriptServer, conn *websocket.Conn) {
 				if idx == 0 {
@@ -332,7 +336,7 @@ func TestRun_TerminalCloseNeverReconnects(t *testing.T) {
 		wsprotocol.ClosePTYProtocolError, wsprotocol.ClosePTYSuperseded, wsprotocol.ClosePTYCancelled,
 		wsprotocol.ClosePTYSessionGone, 4999,
 		// Retry codes the CLI leaves to the user.
-		wsprotocol.ClosePTYInternalError, wsprotocol.ClosePTYGoingAway,
+		wsprotocol.ClosePTYGoingAway, wsprotocol.ClosePTYTryAgainLater,
 	}
 	for _, code := range codes {
 		t.Run(fmt.Sprint(code), func(t *testing.T) {

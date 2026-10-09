@@ -96,7 +96,7 @@ func (e *PTYReconnectError) Error() string {
 // Unwrap returns the original close and the reconnect failure.
 func (e *PTYReconnectError) Unwrap() []error { return []error{e.Close, e.Err} }
 
-// Reconnect backoff for wsprotocol.ReconnectBackoff (4504): exponential from
+// Reconnect backoff for wsprotocol.ReconnectBackoff (4504, 1011): exponential from
 // reconnectBackoffBase to reconnectBackoffMax with full jitter, reset once a
 // session has lived reconnectBackoffResetAfter.
 const (
@@ -354,10 +354,10 @@ func joinEndpointPath(prefix, apiPath string) string {
 // Run starts the PTY session and blocks until it ends.
 //
 // When the server closes the session with a code that
-// wsprotocol.PTYReconnectTiming allows (4503, 4504), Run makes one reconnect
+// wsprotocol.PTYReconnectTiming allows (4503, 4504, 1011), Run makes one reconnect
 // attempt for that close: after a full-jitter delay of up to
 // wsprotocol.PTYPromptReconnectMaxDelay for 4503, or after the normal
-// exponential backoff with full jitter for 4504. A successful reconnect
+// exponential backoff with full jitter for 4504 and 1011. A successful reconnect
 // sends the current terminal size so the remote tmux redraws at the right
 // size. If the reconnect fails (dial error, or the new session closes before
 // it delivers any data), Run returns a *PTYReconnectError and does not try

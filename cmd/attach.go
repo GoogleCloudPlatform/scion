@@ -67,8 +67,9 @@ Local vs Hub mode:
 
 Disconnects:
   When the Hub closes the session with code 4503 (for example a planned relay
-  restart) or 4504 (a transient failure), scion attach reconnects once by
-  itself, after a short random delay, and the screen redraws. If that
+  restart), 4504 (a transient failure) or 1011 (an internal error), scion
+  attach reconnects once by itself, after a short random delay, and the
+  screen redraws. If that
   reconnect fails, or the session ends for any other reason, the command
   exits with a message explaining what happened and what to run next (for
   example scion resume <agent> for a stopped agent, or scion attach <agent>
@@ -684,8 +685,8 @@ func (e *attachCloseError) Unwrap() error { return e.err }
 // authorization re-checks on every handshake independently of what was
 // eligible to select at mint time. Does not change the underlying error —
 // this only augments the message shown once, here. (The CLI reconnects
-// automatically only after a 4503 or 4504 close; a failed handshake ends the
-// command.)
+// automatically only after a 4503, 4504 or 1011 close; a failed handshake
+// ends the command.)
 func attachErrorWithUATHint(err error, token string) error {
 	if err == nil || !strings.HasPrefix(token, store.UATPrefix) {
 		return err
