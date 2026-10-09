@@ -312,15 +312,7 @@ func TestGRPCCallerDeadlineReleasesAfterHandlerEnds(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("handler did not finish")
 	}
-	deadline := time.After(time.Second)
-	for len(r.decodeSlots) != 0 {
-		select {
-		case <-deadline:
-			t.Fatal("permit leaked after deadline")
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
+	waitSlotsDrained(t, r.decodeSlots, "deadline-expired request")
 }
 
 type malformedCodec struct{ encoding.Codec }
@@ -360,8 +352,26 @@ func TestGRPCDecodedMessageSizeBoundary(t *testing.T) {
 			t.Fatalf("size %d: status %v, want %v", size, err, want)
 		}
 	}
-	if len(r.decodeSlots) != 0 {
-		t.Fatalf("size boundary leaked %d slots", len(r.decodeSlots))
+	waitSlotsDrained(t, r.decodeSlots, "size boundary")
+}
+
+// waitSlotsDrained waits up to a second for every decode slot to be
+// released. A rejected gRPC export cannot assert len(slots) == 0 right after
+// the client sees its status: grpc-go's serverStream.RecvMsg writes the
+// failure status to the client itself, before the handler returns and runs
+// its deferred slot release, so the client can observe the error while the
+// slot is still held (ptone/scion#1735). The slot is held through SendMsg
+// on purpose, so the release order in production code must not change.
+func waitSlotsDrained(t *testing.T, slots chan struct{}, what string) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for len(slots) != 0 {
+		select {
+		case <-deadline:
+			t.Fatalf("%s leaked %d slots", what, len(slots))
+		default:
+			time.Sleep(time.Millisecond)
+		}
 	}
 }
 
@@ -391,15 +401,7 @@ func TestGRPCMalformedOversizeAndUnknownMethodReclaimPermits(t *testing.T) {
 	if status.Code(err) != codes.Unimplemented {
 		t.Fatalf("unknown method status = %v", err)
 	}
-	deadline := time.After(time.Second)
-	for len(r.decodeSlots) != 0 {
-		select {
-		case <-deadline:
-			t.Fatal("permit leaked after rejected requests")
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
+	waitSlotsDrained(t, r.decodeSlots, "rejected requests")
 }
 
 func TestGRPCSlowRawBodyHonorsPredecodeCallerDeadline(t *testing.T) {

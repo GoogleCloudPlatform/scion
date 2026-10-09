@@ -1084,6 +1084,32 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 							statusUpdate.Message = exitStatusMessage(hbExitReason, exitCode)
 						}
 					}
+					// The agent's own clean-stop report usually reaches the
+					// Hub before the heartbeat that carries the disruption,
+					// leaving the agent stopped. The broker reports error for
+					// a disruption whose workspace did not survive the pod
+					// (see k8sDisruptionPhase in pkg/runtime), so a later start
+					// cannot resume it: apply that error over the plain stop
+					// (ptone/scion#2669). Never over a stop the user asked for
+					// (run intent stopped), and never over a different
+					// recorded reason.
+					if isDisruption && agentHB.Phase == string(state.PhaseError) &&
+						agent.Phase == string(state.PhaseStopped) &&
+						agent.RunIntent != store.RunIntentStopped &&
+						(agent.ExitReason == "" || agent.ExitReason == agentHB.ExitReason) {
+						statusUpdate.Phase = string(state.PhaseError)
+						statusUpdate.ExitReason = agentHB.ExitReason
+						if agentHB.ExitCode != nil {
+							statusUpdate.ExitCode = agentHB.ExitCode
+						}
+						if isGenericStopMessage(agent.Message) {
+							exitCode := agentHB.ExitCode
+							if exitCode == nil {
+								exitCode = agent.ExitCode
+							}
+							statusUpdate.Message = exitStatusMessage(hbExitReason, exitCode)
+						}
+					}
 				} else {
 					// Structured path: broker sent Phase/Activity directly.
 					// Guard against phase regressions: stale heartbeat data
@@ -1095,9 +1121,22 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					// reports a plain "stopped". Prefer the structured ExitCode
 					// field; fall back to parsing ContainerStatus for old brokers.
 					if hbPhase == state.PhaseStopped || hbPhase == state.PhaseError {
+						// A preempted or evicted pod whose workspace survives is
+						// reported stopped even though its container was killed
+						// with a non-zero code (see k8sDisruptionPhase in
+						// pkg/runtime); the broker's phase is authoritative then.
+						hbReason := state.ExitReason(agentHB.ExitReason)
+						hbDisruption := hbReason == state.ExitReasonPreempted || hbReason == state.ExitReasonEvicted
+						// A stop the user asked for (run intent stopped, its
+						// stopped status not yet written) that races a
+						// disruption ends stopped, keeping the reason.
+						if hbDisruption && hbPhase == state.PhaseError && agent.RunIntent == store.RunIntentStopped {
+							hbPhase = state.PhaseStopped
+							agentHB.Phase = string(state.PhaseStopped)
+						}
 						if agentHB.ExitCode != nil && *agentHB.ExitCode != 0 {
 							// crash path
-							if hbPhase == state.PhaseStopped {
+							if hbPhase == state.PhaseStopped && !hbDisruption {
 								// Promote PhaseStopped→PhaseError when exit code is non-zero.
 								hbPhase = state.PhaseError
 								agentHB.Phase = string(state.PhaseError)

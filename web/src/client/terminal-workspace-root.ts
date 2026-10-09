@@ -1180,13 +1180,14 @@ export class TerminalWorkspaceRoot {
     // neither full-size overlay is shown there: both would cover the
     // placeholders and hide the drop targets, whether or not any terminal
     // is open yet. Narrow and zoomed views render a single slot with no
-    // placeholder and keep the status message.
+    // placeholder, so they keep the empty state when no terminal is open
+    // and the status message otherwise.
     const isMultiPane = layoutState.active !== 'single';
     const showsPlaceholders =
       isMultiPane &&
       !(this.narrowQuery?.matches ?? false) &&
       this.layoutManager.getZoomed() === null;
-    this.empty.hidden = total > 0 || isMultiPane;
+    this.empty.hidden = total > 0 || showsPlaceholders;
     this.status.hidden =
       (total > 0 && hasSelected) || (total === 0 && isMultiPane) || showsPlaceholders;
 

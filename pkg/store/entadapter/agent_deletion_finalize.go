@@ -40,7 +40,7 @@ func (c *CompositeStore) FinalizeAgentDeletion(ctx context.Context, id string, p
 	if err != nil {
 		return 0, err
 	}
-	useLock := c.AgentStore.usesRowLocks(ctx)
+	useLock := c.AgentStore.usesRowLocks()
 	for attempt := 0; attempt < updateAgentDeletionAttempts; attempt++ {
 		affected, retry, err := c.finalizeAgentDeletionOnce(ctx, uid, pred, mode, set, hook, useLock)
 		if err != nil || !retry {
