@@ -38,6 +38,7 @@ import (
 func resetConduitFlags() {
 	conduitInternalListen, conduitInternalAdvertise = "", ""
 	conduitGrantKeyActivation, conduitReconnectWindow = "", ""
+	conduitLifetimeCap = ""
 	conduitUserStreamAuthzMax = ""
 	conduitTCPAllowedPorts = nil
 }
@@ -96,10 +97,10 @@ func TestApplyConduitFlagOverrides(t *testing.T) {
 		{
 			name: "every flag overrides",
 			args: []string{"--internal-listen=:9810", "--internal-advertise=http://b:9810", "--conduit-grant-key-activation=30m",
-				"--conduit-reconnect-window=0s", "--conduit-tcp-allowed-ports=3000,8080"},
+				"--conduit-reconnect-window=0s", "--conduit-tcp-allowed-ports=3000,8080", "--conduit-lifetime-cap=90s"},
 			want: config.HubConduitConfig{
 				InternalListen: ":9810", InternalAdvertise: "http://b:9810", GrantKeyActivation: "30m",
-				ReconnectWindow: "0s", TCPAllowedPorts: []int{3000, 8080}, PeerAuth: "hmac",
+				ReconnectWindow: "0s", TCPAllowedPorts: []int{3000, 8080}, PeerAuth: "hmac", LifetimeCap: "90s",
 			},
 		},
 		{
@@ -139,8 +140,8 @@ func TestAppendConduitDaemonArgs(t *testing.T) {
 		},
 		{
 			name: "every flag",
-			args: []string{"--internal-advertise=http://b:9810", "--conduit-grant-key-activation=30m"},
-			want: []string{"server", "start", "--internal-advertise=http://b:9810", "--conduit-grant-key-activation=30m"},
+			args: []string{"--internal-advertise=http://b:9810", "--conduit-grant-key-activation=30m", "--conduit-lifetime-cap=1h"},
+			want: []string{"server", "start", "--internal-advertise=http://b:9810", "--conduit-grant-key-activation=30m", "--conduit-lifetime-cap=1h"},
 		},
 	}
 	for _, tt := range tests {
@@ -165,6 +166,23 @@ func TestConduitDaemonArgsRoundTrip(t *testing.T) {
 	assert.Equal(t, "90m", childCfg.Hub.Conduit.StreamAuthzMax.User)
 }
 
+// TestConduitLifetimeCapSetting: the relay gets the configured cap, and
+// the 3500s default when none is configured.
+func TestConduitLifetimeCapSetting(t *testing.T) {
+	for _, tt := range []struct {
+		configured string
+		want       time.Duration
+	}{
+		{configured: "", want: 3500 * time.Second},
+		{configured: "90s", want: 90 * time.Second},
+		{configured: "2h", want: 2 * time.Hour},
+	} {
+		cfg := &config.GlobalConfig{}
+		cfg.Hub.Conduit.LifetimeCap = tt.configured
+		assert.Equal(t, tt.want, conduitLifetimeCapSetting(cfg), "lifetime_cap %q", tt.configured)
+	}
+}
+
 func TestValidateServerPreflight_Conduit(t *testing.T) {
 	t.Cleanup(resetServerFlags)
 	tests := []struct {
@@ -177,6 +195,8 @@ func TestValidateServerPreflight_Conduit(t *testing.T) {
 		{name: "bad reconnect window", hub: true, conduit: config.HubConduitConfig{ReconnectWindow: "1h"}, wantErr: "server.hub.conduit.reconnect_window"},
 		{name: "bad activation", hub: true, conduit: config.HubConduitConfig{GrantKeyActivation: "10s"}, wantErr: "server.hub.conduit.grant_key_activation"},
 		{name: "bad port", hub: true, conduit: config.HubConduitConfig{TCPAllowedPorts: []int{0}}, wantErr: "server.hub.conduit.tcp_allowed_ports"},
+		{name: "lifetime cap below the minimum", hub: true, conduit: config.HubConduitConfig{LifetimeCap: "60s"}, wantErr: "server.hub.conduit.lifetime_cap"},
+		{name: "lifetime cap malformed", hub: true, conduit: config.HubConduitConfig{LifetimeCap: "soon"}, wantErr: "server.hub.conduit.lifetime_cap"},
 		{name: "bad user stream authz max", hub: true, conduit: config.HubConduitConfig{StreamAuthzMax: config.HubConduitStreamAuthzMax{User: "30s"}}, wantErr: "server.hub.conduit.stream_authz_max.user"},
 		{name: "bad broker stream authz max (validated though not enforced)", hub: true, conduit: config.HubConduitConfig{StreamAuthzMax: config.HubConduitStreamAuthzMax{Broker: "200h"}}, wantErr: "server.hub.conduit.stream_authz_max.broker"},
 		{name: "bad agent stream authz max (validated though not enforced)", hub: true, conduit: config.HubConduitConfig{StreamAuthzMax: config.HubConduitStreamAuthzMax{Agent: "never"}}, wantErr: "server.hub.conduit.stream_authz_max.agent"},

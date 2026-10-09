@@ -445,11 +445,11 @@ func runProjectSkillsFromDirectory(cmd *cobra.Command, projectArg, dirURL string
 
 	// TTY: prompt unless --yes/--non-interactive.
 	if isInteractiveTerminal() && !autoConfirm {
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Add all %d skill(s)? [Y/n] ", len(result.Skills))
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Add all %d skill(s)? [Y/n] ", len(result.Skills))
 		var answer string
 		_, _ = fmt.Fscanln(cmd.InOrStdin(), &answer)
 		if answer != "" && strings.ToLower(answer) != "y" && strings.ToLower(answer) != "yes" {
-			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Aborted.")
+			_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Aborted.")
 			return nil
 		}
 	}

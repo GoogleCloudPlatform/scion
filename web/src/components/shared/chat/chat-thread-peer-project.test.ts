@@ -113,7 +113,7 @@ function hubSnapshot(agents: Agent[], version = 1): AgentListSnapshot {
 }
 
 function row(id: string, projectId: string): Agent {
-  return { id, name: id, projectId, template: '', phase: 'running' } as Agent;
+  return { id, name: id, projectId, template: '', phase: 'running' };
 }
 
 /** An agent DM thread opened and loaded (history, then its follow-up reads). */
@@ -290,6 +290,166 @@ describe('agent DM peer project', () => {
 
     expect(globalMap.stateManager.seedAgents).not.toHaveBeenCalled();
     expect(globalMap.agents.size).toBe(0);
+  });
+});
+
+describe('peer-agent-resolved', () => {
+  let listeners = new AbortController();
+  afterEach(() => {
+    listeners.abort();
+    listeners = new AbortController();
+  });
+
+  /** Every `peer-agent-resolved` detail that reaches the document. */
+  function listen(): Array<Record<string, unknown>> {
+    const seen: Array<Record<string, unknown>> = [];
+    document.addEventListener(
+      'peer-agent-resolved',
+      (e) => seen.push((e as CustomEvent<Record<string, unknown>>).detail),
+      { signal: listeners.signal }
+    );
+    return seen;
+  }
+
+  it("reports the peer's name and project from its read, outside the thread", async () => {
+    apiFetch.mockImplementation((path) =>
+      Promise.resolve(
+        /^\/api\/v1\/agents\/coder$/.test(path)
+          ? json({ id: 'coder', name: 'Coder One', slug: 'coder-one', projectId: 'proj-coder' })
+          : json({ items: [] })
+      )
+    );
+    const seen = listen();
+    await openDM('coder');
+
+    expect(seen).toEqual([
+      {
+        conversationKey: 'dm:agent:coder:user:u1',
+        agentId: 'coder',
+        name: 'Coder One',
+        projectId: 'proj-coder',
+      },
+    ]);
+  });
+
+  it('falls back to the slug for the name', async () => {
+    apiFetch.mockImplementation((path) =>
+      Promise.resolve(
+        /^\/api\/v1\/agents\/coder$/.test(path)
+          ? json({ id: 'coder', slug: 'coder-one', projectId: 'proj-coder' })
+          : json({ items: [] })
+      )
+    );
+    const seen = listen();
+    await openDM('coder');
+    expect(seen.map((d) => d.name)).toEqual(['coder-one']);
+  });
+
+  it('is reported from the hub list row, with no read', async () => {
+    const seen = listen();
+    store.hub = hubSnapshot([{ ...row('coder', 'proj-hub'), name: 'Coder One' }]);
+    await openDM('coder');
+
+    expect(seen).toEqual([
+      {
+        conversationKey: 'dm:agent:coder:user:u1',
+        agentId: 'coder',
+        name: 'Coder One',
+        projectId: 'proj-hub',
+      },
+    ]);
+    expect(singleAgentReads()).toBe(0);
+  });
+
+  it('is reported from the global agent map row, with no read', async () => {
+    const seen = listen();
+    globalMap.agents.set('coder', { ...row('coder', 'proj-detail'), name: 'Coder One' });
+    await openDM('coder');
+
+    expect(seen.map((d) => [d.name, d.projectId])).toEqual([['Coder One', 'proj-detail']]);
+    expect(singleAgentReads()).toBe(0);
+  });
+
+  it('is reported when the hub list lands after the DM opened and before its read', async () => {
+    let releaseHistory = (): void => {};
+    const base = apiFetch.getMockImplementation()!;
+    apiFetch.mockImplementation((path, init) => {
+      if (path.includes('/messages')) {
+        return new Promise<Response>((resolve) => {
+          releaseHistory = (): void => resolve(json({ items: [] }));
+        });
+      }
+      return base(path, init);
+    });
+    const seen = listen();
+    const el = document.createElement('scion-chat-thread');
+    el.conversationKey = 'dm:agent:coder:user:u1';
+    el.isDM = true;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+
+    // Another view's hub list load finishes while the history is in flight.
+    store.hub = hubSnapshot([{ ...row('coder', 'proj-hub'), name: 'Coder One' }]);
+    releaseHistory();
+    for (let i = 0; i < 10; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(seen.map((d) => [d.name, d.projectId])).toEqual([['Coder One', 'proj-hub']]);
+    expect(singleAgentReads()).toBe(0);
+  });
+
+  it('is reported again from the cached read when the thread comes back to the DM', async () => {
+    const base = apiFetch.getMockImplementation()!;
+    apiFetch.mockImplementation((path, init) =>
+      path === '/api/v1/agents/coder'
+        ? Promise.resolve(json({ id: 'coder', name: 'name-coder', projectId: 'proj-coder' }))
+        : base(path, init)
+    );
+    const seen = listen();
+    const el = await openDM('coder');
+    expect(seen).toHaveLength(1);
+
+    // Over to a space thread, then back to the same DM.
+    el.isDM = false;
+    el.conversationKey = 'topic-1';
+    await el.updateComplete;
+    for (let i = 0; i < 10; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    await openDM('coder', el);
+
+    expect(seen.map((d) => [d.conversationKey, d.name, d.projectId])).toEqual([
+      ['dm:agent:coder:user:u1', 'name-coder', 'proj-coder'],
+      ['dm:agent:coder:user:u1', 'name-coder', 'proj-coder'],
+    ]);
+    expect(singleAgentReads()).toBe(1);
+  });
+
+  it('is not reported for a failed read', async () => {
+    const seen = listen();
+    peerStatus = 500;
+    await openDM('coder');
+    expect(seen).toEqual([]);
+  });
+
+  it('is not reported for a DM the thread has since left', async () => {
+    let answerCoder = (): void => {};
+    const base = apiFetch.getMockImplementation()!;
+    apiFetch.mockImplementation((path, init) => {
+      if (path === '/api/v1/agents/coder') {
+        return new Promise<Response>((resolve) => {
+          answerCoder = (): void => resolve(json({ id: 'coder', projectId: 'proj-coder' }));
+        });
+      }
+      return base(path, init);
+    });
+    const seen = listen();
+    const el = await openDM('coder');
+    apiFetch.mockImplementation(() => new Promise<Response>(() => {}));
+    el.conversationKey = 'dm:agent:stranger:user:u1';
+    await el.updateComplete;
+
+    answerCoder();
+    for (let i = 0; i < 10; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(seen).toEqual([]);
   });
 });
 

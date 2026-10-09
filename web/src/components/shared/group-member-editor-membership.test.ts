@@ -110,9 +110,7 @@ describe('group member editor membership-changed event', () => {
   });
 
   it('is dispatched once a member is removed', async () => {
-    vi.mocked(removeMember).mockResolvedValue({ outcome: 'ok' } as Awaited<
-      ReturnType<typeof removeMember>
-    >);
+    vi.mocked(removeMember).mockResolvedValue({ outcome: 'ok' });
 
     await editor().handleRemoveMember(BOB);
 
@@ -125,7 +123,7 @@ describe('group member editor membership-changed event', () => {
       outcome: 'lockout',
       detail: 'last owner',
       rawBody: {},
-    } as Awaited<ReturnType<typeof removeMember>>);
+    });
 
     await editor().handleRemoveMember(BOB);
 

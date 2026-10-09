@@ -181,6 +181,20 @@ func (s *rsWebChatStore) GetTopicConversationIDIncludingDeleted(_ context.Contex
 	}
 	return t.ConversationID, nil
 }
+func (s *rsWebChatStore) GetTopicConversationIDInProject(_ context.Context, projectID, topicID string) (string, error) {
+	t, ok := s.topics[topicID]
+	if !ok || t.DeletedAt != nil || t.ProjectID != projectID {
+		return "", fmt.Errorf("topic not found: %s: %w", topicID, store.ErrNotFound)
+	}
+	return t.ConversationID, nil
+}
+func (s *rsWebChatStore) GetTopicConversationIDIncludingDeletedInProject(_ context.Context, projectID, topicID string) (string, error) {
+	t, ok := s.topics[topicID]
+	if !ok || t.ProjectID != projectID {
+		return "", fmt.Errorf("topic not found: %s: %w", topicID, store.ErrNotFound)
+	}
+	return t.ConversationID, nil
+}
 func (s *rsWebChatStore) CreateTopic(context.Context, WebChatTopic) error { return nil }
 func (s *rsWebChatStore) ListTopics(context.Context, string) ([]WebChatTopic, error) {
 	return nil, nil
@@ -230,7 +244,10 @@ func (s *rsWebChatStore) GetAttachmentsByMessages(context.Context, []string) (ma
 	return nil, nil
 }
 func (s *rsWebChatStore) LinkAttachmentToMessage(context.Context, string, string) error { return nil }
-func (s *rsWebChatStore) SetMessageReplyTo(context.Context, string, string) error       { return nil }
+func (s *rsWebChatStore) ListMessageIDsForAttachment(context.Context, string, int) ([]string, error) {
+	return nil, nil
+}
+func (s *rsWebChatStore) SetMessageReplyTo(context.Context, string, string) error { return nil }
 func (s *rsWebChatStore) GetMessageExt(context.Context, string) (*WebChatMessageExt, error) {
 	return nil, nil
 }

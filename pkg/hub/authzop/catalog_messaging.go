@@ -29,8 +29,14 @@ var messagingOperations = []OperationSpec{
 			// today, only the broker-call path below.
 			{Kind: EntryPointBrokerCall, Pattern: "broker.inbound"},
 		},
-		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent, PrincipalBroker},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT, CredentialBrokerToken},
+		Principals:  []PrincipalKind{PrincipalUser, PrincipalAgent, PrincipalBroker},
+		Credentials: []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT, CredentialBrokerToken},
+		// References in the message body are contained to the addressed
+		// project: a thread_id resolves only to a topic of that project, a
+		// conversation_id only to a conversation the sender may read
+		// (answered as unknown otherwise), and attachments only to files
+		// the hub ingested from the sender (metadata attachments are not
+		// accepted from callers).
 		ResourceResolver: "agent-from-thread",
 		BasePermission:   "agent.message",
 		Effects:          []SecurityEffect{EffectEmitExternal},

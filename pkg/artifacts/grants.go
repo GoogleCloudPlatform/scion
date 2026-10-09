@@ -102,6 +102,9 @@ type GrantResponse struct {
 // GrantListResponse answers GET /{id}/grants.
 type GrantListResponse struct {
 	Grants []GrantInfo `json:"grants"`
+	// CrossProjectSharing is true when grants to other projects (and
+	// moves to them) are turned on for the hub.
+	CrossProjectSharing bool `json:"crossProjectSharing"`
 }
 
 // PatchArtifactRequest is the body of PATCH /{id}. Each field present is
@@ -218,7 +221,7 @@ func (s *Service) handleListGrants(w http.ResponseWriter, r *http.Request, id st
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the artifact's grants")
 		return
 	}
-	out := GrantListResponse{Grants: []GrantInfo{}}
+	out := GrantListResponse{Grants: []GrantInfo{}, CrossProjectSharing: s.crossScopeAllowed(r.Context())}
 	for i := range grants {
 		g := &grants[i]
 		if g.SubjectKind != SubjectPrincipal && g.SubjectKind != SubjectScope {

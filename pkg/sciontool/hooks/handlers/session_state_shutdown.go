@@ -58,9 +58,9 @@ var ErrSessionStateRefused = errors.New("session metrics state refused")
 // state is removed): without the tombstone a late hook could report it too,
 // and losing one report is preferred to reporting twice.
 //
-// A session without an ID cannot be reported (the Hub requires one), so it
-// is not tombstoned: its state is removed, as the hook path does on
-// session-end, and ok is false.
+// A session whose harness supplied no ID is reported and tombstoned under
+// telemetry.FallbackSessionID, the same ID the session-end hook would have
+// used, so the two paths cannot report it under different IDs.
 //
 // The caller runs as root and the state directory belongs to the workload,
 // so nothing here follows a symlink: every directory component is opened
@@ -78,13 +78,6 @@ func (s *FileSessionState) CloseOpenSession(errMsg string) (telemetry.SessionSum
 		if file.Closed || !file.Aggregator.Open {
 			return nil
 		}
-		if file.Aggregator.SessionID == "" {
-			if err := dirfd.UnlinkAt(dirFd, leaf); err != nil {
-				return fmt.Errorf("removing state of a session without an ID: %w", err)
-			}
-			return nil
-		}
-
 		agg := telemetry.NewAggregator()
 		agg.RestoreState(file.Aggregator)
 		summary = agg.Finalize(0, 0, 0, 0, errMsg)

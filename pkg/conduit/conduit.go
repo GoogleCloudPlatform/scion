@@ -73,6 +73,11 @@ const (
 	CloseRelayTimeout uint32 = 4504
 )
 
+// reasonDrainingRefusal is the StreamClose reason of a stream refused
+// because the session is draining: the relay_restart token (design
+// §3.3.1) with a detail.
+const reasonDrainingRefusal = "relay_restart: session draining"
+
 // CloseError is a stream or session termination carrying a close code.
 type CloseError struct {
 	Code   uint32
@@ -229,6 +234,9 @@ type GoAwayOptions struct {
 	// ReconnectAfter hints the dialer how long to wait before dialing a
 	// replacement (default 0: immediately).
 	ReconnectAfter time.Duration
+	// CloseReason is the reason on the StreamClose (and the session
+	// close) sent at the drain deadline (default Reason).
+	CloseReason string
 }
 
 // Admitter is the relay-side hook (1d): it authenticates the principal,

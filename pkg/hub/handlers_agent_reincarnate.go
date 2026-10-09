@@ -295,8 +295,11 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// authority check: a requester other than the agent itself must pass
 	// CanDelegate and its ceiling must cover the role the next generation
 	// runs with (the patched role, else the stored one); it becomes the
-	// agent's recorded delegator only when it changes the role
-	// (ptone/scion#3762). All of this runs before the
+	// agent's recorded delegator when it changes the role
+	// (ptone/scion#3762), or when a user keeps the role of an agent whose
+	// own edge is missing or unrecorded, or whose chain has an unrecorded
+	// hop the chain walk reaches before any hop it does not accept
+	// (ptone/scion#3948). All of this runs before the
 	// broker and the agent state are examined and before anything is
 	// written, so a refused request claims nothing and a dry run reports
 	// the same refusal.
@@ -556,8 +559,8 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 
 // startReincarnation claims the agent, records the reincarnation (with the
 // authority re-record auth, nil when the edge is kept: a self-reincarnation
-// or one that keeps the role) and starts the
-// detached worker, answering 202. sourceBrokerID and targetBrokerID are
+// or one that keeps the role (except a user repair, ptone/scion#3948)) and
+// starts the detached worker, answering 202. sourceBrokerID and targetBrokerID are
 // echoed in the response (both empty unless the request named a target);
 // move is non-nil for a cross-broker move.
 func (s *Server) startReincarnation(w http.ResponseWriter, r *http.Request, agent *store.Agent, auth *reincarnateAuthority, fresh *store.AgentAppliedConfig, plan ReincarnationPlan, targetGeneration int, handoff string, admittedDeletionClaim int64, sourceBrokerID, targetBrokerID string, move *reincarnationMove) {
@@ -919,14 +922,22 @@ func effectiveAgentRuntime(agent *store.Agent, broker *store.RuntimeBroker) stri
 // the role must pass the same checks for the new role, as create requires
 // of an agent granting a role; one that keeps the role is not checked.
 //
-// The edge is re-recorded only when another requester changes the role: the
+// The edge is re-recorded when another requester changes the role: the
 // requester then becomes the recorded delegator, and it is refused (403)
 // when it descends from agent, because the new edge would close a loop in
-// the delegation chain (requesterDescendsFrom). In every other case,
-// including any self-reincarnation and a reincarnation by another requester
-// that keeps the role, it returns nil: the existing edge with its frozen
-// provenance and ceiling stays in force, so restarting an agent does not
-// change whose authority it runs on.
+// the delegation chain (requesterDescendsFrom). It is also re-recorded,
+// with the user as the recorded delegator, when a user keeps the role of
+// an agent whose own edge is missing or unrecorded, or whose chain has an
+// unrecorded hop further up that the chain walk reaches before any hop it
+// does not accept (reincarnateChainUnrecorded): the reincarnate then
+// repairs the chain as a recreate by that user would (ptone/scion#3948).
+// In every other case, including any self-reincarnation, an agent
+// requester's reincarnation that keeps the role, and a user's that keeps
+// the role of an agent with a recorded own edge and either a fully recorded
+// chain or a chain whose first problem is a hop that is not accepted, it
+// returns nil: the existing edge with its frozen provenance and ceiling
+// stays in force, so restarting an agent does not change whose authority
+// it runs on.
 //
 // On a refusal the response is written (403, 503 for a ceiling or chain
 // lookup fault, or 500 for a nil agent) and ok is false; nothing has been
@@ -990,11 +1001,32 @@ func (s *Server) reincarnateAuthorityFor(w http.ResponseWriter, r *http.Request,
 		writeForbiddenDenial(w, msg, DeniedByDelegationCeiling)
 		return nil, false
 	}
-	if self || !roleChanged {
+	if self {
 		// Decision D1: a self request does not re-record the edge.
-		// ptone/scion#3762: neither does another requester's reincarnate
-		// that keeps the role; the agent keeps its existing delegator.
 		return nil, true
+	}
+	if !roleChanged {
+		// ptone/scion#3762: another requester's reincarnate that keeps the
+		// role keeps the existing edge, so the agent keeps its delegator.
+		// ptone/scion#3948: the one exception is a user's reincarnate of an
+		// agent whose own edge is missing or unrecorded, or whose chain has
+		// an unrecorded hop further up that the chain walk reaches before
+		// any hop it does not accept, which re-records the edge below so
+		// the reincarnate repairs the chain.
+		if agentIdent != nil {
+			return nil, true
+		}
+		unrecorded, err := s.reincarnateChainUnrecorded(ctx, agent)
+		if err != nil {
+			s.agentLifecycleLog.Error("handleReincarnateAgent: delegation chain lookup failed",
+				"agent_id", agent.ID, "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"Unable to evaluate the agent's delegation chain; retry later", nil)
+			return nil, false
+		}
+		if !unrecorded {
+			return nil, true
+		}
 	}
 	if agentIdent != nil {
 		descends, err := s.requesterDescendsFrom(ctx, agentIdent.ID(), agent)
@@ -1024,6 +1056,52 @@ func (s *Server) reincarnateAuthorityFor(w http.ResponseWriter, r *http.Request,
 		Ceiling:       ceiling,
 		Provenance:    prov,
 	}, true
+}
+
+// reincarnateChainUnrecorded reports whether a user's same-role reincarnate
+// of agent re-records its edge. It does when the agent's own edge is missing
+// or is an unrecorded hop (hopUnrecorded: provenance version 0, an
+// uninterpretable version, the unrecorded ceiling kind, or the migration
+// sentinel), whatever lies above it: the user-rooted edge replaces the whole
+// chain, and CanDelegate and the user's ceiling, checked before this, still
+// bound it. Otherwise it does when the chain walk (chainEffectCeilingWalk)
+// counts an unrecorded hop further up: on a chain that folds, any unrecorded
+// hop; on a chain that stops with a structural error (for example a hop with
+// local development provenance on a server without dev auth), an unrecorded
+// hop below the hop where it stopped, or that hop itself when its ceiling
+// kind is unknown and its provenance version is not understood
+// (unrecordedBelow). Those are the chains whose agent a
+// permission requiring recorded provenance denies with ceiling_unrecorded,
+// as the check walks up from the agent and stops at the first unrecorded
+// hop. A fully recorded chain, and a chain whose only problem above a
+// recorded own edge is structural with no unrecorded hop below it, report
+// false, so the edge is kept; only a recreate replaces such a chain. More
+// than one active edge of its own also reports false, but that branch is
+// defensive: the agent standing gate (startGate, resolveChainRoot) runs
+// first and already refuses (409) such an agent, and one whose chain has a
+// missing ancestor edge or a loop. Only a lookup fault is an error.
+func (s *Server) reincarnateChainUnrecorded(ctx context.Context, agent *store.Agent) (bool, error) {
+	own, err := s.authzService.activeProjectEdges(ctx, agent.ID, agent.ProjectID)
+	if err != nil {
+		return false, err
+	}
+	switch {
+	case len(own) == 0:
+		return true, nil
+	case len(own) > 1:
+		// Defensive: unreachable behind the standing gate.
+		return false, nil
+	case hopUnrecorded(own[0]):
+		return true, nil
+	}
+	chain, unrecordedBelow, err := s.authzService.chainEffectCeilingWalk(ctx, agent)
+	if err != nil {
+		if isStructuralProvenanceError(err) {
+			return unrecordedBelow > 0, nil
+		}
+		return false, err
+	}
+	return chain.UnrecordedHops > 0, nil
 }
 
 // requesterDescendsFrom reports whether the requesting agent descends from
