@@ -4728,7 +4728,14 @@
 
 **Resource Resolver:** hub-scoped
 
-**Effects:** `revoke-authority`
+**Effects:** `change-authority`, `revoke-authority`, `mint-credential`
+
+### Delegation
+
+- **Kind:** `conditional_on_increase`
+- The re-issued role and scopes are checked with CanDelegate against the delegator's live grant (never the operator's), and the role is never raised
+
+**Authority Evaluation:** `before_and_after`
 
 ### Governance
 
