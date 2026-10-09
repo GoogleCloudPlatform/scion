@@ -110,10 +110,10 @@ For enterprise SSO setups, Scion supports authenticating Web UI users via an ext
 When registering Scion as a client in your identity provider, set the **redirect URI** (sometimes called "callback URL") to:
 
 ```
-https://<your-hub-domain>/auth/callback/oidc
+<hub-base-url>/auth/callback/oidc
 ```
 
-Replace `<your-hub-domain>` with the public hostname of your Scion Hub (the value of `SCION_SERVER_HUB_ENDPOINT` or `server.hub.endpoint` in `settings.yaml`). This is the endpoint the IdP redirects users to after authentication.
+Replace `<hub-base-url>` with the Hub base URL, including the scheme, for example `https://hub.example.com`. The Hub base URL is set by the `--base-url` flag or, when the flag is not set, by `SCION_SERVER_BASE_URL`; without either, it defaults to `http://localhost:<web port>`. This is the endpoint the IdP redirects users to after authentication.
 
 The Hub builds the redirect URI from its base URL, so a Hub served over plain HTTP uses an `http://` redirect URI. The Hub does not require HTTPS for OIDC login, and it marks the session cookie `Secure` only when the base URL starts with `https://`. Whether an `http://` redirect URI is accepted is up to your identity provider; many require HTTPS for production clients. The `issuer_url` is different: it must use `https://` unless its host is `localhost` or `127.0.0.1`, and the Hub does not start otherwise.
 
@@ -135,7 +135,7 @@ server:
 Prefer `settings.yaml` for these keys. Underscored environment variables such as `SCION_SERVER_OIDC_LOGIN_ENABLED` are ignored, and the Hub logs a warning at startup for each one. The collapsed names (`SCION_SERVER_OIDCLOGIN_ENABLED`, `SCION_SERVER_OIDCLOGIN_ISSUERURL`, `SCION_SERVER_OIDCLOGIN_CLIENTID`, and so on) take effect only when `settings.yaml` has a `server:` section, as above. They are ignored on the legacy `server.yaml` path ([ptone/scion#3038](https://github.com/ptone/scion/issues/3038)).
 
 :::tip[Troubleshooting: `invalid redirect_uri`]
-If your identity provider returns an `invalid redirect_uri` error during login, verify that the redirect URI registered in your IdP matches `https://<your-hub-domain>/auth/callback/oidc` exactly — including the scheme, hostname, and path. The value must match `SCION_SERVER_HUB_ENDPOINT` plus `/auth/callback/oidc`.
+If your identity provider returns an `invalid redirect_uri` error during login, verify that the redirect URI registered in your IdP matches `<hub-base-url>/auth/callback/oidc` exactly, including the scheme, hostname, port, and path. The value must be the Hub base URL, set by `--base-url` or `SCION_SERVER_BASE_URL`, plus `/auth/callback/oidc`.
 :::
 
 ### Verified Email Requirement

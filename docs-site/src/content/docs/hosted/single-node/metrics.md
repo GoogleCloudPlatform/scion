@@ -161,7 +161,7 @@ On those runtimes, GCP export needs one of:
 - **A registered service account assigned to the agent.** Register it with `scion project service-accounts add <email> --gcp-project <id>` (or `mint`), check it with `scion project service-accounts verify <id>`, and start the agent with `--service-account <id>`. This sets mode `assign`, and the metadata server returns tokens for that account. The account needs the roles in [IAM Permissions](#3-iam-permissions). See [`scion project service-accounts`](/scion/reference/cli/) in the CLI reference.
 - **The telemetry credentials secret**, a GCP service account key file, described below.
 
-To check which one an agent has, run `echo $SCION_METADATA_MODE` and `echo $SCION_OTEL_GCP_CREDENTIALS` inside the agent. `assign` means a service account is assigned; `block` with an empty `SCION_OTEL_GCP_CREDENTIALS` means export to GCP has no credentials. `sciontool metadata status` inside the agent also reports the mode and, in `assign` mode, the account and whether its token endpoint returns `200`.
+To check which one an agent has, run `echo $SCION_METADATA_MODE` and `echo $SCION_OTEL_GCP_CREDENTIALS` inside the agent. `assign` means a service account is assigned; `block` with an empty `SCION_OTEL_GCP_CREDENTIALS` and no key file at `~/.scion/telemetry-gcp-credentials.json` means export to GCP has no credentials. `sciontool metadata status` inside the agent also reports the mode and, in `assign` mode, the account and whether its token endpoint returns `200`.
 
 Scion uses a **well-known secret** to provision the key file into every agent container automatically.
 
