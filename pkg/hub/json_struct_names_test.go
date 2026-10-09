@@ -46,7 +46,11 @@ type jnConflictA struct {
 	Untagged string // untagged at equal depth in both: dropped
 }
 
-type jnConflictB struct {
+// JNConflictB is exported and embedded through a pointer so that its Dup
+// tag repeats jnConflictA's at equal depth for encoding/json without go
+// vet's structtag check (which does not follow embedded pointers)
+// reporting the deliberate duplicate.
+type JNConflictB struct {
 	Dup      string `json:"dup"`
 	TagWin   string
 	Untagged string
@@ -68,7 +72,7 @@ type jnHidden struct {
 type jnRoot struct {
 	jnLevel1
 	jnConflictA
-	jnConflictB
+	*JNConflictB
 	*JNPtr
 	jnTaggedEmbed `json:"tagged_embed"` // a tagged embedded struct is a named field
 	*jnHidden                           // unexported embedded pointer: skipped (see structJSONNames)
@@ -108,10 +112,10 @@ func TestStructJSONNames_EmbeddingRules(t *testing.T) {
 }
 
 // The names structJSONNames yields are the keys encoding/json writes for
-// the same type (with the embedded pointer set and the unexported one
-// nil, which encoding/json leaves out).
+// the same type (with the exported embedded pointers set and the
+// unexported one nil, which encoding/json leaves out).
 func TestStructJSONNames_MatchesEncodingJSON(t *testing.T) {
-	v := jnRoot{JNPtr: &JNPtr{Ptr: "p"}}
+	v := jnRoot{JNConflictB: &JNConflictB{}, JNPtr: &JNPtr{Ptr: "p"}}
 	b, err := json.Marshal(v)
 	require.NoError(t, err)
 	var m map[string]json.RawMessage
