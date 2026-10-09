@@ -25,6 +25,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { ArtifactResponse, ArtifactVersion } from '../../client/artifacts.js';
 import type { ScionPageArtifactDetail } from './artifact-detail.js';
 import { resetPrincipalNames } from '../../client/principal-names.js';
+import { requestBodyText, requestUrl } from '../../client/__fixtures__/request-url.js';
 
 const ID = '5f1c2d3e-0000-4000-8000-000000000001';
 
@@ -83,7 +84,7 @@ function mockFetch(
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
+      const url = requestUrl(input);
       const method = init?.method ?? 'GET';
       urls.push(method === 'GET' ? url : `${method} ${url}`);
       if (method !== 'GET' && !url.endsWith('/view')) {
@@ -571,7 +572,7 @@ describe('artifact page', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-        const url = String(input);
+        const url = requestUrl(input);
         if (url === '/api/v1/agents/agent-1') {
           return Promise.resolve(
             new Response(JSON.stringify({ name: 'metrics-agent' }), { status: 200 })
@@ -626,7 +627,7 @@ describe('artifact page', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo | URL) => {
-        if (String(input) === `/api/v1/artifacts/${ID}`) {
+        if (requestUrl(input) === `/api/v1/artifacts/${ID}`) {
           return new Promise<Response>((resolve) => {
             release.push((m) => resolve(new Response(JSON.stringify(m), { status: 200 })));
           });
@@ -849,10 +850,10 @@ describe('artifact page', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-        if (init?.method === 'POST' && String(input).endsWith('/versions'))
-          bodies.push(String(init.body));
-        if (init?.method === 'POST' && String(input).endsWith('/finalize'))
-          finalizeBodies.push(String(init.body));
+        if (init?.method === 'POST' && requestUrl(input).endsWith('/versions'))
+          bodies.push(requestBodyText(init.body));
+        if (init?.method === 'POST' && requestUrl(input).endsWith('/finalize'))
+          finalizeBodies.push(requestBodyText(init.body));
         return realFetch(input, init);
       })
     );
@@ -1091,7 +1092,7 @@ describe('artifact page', () => {
     });
     const inner = globalThis.fetch;
     vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) =>
-      fileStatus !== 200 && String(input).includes('/files/')
+      fileStatus !== 200 && requestUrl(input).includes('/files/')
         ? Promise.resolve(
             new Response('{"error":{"code":"internal","message":"boom"}}', { status: 500 })
           )
@@ -1403,7 +1404,7 @@ describe('artifact page', () => {
     });
     const inner = globalThis.fetch;
     vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) =>
-      gone && String(input) === `/api/v1/artifacts/${ID}` && (init?.method ?? 'GET') === 'GET'
+      gone && requestUrl(input) === `/api/v1/artifacts/${ID}` && (init?.method ?? 'GET') === 'GET'
         ? Promise.resolve(
             new Response('{"error":{"code":"not_found","message":"not found"}}', { status: 404 })
           )

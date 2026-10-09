@@ -146,7 +146,7 @@ export class ScionPageHealthDashboard extends LitElement {
         this.error = await extractApiError(res, 'Failed to fetch health summary');
         return;
       }
-      this.data = await res.json();
+      this.data = (await res.json()) as HealthSummary;
       this.error = null;
     } catch (e) {
       this.error = e instanceof Error ? e.message : 'Network error';

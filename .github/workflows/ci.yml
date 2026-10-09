@@ -318,6 +318,29 @@ jobs:
           esac
           exit "$rc"
 
+      - name: Check Debug Defaults
+        run: |
+          # Invoked directly rather than via `make check-debug-defaults`, for the
+          # same reason as Check Authorization Guards above: make would collapse
+          # the script's exit 1 (violations) and exit 4 (nothing was analysed).
+          set +e
+          ./hack/check-debug-defaults.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=Debug defaults NOT checked::check-debug-defaults --self-test failed (exit $rc) — the check itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
+          ./hack/check-debug-defaults.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=Debug defaults::A setup script, deploy template or hosted setup doc turns on debug logging by default. Remove it, or add a commented ALLOWLIST entry in hack/check-debug-defaults.sh for an intentional mention; details are in the step log above." ;;
+            *) echo "::error title=Debug defaults NOT checked::check-debug-defaults.sh could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure, not a statement about the codebase." ;;
+          esac
+          exit "$rc"
+
       # Run Tests with a diagnostic hang watchdog (ptone/scion#3183). It is
       # diagnostic only: no retries, and on a normal pass or fail the step
       # exits with make test-fast's own exit code. If the tests are still
