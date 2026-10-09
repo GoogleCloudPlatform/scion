@@ -69,7 +69,8 @@ function stubFetch(): void {
       return Promise.resolve({
         ok: true,
         status: 200,
-        json: async () => ({ projects: [], brokers: [], templates: [], harnessConfigs: [] }),
+        json: () =>
+          Promise.resolve({ projects: [], brokers: [], templates: [], harnessConfigs: [] }),
       } as Response);
     })
   );
@@ -86,7 +87,8 @@ function stubFetchTrackingCalls(): { calls: string[] } {
       return Promise.resolve({
         ok: true,
         status: 200,
-        json: async () => ({ projects: [], brokers: [], templates: [], harnessConfigs: [] }),
+        json: () =>
+          Promise.resolve({ projects: [], brokers: [], templates: [], harnessConfigs: [] }),
       } as Response);
     })
   );
@@ -112,13 +114,14 @@ function stubFetchCapturingCreateRequests(): { bodies: Array<Record<string, unkn
         return Promise.resolve({
           ok: false,
           status: 400,
-          json: async () => ({ error: { message: 'stub: not actually created' } }),
+          json: () => Promise.resolve({ error: { message: 'stub: not actually created' } }),
         } as Response);
       }
       return Promise.resolve({
         ok: true,
         status: 200,
-        json: async () => ({ projects: [], brokers: [], templates: [], harnessConfigs: [] }),
+        json: () =>
+          Promise.resolve({ projects: [], brokers: [], templates: [], harnessConfigs: [] }),
       } as Response);
     })
   );
@@ -155,53 +158,55 @@ function stubFetchForKubernetesProjectDefault(
         return Promise.resolve({
           ok: false,
           status: 400,
-          json: async () => ({ error: { message: 'stub: not actually created' } }),
+          json: () => Promise.resolve({ error: { message: 'stub: not actually created' } }),
         } as Response);
       }
       if (url.includes('/api/v1/projects?')) {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({ projects: [{ id: 'p1', name: 'P1' }] }),
+          json: () => Promise.resolve({ projects: [{ id: 'p1', name: 'P1' }] }),
         } as Response);
       }
       if (url.includes('/api/v1/runtime-brokers')) {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({
-            brokers: [
-              {
-                id: brokerId,
-                name: brokerName,
-                status: 'online',
-                profiles: [{ name: 'default', type: brokerType, available: true }],
-              },
-            ],
-          }),
+          json: () =>
+            Promise.resolve({
+              brokers: [
+                {
+                  id: brokerId,
+                  name: brokerName,
+                  status: 'online',
+                  profiles: [{ name: 'default', type: brokerType, available: true }],
+                },
+              ],
+            }),
         } as Response);
       }
       if (url.includes('/api/v1/projects/p1/settings')) {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({
-            defaultGCPIdentityMode: mode,
-            ...(serviceAccountId ? { defaultGCPIdentityServiceAccountID: serviceAccountId } : {}),
-          }),
+          json: () =>
+            Promise.resolve({
+              defaultGCPIdentityMode: mode,
+              ...(serviceAccountId ? { defaultGCPIdentityServiceAccountID: serviceAccountId } : {}),
+            }),
         } as Response);
       }
       if (url.includes('/gcp-service-accounts')) {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({ items: serviceAccounts }),
+          json: () => Promise.resolve({ items: serviceAccounts }),
         } as Response);
       }
       return Promise.resolve({
         ok: true,
         status: 200,
-        json: async () => ({}),
+        json: () => Promise.resolve({}),
       } as Response);
     })
   );
@@ -1079,43 +1084,44 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
           return Promise.resolve({
             ok: false,
             status: 400,
-            json: async () => ({ error: { message: 'stub: not actually created' } }),
+            json: () => Promise.resolve({ error: { message: 'stub: not actually created' } }),
           } as Response);
         }
         if (url.includes('/api/v1/projects?')) {
           return Promise.resolve({
             ok: true,
             status: 200,
-            json: async () => ({ projects: [{ id: 'p1', name: 'P1' }] }),
+            json: () => Promise.resolve({ projects: [{ id: 'p1', name: 'P1' }] }),
           } as Response);
         }
         if (url.includes('/api/v1/runtime-brokers')) {
           return Promise.resolve({
             ok: true,
             status: 200,
-            json: async () => ({
-              brokers: [
-                {
-                  id: 'broker-docker',
-                  name: 'docker-broker',
-                  status: 'online',
-                  profiles: [{ name: 'default', type: 'docker', available: true }],
-                },
-              ],
-            }),
+            json: () =>
+              Promise.resolve({
+                brokers: [
+                  {
+                    id: 'broker-docker',
+                    name: 'docker-broker',
+                    status: 'online',
+                    profiles: [{ name: 'default', type: 'docker', available: true }],
+                  },
+                ],
+              }),
           } as Response);
         }
         if (url.includes('/api/v1/projects/p2/settings')) {
           return Promise.resolve({
             ok: true,
             status: 200,
-            json: async () => ({ defaultGCPIdentityMode: 'passthrough' }),
+            json: () => Promise.resolve({ defaultGCPIdentityMode: 'passthrough' }),
           } as Response);
         }
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({ items: [] }),
+          json: () => Promise.resolve({ items: [] }),
         } as Response);
       })
     );
@@ -1182,12 +1188,16 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
       vi.fn((input: RequestInfo | URL) => {
         const url = requestUrl(input);
         if (url.includes('/api/v1/projects/p2/settings')) {
-          return Promise.resolve({ ok: true, status: 200, json: async () => ({}) } as Response);
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({}),
+          } as Response);
         }
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({ items: [] }),
+          json: () => Promise.resolve({ items: [] }),
         } as Response);
       })
     );
@@ -1236,16 +1246,20 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
           return Promise.resolve({
             ok: false,
             status: 400,
-            json: async () => ({ error: { message: 'stub: not actually created' } }),
+            json: () => Promise.resolve({ error: { message: 'stub: not actually created' } }),
           } as Response);
         }
         if (url.includes('/api/v1/projects/p2/settings')) {
-          return Promise.resolve({ ok: true, status: 200, json: async () => ({}) } as Response);
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({}),
+          } as Response);
         }
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({ items: [] }),
+          json: () => Promise.resolve({ items: [] }),
         } as Response);
       })
     );
@@ -1682,7 +1696,8 @@ describe('Create Agent: GCP identity defaults do not race', () => {
   function deferred(): Deferred {
     let resolve!: (body: unknown) => void;
     const promise = new Promise<Response>((r) => {
-      resolve = (body: unknown) => r({ ok: true, status: 200, json: async () => body } as Response);
+      resolve = (body: unknown) =>
+        r({ ok: true, status: 200, json: () => Promise.resolve(body) } as Response);
     });
     return { promise, resolve };
   }
@@ -1705,14 +1720,14 @@ describe('Create Agent: GCP identity defaults do not race', () => {
             return Promise.resolve({
               ok: true,
               status: 200,
-              json: async () => route,
+              json: () => Promise.resolve(route),
             } as Response);
           }
         }
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({ items: [] }),
+          json: () => Promise.resolve({ items: [] }),
         } as Response);
       })
     );
@@ -1806,7 +1821,7 @@ describe('Create Agent: GCP identity defaults do not race', () => {
       vi.fn((input: RequestInfo | URL) => {
         const url = requestUrl(input);
         const ok = (body: unknown): Promise<Response> =>
-          Promise.resolve({ ok: true, status: 200, json: async () => body } as Response);
+          Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) } as Response);
         if (url.includes('/projects/pA/gcp-service-accounts')) {
           aAccountCalls++;
           return aAccountCalls === 1

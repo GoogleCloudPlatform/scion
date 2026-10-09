@@ -64,7 +64,7 @@ function stubFetch(agent: Record<string, unknown>): void {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({}),
+          json: () => Promise.resolve({}),
         } as Response);
       }
       if (init?.method === 'PATCH') {
@@ -78,8 +78,8 @@ function stubFetch(agent: Record<string, unknown>): void {
             ({
               ok: status < 400,
               status,
-              json: async () => reply.body,
-              text: async () => JSON.stringify(reply.body),
+              json: () => Promise.resolve(reply.body),
+              text: () => Promise.resolve(JSON.stringify(reply.body)),
             }) as Response
         );
       }
@@ -87,14 +87,14 @@ function stubFetch(agent: Record<string, unknown>): void {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => agent,
+          json: () => Promise.resolve(agent),
         } as Response);
       }
       return Promise.resolve({
         ok: false,
         status: 404,
-        json: async () => ({}),
-        text: async () => 'not found',
+        json: () => Promise.resolve({}),
+        text: () => Promise.resolve('not found'),
       } as Response);
     })
   );

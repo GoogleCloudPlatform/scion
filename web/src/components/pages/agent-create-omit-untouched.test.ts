@@ -93,7 +93,7 @@ function stubFetch(): void {
         return Promise.resolve({
           ok: false,
           status: 400,
-          json: async () => ({ error: { message: 'stub: not created' } }),
+          json: () => Promise.resolve({ error: { message: 'stub: not created' } }),
         } as Response);
       }
       let body: unknown = { projects: [], brokers: [], templates: [], harnessConfigs: [] };
@@ -114,7 +114,11 @@ function stubFetch(): void {
       } else if (url.includes('/gcp-service-accounts')) {
         body = { items: serviceAccounts };
       }
-      return Promise.resolve({ ok: true, status: 200, json: async () => body } as Response);
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(body),
+      } as Response);
     })
   );
 }

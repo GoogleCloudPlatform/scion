@@ -283,7 +283,7 @@ function makeFetchHandler(opts?: { createStatus?: number; deleteStatus?: number 
   const deleteStatus = opts?.deleteStatus ?? 404;
   const calls: { url: string; method: string; body?: string }[] = [];
 
-  const handler = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+  const handler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
     const method = init?.method ?? 'GET';
     const body = typeof init?.body === 'string' ? init.body : undefined;
@@ -291,46 +291,50 @@ function makeFetchHandler(opts?: { createStatus?: number; deleteStatus?: number 
 
     // Mutation pre-check: POST probe (create)
     if (path === '/api/v1/admin/role-bindings' && method === 'POST' && body === '{}') {
-      return new Response('{}', { status: createStatus });
+      return Promise.resolve(new Response('{}', { status: createStatus }));
     }
 
     // Mutation pre-check: DELETE probe (delete sentinel)
     if (path.includes('/api/v1/admin/role-bindings/00000000') && method === 'DELETE') {
-      return new Response('{}', { status: deleteStatus });
+      return Promise.resolve(new Response('{}', { status: deleteStatus }));
     }
 
     // Actual POST to create a binding
     if (path === '/api/v1/admin/role-bindings' && method === 'POST' && body !== '{}') {
-      return new Response(JSON.stringify({ id: 'new-binding' }), { status: 201 });
+      return Promise.resolve(new Response(JSON.stringify({ id: 'new-binding' }), { status: 201 }));
     }
 
     // Actual DELETE to remove a binding
     if (path.includes('/api/v1/admin/role-bindings/b-direct') && method === 'DELETE') {
-      return new Response('', { status: 204 });
+      return Promise.resolve(new Response('', { status: 204 }));
     }
 
     // Binding list
     if (path.includes('/api/v1/admin/role-bindings') && method === 'GET') {
-      return new Response(JSON.stringify(makeBindings()), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      });
+      return Promise.resolve(
+        new Response(JSON.stringify(makeBindings()), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
     }
 
     // Role definitions (for add dialog)
     if (path.includes('/api/v1/admin/roles') && method === 'GET') {
-      return new Response(
-        JSON.stringify({
-          items: [
-            { id: 'role-1', name: 'Editor', scopeType: 'system' },
-            { id: 'role-2', name: 'Viewer', scopeType: 'system' },
-          ],
-        }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            items: [
+              { id: 'role-1', name: 'Editor', scopeType: 'system' },
+              { id: 'role-2', name: 'Viewer', scopeType: 'system' },
+            ],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
       );
     }
 
-    return new Response('{}', { status: 200 });
+    return Promise.resolve(new Response('{}', { status: 200 }));
   };
   return { handler, calls };
 }
@@ -675,31 +679,32 @@ describe('Behavioral: create binding request payload', () => {
 describe('Behavioral: error feedback on failed mutation', () => {
   it('shows error feedback when DELETE fails', async () => {
     const calls: { url: string; method: string; body?: string }[] = [];
-    const failingHandler = async (
-      url: string | URL | Request,
-      init?: RequestInit
-    ): Promise<Response> => {
+    const failingHandler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
       const method = init?.method ?? 'GET';
       const body = typeof init?.body === 'string' ? init.body : undefined;
       calls.push({ url: path, method, body });
 
       if (path.includes('/api/v1/admin/role-bindings/b-direct') && method === 'DELETE') {
-        return new Response(JSON.stringify({ error: 'forbidden' }), { status: 403 });
+        return Promise.resolve(
+          new Response(JSON.stringify({ error: 'forbidden' }), { status: 403 })
+        );
       }
       if (path.includes('/api/v1/admin/role-bindings') && method === 'GET') {
-        return new Response(JSON.stringify(makeBindings()), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        });
+        return Promise.resolve(
+          new Response(JSON.stringify(makeBindings()), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
       }
       if (path === '/api/v1/admin/role-bindings' && method === 'POST') {
-        return new Response('{}', { status: 400 });
+        return Promise.resolve(new Response('{}', { status: 400 }));
       }
       if (path.includes('00000000') && method === 'DELETE') {
-        return new Response('{}', { status: 404 });
+        return Promise.resolve(new Response('{}', { status: 404 }));
       }
-      return new Response('{}', { status: 200 });
+      return Promise.resolve(new Response('{}', { status: 200 }));
     };
 
     const el = await createEl(failingHandler);

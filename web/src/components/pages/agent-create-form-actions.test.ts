@@ -75,7 +75,7 @@ function stubFetch(createdPhase?: string, start: StartResponse = { ok: true, sta
           return Promise.resolve({
             ok: true,
             status: 201,
-            json: async () => ({ agent: { id: 'agent-1', phase: createdPhase } }),
+            json: () => Promise.resolve({ agent: { id: 'agent-1', phase: createdPhase } }),
           } as Response);
         }
         if (url.endsWith('/start')) {
@@ -83,18 +83,23 @@ function stubFetch(createdPhase?: string, start: StartResponse = { ok: true, sta
           return Promise.resolve({
             ok: start.ok,
             status: start.status,
-            json: async () => {
-              if (start.body === undefined) throw new SyntaxError('no JSON body');
-              return start.body;
+            json: () => {
+              if (start.body === undefined) return Promise.reject(new SyntaxError('no JSON body'));
+              return Promise.resolve(start.body);
             },
           } as Response);
         }
-        return Promise.resolve({ ok: true, status: 200, json: async () => ({}) } as Response);
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({}),
+        } as Response);
       }
       return Promise.resolve({
         ok: true,
         status: 200,
-        json: async () => ({ projects: [], brokers: [], templates: [], harnessConfigs: [] }),
+        json: () =>
+          Promise.resolve({ projects: [], brokers: [], templates: [], harnessConfigs: [] }),
       } as Response);
     })
   );

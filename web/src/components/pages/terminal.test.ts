@@ -70,7 +70,7 @@ interface MockOptions {
  * terminal component touches during tests.
  */
 function makeFetchMock(calls: Call[], opts: MockOptions = {}) {
-  return async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+  return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const href = requestUrl(url);
     const method = init?.method ?? 'GET';
     let parsed: any = undefined;
@@ -85,34 +85,36 @@ function makeFetchMock(calls: Call[], opts: MockOptions = {}) {
 
     // Shared dirs endpoint
     if (href.includes('/shared-dirs') && method === 'GET') {
-      return jsonResponse({ sharedDirs: opts.sharedDirs ?? [] }, 200);
+      return Promise.resolve(jsonResponse({ sharedDirs: opts.sharedDirs ?? [] }, 200));
     }
 
     // Upload endpoint
     if (href.includes('/shared-dirs/') && href.includes('/files') && method === 'POST') {
       const status = opts.uploadStatus ?? 200;
       if (status >= 400) {
-        return jsonResponse({ error: { message: 'upload failed' } }, status);
+        return Promise.resolve(jsonResponse({ error: { message: 'upload failed' } }, status));
       }
-      return jsonResponse({ ok: true }, status);
+      return Promise.resolve(jsonResponse({ ok: true }, status));
     }
 
     // Agent info (returns a minimal agent object)
     if (href.includes('/api/v1/agents/')) {
-      return jsonResponse(
-        {
-          id: 'test-agent',
-          name: 'test-agent',
-          phase: 'running',
-          projectId: 'proj-1',
-          activity: '',
-          exposedPorts: [],
-        },
-        200
+      return Promise.resolve(
+        jsonResponse(
+          {
+            id: 'test-agent',
+            name: 'test-agent',
+            phase: 'running',
+            projectId: 'proj-1',
+            activity: '',
+            exposedPorts: [],
+          },
+          200
+        )
       );
     }
 
-    return jsonResponse({}, 200);
+    return Promise.resolve(jsonResponse({}, 200));
   };
 }
 
@@ -125,11 +127,11 @@ function createElement(): any {
 }
 
 /** Create an element, set up basic state, and stub fetch for resolveUploadTarget tests. */
-async function createForUploadTest(calls: Call[], opts: MockOptions = {}): Promise<any> {
+function createForUploadTest(calls: Call[], opts: MockOptions = {}): Promise<any> {
   vi.stubGlobal('fetch', vi.fn(makeFetchMock(calls, opts)));
   const el = createElement();
   el.projectId = 'proj-1';
-  return el;
+  return Promise.resolve(el);
 }
 
 function cleanup() {
@@ -374,7 +376,7 @@ describe('terminal — _handleFileDrop upload paths', () => {
 
   it('shows error and disables upload on 409 response', async () => {
     const el = setupElement(
-      vi.fn(async () => jsonResponse({ error: { message: 'upload failed' } }, 409))
+      vi.fn(() => Promise.resolve(jsonResponse({ error: { message: 'upload failed' } }, 409)))
     );
 
     const file = new File(['hello'], 'test.txt');
@@ -390,7 +392,9 @@ describe('terminal — _handleFileDrop upload paths', () => {
 
   it('shows error on non-ok HTTP response', async () => {
     const el = setupElement(
-      vi.fn(async () => jsonResponse({ error: { message: 'server error details' } }, 500))
+      vi.fn(() =>
+        Promise.resolve(jsonResponse({ error: { message: 'server error details' } }, 500))
+      )
     );
 
     const file = new File(['hello'], 'test.txt');
@@ -404,8 +408,8 @@ describe('terminal — _handleFileDrop upload paths', () => {
 
   it('shows error on network failure', async () => {
     const el = setupElement(
-      vi.fn(async () => {
-        throw new Error('Network failure');
+      vi.fn(() => {
+        return Promise.reject(new Error('Network failure'));
       })
     );
 
@@ -418,7 +422,7 @@ describe('terminal — _handleFileDrop upload paths', () => {
   });
 
   it('calls sendData with shell-quoted paths on success', async () => {
-    const el = setupElement(vi.fn(async () => jsonResponse({ ok: true }, 200)));
+    const el = setupElement(vi.fn(() => Promise.resolve(jsonResponse({ ok: true }, 200))));
     // Mock sendData to capture what gets sent to the terminal
     const sendDataCalls: string[] = [];
     el.sendData = (data: string) => {
@@ -438,7 +442,7 @@ describe('terminal — _handleFileDrop upload paths', () => {
   });
 
   it('sends multiple shell-quoted paths on multi-file success', async () => {
-    const el = setupElement(vi.fn(async () => jsonResponse({ ok: true }, 200)));
+    const el = setupElement(vi.fn(() => Promise.resolve(jsonResponse({ ok: true }, 200))));
     const sendDataCalls: string[] = [];
     el.sendData = (data: string) => {
       sendDataCalls.push(data);

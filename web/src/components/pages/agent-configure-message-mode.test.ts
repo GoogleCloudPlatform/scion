@@ -52,8 +52,8 @@ function json(body: unknown, status = 200): Response {
   return {
     ok: status < 400,
     status,
-    json: async () => body,
-    text: async () => JSON.stringify(body),
+    json: () => Promise.resolve(body),
+    text: () => Promise.resolve(JSON.stringify(body)),
   } as Response;
 }
 

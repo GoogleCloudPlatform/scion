@@ -1666,7 +1666,7 @@ describe('_loadPaletteAgents: a refresh does not shrink an already-ready list, a
     expect(el.v2PaletteGroups.agents.candidates).toEqual([agentCandidate('a3', 'Carol')]);
   });
 
-  it('a first load (no previous ready snapshot) wires onProgress and publishes partial pages as they arrive', async () => {
+  it('a first load (no previous ready snapshot) wires onProgress and publishes partial pages as they arrive', () => {
     const el = createPage();
     let capturedOnProgress!: (partial: PaletteCandidate[]) => void;
     vi.spyOn(el._paletteDataController, 'loadAgentsGroup').mockImplementation((onProgress) => {
@@ -1682,7 +1682,7 @@ describe('_loadPaletteAgents: a refresh does not shrink an already-ready list, a
     expect(el.v2PaletteGroups.agents.candidates).toEqual([agentCandidate('a1', 'Alice')]);
   });
 
-  it('a retry after an error also wires onProgress (no complete snapshot to protect)', async () => {
+  it('a retry after an error also wires onProgress (no complete snapshot to protect)', () => {
     const el = createPage();
     el.v2PaletteGroups = {
       ...el.v2PaletteGroups,
@@ -1913,7 +1913,7 @@ describe('_loadPaletteAgents: a refresh does not shrink an already-ready list, a
     expect(agentsSpy).toHaveBeenCalledWith({ keepReady: true });
   });
 
-  it('a chat message during an Agents load re-reads the DMs once that load settles', async () => {
+  it('a chat message during an Agents load re-reads the DMs once that load settles', () => {
     const el = createPage();
     vi.useFakeTimers();
     el.v2PaletteOpen = true;
@@ -2050,7 +2050,7 @@ describe('Agents group follows the agent store', () => {
     expect(el.v2PaletteGroups.agents).toEqual({ status: 'ready', candidates: [] });
   });
 
-  it('ignores store snapshots before the first load, while a load is in flight, and while loading', async () => {
+  it('ignores store snapshots before the first load, while a load is in flight, and while loading', () => {
     const el = createPage();
     el.v2PaletteOpen = true;
     const ready = {
@@ -2245,7 +2245,7 @@ describe('Threads "incomplete" is carried through a reload, not dropped while lo
     expect(el.v2PaletteGroups.threads.incomplete).toBeFalsy();
   });
 
-  it('a reload of a previously-*complete* Threads group does not spuriously mark the transient loading state incomplete', async () => {
+  it('a reload of a previously-*complete* Threads group does not spuriously mark the transient loading state incomplete', () => {
     const el = createPage();
     el.v2PaletteGroups = {
       ...el.v2PaletteGroups,

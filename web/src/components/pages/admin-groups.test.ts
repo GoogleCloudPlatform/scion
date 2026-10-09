@@ -163,7 +163,7 @@ describe('URL round-trip (readFiltersFromURL / syncFiltersToURL)', () => {
     vi.restoreAllMocks();
   });
 
-  it('reads filters from URL query params', async () => {
+  it('reads filters from URL query params', () => {
     const el = new ScionPageAdminGroups();
 
     // Simulate URL params
@@ -194,7 +194,7 @@ describe('URL round-trip (readFiltersFromURL / syncFiltersToURL)', () => {
     });
   });
 
-  it('syncs filters to URL', async () => {
+  it('syncs filters to URL', () => {
     const el = new ScionPageAdminGroups();
 
     Object.defineProperty(window, 'location', {
@@ -232,7 +232,7 @@ describe('URL round-trip (readFiltersFromURL / syncFiltersToURL)', () => {
     });
   });
 
-  it('omits default/empty values from URL', async () => {
+  it('omits default/empty values from URL', () => {
     const el = new ScionPageAdminGroups();
 
     Object.defineProperty(window, 'location', {

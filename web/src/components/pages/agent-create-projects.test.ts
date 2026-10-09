@@ -47,7 +47,8 @@ function stubFetch(): void {
       return Promise.resolve({
         ok: true,
         status: 200,
-        json: async () => ({ projects: [], brokers: [], templates: [], harnessConfigs: [] }),
+        json: () =>
+          Promise.resolve({ projects: [], brokers: [], templates: [], harnessConfigs: [] }),
       } as Response);
     })
   );

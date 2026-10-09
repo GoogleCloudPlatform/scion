@@ -26,7 +26,7 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
 // Stop All asks for confirmation first; the tests confirm it.
-vi.mock('../shared/confirm-dialog.js', () => ({ showConfirm: vi.fn(async () => true) }));
+vi.mock('../shared/confirm-dialog.js', () => ({ showConfirm: vi.fn(() => Promise.resolve(true)) }));
 
 import type { Agent, DeletionInfo } from '../../shared/types.js';
 import { stateManager } from '../../client/state.js';

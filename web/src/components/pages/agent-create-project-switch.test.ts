@@ -35,7 +35,7 @@ interface AgentCreateInternals extends HTMLElement {
 }
 
 function jsonResponse(body: unknown): Response {
-  return { ok: true, status: 200, json: async () => body } as Response;
+  return { ok: true, status: 200, json: () => Promise.resolve(body) } as Response;
 }
 
 /** Resolvers for the project B requests, held until the test releases them. */

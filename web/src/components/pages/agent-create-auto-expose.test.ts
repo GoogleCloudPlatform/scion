@@ -43,7 +43,11 @@ function stubFetch(): void {
       const body = url.includes('/settings/public')
         ? { autoExposePortsEnabled: hubDefault }
         : { projects: [], brokers: [], templates: [], harnessConfigs: [] };
-      return Promise.resolve({ ok: true, status: 200, json: async () => body } as Response);
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(body),
+      } as Response);
     })
   );
 }

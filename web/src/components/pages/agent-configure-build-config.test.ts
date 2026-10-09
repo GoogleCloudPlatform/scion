@@ -109,8 +109,8 @@ function stubFetch(): void {
       Promise.resolve({
         ok: false,
         status: 404,
-        json: async () => ({}),
-        text: async () => 'not found',
+        json: () => Promise.resolve({}),
+        text: () => Promise.resolve('not found'),
       } as Response)
     )
   );
@@ -136,25 +136,26 @@ function stubFetchWithLoadedAgent(appliedConfig?: Record<string, unknown>): void
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({ telemetryEnabled: false, autoExposePortsEnabled: false }),
+          json: () => Promise.resolve({ telemetryEnabled: false, autoExposePortsEnabled: false }),
         } as Response);
       }
       return Promise.resolve({
         ok: true,
         status: 200,
-        json: async () => ({
-          id: 'agent-1',
-          name: 'agent-1',
-          projectId: 'project-1',
-          phase: 'created',
-          appliedConfig: appliedConfig ?? {
-            model: 'claude-opus',
-            inlineConfig: {
-              env: { EXPLICIT_KEY: 'explicit-value' },
-              telemetry: { enabled: true },
+        json: () =>
+          Promise.resolve({
+            id: 'agent-1',
+            name: 'agent-1',
+            projectId: 'project-1',
+            phase: 'created',
+            appliedConfig: appliedConfig ?? {
+              model: 'claude-opus',
+              inlineConfig: {
+                env: { EXPLICIT_KEY: 'explicit-value' },
+                telemetry: { enabled: true },
+              },
             },
-          },
-        }),
+          }),
       } as Response);
     })
   );

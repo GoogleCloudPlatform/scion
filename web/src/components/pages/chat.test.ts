@@ -1386,9 +1386,9 @@ describe('chat page — DM mute toggle', () => {
     const el = pageOnDM(false);
     // The server disagrees with the optimistic value, so the success path wants
     // to write back — but by the time it resolves the user is reading another DM.
-    vi.mocked(apiFetch).mockImplementation(async () => {
+    vi.mocked(apiFetch).mockImplementation(() => {
       el.v2Conversation = { ...el.v2Conversation, conversationKey: 'dm:user-me:user-2' };
-      return new Response(JSON.stringify({ muted: false }), { status: 200 });
+      return Promise.resolve(new Response(JSON.stringify({ muted: false }), { status: 200 }));
     });
 
     await el.toggleDMMute();
