@@ -80,6 +80,41 @@ func SetLogLevelSetting(spec string) (applied bool, err error) {
 	return loglevel.SetSetting(spec)
 }
 
+// ApplyLogLevelSetting applies the settings-file level spec value of the
+// setting called name (for example "server.log_level") with
+// SetLogLevelSetting and logs a warning through slog.Default when the value
+// is invalid. It reports whether the value was applied; it is not applied
+// when the --debug flag or SCION_LOG_LEVEL chose the level.
+func ApplyLogLevelSetting(name, value string) bool {
+	applied, err := SetLogLevelSetting(value)
+	if err != nil {
+		if applied {
+			slog.Warn("Invalid "+name+"; using the parsed fallback", "value", value, "error", err)
+		} else {
+			slog.Warn("Invalid "+name+" (ignored: SCION_LOG_LEVEL or --debug takes precedence)", "value", value, "error", err)
+		}
+	}
+	return applied
+}
+
+// LogResolvedLevel logs one line on l naming the resolved default level spec
+// and the source that set it. A setting that holds the built-in default
+// spec is reported as source "default". The line is logged at INFO, or at
+// WARN when the default level is above info so that a raised level does not
+// hide it; at level error it is filtered out like any other WARN record.
+func LogResolvedLevel(l *slog.Logger) {
+	spec, src := loglevel.Current()
+	srcName := src.String()
+	if src == loglevel.SourceSetting && spec.String() == loglevel.DefaultSpec().String() {
+		srcName = loglevel.SourceDefault.String()
+	}
+	lvl := slog.LevelInfo
+	if spec.Default > slog.LevelInfo {
+		lvl = slog.LevelWarn
+	}
+	l.Log(context.Background(), lvl, "Log level resolved", "log_level", spec.String(), "source", srcName)
+}
+
 // EffectiveLevel returns the effective level for a component (a Subsystem
 // name such as "hub.auth"); an empty component returns the default level.
 func EffectiveLevel(component string) slog.Level {

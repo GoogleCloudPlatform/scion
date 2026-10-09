@@ -38,7 +38,7 @@ func TestApplyServerLogLevelSetting(t *testing.T) {
 		want     slog.Level
 		wantLine string
 	}{
-		{name: "default", setting: "", want: slog.LevelInfo, wantLine: `"log_level":"info","source":"setting"`},
+		{name: "default", setting: "info", want: slog.LevelInfo, wantLine: `"log_level":"info","source":"default"`},
 		{name: "setting applies at boot", setting: "debug", want: slog.LevelDebug, wantLine: `"log_level":"debug","source":"setting"`},
 		{name: "env beats setting", env: "warn", setting: "debug", want: slog.LevelWarn, wantLine: `"log_level":"warn","source":"env"`},
 		{name: "flag beats env and setting", env: "error", flag: true, setting: "warn", want: slog.LevelDebug, wantLine: `"log_level":"debug","source":"flag"`},

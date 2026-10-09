@@ -1918,9 +1918,7 @@ func (o *OperationalSettings) ReadAuthoritativeExperiments(ctx context.Context) 
 // (per design §3.1) and is only changed in file mode via reloadSettings or a
 // workstation server-config save.
 func applySnapshotLogLevel(level string) {
-	if _, err := logging.SetLogLevelSetting(level); err != nil {
-		slog.Warn("Invalid server.log_level; using the parsed fallback", "value", level, "error", err)
-	}
+	logging.ApplyLogLevelSetting("server.log_level", level)
 }
 
 // Lifecycle authority belongs to this captured router/source attachment, never

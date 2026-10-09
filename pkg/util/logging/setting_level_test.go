@@ -15,6 +15,7 @@
 package logging
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"os"
@@ -154,5 +155,82 @@ func TestRequestLogFollowsSettingChange(t *testing.T) {
 	}
 	if !strings.Contains(out, "after-change") {
 		t.Errorf("debug entry missing after the setting changed to debug:\n%s", out)
+	}
+}
+
+// TestApplyLogLevelSettingWarning checks the warning for an invalid value:
+// it names the fallback when the value was applied, and says it was ignored
+// when the environment chose the level.
+func TestApplyLogLevelSettingWarning(t *testing.T) {
+	tests := []struct {
+		name        string
+		env         string
+		wantApplied bool
+		want        string
+		notWant     string
+	}{
+		{name: "applied", wantApplied: true, want: "using the parsed fallback", notWant: "ignored"},
+		{name: "env takes precedence", env: "warn", wantApplied: false, want: "ignored: SCION_LOG_LEVEL or --debug takes precedence", notWant: "parsed fallback"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetLevelState(t)
+			t.Setenv(loglevel.EnvLogLevel, tt.env)
+			orig := slog.Default()
+			t.Cleanup(func() { slog.SetDefault(orig) })
+			var buf bytes.Buffer
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+
+			if got := ApplyLogLevelSetting("server.log_level", "loud"); got != tt.wantApplied {
+				t.Errorf("applied = %v, want %v", got, tt.wantApplied)
+			}
+			out := buf.String()
+			if !strings.Contains(out, "Invalid server.log_level") || !strings.Contains(out, tt.want) {
+				t.Errorf("warning lacks %q:\n%s", tt.want, out)
+			}
+			if strings.Contains(out, tt.notWant) {
+				t.Errorf("warning contains %q:\n%s", tt.notWant, out)
+			}
+		})
+	}
+}
+
+// TestLogResolvedLevel checks the startup line through the real level
+// filter: it names the source (a setting holding the default spec is
+// reported as the default) and is still emitted when the level is raised
+// to warn.
+func TestLogResolvedLevel(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     string
+		setting string
+		want    string // "" means the line is filtered out
+	}{
+		{name: "default value from settings", setting: "info", want: `"level":"INFO","msg":"Log level resolved","log_level":"info","source":"default"`},
+		{name: "debug setting", setting: "debug", want: `"level":"INFO","msg":"Log level resolved","log_level":"debug","source":"setting"`},
+		{name: "warn setting stays visible", setting: "warn", want: `"level":"WARN","msg":"Log level resolved","log_level":"warn","source":"setting"`},
+		{name: "warn env stays visible", env: "warn", setting: "info", want: `"level":"WARN","msg":"Log level resolved","log_level":"warn","source":"env"`},
+		{name: "error hides the line", setting: "error"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetLevelState(t)
+			t.Setenv(loglevel.EnvLogLevel, tt.env)
+			if _, err := SetLogLevelSetting(tt.setting); err != nil {
+				t.Fatal(err)
+			}
+			var buf bytes.Buffer
+			LogResolvedLevel(newFilteredTestLogger(&buf))
+			out := buf.String()
+			if tt.want == "" {
+				if out != "" {
+					t.Errorf("line emitted at level error:\n%s", out)
+				}
+				return
+			}
+			if !strings.Contains(out, tt.want) {
+				t.Errorf("output lacks %s:\n%s", tt.want, out)
+			}
+		})
 	}
 }

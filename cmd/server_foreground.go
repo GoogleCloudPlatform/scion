@@ -69,7 +69,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	gcputil "github.com/GoogleCloudPlatform/scion/pkg/util/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
-	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 	"github.com/GoogleCloudPlatform/scion/web"
 	"github.com/knadh/koanf/v2"
 	"github.com/spf13/cobra"
@@ -972,11 +971,8 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 // is the --debug flag, then SCION_LOG_LEVEL (or SCION_DEBUG), then
 // server.log_level, then the default (info).
 func applyServerLogLevelSetting(level string) {
-	if _, err := logging.SetLogLevelSetting(level); err != nil {
-		slog.Warn("Invalid server.log_level; using the parsed fallback", "value", level, "error", err)
-	}
-	spec, src := loglevel.Current()
-	slog.Info("Log level resolved", "log_level", spec.String(), "source", src.String())
+	logging.ApplyLogLevelSetting("server.log_level", level)
+	logging.LogResolvedLevel(slog.Default())
 }
 
 // validateHubWorkspaceStorage fails hub startup when server.workspace_storage

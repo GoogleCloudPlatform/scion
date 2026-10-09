@@ -18,6 +18,7 @@ package hub
 
 import (
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -50,4 +51,22 @@ func TestReloadSettings_LogLevel(t *testing.T) {
 		[]byte("schema_version: \"1\"\nserver:\n  hub:\n    hub_name: boot-hub\n"), 0o644))
 	srv.reloadSettings()
 	assert.Equal(t, slog.LevelInfo, logging.EffectiveLevel(""))
+}
+
+// A workstation server-config save that sets server.log_level changes the
+// shared level, and a save that clears it reverts to info.
+func TestWorkstation_PutServerConfig_LogLevelSetAndClear(t *testing.T) {
+	settingsPath := tempSettingsHome(t)
+	require.NoError(t, os.WriteFile(settingsPath,
+		[]byte("schema_version: \"1\"\nserver:\n  log_level: info\n"), 0o644))
+	srv, _, _ := newSQLiteHubInMode(t, true, nil)
+
+	rr := putServerConfig(t, srv, `{"server":{"log_level":"debug"}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.Equal(t, slog.LevelDebug, logging.EffectiveLevel(""))
+
+	rr = putServerConfig(t, srv, `{"server":{"log_level":""}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.Equal(t, slog.LevelInfo, logging.EffectiveLevel(""), "clearing server.log_level should revert to info")
+	assert.Equal(t, slog.LevelInfo, stdLogBridgeLevel(), "the std-log bridge level must not change")
 }
