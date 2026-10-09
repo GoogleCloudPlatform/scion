@@ -23,6 +23,10 @@ describe('isHttpUrl', () => {
     'http://grafana.internal:3000/d/hub#panel',
     'HTTPS://dash.example.com',
     'https://dash.example.com/d/caf\u00e9',
+    'https://dash.example.com:1/',
+    'https://dash.example.com:65535/',
+    'https://[::1]:3000/d',
+    'https://b\u00fccher.example/d',
   ])('accepts %s', (v) => {
     expect(isHttpUrl(v)).toBe(true);
   });
@@ -56,6 +60,18 @@ describe('isHttpUrl', () => {
     'https://dash.example.com/#\u2066',
     'https://dash.example.com/\u2069',
     'https://dash.example.com/\ufeff',
+    'https://dash.example.com/\u0001',
+    'https://dash.example.com/\u001b',
+    'https://dash.example.com/\ufffd',
+    'https://dash.example.com/\u00ad',
+    'https://dash.example.com/\u180e',
+    'https://dash.example.com/\u200b',
+    'https://dash.example.com/\u200c',
+    'https://dash.example.com/\u200d',
+    'https://dash.example.com/\u2060',
+    'https://dash.example.com:0/',
+    'https://dash.example.com:65536/',
+    'https://dash.example.com:99999/',
   ])('rejects %j', (v) => {
     expect(isHttpUrl(v)).toBe(false);
   });

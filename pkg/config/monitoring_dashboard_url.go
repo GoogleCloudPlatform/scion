@@ -17,6 +17,7 @@ package config
 import (
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -37,10 +38,17 @@ const MonitoringDashboardURLMaxLength = 2048
 // MonitoringDashboardURLMaxLength bytes, that contains no whitespace (any
 // Unicode White_Space, e.g. U+00A0, U+2028, U+2029), no control character
 // (C0, DEL or C1, e.g. U+0085), no bidirectional formatting character
-// (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069) and no
-// U+FEFF. A path, query and fragment are allowed, since dashboard links
-// commonly carry them. This is the rule of record;
-// web/src/utils/http-url.ts mirrors it for display.
+// (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069), no
+// invisible format character (U+00AD, U+180E, U+200B to U+200D, U+2060,
+// U+FEFF) and no U+FFFD, and whose port, if any, is 1 to 65535. A path,
+// query and fragment are allowed, since dashboard links commonly carry
+// them. This is the rule of record; web/src/utils/http-url.ts mirrors it
+// for display.
+//
+// Invalid UTF-8 never reaches this function through the admin API:
+// json.Unmarshal turns it into U+FFFD, which is rejected. The
+// utf8.ValidString check covers values from settings.yaml, env vars or
+// rows written by other tooling.
 //
 // Like ValidateAgentEndpoint, no error message echoes any part of raw.
 func ValidateMonitoringDashboardURL(raw string) error {
@@ -72,6 +80,12 @@ func ValidateMonitoringDashboardURL(raw string) error {
 	if u.User != nil {
 		return fmt.Errorf("%s: must not contain user credentials", MonitoringDashboardURLKey)
 	}
+	if p := u.Port(); p != "" {
+		// url.Parse only checks that the port is numeric.
+		if n, err := strconv.Atoi(p); err != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("%s: port must be between 1 and 65535", MonitoringDashboardURLKey)
+		}
+	}
 	return nil
 }
 
@@ -89,8 +103,15 @@ func MonitoringDashboardURLOrEmpty(raw string) string {
 // isDisallowedMonitoringURLRune reports whether r may not appear anywhere in
 // a monitoring dashboard URL (see ValidateMonitoringDashboardURL).
 func isDisallowedMonitoringURLRune(r rune) bool {
-	return unicode.IsSpace(r) ||
-		unicode.IsControl(r) ||
-		unicode.Is(unicode.Bidi_Control, r) ||
-		r == '\uFEFF'
+	if unicode.IsSpace(r) || unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) {
+		return true
+	}
+	// Invisible format characters: soft hyphen, Mongolian vowel separator,
+	// zero-width space / non-joiner / joiner, word joiner, and U+FEFF; and
+	// U+FFFD, which is what invalid UTF-8 decodes to.
+	switch r {
+	case '\u00AD', '\u180E', '\u200B', '\u200C', '\u200D', '\u2060', '\uFEFF', '\uFFFD':
+		return true
+	}
+	return false
 }

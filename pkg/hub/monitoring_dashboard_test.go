@@ -133,6 +133,8 @@ func TestMonitoringDashboardURL_InvalidRejected(t *testing.T) {
 		"line separator":    "https://dash.example.com/\u2028",
 		"bidi override":     "https://dash.example.com/\u202e",
 		"bidi isolate":      "https://dash.example.com/\u2066",
+		"zero-width space":  "https://dash.example.com/\u200b",
+		"port out of range": "https://dash.example.com:99999/",
 		"too long":          "https://dash.example.com/" + strings.Repeat("a", config.MonitoringDashboardURLMaxLength),
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -184,6 +186,19 @@ func TestMonitoringDashboardURL_BootstrapAppliesAndIsKept(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, testDashboardURL, got)
 	assert.Equal(t, testDashboardURL, srv.monitoringDashboardURL())
+}
+
+// Invalid UTF-8 in the request body reaches the validator as U+FFFD
+// (json.Unmarshal replaces it) and is rejected with the structured 422.
+func TestMonitoringDashboardURL_InvalidUTF8BodyRejected(t *testing.T) {
+	srv, fakeStore, ops := newMonitoringDBServer(t)
+	body := "{\"server\":{\"hub\":{\"monitoring_dashboard_url\":\"https://dash.example.com/\xff\"}}}"
+	rr := putMonitoringConfig(t, srv, ops, body)
+	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), ErrCodeValidationError)
+	assert.Contains(t, rr.Body.String(), config.MonitoringDashboardURLKey)
+	_, ok := storedMonitoringURL(t, fakeStore)
+	assert.False(t, ok, "nothing is written")
 }
 
 // An explicit "" over a bootstrap value leaves the key UNSET: the new row

@@ -19,14 +19,16 @@
  * (pkg/config ValidateMonitoringDashboardURL): whitespace (JS \s covers
  * Unicode White_Space such as U+00A0, U+2028, U+2029, plus U+FEFF), C0, DEL
  * and C1 control characters (U+0000 to U+001F, U+007F to U+009F, which
- * includes U+0085), and bidirectional formatting characters (U+061C,
- * U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069).
+ * includes U+0085), bidirectional formatting characters (U+061C, U+200E,
+ * U+200F, U+202A to U+202E, U+2066 to U+2069), invisible format
+ * characters (U+00AD, U+180E, U+200B to U+200D, U+2060) and U+FFFD.
  */
-const DISALLOWED = /[\s\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
+const DISALLOWED =
+  /[\s\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufffd]/;
 
 /**
  * Whether value is an absolute http:// or https:// URL with a host and no
- * user credentials. Used to decide whether an operator-configured link is
+ * user credentials, whose port (if any) is 1 to 65535. Used to decide whether an operator-configured link is
  * rendered at all; the hub validates the same rule when the setting is
  * saved, so this is a second check on the display side.
  */
@@ -40,6 +42,8 @@ export function isHttpUrl(value: string | null | undefined): value is string {
   }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
   if (!u.hostname || u.username !== '' || u.password !== '') return false;
+  // new URL() rejects ports above 65535 but accepts 0; the hub requires 1 to 65535.
+  if (u.port === '0') return false;
   // new URL() accepts "http:host" and "http:/host"; require the "//" form.
   return /^https?:\/\/[^/]/i.test(value);
 }
