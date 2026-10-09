@@ -929,14 +929,15 @@ func effectiveAgentRuntime(agent *store.Agent, broker *store.RuntimeBroker) stri
 // with the user as the recorded delegator, when a user keeps the role of
 // an agent whose own edge is missing or unrecorded, or whose chain has an
 // unrecorded hop further up that the chain walk reaches before any hop it
-// does not accept (reincarnateChainUnrecorded): the reincarnate then repairs the chain as a
-// recreate by that user would (ptone/scion#3948). In every other case,
-// including any self-reincarnation, an agent requester's reincarnation that
-// keeps the role, and a user's that keeps the role of an agent with a
-// recorded own edge and either a fully recorded chain or a chain whose
-// first problem is a hop that is not accepted, it returns nil: the existing
-// edge with its frozen provenance and ceiling stays in force, so restarting
-// an agent does not change whose authority it runs on.
+// does not accept (reincarnateChainUnrecorded): the reincarnate then
+// repairs the chain as a recreate by that user would (ptone/scion#3948).
+// In every other case, including any self-reincarnation, an agent
+// requester's reincarnation that keeps the role, and a user's that keeps
+// the role of an agent with a recorded own edge and either a fully recorded
+// chain or a chain whose first problem is a hop that is not accepted, it
+// returns nil: the existing edge with its frozen provenance and ceiling
+// stays in force, so restarting an agent does not change whose authority
+// it runs on.
 //
 // On a refusal the response is written (403, 503 for a ceiling or chain
 // lookup fault, or 500 for a nil agent) and ok is false; nothing has been
@@ -1009,8 +1010,9 @@ func (s *Server) reincarnateAuthorityFor(w http.ResponseWriter, r *http.Request,
 		// role keeps the existing edge, so the agent keeps its delegator.
 		// ptone/scion#3948: the one exception is a user's reincarnate of an
 		// agent whose own edge is missing or unrecorded, or whose chain has
-		// an unrecorded hop below any hop that is not accepted, which
-		// re-records the edge below so the reincarnate repairs the chain.
+		// an unrecorded hop further up that the chain walk reaches before
+		// any hop it does not accept, which re-records the edge below so
+		// the reincarnate repairs the chain.
 		if agentIdent != nil {
 			return nil, true
 		}

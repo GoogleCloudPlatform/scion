@@ -412,6 +412,9 @@ func TestChainEffectCeilingWalkUnrecordedBelow(t *testing.T) {
 		seed    func(t *testing.T, f *repairFixture)
 		wantErr error
 		want    int
+		// wantGateCause, when set, is the SA-assign gate's deny cause for
+		// the same chain: the walk's count must agree with it.
+		wantGateCause DenyCause
 	}{
 		"unrecorded ancestor under the dev_local hop": {
 			seed: func(t *testing.T, f *repairFixture) {
@@ -440,19 +443,22 @@ func TestChainEffectCeilingWalkUnrecordedBelow(t *testing.T) {
 			want:    0,
 		},
 		"unknown kind and unknown version": {
-			seed:    unknownKindAncestor(userRooted("walk-unknown-both"), 99),
-			wantErr: ErrProvenanceChain,
-			want:    1,
+			seed:          unknownKindAncestor(userRooted("walk-unknown-both"), 99),
+			wantErr:       ErrProvenanceChain,
+			want:          1,
+			wantGateCause: DenyCauseCeilingUnrecorded,
 		},
 		"unknown kind with a known version": {
-			seed:    unknownKindAncestor(userRooted("walk-unknown-kind"), store.ProvenanceVersionV1),
-			wantErr: ErrProvenanceChain,
-			want:    0,
+			seed:          unknownKindAncestor(userRooted("walk-unknown-kind"), store.ProvenanceVersionV1),
+			wantErr:       ErrProvenanceChain,
+			want:          0,
+			wantGateCause: DenyCauseCeilingEffectExceeded,
 		},
 		"unknown kind and unknown version, dev_local refused": {
-			seed:    unknownKindAncestor(devLocalRooted("walk-unknown-devlocal"), 99),
-			wantErr: errSourceNotAllowed,
-			want:    0,
+			seed:          unknownKindAncestor(devLocalRooted("walk-unknown-devlocal"), 99),
+			wantErr:       errSourceNotAllowed,
+			want:          0,
+			wantGateCause: DenyCauseCeilingSourceNotAllowed,
 		},
 	}
 	for name, tc := range cases {
@@ -462,6 +468,14 @@ func TestChainEffectCeilingWalkUnrecordedBelow(t *testing.T) {
 			f.srv.authzService.setDevLocalAuthorityEnabled(false)
 			ctx := context.Background()
 			target := mustGetAgent(t, f.s, f.target.ID)
+
+			if tc.wantGateCause != "" {
+				// The rewrite store (if any) is on authzService.store, which
+				// the gate reads too, so it sees the same edges as the walk.
+				d := f.saAssignDecision()
+				require.False(t, d.Allowed, "SA assign: reason %q", d.Reason)
+				assert.Equal(t, tc.wantGateCause, d.DenyCause, "SA assign: reason %q", d.Reason)
+			}
 
 			chain, below, err := f.srv.authzService.chainEffectCeilingWalk(ctx, target)
 			require.ErrorIs(t, err, tc.wantErr)

@@ -467,8 +467,9 @@ func (a *AuthzService) chainEffectCeiling(ctx context.Context, agent *store.Agen
 // hop. The one exception is a hop with a ceiling kind this binary does not
 // know: when its provenance version is not understood either, and it passes
 // any local-development checks, it is counted too, because a permission
-// check denies it as unrecorded before reading the kind. Only reincarnateChainUnrecorded reads unrecordedBelow; every other
-// caller goes through chainEffectCeiling.
+// check denies it as unrecorded before reading the kind. Only
+// reincarnateChainUnrecorded reads unrecordedBelow; every other caller goes
+// through chainEffectCeiling.
 func (a *AuthzService) chainEffectCeilingWalk(ctx context.Context, agent *store.Agent) (chain ChainCeiling, unrecordedBelow int, err error) {
 	if agent == nil {
 		return ChainCeiling{}, 0, fmt.Errorf("%w: no agent", ErrProvenanceChain)
