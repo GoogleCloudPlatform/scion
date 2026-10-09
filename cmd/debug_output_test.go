@@ -159,7 +159,9 @@ func TestExecuteHelperProcess(t *testing.T) {
 
 	// Reading the level here applies the environment if nothing did yet,
 	// so an unguarded SCION_DEBUG would also print its warning now.
-	fmt.Fprintf(os.Stdout, "\n%s%v\n", executeResultTag, loglevel.DebugEnabled(""))
+	if _, err := fmt.Fprintf(os.Stdout, "\n%s%v\n", executeResultTag, loglevel.DebugEnabled("")); err != nil {
+		os.Exit(1)
+	}
 	os.Exit(0)
 }
 
