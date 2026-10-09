@@ -98,7 +98,7 @@ ptone/scion#1855.
     - `--no-auth`: Disable authentication propagation (also sent to the Hub in Hub mode; applies when the agent is created).
     - `-d, --detached`: Run in detached mode (default true).
     - `--config <path>`: Path to inline agent config file (YAML/JSON) for Just-In-Time (JIT) overrides, or `-` for stdin.
-    - `--task-file <path>`: Read the task from a file, or `-` for stdin, up to 128 KiB. See [Long tasks and task files](#long-tasks-and-task-files).
+    - `--task-file <path>`: Read the task from a file, or `-` for stdin, up to 96 KiB. See [Long tasks and task files](#long-tasks-and-task-files).
     - `--harness-config <string>`: Named harness configuration to use.
     - `--thinking-level <value>`: Thinking level to inject into the agent config: an integer from 0 to 100, or a case-insensitive shorthand: `low` (25), `medium` (50), `high` (75), `max` (100). The level is stored as an integer; each harness maps it to its own tiers (see [Thinking Level Map](/scion/reference/harness-settings/#thinking-level-map-thinking)).
     - `--harness-auth <string>`: Override auth method for the harness. Universal types: `api-key`, `oauth-token`, `vertex-ai`, `auth-file` (each harness accepts a subset — see [Harness Authentication](/scion/local/agent-credentials/)).
@@ -147,11 +147,13 @@ without printing the JSON result.
 `--task-file <path>` on `scion start` and `scion create` reads the task from a
 file (`-` reads stdin). Use it for long briefs that are too big for a command
 line or a message. Any `[task]` arguments come first, followed by a blank line
-and then the file. The file must be UTF-8 text and not empty. The whole task,
-arguments included, can be at most 128 KiB (131072 bytes). The CLI checks this
-before it contacts the Hub, and anything larger is rejected. The limit leaves
-room for JSON escaping in the create request the Hub forwards to the runtime
-broker. The task goes in the create request like any other task. The Hub
+and then the file. The file must be UTF-8 text and not empty or whitespace
+only. The whole task, arguments included, can be at most 96 KiB (98304 bytes).
+The CLI checks this before it contacts the Hub, and anything larger is
+rejected. The Hub forwards the create request to the runtime broker as JSON in
+a control channel message of at most 1 MiB. Even a task made only of
+characters that JSON escapes to six bytes, such as `<`, `>` and `&`, fits in
+that message with room for the rest of the request. The task goes in the create request like any other task. The Hub
 stores it with the agent, so this works for agents a Hub runs on any runtime,
 including Kubernetes agents without access to a storage bucket. It also works
 when an agent launches another agent: the agent's CLI reads the file from the
@@ -159,11 +161,15 @@ agent's own filesystem.
 
 Whenever an agent starts with a task, from arguments, `--task-file` or
 `prompt.md`, the full text is written to `~/.scion/task.md` in the agent's home
-directory (mode 0644). Each start that has a task replaces that file. The
-harness gets tasks of up to 8 KiB (8192 bytes) inline, as before. A larger task
-is replaced by a short task that names `~/.scion/task.md` and its size and asks
-the agent to read the whole file. The task starts the harness inside a tmux
-command, and tmux rejects commands larger than about 16 KB.
+directory (mode 0644). Each start that has a task replaces that file; a
+symbolic link at that path is replaced, never written through, and the start
+fails if `~/.scion` is a symbolic link. The task starts the harness inside a
+tmux command, and tmux rejects commands larger than about 16 KB. The harness
+gets a task inline, as before, when it takes at most 8 KiB (8192 bytes) in that
+command once quoted for the shell. Each single quote (`'`) takes 13 bytes
+there, so a task with many quotes is passed as a file at a smaller size. A
+larger task is replaced by a short task that names `~/.scion/task.md` and its
+size and asks the agent to read the whole file.
 
 ### `scion create`
 
@@ -195,7 +201,7 @@ failed start.
     - `-b, --branch <string>`: Git branch to use for the agent workspace.
     - `-w, --workspace <string>`: Host path or project-relative subdirectory to mount as `/workspace`.
     - `--config <path>`: Path to inline agent config file (YAML/JSON), or `-` for stdin.
-    - `--task-file <path>`: Read the task from a file, or `-` for stdin, up to 128 KiB. See [Long tasks and task files](#long-tasks-and-task-files).
+    - `--task-file <path>`: Read the task from a file, or `-` for stdin, up to 96 KiB. See [Long tasks and task files](#long-tasks-and-task-files).
     - `--harness-config <string>` (alias `--harness`): Named harness configuration to use.
     - `--harness-auth <string>`: Override auth method for the harness (`api-key`, `oauth-token`, `auth-file`, `vertex-ai`).
     - `--broker <string>`: Preferred runtime broker ID or name.

@@ -27,28 +27,33 @@ import (
 var taskFilePath string
 
 // maxTaskFileBytes is the largest task --task-file accepts, counting any
-// task given as arguments. It leaves room for JSON escaping within the
-// request size the Hub and its broker connection carry.
-const maxTaskFileBytes = 128 * 1024
+// task given as arguments. The Hub forwards the create request to a
+// broker as JSON, base64-encoded in a control channel message of at most
+// 1 MiB. JSON escaping can make each byte of the task 6 bytes (<, > and &
+// become \u003c and so on), and base64 adds a third, so a 96 KiB task
+// takes at most 768 KiB of the message, leaving room for the rest of the
+// request.
+const maxTaskFileBytes = 96 * 1024
 
-const taskFileFlagUsage = "Read the task from a file ('-' for stdin), up to 128 KiB. " +
+const taskFileFlagUsage = "Read the task from a file ('-' for stdin), up to 96 KiB. " +
 	"Task arguments, if any, come first. The full task is written to ~/.scion/task.md in the agent"
 
 // errTaskFileTooLarge reports a task over maxTaskFileBytes.
-var errTaskFileTooLarge = errors.New("task is over the 128 KiB (131072 bytes) limit for --task-file")
+var errTaskFileTooLarge = errors.New("task is over the 96 KiB (98304 bytes) limit for --task-file")
 
 // applyTaskFile returns task with the content of the file at path
 // appended, separated by a blank line, or task unchanged when path is
 // empty. path "-" reads stdin. The file must be valid UTF-8 and not
-// empty, and the result must be at most maxTaskFileBytes.
+// empty or whitespace only, and the result must be at most
+// maxTaskFileBytes.
 func applyTaskFile(task, path string, stdin io.Reader) (string, error) {
 	if path == "" {
 		return task, nil
 	}
-	name := path
+	name, what := path, "the file"
 	var r io.Reader
 	if path == "-" {
-		name = "stdin"
+		name, what = "stdin", "the input"
 		r = stdin
 	} else {
 		f, err := os.Open(path)
@@ -66,11 +71,11 @@ func applyTaskFile(task, path string, stdin io.Reader) (string, error) {
 		return "", fmt.Errorf("--task-file %s: %w", name, errTaskFileTooLarge)
 	}
 	if !utf8.Valid(data) {
-		return "", fmt.Errorf("--task-file %s: the file is not valid UTF-8 text", name)
+		return "", fmt.Errorf("--task-file %s: %s is not valid UTF-8 text", name, what)
 	}
 	content := string(data)
 	if strings.TrimSpace(content) == "" {
-		return "", fmt.Errorf("--task-file %s: the file is empty", name)
+		return "", fmt.Errorf("--task-file %s: %s is empty or whitespace only", name, what)
 	}
 	if task = strings.TrimSpace(task); task != "" {
 		content = task + "\n\n" + content

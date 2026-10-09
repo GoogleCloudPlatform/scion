@@ -15,12 +15,15 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -65,7 +68,7 @@ func TestApplyTaskFile(t *testing.T) {
 		_, err := applyTaskFile("", writeTaskFile(t, []byte(strings.Repeat("x", maxTaskFileBytes+1))), nil)
 		require.Error(t, err)
 		assert.True(t, errors.Is(err, errTaskFileTooLarge))
-		assert.Contains(t, err.Error(), "128 KiB")
+		assert.Contains(t, err.Error(), "96 KiB")
 	})
 	t.Run("stdin over the limit is rejected", func(t *testing.T) {
 		_, err := applyTaskFile("", "-", strings.NewReader(strings.Repeat("x", maxTaskFileBytes+1)))
@@ -87,7 +90,17 @@ func TestApplyTaskFile(t *testing.T) {
 	t.Run("empty file is rejected", func(t *testing.T) {
 		_, err := applyTaskFile("", writeTaskFile(t, []byte(" \n")), nil)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "empty")
+		assert.Contains(t, err.Error(), "the file is empty or whitespace only")
+	})
+	t.Run("empty stdin is rejected as input", func(t *testing.T) {
+		_, err := applyTaskFile("", "-", strings.NewReader("\n\t "))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--task-file stdin: the input is empty or whitespace only")
+	})
+	t.Run("invalid UTF-8 on stdin is rejected as input", func(t *testing.T) {
+		_, err := applyTaskFile("", "-", strings.NewReader("ok\xff"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "the input is not valid UTF-8")
 	})
 	t.Run("missing file is rejected", func(t *testing.T) {
 		_, err := applyTaskFile("", filepath.Join(t.TempDir(), "nope.md"), nil)
@@ -104,7 +117,7 @@ func TestTaskFileFlag_RegisteredOnStartAndCreate(t *testing.T) {
 		}
 		f := cmd.Flags().Lookup("task-file")
 		require.NotNil(t, f, "%s has no --task-file flag", c)
-		assert.Contains(t, f.Usage, "128 KiB")
+		assert.Contains(t, f.Usage, "96 KiB")
 		assert.Contains(t, f.Usage, "~/.scion/task.md")
 	}
 }
@@ -156,4 +169,33 @@ func TestStartAgentViaHub_SendsLargeTaskIntact(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, stub.createCalls)
 	assert.Equal(t, brief, stub.createBody["task"])
+}
+
+// The largest task, made of the characters JSON escapes the most, still
+// fits, with room for the rest of the request, in the control channel
+// message that carries the create request from the Hub to a broker.
+func TestMaxTaskFitsBrokerControlMessage(t *testing.T) {
+	worst := strings.Repeat("<>&\x01", maxTaskFileBytes/4)
+	require.Len(t, worst, maxTaskFileBytes)
+	task, err := applyTaskFile("", writeTaskFile(t, []byte(worst)), nil)
+	require.NoError(t, err)
+
+	body, err := json.Marshal(hub.RemoteCreateAgentRequest{
+		Slug:      "agent",
+		Name:      "agent",
+		ProjectID: "project",
+		Config:    &hub.RemoteAgentConfig{Task: task},
+	})
+	require.NoError(t, err)
+	msg, err := json.Marshal(wsprotocol.RequestEnvelope{
+		Type:      "request",
+		RequestID: "request",
+		Method:    "POST",
+		Path:      "/api/v1/agents",
+		Body:      body,
+	})
+	require.NoError(t, err)
+	const restOfRequest = 192 * 1024
+	assert.LessOrEqual(t, len(msg)+restOfRequest, wsprotocol.DefaultMaxMessageSize,
+		"a %d-byte task makes a %d-byte control message", len(task), len(msg))
 }
