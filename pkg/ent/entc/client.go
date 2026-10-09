@@ -329,10 +329,9 @@ func applyKeepalives(params map[string]string) {
 // It is idempotent: running it against a database that already has some or
 // all Ent-managed tables succeeds. The retired decision_audits table and its
 // rows are removed explicitly after schema migration succeeds. Other data is
-// preserved. On
-// Postgres, any DDL statement that fails with SQLSTATE 42P07 ("relation
-// already exists") is silently skipped so that new tables are created
-// alongside pre-existing ones.
+// preserved. On Postgres, any DDL statement that fails with SQLSTATE 42P07
+// ("relation already exists") is silently skipped so that new tables are
+// created alongside pre-existing ones.
 func AutoMigrate(ctx context.Context, client *ent.Client) error {
 	migrateOpts := []entschema.MigrateOption{
 		migrate.WithDropColumn(false),

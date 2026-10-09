@@ -192,7 +192,7 @@ Persistence settings for the Hub.
 | `url` | string | `"hub.db"` | Connection string or file path. |
 
 :::caution[Permanent decision-audit data removal]
-`AutoMigrate` permanently drops `decision_audits` and its data. Export first if preservation is required. During Hub schema migration on PostgreSQL, the drop takes an `ACCESS EXCLUSIVE` table lock while the existing advisory schema lock is held. Mixed old replicas may log write failures after the drop. Rolling back to an old binary can recreate an empty table but cannot restore the deleted data.
+`AutoMigrate` permanently drops `decision_audits` and its data. Export first if preservation is required. During Hub schema migration on PostgreSQL, the drop takes an `ACCESS EXCLUSIVE` table lock while the existing advisory schema lock is held. Maintenance commands also call `CompositeStore.Migrate` directly and can trigger this drop: `server recover-authz` (SQLite/PostgreSQL), `hub secret migrate-names` (SQLite/PostgreSQL except `--dry-run`), and `hub secret migrate` (SQLite, including `--dry-run`); the PostgreSQL direct calls may run outside the Hub's advisory schema lock. Mixed old replicas may report degraded legacy health as well as write failures after the drop. Rolling back to an old binary can recreate an empty table but cannot restore the deleted data.
 :::
 
 :::caution[Postgres: `broker_dispatch` index on upgrade]

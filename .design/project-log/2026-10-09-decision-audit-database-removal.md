@@ -58,3 +58,5 @@ health-key sentinel comment match current behavior. Begin-transaction failure
 coverage now requires zero commits and rollbacks. Focused Entc migration tests
 passed; Hub, command, experiment-package, documentation-build and PostgreSQL
 validation remain unexecuted for this revision.
+
+The fourth code review clarifies maintenance-command migration and dry-run behavior, removes an orphaned test banner and reflows the migration comment; static source-call-site, exact-path, stale-text and diff checks passed.
