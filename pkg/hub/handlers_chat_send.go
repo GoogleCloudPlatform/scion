@@ -62,6 +62,11 @@ type chatSendError struct {
 	Message    string
 	Details    map[string]interface{}
 	RetryAfter time.Duration
+	// accessRefused marks a refusal of the sender's access to the
+	// conversation that is answered as not found. It is never written to
+	// the response; callers without a request (scheduled sends) use it to
+	// tell a refusal from a missing or unreadable row.
+	accessRefused bool
 }
 
 func (e *chatSendError) Error() string {
@@ -103,6 +108,14 @@ func chatSendNotFound(resource string) *chatSendError {
 	return newChatSendError(http.StatusNotFound, ErrCodeNotFound, resource+" not found", nil)
 }
 
+// chatSendRefusedAsNotFound is a refusal of the sender's access, answered
+// exactly as chatSendNotFound.
+func chatSendRefusedAsNotFound(resource string) *chatSendError {
+	e := chatSendNotFound(resource)
+	e.accessRefused = true
+	return e
+}
+
 func chatSendFromAgentDMError(e *AgentDMError) *chatSendError {
 	return &chatSendError{Status: e.HTTPStatus, Code: e.Code, Message: e.Message, Details: e.Details, RetryAfter: e.RetryAfter}
 }
@@ -132,6 +145,10 @@ func chatSendPath(key string) string {
 // topic, an existing topic whose current project exists and grants the
 // sender read access. It needs no request, so every caller of
 // sendChatMessage runs the same checks.
+//
+// A sender who may not use the conversation gets the same answer as for a
+// conversation that does not exist ("Thread not found"); the reason is
+// written to the server log only.
 func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key string) (*chatSendTarget, *chatSendError) {
 	if user == nil {
 		return nil, chatSendForbidden()
@@ -146,7 +163,7 @@ func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key s
 	target := &chatSendTarget{Key: key, wcs: wcs}
 	if strings.HasPrefix(key, "dm:") {
 		target.IsDM = true
-		if serr := authorizeDMKeyParticipant(key, user.ID()); serr != nil {
+		if serr := authorizeDMKeyParticipant(ctx, user, key, chatSendPath(key)); serr != nil {
 			return nil, serr
 		}
 		// The other participant must be a principal the caller may message.
@@ -165,22 +182,24 @@ func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key s
 	}
 	project, err := s.store.GetProject(ctx, topic.ProjectID)
 	if err != nil {
-		return nil, chatSendNotFound("Project")
+		logReferenceRefused(ctx, chatSendPath(key), "topic project lookup failed: "+err.Error(), user)
+		return nil, chatSendNotFound("Thread")
 	}
 	resource := projectResource(project)
 	decision := s.authzService.CheckAccess(ctx, user, resource, ActionRead)
 	if !decision.Allowed {
 		logReq := (&http.Request{URL: &url.URL{Path: chatSendPath(key)}}).WithContext(ctx)
 		logAuthzDenial(logReq, user, resource, ActionRead, decision.Reason)
-		details := map[string]interface{}{
-			"resource_type": resource.Type,
-			"denied_action": string(ActionRead),
-		}
+		// The details a 403 used to carry stay in the log only.
+		logAttrs := []any{"route", chatSendPath(key), "resource_type", resource.Type, "denied_action", string(ActionRead)}
 		if decision.DeniedBy == DeniedByDelegationCeiling {
-			details["denied_by"] = string(DeniedByDelegationCeiling)
+			logAttrs = append(logAttrs, "denied_by", string(DeniedByDelegationCeiling))
 		}
-		details = addCeilingUnrecordedDetails(details, decision.adoptionDetailsCause())
-		return nil, newChatSendError(http.StatusForbidden, ErrCodeForbidden, "Insufficient permissions", details)
+		if cause := decision.adoptionDetailsCause(); cause != "" {
+			logAttrs = append(logAttrs, "ceiling_cause", cause)
+		}
+		slog.InfoContext(ctx, "chat send refused as not found", logAttrs...)
+		return nil, chatSendRefusedAsNotFound("Thread")
 	}
 	target.ProjectID = topic.ProjectID
 	target.Topic = topic
@@ -188,17 +207,25 @@ func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key s
 }
 
 // authorizeDMKeyParticipant runs the first two DM steps of
-// authorizeChatSend: the key is well formed, and userID is one of its two
+// authorizeChatSend: the key is well formed, and user is one of its two
 // participants. Callers that need only these steps use it so their
-// responses are the same as authorizeChatSend's.
-func authorizeDMKeyParticipant(key, userID string) *chatSendError {
+// responses are the same as authorizeChatSend's. A caller who is not a
+// participant gets the same answer as for a missing thread; the reason is
+// logged against route, the path of the request being answered.
+func authorizeDMKeyParticipant(ctx context.Context, user UserIdentity, key, route string) *chatSendError {
+	// No caller: the same refusal authorizeChatSend gives a request with no
+	// user.
+	if isNilIdentity(user) {
+		return chatSendForbidden()
+	}
 	// Validate DM key format before any further processing.
 	if !validDMKey(key) {
 		return chatSendBadRequest("invalid DM key format")
 	}
 	// DM key: verify the caller is one of the two participants.
-	if !isDMParticipant(key, userID) {
-		return chatSendForbidden()
+	if !isDMParticipant(key, user.ID()) {
+		logReferenceRefused(ctx, route, "sender is not a participant of this DM", user)
+		return chatSendRefusedAsNotFound("Thread")
 	}
 	return nil
 }
@@ -226,10 +253,10 @@ func chatSendMessageDenied(reason string, agent *store.Agent) *chatSendError {
 //     caller to message it. A refusal for an agent the caller can read is
 //     the usual MESSAGE_DENIED response.
 //
-// Every other outcome is chatSendForbidden, the same response as for a
-// caller who is not a participant, so the response does not depend on
-// which check failed. A store error other than not found fails closed
-// with 503.
+// Every other outcome is "Thread not found", the same response as for a
+// caller who is not a participant or a DM that does not exist, so the
+// response does not depend on which check failed; the reason is logged. A
+// store error other than not found fails closed with 503.
 func (s *Server) authorizeDMPeer(ctx context.Context, user UserIdentity, key string) *chatSendError {
 	kindA, idA, kindB, idB, err := messages.ParseDMKey(key)
 	if err != nil {
@@ -247,19 +274,19 @@ func (s *Server) authorizeDMPeer(ctx context.Context, user UserIdentity, key str
 	case "user":
 		peer, err := s.store.GetUser(ctx, peerID)
 		if err != nil || peer == nil {
-			return s.dmPeerLookupFailure(err)
+			return s.dmPeerLookupFailure(ctx, user, key, err)
 		}
 		if peer.Status == store.UserStatusSuspended {
-			return chatSendForbidden()
+			return dmPeerRefused(ctx, user, key, "DM peer user is suspended")
 		}
 		if !s.authzService.CheckAccess(ctx, user, userResource(peer), ActionRead).Allowed {
-			return chatSendForbidden()
+			return dmPeerRefused(ctx, user, key, "sender may not read the DM peer user")
 		}
 		return nil
 	case "agent":
 		agent, err := s.store.GetAgent(ctx, peerID)
 		if err != nil || agent == nil {
-			return s.dmPeerLookupFailure(err)
+			return s.dmPeerLookupFailure(ctx, user, key, err)
 		}
 		allowed, reason, _ := s.authorizeAgentMessage(ctx, user, agent, false)
 		if allowed {
@@ -273,25 +300,33 @@ func (s *Server) authorizeDMPeer(ctx context.Context, user UserIdentity, key str
 			)
 			return chatSendMessageDenied(reason, agent)
 		}
-		return chatSendForbidden()
+		return dmPeerRefused(ctx, user, key, "sender may not read or message the DM peer agent: "+reason)
 	default:
-		return chatSendForbidden()
+		return dmPeerRefused(ctx, user, key, "unknown DM peer kind")
 	}
+}
+
+// dmPeerRefused is the uniform DM peer refusal: answered as a missing
+// thread, with the reason in the server log.
+func dmPeerRefused(ctx context.Context, user UserIdentity, key, reason string) *chatSendError {
+	logReferenceRefused(ctx, chatSendPath(key), reason, user)
+	return chatSendRefusedAsNotFound("Thread")
 }
 
 // dmPeerLookupFailure maps a failed DM peer lookup: not found is the
 // uniform refusal, any other store error fails closed.
-func (s *Server) dmPeerLookupFailure(err error) *chatSendError {
+func (s *Server) dmPeerLookupFailure(ctx context.Context, user UserIdentity, key string, err error) *chatSendError {
 	if err == nil || errors.Is(err, store.ErrNotFound) {
-		return chatSendForbidden()
+		return dmPeerRefused(ctx, user, key, "DM peer does not exist")
 	}
 	slog.Warn("chat v2 DM peer lookup failed", "error", err)
 	return newChatSendError(http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
 }
 
-// validateChatSendInput checks the content and attachments of a send and
-// returns the trimmed content and the attachment references.
-func (s *Server) validateChatSendInput(ctx context.Context, target *chatSendTarget, in chatSendInput) (string, []AttachmentRef, *chatSendError) {
+// validateChatSendInput checks the content, reply target and attachments of
+// a send by user and returns the trimmed content and the attachment
+// references. It writes nothing, so a refused send leaves no trace.
+func (s *Server) validateChatSendInput(ctx context.Context, user UserIdentity, target *chatSendTarget, in chatSendInput) (string, []AttachmentRef, *chatSendError) {
 	content := strings.TrimSpace(in.Content)
 	if content == "" && len(in.Attachments) == 0 {
 		return "", nil, chatSendValidationError("content or attachments required")
@@ -303,17 +338,41 @@ func (s *Server) validateChatSendInput(ctx context.Context, target *chatSendTarg
 		return "", nil, chatSendValidationError(fmt.Sprintf("too many attachments: %d (max %d)", len(in.Attachments), MaxAttachmentsPerMessage))
 	}
 
-	// W7: Validate attachment IDs and collect metadata.
+	// A reply must target a message of this conversation. A missing message
+	// and a message of another conversation get the same answer.
+	if in.ReplyToID != "" && target.wcs != nil {
+		ok, err := s.messageInChatConversation(ctx, target.wcs, target.Key, in.ReplyToID)
+		if err != nil {
+			slog.Warn("chat v2 reply target lookup failed", "key", target.Key, "error", err)
+			return "", nil, newChatSendError(http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
+		}
+		if !ok {
+			logReferenceRefused(ctx, chatSendPath(target.Key), "reply target is not a message of this conversation", user)
+			return "", nil, chatSendValidationError("reply_to_id does not refer to a message in this conversation")
+		}
+	}
+
+	// W7: Validate attachment IDs and collect metadata. An attachment must
+	// be usable in this conversation (attachmentUsableIn); a missing one and
+	// one that is not usable here get the same answer, and the reason is
+	// logged.
 	var attachmentRefs []AttachmentRef
 	if len(in.Attachments) > 0 && target.wcs != nil {
 		for _, aid := range in.Attachments {
 			meta, err := target.wcs.GetAttachment(ctx, aid)
-			if err != nil || meta == nil {
-				return "", nil, chatSendValidationError(fmt.Sprintf("attachment %q not found", aid))
+			reason := ""
+			switch {
+			case err != nil || meta == nil:
+				reason = "attachment lookup found no attachment"
+				if err != nil && !errors.Is(err, store.ErrNotFound) {
+					reason = "attachment lookup failed: " + err.Error()
+				}
+			case !attachmentUsableIn(meta, target.IsDM, target.ProjectID, user.ID()):
+				reason = "attachment is not usable in this conversation"
 			}
-			// Verify the attachment belongs to the correct project.
-			if target.ProjectID != "" && meta.ProjectID != target.ProjectID {
-				return "", nil, chatSendValidationError(fmt.Sprintf("attachment %q does not belong to this project", aid))
+			if reason != "" {
+				logReferenceRefused(ctx, chatSendPath(target.Key), reason, user)
+				return "", nil, chatSendValidationError(fmt.Sprintf("attachment %q is not available in this conversation", aid))
 			}
 			attachmentRefs = append(attachmentRefs, AttachmentRef{
 				ID:       meta.ID,
@@ -347,11 +406,11 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 	// check sits in the function that sends user-to-user messages
 	// (sendHumanToHuman), as hack/checksecuritymarkergates requires.
 	if target.IsDM && !isDMParticipant(key, user.ID()) {
-		return nil, chatSendForbidden()
+		return nil, chatSendRefusedAsNotFound("Thread")
 	}
 
 	// --- Validate ---
-	content, attachmentRefs, serr := s.validateChatSendInput(ctx, target, in)
+	content, attachmentRefs, serr := s.validateChatSendInput(ctx, user, target, in)
 	if serr != nil {
 		return nil, serr
 	}

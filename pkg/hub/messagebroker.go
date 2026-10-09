@@ -811,8 +811,11 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 
 	// W7: Link the sender's attachments, recorded before publish, to the message
 	// row created here — the ID they need exists nowhere else. Done before the
-	// SSE event so a client refetching on it already sees them.
-	linkAttachmentRefs(ctx, p.webChatStore, storeMsg.ID, parseAttachmentRefs(msg.Metadata), p.log)
+	// SSE event so a client refetching on it already sees them. Only files the
+	// sender owns are linked (linkSenderOwnedAttachmentRefs): the refs come
+	// from message metadata, and a linked file downloads for the message's
+	// readers.
+	linkSenderOwnedAttachmentRefs(ctx, p.webChatStore, storeMsg.ID, projectID, msg.SenderID, parseAttachmentRefs(msg.Metadata), p.log)
 	delete(msg.Metadata, attachmentsMetadataKey) // strip internal transport key
 
 	// Artifact references are recorded only when the hub's admission step
