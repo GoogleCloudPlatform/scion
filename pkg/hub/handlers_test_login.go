@@ -81,17 +81,17 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 
 	var req TestLoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body", nil)
+		BadRequest(w, "invalid request body")
 		return
 	}
 
 	if req.Email == "" {
-		writeError(w, http.StatusBadRequest, ErrCodeValidationError, "email is required", nil)
+		ValidationError(w, "email is required", nil)
 		return
 	}
 
 	if !strings.Contains(req.Email, "@") {
-		writeError(w, http.StatusBadRequest, ErrCodeValidationError, "email must contain @", nil)
+		ValidationError(w, "email must contain @", nil)
 		return
 	}
 
@@ -100,7 +100,7 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 	case "":
 		req.Role = "member"
 	default:
-		writeError(w, http.StatusBadRequest, ErrCodeValidationError, "role must be admin, member, or viewer", nil)
+		ValidationError(w, "role must be admin, member, or viewer", nil)
 		return
 	}
 
