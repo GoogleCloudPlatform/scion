@@ -729,6 +729,17 @@ jobs:
             exit 1
           fi
 
+      # The step above lints check-cloud-init.sh as a file but never runs it,
+      # so the cloud-init runcmd body (which executes under /bin/sh, not bash)
+      # went unchecked (ptone/scion#1769). Running the script extracts runcmd
+      # and lints it with `shellcheck -s sh`; a bash-only construct such as
+      # `&>` (SC3020) in runcmd fails this step.
+      - name: Check cloud-init runcmd is POSIX sh
+        if: ${{ !cancelled() }}
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update && sudo apt-get install -y python3-yaml; }
+          ./scripts/single-node-vm/check-cloud-init.sh
+
       - name: Check for bare MethodNotAllowed calls
         # Blocking (ptone/scion#2421). Formerly the reporting-only "Lint 405
         # Allow header (reporting only)" job, folded in here to save a runner
