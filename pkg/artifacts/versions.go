@@ -897,7 +897,11 @@ func (s *Service) handleGetVersion(w http.ResponseWriter, r *http.Request, id st
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the version")
 		return
 	}
-	writeJSON(w, http.StatusOK, ArtifactResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files)})
+	canManage, ok := s.manageable(w, r, b, a)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, ArtifactResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files), CanManage: canManage})
 }
 
 // ReapPending reaps versions left pending longer than PendingVersionTTL

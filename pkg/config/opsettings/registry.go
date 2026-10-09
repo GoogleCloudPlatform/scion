@@ -64,6 +64,17 @@ func kubernetesServiceAccountMappingsSchema() map[string]interface{} {
 	}
 }
 
+// profileCloneDepthSchema returns profileConfig.clone_depth from the
+// settings schema $defs, so the profiles section validates clone_depth
+// with the same rule as settings-v1.schema.json. It returns nil when the
+// definition is missing.
+func profileCloneDepthSchema(defs map[string]interface{}) map[string]interface{} {
+	profile, _ := defs["profileConfig"].(map[string]interface{})
+	props, _ := profile["properties"].(map[string]interface{})
+	cd, _ := props["clone_depth"].(map[string]interface{})
+	return cd
+}
+
 // sharedDirStorageBackendsSchema mirrors shared_dir_storage_backends in
 // settings-v1.schema.json: shared dir name keys (lowercase letters, digits
 // and hyphens, as api.ValidateSharedDirs requires) mapped to local or nfs.
@@ -382,6 +393,12 @@ func compileSchemas() {
 
 	defs, _ := root["$defs"].(map[string]interface{})
 
+	cloneDepthSchema := profileCloneDepthSchema(defs)
+	if cloneDepthSchema == nil {
+		schemaCompileErr = fmt.Errorf("opsettings: settings schema has no profileConfig.clone_depth")
+		return
+	}
+
 	sectionSchemaMap := map[string]map[string]interface{}{
 		"access": {
 			"type": "object",
@@ -603,6 +620,7 @@ func compileSchemas() {
 						},
 					},
 					"secrets":                     map[string]interface{}{"type": "array"},
+					"clone_depth":                 cloneDepthSchema,
 					"shared_dir_storage_class":    map[string]interface{}{"type": "string"},
 					"shared_dir_size":             map[string]interface{}{"type": "string"},
 					"safe_to_evict":               map[string]interface{}{"type": "boolean"},

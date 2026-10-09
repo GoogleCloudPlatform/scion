@@ -1176,8 +1176,9 @@ func TestCPMAcceptance_AC5_UnauthorizedConversation_NoPersistence(t *testing.T) 
 	rr := httptest.NewRecorder()
 	f.srv.handleAgentOutboundMessage(rr, req, f.hubAgentB.ID)
 
-	assert.Equal(t, http.StatusForbidden, rr.Code,
-		"conversation hijack should be denied: %s", rr.Body.String())
+	assert.Equal(t, http.StatusBadRequest, rr.Code,
+		"conversation hijack should be answered as an unknown conversation_id: %s", rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "caller-supplied conversation_id does not exist")
 }
 
 // =============================================================================

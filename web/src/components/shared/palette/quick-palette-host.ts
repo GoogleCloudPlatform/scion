@@ -62,7 +62,7 @@ import type {
   PaletteCandidate,
   PaletteGroup,
   PaletteTarget,
-} from '../../../client/chat-palette-types.js';
+} from '../../../client/palette-types.js';
 import type { ScionQuickPalette } from './quick-palette.js';
 import { hasOpenModalDescendant } from '../open-modal.js';
 import { deepActiveElement } from '../deep-active-element.js';

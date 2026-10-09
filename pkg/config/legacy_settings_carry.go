@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	koanfyaml "github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/rawbytes"
@@ -46,15 +47,73 @@ var legacySettingsTopLevelKeys = func() map[string]bool {
 	return keys
 }()
 
+// legacyKeyHandling says how MigrateSettingsFile keeps one key of an
+// unversioned settings file that the legacy Settings struct decodes.
+type legacyKeyHandling int
+
+const (
+	// legacyKeyConverted: AdaptLegacySettings converts the value to its v1
+	// form: a v1 key of the same name and shape (such as workspace_path or
+	// hub_connections), or a new place (such as server.broker or
+	// state.yaml) with a deprecation warning.
+	legacyKeyConverted legacyKeyHandling = iota + 1
+	// legacyKeyDropped: deprecated and not kept; AdaptLegacySettings warns.
+	legacyKeyDropped
+)
+
+// legacyTopLevelKeyHandling covers every top-level key the legacy Settings
+// struct decodes. A key whose value is converted field by field (hub, cli)
+// lists the handling of each field in legacySubKeyHandling instead. Tests
+// check that both tables cover every yaml tag of the legacy structs, so a
+// new legacy key cannot be silently dropped by the migration
+// (ptone/scion#3885).
+var legacyTopLevelKeyHandling = map[string]legacyKeyHandling{
+	projectkeys.ConfigProjectIDKey: legacyKeyConverted,
+	"active_profile":               legacyKeyConverted,
+	"default_template":             legacyKeyConverted,
+	"workspace_path":               legacyKeyConverted,
+	"bucket":                       legacyKeyDropped,
+	"hub_connections":              legacyKeyConverted,
+	"runtimes":                     legacyKeyConverted,
+	"harnesses":                    legacyKeyConverted,
+	"profiles":                     legacyKeyConverted,
+}
+
+// legacySubKeyHandling covers each field of the legacy top-level keys that
+// are converted field by field: hub (HubClientConfig) and cli (CLIConfig).
+var legacySubKeyHandling = map[string]map[string]legacyKeyHandling{
+	"hub": {
+		"enabled":        legacyKeyConverted,
+		"linked":         legacyKeyConverted,
+		"local_only":     legacyKeyConverted,
+		"endpoint":       legacyKeyConverted,
+		"token":          legacyKeyDropped,
+		"apiKey":         legacyKeyDropped,
+		"projectId":      legacyKeyConverted,
+		"brokerId":       legacyKeyConverted,
+		"brokerNickname": legacyKeyConverted,
+		"brokerToken":    legacyKeyConverted,
+		"lastSyncedAt":   legacyKeyConverted,
+		"transport":      legacyKeyConverted,
+	},
+	"cli": {
+		"autohelp": legacyKeyConverted,
+		"mode":     legacyKeyConverted,
+	},
+}
+
 // legacyCarriedTopLevelKeys returns the top-level entries of an unversioned
 // settings file that the legacy Settings struct does not decode, such as the
-// v1-only server and image_registry keys. The legacy conversion
-// (AdaptLegacySettings) never sees these, so MigrateSettingsFile carries them
-// into the migrated file unchanged instead of dropping them
-// (ptone/scion#3497). Keys the legacy struct decodes are converted by
-// AdaptLegacySettings and are not returned. For JSON the match is
-// case-insensitive, as json.Unmarshal matches struct fields, so a "Hub" key
-// that the legacy decode converted is not carried a second time.
+// v1-only server and image_registry keys (ptone/scion#3497).
+// MigrateSettingsFile merges them, unchanged, with the output of the legacy
+// conversion (AdaptLegacySettings) so that they are not dropped. Every key
+// the legacy struct decodes is converted or dropped by AdaptLegacySettings
+// (see legacyTopLevelKeyHandling) and is not carried, so it is written once,
+// under its v1 name (ptone/scion#3885).
+//
+// For JSON the legacy decode matches keys case-insensitively, as
+// json.Unmarshal matches struct fields, so a "Hub" key is treated as the
+// legacy hub key and not carried.
 func legacyCarriedTopLevelKeys(data []byte, isJSON bool) (map[string]interface{}, error) {
 	var raw map[string]interface{}
 	var err error
@@ -68,7 +127,7 @@ func legacyCarriedTopLevelKeys(data []byte, isJSON bool) (map[string]interface{}
 	}
 	carried := make(map[string]interface{})
 	for k, v := range raw {
-		if k == "schema_version" || isLegacySettingsTopLevelKey(k, isJSON) {
+		if k == "schema_version" || isLegacySettingsKey(k, isJSON) {
 			continue
 		}
 		carried[k] = v
@@ -76,16 +135,16 @@ func legacyCarriedTopLevelKeys(data []byte, isJSON bool) (map[string]interface{}
 	return carried, nil
 }
 
-// isLegacySettingsTopLevelKey reports whether the legacy Settings decode
-// consumes the top-level key k: an exact match for YAML, a case-insensitive
-// one for JSON.
-func isLegacySettingsTopLevelKey(k string, isJSON bool) bool {
+// isLegacySettingsKey reports whether the legacy decode consumes the
+// top-level key k: on an exact match for YAML and a case-insensitive one for
+// JSON.
+func isLegacySettingsKey(k string, isJSON bool) bool {
 	if legacySettingsTopLevelKeys[k] {
 		return true
 	}
 	if isJSON {
-		for lk := range legacySettingsTopLevelKeys {
-			if strings.EqualFold(k, lk) {
+		for name := range legacySettingsTopLevelKeys {
+			if strings.EqualFold(k, name) {
 				return true
 			}
 		}

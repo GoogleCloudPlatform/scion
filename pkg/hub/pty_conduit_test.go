@@ -96,7 +96,9 @@ type ptyConduitFixture struct {
 	regFault atomic.Bool
 }
 
-func newPTYConduitFixture(t *testing.T) *ptyConduitFixture {
+// newPTYConduitFixture builds the fixture; mods adjust the relay options
+// after the fixture's own (e.g. a lifetime cap).
+func newPTYConduitFixture(t *testing.T, mods ...func(*ConduitRelayOptions)) *ptyConduitFixture {
 	t.Helper()
 	f := &ptyConduitFixture{peerSecret: make([]byte, 32), spawned: make(chan *fakePTY, 8)}
 	_, _ = rand.Read(f.peerSecret)
@@ -112,6 +114,9 @@ func newPTYConduitFixture(t *testing.T) *ptyConduitFixture {
 		}}
 		o.Store = faulty
 		o.Registry = registry.New(faulty, registry.Config{})
+		for _, m := range mods {
+			m(o)
+		}
 	})
 	require.True(t, f.srv.conduitServing())
 	// Broker ids are UUIDs in the store: register the agent's broker under

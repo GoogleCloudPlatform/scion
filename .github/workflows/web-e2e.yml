@@ -1,0 +1,185 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Web Playwright e2e suites (ptone/scion#2580). Advisory: not a required
+# check. PRs and main pushes run only when web/ (or this file) changes;
+# the nightly run covers everything else, such as browser drift.
+#
+# One matrix job per suite config under web/e2e/*/playwright.config.ts,
+# all in full Chromium. Every suite serves the web sources
+# itself (Vite dev server or an esbuild bundle). Only terminal-workspace also
+# needs a production build: some of its tests check the Shoelace icon files
+# in web/dist, so that job runs npm run build first.
+#
+# Not covered here:
+# - web/e2e/chat-mobile: the chat-mobile-e2e job in ci.yml owns it (sharded,
+#   with a stable required-check name), so it is not run twice.
+# - web/playwright.config.ts (e2e/*.spec.ts), which builds and starts the Go
+#   hub in its global setup.
+#
+# CI-only settings (retry, trace on retry, github and HTML reporters,
+# webServer start timeout, globalTimeout) live in each suite config, gated
+# on CI, so local runs are unchanged.
+#
+# Runtime and cost: about 23 minutes of test time per full run (most of it
+# terminal-workspace, chat-palette, terminal-entrypoints and
+# terminal-hidden), plus roughly 2-3 minutes of setup per job, so about
+# 50-60 runner-minutes across 12 jobs; retries of failing tests add to that.
+# The terminal-workspace job also runs a Vite production build first, which
+# adds about 1 minute (that job takes about 4 minutes in total).
+# Wall clock is bounded by the slowest job, about 8-10 minutes.
+
+name: Web E2E (advisory)
+
+on:
+  pull_request:
+    paths:
+      - 'web/**'
+      - '.github/workflows/web-e2e.yml'
+  push:
+    branches: [ main ]
+    paths:
+      - 'web/**'
+      - '.github/workflows/web-e2e.yml'
+  # The odd minute avoids the top-of-hour spike in scheduled GitHub jobs.
+  schedule:
+    - cron: '41 5 * * *'
+  workflow_dispatch:
+
+# Same grouping as ci.yml: a new push to a PR cancels the superseded run;
+# main, scheduled and manual runs are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: e2e (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - agent-store-count
+          - chat
+          - chat-file-preview
+          - chat-palette
+          - project-files-tabs
+          - terminal-coordinator
+          - terminal-entrypoints
+          - terminal-hidden
+          - terminal-lifecycle
+          - terminal-owner
+          - terminal-pane
+          - terminal-workspace
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24' # Node.js 24 (LTS)
+          cache: 'npm'
+          cache-dependency-path: 'web/package-lock.json'
+
+      - name: Install dependencies
+        working-directory: ./web
+        run: npm ci
+
+      # terminal-workspace tests (workspace.pw.ts, dm-buttons.pw.ts) read
+      # icon files from the production build output in web/dist/client.
+      - name: Build web (production)
+        if: matrix.suite == 'terminal-workspace'
+        working-directory: ./web
+        run: npm run build
+
+      - name: Read Playwright version
+        id: playwright
+        working-directory: ./web
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      # Full Chromium is installed, not the headless shell used by the
+      # chat-mobile-e2e job in ci.yml: the terminal-entrypoints test that
+      # Ctrl-clicks a terminal link expects the new tab to load the link's
+      # href, and under the headless shell that tab stays on about:blank.
+      # Browser binaries are keyed on the Playwright version; the key names
+      # full Chromium so a headless-shell-only cache is never restored. The
+      # OS packages Chromium needs are not cacheable and are installed each
+      # run.
+      - name: Cache Playwright Chromium
+        id: browser-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-full-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+
+      # A normal install of full Chromium takes about 1-3 minutes; the
+      # timeout makes a stalled download fail fast instead of using up the
+      # job timeout, with headroom for a slow but progressing download.
+      - name: Install Chromium
+        if: steps.browser-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 10
+        working-directory: ./web
+        run: npx playwright install --with-deps --no-shell chromium
+
+      - name: Install Chromium system dependencies
+        if: steps.browser-cache.outputs.cache-hit == 'true'
+        working-directory: ./web
+        run: npx playwright install-deps chromium
+
+      # CHROMIUM_EXECUTABLE / TERMINAL_OWNER_CHROMIUM point every suite at
+      # the Playwright full Chromium binary, from chromium.executablePath().
+      # Four configs otherwise default to /usr/bin/chromium:
+      # agent-store-count, terminal-entrypoints and terminal-workspace read
+      # CHROMIUM_EXECUTABLE, while terminal-coordinator reads
+      # TERMINAL_OWNER_CHROMIUM (as does terminal-owner, which has no such
+      # default), so both variables are exported. The step stops with a
+      # clear error if the binary is missing, for example after a partial
+      # install or cache restore.
+      - name: Run Playwright suite
+        working-directory: ./web
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: |
+          CHROMIUM_EXECUTABLE="$(node -p "require('playwright-core').chromium.executablePath()")"
+          if [ ! -x "$CHROMIUM_EXECUTABLE" ]; then
+            echo "::error::Playwright Chromium not found at $CHROMIUM_EXECUTABLE (expected from npx playwright install --no-shell chromium)"
+            exit 1
+          fi
+          export CHROMIUM_EXECUTABLE
+          export TERMINAL_OWNER_CHROMIUM="$CHROMIUM_EXECUTABLE"
+          npx playwright test -c "e2e/$SUITE/playwright.config.ts"
+
+      # Uploaded whenever the suite ran, so retry traces of flaky tests (which
+      # pass the job) are kept too. Paths match each config's HTML report
+      # folder (playwright-report/<suite>) and outputDir (test-results/<suite>).
+      # Configs that set no outputDir (agent-store-count, terminal-entrypoints,
+      # terminal-workspace) use Playwright's default, web/test-results.
+      - name: Upload traces and report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: web-e2e-${{ matrix.suite }}
+          path: |
+            web/playwright-report/
+            web/test-results/
+          if-no-files-found: ignore
+          retention-days: 14

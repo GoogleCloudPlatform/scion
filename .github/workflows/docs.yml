@@ -30,9 +30,12 @@ on:
 permissions:
   contents: read
 
+# Per-ref group: each PR gets its own group, so PR builds no longer queue
+# behind (and cancel) one another. A newer push to the same PR supersedes its
+# older run. Pushes to main are never cancelled mid-run.
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build-docs:
@@ -86,6 +89,10 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     needs: build-docs
     runs-on: ubuntu-latest
+    # Serialize Pages deployments; never cancel one that is in progress.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     permissions:
       pages: write
       id-token: write

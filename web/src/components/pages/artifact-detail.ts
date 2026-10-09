@@ -60,6 +60,7 @@ import {
   rendererFor,
 } from '../../client/artifacts.js';
 import type {
+  Artifact,
   ArtifactFile,
   ArtifactResponse,
   ArtifactRenderer,
@@ -83,6 +84,7 @@ import type { CriticCounts, CriticTool } from '../../utils/critic.js';
 import '../shared/artifact-markdown-frame.js';
 import '../shared/detail-header.js';
 import '../shared/artifact-publish-dialog.js';
+import '../shared/artifact-share-dialog.js';
 import '../shared/code-editor.js';
 import './not-found.js';
 
@@ -171,6 +173,7 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private editBusy = false;
   @state() private editError: string | null = null;
   @state() private publishOpen = false;
+  @state() private shareOpen = false;
   /** The version a failed Edit publish left pending; the next attempt resumes it. */
   private editPending: PendingPublish | null = null;
   @state() private reviewing = false;
@@ -966,6 +969,19 @@ export class ScionPageArtifactDetail extends LitElement {
           this.publishOpen = false;
         }}
       ></scion-artifact-publish-dialog>
+      ${this.data?.canManage
+        ? html`<scion-artifact-share-dialog
+            .artifact=${this.data.artifact}
+            .currentUserId=${this.pageData?.user?.id ?? ''}
+            ?open=${this.shareOpen}
+            @artifact-changed=${(e: CustomEvent<Artifact>): void => {
+              if (this.data) this.data = { ...this.data, artifact: e.detail };
+            }}
+            @artifact-share-closed=${(): void => {
+              this.shareOpen = false;
+            }}
+          ></scion-artifact-share-dialog>`
+        : nothing}
     `;
   }
 
@@ -1003,9 +1019,10 @@ export class ScionPageArtifactDetail extends LitElement {
     const owner = this.label(a.ownerKind, a.ownerRef);
     const f = this.entry;
     const ownFiles = v ? v.files.filter((x) => !isRemoteFile(x)) : [];
-    // Every action needs a version or edit rights (Download needs a
-    // version), and all are hidden while editing or reviewing.
-    const hasActions = !this.editing && !this.reviewing && (!!v || this.canEdit);
+    // Every action needs a version, edit rights or (for Share) the right
+    // to manage the artifact; all are hidden while editing or reviewing.
+    const hasActions =
+      !this.editing && !this.reviewing && (!!v || this.canEdit || !!this.data?.canManage);
     return html`
       <scion-detail-header heading=${a.title}>
         <sl-icon slot="icon" name="file-earmark-richtext"></sl-icon>
@@ -1043,6 +1060,17 @@ export class ScionPageArtifactDetail extends LitElement {
                   ? html`<sl-button size="small" @click=${this.startReview}>
                       <sl-icon slot="prefix" name="chat-text"></sl-icon>
                       Review
+                    </sl-button>`
+                  : nothing}
+                ${this.data!.canManage
+                  ? html`<sl-button
+                      size="small"
+                      @click=${(): void => {
+                        this.shareOpen = true;
+                      }}
+                    >
+                      <sl-icon slot="prefix" name="person-plus"></sl-icon>
+                      Share
                     </sl-button>`
                   : nothing}
                 ${v && f && ownFiles.length === 1

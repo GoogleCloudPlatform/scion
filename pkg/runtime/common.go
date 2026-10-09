@@ -145,6 +145,14 @@ func tmuxAgentWindowCmd(shellPath, cmdLine string) string {
 	return shellPath + " -c " + shellQuote(cmdLine+"; echo $? > "+state.HarnessExitCodeFile)
 }
 
+// QuotedTaskBytes is the number of bytes task adds to the tmux command
+// that starts the harness. The harness command line quotes each argument
+// for the shell (harnessCmdLine) and tmuxAgentWindowCmd quotes that line
+// again, so every single quote in task grows to 13 bytes.
+func QuotedTaskBytes(task string) int {
+	return len(shellQuote(shellQuote(task))) - len(shellQuote(shellQuote("")))
+}
+
 // tmuxSessionEnd selects how buildTmuxStartCmd keeps the tmux session's
 // lifetime visible to the container/pod's PID 1 once the session is
 // created.
