@@ -298,8 +298,10 @@ reject grove
 for f in production port; do reject "$f"; done
 # $ownedByConfig - delivered through another channel.
 for f in admin-emails base-url db storage-bucket storage-dir; do reject "$f"; done
-# $unsafeToPass - weaken auth, expose credentials, or local-development only.
-for f in session-secret dev-auth enable-test-login web-assets-dir enable-debug-endpoints; do reject "$f"; done
+# $unsafeToPass - weaken auth or expose credentials.
+for f in session-secret dev-auth enable-test-login web-assets-dir; do reject "$f"; done
+# $refusedWhenHosted - the server refuses it in hosted mode.
+reject enable-debug-endpoints
 # Case-insensitivity of the reserved match (pflag itself is case-SENSITIVE).
 for f in CONFIG Global; do reject "$f"; done
 

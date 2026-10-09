@@ -88,6 +88,7 @@ func TestLoadAndReconcileConfig_RefusesDebugEndpointsInHostedMode(t *testing.T) 
 			})
 			resetServerFlags()
 			enableDebugEndpoints = true
+			t.Setenv("SCION_SERVER_MODE", "")
 			writeServerSettings(t, "schema_version: \"1\"\nserver:\n  mode: "+tc.mode+"\n")
 
 			_, err := loadAndReconcileConfig(serverStartCmd)
@@ -117,6 +118,7 @@ func TestResolveDaemonServerMode_DebugEndpoints(t *testing.T) {
 			savedHosted, savedEndpoints := hostedMode, enableDebugEndpoints
 			t.Cleanup(func() { hostedMode, enableDebugEndpoints = savedHosted, savedEndpoints })
 			hostedMode, enableDebugEndpoints = false, true
+			t.Setenv("SCION_SERVER_MODE", "")
 			writeServerSettings(t, "server:\n  mode: "+tc.mode+"\n")
 
 			c := &cobra.Command{Use: "start", RunE: func(*cobra.Command, []string) error { return nil }}
