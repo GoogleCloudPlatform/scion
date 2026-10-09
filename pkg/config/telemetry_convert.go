@@ -168,18 +168,8 @@ func TelemetryConfigToEnv(cfg *api.TelemetryConfig) map[string]string {
 		}
 	}
 
-	// Local config
-	if cfg.Local != nil {
-		if cfg.Local.Enabled != nil {
-			env["SCION_TELEMETRY_LOCAL_ENABLED"] = strconv.FormatBool(*cfg.Local.Enabled)
-		}
-		if cfg.Local.File != "" {
-			env["SCION_TELEMETRY_LOCAL_FILE"] = cfg.Local.File
-		}
-		if cfg.Local.Console != nil {
-			env["SCION_TELEMETRY_LOCAL_CONSOLE"] = strconv.FormatBool(*cfg.Local.Console)
-		}
-	}
+	// telemetry.local is accepted but not emitted: nothing reads the
+	// SCION_TELEMETRY_LOCAL_* variables (ptone/scion#4103).
 
 	// Filter config
 	if cfg.Filter != nil {

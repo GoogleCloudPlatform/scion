@@ -280,9 +280,6 @@ func TestTelemetryConfigToEnv_Full(t *testing.T) {
 		"SCION_TELEMETRY_CLOUD_PROVIDER":       "gcp",
 		"SCION_TELEMETRY_HUB_ENABLED":          "true",
 		"SCION_TELEMETRY_HUB_REPORT_INTERVAL":  "60s",
-		"SCION_TELEMETRY_LOCAL_ENABLED":        "true",
-		"SCION_TELEMETRY_LOCAL_FILE":           "/var/log/telemetry.jsonl",
-		"SCION_TELEMETRY_LOCAL_CONSOLE":        "true",
 		"SCION_TELEMETRY_FILTER_ENABLED":       "true",
 		"SCION_TELEMETRY_FILTER_INCLUDE":       "agent.tool.call,agent.turn",
 		"SCION_TELEMETRY_FILTER_EXCLUDE":       "agent.user.prompt",
@@ -448,18 +445,21 @@ func TestTelemetryConfigToEnv_HeadersJSON(t *testing.T) {
 	}
 }
 
-// TestTelemetryConfigToEnv_OmitsUnreadDebugVars guards against re-emitting
-// env vars that no consumer reads (ptone/scion#4103).
-func TestTelemetryConfigToEnv_OmitsUnreadDebugVars(t *testing.T) {
+// TestTelemetryConfigToEnv_OmitsUnreadVars guards against re-emitting env
+// vars that no consumer reads (ptone/scion#4103).
+func TestTelemetryConfigToEnv_OmitsUnreadVars(t *testing.T) {
 	on := true
 	env := TelemetryConfigToEnv(&api.TelemetryConfig{
-		Local:  &api.TelemetryLocalConfig{Enabled: &on},
+		Local:  &api.TelemetryLocalConfig{Enabled: &on, File: "/tmp/t.jsonl", Console: &on},
 		Filter: &api.TelemetryFilterConfig{RespectDebugMode: &on},
 	})
-	if got := env["SCION_TELEMETRY_LOCAL_ENABLED"]; got != "true" {
-		t.Errorf("SCION_TELEMETRY_LOCAL_ENABLED = %q, want %q", got, "true")
-	}
-	for _, k := range []string{"SCION_TELEMETRY_DEBUG", "SCION_TELEMETRY_FILTER_RESPECT_DEBUG_MODE"} {
+	for _, k := range []string{
+		"SCION_TELEMETRY_DEBUG",
+		"SCION_TELEMETRY_FILTER_RESPECT_DEBUG_MODE",
+		"SCION_TELEMETRY_LOCAL_ENABLED",
+		"SCION_TELEMETRY_LOCAL_FILE",
+		"SCION_TELEMETRY_LOCAL_CONSOLE",
+	} {
 		if v, ok := env[k]; ok {
 			t.Errorf("%s should not be emitted, got %q", k, v)
 		}
