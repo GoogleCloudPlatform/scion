@@ -11,63 +11,61 @@ The quickest path to a deployed Scion Hub that builds from source is a single Go
 
 - A **GCP project** with billing enabled.
 - The **gcloud CLI** installed and configured (`gcloud auth login`, project set).
-- A **domain name** (optional but recommended for HTTPS/TLS).
+- A **domain name** whose DNS is delegated to Cloud DNS. The default path obtains a wildcard certificate for it through a DNS-01 challenge. Without a public domain, follow [Internal Deployments (BYO TLS)](#internal-deployments-byo-tls) instead.
 
-## Steps
+## Configuration
 
-The Developer Hub scripts are designed to be run in sequence from your local machine.
-
-### 1. Provision the VM
+Every script sources `scripts/starter-hub/hub-config.sh`. That file generates nothing. It is a shared set of shell variables that sets resource names, domains, and file paths from `HUB_NAME` (default `demo`) and `BASE_DOMAIN` (default `scion-ai.dev`). Set those, and any other variable listed in `hub-config.sh`, such as `CERT_EMAIL`, `REGION`, or `ZONE`, in your environment before you run a script:
 
 ```bash
-./scripts/starter-hub/gce-demo-provision.sh
+export HUB_NAME=demo
+export BASE_DOMAIN=example.com    # the Hub is served at hub.demo.example.com
 ```
 
-Creates a GCE VM with the necessary machine type, disk, firewall rules, and service account.
-
-### 2. Set Up the Repository
+Then create the Hub environment file, which `gce-start-hub.sh --full` uploads to the VM as `hub.env`:
 
 ```bash
-./scripts/starter-hub/gce-demo-setup-repo.sh
+mkdir -p .scratch
+cp scripts/starter-hub/hub.env.sample .scratch/hub-${HUB_NAME}.env
+# Edit .scratch/hub-<name>.env with your values
 ```
 
-SSHs into the VM and clones the Scion repository, installing required dependencies.
+## Deploy
 
-### 3. Build and Deploy
+Run all scripts from the repository root.
+
+### All-in-one (recommended)
 
 ```bash
 ./scripts/starter-hub/gce-demo-deploy.sh
 ```
 
-Builds the Hub server and its dependencies on the VM.
+`gce-demo-deploy.sh` runs every step below in order, so for a first deployment it is the only command you need. Running the individual scripts afterwards repeats the same work.
 
-### 4. Configure TLS
+### Individual steps
 
-```bash
-./scripts/starter-hub/gce-certs.sh
-```
+Run these one at a time instead of `gce-demo-deploy.sh` when you need to skip or re-run a single step, for example on an [internal deployment](#internal-deployments-byo-tls). Each script is what `gce-demo-deploy.sh` runs at that step.
 
-Sets up Caddy as a reverse proxy with automatic TLS certificate provisioning. Requires a domain name pointed at the VM's external IP.
+| Step | Script | What it does |
+|------|--------|--------------|
+| 0 | `gce-demo-preflight.sh` | Checks local tools, the env file, GCP auth, APIs, IAM permissions, and DNS readiness. It changes nothing. |
+| 1 | `gce-demo-provision.sh` | Creates the GCE VM, its service account, a firewall rule for tcp:80 and tcp:443, and, when `ENABLE_GKE=true`, a GKE cluster. |
+| 2 | `gce-demo-telemetry-sa.sh` | Creates a service account for agent telemetry export. |
+| 3 | `gce-demo-setup-repo.sh` | Clones the Scion repository on the VM. |
+| 4 | `gce-certs.sh` | Creates the Cloud DNS managed zone if it is missing, points an A record for the Hub domain at the VM's external IP, and runs certbot on the VM to get a Let's Encrypt wildcard certificate (`*.<CERT_DOMAIN>`) through a DNS-01 challenge. It does not install or configure Caddy. |
+| 5 | `gce-start-hub.sh --full` | Uploads `hub.env`, writes `settings.yaml` and the systemd unit, installs Caddy, writes a Caddyfile that serves the certbot certificate from step 4 and proxies to the Hub on port 8080, builds the web assets and the `scion` binary on the VM, and starts the Hub. |
 
 :::note[Internal or private deployments]
-If your VM has no external IP — or TLS is terminated upstream by a load balancer, reverse proxy, or similar appliance — skip this step and see [Internal Deployments (BYO TLS)](#internal-deployments-byo-tls) below.
+If your VM has no external IP, or TLS is terminated upstream by a load balancer, reverse proxy, or similar appliance, skip step 4 and see [Internal Deployments (BYO TLS)](#internal-deployments-byo-tls) below.
 :::
 
-### 5. Generate Hub Configuration
-
-```bash
-./scripts/starter-hub/hub-config.sh
-```
-
-Generates the `settings.yaml` file with your chosen options (domain, auth settings, etc.).
-
-### 6. Start the Hub
+### Updating a running Hub
 
 ```bash
 ./scripts/starter-hub/gce-start-hub.sh
 ```
 
-Starts the Hub service on the VM. The Hub is now ready to accept connections.
+Without `--full`, `gce-start-hub.sh` only pulls the latest code on the VM, rebuilds, restarts the Hub, and checks its health. Add `--full` again when you change `hub.env` or the generated configuration.
 
 ## Post-Setup
 
@@ -126,13 +124,13 @@ The steps above assume a public-facing VM with an external IP and public DNS. If
 | Step | Script | Skip? |
 |------|--------|-------|
 | 1. Provision the VM | `gce-demo-provision.sh` | **No** — run the script as-is. It creates firewall rules for inbound HTTP/HTTPS (tcp:80, tcp:443) that are unnecessary if the VM is not publicly reachable; you can remove them afterward or let your network team manage internal firewall rules instead. |
-| 4. Configure TLS | `gce-certs.sh` | **Yes** — this script fetches the VM's external IP, creates public Cloud DNS records, and obtains Let's Encrypt certificates via DNS challenge. All of this requires a public IP and will fail without one. |
+| 4. DNS and certificates | `gce-certs.sh` | **Yes** — this script fetches the VM's external IP, creates public Cloud DNS records, and obtains Let's Encrypt certificates via DNS challenge. All of this requires a public IP and will fail without one. |
 
-Steps 2, 3, 5, and 6 work without modification.
+Steps 0, 2, 3, and 5 work without modification. Because `gce-demo-deploy.sh` always runs step 4, run the [individual steps](#individual-steps) instead of the all-in-one script.
 
 ### Set `SCION_SERVER_BASE_URL`
 
-The Hub uses `SCION_SERVER_BASE_URL` to construct OAuth redirect URIs and set the session cookie's `Secure` flag. When Step 4 is skipped, you must set this variable yourself.
+The Hub uses `SCION_SERVER_BASE_URL` to construct OAuth redirect URIs and set the session cookie's `Secure` flag. When step 4 is skipped, you must set this variable yourself.
 
 In your `hub.env` file (see `scripts/starter-hub/hub.env.sample`):
 
@@ -162,7 +160,7 @@ hub.internal.example.com {
 }
 ```
 
-Then start Caddy manually (`sudo caddy start --config /etc/caddy/Caddyfile`) instead of running `gce-certs.sh`.
+Then start Caddy manually (`sudo caddy start --config /etc/caddy/Caddyfile`) instead of running `gce-certs.sh`. `gce-start-hub.sh --full` replaces `/etc/caddy/Caddyfile` with its own version, so restore your file after each `--full` run.
 
 **Option B — TLS terminated upstream**
 
