@@ -170,15 +170,15 @@ func lookIdentityServer(t *testing.T, agentJSON string, saStatus int) *httptest.
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.URL.Path == "/api/v1/gcp-service-accounts":
+		switch r.URL.Path {
+		case "/api/v1/gcp-service-accounts":
 			if saStatus != http.StatusOK {
 				w.WriteHeader(saStatus)
 				_, _ = w.Write([]byte(`{"error": {"code": "forbidden", "message": "denied"}}`))
 				return
 			}
 			_, _ = w.Write([]byte(`{"items": [{"id": "sa-1", "email": "` + testSAEmail + `", "displayName": "Build worker"}]}`))
-		case r.URL.Path == "/api/v1/projects/p1/agents/worker":
+		case "/api/v1/projects/p1/agents/worker":
 			_, _ = w.Write([]byte(agentJSON))
 		default:
 			http.NotFound(w, r)
