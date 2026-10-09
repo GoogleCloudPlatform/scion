@@ -350,15 +350,68 @@ func TestReincarnateByUserKeepsRecordedEdgeUnderDevLocalHop(t *testing.T) {
 	assertEdgeKept(t, f.s, f.target.ID, old, f.targetEdge(t))
 }
 
+// edgeRewriteStore rewrites, on read, every delegation edge of one delegate,
+// so a test can present an edge the store would not accept on write (an
+// unknown ceiling kind or provenance version).
+type edgeRewriteStore struct {
+	store.Store
+	delegateID string
+	rewrite    func(e *store.DelegationEdge)
+}
+
+func (s *edgeRewriteStore) GetDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string) ([]*store.DelegationEdge, error) {
+	edges, err := s.Store.GetDelegationEdgesForDelegate(ctx, delegateType, delegateID)
+	if err != nil || delegateID != s.delegateID {
+		return edges, err
+	}
+	out := make([]*store.DelegationEdge, 0, len(edges))
+	for _, e := range edges {
+		c := *e
+		s.rewrite(&c)
+		out = append(out, &c)
+	}
+	return out, nil
+}
+
+// unknownKindAncestor seeds parent -> T recorded with parent's own edge
+// from seedParent, and makes parent's edge read with an unknown ceiling
+// kind and provenance version version.
+func unknownKindAncestor(seedParent func(t *testing.T, f *repairFixture) *store.Agent, version int) func(t *testing.T, f *repairFixture) {
+	return func(t *testing.T, f *repairFixture) {
+		parent := seedParent(t, f)
+		seedFullAgentEdge(t, f.s, store.DelegationPrincipalAgent, parent.ID, f.target)
+		f.srv.authzService.store = &edgeRewriteStore{Store: f.s, delegateID: parent.ID, rewrite: func(e *store.DelegationEdge) {
+			e.Kind = store.EffectCeilingKind("mystery")
+			e.ProvenanceVersion = version
+		}}
+	}
+}
+
 // chainEffectCeilingWalk reports, beside a structural error, the unrecorded
 // hops strictly below the hop at which it stopped; the hop that stopped it
 // is not counted even when it is itself unrecorded, as the SA-assign gate
-// denies such a hop with ceiling_source_not_allowed. chainEffectCeiling
-// returns the zero ChainCeiling with the same error.
+// denies such a hop with ceiling_source_not_allowed. The exception is a hop
+// with an unknown ceiling kind and a provenance version that is not
+// understood: the gate denies it with ceiling_unrecorded before reading the
+// kind, so it counts, unless a dev_local check refuses it first.
+// chainEffectCeiling returns the zero ChainCeiling with the same error.
 func TestChainEffectCeilingWalkUnrecordedBelow(t *testing.T) {
+	userRooted := func(slug string) func(t *testing.T, f *repairFixture) *store.Agent {
+		return func(t *testing.T, f *repairFixture) *store.Agent {
+			p := f.otherAgent(t, slug)
+			seedFullAgentEdge(t, f.s, store.DelegationPrincipalUser, f.userID, p)
+			return p
+		}
+	}
+	devLocalRooted := func(slug string) func(t *testing.T, f *repairFixture) *store.Agent {
+		return func(t *testing.T, f *repairFixture) *store.Agent {
+			return f.devLocalRootedAgent(t, slug, store.EffectCeilingPrincipal)
+		}
+	}
 	cases := map[string]struct {
-		seed func(t *testing.T, f *repairFixture)
-		want int
+		seed    func(t *testing.T, f *repairFixture)
+		wantErr error
+		want    int
 	}{
 		"unrecorded ancestor under the dev_local hop": {
 			seed: func(t *testing.T, f *repairFixture) {
@@ -367,21 +420,39 @@ func TestChainEffectCeilingWalkUnrecordedBelow(t *testing.T) {
 				seedUnrecordedEdge(t, f.s, store.DelegationPrincipalAgent, grand.ID, parent)
 				seedFullAgentEdge(t, f.s, store.DelegationPrincipalAgent, parent.ID, f.target)
 			},
-			want: 1,
+			wantErr: errSourceNotAllowed,
+			want:    1,
 		},
 		"recorded own edge under the dev_local hop": {
 			seed: func(t *testing.T, f *repairFixture) {
 				parent := f.devLocalRootedAgent(t, "walk-parent", store.EffectCeilingPrincipal)
 				seedFullAgentEdge(t, f.s, store.DelegationPrincipalAgent, parent.ID, f.target)
 			},
-			want: 0,
+			wantErr: errSourceNotAllowed,
+			want:    0,
 		},
 		"the dev_local hop itself unrecorded": {
 			seed: func(t *testing.T, f *repairFixture) {
 				parent := f.devLocalRootedAgent(t, "walk-unrec-devlocal", store.EffectCeilingUnrecorded)
 				seedFullAgentEdge(t, f.s, store.DelegationPrincipalAgent, parent.ID, f.target)
 			},
-			want: 0,
+			wantErr: errSourceNotAllowed,
+			want:    0,
+		},
+		"unknown kind and unknown version": {
+			seed:    unknownKindAncestor(userRooted("walk-unknown-both"), 99),
+			wantErr: ErrProvenanceChain,
+			want:    1,
+		},
+		"unknown kind with a known version": {
+			seed:    unknownKindAncestor(userRooted("walk-unknown-kind"), store.ProvenanceVersionV1),
+			wantErr: ErrProvenanceChain,
+			want:    0,
+		},
+		"unknown kind and unknown version, dev_local refused": {
+			seed:    unknownKindAncestor(devLocalRooted("walk-unknown-devlocal"), 99),
+			wantErr: errSourceNotAllowed,
+			want:    0,
 		},
 	}
 	for name, tc := range cases {
@@ -393,16 +464,45 @@ func TestChainEffectCeilingWalkUnrecordedBelow(t *testing.T) {
 			target := mustGetAgent(t, f.s, f.target.ID)
 
 			chain, below, err := f.srv.authzService.chainEffectCeilingWalk(ctx, target)
-			require.ErrorIs(t, err, errSourceNotAllowed)
+			require.ErrorIs(t, err, tc.wantErr)
 			assert.Equal(t, tc.want, below)
 			assert.Equal(t, ChainCeiling{}, chain)
 
 			wrapped, werr := f.srv.authzService.chainEffectCeiling(ctx, target)
-			require.ErrorIs(t, werr, errSourceNotAllowed)
+			require.ErrorIs(t, werr, tc.wantErr)
 			assert.Equal(t, err.Error(), werr.Error())
 			assert.Equal(t, ChainCeiling{}, wrapped)
 		})
 	}
+}
+
+// A lookup fault in the dev_local check of a hop with an unknown ceiling
+// kind and provenance version is returned unchanged (not structural), so a
+// reincarnate answers 503 rather than deciding on a partial count.
+func TestChainEffectCeilingWalkUnknownKindDevLocalFault(t *testing.T) {
+	f := newRepairFixture(t)
+	unknownKindAncestor(func(t *testing.T, f *repairFixture) *store.Agent {
+		return f.devLocalRootedAgent(t, "walk-unknown-fault", store.EffectCeilingPrincipal)
+	}, 99)(t, f)
+	rewrite := f.srv.authzService.store
+	f.srv.authzService.store = &devUserReadErrStore{Store: rewrite}
+	f.srv.authzService.setDevLocalAuthorityEnabled(true)
+
+	_, _, err := f.srv.authzService.chainEffectCeilingWalk(context.Background(), mustGetAgent(t, f.s, f.target.ID))
+	require.ErrorIs(t, err, errInjectedLookup)
+	assert.False(t, isStructuralProvenanceError(err), "a lookup fault is not structural: %v", err)
+}
+
+// devUserReadErrStore fails every read of the local development user.
+type devUserReadErrStore struct {
+	store.Store
+}
+
+func (s *devUserReadErrStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if id == DevUserID {
+		return nil, errInjectedLookup
+	}
+	return s.Store.GetUser(ctx, id)
 }
 
 // Only an ancestor hop is unrecorded (U -> P unrecorded, P -> T recorded):

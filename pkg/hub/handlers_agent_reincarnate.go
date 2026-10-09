@@ -298,7 +298,8 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// agent's recorded delegator when it changes the role
 	// (ptone/scion#3762), or when a user keeps the role of an agent whose
 	// own edge is missing or unrecorded, or whose chain has an unrecorded
-	// hop (ptone/scion#3948). All of this runs before the
+	// hop the chain walk reaches before any hop it does not accept
+	// (ptone/scion#3948). All of this runs before the
 	// broker and the agent state are examined and before anything is
 	// written, so a refused request claims nothing and a dry run reports
 	// the same refusal.
@@ -558,9 +559,8 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 
 // startReincarnation claims the agent, records the reincarnation (with the
 // authority re-record auth, nil when the edge is kept: a self-reincarnation
-// or, but for a user's repair of an unrecorded chain, one that keeps the
-// role) and starts the
-// detached worker, answering 202. sourceBrokerID and targetBrokerID are
+// or one that keeps the role (except a user repair, ptone/scion#3948)) and
+// starts the detached worker, answering 202. sourceBrokerID and targetBrokerID are
 // echoed in the response (both empty unless the request named a target);
 // move is non-nil for a cross-broker move.
 func (s *Server) startReincarnation(w http.ResponseWriter, r *http.Request, agent *store.Agent, auth *reincarnateAuthority, fresh *store.AgentAppliedConfig, plan ReincarnationPlan, targetGeneration int, handoff string, admittedDeletionClaim int64, sourceBrokerID, targetBrokerID string, move *reincarnationMove) {
@@ -928,8 +928,8 @@ func effectiveAgentRuntime(agent *store.Agent, broker *store.RuntimeBroker) stri
 // the delegation chain (requesterDescendsFrom). It is also re-recorded,
 // with the user as the recorded delegator, when a user keeps the role of
 // an agent whose own edge is missing or unrecorded, or whose chain has an
-// unrecorded hop further up below any hop the chain walk does not accept
-// (reincarnateChainUnrecorded): the reincarnate then repairs the chain as a
+// unrecorded hop further up that the chain walk reaches before any hop it
+// does not accept (reincarnateChainUnrecorded): the reincarnate then repairs the chain as a
 // recreate by that user would (ptone/scion#3948). In every other case,
 // including any self-reincarnation, an agent requester's reincarnation that
 // keeps the role, and a user's that keeps the role of an agent with a
@@ -1066,7 +1066,9 @@ func (s *Server) reincarnateAuthorityFor(w http.ResponseWriter, r *http.Request,
 // counts an unrecorded hop further up: on a chain that folds, any unrecorded
 // hop; on a chain that stops with a structural error (for example a hop with
 // local development provenance on a server without dev auth), an unrecorded
-// hop below the hop where it stopped. Those are the chains whose agent a
+// hop below the hop where it stopped, or that hop itself when its ceiling
+// kind is unknown and its provenance version is not understood
+// (unrecordedBelow). Those are the chains whose agent a
 // permission requiring recorded provenance denies with ceiling_unrecorded,
 // as the check walks up from the agent and stops at the first unrecorded
 // hop. A fully recorded chain, and a chain whose only problem above a

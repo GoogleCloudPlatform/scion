@@ -464,7 +464,10 @@ func (a *AuthzService) chainEffectCeiling(ctx context.Context, agent *store.Agen
 // unrecordedBelow: the number of unrecorded hops (as hopUnrecorded counts
 // them) strictly below the hop at which the walk stopped, the hops a
 // permission check walking up from the agent passes before it reaches that
-// hop. Only reincarnateChainUnrecorded reads unrecordedBelow; every other
+// hop. The one exception is a hop with a ceiling kind this binary does not
+// know: when its provenance version is not understood either, and it passes
+// any local-development checks, it is counted too, because a permission
+// check denies it as unrecorded before reading the kind. Only reincarnateChainUnrecorded reads unrecordedBelow; every other
 // caller goes through chainEffectCeiling.
 func (a *AuthzService) chainEffectCeilingWalk(ctx context.Context, agent *store.Agent) (chain ChainCeiling, unrecordedBelow int, err error) {
 	if agent == nil {
@@ -517,7 +520,20 @@ walk:
 			bounded = append(bounded, frozen)
 		case store.EffectCeilingPrincipal, store.EffectCeilingUnrecorded:
 		default:
-			return ChainCeiling{}, below, fmt.Errorf("%w: edge %s has ceiling kind %q", ErrProvenanceChain, edge.ID, edge.Kind)
+			// A permission check (hopEffectCeilingDeny) applies a dev_local
+			// hop's checks, then denies a hop whose provenance version is not
+			// understood with ceiling_unrecorded, before it reads the kind.
+			// unrecordedBelow counts such a hop as unrecorded, so it agrees.
+			chainErr := fmt.Errorf("%w: edge %s has ceiling kind %q", ErrProvenanceChain, edge.ID, edge.Kind)
+			if knownProvenanceVersion(edge.ProvenanceVersion) {
+				return ChainCeiling{}, below, chainErr
+			}
+			if hasDevLocalProvenance(edge) {
+				if err := a.devLocalHopUsable(ctx, edge, &devUserActive); err != nil {
+					return ChainCeiling{}, below, err
+				}
+			}
+			return ChainCeiling{}, below + 1, chainErr
 		}
 		if hopUnrecorded(edge) {
 			unrecorded++
