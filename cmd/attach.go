@@ -64,10 +64,15 @@ Local vs Hub mode:
   once and see the same session.
 
 Disconnects:
-  scion attach does not reconnect. If the connection to the Hub or the runtime
-  broker drops, or the agent's session ends, the command exits with a message
-  explaining what happened and what to run next (for example scion resume
-  <agent> for a stopped agent, or scion attach <agent> to try again).`,
+  When the Hub closes the session with code 4503 (for example a planned relay
+  restart), 4504 (a transient failure) or 1011 (an internal error), scion
+  attach reconnects by itself, once per close, after a short random delay,
+  and the screen redraws (press Ctrl-C during the delay to stop). It stops
+  after 3 reconnects in a row whose sessions each ended within a minute. If
+  a reconnect fails, or the session ends for any other reason, the command
+  exits with a message explaining what happened and what to run next (for
+  example scion resume <agent> for a stopped agent, or scion attach <agent>
+  to try again).`,
 	Example: `  # Attach to a running agent; detach again with Ctrl-b d
   scion attach my-agent
 
@@ -498,13 +503,23 @@ var ptyCloseMessages = map[int]ptyCloseMessage{
 		Summary: "the Hub lost its connection to the agent's runtime broker, or the agent's session is not ready yet",
 	},
 	wsprotocol.ClosePTYUpstreamTimeout: {
-		Summary: "the runtime broker did not start the session in time",
+		Summary: "the runtime broker did not start the session in time, or the Hub hit a transient failure",
+	},
+	wsprotocol.ClosePTYProtocolError: {
+		Summary: "the server rejected the session as a protocol error",
+		Hint:    "Check that your scion CLI is up to date, then try again with: scion attach {agent}",
+	},
+	wsprotocol.ClosePTYCancelled: {
+		Summary: "the session was cancelled before it started",
+	},
+	wsprotocol.ClosePTYSuperseded: {
+		Summary: "the server reports that this connection was superseded by a newer one",
 	},
 }
 
 // Fallback hints by disposition, used when a row has no hint of its own.
 const (
-	ptyCloseRetryHint    = "This may be temporary. scion attach does not reconnect automatically; try again with: scion attach {agent}"
+	ptyCloseRetryHint    = "This may be temporary; try again with: scion attach {agent}"
 	ptyCloseTerminalHint = "Check the agent with: scion list"
 )
 
@@ -514,6 +529,24 @@ func describeAttachClose(err error, agentName string) error {
 	var closeErr *wsclient.PTYCloseError
 	if !errors.As(err, &closeErr) {
 		return err
+	}
+	// wsclient makes one automatic reconnect attempt for some close codes
+	// (wsprotocol.PTYReconnectTiming). When that attempt failed, describe
+	// how it ended: by the reconnect limit, by the new session's own close
+	// code if it has one (its hint is the one that applies now), otherwise by
+	// the reconnect error.
+	note := ""
+	var reconnectErr *wsclient.PTYReconnectError
+	if errors.As(err, &reconnectErr) && reconnectErr.Err != nil {
+		var second *wsclient.PTYCloseError
+		if errors.Is(reconnectErr.Err, wsclient.ErrPTYReconnectLimit) {
+			note = "\nscion attach " + wsclient.ErrPTYReconnectLimit.Error() + "."
+		} else if errors.As(reconnectErr.Err, &second) {
+			note = "\nThis close came on the automatic reconnect after " + ptyCloseCodeText(closeErr) + "."
+			closeErr = second
+		} else {
+			note = "\nThe automatic reconnect also failed: " + reconnectErr.Err.Error()
+		}
 	}
 	disposition := wsprotocol.ClassifyPTYClose(closeErr.Code)
 	msg, known := ptyCloseMessages[closeErr.Code]
@@ -528,22 +561,28 @@ func describeAttachClose(err error, agentName string) error {
 			hint = ptyCloseTerminalHint
 		}
 	}
-	code := fmt.Sprintf("close code %d", closeErr.Code)
-	if closeErr.Reason != "" {
-		code += ": " + closeErr.Reason
-	}
 	return &attachCloseError{
-		msg: fmt.Sprintf("attach to agent '%s' ended: %s (%s)\n\n%s",
-			agentName, msg.Summary, code, strings.ReplaceAll(hint, "{agent}", agentName)),
-		err: closeErr,
+		msg: fmt.Sprintf("attach to agent '%s' ended: %s (%s)%s\n\n%s",
+			agentName, msg.Summary, ptyCloseCodeText(closeErr), note, strings.ReplaceAll(hint, "{agent}", agentName)),
+		err: err,
 	}
 }
 
-// attachCloseError is the user-facing form of a *wsclient.PTYCloseError. It
-// unwraps to the original so callers can still inspect the close code.
+// ptyCloseCodeText formats a close as "close code N" or "close code N: reason".
+func ptyCloseCodeText(ce *wsclient.PTYCloseError) string {
+	code := fmt.Sprintf("close code %d", ce.Code)
+	if ce.Reason != "" {
+		code += ": " + ce.Reason
+	}
+	return code
+}
+
+// attachCloseError is the user-facing form of a *wsclient.PTYCloseError (or
+// a *wsclient.PTYReconnectError wrapping one). It unwraps to the original so
+// callers can still inspect the close code.
 type attachCloseError struct {
 	msg string
-	err *wsclient.PTYCloseError
+	err error
 }
 
 func (e *attachCloseError) Error() string { return e.msg }
@@ -554,8 +593,9 @@ func (e *attachCloseError) Unwrap() error { return e.err }
 // the token may simply lack agent:attach for this agent, which use-time
 // authorization re-checks on every handshake independently of what was
 // eligible to select at mint time. Does not change the underlying error —
-// this only augments the message shown once, here. (The CLI does not
-// reconnect; a failed handshake or a dropped session ends the command.)
+// this only augments the message shown once, here. (The CLI reconnects
+// automatically only after a 4503, 4504 or 1011 close; a failed handshake
+// ends the command.)
 func attachErrorWithUATHint(err error, token string) error {
 	if err == nil || !strings.HasPrefix(token, store.UATPrefix) {
 		return err

@@ -805,12 +805,13 @@ func TestRunLaunch_DownloadValidatesWorkspaceDirBeforeCreatingIt(t *testing.T) {
 	if got.ErrorCode != "runtime_error" {
 		t.Fatalf("terminal error code = %q, want runtime_error", got.ErrorCode)
 	}
-	// The same text the synchronous 400 carries (ptone/scion#3496).
+	// The same fixed text the synchronous 400 carries, without the
+	// validation error (ptone/scion#3496, ptone/scion#3855).
 	_, verr := runtime.ValidateWorkspaceSource(filepath.Join(srv.config.WorktreeBase, name, "workspace"), srv.config.WorktreeBase)
 	if verr == nil {
 		t.Fatal("expected the symlinked workspace directory to fail validation")
 	}
-	if want := "Invalid workspace directory: " + verr.Error(); got.Message != want {
+	if want := invalidWorkspaceDirMessage; got.Message != want {
 		t.Fatalf("terminal message = %q, want the synchronous 400 text %q", got.Message, want)
 	}
 }

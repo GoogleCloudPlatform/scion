@@ -40,7 +40,7 @@ import (
 // CLI exits non-zero.
 func TestReadFromWebSocket_AttachUnsupportedCloseCode_MapsToExplicitError(t *testing.T) {
 	// Give the client its own, never-closed pipe as stdin (never the shared
-	// os.Stdin package variable) so readFromStdin blocks instead of racing
+	// os.Stdin package variable) so the stdin pump blocks instead of racing
 	// the WebSocket goroutine with an EOF of its own; the websocket close
 	// below must be what decides Run()'s error. The read end is left open
 	// for the test's duration; the leaked inner reader goroutine (blocked on

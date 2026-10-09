@@ -171,7 +171,7 @@ func TestDescribeAttachClose(t *testing.T) {
 		contains []string
 	}{
 		{name: "broker disconnected is retryable", code: wsprotocol.ClosePTYUpstreamUnavailable, reason: wsprotocol.CloseReasonBrokerDisconnected,
-			contains: []string{"lost its connection to the agent's runtime broker", "close code 4503: broker_disconnected", "does not reconnect automatically", "scion attach a1"}},
+			contains: []string{"lost its connection to the agent's runtime broker", "close code 4503: broker_disconnected", "This may be temporary", "scion attach a1"}},
 		{name: "agent stopped suggests resume", code: wsprotocol.ClosePTYSessionGone, reason: wsprotocol.CloseReasonAgentStopped,
 			contains: []string{"terminal session has ended", "close code 4410: agent_stopped", "scion resume a1 --attach"}},
 		{name: "agent not found", code: wsprotocol.ClosePTYAgentNotFound,
@@ -189,7 +189,7 @@ func TestDescribeAttachClose(t *testing.T) {
 		{name: "unknown application code is terminal", code: 4999, reason: "new_reason",
 			contains: []string{"the server ended the session", "close code 4999: new_reason", "scion list"}},
 		{name: "unknown retryable code", code: 1014,
-			contains: []string{"the server ended the session", "does not reconnect automatically"}},
+			contains: []string{"the server ended the session", "This may be temporary"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -219,7 +219,7 @@ func TestDescribeAttachClose_InputOverflowIsActionableAndTerminal(t *testing.T) 
 	assert.Equal(t, "attach to agent 'a1' ended: the input was too large for the session "+
 		"(pasted faster than the agent could read it) (close code 1009: input_overflow)\n\n"+
 		"Paste in smaller chunks, then reattach with: scion attach a1", err.Error())
-	assert.NotContains(t, err.Error(), "does not reconnect automatically")
+	assert.NotContains(t, err.Error(), "This may be temporary")
 }
 
 func TestDescribeAttachClose_HintFollowsClassifier(t *testing.T) {
@@ -231,8 +231,53 @@ func TestDescribeAttachClose_HintFollowsClassifier(t *testing.T) {
 		}
 		err := describeAttachClose(&wsclient.PTYCloseError{Code: code}, "a1")
 		retry := wsprotocol.ClassifyPTYClose(code) == wsprotocol.DispositionRetry
-		assert.Equal(t, retry, strings.Contains(err.Error(), "does not reconnect automatically"), "code %d", code)
+		assert.Equal(t, retry, strings.Contains(err.Error(), "This may be temporary"), "code %d", code)
 	}
+}
+
+// A close whose one automatic reconnect failed is described by the original
+// close code, plus why the reconnect failed, and both stay reachable.
+func TestDescribeAttachClose_ReconnectFailed(t *testing.T) {
+	orig := &wsclient.PTYCloseError{Code: wsprotocol.ClosePTYUpstreamUnavailable, Reason: "relay_restart"}
+	dialErr := errors.New("connection failed with status 503: no session")
+	err := describeAttachClose(&wsclient.PTYReconnectError{Close: orig, Err: dialErr}, "a1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "close code 4503: relay_restart")
+	assert.Contains(t, err.Error(), "The automatic reconnect also failed: connection failed with status 503: no session")
+	assert.Contains(t, err.Error(), "try again with: scion attach a1")
+	var ce *wsclient.PTYCloseError
+	require.True(t, errors.As(err, &ce))
+	assert.Same(t, orig, ce)
+	assert.ErrorIs(t, err, dialErr)
+}
+
+// When the automatic reconnect itself ended with a close code, the message
+// and hint follow that close, and mention the close that triggered it.
+func TestDescribeAttachClose_ReconnectEndedWithClose(t *testing.T) {
+	orig := &wsclient.PTYCloseError{Code: wsprotocol.ClosePTYUpstreamUnavailable, Reason: "relay_restart"}
+	second := &wsclient.PTYCloseError{Code: wsprotocol.ClosePTYSessionGone, Reason: wsprotocol.CloseReasonAgentStopped}
+	err := describeAttachClose(&wsclient.PTYReconnectError{Close: orig, Err: second}, "a1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "terminal session has ended")
+	assert.Contains(t, err.Error(), "close code 4410: agent_stopped")
+	assert.Contains(t, err.Error(), "on the automatic reconnect after close code 4503: relay_restart")
+	assert.Contains(t, err.Error(), "scion resume a1 --attach")
+	assert.NotContains(t, err.Error(), "This may be temporary")
+	var ce *wsclient.PTYCloseError
+	require.True(t, errors.As(err, &ce))
+	assert.Same(t, orig, ce, "the original close stays reachable first")
+}
+
+// When the CLI stopped because too many reconnected sessions ended quickly,
+// the message says so rather than offering only the generic retry text.
+func TestDescribeAttachClose_ReconnectLimit(t *testing.T) {
+	orig := &wsclient.PTYCloseError{Code: wsprotocol.ClosePTYUpstreamUnavailable, Reason: "relay_restart"}
+	err := describeAttachClose(&wsclient.PTYReconnectError{Close: orig, Err: wsclient.ErrPTYReconnectLimit}, "a1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "close code 4503: relay_restart")
+	assert.Contains(t, err.Error(), "scion attach stopped after 3 automatic reconnects whose sessions each ended within a minute.")
+	assert.NotContains(t, err.Error(), "automatic reconnect also failed")
+	assert.ErrorIs(t, err, wsclient.ErrPTYReconnectLimit)
 }
 
 func TestDescribeAttachClose_OtherErrorsUnchanged(t *testing.T) {

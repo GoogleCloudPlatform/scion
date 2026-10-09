@@ -549,9 +549,10 @@ func parseExpiryAt(s string, now time.Time) (time.Time, error) {
 	case 'd':
 		step = 24 * time.Hour
 	case 'y':
-		// A year is measured in calendar years below; for the limit check
-		// it counts as the hub's 1-year maximum.
-		step = store.UATMaxExpiry
+		// A year is a fixed 365 days, not a calendar year, so 1y always
+		// fits the hub's 365-day maximum token lifetime even when the
+		// following year contains 29 February.
+		step = 365 * 24 * time.Hour
 	default:
 		return time.Time{}, invalid
 	}
@@ -566,9 +567,6 @@ func parseExpiryAt(s string, now time.Time) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("%q exceeds the maximum expiry of 1 year (1y, %dd, %dh or %dm)",
 			s, int64(store.UATMaxExpiry/(24*time.Hour)), int64(store.UATMaxExpiry/time.Hour),
 			int64(store.UATMaxExpiry/time.Minute))
-	}
-	if unit == 'y' {
-		return now.AddDate(n, 0, 0), nil
 	}
 	return now.Add(time.Duration(n) * step), nil
 }
