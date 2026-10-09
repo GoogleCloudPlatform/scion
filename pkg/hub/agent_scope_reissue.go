@@ -583,8 +583,10 @@ func (s *Server) planUserDelegatorReissue(ctx context.Context, plan *scopeReissu
 		ceiling = ceilingWithout(ceiling, faulted)
 	}
 
-	projected := foldWithChain(ceiling, ChainCeiling{Ceiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal}})
-	after := filterScopes(candidates, projected, ScopeCeilings{})
+	after, err := a.reissueFilteredScopes(ctx, candidates, ceiling, nil)
+	if err != nil {
+		return reissueErrorFromChain(err)
+	}
 	afterSet := scopeSet(after)
 	var withheld []reissueWithheldScope
 	for _, scope := range candidates {
