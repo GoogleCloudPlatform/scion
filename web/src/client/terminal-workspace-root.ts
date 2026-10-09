@@ -2521,6 +2521,8 @@ function disconnectLabel(state: TerminalConnectionState, reason: TerminalDisconn
       return 'Unavailable';
     case 'agent-deleted':
       return 'Deleted';
+    case 'attach-unsupported':
+      return 'Not supported';
     case 'network':
     case 'connect-error':
     case 'server-error':

@@ -252,6 +252,66 @@ describe('error classification (#1659 AC3)', () => {
     }
   );
 
+  it('preflight 503 runtime_attach_unsupported (no PTY path) is terminal: message, no retry', async () => {
+    const f = fixture();
+    const noPath = {
+      error: {
+        code: 'runtime_attach_unsupported',
+        message:
+          "The agent's runtime does not support attach, and the agent has no conduit session that serves PTY",
+        details: { reason: 'agent_pty_unavailable', path: 'none' },
+      },
+    };
+    f.fetcher.mockResolvedValueOnce(json(agent)).mockResolvedValueOnce(json(noPath, 503));
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+
+    expect(session.state.connection).toBe('disconnected');
+    expect(session.state.disconnectReason).toBe('attach-unsupported');
+    expect(session.state.error).toContain('does not support attach');
+    expect(FakeSocket.instances).toHaveLength(0);
+
+    // Not armed: becoming frontmost does not try again.
+    const fetches = f.fetcher.mock.calls.length;
+    session.setFrontmost(false);
+    session.setFrontmost(true);
+    expect(session.reconnecting).toBe(false);
+    expect(f.fetcher.mock.calls.length).toBe(fetches);
+  });
+
+  it('preflight 503 runtime_attach_unsupported without a message uses a fixed one', async () => {
+    const f = fixture();
+    f.fetcher
+      .mockResolvedValueOnce(json(agent))
+      .mockResolvedValueOnce(json({ error: { code: 'runtime_attach_unsupported' } }, 503));
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    expect(session.state.disconnectReason).toBe('attach-unsupported');
+    expect(session.state.error).toContain('no session that serves a terminal');
+  });
+
+  it('other preflight 503s keep the server-error handling', async () => {
+    const f = fixture();
+    f.fetcher
+      .mockResolvedValueOnce(json(agent))
+      .mockResolvedValueOnce(
+        json(
+          {
+            error: {
+              code: 'runtime_broker_unavailable',
+              message: 'Runtime broker not connected',
+              details: { reason: 'broker_not_connected' },
+            },
+          },
+          503
+        )
+      );
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    expect(session.state.disconnectReason).toBe('server-error');
+    expect(session.state.error).toBe('Runtime broker not connected');
+  });
+
   it.each([
     [401, 'auth-401'],
     [404, 'not-found'],

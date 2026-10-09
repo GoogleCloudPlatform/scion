@@ -353,8 +353,6 @@ func (h *launchMockHub) serve(projectID, agentName string) *httptest.Server {
 			h.created = true
 			w.WriteHeader(h.createStatus)
 			_ = json.NewEncoder(w).Encode(h.createBody)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runtime-brokers/"+mockAttachBrokerID:
-			_ = json.NewEncoder(w).Encode(mockAttachBroker(""))
 		case r.Method == http.MethodGet && r.URL.Path == agentPath:
 			if !h.created {
 				w.WriteHeader(http.StatusNotFound) // suspend check: no agent yet
@@ -667,8 +665,6 @@ func TestAttachViaHub_LaunchingAgentHint(t *testing.T) {
 				ID: "id-1", Name: agentName, Phase: "provisioning", RuntimeBrokerID: mockAttachBrokerID,
 				Launch: activeLaunch("image_pull", 2, nil),
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runtime-brokers/"+mockAttachBrokerID:
-			_ = json.NewEncoder(w).Encode(mockAttachBroker(""))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}

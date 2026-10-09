@@ -16,7 +16,7 @@
 
 import type { Agent } from '../shared/types.js';
 import { isTerminalAvailable } from '../shared/types.js';
-import { extractApiError } from './api.js';
+import { apiErrorMessageFromBody, extractApiError } from './api.js';
 import { TerminalMetadata } from './terminal-metadata.js';
 import { AGENT_STOPPED_CLOSE_REASON, classifyPtyClose, PTY_CLOSE } from './terminal-close-codes.js';
 
@@ -50,6 +50,7 @@ export type TerminalDisconnectReason =
   | 'agent-stopped' // SSE reported agent stopped (phase change)
   | 'agent-deleted' // SSE reported agent deleted
   | 'server-error' // 5xx or unclassified HTTP error
+  | 'attach-unsupported' // Preflight 503 runtime_attach_unsupported: no path to the terminal
   | 'connect-error' // WebSocket onerror before open
   | null; // No disconnect (connected, loading, or clean close)
 
@@ -209,6 +210,29 @@ const CONNECT_ERROR_FALLBACK_MS = 1_000;
  * the initial connect: see the onopen handler in attach().
  */
 const FIRST_FRAME_TIMEOUT_MS = 10_000;
+/**
+ * Upper bound of the full-jitter delay before the automatic reconnect after
+ * a 4503 close (a planned relay restart or drain). Many panes are closed
+ * together in that case; a delay drawn uniformly from [0, this] spreads
+ * their redials instead of sending them all at once. Matches the relay's
+ * default GoAway.reconnect_after_ms and the CLI's
+ * wsprotocol.PTYPromptReconnectMaxDelay.
+ */
+export const PROMPT_RECONNECT_MAX_DELAY_MS = 5_000;
+/**
+ * Error code of a preflight 503 that means the hub has no path to the
+ * agent's terminal (mirrors wsprotocol.ErrCodeRuntimeAttachUnsupported).
+ */
+const ATTACH_UNSUPPORTED_ERROR_CODE = 'runtime_attach_unsupported';
+/** Shown for a no-path preflight 503 whose body carries no message. */
+const NO_PATH_MESSAGE =
+  'Attach is not supported for this agent: its runtime has no attach, and the agent has no session that serves a terminal.';
+
+/** Injectable dependencies for tests. */
+export interface TerminalRegistryOptions {
+  /** Returns a number in [0, 1), like Math.random. */
+  readonly random?: () => number;
+}
 
 /** Document-local registry. Browser ownership and UI selection belong to the coordinator. */
 export class TerminalSessionRegistry {
@@ -218,8 +242,10 @@ export class TerminalSessionRegistry {
   private readonly accountId: string;
   readonly metadata: TerminalMetadata;
   private disposed = false;
+  private readonly random: () => number;
 
-  constructor(scope: TerminalScope) {
+  constructor(scope: TerminalScope, options: TerminalRegistryOptions = {}) {
+    this.random = options.random ?? Math.random;
     const url = new URL(scope.hubUrl);
     if (
       !['http:', 'https:'].includes(url.protocol) ||
@@ -268,7 +294,8 @@ export class TerminalSessionRegistry {
         }
       },
       (agent) => this.metadata.seed(id, agent),
-      deferConnect
+      deferConnect,
+      this.random
     );
     this.sessions.set(id, session);
     this.metadata.retain(id);
@@ -359,6 +386,11 @@ class Session implements TerminalSession {
   private currentAttemptManual = true;
   /** The only background timer this session runs: FAILED -> DISCONNECTED after 2 min. */
   private backgroundResetTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Pending full-jitter delay before the owed automatic attempt after a
+   * 4503 close. While it runs, no automatic attempt starts.
+   */
+  private reconnectDelayTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Application heartbeat (liveness only; never drives retries directly). */
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
@@ -373,7 +405,8 @@ class Session implements TerminalSession {
     private readonly initialize: TerminalResourceInitializer,
     private readonly remove: () => void,
     private readonly seedMetadata: (agent: Agent) => void,
-    deferConnect = false
+    deferConnect = false,
+    private readonly random: () => number = Math.random
   ) {
     this.snapshot = {
       key,
@@ -429,6 +462,7 @@ class Session implements TerminalSession {
     this.stopHeartbeat();
     this.clearFirstFrameGuard();
     this.clearBackgroundResetTimer();
+    this.clearReconnectDelayTimer();
     this.attemptReachedOpen = false;
     // Consume the seen-down observation: it authorized at most this one
     // attempt (manual or automatic). A subsequent stale/duplicate "running"
@@ -487,6 +521,7 @@ class Session implements TerminalSession {
     this.stopHeartbeat();
     this.clearFirstFrameGuard();
     this.clearBackgroundResetTimer();
+    this.clearReconnectDelayTimer();
     this.controller?.abort();
     // Not armed until a fresh noteAgentAvailable() call re-arms it.
     this.autoArmed = false;
@@ -548,9 +583,30 @@ class Session implements TerminalSession {
 
   /** Runs the single owed attempt, if this session is armed and frontmost. */
   private maybeAutoAttempt(): void {
+    if (this.reconnectDelayTimer) return; // the jitter delay calls back when it ends
     if (!this.frontmost || !this.everConnected || this.pending) return;
     if (this.state.reconnectFailed || !this.autoArmed) return;
     void this.startAttempt(false);
+  }
+
+  /**
+   * After a 4503 close: waits a delay drawn uniformly from
+   * [0, PROMPT_RECONNECT_MAX_DELAY_MS], then runs the owed attempt (if the
+   * pane is still armed and frontmost by then). A manual reconnect, close
+   * or markUnavailable cancels the delay.
+   */
+  private scheduleJitteredAutoAttempt(): void {
+    this.clearReconnectDelayTimer();
+    const delay = Math.floor(this.random() * (PROMPT_RECONNECT_MAX_DELAY_MS + 1));
+    this.reconnectDelayTimer = setTimeout(() => {
+      this.reconnectDelayTimer = null;
+      this.maybeAutoAttempt();
+    }, delay);
+  }
+
+  private clearReconnectDelayTimer(): void {
+    if (this.reconnectDelayTimer) clearTimeout(this.reconnectDelayTimer);
+    this.reconnectDelayTimer = null;
   }
 
   /** An attempt (automatic or manual) failed. Block further auto-attempts. */
@@ -632,7 +688,15 @@ class Session implements TerminalSession {
       const preflight = await fetch(`${endpoint}/pty`, { credentials: 'include', signal });
       if (!current()) return;
       if (!preflight.ok) {
-        const reason = classifyHttpStatus(preflight.status);
+        const body = await readJsonBody(preflight);
+        if (!current()) return;
+        // A 503 whose code says the hub has no path to the agent's terminal
+        // (the broker's runtime has no attach and the agent has no session
+        // serving one) is final: show it, and do not arm a retry. Other
+        // 503s keep the retriable server-error handling.
+        const noPath =
+          preflight.status === 503 && apiErrorCode(body) === ATTACH_UNSUPPORTED_ERROR_CODE;
+        const reason = noPath ? 'attach-unsupported' : classifyHttpStatus(preflight.status);
         const message =
           preflight.status === 403
             ? 'You do not have permission to attach to this agent.'
@@ -640,11 +704,10 @@ class Session implements TerminalSession {
               ? 'Authentication required to access this terminal.'
               : preflight.status === 404
                 ? 'Agent not found.'
-                : await extractApiError(
-                    preflight,
-                    `Terminal connection failed: ${preflight.statusText}`
-                  );
-        if (!current()) return;
+                : (apiErrorMessageFromBody(body) ??
+                  (noPath
+                    ? NO_PATH_MESSAGE
+                    : `Terminal connection failed: ${preflight.statusText}`));
         this.autoArmed = isRetryableReason(reason);
         this.update({ connection: 'disconnected', disconnectReason: reason, error: message });
         return;
@@ -767,6 +830,8 @@ class Session implements TerminalSession {
         });
         if (reason === 'network') {
           if (wasFailedAttempt) this.markReconnectFailed();
+          else if (event.code === PTY_CLOSE.UPSTREAM_UNAVAILABLE)
+            this.scheduleJitteredAutoAttempt();
           else this.maybeAutoAttempt();
         }
       };
@@ -963,6 +1028,7 @@ class Session implements TerminalSession {
     attempt(() => this.stopHeartbeat());
     attempt(() => this.clearFirstFrameGuard());
     attempt(() => this.clearBackgroundResetTimer());
+    attempt(() => this.clearReconnectDelayTimer());
     attempt(() => this.releaseSocket());
     attempt(() => this.releaseResources());
     attempt(() => this.remove());
@@ -1020,6 +1086,24 @@ function closeReasonFor(code: number, reason: string | undefined): TerminalDisco
     }
   }
   return 'network';
+}
+
+/** Parses a response body as JSON, or undefined when it is not JSON. */
+async function readJsonBody(res: Response): Promise<unknown> {
+  try {
+    return await res.json();
+  } catch {
+    return undefined;
+  }
+}
+
+/** The machine-readable error.code of a hub API error body, if any. */
+function apiErrorCode(body: unknown): string | undefined {
+  if (body === null || typeof body !== 'object') return undefined;
+  const error = (body as { error?: unknown }).error;
+  if (error === null || typeof error !== 'object') return undefined;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' ? code : undefined;
 }
 
 /** Whether an HTTP-classified disconnect reason is retriable. */

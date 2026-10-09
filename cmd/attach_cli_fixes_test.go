@@ -24,13 +24,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -298,22 +301,25 @@ func TestStartAgentViaHub_Attach_CloseCodeIsDescribed(t *testing.T) {
 	}
 }
 
-// TestAttachViaHub_StoppedUnsupportedAgent_ReportsUnsupportedFirst: a stopped
-// agent on a runtime that can never be attached gets the unsupported error,
-// not a hint to resume it first.
-func TestAttachViaHub_StoppedUnsupportedAgent_ReportsUnsupportedFirst(t *testing.T) {
+// TestAttachViaHub_StoppedAgent_SuggestsResumeWithoutBrokerLookup: the CLI
+// no longer refuses from the broker record, so a stopped agent on a broker
+// whose runtime has no attach is told to resume (once running, it may be
+// attachable through the agent path), and the broker record is never read.
+func TestAttachViaHub_StoppedAgent_SuggestsResumeWithoutBrokerLookup(t *testing.T) {
 	const (
 		projectID = "proj-stopped-noattach"
 		agentName = "stopped-noattach"
 	)
+	var brokerGets atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/api/v1/projects/" + projectID + "/agents/" + agentName:
+		switch {
+		case r.URL.Path == "/api/v1/projects/"+projectID+"/agents/"+agentName:
 			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: "id-2", Name: agentName, Phase: "stopped",
 				Runtime: "noattach", RuntimeBrokerID: mockAttachBrokerID})
-		case "/api/v1/runtime-brokers/" + mockAttachBrokerID:
-			_ = json.NewEncoder(w).Encode(mockAttachBroker("noattach"))
+		case strings.HasPrefix(r.URL.Path, "/api/v1/runtime-brokers"):
+			brokerGets.Add(1)
+			w.WriteHeader(http.StatusNotFound)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -324,40 +330,124 @@ func TestAttachViaHub_StoppedUnsupportedAgent_ReportsUnsupportedFirst(t *testing
 
 	err = attachViaHub(&HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}, agentName)
 	require.Error(t, err)
-	assert.Equal(t, "attach is not supported for agents on the noattach runtime", err.Error())
+	assert.Contains(t, err.Error(), "scion resume "+agentName+" --attach")
+	assert.EqualValues(t, 0, brokerGets.Load(), "the CLI does not read the broker record")
 }
 
-// TestAttachViaHub_GateRunsOnce: scion attach runs the capability gate before
-// the phase check and tells attachHubSession not to repeat the broker lookup.
-func TestAttachViaHub_GateRunsOnce(t *testing.T) {
-	clearAppTokenSources(t)
-	t.Setenv("SCION_HUB_TOKEN", "test-token")
-	stubPlainTransport(t)
-	stubAttachSession(t, func() error { return nil })
+// ptyHub is a mock Hub for the full attach flow: the agent record, the
+// broker record (which says attach is unsupported, and is counted), and
+// the agent's /pty endpoint. A plain GET of /pty answers preflightStatus
+// and preflightBody; a WebSocket upgrade is accepted, sends one data frame
+// and closes 1000 (a clean detach).
+type ptyHub struct {
+	srv        *httptest.Server
+	preflights atomic.Int32
+	upgrades   atomic.Int32
+	brokerGets atomic.Int32
+}
 
-	const (
-		projectID = "proj-gate-once"
-		agentName = "gate-once"
-	)
-	brokerGets := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/api/v1/projects/" + projectID + "/agents/" + agentName:
-			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: "id-3", Name: agentName, Phase: "running", RuntimeBrokerID: mockAttachBrokerID})
-		case "/api/v1/runtime-brokers/" + mockAttachBrokerID:
-			brokerGets++
-			_ = json.NewEncoder(w).Encode(mockAttachBroker(""))
+func newPTYHub(t *testing.T, projectID, agentName, agentID string, preflightStatus int, preflightBody string) *ptyHub {
+	t.Helper()
+	h := &ptyHub{}
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	h.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/projects/"+projectID+"/agents/"+agentName:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: agentID, Name: agentName, Phase: "running",
+				RuntimeBrokerID: mockAttachBrokerID})
+		case strings.HasPrefix(r.URL.Path, "/api/v1/runtime-brokers"):
+			h.brokerGets.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(hubclient.RuntimeBroker{ID: mockAttachBrokerID,
+				Capabilities: &hubclient.BrokerCapabilities{Attach: false}})
+		case r.URL.Path == "/api/v1/agents/"+agentID+"/pty" && websocket.IsWebSocketUpgrade(r):
+			h.upgrades.Add(1)
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer func() { _ = conn.Close() }()
+			_ = conn.WriteJSON(wsprotocol.NewPTYDataMessage([]byte("$ ")))
+			_ = conn.WriteControl(websocket.CloseMessage,
+				websocket.FormatCloseMessage(wsprotocol.ClosePTYNormal, ""), time.Now().Add(time.Second))
+		case r.URL.Path == "/api/v1/agents/"+agentID+"/pty":
+			h.preflights.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(preflightStatus)
+			_, _ = w.Write([]byte(preflightBody))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
-	t.Cleanup(srv.Close)
-	client, err := hubclient.New(srv.URL)
+	t.Cleanup(h.srv.Close)
+	return h
+}
+
+// TestAttachViaHub_UnsupportedBrokerAgentPath_Attaches: an agent whose
+// broker runtime has no attach, but which the Hub can reach through the
+// agent path (preflight 200, path agent), is attached: the CLI does not
+// refuse from the broker record, and dials after the preflight.
+func TestAttachViaHub_UnsupportedBrokerAgentPath_Attaches(t *testing.T) {
+	clearAppTokenSources(t)
+	t.Setenv("SCION_HUB_TOKEN", "test-token")
+	stubPlainTransport(t)
+
+	h := newPTYHub(t, "proj-agent-path", "agent-path", "agent-path-id", http.StatusOK, `{"path":"agent"}`)
+	client, err := hubclient.New(h.srv.URL)
 	require.NoError(t, err)
 
-	require.NoError(t, attachViaHub(&HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}, agentName))
-	assert.Equal(t, 1, brokerGets)
+	err = attachViaHub(&HubContext{Client: client, Endpoint: h.srv.URL, ProjectID: "proj-agent-path"}, "agent-path")
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, h.preflights.Load())
+	assert.EqualValues(t, 1, h.upgrades.Load(), "the attach dials after the preflight")
+	assert.EqualValues(t, 0, h.brokerGets.Load(), "the CLI does not read the broker record")
+}
+
+// TestAttachViaHub_NoPath_ExitsWithReasonWithoutRetry: when the Hub has no
+// path to the agent's terminal, the attach ends with the Hub's reason after
+// one preflight, with no WebSocket dial and no retry.
+func TestAttachViaHub_NoPath_ExitsWithReasonWithoutRetry(t *testing.T) {
+	clearAppTokenSources(t)
+	t.Setenv("SCION_HUB_TOKEN", "test-token")
+	stubPlainTransport(t)
+
+	h := newPTYHub(t, "proj-no-path", "no-path", "no-path-id", http.StatusServiceUnavailable, noPathPreflightBody)
+	client, err := hubclient.New(h.srv.URL)
+	require.NoError(t, err)
+
+	err = attachViaHub(&HubContext{Client: client, Endpoint: h.srv.URL, ProjectID: "proj-no-path"}, "no-path")
+	assertNoPathRefusal(t, err, "no-path")
+	assert.Contains(t, err.Error(), "The agent's runtime does not support attach")
+	assert.EqualValues(t, 1, h.preflights.Load(), "one preflight, no retry")
+	assert.EqualValues(t, 0, h.upgrades.Load(), "no WebSocket dial")
+}
+
+// TestDescribeAttachPreflight covers the CLI's wording for preflight
+// refusals: a no-path 503 is final, another 503 is presented as temporary,
+// and other statuses pass through unchanged.
+func TestDescribeAttachPreflight(t *testing.T) {
+	t.Run("other 503", func(t *testing.T) {
+		in := &wsclient.PTYPreflightError{Status: 503, Code: "runtime_broker_unavailable",
+			Reason: "broker_not_connected", Message: "Runtime broker not connected"}
+		err := describeAttachPreflight(in, "a1")
+		assert.Equal(t, "cannot attach to agent 'a1': Runtime broker not connected "+
+			"(503 runtime_broker_unavailable, reason broker_not_connected)\n\n"+
+			"This may be temporary; try again with: scion attach a1", err.Error())
+		assert.ErrorIs(t, err, in)
+	})
+	t.Run("503 without a body", func(t *testing.T) {
+		err := describeAttachPreflight(&wsclient.PTYPreflightError{Status: 503}, "a1")
+		assert.Contains(t, err.Error(), "the Hub cannot attach to this agent right now")
+	})
+	t.Run("403 unchanged", func(t *testing.T) {
+		in := &wsclient.PTYPreflightError{Status: 403, Code: "forbidden", Message: "no"}
+		assert.Same(t, error(in), describeAttachPreflight(in, "a1"))
+	})
+	t.Run("other errors unchanged", func(t *testing.T) {
+		in := errors.New("x")
+		assert.Same(t, in, describeAttachPreflight(in, "a1"))
+	})
 }
 
 func TestAttachHubSession_CleanDetachReturnsNil(t *testing.T) {

@@ -116,6 +116,10 @@ type PTYClient struct {
 	// swapping os.Stdin back out from under it would be a data race, not
 	// just a functional risk.
 	stdin io.Reader
+
+	// preflightClient, if set, is used for Preflight instead of
+	// http.DefaultClient.
+	preflightClient *http.Client
 }
 
 // NewPTYClient creates a new PTY client.
@@ -583,7 +587,8 @@ func (c *PTYClient) Close() error {
 	return nil
 }
 
-// AttachToAgent is a convenience function that connects and runs a PTY session.
+// AttachToAgent is a convenience function that checks the Hub preflight,
+// then connects and runs a PTY session.
 func AttachToAgent(ctx context.Context, endpoint, token, slug string, opts ...AttachOption) error {
 	// Get terminal size
 	cols, rows := 80, 24
@@ -607,6 +612,14 @@ func AttachToAgent(ctx context.Context, endpoint, token, slug string, opts ...At
 	}
 
 	client := NewPTYClient(cfg)
+
+	// Ask the Hub first: it answers a plain GET with the same path decision
+	// it makes for the WebSocket, so a refusal (for example 503 when there
+	// is no path to the agent's terminal) comes back as a readable status
+	// and reason instead of a failed handshake. There is no retry.
+	if err := client.Preflight(ctx); err != nil {
+		return err
+	}
 
 	if err := client.Connect(ctx); err != nil {
 		return err
