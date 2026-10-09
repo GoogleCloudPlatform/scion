@@ -53,6 +53,14 @@ func TestHubConduitConfig_Validate(t *testing.T) {
 		{name: "authz recheck interval below min", cfg: HubConduitConfig{AuthzRecheckInterval: "500ms"}, wantErr: []string{"authz_recheck_interval", "between 1s and 10m0s"}},
 		{name: "authz recheck interval above max", cfg: HubConduitConfig{AuthzRecheckInterval: "11m"}, wantErr: []string{"authz_recheck_interval"}},
 		{name: "authz recheck interval malformed", cfg: HubConduitConfig{AuthzRecheckInterval: "often"}, wantErr: []string{"authz_recheck_interval"}},
+		{name: "lifetime cap at min", cfg: HubConduitConfig{LifetimeCap: "90s"}},
+		{name: "lifetime cap at max", cfg: HubConduitConfig{LifetimeCap: "24h"}},
+		{name: "lifetime cap below min", cfg: HubConduitConfig{LifetimeCap: "89s"}, wantErr: []string{"lifetime_cap", "between 1m30s and 24h0m0s"}},
+		{name: "lifetime cap equal to the GoAway lead", cfg: HubConduitConfig{LifetimeCap: "60s"}, wantErr: []string{"lifetime_cap"}},
+		{name: "lifetime cap zero", cfg: HubConduitConfig{LifetimeCap: "0s"}, wantErr: []string{"lifetime_cap"}},
+		{name: "lifetime cap negative", cfg: HubConduitConfig{LifetimeCap: "-1h"}, wantErr: []string{"lifetime_cap"}},
+		{name: "lifetime cap above max", cfg: HubConduitConfig{LifetimeCap: "25h"}, wantErr: []string{"lifetime_cap"}},
+		{name: "lifetime cap malformed", cfg: HubConduitConfig{LifetimeCap: "an hour"}, wantErr: []string{"lifetime_cap"}},
 		{name: "port out of range", cfg: HubConduitConfig{TCPAllowedPorts: []int{0, 65536}}, wantErr: []string{"port 0 is outside", "port 65536 is outside"}},
 		{name: "port duplicated", cfg: HubConduitConfig{TCPAllowedPorts: []int{22, 22}}, wantErr: []string{"port 22 is listed twice"}},
 		{name: "listen without port", cfg: HubConduitConfig{InternalListen: "10.0.0.5"}, wantErr: []string{"internal_listen"}},
@@ -125,6 +133,7 @@ func TestHubConduitConfig_IsZero(t *testing.T) {
 		"window":     {ReconnectWindow: "1s"},
 		"instance":   {InstanceID: "hub-0"},
 		"recheck":    {AuthzRecheckInterval: "30s"},
+		"cap":        {LifetimeCap: "1h"},
 	} {
 		assert.False(t, c.IsZero(), name)
 	}
@@ -137,7 +146,7 @@ func TestConduitConfig_V1RoundTrip(t *testing.T) {
 		GrantKeyActivation: "20m", TCPAllowedPorts: []int{22, 8080}, InternalListen: ":9810",
 		InternalAdvertise: "http://10.0.0.5:9810", PeerAuth: "oidc",
 		PeerServiceAccounts: []string{"hub@p.iam.gserviceaccount.com"}, PeerAudience: "aud", ReconnectWindow: "7s",
-		InstanceID: "hub-0", AuthzRecheckInterval: "45s",
+		InstanceID: "hub-0", AuthzRecheckInterval: "45s", LifetimeCap: "1800s",
 	}
 	v1 := ConvertGlobalToV1ServerConfig(gc)
 	require.NotNil(t, v1.Hub)
@@ -177,6 +186,7 @@ server:
       peer_auth: hmac
       reconnect_window: 3s
       authz_recheck_interval: 30s
+      lifetime_cap: 1800s
 `), 0644))
 
 	cfg, err := LoadGlobalConfig(configPath)
@@ -191,6 +201,17 @@ server:
 	d, err := c.AuthzRecheckIntervalDuration()
 	require.NoError(t, err)
 	assert.Equal(t, 30*time.Second, d)
+	assert.Equal(t, "1800s", c.LifetimeCap)
+	capD, err := c.LifetimeCapDuration()
+	require.NoError(t, err)
+	assert.Equal(t, 30*time.Minute, capD)
+
+	t.Run("lifetime cap env", func(t *testing.T) {
+		t.Setenv(conduitSchemaEnvVar(t, "lifetime_cap"), "120s")
+		cfg, err := LoadGlobalConfig(configPath)
+		require.NoError(t, err)
+		assert.Equal(t, "120s", cfg.Hub.Conduit.LifetimeCap)
+	})
 
 	t.Run("env override", func(t *testing.T) {
 		t.Setenv(conduitSchemaEnvVar(t, "reconnect_window"), "9s")
@@ -251,4 +272,39 @@ func TestConduitListKeysSplit(t *testing.T) {
 		assert.Equal(t, []string{"a@p.iam.gserviceaccount.com", "b@p.iam.gserviceaccount.com"}, k.Strings("server.hub.conduit.peer_service_accounts"))
 		assert.Equal(t, []int{22, 3000}, k.Ints("server.hub.conduit.tcp_allowed_ports"))
 	}
+}
+
+// TestConduitLifetimeCap_Default: an unset lifetime_cap is the 3500s
+// default and passes validation.
+func TestConduitLifetimeCap_Default(t *testing.T) {
+	d, err := HubConduitConfig{}.LifetimeCapDuration()
+	require.NoError(t, err)
+	assert.Equal(t, 3500*time.Second, d)
+	assert.Equal(t, ConduitDefaultLifetimeCap, d)
+	assert.NoError(t, HubConduitConfig{}.Validate())
+}
+
+// TestConduitLifetimeCap_EnvMapping: SCION_SERVER_HUB_CONDUIT_LIFETIMECAP
+// is the schema's env var for server.hub.conduit.lifetime_cap and maps to
+// that key in both the opsettings keyspace (snake_case) and the hub
+// config (camelCase), so the setting can be given by environment.
+func TestConduitLifetimeCap_EnvMapping(t *testing.T) {
+	const env = "SCION_SERVER_HUB_CONDUIT_LIFETIMECAP"
+	assert.Equal(t, env, conduitSchemaEnvVar(t, "lifetime_cap"))
+	assert.Equal(t, "server.hub.conduit.lifetime_cap", serverEnvToOpsettingsKey("HUB_CONDUIT_LIFETIMECAP"))
+
+	t.Setenv(env, "600s")
+	k := LoadEnvKoanf()
+	assert.Equal(t, "600s", k.String("server.hub.conduit.lifetime_cap"), "keys: %v", k.Keys())
+
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	configPath := filepath.Join(tmpDir, "settings.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte("schema_version: \"1\"\nserver:\n  hub:\n    conduit:\n      lifetime_cap: 1800s\n"), 0644))
+	cfg, err := LoadGlobalConfig(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, "600s", cfg.Hub.Conduit.LifetimeCap, "the env var overrides the file")
+	d, err := cfg.Hub.Conduit.LifetimeCapDuration()
+	require.NoError(t, err)
+	assert.Equal(t, 10*time.Minute, d)
 }

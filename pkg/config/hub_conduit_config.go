@@ -47,6 +47,14 @@ const (
 	// bound authz_recheck_interval.
 	ConduitMinAuthzRecheckInterval = time.Second
 	ConduitMaxAuthzRecheckInterval = 10 * time.Minute
+	// ConduitDefaultLifetimeCap is the default lifetime_cap: under Cloud
+	// Run's 3600s request timeout with room for the GoAway lead.
+	ConduitDefaultLifetimeCap = 3500 * time.Second
+	// ConduitMinLifetimeCap and ConduitMaxLifetimeCap bound lifetime_cap.
+	// The minimum leaves room for the 60s GoAway lead and the 30s drain
+	// deadline that follows it.
+	ConduitMinLifetimeCap = 90 * time.Second
+	ConduitMaxLifetimeCap = 24 * time.Hour
 )
 
 // ConduitMaxInstanceIDLen is the longest accepted instance_id.
@@ -91,13 +99,33 @@ type HubConduitConfig struct {
 	// stream is re-checked within one interval even if its revocation
 	// event is missed.
 	AuthzRecheckInterval string `json:"authzRecheckInterval,omitempty" yaml:"authzRecheckInterval,omitempty" koanf:"authzRecheckInterval"`
+	// LifetimeCap is the platform lifetime cap of a conduit session ("" =
+	// the default, 3500s; design §3.3). The relay sends GoAway 60s before
+	// it, and every drain deadline ends by it.
+	LifetimeCap string `json:"lifetimeCap,omitempty" yaml:"lifetimeCap,omitempty" koanf:"lifetimeCap"`
 }
 
 // IsZero reports whether nothing is configured.
 func (c HubConduitConfig) IsZero() bool {
 	return c.GrantKeyActivation == "" && len(c.TCPAllowedPorts) == 0 && c.InternalListen == "" &&
 		c.InternalAdvertise == "" && c.PeerAuth == "" && len(c.PeerServiceAccounts) == 0 && c.PeerAudience == "" &&
-		c.ReconnectWindow == "" && c.InstanceID == "" && c.AuthzRecheckInterval == ""
+		c.ReconnectWindow == "" && c.InstanceID == "" && c.AuthzRecheckInterval == "" && c.LifetimeCap == ""
+}
+
+// LifetimeCapDuration parses LifetimeCap ("" = ConduitDefaultLifetimeCap).
+// It applies the same bounds as Validate.
+func (c HubConduitConfig) LifetimeCapDuration() (time.Duration, error) {
+	if c.LifetimeCap == "" {
+		return ConduitDefaultLifetimeCap, nil
+	}
+	d, err := time.ParseDuration(c.LifetimeCap)
+	if err != nil {
+		return 0, fmt.Errorf("invalid server.hub.conduit.lifetime_cap %q: %w", c.LifetimeCap, err)
+	}
+	if d < ConduitMinLifetimeCap || d > ConduitMaxLifetimeCap {
+		return 0, fmt.Errorf("invalid server.hub.conduit.lifetime_cap %q: must be between %s and %s (the relay sends GoAway 60s before the cap and drains for up to 30s)", c.LifetimeCap, ConduitMinLifetimeCap, ConduitMaxLifetimeCap)
+	}
+	return d, nil
 }
 
 // AuthzRecheckIntervalDuration parses AuthzRecheckInterval ("" = 0,
@@ -170,6 +198,9 @@ func (c HubConduitConfig) Validate() error {
 		errs = append(errs, err)
 	}
 	if _, err := c.AuthzRecheckIntervalDuration(); err != nil {
+		errs = append(errs, err)
+	}
+	if _, err := c.LifetimeCapDuration(); err != nil {
 		errs = append(errs, err)
 	}
 	seen := map[int]bool{}

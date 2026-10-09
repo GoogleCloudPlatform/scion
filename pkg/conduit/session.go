@@ -1067,7 +1067,7 @@ func (s *session) handleOpen(o *conduitv1.StreamOpen) {
 	h := s.cfg.StreamHandler
 	switch _, kindErr := StreamKindFromProto(o.GetKind()); {
 	case s.draining:
-		code, reason = CloseRelayRestart, "session draining"
+		code, reason = CloseRelayRestart, reasonDrainingRefusal
 	case kindErr != nil:
 		code, reason = CloseProtocolError, kindErr.Error()
 	case h == nil:
@@ -1173,6 +1173,9 @@ func (s *session) GoAway(opts GoAwayOptions) error {
 		return nil
 	}
 	code, reason := opts.Code, opts.Reason
+	if opts.CloseReason != "" {
+		reason = opts.CloseReason
+	}
 	s.setTimer(&s.drainTimer, opts.DrainDeadline, func() { s.drainDeadline(code, reason) })
 	return nil
 }
@@ -1231,7 +1234,7 @@ func (s *session) handleGoAway(g *conduitv1.GoAway) {
 		opening := st.state == StateOpening
 		st.mu.Unlock()
 		if opening {
-			st.abort(CloseRelayRestart, "session draining", false)
+			st.abort(CloseRelayRestart, reasonDrainingRefusal, false)
 		}
 	}
 	for _, st := range streams {

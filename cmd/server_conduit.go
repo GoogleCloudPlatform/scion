@@ -43,6 +43,7 @@ var (
 	conduitGrantKeyActivation string
 	conduitReconnectWindow    string
 	conduitAuthzRecheck       string
+	conduitLifetimeCap        string
 	conduitTCPAllowedPorts    []int
 )
 
@@ -53,6 +54,7 @@ func registerConduitServerFlags(f *pflag.FlagSet) {
 	f.StringVar(&conduitGrantKeyActivation, "conduit-grant-key-activation", "", "Publish-before-sign delay of a new conduit grant key (default 15m, minimum 1m)")
 	f.StringVar(&conduitReconnectWindow, "conduit-reconnect-window", "", "Jitter window targets redial in after a planned conduit close (default 5s, 0s-5m)")
 	f.StringVar(&conduitAuthzRecheck, "conduit-authz-recheck-interval", "", "Period of the authorization re-check sweep of open conduit user streams (default 60s, 1s-10m)")
+	f.StringVar(&conduitLifetimeCap, "conduit-lifetime-cap", "", "Platform lifetime cap of a conduit session; the relay sends GoAway 60s before it (default 3500s, 90s-24h)")
 	f.IntSliceVar(&conduitTCPAllowedPorts, "conduit-tcp-allowed-ports", nil, "Additional agent-local ports a conduit TCP stream may target besides the agent's exposed ports (comma-separated; reserved ports are always refused; default: exposed ports only)")
 }
 
@@ -75,6 +77,9 @@ func applyConduitFlagOverrides(cmd *cobra.Command, cfg *config.GlobalConfig) {
 	if f.Changed("conduit-authz-recheck-interval") {
 		cfg.Hub.Conduit.AuthzRecheckInterval = conduitAuthzRecheck
 	}
+	if f.Changed("conduit-lifetime-cap") {
+		cfg.Hub.Conduit.LifetimeCap = conduitLifetimeCap
+	}
 	if f.Changed("conduit-tcp-allowed-ports") {
 		cfg.Hub.Conduit.TCPAllowedPorts = append([]int(nil), conduitTCPAllowedPorts...)
 	}
@@ -84,7 +89,7 @@ func applyConduitFlagOverrides(cmd *cobra.Command, cfg *config.GlobalConfig) {
 // --foreground daemon child.
 func appendConduitDaemonArgs(cmd *cobra.Command, args []string) []string {
 	f := cmd.Flags()
-	for _, name := range []string{"internal-listen", "internal-advertise", "conduit-grant-key-activation", "conduit-reconnect-window", "conduit-authz-recheck-interval"} {
+	for _, name := range []string{"internal-listen", "internal-advertise", "conduit-grant-key-activation", "conduit-reconnect-window", "conduit-authz-recheck-interval", "conduit-lifetime-cap"} {
 		if f.Changed(name) {
 			args = append(args, fmt.Sprintf("--%s=%s", name, f.Lookup(name).Value.String()))
 		}
@@ -128,6 +133,17 @@ func conduitAuthzRecheckIntervalSetting(cfg *config.GlobalConfig) time.Duration 
 	d, err := cfg.Hub.Conduit.AuthzRecheckIntervalDuration()
 	if err != nil {
 		return 0
+	}
+	return d
+}
+
+// conduitLifetimeCapSetting returns the configured conduit session lifetime
+// cap (default 3500s). validateServerPreflight has already rejected a
+// malformed or out-of-range value.
+func conduitLifetimeCapSetting(cfg *config.GlobalConfig) time.Duration {
+	d, err := cfg.Hub.Conduit.LifetimeCapDuration()
+	if err != nil {
+		return config.ConduitDefaultLifetimeCap
 	}
 	return d
 }
@@ -261,6 +277,7 @@ func startConduitRelay(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hu
 		RequireHA:        requireHA,
 		PeerAuth:         auth,
 		ReconnectWindow:  conduitReconnectWindowSetting(cfg),
+		LifetimeCap:      conduitLifetimeCapSetting(cfg),
 	}); err != nil {
 		return err
 	}

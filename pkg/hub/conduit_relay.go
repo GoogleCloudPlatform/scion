@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/target"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
@@ -83,6 +84,11 @@ type ConduitRelayOptions struct {
 	// ReconnectWindow is GoAway.reconnect_after_ms, the jitter window
 	// targets draw their redial delay from (0 = the relay default, 5s).
 	ReconnectWindow time.Duration
+	// LifetimeCap is the lifetime cap of a conduit session: the relay
+	// sends GoAway{4503 relay_restart} 60s before it and every drain
+	// deadline ends by it (server.hub.conduit.lifetime_cap; 0 = the
+	// default, 3500s; negative = no cap, for tests).
+	LifetimeCap time.Duration
 	// AuthzRecheckInterval overrides ServerConfig.ConduitAuthzRecheckInterval
 	// (0 = use it; negative disables the sweep, for tests).
 	AuthzRecheckInterval time.Duration
@@ -177,6 +183,13 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 			return s.conduitWelcomeGrantKeys(ctx)
 		}
 	}
+	lifetimeCap := opts.LifetimeCap
+	switch {
+	case lifetimeCap == 0:
+		lifetimeCap = config.ConduitDefaultLifetimeCap
+	case lifetimeCap < 0:
+		lifetimeCap = 0
+	}
 	r, err := relay.New(relay.Config{
 		InstanceID:       id,
 		InternalEndpoint: opts.InternalEndpoint,
@@ -189,6 +202,7 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 		HTTPClient:       opts.HTTPClient,
 		Clock:            opts.Clock,
 		ReconnectWindow:  opts.ReconnectWindow,
+		LifetimeCap:      lifetimeCap,
 		Logger:           slog.Default().With("subsystem", "hub.conduit"),
 	})
 	if err != nil {
