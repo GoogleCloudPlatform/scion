@@ -35,7 +35,6 @@ import {
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import type { TerminalAgentMetadata } from '../../client/terminal-metadata.js';
-import type { StatusType } from '../shared/status-badge.js';
 import '../shared/status-badge.js';
 import { showToast } from '../../utils/toast.js';
 import { buildAgentDMKey, chatConversationPath } from '../../client/chat-routes.js';
@@ -933,7 +932,7 @@ export class ScionTerminalPane extends LitElement {
       // (e.g. from shouldAutoFocusTerminal() → terminal.focus()).
       this._focused =
         this.contains(document.activeElement) ||
-        this.shadowRoot?.contains(document.activeElement as Node) ||
+        this.shadowRoot?.contains(document.activeElement) ||
         false;
       if (this._focused) this.dataset.focused = '';
       else delete this.dataset.focused;
@@ -1129,7 +1128,7 @@ export class ScionTerminalPane extends LitElement {
       if (match) {
         const name = match[1];
         if (name === 'agent' || name === 'shell') {
-          this.activeWindow = name as TmuxWindow;
+          this.activeWindow = name;
         }
       }
       return true;
@@ -1141,7 +1140,7 @@ export class ScionTerminalPane extends LitElement {
     this.terminal.parser.registerOscHandler(0, (data: string) => {
       const trimmed = data.trim();
       if (trimmed === 'agent' || trimmed === 'shell') {
-        this.activeWindow = trimmed as TmuxWindow;
+        this.activeWindow = trimmed;
       }
       // Return false to allow other OSC 0 handlers (if any) to also process
       return false;
@@ -1560,7 +1559,7 @@ export class ScionTerminalPane extends LitElement {
   }
 
   private _quoteForShell(path: string): string {
-    if (/^[A-Za-z0-9._\/-]+$/.test(path)) return path;
+    if (/^[A-Za-z0-9._/-]+$/.test(path)) return path;
     return "'" + path.replace(/'/g, "'\\''") + "'";
   }
 
@@ -2133,7 +2132,7 @@ export class ScionTerminalPane extends LitElement {
             `
           : ''}
         <scion-status-badge
-          status=${this.agentDisplayStatus as StatusType}
+          status=${this.agentDisplayStatus}
           size="small"
         ></scion-status-badge>
         <div class="status-indicator">

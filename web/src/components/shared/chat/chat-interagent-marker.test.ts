@@ -201,7 +201,9 @@ describe('scion-chat-interagent-marker', () => {
   it('titles the time label with the full instant and zone (AC4, review R2-3)', async () => {
     setPreferredTimeZone('Asia/Tokyo');
     try {
-      const el = document.createElement('scion-chat-interagent-marker') as ScionChatInteragentMarker;
+      const el = document.createElement(
+        'scion-chat-interagent-marker'
+      ) as ScionChatInteragentMarker;
       el.messageCount = 1;
       el.messages = [makeMessage({ createdAt: '2026-09-23T15:00:00Z' })]; // -> 2026-09-24T00:00 JST
       el.expanded = true;
@@ -220,7 +222,9 @@ describe('scion-chat-interagent-marker', () => {
   // expanded time when the preference changes after mount.
   it('re-renders in the new zone after a mounted marker outlives a preference change', async () => {
     try {
-      const el = document.createElement('scion-chat-interagent-marker') as ScionChatInteragentMarker;
+      const el = document.createElement(
+        'scion-chat-interagent-marker'
+      ) as ScionChatInteragentMarker;
       el.messageCount = 1;
       el.messages = [makeMessage({ createdAt: '2026-09-23T15:00:00Z' })];
       el.expanded = true;

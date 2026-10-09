@@ -364,20 +364,18 @@ describe('error classification (#1659 AC3)', () => {
 
   it('other preflight 503s keep the server-error handling', async () => {
     const f = fixture();
-    f.fetcher
-      .mockResolvedValueOnce(json(agent))
-      .mockResolvedValueOnce(
-        json(
-          {
-            error: {
-              code: 'runtime_broker_unavailable',
-              message: 'Runtime broker not connected',
-              details: { reason: 'broker_not_connected' },
-            },
+    f.fetcher.mockResolvedValueOnce(json(agent)).mockResolvedValueOnce(
+      json(
+        {
+          error: {
+            code: 'runtime_broker_unavailable',
+            message: 'Runtime broker not connected',
+            details: { reason: 'broker_not_connected' },
           },
-          503
-        )
-      );
+        },
+        503
+      )
+    );
     const session = f.registry.open(agentId, f.initialize);
     await session.connect();
     expect(session.state.disconnectReason).toBe('server-error');

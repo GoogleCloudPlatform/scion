@@ -304,7 +304,7 @@ function setCloudRunKey<B extends 'cloudrun' | 'cloudrun_instances'>(
     delete next[key as string];
   }
   if (Object.keys(next).length > 0) {
-    rt[block] = next as V1RuntimeConfig[B];
+    rt[block] = next;
   } else {
     delete rt[block];
   }
@@ -3074,7 +3074,7 @@ export class ScionPageAdminServerConfig extends LitElement {
             <div class="validation-errors-section">
               <div class="validation-errors-section-name">${section}</div>
               <ul class="validation-errors-list">
-                ${(errors as ValidationErrorDetail[]).map(
+                ${errors.map(
                   (err) => html`
                     <li>
                       ${err.field ? html`<code>${err.field}</code>` : nothing} ${err.message || err}
@@ -4865,7 +4865,7 @@ export class ScionPageAdminServerConfig extends LitElement {
               class="shared-dir-storage-backend"
               placeholder="Runtime or server setting"
               clearable
-              value=${(profile.shared_dir_storage_backend as string) || ''}
+              value=${profile.shared_dir_storage_backend || ''}
               ?disabled=${readOnly}
               @sl-change=${(e: Event) => {
                 this.updateProfileField(
@@ -4889,7 +4889,7 @@ export class ScionPageAdminServerConfig extends LitElement {
               class="home-storage-backend"
               placeholder="Runtime or server setting"
               clearable
-              value=${(profile.home_storage_backend as string) || ''}
+              value=${profile.home_storage_backend || ''}
               ?disabled=${readOnly}
               @sl-change=${(e: Event) => {
                 this.updateProfileField(
@@ -4913,7 +4913,7 @@ export class ScionPageAdminServerConfig extends LitElement {
               class="home-storage-leaf"
               placeholder="Runtime or server setting"
               clearable
-              value=${(profile.home_storage_leaf as string) || ''}
+              value=${profile.home_storage_leaf || ''}
               ?disabled=${readOnly}
               @sl-change=${(e: Event) => {
                 this.updateProfileField(
