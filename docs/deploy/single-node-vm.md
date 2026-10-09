@@ -187,10 +187,25 @@ directory, not `/`.
 
 The Hub configuration file. The deploy script writes it in two stages:
 
-1. **During VM setup (Phase 3)** — `auth.mode: dev` for initial health checks
-   via SSH tunnel.
+1. **During VM setup (Phase 3)** — a bootstrap file with `auth.mode: dev` and
+   no proxy settings, so the Hub can start before IAP exists. Phase 3 checks
+   only the unauthenticated `/healthz` endpoint over SSH.
 2. **After IAP is ready (Phase 5)** — `auth.mode: proxy` with the IAP audience
    string, enabling IAP-based authentication.
+
+The Phase 3 file does **not** turn on dev auth. `auth.mode: dev` on its own
+does not enable it, so until Phase 5 the Hub answers `/healthz` normally and
+every authenticated API call with `401`. Dev auth is turned on only by the
+`--dev-auth` flag or `server.auth.dev_mode: true` (environment variable
+`SCION_SERVER_AUTH_DEVMODE=true`). The server refuses to start with dev auth
+when the web server binds a non-loopback address. The Hub unit binds
+`0.0.0.0` so that the IAP proxy can reach it, so do not enable dev auth on
+the VM. If you need authenticated access before Phase 5, configure OAuth
+(see [Authentication](../../docs-site/src/content/docs/hosted/single-node/auth.md)).
+For a short-lived test only, you can bind the Hub to loopback
+(`--host 127.0.0.1`) with dev auth and reach it through an SSH tunnel
+(`gcloud compute ssh scion-hub-my-hub -- -L 8080:localhost:8080`). Revert both
+before Phase 5, because the IAP proxy cannot reach a loopback-only Hub.
 
 Final configuration:
 
@@ -501,8 +516,9 @@ gcloud compute ssh scion-hub-my-hub \
 
 ### Hub starts but IAP authentication does not work
 
-After the IAP proxy is deployed, the script updates `settings.yaml` from
-`auth.mode: dev` to `auth.mode: proxy` and restarts the Hub. If authentication
+After the IAP proxy is deployed, the script updates `settings.yaml` from the
+Phase 3 bootstrap (`auth.mode: dev`, which does not enable dev auth; see
+[settings.yaml](#settingsyaml)) to `auth.mode: proxy` and restarts the Hub. If authentication
 is not working:
 
 1. Verify the settings on the VM:
