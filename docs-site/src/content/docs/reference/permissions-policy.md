@@ -121,6 +121,16 @@ Whenever an API request is made, the Hub's `Decide` endpoint processes the autho
 
 ---
 
+## Adding Permissions (Developer Conventions)
+
+Permission IDs are defined in one registry, `pkg/hub/permissions/registry.go`. Follow these rules when you add a row or change an agent scope bundle:
+
+* **Every row is enforced or reserved.** A row must either record where code checks it (`Enforcement` for a route or handler check, `NonRouteUse` for any other consumer) or set `Reserved` to the reason nothing checks it yet. It cannot do both. `TestPermissionRegistryRowsEnforcedOrReserved` fails a row that is neither, and also fails any project role that holds a reserved permission. When you add a check for a reserved permission, clear `Reserved` and record the check in `Enforcement`.
+* **Point `Enforcement` at the real check.** If several permissions go through one shared function (for example, the artifact service's `Authorize`), that function alone doesn't show that a given permission is checked. Also name the call site that passes the permission. For artifact rows, `TestArtifactPermissionsConsumedUnlessReserved` requires each non-reserved row's `pkg/artifacts` constant to be used, and each reserved row's constant to be unused.
+* **New agent scopes in an existing bundle are ceiling-optional.** If you add a new agent scope to an existing agent role bundle (`ScopesForRole`), list it in `ceilingOptionalRoleScopes`. The exception is a scope already within the authority of the principal that creates the agent. A ceiling-optional scope never decides whether a role fits a creator's ceiling. A mint drops the scope when the source ceiling lacks its permission. This way, a token that fit a role before the scope was added still fits it.
+
+---
+
 ## Offline Authorization Recovery
 
 If an administrator misconfigures an AccessConstraint (e.g., applying an overly restrictive `all_principals` constraint at `system` scope), all administrators may become locked out of the Hub API.

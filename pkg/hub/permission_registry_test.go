@@ -15,6 +15,10 @@
 package hub
 
 import (
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -23,6 +27,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -43,13 +48,176 @@ func TestPermissionRegistryEntriesDeclareCurrentUse(t *testing.T) {
 		if permission.Action == "" {
 			t.Fatalf("%s has empty action", permission.ID)
 		}
-		if len(permission.Enforcement) == 0 && len(permission.NonRouteUse) == 0 {
-			t.Fatalf("%s must declare route enforcement or explicit non-route use", permission.ID)
+		if len(permission.Enforcement) == 0 && len(permission.NonRouteUse) == 0 && permission.Reserved == "" {
+			t.Fatalf("%s must declare route enforcement, explicit non-route use, or Reserved", permission.ID)
 		}
 		for _, enforcement := range permission.Enforcement {
 			assertEnforcementReferenceExists(t, permission.ID, enforcement)
 		}
 	}
+}
+
+// TestPermissionRegistryRowsEnforcedOrReserved requires every registry row
+// to be exactly one of: used (Enforcement or NonRouteUse) or Reserved. A
+// row that is neither is a published permission nothing checks, and one
+// that is both makes it unclear whether the check exists. A reserved row
+// must also stay out of every project role, so no role appears to grant
+// something nothing enforces.
+func TestPermissionRegistryRowsEnforcedOrReserved(t *testing.T) {
+	if err := checkRowsEnforcedOrReserved(permissions.Registry, BuiltInRoles()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func checkRowsEnforcedOrReserved(registry []permissions.Permission, roles []BuiltInRole) error {
+	var problems []string
+	reserved := map[string]bool{}
+	for _, p := range registry {
+		used := len(p.Enforcement) > 0 || len(p.NonRouteUse) > 0
+		isReserved := strings.TrimSpace(p.Reserved) != ""
+		switch {
+		case !used && !isReserved:
+			problems = append(problems, p.ID+": no Enforcement or NonRouteUse and not Reserved")
+		case used && isReserved:
+			problems = append(problems, p.ID+": Reserved but also declares Enforcement or NonRouteUse")
+		case p.Reserved != "" && !isReserved:
+			problems = append(problems, p.ID+": Reserved is blank; give the reason")
+		}
+		if isReserved {
+			reserved[p.ID] = true
+		}
+	}
+	for _, role := range roles {
+		if role.ScopeType != store.RoleScopeProject {
+			continue
+		}
+		for _, id := range role.Permissions {
+			if reserved[id] {
+				problems = append(problems, fmt.Sprintf("project role %s holds reserved permission %s", role.Name, id))
+			}
+		}
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("permission registry rows must be enforced or reserved:\n  %s", strings.Join(problems, "\n  "))
+	}
+	return nil
+}
+
+// TestCheckRowsEnforcedOrReserved_RejectsBadRows pins the checker against
+// the mutations it exists to catch.
+func TestCheckRowsEnforcedOrReserved_RejectsBadRows(t *testing.T) {
+	enforced := permissions.Permission{ID: "x.read", Enforcement: []string{"pkg/hub/x.go"}}
+	reserved := permissions.Permission{ID: "x.delete", Reserved: "nothing checks it yet"}
+	projectRole := func(ids ...string) BuiltInRole {
+		return BuiltInRole{Name: "project-test", ScopeType: store.RoleScopeProject, Permissions: ids}
+	}
+	cases := []struct {
+		name  string
+		rows  []permissions.Permission
+		roles []BuiltInRole
+		want  string
+	}{
+		{"enforcement removed", []permissions.Permission{{ID: "x.read"}}, nil, "x.read: no Enforcement"},
+		{"reserved mark removed", []permissions.Permission{{ID: "x.delete"}}, nil, "x.delete: no Enforcement"},
+		{"blank reserved reason", []permissions.Permission{{ID: "x.delete", Reserved: "  "}}, nil, "x.delete: no Enforcement"},
+		{"both", []permissions.Permission{{ID: "x.read", Enforcement: []string{"pkg/hub/x.go"}, Reserved: "r"}}, nil, "x.read: Reserved but also"},
+		{"project role holds reserved", []permissions.Permission{enforced, reserved}, []BuiltInRole{projectRole("x.read", "x.delete")}, "holds reserved permission x.delete"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkRowsEnforcedOrReserved(tc.rows, tc.roles)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %v, want an error containing %q", err, tc.want)
+			}
+		})
+	}
+	ok := []BuiltInRole{projectRole("x.read"), {Name: "system-test", ScopeType: store.RoleScopeSystem, Permissions: []string{"x.delete"}}}
+	if err := checkRowsEnforcedOrReserved([]permissions.Permission{enforced, reserved}, ok); err != nil {
+		t.Fatalf("valid rows rejected: %v", err)
+	}
+}
+
+// TestArtifactPermissionsConsumedUnlessReserved closes the gap a shared
+// dispatcher leaves: every artifact row names artifactHost.Authorize, which
+// exists whether or not anything passes it that permission. So a non-reserved
+// artifact row must have its pkg/artifacts constant used outside its
+// declaration, and a reserved row's constant must be unused, so wiring one
+// up forces clearing Reserved.
+func TestArtifactPermissionsConsumedUnlessReserved(t *testing.T) {
+	constants := map[string]string{
+		artifacts.PermissionRead:   "PermissionRead",
+		artifacts.PermissionCreate: "PermissionCreate",
+		artifacts.PermissionUpdate: "PermissionUpdate",
+		artifacts.PermissionDelete: "PermissionDelete",
+		artifacts.PermissionManage: "PermissionManage",
+	}
+	uses := artifactIdentUses(t, filepath.Join("..", "artifacts"))
+	seen := map[string]bool{}
+	for _, p := range permissions.Registry {
+		if p.Resource != permissions.ResourceArtifact {
+			continue
+		}
+		name, ok := constants[p.ID]
+		if !ok {
+			t.Errorf("artifact permission %s has no pkg/artifacts Permission constant", p.ID)
+			continue
+		}
+		seen[p.ID] = true
+		switch {
+		case p.Reserved == "" && uses[name] == 0:
+			t.Errorf("%s is not Reserved but pkg/artifacts never uses %s; mark it Reserved or wire the check", p.ID, name)
+		case p.Reserved != "" && uses[name] > 0:
+			t.Errorf("%s is Reserved but pkg/artifacts uses %s %d time(s); clear Reserved and record the check in Enforcement", p.ID, name, uses[name])
+		}
+	}
+	for id := range constants {
+		if !seen[id] {
+			t.Errorf("pkg/artifacts constant for %s has no artifact row in the permission registry", id)
+		}
+	}
+}
+
+// artifactIdentUses counts references to each identifier in the non-test Go
+// files of dir, not counting the names in their own declarations.
+func artifactIdentUses(t *testing.T, dir string) map[string]int {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	fset := token.NewFileSet()
+	counts := map[string]int{}
+	files := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		files++
+		declared := map[*ast.Ident]bool{}
+		ast.Inspect(file, func(n ast.Node) bool {
+			if vs, ok := n.(*ast.ValueSpec); ok {
+				for _, ident := range vs.Names {
+					declared[ident] = true
+				}
+			}
+			return true
+		})
+		ast.Inspect(file, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok && !declared[id] {
+				counts[id.Name]++
+			}
+			return true
+		})
+	}
+	if files == 0 {
+		t.Fatalf("no Go files found in %s", dir)
+	}
+	return counts
 }
 
 func TestCapabilityActionMapsAreRegistryDerived(t *testing.T) {
