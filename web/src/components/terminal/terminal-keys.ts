@@ -143,7 +143,10 @@ export function ctrlCode(char: string): string | null {
  */
 export function applyModifiers(data: string, mods: Modifiers): { data: string; consumed: boolean } {
   if (!mods.ctrl && !mods.alt) return { data, consumed: false };
-  if ([...data].length !== 1) return { data, consumed: !data.startsWith('\x1b') };
+  // One code point, checked without copying the data (a paste can be large).
+  const first = data.codePointAt(0);
+  const isOneCodePoint = first !== undefined && data.length === (first > 0xffff ? 2 : 1);
+  if (!isOneCodePoint) return { data, consumed: !data.startsWith('\x1b') };
   const base = mods.ctrl ? (ctrlCode(data) ?? data) : data;
   return { data: mods.alt ? `\x1b${base}` : base, consumed: true };
 }
