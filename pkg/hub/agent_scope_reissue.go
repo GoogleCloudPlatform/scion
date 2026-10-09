@@ -743,7 +743,8 @@ func (s *Server) reissueAgentDelegatorLive(ctx context.Context, agent, parent *s
 }
 
 // reissueLiveCheckFault is a test seam: when set, a non-nil error for perm
-// is treated as a lookup fault of the live check. Nil in production.
+// is treated as a lookup fault of the live check. Only tests set it; it is
+// nil in production.
 var reissueLiveCheckFault func(perm string) error
 
 // reissuePermissionTarget returns the resource and action the live check
@@ -1023,7 +1024,9 @@ func (s *Server) commitScopeReissue(ctx context.Context, plan *scopeReissuePlan,
 }
 
 // recordReissueDispatch writes the agent_scopes_reissue_dispatch record. A
-// write failure is logged; the commit has already happened.
+// write failure is logged only: the authoritative record of the re-issue
+// (the agent_scopes_reissued row, including the revoked credential count)
+// was written in the commit, and this row only adds the push outcome.
 func recordReissueDispatch(ctx context.Context, st store.Store, agentID string, summary reissueDispatchSummary) {
 	record, err := lifecycleAudit(mutationTypeAgentScopesReissueDispatch, agentID, auditActorFromContext(ctx), time.Now(), summary)
 	if err == nil {
