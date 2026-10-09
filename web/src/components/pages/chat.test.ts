@@ -83,7 +83,13 @@ beforeEach(() => {
   chatSpacesLoad.invalidate();
 });
 
-/** Let pending promise callbacks (a few macrotask turns of awaits) run. */
+/**
+ * Let a few macrotask turns of pending callbacks run. Use this only when
+ * the work stays inside the test's own timers and promises. A fixed number
+ * of turns cannot wait out a dynamic import or a mocked request, which may
+ * take any number of turns under load. Wait on the outcome with vi.waitFor,
+ * or on the work's own promise with trackAsyncCalls, instead.
+ */
 async function flush(): Promise<void> {
   for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
 }
@@ -1741,9 +1747,9 @@ describe('chat page — late route lookups', () => {
     el.parseV2Route();
 
     release();
-    await flush();
-
-    expect(el.v2Conversation).toMatchObject({ conversationKey: 'topic-1', projectId: 'p1' });
+    await vi.waitFor(() =>
+      expect(el.v2Conversation).toMatchObject({ conversationKey: 'topic-1', projectId: 'p1' })
+    );
     expect(el.mobilePanel).toBe('center');
   });
 
@@ -1779,9 +1785,9 @@ describe('chat page — late route lookups', () => {
     railReloaded(el);
 
     release();
-    await flush();
-
-    expect(el.v2Conversation).toMatchObject({ conversationKey: 'topic-1', projectSlug: 'alpha' });
+    await vi.waitFor(() =>
+      expect(el.v2Conversation).toMatchObject({ conversationKey: 'topic-1', projectSlug: 'alpha' })
+    );
     expect(window.location.pathname).toBe('/chat/alpha/topic-1');
   });
 
@@ -1983,9 +1989,7 @@ describe('chat page — late space lookups', () => {
     el.parseV2Route();
 
     releases.slug();
-    await flush();
-
-    expect(navigateTo).toHaveBeenCalledWith('/chat/alpha/general-1');
+    await vi.waitFor(() => expect(navigateTo).toHaveBeenCalledWith('/chat/alpha/general-1'));
     expect(el.v2Conversation).toMatchObject({ conversationKey: 'general-1', projectSlug: 'alpha' });
   });
 });
@@ -2075,12 +2079,12 @@ describe('chat page — late DM peer lookups', () => {
     el.parseV2Route();
     chatDMsLoad.invalidate();
     el.parseV2Route();
-    await flush();
-    expect(releases).toHaveLength(2);
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
 
     releases[0]();
-    await flush();
-    expect(el.v2Conversation.conversationKey).toBe('dm:agent:agent-1:user:user-me');
+    await vi.waitFor(() =>
+      expect(el.v2Conversation.conversationKey).toBe('dm:agent:agent-1:user:user-me')
+    );
     expect(el.mobilePanel).toBe('center');
     el.mobilePanel = 'left';
 
@@ -2100,8 +2104,7 @@ describe('chat page — late DM peer lookups', () => {
     );
     el.parseV2Route();
     el.parseV2Route();
-    await flush();
-    expect(releases).toHaveLength(1);
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
 
     releases[0]();
     await flush();
@@ -2117,7 +2120,8 @@ describe('chat page — late DM peer lookups', () => {
     const el = createPageWithoutUserId();
     window.history.replaceState({}, '', '/chat/dm/agent-1');
     el.parseV2Route();
-    await flush();
+    // The lookup's DM-list request is out and held.
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
     window.history.replaceState({}, '', '/chat');
     el.parseV2Route();
 
@@ -2134,13 +2138,14 @@ describe('chat page — late DM peer lookups', () => {
     window.history.replaceState({}, '', '/chat');
     el.parseV2Route();
     el.openDM('agent-1', 'agent', 'Coder One');
-    await flush();
+    // The lookup's DM-list request is out and held.
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
 
     releases[0]();
-    await flush();
-
-    expect(window.location.pathname).toBe(
-      `/chat/dm/${encodeURIComponent('dm:agent:agent-1:user:user-me')}`
+    await vi.waitFor(() =>
+      expect(window.location.pathname).toBe(
+        `/chat/dm/${encodeURIComponent('dm:agent:agent-1:user:user-me')}`
+      )
     );
     // The rail's next reload re-parses the route; the DM must stay open.
     el.parseV2Route();
@@ -2154,7 +2159,8 @@ describe('chat page — late DM peer lookups', () => {
     window.history.replaceState({}, '', '/chat');
     el.parseV2Route();
     el.openDM('agent-1', 'agent', 'Coder One');
-    await flush();
+    // The lookup's DM-list request is out and held.
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
     el.navigateToThread({
       conversationKey: 'topic-2',
       projectId: 'p1',
@@ -2176,8 +2182,7 @@ describe('chat page — late DM peer lookups', () => {
     el.parseV2Route();
     el.openDM('agent-1', 'agent', 'Coder One');
     el.openDM('agent-2', 'agent', 'Review Bot');
-    await flush();
-    expect(releases).toHaveLength(2);
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
 
     releases[0]();
     await flush();
@@ -2198,8 +2203,7 @@ describe('chat page — late DM peer lookups', () => {
     const historyBefore = window.history.length;
     el.openDM('agent-1', 'agent', 'Coder One');
     el.openDM('agent-2', 'agent', 'Review Bot');
-    await flush();
-    expect(releases).toHaveLength(2);
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
 
     releases[1]();
     await flush();
@@ -2223,11 +2227,10 @@ describe('chat page — late DM peer lookups', () => {
     // longer than one flush on a slow runner. Those imports resolving is
     // what issues it, so wait for that before taking the baseline.
     await vi.waitFor(() => expect(el.v2SpaceRailLoaded).toBe(true), { timeout: 5000 });
-    await flush();
+    await vi.waitFor(() => expect(releases.length).toBeGreaterThan(0));
     const pending = releases.length;
     el.openDM('agent-1', 'agent', 'Coder One');
-    await flush();
-    expect(releases).toHaveLength(pending + 1);
+    await vi.waitFor(() => expect(releases).toHaveLength(pending + 1));
     // The router navigates elsewhere and removes this page.
     window.history.pushState({}, '', '/chat/alpha/topic-2');
     el.remove();
@@ -2247,7 +2250,8 @@ describe('chat page — late DM peer lookups', () => {
     window.history.replaceState({}, '', '/chat');
     el.parseV2Route();
     el.openDM('agent-1', 'agent', 'Coder One');
-    await flush();
+    // The lookup's DM-list request is out and held.
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
     el.navigateToPromotedThread({ id: 'topic-9', projectId: 'p1', name: 'promoted' });
 
     releases[0]();
@@ -2263,7 +2267,8 @@ describe('chat page — late DM peer lookups', () => {
     window.history.replaceState({}, '', '/chat');
     el.parseV2Route();
     el.openDM('agent-1', 'agent', 'Coder One');
-    await flush();
+    // The lookup's DM-list request is out and held.
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
     el.handleResetView();
 
     releases[0]();
@@ -2278,15 +2283,16 @@ describe('chat page — late DM peer lookups', () => {
     const el = createPageWithoutUserId();
     window.history.replaceState({}, '', '/chat/dm/agent-1');
     el.parseV2Route();
-    await flush();
+    // The lookup's DM-list request is out and held.
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
 
     releases[0]();
-    await flush();
-
-    expect(el.v2Conversation).toMatchObject({
-      conversationKey: 'dm:agent:agent-1:user:user-me',
-      peerName: 'Coder One',
-    });
+    await vi.waitFor(() =>
+      expect(el.v2Conversation).toMatchObject({
+        conversationKey: 'dm:agent:agent-1:user:user-me',
+        peerName: 'Coder One',
+      })
+    );
     expect(el.mobilePanel).toBe('center');
   });
 
@@ -2295,7 +2301,8 @@ describe('chat page — late DM peer lookups', () => {
     const el = createPageWithoutUserId();
     window.history.replaceState({}, '', '/chat/dm/agent-1');
     el.parseV2Route();
-    await flush();
+    // The lookup's DM-list request is out and held.
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
     // The router replaced this page with a new one for the same URL.
     Object.defineProperty(el, 'isConnected', { get: () => false });
 
@@ -2320,6 +2327,8 @@ describe('chat page — late DM peer lookups', () => {
       }
       return new Response('{}', { status: 200 });
     });
+    // Calls from earlier tests must not satisfy the wait for /auth/me below.
+    vi.mocked(apiFetch).mockClear();
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const el = createPageWithoutUserId();
     const buildKey = vi.spyOn(el, 'buildDMKey');
@@ -2328,7 +2337,8 @@ describe('chat page — late DM peer lookups', () => {
     el.openDM('agent-1', 'agent', 'Coder One');
     // openDM tries the key once itself before it starts the lookup.
     buildKey.mockClear();
-    await flush();
+    // The lookup has reached the held user request.
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalledWith('/api/v1/auth/me'));
     el.navigateToThread({
       conversationKey: 'topic-2',
       projectId: 'p1',
@@ -2964,11 +2974,14 @@ describe('chat page — late conversation switches while composing', () => {
       }
       return new Response('{}', { status: 200 });
     });
+    // Calls from earlier tests must not satisfy the wait for /auth/me below.
+    vi.mocked(apiFetch).mockClear();
     const el = createPage();
     el.pageData = {};
     window.history.replaceState({}, '', '/chat/dm/agent-1');
     el.parseV2Route();
-    await flush();
+    // The lookup has reached the held user request.
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalledWith('/api/v1/auth/me'));
     // The user picks a thread from the rail and starts typing in it.
     el.navigateToThread({
       conversationKey: 'topic-2',
