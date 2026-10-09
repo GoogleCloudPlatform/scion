@@ -149,7 +149,7 @@ export class ChatNotificationDispatcher {
 
   private onNotificationEvent(e: Event): void {
     const detail = (e as CustomEvent<{ data?: unknown }>).detail;
-    this.handle((detail?.data ?? {}) as ChatNotificationPayload);
+    this.handle(detail?.data ?? {});
   }
 
   /**

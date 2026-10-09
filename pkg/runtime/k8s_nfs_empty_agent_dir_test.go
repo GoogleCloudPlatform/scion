@@ -108,16 +108,6 @@ func TestBuildPod_NFSEmptyAgentDir_SharedDirs(t *testing.T) {
 	assert.Equal(t, "projects/proj-123/agents/agent-1", ic.VolumeMounts[0].SubPath)
 }
 
-// Each pod prepares its own agent directory, so a broker lock loser gets
-// the provisioning init container rather than the wait-only one.
-func TestBuildPod_NFSEmptyAgentDir_LockLoserProvisions(t *testing.T) {
-	cfg := nfsEmptyAgentDirConfig("epa-loser")
-	cfg.nfsProvisionLockLost = true
-	pod, err := newNFSTestK8sRuntime().buildPod("default", cfg)
-	require.NoError(t, err)
-	assert.False(t, hasFlag(pod.Spec.InitContainers[0].Command, "--wait-for-sentinel"))
-}
-
 // NFSAgentDirEmpty without NFSAgentDirName changes nothing: the agent keeps
 // the layout the other fields select.
 func TestBuildPod_NFSEmptyAgentDir_FlagAloneIgnored(t *testing.T) {

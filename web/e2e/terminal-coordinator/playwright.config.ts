@@ -7,6 +7,7 @@ export default defineConfig({
   testMatch: '*.pw.ts',
   timeout: 15_000,
   workers: 1,
+  forbidOnly: CI,
   // CI-only settings (local runs are unchanged), as in e2e/chat-mobile: one
   // retry for a timing blip on a shared runner (still reported as flaky), a
   // global timeout below the 20m job timeout so the report is still written,
