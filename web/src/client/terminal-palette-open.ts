@@ -66,6 +66,21 @@ export function nonOwnerOpenStatus(status: TerminalOpenResult['status']): string
   return 'Terminal workspace is unavailable in this tab.';
 }
 
+/** The button on the non-owner screen that moves the terminals to this window. */
+export const MOVE_TERMINALS_LABEL = 'Move terminals to this window';
+/** The same button while a move is in progress. */
+export const MOVING_TERMINALS_LABEL = 'Moving terminals…';
+/** What a window shows after its terminals moved to another window. */
+export const TERMINALS_MOVED_STATUS = 'Terminals moved to another window.';
+
+/**
+ * Whether the non-owner screen offers the move button for an open's
+ * result: only once the owning tab has the terminal selected.
+ */
+export function offersMove(status: TerminalOpenResult['status']): boolean {
+  return status === 'selected';
+}
+
 /**
  * Opens an agent the "Jump to agent" palette picked in a multi-pane layout,
  * when this tab has no session for it yet.
