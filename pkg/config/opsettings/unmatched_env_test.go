@@ -94,6 +94,10 @@ func TestFindUnmatchedSettingsEnv_FlagsWithoutHint(t *testing.T) {
 		// accepted spelling is SCION_SEED_AUTOEXPOSEPORTS_ENABLED.
 		"SCION_SEED_AUTO_EXPOSE_PORTS_ENABLED",
 		"SCION_SEED_SERVER_HUB_IMAGEREGISTRY", // image_registry is top-level
+		// trusted_issuers is a list of objects, so no single env string can
+		// set it (ptone/scion#3836).
+		"SCION_SERVER_FEDERATION_TRUSTEDISSUERS",
+		"SCION_SEED_SERVER_FEDERATION_TRUSTEDISSUERS",
 	}
 	var environ []string
 	for _, n := range names {
