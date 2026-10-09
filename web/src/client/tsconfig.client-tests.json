@@ -2,12 +2,15 @@
   "extends": "../../tsconfig.json",
   "compilerOptions": { "noEmit": true, "types": ["vite/client"] },
   "include": [
+    "agent-palette-candidate.test.ts",
     "agent-store.test.ts",
     "agent-store-feed.test.ts",
     "agent-store-probe.test.ts",
     "paginate-all.test.ts",
+    "chat-routes.test.ts",
     "state.test.ts",
-    "__fixtures__/agent-store-harness.ts"
+    "__fixtures__/agent-store-harness.ts",
+    "__fixtures__/request-url.ts"
   ],
   "exclude": []
 }

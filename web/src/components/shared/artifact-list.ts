@@ -16,8 +16,10 @@
 
 /**
  * A project's artifacts (experiment hub.artifacts): the artifacts homed in
- * the project that the caller can read, newest first, with search, paging
- * and a New artifact button. A row opens the artifact's page.
+ * the project, and those other projects shared with it, that the caller can
+ * read, newest first, with search, a "Shared with this project" filter,
+ * paging and a New artifact button. A shared row is badged and names the
+ * project it comes from. A row opens the artifact's page.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -27,7 +29,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { navigateTo } from '../../client/navigation.js';
 import { formatInstant } from '../../utils/time.js';
 import { artifactPagePath, listProjectArtifacts } from '../../client/artifacts.js';
-import { principalLabel, principalName } from '../../client/principal-names.js';
+import { principalLabel, principalName, projectName } from '../../client/principal-names.js';
 import type { ArtifactListItem, ArtifactResponse } from '../../client/artifacts.js';
 import './artifact-publish-dialog.js';
 
@@ -49,6 +51,8 @@ export class ScionArtifactList extends LitElement {
   @state() private loadingMore = false;
   @state() private error: string | null = null;
   @state() private query = '';
+  /** Only artifacts homed elsewhere and shared with this project. */
+  @state() private sharedOnly = false;
   @state() private publishOpen = false;
   /** Owner display names by "kind:id"; missing while unknown. */
   @state() private names = new Map<string, string>();
@@ -119,6 +123,17 @@ export class ScionArtifactList extends LitElement {
     }
     .muted {
       color: var(--sl-color-neutral-600);
+    }
+    sl-badge.shared {
+      margin-left: 0.375rem;
+    }
+    sl-badge.shared sl-icon {
+      vertical-align: -0.125em;
+    }
+    .from {
+      margin-left: 0.25rem;
+      font-size: 0.75rem;
+      color: var(--sl-color-neutral-500);
     }
     .more {
       text-align: center;
@@ -209,6 +224,7 @@ export class ScionArtifactList extends LitElement {
           q: this.query.trim(),
           cursor,
           signal: abort.signal,
+          sharedOnly: this.sharedOnly,
         });
         if (abort.signal.aborted) return;
         items = [...items, ...page.artifacts];
@@ -250,8 +266,24 @@ export class ScionArtifactList extends LitElement {
     navigateTo(artifactPagePath({ id: a.id, scopeRef: a.scopeRef || this.projectId }));
   };
 
+  private onSharedOnly = (e: Event): void => {
+    this.sharedOnly = (e.target as HTMLInputElement).checked;
+    this.cursor = '';
+    void this.load();
+  };
+
   private resolveNames(items: ArtifactListItem[]): void {
     for (const item of items) {
+      if (item.sharedWithScope && item.scopeRef) {
+        const pkey = `project:${item.scopeRef}`;
+        if (!this.names.has(pkey)) {
+          void projectName(item.scopeRef).then((name) => {
+            if (name && this.isConnected && !this.names.has(pkey)) {
+              this.names = new Map(this.names).set(pkey, name);
+            }
+          });
+        }
+      }
       const key = `${item.ownerKind}:${item.ownerRef}`;
       if (this.names.has(key)) continue;
       // The signed-in user is shown as "You"; no lookup is needed.
@@ -285,6 +317,11 @@ export class ScionArtifactList extends LitElement {
   private renderEmpty(): TemplateResult {
     if (this.query.trim()) {
       return html`<div class="empty">No artifacts match "${this.query.trim()}".</div>`;
+    }
+    if (this.sharedOnly) {
+      return html`<div class="empty">
+        No artifacts from other projects are shared with this project.
+      </div>`;
     }
     return html`
       <div class="empty">
@@ -342,6 +379,15 @@ export class ScionArtifactList extends LitElement {
                     <sl-icon name="file-earmark-richtext"></sl-icon>
                     ${item.title}
                   </a>
+                  ${item.sharedWithScope
+                    ? html`<sl-badge class="shared" pill variant="success">
+                          <sl-icon name="people"></sl-icon> Shared with this project
+                        </sl-badge>
+                        <span class="from"
+                          >from
+                          ${this.names.get(`project:${item.scopeRef}`) || 'another project'}</span
+                        >`
+                    : nothing}
                   ${item.key ? html`<span class="key">${item.key}</span>` : nothing}
                 </td>
                 <td>${this.owner(item)}</td>
@@ -396,6 +442,9 @@ export class ScionArtifactList extends LitElement {
         >
           <sl-icon slot="prefix" name="search"></sl-icon>
         </sl-input>
+        <sl-checkbox size="small" ?checked=${this.sharedOnly} @sl-change=${this.onSharedOnly}
+          >Shared with this project</sl-checkbox
+        >
         <span class="spacer"></span>
         ${this.newButton()}
       </div>

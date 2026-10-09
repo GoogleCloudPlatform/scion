@@ -165,9 +165,10 @@ type launchWaitOptions struct {
 // (*launchWaitTimeoutError), or ctx is cancelled (*launchWaitInterruptedError).
 // Transient fetch errors (network, 5xx, 408, 429) are retried; other 4xx
 // answers end the wait with the Hub's error. The agent is reported deleted
-// only on a not-found after it has been read in this wait, or on a user
-// caller's not-found (after launchUnreadableGrace when Accepted); see
-// Accepted for a status that is not readable. It never changes the agent.
+// only on a not-found after it has been read in this wait that persists for
+// launchUnreadableGrace, or on a user caller's not-found (after
+// launchUnreadableGrace when Accepted); see Accepted for a status that is
+// not readable. It never changes the agent.
 func waitForAgentLaunch(ctx context.Context, o launchWaitOptions) (*hubclient.Agent, error) {
 	interval := o.PollInterval
 	if interval <= 0 {
@@ -186,8 +187,28 @@ func waitForAgentLaunch(ctx context.Context, o launchWaitOptions) (*hubclient.Ag
 		getCancel()
 		if err != nil && last == nil && o.Accepted && isUnreadableStatusError(err) {
 			a, err = retryUnreadableStatus(fetchCtx, o.Get, err)
-			if err != nil && isUnreadableStatusError(err) && fetchCtx.Err() != nil {
-				return false, nil // the wait loop reports the timeout or interrupt
+			// When the retry is cut short, the wait loop reports the
+			// interrupt or timeout, except for a user caller whose wait
+			// budget ran out: its 403 or 404 is a definite answer and is
+			// reported below, not as a launch still in progress.
+			if err != nil && isUnreadableStatusError(err) && fetchCtx.Err() != nil &&
+				(ctx.Err() != nil || config.IsHubManagedAgent()) {
+				return false, nil
+			}
+		}
+		// A not-found after the agent has been read in this wait is
+		// reported as a deletion, which ends the start with a failure. A
+		// single not-found is not enough for that: it is confirmed by
+		// retrying for launchUnreadableGrace, and any successful read in
+		// that window means the agent is still there and the wait goes on.
+		// If the wait budget runs out first, the not-found that lasted to
+		// the end of the wait is reported below as a deletion, not as a
+		// launch still in progress; only an interrupt is left to the wait
+		// loop.
+		if err != nil && last != nil && apiclient.IsNotFoundError(err) {
+			a, err = retryUnreadableStatus(fetchCtx, o.Get, err)
+			if err != nil && isUnreadableStatusError(err) && ctx.Err() != nil {
+				return false, nil // the wait loop reports the interrupt
 			}
 		}
 		// An agent caller gets the same 404 for an agent it may not read as
@@ -391,10 +412,12 @@ func isUnreadableStatusError(err error) bool {
 }
 
 // retryUnreadableStatus retries a status fetch that failed with an
-// unreadable-status error, with backoff, for launchUnreadableGrace; the last
-// delay is shortened to end at the grace. It returns the first success, the
-// first other error, or the last unreadable-status error when the grace
-// runs out or ctx ends.
+// unreadable-status error (a refusal or a not-found that may be transient
+// or may mean the status is not readable or the agent is gone), with
+// backoff, for launchUnreadableGrace; the last delay is shortened to end
+// at the grace. It returns the first success, the first other error, or
+// the last unreadable-status error when the grace runs out or ctx ends
+// (also when ctx ends during a read).
 func retryUnreadableStatus(ctx context.Context, get func(context.Context) (*hubclient.Agent, error), err error) (*hubclient.Agent, error) {
 	deadline := launchNow().Add(launchUnreadableGrace)
 	delay := launchUnreadableBackoff
@@ -411,6 +434,9 @@ func retryUnreadableStatus(ctx context.Context, get func(context.Context) (*hubc
 		getCtx, getCancel := context.WithTimeout(ctx, launchFetchTimeout)
 		a, getErr := get(getCtx)
 		getCancel()
+		if getErr != nil && ctx.Err() != nil {
+			return nil, err // a read cut short by ctx says nothing new
+		}
 		if getErr == nil || !isUnreadableStatusError(getErr) {
 			return a, getErr
 		}
@@ -421,9 +447,9 @@ func retryUnreadableStatus(ctx context.Context, get func(context.Context) (*hubc
 
 // launchStatusUnreadableError is returned when the Hub accepted the launch
 // but the new agent's status could not be read with the caller's
-// credential. The launch itself is not affected. Like a wait timeout, it
-// exits 1: the outcome of the launch is unknown, so it is not reported as
-// success.
+// credential. The launch itself is not affected. finishHubStart reports it
+// as an accepted launch (exit 0), like a wait timeout, unless --attach
+// needs the running agent.
 type launchStatusUnreadableError struct {
 	Agent    string
 	LaunchID string
@@ -490,7 +516,9 @@ func (e *launchFailedError) Error() string {
 }
 
 // launchWaitTimeoutError is returned when the wait budget runs out while the
-// agent is still launching. The launch itself is not affected.
+// agent is still launching. The launch itself is not affected. finishHubStart
+// reports it for an accepted launch as accepted (exit 0), unless --attach
+// needs the running agent.
 type launchWaitTimeoutError struct {
 	Agent    string
 	Deadline *time.Time
@@ -584,6 +612,27 @@ func deadlineSuffix(d *time.Time) string {
 		return ""
 	}
 	return fmt.Sprintf(" (deadline %s)", d.UTC().Format(time.RFC3339))
+}
+
+// acceptedLaunchNotFollowed reports whether a launch wait error leaves an
+// accepted launch running on the Hub with an outcome the wait could not
+// see: the status was not readable with this credential, or the launch was
+// still in progress when the wait budget ran out. It returns the line that
+// explains why the wait did not follow the launch to running.
+func acceptedLaunchNotFollowed(err error) (string, bool) {
+	var unreadable *launchStatusUnreadableError
+	if errors.As(err, &unreadable) {
+		launch := ""
+		if unreadable.LaunchID != "" {
+			launch = fmt.Sprintf(" (launch %s)", unreadable.LaunchID)
+		}
+		return fmt.Sprintf("Its status is not readable with this credential's scope%s; the launch continues on the Hub.", launch), true
+	}
+	var timeout *launchWaitTimeoutError
+	if errors.As(err, &timeout) {
+		return fmt.Sprintf("It was still launching when the wait ended%s; the launch continues on the Hub.", deadlineSuffix(timeout.Deadline)), true
+	}
+	return "", false
 }
 
 // asIncompleteCreate returns the Hub's agent_create_incomplete error, if err
