@@ -735,7 +735,12 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
 
     await setValue(el, '#startFrom', 'tpl-git', 'sl-change');
     await setValue(el, '#name', 'userinfo-query', 'sl-input');
-    await setValue(el, '#templateGitRemote', 'https://user:PSECRET?W@github.com/acme/payments.git', 'sl-input');
+    await setValue(
+      el,
+      '#templateGitRemote',
+      'https://user:PSECRET?W@github.com/acme/payments.git',
+      'sl-input'
+    );
     q(el, '#templateGitRemote')!.dispatchEvent(new Event('sl-blur'));
     await el.updateComplete;
 
@@ -1215,7 +1220,7 @@ describe('cloneUrlCredentialHint', () => {
     'flags query or fragment in %s',
     (url) => {
       expect(hint(url)).toMatch(/query string or fragment/);
-    },
+    }
   );
 
   it.each([

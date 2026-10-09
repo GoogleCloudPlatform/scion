@@ -609,6 +609,11 @@ func RunInit(args []string, opts InitRunOptions) int {
 		}
 	}
 
+	// Natively derived usage also feeds the session metrics state, so
+	// session reports include model calls and tokens. A nil pipeline is a
+	// no-op.
+	runWireSessionUsage(telemetryPipeline, agentHome)
+
 	// Initialize lifecycle hooks manager. newLifecycleManager also reports
 	// the value this run wants hub.EnforceTokenFileOwnerChecks called with —
 	// both come from the identical requirePrivilegeDrop input, bundled into

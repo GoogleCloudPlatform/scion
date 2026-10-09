@@ -77,9 +77,7 @@ const ENFORCED_BROKER = {
   agentLimitSource: 'hub_default',
 };
 
-async function mountBrokersPage(): Promise<
-  HTMLElement & { updateComplete: Promise<boolean> }
-> {
+async function mountBrokersPage(): Promise<HTMLElement & { updateComplete: Promise<boolean> }> {
   const el = document.createElement('scion-page-brokers') as HTMLElement & {
     updateComplete: Promise<boolean>;
   };
