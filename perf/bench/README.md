@@ -784,10 +784,10 @@ in "Isolate the hub environment" above), runs both benchmarks with the
 trial counts above, and runs `median-ratio.mjs`.
 
 Prerequisites: Linux with bash 4.4 or newer and GNU coreutils, Go (the
-`go.mod` version), Node.js 20 or newer with npm, curl and git. Network access is needed once, for `npm ci` and the Chromium
-download. No root is needed, but Playwright's Chromium needs the usual
-system libraries (`npx playwright install-deps chromium` installs them,
-with root).
+`go.mod` version), Node.js 20 or newer with npm, curl and git. Network
+access is needed once, for `npm ci` and the Chromium download. No root is
+needed, but Playwright's Chromium needs the usual system libraries
+(`npx playwright install-deps chromium` installs them, with root).
 
 ```sh
 # From the repo root. Record a baseline on the booked runner:

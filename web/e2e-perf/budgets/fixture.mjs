@@ -271,14 +271,17 @@ export function buildFixture() {
 
 /** jsonType names the JSON type of a value, as perfBudgetJSONType does in Go. */
 function jsonType(x) {
-  if (x === null || x === undefined) return 'null';
+  // route.fulfill drops undefined keys, so the wire never carries one.
+  if (x === undefined) throw new Error('fixture value is undefined; use null or omit the key');
+  if (x === null) return 'null';
   if (Array.isArray(x)) return 'array';
   return typeof x; // 'object', 'string', 'number' or 'boolean'
 }
 
 /**
  * fieldPaths returns the sorted, de-duplicated typed field paths of a JSON
- * value: object keys joined with '.', array elements as '[]', then ':' and
+ * value: object keys joined with '.', array elements as '[]' (scalar
+ * elements recorded at '<path>[]'), then ':' and
  * the '|'-joined sorted JSON types seen at that path (for example
  * 'agents[].generation:number'). It matches perfBudgetFieldPaths in
  * pkg/hub/perf_budget_test.go.
@@ -287,7 +290,15 @@ export function fieldPaths(v) {
   const types = new Map();
   const walk = (x, prefix) => {
     if (Array.isArray(x)) {
-      for (const c of x) walk(c, prefix + '[]');
+      const p = prefix + '[]';
+      for (const c of x) {
+        if (c === null || typeof c !== 'object') {
+          // A scalar element: record its type at '<path>[]'.
+          if (!types.has(p)) types.set(p, new Set());
+          types.get(p).add(jsonType(c));
+        }
+        walk(c, p);
+      }
     } else if (x !== null && typeof x === 'object') {
       for (const [k, c] of Object.entries(x)) {
         const p = prefix ? `${prefix}.${k}` : k;

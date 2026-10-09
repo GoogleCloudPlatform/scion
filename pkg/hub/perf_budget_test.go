@@ -452,10 +452,11 @@ type perfBudgetWebSchema struct {
 // perfBudgetWebSchemaEndpoint is one request's status and the sorted,
 // de-duplicated field paths of its JSON body, each with the JSON types of
 // its values: object keys joined with ".", array elements as "[]" (so
-// every agent in a list contributes to "agents[].<field>"), then ":" and
-// the "|"-joined sorted types seen there (array, boolean, null, number,
-// object, string), e.g. "agents[].generation:number". A non-JSON body
-// has no fields.
+// every agent in a list contributes to "agents[].<field>", and scalar
+// elements are recorded at "<path>[]", e.g. "permissions[]:string"),
+// then ":" and the "|"-joined sorted types seen there (array, boolean,
+// null, number, object, string), e.g. "agents[].generation:number". A
+// non-JSON body has no fields.
 type perfBudgetWebSchemaEndpoint struct {
 	Status int      `json:"status"`
 	Fields []string `json:"fields"`
@@ -500,8 +501,18 @@ func perfBudgetFieldPaths(v any) []string {
 				walk(c, p)
 			}
 		case []any:
+			p := prefix + "[]"
 			for _, c := range x {
-				walk(c, prefix+"[]")
+				switch c.(type) {
+				case map[string]any, []any:
+				default:
+					// A scalar element: record its type at "<path>[]".
+					if types[p] == nil {
+						types[p] = map[string]bool{}
+					}
+					types[p][perfBudgetJSONType(c)] = true
+				}
+				walk(c, p)
 			}
 		}
 	}

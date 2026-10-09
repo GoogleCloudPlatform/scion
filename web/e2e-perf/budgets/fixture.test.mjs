@@ -47,7 +47,12 @@ test('the generated fixture is deterministic', () => {
 
 test('fieldPaths joins keys, collapses arrays, records leaf types and sorts byte-wise', () => {
   assert.deepEqual(
-    fieldPaths({ b: [{ x: 1 }, { x: 'one', y: [[1]] }], a: null, Z: { k: 'v', t: true } }),
+    fieldPaths({
+      b: [{ x: 1 }, { x: 'one', y: [[1]] }],
+      a: null,
+      Z: { k: 'v', t: true },
+      s: ['a', 2, null],
+    }),
     [
       'Z.k:string',
       'Z.t:boolean',
@@ -56,6 +61,13 @@ test('fieldPaths joins keys, collapses arrays, records leaf types and sorts byte
       'b:array',
       'b[].x:number|string',
       'b[].y:array',
+      'b[].y[][]:number',
+      's:array',
+      's[]:null|number|string',
     ]
   );
+});
+
+test('fieldPaths refuses undefined, which the wire would drop', () => {
+  assert.throws(() => fieldPaths({ a: undefined }), /undefined/);
 });

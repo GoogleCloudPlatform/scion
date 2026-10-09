@@ -153,6 +153,7 @@ async function measureLoad(browser: Browser, v: ViewBudget, slow = false): Promi
     await page.addInitScript((fixedMs) => {
       const RealDate = Date;
       const offset = fixedMs - RealDate.now();
+      // Must be called with new: plain Date() (a string) would throw; web/src has no such calls.
       class PinnedDate extends RealDate {
         constructor(...args: unknown[]) {
           if (args.length === 0) super(RealDate.now() + offset);
@@ -225,6 +226,16 @@ async function measureLoad(browser: Browser, v: ViewBudget, slow = false): Promi
         })
         .toBe(0);
     }
+    // Mounted either way (with no placeholder, a slowed load had already
+    // revealed it), so a renamed placeholder class cannot silently skip
+    // this step. Eager mounting below the fold is guarded by the
+    // project-files-tabs e2e suite, not by this gate.
+    await expect
+      .poll(() => countDeep(page, 'scion-file-browser'), {
+        timeout: 30_000,
+        message: `${v.view}: Files section not mounted (placeholder class renamed?)`,
+      })
+      .toBeGreaterThanOrEqual(1);
     const reads = [await countDeep(page, '*')];
     for (let i = 0; i < 40; i++) {
       const n = reads.length;
