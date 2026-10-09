@@ -78,7 +78,7 @@ func TestChatV2_A2511_R1_UserUser_AgentUUIDAsPeer_NoPhantomRow(t *testing.T) {
 	require.NoError(t, err)
 
 	code, parts := sendChatV2AndSnapshot(t, srv, s, key)
-	require.Equal(t, http.StatusForbidden, code, "authorizeDMPeer refuses a peer that is not a user")
+	require.Equal(t, http.StatusNotFound, code, "authorizeDMPeer refuses a peer that is not a user, answered as a missing thread")
 	assert.Empty(t, parts, "no participant rows may be written when the peer slot names an agent, not a user")
 
 	// Also confirm agent Z gains no listing from this: it must not appear in
@@ -98,7 +98,7 @@ func TestChatV2_A2511_R1_UserUser_GhostUUIDAsPeer_NoPhantomRow(t *testing.T) {
 	require.NoError(t, err)
 
 	code, parts := sendChatV2AndSnapshot(t, srv, s, key)
-	require.Equal(t, http.StatusForbidden, code)
+	require.Equal(t, http.StatusNotFound, code)
 	assert.Empty(t, parts, "no participant rows may be written when the peer slot resolves to nothing")
 }
 
@@ -112,7 +112,7 @@ func TestChatV2_A2511_R1_AgentUser_GhostAgentAsPeer_NoPhantomRow(t *testing.T) {
 	key := "dm:agent:" + tid("a2511-ghost-agent") + ":user:" + DevUserID
 
 	code, parts := sendChatV2AndSnapshot(t, srv, s, key)
-	require.Equal(t, http.StatusForbidden, code)
+	require.Equal(t, http.StatusNotFound, code)
 	assert.Empty(t, parts, "no participant rows may be written when the peer slot names a nonexistent agent")
 }
 
@@ -134,7 +134,7 @@ func TestChatV2_A2511_R1_AgentUser_UserUUIDInAgentSlot_NoPhantomRow(t *testing.T
 	require.NoError(t, s.CreateUser(ctx, u))
 	key := "dm:agent:" + u.ID + ":user:" + DevUserID
 	code, parts := sendChatV2AndSnapshot(t, srv, s, key)
-	require.Equal(t, http.StatusForbidden, code)
+	require.Equal(t, http.StatusNotFound, code)
 	assert.Empty(t, parts)
 }
 

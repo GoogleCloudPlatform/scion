@@ -98,16 +98,19 @@ type HealthAttentionSubject struct {
 //   - degraded when dispatch has stuck messages or stuck broker dispatches;
 //   - degraded when a managed integration reports unhealthy;
 //   - degraded when at least agentErrorDegradedRatio of the considered
-//     agents are in error or crashed.
+//     agents are in error or crashed;
+//   - degraded when the service account assignment check cannot run
+//     (ServiceAccountCheck is set).
 //
 // A section that could not be read (agents or dispatch null, broker list
 // not reported) adds a warning item and does not change the status.
 // Stalled agents are never counted. Offline agents, and error or crashed
 // agents below the ratio, add warning items only.
 //
-// Order: critical hub checks, other hub checks, then broker, integration
-// and dispatch warnings, then the agent error ratio item, then agent items
-// (errored, crashed, offline).
+// Order: critical hub checks, other hub checks, the service account
+// assignment check item, then broker, integration and dispatch warnings,
+// then the agent error ratio item, then agent items (errored, crashed,
+// offline).
 func deriveHealthSummaryStatus(resp *HealthSummaryResponse) (string, []HealthAttentionItem) {
 	status := HealthStatusHealthy
 	if resp.Hub.Status != "" {
@@ -117,6 +120,17 @@ func deriveHealthSummaryStatus(resp *HealthSummaryResponse) (string, []HealthAtt
 	items := []HealthAttentionItem{}
 
 	items = append(items, hubCheckAttention(resp.Hub)...)
+
+	// Service account assignment check. A hub-level condition, so it is a
+	// hub_check item about this hub instance.
+	if resp.ServiceAccountCheck != nil {
+		degrade()
+		items = append(items, HealthAttentionItem{
+			Severity: HealthAttentionWarning, Kind: HealthAttentionHubCheck,
+			Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: resp.Hub.InstanceID},
+			Message: "Service account assignment check cannot run",
+		})
+	}
 
 	// Runtime brokers.
 	if resp.Brokers.NotReported {

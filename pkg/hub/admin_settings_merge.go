@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"iter"
 	"reflect"
 	"strings"
 
@@ -266,10 +267,11 @@ func mergeSettingsStruct(existing map[string]interface{}, t reflect.Type, sent [
 }
 
 // structFieldByJSONName returns the field of struct type t whose JSON name
-// is name. Like encoding/json, it prefers an exact match and otherwise
-// accepts a case-insensitive one, so a key that decoded into the request
-// is also found here (the strict unknown-key check folds case the same
-// way).
+// is name, with the matchJSONKey rule: an exact match wins, otherwise the
+// first case-insensitive match in field order is used, so a key that
+// decoded into the request is also found here (the strict unknown-key
+// check folds case the same way). Only the direct exported fields of t
+// are candidates; a field tagged "-" (including "-,") is not one.
 func structFieldByJSONName(t reflect.Type, name string) (reflect.StructField, bool) {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
@@ -277,28 +279,30 @@ func structFieldByJSONName(t reflect.Type, name string) (reflect.StructField, bo
 	if t.Kind() != reflect.Struct {
 		return reflect.StructField{}, false
 	}
-	var folded reflect.StructField
-	foundFolded := false
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		if !f.IsExported() {
-			continue
-		}
-		jn := strings.Split(f.Tag.Get("json"), ",")[0]
-		if jn == "-" {
-			continue
-		}
-		if jn == "" {
-			jn = f.Name
-		}
-		if jn == name {
-			return f, true
-		}
-		if !foundFolded && strings.EqualFold(jn, name) {
-			folded, foundFolded = f, true
+	return matchJSONKey(structJSONNames(t), name)
+}
+
+// structJSONNames yields the JSON name and field of each direct exported
+// field of struct type t, in field order, for structFieldByJSONName.
+func structJSONNames(t reflect.Type) iter.Seq2[string, reflect.StructField] {
+	return func(yield func(string, reflect.StructField) bool) {
+		for i := 0; i < t.NumField(); i++ {
+			f := t.Field(i)
+			if !f.IsExported() {
+				continue
+			}
+			jn := strings.Split(f.Tag.Get("json"), ",")[0]
+			if jn == "-" {
+				continue
+			}
+			if jn == "" {
+				jn = f.Name
+			}
+			if !yield(jn, f) {
+				return
+			}
 		}
 	}
-	return folded, foundFolded
 }
 
 // yamlFieldName returns the key yaml.v3 uses for f.

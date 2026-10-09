@@ -3311,6 +3311,19 @@ type QuotaStore interface {
 	// ListActiveReservations returns active (non-released) reservations for a limit and scope.
 	ListActiveReservations(ctx context.Context, limitDefinitionID, scopeType, scopeID string) ([]*UsageReservation, error)
 
+	// ListActiveReservationsByScopeType returns active (non-released)
+	// reservations for a limit across every scope ID of scopeType, in one
+	// query, ordered by created_at ascending (the same order
+	// ListActiveReservations uses within a single scope). Callers that need
+	// one scope's rows filter on UsageReservation.ScopeID (ptone/scion#2314).
+	ListActiveReservationsByScopeType(ctx context.Context, limitDefinitionID, scopeType string) ([]*UsageReservation, error)
+
+	// CountActiveReservationsByScope returns the number of active
+	// (non-released) reservations for a limit and scopeType, grouped by scope
+	// ID, in one query. Scope IDs with no active reservation are absent from
+	// the map (ptone/scion#2314).
+	CountActiveReservationsByScope(ctx context.Context, limitDefinitionID, scopeType string) (map[string]int64, error)
+
 	// HasActiveReservation reports whether resourceID already holds a
 	// non-released reservation for the given limit, regardless of scope.
 	// Used to make re-reservation idempotent (ptone/scion#1963): a caller

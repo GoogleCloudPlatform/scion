@@ -45,38 +45,6 @@ import (
 
 const joinTestDevToken = "scion_dev_join_token_cli_test_0123456789abcdef"
 
-// isolateJoinEnv clears the environment the join and mint commands read, so
-// values exported by the surrounding container do not leak in.
-func isolateJoinEnv(t *testing.T) {
-	t.Helper()
-	for _, k := range []string{
-		envBrokerJoinToken, envBrokerID, "SCION_HUB_ENDPOINT", "SCION_HUB_URL",
-		"SCION_AUTH_TOKEN", "SCION_HUB_TOKEN", "SCION_DEV_TOKEN", "SCION_DEV_TOKEN_FILE",
-		"SCION_TRANSPORT_MODE", "SCION_TRANSPORT_AUDIENCE",
-	} {
-		t.Setenv(k, "")
-	}
-	savedProjectPath, savedGlobal, savedHubEndpoint := projectPath, globalMode, hubEndpoint
-	savedBrokerID, savedHubName := brokerJoinBrokerID, brokerHubName
-	savedTokenFile, savedForce := brokerJoinTokenFile, brokerJoinForce
-	savedTTL, savedJSON := hubBrokersJoinTokenTTL, hubBrokersJoinTokenJSON
-	t.Cleanup(func() {
-		projectPath, globalMode, hubEndpoint = savedProjectPath, savedGlobal, savedHubEndpoint
-		brokerJoinBrokerID, brokerHubName = savedBrokerID, savedHubName
-		brokerJoinTokenFile, brokerJoinForce = savedTokenFile, savedForce
-		brokerJoinCmd.SetIn(nil)
-		hubBrokersJoinTokenTTL, hubBrokersJoinTokenJSON = savedTTL, savedJSON
-	})
-	// cobra sets a context when the command is executed; these tests call
-	// the run functions directly.
-	brokerJoinCmd.SetContext(context.Background())
-	hubBrokersJoinTokenCreateCmd.SetContext(context.Background())
-	globalMode, hubEndpoint = false, ""
-	brokerJoinBrokerID, brokerHubName = "", ""
-	brokerJoinTokenFile, brokerJoinForce = "", false
-	hubBrokersJoinTokenTTL, hubBrokersJoinTokenJSON = 0, false
-}
-
 // recordingHub is a fake hub that records each request and answers
 // POST /api/v1/brokers and POST /api/v1/brokers/join.
 type recordingHub struct {
