@@ -226,6 +226,11 @@ func (a *Aggregator) Finalize(inputTokens, outputTokens, cachedTokens, reasoning
 	a.open = false
 	a.implicit = false
 
+	// The fallback depends on startedAt. A persisted open state with a zero
+	// StartedAt would make the session-end hook and the shutdown backstop
+	// compute different IDs (each substitutes its own endedAt above). That
+	// cannot report twice (the state lock and tombstone allow one report),
+	// and it is unreachable: resetLocked always sets startedAt.
 	sessionID := a.sessionID
 	if sessionID == "" {
 		sessionID = FallbackSessionID(a.agentID, startedAt)

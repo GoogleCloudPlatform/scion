@@ -148,8 +148,8 @@ func (s *FileSessionState) Update(agg *telemetry.Aggregator, event *hooks.Event,
 // closedSessionOwnsEvent reports whether event belongs to the session that a
 // tombstone closed. A session-start always begins a new session. Any other
 // event belongs to the closed session unless it carries a different session
-// ID; an event without an ID belongs to it even when its ID is a fallback
-// (telemetry.FallbackSessionID). Tombstones do not survive a restart (init
+// ID. An event without an ID belongs to it, including when the tombstone's
+// ID is a fallback (telemetry.FallbackSessionID). Tombstones do not survive a restart (init
 // clears them before the harness starts), so a resumed session that reuses
 // the ID is counted again.
 func closedSessionOwnsEvent(closedID string, event *hooks.Event) bool {
