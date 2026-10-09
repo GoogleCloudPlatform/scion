@@ -19,3 +19,15 @@ export function requestUrl(input: RequestInfo | URL): string {
   if (typeof input === 'string') return input;
   return input instanceof URL ? input.href : input.url;
 }
+
+/**
+ * The text of a fetch mock's request body. Matches `String(body)` for the
+ * body kinds the app sends (strings and URLSearchParams) and for a missing
+ * body; any other kind is not expected in these tests and throws.
+ */
+export function requestBodyText(body: BodyInit | null | undefined): string {
+  if (typeof body === 'string') return body;
+  if (body === null || body === undefined) return String(body);
+  if (body instanceof URLSearchParams) return body.toString();
+  throw new TypeError('expected a string request body');
+}

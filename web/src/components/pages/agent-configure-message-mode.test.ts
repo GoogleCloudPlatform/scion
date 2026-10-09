@@ -30,6 +30,7 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 vi.mock('../../client/navigation.js', () => ({ navigateTo: vi.fn() }));
 
 import { navigateTo } from '../../client/navigation.js';
+import { requestBodyText, requestUrl } from '../../client/__fixtures__/request-url.js';
 
 interface Call {
   method: string;
@@ -60,12 +61,14 @@ function stubFetch(agent: Record<string, unknown>): void {
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = typeof input === 'string' ? input : input.toString();
+      const url = requestUrl(input);
       const method = init?.method ?? 'GET';
       calls.push({
         method,
         url,
-        body: init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined,
+        body: init?.body
+          ? (JSON.parse(requestBodyText(init.body)) as Record<string, unknown>)
+          : undefined,
       });
       if (url.includes('/settings/public')) return Promise.resolve(json({}));
       if (method === 'PATCH') return Promise.resolve(json({ agent }));

@@ -27,6 +27,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 const { showToast } = vi.hoisted(() => ({ showToast: vi.fn() }));
 vi.mock('../../utils/toast.js', () => ({ showToast }));
@@ -59,7 +60,7 @@ function stubFetch(createdPhase?: string, start: StartResponse = { ok: true, sta
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = typeof input === 'string' ? input : input.toString();
+      const url = requestUrl(input);
       const method = init?.method ?? 'GET';
       if (method === 'POST') {
         requests.push({

@@ -24,6 +24,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 interface ProfileFixture {
   name: string;
@@ -83,7 +84,7 @@ function stubFetch(): void {
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = typeof input === 'string' ? input : input.toString();
+      const url = requestUrl(input);
       if (url.includes('/api/v1/agents') && init?.method === 'POST') {
         if (typeof init.body === 'string') {
           bodies.push(JSON.parse(init.body) as Record<string, unknown>);

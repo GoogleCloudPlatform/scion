@@ -33,6 +33,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 interface BrokerProfileFixture {
   name: string;
@@ -80,7 +81,7 @@ function stubFetchTrackingCalls(): { calls: string[] } {
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = typeof input === 'string' ? input : input.toString();
+      const url = requestUrl(input);
       calls.push(`${init?.method ?? 'GET'} ${url}`);
       return Promise.resolve({
         ok: true,
@@ -103,7 +104,7 @@ function stubFetchCapturingCreateRequests(): { bodies: Array<Record<string, unkn
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = typeof input === 'string' ? input : input.toString();
+      const url = requestUrl(input);
       if (url.includes('/api/v1/agents') && init?.method === 'POST') {
         if (typeof init.body === 'string') {
           bodies.push(JSON.parse(init.body) as Record<string, unknown>);
@@ -146,7 +147,7 @@ function stubFetchForKubernetesProjectDefault(
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = typeof input === 'string' ? input : input.toString();
+      const url = requestUrl(input);
       if (url.includes('/api/v1/agents') && init?.method === 'POST') {
         if (typeof init.body === 'string') {
           bodies.push(JSON.parse(init.body) as Record<string, unknown>);
@@ -1070,7 +1071,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === 'string' ? input : input.toString();
+        const url = requestUrl(input);
         if (url.includes('/api/v1/agents') && init?.method === 'POST') {
           if (typeof init.body === 'string') {
             bodies.push(JSON.parse(init.body) as Record<string, unknown>);
@@ -1179,7 +1180,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo | URL) => {
-        const url = typeof input === 'string' ? input : input.toString();
+        const url = requestUrl(input);
         if (url.includes('/api/v1/projects/p2/settings')) {
           return Promise.resolve({ ok: true, status: 200, json: async () => ({}) } as Response);
         }
@@ -1227,7 +1228,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-        const url = typeof input === 'string' ? input : input.toString();
+        const url = requestUrl(input);
         if (url.includes('/api/v1/agents') && init?.method === 'POST') {
           if (typeof init.body === 'string') {
             bodies.push(JSON.parse(init.body) as Record<string, unknown>);
@@ -1695,7 +1696,7 @@ describe('Create Agent: GCP identity defaults do not race', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo | URL) => {
-        const url = typeof input === 'string' ? input : input.toString();
+        const url = requestUrl(input);
         for (const [fragment, route] of Object.entries(routes)) {
           if (url.includes(fragment)) {
             if (route && typeof route === 'object' && 'promise' in route) {
@@ -1803,7 +1804,7 @@ describe('Create Agent: GCP identity defaults do not race', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo | URL) => {
-        const url = typeof input === 'string' ? input : input.toString();
+        const url = requestUrl(input);
         const ok = (body: unknown): Promise<Response> =>
           Promise.resolve({ ok: true, status: 200, json: async () => body } as Response);
         if (url.includes('/projects/pA/gcp-service-accounts')) {

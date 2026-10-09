@@ -25,6 +25,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let ScionTokenList: any;
@@ -153,7 +154,7 @@ function baseFetch(
   }> = {}
 ) {
   return (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-    const url = typeof input === 'string' ? input : input.toString();
+    const url = requestUrl(input);
     const method = init?.method ?? 'GET';
     if (url.startsWith('/api/v1/auth/scopes')) {
       return Promise.resolve(

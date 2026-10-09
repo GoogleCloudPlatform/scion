@@ -27,6 +27,7 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
 import { browserTimeZone, setPreferredTimeZone } from '../../utils/time.js';
+import { requestBodyText, requestUrl } from '../../client/__fixtures__/request-url.js';
 
 interface PatchCall {
   body: Record<string, unknown>;
@@ -58,7 +59,7 @@ function stubFetch(agent: Record<string, unknown>): void {
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = typeof input === 'string' ? input : input.toString();
+      const url = requestUrl(input);
       if (url.includes('/settings/public')) {
         return Promise.resolve({
           ok: true,
@@ -67,7 +68,9 @@ function stubFetch(agent: Record<string, unknown>): void {
         } as Response);
       }
       if (init?.method === 'PATCH') {
-        patchCalls.push({ body: JSON.parse(String(init.body)) as Record<string, unknown> });
+        patchCalls.push({
+          body: JSON.parse(requestBodyText(init.body)) as Record<string, unknown>,
+        });
         const reply = patchReplies.shift() ?? { body: {} };
         const status = reply.status ?? 200;
         return (reply.gate ?? Promise.resolve()).then(

@@ -4963,7 +4963,7 @@ describe('project-detail — agent list window', () => {
         requests: [],
       });
       stubFetch((input: string | URL | Request, init?: RequestInit) => {
-        const url = typeof input === 'string' ? input : input.toString();
+        const url = requestUrl(input);
         if (init?.method && init.method !== 'GET') {
           mutations.push(`${init.method} ${url}`);
           return Promise.resolve(onMutate(url));
@@ -5241,7 +5241,7 @@ describe('project-detail — agent list window', () => {
         const deletes: string[] = [];
         stubFetch((input: string | URL | Request, init?: RequestInit) => {
           if (init?.method === 'DELETE') {
-            deletes.push(String(input));
+            deletes.push(requestUrl(input));
             return Promise.resolve(jsonResponse({ deletion: deletingView() }, 202));
           }
           return inner(input, init);

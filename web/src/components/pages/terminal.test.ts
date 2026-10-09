@@ -31,6 +31,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -70,7 +71,7 @@ interface MockOptions {
  */
 function makeFetchMock(calls: Call[], opts: MockOptions = {}) {
   return async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
-    const href = String(url);
+    const href = requestUrl(url);
     const method = init?.method ?? 'GET';
     let parsed: any = undefined;
     if (init?.body && typeof init.body === 'string') {

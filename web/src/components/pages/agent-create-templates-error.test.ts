@@ -23,6 +23,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 let templatesStatus = 500;
 
@@ -31,7 +32,7 @@ beforeEach(() => {
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL) => {
-      const url = typeof input === 'string' ? input : input.toString();
+      const url = requestUrl(input);
       if (url.includes('/api/v1/templates')) {
         return Promise.resolve(
           new Response(JSON.stringify({ templates: [{ id: 't1', name: 't1' }] }), {

@@ -38,6 +38,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let ScionGCPServiceAccountList: any;
@@ -57,7 +58,7 @@ function makeFetch(
   listBody: Record<string, unknown>
 ): (url: string | URL | Request, init?: RequestInit) => Promise<Response> {
   return (url, init) => {
-    calls.push({ url: String(url), method: init?.method ?? 'GET' });
+    calls.push({ url: requestUrl(url), method: init?.method ?? 'GET' });
     return Promise.resolve(
       new Response(JSON.stringify(listBody), {
         status: 200,

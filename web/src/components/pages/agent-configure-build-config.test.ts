@@ -36,6 +36,7 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 // Shared golden fixture (ptone/scion#2493 R2-2): the Go hub test
 // (pkg/hub/applied_config_explicit_edits_test.go) loads the SAME file as its
@@ -130,7 +131,7 @@ function stubFetchWithLoadedAgent(appliedConfig?: Record<string, unknown>): void
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL) => {
-      const url = typeof input === 'string' ? input : input.toString();
+      const url = requestUrl(input);
       if (url.includes('/settings/public')) {
         return Promise.resolve({
           ok: true,
