@@ -139,8 +139,9 @@ jobs:
 
       # Uploaded whenever the suite ran, so retry traces of flaky tests (which
       # pass the job) are kept too. Paths match each config's HTML report
-      # folder (playwright-report/<suite>) and outputDir (test-results/<suite>,
-      # or e2e/<suite>/test-results where a config sets none).
+      # folder (playwright-report/<suite>) and outputDir (test-results/<suite>).
+      # Configs that set no outputDir (agent-store-count, terminal-entrypoints,
+      # terminal-workspace) use Playwright's default, web/test-results.
       - name: Upload traces and report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -149,6 +150,5 @@ jobs:
           path: |
             web/playwright-report/
             web/test-results/
-            web/e2e/*/test-results/
           if-no-files-found: ignore
           retention-days: 14
