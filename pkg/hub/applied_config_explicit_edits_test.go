@@ -375,9 +375,9 @@ func TestApplyAgentUpdate_NilCreateInputsStaysNil(t *testing.T) {
 
 // TestApplyAgentUpdate_HarnessConfigNeverReachesCreateInputs is test-plan
 // item 8: a PATCH that changes harness_config must never let that reach
-// CreateInputs -- a harness switch is not a validated PATCH operation today,
-// and reincarnate must not pick one up unvalidated against whatever harness
-// is current at that later point.
+// CreateInputs. harness_config is fixed at creation (ptone/scion#3972), so
+// such a PATCH is now refused with 400 and nothing reaches the live config
+// or CreateInputs.
 func TestApplyAgentUpdate_HarnessConfigNeverReachesCreateInputs(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
@@ -385,6 +385,7 @@ func TestApplyAgentUpdate_HarnessConfigNeverReachesCreateInputs(t *testing.T) {
 
 	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
 		a.Phase = string(state.PhaseCreated)
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{HarnessConfig: "original-harness-config"}
 		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{
 			HarnessConfig: "original-harness-config",
 			InlineConfig:  &api.ScionConfig{HarnessConfig: "original-harness-config"},
@@ -394,10 +395,13 @@ func TestApplyAgentUpdate_HarnessConfigNeverReachesCreateInputs(t *testing.T) {
 	rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
 		"harness_config": "new-harness-config",
 	})
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "config.harness_config")
 
 	updated, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
+	assert.Equal(t, "original-harness-config", updated.AppliedConfig.InlineConfig.HarnessConfig,
+		"a refused harness_config must not reach the live inline config")
 	ci := updated.AppliedConfig.CreateInputs
 	require.NotNil(t, ci)
 	assert.Equal(t, "original-harness-config", ci.HarnessConfig,

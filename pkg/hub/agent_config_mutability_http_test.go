@@ -20,8 +20,11 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -322,4 +325,233 @@ func TestGetAgent_EditabilityLocksRoleForCallerWhoCannotDelegate(t *testing.T) {
 	grantAgentDelegationAtProject(t, s, user.ID, project.ID)
 	ed = getAgentEditability(t, srv, identity, agent.ID)
 	assert.Equal(t, EditReincarnate, ed.Fields["agentRole"].Disposition)
+}
+
+// patchErrorBody decodes an error response's code and details.fields.
+func patchErrorBody(t *testing.T, body string) (string, map[string]interface{}) {
+	t.Helper()
+	var resp struct {
+		Error struct {
+			Code    string                 `json:"code"`
+			Details map[string]interface{} `json:"details"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &resp))
+	fields, _ := resp.Error.Details["fields"].(map[string]interface{})
+	return resp.Error.Code, fields
+}
+
+// TestAgentConfigPatch_FixedKeysRefused: a PATCH that would change a key
+// the table fixes is refused with 400, naming every such key, and writes
+// nothing, in every phase a config PATCH is otherwise accepted. Echoing a
+// fixed key's stored value, or sending it empty where none is stored, is
+// ignored.
+func TestAgentConfigPatch_FixedKeysRefused(t *testing.T) {
+	for _, phase := range []state.Phase{state.PhaseCreated, state.PhaseStopped, state.PhaseError, state.PhaseSuspended} {
+		t.Run(string(phase), func(t *testing.T) {
+			disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			agent := newEditTestAgent(t, s, project, broker, phase)
+
+			_, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{
+				"name": "Renamed",
+				"config": map[string]interface{}{
+					"max_turns": 8, "branch": "other", "harness": "generic", "harness_config": "hc",
+					"default_harness_config": "d", "clone_depth": "full", "config_dir": "/x", "detached": false,
+					"hub": map[string]string{"endpoint": "https://x"}, "explicit_workspace": true,
+					"empty_per_agent_workspace": true,
+				},
+			})
+			require.Equal(t, http.StatusBadRequest, code, body)
+			errCode, fields := patchErrorBody(t, body)
+			assert.Equal(t, "validation_error", errCode)
+			assert.Equal(t, []string{
+				"config.branch", "config.clone_depth", "config.config_dir", "config.default_harness_config",
+				"config.detached", "config.empty_per_agent_workspace", "config.explicit_workspace",
+				"config.harness", "config.harness_config", "config.hub",
+			}, sortedFieldKeys(fields))
+			assert.Equal(t, editReasonFixedPatch, fields["config.harness"])
+
+			after, err := s.GetAgent(context.Background(), agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, agent.StateVersion, after.StateVersion, "nothing is written")
+			assert.Equal(t, agent.Name, after.Name)
+			assert.Equal(t, 3, after.AppliedConfig.InlineConfig.MaxTurns)
+			assert.Equal(t, "claude", after.AppliedConfig.InlineConfig.Harness)
+			assert.Empty(t, after.AppliedConfig.InlineConfig.Branch)
+
+			// The stored harness, and empty values where nothing is stored,
+			// are not changes.
+			resp, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{
+				"config": map[string]interface{}{"max_turns": 8, "harness": "claude", "branch": "", "config_dir": "", "detached": nil},
+			})
+			require.Equal(t, http.StatusOK, code, body)
+			assert.Contains(t, resp.Disposition.Applied, "config.max_turns")
+			assert.Equal(t, 8, resp.AppliedConfig.InlineConfig.MaxTurns)
+		})
+	}
+}
+
+// TestAgentConfigPatch_TaskRefusedWhileSuspended: a resume does not send
+// the task again, so a suspended agent's task is locked and a PATCH of it
+// is refused with 409, nothing written.
+func TestAgentConfigPatch_TaskRefusedWhileSuspended(t *testing.T) {
+	disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newEditTestAgent(t, s, project, broker, state.PhaseSuspended)
+
+	_, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{
+		"config": map[string]interface{}{"task": "next task", "max_turns": 8},
+	})
+	require.Equal(t, http.StatusConflict, code, body)
+	_, fields := patchErrorBody(t, body)
+	assert.Equal(t, map[string]interface{}{"config.task": editReasonNotOnResume}, fields)
+	after, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, agent.StateVersion, after.StateVersion)
+	assert.Empty(t, after.AppliedConfig.Task)
+
+	// A stopped agent's next fresh start sends the task, so it is accepted.
+	stopped := newEditTestAgent(t, s, project, broker, state.PhaseStopped)
+	_, code, body = patchAgentBody(t, srv, stopped.ID, map[string]interface{}{
+		"config": map[string]interface{}{"task": "next task"},
+	})
+	require.Equal(t, http.StatusOK, code, body)
+}
+
+// TestAgentPatch_DeletedAgentRefused: a soft-deleted agent cannot be
+// edited at all, metadata included.
+func TestAgentPatch_DeletedAgentRefused(t *testing.T) {
+	disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseStopped)
+		a.DeletedAt = time.Now()
+	})
+
+	_, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{
+		"name":   "Renamed",
+		"labels": map[string]string{"a": "b"},
+	})
+	require.Equal(t, http.StatusConflict, code, body)
+	_, fields := patchErrorBody(t, body)
+	assert.Equal(t, map[string]interface{}{"name": editReasonDeleted, "labels": editReasonDeleted}, fields)
+	after, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, agent.Name, after.Name)
+}
+
+// TestAgentConfigPatch_RemovedEnvKeysWarning: a config.env that drops keys
+// of the agent's inline env warns that the removal applies only at the next
+// reincarnation, naming the keys; auto-expose keys, which an absent key
+// leaves untouched, are not named.
+func TestAgentConfigPatch_RemovedEnvKeysWarning(t *testing.T) {
+	disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseStopped)
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{Harness: "claude", Env: map[string]string{
+			"KEEP": "1", "DROP_B": "2", "DROP_A": "3", "SCION_AUTO_EXPOSE_PORTS": "true",
+		}}
+	})
+
+	resp, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{
+		"config": map[string]interface{}{"env": map[string]string{"KEEP": "1", "NEW": "4"}},
+	})
+	require.Equal(t, http.StatusOK, code, body)
+	require.Len(t, resp.Warnings, 1, "%v", resp.Warnings)
+	assert.Contains(t, resp.Warnings[0], "config.env: removed DROP_A, DROP_B now; the agent keeps those variables until the next reincarnation")
+
+	resp, code, body = patchAgentBody(t, srv, agent.ID, map[string]interface{}{
+		"config": map[string]interface{}{"max_turns": 2},
+	})
+	require.Equal(t, http.StatusOK, code, body)
+	assert.Empty(t, resp.Warnings, "no env in the request, no env warning")
+}
+
+// TestAgentEditAccess_RoleNeedsCeiling: changing the role needs, besides
+// CanDelegate, a credential whose scopes cover the role, as a reincarnation
+// does. A requester whose own role does not cover the agent's role sees the
+// role locked; the same requester with a covering role does not.
+func TestAgentEditAccess_RoleNeedsCeiling(t *testing.T) {
+	srv, s, project, broker := setupReincarnateTestServer(t, newReincarnateTestDispatcher())
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseStopped)
+	})
+	srv.authzService.mintDevAuthOverride = false
+	caps := &Capabilities{Actions: []string{string(ActionRead), string(ActionUpdate), string(ActionLifecycle)}}
+
+	for _, tc := range []struct {
+		role string
+		want bool
+	}{
+		{role: string(AgentRoleNone), want: false},
+		{role: string(AgentRoleBaseline), want: true},
+	} {
+		t.Run(tc.role, func(t *testing.T) {
+			requester := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+				a.ID = tid("requester-" + t.Name())
+				a.Slug = "requester-" + tidSlugSafe(t.Name())
+				a.AppliedConfig.AgentRole = tc.role
+			})
+			ident := delegatingRequesterFor(requester.ID, project.ID)
+			ctx := contextWithIdentity(context.Background(), ident)
+			access := srv.agentEditAccessFor(ctx, ident, agent, caps)
+			assert.True(t, access.CanUpdate)
+			assert.Equal(t, tc.want, access.CanChangeRole)
+		})
+	}
+}
+
+// TestAgentEditGoldens: the request bodies the web Edit page sends
+// (web/src/components/pages/agent-edit.test.ts checks it still emits
+// exactly these files) are accepted by the PATCH handler and store what
+// they say.
+func TestAgentEditGoldens(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		applied  []string
+		check    func(t *testing.T, inline *api.ScionConfig)
+		warnings int
+	}{
+		{name: "untouched", applied: []string{}, check: func(t *testing.T, inline *api.ScionConfig) {
+			assert.Equal(t, "old-model", inline.Model)
+			assert.Equal(t, 3, inline.MaxTurns)
+		}},
+		{name: "clear", applied: []string{"config.max_duration", "config.max_turns", "config.model"}, warnings: 1, check: func(t *testing.T, inline *api.ScionConfig) {
+			assert.Empty(t, inline.Model)
+			assert.Zero(t, inline.MaxTurns)
+			assert.Empty(t, inline.MaxDuration)
+		}},
+		{name: "unlimited", applied: []string{"config.max_duration", "config.max_turns"}, warnings: 1, check: func(t *testing.T, inline *api.ScionConfig) {
+			assert.Zero(t, inline.MaxTurns)
+			assert.Equal(t, "0", inline.MaxDuration)
+			assert.Zero(t, inline.ParseMaxDuration(), `"0" is no duration limit`)
+		}},
+		{name: "typed", applied: []string{"config.max_duration", "config.max_turns", "config.model"}, check: func(t *testing.T, inline *api.ScionConfig) {
+			assert.Equal(t, "claude-sonnet", inline.Model)
+			assert.Equal(t, 40, inline.MaxTurns)
+			assert.Equal(t, "2h", inline.MaxDuration)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join("testdata", "agent-edit-"+tc.name+"-body.json"))
+			require.NoError(t, err)
+			var body map[string]interface{}
+			require.NoError(t, json.Unmarshal(raw, &body))
+
+			disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			agent := newEditTestAgent(t, s, project, broker, state.PhaseStopped)
+			body["stateVersion"] = agent.StateVersion
+
+			resp, code, respBody := patchAgentBody(t, srv, agent.ID, body)
+			require.Equal(t, http.StatusOK, code, respBody)
+			assert.Equal(t, tc.applied, resp.Disposition.Applied)
+			assert.Len(t, resp.Warnings, tc.warnings, "%v", resp.Warnings)
+			after, err := s.GetAgent(context.Background(), agent.ID)
+			require.NoError(t, err)
+			tc.check(t, after.AppliedConfig.InlineConfig)
+		})
+	}
 }

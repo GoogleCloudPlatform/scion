@@ -3951,8 +3951,10 @@ func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, a
 
 // agentEditAccessFor computes what the caller may edit on agent, for the
 // GET response's editability: caps are the caller's capabilities on the
-// agent. Changing the role needs what a role-changing reincarnation needs:
-// agent.lifecycle and authority to delegate the agent's current role.
+// agent. Changing the role needs what a role-changing reincarnation needs
+// (reincarnateAuthorityFor): agent.lifecycle, authority to delegate the
+// role (CanDelegate) and a credential whose scopes cover it. It is probed
+// with the agent's current role.
 func (s *Server) agentEditAccessFor(ctx context.Context, identity Identity, agent *store.Agent, caps *Capabilities) agentEditAccess {
 	if identity == nil || caps == nil {
 		return agentEditAccess{}
@@ -3969,7 +3971,18 @@ func (s *Server) agentEditAccessFor(ctx context.Context, identity Identity, agen
 		ScopeType: store.RoleScopeProject,
 		ScopeID:   agent.ProjectID,
 	})
-	access.CanChangeRole = decision.Allowed
+	if !decision.Allowed {
+		return access
+	}
+	// The ceiling half of reincarnateAuthorityFor, check-only: the caller's
+	// credential scopes must cover the role. A lookup error counts as not
+	// allowed. The role actually requested is checked again, with the
+	// rest of the authority rules, when the reincarnation is asked for.
+	ceiling, _, err := s.authzService.sourceEffectCeiling(ctx, identity)
+	if err != nil {
+		return access
+	}
+	_, _, access.CanChangeRole = childRoleWithinCeiling(ceiling, role, true)
 	return access
 }
 
@@ -4070,6 +4083,14 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		return
 	}
 
+	// Refuse, before anything is written, a request that names a key the
+	// mutability table locks for this agent (agent_config_mutability.go):
+	// the same rule GET editability reports.
+	if ref := lockedPatchKeys(agent, presentAgentPatchKeys(updates.Name, updates.Labels, updates.Annotations, updates.TaskSummary, updates.GCPIdentity != nil, updates.ExplicitTimezone != nil), rawFields, updates.Config); ref != nil {
+		writePatchRefusal(w, agent, ref, updates.Config != nil)
+		return
+	}
+
 	if updates.ExplicitTimezone != nil {
 		if !agent.DeletedAt.IsZero() {
 			Conflict(w, "explicitTimezone cannot be updated for deleted agents")
@@ -4125,7 +4146,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			return
 		}
 		if !configPatchPhase(agent.Phase) {
-			Conflict(w, "Config can only be updated for agents in 'created', 'stopped', 'error' or 'suspended' phase")
+			Conflict(w, configPatchPhaseMessage)
 			return
 		}
 		resolvedHarness, harnessCaps := s.resolveAgentHarnessCapabilities(ctx, agent)
@@ -4220,27 +4241,16 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		// render volumes, skills, MCP servers, services, command args or
 		// kubernetes, and sends telemetry and env only when touched, so a
 		// wholesale replace would wipe them on every Save and Start.
-		merged := mergePresentInlineFields(old.InlineConfig, cfg, presentConfigKeys)
-		// A config PATCH can change the harness (harness or harness_config)
-		// while keys it does not mention are kept, so re-check the merged
-		// config against the harness it now resolves to. When the harness is
-		// unchanged, the check above already covered every key the request
+		// The harness cannot change here: harness and harness_config are
+		// fixed keys, refused above when they would change. So the check
+		// against the agent's harness above covers every key the request
 		// sends, and kept keys are left as they were.
-		probeConfig := *agent.AppliedConfig
-		probeConfig.InlineConfig = merged
-		probe := *agent
-		probe.AppliedConfig = &probeConfig
-		if mergedHarness, mergedCaps := s.resolveAgentHarnessCapabilities(ctx, &probe); mergedHarness != resolvedHarness {
-			if issues := validateConfigAgainstHarnessCapabilities(merged, mergedCaps); len(issues) > 0 {
-				ValidationError(w, "Config contains unsupported fields for harness "+mergedHarness, map[string]interface{}{
-					"harness": mergedHarness,
-					"fields":  issues,
-				})
-				return
-			}
-		}
+		merged := mergePresentInlineFields(old.InlineConfig, cfg, presentConfigKeys)
 		agent.AppliedConfig.InlineConfig = merged
 		warnings = append(warnings, reincarnateOnlyEditWarnings(rawFields)...)
+		if w := removedEnvKeysWarning(old.InlineConfig, cfg, presentConfigKeys["env"], canViewAgentEnv(ctx, s, agent)); w != "" {
+			warnings = append(warnings, w)
+		}
 	}
 
 	// Apply GCP identity update (only allowed for agents in 'created' phase)
@@ -4410,6 +4420,78 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		Warnings:         warnings,
 		Disposition:      agentUpdateAppliedKeys(updates.Name, updates.Labels, updates.Annotations, updates.TaskSummary, updates.Config != nil, rawFields, updates.GCPIdentity != nil, updates.ExplicitTimezone != nil),
 	})
+}
+
+// presentAgentPatchKeys lists the top-level wire keys an agent PATCH names,
+// by the same presence rules applyAgentUpdate writes them with.
+func presentAgentPatchKeys(name string, lbls, annotations map[string]string, taskSummary string, hasGCPIdentity, hasTimezone bool) []string {
+	var keys []string
+	if name != "" {
+		keys = append(keys, "name")
+	}
+	if lbls != nil {
+		keys = append(keys, "labels")
+	}
+	if annotations != nil {
+		keys = append(keys, "annotations")
+	}
+	if taskSummary != "" {
+		keys = append(keys, "taskSummary")
+	}
+	if hasGCPIdentity {
+		keys = append(keys, "gcp_identity")
+	}
+	if hasTimezone {
+		keys = append(keys, "explicitTimezone")
+	}
+	return keys
+}
+
+// writePatchRefusal answers an agent PATCH that names locked keys: 409 when
+// a lock comes from the agent's phase or its deletion, 400 when every
+// refused key is fixed. details.fields maps each refused key to the reason.
+func writePatchRefusal(w http.ResponseWriter, agent *store.Agent, ref *patchRefusal, hasConfig bool) {
+	details := map[string]interface{}{"fields": ref.Fields}
+	switch {
+	case !agent.DeletedAt.IsZero():
+		writeError(w, http.StatusConflict, ErrCodeConflict, "The agent is deleted and cannot be edited", details)
+	case ref.Conflict && hasConfig && !configPatchPhase(agent.Phase):
+		writeError(w, http.StatusConflict, ErrCodeConflict, configPatchPhaseMessage, details)
+	case ref.Conflict:
+		writeError(w, http.StatusConflict, ErrCodeConflict, "Some fields cannot be edited in the agent's current phase", details)
+	default:
+		ValidationError(w, "Some fields are set when the agent is created and cannot be changed", details)
+	}
+}
+
+// configPatchPhaseMessage is the 409 for a config PATCH of an agent that
+// has, or is creating or removing, a container.
+const configPatchPhaseMessage = "Config can only be updated for agents in 'created', 'stopped', 'error' or 'suspended' phase"
+
+// removedEnvKeysWarning returns a PATCH warning naming the env keys a
+// present config.env drops from the agent's inline env: the broker's
+// start-time merge keeps env keys it already has, so a removal applies only
+// at the next reincarnation. An empty env is reported by
+// reincarnateOnlyEditWarnings instead. Auto-expose keys, which the PATCH
+// treats as untouched when absent, and TZ, which config.env never sets, are
+// not counted. canViewEnv gates it: a caller who cannot see the agent's env
+// must not learn its key names.
+func removedEnvKeysWarning(old, req *api.ScionConfig, envPresent, canViewEnv bool) string {
+	if !envPresent || !canViewEnv || old == nil || req == nil || len(req.Env) == 0 {
+		return ""
+	}
+	var removed []string
+	for k := range old.Env {
+		if _, kept := req.Env[k]; kept || autoExposeEnvKeys[k] || k == agentTZEnvKey {
+			continue
+		}
+		removed = append(removed, k)
+	}
+	if len(removed) == 0 {
+		return ""
+	}
+	sort.Strings(removed)
+	return "config.env: removed " + strings.Join(removed, ", ") + " now; the agent keeps those variables until the next reincarnation (a plain start does not remove an env variable)"
 }
 
 // configPatchPhase reports whether an agent PATCH may write config in

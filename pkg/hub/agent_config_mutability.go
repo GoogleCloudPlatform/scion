@@ -17,10 +17,12 @@ package hub
 import (
 	"bytes"
 	"encoding/json"
+	"reflect"
 	"sort"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -122,6 +124,7 @@ const (
 	editReasonNoUpdate       = "You do not have permission to edit this agent."
 	editReasonCannotDelegate = "You cannot delegate this agent's role, so you cannot change it."
 	editReasonUnknownPhase   = "The agent's phase does not allow edits."
+	editReasonFixedPatch     = "Set when the agent was created; recreate the agent, or change the template and reincarnate it."
 )
 
 // agentEditFields is the mutability table: every field the agent form shows
@@ -252,6 +255,17 @@ func editDisposition(f agentEditField, phase string, deleted bool) (EditDisposit
 	return EditLocked, editReasonUnknownPhase
 }
 
+// phaseHasLiveOrTransitionalContainer reports whether an agent in phase has
+// a live container or one being created or removed: the phases whose config
+// edits would be held rather than written.
+func phaseHasLiveOrTransitionalContainer(phase string) bool {
+	switch state.Phase(phase) {
+	case state.PhaseProvisioning, state.PhaseCloning, state.PhaseStarting, state.PhaseRunning, state.PhaseStopping:
+		return true
+	}
+	return false
+}
+
 // AgentEditability is the per-agent, per-caller result of the mutability
 // table, returned as "editability" on GET /api/v1/agents/{id}.
 type AgentEditability struct {
@@ -300,9 +314,16 @@ func buildAgentEditability(agent *store.Agent, access agentEditAccess) *AgentEdi
 		Phase:  agent.Phase,
 		Fields: make(map[string]FieldEditState, len(agentEditFields)),
 	}
+	live := phaseHasLiveOrTransitionalContainer(agent.Phase)
 	for _, f := range agentEditFields {
 		d, reason := editDisposition(f, agent.Phase, deleted)
-		if d == EditHeld {
+		// Held edits do not exist yet, and a config PATCH of an agent
+		// with a live or transitional container is refused, so every
+		// config key of such an agent is locked, provision-rendered keys
+		// included: the reincarnate endpoint takes no config patch for
+		// them either. The role and GCP identity keep "reincarnate"; they
+		// change through the reincarnate endpoint.
+		if d == EditHeld || (live && d != EditLocked && strings.HasPrefix(f.Key, agentConfigKeyPrefix)) {
 			d, reason = EditLocked, editReasonRunning
 		}
 		if d != EditLocked {
@@ -328,6 +349,122 @@ func buildAgentEditability(agent *store.Agent, access agentEditAccess) *AgentEdi
 		out.Fields[f.Key] = st
 	}
 	return out
+}
+
+// patchRefusal is the answer to an agent PATCH that names keys the table
+// locks for the agent: the request is refused whole and nothing is written.
+type patchRefusal struct {
+	// Conflict is true when a lock comes from the agent's phase or its
+	// deletion (409); false when every refused key is fixed (400).
+	Conflict bool
+	// Fields maps each refused wire key to the reason.
+	Fields map[string]string
+}
+
+// lockedPatchKeys checks the keys an agent PATCH names against the
+// mutability table, with the same rule GET editability reports: top are the
+// present top-level wire keys, rawConfig the request's raw config object and
+// cfg its decoded form. A fixed (TX) config key is refused only when its
+// value would change: an echo of the stored value, or an empty value where
+// none is stored, is ignored. Config keys the table does not know are
+// ignored, as encoding/json ignores them. It returns nil when nothing is
+// locked.
+func lockedPatchKeys(agent *store.Agent, top []string, rawConfig map[string]json.RawMessage, cfg *api.ScionConfig) *patchRefusal {
+	ed := buildAgentEditability(agent, agentEditAccess{CanUpdate: true, CanChangeRole: true})
+	var stored *api.ScionConfig
+	if agent.AppliedConfig != nil {
+		stored = agent.AppliedConfig.InlineConfig
+	}
+	ref := &patchRefusal{Fields: map[string]string{}}
+	check := func(f agentEditField) {
+		st, ok := ed.Fields[f.Key]
+		if !ok || st.Disposition != EditLocked {
+			return
+		}
+		if f.Tier == EditTierImmutable && agent.DeletedAt.IsZero() {
+			k, isConfig := strings.CutPrefix(f.Key, agentConfigKeyPrefix)
+			// A fixed top-level key (template, profile, ...) has no PATCH
+			// surface, so nothing decodes or writes it.
+			if !isConfig || configFieldUnchanged(k, cfg, stored) {
+				return
+			}
+			ref.Fields[f.Key] = editReasonFixedPatch
+			return
+		}
+		ref.Conflict = true
+		ref.Fields[f.Key] = st.Reason
+	}
+	for _, k := range top {
+		if f, ok := agentEditFieldByKey[k]; ok {
+			check(f)
+		}
+	}
+	for _, f := range configPatchKeys(rawConfig) {
+		check(f)
+	}
+	if len(ref.Fields) == 0 {
+		return nil
+	}
+	return ref
+}
+
+// scionConfigFieldByJSONKey indexes api.ScionConfig's fields by json key.
+var scionConfigFieldByJSONKey = func() map[string]int {
+	m := map[string]int{}
+	typ := reflect.TypeOf(api.ScionConfig{})
+	for i := 0; i < typ.NumField(); i++ {
+		if k := scionConfigJSONKey(typ.Field(i)); k != "" {
+			m[k] = i
+		}
+	}
+	return m
+}()
+
+// scionConfigJSONKey is the json key encoding/json uses for an
+// api.ScionConfig field, or "" for a field it does not encode.
+func scionConfigJSONKey(f reflect.StructField) string {
+	if !f.IsExported() {
+		return ""
+	}
+	tag := strings.Split(f.Tag.Get("json"), ",")[0]
+	if tag == "-" {
+		return ""
+	}
+	if tag == "" {
+		return f.Name
+	}
+	return tag
+}
+
+// configFieldUnchanged reports whether the config key key has the same
+// value in req as in stored, counting an empty value and an unset one as
+// the same.
+func configFieldUnchanged(key string, req, stored *api.ScionConfig) bool {
+	i, ok := scionConfigFieldByJSONKey[key]
+	if !ok {
+		return true
+	}
+	var a, b reflect.Value
+	if req != nil {
+		a = reflect.ValueOf(*req).Field(i)
+	}
+	if stored != nil {
+		b = reflect.ValueOf(*stored).Field(i)
+	}
+	aZero := !a.IsValid() || a.IsZero() || (isNilable(a) && a.Len() == 0)
+	bZero := !b.IsValid() || b.IsZero() || (isNilable(b) && b.Len() == 0)
+	if aZero || bZero {
+		return aZero == bZero
+	}
+	return reflect.DeepEqual(a.Interface(), b.Interface())
+}
+
+func isNilable(v reflect.Value) bool {
+	switch v.Kind() {
+	case reflect.Map, reflect.Slice:
+		return true
+	}
+	return false
 }
 
 // AgentUpdateDisposition reports, in the agent PATCH response, what the hub

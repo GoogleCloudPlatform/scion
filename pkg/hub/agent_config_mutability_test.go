@@ -140,18 +140,41 @@ var wantDispositionException = map[string]map[state.Phase]EditDisposition{
 }
 
 // TestAgentEditTable_CoversEveryScionConfigKey fails when an api.ScionConfig
-// key has no row in the mutability table.
+// key has no row in the mutability table, and when a config row names a key
+// api.ScionConfig no longer has. An exported field with no json tag is
+// encoded under its Go name, so it needs a row under that name.
 func TestAgentEditTable_CoversEveryScionConfigKey(t *testing.T) {
 	typ := reflect.TypeOf(api.ScionConfig{})
+	jsonKeys := map[string]bool{}
 	for i := 0; i < typ.NumField(); i++ {
-		tag := strings.Split(typ.Field(i).Tag.Get("json"), ",")[0]
-		if tag == "" || tag == "-" {
+		key := scionConfigJSONKey(typ.Field(i))
+		if key == "" {
 			continue
 		}
-		key := agentConfigKeyPrefix + tag
-		_, ok := agentEditFieldByKey[key]
-		assert.True(t, ok, "api.ScionConfig key %q has no row in agentEditFields (agent_config_mutability.go); give it a tier", key)
+		jsonKeys[key] = true
+		_, ok := agentEditFieldByKey[agentConfigKeyPrefix+key]
+		assert.True(t, ok, "api.ScionConfig key %q has no row in agentEditFields (agent_config_mutability.go); give it a tier", agentConfigKeyPrefix+key)
 	}
+	for _, f := range agentEditFields {
+		if k, ok := strings.CutPrefix(f.Key, agentConfigKeyPrefix); ok {
+			assert.True(t, jsonKeys[k], "table row %q names no api.ScionConfig key", f.Key)
+		}
+	}
+}
+
+func TestScionConfigJSONKey(t *testing.T) {
+	typ := reflect.TypeOf(struct {
+		Tagged   string `json:"tagged_key,omitempty"`
+		Untagged string
+		Skipped  string `json:"-"`
+		Info     string `json:"-" yaml:"-"`
+		hidden   string //nolint:unused // exercises the unexported case
+	}{})
+	got := []string{}
+	for i := 0; i < typ.NumField(); i++ {
+		got = append(got, scionConfigJSONKey(typ.Field(i)))
+	}
+	assert.Equal(t, []string{"tagged_key", "Untagged", "", "", ""}, got)
 }
 
 // TestAgentEditTable_EveryKeyEveryPhase enumerates every key and every
@@ -209,8 +232,15 @@ func TestBuildAgentEditability_HeldIsNotAvailableYet(t *testing.T) {
 		}
 		assert.Equal(t, EditNow, ed.Fields["explicitTimezone"].Disposition, "timezone in %s", phase)
 		assert.Equal(t, EditImmediate, ed.Fields["name"].Disposition, "name in %s", phase)
-		assert.Equal(t, EditReincarnate, ed.Fields["config.system_prompt"].Disposition, "system prompt in %s", phase)
+		// Provision-rendered keys too: no endpoint takes them for a running
+		// agent yet.
+		assert.Equal(t, EditLocked, ed.Fields["config.system_prompt"].Disposition, "system prompt in %s", phase)
+		assert.Equal(t, editReasonRunning, ed.Fields["config.system_prompt"].Reason)
+		assert.Equal(t, EditLocked, ed.Fields["config.harness"].Disposition, "a fixed key in %s", phase)
+		assert.Equal(t, editReasonImmutable, ed.Fields["config.harness"].Reason, "a fixed key keeps its own reason")
+		// The role and GCP identity change through the reincarnate endpoint.
 		assert.Equal(t, EditReincarnate, ed.Fields["agentRole"].Disposition, "role in %s", phase)
+		assert.Equal(t, EditReincarnate, ed.Fields["gcp_identity"].Disposition, "GCP identity in %s", phase)
 	}
 }
 
@@ -320,4 +350,77 @@ func TestAgentUpdateAppliedKeys(t *testing.T) {
 	empty := agentUpdateAppliedKeys("", nil, nil, "", false, nil, false, false)
 	require.NotNil(t, empty.Applied, "applied is an empty list, not null")
 	assert.Empty(t, empty.Applied)
+}
+
+func TestConfigFieldUnchanged(t *testing.T) {
+	tl := 1
+	stored := &api.ScionConfig{Harness: "claude", Volumes: []api.VolumeMount{{Source: "/a", Target: "/b"}}, ThinkingLevel: &tl}
+	assert.True(t, configFieldUnchanged("harness", &api.ScionConfig{Harness: "claude"}, stored))
+	assert.False(t, configFieldUnchanged("harness", &api.ScionConfig{Harness: "generic"}, stored))
+	assert.False(t, configFieldUnchanged("harness", &api.ScionConfig{}, stored), "clearing a stored value is a change")
+	assert.True(t, configFieldUnchanged("branch", &api.ScionConfig{}, stored), "empty where nothing is stored is no change")
+	assert.True(t, configFieldUnchanged("branch", &api.ScionConfig{}, nil))
+	assert.False(t, configFieldUnchanged("branch", &api.ScionConfig{Branch: "x"}, nil))
+	assert.True(t, configFieldUnchanged("volumes", &api.ScionConfig{Volumes: []api.VolumeMount{{Source: "/a", Target: "/b"}}}, stored))
+	assert.True(t, configFieldUnchanged("command_args", &api.ScionConfig{CommandArgs: []string{}}, stored), "an empty list where none is stored")
+	assert.True(t, configFieldUnchanged("not_a_key", &api.ScionConfig{}, stored))
+}
+
+func TestLockedPatchKeys(t *testing.T) {
+	raw := func(body string) map[string]json.RawMessage { return rawConfigOf(t, body) }
+	decode := func(body string) *api.ScionConfig {
+		var c api.ScionConfig
+		require.NoError(t, json.Unmarshal([]byte(body), &c))
+		return &c
+	}
+	stopped := &store.Agent{Phase: string(state.PhaseStopped), AppliedConfig: &store.AgentAppliedConfig{
+		InlineConfig: &api.ScionConfig{Harness: "claude", Branch: "main"},
+	}}
+
+	t.Run("container and provision keys are writable with no container", func(t *testing.T) {
+		body := `{"model":"m","max_turns":0,"system_prompt":"p","bogus_key":1}`
+		assert.Nil(t, lockedPatchKeys(stopped, []string{"name", "labels", "explicitTimezone"}, raw(body), decode(body)))
+	})
+
+	t.Run("a fixed key that would change is refused as fixed", func(t *testing.T) {
+		body := `{"harness":"generic","branch":"main","clone_depth":"full","model":"m"}`
+		ref := lockedPatchKeys(stopped, nil, raw(body), decode(body))
+		require.NotNil(t, ref)
+		assert.False(t, ref.Conflict)
+		assert.Equal(t, map[string]string{
+			"config.harness":     editReasonFixedPatch,
+			"config.clone_depth": editReasonFixedPatch,
+		}, ref.Fields, "branch echoes the stored value and is ignored")
+	})
+
+	t.Run("an empty fixed key where none is stored is ignored", func(t *testing.T) {
+		body := `{"config_dir":"","detached":null,"hub":null,"user":""}`
+		assert.Nil(t, lockedPatchKeys(stopped, nil, raw(body), decode(body)))
+	})
+
+	t.Run("the task of a suspended agent is a phase conflict", func(t *testing.T) {
+		suspended := &store.Agent{Phase: string(state.PhaseSuspended)}
+		body := `{"task":"next","max_turns":3}`
+		ref := lockedPatchKeys(suspended, nil, raw(body), decode(body))
+		require.NotNil(t, ref)
+		assert.True(t, ref.Conflict)
+		assert.Equal(t, map[string]string{"config.task": editReasonNotOnResume}, ref.Fields)
+	})
+
+	t.Run("config of a running agent is a phase conflict", func(t *testing.T) {
+		running := &store.Agent{Phase: string(state.PhaseRunning)}
+		body := `{"max_turns":3}`
+		ref := lockedPatchKeys(running, []string{"name"}, raw(body), decode(body))
+		require.NotNil(t, ref)
+		assert.True(t, ref.Conflict)
+		assert.Equal(t, map[string]string{"config.max_turns": editReasonRunning}, ref.Fields, "a rename stays allowed")
+	})
+
+	t.Run("anything on a deleted agent is a conflict", func(t *testing.T) {
+		deleted := &store.Agent{Phase: string(state.PhaseStopped), DeletedAt: time.Now()}
+		ref := lockedPatchKeys(deleted, []string{"name", "annotations"}, nil, nil)
+		require.NotNil(t, ref)
+		assert.True(t, ref.Conflict)
+		assert.Equal(t, map[string]string{"name": editReasonDeleted, "annotations": editReasonDeleted}, ref.Fields)
+	})
 }
