@@ -149,6 +149,16 @@ func TestReimportSourceURL_OmittedOverrideUsesStoredURL(t *testing.T) {
 	assert.Equal(t, hc.ID, after.ID)
 	assert.Equal(t, stored, after.SourceURL)
 	assert.NotEqual(t, hc.ContentHash, after.ContentHash, "reimport from the stored URL must replace the files")
+
+	// A whitespace-only override is treated as omitted, matching finalize:
+	// reimport uses the stored URL again.
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/reimport",
+		map[string]interface{}{"sourceUrl": "  \t "})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	again := globalClaude(t, s)
+	require.NotNil(t, again)
+	assert.Equal(t, hc.ID, again.ID)
+	assert.Equal(t, stored, again.SourceURL, "a whitespace-only override must leave the stored source URL in use")
 }
 
 func TestReimportSourceURL_OmittedOverrideWithoutStoredURL(t *testing.T) {
@@ -182,6 +192,8 @@ func TestValidReimportSourceURL(t *testing.T) {
 		"github.com/myorg/scion-harnesses/\nhermes",
 		"githubxcom/myorg/repo",
 		"example.com/github.com/myorg/repo",
+		"github.com.example.com/myorg/repo",
+		"github.com@example.com/myorg/repo",
 	}, invalidRecordedSourceURLs...)
 	for _, bad := range rejected {
 		assert.False(t, validReimportSourceURL(bad), "%q must be refused", bad)
