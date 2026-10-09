@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 	"github.com/spf13/cobra"
 )
 
@@ -64,7 +65,11 @@ func applyLogLevelFlag(cmd *cobra.Command) {
 		return
 	}
 	if err := log.ApplyLogLevel(logLevel); err != nil {
-		log.Warn("--log-level: %v; using info", err)
+		// Report the spec that was actually applied (an invalid component
+		// entry is dropped, an invalid default falls back to info), and
+		// bypass level filtering so "error,x=loud" is still reported.
+		applied, _ := loglevel.Current()
+		log.WarnAlways("--log-level: %v; using %q", err, applied.String())
 	}
 }
 

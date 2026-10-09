@@ -190,13 +190,15 @@ SCION_LOG_LEVEL=info,hub.auth=debug,hubsync=debug scion server start --enable-hu
 
 Component names are the server's [subsystem names](#available-subsystems), such as `hub.auth` or `broker.heartbeat`, and the tags on the CLI's `[DEBUG]` lines, such as `hubsync`. Matching is hierarchical on dots: `hub=debug` applies to `hub.auth` and `hub.maintenance.pull-images` unless a longer key such as `hub.auth=info` is also given. Component keys that match nothing are accepted and have no effect.
 
+Server output written through Go's standard `log` package (for example lines that start with `Warning:`) is logged at INFO level, so `SCION_LOG_LEVEL=warn` or `error` hides it.
+
 If a level name is not valid, Scion prints a warning to stderr once and falls back: an invalid default level becomes `info`, and an invalid component entry is ignored.
 
 Where each part of Scion applies the level:
 
 | Part | Where it applies |
 | :--- | :--- |
-| Hub and Broker server log | The default level and per-component levels filter the main server log on every sink: stdout, OpenTelemetry and direct Cloud Logging. The HTTP request log and the message log are an access and audit trail: `SCION_LOG_LEVEL` can only make them more verbose (`debug`), so `warn` or `error` never drops their INFO entries. |
+| Hub and Broker server log | The default level and per-component levels filter the main server log on every sink: stdout, OpenTelemetry and direct Cloud Logging. OpenTelemetry export used to receive DEBUG records even at the default level; it now follows `SCION_LOG_LEVEL` like the other sinks. The HTTP request log and the message log are an access and audit trail: `SCION_LOG_LEVEL` can only make them more verbose (`debug`), so `warn` or `error` never drops their INFO entries. |
 | CLI | `[DEBUG]` lines on stderr appear when the default level is `debug`. Tagged lines such as `[hubsync]` also appear when that tag's component level is `debug`. |
 | `sciontool` (`agent.log`) | The default level filters DEBUG, INFO and WARN lines. A tag on a line, or a `subsystem` attribute on a structured log record, is matched against the per-component levels. |
 

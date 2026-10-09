@@ -129,3 +129,47 @@ func TestIsHookInvocation(t *testing.T) {
 		assert.Equal(t, tt.want, isHookInvocation(tt.args), "args=%v", tt.args)
 	}
 }
+
+func TestLogLevelFlagInvalidIsReported(t *testing.T) {
+	tests := []struct {
+		name       string
+		flag       string
+		quiet      bool
+		wantStderr string // empty: nothing on stderr
+	}{
+		{name: "invalid default falls back to info", flag: "loud", wantStderr: `using "info"`},
+		{name: "invalid component keeps the default", flag: "warn,hooks=loud", wantStderr: `using "warn"`},
+		{name: "reported even at error level", flag: "error,hooks=loud", wantStderr: `using "error"`},
+		{name: "quiet suppresses stderr", flag: "error,hooks=loud", quiet: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetRootCmdState(t)
+			resetLogLevelState(t)
+			log.SetQuiet(tt.quiet)
+			t.Cleanup(func() { log.SetQuiet(false) })
+			rootCmd.SetOut(io.Discard)
+			rootCmd.SetErr(io.Discard)
+			rootCmd.SetArgs([]string{"--log-level", tt.flag, "version"})
+
+			r, w, err := os.Pipe()
+			require.NoError(t, err)
+			oldStderr := os.Stderr
+			os.Stderr = w
+			execErr := rootCmd.Execute()
+			_ = w.Close()
+			os.Stderr = oldStderr
+			var buf bytes.Buffer
+			_, _ = buf.ReadFrom(r)
+			require.NoError(t, execErr)
+
+			if tt.wantStderr == "" {
+				assert.NotContains(t, buf.String(), "--log-level")
+				return
+			}
+			assert.Contains(t, buf.String(), "--log-level: ")
+			assert.Contains(t, buf.String(), "invalid log level")
+			assert.Contains(t, buf.String(), tt.wantStderr)
+		})
+	}
+}

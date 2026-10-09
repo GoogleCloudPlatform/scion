@@ -245,6 +245,14 @@ func Warn(format string, args ...interface{}) {
 	logf("WARN", "", format, args...)
 }
 
+// WarnAlways logs a warning that bypasses level filtering. It is for
+// problems with the logging configuration itself (such as an invalid
+// --log-level), which must be reported even when the level is raised to
+// error. Quiet mode still suppresses the stderr copy.
+func WarnAlways(format string, args ...interface{}) {
+	write("WARN", "", format, args...)
+}
+
 // Debug logs a debug message if the debug level is enabled
 // (SCION_LOG_LEVEL=debug, --log-level debug, or the deprecated SCION_DEBUG).
 func Debug(format string, args ...interface{}) {

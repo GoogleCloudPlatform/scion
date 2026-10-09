@@ -193,3 +193,18 @@ func TestSlogSubsystemScanOnlyWithComponents(t *testing.T) {
 		}
 	})
 }
+
+func TestWarnAlwaysBypassesLevel(t *testing.T) {
+	resetUninitializedForTest(t)
+	t.Setenv(loglevel.EnvLogLevel, "error")
+	Init()
+	Warn("filtered-warn")
+	WarnAlways("config-warn")
+	out := readLog(t)
+	if strings.Contains(out, "filtered-warn") {
+		t.Error("Warn should be filtered at error level")
+	}
+	if !strings.Contains(out, "[WARN] config-warn") {
+		t.Errorf("WarnAlways should bypass the level filter, log:\n%s", out)
+	}
+}
