@@ -29,6 +29,9 @@ type DeletionPredicate struct {
 	// States, when non-empty, requires deletion_state to be one of these
 	// values. "" matches a row with no delete marker (including NULL).
 	States []string
+	// Codes, when non-empty, requires deletion_code to be one of these
+	// values. "" matches a row with no stored code.
+	Codes []string
 	// DeletedAtNull requires deleted_at IS NULL.
 	DeletedAtNull bool
 	// LeaseExpiredBefore, when set, requires deletion_lease_at to be set and

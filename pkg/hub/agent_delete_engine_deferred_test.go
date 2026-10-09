@@ -53,6 +53,9 @@ type engineHookStore struct {
 	// racing write would; claimMisses counts them.
 	missClaims  bool
 	claimMisses int
+	// onDeletionWrite, when set, observes every UpdateAgentDeletion
+	// predicate before the write runs.
+	onDeletionWrite func(pred store.DeletionPredicate)
 }
 
 var errInjectedDeletionWrite = errors.New("injected deletion write error")
@@ -63,6 +66,11 @@ func (h *engineHookStore) UpdateAgentDeletion(ctx context.Context, id string, pr
 		h.claimMisses++
 		h.mu.Unlock()
 		return 0, nil
+	}
+	if obs := h.onDeletionWrite; obs != nil {
+		h.mu.Unlock()
+		obs(pred)
+		h.mu.Lock()
 	}
 	match := h.failDeletionWrite
 	if match != nil && match(set) {
