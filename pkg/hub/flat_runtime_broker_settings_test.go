@@ -89,7 +89,7 @@ func flatSettingsHome(t *testing.T, content string) string {
 	return path
 }
 
-func putFileModeServerConfig(t *testing.T, body string) *httptest.ResponseRecorder {
+func putFlatFileModeServerConfig(t *testing.T, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	srv := &Server{}
 	rr := httptest.NewRecorder()
@@ -114,7 +114,7 @@ func TestServerConfigPut_FileModePreservesRuntimeBrokerInstances(t *testing.T) {
 	t.Run("absent key keeps the stored entry", func(t *testing.T) {
 		flatSettingsHome(t, flatInstanceSettingsYAML)
 		// The admin editor sends server.broker built from form fields only.
-		rr := putFileModeServerConfig(t, `{"server":{"broker":{"enabled":true,"port":9811}}}`)
+		rr := putFlatFileModeServerConfig(t, `{"server":{"broker":{"enabled":true,"port":9811}}}`)
 		if rr.Code != http.StatusOK {
 			t.Fatalf("PUT: %d %s", rr.Code, rr.Body.String())
 		}
@@ -124,7 +124,7 @@ func TestServerConfigPut_FileModePreservesRuntimeBrokerInstances(t *testing.T) {
 	})
 	t.Run("explicit list is validated and applied", func(t *testing.T) {
 		flatSettingsHome(t, flatInstanceSettingsYAML)
-		rr := putFileModeServerConfig(t, `{"server":{"broker":{"enabled":true,"instances":[{"key":"other","name":"other-docker","runtime_target":{"type":"docker"}}]}}}`)
+		rr := putFlatFileModeServerConfig(t, `{"server":{"broker":{"enabled":true,"instances":[{"key":"other","name":"other-docker","runtime_target":{"type":"docker"}}]}}}`)
 		if rr.Code != http.StatusOK {
 			t.Fatalf("PUT: %d %s", rr.Code, rr.Body.String())
 		}
@@ -135,7 +135,7 @@ func TestServerConfigPut_FileModePreservesRuntimeBrokerInstances(t *testing.T) {
 	})
 	t.Run("explicit empty list removes", func(t *testing.T) {
 		flatSettingsHome(t, flatInstanceSettingsYAML)
-		rr := putFileModeServerConfig(t, `{"server":{"broker":{"enabled":true,"instances":[]}}}`)
+		rr := putFlatFileModeServerConfig(t, `{"server":{"broker":{"enabled":true,"instances":[]}}}`)
 		if rr.Code != http.StatusOK {
 			t.Fatalf("PUT: %d %s", rr.Code, rr.Body.String())
 		}
@@ -145,7 +145,7 @@ func TestServerConfigPut_FileModePreservesRuntimeBrokerInstances(t *testing.T) {
 	})
 	t.Run("null server.broker keeps the stored entry", func(t *testing.T) {
 		flatSettingsHome(t, flatInstanceSettingsYAML)
-		rr := putFileModeServerConfig(t, `{"server":{"broker":null}}`)
+		rr := putFlatFileModeServerConfig(t, `{"server":{"broker":null}}`)
 		if rr.Code != http.StatusOK {
 			t.Fatalf("PUT: %d %s", rr.Code, rr.Body.String())
 		}
@@ -155,7 +155,7 @@ func TestServerConfigPut_FileModePreservesRuntimeBrokerInstances(t *testing.T) {
 	})
 	t.Run("null server keeps the stored entry", func(t *testing.T) {
 		flatSettingsHome(t, flatInstanceSettingsYAML)
-		rr := putFileModeServerConfig(t, `{"server":null}`)
+		rr := putFlatFileModeServerConfig(t, `{"server":null}`)
 		if rr.Code != http.StatusOK {
 			t.Fatalf("PUT: %d %s", rr.Code, rr.Body.String())
 		}
@@ -165,7 +165,7 @@ func TestServerConfigPut_FileModePreservesRuntimeBrokerInstances(t *testing.T) {
 	})
 	t.Run("explicit null instances removes", func(t *testing.T) {
 		flatSettingsHome(t, flatInstanceSettingsYAML)
-		rr := putFileModeServerConfig(t, `{"server":{"broker":{"enabled":true,"instances":null}}}`)
+		rr := putFlatFileModeServerConfig(t, `{"server":{"broker":{"enabled":true,"instances":null}}}`)
 		if rr.Code != http.StatusOK {
 			t.Fatalf("PUT: %d %s", rr.Code, rr.Body.String())
 		}
@@ -175,7 +175,7 @@ func TestServerConfigPut_FileModePreservesRuntimeBrokerInstances(t *testing.T) {
 	})
 	t.Run("unrelated non-broker key keeps the stored entry", func(t *testing.T) {
 		path := flatSettingsHome(t, flatInstanceSettingsYAML)
-		rr := putFileModeServerConfig(t, `{"default_template":"other-template"}`)
+		rr := putFlatFileModeServerConfig(t, `{"default_template":"other-template"}`)
 		if rr.Code != http.StatusOK {
 			t.Fatalf("PUT: %d %s", rr.Code, rr.Body.String())
 		}
@@ -193,7 +193,7 @@ func TestServerConfigPut_FileModePreservesRuntimeBrokerInstances(t *testing.T) {
 			`{"server":{"broker":{"instances":[{"key":"a","name":"x","runtime_target":{"type":"kubernetes"}}]}}}`,
 			`{"server":{"broker":{"instances":[{"key":"a","name":"x","profile":"p","runtime_target":{"type":"docker"}}]}}}`,
 		} {
-			rr := putFileModeServerConfig(t, body)
+			rr := putFlatFileModeServerConfig(t, body)
 			if rr.Code != http.StatusBadRequest {
 				t.Fatalf("want 400 for %s, got %d %s", body, rr.Code, rr.Body.String())
 			}
@@ -214,7 +214,7 @@ func TestServerConfigPut_FileModeInstancesAreKnownKeys(t *testing.T) {
 	const fullInstances = `"instances":[{"key":"other","name":"other-docker","runtime_target":{"type":"docker","display_name":"Other Docker"}}]`
 	t.Run("full-field instances entry is applied", func(t *testing.T) {
 		flatSettingsHome(t, flatInstanceSettingsYAML)
-		rr := putFileModeServerConfig(t, `{"server":{"broker":{"enabled":true,`+fullInstances+`}}}`)
+		rr := putFlatFileModeServerConfig(t, `{"server":{"broker":{"enabled":true,`+fullInstances+`}}}`)
 		if rr.Code != http.StatusOK {
 			t.Fatalf("PUT: want 200, got %d %s", rr.Code, rr.Body.String())
 		}
@@ -226,7 +226,7 @@ func TestServerConfigPut_FileModeInstancesAreKnownKeys(t *testing.T) {
 	t.Run("unknown non-instances key in the same body is still 422", func(t *testing.T) {
 		path := flatSettingsHome(t, flatInstanceSettingsYAML)
 		before, _ := os.ReadFile(path)
-		rr := putFileModeServerConfig(t, `{"not_a_setting":"x","server":{"broker":{"enabled":true,`+fullInstances+`}}}`)
+		rr := putFlatFileModeServerConfig(t, `{"not_a_setting":"x","server":{"broker":{"enabled":true,`+fullInstances+`}}}`)
 		if rr.Code != http.StatusUnprocessableEntity {
 			t.Fatalf("PUT: want 422, got %d %s", rr.Code, rr.Body.String())
 		}

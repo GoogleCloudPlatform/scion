@@ -300,20 +300,21 @@ func startExtrasWireKey(extras StartExtras, key string) string {
 	return v
 }
 
-// countingTokenGen counts agent credential mints.
+// countingTokenGen counts agent credential mints: a mint is a
+// SignAgentToken call (AuthorizeAgentToken only computes the grant and has
+// no side effects).
 type countingTokenGen struct {
 	inner AgentTokenGenerator
 	mints int
 }
 
-func (c *countingTokenGen) GenerateAgentToken(agentID, projectID string, ancestry []string, role AgentRole, scopes []AgentTokenScope) (string, error) {
-	c.mints++
-	return c.inner.GenerateAgentToken(agentID, projectID, ancestry, role, scopes)
+func (c *countingTokenGen) AuthorizeAgentToken(ctx context.Context, agent *store.Agent) (AgentTokenGrant, error) {
+	return c.inner.AuthorizeAgentToken(ctx, agent)
 }
 
-func (c *countingTokenGen) GenerateAgentTokenForAgent(ctx context.Context, agent *store.Agent) (string, error) {
+func (c *countingTokenGen) SignAgentToken(grant AgentTokenGrant, runID string) (string, *store.AgentCredential, error) {
 	c.mints++
-	return c.inner.GenerateAgentTokenForAgent(ctx, agent)
+	return c.inner.SignAgentToken(grant, runID)
 }
 
 // racingPinStore lands a competing first placement just before the handler's
@@ -1325,10 +1326,12 @@ func fireScheduledCreate(t *testing.T, srv *Server, s store.Store, projectID, ag
 	}
 	payload, err := json.Marshal(DispatchAgentEventPayload{AgentName: agentName, Task: "scheduled"})
 	require.NoError(t, err)
-	return srv.dispatchAgentEventHandler()(ctx, store.ScheduledEvent{
+	// The event carries the recorded authorization revision a session
+	// create by the dev user writes (a fire refuses an event without one).
+	return srv.dispatchAgentEventHandler()(ctx, withSessionRevision(store.ScheduledEvent{
 		ID: tid("sched-" + agentName + "-" + t.Name()), ProjectID: projectID, EventType: "dispatch_agent",
 		Payload: string(payload), CreatedBy: DevUserID,
-	})
+	}, DevUserID))
 }
 
 // flatOnlyProject creates a project whose only provider is the flat row, so

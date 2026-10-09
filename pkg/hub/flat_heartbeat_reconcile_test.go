@@ -210,7 +210,7 @@ func TestFlatHeartbeat_RunIDAndRecoverySemanticsPreserved(t *testing.T) {
 		_, err := f.s.SetRunIntent(ctx, a.ID, store.RunIntentRunning)
 		require.NoError(t, err)
 	}
-	_, err := f.s.SetAgentRunID(ctx, lost.ID, "run-flat-1")
+	_, err := f.s.SetAgentRunID(ctx, lost.ID, "run-flat-1", nil)
 	require.NoError(t, err)
 
 	hb := brokerHeartbeatRequest{
