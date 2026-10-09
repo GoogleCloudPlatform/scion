@@ -1305,7 +1305,7 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
     // that public API even though the current sole caller (chat.ts) never
     // actually passes it. The guard is kept as a real, exercised defense,
     // not dead code.
-    const el = await mountPalette({} as unknown as Record<'agents', GroupState>);
+    const el = await mountPalette({});
     expect(el.shadowRoot?.querySelectorAll('[role="group"]')).toHaveLength(0);
     expect(el.shadowRoot?.querySelectorAll('.palette-option')).toHaveLength(0);
   });

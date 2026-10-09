@@ -175,6 +175,8 @@ function stubTouchPrimary(isTouch: boolean): void {
 async function mountHeader(
   overrides: Partial<{ user: User | null; currentPath: string }> = {}
 ): Promise<ScionHeader> {
+  // Only checks whether matchMedia is already a mock; it is never called here.
+  // eslint-disable-next-line @typescript-eslint/unbound-method
   if (!vi.isMockFunction(window.matchMedia)) stubTouchPrimary(false);
   const el = document.createElement('scion-header');
   el.user = 'user' in overrides ? overrides.user! : TEST_USER;

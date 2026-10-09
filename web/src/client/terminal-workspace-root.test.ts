@@ -30,6 +30,12 @@ import { AgentStore } from './agent-store.js';
 import { FakeEventSource } from './__fixtures__/agent-store-harness.js';
 import { TOUCH_PRIMARY_QUERY } from '../utils/input-modality.js';
 
+/** The URL string a fetch mock was called with. */
+function requestUrl(input: RequestInfo | URL): string {
+  if (typeof input === 'string') return input;
+  return input instanceof URL ? input.href : input.url;
+}
+
 // Mock terminal-pane custom element before importing workspace root
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
@@ -761,7 +767,9 @@ describe('URL layout sync (#1715)', () => {
     replaceStateSpy.mockClear();
     root.layoutManager.setLayout('two-columns');
     // Subscriber triggers syncUrlFromLayout synchronously
-    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) => String(c[2] ?? ''));
+    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) =>
+      String((c[2] as string | URL | null | undefined) ?? '')
+    );
     const layoutCall = urls.find((u: string) => u.includes('lv=1'));
     expect(layoutCall).toBeTruthy();
     expect(layoutCall).toContain('lp=two-columns');
@@ -773,7 +781,9 @@ describe('URL layout sync (#1715)', () => {
     replaceStateSpy.mockClear();
     root.layoutManager.setLayout('single');
     // In single mode, URL should not contain layout params
-    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) => String(c[2] ?? ''));
+    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) =>
+      String((c[2] as string | URL | null | undefined) ?? '')
+    );
     const lastUrl = urls[urls.length - 1];
     if (lastUrl) {
       expect(lastUrl).not.toContain('lv=1');
@@ -786,7 +796,9 @@ describe('URL layout sync (#1715)', () => {
     root.setSuppressUrlSync(true);
     root.layoutManager.setLayout('four');
     // Subscriber was called but syncUrlFromLayout should have been a no-op
-    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) => String(c[2] ?? ''));
+    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) =>
+      String((c[2] as string | URL | null | undefined) ?? '')
+    );
     const layoutCall = urls.find((u: string) => u.includes('lp=four'));
     expect(layoutCall).toBeUndefined();
     root.setSuppressUrlSync(false);
@@ -797,7 +809,9 @@ describe('URL layout sync (#1715)', () => {
     root.layoutManager.setLayout('two-columns');
     await flush();
     // Should have been called at least once with two-columns
-    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) => String(c[2] ?? ''));
+    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) =>
+      String((c[2] as string | URL | null | undefined) ?? '')
+    );
     expect(urls.length).toBeGreaterThan(0);
     const layoutCall = urls.find((u: string) => u.includes('lp=two-columns'));
     expect(layoutCall).toBeTruthy();
@@ -2321,8 +2335,9 @@ function agentCandidate(agentId: string, label = agentId): PaletteCandidate {
 
 /** Counts the palette's own agent-list fetches. */
 function agentListLoads(): number {
-  return vi.mocked(fetch).mock.calls.filter(([url]) => String(url).startsWith('/api/v1/agents?'))
-    .length;
+  return vi
+    .mocked(fetch)
+    .mock.calls.filter(([url]) => requestUrl(url).startsWith('/api/v1/agents?')).length;
 }
 
 describe('"Jump to agent" palette: palette and focus lifecycle', () => {
@@ -3114,14 +3129,14 @@ describe('"Jump to agent" palette: keyboard shortcut', () => {
     press({ key: 'k', metaKey: true });
     const palette = await expectOpened();
     const agentLoads = fetchMock.mock.calls.filter(([url]) =>
-      String(url).startsWith('/api/v1/agents?')
+      requestUrl(url).startsWith('/api/v1/agents?')
     ).length;
 
     expect(press({ key: 'k', ctrlKey: true })).toBe(false);
 
     expect(palette.open).toBe(false);
     expect(
-      fetchMock.mock.calls.filter(([url]) => String(url).startsWith('/api/v1/agents?')).length
+      fetchMock.mock.calls.filter(([url]) => requestUrl(url).startsWith('/api/v1/agents?')).length
     ).toBe(agentLoads);
   });
 

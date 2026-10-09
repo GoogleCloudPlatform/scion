@@ -3,6 +3,12 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import type { ScionTerminalPane } from './terminal-pane.js';
 import { TerminalSessionRegistry } from '../../client/terminal-sessions.js';
 
+/** The URL string a fetch mock was called with. */
+function requestUrl(input: RequestInfo | URL): string {
+  if (typeof input === 'string') return input;
+  return input instanceof URL ? input.href : input.url;
+}
+
 const showToast = vi.fn();
 vi.mock('../../utils/toast.js', () => ({ showToast }));
 
@@ -226,7 +232,7 @@ it('two panes share registry SSE and preserve metadata across transport notifica
   fetcher.mockImplementation((url) =>
     Promise.resolve(
       json({
-        id: String(url).includes(otherId) ? otherId : agentId,
+        id: requestUrl(url).includes(otherId) ? otherId : agentId,
         name: 'test',
         phase: 'running',
       })
