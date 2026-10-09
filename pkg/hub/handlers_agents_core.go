@@ -2836,7 +2836,10 @@ func (s *Server) createAgentInProject(
 					writeCreateFailure(w, corrID, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
 				}
-				warnings = append(warnings, api.ProvisionFailedWarningPrefix+err.Error())
+				// A Kubernetes identity mapping refusal reads as the
+				// hub's coded message, not the raw broker body
+				// (ptone/scion#4024).
+				warnings = append(warnings, api.ProvisionFailedWarningPrefix+dispatchFailureText(err))
 			} else {
 				agent.Phase = string(state.PhaseCreated)
 				if err := s.updateAgentAfterDispatch(ctx, agent); err != nil {
@@ -3440,6 +3443,9 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		// finalize-env creates the agent on the broker, so it can meet the
 		// same workspace-bucket refusal as create (ptone/scion#3422).
 		if relayWorkspaceStorageUnconfigured(w, err) {
+			return
+		}
+		if relayIdentityMappingError(w, err) {
 			return
 		}
 		if relayHarnessConfigRefusal(w, err) {
@@ -5224,6 +5230,8 @@ func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID strin
 	case relayWorkspaceStorageUnconfigured(w, err):
 		// Response already written.
 	case relayHarnessConfigRefusal(w, err):
+		// Response already written.
+	case relayIdentityMappingError(w, err):
 		// Response already written.
 	case isBrokerStatus(err, http.StatusNotFound):
 		message := err.Error()
