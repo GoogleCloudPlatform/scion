@@ -355,15 +355,29 @@ func assertNoGoAway(t *testing.T, goAways <-chan *conduitv1.GoAway) {
 }
 
 // TestLifetimeCap_SessionEndedBeforeGoAway: a session that ends before its
-// lifetime GoAway leaves no armed timer behind: advancing past the cap
-// touches neither the (deleted) row nor anything else.
+// lifetime GoAway leaves no armed timer behind (the relay clock is back to
+// the timers it had before the session: its lifetime timer was stopped
+// along with the session's own), and advancing past the cap touches
+// neither the (deleted) row nor anything else.
 func TestLifetimeCap_SessionEndedBeforeGoAway(t *testing.T) {
 	w := relaytest.NewWorld(t)
 	n := lifetimeNode(t, w, 90*time.Second, 0)
 	w.SetPrincipal("a", agentPrincipal("L1", 1))
-	target, _ := n.MustDial("a", relaytest.AgentHello(agentID, "L1", "", "pty"), echoConfig())
+	baseline := n.Clock.Pending() // relay heartbeat only
+	target, wel := n.MustDial("a", relaytest.AgentHello(agentID, "L1", "", "pty"), echoConfig())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, _, ok := n.Relay.Local(ctx, wel.GetSessionId()); !ok { // registered: lifetime timer armed
+		t.Fatal("session not registered")
+	}
+	if p := n.Clock.Pending(); p <= baseline {
+		t.Fatalf("pending timers %d with a live session, want more than %d", p, baseline)
+	}
 	_ = target.Close()
 	_ = relaytest.Wait(t, n.Served, "Serve to return")
+	if !n.Clock.WaitFor(10*time.Second, func(p int) bool { return p == baseline }) {
+		t.Fatalf("pending timers %d after the session ended, want %d (a timer was left armed)", n.Clock.Pending(), baseline)
+	}
 	var log opLog
 	w.SetFault(func(op string) error { log.record(op); return nil })
 	n.Clock.Advance(2 * time.Minute)
