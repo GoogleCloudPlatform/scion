@@ -18,6 +18,7 @@ package artifacts
 
 import (
 	"context"
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -272,6 +273,72 @@ func TestReviewGrantHomeUnderLock(t *testing.T) {
 	f.svc.SetStore(&movingReviewStore{Store: f.store, to: "project-3"})
 	if got := response(f.postGrantBody(projAdmin, id, reviewBody(SubjectPrincipal, reviewerID, GrantWrite))); got != want {
 		t.Errorf("after a concurrent move: %s", got)
+	}
+	if g := f.grantOf(id, reviewerID); g != nil {
+		t.Errorf("grant written: %+v", g)
+	}
+}
+
+// TestReviewGrantFollowsCurrentHome pins the D24 clarification on moves:
+// authority is always checked against the artifact's current home. After
+// a move, an admin of the old home project is refused and an admin of the
+// new one is allowed; the delegating user keeps the authority, provided
+// their credential permits artifact.manage in the new home.
+func TestReviewGrantFollowsCurrentHome(t *testing.T) {
+	f, id := newReviewGrantFixture(t)
+	newAdmin := principal{PrincipalKindUser, "user-new-admin", ""}
+	f.host.allowReview(newAdmin, agentA.ref, "project-3")
+	f.host.allowReview(delegator, agentA.ref, "project-3") // the delegating user, whatever the home
+	for _, p := range []principal{delegator, projAdmin, newAdmin, member} {
+		f.host.allow(p, "project-3", PermissionRead)
+	}
+	if _, err := f.store.UpdateArtifact(context.Background(), id, ArtifactUpdate{
+		HomeGrant: &Grant{ID: uuid.NewString(), ArtifactID: id, SubjectKind: SubjectScope, SubjectRef: "project-3",
+			Permission: GrantRead, CreatedAt: time.Now()}, MaxGrants: MaxGrantsPerArtifact}); err != nil {
+		t.Fatal(err)
+	}
+	want := response(f.postGrantBody(member, id, "junk"))
+	if got := response(f.postGrantBody(projAdmin, id, reviewBody(SubjectPrincipal, reviewerID, GrantWrite))); got != want {
+		t.Errorf("old-home admin after the move: %s", got)
+	}
+	if g := f.grantOf(id, reviewerID); g != nil {
+		t.Fatalf("old-home admin wrote a grant: %+v", g)
+	}
+	if rec := f.postGrantBody(newAdmin, id, reviewBody(SubjectPrincipal, reviewerID, GrantWrite)); rec.Code != http.StatusCreated {
+		t.Errorf("new-home admin after the move: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := f.postGrantBody(delegator, id, reviewBody(SubjectPrincipal, "user:second", GrantWrite)); rec.Code != http.StatusCreated {
+		t.Errorf("delegating user after the move: %d", rec.Code)
+	}
+	// The credential gate follows the current home too.
+	f.host.deny(delegator, "project-3", PermissionManage)
+	if got := response(f.postGrantBody(delegator, id, reviewBody(SubjectPrincipal, "user:third", GrantWrite))); got != want {
+		t.Errorf("delegating user without manage in the new home: %s", got)
+	}
+}
+
+// deletingReviewStore deletes the artifact just before PutReviewGrant
+// runs, as a concurrent delete or expiry sweep would.
+type deletingReviewStore struct {
+	Store
+	db *sql.DB
+}
+
+func (d *deletingReviewStore) PutReviewGrant(ctx context.Context, g *Grant, max int, home string) (bool, error) {
+	s := d.Store.(*sqlStore)
+	if _, err := d.db.ExecContext(ctx, s.rebind("UPDATE artifact SET deleted_at = ? WHERE id = ?"), s.timeArg(time.Now()), g.ArtifactID); err != nil {
+		return false, err
+	}
+	return d.Store.PutReviewGrant(ctx, g, max, home)
+}
+
+// TestReviewGrantArtifactDeletedMeanwhile: an artifact deleted between the
+// checks and the write takes no grant and answers 404.
+func TestReviewGrantArtifactDeletedMeanwhile(t *testing.T) {
+	f, id := newReviewGrantFixture(t)
+	f.svc.SetStore(&deletingReviewStore{Store: f.store, db: f.db})
+	if rec := f.postGrantBody(delegator, id, reviewBody(SubjectPrincipal, reviewerID, GrantWrite)); rec.Code != http.StatusNotFound {
+		t.Errorf("deleted meanwhile: %d %s", rec.Code, rec.Body.String())
 	}
 	if g := f.grantOf(id, reviewerID); g != nil {
 		t.Errorf("grant written: %+v", g)
