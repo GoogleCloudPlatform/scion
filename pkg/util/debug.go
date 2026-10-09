@@ -22,8 +22,7 @@ import (
 )
 
 var (
-	debugEnabled     bool
-	debugInitialized bool
+	debugEnabled     bool // set by an explicit request such as --debug
 	agentDebugPolicy bool
 	debugMu          sync.RWMutex
 )
@@ -55,7 +54,6 @@ func SetExplicitDebug(on bool) {
 	debugMu.Lock()
 	defer debugMu.Unlock()
 	debugEnabled = on
-	debugInitialized = on
 }
 
 // DebugEnabled returns true if debug mode is enabled.
@@ -65,10 +63,10 @@ func SetExplicitDebug(on bool) {
 //   - the agent debug policy is off and SCION_DEBUG is set
 func DebugEnabled() bool {
 	debugMu.RLock()
-	initialized, enabled, agentPolicy := debugInitialized, debugEnabled, agentDebugPolicy
+	enabled, agentPolicy := debugEnabled, agentDebugPolicy
 	debugMu.RUnlock()
-	if initialized {
-		return enabled
+	if enabled {
+		return true
 	}
 
 	// Not explicitly set, check environment

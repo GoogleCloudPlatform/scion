@@ -323,10 +323,11 @@ func Execute() {
 }
 
 // configureDebugOutput sets up CLI debug output for one invocation. An
-// explicit --debug always enables it. Otherwise, in agent mode the CLI ignores the
-// SCION_DEBUG value inherited from the agent's environment (it is meant
-// for in-container tooling and agent logs) and enables debug output only
-// for SCION_LOG_LEVEL=debug; outside agent mode SCION_DEBUG still works.
+// explicit --debug always enables it. Otherwise, in agent mode the CLI
+// ignores the SCION_DEBUG value inherited from the agent's environment
+// (it is meant for in-container tooling and agent logs) and enables
+// debug output only for SCION_LOG_LEVEL=debug; outside agent mode
+// SCION_DEBUG still works.
 func configureDebugOutput(mode CLIMode, explicitDebug bool) {
 	util.SetAgentDebugPolicy(mode == ModeAgent)
 	util.SetExplicitDebug(explicitDebug)

@@ -26,7 +26,6 @@ func TestDebugEnabled(t *testing.T) {
 	// Reset state for testing
 	debugMu.Lock()
 	debugEnabled = false
-	debugInitialized = false
 	debugMu.Unlock()
 
 	// Clean environment
@@ -47,7 +46,6 @@ func TestDebugEnabled(t *testing.T) {
 	// Test 3: Debug via EnableDebug()
 	debugMu.Lock()
 	debugEnabled = false
-	debugInitialized = false
 	debugMu.Unlock()
 
 	EnableDebug()
@@ -64,7 +62,6 @@ func TestDebugEnabled(t *testing.T) {
 	// Cleanup
 	debugMu.Lock()
 	debugEnabled = false
-	debugInitialized = false
 	debugMu.Unlock()
 }
 
@@ -72,7 +69,6 @@ func TestDebugf(t *testing.T) {
 	// Reset state
 	debugMu.Lock()
 	debugEnabled = false
-	debugInitialized = false
 	debugMu.Unlock()
 
 	// Capture stderr
@@ -117,7 +113,6 @@ func TestDebugf(t *testing.T) {
 	// Cleanup
 	debugMu.Lock()
 	debugEnabled = false
-	debugInitialized = false
 	debugMu.Unlock()
 }
 
@@ -125,7 +120,6 @@ func TestDebugfTagged(t *testing.T) {
 	// Reset state
 	debugMu.Lock()
 	debugEnabled = false
-	debugInitialized = false
 	debugMu.Unlock()
 
 	// Capture stderr
@@ -149,7 +143,6 @@ func TestDebugfTagged(t *testing.T) {
 	// Cleanup
 	debugMu.Lock()
 	debugEnabled = false
-	debugInitialized = false
 	debugMu.Unlock()
 }
 
