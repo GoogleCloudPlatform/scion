@@ -130,9 +130,10 @@ func grantAgentProjectAccess(t *testing.T, s store.Store, agentID, projectID str
 	require.NoError(t, err)
 }
 
-// listReaderAgentContext is an agent caller that can read its project's
-// group conversations: the list shows a group only to a current reader.
-func listReaderAgentContext(t *testing.T, s store.Store, agentID, projectID string) context.Context {
+// projectReaderAgentContext is an agent caller that can read its project
+// (project-read scope and a project role), as the conversation list and
+// add-participant require of their callers.
+func projectReaderAgentContext(t *testing.T, s store.Store, agentID, projectID string) context.Context {
 	t.Helper()
 	grantAgentProjectAccess(t, s, agentID, projectID)
 	return agentContextWithScopes(agentID, projectID, []AgentTokenScope{ScopeProjectRead})
@@ -166,7 +167,7 @@ func TestListConversations_HappyPath(t *testing.T) {
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations", nil)
-	req = req.WithContext(listReaderAgentContext(t, s, agent.ID, convProjectID(conv)))
+	req = req.WithContext(projectReaderAgentContext(t, s, agent.ID, convProjectID(conv)))
 	rr := httptest.NewRecorder()
 	srv.handleListConversations(rr, req)
 
@@ -202,7 +203,7 @@ func TestListConversations_WithFilters(t *testing.T) {
 	require.NoError(t, s.CreateConversation(context.Background(), conv2))
 	addConvParticipant(t, s, conv2.ID, "agent", agent.ID)
 
-	readerCtx := listReaderAgentContext(t, s, agent.ID, project.ID)
+	readerCtx := projectReaderAgentContext(t, s, agent.ID, project.ID)
 
 	// Filter by surface=native — should only return the first conversation.
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations?surface=native", nil)
@@ -257,7 +258,7 @@ func TestListConversations_WithLimit(t *testing.T) {
 	require.Len(t, convs, 3) // agent was only added to 3 new ones
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations?limit=2", nil)
-	req = req.WithContext(listReaderAgentContext(t, s, agent.ID, project.ID))
+	req = req.WithContext(projectReaderAgentContext(t, s, agent.ID, project.ID))
 	rr := httptest.NewRecorder()
 	srv.handleListConversations(rr, req)
 
@@ -1096,7 +1097,7 @@ func TestMux_ListConversations(t *testing.T) {
 	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations", nil)
-	req = req.WithContext(listReaderAgentContext(t, s, agent.ID, convProjectID(conv)))
+	req = req.WithContext(projectReaderAgentContext(t, s, agent.ID, convProjectID(conv)))
 	rr := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rr, req)
 
@@ -1310,7 +1311,7 @@ func TestAddParticipant_InvalidPrincipalKind(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conv.ID+"/participants", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(listReaderAgentContext(t, s, agent.ID, convProjectID(conv)))
+	req = req.WithContext(projectReaderAgentContext(t, s, agent.ID, convProjectID(conv)))
 	rr := httptest.NewRecorder()
 	srv.handleAddParticipant(rr, req, conv.ID)
 
