@@ -20,8 +20,10 @@
  * Renders the summary's attention list exactly as the server sends it: in
  * server order, with the server's sentence. An item links to its subject
  * only when the subject carries what the link needs (a broker, agent or
- * integration ID). Hub, dispatch and aggregate agent items, and integration
- * items without identity (integrations_detail false), are not linked.
+ * integration ID). Hub, dispatch and aggregate agent items are not linked.
+ * Integration items are linked only when the summary says it carries
+ * integration identity (integrations_detail true) and the item has an ID;
+ * the server already omits the ID otherwise, this is a second check.
  */
 
 import { LitElement, html, css, type TemplateResult } from 'lit';
@@ -42,9 +44,13 @@ export interface HealthAttentionItem {
 
 /**
  * The page an item's subject links to, or null when the subject is not a
- * single linkable resource or does not carry its ID.
+ * single linkable resource or does not carry its ID. Integration subjects
+ * link only when integrationsDetail is true.
  */
-export function attentionHref(item: HealthAttentionItem): string | null {
+export function attentionHref(
+  item: HealthAttentionItem,
+  integrationsDetail: boolean
+): string | null {
   const id = item.subject?.id;
   if (!id) return null;
   switch (item.subject.type) {
@@ -53,6 +59,7 @@ export function attentionHref(item: HealthAttentionItem): string | null {
     case 'agent':
       return `/agents/${encodeURIComponent(id)}`;
     case 'integration':
+      if (!integrationsDetail) return null;
       return `${INTEGRATIONS_PAGE}/${encodeURIComponent(id)}`;
     default:
       return null;
@@ -71,6 +78,10 @@ export class ScionHealthAttention extends LitElement {
   /** The summary's attention list; null when the response had none. */
   @property({ attribute: false })
   items: HealthAttentionItem[] | null = null;
+
+  /** The summary's integrations_detail; integration items link only when true. */
+  @property({ attribute: false })
+  integrationsDetail = false;
 
   static override styles = css`
     :host {
@@ -179,7 +190,7 @@ export class ScionHealthAttention extends LitElement {
 
   private renderItem(it: HealthAttentionItem): TemplateResult {
     const icon = severityIcon(it.severity);
-    const href = attentionHref(it);
+    const href = attentionHref(it, this.integrationsDetail);
     return html`<li
       class="sev-${it.severity === 'critical' ? 'critical' : 'warning'}"
       data-kind=${it.kind}

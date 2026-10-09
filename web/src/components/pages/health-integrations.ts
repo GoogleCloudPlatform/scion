@@ -63,6 +63,18 @@ const COUNT_FIELDS: ReadonlyArray<{
   { key: 'unknown', tone: 'neutral' },
 ];
 
+/**
+ * Whether the Integrations section has anything to show: the rows when the
+ * summary carries integration identity, otherwise the aggregate counts.
+ */
+export function integrationsSectionVisible(
+  detail: boolean,
+  items: readonly HealthSummaryIntegration[] | null | undefined,
+  counts: HealthSummaryIntegrationCounts | null | undefined
+): boolean {
+  return detail ? (items?.length ?? 0) > 0 : (counts?.total ?? 0) > 0;
+}
+
 /** The Integrations admin page. */
 export const INTEGRATIONS_PAGE = '/admin/integrations';
 
@@ -232,9 +244,9 @@ export class ScionHealthIntegrations extends LitElement {
   `;
 
   override render(): TemplateResult | typeof nothing {
+    if (!integrationsSectionVisible(this.detail, this.integrations, this.counts)) return nothing;
     if (!this.detail) return this.renderCounts();
     const items = this.integrations ?? [];
-    if (items.length === 0) return nothing;
     return html`
       <section class="card" aria-labelledby="integrations-title">
         <div class="card-head">
@@ -263,7 +275,7 @@ export class ScionHealthIntegrations extends LitElement {
 
   private renderCounts(): TemplateResult | typeof nothing {
     const c = this.counts;
-    if (!c || c.total <= 0) return nothing;
+    if (!c) return nothing;
     return html`
       <section class="card" aria-labelledby="integrations-title">
         <div class="card-head">

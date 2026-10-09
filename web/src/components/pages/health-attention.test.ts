@@ -25,9 +25,13 @@ import { attentionHref, type HealthAttentionItem } from './health-attention.js';
 import './health-attention.js';
 import { elementStyleRules } from './__fixtures__/css-rules.js';
 
-async function mount(items: HealthAttentionItem[] | null): Promise<ShadowRoot> {
+async function mount(
+  items: HealthAttentionItem[] | null,
+  integrationsDetail = true
+): Promise<ShadowRoot> {
   const el = document.createElement('scion-health-attention');
   el.items = items;
+  el.integrationsDetail = integrationsDetail;
   document.body.appendChild(el);
   await el.updateComplete;
   return el.shadowRoot!;
@@ -124,6 +128,18 @@ describe('scion-health-attention', () => {
     ]);
   });
 
+  it('links no integration item when the summary has no integration identity', async () => {
+    const root = await mount(items, false);
+    const row = [...root.querySelectorAll('li')].find(
+      (li) => li.textContent?.trim() === 'Integration chat is unhealthy'
+    );
+    expect(row).toBeTruthy();
+    expect(row!.querySelector('a')).toBeNull();
+    // Other subjects still link.
+    expect(root.querySelector('a[href="/brokers/b%201"]')).not.toBeNull();
+    expect(root.querySelector('a[href="/agents/ag1"]')).not.toBeNull();
+  });
+
   it('shows Nothing needs attention for an empty list', async () => {
     const root = await mount([]);
     expect(root.querySelector('ul')).toBeNull();
@@ -146,9 +162,21 @@ describe('scion-health-attention', () => {
 
 describe('attentionHref', () => {
   it('returns null for subjects without an ID or of other types', () => {
-    expect(attentionHref({ ...items[2]!, subject: { type: 'runtime_broker' } })).toBeNull();
-    expect(attentionHref({ ...items[2]!, subject: { type: 'hub', id: 'x' } })).toBeNull();
-    expect(attentionHref({ ...items[2]!, subject: { type: 'dispatch', id: 'x' } })).toBeNull();
-    expect(attentionHref({ ...items[2]!, subject: { type: 'agents', id: 'x' } })).toBeNull();
+    for (const subject of [
+      { type: 'runtime_broker' },
+      { type: 'agent' },
+      { type: 'integration' },
+      { type: 'hub', id: 'x' },
+      { type: 'dispatch', id: 'x' },
+      { type: 'agents', id: 'x' },
+    ]) {
+      expect(attentionHref({ ...items[2]!, subject }, true)).toBeNull();
+    }
+  });
+
+  it('links an integration only when the summary carries integration identity', () => {
+    expect(attentionHref(items[3]!, true)).toBe('/admin/integrations/chat');
+    expect(attentionHref(items[3]!, false)).toBeNull();
+    expect(attentionHref(items[2]!, false)).toBe('/brokers/b%201');
   });
 });

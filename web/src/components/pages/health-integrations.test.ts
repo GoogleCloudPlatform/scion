@@ -29,6 +29,7 @@ import { apiFetch } from '../../client/api.js';
 import {
   ScionHealthIntegrations,
   integrationHealthTone,
+  integrationsSectionVisible,
   type HealthSummaryIntegration,
 } from './health-integrations.js';
 import { ScionPageHealthDashboard } from './health-dashboard.js';
@@ -100,6 +101,26 @@ describe('scion-health-integrations without identity', () => {
   });
 
   it('renders nothing when there are no integrations', async () => {
+    expect(integrationsSectionVisible(false, [integration()], null)).toBe(false);
+    expect(
+      integrationsSectionVisible(false, [], {
+        total: 1,
+        healthy: 1,
+        degraded: 0,
+        unhealthy: 0,
+        unknown: 0,
+      })
+    ).toBe(true);
+    expect(
+      integrationsSectionVisible(true, [], {
+        total: 1,
+        healthy: 1,
+        degraded: 0,
+        unhealthy: 0,
+        unknown: 0,
+      })
+    ).toBe(false);
+    expect(integrationsSectionVisible(true, [integration()], null)).toBe(true);
     for (const counts of [null, { total: 0, healthy: 0, degraded: 0, unhealthy: 0, unknown: 0 }]) {
       const root = await mountCounts(counts);
       expect(root.querySelector('section')).toBeNull();
@@ -209,8 +230,11 @@ describe('scion-page-health-dashboard integrations', () => {
       vi.mocked(apiFetch).mockImplementation(async () => summary(integrations));
       const el = await page();
       expect(el.shadowRoot?.querySelector('scion-health-hub-card')).not.toBeNull();
-      const section = el.shadowRoot?.querySelector('scion-health-integrations');
-      expect(section?.shadowRoot?.querySelector('section, table')).toBeNull();
+      // No section and no empty full-width wrapper adding a second gap.
+      expect(el.shadowRoot?.querySelector('scion-health-integrations')).toBeNull();
+      for (const full of el.shadowRoot?.querySelectorAll('.grid-full') ?? []) {
+        expect(full.children.length).toBeGreaterThan(0);
+      }
       el.remove();
     }
   });

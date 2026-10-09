@@ -46,7 +46,7 @@ import type {
   HealthSummaryIntegration,
   HealthSummaryIntegrationCounts,
 } from './health-integrations.js';
-import './health-integrations.js';
+import { integrationsSectionVisible } from './health-integrations.js';
 import type { HealthSummaryDispatch } from './health-dispatch-card.js';
 import './health-dispatch-card.js';
 import { healthPillStyles, healthTone } from './health-status.js';
@@ -280,7 +280,10 @@ export class ScionPageHealthDashboard extends LitElement {
       ${this.error ? html`<div class="error-banner" role="alert">${this.error}</div>` : nothing}
 
       <div class="grid-full">
-        <scion-health-attention .items=${d.attention ?? null}></scion-health-attention>
+        <scion-health-attention
+          .items=${d.attention ?? null}
+          .integrationsDetail=${d.integrations_detail === true}
+        ></scion-health-attention>
       </div>
 
       <div class="grid-2" data-role="hub-dispatch">
@@ -295,13 +298,19 @@ export class ScionPageHealthDashboard extends LitElement {
         <scion-health-broker-table .brokers=${d.runtime_brokers}></scion-health-broker-table>
       </div>
 
-      <div class="grid-full">
-        <scion-health-integrations
-          .integrations=${d.integrations ?? []}
-          .detail=${d.integrations_detail === true}
-          .counts=${d.integration_counts ?? null}
-        ></scion-health-integrations>
-      </div>
+      ${integrationsSectionVisible(
+        d.integrations_detail === true,
+        d.integrations,
+        d.integration_counts
+      )
+        ? html`<div class="grid-full">
+            <scion-health-integrations
+              .integrations=${d.integrations ?? []}
+              .detail=${d.integrations_detail === true}
+              .counts=${d.integration_counts ?? null}
+            ></scion-health-integrations>
+          </div>`
+        : nothing}
 
       <div class="grid-full">
         <scion-health-agents-card .agents=${d.agents ?? null}></scion-health-agents-card>

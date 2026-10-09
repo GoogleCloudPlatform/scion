@@ -497,6 +497,27 @@ describe('scion-page-health-dashboard needs attention (ptone/scion#3595)', () =>
     expect(link?.getAttribute('href')).toBe('/brokers/b1');
   });
 
+  it('does not link an integration item when integrations_detail is false', async () => {
+    const item = {
+      severity: 'warning',
+      kind: 'integration',
+      subject: { type: 'integration', id: 'chat', name: 'chat' },
+      message: 'Integration chat is unhealthy',
+    };
+    const restricted = await mountPage(
+      summaryBody({ status: 'degraded', attention: [item], integrations_detail: false })
+    );
+    expect(attentionRows(restricted)[0]!.querySelector('a')).toBeNull();
+    restricted.remove();
+
+    const full = await mountPage(
+      summaryBody({ status: 'degraded', attention: [item], integrations_detail: true })
+    );
+    expect(attentionRows(full)[0]!.querySelector('a')?.getAttribute('href')).toBe(
+      '/admin/integrations/chat'
+    );
+  });
+
   it('does not link the hub item for a broker list that could not be read', async () => {
     const page = await mountPage(
       summaryBody({
@@ -549,6 +570,38 @@ describe('scion-page-health-dashboard layout (ptone/scion#3595)', () => {
       expect(table.shadowRoot?.querySelectorAll('tbody tr')).toHaveLength(n);
     });
   }
+
+  it('renders no empty full-width wrapper when the Integrations section is hidden', async () => {
+    for (const over of [
+      { integrations: [], integrations_detail: true },
+      {
+        integrations: [],
+        integrations_detail: false,
+        integration_counts: { total: 0, healthy: 0, degraded: 0, unhealthy: 0, unknown: 0 },
+      },
+    ]) {
+      const page = await mountPage(summaryBody(over));
+      const root = page.shadowRoot!;
+      expect(root.querySelector('scion-health-integrations')).toBeNull();
+      const full = [...root.querySelectorAll('.grid-full')];
+      for (const f of full) expect(f.children.length).toBeGreaterThan(0);
+      // Attention, brokers and agents only.
+      expect(full).toHaveLength(3);
+      page.remove();
+    }
+  });
+
+  it('wraps the Integrations section when it has content', async () => {
+    const page = await mountPage(
+      summaryBody({
+        integrations: [],
+        integrations_detail: false,
+        integration_counts: { total: 2, healthy: 2, degraded: 0, unhealthy: 0, unknown: 0 },
+      })
+    );
+    const section = page.shadowRoot!.querySelector('scion-health-integrations');
+    expect(section?.parentElement?.classList.contains('grid-full')).toBe(true);
+  });
 
   it('has no separate Database card: the pool is inside the Hub card', async () => {
     const page = await mountPage(summaryBody());
