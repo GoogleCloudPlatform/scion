@@ -1270,13 +1270,9 @@ export class ScionPageAgentCreate extends LitElement {
   // ═══════════════════════════════════════════════════════════════════
 
   /**
-   * Create the agent without starting it. Navigates to the agent detail page.
+   * Create the agent and start it, then navigate to the agent detail page.
    */
-  private async handleCreateOnly(_e: Event): Promise<void> {
-    return this.handleSubmit(_e, true);
-  }
-
-  private async handleSubmit(_e: Event, provisionOnly = false): Promise<void> {
+  private async handleSubmit(_e: Event): Promise<void> {
     if (!this.name.trim()) {
       this.error = 'Agent name is required.';
       return;
@@ -1330,7 +1326,6 @@ export class ScionPageAgentCreate extends LitElement {
       if (this.task.trim()) body.task = this.task.trim();
       if (this.agentRole) body.agentRole = this.agentRole;
       if (this.messageMode) body.messageMode = this.messageMode;
-      if (provisionOnly) body.provisionOnly = true;
 
       const builtLabels = this.buildLabels();
       if (builtLabels) body.labels = builtLabels;
@@ -1390,18 +1385,16 @@ export class ScionPageAgentCreate extends LitElement {
         throw new Error('No agent ID in response');
       }
 
-      // Start the agent unless provisionOnly was requested
-      if (!provisionOnly) {
-        const startedPhases = ['running', 'provisioning', 'cloning', 'starting'];
-        const alreadyStarted = agent?.phase ? startedPhases.includes(agent.phase) : false;
-        if (!alreadyStarted) {
-          const startResp = await fetch(`/api/v1/agents/${agentId}/start`, {
-            method: 'POST',
-            credentials: 'include',
-          });
-          if (!startResp.ok) {
-            console.warn('Agent created but failed to start:', startResp.status);
-          }
+      // Start the agent unless the create response shows it already started.
+      const startedPhases = ['running', 'provisioning', 'cloning', 'starting'];
+      const alreadyStarted = agent?.phase ? startedPhases.includes(agent.phase) : false;
+      if (!alreadyStarted) {
+        const startResp = await fetch(`/api/v1/agents/${agentId}/start`, {
+          method: 'POST',
+          credentials: 'include',
+        });
+        if (!startResp.ok) {
+          console.warn('Agent created but failed to start:', startResp.status);
         }
       }
 
@@ -1519,13 +1512,6 @@ export class ScionPageAgentCreate extends LitElement {
           >
             <sl-icon slot="prefix" name="play-circle"></sl-icon>
             Start
-          </sl-button>
-          <sl-button
-            variant="default"
-            ?disabled=${this.submitting}
-            @click=${(e: Event) => this.handleCreateOnly(e)}
-          >
-            Create
           </sl-button>
           <sl-button
             variant="text"

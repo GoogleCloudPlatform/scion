@@ -568,7 +568,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     const el = await mountAgentCreate();
     const page = internals(el) as AgentCreateInternals & {
       name: string;
-      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+      handleSubmit: (e: Event) => Promise<void>;
       error: string | null;
     };
     page.name = 'test-agent';
@@ -584,7 +584,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     const el = await mountAgentCreate();
     const page = internals(el) as AgentCreateInternals & {
       name: string;
-      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+      handleSubmit: (e: Event) => Promise<void>;
       error: string | null;
     };
     page.name = 'test-agent';
@@ -607,7 +607,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     const el = await mountAgentCreate();
     const page = internals(el) as AgentCreateInternals & {
       name: string;
-      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+      handleSubmit: (e: Event) => Promise<void>;
       error: string | null;
     };
     page.name = 'test-agent';
@@ -648,7 +648,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     const el = await mountAgentCreate();
     const page = internals(el) as AgentCreateInternals & {
       name: string;
-      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+      handleSubmit: (e: Event) => Promise<void>;
     };
     page.name = 'test-agent';
 
@@ -673,7 +673,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     const el = await mountAgentCreate();
     const page = internals(el) as AgentCreateInternals & {
       name: string;
-      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+      handleSubmit: (e: Event) => Promise<void>;
     };
     page.name = 'test-agent';
     expect(page.gcpMetadataMode).toBe('passthrough');
@@ -707,7 +707,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     const el = await mountAgentCreate();
     const page = internals(el) as AgentCreateInternals & {
       name: string;
-      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+      handleSubmit: (e: Event) => Promise<void>;
     };
     page.name = 'test-agent';
     expect(page.gcpMetadataMode).toBe('assign');
@@ -745,7 +745,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     const el = await mountAgentCreate();
     const page = internals(el) as AgentCreateInternals & {
       name: string;
-      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+      handleSubmit: (e: Event) => Promise<void>;
     };
     page.name = 'test-agent';
 
@@ -796,7 +796,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     const el = await mountAgentCreate();
     const page = internals(el) as AgentCreateInternals & {
       name: string;
-      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+      handleSubmit: (e: Event) => Promise<void>;
     };
     page.name = 'test-agent';
     expect(page.gcpMetadataMode).toBe('assign');
@@ -853,7 +853,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     const el = await mountAgentCreate();
     const page = internals(el) as AgentCreateInternals & {
       name: string;
-      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+      handleSubmit: (e: Event) => Promise<void>;
     };
     page.name = 'test-agent';
     expect(page.gcpMetadataMode).toBe('passthrough');
@@ -896,7 +896,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     const page = internals(el) as AgentCreateInternals & {
       name: string;
       projectId: string;
-      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+      handleSubmit: (e: Event) => Promise<void>;
     };
     page.name = 'test-agent';
     page.projectId = 'p1';
@@ -952,7 +952,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     const el = await mountAgentCreate();
     const page = internals(el) as AgentCreateInternals & {
       name: string;
-      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+      handleSubmit: (e: Event) => Promise<void>;
     };
     page.name = 'test-agent';
 
@@ -1006,7 +1006,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     const el = await mountAgentCreate();
     const page = internals(el) as AgentCreateInternals & {
       name: string;
-      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+      handleSubmit: (e: Event) => Promise<void>;
     };
     page.name = 'test-agent';
 
@@ -1112,7 +1112,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     const page = internals(el) as AgentCreateInternals & {
       name: string;
       projectId: string;
-      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+      handleSubmit: (e: Event) => Promise<void>;
     };
     page.name = 'test-agent';
 
@@ -1205,7 +1205,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     const page = internals(el) as AgentCreateInternals & {
       name: string;
       projectId: string;
-      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+      handleSubmit: (e: Event) => Promise<void>;
     };
     page.name = 'test-agent';
     expect(page.gcpMetadataMode).toBe('assign');
@@ -1300,7 +1300,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
       name: string;
       projectId: string;
       error: string | null;
-      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+      handleSubmit: (e: Event) => Promise<void>;
     };
     page.name = 'test-agent';
     page.projectId = 'p1';
@@ -1338,7 +1338,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     const page = internals(el) as AgentCreateInternals & {
       name: string;
       projectId: string;
-      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+      handleSubmit: (e: Event) => Promise<void>;
     };
     page.name = 'test-agent';
     page.projectId = 'p1';
@@ -1368,7 +1368,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     const page = internals(el) as AgentCreateInternals & {
       name: string;
       projectId: string;
-      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+      handleSubmit: (e: Event) => Promise<void>;
     };
     page.name = 'test-agent';
     page.projectId = 'p1';
@@ -1403,7 +1403,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     const page = internals(el) as AgentCreateInternals & {
       name: string;
       projectId: string;
-      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+      handleSubmit: (e: Event) => Promise<void>;
     };
     page.name = 'test-agent';
     page.projectId = 'p1';
@@ -1484,7 +1484,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     const page = internals(el) as AgentCreateInternals & {
       name: string;
       projectId: string;
-      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+      handleSubmit: (e: Event) => Promise<void>;
     };
     page.name = 'test-agent';
     page.projectId = 'p1';
@@ -1545,7 +1545,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     const page = internals(el) as AgentCreateInternals & {
       name: string;
       projectId: string;
-      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+      handleSubmit: (e: Event) => Promise<void>;
     };
     page.name = 'test-agent';
     page.projectId = 'p1';
@@ -1582,7 +1582,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     const el = await mountAgentCreate();
     const page = internals(el) as AgentCreateInternals & {
       name: string;
-      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+      handleSubmit: (e: Event) => Promise<void>;
     };
     page.name = 'test-agent';
     expect(page.brokerId).toBe('broker-k8s');
@@ -1616,7 +1616,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     const page = internals(el) as AgentCreateInternals & {
       name: string;
       projectId: string;
-      handleSubmit: (e: Event, provisionOnly?: boolean) => Promise<void>;
+      handleSubmit: (e: Event) => Promise<void>;
     };
     page.name = 'test-agent';
     page.projectId = 'p1';
