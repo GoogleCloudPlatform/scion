@@ -95,7 +95,17 @@ func startNFSAgentDirAgent(t *testing.T, runtimeName, mountRoot string, env map[
 // name; ran reports whether the runtime was asked to run the agent.
 func startNFSAgentDirAgentNamed(t *testing.T, name, runtimeName, mountRoot string, env map[string]string, gitClone *api.GitCloneConfig) (cfg runtime.RunConfig, emptyWorkspaceAtRun, ran bool, err error) {
 	t.Helper()
+	cfg, emptyWorkspaceAtRun, ran, _, err = startNFSAgentDirAgentFull(t, name, runtimeName, mountRoot, env, gitClone, false)
+	return cfg, emptyWorkspaceAtRun, ran, err
+}
+
+// startNFSAgentDirAgentFull is startNFSAgentDirAgentNamed with
+// FreshProvision (a create) set to fresh; agentDir is the agent's broker
+// directory.
+func startNFSAgentDirAgentFull(t *testing.T, name, runtimeName, mountRoot string, env map[string]string, gitClone *api.GitCloneConfig, fresh bool) (cfg runtime.RunConfig, emptyWorkspaceAtRun, ran bool, agentDir string, err error) {
+	t.Helper()
 	f := newSharedDirStorageRunFixture(t)
+	agentDir = filepath.Join(f.projectScionDir, "agents", name)
 	f.writeGlobalSettings(t, fmt.Sprintf(nfsWorkspaceStartYAML, mountRoot))
 	ws := filepath.Join(nfsTestAgentDir(mountRoot, "test-agent"), provision.AgentWorkspaceDir)
 	mockRT := &runtime.MockRuntime{
@@ -113,18 +123,19 @@ func startNFSAgentDirAgentNamed(t *testing.T, name, runtimeName, mountRoot strin
 		fullEnv[k] = v
 	}
 	_, err = NewManager(mockRT).Start(context.Background(), api.StartOptions{
-		Name:        name,
-		ProjectPath: f.projectScionDir,
-		NoAuth:      true,
-		Env:         fullEnv,
-		GitClone:    gitClone,
+		Name:           name,
+		ProjectPath:    f.projectScionDir,
+		NoAuth:         true,
+		Env:            fullEnv,
+		GitClone:       gitClone,
+		FreshProvision: fresh,
 	})
-	return cfg, emptyWorkspaceAtRun, ran, err
+	return cfg, emptyWorkspaceAtRun, ran, agentDir, err
 }
 
 var testGitClone = &api.GitCloneConfig{URL: "https://example.com/repo.git"}
 
-// First start of a clone-per-agent agent on Kubernetes: the agent's own
+// First start (create) of a clone-per-agent agent on Kubernetes: the agent's own
 // workspace (agents/<agent name>/workspace) is created empty before the
 // pod, the project's workspace directory is not, and the pod is told to
 // use the agent directory.
@@ -132,8 +143,9 @@ func TestStartNFSAgentDir_FirstStart(t *testing.T) {
 	mountRoot := filepath.Join(t.TempDir(), "nfs")
 	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share-1"), 0o755))
 
-	cfg, emptyAtRun, err := startNFSAgentDirAgent(t, "kubernetes", mountRoot, map[string]string{"SCION_WORKSPACE_MODE": "clone-per-agent"}, testGitClone)
+	cfg, emptyAtRun, _, agentDir, err := startNFSAgentDirAgentFull(t, "test-agent", "kubernetes", mountRoot, map[string]string{"SCION_WORKSPACE_MODE": "clone-per-agent"}, testGitClone, true)
 	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(agentDir, nfsAgentDirRecordFile), "a create records the agent directory")
 	assert.True(t, emptyAtRun, "the agent's workspace must exist, empty, when the pod is created")
 	assert.Equal(t, "test-agent", cfg.NFSAgentDirName)
 	assert.Equal(t, "scion/test-agent", cfg.NFSAgentBranch)
@@ -176,6 +188,73 @@ func TestStartNFSAgentDir_ExplicitBranchAndRestart(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "feature/x", cfg.NFSAgentBranch)
 	assert.FileExists(t, filepath.Join(ws, "work.txt"))
+}
+
+// ptone/scion#3998: an agent started before unlabelled git projects were
+// dispatched as clone-per-agent worked in the shared checkout. A later
+// start (not a create) with no record and no agent directory on the
+// mounted export keeps the shared checkout and its shared-plain mode; one
+// whose agent directory exists keeps it and gets the record.
+func TestStartNFSAgentDir_ExistingAgentLayoutIsSticky(t *testing.T) {
+	cpa := map[string]string{"SCION_WORKSPACE_MODE": "clone-per-agent"}
+	t.Run("shared checkout kept", func(t *testing.T) {
+		mountRoot := filepath.Join(t.TempDir(), "nfs")
+		require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share-1"), 0o755))
+		cfg, _, _, agentDir, err := startNFSAgentDirAgentFull(t, "test-agent", "kubernetes", mountRoot, cpa, testGitClone, false)
+		require.NoError(t, err)
+		assert.Empty(t, cfg.NFSAgentDirName)
+		assert.Empty(t, cfg.NFSAgentBranch)
+		assert.Contains(t, cfg.Env, "SCION_WORKSPACE_MODE=shared-plain")
+		assert.NotContains(t, cfg.Env, "SCION_WORKSPACE_MODE=clone-per-agent")
+		assert.NoDirExists(t, nfsTestAgentDir(mountRoot, "test-agent"))
+		assert.NoFileExists(t, filepath.Join(agentDir, nfsAgentDirRecordFile))
+	})
+	t.Run("existing agent directory kept and recorded", func(t *testing.T) {
+		mountRoot := filepath.Join(t.TempDir(), "nfs")
+		require.NoError(t, os.MkdirAll(filepath.Join(nfsTestAgentDir(mountRoot, "test-agent"), provision.AgentWorkspaceDir), 0o770))
+		cfg, _, _, agentDir, err := startNFSAgentDirAgentFull(t, "test-agent", "kubernetes", mountRoot, cpa, testGitClone, false)
+		require.NoError(t, err)
+		assert.Equal(t, "test-agent", cfg.NFSAgentDirName)
+		assert.Contains(t, cfg.Env, "SCION_WORKSPACE_MODE=clone-per-agent")
+		assert.FileExists(t, filepath.Join(agentDir, nfsAgentDirRecordFile))
+	})
+}
+
+func TestNFSKeepSharedCheckout(t *testing.T) {
+	mountRoot := filepath.Join(t.TempDir(), "nfs")
+	resolved := resolveTestNFSWorkspace(t, mountRoot)
+	require.NoError(t, os.MkdirAll(resolved.HostBase, 0o755))
+	unmounted := resolved
+	unmounted.HostBase = filepath.Join(t.TempDir(), "absent")
+	withRecord := t.TempDir()
+	recordNFSAgentDir(withRecord, "a")
+	require.FileExists(t, filepath.Join(withRecord, nfsAgentDirRecordFile))
+	sub, err := runtime.NFSAgentDirSubPath(resolved.ServerRelativePath, "has-dir")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(resolved.HostBase, sub), 0o770))
+
+	cases := []struct {
+		name     string
+		fresh    bool
+		agentDir string
+		resolved runtime.ResolvedWorkspace
+		agent    string
+		want     bool
+	}{
+		{"existing agent, no record, no dir", false, t.TempDir(), resolved, "old", true},
+		{"create", true, t.TempDir(), resolved, "old", false},
+		{"record present, dir absent", false, withRecord, resolved, "old", false},
+		{"export not mounted", false, t.TempDir(), unmounted, "old", false},
+		{"pre-release agent with its dir", false, t.TempDir(), resolved, "has-dir", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, reason := nfsKeepSharedCheckout(tc.fresh, tc.agentDir, tc.resolved, tc.agent)
+			assert.Equal(t, tc.want, got)
+			assert.Equal(t, tc.want, reason != "")
+		})
+	}
+	assert.NoDirExists(t, filepath.Join(resolved.HostBase, filepath.Dir(sub), "old"), "the check only reads")
 }
 
 // The export not mounted on the broker: the pod still uses the agent

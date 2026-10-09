@@ -1870,6 +1870,16 @@ authDone:
 					claimSharedDirNames = append(claimSharedDirNames, name)
 				}
 			}
+			if agentDirName != "" && mount.PVClaimName != "" {
+				if keep, reason := nfsKeepSharedCheckout(opts.FreshProvision, agentDir, resolvedWorkspace, agentDirName); keep {
+					// The agent keeps the layout and mode it had before
+					// ptone/scion#3998, so its work stays where it is.
+					slog.Info("workspace_storage nfs: "+reason, "agent", opts.Name)
+					agentDirName, agentBranch = "", ""
+					opts.Env["SCION_WORKSPACE_MODE"] = string(store.SharingModeSharedPlain)
+					agentEnv = withEnvValue(agentEnv, "SCION_WORKSPACE_MODE", string(store.SharingModeSharedPlain))
+				}
+			}
 			if emptyAgentDirName != "" {
 				// Empty-per-agent: only the agent's own directory is ever
 				// mounted, never the project's workspace path resolved
@@ -1890,6 +1900,9 @@ authDone:
 			}
 			if err != nil {
 				return nil, err
+			}
+			if nfsAgentDirName != "" && !nfsAgentDirEmpty {
+				recordNFSAgentDir(agentDir, opts.Name)
 			}
 			if worktreeName != "" && mount.PVClaimName != "" {
 				worktreePreCreated, err := ensureNFSWorktreeLeaf(m.Runtime.Name(), resolvedWorkspace, mount.PVClaimName, worktreeName)

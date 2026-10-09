@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -144,4 +145,59 @@ func (m *AgentManager) removeNFSAgentWorkspace(ctx context.Context, projectPath,
 	purgeRemovedAgentWorkspaces(agentDir)
 	slog.Info("workspace_storage nfs: removed the agent's workspace", "path", filepath.Join(agentDir, provision.AgentWorkspaceDir))
 	return agentDir, nil
+}
+
+// nfsAgentDirRecordFile is the per-agent file, in the agent's broker
+// directory next to home-storage.json, that records that the agent uses its
+// own NFS agent directory (agents/<agent name>). It is removed with that
+// directory when the agent is deleted.
+const nfsAgentDirRecordFile = "nfs-agent-dir.json"
+
+// nfsKeepSharedCheckout reports whether an agent that nfsAgentDirSelection
+// put in its own agent directory keeps mounting the project's shared
+// checkout instead, and why. That holds only for an agent created before
+// unlabelled git projects were dispatched as clone-per-agent
+// (ptone/scion#3998), which worked in the shared checkout: a start that is
+// not a create, with no record in agentDir, on a broker with the export
+// mounted, where the agent's directory does not exist. A create, a record,
+// an existing directory, an unmounted export or any other stat error all
+// keep the agent directory. The record is broker-local, so on another
+// broker the stat alone decides. The check only reads.
+func nfsKeepSharedCheckout(fresh bool, agentDir string, resolved runtime.ResolvedWorkspace, agentName string) (bool, string) {
+	if fresh {
+		return false, ""
+	}
+	if _, err := os.Stat(filepath.Join(agentDir, nfsAgentDirRecordFile)); err == nil {
+		return false, ""
+	}
+	sub, err := runtime.NFSAgentDirSubPath(resolved.ServerRelativePath, agentName)
+	if err != nil || resolved.HostBase == "" {
+		return false, ""
+	}
+	if _, err := os.Stat(resolved.HostBase); err != nil {
+		return false, ""
+	}
+	if _, err := os.Lstat(filepath.Join(resolved.HostBase, sub)); !errors.Is(err, fs.ErrNotExist) {
+		return false, ""
+	}
+	return true, "existing agent without its own NFS agent directory keeps the shared checkout"
+}
+
+// recordNFSAgentDir writes nfsAgentDirRecordFile. A failure is logged and
+// does not fail the start: the directory stat still decides next time.
+func recordNFSAgentDir(agentDir, agentName string) {
+	if err := os.WriteFile(filepath.Join(agentDir, nfsAgentDirRecordFile), []byte("{\"layout\":\"agent-dir\"}\n"), 0o600); err != nil {
+		slog.Warn("workspace_storage nfs: could not record the agent's NFS agent directory", "agent", agentName, "error", err)
+	}
+}
+
+// withEnvValue returns env with key set to value, replacing any entry for key.
+func withEnvValue(env []string, key, value string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, key+"=") {
+			out = append(out, kv)
+		}
+	}
+	return append(out, key+"="+value)
 }
