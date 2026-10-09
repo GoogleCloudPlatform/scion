@@ -51,8 +51,10 @@ import (
 //   - One agent_scopes_reissue_batch row records the operator, dry_run and
 //     counts only (no scope names). If it cannot be written the response
 //     says so (batch_audit_recorded=false).
-//   - A dry run writes nothing per agent: it previews each agent through
-//     the same computation and hands the would-be result to its descendants
+//   - A dry run runs each agent through the single-agent dry run, so it
+//     audits exactly as --dry-run does (a dry_run=true row per agent, or a
+//     denial row, each with the batch_op_id) and changes nothing else; the
+//     would-be result of each changed agent goes to its descendants
 //     (reissueOverlay), so it reports exactly what --apply would change.
 //   - The run is detached from the request and bounded by
 //     ReissueBulkRunTimeout.
@@ -367,11 +369,11 @@ func (s *Server) runScopeReissueBulk(ctx context.Context, operator reissueOperat
 	return resp, nil
 }
 
-// reissueOneForBulk runs the single-agent re-issue for a and classifies the
-// outcome. It re-reads the agent so it computes against its own current
-// row. In a dry run it previews instead (previewScopeReissue): the same
-// computation, with the would-be result handed to later agents through the
-// overlay and nothing written.
+// reissueOneForBulk runs the single-agent re-issue for a (runScopeReissue,
+// dry run or applied) and classifies the outcome. It re-reads the agent so
+// it computes against its own current row. In a dry run the context carries
+// the overlay, so the would-be result of a changed agent reaches the agents
+// after it.
 func (s *Server) reissueOneForBulk(ctx context.Context, a *store.Agent, depth int, operator reissueOperator, dryRun bool, batchOpID string) ScopeReissueBulkAgent {
 	if reissueBulkAgentHook != nil {
 		reissueBulkAgentHook(a.ID)
@@ -391,12 +393,7 @@ func (s *Server) reissueOneForBulk(ctx context.Context, a *store.Agent, depth in
 		}
 		return out
 	}
-	var resp *ScopeReissueResponse
-	if dryRun {
-		resp, err = s.previewScopeReissue(ctx, fresh, operator)
-	} else {
-		resp, err = s.runScopeReissue(ctx, fresh, operator, false, batchOpID)
-	}
+	resp, err := s.runScopeReissue(ctx, fresh, operator, dryRun, batchOpID)
 	if err != nil {
 		out.Outcome = "refused"
 		out.Cause = reissueBulkCause(ctx, err, a.ID, batchOpID)
@@ -417,24 +414,6 @@ func (s *Server) reissueOneForBulk(ctx context.Context, a *store.Agent, depth in
 		out.Outcome = "changed"
 	}
 	return out
-}
-
-// previewScopeReissue is the bulk dry run of one agent: the same
-// computation as the applied run (computeScopeReissue), whose result, when
-// it changes the agent, goes to the overlay in place of the commit. It
-// mints, revokes, pushes and records nothing (no edge, no audit row, no
-// denial row); the batch row records the dry run and its counts.
-func (s *Server) previewScopeReissue(ctx context.Context, agent *store.Agent, operator reissueOperator) (*ScopeReissueResponse, error) {
-	plan, err := s.computeScopeReissue(ctx, agent)
-	if err != nil {
-		return nil, err
-	}
-	if !plan.noop {
-		reissueOverlayFrom(ctx).record(agent.ID, plan.replacementEdge(operator), plan.roleAfter)
-	}
-	resp := reissueResponseFromPlan(plan, "", true)
-	resp.Message = "Dry run: nothing was changed"
-	return resp, nil
 }
 
 // reissueBulkCause is the cause reported for a refused agent.
