@@ -145,6 +145,8 @@ func TestSSEMessageViewer(t *testing.T) {
 			assert.True(t, v.visible(evt("agent.agent-1.message", othersMsg)))
 			assert.True(t, v.visible(evt("project.p.user.message", othersMsg)))
 			assert.False(t, v.visible(evt("agent.agent-2.message", othersMsg)))
+			// An empty agent id token is denied, not taken from the payload.
+			assert.False(t, v.visible(evt("agent..message", othersMsg)))
 		}
 		assert.Equal(t, map[string]int{"agent-1": 1, "agent-2": 1}, calls)
 	})

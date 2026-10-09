@@ -1629,9 +1629,9 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 // "dm:" thread id) are delivered only to users named in the DM key — the
 // same rule the REST DM reads apply (isDMParticipant). Participants also
 // receive every DM message on user.<id>.chat.dm. All other events pass
-// through here. The events stream applies this rule through
-// sseMessageViewer.visible, which then also applies the agent message
-// history rule.
+// through here. It is a test helper wrapping sseDMRuleAllows; the events
+// stream applies that rule through sseMessageViewer.visible, which then
+// also applies the agent message history rule.
 func sseEventVisible(evt Event, userID string) bool {
 	if !sseSubjectMayCarryDM(evt.Subject) {
 		return true
@@ -1642,26 +1642,27 @@ func sseEventVisible(evt Event, userID string) bool {
 
 // sseSubjectMayCarryDM matches the subjects onto which PublishUserMessage
 // publishes DM messages that are not already scoped to a participant:
-// agent.<id>.message and project.<id>.user.message.
+// agent.<id>.message and project.<id>.user.message. It is a test helper
+// wrapping sseUserMessageSubject, which sseMessageViewer.visible uses.
 func sseSubjectMayCarryDM(subject string) bool {
-	_, ok := sseUserMessageSubject(subject)
+	_, _, ok := sseUserMessageSubject(subject)
 	return ok
 }
 
 // sseUserMessageSubject matches agent.<id>.message and
 // project.<id>.user.message, the subjects on which PublishUserMessage
-// publishes user messages to every reader of the agent or project. For an
-// agent subject it also returns the agent id; for a project subject that
-// id is empty.
-func sseUserMessageSubject(subject string) (subjectAgentID string, ok bool) {
+// publishes user messages to every reader of the agent or project.
+// agentSubject reports the agent form, and subjectAgentID is its id token
+// (which may be empty); for the project form both are zero.
+func sseUserMessageSubject(subject string) (subjectAgentID string, agentSubject, ok bool) {
 	tokens := strings.Split(subject, ".")
 	switch {
 	case len(tokens) == 3 && tokens[0] == "agent" && tokens[2] == "message":
-		return tokens[1], true
+		return tokens[1], true, true
 	case len(tokens) == 4 && tokens[0] == "project" && tokens[2] == "user" && tokens[3] == "message":
-		return "", true
+		return "", false, true
 	}
-	return "", false
+	return "", false, false
 }
 
 // sseUserMessage holds the UserMessageEvent fields the visibility rules
@@ -1742,7 +1743,7 @@ func (ws *WebServer) newSSEMessageViewer(r *http.Request) *sseMessageViewer {
 // once, then applies the DM rule and the attach-or-participant rule, in
 // that order. Other events pass through.
 func (v *sseMessageViewer) visible(evt Event) bool {
-	subjectAgentID, ok := sseUserMessageSubject(evt.Subject)
+	subjectAgentID, agentSubject, ok := sseUserMessageSubject(evt.Subject)
 	if !ok {
 		return true
 	}
@@ -1754,9 +1755,10 @@ func (v *sseMessageViewer) visible(evt Event) bool {
 		return true
 	}
 	// The subject names the agent the caller was authorized for; on the
-	// project subject only the payload names it.
+	// project subject only the payload names it. An agent subject with an
+	// empty id token is denied, never resolved from the payload.
 	agentID := msg.AgentID
-	if subjectAgentID != "" {
+	if agentSubject {
 		agentID = subjectAgentID
 	}
 	return agentID != "" && v.hasAttach(agentID)

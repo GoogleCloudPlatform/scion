@@ -809,8 +809,9 @@ func (p *eventBuilder) PublishInviteChanged(_ context.Context, action, inviteID,
 //
 // DM messages (a "dm:" thread id) on the agent and project subjects are
 // delivered by the web events stream only to DM participants; see
-// sseEventVisible in web.go. Other messages on those subjects follow the
-// agent message history rule (sseMessageViewer in web.go).
+// sseMessageViewer.visible and sseDMRuleAllows in web.go. Other messages on
+// those subjects follow the agent message history rule
+// (sseMessageViewer.visible).
 func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message, attachments []AttachmentRef) {
 	evt := UserMessageEvent{
 		ID:             msg.ID,
