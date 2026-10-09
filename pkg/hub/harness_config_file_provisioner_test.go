@@ -19,11 +19,26 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 )
+
+// uploadRecordingStorage records every Upload call, so a test can assert
+// that a refused request wrote nothing at all.
+type uploadRecordingStorage struct {
+	*contentMockStorage
+	uploads []string
+}
+
+func (m *uploadRecordingStorage) Upload(ctx context.Context, objectPath string, reader io.Reader, opts storage.UploadOptions) (*storage.Object, error) {
+	m.uploads = append(m.uploads, objectPath)
+	return m.contentMockStorage.Upload(ctx, objectPath, reader, opts)
+}
 
 // provisionerUploadCases are the config.yaml bodies the harness-config
 // file-write and multipart upload paths must refuse or accept, matching
@@ -119,42 +134,75 @@ func TestHandleHarnessConfigFileWrite_RejectsUnusableProvisioner(t *testing.T) {
 	}
 }
 
+// A file path that cleans to config.yaml gets the same check as the exact
+// name on the per-file PUT.
+func TestHandleHarnessConfigFileWrite_RejectsUnusableProvisionerUncleanPath(t *testing.T) {
+	srv, s, stor := testHarnessConfigFileServer(t)
+	rs := &uploadRecordingStorage{contentMockStorage: stor}
+	srv.SetStorage(rs)
+	hc := createTestHarnessConfigWithFiles(t, s, nil, nil)
+
+	refused := provisionerUploadCases[0]
+	req := httptest.NewRequest(http.MethodPut, "/", strings.NewReader(refused.configYAML))
+	req.Header.Set("Content-Type", "text/plain")
+	rec := httptest.NewRecorder()
+	srv.handleHarnessConfigFileWrite(rec, req, hc, "./config.yaml")
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
+	}
+	assertUnusableProvisionerResponse(t, rec, refused.wantReason)
+	if len(rs.uploads) != 0 {
+		t.Errorf("refused write uploaded %v", rs.uploads)
+	}
+}
+
 // The multipart upload refuses an unusable provisioner block in a
-// config.yaml part before writing any part.
+// config.yaml part before writing any part. Parts are written in sorted
+// order and "aaa-first.txt" sorts before "config.yaml", so a check made
+// inside the write loop instead of before it always records an upload.
 func TestHandleHarnessConfigFileUpload_RejectsUnusableProvisioner(t *testing.T) {
-	for _, tc := range provisionerUploadCases {
-		t.Run(tc.name, func(t *testing.T) {
-			srv, s, _ := testHarnessConfigFileServer(t)
-			hc := createTestHarnessConfigWithFiles(t, s, nil, nil)
-			stor := srv.GetStorage().(*contentMockStorage)
-
-			req := harnessConfigMultipartRequest(t, hc.ID, map[string][]byte{
-				"config.yaml":  []byte(tc.configYAML),
-				"provision.py": []byte("print('ok')\n"),
+	for _, configPart := range []string{"config.yaml", "./config.yaml", "sub/../config.yaml"} {
+		for _, tc := range provisionerUploadCases {
+			t.Run(configPart+"/"+tc.name, func(t *testing.T) {
+				testMultipartProvisionerCase(t, configPart, tc.configYAML, tc.wantStatus, tc.wantReason)
 			})
-			rec := httptest.NewRecorder()
-			srv.Handler().ServeHTTP(rec, req)
-			if rec.Code != tc.wantStatus {
-				t.Fatalf("status = %d, want %d: %s", rec.Code, tc.wantStatus, rec.Body.String())
-			}
+		}
+	}
+}
 
-			stored, err := s.GetHarnessConfig(context.Background(), hc.ID)
-			if err != nil {
-				t.Fatalf("get harness config: %v", err)
-			}
-			if tc.wantStatus == http.StatusOK {
-				if len(stored.Files) != 2 {
-					t.Errorf("expected both files recorded, got %+v", stored.Files)
-				}
-				return
-			}
-			assertUnusableProvisionerResponse(t, rec, tc.wantReason)
-			if len(stor.content) != 0 {
-				t.Errorf("refused upload wrote to storage: %d objects", len(stor.content))
-			}
-			if len(stored.Files) != 0 || stored.ContentHash != hc.ContentHash {
-				t.Errorf("record changed by a refused upload: files=%+v hash=%q", stored.Files, stored.ContentHash)
-			}
-		})
+func testMultipartProvisionerCase(t *testing.T, configPart, configYAML string, wantStatus int, wantReason string) {
+	t.Helper()
+	srv, s, contentStor := testHarnessConfigFileServer(t)
+	stor := &uploadRecordingStorage{contentMockStorage: contentStor}
+	srv.SetStorage(stor)
+	hc := createTestHarnessConfigWithFiles(t, s, nil, nil)
+
+	req := harnessConfigMultipartRequest(t, hc.ID, map[string][]byte{
+		"aaa-first.txt": []byte("first\n"),
+		configPart:      []byte(configYAML),
+		"provision.py":  []byte("print('ok')\n"),
+	})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != wantStatus {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, wantStatus, rec.Body.String())
+	}
+
+	stored, err := s.GetHarnessConfig(context.Background(), hc.ID)
+	if err != nil {
+		t.Fatalf("get harness config: %v", err)
+	}
+	if wantStatus == http.StatusOK {
+		if len(stor.uploads) != 3 || len(stored.Files) != 3 {
+			t.Errorf("expected all three parts written and recorded: uploads=%v files=%+v", stor.uploads, stored.Files)
+		}
+		return
+	}
+	assertUnusableProvisionerResponse(t, rec, wantReason)
+	if len(stor.uploads) != 0 {
+		t.Errorf("refused upload wrote parts before the check: %v", stor.uploads)
+	}
+	if len(stored.Files) != 0 || stored.ContentHash != hc.ContentHash {
+		t.Errorf("record changed by a refused upload: files=%+v hash=%q", stored.Files, stored.ContentHash)
 	}
 }

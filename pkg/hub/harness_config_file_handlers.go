@@ -25,7 +25,9 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -240,7 +242,7 @@ func (s *Server) handleHarnessConfigFileWrite(w http.ResponseWriter, r *http.Req
 	}
 
 	content := []byte(req.Content)
-	if filePath == "config.yaml" && refuseUnusableProvisionerYAML(w, hc.Name, content) {
+	if isHarnessConfigYAMLPath(filePath) && refuseUnusableProvisionerYAML(w, hc.Name, content) {
 		return
 	}
 	objectPath := hc.StoragePath + "/" + filePath
@@ -277,7 +279,7 @@ func (s *Server) handleHarnessConfigFileWrite(w http.ResponseWriter, r *http.Req
 
 	hc.ContentHash = computeContentHash(hc.Files)
 
-	if filePath == "config.yaml" {
+	if isHarnessConfigYAMLPath(filePath) {
 		if entry, err := config.ParseHarnessConfigYAML(content); err == nil {
 			if hc.Config == nil {
 				hc.Config = &store.HarnessConfigData{}
@@ -325,9 +327,20 @@ func (s *Server) handleHarnessConfigFileUpload(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Check an uploaded config.yaml before any part is written, so a refused
-	// upload leaves storage and the record unchanged.
-	if headers := r.MultipartForm.File["config.yaml"]; len(headers) > 0 {
+	// Write parts in a stable order.
+	partPaths := make([]string, 0, len(r.MultipartForm.File))
+	for filePath := range r.MultipartForm.File {
+		partPaths = append(partPaths, filePath)
+	}
+	slices.Sort(partPaths)
+
+	// Check every part that resolves to config.yaml before any part is
+	// written, so a refused upload leaves storage and the record unchanged.
+	for _, filePath := range partPaths {
+		headers := r.MultipartForm.File[filePath]
+		if !isHarnessConfigYAMLPath(filePath) || len(headers) == 0 {
+			continue
+		}
 		data, err := readMultipartFile(headers[0])
 		if err != nil {
 			BadRequest(w, "Failed to read multipart file: "+err.Error())
@@ -339,8 +352,9 @@ func (s *Server) handleHarnessConfigFileUpload(w http.ResponseWriter, r *http.Re
 	}
 
 	files := hc.Files
-	entries := make([]HarnessConfigFileEntry, 0, len(r.MultipartForm.File))
-	for filePath, headers := range r.MultipartForm.File {
+	entries := make([]HarnessConfigFileEntry, 0, len(partPaths))
+	for _, filePath := range partPaths {
+		headers := r.MultipartForm.File[filePath]
 		if err := validateWorkspaceFilePath(filePath); err != nil {
 			BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", filePath, err.Error()))
 			return
@@ -442,6 +456,13 @@ func refuseUnusableProvisionerYAML(w http.ResponseWriter, name string, configYAM
 		return true
 	}
 	return false
+}
+
+// isHarnessConfigYAMLPath reports whether a harness-config file path names
+// the top-level config.yaml once cleaned, so spellings such as
+// "./config.yaml" get the same checks as the exact name.
+func isHarnessConfigYAMLPath(filePath string) bool {
+	return path.Clean(filePath) == "config.yaml"
 }
 
 // readMultipartFile reads one multipart file part fully.
