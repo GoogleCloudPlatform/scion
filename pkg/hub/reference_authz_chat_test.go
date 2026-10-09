@@ -348,20 +348,26 @@ func TestChatDMHistory_StaysReadableAfterProjectAccessEnds(t *testing.T) {
 	f.seedMessage(t, f.projA.ID, dm, "", "earlier DM message")
 	require.NotEmpty(t, f.history(t, f.ua, dm).Messages)
 
-	f.removeFromProject(t, f.ua, f.projA)
+	f.revokeProjectAccess(t, f.ua, f.projA)
 
 	hist := f.history(t, f.ua, dm)
 	assert.NotEmpty(t, hist.Messages, "the user's own DM history with the agent stays readable")
 }
 
-// removeFromProject takes away every role user has in project, and checks
-// that the user can no longer read it.
-func (f *refFixture) removeFromProject(t *testing.T, user *store.User, project *store.Project) {
+// revokeProjectAccess removes user from project's members group and deletes
+// all of user's role bindings (in every project and at hub level, which is
+// broader than this one project), then checks that the user can no longer
+// read project.
+func (f *refFixture) revokeProjectAccess(t *testing.T, user *store.User, project *store.Project) {
 	t.Helper()
 	ctx := context.Background()
 	membersGroup, err := f.st.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
 	require.NoError(t, err)
-	_ = f.st.RemoveGroupMember(ctx, membersGroup.ID, store.GroupMemberTypeUser, user.ID)
+	// A user whose access comes from a role binding alone is not in the
+	// members group; that case is not an error here.
+	if err := f.st.RemoveGroupMember(ctx, membersGroup.ID, store.GroupMemberTypeUser, user.ID); err != nil {
+		require.ErrorIs(t, err, store.ErrNotFound)
+	}
 	_, err = f.st.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, user.ID)
 	require.NoError(t, err)
 	ident := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, string(ClientTypeWeb))
@@ -666,7 +672,7 @@ func TestAttachmentDownload_AgentDMFileReadableAfterProjectAccessEnds(t *testing
 	require.Equal(t, http.StatusOK, f.download(t, f.ua, file).status)
 
 	// alice loses access to project A.
-	f.removeFromProject(t, f.ua, f.projA)
+	f.revokeProjectAccess(t, f.ua, f.projA)
 
 	got := f.download(t, f.ua, file)
 	require.Equal(t, http.StatusOK, got.status, "the DM's file stays readable with the DM: %s", got.body)
