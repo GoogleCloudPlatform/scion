@@ -1907,6 +1907,7 @@ export class ScionChatMessage extends LitElement {
       pre.setAttribute('data-highlighted', 'true');
 
       // Create a readonly code editor and replace the <pre> in-place.
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion -- explicit element type kept for readability; HTMLElementTagNameMap gives the same type.
       const editor = document.createElement(
         'scion-code-editor'
       ) as import('../code-editor.js').ScionCodeEditor;

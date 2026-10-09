@@ -62,7 +62,7 @@ interface EffectiveRoleBinding {
   notBefore?: string;
   expiresAt?: string;
   /** How the binding was obtained: 'direct' or the group that grants it. */
-  source: 'direct' | string;
+  source: string;
   /** When source is not 'direct', this holds the group display name. */
   sourceGroupName?: string;
 }

@@ -970,6 +970,7 @@ export class ScionPageAgentDetail extends LitElement {
       await Promise.all(parallel);
 
       // Load metrics summary (non-blocking).
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises -- fire-and-forget by design; per-site decision tracked in ptone/scion#4126.
       this.loadMetricsSummary();
 
       this.seedAgent(this.agent, agentId, epoch, epochGeneration);
@@ -1179,6 +1180,7 @@ export class ScionPageAgentDetail extends LitElement {
     this.chatViewActive = mode === 'chat';
     // Trigger load for the newly active view
     if (this.chatViewActive) {
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises -- fire-and-forget by design; per-site decision tracked in ptone/scion#4126.
       this.updateComplete.then(() => {
         const chatThread = this.shadowRoot?.querySelector(
           'scion-chat-thread'
@@ -1186,6 +1188,7 @@ export class ScionPageAgentDetail extends LitElement {
         chatThread?.loadHistory();
       });
     } else {
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises -- fire-and-forget by design; per-site decision tracked in ptone/scion#4126.
       this.updateComplete.then(() => {
         const viewer = this.shadowRoot?.querySelector(
           'scion-agent-message-viewer'

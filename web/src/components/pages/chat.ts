@@ -2155,7 +2155,7 @@ export class ScionPageChat extends LitElement {
             dispatchPageTitle(this, 'DM', 'Chat');
           }
 
-          let peerName = '';
+          let peerName: string;
           if (isAgent) {
             const agent = this.v2AgentMembers.find((a) => a.id === segment);
             peerName = agent?.displayName || '';
@@ -3995,6 +3995,7 @@ export class ScionPageChat extends LitElement {
    * `popstate` to the page; on any other URL the router replaces the page.
    */
   private routeShowsCurrentUrl(): boolean {
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion -- tsc needs the cast to read currentPath on the parent element.
     const shell = this.parentElement as (HTMLElement & { currentPath?: unknown }) | null;
     if (typeof shell?.currentPath !== 'string') return false;
     const appPath = stripBasePath(window.location.pathname) + window.location.search;
@@ -4342,6 +4343,7 @@ export class ScionPageChat extends LitElement {
         // Fall through to the manual walk below (e.g. not implemented in this environment).
       }
     }
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion -- cast through unknown keeps no-this-alias from reporting the loop variable.
     let node: Node | null = this as unknown as Node;
     while (node) {
       const el = node as HTMLElement;
@@ -5522,7 +5524,7 @@ export class ScionPageChat extends LitElement {
   private async _pollForNewComposerTextarea(): Promise<HTMLElement | null> {
     await this.updateComplete;
     const deadline = Date.now() + 2000;
-    let slTextarea: Element | null = null;
+    let slTextarea: Element | null;
     do {
       const thread = this.shadowRoot?.querySelector('scion-chat-thread');
       const composer = thread?.shadowRoot?.querySelector('scion-chat-composer');

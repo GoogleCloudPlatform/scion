@@ -233,6 +233,7 @@ export class ScionCodeEditor extends LitElement {
     }
   `;
 
+  // eslint-disable-next-line @typescript-eslint/no-misused-promises -- async callback where a void return is expected, by design; per-site decision tracked in ptone/scion#4126.
   override async connectedCallback(): Promise<void> {
     super.connectedCallback();
     await this.updateComplete;

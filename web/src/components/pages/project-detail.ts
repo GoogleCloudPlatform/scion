@@ -1753,7 +1753,7 @@ export class ScionPageProjectDetail extends LitElement {
       return;
     }
     const viewEpoch = this.viewEpoch;
-    let adopted = false;
+    let adopted: boolean;
     this.beginLoadingIndicator();
     try {
       adopted =
@@ -2985,6 +2985,7 @@ export class ScionPageProjectDetail extends LitElement {
       this.messagesExpanded = false;
     } else {
       this.messagesExpanded = true;
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises -- fire-and-forget by design; per-site decision tracked in ptone/scion#4126.
       this.updateComplete.then(() => {
         const viewer = this.shadowRoot?.querySelector('scion-agent-message-viewer') as
           | import('../shared/agent-message-viewer.js').ScionAgentMessageViewer
@@ -3129,6 +3130,7 @@ export class ScionPageProjectDetail extends LitElement {
     const browser = this.shadowRoot?.querySelector(
       `scion-file-browser[data-tab="${this.activeFileTab}"]`
     ) as import('../shared/file-browser.js').ScionFileBrowser | null;
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises -- fire-and-forget by design; per-site decision tracked in ptone/scion#4126.
     browser?.loadFiles();
   }
 
