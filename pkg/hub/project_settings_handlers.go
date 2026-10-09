@@ -354,6 +354,16 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 		return true
 	}
 
+	// The service account itself is checked only when this request sets
+	// it, or selects assign, which is what makes it apply. A request that
+	// moves the mode away from assign (or clears it) leaves the stored
+	// account unused, so a stored account that has since gone bad must not
+	// block that escape either.
+	if !present[projectSettingsFieldGCPIdentitySAID] &&
+		merged.DefaultGCPIdentityMode != store.GCPMetadataModeAssign {
+		return true
+	}
+
 	// Deliberately identical to the not-reachable message below. Distinguishing
 	// them would make this endpoint an existence oracle: a project owner could
 	// enumerate other projects' service account IDs by watching which ones fail

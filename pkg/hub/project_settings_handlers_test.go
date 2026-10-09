@@ -1423,3 +1423,32 @@ func TestProjectSettings_PartialPutDoesNotRevalidateStoredIdentity(t *testing.T)
 		json.RawMessage(`{"defaultGCPIdentityMode":"assign"}`))
 	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
 }
+
+// Moving the mode away from assign, or clearing it, must not be blocked by a
+// stored service account that has gone unverified since it was saved: the
+// account no longer applies once the mode is not assign.
+func TestProjectSettings_ModeOnlyPutSkipsStaleStoredSA(t *testing.T) {
+	for _, mode := range []string{"passthrough", ""} {
+		t.Run("mode="+mode, func(t *testing.T) {
+			srv, s := testServer(t)
+			project := createTestProjectForSettings(t, s)
+			sa := newSettingsTestSA(t, s, project.ID, "sa-mode-only")
+
+			rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+				hubclient.ProjectSettings{DefaultGCPIdentityMode: "assign", DefaultGCPIdentityServiceAccountID: sa.ID})
+			require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+			sa.Verified = false
+			sa.VerificationStatus = ""
+			require.NoError(t, s.UpdateGCPServiceAccount(t.Context(), sa))
+
+			rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+				json.RawMessage(`{"defaultGCPIdentityMode":"`+mode+`"}`))
+			require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+			var got hubclient.ProjectSettings
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
+			assert.Equal(t, mode, got.DefaultGCPIdentityMode)
+		})
+	}
+}
