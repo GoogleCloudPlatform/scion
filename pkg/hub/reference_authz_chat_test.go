@@ -662,7 +662,9 @@ func TestCheckAccessError_DeniesGroupPost(t *testing.T) {
 	f.faults.failGetProject = true
 	f.fault.Arm()
 	got := postMessageWithConv(t, f.srv, alice, f.aa, groupA)
-	assert.NotEqual(t, http.StatusOK, got.status, "a project lookup error refuses the post: %s", got.body)
+	missing := postMessageWithConv(t, f.srv, alice, f.aa, tid("check-access-error-unknown-conv"))
+	require.Equal(t, http.StatusBadRequest, missing.status, missing.body)
+	requireSameAnswer(t, missing, got)
 	assert.Equal(t, before, participantCount(t, f.st, groupA), "no participant row is written")
 }
 
