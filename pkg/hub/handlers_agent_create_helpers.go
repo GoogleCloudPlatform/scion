@@ -1984,6 +1984,17 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 			// project only through an explicit link. Dispatch authorization
 			// (canDispatchToBroker) is answered first, then the create is
 			// refused without writing anything.
+			//
+			// This check uses IsFlat (a stored target ID), while
+			// canUseBrokerForProject uses hasRuntimeTargetDescriptor (any
+			// descriptor). They differ only for a row whose descriptor has no
+			// ID, which the store never loads (it builds a descriptor only
+			// when the target ID is set). Such a row would take the legacy
+			// path below: linking still needs project update, and the later
+			// dispatch decision (checkBrokerDispatchAccess, through
+			// canUseBrokerForProject) still decides it with
+			// canDispatchToBroker. The difference admits no additional
+			// caller.
 			if broker.IsFlat() {
 				if !s.canDispatchToBroker(ctx, broker) {
 					writeBrokerDispatchForbidden(w)
