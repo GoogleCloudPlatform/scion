@@ -4107,3 +4107,77 @@ func TestProvisionAgent_InlineConfigSuppliedRepoRootIsInert(t *testing.T) {
 		t.Fatalf("inline-config-supplied repo root persisted into state: %q (want empty)", got)
 	}
 }
+
+// TestGetAgent_ResolutionFailureLeavesNothingBehind verifies that when a
+// start of an agent with no agent directory fails template or harness-config
+// resolution, ProvisionAgent has not yet created the agent directory, the
+// workspace worktree or its branch (ptone/scion#3135).
+func TestGetAgent_ResolutionFailureLeavesNothingBehind(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "") // Clear container context for worktree ops
+
+	cases := []struct {
+		name          string
+		template      string
+		harnessConfig string
+	}{
+		{name: "unknown harness-config", harnessConfig: "no-such-harness-config"},
+		{name: "unknown template", template: "no-such-template"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+
+			oldWd, _ := os.Getwd()
+			_ = os.Chdir(tmpDir)
+			defer func() { _ = os.Chdir(oldWd) }()
+			t.Setenv("HOME", tmpDir)
+
+			projectDir := filepath.Join(tmpDir, "project")
+			_ = os.MkdirAll(projectDir, 0755)
+			git := func(args ...string) string {
+				t.Helper()
+				cmd := exec.Command("git", args...)
+				cmd.Dir = projectDir
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("git %v failed: %v\n%s", args, err, out)
+				}
+				return string(out)
+			}
+			git("init")
+			git("config", "user.email", "test@example.com")
+			git("config", "user.name", "Test")
+			git("commit", "--allow-empty", "-m", "initial")
+
+			scionDir := filepath.Join(projectDir, ".scion")
+			_ = os.MkdirAll(filepath.Join(scionDir, "templates"), 0755)
+			globalScionDir := filepath.Join(tmpDir, ".scion")
+			_ = os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
+			seedTestHarnessConfig(t, globalScionDir, "generic", "generic")
+			tplDir := filepath.Join(globalScionDir, "templates", "default")
+			_ = os.MkdirAll(tplDir, 0755)
+			_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"generic"}`), 0644)
+			_ = os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte(".scion/agents/\n"), 0644)
+
+			agentName := "failed-agent"
+			agentDir := filepath.Join(scionDir, "agents", agentName)
+			worktreesBefore := git("worktree", "list", "--porcelain")
+			branchesBefore := git("branch", "--list")
+
+			_, _, _, _, err := GetAgent(context.Background(), agentName, tc.template, "", tc.harnessConfig, scionDir, "", "", "", "")
+			if err == nil {
+				t.Fatal("expected GetAgent to fail resolution")
+			}
+
+			if _, statErr := os.Lstat(agentDir); !os.IsNotExist(statErr) {
+				t.Errorf("agent dir %s exists after a resolution failure (stat err: %v)", agentDir, statErr)
+			}
+			if got := git("worktree", "list", "--porcelain"); got != worktreesBefore {
+				t.Errorf("worktree list changed after a resolution failure:\nbefore:\n%s\nafter:\n%s", worktreesBefore, got)
+			}
+			if got := git("branch", "--list"); got != branchesBefore {
+				t.Errorf("branches changed after a resolution failure:\nbefore:\n%s\nafter:\n%s", branchesBefore, got)
+			}
+		})
+	}
+}
