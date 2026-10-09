@@ -5278,6 +5278,16 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_InjectsWorkspaceMode(t *testing.
 			wantGit:            true,
 		},
 		{
+			// An unlabelled git project gets a per-agent clone, so the hub
+			// sends the canonical clone-per-agent (ptone/scion#3998).
+			name:               "git, empty label: clone-per-agent",
+			workspaceModeLabel: "",
+			gitRemote:          "https://github.com/example/repo.git",
+			appliedGitClone:    &api.GitCloneConfig{URL: "https://github.com/example/repo.git"},
+			wantMode:           "clone-per-agent",
+			wantGit:            true,
+		},
+		{
 			// When no workspace mode label is set, the hub does not inject
 			// SCION_WORKSPACE_MODE. The broker applies the shared-plain default
 			// in buildStartContext when the key is absent from resolvedEnv.
