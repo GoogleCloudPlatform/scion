@@ -24,6 +24,9 @@
 #   - a command continuation line that starts with `--debug` (followed by
 #     nothing, a trailing `\` or further flags), or a YAML list item
 #     `- --debug`; prose that merely names the flag is not flagged
+#   - `--debug` as an element of an inline list, quoted or not
+#     (`args: ["--debug"]`, `args = ["server", "start", "--debug"]`,
+#     `command: [scion, server, start, --debug]`)
 #   - SCION_LOG_LEVEL set to debug (`=debug`, `: debug`, quoted or not)
 #   - SCION_DEBUG set to a non-empty value
 #   - log_level / logLevel set to debug (`log_level: debug`,
@@ -52,8 +55,9 @@
 #   4  could not analyse: a scan root is missing, no files were found, or
 #      find/grep failed
 #
-# Uses only bash 3.2-compatible syntax and POSIX find/grep, so it runs with
-# the system bash and BSD tools on macOS.
+# Uses only bash 3.2-compatible syntax, POSIX ERE patterns, and find/grep
+# flags supported by both GNU and BSD tools, so it runs with the system bash
+# and BSD tools on macOS.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -81,7 +85,7 @@ ALLOWLIST=(
   "docs-site/src/content/docs/hosted/single-node/observability.md::To get DEBUG-level Hub logs"
   # Examples of storing an arbitrary agent environment variable with
   # `scion hub env set`; LOG_LEVEL here is not a Hub setting.
-  "docs-site/src/content/docs/hosted/user/secrets.md::^scion hub env set .*LOG_LEVEL=debug$"
+  "docs-site/src/content/docs/hosted/user/secrets.md::^scion hub env set .*[[:space:]]LOG_LEVEL=debug$"
 )
 
 # --- Patterns (POSIX ERE, matched case-insensitively) ---
@@ -93,6 +97,7 @@ PATTERNS=(
   "(server|runtime-broker) start.*${dbg}([^=A-Za-z0-9_-]|$)"
   "${dbg}[[:space:]].*(server|runtime-broker) start"
   "^[[:space:]]*(-[[:space:]]+)?${q}?${dbg}${q}?([[:space:]]*(\\\\|--.*))?$"
+  "[[,][[:space:]]*${q}?${dbg}${q}?[[:space:]]*[],]"
   "SCION_LOG_LEVEL${q}?[[:space:]]*[=:][[:space:]]*${q}?debug"
   "SCION_DEBUG${q}?[[:space:]]*[=:][[:space:]]*${q}?[^\"'[:space:]]"
   "(^|[^A-Za-z_])log_?level${q}?[[:space:]]*[:=][[:space:]]*${q}?debug"
@@ -152,13 +157,15 @@ analyse() {
   fi
 
   : >"$WORK/violations"
+  # ${ALLOWLIST[@]+"${ALLOWLIST[@]}"} keeps an empty ALLOWLIST from aborting
+  # under set -u on bash before 4.4 (macOS ships 3.2).
   while IFS= read -r line; do
     file="${line%%:*}"
     text="${line#*:}"
     text="${text#*:}"
     hit=""
     i=0
-    for entry in "${ALLOWLIST[@]}"; do
+    for entry in ${ALLOWLIST[@]+"${ALLOWLIST[@]}"}; do
       if [[ "$file" == "${entry%%::*}" ]] && printf '%s\n' "$text" | grep -Eq -e "${entry#*::}"; then
         hit=1
         used="${used}${i} "
@@ -172,7 +179,7 @@ analyse() {
   done <"$WORK/uncommented"
 
   i=0
-  for entry in "${ALLOWLIST[@]}"; do
+  for entry in ${ALLOWLIST[@]+"${ALLOWLIST[@]}"}; do
     case "$used" in
       *" $i "*) ;;
       *) printf 'stale-allowlist:%s (matched nothing; remove it or fix its pattern)\n' "$entry" >>"$WORK/violations" ;;
@@ -208,6 +215,10 @@ args:
 logLevel: debug
 log_level = "debug"
 scion server start --debug=true --enable-hub
+args: ["--debug"]
+args = ["server", "start", "--debug"]
+command: [scion, server, start, --debug]
+args: ['--debug=true', '--enable-hub']
 EOF
   cat >"$fx/scripts/starter-hub/good.sh" <<'EOF'
 # SCION_LOG_LEVEL=debug
@@ -225,6 +236,9 @@ log_level: info
 logLevel: "info"
 The --debug flag turns on debug logging.
   --debug is on, no log line either.
+args: ["--debug=false"]
+args: ["--debug-port", "9000"]
+args: []
 EOF
   # Pruned: top-level ci/ of a chart.
   printf 'log_level: debug\n' >"$fx/deploy/helm/chart/ci/values.yaml"
@@ -255,6 +269,10 @@ scripts/starter-hub/bad.sh:12
 scripts/starter-hub/bad.sh:13
 scripts/starter-hub/bad.sh:14
 scripts/starter-hub/bad.sh:15
+scripts/starter-hub/bad.sh:16
+scripts/starter-hub/bad.sh:17
+scripts/starter-hub/bad.sh:18
+scripts/starter-hub/bad.sh:19
 scripts/starter-hub/bad.sh:2
 scripts/starter-hub/bad.sh:4
 scripts/starter-hub/bad.sh:5
@@ -272,6 +290,22 @@ stale-allowlist:docs-site/src/content/docs/hosted/page.md"
     exit 1
   fi
 
+  # An empty ALLOWLIST must still analyse: the allowlisted docs line is then
+  # reported too, and no stale entry exists.
+  rc=0
+  out="$(
+    cd "$fx"
+    SCAN_ROOTS=(scripts deploy docs-site/src/content/docs/hosted)
+    ALLOWLIST=()
+    analyse
+  )" || rc=$?
+  got="$(printf '%s\n' "$out" | cut -d: -f1,2 | grep -c -e '^docs-site/src/content/docs/hosted/page.md:[12]$' -e '^scripts/starter-hub/bad.sh:' || true)"
+  if [[ "$rc" -ne 1 ]] || [[ "$got" -ne 18 ]] || printf '%s\n' "$out" | grep -q '^stale-allowlist:'; then
+    echo "$NAME --self-test: FAIL, empty ALLOWLIST gave exit $rc with output:" >&2
+    printf '%s\n' "$out" >&2
+    exit 1
+  fi
+
   # A missing scan root must report "nothing analysed", not a clean pass.
   rc=0
   (cd "$fx" && SCAN_ROOTS=(no-such-dir) && analyse) >/dev/null 2>&1 || rc=$?
@@ -280,7 +314,7 @@ stale-allowlist:docs-site/src/content/docs/hosted/page.md"
     exit 1
   fi
 
-  echo "$NAME --self-test: ok (14 violations and 1 stale allowlist entry flagged; clean, commented, pruned and non-doc lines ignored; missing root exits 4)"
+  echo "$NAME --self-test: ok (18 violations and 1 stale allowlist entry flagged; clean, commented, pruned and non-doc lines ignored; empty allowlist works; missing root exits 4)"
 }
 
 if [[ "${1:-}" == "--self-test" ]]; then

@@ -30,7 +30,7 @@ Pass the session secret via the `SESSION_SECRET` environment variable (e.g., thr
 :::
 
 :::note[Debug logging]
-Debug logging is off by default and should stay off in production. To troubleshoot, turn it on temporarily: add `--debug` to the startup command, or set `SCION_LOG_LEVEL=debug` in the Hub's environment, then restart the Hub. When you are done, remove the flag or variable and restart again.
+Debug logging is off by default and should stay off in production. To troubleshoot, turn it on temporarily: set `SCION_LOG_LEVEL=debug` in the Hub's environment and restart the Hub. The `--debug` startup flag turns on server debug mode, which also includes debug logs. When you are done, remove the variable or flag and restart again.
 :::
 
 This is often best managed through something like systemd
