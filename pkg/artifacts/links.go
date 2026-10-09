@@ -221,7 +221,7 @@ func (s *Service) adminArtifact(w http.ResponseWriter, r *http.Request, id strin
 // an artifact but not administer it. It states the rule, the same for every
 // artifact and every refusal, and never why this caller was refused.
 const adminForbiddenMessage = "only the artifact's owner or a user with an admin grant may share or change it; " +
-	"on an artifact owned by an agent, the agent's delegating user or an admin of its home project may also grant review access"
+	"on an artifact owned by an agent, the agent's delegating user or an admin of the artifact's home project may also grant review access"
 
 // writeAdminForbidden writes the 403 of a caller that may read an artifact
 // but not administer it.

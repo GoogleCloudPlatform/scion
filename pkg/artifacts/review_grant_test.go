@@ -361,7 +361,7 @@ func TestAdminForbiddenCopy(t *testing.T) {
 	if err := json.Unmarshal(a.Body.Bytes(), &e); err != nil || a.Code != http.StatusForbidden {
 		t.Fatalf("%d %v", a.Code, err)
 	}
-	for _, want := range []string{"owner", "admin grant", "delegating user", "admin of its home project", "review access"} {
+	for _, want := range []string{"owner", "admin grant", "delegating user", "admin of the artifact's home project", "review access"} {
 		if !strings.Contains(e.Error.Message, want) {
 			t.Errorf("message %q lacks %q", e.Error.Message, want)
 		}
