@@ -68,8 +68,8 @@ func TestParseExpiry_Years(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	expectedMin := before.AddDate(1, 0, 0)
-	expectedMax := after.AddDate(1, 0, 0)
+	expectedMin := before.Add(365 * 24 * time.Hour)
+	expectedMax := after.Add(365 * 24 * time.Hour)
 	if result.Before(expectedMin) || result.After(expectedMax) {
 		t.Errorf("expected time around %v, got %v", expectedMin, result)
 	}
@@ -113,8 +113,23 @@ func TestParseExpiry_Invalid(t *testing.T) {
 		"1.5h",
 		"1.5m",
 		"90mm",
+		// The day and year units parse their number just as strictly
+		// (ptone/scion#3811).
+		"1.5d",
+		"3xd",
+		"xd",
+		"1e2d",
+		"0d",
+		"-1d",
+		"d",
+		"1.5y",
+		"2.9y",
+		"0y",
+		"-1y",
+		"y",
 		// A number too large to parse at all gets the generic error.
 		"99999999999999999999h",
+		"99999999999999999999d",
 	}
 
 	for _, input := range tests {
@@ -132,7 +147,7 @@ func TestParseExpiry_Invalid(t *testing.T) {
 	}
 }
 
-// TestParseExpiry_OverLimit checks that hour and minute values above the
+// TestParseExpiry_OverLimit checks that values in any unit above the
 // hub's 1-year maximum are rejected before multiplying, so huge values cannot
 // overflow into an expiry in the past, and that the error names the limit.
 func TestParseExpiry_OverLimit(t *testing.T) {
@@ -142,6 +157,11 @@ func TestParseExpiry_OverLimit(t *testing.T) {
 		"99999999999999h",
 		"99999999999999m",
 		"9223372036854775807h",
+		"366d",
+		"99999999999999d",
+		"9223372036854775807d",
+		"2y",
+		"9223372036854775807y",
 	}
 
 	for _, input := range tests {
@@ -150,7 +170,7 @@ func TestParseExpiry_OverLimit(t *testing.T) {
 			t.Errorf("expected error for input %q, got nil", input)
 			continue
 		}
-		want := fmt.Sprintf("%q exceeds the maximum expiry of 1 year (8760h or 525600m)", input)
+		want := fmt.Sprintf("%q exceeds the maximum expiry of 1 year (1y, 365d, 8760h or 525600m)", input)
 		if err.Error() != want {
 			t.Errorf("error for %q = %q, want %q", input, err.Error(), want)
 		}
@@ -172,13 +192,11 @@ func TestParseExpiryAt_Table(t *testing.T) {
 		{"90d", now.Add(90 * 24 * time.Hour)},
 		{"1d", now.Add(24 * time.Hour)},
 		{" 7d ", now.Add(7 * 24 * time.Hour)},
-		{"1y", now.AddDate(1, 0, 0)},
+		{"1y", now.Add(365 * 24 * time.Hour)},
 		{"2026-12-31T00:00:00Z", time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC)},
 		{"2026-12-31T10:00:00+02:00", time.Date(2026, 12, 31, 8, 0, 0, 0, time.UTC)},
-		// The day and year units keep their original lax number parse.
-		{"1.5d", now.Add(24 * time.Hour)},
-		{"3xd", now.Add(3 * 24 * time.Hour)},
-		{"2.9y", now.AddDate(2, 0, 0)},
+		// The largest day value accepted: the hub's 1-year maximum.
+		{"365d", now.Add(365 * 24 * time.Hour)},
 		// New forms.
 		{"2h", now.Add(2 * time.Hour)},
 		{"1h", now.Add(time.Hour)},
@@ -200,6 +218,40 @@ func TestParseExpiryAt_Table(t *testing.T) {
 		if !got.Equal(tt.want) {
 			t.Errorf("parseExpiryAt(%q) = %v, want %v", tt.in, got, tt.want)
 		}
+	}
+}
+
+// TestParseExpiryAt_YearIs365Days pins that 1y means exactly 365 days, the
+// hub's maximum token lifetime, so it is never over that maximum: neither
+// when the following year contains 29 February (where one calendar year
+// would be 366 days) nor in a span without a leap day (ptone/scion#3930).
+func TestParseExpiryAt_YearIs365Days(t *testing.T) {
+	tests := []struct {
+		name string
+		now  time.Time
+	}{
+		{"span containing 29 February", time.Date(2027, 3, 1, 12, 0, 0, 0, time.UTC)},
+		{"span starting on 29 February", time.Date(2028, 2, 29, 12, 0, 0, 0, time.UTC)},
+		{"span without a leap day", time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseExpiryAt("1y", tt.now)
+			if err != nil {
+				t.Fatalf("parseExpiryAt(1y): unexpected error: %v", err)
+			}
+			want := tt.now.Add(365 * 24 * time.Hour)
+			if !got.Equal(want) {
+				t.Errorf("parseExpiryAt(1y) = %v, want %v", got, want)
+			}
+			if lifetime := got.Sub(tt.now); lifetime > store.UATMaxExpiry {
+				t.Errorf("1y lifetime %v exceeds the hub maximum %v", lifetime, store.UATMaxExpiry)
+			}
+			// 2y stays over the limit at every reference time.
+			if _, err := parseExpiryAt("2y", tt.now); err == nil {
+				t.Error("parseExpiryAt(2y): expected an over-limit error, got nil")
+			}
+		})
 	}
 }
 

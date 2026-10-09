@@ -454,11 +454,32 @@ func (a *AuthzService) devLocalHopUsable(ctx context.Context, edge *store.Delega
 // complete is exempt and folds as one unrecorded hop; the migration sentinel
 // edge folds as an unrecorded terminal hop.
 //
-// Errors: ErrProvenanceMissing, ErrProvenanceAmbiguous, ErrProvenanceChain,
-// errSourceNotAllowed, and wrapped lookup errors.
+// Errors: ErrProvenanceMissing (also wrapping errOwnEdgeMissing when the
+// agent's own edge is the missing one), ErrProvenanceAmbiguous,
+// ErrProvenanceChain, errSourceNotAllowed, and wrapped lookup errors. On an
+// error the returned ChainCeiling is the zero value.
 func (a *AuthzService) chainEffectCeiling(ctx context.Context, agent *store.Agent) (ChainCeiling, error) {
+	chain, _, err := a.chainEffectCeilingWalk(ctx, agent)
+	if err != nil {
+		return ChainCeiling{}, err
+	}
+	return chain, nil
+}
+
+// chainEffectCeilingWalk is chainEffectCeiling's walk. On success it returns
+// the same ChainCeiling and a nil error. On an error it also returns
+// unrecordedBelow: the number of unrecorded hops (as hopUnrecorded counts
+// them) strictly below the hop at which the walk stopped, the hops a
+// permission check walking up from the agent passes before it reaches that
+// hop. The one exception is a hop with a ceiling kind this binary does not
+// know: when its provenance version is not understood either, and it passes
+// any local-development checks, it is counted too, because a permission
+// check denies it as unrecorded before reading the kind. Only
+// reincarnateChainUnrecorded reads unrecordedBelow; every other caller goes
+// through chainEffectCeiling.
+func (a *AuthzService) chainEffectCeilingWalk(ctx context.Context, agent *store.Agent) (chain ChainCeiling, unrecordedBelow int, err error) {
 	if agent == nil {
-		return ChainCeiling{}, fmt.Errorf("%w: no agent", ErrProvenanceChain)
+		return ChainCeiling{}, 0, fmt.Errorf("%w: no agent", ErrProvenanceChain)
 	}
 	var (
 		bounded       []permissions.FrozenPermissionCeiling
@@ -470,54 +491,65 @@ func (a *AuthzService) chainEffectCeiling(ctx context.Context, agent *store.Agen
 walk:
 	for depth := 0; ; depth++ {
 		if depth > maxDelegationDepth {
-			return ChainCeiling{}, fmt.Errorf("%w: maximum depth exceeded", ErrProvenanceChain)
+			return ChainCeiling{}, unrecorded, fmt.Errorf("%w: maximum depth exceeded", ErrProvenanceChain)
 		}
 		if visited[delegateID] {
-			return ChainCeiling{}, fmt.Errorf("%w: agent %s repeats in the chain", ErrProvenanceChain, delegateID)
+			return ChainCeiling{}, unrecorded, fmt.Errorf("%w: agent %s repeats in the chain", ErrProvenanceChain, delegateID)
 		}
 		visited[delegateID] = true
 
 		active, err := a.activeProjectEdges(ctx, delegateID, agent.ProjectID)
 		if err != nil {
-			return ChainCeiling{}, err
+			return ChainCeiling{}, unrecorded, err
 		}
 		if len(active) == 0 {
 			if depth == 0 && !a.backfillCompleted(ctx) {
 				unrecorded++
 				break walk
 			}
-			return ChainCeiling{}, fmt.Errorf("%w: agent %s", ErrProvenanceMissing, delegateID)
+			if depth == 0 {
+				return ChainCeiling{}, unrecorded, fmt.Errorf("%w: %w: agent %s", ErrProvenanceMissing, errOwnEdgeMissing, delegateID)
+			}
+			return ChainCeiling{}, unrecorded, fmt.Errorf("%w: agent %s", ErrProvenanceMissing, delegateID)
 		}
 		if len(active) > 1 {
-			return ChainCeiling{}, fmt.Errorf("%w: agent %s", ErrProvenanceAmbiguous, delegateID)
+			return ChainCeiling{}, unrecorded, fmt.Errorf("%w: agent %s", ErrProvenanceAmbiguous, delegateID)
 		}
 		edge := active[0]
+		below := unrecorded // unrecorded hops below this one
 		if isMigrationSentinel(edge) {
 			unrecorded++
 			break walk
 		}
 
-		versionKnown := knownProvenanceVersion(edge.ProvenanceVersion)
 		switch edge.Kind {
 		case store.EffectCeilingBounded:
 			frozen, _ := edge.Frozen()
 			bounded = append(bounded, frozen)
-			if !versionKnown {
-				unrecorded++
-			}
-		case store.EffectCeilingPrincipal:
-			if !versionKnown {
-				unrecorded++
-			}
-		case store.EffectCeilingUnrecorded:
-			unrecorded++
+		case store.EffectCeilingPrincipal, store.EffectCeilingUnrecorded:
 		default:
-			return ChainCeiling{}, fmt.Errorf("%w: edge %s has ceiling kind %q", ErrProvenanceChain, edge.ID, edge.Kind)
+			// A permission check (hopEffectCeilingDeny) applies a dev_local
+			// hop's checks, then denies a hop whose provenance version is not
+			// understood with ceiling_unrecorded, before it reads the kind.
+			// unrecordedBelow counts such a hop as unrecorded, so it agrees.
+			chainErr := fmt.Errorf("%w: edge %s has ceiling kind %q", ErrProvenanceChain, edge.ID, edge.Kind)
+			if knownProvenanceVersion(edge.ProvenanceVersion) {
+				return ChainCeiling{}, below, chainErr
+			}
+			if hasDevLocalProvenance(edge) {
+				if err := a.devLocalHopUsable(ctx, edge, &devUserActive); err != nil {
+					return ChainCeiling{}, below, err
+				}
+			}
+			return ChainCeiling{}, below + 1, chainErr
+		}
+		if hopUnrecorded(edge) {
+			unrecorded++
 		}
 
 		if hasDevLocalProvenance(edge) {
 			if err := a.devLocalHopUsable(ctx, edge, &devUserActive); err != nil {
-				return ChainCeiling{}, err
+				return ChainCeiling{}, below, err
 			}
 		}
 
@@ -527,12 +559,28 @@ walk:
 		case store.DelegationPrincipalAgent:
 			delegateID = edge.DelegatorID
 		default:
-			return ChainCeiling{}, fmt.Errorf("%w: edge %s has delegator type %q", ErrProvenanceChain, edge.ID, edge.DelegatorType)
+			return ChainCeiling{}, below, fmt.Errorf("%w: edge %s has delegator type %q", ErrProvenanceChain, edge.ID, edge.DelegatorType)
 		}
 	}
 
-	return ChainCeiling{Ceiling: foldCeilings(bounded, unrecorded), UnrecordedHops: unrecorded}, nil
+	return ChainCeiling{Ceiling: foldCeilings(bounded, unrecorded), UnrecordedHops: unrecorded}, 0, nil
 }
+
+// hopUnrecorded reports whether one active edge is an unrecorded hop as
+// chainEffectCeiling counts it: the migration sentinel, an edge with the
+// unrecorded ceiling kind, or an edge whose provenance version fails
+// knownProvenanceVersion (provenance version 0 included).
+func hopUnrecorded(edge *store.DelegationEdge) bool {
+	return isMigrationSentinel(edge) ||
+		edge.Kind == store.EffectCeilingUnrecorded ||
+		!knownProvenanceVersion(edge.ProvenanceVersion)
+}
+
+// errOwnEdgeMissing marks a chainEffectCeiling ErrProvenanceMissing that was
+// found at depth 0: the agent itself has no active edge in its project (after
+// the edge backfill completed). The returned error wraps both sentinels, so
+// errors.Is(err, ErrProvenanceMissing) still holds.
+var errOwnEdgeMissing = errors.New("provenance: the agent has no edge of its own")
 
 // foldCeilings returns the fold of the bounded hops' ceilings: bounded V1
 // over the registry permissions every bounded hop allows when there is any

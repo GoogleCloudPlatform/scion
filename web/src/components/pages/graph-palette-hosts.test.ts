@@ -70,7 +70,7 @@ function agent(id: string, phase: Agent['phase'], projectId = PROJECT_ID): Agent
     project: `Project ${projectId}`,
     template: 't',
     phase,
-  } as Agent;
+  };
 }
 
 const AGENTS = [

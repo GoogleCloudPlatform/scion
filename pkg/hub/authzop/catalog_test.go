@@ -1254,7 +1254,7 @@ var domainResourceCompatibility = map[string][]string{
 	"quota":              {"ResourceQuota"},
 	"schedule":           {"ResourceScheduledEvent"},
 	"chat":               {"ResourceProject"},
-	"env":                {"ResourceProject"},
+	"env":                {"ResourceProject", "ResourceHub"},
 	"artifact":           {"ResourceArtifact"},
 	"inbox":              {"ResourceInbox"},
 }

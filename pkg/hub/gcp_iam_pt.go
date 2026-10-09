@@ -65,6 +65,11 @@ type PolicyTroubleshooterChecker struct {
 	// denyUnknownFailOpenFn, when set, is read on every check instead of
 	// denyUnknownFailOpen, so the checker follows a reloaded setting.
 	denyUnknownFailOpenFn func() bool
+
+	// callObserver, when set, is told the error (nil on success) of every
+	// Policy Troubleshooter API call this checker actually makes. Checks
+	// answered without a call, including cached ones, are not reported.
+	callObserver func(error)
 }
 
 // SetDenyUnknownPolicySource makes the checker read the deny-unknown
@@ -72,6 +77,13 @@ type PolicyTroubleshooterChecker struct {
 // value it was constructed with. Call before the checker is shared.
 func (c *PolicyTroubleshooterChecker) SetDenyUnknownPolicySource(fn func() bool) {
 	c.denyUnknownFailOpenFn = fn
+}
+
+// SetCallObserver registers fn to receive the error (nil on success) of
+// every Policy Troubleshooter API call the checker makes. fn only observes;
+// the check's result is unaffected. Call before the checker is shared.
+func (c *PolicyTroubleshooterChecker) SetCallObserver(fn func(error)) {
+	c.callObserver = fn
 }
 
 // failOpen returns the deny-unknown fallback policy in effect.
@@ -135,6 +147,9 @@ func (c *PolicyTroubleshooterChecker) CanActAs(
 			Permission:       store.PermissionActAs,
 		},
 	})
+	if c.callObserver != nil {
+		c.callObserver(err)
+	}
 	if err != nil {
 		// gRPC error: return indeterminate + error per the interface contract.
 		return store.ActAsResult{

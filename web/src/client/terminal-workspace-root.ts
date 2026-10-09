@@ -25,7 +25,7 @@ import {
   type TerminalPaletteNewAgentDetail,
 } from './terminal-workspace-events.js';
 import { enterAppFrame, exitAppFrame } from '../components/shared/app-frame.js';
-import type { PaletteCandidate } from './chat-palette-types.js';
+import type { PaletteCandidate } from './palette-types.js';
 import {
   QuickPaletteHost,
   isQuickPaletteShortcut,
@@ -2521,6 +2521,8 @@ function disconnectLabel(state: TerminalConnectionState, reason: TerminalDisconn
       return 'Unavailable';
     case 'agent-deleted':
       return 'Deleted';
+    case 'attach-unsupported':
+      return 'Not supported';
     case 'network':
     case 'connect-error':
     case 'server-error':

@@ -24,7 +24,7 @@ import {
 import type { ScionQuickPalette } from './quick-palette.js';
 import { hasOpenModalDescendant } from '../open-modal.js';
 import { PALETTE_TYPEAHEAD_MAX_MS } from './palette-typeahead.js';
-import type { PaletteAgentTarget, PaletteCandidate } from '../../../client/chat-palette-types.js';
+import type { PaletteAgentTarget, PaletteCandidate } from '../../../client/palette-types.js';
 
 function candidate(agentId: string, label = agentId): PaletteCandidate {
   return {

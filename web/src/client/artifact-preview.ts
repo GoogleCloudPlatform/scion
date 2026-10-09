@@ -190,7 +190,45 @@ function cssValue(v: string, fallback: string): string {
 }
 
 /** The full srcdoc of the preview frame for rewritten, sanitized HTML. */
-export function previewDocument(bodyHtml: string, theme: Partial<PreviewTheme> = {}): string {
+/**
+ * Styles of rendered CriticMarkup (utils/critic.ts): insertions green and
+ * underlined, deletions red and struck through, highlights yellow, and
+ * comments as numbered notes in a right-hand margin when the frame is wide
+ * enough, otherwise as a block under the reference.
+ */
+export const CRITIC_CSS = `ins.critic-ins{color:#166534;background:#dcfce7;text-decoration:underline}
+del.critic-del{color:#991b1b;background:#fee2e2;text-decoration:line-through}
+mark.critic-hl{background:#fef08a;color:inherit}
+sup.critic-ref{font-size:.7em;font-weight:600;color:#6d28d9;background:#ede9fe;border-radius:.25rem;padding:0 .25em;margin-left:.1em}
+.critic-note{display:block;margin:.35em 0 .6em;padding:.4em .6em;font-size:.8125rem;line-height:1.45;color:#4c1d95;background:#f5f3ff;border-left:3px solid #8b5cf6;border-radius:.25rem}
+.critic-note-n{font-weight:600;margin-right:.25em}
+.critic-side{display:block;margin:0 0 1em;font-size:.8125rem;line-height:1.45;color:#64748b}
+.critic-side.empty{padding:.75em 1em;border:1px dashed #cbd5e1;border-radius:.5rem;text-align:center}
+body.notes-margin{padding-right:17rem}
+body.notes-margin .critic-note,body.notes-margin .critic-side{float:right;clear:right;width:14rem;margin:0 -16rem .5em 0}`;
+
+/** Options of a preview document. */
+export interface PreviewOptions {
+  /**
+   * Lay comment notes out in a right-hand margin. The page decides from
+   * its viewport width; without it, notes sit under their reference.
+   */
+  marginNotes?: boolean;
+  /** A short note shown first in the margin (or above the text). */
+  sideNote?: string;
+  /** Style the side note as an empty-state placeholder. */
+  sideNoteEmpty?: boolean;
+}
+
+function escapeText(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+export function previewDocument(
+  bodyHtml: string,
+  theme: Partial<PreviewTheme> = {},
+  options: PreviewOptions = {}
+): string {
   const t = { ...DEFAULT_THEME };
   for (const k of Object.keys(DEFAULT_THEME) as (keyof PreviewTheme)[]) {
     if (theme[k] !== undefined) t[k] = cssValue(theme[k]!, DEFAULT_THEME[k]);
@@ -219,5 +257,10 @@ hr{border:none;border-top:1px solid ${t.border};margin:1.5em 0}
 img{max-width:100%;height:auto}
 .image-placeholder{display:inline-block;padding:.2em .5em;border:1px dashed ${t.border};border-radius:.25rem;color:${t.muted};background:${t.subtle};font-size:.8125rem}
 .image-placeholder.failed{border-color:#fca5a5;color:#991b1b;background:#fef2f2}
-</style></head><body>${bodyHtml}</body></html>`;
+${CRITIC_CSS}
+</style></head><body${options.marginNotes ? ' class="notes-margin"' : ''}>${
+    options.sideNote
+      ? `<aside class="critic-side${options.sideNoteEmpty ? ' empty' : ''}">${escapeText(options.sideNote)}</aside>`
+      : ''
+  }${bodyHtml}</body></html>`;
 }

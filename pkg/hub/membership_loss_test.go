@@ -251,6 +251,65 @@ func TestMembershipLoss_WalkErrorFailsCheck(t *testing.T) {
 	assert.GreaterOrEqual(t, checks[0].Attempts, 2, "claimed by the drain and again here")
 }
 
+// staleWalkStore adds a ref to staleID to the first descendant walk only,
+// as a walk does when it read an agent whose hard delete commits before the
+// hold insert.
+type staleWalkStore struct {
+	store.Store
+	staleID string
+	calls   *int
+}
+
+func (w *staleWalkStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return w.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&staleWalkStore{Store: tx, staleID: w.staleID, calls: w.calls})
+	})
+}
+
+func (w *staleWalkStore) ListDelegationDescendants(ctx context.Context, q store.DescendantQuery) (store.DescendantResult, error) {
+	res, err := w.Store.ListDelegationDescendants(ctx, q)
+	*w.calls++
+	if err == nil && *w.calls == 1 {
+		res.Agents = append(res.Agents, store.DescendantRef{AgentID: w.staleID, Depth: 2})
+	}
+	return res, err
+}
+
+// An agent hard-deleted between the walk and the hold insert fails that
+// attempt, and the retry holds the remaining agents: the check converges
+// (ptone/scion#4051).
+func TestMembershipLoss_HardDeleteAfterWalkRetries(t *testing.T) {
+	f := newMSFixture(t, "stalewalk")
+	ctx := context.Background()
+	origLease := membershipLossLease
+	membershipLossLease = time.Millisecond
+	t.Cleanup(func() { membershipLossLease = origLease })
+	f.dropBindings(f.userID)
+	require.NoError(t, enqueueMembershipLossTx(ctx, f.s, f.userID, f.projectID, store.MembershipLossTriggerMemberRemove, AuditActor{}))
+	require.NoError(t, f.s.DeleteAgent(ctx, f.childC.ID))
+
+	calls := 0
+	orig := f.srv.store
+	f.srv.store = &staleWalkStore{Store: orig, staleID: f.childC.ID, calls: &calls}
+	t.Cleanup(func() { f.srv.store = orig })
+	require.False(t, f.srv.processClaimedMembershipLossCheck(ctx, mustClaimOne(t, f.s)),
+		"the attempt whose walk names the deleted agent fails")
+	assert.False(t, f.held(f.agentA.ID), "the failed attempt held nothing")
+
+	time.Sleep(5 * time.Millisecond)
+	f.srv.drainMembershipLossChecks(ctx)
+	assert.True(t, f.held(f.agentA.ID), "the retry holds the remaining agent")
+	assert.Empty(t, pendingChecks(t, f.s), "the retried check is completed")
+}
+
+func mustClaimOne(t *testing.T, s store.Store) *store.MembershipLossCheck {
+	t.Helper()
+	cs, err := s.ClaimMembershipLossChecks(context.Background(), 10, membershipLossLease)
+	require.NoError(t, err)
+	require.Len(t, cs, 1)
+	return cs[0]
+}
+
 // walkFaultProjectStore fails ListDelegationDescendants for one project,
 // inside transactions too.
 type walkFaultProjectStore struct {

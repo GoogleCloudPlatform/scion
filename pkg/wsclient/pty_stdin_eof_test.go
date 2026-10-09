@@ -29,7 +29,7 @@ import (
 
 // TestPTYClient_Run_NonTTYStdinEOF_SendsNormalCloseAndExitsZero pins the
 // behavior of a non-interactive CLI invocation: when stdin is not a
-// terminal and is already at EOF, readFromStdin's io.EOF branch returns nil
+// terminal and is already at EOF, pumpStdin's io.EOF branch returns nil
 // (not an error), so it is the first — and, here, only — sender on errCh.
 // Run() then sends a CloseNormalClosure (1000) frame to the server and
 // returns nil, all before any server-side rejection could ever arrive. This
@@ -40,7 +40,7 @@ import (
 // same session never gets to decide the code the CLI already sent.
 func TestPTYClient_Run_NonTTYStdinEOF_SendsNormalCloseAndExitsZero(t *testing.T) {
 	// A pipe whose write end is closed before Run() ever starts: the first
-	// read done by readFromStdin's inner reader goroutine returns (0, io.EOF)
+	// read done by startStdinReader's goroutine returns (0, io.EOF)
 	// immediately, deterministically, not depending on timing. Given to the
 	// client directly (never the shared os.Stdin package variable), so the
 	// leaked inner reader goroutine never races anything once the test ends.

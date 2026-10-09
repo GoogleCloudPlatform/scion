@@ -3625,7 +3625,7 @@ func TestSendOutboundMessageViaHub_SkippedMentionPrintsBeforeConfirmation(t *tes
 	})
 	require.NoError(t, err)
 	require.Contains(t, out, "Note: @bob is not an agent in this project; no agent was notified.")
-	assert.Equal(t, "Message sent to user:alice@example.com via Hub.", lastLine(out))
+	assert.Equal(t, "Message sent to user:alice@example.com via Hub (message outbound-msg-3303b).", lastLine(out))
 }
 
 // TestSendGroupMessageViaHub_SkippedMentionPrintsBeforeSummary covers the

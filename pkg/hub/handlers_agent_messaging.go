@@ -33,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/google/uuid"
 )
 
@@ -205,10 +206,10 @@ func outboundThreadSurface(kind, channel string) string {
 // ResolveOrCreateConversationByKey would reuse rather than mint, and whether
 // that conversation is still visible:
 //
-//   - a live webchat topic for threadID (when tl is set): exists. A topic that
+//   - a live webchat topic for threadID in projectID (when tl is set): exists. A topic that
 //     has no conversation_id yet also counts; the resolver refuses to mint
 //     for it and reports its own error.
-//   - a soft-deleted webchat topic for threadID: deleted. This is stricter
+//   - a soft-deleted webchat topic for threadID in projectID: deleted. This is stricter
 //     than the resolver, which reuses a deleted topic's conversation.
 //   - otherwise, a native conversation whose external_ref is extRef: exists.
 //   - otherwise: missing.
@@ -222,17 +223,19 @@ func outboundThreadConversationState(
 	ctx context.Context,
 	cr messaging.ConversationReader,
 	tl messaging.TopicConversationLookup,
-	extRef, threadID string,
+	projectID, extRef, threadID string,
 ) (outboundThreadState, error) {
 	if tl != nil {
-		_, err := tl.GetTopicConversationID(ctx, threadID)
+		// Topics are looked up within the sender's project: a topic of
+		// another project is answered exactly like a missing one.
+		_, err := tl.GetTopicConversationIDInProject(ctx, projectID, threadID)
 		if err == nil {
 			return outboundThreadExists, nil
 		}
 		if !errors.Is(err, store.ErrNotFound) {
 			return outboundThreadMissing, fmt.Errorf("topic lookup: %w", err)
 		}
-		_, err = tl.GetTopicConversationIDIncludingDeleted(ctx, threadID)
+		_, err = tl.GetTopicConversationIDIncludingDeletedInProject(ctx, projectID, threadID)
 		if err == nil {
 			return outboundThreadDeleted, nil
 		}
@@ -441,7 +444,7 @@ func (s *Server) resolveOutboundRouting(
 		Attachments:    req.Attachments,
 		Channel:        req.Channel,
 		ThreadID:       req.ThreadID,
-		Metadata:       req.Metadata,
+		Metadata:       stripClientAttachmentRefs(req.Metadata),
 		ConversationID: req.ConversationID,
 	}
 	if err := messaging.ValidateLegacyMessage(validationMsg); err != nil {
@@ -556,8 +559,7 @@ func (s *Server) resolveOutboundRouting(
 					"auth_id", authID,
 					"error", err,
 				)
-				writeError(w, http.StatusForbidden, ErrCodeForbidden,
-					"authenticated sender is not a participant in the direct conversation", nil)
+				writeConversationIDNotFound(ctx, w, "/api/v1/agents/"+agent.ID+"/outbound-message", "sender is not a participant of the direct conversation", authKind, authID)
 				return nil, err
 			}
 		case "group":
@@ -571,8 +573,7 @@ func (s *Server) resolveOutboundRouting(
 					"conv_project_id", conv.ProjectID,
 					"agent_project_id", agent.ProjectID,
 				)
-				writeError(w, http.StatusForbidden, ErrCodeForbidden,
-					"conversation does not belong to the agent's project", nil)
+				writeConversationIDNotFound(ctx, w, "/api/v1/agents/"+agent.ID+"/outbound-message", "group conversation is not in the sending agent's project", authKind, authID)
 				return nil, fmt.Errorf("project mismatch")
 			}
 
@@ -599,8 +600,7 @@ func (s *Server) resolveOutboundRouting(
 				"conversation_id", conv.ID,
 				"kind", conv.Kind,
 			)
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"unsupported conversation kind", nil)
+			writeConversationIDNotFound(ctx, w, "/api/v1/agents/"+agent.ID+"/outbound-message", "unsupported conversation kind", authKind, authID)
 			return nil, fmt.Errorf("unknown kind")
 		}
 
@@ -649,7 +649,7 @@ func (s *Server) resolveOutboundRouting(
 				if wcs != nil {
 					tl = wcs
 				}
-				state, stateErr := outboundThreadConversationState(ctx, s.store, tl, extRef, req.ThreadID)
+				state, stateErr := outboundThreadConversationState(ctx, s.store, tl, agent.ProjectID, extRef, req.ThreadID)
 				if stateErr != nil {
 					s.messageLog.Error("thread conversation lookup failed",
 						"thread_id", req.ThreadID, "agent_id", agent.ID, "error", stateErr)
@@ -1201,7 +1201,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			Type:           req.Type,
 			Urgent:         req.Urgent,
 			Attachments:    req.Attachments,
-			Metadata:       req.Metadata,
+			Metadata:       stripClientAttachmentRefs(req.Metadata),
 			ConversationID: result.ConversationID,
 			ConvResult:     result.ConvResult,
 			Asserted:       result.Asserted,
@@ -1302,7 +1302,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		Attachments:          req.Attachments,
 		Channel:              result.Channel,
 		ThreadID:             result.ThreadID,
-		Metadata:             req.Metadata,
+		Metadata:             stripClientAttachmentRefs(req.Metadata),
 		ConversationID:       result.ConversationID,
 		ConversationAsserted: result.Asserted,
 		Recipients:           result.Recipients,
@@ -2350,8 +2350,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 						"auth_kind", authKind,
 						"error", err,
 					)
-					writeError(w, http.StatusForbidden, ErrCodeForbidden,
-						"authenticated sender is not a participant in the direct conversation", nil)
+					writeConversationIDNotFound(ctx, w, logging.RequestPath(r), "sender is not a participant of the direct conversation", authKind, authID)
 					return
 				}
 			case "group":
@@ -2368,8 +2367,14 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 						"conv_project_id", conv.ProjectID,
 						"agent_project_id", agent.ProjectID,
 					)
-					writeError(w, http.StatusForbidden, ErrCodeForbidden,
-						"conversation does not belong to the agent's project", nil)
+					writeConversationIDNotFound(ctx, w, logging.RequestPath(r), "group conversation is not in the recipient agent's project", authKind, authID)
+					return
+				}
+				// The sender must be able to read the group conversation
+				// (an agent only within its own project), checked before
+				// any participant row is written.
+				if !s.senderCanReadGroup(ctx, *conv.ProjectID) {
+					writeConversationIDNotFound(ctx, w, logging.RequestPath(r), "sender cannot read the group conversation's project", authKind, authID)
 					return
 				}
 
@@ -2408,8 +2413,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 					"conversation_id", conv.ID,
 					"kind", conv.Kind,
 				)
-				writeError(w, http.StatusForbidden, ErrCodeForbidden,
-					"unsupported conversation kind", nil)
+				writeConversationIDNotFound(ctx, w, logging.RequestPath(r), "unsupported conversation kind", authKind, authID)
 				return
 			}
 
@@ -3710,9 +3714,16 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 		// Phase 9b(ii): render the delivery envelope for this broadcast
 		// recipient. ConvResult is nil — broadcasts deliberately skip
 		// conversation resolution (no conversation for broadcasts).
+		// The envelope's message_id names the stored row, so it is passed
+		// only when the row was written (ptone/scion#3881); an empty ID
+		// omits the key.
 		if s.writeDenyEnabled() {
+			renderID := ""
+			if persisted {
+				renderID = storeMsg.ID
+			}
 			agentMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
-				MessageID:  storeMsg.ID,
+				MessageID:  renderID,
 				ConvResult: nil,
 				Msg:        &agentMsg,
 				CreatedAt:  storeMsg.CreatedAt,

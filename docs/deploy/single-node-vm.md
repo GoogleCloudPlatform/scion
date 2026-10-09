@@ -199,7 +199,7 @@ schema_version: "1"
 image_registry: "localhost/scion"
 server:
   hub:
-    name: "my-hub"
+    hub_name: "my-hub"
     admin_emails:
       - "you@example.com"
   maintenance:
@@ -216,7 +216,7 @@ server:
       provider: iap
       iap:
         audience: "/projects/PROJECT_NUMBER/locations/REGION/services/SERVICE"
-  listen_port: 8080
+  # Listen port: set by --web-port in scion-hub.service, not here.
 ```
 
 Key settings:
@@ -224,6 +224,11 @@ Key settings:
 - `schema_version` — must be `"1"` (not `settings_version`).
 - `image_registry` — required, even for locally built images. Set to
   `localhost/scion` for local builds, or the registry path for remote images.
+- `hub.hub_name` — display name for the Hub, also reported as the
+  `scion.hub.name` telemetry attribute. The name also appears in health
+  output and scopes the diagnostics log queries. The deploy script sets
+  it to the hub name you deploy with; when unset, the VM host name is
+  used.
 - `admin_emails` — email(s) auto-promoted to super-admin on login.
 - `storage.local_path` — all workspace data stored on the VM's local disk.
 - `secrets.backend: local` — secrets are read from `hub.env` on disk, not from

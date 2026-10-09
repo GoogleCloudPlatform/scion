@@ -187,6 +187,27 @@ With a `disk` limit set, a pod whose ephemeral storage use goes over that limit 
 
 Extended resources (GPUs, custom devices) use `kubernetes.resources`. Keys set there (including `memory` or `ephemeral-storage`) override the common `resources` field and the defaults.
 
+#### Go runtime settings from limits
+
+Inside a pod, `nproc` and `free` report the node, not the pod's limits. To keep Go programs sized to the pod, Scion sets two variables in the agent container's environment from the container's limits:
+
+- `GOMAXPROCS`: the CPU limit rounded up to whole cores (at least `1`). For example, `limits.cpu: "1500m"` gives `2`.
+- `GOMEMLIMIT`: 90% of the memory limit, rounded down to whole MiB. For example, `limits.memory: "8Gi"` gives `7372MiB`.
+
+A variable is set only when its limit is set, either in `resources.limits` or in `kubernetes.resources.limits`. Requests alone set nothing, and neither does a limit that a namespace LimitRange adds when the pod is admitted.
+
+`GOMEMLIMIT` is a soft limit that applies to each Go process separately. Every Go process in the container, for example each compile process under `go build`, gets the full value, so it does not cap the container's total memory and does not prevent OOM kills. It only makes the garbage collector work harder as a process gets close to the value.
+
+Setting `GOMAXPROCS` turns off the Go 1.25+ default, which reads the cgroup CPU limit and follows changes to it (for example after an in-place pod resize). In return, images with older Go toolchains also get a value that matches the pod.
+
+A value set in the template or agent `env` always wins, and each variable is checked separately. A value set with `ENV` in the container image does not: pod env overrides image `ENV`, so the value derived from the limit replaces it. Set `GOMEMLIMIT: "off"` to turn the soft limit off, or any `GOMAXPROCS` value to replace the one derived from the CPU limit:
+
+```yaml
+env:
+  GOMEMLIMIT: "off"
+  GOMAXPROCS: "8"
+```
+
 ### GKE Workload Identity
 
 When running in Google Kubernetes Engine (GKE), Scion natively supports Workload Identity for secure access to GCP APIs (like Vertex AI or Cloud Storage) without passing long-lived service account keys.
