@@ -82,10 +82,16 @@ type WebChatStore interface {
 	// GetTopicConversationID returns the conversation_id for a webchat topic.
 	// Returns ("", store.ErrNotFound) if the topic does not exist or is soft-deleted.
 	// Returns ("", nil) if the topic exists but has no conversation_id yet.
+	//
+	// Not scoped to a project: do not use it to resolve a caller-supplied
+	// thread or key; use GetTopicConversationIDInProject.
 	GetTopicConversationID(ctx context.Context, topicID string) (string, error)
 
 	// GetTopicConversationIDIncludingDeleted returns the conversation_id for a
 	// webchat topic regardless of its deletion state.
+	//
+	// Not scoped to a project: do not use it to resolve a caller-supplied
+	// thread or key; use GetTopicConversationIDIncludingDeletedInProject.
 	GetTopicConversationIDIncludingDeleted(ctx context.Context, topicID string) (string, error)
 
 	// GetTopicConversationIDInProject and
