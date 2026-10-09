@@ -1756,7 +1756,8 @@ func (v *sseMessageViewer) visible(evt Event) bool {
 	}
 	// The subject names the agent the caller was authorized for; on the
 	// project subject only the payload names it. An agent subject with an
-	// empty id token is denied, never resolved from the payload.
+	// empty id token is not resolved from the payload and gets no attach
+	// access; a sender or recipient still sees it through the check above.
 	agentID := msg.AgentID
 	if agentSubject {
 		agentID = subjectAgentID
