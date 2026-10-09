@@ -123,6 +123,16 @@ func lookViaHub(hubCtx *HubContext, agentName string, execCmd []string) error {
 
 	agentSvc := hubCtx.Client.ProjectAgents(projectID)
 
+	// Fetch the identity header alongside Exec rather than after it, so the
+	// header's round trips do not delay the terminal output. The channel is
+	// buffered so the fetch never blocks when Exec fails and nobody reads it.
+	headerCtx, cancelHeader := context.WithTimeout(context.Background(), lookIdentityTimeout)
+	defer cancelHeader()
+	headerCh := make(chan string, 1)
+	go func() {
+		headerCh <- fetchLookIdentityHeader(headerCtx, hubCtx.Client, agentSvc, projectID, agentName)
+	}()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -131,25 +141,36 @@ func lookViaHub(hubCtx *HubContext, agentName string, execCmd []string) error {
 		return wrapHubError(fmt.Errorf("failed to capture terminal output for agent '%s': %w", agentName, err))
 	}
 
-	printLookIdentityHeader(hubCtx.Client, agentSvc, projectID, agentName)
+	// The header goes to stderr, so stdout keeps only the captured terminal
+	// output that scripts parse. It is skipped silently once its timeout
+	// passes.
+	select {
+	case header := <-headerCh:
+		if header != "" {
+			fmt.Fprintln(os.Stderr, header)
+		}
+	case <-headerCtx.Done():
+	}
 	printLookOutput(resp.Output)
 	return nil
 }
 
-// printLookIdentityHeader writes the agent's GCP identity header to stderr,
-// so stdout keeps only the captured terminal output that scripts parse. It is
-// best effort: when the agent cannot be read, no header is printed.
-func printLookIdentityHeader(client hubclient.Client, agentSvc hubclient.AgentService, projectID, agentName string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+// lookIdentityTimeout bounds the identity header fetch. It runs alongside
+// Exec, so it delays the terminal output only when it outlasts Exec. A var
+// so tests can shorten it.
+var lookIdentityTimeout = 3 * time.Second
 
+// fetchLookIdentityHeader returns the agent's GCP identity header line for
+// scion look. It is best effort: when the agent cannot be read, or no
+// identity is recorded, it returns "".
+func fetchLookIdentityHeader(ctx context.Context, client hubclient.Client, agentSvc hubclient.AgentService, projectID, agentName string) string {
 	agent, err := agentSvc.Get(ctx, agentName)
 	if err != nil || agent == nil {
-		return
+		return ""
 	}
 	id := agentGCPIdentity(*agent)
 	if id == nil {
-		return
+		return ""
 	}
 	if id.ServiceAccountID != "" {
 		pid := agent.ProjectID
@@ -162,9 +183,7 @@ func printLookIdentityHeader(client hubclient.Client, agentSvc hubclient.AgentSe
 	if agent.AppliedConfig != nil {
 		profile = agent.AppliedConfig.Profile
 	}
-	if header := lookIdentityHeader(id, profile); header != "" {
-		fmt.Fprintln(os.Stderr, header)
-	}
+	return lookIdentityHeader(id, profile)
 }
 
 func init() {

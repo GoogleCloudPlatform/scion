@@ -17,9 +17,11 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // agentGCPIdentity converts the GCP identity the Hub applied to an agent
@@ -37,28 +39,55 @@ func agentGCPIdentity(a hubclient.Agent) *api.AgentGCPIdentity {
 	}
 }
 
+// serviceAccountLookupParallelism bounds the concurrent service account list
+// calls serviceAccountDisplayNames makes.
+const serviceAccountLookupParallelism = 4
+
 // serviceAccountDisplayNames returns the display names of the service
 // accounts assignable in each given Scion project, keyed by service account
 // ID. It is best effort: a project whose accounts the caller cannot read
 // contributes nothing, and callers fall back to the email.
+//
+// Cost: one service account list call per distinct project (duplicates are
+// looked up once), at most serviceAccountLookupParallelism at a time, within
+// the caller's context. scion look passes one project; scion list --all
+// --format json passes every project with an assigned agent. If the context
+// runs out, the remaining calls fail and only display names are lost.
 func serviceAccountDisplayNames(ctx context.Context, client hubclient.Client, projectIDs []string) map[string]string {
-	names := make(map[string]string)
 	seen := make(map[string]bool)
+	var unique []string
 	for _, pid := range projectIDs {
 		if pid == "" || seen[pid] {
 			continue
 		}
 		seen[pid] = true
-		accounts, err := client.GCPServiceAccounts().List(ctx, hubclient.ListForProjectIncludingHubScoped(pid))
-		if err != nil {
-			continue
-		}
-		for _, sa := range accounts {
-			if sa.DisplayName != "" {
-				names[sa.ID] = sa.DisplayName
-			}
-		}
+		unique = append(unique, pid)
 	}
+
+	names := make(map[string]string)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, serviceAccountLookupParallelism)
+	for _, pid := range unique {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(pid string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			accounts, err := client.GCPServiceAccounts().List(ctx, hubclient.ListForProjectIncludingHubScoped(pid))
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			for _, sa := range accounts {
+				if sa.DisplayName != "" {
+					names[sa.ID] = sa.DisplayName
+				}
+			}
+		}(pid)
+	}
+	wg.Wait()
 	return names
 }
 
@@ -96,7 +125,7 @@ func formatGCPIdentity(id *api.AgentGCPIdentity) string {
 	if id == nil || id.Mode == "" {
 		return "none"
 	}
-	if id.Mode != "assign" {
+	if id.Mode != store.GCPMetadataModeAssign {
 		return id.Mode
 	}
 	account := id.DisplayName
