@@ -238,7 +238,7 @@ type PerfTrace struct {
 	// db is the hub's connection pool, when the store exposes one; dbStart
 	// is its stats at request start. The reported values are deltas over
 	// the request. The pool is shared, so a delta includes waits by
-	// concurrent requests and the audit writer.
+	// concurrent requests.
 	db      *sql.DB
 	dbStart sql.DBStats
 }

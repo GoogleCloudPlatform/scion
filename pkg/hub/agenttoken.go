@@ -92,10 +92,10 @@ const (
 	// whatever artifact grants exist.
 	ScopeProjectArtifactRead AgentTokenScope = "project:artifact:read"
 	// ScopeProjectArtifactWrite allows the agent to publish artifacts, and
-	// new versions of them, homed in its own project (artifact.create,
-	// artifact.update). Deliberately excludes deletion and grant
-	// management. Minted for the baseline and full agent roles
-	// (ScopesForRole).
+	// new versions of them, homed in its own project (artifact.create).
+	// Deliberately excludes deletion and grant management, and carries no
+	// reserved permission (artifact.update is Reserved: nothing checks it).
+	// Minted for the baseline and full agent roles (ScopesForRole).
 	ScopeProjectArtifactWrite AgentTokenScope = "project:artifact:write"
 	// ScopeAgentSetMessageMode allows the agent to change message mode
 	// for agents within the same project.

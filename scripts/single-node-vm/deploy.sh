@@ -1796,7 +1796,7 @@ if [[ "$HYBRID_ENABLED" == "true" ]]; then
   hybrid_ensure_transport_sa "${HUB_NAME}" "${PROJECT_ID}"
   hybrid_grant_transport_token_creator "${HYBRID_TRANSPORT_SA_EMAIL}" "${SA_EMAIL}" "${PROJECT_ID}"
   # Rendered once, here, and spliced into both settings.yaml writes below
-  # (dev mode in Phase 3, proxy mode in Phase 5), the same pattern
+  # (Phase 3 bootstrap, proxy mode in Phase 5), the same pattern
   # HYBRID_SHARED_DIR_STORAGE_YAML uses. IAM changes (the grants above,
   # and the Cloud Run accessor grant in Phase 4) can take on the order of
   # a minute to propagate; the first agent dispatched immediately after
@@ -2273,7 +2273,7 @@ fi
 
 # --- Hybrid tier: settings.yaml shared_dir_storage block ---
 # Rendered once, here, and spliced into both settings.yaml writes below
-# (dev mode in Phase 3, proxy mode in Phase 5) so they stay in sync.
+# (Phase 3 bootstrap, proxy mode in Phase 5) so they stay in sync.
 # Empty when the tier is off, so both writes render byte-identical to
 # before this existed.
 HYBRID_SHARED_DIR_STORAGE_YAML=""
@@ -2492,9 +2492,12 @@ else
     "
 fi
 
-# --- Write settings.yaml (dev mode for initial startup) ---
+# --- Write settings.yaml (bootstrap config for initial startup) ---
+# auth.mode: dev here does not enable dev auth (that needs --dev-auth or
+# server.auth.dev_mode, and the server refuses dev auth on a non-loopback
+# bind). Until Phase 5, only the unauthenticated /healthz check is used.
 # Phase 5 will overwrite this with proxy auth config once IAP is ready.
-info "Writing settings.yaml (dev mode)..."
+info "Writing settings.yaml (bootstrap config)..."
 gcloud compute ssh "${INSTANCE_NAME}" \
   --zone="${ZONE}" --project="${PROJECT_ID}" \
   --command="
