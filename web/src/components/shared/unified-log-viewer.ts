@@ -449,7 +449,7 @@ export class ScionUnifiedLogViewer extends LitElement {
 
     this.eventSource.addEventListener('log', (event: Event) => {
       try {
-        const entry = JSON.parse((event as MessageEvent).data) as DiagnosticLogEntry;
+        const entry = JSON.parse((event as MessageEvent<string>).data) as DiagnosticLogEntry;
         this.mergeEntries([entry]);
 
         // Only count entries that pass current filters for the "new entries" banner
