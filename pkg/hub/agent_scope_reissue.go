@@ -1100,6 +1100,13 @@ func (s *Server) runScopeReissue(ctx context.Context, agent *store.Agent, operat
 		if err != nil {
 			return nil, fmt.Errorf("scope re-issue dry-run audit: %w", err)
 		}
+		// In a bulk dry run the would-be record and role go to the agents
+		// processed after this one (reissueOverlay); nil otherwise.
+		if !plan.noop {
+			if o := reissueOverlayFrom(ctx); o != nil {
+				o.record(agent.ID, plan.replacementEdge(operator), plan.roleAfter)
+			}
+		}
 		resp.Message = "Dry run: nothing was changed"
 		return resp, nil
 	}

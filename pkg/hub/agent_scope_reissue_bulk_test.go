@@ -144,10 +144,11 @@ func bulkHTTP(t *testing.T, srv *Server, ctx context.Context, body any, identity
 }
 
 // T12: without an explicit dry_run=false the bulk run is a dry run. A bulk
-// dry run writes no per-agent rows (only the batch row with dry_run=true and
-// counts); a single-agent --dry-run keeps its dry_run=true row (see
-// TestScopeReissue_T9_DryRunMatchesRealRun). It also writes no edge and no
-// credential change, and its report equals the applied run's diff
+// dry run audits exactly as a single-agent --dry-run does for each agent
+// (one agent_scopes_reissued row with dry_run=true, carrying the shared
+// batch_op_id), plus the batch row with dry_run=true and counts. It writes
+// no edge and no credential change, and its report equals the applied
+// run's diff
 // for a parent and child in one tree, where the child gains the scopes
 // only through its parent's re-issue: the dry run computes the child
 // against the parent's would-be record. The parent is NOT re-issued
@@ -169,9 +170,19 @@ func TestScopeReissueBulk_T12_DryRunDefault(t *testing.T) {
 	assert.Equal(t, childEdges, f.allEdges(t, f.child), "dry run writes no edge")
 	assertCredentialUnrevoked(t, f.store, jti, credBefore)
 	for _, id := range []string{f.root.ID, f.parent.ID, f.child.ID} {
-		assert.Empty(t, reissueAudits(t, f.store, id, mutationTypeAgentScopesReissued), "no per-agent row for %s", id)
+		// Per-agent parity with the single-agent dry run.
+		recs := reissueAudits(t, f.store, id, mutationTypeAgentScopesReissued)
+		require.Len(t, recs, 1, "one dry-run row for %s", id)
+		summary := decodeReissueSummary(t, recs[0])
+		assert.True(t, summary.DryRun, id)
+		assert.Equal(t, dry.BatchOpID, summary.BatchOpID, id)
+		assert.Empty(t, summary.EdgeNew, id)
+		assert.Equal(t, 0, summary.CredentialsRevoked, id)
+		assert.Empty(t, reissueAudits(t, f.store, id, mutationTypeAgentScopesReissueDispatch), id)
 		assert.Empty(t, issueDeniedAudits(t, f.store, id))
 	}
+	childSummary := decodeReissueSummary(t, reissueAudits(t, f.store, f.child.ID, mutationTypeAgentScopesReissued)[0])
+	assert.Equal(t, artifactScopeStrings(), reissueSorted(childSummary.ScopesAdded), "the child's dry-run row lists what --apply adds")
 	batch := batchAudits(t, f.store)
 	require.Len(t, batch, 1)
 	assert.Contains(t, batch[0].AfterSummary, `"dry_run":true`)

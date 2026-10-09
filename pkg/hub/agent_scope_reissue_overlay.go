@@ -30,7 +30,8 @@ import (
 // change, without writing anything and without holding a transaction
 // across the batch.
 //
-// It is carried in the context of a bulk dry run only. The two lookups the
+// It is carried in the context of a bulk dry run only; the dry-run branch
+// of runScopeReissue writes to it where the applied run commits. The two lookups the
 // re-issue computation reads an agent's delegation through consult it:
 // edges by delegate (activeProjectEdges and getCachedDelegationEdges) and a
 // delegator agent's stored role (planAgentDelegatorReissue and
