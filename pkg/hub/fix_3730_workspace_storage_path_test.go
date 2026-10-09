@@ -402,6 +402,62 @@ func TestWorkspaceRecord_RereadFails_RollsBack(t *testing.T) {
 	assert.Zero(t, pub.count("created"), "no created: %v", pub.kinds())
 }
 
+// A delete removed the row before the record write: the write fails with
+// store.ErrNotFound, the rollback finds the delete won, and the create
+// answers 409 delete_in_progress with nothing dispatched or published.
+func TestWorkspaceRecord_DeleteRemovedRow_Answers409(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	useHubWorkspaceUpload(t, srv, project)
+	pub := recordCreatedEvents(t, srv)
+	fs := &workspaceRecordStore{Store: s, beforeFirst: func(id string) {
+		require.NoError(t, s.DeleteAgent(context.Background(), id))
+	}}
+	srv.store = fs
+
+	rec := brokerCreate(t, srv, project.ID, "ws-record-removed")
+	agentID, writes, retried := fs.snapshot()
+	require.NotEmpty(t, agentID, "the delete ran: %d %s", rec.Code, rec.Body.String())
+	requireDeletedDuringCreate(t, rec, agentID)
+
+	assert.False(t, retried, "no retry after a non-conflict error")
+	assert.Equal(t, 1, writes, "only the failed write")
+	_, err := s.GetAgent(context.Background(), agentID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the row stays removed")
+	assert.Nil(t, disp.capturedAgent, "nothing dispatched")
+	assert.Zero(t, pub.count("created"), "no created: %v", pub.kinds())
+}
+
+// Broker create accepted for asynchronous launch: a conflicting record write
+// is retried, the launch request carries the storage path, and the accepted
+// launch's own write (persistAcceptedLaunch, whose retry merges with
+// mergeDispatchedConfig) keeps the path on the row.
+func TestWorkspaceRecord_AsyncAccepted_ConflictRetryKeepsStoragePath(t *testing.T) {
+	srv, s, project, client := newAsyncCreateServer(t, true)
+	useHubWorkspaceUpload(t, srv, project)
+	fs := &workspaceRecordStore{Store: s, beforeFirst: func(id string) {
+		claimForTest(t, s, id, store.DeletionStateFailed, time.Minute)
+	}}
+	srv.store = fs
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", map[string]interface{}{
+		"name": "ws-record-async", "projectId": project.ID, "task": "do it", "acceptAsyncLaunch": true,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	agentID, _, retried := fs.snapshot()
+	require.NotEmpty(t, agentID)
+	assert.True(t, retried, "the conflicting record write was retried")
+	require.Len(t, client.sends, 1, "one launch request")
+	assert.True(t, client.sends[0].AsyncLaunch, "fixture check: an async launch")
+	assert.NotEmpty(t, client.sends[0].WorkspaceStoragePath, "the launch request carries the storage path")
+	assert.Equal(t, workspaceRecordTestBucket, client.sends[0].WorkspaceStorageBucket)
+	row, err := s.GetAgent(context.Background(), agentID)
+	require.NoError(t, err)
+	assertWorkspaceRecorded(t, row)
+	assert.Equal(t, store.DeletionStateFailed, row.DeletionState, "the delete's fields are kept")
+}
+
 // Managed create: a conflicting record write is retried, which leaves the
 // create's copy at an older state_version, so the managed post-create write
 // conflicts too and goes through mergeManagedCreate. The stored row keeps
@@ -471,11 +527,15 @@ func TestMergeManagedCreate_CopiesWorkspaceStorage(t *testing.T) {
 			},
 		}
 	}
-	for _, phase := range []string{string(state.PhaseCreated), string(state.PhaseStopped)} {
-		t.Run("swap/"+phase, func(t *testing.T) {
-			dst := &store.Agent{Phase: phase, AppliedConfig: &store.AgentAppliedConfig{Workspace: "/hub/local", Task: "kept"}}
+	for _, tc := range []struct{ phase, wantPhase string }{
+		{string(state.PhaseCreated), string(state.PhaseRunning)},
+		{string(state.PhaseStopped), string(state.PhaseStopped)},
+	} {
+		t.Run("swap/"+tc.phase, func(t *testing.T) {
+			dst := &store.Agent{Phase: tc.phase, AppliedConfig: &store.AgentAppliedConfig{Workspace: "/hub/local", Task: "kept"}}
 			mergeManagedCreate(dst, swapped())
 			assertWorkspaceRecorded(t, dst)
+			assert.Equal(t, tc.wantPhase, dst.Phase, "a terminal phase is kept; a live one takes the create's running")
 			assert.Equal(t, "kept", dst.AppliedConfig.Task, "other applied config is kept")
 		})
 	}
