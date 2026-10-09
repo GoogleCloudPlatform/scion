@@ -1804,6 +1804,15 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
+	// External chat references name conversations owned by chat
+	// integrations, which authenticate as brokers. Any other caller is
+	// refused before anything is looked up or written.
+	if (req.Surface != "" || req.ExternalRef != "" || req.ParentRef != "") && GetBrokerIdentityFromContext(ctx) == nil {
+		logReferenceRefused(ctx, logging.RequestPath(r), "external chat reference from a caller that is not a chat integration", GetIdentityFromContext(ctx))
+		ValidationError(w, "surface and external_ref are set by chat integrations", nil)
+		return
+	}
+
 	// Determine the message content and structured message to forward
 	var plainMessage string
 	var structuredMsg *messages.StructuredMessage
@@ -2040,8 +2049,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 	}
 
-	// Phase 11: Conversation resolution for broker plugins using the SDK path
-	// (e.g. Google Chat).  Same logic as handleBrokerInbound.
+	// Phase 11: Conversation resolution for chat integrations using the SDK
+	// path (e.g. Google Chat). Same logic as handleBrokerInbound. Only
+	// broker-authenticated callers reach this block with a surface or
+	// external_ref set (checked when the request is parsed).
 	if req.ExternalRef != "" && req.Surface == "" {
 		ValidationError(w, "external_ref requires surface to be set", nil)
 		return

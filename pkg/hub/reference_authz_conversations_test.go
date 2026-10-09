@@ -231,3 +231,113 @@ func TestBrokerInbound_ExternalRefMismatchRefusedWithWriteDenyOff(t *testing.T) 
 		f.requireNothingDelivered(t)
 	})
 }
+
+// postAgentMessageAs posts req to /api/v1/agents/{target}/message with the
+// given request context set up by withCtx.
+func postAgentMessageAs(t *testing.T, srv *Server, withCtx func(context.Context) context.Context, target *store.Agent, req MessageRequest) refAnswer {
+	t.Helper()
+	body, err := json.Marshal(req)
+	require.NoError(t, err)
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+target.ID+"/message", bytes.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	r = r.WithContext(withCtx(r.Context()))
+	rr := httptest.NewRecorder()
+	srv.handleAgentMessage(rr, r, target.ID)
+	return refAnswer{status: rr.Code, body: rr.Body.String()}
+}
+
+func externalRefMessage(target *store.Agent, surface, ref, parent string) MessageRequest {
+	return MessageRequest{
+		StructuredMessage: &messages.StructuredMessage{
+			Version: messages.Version, Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Recipient: "agent:" + target.Slug, RecipientID: target.ID,
+			Msg: "from a thread", Type: messages.TypeInstruction,
+		},
+		Surface:     surface,
+		ExternalRef: ref,
+		ParentRef:   parent,
+	}
+}
+
+const chatIntegrationsOnly = "surface and external_ref are set by chat integrations"
+
+// TestAgentMessage_ExternalRefFromNonIntegrationCallerRefused: on
+// /agents/{id}/message only chat integrations (broker-authenticated callers)
+// may name surface, external_ref or parent_ref. Users and agents get 400 and
+// no conversation is created.
+func TestAgentMessage_ExternalRefFromNonIntegrationCallerRefused(t *testing.T) {
+	f := newRefFixture(t)
+	f.srv.SetDispatcher(&recordingDispatcher{})
+	ctx := context.Background()
+	alice := NewAuthenticatedUser(f.ua.ID, f.ua.Email, f.ua.DisplayName, f.ua.Role, string(ClientTypeWeb))
+	agentA := agentIdentityFor(tid("ref-agent-a-sender"), f.projA.ID)
+	asIdentity := func(id Identity) func(context.Context) context.Context {
+		return func(c context.Context) context.Context { return contextWithIdentity(c, id) }
+	}
+
+	cases := []struct {
+		name                 string
+		caller               Identity
+		surface, ref, parent string
+	}{
+		{"user surface and external_ref", alice, "slack", "C0USER:1.1", ""},
+		{"agent surface and external_ref", agentA, "slack", "C0AGENT:1.1", ""},
+		{"user parent_ref alone", alice, "", "", "C0PARENT"},
+		{"agent parent_ref alone", agentA, "", "", "C0PARENT"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := postAgentMessageAs(t, f.srv, asIdentity(tc.caller), f.aa, externalRefMessage(f.aa, tc.surface, tc.ref, tc.parent))
+			require.Equal(t, http.StatusBadRequest, got.status, got.body)
+			assert.Contains(t, got.body, chatIntegrationsOnly)
+			if tc.ref != "" {
+				_, err := f.st.GetConversationByExternalRef(ctx, tc.surface, tc.ref)
+				assert.ErrorIs(t, err, store.ErrNotFound, "no conversation is created")
+			}
+		})
+	}
+
+	t.Run("chat integration acting for a user is accepted", func(t *testing.T) {
+		const ref = "C0BROKER:1.1"
+		withBroker := func(c context.Context) context.Context {
+			return contextWithIdentity(contextWithBrokerIdentity(c, NewBrokerIdentity("test-broker")), alice)
+		}
+		got := postAgentMessageAs(t, f.srv, withBroker, f.aa, externalRefMessage(f.aa, "slack", ref, "C0BROKER"))
+		require.NotContains(t, got.body, chatIntegrationsOnly)
+		conv, err := f.st.GetConversationByExternalRef(ctx, "slack", ref)
+		require.NoError(t, err, "the chat integration's reference resolves a conversation (answer: %d %s)", got.status, got.body)
+		require.NotNil(t, conv.ProjectID)
+		assert.Equal(t, f.projA.ID, *conv.ProjectID)
+	})
+}
+
+// TestAgentMessage_NonIntegrationCallerCannotMoveProjectlessConversation: a
+// user naming the reference of a conversation that has no project is refused
+// and the conversation is left exactly as it was.
+func TestAgentMessage_NonIntegrationCallerCannotMoveProjectlessConversation(t *testing.T) {
+	f := newRefFixture(t)
+	f.srv.SetDispatcher(&recordingDispatcher{})
+	ctx := context.Background()
+
+	const surface, ref = "slack", "C0LEGACY:1.1"
+	created, err := f.st.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind: "group", Surface: surface, ExternalRef: ref, DisplayName: "legacy thread", DriftState: "active",
+	})
+	require.NoError(t, err)
+	before, err := f.st.GetConversation(ctx, created.ID)
+	require.NoError(t, err)
+	require.Nil(t, before.ProjectID)
+
+	alice := NewAuthenticatedUser(f.ua.ID, f.ua.Email, f.ua.DisplayName, f.ua.Role, string(ClientTypeWeb))
+	got := postAgentMessageAs(t, f.srv, func(c context.Context) context.Context { return contextWithIdentity(c, alice) },
+		f.aa, externalRefMessage(f.aa, surface, ref, "C0LEGACY"))
+	require.Equal(t, http.StatusBadRequest, got.status, got.body)
+	assert.Contains(t, got.body, chatIntegrationsOnly)
+
+	after, err := f.st.GetConversation(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Nil(t, after.ProjectID, "the conversation stays without a project")
+	assert.Nil(t, after.DefaultAgentID, "default agent unchanged")
+	assert.Equal(t, before.ParentRef, after.ParentRef, "parent_ref unchanged")
+	assert.True(t, before.LastActivityAt.Equal(after.LastActivityAt), "conversation not touched")
+}
