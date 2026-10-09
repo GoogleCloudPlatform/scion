@@ -48,6 +48,12 @@ import {
 import { agentStatusBadge } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
+import {
+  READINESS_MARKS,
+  markReady,
+  readinessLoadEpoch,
+  readinessMarkPending,
+} from '../../client/readiness-marks.js';
 import { stateManager } from '../../client/state.js';
 import type { AgentsChangedDetail } from '../../client/state.js';
 import { fetchHubProjectCapabilities } from '../../client/hub-capabilities.js';
@@ -1362,6 +1368,40 @@ export class ScionPageProjectDetail extends LitElement {
   override updated(changed: Map<string, unknown>): void {
     super.updated(changed);
     this.observeFilesSection();
+    this.noteRowsReady();
+  }
+
+  /**
+   * Writes the view's readiness mark (client/readiness-marks.ts) on the
+   * first frame that shows the adopted agent result: for grid and list the
+   * first page of cards or rows, or the empty state; for the graph only its
+   * empty state (a non-empty graph is marked by the tree view once it is
+   * laid out). Does nothing when marks are off or the mark was already
+   * written in this load, and drops the mark if the load ends before the
+   * frame.
+   */
+  private noteRowsReady(): void {
+    const view = this.viewMode;
+    const name =
+      view === 'grid'
+        ? READINESS_MARKS.rowsGrid
+        : view === 'list'
+          ? READINESS_MARKS.rowsList
+          : READINESS_MARKS.graph;
+    if (!readinessMarkPending(name)) return;
+    if (!this.hasAgentsResult || this.agentsLoadError) return;
+    if (this.agentsLoading || this.agentWindow.loading) return;
+    const empty = '.empty-state, .empty-filter-state';
+    const shown =
+      view === 'grid'
+        ? `.agent-card, ${empty}`
+        : view === 'list'
+          ? `.agent-table-container tbody tr, ${empty}`
+          : empty;
+    if (view === 'graph' && this.renderRoot.querySelector('scion-agent-tree-view')) return;
+    if (!this.renderRoot.querySelector(shown)) return;
+    const epoch = readinessLoadEpoch();
+    requestAnimationFrame(() => markReady(name, view, epoch));
   }
 
   /**
@@ -1772,6 +1812,7 @@ export class ScionPageProjectDetail extends LitElement {
     if (adopted) {
       this.hasAgentsResult = true;
       this.agentsLoadError = null;
+      markReady(READINESS_MARKS.agentsData, this.viewMode);
     }
     if (
       adopted &&

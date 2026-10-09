@@ -177,6 +177,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/experiments", RouteID: "experiments.resolved",
 		Classification: RouteAuthenticated,
 	},
+	"/api/v1/profiling": {
+		Pattern: "/api/v1/profiling", RouteID: "profiling.client",
+		Classification: RouteAuthenticated,
+	},
 	"/api/v1/auth/admin-status": {
 		Pattern: "/api/v1/auth/admin-status", RouteID: "auth.admin-status",
 		Classification: RouteAuthenticated,
@@ -755,6 +759,14 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/admin/experiments", RouteID: "admin.experiments",
 		Classification: RouteHubAdmin,
 		Permission:     "hub.experiments.update", Resource: "hub", Action: "update",
+	},
+	// Profiling switches (DB-only "profiling" section). Session only: no
+	// token reads or writes them.
+	"/api/v1/admin/profiling": {
+		Pattern: "/api/v1/admin/profiling", RouteID: "admin.profiling",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.config.update", Resource: "hub", Action: "update",
+		SessionOnly: authzop.ReasonHostOperations,
 	},
 	// Conduit grant key rotation, behind hub.conduit. Returns kids and
 	// timestamps only.
