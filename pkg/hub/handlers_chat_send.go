@@ -146,13 +146,8 @@ func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key s
 	target := &chatSendTarget{Key: key, wcs: wcs}
 	if strings.HasPrefix(key, "dm:") {
 		target.IsDM = true
-		// Validate DM key format before any further processing.
-		if !validDMKey(key) {
-			return nil, chatSendBadRequest("invalid DM key format")
-		}
-		// DM key: verify the caller is one of the two participants.
-		if !isDMParticipant(key, user.ID()) {
-			return nil, chatSendForbidden()
+		if serr := authorizeDMKeyParticipant(key, user.ID()); serr != nil {
+			return nil, serr
 		}
 		// The other participant must be a principal the caller may message.
 		if serr := s.authorizeDMPeer(ctx, user, key); serr != nil {
@@ -190,6 +185,22 @@ func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key s
 	target.ProjectID = topic.ProjectID
 	target.Topic = topic
 	return target, nil
+}
+
+// authorizeDMKeyParticipant runs the first two DM steps of
+// authorizeChatSend: the key is well formed, and userID is one of its two
+// participants. Callers that need only these steps use it so their
+// responses are the same as authorizeChatSend's.
+func authorizeDMKeyParticipant(key, userID string) *chatSendError {
+	// Validate DM key format before any further processing.
+	if !validDMKey(key) {
+		return chatSendBadRequest("invalid DM key format")
+	}
+	// DM key: verify the caller is one of the two participants.
+	if !isDMParticipant(key, userID) {
+		return chatSendForbidden()
+	}
+	return nil
 }
 
 // chatSendMessageDenied is the refusal for a sender the messaging rules do
