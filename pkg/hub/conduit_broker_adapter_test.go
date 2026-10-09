@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -245,8 +246,17 @@ func TestBrokerPTYUnchanged_ExperimentOffAndOn(t *testing.T) {
 			// Preflight: broker not connected, then connected.
 			resp, err := http.Get(path)
 			require.NoError(t, err)
+			var notConnected ErrorResponse
+			require.NoError(t, json.NewDecoder(resp.Body).Decode(&notConnected))
 			_ = resp.Body.Close()
 			assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+			assert.Equal(t, ErrCodeRuntimeBrokerUnavail, notConnected.Error.Code)
+			if tc.name == "conduit off" {
+				// The experiment-off response is unchanged: no details.
+				assert.Nil(t, notConnected.Error.Details)
+			} else {
+				assert.Equal(t, ptyReasonBrokerNotConnected, notConnected.Error.Details["reason"])
+			}
 			b := connectFakeBroker(t, f.srv, "broker-1")
 			resp, err = http.Get(path)
 			require.NoError(t, err)
