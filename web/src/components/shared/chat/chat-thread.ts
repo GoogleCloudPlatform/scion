@@ -4275,7 +4275,6 @@ export class ScionChatThread extends LitElement {
   // Phase-5: Context menu
   // ---------------------------------------------------------------------------
 
-  /** The actions of a message's menu, shared by the popup and the sheet. */
   /**
    * The agent member the thread default names. The stored value may be an
    * agent ID, a slug, or a display name (see default-agent.ts).
@@ -4301,6 +4300,7 @@ export class ScionChatThread extends LitElement {
     return msg.sender.startsWith('agent:') && msg.sender.slice(6) === this.defaultAgentSlug();
   }
 
+  /** The actions of a message's menu, shared by the popup and the sheet. */
   private messageMenuActions(msg: Message): MenuAction[] {
     const isOwnMessage = msg.senderId === (this._currentUserId || this.currentUserId);
     const canEditDelete = isOwnMessage && !this.hasAgentReplyAfter(msg);

@@ -9065,6 +9065,49 @@ describe('scion-chat-thread default agent stored by ID', () => {
     expect(ids(agentMessage('other', 'agent-2'))).toContain('set-default-agent');
   });
 
+  it('hides the action when only senderId matches the default agent', async () => {
+    const el = await mountWithIdDefault();
+    const internals = el as unknown as {
+      messageMenuActions(msg: Message): { id: string }[];
+    };
+    const ids = internals
+      .messageMenuActions(agentMessage('renamed-slug', AGENT_ID))
+      .map((a) => a.id);
+    expect(ids).not.toContain('set-default-agent');
+  });
+
+  it('falls back to the stored value when the default does not resolve', async () => {
+    const el = await mountWithIdDefault();
+    el.defaultAgent = 'gone-agent';
+    const internals = el as unknown as {
+      messageMap: Map<string, Message>;
+      messageMenuActions(msg: Message): { id: string }[];
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+    const ids = (m: Message): string[] => internals.messageMenuActions(m).map((a) => a.id);
+    expect(ids(agentMessage('gone-agent', 'agent-gone'))).not.toContain('set-default-agent');
+    expect(ids(agentMessage('coder', AGENT_ID))).toContain('set-default-agent');
+
+    apiFetch.mockImplementationOnce(() => new Promise<Response>(() => {}));
+    void internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'Please help',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+    const optimistic = Array.from(internals.messageMap.values()).find(
+      (message) => message.dispatchState === 'pending'
+    );
+    expect(optimistic?.recipient).toBe('agent:gone-agent');
+    expect(optimistic?.recipientId).toBe('gone-agent');
+  });
+
   it('names the agent by slug on the optimistic send', async () => {
     const el = await mountWithIdDefault();
     const internals = el as unknown as {
