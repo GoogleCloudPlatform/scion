@@ -116,7 +116,7 @@ export async function getMarkdownRenderer(): Promise<MarkdownRenderer> {
       return {
         render(markdown: string, options?: MarkdownRenderOptions): string {
           const source = options?.criticMarks ? criticToSentinels(markdown) : markdown;
-          let rawHtml = marked.parse(source, { async: false }) as string;
+          let rawHtml = marked.parse(source, { async: false });
           if (options?.criticMarks) rawHtml = renderCriticSentinels(rawHtml, options.criticAuthor);
           const clean = purify.sanitize(rawHtml);
           return options?.sameOriginImagesOnly

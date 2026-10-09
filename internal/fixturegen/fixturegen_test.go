@@ -34,7 +34,7 @@ import (
 // expectedTableCount is the number of domain tables in the hub schema
 // (excluding the schema_migrations bookkeeping table). The fixture must cover
 // every one of them.
-const expectedTableCount = 74
+const expectedTableCount = 73
 
 // TestFixtureCoverage is the CI coverage gate: it generates the fixture and
 // fails if any domain table has zero rows.
@@ -45,6 +45,7 @@ func TestFixtureCoverage(t *testing.T) {
 
 	t.Logf("fixture covers %d domain tables", report.TotalTables())
 	for _, c := range report.Counts {
+		assert.NotEqual(t, "decision_audits", c.Table, "retired decision audit table must be absent")
 		t.Logf("  %-32s %d row(s)", c.Table, c.Count)
 	}
 

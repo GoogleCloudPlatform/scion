@@ -1271,20 +1271,17 @@ export class ScionPageProjectDetail extends LitElement {
     void this.loadHubProjectCapabilities();
 
     // Listen for real-time updates
-    stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated as EventListener);
-    stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
-    stateManager.addEventListener('agents-resync', this.boundOnAgentsResync as EventListener);
+    stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated);
+    stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged);
+    stateManager.addEventListener('agents-resync', this.boundOnAgentsResync);
     this.agentWindow.addEventListener('change', this.boundOnWindowChange);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    stateManager.removeEventListener(
-      'projects-updated',
-      this.boundOnProjectsUpdated as EventListener
-    );
-    stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
-    stateManager.removeEventListener('agents-resync', this.boundOnAgentsResync as EventListener);
+    stateManager.removeEventListener('projects-updated', this.boundOnProjectsUpdated);
+    stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged);
+    stateManager.removeEventListener('agents-resync', this.boundOnAgentsResync);
     this.agentWindow.removeEventListener('change', this.boundOnWindowChange);
     this.cancelAgentsLoad();
     this.filesSectionObserver?.disconnect();
@@ -2498,8 +2495,7 @@ export class ScionPageProjectDetail extends LitElement {
         method: 'POST',
       });
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const result = (await response.json()) as any;
+      const result = await response.json();
 
       if (!response.ok) {
         // Extract error message from structured APIError or legacy format

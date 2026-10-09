@@ -361,19 +361,8 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			log.Fatalf("Hub server failed to start: %v", hubInitErr)
 		}
 
-		// The Hub handler may be served by two listeners (its own and the
-		// WebServer's), so neither listener's Shutdown closes the decision
-		// audit writer; exit.run does, before the store closer deferred
-		// above and before the OTel providers registered below flush, so
-		// the drain's drops and write latencies are exported. On SIGINT
-		// (Ctrl-C, `scion server stop`) it runs after wg.Wait, once both
-		// listeners have drained, so records from requests served during
-		// the drain are written. On an error or early return there is no
-		// wg.Wait: a listener may still be serving or draining, and
-		// records from requests that finish after the close are counted
-		// as shutdown drops.
-		hubSrv.DeferDecisionAuditClose()
-		exit := &hubExitSequence{closeDecisionAudit: hubSrv.CloseDecisionAudit}
+		// Flush telemetry providers before the store closes on exit.
+		exit := &hubExitSequence{}
 		defer exit.run()
 
 		// The co-located broker registers (startRuntimeBroker, step 13)
@@ -2075,13 +2064,6 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		hubSrv.SetReaperMetrics(reaperRec)
 	}
 
-	auditRec, auditErr := hub.NewOTelDecisionAuditMetrics(mp, hubSrv.DecisionAuditQueueDepth)
-	if auditErr != nil {
-		log.Printf("WARNING: hub decision audit metrics disabled: %v", auditErr)
-	} else {
-		hubSrv.SetDecisionAuditMetrics(auditRec)
-	}
-
 	if authzRec, err := hub.NewOTelConduitStreamAuthzMetrics(mp); err != nil {
 		log.Printf("WARNING: hub conduit stream authz metrics disabled: %v", err)
 	} else {
@@ -2426,7 +2408,7 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 
 	// Build koanf instances.
 	envKoanf := config.LoadEnvKoanf()
-	bootstrapKoanf := config.LoadBootstrapKoanf()
+	bootstrapKoanf := config.LoadBootstrapKoanfWithConfigPath(serverConfigPath)
 	// Seed material never carries the removed key, so the every-boot sync
 	// cannot write it back into a seeded profiles row.
 	config.DeleteLegacyProfileTimezones(bootstrapKoanf, tzScan.ProfileTimezones)
@@ -3945,14 +3927,9 @@ func telemetryGCPProjectFromSecret(ctx context.Context, sb secret.SecretBackend,
 	return gcputil.ParseProjectID([]byte(sw.Value))
 }
 
-// hubExitSequence is the Hub's exit work in runServerStart, deferred as
-// one call so its order is fixed and tested: drain and close the decision
-// audit writer first, then flush the OTel providers in reverse order of
-// registration (as separate defers would), so the drain's drops and write
-// latencies reach the final export.
+// hubExitSequence flushes telemetry providers in reverse registration order.
 type hubExitSequence struct {
-	closeDecisionAudit func(context.Context)
-	flushes            []func(context.Context) error
+	flushes []func(context.Context) error
 }
 
 func (h *hubExitSequence) addFlush(f func(context.Context) error) {
@@ -3960,7 +3937,6 @@ func (h *hubExitSequence) addFlush(f func(context.Context) error) {
 }
 
 func (h *hubExitSequence) run() {
-	h.closeDecisionAudit(context.Background())
 	for i := len(h.flushes) - 1; i >= 0; i-- {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := h.flushes[i](ctx); err != nil {
