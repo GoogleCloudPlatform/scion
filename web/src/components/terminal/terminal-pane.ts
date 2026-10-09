@@ -1000,7 +1000,13 @@ export class ScionTerminalPane extends LitElement {
     this.error = this.metadataError ?? state.error;
     this.disconnectReason = state.disconnectReason;
     this.reconnectInProgress = this.ownedSession?.reconnecting ?? false;
-    this.attempting = state.connection === 'loading' || state.connection === 'connecting';
+    // Also true during the jitter wait before an automatic attempt
+    // (session.reconnecting), so the overlay says RECONNECTING... from the
+    // close through the redial.
+    this.attempting =
+      state.connection === 'loading' ||
+      state.connection === 'connecting' ||
+      this.reconnectInProgress;
     this.idle = state.connection === 'idle';
     this.reconnectFailed = state.reconnectFailed;
     this.reconnectFailedManual = state.reconnectFailedManual;

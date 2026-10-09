@@ -1005,13 +1005,18 @@ describe('the reconnect after a 4503 close waits a full-jitter delay of 0-5s', (
 
       socket0.readyState = 3;
       socket0.onclose?.({ code: 4503, reason: 'relay_restart' });
-      expect(session.reconnecting).toBe(false); // no immediate redial
+      // The wait counts as reconnecting (the pane shows RECONNECTING...),
+      // but nothing is redialed yet.
+      expect(session.reconnecting).toBe(true);
+      expect(FakeSocket.instances).toHaveLength(1);
+      expect(f.fetcher).toHaveBeenCalledTimes(2); // the first attach only
       expect(session.state.disconnectReason).toBe('network');
 
       if (delay > 0) {
         await vi.advanceTimersByTimeAsync(delay - 1);
-        expect(session.reconnecting).toBe(false);
+        expect(session.reconnecting).toBe(true);
         expect(FakeSocket.instances).toHaveLength(1);
+        expect(f.fetcher).toHaveBeenCalledTimes(2);
       }
       // Synchronous advance: the timer callback starts the attempt, and
       // `reconnecting` is observed before the (mocked, instantly resolving)
@@ -1055,6 +1060,7 @@ describe('the reconnect after a 4503 close waits a full-jitter delay of 0-5s', (
     FakeSocket.instances[1].onclose?.({ code: 4503 }); // closes before any data
 
     expect(session.state.reconnectFailed).toBe(true);
+    expect(session.reconnecting).toBe(false); // cleared once the attempt settled
     await vi.advanceTimersByTimeAsync(PROMPT_RECONNECT_MAX_DELAY_MS + 1);
     expect(FakeSocket.instances).toHaveLength(2);
   });
@@ -1071,6 +1077,7 @@ describe('the reconnect after a 4503 close waits a full-jitter delay of 0-5s', (
     await session.connect(); // user clicks Reconnect before the delay ends
     FakeSocket.instances[1].open();
     FakeSocket.instances[1].data();
+    expect(session.reconnecting).toBe(false);
     await vi.advanceTimersByTimeAsync(PROMPT_RECONNECT_MAX_DELAY_MS + 1);
     expect(FakeSocket.instances).toHaveLength(2);
     expect(session.state.connection).toBe('connected');
@@ -1085,9 +1092,14 @@ describe('the reconnect after a 4503 close waits a full-jitter delay of 0-5s', (
     socket0.onclose?.({ code: 4503 }); // background pane: armed, delay running
 
     session.setFrontmost(true);
-    expect(session.reconnecting).toBe(false);
-    vi.advanceTimersByTime(3_000); // synchronous: see above
+    expect(FakeSocket.instances).toHaveLength(1);
+    expect(f.fetcher).toHaveBeenCalledTimes(2); // no attempt yet
+    vi.advanceTimersByTime(2_999);
+    expect(f.fetcher).toHaveBeenCalledTimes(2);
+    vi.advanceTimersByTime(1); // synchronous: see above
     expect(session.reconnecting).toBe(true);
+    await session.connect();
+    expect(FakeSocket.instances).toHaveLength(2);
   });
 
   it('a background pane whose delay ends attempts only when foregrounded', async () => {
@@ -1116,6 +1128,67 @@ describe('the reconnect after a 4503 close waits a full-jitter delay of 0-5s', (
     socket0.onclose?.({ code: 4503 });
 
     session.close();
+    expect(session.reconnecting).toBe(false);
+    await vi.advanceTimersByTimeAsync(PROMPT_RECONNECT_MAX_DELAY_MS + 1);
+    expect(FakeSocket.instances).toHaveLength(1);
+  });
+
+  it('reconnecting is true during the wait and false once it is cancelled or ends without an attempt', async () => {
+    vi.useFakeTimers();
+    const f = fixture({ random: () => 0.5 });
+    const session = f.registry.open(agentId, f.initialize);
+    const seen: boolean[] = [];
+    session.subscribe(() => seen.push(session.reconnecting));
+    const socket0 = await connectAndOpen(session);
+    socket0.readyState = 3;
+    socket0.onclose?.({ code: 4503 }); // background pane: the wait runs, no attempt at the end
+    expect(session.reconnecting).toBe(true);
+    expect(seen[seen.length - 1]).toBe(true); // subscribers were told
+
+    await vi.advanceTimersByTimeAsync(PROMPT_RECONNECT_MAX_DELAY_MS + 1);
+    expect(session.reconnecting).toBe(false);
+    expect(seen[seen.length - 1]).toBe(false);
+    expect(FakeSocket.instances).toHaveLength(1);
+  });
+
+  it('an attempt that ends attach-unsupported clears reconnecting and is final', async () => {
+    vi.useFakeTimers();
+    const f = fixture({ random: () => 0.5 });
+    const session = f.registry.open(agentId, f.initialize);
+    const socket0 = await connectAndOpen(session);
+    session.setFrontmost(true);
+    const noPath = {
+      error: {
+        code: 'runtime_attach_unsupported',
+        message: 'No path to the terminal',
+        details: { reason: 'agent_pty_unavailable' },
+      },
+    };
+    f.fetcher.mockResolvedValueOnce(json(agent)).mockResolvedValueOnce(json(noPath, 503));
+    socket0.readyState = 3;
+    socket0.onclose?.({ code: 4503 });
+    expect(session.reconnecting).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(PROMPT_RECONNECT_MAX_DELAY_MS + 1);
+    expect(session.state.disconnectReason).toBe('attach-unsupported');
+    expect(session.reconnecting).toBe(false);
+    expect(session.state.reconnectFailed).toBe(false);
+    await vi.advanceTimersByTimeAsync(2 * PROMPT_RECONNECT_MAX_DELAY_MS);
+    expect(FakeSocket.instances).toHaveLength(1);
+  });
+
+  it('markUnavailable during the wait clears reconnecting and prevents the attempt', async () => {
+    vi.useFakeTimers();
+    const f = fixture({ random: () => 0.5 });
+    const session = f.registry.open(agentId, f.initialize);
+    const socket0 = await connectAndOpen(session);
+    session.setFrontmost(true);
+    socket0.readyState = 3;
+    socket0.onclose?.({ code: 4503 });
+    expect(session.reconnecting).toBe(true);
+
+    session.markUnavailable('agent-stopped', 'Agent stopped');
+    expect(session.reconnecting).toBe(false);
     await vi.advanceTimersByTimeAsync(PROMPT_RECONNECT_MAX_DELAY_MS + 1);
     expect(FakeSocket.instances).toHaveLength(1);
   });

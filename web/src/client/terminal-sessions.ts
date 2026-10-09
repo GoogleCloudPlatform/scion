@@ -425,8 +425,13 @@ class Session implements TerminalSession {
     return this.snapshot;
   }
 
+  /**
+   * True while an attempt is in flight, and also while the full-jitter wait
+   * before the automatic attempt after a 4503 close is running, so the pane
+   * shows "Reconnecting..." from the close through the redial.
+   */
   get reconnecting(): boolean {
-    return this.pending !== null;
+    return this.pending !== null || this.reconnectDelayTimer !== null;
   }
 
   subscribe(listener: (state: TerminalSessionState) => void): () => void {
@@ -604,7 +609,12 @@ class Session implements TerminalSession {
     this.reconnectDelayTimer = setTimeout(() => {
       this.reconnectDelayTimer = null;
       this.maybeAutoAttempt();
+      // No attempt started (for example a background pane): tell
+      // subscribers that `reconnecting` is false again.
+      if (!this.pending) this.update({});
     }, delay);
+    // Subscribers re-read `reconnecting`, which is now true.
+    this.update({});
   }
 
   private clearReconnectDelayTimer(): void {
