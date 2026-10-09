@@ -33,6 +33,7 @@ REPO_ROOT="$(cd "${STARTER_DIR}/../.." && pwd)"
 PASS=0
 FAIL=0
 CURRENT=""
+EXTRA_ENV=()
 
 fail() {
     echo "  FAIL [${CURRENT}]: $1"

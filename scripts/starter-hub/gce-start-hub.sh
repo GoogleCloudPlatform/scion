@@ -587,6 +587,7 @@ REMOTE_HEALTH=""
 CURL_RC=0
 for i in {1..12}; do
     CURL_RC=0
+    # Runs on the operator workstation; macOS bash 3.2 errors on an empty "${arr[@]}" under set -u, hence the ${arr[@]+...} form.
     REMOTE_HEALTH=$(curl -s ${CURL_TLS_ARGS[@]+"${CURL_TLS_ARGS[@]}"} "https://${DOMAIN}/healthz") || CURL_RC=$?
     if echo "$REMOTE_HEALTH" | grep -q '^{"status":"healthy"'; then
         echo "  -> Hub is healthy!"
