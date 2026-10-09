@@ -57,19 +57,6 @@ func decodeStatusBody(t *testing.T, rr *httptest.ResponseRecorder) map[string]st
 	return body
 }
 
-func decodeErrorCode(t *testing.T, rr *httptest.ResponseRecorder) string {
-	t.Helper()
-	var body struct {
-		Error struct {
-			Code string `json:"code"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode error body %q: %v", rr.Body.String(), err)
-	}
-	return body.Error.Code
-}
-
 // The local-image delete and pull handlers read the co-located runtime's
 // image manager through one getImageManager snapshot (ptone/scion#1374).
 
@@ -83,7 +70,7 @@ func TestHarnessConfigDeleteLocalImage_NoImageManager(t *testing.T) {
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %d: %s", rr.Code, rr.Body.String())
 	}
-	if code := decodeErrorCode(t, rr); code != "no_runtime" {
+	if code := decodeErrorCode(t, rr.Body.Bytes()); code != "no_runtime" {
 		t.Fatalf("expected error code no_runtime, got %q", code)
 	}
 }
@@ -138,7 +125,7 @@ func TestHarnessConfigPullImage_NoImageManager(t *testing.T) {
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %d: %s", rr.Code, rr.Body.String())
 	}
-	if code := decodeErrorCode(t, rr); code != "no_runtime" {
+	if code := decodeErrorCode(t, rr.Body.Bytes()); code != "no_runtime" {
 		t.Fatalf("expected error code no_runtime, got %q", code)
 	}
 }
