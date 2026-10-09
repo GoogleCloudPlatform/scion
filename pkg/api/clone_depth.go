@@ -1,3 +1,17 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package api
 
 import (
@@ -5,7 +19,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
-	"strings"
 )
 
 // CloneDepthFull is the clone_depth value that requests a full clone
@@ -47,20 +60,38 @@ func (d *CloneDepth) UnmarshalJSON(b []byte) error {
 // false when the setting is empty (not set). "full" yields 0 (full clone);
 // a positive integer N yields N. Any other value is an error: 0 and
 // negative numbers are rejected so that "full" is the only way to ask for
-// a full clone.
+// a full clone. The accepted forms match the schemas exactly: lowercase
+// "full" or ^[1-9][0-9]*$ (no sign, spaces or leading zeros).
 func (d CloneDepth) GitDepth() (depth int, ok bool, err error) {
-	s := strings.TrimSpace(string(d))
+	s := string(d)
 	if s == "" {
 		return 0, false, nil
 	}
-	if strings.EqualFold(s, CloneDepthFull) {
+	if s == CloneDepthFull {
 		return 0, true, nil
 	}
+	if !isPositiveDecimal(s) {
+		return 0, false, fmt.Errorf("invalid clone_depth %q: want %q or a positive integer", s, CloneDepthFull)
+	}
 	n, convErr := strconv.Atoi(s)
-	if convErr != nil || n < 1 {
-		return 0, false, fmt.Errorf("invalid clone_depth %q: want %q or a positive integer", string(d), CloneDepthFull)
+	if convErr != nil {
+		return 0, false, fmt.Errorf("invalid clone_depth %q: %w", s, convErr)
 	}
 	return n, true, nil
+}
+
+// isPositiveDecimal reports whether s matches ^[1-9][0-9]*$, the same
+// form the settings and agent schemas accept.
+func isPositiveDecimal(s string) bool {
+	if s == "" || s[0] < '1' || s[0] > '9' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // Validate reports whether the setting is empty, "full" or a positive

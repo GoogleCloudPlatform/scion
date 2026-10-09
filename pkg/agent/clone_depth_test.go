@@ -4,13 +4,14 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//	http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 package agent
 
 import (
@@ -215,10 +216,56 @@ func TestStartCloneDepth_Precedence(t *testing.T) {
 			require.NotNil(t, cfg.GitClone)
 			require.NotNil(t, cfg.GitClone.Depth)
 			assert.Equal(t, tt.want, *cfg.GitClone.Depth)
+			require.NotNil(t, cfg.GitCloneForInit, "the Kubernetes NFS init container must get the clone config")
+			require.NotNil(t, cfg.GitCloneForInit.Depth)
+			assert.Equal(t, tt.want, *cfg.GitCloneForInit.Depth)
 			env, ok := runEnvValue(cfg, gitDepthEnvKey)
 			require.True(t, ok, "SCION_GIT_DEPTH must be set")
 			assert.Equal(t, strconv.Itoa(tt.want), env)
 		})
+	}
+}
+
+// A start that names no profile uses the profile the agent was created
+// with, not the active profile.
+func TestStartCloneDepth_RestartUsesCreatedWithProfile(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(f.globalScionDir, "settings.yaml"),
+		[]byte(cloneDepthRunSettings), 0644))
+	var captured []runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		NameFunc: func() string { return "kubernetes" },
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			captured = append(captured, config)
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+	start := func(profile string) {
+		t.Helper()
+		gc := requestGitClone()
+		_, err := mgr.Start(context.Background(), api.StartOptions{
+			Name: "cd-agent", ProjectPath: f.projectScionDir, NoAuth: true,
+			Profile:  profile,
+			GitClone: gc,
+			Env: map[string]string{
+				"SCION_AGENT_ID":      "agent-cd",
+				"SCION_PROJECT_ID":    "pid-cd",
+				"SCION_GIT_CLONE_URL": gc.URL,
+				gitDepthEnvKey:        "1",
+			},
+		})
+		require.NoError(t, err)
+	}
+	start("deep") // created under "deep"; the active profile is "plain"
+	start("")     // restart without a profile
+	require.Len(t, captured, 2)
+	for i, cfg := range captured {
+		require.NotNil(t, cfg.GitClone, "start %d", i)
+		require.NotNil(t, cfg.GitClone.Depth, "start %d", i)
+		assert.Equal(t, 40, *cfg.GitClone.Depth, "start %d", i)
+		env, _ := runEnvValue(cfg, gitDepthEnvKey)
+		assert.Equal(t, "40", env, "start %d", i)
 	}
 }
 
