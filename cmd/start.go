@@ -76,6 +76,7 @@ func init() {
 
 	// Inline config flag
 	startCmd.Flags().StringVar(&inlineConfigPath, "config", "", "Path to inline agent config file (YAML/JSON), or '-' for stdin")
+	startCmd.Flags().StringVar(&taskFilePath, "task-file", "", taskFileFlagUsage)
 
 	// Model flag
 	startCmd.Flags().StringVar(&modelFlag, "model", "", "Model to use: alias (small, medium, large, extra-large/xl) or explicit model ID")

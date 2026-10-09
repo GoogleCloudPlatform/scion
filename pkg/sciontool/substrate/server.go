@@ -232,6 +232,7 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -259,6 +260,7 @@ func (s *Server) bootstrapState() (bootstrapped, initFailed bool) {
 
 func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -656,6 +658,7 @@ func writeFileAtomicMode(dir, path string, content []byte, mode os.FileMode, uid
 
 func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}

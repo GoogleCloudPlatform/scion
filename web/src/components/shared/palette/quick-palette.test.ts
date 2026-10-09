@@ -30,12 +30,8 @@ import { describe, it, expect, afterEach, beforeEach, vi, type Mock } from 'vite
 
 await import('./quick-palette.js');
 type ScionQuickPalette = import('./quick-palette.js').ScionQuickPalette;
-import type {
-  GroupState,
-  PaletteGroup,
-  PaletteTarget,
-} from '../../../client/chat-palette-types.js';
-import { dmCandidateId } from '../../../client/chat-palette-types.js';
+import type { GroupState, PaletteGroup, PaletteTarget } from '../../../client/palette-types.js';
+import { dmCandidateId } from '../../../client/palette-types.js';
 import { TOUCH_PRIMARY_QUERY } from '../../../utils/input-modality.js';
 import { PALETTE_TYPEAHEAD_MAX_MS, PaletteTypeahead } from './palette-typeahead.js';
 
@@ -1309,7 +1305,7 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
     // that public API even though the current sole caller (chat.ts) never
     // actually passes it. The guard is kept as a real, exercised defense,
     // not dead code.
-    const el = await mountPalette({} as unknown as Record<'agents', GroupState>);
+    const el = await mountPalette({});
     expect(el.shadowRoot?.querySelectorAll('[role="group"]')).toHaveLength(0);
     expect(el.shadowRoot?.querySelectorAll('.palette-option')).toHaveLength(0);
   });

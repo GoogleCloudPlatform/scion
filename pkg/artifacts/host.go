@@ -88,6 +88,15 @@ type Host interface {
 	OpenCursor(ctx context.Context, cursor, binding string) (string, error)
 }
 
+// ScopeChecker is an optional extension of Host. The artifact list asks it
+// which home projects still exist, so it can mark the rows of artifacts
+// whose project was deleted. A host without it reports none deleted.
+type ScopeChecker interface {
+	// ScopesExist reports, for each project id in refs, whether the
+	// project exists. An id missing from the answer counts as existing.
+	ScopesExist(ctx context.Context, refs []string) (map[string]bool, error)
+}
+
 // ScopeExplainer is an optional extension of Host. When a credential
 // lacks a scope that publishing needs, the service asks it which one, so
 // the caller gets a 403 naming the scope instead of an answer that looks

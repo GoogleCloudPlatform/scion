@@ -882,6 +882,28 @@ func (vs *VersionedSettings) ResolveSafeToEvictWithSource(profileName string) (v
 	return nil, ""
 }
 
+// ResolveCloneDepthWithSource returns the profile's clone_depth and the
+// settings key it came from ("profiles.NAME.clone_depth"). If profileName
+// is empty, ActiveProfile is used. An unknown profile, or a profile
+// without clone_depth, yields an empty value and source.
+//
+// This is a default only: a template's or agent's clone_depth wins over
+// it. The value is returned as written; callers validate it with
+// api.CloneDepth.GitDepth so the error can name its source.
+func (vs *VersionedSettings) ResolveCloneDepthWithSource(profileName string) (value api.CloneDepth, source string) {
+	if vs == nil {
+		return "", ""
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	profile, ok := vs.Profiles[profileName]
+	if !ok || profile.CloneDepth == "" {
+		return "", ""
+	}
+	return profile.CloneDepth, "profiles." + profileName + ".clone_depth"
+}
+
 // ApplySafeToEvictDefault returns base with SafeToEvict filled from the
 // settings default when base leaves it unset, so a template's or agent's
 // explicit value (true or false) always wins. base is never modified; a
@@ -1121,6 +1143,13 @@ type VersionedSettings struct {
 
 	// AgentSecrets controls hub-level policy for secrets written by agents.
 	AgentSecrets *AgentSecretsSettings `json:"agent_secrets,omitempty" yaml:"agent_secrets,omitempty" koanf:"agent_secrets"`
+
+	// ProjectID is the top-level project ID of a migrated legacy settings
+	// file, kept verbatim. hub.project_id is the canonical v1 key and takes
+	// precedence when set.
+	ProjectID string `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
+	// HubConnections holds named Hub connections for a Runtime Broker.
+	HubConnections map[string]V1HubConnectionConfig `json:"hub_connections,omitempty" yaml:"hub_connections,omitempty" koanf:"hub_connections"`
 }
 
 // AutoExposePortsSettings holds the auto-expose ports configuration.
@@ -1490,6 +1519,10 @@ type V1ServerHubConduitConfig struct {
 	// AuthzRecheckInterval is the period of the re-check sweep of open
 	// user streams (e.g. "60s"; default "60s", 1s-10m).
 	AuthzRecheckInterval string `json:"authz_recheck_interval,omitempty" yaml:"authz_recheck_interval,omitempty" koanf:"authz_recheck_interval"`
+	// LifetimeCap is the platform lifetime cap of a conduit session
+	// (e.g. "3500s"; default "3500s", 90s-24h). The relay sends GoAway
+	// 60s before it.
+	LifetimeCap string `json:"lifetime_cap,omitempty" yaml:"lifetime_cap,omitempty" koanf:"lifetime_cap"`
 	// StreamAuthzMax is the authorization interval of open streams per
 	// originating principal kind: when a stream reaches it, the hub
 	// re-checks the principal and renews or closes the stream (defaults
@@ -2100,12 +2133,29 @@ type V1HubClientConfig struct {
 	Endpoint  string `json:"endpoint,omitempty" yaml:"endpoint,omitempty" koanf:"endpoint"`
 	ProjectID string `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
 	LocalOnly *bool  `json:"local_only,omitempty" yaml:"local_only,omitempty" koanf:"local_only"`
+	// Transport is the transport-layer auth for reaching a Hub behind a
+	// platform guard (IAP, Cloud Run invoker IAM).
+	Transport *V1HubTransportConfig `json:"transport,omitempty" yaml:"transport,omitempty" koanf:"transport"`
+}
+
+// V1HubTransportConfig is hub.transport in versioned settings (the legacy
+// HubTransportConfig).
+type V1HubTransportConfig struct {
+	Mode     string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
+	Audience string `json:"audience,omitempty" yaml:"audience,omitempty" koanf:"audience"`
+}
+
+// V1HubConnectionConfig is one entry of hub_connections in versioned
+// settings (the legacy HubConnectionConfig).
+type V1HubConnectionConfig struct {
+	Endpoint string `json:"endpoint,omitempty" yaml:"endpoint,omitempty" koanf:"endpoint"`
 }
 
 // V1CLIConfig defines CLI behavior settings for versioned config.
 type V1CLIConfig struct {
-	AutoHelp            *bool `json:"autohelp,omitempty" yaml:"autohelp,omitempty" koanf:"autohelp"`
-	InteractiveDisabled *bool `json:"interactive_disabled,omitempty" yaml:"interactive_disabled,omitempty" koanf:"interactive_disabled"`
+	AutoHelp            *bool  `json:"autohelp,omitempty" yaml:"autohelp,omitempty" koanf:"autohelp"`
+	InteractiveDisabled *bool  `json:"interactive_disabled,omitempty" yaml:"interactive_disabled,omitempty" koanf:"interactive_disabled"`
+	Mode                string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
 }
 
 // V1TelemetryConfig holds telemetry/observability settings.
@@ -2599,6 +2649,11 @@ type V1ProfileConfig struct {
 	// loses to a template's or agent's kubernetes.safeToEvict. Only false
 	// has an effect. See ResolveSafeToEvict.
 	SafeToEvict *bool `json:"safe_to_evict,omitempty" yaml:"safe_to_evict,omitempty" koanf:"safe_to_evict"`
+	// CloneDepth is the git clone depth for agents using this profile:
+	// "full" or a positive integer. A template's or agent's clone_depth
+	// wins over it. Empty keeps the default shallow clone. See
+	// ResolveCloneDepthWithSource.
+	CloneDepth api.CloneDepth `json:"clone_depth,omitempty" yaml:"clone_depth,omitempty" koanf:"clone_depth"`
 	// SharedDirStorageBackend overrides server.shared_dir_storage.backend
 	// ("local" or "nfs") for agents using this profile. It wins over the
 	// same key on the profile's runtime entry. The nfs details always come
@@ -2749,7 +2804,7 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 		Profiles:       make(map[string]V1ProfileConfig),
 	}
 
-	if err := k.Unmarshal("", settings); err != nil {
+	if err := unmarshalVersionedSettings(k, settings); err != nil {
 		return nil, err
 	}
 	if settings.Telemetry != nil && settings.Telemetry.Cloud != nil && settings.Telemetry.Cloud.TLS != nil {
@@ -2760,6 +2815,32 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 	}
 
 	return settings, nil
+}
+
+// unmarshalVersionedSettings decodes k into settings after normalizing
+// every profiles.NAME.clone_depth value with api.CloneDepthFromValue. The
+// koanf decoder is weakly typed and would turn clone_depth: true into "1";
+// normalizing first gives the settings loader the same value the schema
+// validator and the template loader see (true stays "true", 5.0 is "5").
+func unmarshalVersionedSettings(k *koanf.Koanf, settings *VersionedSettings) error {
+	normalized := map[string]interface{}{}
+	for _, key := range k.Keys() {
+		parts := strings.Split(key, ".")
+		if len(parts) != 3 || parts[0] != "profiles" || parts[2] != "clone_depth" {
+			continue
+		}
+		cd, err := api.CloneDepthFromValue(k.Get(key))
+		if err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
+		normalized[key] = string(cd)
+	}
+	if len(normalized) > 0 {
+		if err := k.Load(confmap.Provider(normalized, "."), nil); err != nil {
+			return err
+		}
+	}
+	return k.Unmarshal("", settings)
 }
 
 // settingsExcludedEnvVars lists SCION_* variables that are never settings
@@ -2876,6 +2957,7 @@ var knownCompoundFields = []string{
 	"reconnect_window",
 	"internal_listen",
 	"peer_audience",
+	"lifetime_cap",
 	"instance_id",
 	"peer_auth",
 	"authorized_domains",
@@ -3223,6 +3305,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				ReconnectWindow:      c.ReconnectWindow,
 				InstanceID:           c.InstanceID,
 				AuthzRecheckInterval: c.AuthzRecheckInterval,
+				LifetimeCap:          c.LifetimeCap,
 			}
 			if m := c.StreamAuthzMax; m != nil {
 				gc.Hub.Conduit.StreamAuthzMax = HubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
@@ -3564,6 +3647,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			ReconnectWindow:      c.ReconnectWindow,
 			InstanceID:           c.InstanceID,
 			AuthzRecheckInterval: c.AuthzRecheckInterval,
+			LifetimeCap:          c.LifetimeCap,
 		}
 		if m := c.StreamAuthzMax; !m.IsZero() {
 			v1Hub.Conduit.StreamAuthzMax = &V1ServerHubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
@@ -3796,6 +3880,14 @@ func AdaptLegacySettings(legacy *Settings) (*VersionedSettings, []string) {
 		SchemaVersion:   "1",
 		ActiveProfile:   legacy.ActiveProfile,
 		DefaultTemplate: legacy.DefaultTemplate,
+		WorkspacePath:   legacy.WorkspacePath,
+		ProjectID:       legacy.ProjectID,
+	}
+	if legacy.HubConnections != nil {
+		vs.HubConnections = make(map[string]V1HubConnectionConfig, len(legacy.HubConnections))
+		for name, hc := range legacy.HubConnections {
+			vs.HubConnections[name] = V1HubConnectionConfig(hc)
+		}
 	}
 
 	// Adapt Hub config
@@ -3806,6 +3898,12 @@ func AdaptLegacySettings(legacy *Settings) (*VersionedSettings, []string) {
 			Endpoint:  legacy.Hub.Endpoint,
 			ProjectID: legacy.Hub.ProjectID,
 			LocalOnly: legacy.Hub.LocalOnly,
+		}
+		if legacy.Hub.Transport != nil {
+			vs.Hub.Transport = &V1HubTransportConfig{
+				Mode:     legacy.Hub.Transport.Mode,
+				Audience: legacy.Hub.Transport.Audience,
+			}
 		}
 		if legacy.Hub.Token != "" {
 			warnings = append(warnings, "hub.token is deprecated; use server.auth.dev_token for dev mode authentication")
@@ -3842,6 +3940,7 @@ func AdaptLegacySettings(legacy *Settings) (*VersionedSettings, []string) {
 	if legacy.CLI != nil {
 		vs.CLI = &V1CLIConfig{
 			AutoHelp: legacy.CLI.AutoHelp,
+			Mode:     legacy.CLI.Mode,
 		}
 	}
 
@@ -5372,8 +5471,9 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 	result.Warnings = warnings
 
 	// 4a. Top-level keys the legacy struct does not decode (v1-only keys
-	// such as server and image_registry) are carried through unchanged
-	// (ptone/scion#3497).
+	// such as server and image_registry, ptone/scion#3497) are carried
+	// through unchanged. Legacy keys are not: AdaptLegacySettings maps each
+	// of them once (ptone/scion#3885).
 	carried, err := legacyCarriedTopLevelKeys(data, result.WasJSON)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse settings: %w", err)

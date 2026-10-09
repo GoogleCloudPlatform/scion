@@ -27,6 +27,7 @@ vi.mock('../../client/api.js', async (orig) => ({
 
 import { apiFetch } from '../../client/api.js';
 import { formatHeartbeatAge, ScionPageHealthDashboard } from './health-dashboard.js';
+import { elementStyleRules } from './__fixtures__/css-rules.js';
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -87,7 +88,7 @@ describe('scion-page-health-dashboard cards', () => {
 
   it('renders no stall settings card and no recent alerts card', async () => {
     const text = await rendered();
-    expect(text).toContain('Hub Status');
+    expect(el.shadowRoot?.querySelector('scion-health-hub-card')).not.toBeNull();
     expect(text).not.toContain('Stall Detection');
     expect(text).not.toContain('Auto-Suspend');
     expect(text).not.toContain('Recent Alerts');
@@ -95,12 +96,21 @@ describe('scion-page-health-dashboard cards', () => {
     expect(el.shadowRoot?.querySelector('a[href*="console.cloud.google.com"]')).toBeNull();
   });
 
-  it('renders no service account check card when the section is absent', async () => {
-    const text = await rendered();
-    expect(text).not.toContain('Service Account Assignment Check');
+  /** The Hub card's shadow root, where the service account check diagnostic lives. */
+  async function hubCard(): Promise<ShadowRoot> {
+    const card = el.shadowRoot!.querySelector('scion-health-hub-card')!;
+    await (card as LitLike).updateComplete;
+    return card.shadowRoot!;
+  }
+
+  it('renders no service account check diagnostic when the section is absent', async () => {
+    await rendered();
+    const hub = await hubCard();
+    expect(hub.querySelector('.sa-check')).toBeNull();
+    expect(hub.textContent).not.toContain('Service Account Assignment Check');
   });
 
-  it('renders the service account check card with its remedy and docs link', async () => {
+  it('renders the service account check diagnostic in the Hub card with its remedy and docs link', async () => {
     el.remove();
     extra = {
       service_account_check: {
@@ -114,11 +124,22 @@ describe('scion-page-health-dashboard cards', () => {
     };
     el = new ScionPageHealthDashboard();
     document.body.appendChild(el);
-    const text = await rendered();
-    expect(text).toContain('Service Account Assignment Check');
-    expect(text).toContain("Grant the hub's identity that access.");
-    const link = el.shadowRoot?.querySelector('.sa-check a');
+    await rendered();
+    const hub = await hubCard();
+    const block = hub.querySelector('.sa-check');
+    expect(block).not.toBeNull();
+    expect(block!.textContent).toContain('Service Account Assignment Check');
+    expect(block!.textContent).toContain("Grant the hub's identity that access.");
+    const link = hub.querySelector('.sa-check a');
     expect(link?.getAttribute('href')).toBe('https://example.com/docs#check');
+    // A hub-level block inside the Hub card, which sits in the two-column
+    // row, not a separate full-width card.
+    const host = (block!.getRootNode() as ShadowRoot).host;
+    expect(host.tagName.toLowerCase()).toBe('scion-health-hub-card');
+    expect(host.parentElement?.classList.contains('grid-2')).toBe(true);
+    expect(
+      el.shadowRoot!.querySelector('.grid-full .sa-check, .grid-full scion-health-hub-card')
+    ).toBeNull();
   });
 
   it('never reads or writes the server config', async () => {
@@ -334,6 +355,313 @@ describe('scion-page-health-dashboard dispatch (ptone/scion#3589)', () => {
     expect(values).toEqual(['2', '1', '4']);
     const text = `${page.shadowRoot?.textContent ?? ''} ${card!.shadowRoot?.textContent ?? ''}`;
     expect(text).not.toMatch(/not yet available|future update/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Header, Needs attention and layout (ptone/scion#3595)
+// ---------------------------------------------------------------------------
+
+function brokerItem(i: number, status = 'online') {
+  return {
+    id: `b${i}`,
+    name: `broker-${String(i).padStart(2, '0')}`,
+    version: '1.0.0',
+    status,
+    last_heartbeat: '2026-10-09T11:59:00Z',
+    runtime: { type: 'docker', profile: 'docker' },
+    workspace_storage: { backend: 'local' },
+    health: null,
+    agents: { running: 1, attention: 0 },
+  };
+}
+
+function summaryBody(over: Record<string, unknown> = {}) {
+  return {
+    status: 'healthy',
+    generated_at: '2026-10-09T12:34:56Z',
+    attention: [],
+    hub: {
+      status: 'healthy',
+      instance_id: 'hub-7f3a',
+      version: 'v1',
+      uptime: '1h',
+      connected_brokers: 1,
+      active_agents: 21,
+      projects: 1,
+      checks: { database: 'healthy', workspace_storage: 'healthy' },
+    },
+    database: {
+      status: 'healthy',
+      pool_active: 3,
+      pool_max: 25,
+      pool_idle: 2,
+      pool_wait_count_total: 0,
+    },
+    runtime_brokers: { items: [brokerItem(0)], total: 1, truncated: false },
+    integrations: [],
+    integrations_detail: true,
+    integration_counts: { total: 0, healthy: 0, degraded: 0, unhealthy: 0, unknown: 0 },
+    agents: { total: 21, active: 21, errored: 0, considered: 21, by_phase: [], problems: [] },
+    dispatch: { stuck_messages: 0, stuck_broker_dispatch: 0, failed_broker_dispatch_1h: 0 },
+    ...over,
+  };
+}
+
+async function mountPage(body: unknown): Promise<ScionPageHealthDashboard> {
+  vi.mocked(apiFetch).mockImplementation(async () => json(body));
+  const page = document.createElement('scion-page-health-dashboard') as ScionPageHealthDashboard;
+  document.body.appendChild(page);
+  await (page as unknown as { fetchData(): Promise<void> }).fetchData();
+  await page.updateComplete;
+  for (const child of page.shadowRoot?.querySelectorAll('*') ?? []) {
+    if ('updateComplete' in child) await (child as LitLike).updateComplete;
+  }
+  return page;
+}
+
+function pill(page: ScionPageHealthDashboard): HTMLElement {
+  return page.shadowRoot!.querySelector('[data-role="overall-status"]') as HTMLElement;
+}
+
+function attentionRows(page: ScionPageHealthDashboard): HTMLElement[] {
+  const panel = page.shadowRoot!.querySelector('scion-health-attention')!;
+  return [...(panel.shadowRoot?.querySelectorAll('li') ?? [])] as HTMLElement[];
+}
+
+describe('scion-page-health-dashboard header (ptone/scion#3595)', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  it('shows the pill with a theme tone, the as-of time and the serving instance', async () => {
+    const page = await mountPage(summaryBody());
+    expect(pill(page).textContent?.trim()).toBe('healthy');
+    expect(pill(page).classList.contains('tone-ok')).toBe(true);
+    // TZ is pinned to UTC in vitest.config.ts.
+    const asOf = page.shadowRoot!.querySelector('[data-role="as-of"]');
+    expect(asOf?.textContent?.trim()).toBe('as of 12:34:56');
+    const instance = page.shadowRoot!.querySelector('[data-role="instance"]');
+    expect(instance?.textContent?.trim()).toBe('this instance: hub-7f3a');
+  });
+
+  it('maps degraded and unhealthy to the warning and danger tones', async () => {
+    for (const [status, tone] of [
+      ['degraded', 'tone-warn'],
+      ['unhealthy', 'tone-bad'],
+      ['unknown', 'tone-neutral'],
+    ] as const) {
+      const page = await mountPage(summaryBody({ status }));
+      expect(pill(page).classList.contains(tone)).toBe(true);
+      page.remove();
+    }
+  });
+
+  it('styles the page with theme tokens only, with no hex fallbacks', () => {
+    for (const body of elementStyleRules('scion-page-health-dashboard').values()) {
+      expect(body).not.toMatch(/#[0-9a-f]{3,8}\b|rgba?\(/i);
+      for (const m of body.matchAll(/var\((--[\w-]+)/g)) expect(m[1]).toMatch(/^--scion-/);
+    }
+  });
+});
+
+describe('scion-page-health-dashboard needs attention (ptone/scion#3595)', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  it('shows the panel first, with Nothing needs attention when the list is empty', async () => {
+    const page = await mountPage(summaryBody());
+    const sections = [...page.shadowRoot!.children].filter((c) => c.tagName !== 'STYLE');
+    // Header, then the attention panel's container.
+    expect(sections[1]?.querySelector('scion-health-attention')).not.toBeNull();
+    const panel = page.shadowRoot!.querySelector('scion-health-attention')!;
+    expect(panel.shadowRoot?.textContent).toContain('Nothing needs attention.');
+  });
+
+  it('keeps the pill healthy and shows a linked warning for an agent-only problem below 5%', async () => {
+    const page = await mountPage(
+      summaryBody({
+        status: 'healthy',
+        attention: [
+          {
+            severity: 'warning',
+            kind: 'agents',
+            subject: { type: 'agent', id: 'ag1', name: 'w', project_id: 'p' },
+            message: 'Agent proj / w is in the error phase',
+          },
+        ],
+        agents: {
+          total: 21,
+          active: 20,
+          errored: 1,
+          considered: 21,
+          by_phase: [],
+          problems: [
+            {
+              kind: 'errored',
+              count: 1,
+              items: [
+                { id: 'ag1', name: 'w', project_id: 'p', project_slug: 'proj', broker_id: 'b0' },
+              ],
+            },
+          ],
+        },
+      })
+    );
+    expect(pill(page).textContent?.trim()).toBe('healthy');
+    expect(pill(page).classList.contains('tone-ok')).toBe(true);
+    const rows = attentionRows(page);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.querySelector('sl-icon')?.getAttribute('label')).toBe('Warning');
+    const link = rows[0]!.querySelector('a');
+    expect(link?.getAttribute('href')).toBe('/agents/ag1');
+    expect(link?.textContent?.trim()).toBe('Agent proj / w is in the error phase');
+  });
+
+  it('degrades the pill and links the broker for an offline broker', async () => {
+    const page = await mountPage(
+      summaryBody({
+        status: 'degraded',
+        attention: [
+          {
+            severity: 'warning',
+            kind: 'broker_offline',
+            subject: { type: 'runtime_broker', id: 'b1', name: 'broker-01' },
+            message: 'Runtime broker broker-01 is offline',
+          },
+        ],
+        runtime_brokers: {
+          items: [brokerItem(0), brokerItem(1, 'offline')],
+          total: 2,
+          truncated: false,
+        },
+      })
+    );
+    expect(pill(page).textContent?.trim()).toBe('degraded');
+    expect(pill(page).classList.contains('tone-warn')).toBe(true);
+    const link = attentionRows(page)[0]!.querySelector('a');
+    expect(link?.getAttribute('href')).toBe('/brokers/b1');
+  });
+
+  it('does not link an integration item when integrations_detail is false', async () => {
+    const item = {
+      severity: 'warning',
+      kind: 'integration',
+      subject: { type: 'integration', id: 'chat', name: 'chat' },
+      message: 'Integration chat is unhealthy',
+    };
+    const restricted = await mountPage(
+      summaryBody({ status: 'degraded', attention: [item], integrations_detail: false })
+    );
+    expect(attentionRows(restricted)[0]!.querySelector('a')).toBeNull();
+    restricted.remove();
+
+    const full = await mountPage(
+      summaryBody({ status: 'degraded', attention: [item], integrations_detail: true })
+    );
+    expect(attentionRows(full)[0]!.querySelector('a')?.getAttribute('href')).toBe(
+      '/admin/integrations/chat'
+    );
+  });
+
+  it('does not link the hub item for a broker list that could not be read', async () => {
+    const page = await mountPage(
+      summaryBody({
+        attention: [
+          {
+            severity: 'warning',
+            kind: 'hub_check',
+            subject: { type: 'hub', id: 'hub-7f3a' },
+            message: 'Runtime broker data not available',
+          },
+        ],
+        runtime_brokers: { items: [], total: 0, truncated: false, not_reported: true },
+      })
+    );
+    const rows = attentionRows(page);
+    expect(rows[0]!.textContent?.trim()).toBe('Runtime broker data not available');
+    expect(rows[0]!.querySelector('a')).toBeNull();
+  });
+});
+
+describe('scion-page-health-dashboard layout (ptone/scion#3595)', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  for (const n of [1, 2, 13]) {
+    it(`puts Dispatch next to Hub and no card alone at full width with ${n} broker(s)`, async () => {
+      const items = Array.from({ length: n }, (_, i) => brokerItem(i));
+      const page = await mountPage(
+        summaryBody({ runtime_brokers: { items, total: n, truncated: false } })
+      );
+      const root = page.shadowRoot!;
+      const pair = root.querySelector('.grid-2')!;
+      expect([...pair.children].map((c) => c.tagName.toLowerCase())).toEqual([
+        'scion-health-hub-card',
+        'scion-health-dispatch-card',
+      ]);
+      expect(elementStyleRules('scion-page-health-dashboard').get('.grid-2')).toMatch(
+        /grid-template-columns:\s*1fr 1fr/
+      );
+      // Full-width rows hold the attention panel and the tables, never a
+      // lone summary card.
+      for (const full of root.querySelectorAll('.grid-full')) {
+        expect(full.querySelector('scion-health-hub-card, scion-health-dispatch-card')).toBeNull();
+      }
+      // The broker section is one table with a row per broker.
+      const table = root.querySelector('scion-health-broker-table')!;
+      expect(table.shadowRoot?.querySelectorAll('table')).toHaveLength(1);
+      expect(table.shadowRoot?.querySelectorAll('tbody tr')).toHaveLength(n);
+    });
+  }
+
+  it('renders no empty full-width wrapper when the Integrations section is hidden', async () => {
+    for (const over of [
+      { integrations: [], integrations_detail: true },
+      {
+        integrations: [],
+        integrations_detail: false,
+        integration_counts: { total: 0, healthy: 0, degraded: 0, unhealthy: 0, unknown: 0 },
+      },
+    ]) {
+      const page = await mountPage(summaryBody(over));
+      const root = page.shadowRoot!;
+      expect(root.querySelector('scion-health-integrations')).toBeNull();
+      const full = [...root.querySelectorAll('.grid-full')];
+      for (const f of full) expect(f.children.length).toBeGreaterThan(0);
+      // Attention, brokers and agents only.
+      expect(full).toHaveLength(3);
+      page.remove();
+    }
+  });
+
+  it('wraps the Integrations section when it has content', async () => {
+    const page = await mountPage(
+      summaryBody({
+        integrations: [],
+        integrations_detail: false,
+        integration_counts: { total: 2, healthy: 2, degraded: 0, unhealthy: 0, unknown: 0 },
+      })
+    );
+    const section = page.shadowRoot!.querySelector('scion-health-integrations');
+    expect(section?.parentElement?.classList.contains('grid-full')).toBe(true);
+  });
+
+  it('has no separate Database card: the pool is inside the Hub card', async () => {
+    const page = await mountPage(summaryBody());
+    const hub = page.shadowRoot!.querySelector('scion-health-hub-card')!;
+    expect(hub.shadowRoot?.querySelector('[data-role="pool"]')?.textContent?.trim()).toBe(
+      'Pool 3/25 in use, 2 idle'
+    );
+    const cardTitles = [...page.shadowRoot!.querySelectorAll('*')]
+      .flatMap((c) => [...(c.shadowRoot?.querySelectorAll('.card-title') ?? [])])
+      .map((t) => t.textContent?.trim());
+    expect(cardTitles).not.toContain('Database');
   });
 });
 
