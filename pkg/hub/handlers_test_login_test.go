@@ -169,6 +169,7 @@ func TestHandleTestLogin_MethodNotAllowed(t *testing.T) {
 	ws.handleTestLogin(rec, req)
 
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+	assert.Equal(t, "POST", rec.Header().Get("Allow"))
 }
 
 func TestHandleTestLogin_MissingEmail(t *testing.T) {

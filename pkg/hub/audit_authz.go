@@ -318,7 +318,7 @@ func canonicalizeExplainPermission(resourceType string, action string) string {
 // handleAuthzExplain handles POST /api/v1/authz/explain.
 func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, ErrCodeInvalidRequest, "Method not allowed", nil)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
