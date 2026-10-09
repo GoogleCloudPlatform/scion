@@ -232,15 +232,49 @@ func TestPreflight_NonJSONBodyIsSummarised(t *testing.T) {
 	var pe *PTYPreflightError
 	require.True(t, errors.As(err, &pe), "got %T: %v", err, err)
 	assert.True(t, strings.HasPrefix(pe.Message, "<html>[31m"), "control characters dropped: %q", pe.Message)
-	assert.LessOrEqual(t, len(pe.Message), maxPlainBodySummary)
+	assert.LessOrEqual(t, len(pe.Message), maxPreflightMessage)
 	assert.NotContains(t, pe.Message, "second line")
 	assert.NotContains(t, pe.Message, "\x1b")
 }
 
-func TestPlainBodySummary_UTF8Boundary(t *testing.T) {
-	got := plainBodySummary([]byte(strings.Repeat("é", 150))) // 300 bytes
-	assert.LessOrEqual(t, len(got), maxPlainBodySummary)
-	assert.True(t, utf8.ValidString(got))
+func TestNormalizeErrorText(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+		max            int
+	}{
+		{name: "plain", in: "Runtime broker not connected", max: 200, want: "Runtime broker not connected"},
+		{name: "control characters", in: "a\x1b[2Jb\x07c\rd", max: 200, want: "a[2Jbcd"},
+		{name: "format characters", in: "abc\u202edef\u200bghi", max: 200, want: "abcdefghi"},
+		{name: "first non-empty line", in: "\n  first  \nsecond", max: 200, want: "first"},
+		{name: "byte bound", in: strings.Repeat("x", 300), max: 200, want: strings.Repeat("x", 200)},
+		{name: "invalid utf-8 dropped", in: "a\xffb", max: 200, want: "ab"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, normalizeErrorText(tc.in, tc.max))
+		})
+	}
+	got := normalizeErrorText(strings.Repeat("é", 150), maxPreflightMessage) // 300 bytes
+	assert.LessOrEqual(t, len(got), maxPreflightMessage)
+	assert.True(t, utf8.ValidString(got), "cut on a UTF-8 boundary")
+}
+
+// TestPreflight_JSONFieldsAreNormalized: the message, code and reason from
+// a JSON error envelope go through the same normalisation as a plain body.
+func TestPreflight_JSONFieldsAreNormalized(t *testing.T) {
+	body := `{"error":{"code":"forb\u001bidden","message":"no\u0007 access\u202e here\nsecond line","details":{"reason":"r\u001b[0m` + strings.Repeat("x", 300) + `"}}}`
+	h := newPreflightHub(t, http.StatusForbidden, body)
+	c := NewPTYClient(PTYClientConfig{Endpoint: h.srv.URL, Slug: "a1"})
+	err := c.Preflight(context.Background())
+	var pe *PTYPreflightError
+	require.True(t, errors.As(err, &pe), "got %T: %v", err, err)
+	assert.Equal(t, "forbidden", pe.Code)
+	assert.Equal(t, "no access here", pe.Message)
+	assert.True(t, strings.HasPrefix(pe.Reason, "r[0m"))
+	assert.LessOrEqual(t, len(pe.Reason), maxPreflightToken)
+	assert.NotContains(t, err.Error(), "\x1b")
+	assert.NotContains(t, err.Error(), "\x07")
+	assert.Contains(t, err.Error(), "status 403, forbidden")
 }
 
 // TestAttachToAgent_PreflightTransportFailure: when the Hub cannot be

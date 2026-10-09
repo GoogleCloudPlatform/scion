@@ -136,25 +136,29 @@ func (c *PTYClient) Preflight(ctx context.Context) error {
 	perr := &PTYPreflightError{Status: resp.StatusCode}
 	var parsed preflightErrorBody
 	if json.Unmarshal(body, &parsed) == nil && (parsed.Error.Code != "" || parsed.Error.Message != "") {
-		perr.Code = parsed.Error.Code
-		perr.Reason = parsed.Error.Details.Reason
-		perr.Message = parsed.Error.Message
+		perr.Code = normalizeErrorText(parsed.Error.Code, maxPreflightToken)
+		perr.Reason = normalizeErrorText(parsed.Error.Details.Reason, maxPreflightToken)
+		perr.Message = normalizeErrorText(parsed.Error.Message, maxPreflightMessage)
 	} else {
-		perr.Message = plainBodySummary(body)
+		perr.Message = normalizeErrorText(string(body), maxPreflightMessage)
 	}
 	return perr
 }
 
-// maxPlainBodySummary bounds how much of a non-JSON error body (for
-// example an HTML error page from a load balancer or proxy) reaches the
-// error message.
-const maxPlainBodySummary = 200
+// Bounds on the preflight error text that reaches PTYPreflightError (and
+// the CLI's output): the message, and the code and reason tokens.
+const (
+	maxPreflightMessage = 200
+	maxPreflightToken   = 100
+)
 
-// plainBodySummary returns the first non-empty line of a non-JSON body,
-// with control characters removed and cut to maxPlainBodySummary bytes
-// (on a UTF-8 boundary).
-func plainBodySummary(body []byte) string {
-	text := strings.ToValidUTF8(string(body), "")
+// normalizeErrorText normalises preflight error text from the response,
+// whether a JSON field or a non-JSON body (for example an HTML error page
+// from a load balancer or proxy): it keeps the first non-empty line, drops
+// control and Unicode format characters, and cuts the result to maxBytes
+// on a UTF-8 boundary.
+func normalizeErrorText(text string, maxBytes int) string {
+	text = strings.ToValidUTF8(text, "")
 	line := ""
 	for _, l := range strings.Split(text, "\n") {
 		if l = strings.TrimSpace(l); l != "" {
@@ -163,13 +167,14 @@ func plainBodySummary(body []byte) string {
 		}
 	}
 	line = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			return -1
 		}
 		return r
 	}, line)
-	if len(line) > maxPlainBodySummary {
-		cut := maxPlainBodySummary
+	line = strings.TrimSpace(line)
+	if len(line) > maxBytes {
+		cut := maxBytes
 		for cut > 0 && !utf8.RuneStart(line[cut]) {
 			cut--
 		}
