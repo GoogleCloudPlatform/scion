@@ -140,6 +140,7 @@ describe('scion-health-hub-card', () => {
     );
     const link = block.querySelector('a')!;
     expect(link.getAttribute('href')).toBe('https://example.com/docs#check');
+    expect(link.getAttribute('target')).toBe('_blank');
     expect(link.getAttribute('rel')).toBe('noopener noreferrer');
 
     // Only an https docs URL becomes a link; the remedy still shows.

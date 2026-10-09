@@ -104,8 +104,7 @@ describe('scion-page-health-dashboard cards', () => {
   }
 
   it('renders no service account check diagnostic when the section is absent', async () => {
-    const text = await rendered();
-    expect(text).not.toContain('Service Account Assignment Check');
+    await rendered();
     const hub = await hubCard();
     expect(hub.querySelector('.sa-check')).toBeNull();
     expect(hub.textContent).not.toContain('Service Account Assignment Check');
@@ -133,10 +132,14 @@ describe('scion-page-health-dashboard cards', () => {
     expect(block!.textContent).toContain("Grant the hub's identity that access.");
     const link = hub.querySelector('.sa-check a');
     expect(link?.getAttribute('href')).toBe('https://example.com/docs#check');
-    // A hub-level block inside the Hub card, not a separate full-width card.
-    for (const full of el.shadowRoot!.querySelectorAll('.grid-full')) {
-      expect(full.textContent).not.toContain('Service Account Assignment Check');
-    }
+    // A hub-level block inside the Hub card, which sits in the two-column
+    // row, not a separate full-width card.
+    const host = (block!.getRootNode() as ShadowRoot).host;
+    expect(host.tagName.toLowerCase()).toBe('scion-health-hub-card');
+    expect(host.parentElement?.classList.contains('grid-2')).toBe(true);
+    expect(
+      el.shadowRoot!.querySelector('.grid-full .sa-check, .grid-full scion-health-hub-card')
+    ).toBeNull();
   });
 
   it('never reads or writes the server config', async () => {
