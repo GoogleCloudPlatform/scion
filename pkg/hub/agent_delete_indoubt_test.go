@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -48,6 +49,7 @@ func newInDoubtFixture(t *testing.T, suffix string, setup func(f *deferredDelete
 	requireInDoubt(t, f, f.del(t, ""))
 	intents := f.pendingDeleteIntents(t)
 	require.Len(t, intents, 1, "the intent is still outstanding")
+	require.Equal(t, store.DispatchStatePending, intents[0].State, "in_doubt because the intent never ran")
 	claim := mustGetAgent(t, f.store, f.agent.ID).DeletionClaim
 	require.NotZero(t, claim)
 	return f, intents[0], claim
@@ -230,10 +232,10 @@ func TestInDoubtDelete_LiveClaimLeftToEngine(t *testing.T) {
 	setDeleteWaitTimeout(t, func(context.Context) time.Duration { return 10 * time.Second })
 	f := newDeferredDeleteFixture(t, "idlive", nil)
 
-	var reclaims int
+	var reclaims atomic.Int32
 	f.hooks.onDeletionWrite = func(pred store.DeletionPredicate) {
 		if slices.Contains(pred.Codes, store.DeletionCodeInDoubt) {
-			reclaims++
+			reclaims.Add(1)
 		}
 	}
 	ch := deleteAsync(t, f.srv, "/api/v1/agents/"+f.agent.ID, nil)
@@ -247,7 +249,7 @@ func TestInDoubtDelete_LiveClaimLeftToEngine(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, r.rec.Code, r.rec.Body.String())
 	assert.True(t, agentGone(t, f.store, f.agent.ID))
 	requireDeletedOnce(t, f)
-	assert.LessOrEqual(t, reclaims, 1, "at most one (missed) re-claim attempt")
+	assert.LessOrEqual(t, reclaims.Load(), int32(1), "at most one (missed) re-claim attempt")
 }
 
 // Only a failed/in_doubt row is re-claimed: a rollback, a conflict, a
@@ -356,11 +358,13 @@ func TestInDoubtDelete_EngineRecheckFinalizes(t *testing.T) {
 	setDeleteWaitTimeout(t, func(context.Context) time.Duration { return 100 * time.Millisecond })
 	f := newDeferredDeleteFixture(t, "idrecheck", nil)
 	var once sync.Once
+	var fired atomic.Bool
 	setInDoubtWrittenHook(t, func(agentID string) {
 		if agentID != f.agent.ID {
 			return
 		}
 		once.Do(func() {
+			fired.Store(true)
 			for _, d := range f.pendingDeleteIntents(t) {
 				endIntent(t, f.store, d.ID, true)
 			}
@@ -370,6 +374,7 @@ func TestInDoubtDelete_EngineRecheckFinalizes(t *testing.T) {
 	})
 
 	r := f.del(t, "")
+	require.True(t, fired.Load(), "the in_doubt write ran the seam")
 	require.Equal(t, http.StatusNoContent, r.rec.Code, r.rec.Body.String())
 	assert.True(t, agentGone(t, f.store, f.agent.ID))
 	requireDeletedOnce(t, f)
@@ -385,12 +390,14 @@ func TestInDoubtDelete_EngineRecheckClaimlessCompletionIsSafe(t *testing.T) {
 	setDeleteWaitTimeout(t, func(context.Context) time.Duration { return 100 * time.Millisecond })
 	f := newDeferredDeleteFixture(t, "idclrace", nil)
 	var once sync.Once
+	var fired atomic.Bool
 	var firstClaim int64
 	setInDoubtWrittenHook(t, func(agentID string) {
 		if agentID != f.agent.ID {
 			return
 		}
 		once.Do(func() {
+			fired.Store(true)
 			firstClaim = mustGetAgent(t, f.store, f.agent.ID).DeletionClaim
 			for _, d := range f.pendingDeleteIntents(t) {
 				endIntent(t, f.store, d.ID, false)
@@ -401,6 +408,7 @@ func TestInDoubtDelete_EngineRecheckClaimlessCompletionIsSafe(t *testing.T) {
 	})
 
 	requireInDoubt(t, f, f.del(t, ""))
+	require.True(t, fired.Load(), "the in_doubt write ran the seam")
 	got := mustGetAgent(t, f.store, f.agent.ID)
 	require.Equal(t, firstClaim+1, got.DeletionClaim, "the recheck re-claimed")
 	intents := f.pendingDeleteIntents(t)
