@@ -802,8 +802,8 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 	// Staging does not deliver the task: prompt.md is only read by Start as
 	// a fallback when its request has no task, and a start that carries
 	// the same task overwrites the file with it and delivers it once.
-	// This runs before the shared dir backend change is recorded, so that
-	// record stays the last step that can fail ("recorded only after
+	// This runs before the shared dir backend change is recorded, so a
+	// failed write leaves that change unrecorded ("recorded only after
 	// provisioning succeeds").
 	if err := writeReprovisionPrompt(agentDir, opts.Task); err != nil {
 		return cfg, err
