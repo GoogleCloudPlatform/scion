@@ -550,3 +550,83 @@ func TestMessagingTargetsResolve_ReplyOnlyTargetMatchesMissing(t *testing.T) {
 	assert.False(t, resp.Messageability.CanReachViewer, "the reply direction is still reported")
 	assert.Contains(t, forward.body, `"canReachViewer"`)
 }
+
+// postGroupMessage posts a group[...] message anchored on f.aa as alice.
+func (f *refFixture) postGroupMessage(t *testing.T, recipient string) refAnswer {
+	t.Helper()
+	alice := NewAuthenticatedUser(f.ua.ID, f.ua.Email, f.ua.DisplayName, f.ua.Role, string(ClientTypeWeb))
+	return postAgentMessageAs(t, f.srv, func(c context.Context) context.Context { return contextWithIdentity(c, alice) },
+		f.aa, MessageRequest{StructuredMessage: &messages.StructuredMessage{
+			Version: messages.Version, Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Recipient: recipient, Msg: "to a group", Type: messages.TypeInstruction,
+		}})
+}
+
+// withoutText replaces every occurrence of text in a.body with a placeholder.
+func withoutText(a refAnswer, text string) refAnswer {
+	return refAnswer{status: a.status, body: strings.ReplaceAll(a.body, text, "<ref>")}
+}
+
+// TestGroupMessage_OtherProjectReferenceMatchesUnknownProject: in a group[...]
+// message, an agent reference qualified with a project other than the anchor
+// agent's gets exactly the answer for an unknown project.
+func TestGroupMessage_OtherProjectReferenceMatchesUnknownProject(t *testing.T) {
+	f := newRefFixture(t)
+	f.srv.SetDispatcher(&recordingDispatcher{})
+	bb := f.agentOfB(t)
+
+	got := f.postGroupMessage(t, "group[agent:"+f.projB.Slug+"/"+bb.Slug+",agent:"+f.aa.Slug+"]")
+	unknown := f.postGroupMessage(t, "group[agent:nosuch/"+bb.Slug+",agent:"+f.aa.Slug+"]")
+	require.Equal(t, http.StatusBadRequest, unknown.status, unknown.body)
+	require.Contains(t, unknown.body, `project \"nosuch\" not found`)
+	requireSameAnswer(t, withoutText(unknown, "nosuch"), withoutText(got, f.projB.Slug))
+
+	// A reference qualified with the anchor's own project passes this check.
+	own := f.postGroupMessage(t, "group[agent:"+f.projA.Slug+"/"+f.aa.Slug+"]")
+	assert.NotContains(t, own.body, "not found", own.body)
+}
+
+// TestRefusalReasonsLoggedNotReturned_Conversations: each refusal answered
+// like an unknown conversation, agent, target or project writes its reason
+// to the hub log, and the response carries no reason text.
+func TestRefusalReasonsLoggedNotReturned_Conversations(t *testing.T) {
+	f := newRefFixture(t)
+	f.srv.SetDispatcher(&recordingDispatcher{})
+	bb := f.agentOfB(t)
+	groupA := seedGroupConversation(t, f.st, f.projA.ID, "logged-refusals")
+	addUserParticipant(t, f.st, groupA, f.ua.ID)
+
+	cases := []struct {
+		name   string
+		reason string
+		do     func(t *testing.T) refAnswer
+	}{
+		{"add participant by a non-participant", "caller is not a participant of the conversation",
+			func(t *testing.T) refAnswer { return f.addParticipantAnswer(t, f.ub, groupA, "user", f.uc.ID) }},
+		{"add an agent of another project", "agent belongs to another project than the conversation",
+			func(t *testing.T) refAnswer { return f.addParticipantAnswer(t, f.ua, groupA, "agent", bb.ID) }},
+		{"group reference to another project", "group reference names another project",
+			func(t *testing.T) refAnswer {
+				return f.postGroupMessage(t, "group[agent:"+f.projB.Slug+"/"+bb.Slug+",agent:"+f.aa.Slug+"]")
+			}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureSlog(t)
+			got := tc.do(t)
+			assert.Contains(t, []int{http.StatusBadRequest, http.StatusNotFound}, got.status, got.body)
+			assert.Contains(t, logs.String(), "reference refused")
+			assert.Contains(t, logs.String(), tc.reason, "the reason is in the hub log")
+			assert.NotContains(t, got.body, tc.reason, "the reason is not in the response")
+		})
+	}
+
+	t.Run("reply-only messaging target", func(t *testing.T) {
+		srv, _, _, _, _, _, agentA, agentB := cpmSetup(t)
+		logs := captureSlog(t)
+		got := resolveTargetAs(t, srv, cpmAgentIdentity(agentB.ID, agentB.ProjectID, agentB.Ancestry), "project-a", agentA.Slug)
+		require.Equal(t, http.StatusNotFound, got.status, got.body)
+		assert.Contains(t, logs.String(), "target not messageable")
+		assert.NotContains(t, got.body, "messageable")
+	})
+}

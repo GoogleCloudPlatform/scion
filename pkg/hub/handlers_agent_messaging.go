@@ -3029,21 +3029,21 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				return
 			}
 			if ref.ProjectSlug != "" {
-				// Explicit cross-project reference in a group context: resolve
-				// the slug to a project ID so the boundary check compares the
-				// same type (ID vs ID) on both sides.
+				// Project-qualified reference in a group context: resolve the
+				// slug to a project ID so the boundary check compares the same
+				// type (ID vs ID) on both sides. A reference to any project
+				// other than the anchor agent's gets the same answer as an
+				// unknown project; the reason is logged.
 				refProject, refErr := s.store.GetProjectBySlug(ctx, ref.ProjectSlug)
 				if refErr != nil || refProject == nil {
 					writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
 						fmt.Sprintf("project %q not found", ref.ProjectSlug), nil)
 					return
 				}
-				boundary := ValidateCrossProjectGroupBoundary(projectID, refProject.ID, "group message")
-				if boundary != nil {
-					writeError(w, http.StatusForbidden, ErrCodeForbidden,
-						boundary.Reason, map[string]interface{}{
-							"code": string(boundary.Code),
-						})
+				if boundary := ValidateCrossProjectGroupBoundary(projectID, refProject.ID, "group message"); boundary != nil {
+					logReferenceRefused(ctx, logging.RequestPath(r), "group reference names another project: "+boundary.Reason, GetIdentityFromContext(ctx))
+					writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+						fmt.Sprintf("project %q not found", ref.ProjectSlug), nil)
 					return
 				}
 			}
