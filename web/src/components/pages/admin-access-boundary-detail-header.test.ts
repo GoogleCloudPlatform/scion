@@ -175,4 +175,10 @@ describe('access constraint detail header', () => {
     // The page still styles its own meta line.
     expect(rules.has('.header-meta')).toBe(true);
   });
+
+  it('breaks a long scope or subject label inside the meta line', () => {
+    const ctor = customElements.get(TAG) as unknown as { elementStyles: CSSResult[] };
+    const rules = styleRules(ctor.elementStyles.map((s) => s.cssText).join('\n'));
+    expect(rules.get('.header-meta') ?? '').toMatch(/overflow-wrap:\s*anywhere/);
+  });
 });

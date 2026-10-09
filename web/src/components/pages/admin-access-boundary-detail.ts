@@ -128,9 +128,12 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
       text-decoration: underline;
     }
 
+    /* Long scope or subject labels (ids) break instead of widening the
+       shared header's title column. */
     .header-meta {
       font-size: 0.8125rem;
       color: var(--scion-text-muted, #64748b);
+      overflow-wrap: anywhere;
     }
 
     .header-meta span + span::before {

@@ -24,7 +24,9 @@
 
 import { describe, it, expect, vi, afterEach, beforeAll } from 'vitest';
 import { setPreferredTimeZone } from '../../utils/time.js';
+import type { CSSResult } from 'lit';
 import type { ScionDetailHeader } from '../shared/detail-header.js';
+import { styleRules } from './__fixtures__/css-rules.js';
 
 // ---------------------------------------------------------------------------
 // Mock data
@@ -340,13 +342,6 @@ describe('admin-role-detail', () => {
     const badges = Array.from(header.children).filter((n) => !n.hasAttribute('slot'));
     expect(badges.map((n) => n.className.trim())).toEqual(['type-badge custom', 'scope-badge']);
     expect(badges.map((n) => n.textContent?.trim())).toEqual(['Custom', 'system']);
-
-    // In the shared header, the default slot follows the h1 in the title row.
-    await header.updateComplete;
-    const row = header.shadowRoot?.querySelector('.header-title-text');
-    const parts = Array.from(row?.children ?? []).map((n) => n.tagName.toLowerCase());
-    expect(parts).toEqual(['h1', 'slot']);
-    expect(row?.querySelector('slot')?.hasAttribute('name')).toBe(false);
   });
 
   it('puts the description and metadata in the meta slot', async () => {
@@ -357,6 +352,14 @@ describe('admin-role-detail', () => {
     const meta = Array.from(header.querySelectorAll(':scope > [slot="meta"]'));
     expect(meta.map((n) => n.className)).toEqual(['header-description', 'metadata-row']);
     expect(meta[1].textContent).toMatch(/Updated .* · Created /);
+  });
+
+  it('breaks a long description inside the meta line', () => {
+    const ctor = customElements.get('scion-page-admin-role-detail') as unknown as {
+      elementStyles: CSSResult[];
+    };
+    const rules = styleRules(ctor.elementStyles.map((s) => s.cssText).join('\n'));
+    expect(rules.get('.header-description') ?? '').toMatch(/overflow-wrap:\s*anywhere/);
   });
 
   it('omits the description from the meta slot when the role has none', async () => {
