@@ -29,6 +29,7 @@ import (
 	gcplog "cloud.google.com/go/logging"
 	logpb "cloud.google.com/go/logging/apiv2/loggingpb"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
@@ -421,12 +422,17 @@ func ResolveProjectID() string {
 	return resolveProjectID()
 }
 
-// ResolveLogLevel returns the slog.Level based on the debug flag and env var.
+// ResolveLogLevel returns the level floor for a handler that is constructed
+// with a fixed level (such as CloudHandler): debug when the debug flag is
+// set, otherwise the most verbose level in the shared level spec
+// (SCION_LOG_LEVEL, including per-component levels). Records above the floor
+// are still filtered per component by the handler chain that Setup and
+// SetupWithOTel install.
 func ResolveLogLevel(debug bool) slog.Level {
-	if debug || os.Getenv("SCION_LOG_LEVEL") == "debug" {
+	if debug {
 		return slog.LevelDebug
 	}
-	return slog.LevelInfo
+	return loglevel.MinLevel().Level()
 }
 
 // FormatLogID returns the configured log ID (for display purposes).

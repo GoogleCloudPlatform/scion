@@ -7,6 +7,7 @@ package log
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/user"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 )
 
 var (
@@ -25,6 +27,10 @@ var (
 	// slogHandler.Enabled) can read them without taking mu. Writers still
 	// hold mu where they also touch logPath/logFile, so that Init and the
 	// lazy init in write() stay mutually exclusive.
+	// debug governs Debug lines. It is synced from the shared level state
+	// (SCION_LOG_LEVEL, --log-level) at Init and by ApplyLogLevel, and can
+	// be forced with SetDebug. Info/Warn/Error lines read the shared level
+	// state directly.
 	debug       atomic.Bool
 	quiet       atomic.Bool
 	mu          sync.Mutex
@@ -60,8 +66,16 @@ func Timestamp(t time.Time) string {
 
 // SetQuiet suppresses stderr log output (but preserves file logging).
 // Used when running as a hook/status subprocess where stderr is captured by the host.
+// It also silences the shared one-time level warnings (such as the
+// SCION_DEBUG deprecation notice), which would otherwise repeat on every
+// short-lived hook invocation.
 func SetQuiet(enabled bool) {
 	quiet.Store(enabled)
+	if enabled {
+		loglevel.SetWarningOutput(io.Discard)
+	} else {
+		loglevel.SetWarningOutput(os.Stderr)
+	}
 }
 
 // Init initializes the logging system. It may be called more than once
@@ -106,9 +120,10 @@ func initLocked() {
 		}
 	}
 
-	if os.Getenv("SCION_DEBUG") != "" {
-		debug.Store(true)
-	}
+	// Levels come from the shared parser: SCION_LOG_LEVEL, or the
+	// deprecated SCION_DEBUG alias. A --log-level flag applied later via
+	// ApplyLogLevel takes precedence.
+	syncLevelFromShared()
 
 	// Set as default slog handler to capture all debug lines from shared packages
 	slog.SetDefault(slog.New(newHandler()))
@@ -119,6 +134,51 @@ func initLocked() {
 // SetDebug enables or disables debug logging.
 func SetDebug(enabled bool) {
 	debug.Store(enabled)
+}
+
+// syncLevelFromShared sets the debug switch from the shared default level.
+func syncLevelFromShared() {
+	debug.Store(loglevel.DebugEnabled(""))
+}
+
+// ApplyLogLevel applies a --log-level flag value (a level spec such as
+// "warn" or "info,hooks=debug") through the shared parser at flag
+// precedence, so it overrides SCION_LOG_LEVEL and SCION_DEBUG. On a parse
+// problem the fallback spec (info for an invalid default) is still applied
+// and the error is returned for the caller to report.
+func ApplyLogLevel(spec string) error {
+	_, err := loglevel.ApplyString(spec, loglevel.SourceFlag)
+	syncLevelFromShared()
+	return err
+}
+
+// levelValue maps the level names used by write to slog levels.
+func levelValue(level string) slog.Level {
+	switch level {
+	case "DEBUG":
+		return slog.LevelDebug
+	case "WARN":
+		return slog.LevelWarn
+	case "ERROR":
+		return slog.LevelError
+	}
+	return slog.LevelInfo
+}
+
+// enabled reports whether a line at level for component (a tag or slog
+// subsystem; may be empty) should be written. An explicit per-component
+// level wins; otherwise debug lines follow the debug switch and the rest
+// follow the shared default level.
+func enabled(level slog.Level, component string) bool {
+	if component != "" {
+		if lvl, ok := loglevel.ComponentLevel(component); ok {
+			return level >= lvl
+		}
+	}
+	if level < slog.LevelInfo {
+		return debug.Load()
+	}
+	return level >= loglevel.Effective("")
 }
 
 // Chown changes the ownership of the log file. It chowns the already-open
@@ -141,9 +201,10 @@ func Chown(uid, gid int) error {
 // (and re-validates) the new one.
 //
 // It does not mark the package initialized: if it is called before Init,
-// the lazy init on the first log line still reads SCION_DEBUG and installs
-// the slog default handler, and keeps this path (initLocked only picks a
-// default path when none is set).
+// the lazy init on the first log line still resolves the log level
+// (SCION_LOG_LEVEL, or the deprecated SCION_DEBUG) and installs the slog
+// default handler, and keeps this path (initLocked only picks a default
+// path when none is set).
 func SetLogPath(path string) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -156,34 +217,47 @@ func SetLogPath(path string) {
 
 // Info logs an informational message.
 func Info(format string, args ...interface{}) {
-	write("INFO", "", format, args...)
+	logf("INFO", "", format, args...)
 }
 
-// TaggedInfo logs an informational message with an additional tag.
+// TaggedInfo logs an informational message with an additional tag. The tag
+// is also a component name for per-component levels.
 func TaggedInfo(tag string, format string, args ...interface{}) {
-	write("INFO", tag, format, args...)
+	logf("INFO", tag, format, args...)
 }
 
 // Error logs an error message.
 func Error(format string, args ...interface{}) {
-	write("ERROR", "", format, args...)
+	logf("ERROR", "", format, args...)
 }
 
 // Warn logs a warning: something an operator should notice and act on, but
 // that does not itself abort whatever operation triggered it (unlike Error,
 // which this codebase's convention reserves for a failure the caller is
 // already handling as one). Always emitted, the same as Error — never
-// gated behind SCION_DEBUG the way Debug is.
+// gated behind the debug level the way Debug is. Suppressed only when the
+// level is explicitly raised to error.
 func Warn(format string, args ...interface{}) {
-	write("WARN", "", format, args...)
+	logf("WARN", "", format, args...)
 }
 
-// Debug logs a debug message if SCION_DEBUG is set.
+// Debug logs a debug message if the debug level is enabled
+// (SCION_LOG_LEVEL=debug, --log-level debug, or the deprecated SCION_DEBUG).
 func Debug(format string, args ...interface{}) {
 	if !debug.Load() {
 		return
 	}
-	write("DEBUG", "", format, args...)
+	logf("DEBUG", "", format, args...)
+}
+
+// logf initializes the package if needed, applies level filtering and
+// writes the line.
+func logf(level, tag, format string, args ...interface{}) {
+	ensureInit()
+	if !enabled(levelValue(level), tag) {
+		return
+	}
+	write(level, tag, format, args...)
 }
 
 func write(level, tag, format string, args ...interface{}) {
@@ -321,6 +395,9 @@ func openLogFileNoFollow(path string, mode os.FileMode) (*os.File, error) {
 // slogHandler implements slog.Handler by bridging to our write function.
 type slogHandler struct {
 	attrs []slog.Attr
+	// subsystem is the value of a "subsystem" attr added via WithAttrs,
+	// used for per-component levels.
+	subsystem string
 }
 
 func newHandler() *slogHandler {
@@ -328,19 +405,35 @@ func newHandler() *slogHandler {
 }
 
 func (h *slogHandler) Enabled(_ context.Context, level slog.Level) bool {
-	if level >= slog.LevelError {
+	ensureInit()
+	if level < slog.LevelDebug {
+		return false
+	}
+	if h.subsystem != "" {
+		return enabled(level, h.subsystem)
+	}
+	// A record-level subsystem attribute may carry its own level, so admit
+	// anything a configured component could want; Handle decides.
+	if level >= loglevel.MinLevel().Level() {
 		return true
 	}
-	if level >= slog.LevelInfo {
-		return true
-	}
-	if level >= slog.LevelDebug {
-		return debug.Load()
-	}
-	return false
+	return enabled(level, "")
 }
 
 func (h *slogHandler) Handle(_ context.Context, r slog.Record) error {
+	sub := h.subsystem
+	if sub == "" {
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "subsystem" {
+				sub = a.Value.String()
+				return false
+			}
+			return true
+		})
+	}
+	if !enabled(r.Level, sub) {
+		return nil
+	}
 	level := r.Level.String()
 	msg := r.Message
 	if r.NumAttrs() > 0 || len(h.attrs) > 0 {
@@ -366,7 +459,13 @@ func (h *slogHandler) Handle(_ context.Context, r slog.Record) error {
 }
 
 func (h *slogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return &slogHandler{attrs: append(h.attrs, attrs...)}
+	next := &slogHandler{attrs: append(h.attrs[:len(h.attrs):len(h.attrs)], attrs...), subsystem: h.subsystem}
+	for _, a := range attrs {
+		if a.Key == "subsystem" {
+			next.subsystem = a.Value.String()
+		}
+	}
+	return next
 }
 
 func (h *slogHandler) WithGroup(name string) slog.Handler {

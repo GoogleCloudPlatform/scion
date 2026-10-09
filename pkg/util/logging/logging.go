@@ -18,6 +18,8 @@ import (
 	"context"
 	"log/slog"
 	"os"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 )
 
 // Standard attribute keys
@@ -35,23 +37,56 @@ const (
 
 // Setup initializes the global logger.
 // component is the name of the service (e.g., "hub", "runtimebroker").
-// debug enables DEBUG level logging.
+// debug enables DEBUG level logging (flag precedence; see ApplyDebugFlag).
 // useGCP formats logs for Google Cloud Logging.
+//
+// The level is otherwise taken from the shared level state in package
+// loglevel (SCION_LOG_LEVEL, the deprecated SCION_DEBUG alias, or a
+// settings value applied with SetLogLevelSetting), including per-component
+// levels keyed on Subsystem names.
 func Setup(component string, debug bool, useGCP bool) {
-	handler := createBaseHandler(component, debug, useGCP, "")
+	ApplyDebugFlag(debug)
+	handler := newLevelFilter(createBaseHandler(component, useGCP, ""))
 	logger := slog.New(handler)
 	slog.SetDefault(logger)
 }
 
-// createBaseHandler creates the base slog handler for local logging.
-func createBaseHandler(component string, debug bool, useGCP bool, hubName string) slog.Handler {
-	level := slog.LevelInfo
-	if debug || os.Getenv("SCION_LOG_LEVEL") == "debug" {
-		level = slog.LevelDebug
+// ApplyDebugFlag maps a --debug style flag onto the shared level state: when
+// debug is true the default level becomes debug at flag precedence. It is a
+// no-op when debug is false.
+func ApplyDebugFlag(debug bool) {
+	if debug {
+		loglevel.EnableDebug(loglevel.SourceFlag)
 	}
+}
 
+// ParseLevelSpec parses a SCION_LOG_LEVEL style level spec, such as
+// "info,hub.auth=debug". See package loglevel for the syntax.
+func ParseLevelSpec(s string) (loglevel.Spec, error) {
+	return loglevel.ParseLevelSpec(s)
+}
+
+// SetLogLevelSetting applies a settings-file level spec (for example
+// server.log_level) at setting precedence: it takes effect only when neither
+// a flag nor the environment chose a level, and it may be called again on
+// settings reload. Handlers installed by Setup and SetupWithOTel pick up the
+// change immediately.
+func SetLogLevelSetting(spec string) (applied bool, err error) {
+	return loglevel.SetSetting(spec)
+}
+
+// EffectiveLevel returns the effective level for a component (a Subsystem
+// name such as "hub.auth"); an empty component returns the default level.
+func EffectiveLevel(component string) slog.Level {
+	return loglevel.Effective(component)
+}
+
+// createBaseHandler creates the base slog handler for local logging. It
+// passes every record; callers wrap it with newLevelFilter so the shared
+// level state decides what is emitted.
+func createBaseHandler(component string, useGCP bool, hubName string) slog.Handler {
 	opts := &slog.HandlerOptions{
-		Level: level,
+		Level: passAllLevel,
 	}
 
 	if useGCP {
