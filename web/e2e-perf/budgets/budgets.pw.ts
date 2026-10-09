@@ -22,14 +22,18 @@
  * context. A load is measured once the view has written its readiness mark
  * (READY_MARK, turned on in the mocked page data), has rendered its agents
  * (25 cards or rows on the first page of the grid and list, 100 graph
- * nodes), and its deep DOM count is the same on three reads 500 ms apart.
+ * nodes), its lazily mounted Files section has been scrolled into view
+ * (otherwise whether it mounts depends on load speed), and its deep DOM
+ * count is the same on three reads 500 ms apart. The page's Date is pinned
+ * to FIXED_NOW (its timers and animation frames are left alone; the
+ * readiness marks need them).
  * The slowed load must settle on the same DOM count as the normal ones, so
  * the gate cannot depend on how fast the runner is.
  *
  * Counters:
  * - domElements: every element in the document, including inside shadow
  *   roots (the countAllDeep walk from large-project-bench.mjs). The
- *   fixture has fixed IDs and times and the page clock is pinned
+ *   fixture has fixed IDs and times and the page's Date is pinned
  *   (FIXED_NOW), so this is exact for a given web build and fixture;
  *   every measured load must stay within the limit.
  * - longTasks: main-thread tasks over 50 ms (PerformanceObserver
@@ -39,15 +43,15 @@
  *   noisy load cannot fail CI.
  *
  * Baselines were measured on BASELINE_COMMIT, Chromium headless shell,
- * one worker:
- * - domElements: identical on all 6 measured loads (2 runs of 3) per view.
- * - longTasks: the median of the same 6 loads, rounded up (grid 2-5, list
- *   2-5, graph 3-5 per load).
+ * one worker, over 3 runs (9 normal loads and 3 slowed loads per view):
+ * - domElements: identical on all 12 loads per view, slowed ones included.
+ * - longTasks: the median of the 9 normal loads (grid 3-7, list 4-8, graph
+ *   3-7 per load; run medians grid 4-6, list 5-6, graph 4-6).
  * Limits:
  * - domElements: baseline + DOM_MARGIN elements. One extra element per
  *   rendered card or row adds 25 (grid, list) or 100 (graph) and fails.
  * - longTasks: baseline + max(3, 50% of baseline, rounded up). Eight added
- *   120 ms tasks at startup measured medians of 11-13 and fail.
+ *   120 ms tasks at startup measured medians of 13-15 and fail.
  *
  * Updating a budget for an intended change: run
  *   npm run test:e2e:perf-budgets
@@ -59,10 +63,10 @@ import { expect, test, type Browser, type Page } from '@playwright/test';
 
 import { loadFixture, setupBudgetMocks } from './mock-api.js';
 
-const BASELINE_COMMIT = 'main 00d36ed';
+const BASELINE_COMMIT = 'main 7049f53';
 const LOADS = 3;
 const DOM_MARGIN = 10;
-// The page's clock, a few minutes after the fixture's agent times, so
+// The page's Date, a few minutes after the fixture's agent times, so
 // relative times and any age-based rendering do not drift with the date.
 const FIXED_NOW = new Date('2026-10-01T12:05:00Z');
 
@@ -79,19 +83,19 @@ const VIEWS: ViewBudget[] = [
     view: 'grid',
     selector: '.agent-card',
     expected: 25,
-    baseline: { domElements: 2439, longTasks: 4 },
+    baseline: { domElements: 2448, longTasks: 5 },
   },
   {
     view: 'list',
     selector: '.agent-table-container tbody tr',
     expected: 25,
-    baseline: { domElements: 2360, longTasks: 4 },
+    baseline: { domElements: 2369, longTasks: 5 },
   },
   {
     view: 'graph',
     selector: '.node-wrapper',
     expected: 100,
-    baseline: { domElements: 2934, longTasks: 5 },
+    baseline: { domElements: 2971, longTasks: 6 },
   },
 ];
 
@@ -144,7 +148,22 @@ async function measureLoad(browser: Browser, v: ViewBudget, slow = false): Promi
   const context = await browser.newContext();
   try {
     const page = await context.newPage();
-    await page.clock.setFixedTime(FIXED_NOW);
+    // Pin the page's Date (not its timers or animation frames, which the
+    // readiness marks need) to FIXED_NOW, then let it run on from there.
+    await page.addInitScript((fixedMs) => {
+      const RealDate = Date;
+      const offset = fixedMs - RealDate.now();
+      class PinnedDate extends RealDate {
+        constructor(...args: unknown[]) {
+          if (args.length === 0) super(RealDate.now() + offset);
+          else super(...(args as ConstructorParameters<typeof Date>));
+        }
+        static now(): number {
+          return RealDate.now() + offset;
+        }
+      }
+      (window as unknown as { Date: DateConstructor }).Date = PinnedDate as DateConstructor;
+    }, FIXED_NOW.getTime());
     const unexpected = await setupBudgetMocks(page, fixture);
     await page.addInitScript((view) => {
       localStorage.setItem('scion-view-project-agents', view);
@@ -177,6 +196,35 @@ async function measureLoad(browser: Browser, v: ViewBudget, slow = false): Promi
         message: `${v.view}: rendered items`,
       })
       .toBe(v.expected);
+    // The Files section mounts lazily once its placeholder nears the
+    // viewport, and stays mounted. Whether an intermediate layout brought it
+    // near depends on load speed, so reveal it on every load: the counted
+    // page is then the same whether the load was fast or slow.
+    const placeholder = await page.evaluateHandle(() => {
+      const find = (root: Document | ShadowRoot): Element | null => {
+        const el = root.querySelector('.files-section-placeholder');
+        if (el) return el;
+        for (const n of root.querySelectorAll('*')) {
+          const f = n.shadowRoot ? find(n.shadowRoot) : null;
+          if (f) return f;
+        }
+        return null;
+      };
+      return find(document);
+    });
+    const hadPlaceholder = await placeholder.evaluate((el) => {
+      if (!el) return false;
+      el.scrollIntoView({ block: 'center' });
+      return true;
+    });
+    if (hadPlaceholder) {
+      await expect
+        .poll(() => countDeep(page, '.files-section-placeholder'), {
+          timeout: 30_000,
+          message: `${v.view}: Files section revealed`,
+        })
+        .toBe(0);
+    }
     const reads = [await countDeep(page, '*')];
     for (let i = 0; i < 40; i++) {
       const n = reads.length;

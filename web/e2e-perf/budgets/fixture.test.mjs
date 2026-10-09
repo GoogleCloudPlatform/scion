@@ -48,6 +48,14 @@ test('the generated fixture is deterministic', () => {
 test('fieldPaths joins keys, collapses arrays, records leaf types and sorts byte-wise', () => {
   assert.deepEqual(
     fieldPaths({ b: [{ x: 1 }, { x: 'one', y: [[1]] }], a: null, Z: { k: 'v', t: true } }),
-    ['Z.k:string', 'Z.t:boolean', 'Z:object', 'a:null', 'b:array', 'b[].x:number|string', 'b[].y:array']
+    [
+      'Z.k:string',
+      'Z.t:boolean',
+      'Z:object',
+      'a:null',
+      'b:array',
+      'b[].x:number|string',
+      'b[].y:array',
+    ]
   );
 });
