@@ -459,3 +459,132 @@ it('releases every retained entry and metadata when a renderer disposer throws',
   expect(() => f.registry.open(agentId, f.initialize)).toThrow('disposed');
   expect(() => f.registry.dispose()).not.toThrow();
 });
+
+describe('connect timeouts', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Subscribes after the attempt is in 'connecting' and returns the listener. */
+  function watch(session: { subscribe: (l: (s: TerminalSessionState) => void) => () => void }) {
+    const listener = vi.fn<(state: TerminalSessionState) => void>();
+    session.subscribe(listener);
+    listener.mockClear();
+    return listener;
+  }
+
+  it('an initial connect whose socket opens but sends no data ends in disconnected with Retry', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    const socket = FakeSocket.instances[0];
+    socket.open();
+    const listener = watch(session);
+
+    await vi.advanceTimersByTimeAsync(10_000 - 1);
+    expect(session.state.connection).toBe('connecting');
+    expect(listener).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(session.state.connection).toBe('disconnected');
+    expect(session.state.disconnectReason).toBe('network');
+    expect(session.state.error).toBe('No response from the terminal stream.');
+    // An initial connect is not a failed reconnect.
+    expect(session.state.reconnectFailed).toBe(false);
+    expect(session.reconnecting).toBe(false);
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(socket.close).toHaveBeenCalledTimes(1);
+    expect(socket.onopen).toBeNull();
+    expect(socket.onmessage).toBeNull();
+    expect(socket.onclose).toBeNull();
+    expect(socket.onerror).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+
+    // Retry starts a fresh attempt on a new socket.
+    await session.connect();
+    expect(FakeSocket.instances).toHaveLength(2);
+    FakeSocket.instances[1].open();
+    FakeSocket.instances[1].data([65]);
+    expect(session.state.connection).toBe('connected');
+  });
+
+  it('an initial connect whose socket never opens ends in disconnected', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    const socket = FakeSocket.instances[0];
+    const listener = watch(session);
+
+    await vi.advanceTimersByTimeAsync(10_000 - 1);
+    expect(session.state.connection).toBe('connecting');
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(session.state.connection).toBe('disconnected');
+    expect(session.state.disconnectReason).toBe('network');
+    expect(session.state.reconnectFailed).toBe(false);
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(socket.close).toHaveBeenCalledTimes(1);
+    expect(socket.onopen).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('a reconnect whose socket never opens ends as a failed attempt', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    FakeSocket.instances[0].open();
+    FakeSocket.instances[0].data([65]);
+    FakeSocket.instances[0].onclose?.({ code: 1006 });
+    expect(session.state.connection).toBe('disconnected');
+
+    await session.connect();
+    const socket = FakeSocket.instances[1];
+    expect(session.state.connection).toBe('connecting');
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(session.state.connection).toBe('disconnected');
+    expect(session.state.disconnectReason).toBe('network');
+    expect(session.state.reconnectFailed).toBe(true);
+    expect(socket.close).toHaveBeenCalledTimes(1);
+    expect(socket.onopen).toBeNull();
+    expect(FakeSocket.instances).toHaveLength(2);
+  });
+
+  it.each(['before open', 'after open'])(
+    'a late open, message or close after a timeout %s changes nothing',
+    async (stage) => {
+      vi.useFakeTimers();
+      const f = fixture();
+      const session = f.registry.open(agentId, f.initialize);
+      await session.connect();
+      const socket = FakeSocket.instances[0];
+      if (stage === 'after open') socket.open();
+      // Keep the handlers the session installed, as a browser that already
+      // queued these events would still deliver them.
+      const { onopen, onmessage, onclose, onerror } = socket;
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(session.state.connection).toBe('disconnected');
+      const settled = session.state;
+      const listener = watch(session);
+
+      onopen?.();
+      onmessage?.({
+        data: JSON.stringify({ type: 'data', data: btoa('late') }),
+      });
+      onclose?.({ code: 4410 });
+      onerror?.();
+      socket.open();
+      socket.data([65]);
+      socket.onclose?.({ code: 4410 });
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(session.state).toBe(settled);
+      expect(listener).not.toHaveBeenCalled();
+      expect(f.resources.write).not.toHaveBeenCalled();
+      expect(FakeSocket.instances).toHaveLength(1);
+    }
+  );
+});

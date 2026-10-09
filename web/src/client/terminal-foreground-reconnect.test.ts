@@ -826,27 +826,21 @@ describe('accept-then-close does not loop', () => {
   });
 });
 
-describe('the first-frame guard applies to reconnect attempts only, not the initial connect', () => {
-  it('an initial connect with no data for over 10s is not failed', async () => {
+describe('the first-frame guard applies to the initial connect and to reconnect attempts', () => {
+  it('an initial connect with no data for 10s ends in disconnected, not a failed reconnect', async () => {
     vi.useFakeTimers();
     const f = fixture();
     const session = f.registry.open(agentId, f.initialize);
+    session.setFrontmost(true);
     await session.connect();
-    FakeSocket.instances[0].open(); // Hub upgrades; the broker exec/attach is still slow
+    FakeSocket.instances[0].open(); // Hub upgrades; no data frame ever follows
 
     await vi.advanceTimersByTimeAsync(10_000 + 1);
 
-    // Before this fix, the 10s guard would have applied to every attempt,
-    // including this one, and failed a legitimately slow cold start (e.g. a
-    // Cloud Run sandbox exec) that main accepts today.
-    expect(session.state.connection).toBe('connecting');
+    expect(session.state.connection).toBe('disconnected');
+    expect(session.state.disconnectReason).toBe('network');
     expect(session.state.reconnectFailed).toBe(false);
     expect(FakeSocket.instances).toHaveLength(1); // no guard-triggered redial
-
-    // It still only counts as connected once data actually arrives, however
-    // late — counting a data frame as live is unconditional, unlike the guard.
-    FakeSocket.instances[0].data();
-    expect(session.state.connection).toBe('connected');
   });
 
   it('a reconnect attempt (after the session has connected once) is still bounded by the guard', async () => {
@@ -985,7 +979,9 @@ describe("the first-frame guard's timer is cleared on every teardown path", () =
     session.setFrontmost(true);
     session.noteAgentAvailable(); // the agent-restart re-arm: a fresh attempt
     await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(3));
-    expect(vi.getTimerCount()).toBe(0); // the new attempt hasn't reached 'connecting' yet
+    // Only the new attempt's own guard (waiting for onopen) runs: nothing
+    // is left over from the ended attempt.
+    expect(vi.getTimerCount()).toBe(1);
   });
 });
 
