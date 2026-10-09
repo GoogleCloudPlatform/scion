@@ -3456,7 +3456,7 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		if relayIdentityMappingError(w, err) {
 			return
 		}
-		if relayHarnessConfigRefusal(w, err) {
+		if relayBrokerRefusal(w, err) {
 			return
 		}
 		RuntimeError(w, "Failed to finalize env on runtime broker: "+err.Error())
@@ -5255,7 +5255,7 @@ func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID strin
 		// Response already written.
 	case relayWorkspaceStorageUnconfigured(w, err):
 		// Response already written.
-	case relayHarnessConfigRefusal(w, err):
+	case relayBrokerRefusal(w, err):
 		// Response already written.
 	case relayIdentityMappingError(w, err):
 		// Response already written.
@@ -5326,20 +5326,22 @@ func relayWorkspaceStorageUnconfigured(w http.ResponseWriter, err error) bool {
 	return true
 }
 
-// relayHarnessConfigRefusal writes the broker's refusal of the
-// harness-config a dispatch would run -- 422 harness_config_unusable (its
-// provisioner cannot run) or 403 forbidden (the broker's harness-config
-// policy does not allow it) -- with the broker's status, code and message
-// instead of the generic 502, and reports whether it did
-// (ptone/scion#3132). For any other error it writes nothing and returns
-// false. The broker's start markers in error.details are not relayed, as
-// for a skill resolution failure.
+// relayBrokerRefusal writes a broker 4xx refusal of a dispatch -- 422
+// harness_config_unusable, 403 forbidden or 400 validation_error -- with the
+// broker's status, code and message instead of the generic 502, and reports
+// whether it did. For any other error it writes nothing and returns false.
 //
-// It also relays the broker's 400 validation_error the same way: the broker
+// The 422 harness_config_unusable and 403 forbidden answers are the broker's
+// refusal of the harness-config a dispatch would run: its provisioner cannot
+// run it, or the broker's harness-config policy does not allow it
+// (ptone/scion#3132). The broker's start markers in error.details are not
+// relayed, as for a skill resolution failure.
+//
+// The 400 validation_error is relayed the same way: the broker
 // answers it for a request it refuses as invalid (its ValidationError
 // helper and the start-context checks), usually a request the caller must
 // fix, so it is not a "runtime broker failed" 502 (ptone/scion#2666).
-func relayHarnessConfigRefusal(w http.ResponseWriter, err error) bool {
+func relayBrokerRefusal(w http.ResponseWriter, err error) bool {
 	var se *brokerStatusError
 	if !errors.As(err, &se) {
 		return false
