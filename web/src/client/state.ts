@@ -906,6 +906,12 @@ export class StateManager extends EventTarget {
   }
 
   private handleAgentEvent(agentId: string, eventType: string, data: unknown): void {
+    // `agent.{id}.message` carries a chat message payload, not an agent
+    // delta. Message views read the agent messages stream instead.
+    if (eventType === 'message') {
+      return;
+    }
+
     if (eventType === 'deleted') {
       this.state.agents.delete(agentId);
       this.state.deletedAgentIds.add(agentId);
