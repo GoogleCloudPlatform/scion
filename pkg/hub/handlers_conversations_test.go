@@ -130,24 +130,6 @@ func grantAgentProjectAccess(t *testing.T, s store.Store, agentID, projectID str
 	require.NoError(t, err)
 }
 
-// grantUserProjectAccess gives a user the project-member role on a project,
-// so it can read the project's group conversations.
-func grantUserProjectAccess(t *testing.T, s store.Store, userID, projectID string) {
-	t.Helper()
-	ctx := context.Background()
-	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
-	require.NoError(t, err, "project-member role definition not found")
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          projectID,
-		CreatedBy:        "test",
-	})
-	require.NoError(t, err)
-}
-
 // listReaderAgentContext is an agent caller that can read its project's
 // group conversations: the list shows a group only to a current reader.
 func listReaderAgentContext(t *testing.T, s store.Store, agentID, projectID string) context.Context {

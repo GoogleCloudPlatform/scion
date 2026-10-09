@@ -794,37 +794,34 @@ func TestScheduledTargetReadable_LookupErrorTreatedAsUnreadable(t *testing.T) {
 
 // TestBrokerInbound_ThreadKeyOfOtherProjectNotResolved: a chat integration
 // naming a native thread key of another project for an agent of this project
-// gets the same answer as any other resolution failure, and nothing is
-// delivered, stored or linked to the other project's thread.
+// gets the same answer as any other resolution failure; no conversation is
+// created under the other project's key and nothing is delivered or stored.
 func TestBrokerInbound_ThreadKeyOfOtherProjectNotResolved(t *testing.T) {
-	setup := func(t *testing.T) (externalRefFixture, string) {
-		f := newExternalRefFixture(t)
-		topicID := tid("extref-other-topic")
-		require.NoError(t, f.webChatStore.CreateTopic(context.Background(), WebChatTopic{
-			ID: topicID, ProjectID: f.otherProject.ID, Name: "other-topic",
-			ConversationID: f.otherConv.ID, CreatedBy: f.user.ID, CreatedAt: time.Now().UTC(),
-		}))
-		conv, err := f.store.GetConversation(context.Background(), f.otherConv.ID)
-		require.NoError(t, err)
-		f.otherConv = conv
-		return f, "thread:" + f.otherProject.ID + ":" + topicID
+	requireNoConversation := func(t *testing.T, f externalRefFixture, key string) {
+		t.Helper()
+		_, err := f.store.GetConversationByExternalRef(context.Background(), "native", key)
+		assert.ErrorIs(t, err, store.ErrNotFound, "no conversation is created under the other project's key")
 	}
 	t.Run("inbound", func(t *testing.T) {
-		f, key := setup(t)
+		f := newExternalRefFixture(t)
+		key := "thread:" + f.otherProject.ID + ":" + tid("extref-other-thread-inbound")
 		unresolved := f.postLegacyInbound(t, "native", "thread:bad")
 		require.Equal(t, http.StatusConflict, unresolved.Code, unresolved.Body.String())
 		rec := f.postLegacyInbound(t, "native", key)
 		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 		assert.Equal(t, unresolved.Body.String(), rec.Body.String())
 		f.requireNothingDelivered(t)
+		requireNoConversation(t, f, key)
 	})
 	t.Run("routed", func(t *testing.T) {
-		f, key := setup(t)
+		f := newExternalRefFixture(t)
+		key := "thread:" + f.otherProject.ID + ":" + tid("extref-other-thread-routed")
 		unresolved := f.postRoutedInbound(t, "native", "thread:bad")
 		require.Equal(t, http.StatusConflict, unresolved.Code, unresolved.Body.String())
 		rec := f.postRoutedInbound(t, "native", key)
 		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 		assert.Equal(t, routedBodyWithoutMessageIDs(t, unresolved), routedBodyWithoutMessageIDs(t, rec))
 		f.requireNothingDelivered(t)
+		requireNoConversation(t, f, key)
 	})
 }
