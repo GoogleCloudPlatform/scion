@@ -390,6 +390,8 @@ class Session implements TerminalSession {
    * 4503 close. While it runs, no automatic attempt starts.
    */
   private reconnectDelayTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The `reconnecting` value subscribers saw at the last notification. */
+  private notifiedReconnecting = false;
 
   /** Application heartbeat (liveness only; never drives retries directly). */
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
@@ -444,7 +446,19 @@ class Session implements TerminalSession {
 
   private update(patch: Partial<TerminalSessionState>): void {
     this.snapshot = { ...this.snapshot, ...patch };
+    this.notifiedReconnecting = this.reconnecting;
     for (const listener of this.listeners) listener(this.snapshot);
+  }
+
+  /**
+   * Notifies subscribers when `reconnecting` (which reads `pending` and the
+   * jitter timer, not the snapshot) has changed since they were last
+   * notified. Connection and disconnect reason only change through
+   * update(), which always notifies.
+   */
+  private notifyIfReconnectingChanged(): void {
+    if (this.state.connection === 'closed') return;
+    if (this.reconnecting !== this.notifiedReconnecting) this.update({});
   }
 
   connect(): Promise<void> {
@@ -526,12 +540,7 @@ class Session implements TerminalSession {
       // own events (data, close, error) notify next, and the pane already
       // treats 'connecting' as an attempt, so a repeat notification would
       // only duplicate the 'connecting' state.
-      if (
-        wasPending &&
-        this.state.connection !== 'closed' &&
-        this.state.connection !== 'connecting'
-      )
-        this.update({});
+      if (wasPending && this.state.connection !== 'connecting') this.notifyIfReconnectingChanged();
     });
     return attempt;
   }
@@ -623,12 +632,12 @@ class Session implements TerminalSession {
     this.reconnectDelayTimer = setTimeout(() => {
       this.reconnectDelayTimer = null;
       this.maybeAutoAttempt();
-      // No attempt started (for example a background pane): tell
-      // subscribers that `reconnecting` is false again.
-      if (!this.pending) this.update({});
+      // No attempt started (for example a background pane): `reconnecting`
+      // is false again.
+      this.notifyIfReconnectingChanged();
     }, delay);
-    // Subscribers re-read `reconnecting`, which is now true.
-    this.update({});
+    // `reconnecting` is now true.
+    this.notifyIfReconnectingChanged();
   }
 
   private clearReconnectDelayTimer(): void {
