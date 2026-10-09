@@ -58,8 +58,6 @@ type Tx struct {
 	Conversation *ConversationClient
 	// ConversationParticipant is the client for interacting with the ConversationParticipant builders.
 	ConversationParticipant *ConversationParticipantClient
-	// DecisionAudit is the client for interacting with the DecisionAudit builders.
-	DecisionAudit *DecisionAuditClient
 	// DelegationAdoption is the client for interacting with the DelegationAdoption builders.
 	DelegationAdoption *DelegationAdoptionClient
 	// DelegationEdge is the client for interacting with the DelegationEdge builders.
@@ -314,7 +312,6 @@ func (tx *Tx) init() {
 	tx.ConduitSession = NewConduitSessionClient(tx.config)
 	tx.Conversation = NewConversationClient(tx.config)
 	tx.ConversationParticipant = NewConversationParticipantClient(tx.config)
-	tx.DecisionAudit = NewDecisionAuditClient(tx.config)
 	tx.DelegationAdoption = NewDelegationAdoptionClient(tx.config)
 	tx.DelegationEdge = NewDelegationEdgeClient(tx.config)
 	tx.EntitlementBinding = NewEntitlementBindingClient(tx.config)

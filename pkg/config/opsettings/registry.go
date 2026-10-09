@@ -64,6 +64,17 @@ func kubernetesServiceAccountMappingsSchema() map[string]interface{} {
 	}
 }
 
+// profileCloneDepthSchema returns profileConfig.clone_depth from the
+// settings schema $defs, so the profiles section validates clone_depth
+// with the same rule as settings-v1.schema.json. It returns nil when the
+// definition is missing.
+func profileCloneDepthSchema(defs map[string]interface{}) map[string]interface{} {
+	profile, _ := defs["profileConfig"].(map[string]interface{})
+	props, _ := profile["properties"].(map[string]interface{})
+	cd, _ := props["clone_depth"].(map[string]interface{})
+	return cd
+}
+
 // sharedDirStorageBackendsSchema mirrors shared_dir_storage_backends in
 // settings-v1.schema.json: shared dir name keys (lowercase letters, digits
 // and hyphens, as api.ValidateSharedDirs requires) mapped to local or nfs.
@@ -382,6 +393,12 @@ func compileSchemas() {
 
 	defs, _ := root["$defs"].(map[string]interface{})
 
+	cloneDepthSchema := profileCloneDepthSchema(defs)
+	if cloneDepthSchema == nil {
+		schemaCompileErr = fmt.Errorf("opsettings: settings schema has no profileConfig.clone_depth")
+		return
+	}
+
 	sectionSchemaMap := map[string]map[string]interface{}{
 		"access": {
 			"type": "object",
@@ -499,6 +516,7 @@ func compileSchemas() {
 				"default_retention_days":       map[string]interface{}{"type": "integer", "minimum": 0},
 				"link_default_ttl_hours":       map[string]interface{}{"type": "integer", "minimum": 1},
 				"link_max_ttl_hours":           map[string]interface{}{"type": "integer", "minimum": 1},
+				"gc_grace_hours":               map[string]interface{}{"type": "integer", "minimum": ArtifactsMinGCGraceHours},
 				"remote_images_enabled":        map[string]interface{}{"type": "boolean"},
 				"remote_image_max_count":       map[string]interface{}{"type": "integer", "minimum": 1},
 				"remote_image_max_bytes":       map[string]interface{}{"type": "integer", "minimum": 1},
@@ -518,7 +536,7 @@ func compileSchemas() {
 				"default_max_duration":                    getSchemaProperty(root, "default_max_duration"),
 				"default_resources":                       getSchemaProperty(root, "default_resources"),
 				"default_model":                           map[string]interface{}{"type": "string"},
-				"default_thinking_level":                  map[string]interface{}{"type": "integer"},
+				"default_thinking_level":                  getSchemaProperty(root, "default_thinking_level"),
 				"default_max_agent_role":                  getSchemaProperty(root, "default_max_agent_role"),
 				"default_agent_role":                      getSchemaProperty(root, "default_agent_role"),
 				"default_runtime_broker":                  getSchemaProperty(root, "default_runtime_broker"),
@@ -602,6 +620,7 @@ func compileSchemas() {
 						},
 					},
 					"secrets":                     map[string]interface{}{"type": "array"},
+					"clone_depth":                 cloneDepthSchema,
 					"shared_dir_storage_class":    map[string]interface{}{"type": "string"},
 					"shared_dir_size":             map[string]interface{}{"type": "string"},
 					"safe_to_evict":               map[string]interface{}{"type": "boolean"},

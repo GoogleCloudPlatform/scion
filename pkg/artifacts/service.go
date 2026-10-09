@@ -122,6 +122,10 @@ type Limits struct {
 	// above the maximum is lowered to it.
 	LinkDefaultTTL time.Duration
 	LinkMaxTTL     time.Duration
+	// DefaultRetention is how long a new artifact is kept: a positive
+	// value sets its expiry at creation; zero or negative keeps it until
+	// it is deleted (design D12).
+	DefaultRetention time.Duration
 	// RemoteImages bound the remote images fetched at publish time. A host
 	// that sets a limits getter must fill them in: incomplete or invalid
 	// values turn remote images off.
@@ -332,6 +336,10 @@ func (s *Service) RegisterRoutes(mux Mux, guard Guard) {
 //	GET  /api/v1/artifacts/view/{capability}/{path}         a file of the version a capability names
 //	GET  /api/v1/artifacts/{id}/versions/{seq}/files/{path} a file of version seq
 //	PUT  /api/v1/artifacts/{id}/versions/{seq}/files/{path} upload a file of a pending version
+//	PATCH /api/v1/artifacts/{id}                            set the expiry, move to another project
+//	GET  /api/v1/artifacts/{id}/grants                      the principal and scope grants
+//	POST /api/v1/artifacts/{id}/grants                      add or change a grant
+//	DELETE /api/v1/artifacts/{id}/grants/{grantId}          remove a grant
 //	POST /api/v1/artifacts/{id}/links                       create a share link
 //	GET  /api/v1/artifacts/{id}/links                       the unexpired share links
 //	DELETE /api/v1/artifacts/{id}/links/{linkId}            revoke a share link
@@ -386,11 +394,29 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case len(segs) == 1:
-		if !isRead(r.Method) {
-			writeMethodNotAllowed(w, http.MethodGet, http.MethodHead)
+		switch {
+		case isRead(r.Method):
+			s.handleGetArtifact(w, r, id)
+		case r.Method == http.MethodPatch:
+			s.handlePatchArtifact(w, r, id)
+		default:
+			writeMethodNotAllowed(w, http.MethodGet, http.MethodHead, http.MethodPatch)
+		}
+	case len(segs) == 2 && segs[1] == "grants":
+		switch {
+		case isRead(r.Method):
+			s.handleListGrants(w, r, id)
+		case r.Method == http.MethodPost:
+			s.handlePutGrant(w, r, id)
+		default:
+			writeMethodNotAllowed(w, http.MethodGet, http.MethodHead, http.MethodPost)
+		}
+	case len(segs) == 3 && segs[1] == "grants":
+		if r.Method != http.MethodDelete {
+			writeMethodNotAllowed(w, http.MethodDelete)
 			return
 		}
-		s.handleGetArtifact(w, r, id)
+		s.handleDeleteGrant(w, r, id, segs[2])
 	case len(segs) >= 3 && segs[1] == "files":
 		if !isRead(r.Method) {
 			writeMethodNotAllowed(w, http.MethodGet, http.MethodHead)
@@ -534,7 +560,11 @@ func writeNotFound(w http.ResponseWriter) {
 	writeError(w, http.StatusNotFound, "not_found", "not found")
 }
 
-func writeMethodNotAllowed(w http.ResponseWriter, allowed ...string) {
+// writeMethodNotAllowed answers 405 with the Allow header RFC 9110 §15.5.6
+// requires. The signature requires at least one method, so a call that
+// would send an empty Allow does not compile.
+func writeMethodNotAllowed(w http.ResponseWriter, allowedMethod string, otherMethods ...string) {
+	allowed := append([]string{allowedMethod}, otherMethods...)
 	w.Header().Set("Allow", strings.Join(allowed, ", "))
 	writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 }

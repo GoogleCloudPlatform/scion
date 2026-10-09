@@ -410,6 +410,15 @@ const PATH_LINK_NO_PROJECT_ERROR =
 // lives in utils/chat-file-links.ts so the recorder can share it.
 export { parseContainerPath, buildFileApiUrl, type PathLinkTarget };
 
+/** Detail of `peer-agent-resolved`: the agent DM peer, read for the open conversation. */
+export interface PeerAgentResolvedDetail {
+  conversationKey: string;
+  agentId: string;
+  /** The agent's name, or its slug; empty when the row carries neither. */
+  name: string;
+  projectId: string;
+}
+
 @customElement('scion-chat-thread')
 export class ScionChatThread extends LitElement {
   /**
@@ -827,7 +836,14 @@ export class ScionChatThread extends LitElement {
    * (see {@link resolvePeerAgentProject}). Kept for one conversation: a read
    * for another conversation key is not used.
    */
-  private _peerAgentProject: { conversationKey: string; projectId: string } | null = null;
+  private _peerAgentProject: {
+    conversationKey: string;
+    projectId: string;
+    /** The peer's name (or slug) from the read, for reporting it again. */
+    name: string;
+    /** Whether the read has answered; until then it reports on its own. */
+    done: boolean;
+  } | null = null;
 
   /** Current user ID, cached from the stateManager scope once it exists. */
   private _currentUserId = '';
@@ -2788,7 +2804,7 @@ export class ScionChatThread extends LitElement {
       // hub keeps only those the sender can read.
       if (artifactRefs && artifactRefs.length > 0) {
         body.metadata = {
-          ...((body.metadata as Record<string, string> | undefined) ?? {}),
+          ...(body.metadata ?? {}),
           [ARTIFACTS_METADATA_KEY]: JSON.stringify(artifactRefs),
         };
       }
@@ -4717,10 +4733,39 @@ export class ScionChatThread extends LitElement {
 
   /** The peer's project from the global agent map, then the store's hub list. */
   private knownPeerAgentProjectId(peerAgentId: string): string {
-    const fromView = stateManager.getAgent(peerAgentId)?.projectId;
-    if (fromView) return fromView;
+    return this.knownPeerAgent(peerAgentId)?.projectId || '';
+  }
+
+  /**
+   * The peer's row that carries a project: the global agent map's, then the
+   * store's hub list's. Undefined when neither has one.
+   */
+  private knownPeerAgent(peerAgentId: string): Agent | undefined {
+    const fromView = stateManager.getAgent(peerAgentId);
+    if (fromView?.projectId) return fromView;
     const hub = agentStore.peek({ scope: 'hub' });
-    return (hub && agentIndexOf(hub).get(peerAgentId)?.projectId) || '';
+    const fromHub = hub ? agentIndexOf(hub).get(peerAgentId) : undefined;
+    return fromHub?.projectId ? fromHub : undefined;
+  }
+
+  /**
+   * Tell the page who the open agent DM's peer is. The page names the peer
+   * and fills the members sidebar from it when it had no row for the agent
+   * of its own when the DM opened (a DM opened by URL).
+   */
+  private reportPeerAgent(
+    conversationKey: string,
+    agentId: string,
+    agent: Partial<Agent>,
+    projectId: string
+  ): void {
+    this.dispatchEvent(
+      new CustomEvent<PeerAgentResolvedDetail>('peer-agent-resolved', {
+        detail: { conversationKey, agentId, name: agent.name || agent.slug || '', projectId },
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   /**
@@ -4729,14 +4774,28 @@ export class ScionChatThread extends LitElement {
    * thread opened directly, say, with no hub list loaded. The hub list is
    * not loaded for this: on a large hub that would walk every agent for one
    * id. A failed read is not cached, so the next open of the conversation
-   * reads again.
+   * reads again. Either way the peer is reported to the page: from the row
+   * already held, with no request, or from the read.
    */
   private async resolvePeerAgentProject(): Promise<void> {
     const conversationKey = this.conversationKey;
     const peerAgentId = this.peerAgentId();
-    if (!peerAgentId || this.knownPeerAgentProjectId(peerAgentId)) return;
-    if (this._peerAgentProject?.conversationKey === conversationKey) return;
-    const read = { conversationKey, projectId: '' };
+    if (!peerAgentId) return;
+    const known = this.knownPeerAgent(peerAgentId);
+    if (known) {
+      this.reportPeerAgent(conversationKey, peerAgentId, known, known.projectId || '');
+      return;
+    }
+    const cached = this._peerAgentProject;
+    if (cached?.conversationKey === conversationKey) {
+      // Back on a conversation already read (after a switch away, say): the
+      // page that asked may be showing it again, so report it again.
+      if (cached.done) {
+        this.reportPeerAgent(conversationKey, peerAgentId, { name: cached.name }, cached.projectId);
+      }
+      return;
+    }
+    const read = { conversationKey, projectId: '', name: '', done: false };
     this._peerAgentProject = read;
     try {
       const res = await apiFetch(`/api/v1/agents/${encodeURIComponent(peerAgentId)}`, {
@@ -4745,6 +4804,11 @@ export class ScionChatThread extends LitElement {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const agent = (await res.json()) as Partial<Agent>;
       read.projectId = agent.projectId || '';
+      read.name = agent.name || agent.slug || '';
+      read.done = true;
+      if (this._peerAgentProject === read && this.conversationKey === conversationKey) {
+        this.reportPeerAgent(conversationKey, peerAgentId, agent, read.projectId);
+      }
     } catch {
       // Non-critical: path links in this DM fall back to the message's own project.
       if (this._peerAgentProject === read) this._peerAgentProject = null;
@@ -5070,7 +5134,7 @@ export class ScionChatThread extends LitElement {
     if (composer) {
       const slTextarea = (composer as LitElement).shadowRoot?.querySelector('sl-textarea');
       if (slTextarea) {
-        focusElement(slTextarea as HTMLElement);
+        focusElement(slTextarea);
       }
     }
   }
@@ -5550,7 +5614,7 @@ export class ScionChatThread extends LitElement {
             <scion-chat-system-line
               message=${msg.msg}
               timestamp=${msg.createdAt}
-              category=${(msg.metadata?.['system_category'] as string) || ''}
+              category=${msg.metadata?.['system_category'] || ''}
             ></scion-chat-system-line>
           `,
         });

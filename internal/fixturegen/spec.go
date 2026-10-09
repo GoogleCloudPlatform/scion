@@ -577,16 +577,6 @@ func Spec() []TableFixture {
 			},
 		}},
 
-		// ---- Decision audits ----
-		{Table: "decision_audits", Rows: []row{
-			{
-				"id": "da000000-0000-0000-0000-000000000001", "timestamp": baseTime,
-				"principal_kind": "user", "principal_id": userID,
-				"resource_type": "agent", "permission": "read",
-				"result": "allow", "reason": "owner", "sampled": false,
-			},
-		}},
-
 		// ---- Delegation edges ----
 		{Table: "delegation_edges", Rows: []row{
 			{

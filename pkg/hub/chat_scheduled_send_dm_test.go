@@ -25,6 +25,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,6 +45,16 @@ func scheduledDMKey(t *testing.T, kindA, idA, kindB, idB string) string {
 
 func scheduledConversationPath(key string) string {
 	return "/api/v1/chat/conversations/" + key + "/scheduled"
+}
+
+// requireLiveSendAnswer asserts that rec carries exactly the answer a live
+// send of key by user gets.
+func requireLiveSendAnswer(t *testing.T, srv *Server, user *store.User, key string, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	live := doRequestAsUser(t, srv, user, http.MethodPost, "/api/v1/chat/conversations/"+key+"/messages",
+		map[string]interface{}{"content": "x"})
+	assert.Equal(t, live.Code, rec.Code, "status must match a live send: %s", rec.Body.String())
+	assert.Equal(t, live.Body.String(), rec.Body.String(), "body must match a live send")
 }
 
 // scheduleIn creates a scheduled message in conversation key as user and
@@ -134,9 +146,11 @@ func TestScheduledSend_DM_NonParticipantRefused(t *testing.T) {
 	rec := doRequestAsUser(t, f.srv, f.alice, http.MethodPost, path, map[string]interface{}{
 		"content": "x", "fire_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
 	})
-	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	requireLiveSendAnswer(t, f.srv, f.alice, key, rec)
 	rec = doRequestAsUser(t, f.srv, f.alice, http.MethodGet, path, nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	requireLiveSendAnswer(t, f.srv, f.alice, key, rec)
 	rec = doRequestAsUser(t, f.srv, f.alice, http.MethodDelete, path+"/"+sm.ID, nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 	assert.Equal(t, ScheduledMessagePending, f.row(t, f.bob, sm.ID).Status)
@@ -258,7 +272,8 @@ func TestScheduledSend_DM_SendNowAndDismiss(t *testing.T) {
 
 	path := scheduledConversationPath(key) + "/" + missed.ID
 	rec := doRequestAsUser(t, f.srv, f.alice, http.MethodPost, path+"/send-now", nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code, "not a participant")
+	assert.Equal(t, http.StatusNotFound, rec.Code, "not a participant")
+	requireLiveSendAnswer(t, f.srv, f.alice, key, rec)
 	rec = doRequestAsUser(t, f.srv, f.bob, http.MethodPost, path+"/send-now", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	time.Sleep(time.Until(f.row(t, f.bob, missed.ID).FireAt))
@@ -480,6 +495,31 @@ func TestScheduledSend_DM_ListRefusalsMatchLiveSend(t *testing.T) {
 			map[string]interface{}{"content": "hi"})
 		assert.Equal(t, live.Code, list.Code, key)
 		assert.Equal(t, live.Body.String(), list.Body.String(), key)
-		assert.Contains(t, []int{http.StatusForbidden, http.StatusBadRequest}, list.Code)
+		assert.Contains(t, []int{http.StatusNotFound, http.StatusBadRequest}, list.Code)
 	}
+}
+
+// The scheduled DM list refuses a non-participant with the reason logged
+// against the route that was called.
+func TestScheduledSend_DMListRefusalLogsItsRoute(t *testing.T) {
+	logs := captureSlog(t)
+	f := newScheduledSendFixture(t)
+	key := scheduledDMKey(t, "agent", f.agent.ID, "user", f.bob.ID)
+	path := scheduledConversationPath(key)
+
+	logs.Reset()
+	rec := doRequestAsUser(t, f.srv, f.alice, http.MethodGet, path, nil)
+	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+
+	var line string
+	for _, l := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(l, "reference refused") {
+			line = l
+		}
+	}
+	require.NotEmpty(t, line, "the refusal is logged")
+	assert.Contains(t, line, "not a participant of this DM")
+	assert.Contains(t, line, path, "the log names the route that was called")
+	assert.NotContains(t, line, "/messages")
+	assert.NotContains(t, rec.Body.String(), "participant", "the response carries no reason")
 }

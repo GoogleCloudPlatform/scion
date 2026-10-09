@@ -29,7 +29,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitsession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionaudit"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationadoption"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entitlementbinding"
@@ -824,44 +823,6 @@ func init() {
 	conversationparticipantDescID := conversationparticipantFields[0].Descriptor()
 	// conversationparticipant.DefaultID holds the default value on creation for the id field.
 	conversationparticipant.DefaultID = conversationparticipantDescID.Default.(func() uuid.UUID)
-	decisionauditFields := schema.DecisionAudit{}.Fields()
-	_ = decisionauditFields
-	// decisionauditDescTimestamp is the schema descriptor for timestamp field.
-	decisionauditDescTimestamp := decisionauditFields[1].Descriptor()
-	// decisionaudit.DefaultTimestamp holds the default value on creation for the timestamp field.
-	decisionaudit.DefaultTimestamp = decisionauditDescTimestamp.Default.(func() time.Time)
-	// decisionauditDescPrincipalKind is the schema descriptor for principal_kind field.
-	decisionauditDescPrincipalKind := decisionauditFields[2].Descriptor()
-	// decisionaudit.PrincipalKindValidator is a validator for the "principal_kind" field. It is called by the builders before save.
-	decisionaudit.PrincipalKindValidator = decisionauditDescPrincipalKind.Validators[0].(func(string) error)
-	// decisionauditDescPrincipalID is the schema descriptor for principal_id field.
-	decisionauditDescPrincipalID := decisionauditFields[3].Descriptor()
-	// decisionaudit.PrincipalIDValidator is a validator for the "principal_id" field. It is called by the builders before save.
-	decisionaudit.PrincipalIDValidator = decisionauditDescPrincipalID.Validators[0].(func(string) error)
-	// decisionauditDescResourceType is the schema descriptor for resource_type field.
-	decisionauditDescResourceType := decisionauditFields[7].Descriptor()
-	// decisionaudit.ResourceTypeValidator is a validator for the "resource_type" field. It is called by the builders before save.
-	decisionaudit.ResourceTypeValidator = decisionauditDescResourceType.Validators[0].(func(string) error)
-	// decisionauditDescPermission is the schema descriptor for permission field.
-	decisionauditDescPermission := decisionauditFields[9].Descriptor()
-	// decisionaudit.PermissionValidator is a validator for the "permission" field. It is called by the builders before save.
-	decisionaudit.PermissionValidator = decisionauditDescPermission.Validators[0].(func(string) error)
-	// decisionauditDescResult is the schema descriptor for result field.
-	decisionauditDescResult := decisionauditFields[10].Descriptor()
-	// decisionaudit.ResultValidator is a validator for the "result" field. It is called by the builders before save.
-	decisionaudit.ResultValidator = decisionauditDescResult.Validators[0].(func(string) error)
-	// decisionauditDescReason is the schema descriptor for reason field.
-	decisionauditDescReason := decisionauditFields[11].Descriptor()
-	// decisionaudit.ReasonValidator is a validator for the "reason" field. It is called by the builders before save.
-	decisionaudit.ReasonValidator = decisionauditDescReason.Validators[0].(func(string) error)
-	// decisionauditDescSampled is the schema descriptor for sampled field.
-	decisionauditDescSampled := decisionauditFields[16].Descriptor()
-	// decisionaudit.DefaultSampled holds the default value on creation for the sampled field.
-	decisionaudit.DefaultSampled = decisionauditDescSampled.Default.(bool)
-	// decisionauditDescID is the schema descriptor for id field.
-	decisionauditDescID := decisionauditFields[0].Descriptor()
-	// decisionaudit.DefaultID holds the default value on creation for the id field.
-	decisionaudit.DefaultID = decisionauditDescID.Default.(func() uuid.UUID)
 	delegationadoptionFields := schema.DelegationAdoption{}.Fields()
 	_ = delegationadoptionFields
 	// delegationadoptionDescCohortID is the schema descriptor for cohort_id field.

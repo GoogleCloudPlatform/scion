@@ -239,8 +239,7 @@ func (s *Server) softDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 // (hardDeleteAgentTx) and the rollback of a committed create
 // (compensateAgentCreate) run it, so a hook registered for hard delete also
 // runs when a create is rolled back. The hooks run when rowRemoved is true
-// or anything was deactivated; a repeated rollback that finds nothing left
-// to change runs none. label prefixes store errors; a hook error is
+// or anything was deactivated. label prefixes store errors; a hook error is
 // returned as is.
 func (s *Server) agentHardDeleteWork(ctx context.Context, tx store.Store, a *store.Agent, actor AuditActor, d store.Deactivation, label string, rowRemoved bool) (edges, assignments int, err error) {
 	edges, err = tx.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, a.ID, d)
@@ -463,11 +462,14 @@ func delegatorLive(ctx context.Context, tx store.Store, delegatorType, delegator
 	}
 }
 
-// reincarnateAuthority is the authority a role-changing reincarnation by
-// another principal re-records: a new delegation edge from the requester,
-// with the requester's frozen provenance and ceiling. nil for a
-// self-reincarnation and for any reincarnation that keeps the role, which
-// keep the existing edge unchanged (ptone/scion#3762).
+// reincarnateAuthority is the authority a reincarnation by another
+// principal re-records: a new delegation edge from the requester, with the
+// requester's frozen provenance and ceiling. It is set for a role-changing
+// reincarnation, and for a user's reincarnation that keeps the role of an
+// agent whose own edge is missing or unrecorded, or whose chain has an
+// unrecorded hop (ptone/scion#3948), where Role is the stored role. nil for a
+// self-reincarnation and for any other reincarnation that keeps the role,
+// which keep the existing edge unchanged (ptone/scion#3762).
 type reincarnateAuthority struct {
 	DelegatorType string
 	DelegatorID   string

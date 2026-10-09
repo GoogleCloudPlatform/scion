@@ -437,13 +437,12 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 // A NEW fault is a CRITICAL audit/logging warning. Its effect on Hub service
 // availability is degraded-but-serving: these keys are outside the availability-
-// failure set, and readiness remains independent. Legacy historical drops/close
-// stay separate. No sink call or positive persistence proof is used here.
+// failure set, and readiness remains independent. No legacy writer health is
+// reported. No sink call or positive persistence proof is used here.
 func (s *Server) checkDecisionAuditHealth(checks map[string]string) {
 	if s.decisionAuditRouter == nil {
 		return
 	}
-	newHealth, legacyHealth := s.decisionAuditRouter.healthProjection()
+	newHealth := s.decisionAuditRouter.healthProjection()
 	checks[decisionAuditNewHealthKey] = newHealth
-	checks[decisionAuditLegacyHealthKey] = legacyHealth
 }

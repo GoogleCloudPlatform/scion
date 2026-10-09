@@ -32,6 +32,7 @@ func TestArtifactsResolve_AbsentFieldsTakeDefaults(t *testing.T) {
 		DefaultRetentionDays: 0,
 		LinkDefaultTTLHours:  168,
 		LinkMaxTTLHours:      720,
+		GCGraceHours:         168,
 
 		RemoteImagesEnabled:      true,
 		RemoteImageMaxCount:      32,
@@ -62,8 +63,8 @@ func TestParseArtifactsDoc(t *testing.T) {
 		{name: "empty object", raw: `{}`, want: DefaultArtifactsConfig()},
 		{
 			name: "every field set",
-			raw:  `{"enabled":false,"max_file_bytes":1024,"max_bundle_bytes":4096,"max_files":3,"default_retention_days":30,"link_default_ttl_hours":24,"link_max_ttl_hours":48,"remote_images_enabled":false,"remote_image_max_count":3,"remote_image_max_bytes":512,"remote_image_fetch_timeout_s":3,"remote_image_total_budget_s":9}`,
-			want: ArtifactsConfig{Enabled: false, MaxFileBytes: 1024, MaxBundleBytes: 4096, MaxFiles: 3, DefaultRetentionDays: 30, LinkDefaultTTLHours: 24, LinkMaxTTLHours: 48,
+			raw:  `{"enabled":false,"max_file_bytes":1024,"max_bundle_bytes":4096,"max_files":3,"default_retention_days":30,"link_default_ttl_hours":24,"link_max_ttl_hours":48,"gc_grace_hours":72,"remote_images_enabled":false,"remote_image_max_count":3,"remote_image_max_bytes":512,"remote_image_fetch_timeout_s":3,"remote_image_total_budget_s":9}`,
+			want: ArtifactsConfig{Enabled: false, MaxFileBytes: 1024, MaxBundleBytes: 4096, MaxFiles: 3, DefaultRetentionDays: 30, LinkDefaultTTLHours: 24, LinkMaxTTLHours: 48, GCGraceHours: 72,
 				RemoteImagesEnabled: false, RemoteImageMaxCount: 3, RemoteImageMaxBytes: 512, RemoteImageFetchTimeoutS: 3, RemoteImageTotalBudgetS: 9},
 		},
 		{
@@ -200,6 +201,22 @@ func TestValidateArtifactsCrossField(t *testing.T) {
 	for _, raw := range []string{`{}`, `{"max_files":10}`, `{"max_file_bytes":1048576}`, `{"remote_images_enabled":false}`} {
 		if errs := Validate("artifacts", json.RawMessage(raw)); len(errs) != 0 {
 			t.Errorf("Validate(%s) = %v", raw, errs)
+		}
+	}
+}
+
+// TestArtifactsGCGrace: gc_grace_hours defaults to 168 and may not go
+// below 24.
+func TestArtifactsGCGrace(t *testing.T) {
+	for raw, want := range map[string]int{`{}`: 168, `{"gc_grace_hours": 24}`: 24, `{"gc_grace_hours": 500}`: 500} {
+		c, err := ParseArtifactsDoc([]byte(raw))
+		if err != nil || c.GCGraceHours != want {
+			t.Errorf("%s: %d %v, want %d", raw, c.GCGraceHours, err, want)
+		}
+	}
+	for _, raw := range []string{`{"gc_grace_hours": 23}`, `{"gc_grace_hours": 0}`, `{"gc_grace_hours": -5}`} {
+		if c, err := ParseArtifactsDoc([]byte(raw)); err == nil || !c.Malformed {
+			t.Errorf("%s accepted: %+v", raw, c)
 		}
 	}
 }

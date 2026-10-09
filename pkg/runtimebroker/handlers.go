@@ -41,7 +41,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -557,9 +556,10 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	if projectID := query.Get("projectId"); projectID != "" {
 		filter["scion.project_id"] = projectID
 	}
-	if status := query.Get("status"); status != "" {
-		filter["status"] = status
-	}
+	// The status query matches the agent's Phase after listing. It is not
+	// a runtime label filter: containers carry no status label, so passing
+	// it to the runtimes would match nothing (ptone/scion#3020).
+	status := query.Get("status")
 
 	agents, err := s.manager.List(ctx, filter)
 	if err != nil {
@@ -596,6 +596,16 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 				agents = append(agents, ag)
 			}
 		}
+	}
+
+	if status != "" {
+		matched := make([]api.AgentInfo, 0, len(agents))
+		for _, ag := range agents {
+			if strings.EqualFold(ag.Phase, status) {
+				matched = append(matched, ag)
+			}
+		}
+		agents = matched
 	}
 
 	// Convert to API response format
@@ -1630,7 +1640,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent's files belong to another run",
 					"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name,
 					"run_id", opts.RunID, "files_run_id", owner)
-			} else if _, cleanupErr := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); cleanupErr != nil {
+			} else if _, cleanupErr := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); cleanupErr != nil && !errors.Is(cleanupErr, agent.ErrAgentProjectUnresolved) {
 				s.agentLifecycleLog.Warn("Failed to clean up agent files after start failure",
 					"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name, "error", cleanupErr)
 			} else {
@@ -1710,11 +1720,6 @@ var errInvalidWorkspaceDir = errors.New("invalid workspace directory")
 // (ptone/scion#3422).
 var errWorkspaceStorageUnconfigured = errors.New("storage bucket not configured for workspace bootstrap")
 
-// syncWorkspaceFromGCS downloads a workspace upload (the create-time
-// bootstrap and handleWorkspaceApply, through Server.workspaceDownloader);
-// a variable so tests can substitute a fake for real GCS.
-var syncWorkspaceFromGCS = gcp.SyncFromGCS
-
 // workspaceStorageUnconfiguredMessage is the user-facing text for
 // errWorkspaceStorageUnconfigured.
 const workspaceStorageUnconfiguredMessage = "Cannot download the uploaded workspace: the create request names no storage bucket and this runtime broker has no storage bucket configured. " +
@@ -1728,6 +1733,15 @@ const (
 	opDownloadWorkspace  = "download workspace from GCS"
 )
 
+// opValidateWorkspaceDir is the op logged when the GCS workspace bootstrap
+// directory fails validation. The client gets invalidWorkspaceDirMessage
+// (400), without the validation error, which names the broker's workspace
+// path; that error is logged at the broker (ptone/scion#3855).
+const opValidateWorkspaceDir = "validate workspace directory"
+
+// invalidWorkspaceDirMessage is the client text for errInvalidWorkspaceDir.
+const invalidWorkspaceDirMessage = "Invalid workspace directory"
+
 // workspaceBootstrapFailed logs a runtime failure of the GCS workspace
 // bootstrap step op and returns downloadWorkspaceFromGCS's error triple for
 // it: the attempt status, the fixed client text, and cause wrapped for span
@@ -1739,9 +1753,15 @@ func (s *Server) workspaceBootstrapFailed(req CreateAgentRequest, op string, cau
 
 // logWorkspaceBootstrapFailure records a GCS workspace bootstrap failure's
 // cause at the broker, which the client text leaves out. It names the
-// agent, project and run, never the request's credentials.
+// agent, project and run, never the request's credentials. An invalid
+// workspace directory is a 400 for the request, so it is logged at Warn;
+// every other step failure is logged at Error.
 func (s *Server) logWorkspaceBootstrapFailure(req CreateAgentRequest, op string, cause error) {
-	s.agentLifecycleLog.Error("GCS workspace bootstrap failed", "op", op,
+	level := slog.LevelError
+	if op == opValidateWorkspaceDir {
+		level = slog.LevelWarn
+	}
+	s.agentLifecycleLog.Log(context.Background(), level, "GCS workspace bootstrap failed", "op", op,
 		"agent_id", req.ID, "project_id", req.ProjectID, "run_id", req.RunID, "error", cause)
 }
 
@@ -1889,7 +1909,8 @@ func (s *Server) resolveGCSWorkspaceDir(req CreateAgentRequest) (resolvedDir str
 	// returns, not the original join.
 	resolvedWorkspaceDir, verr := scionrt.ValidateWorkspaceSource(workspaceDir, workspaceRoot)
 	if verr != nil {
-		return "", "invalid workspace directory", "Invalid workspace directory: " + verr.Error(),
+		s.logWorkspaceBootstrapFailure(req, opValidateWorkspaceDir, verr)
+		return "", "invalid workspace directory", invalidWorkspaceDirMessage,
 			fmt.Errorf("%w: %w", errInvalidWorkspaceDir, verr)
 	}
 	return resolvedWorkspaceDir, "", "", nil
@@ -2884,12 +2905,13 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	// Resolve saved profile for runtime selection, and re-resolve the
 	// manager against it. This resolution is the authoritative one for what
 	// actually starts, so the hub-default passthrough re-check runs again
-	// here (recheckHubDefaultPassthrough), and so does the Kubernetes/"block"
-	// rejection (rejectKubernetesBlock, start_context.go, ptone/scion#2328):
-	// a saved profile buildStartContext could not see may resolve to
-	// Kubernetes only at this later point. This runs before any side effect
-	// below (applyInlineConfigUpdate's scion-agent.json write), so a
-	// rejection here does not leave a partial update applied.
+	// here (recheckHubDefaultPassthrough), and so do the Kubernetes "assign"
+	// and "block" consistency checks (rejectKubernetesAssignRuntimeChange,
+	// rejectKubernetesBlockRuntimeChange): a saved profile buildStartContext
+	// could not see may resolve to Kubernetes only at this later point.
+	// This runs before any side effect below (applyInlineConfigUpdate's
+	// scion-agent.json write), so a rejection here does not leave a partial
+	// update applied.
 	if opts.ProjectPath != "" {
 		opts.Profile = agent.GetSavedProfile(id, opts.ProjectPath)
 	}
@@ -2915,7 +2937,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		s.writeStartContextError(w, sce, "start agent")
 		return
 	}
-	if sce := rejectKubernetesBlock(resolvedRuntimeType, opts.Env["SCION_METADATA_MODE"]); sce != nil {
+	if sce := rejectKubernetesBlockRuntimeChange(runtimeOpts, sc.BlockSelection, resolvedRuntimeType, func() dispatchProfileSelection {
+		return s.resolveDispatchProfileSelection(runtimeOpts)
+	}); sce != nil {
 		s.writeStartContextError(w, sce, "start agent")
 		return
 	}
@@ -3749,6 +3773,14 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		}
 		projectPath = match.entry.ProjectPath
 	}
+	// The runtime the stop below acts on. Without a saved profile the start
+	// is pinned to it rather than to the project's active profile, so a
+	// restart does not stop the agent on one runtime and start it on
+	// another.
+	var pin pinnedRuntime
+	if matchErr == nil && match.containerID != "" && match.manager != nil {
+		pin = pinnedRuntimeOf(match.manager, match.runtime, s.runtimeOfManager(match.manager))
+	}
 
 	sc, err := s.buildStartContext(ctx, startContextInputs{
 		Name:                     agentName,
@@ -3763,9 +3795,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		// The Hub-supplied project ID (the request's projectId) locates a
 		// shared-workspace agent's broker-side external state root, as on
 		// start; never the project-id marker inside the workspace.
-		ProjectID:   projectID,
-		HTTPRequest: r,
-		Operation:   opHTTPRestart,
+		ProjectID:     projectID,
+		HTTPRequest:   r,
+		Operation:     opHTTPRestart,
+		PinnedRuntime: pin,
 	})
 	if err != nil {
 		s.writeStartContextError(w, err, "restart agent")
@@ -3797,7 +3830,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// agent-info.json by opts.Name (the container's name). If they differ
 	// the fallback cannot fire and the 503 is returned, which fails safe.
 	// buildStartContext already logged any fallback at Warn; Debug here.
-	mgr, resolvedRuntimeType, err := s.resolveManagerForOptsStrict(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned), slog.LevelDebug)
+	mgr, resolvedRuntimeType, err := s.resolveExistingAgentManager(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned), slog.LevelDebug, pin)
 	if err != nil {
 		writeSavedProfileUnresolved(w, err)
 		return
@@ -3809,7 +3842,9 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		s.writeStartContextError(w, sce, "restart agent")
 		return
 	}
-	if sce := rejectKubernetesBlock(resolvedRuntimeType, opts.Env["SCION_METADATA_MODE"]); sce != nil {
+	if sce := rejectKubernetesBlockRuntimeChange(runtimeOpts, sc.BlockSelection, resolvedRuntimeType, func() dispatchProfileSelection {
+		return s.resolveDispatchProfileSelection(runtimeOpts)
+	}); sce != nil {
 		s.writeStartContextError(w, sce, "restart agent")
 		return
 	}
@@ -5868,6 +5903,41 @@ func (s *Server) resolveRuntimeNameForOpts(opts api.StartOptions) string {
 func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, string) {
 	mgr, runtimeType, _ := s.resolveManagerForOptsStrict(opts, profileLenient, slog.LevelWarn)
 	return mgr, runtimeType
+}
+
+// pinnedRuntime is the runtime an existing agent's container was found
+// on, as a manager and its runtime name. The zero value pins nothing.
+type pinnedRuntime struct {
+	mgr  agent.Manager
+	name string
+}
+
+// pinnedRuntimeOf returns the pin for mgr, named after the first non-nil
+// runtime given; the zero value when none is.
+func pinnedRuntimeOf(mgr agent.Manager, runtimes ...scionrt.Runtime) pinnedRuntime {
+	for _, rt := range runtimes {
+		if rt != nil {
+			return pinnedRuntime{mgr: mgr, name: rt.Name()}
+		}
+	}
+	return pinnedRuntime{}
+}
+
+// resolveExistingAgentManager is resolveManagerForOptsStrict for an
+// existing agent's start or restart. When the agent has no saved or
+// provisioned profile (opts.Profile is empty) and its container was found
+// on a runtime (pin), that runtime is used instead of the project's active
+// profile, so the agent starts where it was found. A forced runtime
+// (ServerConfig.ForceRuntime) still takes precedence when it resolves to a
+// registered runtime; one that resolves to none is ignored by
+// resolveManagerForOptsStrict, so it does not drop the pin either.
+func (s *Server) resolveExistingAgentManager(opts api.StartOptions, mode profileResolution, fallbackLevel slog.Level, pin pinnedRuntime) (agent.Manager, string, error) {
+	if opts.Profile == "" && pin.mgr != nil && pin.name != "" {
+		if _, forced := s.forcedRuntime(); !forced {
+			return pin.mgr, pin.name, nil
+		}
+	}
+	return s.resolveManagerForOptsStrict(opts, mode, fallbackLevel)
 }
 
 // profileResolution selects how resolveManagerForOptsStrict treats a

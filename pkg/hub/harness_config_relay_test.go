@@ -57,6 +57,9 @@ var harnessConfigRefusals = []struct {
 }{
 	{name: "422 unusable", status: http.StatusUnprocessableEntity, code: "harness_config_unusable", message: harnessUnusableMessage},
 	{name: "403 policy", status: http.StatusForbidden, code: "forbidden", message: harnessPolicyMessage},
+	// A broker 400 validation_error is relayed by the same helper
+	// (ptone/scion#2666).
+	{name: "400 validation", status: http.StatusBadRequest, code: "validation_error", message: brokerValidationMessage},
 }
 
 // assertHarnessConfigRelayed asserts rec carries the broker's status, code
@@ -95,6 +98,9 @@ func TestDispatchCreateErrorResponse_OtherBrokerErrorsStay502(t *testing.T) {
 		{name: "403 without broker envelope", err: &brokerStatusError{StatusCode: http.StatusForbidden, Body: "<html>Forbidden</html>"}},
 		{name: "422 other code", err: brokerHarnessConfigErr(http.StatusUnprocessableEntity, "validation_error", "boom")},
 		{name: "403 unusable code", err: brokerHarnessConfigErr(http.StatusForbidden, "harness_config_unusable", "boom")},
+		{name: "400 other code", err: brokerHarnessConfigErr(http.StatusBadRequest, "bad_request", "boom")},
+		{name: "400 without broker envelope", err: &brokerStatusError{StatusCode: http.StatusBadRequest, Body: "<html>Bad Request</html>"}},
+		{name: "500 validation_error", err: brokerHarnessConfigErr(http.StatusInternalServerError, "validation_error", "boom")},
 		{name: "transport error", err: errors.New("dial tcp: connection refused")},
 	}
 	for _, tc := range tests {

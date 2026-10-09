@@ -243,6 +243,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		ctx = api.ContextWithBrokerMode(ctx)
 	}
 	if opts.GitClone != nil {
+		// Presence only: clone_depth is applied to opts.GitClone below, so
+		// do not read Depth from the ctx copy.
 		ctx = api.ContextWithGitClone(ctx, opts.GitClone)
 	}
 	if opts.FreshProvision {
@@ -282,6 +284,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	agentDir, agentHome, agentWorkspace, finalScionCfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "", opts.Branch, opts.Workspace, startInlineConfig)
 	if err != nil {
 		return nil, err
+	}
+	if opts.FreshProvision {
+		recordNFSAgentDir(agentDir, opts.Name)
 	}
 	// Empty-per-agent (design #2703): the request's mode, or the mode
 	// persisted at provision, so a start that lost it (e.g. a dropped or
@@ -545,6 +550,33 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if finalScionCfg != nil && finalScionCfg.User != "" {
 		unixUsername = finalScionCfg.User
 		util.Debugf("user resolution: from ScionConfig user=%s", unixUsername)
+	}
+
+	// clone_depth for a clone-per-agent start: the template/agent value,
+	// else the profile's (the one named for this start, else the one the
+	// agent was created with, else the active profile). Unset keeps the
+	// depth sent with the request.
+	if opts.GitClone != nil {
+		cdProfile := opts.Profile
+		if cdProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
+			cdProfile = finalScionCfg.Info.Profile
+		}
+		var cdIn cloneDepthInput
+		if finalScionCfg != nil {
+			cdIn.Template = finalScionCfg.CloneDepth
+		}
+		cdIn.Profile, cdIn.ProfileSource = settings.ResolveCloneDepthWithSource(cdProfile)
+		if opts.Env == nil {
+			opts.Env = make(map[string]string)
+		}
+		gc, err := applyCloneDepth(opts.GitClone, opts.Env, cdIn)
+		if err != nil {
+			return nil, err
+		}
+		if gc != opts.GitClone && gc.Depth != nil {
+			slog.Debug("Start: resolved clone_depth", "agent", opts.Name, "depth", *gc.Depth)
+		}
+		opts.GitClone = gc
 	}
 
 	var warnings []string
@@ -1870,6 +1902,16 @@ authDone:
 					claimSharedDirNames = append(claimSharedDirNames, name)
 				}
 			}
+			if agentDirName != "" && mount.PVClaimName != "" {
+				if keep, reason := nfsKeepSharedCheckout(opts.FreshProvision, agentDir, resolvedWorkspace, agentDirName); keep {
+					// The agent keeps the layout and mode it had before
+					// ptone/scion#3998, so its work stays where it is.
+					slog.Info("workspace_storage nfs: "+reason, "agent", opts.Name)
+					agentDirName, agentBranch = "", ""
+					opts.Env["SCION_WORKSPACE_MODE"] = string(store.SharingModeSharedPlain)
+					agentEnv = withEnvValue(agentEnv, "SCION_WORKSPACE_MODE", string(store.SharingModeSharedPlain))
+				}
+			}
 			if emptyAgentDirName != "" {
 				// Empty-per-agent: only the agent's own directory is ever
 				// mounted, never the project's workspace path resolved
@@ -1890,6 +1932,9 @@ authDone:
 			}
 			if err != nil {
 				return nil, err
+			}
+			if nfsAgentDirName != "" && !nfsAgentDirEmpty {
+				recordNFSAgentDir(agentDir, opts.Name)
 			}
 			if worktreeName != "" && mount.PVClaimName != "" {
 				worktreePreCreated, err := ensureNFSWorktreeLeaf(m.Runtime.Name(), resolvedWorkspace, mount.PVClaimName, worktreeName)
@@ -2050,6 +2095,13 @@ authDone:
 	// request or template env is replaced.
 	agentEnv = withLaunchIDEnv(agentEnv, runID)
 
+	// Write the full task to the agent home, and pass a short pointer to
+	// it instead when the task is too large to pass inline.
+	task, err = deliverTaskFile(agentHome, task)
+	if err != nil {
+		return nil, err
+	}
+
 	runCfg := runtime.RunConfig{
 		Name:                 containerName(projectName, opts.Name),
 		Template:             template,
@@ -2157,6 +2209,7 @@ authDone:
 			}
 			return nil
 		}(),
+		KubernetesBlockIdentity: opts.KubernetesBlockIdentity != nil,
 		Kubernetes: func() *api.KubernetesConfig {
 			// Start from the template/agent config's Kubernetes settings
 			// (namespace, resources, node selector, etc.), then ALWAYS
@@ -2207,6 +2260,17 @@ authDone:
 					k8sCfg = &api.KubernetesConfig{}
 				}
 				k8sCfg.ServiceAccountName = opts.ResolvedKubernetesServiceAccountName
+			}
+			// GCP identity "block" (ptone/scion#4034): the pod runs as the
+			// block ServiceAccount, or as the namespace's default when none
+			// is configured. Either way it replaces any template or
+			// persisted serviceAccountName, which could name a KSA bound to
+			// a GCP service account.
+			if opts.KubernetesBlockIdentity != nil {
+				if k8sCfg == nil {
+					k8sCfg = &api.KubernetesConfig{}
+				}
+				k8sCfg.ServiceAccountName = opts.KubernetesBlockIdentity.ServiceAccountName
 			}
 			return k8sCfg
 		}(),

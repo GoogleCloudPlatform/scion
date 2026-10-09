@@ -783,68 +783,17 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	runtimeLog.Info("Pre-create setup complete", "agent", config.Name, "namespace", namespace,
 		"phase", "pre-create", "elapsed_ms", time.Since(preCreateStart).Milliseconds())
 
-	// The pod create's checkpoint comes before the NFS provisioning lock
-	// below, not inside it: it can block for as long as the launch deadline
-	// while the Hub is unreachable, and other agents of the project would
-	// wait on the lock meanwhile. Between here and the pod create there is
-	// only local work (the lock and the pod spec), no API object creates.
+	// The pod create's checkpoint can block for as long as the launch
+	// deadline while the Hub is unreachable. Between here and the pod create
+	// there is only local work (the pod spec), no API object creates.
 	if err := hooks.checkpoint(ctx, CheckpointStepPodCreate); err != nil {
 		// The launch is over: create nothing further. The secrets this
 		// launch created are removed by its cleanup, by UID.
 		return "", err
 	}
 
-	// --- N2-2b: Per-project advisory lock for NFS init-container provisioning ---
-	//
-	// When backend=nfs with a bound PV claim, acquire the per-project lock
-	// before building the pod spec (F-111: no longer gated on a git clone
-	// being configured — see nfsInitContainerInjected). This prevents
-	// concurrent first-provision corruption (risk RN1, design §7):
-	//   - Lock winner: injects the provisioning init container (existing N2-2 script)
-	//   - Lock loser:  injects a wait-for-sentinel init container (polls for
-	//                  .scion-provisioned without provisioning)
-	//
-	// The lock is held until waitForPodReady returns (all init containers
-	// complete), mirroring N1-4's "hold during clone" lifetime. On error
-	// paths the deferred release ensures no lock leak.
-	var nfsProvisionLockRelease func() error
-	if nfsInitContainerInjected(config) {
-		if config.Locker != nil {
-			objID := store.StableProjectHash(config.ProjectID)
-			acquired, release, err := config.Locker.TryAdvisoryLockObject(
-				ctx, store.LockWorkspaceProvision, objID,
-			)
-			if err != nil {
-				return "", fmt.Errorf("NFS provision advisory lock for project %s: %w", config.ProjectID, err)
-			}
-			nfsProvisionLockRelease = release
-			if !acquired {
-				// Another node is currently provisioning this project's workspace.
-				// buildPod will inject a wait-for-sentinel init container instead
-				// of the cloning one.
-				config.nfsProvisionLockLost = true
-				runtimeLog.Info("NFS provision lock held by another node — pod will wait for sentinel",
-					"agent", config.Name, "project_id", config.ProjectID, "phase", "nfs-lock")
-			} else {
-				runtimeLog.Info("NFS provision lock acquired — pod will clone workspace",
-					"agent", config.Name, "project_id", config.ProjectID, "phase", "nfs-lock")
-			}
-		} else {
-			runtimeLog.Warn("No advisory locker available — NFS provisioning is unguarded (sentinel-only)",
-				"agent", config.Name, "project_id", config.ProjectID, "phase", "nfs-lock")
-		}
-	}
-	// Deferred release: held through pod creation + waitForPodReady (init
-	// containers complete), then released. Safe to call even when nil.
-	defer func() {
-		if nfsProvisionLockRelease != nil {
-			if err := nfsProvisionLockRelease(); err != nil {
-				runtimeLog.Error("Failed to release NFS provision lock", "error", err,
-					"agent", config.Name, "project_id", config.ProjectID)
-			}
-		}
-	}()
-
+	// NFS workspace provisioning is serialized by the file lock that
+	// sciontool provision takes on the export, inside the init container.
 	pod, err := r.buildPod(namespace, config)
 	if err != nil {
 		return "", fmt.Errorf("failed to build pod spec: %w", err)
@@ -2101,6 +2050,33 @@ func (r *KubernetesRuntime) ensureProjectRWXClaim(
 	return nil
 }
 
+// KubernetesWorkloadIdentityNodeLabel is the GKE node label set to "true"
+// on nodes in GKE Workload Identity node pools.
+// A GCP identity "block" pod requires it as a node selector: on a node pool
+// without Workload Identity a pod can use the node's own service account.
+const KubernetesWorkloadIdentityNodeLabel = "iam.gke.io/gke-metadata-server-enabled"
+
+// applyKubernetesBlockIdentity applies the GCP identity "block" pod settings
+// (ptone/scion#4034): the Kubernetes API token is not mounted, and the pod
+// may only schedule onto Workload Identity nodes. The node selector is
+// merged into a copy of any existing one, overriding a conflicting value for
+// the Workload Identity label. The ServiceAccount is set by the caller.
+//
+// This does not remove the pod's GCP identity: on a Workload Identity node
+// pool every ServiceAccount receives a federated token. It is zero-privilege
+// only while no IAM grant names the ServiceAccount, its namespace, or the
+// cluster or pool principal sets (see the Kubernetes identity docs).
+func applyKubernetesBlockIdentity(pod *corev1.Pod) {
+	automount := false
+	pod.Spec.AutomountServiceAccountToken = &automount
+	selector := make(map[string]string, len(pod.Spec.NodeSelector)+1)
+	for k, v := range pod.Spec.NodeSelector {
+		selector[k] = v
+	}
+	selector[KubernetesWorkloadIdentityNodeLabel] = "true"
+	pod.Spec.NodeSelector = selector
+}
+
 func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev1.Pod, error) {
 	// Command Resolution — see buildCommonRunArgs for the Docker/Podman
 	// equivalent. No-auth mode builds a raw shell command string to avoid
@@ -2400,6 +2376,24 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		envVars = append(envVars, corev1.EnvVar{Name: "SCION_WORKSPACE_PATH", Value: NFSWorktreeContainerPath(config.NFSWorktreeName)})
 	}
 
+	// Resolve the container's resource requests/limits from the resolved
+	// spec and kubernetes.resources. Default requests fill only resources
+	// with neither a request nor a limit (see buildK8sResourceRequirements).
+	// Resolved here, before de-duplication, so the Go runtime env derived
+	// from the limits below goes through the same de-duplication path.
+	var k8sResources *api.K8sResources
+	if config.Kubernetes != nil {
+		k8sResources = config.Kubernetes.Resources
+	}
+	containerResources, err := buildK8sResourceRequirements(config.Resources, k8sResources)
+	if err != nil {
+		return nil, err
+	}
+
+	// GOMAXPROCS/GOMEMLIMIT from the container limits, added last and only
+	// for names no other source has set (see appendGoRuntimeEnvFromLimits).
+	envVars = appendGoRuntimeEnvFromLimits(envVars, containerResources.Limits)
+
 	// Env vars are assembled above from several sources (harness env, config.Env,
 	// resolved auth, resolved secrets) that can legitimately overlap in name
 	// (e.g. SCION_AGENT_NAME, GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_REGION).
@@ -2605,50 +2599,26 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// select clone-vs-plain-provision behavior, not whether provisioning
 	// happens at all.
 	//
-	// Advisory lock integration (N2-2b, design §7, risk RN1): the Go-side
-	// Run() method acquires a per-project advisory lock (via TryAdvisoryLockObject)
-	// BEFORE reaching this point. The lock result determines the init container
-	// behavior:
-	//   - Lock winner (nfsProvisionLockLost=false): injects the PROVISIONING
-	//     init container that checks the sentinel and provisions (mkdir+chown,
-	//     plus clone when GitCloneForInit is set) if absent (N2-2 script).
-	//   - Lock loser  (nfsProvisionLockLost=true): injects a WAIT-for-sentinel
-	//     init container that polls for .scion-provisioned without cloning.
-	//
-	// When no advisory locker is available (Locker nil / single-node deploy),
-	// nfsProvisionLockLost stays false and the provisioning init container is
-	// injected — the sentinel provides idempotent protection but NOT
-	// cross-node mutual exclusion.
+	// Every pod provisions: the init container checks the sentinel and
+	// provisions (mkdir+chown, plus clone when GitCloneForInit is set) if it
+	// is absent. Concurrent provisioners of the same project are serialized
+	// by the file lock sciontool provision takes on the export; in
+	// worktree-per-agent mode that lock also serializes every worktree add,
+	// and in clone-per-agent mode each pod prepares its own agent directory.
 	if nfsInitContainerInjected(config) {
-		// waitOnly: a broker lock loser waits for the project's sentinel
-		// instead of provisioning. In worktree-per-agent mode every pod
-		// provisions, because each agent adds its own worktree; the
-		// provisioning lock on the export serializes the clone and every
-		// worktree add.
-		// The same holds in clone-per-agent mode, where each pod prepares
-		// its own agent directory.
-		waitOnly := config.nfsProvisionLockLost && !nfsWorktree && !nfsAgentDir
 		// Clone-per-agent: the agent container clones, so the init
 		// container gets no clone settings.
 		initGitClone := config.GitCloneForInit
 		if nfsAgentDir {
 			initGitClone = nil
 		}
-		var initCommand []string
-		if waitOnly {
-			// Lock loser: wait for the sentinel written by the winning node's
-			// provisioning init container. Does NOT provision.
-			initCommand = []string{"sciontool", "provision", "--wait-for-sentinel"}
-		} else {
-			// Lock winner (or no locker available): provision (mkdir+chown,
-			// plus clone if GitCloneForInit is set) if sentinel is absent,
-			// skip if already provisioned. The command is idempotent.
-			// Ownership follows the pod securityContext above: uid is the
-			// RunAsUser the agent runs as, gid is the NFS fsGroup. The
-			// configured NFS uid is not applied to RunAsUser, so it is not
-			// passed here either.
-			initCommand = nfsProvisionCommand(initGitClone, containerUID, fsGroupGID)
-		}
+		// Provision (mkdir+chown, plus clone if GitCloneForInit is set) if
+		// the sentinel is absent, skip if already provisioned. The command
+		// is idempotent. Ownership follows the pod securityContext above:
+		// uid is the RunAsUser the agent runs as, gid is the NFS fsGroup.
+		// The configured NFS uid is not applied to RunAsUser, so it is not
+		// passed here either.
+		initCommand := nfsProvisionCommand(initGitClone, containerUID, fsGroupGID)
 
 		// F-111: shared dirs served from the workspace PVC by subPath
 		// (nfsSharedDirs below) are siblings of the workspace under the
@@ -2703,12 +2673,12 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			Value: config.ProjectID,
 		})
 		// ptone/scion#2990: the container that clones (shared-plain and
-		// worktree-per-agent, not a wait-only one) reads the project's git
-		// token from the same Secret key as the agent container, so it can
-		// clone a private repository. sciontool provision gives it to the
-		// clone command through a credential helper. Without a git token
-		// the env is unchanged.
-		if gitTokenRef != nil && !waitOnly && initGitClone != nil && initGitClone.URL != "" {
+		// worktree-per-agent) reads the project's git token from the same
+		// Secret key as the agent container, so it can clone a private
+		// repository. sciontool provision gives it to the clone command
+		// through a credential helper. Without a git token the env is
+		// unchanged.
+		if gitTokenRef != nil && initGitClone != nil && initGitClone.URL != "" {
 			ref := *gitTokenRef
 			initEnv = append(initEnv, corev1.EnvVar{
 				Name:      provision.GitTokenEnv,
@@ -2755,11 +2725,10 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		// directories itself, or found them with setgid and group write,
 		// agents reach them through their group,
 		// so a chown the export does not allow (root mapped to an anonymous
-		// user) is logged instead of failing the pod. Only the provisioning
-		// (lock-winner) container runs the chown. An env var rather than a
+		// user) is logged instead of failing the pod. An env var rather than a
 		// flag, so an older sciontool simply ignores it and keeps the strict
 		// behavior instead of rejecting an unknown flag.
-		if config.NFSWorkspacePreCreated && !waitOnly {
+		if config.NFSWorkspacePreCreated {
 			initEnv = append(initEnv, corev1.EnvVar{
 				Name:  provision.ChownBestEffortEnv,
 				Value: "1",
@@ -2778,20 +2747,16 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		// (https://docs.cloud.google.com/kubernetes-engine/docs/concepts/autopilot-security,
 		// "Security context and workload identity" — allowed capabilities
 		// include chown/dac_override/fowner; "Autopilot allows running as
-		// root to enable most workloads"). Only the WINNER container needs
-		// this: the wait-for-sentinel (loser) container only os.Stats a
-		// file, so it keeps the minimal, fully-dropped, non-root default.
+		// root to enable most workloads").
 		initSecurityContext := &corev1.SecurityContext{
 			AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+			RunAsUser:                int64Ptr(0),
+			RunAsGroup:               int64Ptr(0),
+			RunAsNonRoot:             boolPtr(false),
 			Capabilities: &corev1.Capabilities{
 				Drop: []corev1.Capability{"ALL"},
+				Add:  []corev1.Capability{"CHOWN", "FOWNER", "DAC_OVERRIDE"},
 			},
-		}
-		if !waitOnly {
-			initSecurityContext.RunAsUser = int64Ptr(0)
-			initSecurityContext.RunAsGroup = int64Ptr(0)
-			initSecurityContext.RunAsNonRoot = boolPtr(false)
-			initSecurityContext.Capabilities.Add = []corev1.Capability{"CHOWN", "FOWNER", "DAC_OVERRIDE"}
 		}
 
 		initContainer := corev1.Container{
@@ -2826,17 +2791,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, extraVolumeMounts...)
 	}
 
-	// Apply resource requests/limits from the resolved spec and
-	// kubernetes.resources. Default requests fill only resources with neither a
-	// request nor a limit (see buildK8sResourceRequirements).
-	var k8sResources *api.K8sResources
-	if config.Kubernetes != nil {
-		k8sResources = config.Kubernetes.Resources
-	}
-	containerResources, err := buildK8sResourceRequirements(config.Resources, k8sResources)
-	if err != nil {
-		return nil, err
-	}
+	// Apply the resource requests/limits resolved above.
 	pod.Spec.Containers[0].Resources = containerResources
 
 	// Process shared directories — mount shared-dir volumes.
@@ -3031,6 +2986,10 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 				})
 			}
 		}
+	}
+
+	if config.KubernetesBlockIdentity {
+		applyKubernetesBlockIdentity(pod)
 	}
 
 	// Priority class: an explicit per-template/agent kubernetes.priorityClassName
@@ -4467,7 +4426,7 @@ func (r *KubernetesRuntime) GetWorkspacePath(ctx context.Context, id string) (st
 // filepath.Join silently collapses ".." segments before Kubernetes' own
 // subPath escape check ever sees the resulting string. A name like
 // "../../<other-project>/workspace" would resolve to another project's real
-// workspace directory; since F-111 gave the winner init container CHOWN/
+// workspace directory; since F-111 gave the provisioning init container CHOWN/
 // FOWNER/DAC_OVERRIDE, that's not just a data leak, it's a cross-project
 // ownership hijack (chown -R -h on someone else's tree). This is defense in
 // depth alongside pkg/agent/shared_dir_storage.go's own validation gate
@@ -4607,7 +4566,7 @@ func nfsInitContainerInjected(config RunConfig) bool {
 // chowns the workspace to this uid so the agent owns what it clones.
 const containerUID int64 = 1000
 
-// nfsProvisionCommand builds the Command slice for the lock-winner init
+// nfsProvisionCommand builds the Command slice for the provisioning init
 // container. It invokes `sciontool provision` with numeric flags for depth
 // and the workspace ownership uid/gid. URL and branch are passed via env vars
 // (nfsProvisionEnv) to prevent shell injection.

@@ -39,7 +39,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitsession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionaudit"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationadoption"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entitlementbinding"
@@ -143,8 +142,6 @@ type Client struct {
 	Conversation *ConversationClient
 	// ConversationParticipant is the client for interacting with the ConversationParticipant builders.
 	ConversationParticipant *ConversationParticipantClient
-	// DecisionAudit is the client for interacting with the DecisionAudit builders.
-	DecisionAudit *DecisionAuditClient
 	// DelegationAdoption is the client for interacting with the DelegationAdoption builders.
 	DelegationAdoption *DelegationAdoptionClient
 	// DelegationEdge is the client for interacting with the DelegationEdge builders.
@@ -279,7 +276,6 @@ func (c *Client) init() {
 	c.ConduitSession = NewConduitSessionClient(c.config)
 	c.Conversation = NewConversationClient(c.config)
 	c.ConversationParticipant = NewConversationParticipantClient(c.config)
-	c.DecisionAudit = NewDecisionAuditClient(c.config)
 	c.DelegationAdoption = NewDelegationAdoptionClient(c.config)
 	c.DelegationEdge = NewDelegationEdgeClient(c.config)
 	c.EntitlementBinding = NewEntitlementBindingClient(c.config)
@@ -445,7 +441,6 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		ConduitSession:                NewConduitSessionClient(cfg),
 		Conversation:                  NewConversationClient(cfg),
 		ConversationParticipant:       NewConversationParticipantClient(cfg),
-		DecisionAudit:                 NewDecisionAuditClient(cfg),
 		DelegationAdoption:            NewDelegationAdoptionClient(cfg),
 		DelegationEdge:                NewDelegationEdgeClient(cfg),
 		EntitlementBinding:            NewEntitlementBindingClient(cfg),
@@ -538,7 +533,6 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		ConduitSession:                NewConduitSessionClient(cfg),
 		Conversation:                  NewConversationClient(cfg),
 		ConversationParticipant:       NewConversationParticipantClient(cfg),
-		DecisionAudit:                 NewDecisionAuditClient(cfg),
 		DelegationAdoption:            NewDelegationAdoptionClient(cfg),
 		DelegationEdge:                NewDelegationEdgeClient(cfg),
 		EntitlementBinding:            NewEntitlementBindingClient(cfg),
@@ -624,19 +618,18 @@ func (c *Client) Use(hooks ...Hook) {
 		c.AllowListEntry, c.ApiKey, c.BrokerDispatch, c.BrokerJoinToken,
 		c.BrokerSecret, c.BrokerSetting, c.BrokerTargetInventory, c.ChatLinkCode,
 		c.ConduitPrincipalEpoch, c.ConduitSession, c.Conversation,
-		c.ConversationParticipant, c.DecisionAudit, c.DelegationAdoption,
-		c.DelegationEdge, c.EntitlementBinding, c.EnvVar, c.ExternalIdentity,
-		c.GCPServiceAccount, c.GitHubResolutionCache, c.GithubInstallation, c.Group,
-		c.GroupMembership, c.HarnessConfig, c.HubSetting, c.IntegrationConfig,
-		c.IntegrationUpdate, c.InviteCode, c.LaunchReaperState, c.LifecycleHook,
-		c.LifecycleHookAgentPhase, c.LimitDefinition, c.MaintenanceOperation,
-		c.MaintenanceOperationRun, c.MembershipLossCheck, c.Message,
-		c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
-		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
-		c.ProjectPreStartHook, c.ProjectSyncState, c.RelayInstance, c.RoleBinding,
-		c.RoleDefinition, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
-		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
-		c.SubscriptionTemplate, c.Template, c.UsageReservation, c.User,
+		c.ConversationParticipant, c.DelegationAdoption, c.DelegationEdge,
+		c.EntitlementBinding, c.EnvVar, c.ExternalIdentity, c.GCPServiceAccount,
+		c.GitHubResolutionCache, c.GithubInstallation, c.Group, c.GroupMembership,
+		c.HarnessConfig, c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate,
+		c.InviteCode, c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
+		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
+		c.MembershipLossCheck, c.Message, c.MessageAddressee, c.MutationAudit,
+		c.NonceCache, c.Notification, c.NotificationSubscription, c.PolicyBinding,
+		c.Project, c.ProjectContributor, c.ProjectPreStartHook, c.ProjectSyncState,
+		c.RelayInstance, c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.Schedule,
+		c.ScheduledEvent, c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry,
+		c.SkillVersion, c.SubscriptionTemplate, c.Template, c.UsageReservation, c.User,
 		c.UserAccessToken, c.UserTerminalWorkspace,
 	} {
 		n.Use(hooks...)
@@ -653,19 +646,18 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.AllowListEntry, c.ApiKey, c.BrokerDispatch, c.BrokerJoinToken,
 		c.BrokerSecret, c.BrokerSetting, c.BrokerTargetInventory, c.ChatLinkCode,
 		c.ConduitPrincipalEpoch, c.ConduitSession, c.Conversation,
-		c.ConversationParticipant, c.DecisionAudit, c.DelegationAdoption,
-		c.DelegationEdge, c.EntitlementBinding, c.EnvVar, c.ExternalIdentity,
-		c.GCPServiceAccount, c.GitHubResolutionCache, c.GithubInstallation, c.Group,
-		c.GroupMembership, c.HarnessConfig, c.HubSetting, c.IntegrationConfig,
-		c.IntegrationUpdate, c.InviteCode, c.LaunchReaperState, c.LifecycleHook,
-		c.LifecycleHookAgentPhase, c.LimitDefinition, c.MaintenanceOperation,
-		c.MaintenanceOperationRun, c.MembershipLossCheck, c.Message,
-		c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
-		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
-		c.ProjectPreStartHook, c.ProjectSyncState, c.RelayInstance, c.RoleBinding,
-		c.RoleDefinition, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
-		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
-		c.SubscriptionTemplate, c.Template, c.UsageReservation, c.User,
+		c.ConversationParticipant, c.DelegationAdoption, c.DelegationEdge,
+		c.EntitlementBinding, c.EnvVar, c.ExternalIdentity, c.GCPServiceAccount,
+		c.GitHubResolutionCache, c.GithubInstallation, c.Group, c.GroupMembership,
+		c.HarnessConfig, c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate,
+		c.InviteCode, c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
+		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
+		c.MembershipLossCheck, c.Message, c.MessageAddressee, c.MutationAudit,
+		c.NonceCache, c.Notification, c.NotificationSubscription, c.PolicyBinding,
+		c.Project, c.ProjectContributor, c.ProjectPreStartHook, c.ProjectSyncState,
+		c.RelayInstance, c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.Schedule,
+		c.ScheduledEvent, c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry,
+		c.SkillVersion, c.SubscriptionTemplate, c.Template, c.UsageReservation, c.User,
 		c.UserAccessToken, c.UserTerminalWorkspace,
 	} {
 		n.Intercept(interceptors...)
@@ -721,8 +713,6 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.Conversation.mutate(ctx, m)
 	case *ConversationParticipantMutation:
 		return c.ConversationParticipant.mutate(ctx, m)
-	case *DecisionAuditMutation:
-		return c.DecisionAudit.mutate(ctx, m)
 	case *DelegationAdoptionMutation:
 		return c.DelegationAdoption.mutate(ctx, m)
 	case *DelegationEdgeMutation:
@@ -4028,139 +4018,6 @@ func (c *ConversationParticipantClient) mutate(ctx context.Context, m *Conversat
 		return (&ConversationParticipantDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown ConversationParticipant mutation op: %q", m.Op())
-	}
-}
-
-// DecisionAuditClient is a client for the DecisionAudit schema.
-type DecisionAuditClient struct {
-	config
-}
-
-// NewDecisionAuditClient returns a client for the DecisionAudit from the given config.
-func NewDecisionAuditClient(c config) *DecisionAuditClient {
-	return &DecisionAuditClient{config: c}
-}
-
-// Use adds a list of mutation hooks to the hooks stack.
-// A call to `Use(f, g, h)` equals to `decisionaudit.Hooks(f(g(h())))`.
-func (c *DecisionAuditClient) Use(hooks ...Hook) {
-	c.hooks.DecisionAudit = append(c.hooks.DecisionAudit, hooks...)
-}
-
-// Intercept adds a list of query interceptors to the interceptors stack.
-// A call to `Intercept(f, g, h)` equals to `decisionaudit.Intercept(f(g(h())))`.
-func (c *DecisionAuditClient) Intercept(interceptors ...Interceptor) {
-	c.inters.DecisionAudit = append(c.inters.DecisionAudit, interceptors...)
-}
-
-// Create returns a builder for creating a DecisionAudit entity.
-func (c *DecisionAuditClient) Create() *DecisionAuditCreate {
-	mutation := newDecisionAuditMutation(c.config, OpCreate)
-	return &DecisionAuditCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
-}
-
-// CreateBulk returns a builder for creating a bulk of DecisionAudit entities.
-func (c *DecisionAuditClient) CreateBulk(builders ...*DecisionAuditCreate) *DecisionAuditCreateBulk {
-	return &DecisionAuditCreateBulk{config: c.config, builders: builders}
-}
-
-// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
-// a builder and applies setFunc on it.
-func (c *DecisionAuditClient) MapCreateBulk(slice any, setFunc func(*DecisionAuditCreate, int)) *DecisionAuditCreateBulk {
-	rv := reflect.ValueOf(slice)
-	if rv.Kind() != reflect.Slice {
-		return &DecisionAuditCreateBulk{err: fmt.Errorf("calling to DecisionAuditClient.MapCreateBulk with wrong type %T, need slice", slice)}
-	}
-	builders := make([]*DecisionAuditCreate, rv.Len())
-	for i := 0; i < rv.Len(); i++ {
-		builders[i] = c.Create()
-		setFunc(builders[i], i)
-	}
-	return &DecisionAuditCreateBulk{config: c.config, builders: builders}
-}
-
-// Update returns an update builder for DecisionAudit.
-func (c *DecisionAuditClient) Update() *DecisionAuditUpdate {
-	mutation := newDecisionAuditMutation(c.config, OpUpdate)
-	return &DecisionAuditUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
-}
-
-// UpdateOne returns an update builder for the given entity.
-func (c *DecisionAuditClient) UpdateOne(_m *DecisionAudit) *DecisionAuditUpdateOne {
-	mutation := newDecisionAuditMutation(c.config, OpUpdateOne, withDecisionAudit(_m))
-	return &DecisionAuditUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
-}
-
-// UpdateOneID returns an update builder for the given id.
-func (c *DecisionAuditClient) UpdateOneID(id uuid.UUID) *DecisionAuditUpdateOne {
-	mutation := newDecisionAuditMutation(c.config, OpUpdateOne, withDecisionAuditID(id))
-	return &DecisionAuditUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
-}
-
-// Delete returns a delete builder for DecisionAudit.
-func (c *DecisionAuditClient) Delete() *DecisionAuditDelete {
-	mutation := newDecisionAuditMutation(c.config, OpDelete)
-	return &DecisionAuditDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
-}
-
-// DeleteOne returns a builder for deleting the given entity.
-func (c *DecisionAuditClient) DeleteOne(_m *DecisionAudit) *DecisionAuditDeleteOne {
-	return c.DeleteOneID(_m.ID)
-}
-
-// DeleteOneID returns a builder for deleting the given entity by its id.
-func (c *DecisionAuditClient) DeleteOneID(id uuid.UUID) *DecisionAuditDeleteOne {
-	builder := c.Delete().Where(decisionaudit.ID(id))
-	builder.mutation.id = &id
-	builder.mutation.op = OpDeleteOne
-	return &DecisionAuditDeleteOne{builder}
-}
-
-// Query returns a query builder for DecisionAudit.
-func (c *DecisionAuditClient) Query() *DecisionAuditQuery {
-	return &DecisionAuditQuery{
-		config: c.config,
-		ctx:    &QueryContext{Type: TypeDecisionAudit},
-		inters: c.Interceptors(),
-	}
-}
-
-// Get returns a DecisionAudit entity by its id.
-func (c *DecisionAuditClient) Get(ctx context.Context, id uuid.UUID) (*DecisionAudit, error) {
-	return c.Query().Where(decisionaudit.ID(id)).Only(ctx)
-}
-
-// GetX is like Get, but panics if an error occurs.
-func (c *DecisionAuditClient) GetX(ctx context.Context, id uuid.UUID) *DecisionAudit {
-	obj, err := c.Get(ctx, id)
-	if err != nil {
-		panic(err)
-	}
-	return obj
-}
-
-// Hooks returns the client hooks.
-func (c *DecisionAuditClient) Hooks() []Hook {
-	return c.hooks.DecisionAudit
-}
-
-// Interceptors returns the client interceptors.
-func (c *DecisionAuditClient) Interceptors() []Interceptor {
-	return c.inters.DecisionAudit
-}
-
-func (c *DecisionAuditClient) mutate(ctx context.Context, m *DecisionAuditMutation) (Value, error) {
-	switch m.Op() {
-	case OpCreate:
-		return (&DecisionAuditCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
-	case OpUpdate:
-		return (&DecisionAuditUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
-	case OpUpdateOne:
-		return (&DecisionAuditUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
-	case OpDelete, OpDeleteOne:
-		return (&DecisionAuditDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
-	default:
-		return nil, fmt.Errorf("ent: unknown DecisionAudit mutation op: %q", m.Op())
 	}
 }
 
@@ -11254,19 +11111,18 @@ type (
 		AgentServiceAccountAssignment, AgentSessionMetrics, AllowListEntry, ApiKey,
 		BrokerDispatch, BrokerJoinToken, BrokerSecret, BrokerSetting,
 		BrokerTargetInventory, ChatLinkCode, ConduitPrincipalEpoch, ConduitSession,
-		Conversation, ConversationParticipant, DecisionAudit, DelegationAdoption,
-		DelegationEdge, EntitlementBinding, EnvVar, ExternalIdentity,
-		GCPServiceAccount, GitHubResolutionCache, GithubInstallation, Group,
-		GroupMembership, HarnessConfig, HubSetting, IntegrationConfig,
-		IntegrationUpdate, InviteCode, LaunchReaperState, LifecycleHook,
-		LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
-		MaintenanceOperationRun, MembershipLossCheck, Message, MessageAddressee,
-		MutationAudit, NonceCache, Notification, NotificationSubscription,
-		PolicyBinding, Project, ProjectContributor, ProjectPreStartHook,
-		ProjectSyncState, RelayInstance, RoleBinding, RoleDefinition, RuntimeBroker,
-		Schedule, ScheduledEvent, Secret, Skill, SkillInjection, SkillRegistry,
-		SkillVersion, SubscriptionTemplate, Template, UsageReservation, User,
-		UserAccessToken, UserTerminalWorkspace []ent.Hook
+		Conversation, ConversationParticipant, DelegationAdoption, DelegationEdge,
+		EntitlementBinding, EnvVar, ExternalIdentity, GCPServiceAccount,
+		GitHubResolutionCache, GithubInstallation, Group, GroupMembership,
+		HarnessConfig, HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
+		LaunchReaperState, LifecycleHook, LifecycleHookAgentPhase, LimitDefinition,
+		MaintenanceOperation, MaintenanceOperationRun, MembershipLossCheck, Message,
+		MessageAddressee, MutationAudit, NonceCache, Notification,
+		NotificationSubscription, PolicyBinding, Project, ProjectContributor,
+		ProjectPreStartHook, ProjectSyncState, RelayInstance, RoleBinding,
+		RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret, Skill,
+		SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate, Template,
+		UsageReservation, User, UserAccessToken, UserTerminalWorkspace []ent.Hook
 	}
 	inters struct {
 		AccessConstraint, AccessConstraintHistory, AccessPolicy, Agent, AgentCredential,
@@ -11274,18 +11130,18 @@ type (
 		AgentServiceAccountAssignment, AgentSessionMetrics, AllowListEntry, ApiKey,
 		BrokerDispatch, BrokerJoinToken, BrokerSecret, BrokerSetting,
 		BrokerTargetInventory, ChatLinkCode, ConduitPrincipalEpoch, ConduitSession,
-		Conversation, ConversationParticipant, DecisionAudit, DelegationAdoption,
-		DelegationEdge, EntitlementBinding, EnvVar, ExternalIdentity,
-		GCPServiceAccount, GitHubResolutionCache, GithubInstallation, Group,
-		GroupMembership, HarnessConfig, HubSetting, IntegrationConfig,
-		IntegrationUpdate, InviteCode, LaunchReaperState, LifecycleHook,
-		LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
-		MaintenanceOperationRun, MembershipLossCheck, Message, MessageAddressee,
-		MutationAudit, NonceCache, Notification, NotificationSubscription,
-		PolicyBinding, Project, ProjectContributor, ProjectPreStartHook,
-		ProjectSyncState, RelayInstance, RoleBinding, RoleDefinition, RuntimeBroker,
-		Schedule, ScheduledEvent, Secret, Skill, SkillInjection, SkillRegistry,
-		SkillVersion, SubscriptionTemplate, Template, UsageReservation, User,
-		UserAccessToken, UserTerminalWorkspace []ent.Interceptor
+		Conversation, ConversationParticipant, DelegationAdoption, DelegationEdge,
+		EntitlementBinding, EnvVar, ExternalIdentity, GCPServiceAccount,
+		GitHubResolutionCache, GithubInstallation, Group, GroupMembership,
+		HarnessConfig, HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
+		LaunchReaperState, LifecycleHook, LifecycleHookAgentPhase, LimitDefinition,
+		MaintenanceOperation, MaintenanceOperationRun, MembershipLossCheck, Message,
+		MessageAddressee, MutationAudit, NonceCache, Notification,
+		NotificationSubscription, PolicyBinding, Project, ProjectContributor,
+		ProjectPreStartHook, ProjectSyncState, RelayInstance, RoleBinding,
+		RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret, Skill,
+		SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate, Template,
+		UsageReservation, User, UserAccessToken,
+		UserTerminalWorkspace []ent.Interceptor
 	}
 )

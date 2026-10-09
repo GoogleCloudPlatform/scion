@@ -357,22 +357,39 @@ const saAssignGenericForbiddenMsg = "You don't have permission to assign this GC
 // comment on authz.go, which already says "directly or transitively".
 //
 // DenyCauseCeilingUnrecorded names the usual origin of the cause, an agent
-// created without recorded provenance, and the remedy that clears it. The
-// unrecorded hop can be this agent's own edge or any edge further up the
-// chain. A user's create writes the new agent's edge with recorded provenance
-// (commitAgentCreate), and because a user is the root of a chain, a
-// user-created agent's chain contains only that one recorded edge. So having
-// a user recreate this agent directly always clears the cause, whether the
-// unrecorded link was this agent or an ancestor; the message does not need to
-// identify which hop failed. Recreating the agent from an agent whose chain
-// includes the unrecorded hop (for example the same parent) keeps that hop,
-// and reincarnating an agent keeps its existing edge, so neither clears the
-// cause. The same cause also covers a hop whose provenance version this
-// binary does not interpret (hopEffectCeilingDeny); the remedy is the same
-// for both. When the unrecorded hop is a row that delegation-provenance
-// adoption can address, the 403 details also name the admin adoption route
-// (addCeilingUnrecordedDetails). The message names the user-side remedy and
-// the details the admin-side one; the details add no message text.
+// created without recorded provenance (for example before a hub upgrade),
+// and the two remedies that clear it. The unrecorded hop can be this agent's
+// own edge or any edge further up the chain. Both remedies replace this
+// agent's edge with one recorded from the user, and because a user is the
+// root of a chain, the agent's chain is then that one recorded edge, so
+// either clears the cause whether the unrecorded link was this agent or an
+// ancestor; the message does not need to identify which hop failed:
+//   - reincarnate by an authorized user: a user's reincarnate that keeps the
+//     role re-records the edge, with the user as delegator, when the
+//     agent's own edge is unrecorded, or when a hop above it is unrecorded
+//     and the chain walk reaches that hop before any hop it does not accept
+//     (reincarnateChainUnrecorded, ptone/scion#3948), as a user's
+//     role-changing reincarnate always does. This gate walks up from the
+//     agent and denies at the first hop that fails, so whenever it denies
+//     with this cause every hop below the unrecorded one was accepted and
+//     the reincarnate re-records, even if a hop further up (for example one
+//     with local development provenance on a server without dev auth) is
+//     not accepted. Every hop this cause can come from is an existing edge,
+//     which the agent standing gate accepts;
+//   - recreate by an authorized user directly: a user's create writes the
+//     new agent's edge with recorded provenance (commitAgentCreate).
+//
+// Neither works from another agent: recreating the agent from an agent
+// whose chain includes the unrecorded hop (for example the same parent)
+// keeps that hop, and an agent's or the agent's own reincarnate that keeps
+// the role keeps the existing edge. The same cause also covers a hop whose
+// provenance version this binary does not interpret (hopEffectCeilingDeny);
+// the remedies are the same, and the reincarnate repair counts that hop as
+// unrecorded too (hopUnrecorded). When the unrecorded hop is a row that
+// delegation-provenance adoption can address, the 403 details also name the
+// admin adoption route (addCeilingUnrecordedDetails). The message names the
+// user-side remedies and the details the admin-side one; the details add no
+// message text.
 //
 // DenyCauseCeilingError and any unrecognised cause (including "", the zero
 // value) fall through to the generic message: a store fault is
@@ -391,7 +408,7 @@ func saAssignForbiddenMessage(cause DenyCause) string {
 	case DenyCauseCeilingUnrecorded:
 		return "This agent cannot assign service accounts: its delegation chain includes an agent " +
 			"created without recorded provenance (this agent or one of the agents that created it). " +
-			"Have an authorized user recreate this agent directly (not from another agent)."
+			"Have an authorized user reincarnate this agent, or recreate it directly (not from another agent)."
 	default:
 		return saAssignGenericForbiddenMsg
 	}

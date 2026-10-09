@@ -33,4 +33,30 @@ const (
 	// harness-config provisioner cannot run (422). It is a configuration
 	// error the caller must fix (ptone/scion#3132).
 	BrokerErrCodeHarnessConfigUnusable = "harness_config_unusable"
+
+	// BrokerErrCodeIdentityNotMapped marks a dispatch in GCP identity mode
+	// "assign" on the Kubernetes runtime whose GCP service account has no
+	// kubernetes_service_account_mappings entry on the selected profile
+	// (400). The error details name the account, profile, runtime entry
+	// and broker so the hub can say who must add the mapping
+	// (ptone/scion#4024).
+	BrokerErrCodeIdentityNotMapped = "identity_not_mapped"
+
+	// BrokerErrCodeIdentityKSAMismatch marks the same kind of dispatch
+	// whose explicitly requested Kubernetes ServiceAccount differs from the
+	// one mapped to its GCP service account (400). The details also name
+	// the requested and mapped Kubernetes ServiceAccounts.
+	BrokerErrCodeIdentityKSAMismatch = "identity_ksa_mismatch"
+)
+
+// Detail keys of a broker identity_not_mapped or identity_ksa_mismatch
+// error. The broker writes them and the hub reads them to build its own
+// message.
+const (
+	BrokerErrDetailServiceAccount = "serviceAccount"
+	BrokerErrDetailProfile        = "profile"
+	BrokerErrDetailRuntimeEntry   = "runtimeEntry"
+	BrokerErrDetailBroker         = "broker"
+	BrokerErrDetailRequestedKSA   = "requestedKubernetesServiceAccount"
+	BrokerErrDetailMappedKSA      = "mappedKubernetesServiceAccount"
 )

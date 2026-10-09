@@ -781,29 +781,25 @@ func compensationAgent(t *testing.T, s store.Store) *store.Agent {
 }
 
 func TestCompensateAgentCreate_RunsHardDeleteHooks(t *testing.T) {
-	for name, conditional := range map[string]bool{"unconditional": false, "conditional": true} {
-		t.Run(name, func(t *testing.T) {
-			srv, s := testServer(t)
-			agent := compensationAgent(t, s)
-			var log hookLog
-			var seen []string
-			srv.RegisterHardDeleteHook("grants", func(_ context.Context, tx store.Store, a *store.Agent, _ AuditActor) error {
-				log.add("grants")
-				seen = append(seen, a.ID)
-				rows, err := tx.GetActiveAgentServiceAccountAssignments(context.Background(), a.ID)
-				require.NoError(t, err)
-				assert.Empty(t, rows, "assignments are deactivated before the hooks")
-				return nil
-			})
-			srv.RegisterSoftDeleteHook("soft", recordingHook(&log, "soft", nil, nil))
-			require.NoError(t, srv.compensateAgentCreate(context.Background(), createCompensation{
-				Agent: agent, Stage: createStageDispatch, IfNotDeleteHeld: conditional,
-			}))
-			assert.Equal(t, []string{"grants"}, log.get(), "hard-delete hooks run on compensation; soft hooks do not")
-			assert.Equal(t, []string{agent.ID}, seen)
-			assert.True(t, agentGone(t, s, agent.ID))
-		})
-	}
+	srv, s := testServer(t)
+	agent := compensationAgent(t, s)
+	var log hookLog
+	var seen []string
+	srv.RegisterHardDeleteHook("grants", func(_ context.Context, tx store.Store, a *store.Agent, _ AuditActor) error {
+		log.add("grants")
+		seen = append(seen, a.ID)
+		rows, err := tx.GetActiveAgentServiceAccountAssignments(context.Background(), a.ID)
+		require.NoError(t, err)
+		assert.Empty(t, rows, "assignments are deactivated before the hooks")
+		return nil
+	})
+	srv.RegisterSoftDeleteHook("soft", recordingHook(&log, "soft", nil, nil))
+	require.NoError(t, srv.compensateAgentCreate(context.Background(), createCompensation{
+		Agent: agent, Stage: createStageDispatch,
+	}))
+	assert.Equal(t, []string{"grants"}, log.get(), "hard-delete hooks run on compensation; soft hooks do not")
+	assert.Equal(t, []string{agent.ID}, seen)
+	assert.True(t, agentGone(t, s, agent.ID))
 }
 
 func TestCompensateAgentCreate_DeactivatesAssignment(t *testing.T) {
@@ -835,9 +831,11 @@ func TestCompensateAgentCreate_IdempotentSkipsHooks(t *testing.T) {
 	agent := compensationAgent(t, s)
 	var log hookLog
 	srv.RegisterHardDeleteHook("grants", recordingHook(&log, "grants", nil, nil))
-	for i := 0; i < 2; i++ {
-		require.NoError(t, srv.compensateAgentCreate(context.Background(), createCompensation{Agent: agent, Stage: createStageDispatch}))
-	}
+	require.NoError(t, srv.compensateAgentCreate(context.Background(), createCompensation{Agent: agent, Stage: createStageDispatch}))
+	// The row is gone, so the repeat changes nothing and reports that the
+	// row is left to a delete.
+	err := srv.compensateAgentCreate(context.Background(), createCompensation{Agent: agent, Stage: createStageDispatch})
+	require.ErrorIs(t, err, errCreateRowDeleteHeld)
 	assert.Equal(t, []string{"grants"}, log.get(), "a repeated compensation that changes nothing runs no hook")
 	assert.Len(t, agentAudits(t, s, mutationTypeAgentCreateDispatchFailed, agent.ID), 1)
 }

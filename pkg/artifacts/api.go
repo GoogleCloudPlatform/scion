@@ -68,6 +68,9 @@ type ArtifactResponse struct {
 	Version *VersionInfo `json:"version,omitempty"`
 	// Warnings are notes about the write that did not fail it.
 	Warnings []string `json:"warnings,omitempty"`
+	// CanManage, on a GET of the artifact or of one of its versions, is
+	// true when the caller may share and change it (see canAdminister).
+	CanManage bool `json:"canManage,omitempty"`
 }
 
 // CreateVersionRequest is the body of POST /api/v1/artifacts (create an
@@ -116,7 +119,8 @@ type PendingVersionResponse struct {
 type UploadInfo struct {
 	// Required lists the manifest paths whose bytes must be uploaded with
 	// PUT .../versions/{seq}/files/{path}. A file identical to one of the
-	// artifact's current version needs no upload.
+	// artifact's current version needs no upload, and of several files with
+	// the same bytes only one is listed (uploading it covers the others).
 	Required []string `json:"required"`
 }
 
@@ -130,17 +134,20 @@ type VersionListResponse struct {
 
 // ArtifactInfo describes an artifact.
 type ArtifactInfo struct {
-	ID         string    `json:"id"`
-	Ref        string    `json:"ref"`
-	ScopeKind  string    `json:"scopeKind"`
-	ScopeRef   string    `json:"scopeRef"`
-	OwnerKind  string    `json:"ownerKind"`
-	OwnerRef   string    `json:"ownerRef"`
-	Key        string    `json:"key,omitempty"`
-	Title      string    `json:"title"`
-	CurrentSeq int       `json:"currentSeq"`
-	CreatedAt  time.Time `json:"createdAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
+	ID         string `json:"id"`
+	Ref        string `json:"ref"`
+	ScopeKind  string `json:"scopeKind"`
+	ScopeRef   string `json:"scopeRef"`
+	OwnerKind  string `json:"ownerKind"`
+	OwnerRef   string `json:"ownerRef"`
+	Key        string `json:"key,omitempty"`
+	Title      string `json:"title"`
+	CurrentSeq int    `json:"currentSeq"`
+	// ExpiresAt is when the artifact expires and is deleted, or absent
+	// when it is kept until deleted.
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
+	CreatedAt time.Time  `json:"createdAt"`
+	UpdatedAt time.Time  `json:"updatedAt"`
 }
 
 // VersionInfo describes one version and its files.
@@ -177,7 +184,7 @@ func artifactInfo(a *Artifact) ArtifactInfo {
 	return ArtifactInfo{
 		ID: a.ID, Ref: FormatRef(a.ID, 0), ScopeKind: a.ScopeKind, ScopeRef: a.ScopeRef,
 		OwnerKind: a.OwnerKind, OwnerRef: a.OwnerRef, Key: a.Key, Title: a.Title,
-		CurrentSeq: a.CurrentSeq, CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt,
+		CurrentSeq: a.CurrentSeq, ExpiresAt: a.ExpiresAt, CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt,
 	}
 }
 

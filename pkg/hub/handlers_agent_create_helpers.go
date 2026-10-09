@@ -1294,6 +1294,10 @@ func (s *Server) handleExistingAgent(
 		// (ptone/scion#1961); its dispatch is bounded by syncDispatch
 		// (SyncDispatchBound).
 		ctx = detachLaunchFromClient(ctx)
+		// The response waits on the start for up to syncDispatchTimeout:
+		// extend this request's write deadline to cover it
+		// (ptone/scion#3890, as ptone/scion#3850 did for create).
+		extendWriteDeadlineForSyncDispatch(ctx, w, s.config.WriteTimeout)
 		// This branch only runs for suspended agents, so resume the harness
 		// session (Claude --continue) rather than starting fresh.
 		resume := existingAgent.Phase == string(state.PhaseSuspended)
@@ -1358,6 +1362,8 @@ func (s *Server) handleExistingAgent(
 				// Required-skill resolution failure relayed with the broker's status.
 			case relayHarnessConfigRefusal(w, err):
 				// Harness-config refusal relayed with the broker's status.
+			case relayIdentityMappingError(w, err):
+				// Kubernetes identity mapping refusal relayed as a 400.
 			default:
 				RuntimeError(w, "Failed to resume suspended agent: "+err.Error())
 			}
@@ -1428,6 +1434,10 @@ func (s *Server) handleExistingAgent(
 			// (ptone/scion#1961); its dispatch is bounded by syncDispatch
 			// (SyncDispatchBound).
 			ctx = detachLaunchFromClient(ctx)
+			// The response waits on the start for up to syncDispatchTimeout:
+			// extend this request's write deadline to cover it
+			// (ptone/scion#3890, as ptone/scion#3850 did for create).
+			extendWriteDeadlineForSyncDispatch(ctx, w, s.config.WriteTimeout)
 			// The post-start write runs inside the start claim, before it is
 			// released, so it never overwrites a newer start's status.
 			var afterErr error // a post-start write error, answered after the start
@@ -1489,6 +1499,8 @@ func (s *Server) handleExistingAgent(
 					// Required-skill resolution failure relayed with the broker's status.
 				case relayHarnessConfigRefusal(w, err):
 					// Harness-config refusal relayed with the broker's status.
+				case relayIdentityMappingError(w, err):
+					// Kubernetes identity mapping refusal relayed as a 400.
 				default:
 					RuntimeError(w, "Failed to resume stopped agent: "+err.Error())
 				}
@@ -1622,6 +1634,10 @@ func (s *Server) handleExistingAgent(
 		// (ptone/scion#1961); its dispatch is bounded by syncDispatch
 		// (SyncDispatchBound).
 		ctx = detachLaunchFromClient(ctx)
+		// The response waits on the start for up to syncDispatchTimeout:
+		// extend this request's write deadline to cover it
+		// (ptone/scion#3890, as ptone/scion#3850 did for create).
+		extendWriteDeadlineForSyncDispatch(ctx, w, s.config.WriteTimeout)
 		// The post-start write runs inside the start claim, before it is
 		// released, so it never overwrites a newer start's status.
 		var afterErr error // a post-start write error, answered after the start
@@ -1678,6 +1694,8 @@ func (s *Server) handleExistingAgent(
 				// Required-skill resolution failure relayed with the broker's status.
 			case relayHarnessConfigRefusal(w, err):
 				// Harness-config refusal relayed with the broker's status.
+			case relayIdentityMappingError(w, err):
+				// Kubernetes identity mapping refusal relayed as a 400.
 			default:
 				RuntimeError(w, "Failed to start agent: "+err.Error())
 			}

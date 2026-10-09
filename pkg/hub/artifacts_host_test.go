@@ -151,7 +151,7 @@ func TestArtifactHostAuthorizeAgentScopes(t *testing.T) {
 
 	writer := contextWithIdentity(context.Background(), artifactTestAgent(agent.ID, project, ScopeProjectArtifactRead, ScopeProjectArtifactWrite))
 	assert.True(t, host.Authorize(writer, project, artifacts.PermissionCreate), "project:artifact:write grants artifact.create in the agent's project")
-	assert.True(t, host.Authorize(writer, project, artifacts.PermissionUpdate), "project:artifact:write grants artifact.update in the agent's project")
+	assert.False(t, host.Authorize(writer, project, artifacts.PermissionUpdate), "artifact.update is Reserved: no agent scope carries it")
 	assert.False(t, host.Authorize(writer, otherProject, artifacts.PermissionCreate), "artifact.create in another real project")
 
 	writeOnly := contextWithIdentity(context.Background(), artifactTestAgent(agent.ID, project, ScopeProjectArtifactWrite))
@@ -213,8 +213,11 @@ func TestArtifactHostAuthorizeUsers(t *testing.T) {
 
 	admin := createScopeSuperAdmin(t, s, "artifact-superadmin")
 	adminCtx := contextWithIdentity(context.Background(), NewAuthenticatedUser(admin.ID, admin.Email, admin.DisplayName, admin.Role, "web"))
-	for _, p := range []string{artifacts.PermissionRead, artifacts.PermissionCreate, artifacts.PermissionUpdate, artifacts.PermissionDelete, artifacts.PermissionManage} {
+	for _, p := range []string{artifacts.PermissionRead, artifacts.PermissionCreate, artifacts.PermissionManage} {
 		assert.True(t, host.Authorize(adminCtx, project.ID, p), "super-admin holds %s", p)
+	}
+	for _, p := range []string{artifacts.PermissionUpdate, artifacts.PermissionDelete} {
+		assert.False(t, host.Authorize(adminCtx, project.ID, p), "%s is Reserved: no role holds it, super-admin included", p)
 	}
 
 	bobCtx := contextWithIdentity(context.Background(), NewAuthenticatedUser(bob.ID, bob.Email, bob.DisplayName, bob.Role, "web"))

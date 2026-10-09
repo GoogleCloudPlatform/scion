@@ -609,6 +609,11 @@ func RunInit(args []string, opts InitRunOptions) int {
 		}
 	}
 
+	// Natively derived usage also feeds the session metrics state, so
+	// session reports include model calls and tokens. A nil pipeline is a
+	// no-op.
+	runWireSessionUsage(telemetryPipeline, agentHome)
+
 	// Initialize lifecycle hooks manager. newLifecycleManager also reports
 	// the value this run wants hub.EnforceTokenFileOwnerChecks called with —
 	// both come from the identical requirePrivilegeDrop input, bundled into
@@ -3180,12 +3185,18 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 		gitPath, rerr := rootexec.Resolve("git")
 		if rerr != nil {
 			log.Error("Failed to resolve a trusted git binary: %v", rerr)
+			if gitConfigFailureHook != nil {
+				gitConfigFailureHook(args, rerr)
+			}
 			return
 		}
 		cmd := exec.CommandContext(ctx, gitPath, append([]string{"config", "--file", gitconfigPath}, args...)...)
 		configureCmd(cmd)
 		if out, cerr := procreap.CombinedOutputManaged(cmd); cerr != nil {
 			log.Error("Failed to run git config %v: %s %v", args, string(out), cerr)
+			if gitConfigFailureHook != nil {
+				gitConfigFailureHook(args, cerr)
+			}
 		}
 	}
 
@@ -3216,6 +3227,14 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 	}
 	return nil
 }
+
+// gitConfigFailureHook is a test-only seam: production never assigns it, so
+// it stays nil and configureSharedWorkspaceGit's runGitConfig only logs a
+// failed `git config` call, as before. Tests set it to observe failures that
+// runGitConfig otherwise has no way to report (it has no error return). It
+// may be called from concurrent configureSharedWorkspaceGit calls, so a
+// test's hook must be safe for concurrent use.
+var gitConfigFailureHook func(args []string, err error)
 
 // configureGitCommandGetuid is a test-only seam: production never reassigns
 // it. Tests stub it to 0 to reach configureGitCommand's root-init branch

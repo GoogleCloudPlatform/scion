@@ -18,15 +18,11 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
-	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
@@ -415,19 +411,15 @@ func TestRegisterGlobalProjectAndBroker_EmptyPerAgentFollowsDefaultRuntime(t *te
 	}
 }
 
-// TestRegisterGlobalProjectAndBroker_AttachOptOut_PersistsFalseAndCLIRefuses
-// is the producer-path integration test: a broker whose default runtime
-// opts out of attach registers through the real production path
-// (registerGlobalProjectAndBroker -> buildStoreBrokerProfiles), the stored
-// record ends up with Attach=false on both the default profile and the
-// broker-wide capability, and a CLI attach attempt against an agent on that
-// broker refuses before any WebSocket dial. The persisted store.RuntimeBroker
-// is round-tripped through JSON into the wire shape a real Hub GET
-// /runtime-brokers/{id} response carries (hubclient.RuntimeBroker) rather
-// than hand-built as a mock literal, so this proves the producer, the
-// *bool encode/decode, and the CLI's read all agree — not just the CLI's
-// read of a value nothing upstream actually produces.
-func TestRegisterGlobalProjectAndBroker_AttachOptOut_PersistsFalseAndCLIRefuses(t *testing.T) {
+// TestRegisterGlobalProjectAndBroker_AttachOptOut_PersistsFalse is the
+// producer-path integration test: a broker whose default runtime opts out
+// of attach registers through the real production path
+// (registerGlobalProjectAndBroker -> buildStoreBrokerProfiles), and the
+// stored record ends up with Attach=false on both the default profile and
+// the broker-wide capability. The Hub reads this record to choose the PTY
+// path (and to refuse the attach preflight when there is none); the CLI no
+// longer reads it.
+func TestRegisterGlobalProjectAndBroker_AttachOptOut_PersistsFalse(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	settings := &config.Settings{}
@@ -444,34 +436,6 @@ func TestRegisterGlobalProjectAndBroker_AttachOptOut_PersistsFalseAndCLIRefuses(
 	require.Len(t, broker.Profiles, 1)
 	require.NotNil(t, broker.Profiles[0].Attach, "the default profile's Attach must be explicitly set, not left unknown")
 	assert.False(t, *broker.Profiles[0].Attach)
-
-	raw, err := json.Marshal(broker)
-	require.NoError(t, err)
-	agentPath := "/api/v1/projects/proj-optout/agents/optout-agent"
-	brokerPath := "/api/v1/runtime-brokers/" + brokerID
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case brokerPath:
-			_, _ = w.Write(raw)
-		case agentPath:
-			_ = json.NewEncoder(w).Encode(hubclient.Agent{
-				ID: "a1", Name: "optout-agent", Phase: "running", Runtime: "optout",
-				RuntimeBrokerID: brokerID,
-				AppliedConfig:   &hubclient.AgentConfig{Profile: broker.Profiles[0].Name},
-			})
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	t.Cleanup(srv.Close)
-
-	client, err := hubclient.New(srv.URL)
-	require.NoError(t, err)
-
-	err = attachViaHub(&HubContext{Client: client, Endpoint: srv.URL, ProjectID: "proj-optout"}, "optout-agent")
-	require.Error(t, err)
-	assert.Equal(t, "attach is not supported for agents on the optout runtime", err.Error())
 }
 
 // TestRegisterGlobalProjectAndBroker_UpdateSetsReprovisionCapability is the

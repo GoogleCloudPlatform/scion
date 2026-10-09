@@ -290,11 +290,12 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"agent.port_forward":   "Agent token scope, not route-enforced",
 		"agent.identity_token": "Agent token scope, not route-enforced",
 
-		// Artifact service: read and create are cataloged (P1); update,
-		// delete and manage have no handler behaviour yet.
-		"artifact.update": "Artifact service: new versions land with the two-step publish (ptone/scion#3215)",
-		"artifact.delete": "Artifact service: deletion lands with grants and retention (ptone/scion#3231)",
-		"artifact.manage": "Artifact service: grants and share links land in ptone/scion#3231",
+		// Artifact service: read and create are cataloged (P1). update and
+		// delete are Reserved registry rows (nothing checks them yet);
+		// manage is checked inline by the artifact service.
+		"artifact.update": "Reserved in the permission registry: no artifact route checks it",
+		"artifact.delete": "Reserved in the permission registry: no artifact route checks it",
+		"artifact.manage": "Inline check in pkg/artifacts canAdminister (grants, share links, PATCH), no catalog operation",
 
 		// Material delivery and runtime-use permissions — NonRouteUse only
 		// (ptone/scion#2129)
@@ -1253,7 +1254,7 @@ var domainResourceCompatibility = map[string][]string{
 	"quota":              {"ResourceQuota"},
 	"schedule":           {"ResourceScheduledEvent"},
 	"chat":               {"ResourceProject"},
-	"env":                {"ResourceProject"},
+	"env":                {"ResourceProject", "ResourceHub"},
 	"artifact":           {"ResourceArtifact"},
 	"inbox":              {"ResourceInbox"},
 }

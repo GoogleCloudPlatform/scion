@@ -438,9 +438,7 @@ describe('scion-gcp-service-account-list', () => {
 
       // The component exposes isMintDisabled as a private method — call it
       // through the element to exercise scope-aware branching.
-      const disabled = (
-        el as unknown as { isMintDisabled: () => boolean }
-      ).isMintDisabled();
+      const disabled = (el as unknown as { isMintDisabled: () => boolean }).isMintDisabled();
       expect(disabled).toBe(true);
     });
 

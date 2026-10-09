@@ -135,6 +135,12 @@ type ServerConfig struct {
 	// open user streams (conduit.authz_recheck_interval; 0 = 60s). Only
 	// used behind the hub.conduit experiment.
 	ConduitAuthzRecheckInterval time.Duration
+	// ConduitUserStreamAuthzMax is the authorization interval of
+	// user-originated streams (conduit.stream_authz_max.user; 0 = 8h,
+	// negative disables the deadline, for tests): when a stream reaches
+	// it, the hub re-checks the user and renews or closes the stream.
+	// Only used behind the hub.conduit experiment.
+	ConduitUserStreamAuthzMax time.Duration
 	// AuthMode is the exclusive human auth mode: "oauth" (default), "proxy", "dev".
 	AuthMode string
 	// ProxyAuthenticator is the configured proxy authenticator (when AuthMode == "proxy").
@@ -1490,14 +1496,8 @@ type Server struct {
 	// users' user-scope data ends (startUserScopedDataSweep).
 	userScopedDataSweepDone <-chan struct{}
 
-	// decisionAuditWriter is the buffered decision audit writer wired into
-	// authzService. CleanupResources does not close it: it runs before
-	// the HTTP drain, and requests still being served then emit records.
-	// Shutdown closes it after the HTTP drain, unless
-	// DeferDecisionAuditClose moved that to the caller.
-	decisionAuditRouter        *decisionAuditRouter
-	decisionAuditWriter        *StoreDecisionAuditEmitter
-	decisionAuditCloseDeferred atomic.Bool
+	// decisionAuditRouter preserves the in-memory decision emission seam.
+	decisionAuditRouter *decisionAuditRouter
 
 	// githubWebhookNoSecretWarnOnce ensures the "no webhook secret configured"
 	// rejection is logged at most once per process, so a hub being repeatedly
@@ -1530,6 +1530,9 @@ type Server struct {
 
 	// Artifact store for the artifact_* tables (pkg/artifacts) — nil = artifacts unavailable.
 	artifactStore artifacts.Store
+	// artifactBlobSweeper keeps the blob sweep's position between passes
+	// of the artifact maintenance loop (its only user).
+	artifactBlobSweeper artifacts.BlobSweeper
 
 	// Chat notifier for human mention + DM received notifications (W6). Nil-safe.
 	chatNotifier *ChatNotifier
@@ -1620,6 +1623,11 @@ type Server struct {
 	// denyUnknownFailOpen is written with saAssignCheckMode under s.mu
 	// (applyGCPIAMSettingsLocked) and read lock-free by the checker.
 	denyUnknownFailOpen atomic.Bool
+	// saAssignCheckDiag is set while the assignment check cannot run because
+	// the hub's identity lacks the access it needs, and cleared once a
+	// check call succeeds or the check stops being enforced. Updated only
+	// by NoteSAAssignCheckCall. Shown on the admin health summary.
+	saAssignCheckDiag atomic.Pointer[saAssignCheckDiagnostic]
 	// gcpIAMStartup is the deploy-time pair of GCP permission-check
 	// settings, resolved once in New. A stored value that is absent or
 	// cannot be used resolves to it (resolveGCPIAMSettings).
@@ -1748,6 +1756,11 @@ type Server struct {
 	// perfTraceLog receives the per-request perf_trace lines. Set only when
 	// server.hub.perf_trace is on; nil otherwise.
 	perfTraceLog *slog.Logger
+
+	// hubWorkspaceDownload replaces gcp.SyncFromGCS for downloads of a
+	// workspace upload into a hub workspace when set (tests only). Guarded
+	// by mu; see setHubWorkspaceDownloader and hubWorkspaceDownloader.
+	hubWorkspaceDownload func(ctx context.Context, bucket, prefix, localPath string) error
 
 	// templateSourceFetcher downloads template sources for reimport. nil
 	// selects the default fetcher (newTemplateSourceFetcher); tests replace it.
@@ -1973,14 +1986,13 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		agentMetricsLog:   logging.Subsystem("hub.agent-metrics"),
 	}
 	// A New that fails part-way must not leak what it already started: the
-	// link-service and preview cleanup loops, the decision audit worker,
+	// link-service and preview cleanup loops, the decision router,
 	// the OIDC key loops. The caller gets no *Server to shut down, so tear
-	// it down here (ptone/scion#3641). Both calls are idempotent and
+	// it down here (ptone/scion#3641). Cleanup is idempotent and
 	// nil-safe on a partly built Server.
 	defer func() {
 		if retErr != nil {
 			_ = srv.CleanupResources(context.Background())
-			srv.CloseDecisionAudit(context.Background())
 		}
 	}()
 	// The startup-resolved hub name, which ApplySnapshot returns to when
@@ -2282,8 +2294,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	srv.authzService.saIAMCheckMode = srv.saAssignCheckModeValue
 
 	// Wire decision audit emitter
-	auditEmitter := NewStoreDecisionAuditEmitter(s, logging.Subsystem("hub.decision-audit"))
-	srv.decisionAuditWriter = auditEmitter
+	auditEmitter := inertDecisionAuditTarget
 	srv.decisionAuditRouter = newDecisionAuditRouter(auditEmitter, srv)
 	// With server.hub.perf_trace on, records pass through a counting
 	// decorator on their way to the same emitter (perftrace_audit.go).
@@ -3669,47 +3680,6 @@ func (s *Server) SetGCPTokenMetrics(m GCPTokenMetricsRecorder) {
 	s.gcpTokenMetrics = m
 }
 
-// SetDecisionAuditMetrics wires metrics into the decision audit writer. A
-// nil recorder disables them. Queue depth is read separately through
-// DecisionAuditQueueDepth.
-func (s *Server) SetDecisionAuditMetrics(m DecisionAuditMetricsRecorder) {
-	if s.decisionAuditWriter != nil {
-		s.decisionAuditWriter.SetMetrics(m)
-	}
-}
-
-// DecisionAuditQueueDepth reports the number of decision audit records
-// queued to be written (not in-flight: records a worker is writing or
-// retrying are not counted). It is the source for the queue depth gauge.
-func (s *Server) DecisionAuditQueueDepth() int64 {
-	if s.decisionAuditWriter == nil {
-		return 0
-	}
-	return int64(s.decisionAuditWriter.QueueDepth())
-}
-
-// DeferDecisionAuditClose tells the Server that the caller will call
-// CloseDecisionAudit itself, after every HTTP server that serves this
-// Server's handler has drained. Shutdown then leaves the writer open. Use
-// it when the handler is also mounted on another listener (for example
-// the WebServer), so records from requests that the other listener is
-// still draining are written rather than dropped.
-func (s *Server) DeferDecisionAuditClose() {
-	s.decisionAuditCloseDeferred.Store(true)
-}
-
-// CloseDecisionAudit drains and closes the decision audit writer. Call it
-// after the HTTP servers that serve this Server have drained and before
-// the store is closed. Safe to call more than once.
-func (s *Server) CloseDecisionAudit(ctx context.Context) {
-	if s.decisionAuditRouter != nil {
-		_ = s.decisionAuditRouter.CloseNew(ctx)
-	}
-	if s.decisionAuditWriter != nil {
-		s.decisionAuditWriter.Close(ctx)
-	}
-}
-
 // SetAgentRunScopeMetrics wires the agent token run-scope counter. It does
 // nothing when server.auth.agent_run_scope is off.
 func (s *Server) SetAgentRunScopeMetrics(m *OTelAgentRunScopeMetrics) {
@@ -3791,11 +3761,25 @@ func (s *Server) SetGEExchangeMetrics(m GEExchangeMetricsRecorder) {
 
 // SetLocalImageChecker wires a local container runtime into the image
 // checker so it can verify images via the local Docker/Podman daemon.
+// imagecheck.Checker.SetLocal is itself safe to call while checks run.
 func (s *Server) SetLocalImageChecker(l imagecheck.LocalImageExister) {
 	s.imageChecker.SetLocal(l)
 	if mgr, ok := l.(imageManager); ok {
+		// Under s.mu: this also runs after serving has started (broker
+		// startup, the system-runtime PUT handler and the runtime reload
+		// func), while handlers read the field through getImageManager.
+		s.mu.Lock()
 		s.imageManager = mgr
+		s.mu.Unlock()
 	}
+}
+
+// getImageManager returns the co-located runtime's image manager, or nil.
+// Callers take one snapshot and use it for the whole operation.
+func (s *Server) getImageManager() imageManager {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.imageManager
 }
 
 // GetMaintenanceState returns the runtime maintenance state.
@@ -3911,9 +3895,6 @@ func (s *Server) SetCommandBus(cb CommandBus) {
 		})
 	}
 }
-
-// CommandBus returns the configured command bus, or nil.
-func (s *Server) CommandBus() CommandBus { return s.commandBus }
 
 // StartNotificationDispatcher creates and starts the notification dispatcher
 // if a subscription-capable EventPublisher is available. It uses a lazy getter for the
@@ -5178,7 +5159,10 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		// rollback compensates the committed create after a later step
 		// failed: the agent row is deleted, its edge deactivated with cause
 		// create_compensation, and an agent_create_dispatch_failed audit
-		// record written (cleanupFailedCreate).
+		// record written (cleanupFailedCreate). The row is removed only if
+		// no delete holds it (ptone/scion#3958); when one does, the row, its
+		// edge and its quotas are left to that delete and the fire fails
+		// with the same error as any other rollback.
 		rollback := func(rb createRollback) error {
 			rb.Agent = agent
 			rb.RuntimeBrokerID = runtimeBrokerID
@@ -5550,7 +5534,14 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	if s.config.SchedulerMaxConcurrency != nil {
 		schedOpts = append(schedOpts, WithMaxConcurrency(*s.config.SchedulerMaxConcurrency))
 	}
-	s.scheduler = NewScheduler(s.store, logging.Subsystem("hub.scheduler"), schedOpts...)
+	// Written under s.mu: in combined mode the CleanupResources goroutine
+	// (cmd/server_foreground.go) is already running and reads s.scheduler
+	// under s.mu.RLock. The reads in registerSchedulerHandlers below run on
+	// this goroutine, after this write, so they need no lock.
+	sched := NewScheduler(s.store, logging.Subsystem("hub.scheduler"), schedOpts...)
+	s.mu.Lock()
+	s.scheduler = sched
+	s.mu.Unlock()
 	s.registerSchedulerHandlers()
 
 	// Report non-canonical stored timestamps (SQLite). It runs in the
@@ -5660,8 +5651,7 @@ func (s *Server) Start(ctx context.Context) error {
 // listener to shut down. It is also safe to call more than once, or
 // together with CleanupResources, since CleanupResources is idempotent and
 // http.Server.Shutdown tolerates repeated calls. The order is:
-// CleanupResources, then the HTTP drain, then the decision audit writer
-// drain (skipped if DeferDecisionAuditClose was called).
+// CleanupResources, then the HTTP drain.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.RLock()
 	srv := s.httpServer
@@ -5682,11 +5672,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		cancel()
 	}
 
-	// Close the decision audit writer only after the HTTP drain, so
-	// records from requests that finish during the drain are written.
-	if !s.decisionAuditCloseDeferred.Load() {
-		s.CloseDecisionAudit(ctx)
-	}
 	return err
 }
 
@@ -5695,16 +5680,30 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // where the Hub API is mounted on the WebServer and has no listener of its own.
 // It is also called internally by Shutdown, and is safe to call more than
 // once, including after Shutdown: the teardown below runs at most once.
-// It does not close the decision audit writer; in combined mode, call
-// CloseDecisionAudit after the WebServer's HTTP drain.
+// It closes the NEW admission side.
 func (s *Server) CleanupResources(ctx context.Context) error {
 	s.cleanupOnce.Do(func() {
 		if s.decisionAuditRouter != nil {
 			_ = s.decisionAuditRouter.CloseNew(ctx)
 		}
+		// Fields whose setters take s.mu.Lock are snapshotted once here
+		// and only the locals are used below. Those setters
+		// (StartBackgroundServices, StartNotificationDispatcher,
+		// StartLifecycleHookEvaluator, StartMessageBroker,
+		// InitPresenceManager, SetEventPublisher, SetCommandBus) can run
+		// on the startup goroutine while this runs on shutdown during
+		// startup, and cleanupOnce does not order them. The other fields
+		// used below are set in New(), before any caller can reach this.
 		s.mu.RLock()
 		cc := s.controlChannel
 		stopPoolSampler := s.stopPoolSampler
+		scheduler := s.scheduler
+		notificationDispatcher := s.notificationDispatcher
+		lifecycleHookEvaluator := s.lifecycleHookEvaluator
+		messageBrokerProxy := s.messageBrokerProxy
+		presenceManager := s.presenceManager
+		events := s.events
+		commandBus := s.commandBus
 		s.mu.RUnlock()
 
 		slog.Info("Cleaning up Hub resources...")
@@ -5744,17 +5743,17 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 		if s.brokerAuthService != nil {
 			s.brokerAuthService.Close()
 		}
-		if s.scheduler != nil {
-			s.scheduler.Stop()
+		if scheduler != nil {
+			scheduler.Stop()
 		}
-		if s.notificationDispatcher != nil {
-			s.notificationDispatcher.Stop()
+		if notificationDispatcher != nil {
+			notificationDispatcher.Stop()
 		}
-		if s.lifecycleHookEvaluator != nil {
-			s.lifecycleHookEvaluator.Stop()
+		if lifecycleHookEvaluator != nil {
+			lifecycleHookEvaluator.Stop()
 		}
-		if s.messageBrokerProxy != nil {
-			s.messageBrokerProxy.Stop()
+		if messageBrokerProxy != nil {
+			messageBrokerProxy.Stop()
 		}
 		if s.telegramLinkService != nil {
 			s.telegramLinkService.Close()
@@ -5770,14 +5769,14 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 			s.previewService.Close()
 		}
 		// Stop presence manager before closing event publisher
-		if s.presenceManager != nil {
-			s.presenceManager.Stop()
+		if presenceManager != nil {
+			presenceManager.Stop()
 		}
-		if s.events != nil {
-			s.events.Close()
+		if events != nil {
+			events.Close()
 		}
-		if s.commandBus != nil {
-			s.commandBus.Close()
+		if commandBus != nil {
+			commandBus.Close()
 		}
 		if s.logQueryService != nil {
 			_ = s.logQueryService.Close()

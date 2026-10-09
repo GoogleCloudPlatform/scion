@@ -510,3 +510,90 @@ function tickOwned(el: ScionPageArtifacts): void {
 function loadMoreButton(el: ScionPageArtifacts): HTMLElement | null {
   return el.shadowRoot!.querySelector('.load-more sl-button');
 }
+
+describe('artifacts list page sharing', () => {
+  beforeAll(async () => {
+    await import('./artifacts.js');
+  }, 30_000);
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+    delete window.__SCION_FEATURES__;
+  });
+
+  it('says why each artifact is visible and filters to shared with me', async () => {
+    const m = mockFetch({
+      '': {
+        artifacts: [
+          item(1, { access: 'owned', ownerKind: 'user', ownerRef: ME }),
+          item(2, { access: 'project' }),
+          item(3, { access: 'shared' }),
+        ],
+      },
+    });
+    const el = await mount(true);
+    const r = rows(el);
+    expect(r.map((row) => row.querySelector('sl-badge')!.textContent!.trim())).toEqual([
+      'Owned',
+      'Project',
+      'Shared with you',
+    ]);
+
+    const [owned, shared] = Array.from(el.shadowRoot!.querySelectorAll('sl-checkbox')) as Array<
+      HTMLElement & { checked: boolean }
+    >;
+    expect(shared.textContent).toContain('Shared with me');
+    shared.checked = true;
+    shared.dispatchEvent(new Event('sl-change'));
+    await settle(el);
+    let last = listUrls(m).at(-1)!;
+    expect(last.get('shared')).toBe('1');
+    expect(last.get('owner')).toBeNull();
+
+    // The two filters exclude each other.
+    owned.checked = true;
+    owned.dispatchEvent(new Event('sl-change'));
+    await settle(el);
+    last = listUrls(m).at(-1)!;
+    expect(last.get('owner')).toBe('me');
+    expect(last.get('shared')).toBeNull();
+  });
+
+  it('marks rows whose project was deleted and offers Move only to who may move', async () => {
+    const movable = item(1, { scopeRef: 'gone-1', scopeDeleted: true, canManage: true });
+    const readOnly = item(2, { scopeRef: 'gone-2', scopeDeleted: true });
+    const m = mockFetch({ '': { artifacts: [movable, readOnly] } });
+    const el = await mount(true);
+    const [r1, r2] = rows(el);
+    expect(r1.textContent).toContain('Deleted project');
+    expect(r2.textContent).toContain('Deleted project');
+    expect(r1.querySelector('a.move')).not.toBeNull();
+    expect(r2.querySelector('a.move')).toBeNull();
+    // A deleted project is not looked up.
+    expect(m.urls.filter((u) => u.startsWith('/api/v1/projects/'))).toEqual([]);
+
+    const dialog = el.shadowRoot!.querySelector('scion-artifact-move-dialog') as HTMLElement & {
+      open: boolean;
+    };
+    expect(dialog.open).toBe(false);
+    (r1.querySelector('a.move') as HTMLElement).click();
+    await settle(el);
+    expect(dialog.open).toBe(true);
+    // Opening the dialog does not navigate to the artifact.
+    expect(window.location.pathname).not.toContain(movable.id);
+
+    // A finished move turns the row into a normal one in its new project.
+    dialog.dispatchEvent(
+      new CustomEvent('artifact-moved', {
+        detail: { ...movable, scopeRef: 'proj-9', scopeDeleted: undefined, canManage: undefined },
+      })
+    );
+    await settle(el);
+    expect(dialog.open).toBe(false);
+    const moved = rows(el)[0];
+    expect(moved.textContent).not.toContain('Deleted project');
+    expect(moved.querySelector('a.move')).toBeNull();
+    expect(moved.querySelector('a[href="/projects/proj-9"]')).not.toBeNull();
+  });
+});

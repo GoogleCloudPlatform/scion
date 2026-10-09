@@ -296,7 +296,15 @@ func TestBrokerAutoProvide_SeedReconcileGrantsSuperAdmin(t *testing.T) {
 	rd, err = s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
 	require.NoError(t, err)
 	assert.Contains(t, rd.Permissions, "broker.auto_provide")
-	assert.Equal(t, 2, getAppliedBuiltInRoleMarker(ctx, s, store.SystemRoleSuperAdmin).Revision)
+	wantRevision := 0
+	for _, role := range BuiltInRoles() {
+		if role.Name == store.SystemRoleSuperAdmin {
+			wantRevision = role.Revision
+		}
+	}
+	require.NotZero(t, wantRevision, "super-admin must be a built-in role")
+	assert.Equal(t, wantRevision, getAppliedBuiltInRoleMarker(ctx, s, store.SystemRoleSuperAdmin).Revision,
+		"the super-admin marker advances to its declared revision")
 
 	d = srv.authzService.CheckAccess(ctx, adminIdent, resource, ActionAutoProvide)
 	assert.True(t, d.Allowed, "a super-admin holds broker.auto_provide after reconciliation: %s", d.Reason)

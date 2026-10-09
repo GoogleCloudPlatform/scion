@@ -51,10 +51,10 @@ function createFetchHandler(opts?: {
         return Promise.resolve(new Response('', { status: 404 }));
       }
       return Promise.resolve(
-        new Response(
-          JSON.stringify(opts?.messagingPolicy ?? MESSAGING_POLICY_RESPONSE),
-          { status: 200, headers: { 'Content-Type': 'application/json' } }
-        )
+        new Response(JSON.stringify(opts?.messagingPolicy ?? MESSAGING_POLICY_RESPONSE), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
       );
     }
 
@@ -82,19 +82,19 @@ function createFetchHandler(opts?: {
 
     if (path.includes('/settings/public')) {
       return Promise.resolve(
-        new Response(
-          JSON.stringify({}),
-          { status: 200, headers: { 'Content-Type': 'application/json' } }
-        )
+        new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
       );
     }
 
     if (path.includes('/templates')) {
       return Promise.resolve(
-        new Response(
-          JSON.stringify({ templates: [], page: 1, pageSize: 100, total: 0 }),
-          { status: 200, headers: { 'Content-Type': 'application/json' } }
-        )
+        new Response(JSON.stringify({ templates: [], page: 1, pageSize: 100, total: 0 }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
       );
     }
 
