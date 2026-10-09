@@ -88,9 +88,33 @@ func TestK8sBuildPod_GoRuntimeEnvFromLimits(t *testing.T) {
 			wantMemLimit: unset,
 		},
 		{
-			name:         "very large CPU limit does not overflow",
+			name:         "CPU limit of MaxInt32 cores is kept",
+			spec:         &api.ResourceSpec{Limits: api.ResourceList{CPU: "2147483647"}},
+			wantMaxProcs: "2147483647",
+			wantMemLimit: unset,
+		},
+		{
+			name:         "CPU limit above MaxInt32 cores sets nothing",
+			spec:         &api.ResourceSpec{Limits: api.ResourceList{CPU: "2147483648"}},
+			wantMaxProcs: unset,
+			wantMemLimit: unset,
+		},
+		{
+			name:         "CPU limit of MaxInt64 cores sets nothing",
 			spec:         &api.ResourceSpec{Limits: api.ResourceList{CPU: "9223372036854775807"}},
-			wantMaxProcs: "9223372036854775807",
+			wantMaxProcs: unset,
+			wantMemLimit: unset,
+		},
+		{
+			name:         "CPU limit above MaxInt64 cores sets nothing",
+			spec:         &api.ResourceSpec{Limits: api.ResourceList{CPU: "1e30"}},
+			wantMaxProcs: unset,
+			wantMemLimit: unset,
+		},
+		{
+			name:         "memory limit above MaxInt64 bytes sets nothing",
+			spec:         &api.ResourceSpec{Limits: api.ResourceList{Memory: "1e30"}},
+			wantMaxProcs: unset,
 			wantMemLimit: unset,
 		},
 		{

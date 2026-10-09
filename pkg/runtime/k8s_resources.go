@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	corev1 "k8s.io/api/core/v1"
@@ -131,6 +132,15 @@ func buildK8sResourceRequirements(spec *api.ResourceSpec, k8s *api.K8sResources)
 // non-Go processes in the container.
 const goMemLimitPercent = 90
 
+var (
+	// maxGoMaxProcs is the largest GOMAXPROCS the Go runtime accepts: it
+	// parses the variable as a 32-bit integer and ignores any other value.
+	maxGoMaxProcs = *resource.NewQuantity(math.MaxInt32, resource.DecimalSI)
+	// maxGoMemLimitBytes is the largest memory limit whose byte count
+	// fits in an int64.
+	maxGoMemLimitBytes = *resource.NewQuantity(math.MaxInt64, resource.BinarySI)
+)
+
 // appendGoRuntimeEnvFromLimits appends GOMAXPROCS and GOMEMLIMIT derived
 // from the container's resource limits, so that Go programs in the pod size
 // themselves to the pod rather than to the node (nproc and free inside a pod
@@ -147,6 +157,9 @@ const goMemLimitPercent = 90
 // so no variable is set for it.
 //
 //   - GOMAXPROCS is the CPU limit rounded up to whole cores, at least 1.
+//     It is left out when the limit is above math.MaxInt32 cores, the
+//     largest value the Go runtime accepts, so the runtime default
+//     applies.
 //     Setting it explicitly turns off the cgroup-aware default of Go 1.25+
 //     and its runtime updates (for example after an in-place pod resize).
 //     This is a deliberate trade-off: agent images may carry older Go
@@ -156,7 +169,8 @@ const goMemLimitPercent = 90
 //     limit: every Go process (for example each compile process under go
 //     build) gets its own copy, so it does not cap the container total and
 //     is not OOM protection. It only makes the GC work harder as a process
-//     nears the limit.
+//     nears the limit. It is left out when the limit is above
+//     math.MaxInt64 bytes.
 func appendGoRuntimeEnvFromLimits(env []corev1.EnvVar, limits corev1.ResourceList) []corev1.EnvVar {
 	present := make(map[string]struct{}, len(env))
 	for _, e := range env {
@@ -169,16 +183,17 @@ func appendGoRuntimeEnvFromLimits(env []corev1.EnvVar, limits corev1.ResourceLis
 		env = append(env, corev1.EnvVar{Name: name, Value: value})
 	}
 
-	if q, ok := limits[corev1.ResourceCPU]; ok && q.Sign() > 0 {
-		// Value rounds a fractional quantity up to the next whole number
-		// and does not overflow for very large limits.
+	// Both bounds are checked on the Quantity before Value is called,
+	// because Value wraps silently for quantities above math.MaxInt64.
+	if q, ok := limits[corev1.ResourceCPU]; ok && q.Sign() > 0 && q.Cmp(maxGoMaxProcs) <= 0 {
+		// Value rounds a fractional quantity up to the next whole number.
 		cores := q.Value()
 		if cores < 1 {
 			cores = 1
 		}
 		add("GOMAXPROCS", fmt.Sprintf("%d", cores))
 	}
-	if q, ok := limits[corev1.ResourceMemory]; ok && q.Sign() > 0 {
+	if q, ok := limits[corev1.ResourceMemory]; ok && q.Sign() > 0 && q.Cmp(maxGoMemLimitBytes) <= 0 {
 		bytes := q.Value()
 		// bytes/100*percent avoids overflow for very large limits; the
 		// precision lost is below one MiB for any limit that matters.
