@@ -578,6 +578,47 @@ describe('connect timeouts', () => {
     expect(FakeSocket.instances).toHaveLength(2);
   });
 
+  it('a close before open clears the pre-open guard: no timer left, nothing fires later', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    const socket = FakeSocket.instances[0];
+    expect(vi.getTimerCount()).toBe(1); // the pre-open guard
+
+    socket.onclose?.({ code: 1006 });
+    expect(session.state.connection).toBe('disconnected');
+    expect(session.state.disconnectReason).toBe('network');
+    expect(vi.getTimerCount()).toBe(0);
+    const settled = session.state;
+    const listener = watch(session);
+
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(session.state).toBe(settled);
+    expect(listener).not.toHaveBeenCalled();
+    expect(socket.close).not.toHaveBeenCalled();
+    expect(FakeSocket.instances).toHaveLength(1);
+  });
+
+  it('markUnavailable before open clears the pre-open guard: no timer left, nothing fires later', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    await session.connect();
+    expect(vi.getTimerCount()).toBe(1); // the pre-open guard
+
+    session.markUnavailable('agent-stopped', 'Agent has stopped.');
+    expect(session.state.connection).toBe('unavailable');
+    expect(vi.getTimerCount()).toBe(0);
+    const settled = session.state;
+    const listener = watch(session);
+
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(session.state).toBe(settled);
+    expect(listener).not.toHaveBeenCalled();
+    expect(FakeSocket.instances).toHaveLength(1);
+  });
+
   it.each(['before open', 'after open'])(
     'a late open, message or close after a timeout %s changes nothing',
     async (stage) => {
