@@ -942,7 +942,7 @@ describe('scion-chat-message delivery state', () => {
   it('falls back to matching the reason prefix for history rows without a code', async () => {
     const el = await mountOutbound({
       dispatchState: 'failed',
-      dispatchFailureReason: 'Agent unreachable (deleted)',
+      dispatchFailureReason: 'Agent unreachable',
       dispatchFailureCode: '',
     });
 

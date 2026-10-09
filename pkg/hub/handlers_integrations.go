@@ -33,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationupdate"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/secretmigration"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -210,28 +211,18 @@ func (s *Server) handleAdminIntegrations(w http.ResponseWriter, r *http.Request)
 }
 
 // handleAdminIntegrationByName dispatches requests under
-// /api/v1/admin/integrations/{name}[/config|/restart|/health].
-// Authorization: route guard checks hub.integrations.read for GET.
-// Write operations (PUT/POST/DELETE) require hub.integrations.update via inline Decide.
+// /api/v1/admin/integrations/{name}[/config|/restart|/health|/update|/install].
+// Authorization: route guard checks hub.integrations.read for every method.
+// Write operations (PUT/POST/DELETE) require hub.integrations.update via
+// inline Decide. Install and starting an update build and install code on
+// the hub host, so they also require an interactive session
+// (HOST_OPERATIONS) before any permission check.
 func (s *Server) handleAdminIntegrationByName(w http.ResponseWriter, r *http.Request) {
-	// Inline authorization for write operations — the route guard only
-	// checks the read permission. Writes need hub.integrations.update.
-	switch r.Method {
-	case http.MethodPut, http.MethodPost, http.MethodDelete:
-		if _, ok := s.requireWritePermission(w, r, "hub.integrations.update"); !ok {
-			return
-		}
-	}
-
 	// Parse: /api/v1/admin/integrations/{name}[/{action}[/{sub}]]
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/admin/integrations/")
 	path = strings.TrimSuffix(path, "/")
 	parts := strings.SplitN(path, "/", 3)
 	name := parts[0]
-	if name == "" {
-		NotFound(w, "integration")
-		return
-	}
 
 	action := ""
 	if len(parts) >= 2 {
@@ -240,6 +231,25 @@ func (s *Server) handleAdminIntegrationByName(w http.ResponseWriter, r *http.Req
 	actionSub := ""
 	if len(parts) >= 3 {
 		actionSub = parts[2]
+	}
+
+	// Inline authorization for write operations — the route guard only
+	// checks the read permission. Writes need hub.integrations.update.
+	switch r.Method {
+	case http.MethodPut, http.MethodPost, http.MethodDelete:
+		if action == "install" || action == "update" {
+			if _, ok := s.requireSessionCredentialFor(w, r.Context(), authzop.ReasonHostOperations); !ok {
+				return
+			}
+		}
+		if _, ok := s.requireWritePermission(w, r, "hub.integrations.update"); !ok {
+			return
+		}
+	}
+
+	if name == "" {
+		NotFound(w, "integration")
+		return
 	}
 
 	// Special-case: "available" as a name with no action is the available-integrations list.
@@ -491,6 +501,13 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 	}
 
 	ctx := r.Context()
+
+	// A credential other than an interactive session writes configuration
+	// settings keys only (integration_token_settings.go). Checked on the
+	// decoded request, which is what is written, before any write.
+	if writeTokenRefusedIntegrationKeys(w, ctx, tokenRefusedIntegrationConfigKeys(name, req)) {
+		return
+	}
 	user := GetUserIdentityFromContext(ctx)
 	userID := ""
 	if user != nil {

@@ -38,6 +38,15 @@ type hcScopeRecorder struct {
 	createReqs  []hubclient.CreateHarnessConfigRequest
 	finalized   int
 	existingIDs map[string]string // "scope|scopeId|name" -> id
+	// finalizeSourceURLs records the sourceUrl of each finalize body ("" when
+	// omitted), ptone/scion#3853.
+	finalizeSourceURLs []string
+	// existingSourceURL is the sourceUrl the list call reports for an
+	// existing config.
+	existingSourceURL string
+	// downloadHashes, when set, makes the download call report these
+	// path -> hash entries for an existing config (instead of "no files").
+	downloadHashes map[string]string
 }
 
 func (r *hcScopeRecorder) key(scope, scopeID, name string) string {
@@ -49,8 +58,14 @@ func (r *hcScopeRecorder) key(scope, scopeID, name string) string {
 // exists only if rec.existingIDs has an entry for its exact scope.
 func newHarnessConfigScopeHub(t *testing.T, rec *hcScopeRecorder) *httptest.Server {
 	t.Helper()
+	return httptest.NewServer(harnessConfigScopeHubHandler(t, rec))
+}
+
+// harnessConfigScopeHubHandler is the handler behind newHarnessConfigScopeHub.
+func harnessConfigScopeHubHandler(t *testing.T, rec *hcScopeRecorder) http.HandlerFunc {
+	t.Helper()
 	const newID = "hc-new"
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		rec.mu.Lock()
 		defer rec.mu.Unlock()
@@ -62,6 +77,7 @@ func newHarnessConfigScopeHub(t *testing.T, rec *hcScopeRecorder) *httptest.Serv
 			if id, ok := rec.existingIDs[rec.key(q.Get("scope"), q.Get("scopeId"), q.Get("name"))]; ok {
 				list = append(list, map[string]interface{}{
 					"id": id, "name": q.Get("name"), "scope": q.Get("scope"), "status": "active",
+					"sourceUrl": rec.existingSourceURL,
 				})
 			}
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"harnessConfigs": list})
@@ -73,6 +89,13 @@ func newHarnessConfigScopeHub(t *testing.T, rec *hcScopeRecorder) *httptest.Serv
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"harnessConfig": map[string]interface{}{"id": newID, "name": req.Name, "harness": req.Harness},
 			})
+
+		case r.Method == http.MethodGet && filepath.Base(r.URL.Path) == "download" && rec.downloadHashes != nil:
+			var files []map[string]interface{}
+			for p, h := range rec.downloadHashes {
+				files = append(files, map[string]interface{}{"path": p, "hash": h, "url": "file:///nonexistent/" + p})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"files": files})
 
 		case r.Method == http.MethodGet && filepath.Base(r.URL.Path) == "download":
 			// Existing config with no files: forces a full upload.
@@ -104,6 +127,9 @@ func newHarnessConfigScopeHub(t *testing.T, rec *hcScopeRecorder) *httptest.Serv
 
 		case r.Method == http.MethodPost && filepath.Base(r.URL.Path) == "finalize":
 			rec.finalized++
+			var body hubclient.HarnessConfigFinalizeRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			rec.finalizeSourceURLs = append(rec.finalizeSourceURLs, body.SourceURL)
 			id := filepath.Base(filepath.Dir(r.URL.Path))
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"id": id, "name": "codex", "harness": "codex", "status": "active", "contentHash": "sha256:abc",
@@ -112,7 +138,7 @@ func newHarnessConfigScopeHub(t *testing.T, rec *hcScopeRecorder) *httptest.Serv
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
-	}))
+	})
 }
 
 func newHCScopeTestEnv(t *testing.T, rec *hcScopeRecorder) (*HubContext, string) {
@@ -197,7 +223,7 @@ func TestInstallToHub_Force(t *testing.T) {
 		rec := &hcScopeRecorder{}
 		hubCtx, dir := newHCScopeTestEnv(t, rec)
 
-		require.NoError(t, installToHub(hubCtx, "codex", dir, "codex", false))
+		require.NoError(t, installToHub(hubCtx, "codex", dir, "codex", "", false))
 		require.Len(t, rec.createReqs, 1)
 		assert.Equal(t, "project", rec.createReqs[0].Scope)
 		assert.Equal(t, "proj-1913", rec.createReqs[0].ScopeID)
@@ -209,7 +235,7 @@ func TestInstallToHub_Force(t *testing.T) {
 		rec.existingIDs = map[string]string{rec.key("project", "proj-1913", "codex"): "hc-existing"}
 		hubCtx, dir := newHCScopeTestEnv(t, rec)
 
-		err := installToHub(hubCtx, "codex", dir, "codex", false)
+		err := installToHub(hubCtx, "codex", dir, "codex", "", false)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), `harness-config "codex" already exists`)
 		assert.Contains(t, err.Error(), "project (proj-1913)")
@@ -224,7 +250,7 @@ func TestInstallToHub_Force(t *testing.T) {
 		rec.existingIDs = map[string]string{rec.key("project", "proj-1913", "codex"): "hc-existing"}
 		hubCtx, dir := newHCScopeTestEnv(t, rec)
 
-		require.NoError(t, installToHub(hubCtx, "codex", dir, "codex", true))
+		require.NoError(t, installToHub(hubCtx, "codex", dir, "codex", "", true))
 		assert.Empty(t, rec.createReqs)
 		assert.Equal(t, 1, rec.finalized)
 	})
@@ -235,7 +261,7 @@ func TestInstallToHub_Force(t *testing.T) {
 		rec.existingIDs = map[string]string{rec.key("global", "", "codex"): "hc-global"}
 		hubCtx, dir := newHCScopeTestEnv(t, rec)
 
-		require.NoError(t, installToHub(hubCtx, "codex", dir, "codex", false))
+		require.NoError(t, installToHub(hubCtx, "codex", dir, "codex", "", false))
 		require.Len(t, rec.createReqs, 1)
 		assert.Equal(t, "project", rec.createReqs[0].Scope)
 	})
@@ -246,7 +272,7 @@ func TestInstallToHub_Force(t *testing.T) {
 		rec.existingIDs = map[string]string{rec.key("global", "", "codex"): "hc-global"}
 		hubCtx, dir := newHCScopeTestEnv(t, rec)
 
-		err := installToHub(hubCtx, "codex", dir, "codex", false)
+		err := installToHub(hubCtx, "codex", dir, "codex", "", false)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "scope global")
 	})

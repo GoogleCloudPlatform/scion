@@ -651,6 +651,20 @@ var bearerMatrixPositiveServerErrors = map[liveInventoryKey]bearerMatrixPositive
 		http.StatusNotImplemented, "the test server configures no operational settings"},
 	{"hub.projectdefaults.update", http.MethodPost, "/api/v1/admin/project-defaults"}: {
 		http.StatusNotImplemented, "the test server configures no operational settings"},
+	{"hub.diagnostics.read", http.MethodGet, "/api/v1/admin/diagnostics/logs"}: {
+		http.StatusNotImplemented, "the test server configures no log query service"},
+	{"hub.diagnostics.read", http.MethodGet, "/api/v1/admin/diagnostics/logs/stream"}: {
+		http.StatusNotImplemented, "the test server configures no log query service"},
+	{"hub.metrics.read", http.MethodGet, "/api/v1/metrics/{name}"}: {
+		http.StatusServiceUnavailable, "the test server configures no telemetry project"},
+	{"hub.metrics.read", http.MethodGet, "/api/v1/admin/metrics-dashboard"}: {
+		http.StatusServiceUnavailable, "the test server configures no telemetry project"},
+	{"hub.githubapp.update", http.MethodPut, "/api/v1/github-app/installations/{id}"}: {
+		http.StatusInternalServerError, "the empty update body fails at the store write"},
+	{"hub.githubapp.update", http.MethodPost, "/api/v1/github-app/installations/discover"}: {
+		http.StatusServiceUnavailable, "the test server configures no GitHub App"},
+	{"hub.githubapp.update", http.MethodPost, "/api/v1/github-app/sync-permissions"}: {
+		http.StatusBadGateway, "the test server configures no GitHub App"},
 }
 
 // bearerMatrixAuthzErrorCodes are error codes that report an authorization

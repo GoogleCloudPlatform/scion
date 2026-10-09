@@ -29,6 +29,7 @@ import { stateManager } from './state.js';
 import { debugLog } from './debug-log.js';
 import { setDocumentTitle } from './page-title.js';
 import { setInitialPageData, takeInitialPageData } from './ssr-page-data.js';
+import { configureReadinessMarks, readinessNavigationStarted } from './readiness-marks.js';
 import { CHAT_DM_ROUTE, CHAT_SPACE_ROUTE, CHAT_THREAD_ROUTE } from './chat-routes.js';
 import { chatNotifications } from './chat-notifications.js';
 import { chatUnread, startChatUnreadIfEligible } from './chat-unread.js';
@@ -56,7 +57,7 @@ import {
 import { ACCOUNT_TEARDOWN_EVENT, type AccountTeardownDetail } from '../utils/auth.js';
 import { clearAdminStatus, loadAdminStatus } from './admin-status.js';
 import { chatRecentFiles } from './chat-recent-files.js';
-import { pushRouteEntry, type RouteShell } from './route-history.js';
+import { isInPagePop, pushRouteEntry, type RouteShell } from './route-history.js';
 import { browserPath, stripBasePath } from './navigation.js';
 import { clearChatScrollAnchor } from '../components/shared/chat/chat-scroll-anchor.js';
 import { installViewportFrame } from './viewport.js';
@@ -787,6 +788,8 @@ async function init(): Promise<void> {
 
   // Get initial data from SSR
   const initialData = getInitialData();
+  // Fixed for this document: a change of the setting applies on the next full load.
+  configureReadinessMarks(initialData?.readinessMarks === true);
   if (initialData) {
     console.info('[Scion] Initial page data:', initialData.path);
     if (initialData.user) {
@@ -1017,6 +1020,7 @@ async function renderRoute(path: string): Promise<void> {
   const appContainer = ensureRoots();
   if (!appContainer) return;
   const thisNav = ++navigationId;
+  readinessNavigationStarted(thisNav);
 
   // The SSR payload belongs to this document and is offered to the first
   // render only, whichever route it is; it is cleared here whether or not it
@@ -1334,10 +1338,27 @@ function setupRouter(): void {
 
   // Handle browser back/forward.
   // Include query string so terminal layout state can be restored (#1715).
-  window.addEventListener('popstate', () => {
+  // A page's own in-page entry on the path already shown (a chat panel on a
+  // phone) is restored by that page; rendering would rebuild it.
+  window.addEventListener('popstate', (e: PopStateEvent) => {
     const path = stripBasePath(window.location.pathname);
     const search = window.location.search;
-    void renderRoute(search ? `${path}${search}` : path);
+    const appPath = search ? `${path}${search}` : path;
+    if (
+      isInPagePop(
+        e.state,
+        appPath,
+        activeShell?.element as RouteShell | undefined,
+        routeOutlet?.hidden ?? true
+      )
+    ) {
+      // Back/Forward supersedes a render still in flight (a route the user
+      // left this page for a moment ago), as any navigation does: it must
+      // not replace the page this entry belongs to once it finishes.
+      ++navigationId;
+      return;
+    }
+    void renderRoute(appPath);
   });
 }
 
@@ -1385,10 +1406,16 @@ function replaceRoute(path: string): Promise<void> {
  * chat page opening another thread in place). Records the path as the active
  * shell's rendered path, as a render would, so the header's mode switch
  * remembers it and returning from the terminal workspace reuses the page.
- * Resolves once the shell has re-rendered for it.
+ * `state` becomes the entry's history state. Resolves once the shell has
+ * re-rendered for it.
  */
-function pushRoute(path: string): Promise<void> {
-  return pushRouteEntry(activeShell?.element as RouteShell | undefined, path, browserPath(path));
+function pushRoute(path: string, state: Record<string, unknown> = {}): Promise<void> {
+  return pushRouteEntry(
+    activeShell?.element as RouteShell | undefined,
+    path,
+    browserPath(path),
+    state
+  );
 }
 
 // Initialize when DOM is ready

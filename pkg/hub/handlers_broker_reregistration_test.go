@@ -238,9 +238,11 @@ func TestBrokerReregistration_OrdinaryHubMemberDenied(t *testing.T) {
 	member := newHubMemberUser(t, s, "reregistration-member-hubmember")
 	broker := createReregistrationTestBroker(t, s, "reregistration-broker-hubmember", owner.ID)
 
+	// No auto-provide in the body, so the denial comes from the
+	// re-registration target check alone.
 	rec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
-		Name:        broker.Name,
-		AutoProvide: true,
+		Name:   broker.Name,
+		Labels: map[string]string{"env": "requested"},
 	})
 
 	assert.Equal(t, http.StatusForbidden, rec.Code,
@@ -259,9 +261,8 @@ func TestBrokerReregistration_OwnerAllowed(t *testing.T) {
 	broker := createReregistrationTestBroker(t, s, "reregistration-broker-owner-c", owner.ID)
 
 	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
-		Name:        broker.Name,
-		AutoProvide: true,
-		Labels:      map[string]string{"env": "updated"},
+		Name:   broker.Name,
+		Labels: map[string]string{"env": "updated"},
 	})
 
 	require.Equal(t, http.StatusCreated, rec.Code,
@@ -275,8 +276,7 @@ func TestBrokerReregistration_OwnerAllowed(t *testing.T) {
 
 	updated, err := s.GetRuntimeBroker(context.Background(), broker.ID)
 	require.NoError(t, err)
-	assert.True(t, updated.AutoProvide, "owner re-registration should apply the requested fields")
-	assert.Equal(t, "updated", updated.Labels["env"])
+	assert.Equal(t, "updated", updated.Labels["env"], "owner re-registration should apply the requested fields")
 }
 
 // TestBrokerReregistration_OwnerWithoutBrokerCreateDenied confirms that the

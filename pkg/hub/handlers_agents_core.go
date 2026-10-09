@@ -1624,9 +1624,11 @@ func (s *Server) createAgentInProject(
 		return
 	}
 
-	// Enforce broker-level dispatch authorization: only the broker owner can create agents on it
+	// Enforce broker-level dispatch authorization: an auto-provide broker, a
+	// broker associated with this project with its owner's consent, or
+	// broker.dispatch on the broker (canUseBrokerForProject).
 	if runtimeBrokerID != "" {
-		if !s.checkBrokerDispatchAccess(ctx, w, runtimeBrokerID) {
+		if !s.checkBrokerDispatchAccess(ctx, w, runtimeBrokerID, project) {
 			return
 		}
 	}
@@ -2613,6 +2615,16 @@ func (s *Server) createAgentInProject(
 	// the post-dispatch phase writes, or a real failure's rollback. Each
 	// dispatch below is bounded by syncDispatch instead.
 	ctx = detachLaunchFromClient(ctx)
+	// On the synchronous outcome the response waits on that dispatch for up
+	// to syncDispatchTimeout, longer than the default WriteTimeout of the
+	// serving listener: extend this request's write deadline to cover it,
+	// so a slow launch that succeeds is not answered with a dropped
+	// connection (ptone/scion#3850). The extension also runs when the
+	// broker accepts the create for asynchronous launch; that response is
+	// written promptly, so the longer deadline is harmless there.
+	if s.GetDispatcher() != nil {
+		extendWriteDeadlineForSyncDispatch(ctx, w, s.config.WriteTimeout)
+	}
 	// acceptedLaunch is set when the broker accepted the create for
 	// asynchronous launch; the launch then reports back to the hub, which
 	// handles a delete that won the race (see compensateLandedRun).
@@ -3397,6 +3409,15 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		if writeAgentTokenRecordError(w, err) {
 			return
 		}
+		// The hub can refuse the finalize itself, before or instead of the
+		// broker: answer with the hub's own classification, as create does
+		// (ptone/scion#3452).
+		if writeAgentTokenIssueError(w, err) {
+			return
+		}
+		if writeEmptyPerAgentCapabilityError(w, err) {
+			return
+		}
 		var stillMissing *ErrEnvStillMissing
 		if errors.As(err, &stillMissing) {
 			MissingEnvVars(w, stillMissing.Requirements.Needs,
@@ -3410,6 +3431,9 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		// finalize-env creates the agent on the broker, so it can meet the
 		// same workspace-bucket refusal as create (ptone/scion#3422).
 		if relayWorkspaceStorageUnconfigured(w, err) {
+			return
+		}
+		if relayHarnessConfigRefusal(w, err) {
 			return
 		}
 		RuntimeError(w, "Failed to finalize env on runtime broker: "+err.Error())
@@ -5138,6 +5162,10 @@ const skillResolutionErrorCode = api.BrokerErrCodeSkillResolution
 // with no bucket to download the workspace upload from.
 const workspaceStorageUnconfiguredErrorCode = api.BrokerErrCodeWorkspaceStorageUnconfigured
 
+// harnessConfigUnusableErrorCode is the runtime broker's error code for a
+// harness-config whose provisioner cannot run (ptone/scion#3132).
+const harnessConfigUnusableErrorCode = api.BrokerErrCodeHarnessConfigUnusable
+
 // dispatchCreateErrorResponse classifies a failed create/provision dispatch to
 // the runtime broker and writes the matching HTTP response.
 //
@@ -5173,6 +5201,8 @@ func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID strin
 	case relaySkillResolutionError(w, err):
 		// Response already written.
 	case relayWorkspaceStorageUnconfigured(w, err):
+		// Response already written.
+	case relayHarnessConfigRefusal(w, err):
 		// Response already written.
 	case isBrokerStatus(err, http.StatusNotFound):
 		message := err.Error()
@@ -5238,6 +5268,34 @@ func relayWorkspaceStorageUnconfigured(w http.ResponseWriter, err error) bool {
 		return false
 	}
 	writeError(w, se.StatusCode, workspaceStorageUnconfiguredErrorCode, "Failed to dispatch to runtime broker: "+se.brokerErrorMessage(), nil)
+	return true
+}
+
+// relayHarnessConfigRefusal writes the broker's refusal of the
+// harness-config a dispatch would run -- 422 harness_config_unusable (its
+// provisioner cannot run) or 403 forbidden (the broker's harness-config
+// policy does not allow it) -- with the broker's status, code and message
+// instead of the generic 502, and reports whether it did
+// (ptone/scion#3132). For any other error it writes nothing and returns
+// false. The broker's start markers in error.details are not relayed, as
+// for a skill resolution failure.
+func relayHarnessConfigRefusal(w http.ResponseWriter, err error) bool {
+	var se *brokerStatusError
+	if !errors.As(err, &se) {
+		return false
+	}
+	code := se.brokerErrorCode()
+	switch {
+	case se.StatusCode == http.StatusUnprocessableEntity && code == harnessConfigUnusableErrorCode:
+	case se.StatusCode == http.StatusForbidden && code == ErrCodeForbidden:
+		// Harness-config policy is today the broker's only producer of a
+		// 403 "forbidden". If the broker ever sends 403 forbidden with a
+		// different meaning, give that refusal its own code or revisit
+		// this mapping, or it will be relayed as a policy refusal.
+	default:
+		return false
+	}
+	writeError(w, se.StatusCode, code, se.brokerErrorMessage(), nil)
 	return true
 }
 
