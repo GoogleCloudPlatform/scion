@@ -511,7 +511,9 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	// Auto-provide may have linked the broker without a local_path, so we always
 	// check and update if needed.
 	if err := ensureProviderPath(context.Background(), hubCtx); err != nil {
-		warnf("failed to ensure provider path: %v", err)
+		// Kept at debug: on broker hosts where provider listing is not
+		// permitted this would otherwise print on every command.
+		debugf("Warning: failed to ensure provider path: %v", err)
 	}
 
 	// Skip sync if requested
