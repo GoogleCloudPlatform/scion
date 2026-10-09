@@ -343,11 +343,21 @@ func TestExecDispatchDelete_RowlessOnlyForClaimlessTargetedIntents(t *testing.T)
 	t.Run("row gone, target on another broker: not found", func(t *testing.T) {
 		f := newRowlessFixture(t)
 		f.removeRows(t)
+		// A registered broker this node can send to, so the delete would
+		// reach it (and the recording client) if the target were used.
+		other := &store.RuntimeBroker{
+			ID:     uuid.NewString(),
+			Name:   "other-broker",
+			Slug:   "ob-" + uuid.NewString()[:8],
+			Status: "online",
+		}
+		require.NoError(t, f.store.CreateRuntimeBroker(ctx, other))
 		tgt := target(f)
-		tgt.BrokerID = uuid.NewString()
+		tgt.BrokerID = other.ID
 		client, err := exec(t, f, DeleteDispatchArgs{RunID: "run-a", PreviousRunIDs: []string{"run-p"}, Target: tgt})
 		require.ErrorIs(t, err, store.ErrNotFound)
-		assert.Empty(t, client.sent())
+		assert.Contains(t, err.Error(), "resolve agent "+f.snapshot.ID, "the error is the row lookup's")
+		assert.Empty(t, client.sent(), "a delete reached a broker")
 	})
 	t.Run("lookup error other than not found: returned, target unused", func(t *testing.T) {
 		f := newRowlessFixture(t)
