@@ -716,6 +716,11 @@ baseline section).
 
 ## Choosing regression budgets
 
+(The budgets now exist: counter budgets in CI, and the wall-clock
+median-ratio check below. This section keeps the reasoning behind them.
+One correction to it: long-task count does depend on the host's CPU and
+load, so the CI budget for it uses a median and a wide margin.)
+
 Not implemented by this harness, and deliberately not guessed at: this
 container is a shared 16-CPU development host with a
 load average observed to swing from roughly 47 to 450 depending on what
@@ -741,6 +746,86 @@ need a quiet, dedicated runner with a repeated (>=10 run) baseline.
 apibench run) are recorded so a reader can sanity-check whether a given
 historical run's numbers are trustworthy for wall-clock comparisons, not to
 derive budgets from directly.
+
+## Wall-clock budgets (median ratio)
+
+Counter budgets (store calls, decisions, response bytes, DOM elements,
+long tasks) run in CI; see
+`docs-site/src/content/docs/contributing/perf-tracing.md`, "Regression
+budgets in CI". Wall-clock budgets are separate and run **only on a quiet,
+dedicated runner booked for the run, never as a required check on shared
+CI hosts**. `web/e2e-perf/median-ratio.mjs` compares the median of repeated
+timed trials with a stored baseline median, per metric:
+
+- **Metrics.** `api:<scenario>` is the `totalMs` of each successful
+  `apibench` attempt; `browser:<scenario>` is the `navToPopulatedMs` of each
+  warm, populated `large-project-bench.mjs` run.
+- **Warm-up.** `apibench --warmup 2` (two untimed requests per scenario,
+  discarded before the report). In the browser report, the first (cold,
+  fresh-context) run of each scenario is the warm-up and is not counted.
+- **Trials.** `apibench --runs 15` and `large-project-bench.mjs --runs 11`
+  (1 cold plus 10 warm). A metric with fewer than 10 timed samples (for
+  example after failed attempts) fails as `insufficient`, it never passes.
+- **Ratio.** A metric fails when its median is more than **1.25x** its
+  baseline median. The median, not the mean or the standard deviation,
+  because this data is heavy-tailed (see above): one slow trial moves the
+  mean, not the median.
+- **Baseline.** Taken on the same runner, at 100 agents, with the same
+  commands, and stored with the commit and a runner description (no host
+  names). A baseline from one runner says nothing about another.
+
+### Running it: `perf/bench/wallclock.sh`
+
+One script does the whole run from a plain checkout. It builds the hub,
+`seed` and `apibench`, runs `npm ci` and `npm run build` in `web/`, and
+installs Playwright's Chromium. Then it seeds 100 agents into a fresh
+SQLite file, starts an isolated hub on loopback (scrubbed environment, as
+in "Isolate the hub environment" above), runs both benchmarks with the
+trial counts above, and runs `median-ratio.mjs`.
+
+Prerequisites: Go (the `go.mod` version), Node.js 20 or newer with npm,
+curl and git. Network access is needed once, for `npm ci` and the Chromium
+download. No root is needed, but Playwright's Chromium needs the usual
+system libraries (`npx playwright install-deps chromium` installs them,
+with root).
+
+```sh
+# From the repo root. Record a baseline on the booked runner:
+perf/bench/wallclock.sh --write-baseline perf/bench/wallclock-baseline.json \
+  --runner "<runner description: CPU count, memory, OS; no host names>"
+
+# Later runs on the same runner, against that baseline (exit 1 on a regression):
+perf/bench/wallclock.sh --baseline perf/bench/wallclock-baseline.json
+```
+
+Options: `--workdir DIR` (default: a new `/tmp/scion-wallclock.*`
+directory, kept after the run), `--skip-build` (reuse the binaries and web
+build from an earlier run in the same `--workdir`) and `--port N` (default
+`18080`; the hub also uses `N+1`).
+
+Outputs, in the work directory: `seed-100.json`, `api-100.json` (the
+apibench report), `browser-100.json` (the browser report), `hub.log` and,
+for a check run, `median-ratio.txt`. The script prints one line per metric
+(`ok`, `over`, `insufficient` or `new`) with the median, the baseline
+median, the ratio and the trial count. Exit status: 0 within budget or
+baseline written, 1 over budget or too few trials, 2 usage or setup error.
+
+Expected runtime: about 5-10 minutes to build on a cold Go and npm cache,
+then about 2 minutes for the API benchmark (3 scenarios x 17 requests) and
+about 10-15 minutes for the browser benchmark (4 scenarios x 11 loads),
+so 20-30 minutes in all.
+
+The same comparison by hand, for reports produced some other way:
+
+```sh
+cd web
+node e2e-perf/median-ratio.mjs --baseline ../perf/bench/wallclock-baseline.json \
+  --api /path/to/api-100.json --browser /path/to/browser-100.json
+```
+
+`--ratio` and `--min-trials` override the defaults (1.25 and 10). Both are
+also stored in the baseline file, and a baseline's values apply unless
+overridden on the command line.
 
 ## #2393 acceptance-criteria gaps
 
