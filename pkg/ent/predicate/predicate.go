@@ -72,9 +72,6 @@ type Conversation func(*sql.Selector)
 // ConversationParticipant is the predicate function for conversationparticipant builders.
 type ConversationParticipant func(*sql.Selector)
 
-// DecisionAudit is the predicate function for decisionaudit builders.
-type DecisionAudit func(*sql.Selector)
-
 // DelegationAdoption is the predicate function for delegationadoption builders.
 type DelegationAdoption func(*sql.Selector)
 

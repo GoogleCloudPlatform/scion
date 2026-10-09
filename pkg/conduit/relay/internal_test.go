@@ -427,6 +427,40 @@ func TestInternalAPIBindsTargetRelay(t *testing.T) {
 	})
 }
 
+// TestInternalAPIMethodNotAllowedSetsAllow: an authenticated request with
+// the wrong method gets a plain-HTTP 405 that names the route's method in
+// Allow (RFC 9110), before any WebSocket upgrade (ptone/scion#4057).
+func TestInternalAPIMethodNotAllowedSetsAllow(t *testing.T) {
+	p := newPair(t, echoConfig())
+	base := p.a.Internal.URL + relay.InternalPathPrefix
+	want := `{"project_id":"` + project + `","incarnation":"L1"}`
+	for _, tc := range []struct {
+		name, method, url, allow string
+	}{
+		{"self POST", http.MethodPost, base + "self", "GET"},
+		{"self DELETE", http.MethodDelete, base + "self", "GET"},
+		{"rpc GET", http.MethodGet, base + "sessions/" + p.rec.SessionID + "/rpc", "POST"},
+		{"rpc PUT", http.MethodPut, base + "sessions/" + p.rec.SessionID + "/rpc", "POST"},
+		{"stream POST", http.MethodPost, base + "sessions/" + p.rec.SessionID + "/stream", "GET"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := signed(t, p.a.Relay, p.w.PeerAuth("relay-b"), tc.method, tc.url, nil, want)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusMethodNotAllowed {
+				t.Fatalf("status %d, want 405", resp.StatusCode)
+			}
+			if got := resp.Header.Get("Allow"); got != tc.allow {
+				t.Fatalf("Allow %q, want %q", got, tc.allow)
+			}
+		})
+	}
+}
+
 // TestInternalStreamCapabilityChecks (F9): a stream request must name its
 // stream kind as the capability (400 otherwise, before any upgrade), and a
 // StreamOpen whose kind differs from the admitted capability is closed with

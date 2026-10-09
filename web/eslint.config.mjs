@@ -115,6 +115,8 @@ export default defineConfig([
   project(terminalTests, './src/client/tsconfig.terminal-tests.json'),
   project(clientTests, './src/client/tsconfig.client-tests.json'),
   project(componentTests, './src/components/tsconfig.component-tests.json'),
+  // Checks the Playwright configs, so it needs their TS project.
+  project(['src/utils/playwright-forbid-only.test.ts'], './tsconfig.e2e-configs.json'),
   project(
     [
       'e2e/chat-palette/accessibility.pw.ts',
