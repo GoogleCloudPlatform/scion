@@ -227,7 +227,7 @@ describe('scion-page-health-dashboard integrations', () => {
 
   it('hides the section when the summary has no plugins', async () => {
     for (const integrations of [[], undefined]) {
-      vi.mocked(apiFetch).mockImplementation(async () => summary(integrations));
+      vi.mocked(apiFetch).mockImplementation(() => Promise.resolve(summary(integrations)));
       const el = await page();
       expect(el.shadowRoot?.querySelector('scion-health-hub-card')).not.toBeNull();
       // No section and no empty full-width wrapper adding a second gap.
@@ -240,13 +240,13 @@ describe('scion-page-health-dashboard integrations', () => {
   });
 
   it('updates a row when the next refresh reports the plugin stopped', async () => {
-    vi.mocked(apiFetch).mockImplementation(async () => summary([integration()]));
+    vi.mocked(apiFetch).mockImplementation(() => Promise.resolve(summary([integration()])));
     const el = await page();
     expect(cell(row(el, 'telegram'), 'health')).toBe('healthy');
     expect(cell(row(el, 'telegram'), 'connected')).toBe('yes');
 
-    vi.mocked(apiFetch).mockImplementation(async () =>
-      summary([integration({ health: 'unknown', connected: false, version: '' })])
+    vi.mocked(apiFetch).mockImplementation(() =>
+      Promise.resolve(summary([integration({ health: 'unknown', connected: false, version: '' })]))
     );
     await refresh(el);
     expect(cell(row(el, 'telegram'), 'health')).toBe('unknown');
@@ -254,7 +254,7 @@ describe('scion-page-health-dashboard integrations', () => {
   });
 
   it('shows plugins only under Integrations, not as runtime brokers', async () => {
-    vi.mocked(apiFetch).mockImplementation(async () => summary([integration()]));
+    vi.mocked(apiFetch).mockImplementation(() => Promise.resolve(summary([integration()])));
     const el = await page();
     const table = el.shadowRoot?.querySelector('scion-health-broker-table');
     await table?.updateComplete;
@@ -263,8 +263,8 @@ describe('scion-page-health-dashboard integrations', () => {
   });
 
   it('shows only the aggregate counts when the summary has no integration identity', async () => {
-    vi.mocked(apiFetch).mockImplementation(
-      async () =>
+    vi.mocked(apiFetch).mockImplementation(() =>
+      Promise.resolve(
         new Response(
           JSON.stringify({
             status: 'degraded',
@@ -287,6 +287,7 @@ describe('scion-page-health-dashboard integrations', () => {
           }),
           { status: 200, headers: { 'Content-Type': 'application/json' } }
         )
+      )
     );
     const el = await page();
     const section = el.shadowRoot?.querySelector('scion-health-integrations');

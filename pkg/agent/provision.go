@@ -42,9 +42,18 @@ import (
 	"github.com/google/uuid"
 )
 
+// ErrAgentProjectUnresolved is returned by DeleteAgentFiles when the
+// project path resolves to no existing project directory.
+var ErrAgentProjectUnresolved = errors.New("the agent's project directory does not exist")
+
+// DeleteAgentFiles removes agentName's files in the project projectPath
+// resolves to (its agent directory and workspace, worktree and, with
+// removeBranch, branch, and its external per-agent state). It never touches
+// another project's directories; the global project's agents are deleted
+// only when the global project is the target.
 func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (bool, error) {
 	// Every path built below joins agentName onto some directory -- the
-	// project's agents dir, the global agents dir, the external per-agent
+	// project's agents dir, the external per-agent
 	// state dir, or the shared worktree base -- so an unvalidated name could
 	// otherwise resolve outside all of them (e.g. "../sibling"). Containment
 	// under checkAgentDirContained is invariant of which root and
@@ -55,6 +64,16 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	// branch regardless of which directory ends up being touched.
 	if _, err := checkAgentDirContained(projectPath, agentName, false); err != nil {
 		return false, fmt.Errorf("delete: %w", err)
+	}
+
+	// The agent's files live under its project only. A project path that
+	// resolves to no existing project directory has nothing of the agent's
+	// to delete: it is reported (ErrAgentProjectUnresolved), never resolved
+	// to another project.
+	if pd, err := config.GetResolvedProjectDir(projectPath); err != nil {
+		return false, fmt.Errorf("delete: %w: %v", ErrAgentProjectUnresolved, err)
+	} else if _, statErr := os.Stat(pd); errors.Is(statErr, fs.ErrNotExist) {
+		return false, fmt.Errorf("delete: %w: %s", ErrAgentProjectUnresolved, pd)
 	}
 
 	var agentsDirs []string
@@ -123,11 +142,6 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 			externalAgentDir = filepath.Join(extDir, agentName)
 		}
 	}
-	// Also check global just in case
-	if globalDir, err := config.GetGlobalAgentsDir(); err == nil {
-		agentsDirs = append(agentsDirs, globalDir)
-	}
-
 	// Empty-per-agent (design #2703): the agent's workspace is a private,
 	// non-git directory that owns no worktree or branch. Even when the
 	// agent ran `git init` in it, or the project sits inside an enclosing

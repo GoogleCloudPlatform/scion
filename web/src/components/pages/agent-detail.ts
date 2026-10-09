@@ -52,7 +52,6 @@ interface AgentNotificationsResponse {
   userNotifications: Notification[];
   agentNotifications: Notification[];
 }
-import type { StatusType } from '../shared/status-badge.js';
 import { agentStatusBadge, stateLabel } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
@@ -702,19 +701,16 @@ export class ScionPageAgentDetail extends LitElement {
     }
     void this.loadData();
 
-    stateManager.addEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
-    stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated as EventListener);
+    stateManager.addEventListener('agents-updated', this.boundOnAgentsUpdated);
+    stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated);
 
     this.relativeTimeInterval = setInterval(() => this.requestUpdate(), 15000);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    stateManager.removeEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
-    stateManager.removeEventListener(
-      'projects-updated',
-      this.boundOnProjectsUpdated as EventListener
-    );
+    stateManager.removeEventListener('agents-updated', this.boundOnAgentsUpdated);
+    stateManager.removeEventListener('projects-updated', this.boundOnProjectsUpdated);
     if (this.relativeTimeInterval) {
       clearInterval(this.relativeTimeInterval);
       this.relativeTimeInterval = null;
@@ -957,9 +953,7 @@ export class ScionPageAgentDetail extends LitElement {
                 const data = (await subRes.json()) as
                   | Subscription[]
                   | { subscriptions?: Subscription[] };
-                const subs = Array.isArray(data)
-                  ? data
-                  : (data as { subscriptions?: Subscription[] }).subscriptions || [];
+                const subs = Array.isArray(data) ? data : data.subscriptions || [];
                 const match = subs.find((s) => s.scope === 'agent' && s.agentId === this.agentId);
                 if (match) {
                   this.subscribed = true;
@@ -1642,7 +1636,7 @@ export class ScionPageAgentDetail extends LitElement {
             <span class="info-value">
               ${agent.activity
                 ? html`<scion-status-badge
-                      status=${agent.activity as StatusType}
+                      status=${agent.activity}
                       label=${stateLabel(agent.activity)}
                       size="small"
                     ></scion-status-badge
@@ -1782,9 +1776,7 @@ export class ScionPageAgentDetail extends LitElement {
                   <span class="info-label">Connection State</span>
                   <span class="info-value">
                     <scion-status-badge
-                      status=${agent.connectionState === 'connected'
-                        ? ('success' as StatusType)
-                        : ('danger' as StatusType)}
+                      status=${agent.connectionState === 'connected' ? 'success' : 'danger'}
                       label=${agent.connectionState}
                       size="small"
                     ></scion-status-badge>
@@ -2182,7 +2174,7 @@ export class ScionPageAgentDetail extends LitElement {
    */
   private async handleModeChange(newMode: MessageMode, selectEl: HTMLElement): Promise<void> {
     const agent = this.agent!;
-    const oldMode = (agent.messageMode || 'project') as MessageMode;
+    const oldMode = agent.messageMode || 'project';
     if (newMode === oldMode) return;
 
     const revertSelect = () => {

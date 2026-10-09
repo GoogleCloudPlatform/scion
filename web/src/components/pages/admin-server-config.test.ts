@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { setPreferredTimeZone } from '../../utils/time.js';
+import type { ScionPageAdminServerConfig } from './admin-server-config.js';
 
 // ── Shared mock data builders ──
 
@@ -228,8 +229,6 @@ function createFetchHandler(
 }
 
 // Import the component module once so the custom element is only registered once.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let ScionPageAdminServerConfig: any;
 
 async function createComponent(
   fetchHandler: (url: string | URL | Request, init?: RequestInit) => Promise<Response>
@@ -264,8 +263,7 @@ describe('scion-page-admin-server-config', () => {
 
   beforeAll(async () => {
     vi.stubGlobal('fetch', vi.fn(createFetchHandler(makeBaseConfig())));
-    const mod = await import('./admin-server-config.js');
-    ScionPageAdminServerConfig = mod.ScionPageAdminServerConfig;
+    await import('./admin-server-config.js');
   });
 
   afterEach(() => {
@@ -2001,6 +1999,65 @@ describe('scion-page-admin-server-config', () => {
 
       // The switch itself must not render while the field is env-pinned.
       expect(agentSecretsSwitch(element)).toBeUndefined();
+    });
+  });
+
+  // ── Per-field env badges on map sections and the GCP IAM tab (ptone/scion#389) ──
+
+  describe('env badges on runtimes, profiles and GCP IAM fields', () => {
+    function envBadgeCount(el: HTMLElement): number {
+      return queryAll(el, '.env-badge').length;
+    }
+
+    it('renders no env badge when nothing is overridden', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      expect(envBadgeCount(element)).toBe(0);
+    });
+
+    it('badges the runtimes and profiles sections from leaf env keys under them', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            env_overrides: ['runtimes.docker.host', 'profiles.local.runtime'],
+          })
+        )
+      );
+      expect(envBadgeCount(element)).toBe(2);
+    });
+
+    it('does not badge a section from a key that only shares its name prefix', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({ settings_tier: 'db', env_overrides: ['profilesx.local.runtime'] })
+        )
+      );
+      expect(envBadgeCount(element)).toBe(0);
+    });
+
+    const gcpIamEnv = ['server.hub.gcp_iam_check_mode', 'server.hub.gcp_iam_deny_unknown_policy'];
+
+    it('badges the GCP IAM check mode and deny policy fields on a hosted DB hub', async () => {
+      // gcp_iam is Layer-1, so the selects stay editable and carry the env badge.
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'db', env_overrides: gcpIamEnv }))
+      );
+      const panel = query(element, 'sl-tab-panel[name="gcp-identity"]');
+      expect(panel?.querySelectorAll('.env-badge').length).toBe(2);
+      // The selects stay editable: both render, and neither is env-pinned.
+      expect(panel?.querySelectorAll('sl-select').length).toBe(2);
+      expect(panel?.querySelectorAll('.read-only-badge').length).toBe(0);
+    });
+
+    it('shows the GCP IAM fields as env-pinned on a file-tier hub', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ env_overrides: gcpIamEnv }))
+      );
+      const panel = query(element, 'sl-tab-panel[name="gcp-identity"]');
+      const pinned = Array.from(panel?.querySelectorAll('.read-only-badge') ?? []).filter((b) =>
+        (b.textContent ?? '').includes('environment variable')
+      );
+      expect(pinned.length).toBe(2);
     });
   });
 
