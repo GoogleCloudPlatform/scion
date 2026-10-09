@@ -951,14 +951,14 @@ func TestChatV2_ConversationRead_RejectsUnknownMessageID(t *testing.T) {
 }
 
 // TestChatV2_ConversationRead_AllowsMismatchedThreadIDWithRealConversationID:
-// the watermark guard checks existence only, not same-conversation
-// membership by ThreadID. A real, persisted message with a ConversationID
-// set but a ThreadID that doesn't match `key` (e.g. an agent API call with
-// an explicit conversation_id and an unrelated/absent thread_id) must still
-// be usable as a read watermark — rejecting it would make the guard
-// stricter than handleConversationHistory's ConversationID-based filter.
+// a real, persisted message of the topic's conversation whose ThreadID
+// doesn't match `key` (e.g. an agent API call with an explicit
+// conversation_id and an unrelated/absent thread_id) must still be usable
+// as a read watermark — rejecting it would make the guard stricter than
+// handleConversationHistory's ConversationID-based filter. A message of
+// another conversation is refused.
 func TestChatV2_ConversationRead_AllowsMismatchedThreadIDWithRealConversationID(t *testing.T) {
-	srv, s, wcs, proj, _ := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
 	if err := wcs.CreateTopic(ctx, WebChatTopic{
@@ -966,10 +966,26 @@ func TestChatV2_ConversationRead_AllowsMismatchedThreadIDWithRealConversationID(
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, "topic-a", proj.ID)
+	convID, err := wcs.GetTopicConversationID(ctx, "topic-a")
+	if err != nil || convID == "" {
+		t.Fatalf("GetTopicConversationID: %q %v", convID, err)
+	}
+
+	foreign := &store.Message{ID: tid("mismatched-thread-other-conv"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
+		Recipient: "thread:topic-a", Msg: "hi", Type: messages.TypeChat, Channel: "web",
+		ThreadID: "some-other-thread", ConversationID: tid("conv-elsewhere"), CreatedAt: time.Now().UTC()}
+	if err := s.CreateMessage(ctx, foreign); err != nil {
+		t.Fatalf("CreateMessage: %v", err)
+	}
+	if rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-a/read",
+		map[string]string{"messageId": foreign.ID}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a message of another conversation, got %d: %s", rec.Code, rec.Body.String())
+	}
 
 	msg := &store.Message{ID: tid("mismatched-thread-real-conv"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
 		Recipient: "thread:topic-a", Msg: "hi", Type: messages.TypeChat, Channel: "web",
-		ThreadID: "some-other-thread", ConversationID: tid("conv-topic-a"), CreatedAt: time.Now().UTC()}
+		ThreadID: "some-other-thread", ConversationID: convID, CreatedAt: time.Now().UTC()}
 	if err := s.CreateMessage(ctx, msg); err != nil {
 		t.Fatalf("CreateMessage: %v", err)
 	}
@@ -991,10 +1007,10 @@ func TestChatV2_ConversationRead_AllowsMismatchedThreadIDWithRealConversationID(
 
 // TestChatV2_ConversationRead_EnvelopeOnlyReplyAllowed: native agent replies
 // can persist with ThreadID == "" and only ConversationID set (see
-// TestChatDMs_UnreadMatchesNativeHistory's "envelope" mode). The existence-only
-// guard must not reject such a message as a read watermark.
+// TestChatDMs_UnreadMatchesNativeHistory's "envelope" mode). The guard must
+// accept such a message of the topic's conversation as a read watermark.
 func TestChatV2_ConversationRead_EnvelopeOnlyReplyAllowed(t *testing.T) {
-	srv, s, wcs, proj, _ := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
 	if err := wcs.CreateTopic(ctx, WebChatTopic{
@@ -1002,10 +1018,15 @@ func TestChatV2_ConversationRead_EnvelopeOnlyReplyAllowed(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, "topic-envelope", proj.ID)
+	convID, err := wcs.GetTopicConversationID(ctx, "topic-envelope")
+	if err != nil || convID == "" {
+		t.Fatalf("GetTopicConversationID: %q %v", convID, err)
+	}
 
 	envelopeMsg := &store.Message{ID: tid("envelope-reply"), ProjectID: proj.ID, Sender: "agent:bot", SenderID: tid("bot"),
 		Recipient: "user:dev@localhost", RecipientID: DevUserID,
-		Msg: "reply", Type: messages.TypeChat, Channel: "web", ThreadID: "", ConversationID: tid("conv-envelope"),
+		Msg: "reply", Type: messages.TypeChat, Channel: "web", ThreadID: "", ConversationID: convID,
 		CreatedAt: time.Now().UTC()}
 	if err := s.CreateMessage(ctx, envelopeMsg); err != nil {
 		t.Fatalf("CreateMessage: %v", err)

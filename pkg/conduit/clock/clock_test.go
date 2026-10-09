@@ -68,6 +68,26 @@ func TestFakeWaitFor(t *testing.T) {
 	}
 }
 
+func TestFakeWaitForTimer(t *testing.T) {
+	c := NewFake(t0)
+	other := c.AfterFunc(time.Hour, func() {}) // a timer at another deadline
+	go c.AfterFunc(time.Second, func() {})
+	if !c.WaitForTimer(10*time.Second, t0.Add(time.Second)) {
+		t.Fatal("WaitForTimer missed the armed timer")
+	}
+	if c.WaitForTimer(time.Millisecond, t0.Add(2*time.Second)) {
+		t.Fatal("WaitForTimer reported a deadline no timer has")
+	}
+	other.Stop()
+	if c.WaitForTimer(time.Millisecond, t0.Add(time.Hour)) {
+		t.Fatal("WaitForTimer reported a stopped timer")
+	}
+	c.Advance(time.Second)
+	if c.WaitForTimer(time.Millisecond, t0.Add(time.Second)) {
+		t.Fatal("WaitForTimer reported a timer that already fired")
+	}
+}
+
 func TestAfter(t *testing.T) {
 	c := NewFake(t0)
 	ch, stop := After(c, time.Second)

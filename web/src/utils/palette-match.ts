@@ -16,14 +16,15 @@
 
 /**
  * Pure normalization, match classification, deterministic comparator and
- * highlight-range helpers for the native chat quick command palette.
+ * highlight-range helpers for the quick palette, shared by every surface
+ * that hosts it.
  *
  * No dependency on CodeMirror, an external fuzzy-match package, or any DOM
  * API — every export here is a plain function over strings and plain
  * objects so it can be unit tested without mounting a component.
  */
 
-import { PALETTE_GROUP_ORDER, type PaletteCandidate } from '../client/chat-palette-types.js';
+import { PALETTE_GROUP_ORDER, type PaletteCandidate } from '../client/palette-types.js';
 
 /** Match tiers, best (0) to worst (3). `null` means "no match". */
 export type MatchTier = 0 | 1 | 2 | 3;

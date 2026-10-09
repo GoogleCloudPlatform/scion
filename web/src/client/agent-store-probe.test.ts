@@ -597,14 +597,14 @@ describe('AgentStore delta probe', () => {
     it('does not publish when a probe row lacks a creator name the held row has', async () => {
       const h = await loaded(
         Array.from({ length: 10 }, (_, i) =>
-          active(`a${i}`, 1, { appliedConfig: { creatorName: 'Ada' } } as Partial<Agent>)
+          active(`a${i}`, 1, { appliedConfig: { creatorName: 'Ada' } })
         )
       );
       let publishes = 0;
       h.store.retain(HUB, () => publishes++);
       const a3 = find(h.store.peek(HUB), 'a3') as (Agent & { creatorName?: string }) | undefined;
       expect(a3?.creatorName).toBe('Ada');
-      h.server.agents = h.server.agents.map((a) => ({ ...a, appliedConfig: {} }) as Agent);
+      h.server.agents = h.server.agents.map((a) => ({ ...a, appliedConfig: {} }));
       h.server.heartbeat(t(1000));
       await tick();
 
@@ -615,9 +615,7 @@ describe('AgentStore delta probe', () => {
 
     it('does not publish for the empty values a full row holds and compact probe rows omit', async () => {
       const h = await loaded([active('a1', 1)]);
-      h.server.agents.push(
-        active('a2', 2, { template: '', labels: {}, ancestry: [] } as Partial<Agent>)
-      );
+      h.server.agents.push(active('a2', 2, { template: '', labels: {}, ancestry: [] }));
       await h.emitAgent('created', { agentId: 'a2', name: 'a2', slug: 'a2', phase: 'running' });
       await settle();
       const a2 = h.feeds[0].getAgent('a2');
@@ -1394,9 +1392,7 @@ describe('AgentStore delta probe', () => {
 
   it('clears an offline activity a stopped and restarted agent no longer has, and keeps full fields', async () => {
     const h = await loaded([row('a1', 1, { activity: 'offline' })]);
-    h.feeds[0].seedAgents([
-      { ...(h.feeds[0].getAgent('a1') as Agent), harnessConfig: 'claude' } as Agent,
-    ]);
+    h.feeds[0].seedAgents([{ ...(h.feeds[0].getAgent('a1') as Agent), harnessConfig: 'claude' }]);
     let publishes = 0;
     h.store.retain(HUB, () => publishes++);
     await h.emitAgent('status', { agentId: 'a1', phase: 'stopped' });
@@ -1463,7 +1459,7 @@ describe('AgentStore delta probe', () => {
         _messageability: { canMessage: true },
       } as Partial<Agent>),
     ]);
-    h.server.projectRow = ({ _messageability: _omitted, ...rest }): Agent => rest as Agent;
+    h.server.projectRow = ({ _messageability: _omitted, ...rest }): Agent => rest;
     h.store.retain(P1, () => {});
     await h.store.ensure(P1);
     h.server.agents[0] = withoutActivity(

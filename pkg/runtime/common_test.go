@@ -2793,3 +2793,39 @@ func TestParseDockerServerVersion(t *testing.T) {
 		})
 	}
 }
+
+// taskArgHarness passes the task as the last argument of its command.
+type taskArgHarness struct{ MockHarness }
+
+func (h *taskArgHarness) GetCommand(task string, _ bool, args []string) []string {
+	return append(append([]string{"harness"}, args...), task)
+}
+
+// TestQuotedTaskBytes checks that QuotedTaskBytes is the growth of the
+// tmux start command when the task is added, for plain and quote-heavy
+// tasks.
+func TestQuotedTaskBytes(t *testing.T) {
+	startCmd := func(task string) string {
+		line, ok := harnessCmdLine(RunConfig{Harness: &taskArgHarness{}, Task: task})
+		if !ok {
+			t.Fatal("harnessCmdLine: no command line")
+		}
+		return buildTmuxStartCmd(tmuxAgentWindowCmd("sh", line), tmuxAttachSession)
+	}
+	base := len(startCmd(""))
+	for _, task := range []string{
+		"x",
+		strings.Repeat("plain text ", 100),
+		"it's",
+		strings.Repeat("'", 500),
+		strings.Repeat("don't \"quote\" $me\\n ", 50),
+	} {
+		want := len(startCmd(task)) - base
+		if got := QuotedTaskBytes(task); got != want {
+			t.Errorf("QuotedTaskBytes(%.30q) = %d, want %d", task, got, want)
+		}
+	}
+	if got := QuotedTaskBytes("'"); got != 13 {
+		t.Errorf("QuotedTaskBytes(\"'\") = %d, want 13", got)
+	}
+}

@@ -683,7 +683,7 @@ describe('PaletteTypeahead: holding the on-screen keyboard', () => {
     const proxy = typeahead.keyboardProxy!;
     press('a');
     composeAtFieldWebKit(proxy, 'にほん', '日本', () => {
-      press('Enter', { keyCode: 229 } as KeyboardEventInit);
+      press('Enter', { keyCode: 229 });
     });
     expect(typeahead.take()).toBe('a日本');
   });
@@ -694,7 +694,7 @@ describe('PaletteTypeahead: holding the on-screen keyboard', () => {
     const proxy = typeahead.keyboardProxy!;
     press('a');
     commitAtField(proxy, '日本', true);
-    const e = press('Backspace', { keyCode: 229 } as KeyboardEventInit);
+    const e = press('Backspace', { keyCode: 229 });
     expect(e.defaultPrevented).toBe(false);
     // The field's own Backspace.
     proxy.value = proxy.value.slice(0, -1);
@@ -707,7 +707,7 @@ describe('PaletteTypeahead: holding the on-screen keyboard', () => {
     const proxy = typeahead.keyboardProxy!;
     press('a');
     commitAtField(proxy, 'hello', false);
-    const e = press('x', { keyCode: 229 } as KeyboardEventInit);
+    const e = press('x', { keyCode: 229 });
     expect(e.defaultPrevented).toBe(false);
     // The field takes the character itself.
     proxy.value += 'x';
@@ -716,7 +716,7 @@ describe('PaletteTypeahead: holding the on-screen keyboard', () => {
 
   /** An IME-processed Backspace, applied by the field itself when the capture lets it through. */
   function imeBackspace(proxy: HTMLInputElement): KeyboardEvent {
-    const e = press('Backspace', { keyCode: 229 } as KeyboardEventInit);
+    const e = press('Backspace', { keyCode: 229 });
     if (!e.defaultPrevented) proxy.value = proxy.value.slice(0, -1);
     return e;
   }
@@ -748,7 +748,7 @@ describe('PaletteTypeahead: holding the on-screen keyboard', () => {
     typeahead.start();
     const proxy = typeahead.keyboardProxy!;
     press('a');
-    const e = press('x', { keyCode: 229 } as KeyboardEventInit);
+    const e = press('x', { keyCode: 229 });
     expect(e.defaultPrevented).toBe(false);
     proxy.value += 'x';
     press('y');
@@ -760,9 +760,9 @@ describe('PaletteTypeahead: holding the on-screen keyboard', () => {
     typeahead.start();
     const proxy = typeahead.keyboardProxy!;
     press('a');
-    expect(press('Delete', { keyCode: 229 } as KeyboardEventInit).defaultPrevented).toBe(false);
+    expect(press('Delete', { keyCode: 229 }).defaultPrevented).toBe(false);
     commitAtField(proxy, 'hi', false);
-    expect(press('Delete', { keyCode: 229 } as KeyboardEventInit).defaultPrevented).toBe(false);
+    expect(press('Delete', { keyCode: 229 }).defaultPrevented).toBe(false);
     expect(typeahead.take()).toBe('ahi');
   });
 
@@ -773,8 +773,8 @@ describe('PaletteTypeahead: holding the on-screen keyboard', () => {
     press('a');
     commitAtField(proxy, 'hi', false);
     target.focus();
-    expect(press('x', { keyCode: 229 } as KeyboardEventInit).defaultPrevented).toBe(true);
-    expect(press('Backspace', { keyCode: 229 } as KeyboardEventInit).defaultPrevented).toBe(true);
+    expect(press('x', { keyCode: 229 }).defaultPrevented).toBe(true);
+    expect(press('Backspace', { keyCode: 229 }).defaultPrevented).toBe(true);
     expect(typeahead.take()).toBe('ahi');
   });
 
@@ -783,7 +783,7 @@ describe('PaletteTypeahead: holding the on-screen keyboard', () => {
     typeahead.start();
     const proxy = typeahead.keyboardProxy!;
     commitAtField(proxy, 'hi', false);
-    const e = press('Enter', { keyCode: 229 } as KeyboardEventInit);
+    const e = press('Enter', { keyCode: 229 });
     expect(e.defaultPrevented).toBe(true);
     expect(proxy.value).toBe('hi');
     expect(typeahead.pending).toBe('');
@@ -791,9 +791,9 @@ describe('PaletteTypeahead: holding the on-screen keyboard', () => {
 
   it('without the field, the capture takes an IME-processed key', () => {
     typeahead.start();
-    expect(press('x', { keyCode: 229 } as KeyboardEventInit).defaultPrevented).toBe(true);
+    expect(press('x', { keyCode: 229 }).defaultPrevented).toBe(true);
     press('y');
-    expect(press('Backspace', { keyCode: 229 } as KeyboardEventInit).defaultPrevented).toBe(true);
+    expect(press('Backspace', { keyCode: 229 }).defaultPrevented).toBe(true);
     expect(typeahead.take()).toBe('x');
   });
 

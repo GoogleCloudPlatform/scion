@@ -209,12 +209,12 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if projectDir, ok := config.FindProjectRoot(); ok {
 		if projectDir != globalDir {
 			parentDir := filepath.Dir(projectDir)
-			fmt.Fprintf(os.Stderr, "\n%s%s WARNING: Server is running from a project directory context (%s)%s\n",
-				util.Bold, util.Yellow, parentDir, util.Reset)
-			fmt.Fprintf(os.Stderr, "%s%s          The runtime broker will use this project's templates and settings.%s\n",
-				util.Bold, util.Yellow, util.Reset)
-			fmt.Fprintf(os.Stderr, "%s%s          For machine-wide operation, run the server from outside any project directory.%s\n\n",
-				util.Bold, util.Yellow, util.Reset)
+			fmt.Fprint(os.Stderr, util.ColorFor(os.Stderr, fmt.Sprintf("\n%s%s WARNING: Server is running from a project directory context (%s)%s\n",
+				util.Bold, util.Yellow, parentDir, util.Reset)))
+			fmt.Fprint(os.Stderr, util.ColorFor(os.Stderr, fmt.Sprintf("%s%s          The runtime broker will use this project's templates and settings.%s\n",
+				util.Bold, util.Yellow, util.Reset)))
+			fmt.Fprint(os.Stderr, util.ColorFor(os.Stderr, fmt.Sprintf("%s%s          For machine-wide operation, run the server from outside any project directory.%s\n\n",
+				util.Bold, util.Yellow, util.Reset)))
 		}
 	}
 
