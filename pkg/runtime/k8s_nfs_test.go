@@ -321,17 +321,17 @@ func TestBuildPod_NFSBackend_InitContainer_Present_NonGit(t *testing.T) {
 	assert.True(t, hasProjectID, "non-git init container missing SCION_PROJECT_ID env var")
 }
 
-// TestBuildPod_NFSBackend_InitContainer_SecurityContext_Winner verifies the
-// F-111 capability/root fix: the lock-winner (or no-locker) init container —
+// TestBuildPod_NFSBackend_InitContainer_SecurityContext verifies the
+// F-111 capability/root fix: the provisioning init container —
 // the one that actually chowns — must run as root with exactly CHOWN,
 // FOWNER, DAC_OVERRIDE added on top of Drop:ALL. All three are in GKE
 // Autopilot's default allowed capability set, as is running a container as
 // root (see the comment on this security context in k8s_runtime.go for the
 // source cited).
-func TestBuildPod_NFSBackend_InitContainer_SecurityContext_Winner(t *testing.T) {
+func TestBuildPod_NFSBackend_InitContainer_SecurityContext(t *testing.T) {
 	r := newNFSTestK8sRuntime()
 	config := RunConfig{
-		Name:                 "test-nfs-secctx-winner",
+		Name:                 "test-nfs-secctx",
 		Image:                "test-image",
 		UnixUsername:         "scion",
 		WorkspaceBackendName: "nfs",
@@ -352,53 +352,20 @@ func TestBuildPod_NFSBackend_InitContainer_SecurityContext_Winner(t *testing.T) 
 		t.Fatal("init container has no SecurityContext")
 	}
 	if sc.RunAsUser == nil || *sc.RunAsUser != 0 {
-		t.Errorf("winner RunAsUser = %v, want 0", sc.RunAsUser)
+		t.Errorf("init container RunAsUser = %v, want 0", sc.RunAsUser)
 	}
 	if sc.RunAsGroup == nil || *sc.RunAsGroup != 0 {
-		t.Errorf("winner RunAsGroup = %v, want 0", sc.RunAsGroup)
+		t.Errorf("init container RunAsGroup = %v, want 0", sc.RunAsGroup)
 	}
 	if sc.RunAsNonRoot == nil || *sc.RunAsNonRoot != false {
-		t.Errorf("winner RunAsNonRoot = %v, want false (override the pod-level true)", sc.RunAsNonRoot)
+		t.Errorf("init container RunAsNonRoot = %v, want false (override the pod-level true)", sc.RunAsNonRoot)
 	}
 	if sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation != false {
-		t.Errorf("winner AllowPrivilegeEscalation = %v, want false", sc.AllowPrivilegeEscalation)
+		t.Errorf("init container AllowPrivilegeEscalation = %v, want false", sc.AllowPrivilegeEscalation)
 	}
 	assert.ElementsMatch(t, []corev1.Capability{"CHOWN", "FOWNER", "DAC_OVERRIDE"}, sc.Capabilities.Add,
-		"winner must add exactly CHOWN, FOWNER, DAC_OVERRIDE")
-	assert.Equal(t, []corev1.Capability{"ALL"}, sc.Capabilities.Drop, "winner must still drop ALL first")
-}
-
-// TestBuildPod_NFSBackend_InitContainer_SecurityContext_Loser verifies the
-// wait-for-sentinel (lock-loser) init container keeps the minimal, fully-
-// dropped, non-root default — it only os.Stats a file, so it never needs
-// root or any added capability, unlike the winner above.
-func TestBuildPod_NFSBackend_InitContainer_SecurityContext_Loser(t *testing.T) {
-	r := newNFSTestK8sRuntime()
-	config := nfsBaseConfig("test-nfs-secctx-loser")
-	config.nfsProvisionLockLost = true
-
-	pod, err := r.buildPod("default", config)
-	if err != nil {
-		t.Fatalf("buildPod failed: %v", err)
-	}
-	if len(pod.Spec.InitContainers) != 1 {
-		t.Fatalf("expected 1 init container, got %d", len(pod.Spec.InitContainers))
-	}
-
-	sc := pod.Spec.InitContainers[0].SecurityContext
-	if sc == nil {
-		t.Fatal("init container has no SecurityContext")
-	}
-	if sc.RunAsUser != nil {
-		t.Errorf("loser RunAsUser = %v, want nil (inherit pod-level uid 1000)", sc.RunAsUser)
-	}
-	if sc.RunAsNonRoot != nil {
-		t.Errorf("loser RunAsNonRoot = %v, want nil (inherit pod-level true)", sc.RunAsNonRoot)
-	}
-	if len(sc.Capabilities.Add) != 0 {
-		t.Errorf("loser Capabilities.Add = %v, want none", sc.Capabilities.Add)
-	}
-	assert.Equal(t, []corev1.Capability{"ALL"}, sc.Capabilities.Drop, "loser must still drop ALL")
+		"init container must add exactly CHOWN, FOWNER, DAC_OVERRIDE")
+	assert.Equal(t, []corev1.Capability{"ALL"}, sc.Capabilities.Drop, "init container must still drop ALL first")
 }
 
 func TestBuildPod_LocalBackend_NoInitContainer_EvenWithGitClone(t *testing.T) {
@@ -634,10 +601,9 @@ func nfsBaseConfig(name string) RunConfig {
 	}
 }
 
-func TestBuildPod_NFSLockWinner_InjectsCloneInitContainer(t *testing.T) {
+func TestBuildPod_NFSProvision_InjectsCloneInitContainer(t *testing.T) {
 	r := newNFSTestK8sRuntime()
-	config := nfsBaseConfig("test-lock-winner")
-	// nfsProvisionLockLost defaults to false (winner)
+	config := nfsBaseConfig("test-nfs-provision")
 
 	pod, err := r.buildPod("default", config)
 	if err != nil {
@@ -653,11 +619,11 @@ func TestBuildPod_NFSLockWinner_InjectsCloneInitContainer(t *testing.T) {
 		t.Errorf("init container name = %q, want %q", ic.Name, "workspace-provision")
 	}
 
-	// Winner must invoke sciontool provision (clone mode, no --wait-for-sentinel)
+	// Must invoke sciontool provision (clone mode)
 	assert.Equal(t, "sciontool", ic.Command[0])
 	assert.Equal(t, "provision", ic.Command[1])
 	assert.False(t, hasFlag(ic.Command, "--wait-for-sentinel"),
-		"winner should NOT have --wait-for-sentinel flag")
+		"must not have --wait-for-sentinel flag")
 
 	// URL must NOT appear in command args (injection safety — passed via env)
 	for _, arg := range ic.Command {
@@ -683,36 +649,10 @@ func TestBuildPod_NFSLockWinner_InjectsCloneInitContainer(t *testing.T) {
 	}
 }
 
-func TestBuildPod_NFSLockLoser_InjectsWaitInitContainer(t *testing.T) {
-	r := newNFSTestK8sRuntime()
-	config := nfsBaseConfig("test-lock-loser")
-	config.nfsProvisionLockLost = true
-
-	pod, err := r.buildPod("default", config)
-	if err != nil {
-		t.Fatalf("buildPod failed: %v", err)
-	}
-
-	if len(pod.Spec.InitContainers) != 1 {
-		t.Fatalf("expected 1 init container, got %d", len(pod.Spec.InitContainers))
-	}
-
-	ic := pod.Spec.InitContainers[0]
-	if ic.Name != "workspace-provision" {
-		t.Errorf("init container name = %q, want %q", ic.Name, "workspace-provision")
-	}
-
-	// Loser must invoke sciontool provision --wait-for-sentinel
-	assert.Equal(t, "sciontool", ic.Command[0])
-	assert.Equal(t, "provision", ic.Command[1])
-	assert.True(t, hasFlag(ic.Command, "--wait-for-sentinel"),
-		"loser should have --wait-for-sentinel flag")
-}
-
 func TestBuildPod_NFSNoLocker_InjectsCloneInitContainer(t *testing.T) {
 	r := newNFSTestK8sRuntime()
 	config := nfsBaseConfig("test-no-locker")
-	// Locker is nil, nfsProvisionLockLost stays false → clone init container
+	// Locker is nil → clone init container
 
 	pod, err := r.buildPod("default", config)
 	if err != nil {
@@ -731,29 +671,9 @@ func TestBuildPod_NFSNoLocker_InjectsCloneInitContainer(t *testing.T) {
 		"no-locker: should get clone init command (sentinel-only fallback)")
 }
 
-func TestBuildPod_LocalBackend_LockLostIgnored(t *testing.T) {
-	r := newNFSTestK8sRuntime()
-	config := RunConfig{
-		Name:                 "test-local-lockflag",
-		Image:                "test-image",
-		UnixUsername:         "scion",
-		nfsProvisionLockLost: true, // should be ignored for local backend
-	}
-
-	pod, err := r.buildPod("default", config)
-	if err != nil {
-		t.Fatalf("buildPod failed: %v", err)
-	}
-
-	// Local backend: no init containers regardless of lock flag
-	if len(pod.Spec.InitContainers) != 0 {
-		t.Errorf("local backend: expected no init containers, got %d", len(pod.Spec.InitContainers))
-	}
-}
-
 func TestBuildPod_NFSConcurrentProjects_IndependentLocks(t *testing.T) {
 	// Two pods for DIFFERENT projects should both get clone init containers
-	// when both are lock winners (no contention across projects).
+	// (no contention across projects).
 	r := newNFSTestK8sRuntime()
 
 	configA := nfsBaseConfig("test-proj-a")
@@ -780,7 +700,7 @@ func TestBuildPod_NFSConcurrentProjects_IndependentLocks(t *testing.T) {
 		t.Fatalf("project B: expected 1 init container, got %d", len(podB.Spec.InitContainers))
 	}
 
-	// Both should be clone (winner) init containers — sciontool provision without --wait
+	// Both should be clone init containers — sciontool provision without --wait
 	icA := podA.Spec.InitContainers[0]
 	icB := podB.Spec.InitContainers[0]
 	assert.Equal(t, "sciontool", icA.Command[0])
@@ -791,42 +711,7 @@ func TestBuildPod_NFSConcurrentProjects_IndependentLocks(t *testing.T) {
 	assert.False(t, hasFlag(icB.Command, "--wait-for-sentinel"))
 }
 
-func TestBuildPod_NFSSameProject_WinnerAndLoser(t *testing.T) {
-	// Simulate two pods for the SAME project: one winner, one loser.
-	r := newNFSTestK8sRuntime()
-
-	winner := nfsBaseConfig("test-winner")
-	loser := nfsBaseConfig("test-loser")
-	loser.nfsProvisionLockLost = true
-
-	podWinner, err := r.buildPod("default", winner)
-	if err != nil {
-		t.Fatalf("buildPod winner failed: %v", err)
-	}
-	podLoser, err := r.buildPod("default", loser)
-	if err != nil {
-		t.Fatalf("buildPod loser failed: %v", err)
-	}
-
-	if len(podWinner.Spec.InitContainers) != 1 || len(podLoser.Spec.InitContainers) != 1 {
-		t.Fatal("both pods should have exactly 1 init container")
-	}
-
-	winnerCmd := podWinner.Spec.InitContainers[0].Command
-	loserCmd := podLoser.Spec.InitContainers[0].Command
-
-	// Winner: sciontool provision (clone mode)
-	assert.Equal(t, "sciontool", winnerCmd[0])
-	assert.Equal(t, "provision", winnerCmd[1])
-	assert.False(t, hasFlag(winnerCmd, "--wait-for-sentinel"))
-
-	// Loser: sciontool provision --wait-for-sentinel
-	assert.Equal(t, "sciontool", loserCmd[0])
-	assert.Equal(t, "provision", loserCmd[1])
-	assert.True(t, hasFlag(loserCmd, "--wait-for-sentinel"))
-}
-
-// --- N2-2b: Run()-level advisory lock integration tests ---
+// --- Run()-level Locker tests ---
 
 // errorLocker is an AdvisoryLocker that always returns an error.
 type errorLocker struct {
@@ -851,36 +736,6 @@ func (l *alwaysLoseLocker) TryAdvisoryLock(_ context.Context, _ store.AdvisoryLo
 
 func (l *alwaysLoseLocker) TryAdvisoryLockObject(_ context.Context, _ store.AdvisoryLockKey, _ int32) (bool, func() error, error) {
 	return false, func() error { return nil }, nil
-}
-
-func TestRun_NFSLockError_FailsDispatch(t *testing.T) {
-	// When the advisory lock returns an error, Run() must fail BEFORE
-	// creating any pods (no unguarded clone).
-	r := newNFSTestK8sRuntime()
-	config := nfsBaseConfig("test-lock-err")
-	config.Locker = &errorLocker{err: errors.New("connection lost")}
-
-	_, err := r.Run(context.Background(), config)
-	if err == nil {
-		t.Fatal("expected Run() to fail when advisory lock returns error")
-	}
-	if !strings.Contains(err.Error(), "advisory lock") {
-		t.Errorf("error should mention advisory lock, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "connection lost") {
-		t.Errorf("error should propagate underlying cause, got: %v", err)
-	}
-
-	// Verify no pods were created
-	pods, listErr := r.Client.Clientset.CoreV1().Pods("default").List(
-		context.Background(), metav1.ListOptions{},
-	)
-	if listErr != nil {
-		t.Fatalf("failed to list pods: %v", listErr)
-	}
-	if len(pods.Items) != 0 {
-		t.Errorf("lock error should prevent pod creation, but found %d pods", len(pods.Items))
-	}
 }
 
 // TestWaitForPodReady_NamesFailedInitContainer is the F-111 review fix
@@ -1113,48 +968,14 @@ func TestWaitForPodReady_MainContainerTerminalWaitingReasons(t *testing.T) {
 	}
 }
 
-func TestRun_NFSLockLost_CreatesWaitPod(t *testing.T) {
-	// When the lock is held by another node, the pod should have a
-	// wait-for-sentinel init container, not a cloning one.
+func TestRun_NFSWorkspace_DoesNotUseLocker(t *testing.T) {
+	// NFS workspace provisioning does not take the Locker (sciontool
+	// provision serializes provisioners with a file lock on the export):
+	// with a Locker set and no NFS home, Run never calls it and the pod
+	// gets the provisioning init container.
 	r := newNFSTestK8sRuntime()
-	config := nfsBaseConfig("scion-test-lock-lost")
-	config.Locker = &alwaysLoseLocker{}
-
-	// Run() creates the pod, then fails readiness at its first poll (see
-	// failPodReadiness), which keeps the pod for inspection.
-	failPodReadiness(r.Client.Clientset.(*k8sfake.Clientset))
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	r.Run(ctx, config) //nolint:errcheck
-
-	// Verify the created pod has a wait-for-sentinel init container
-	pods, err := r.Client.Clientset.CoreV1().Pods("default").List(
-		context.Background(), metav1.ListOptions{},
-	)
-	if err != nil {
-		t.Fatalf("failed to list pods: %v", err)
-	}
-	if len(pods.Items) != 1 {
-		t.Fatalf("expected 1 pod, got %d", len(pods.Items))
-	}
-
-	pod := pods.Items[0]
-	if len(pod.Spec.InitContainers) != 1 {
-		t.Fatalf("expected 1 init container, got %d", len(pod.Spec.InitContainers))
-	}
-
-	cmd := pod.Spec.InitContainers[0].Command
-	assert.Equal(t, "sciontool", cmd[0])
-	assert.Equal(t, "provision", cmd[1])
-	assert.True(t, hasFlag(cmd, "--wait-for-sentinel"),
-		"lock-lost pod should have --wait-for-sentinel flag")
-}
-
-func TestRun_NFSLockWon_CreatesClonePod(t *testing.T) {
-	// When the lock is won, the pod should have the cloning init container.
-	r := newNFSTestK8sRuntime()
-	locker := newTestLocker()
-	config := nfsBaseConfig("scion-test-lock-won")
+	locker := &countingLocker{acquire: true}
+	config := nfsBaseConfig("scion-test-nfs-locker")
 	config.Locker = locker
 
 	// Run() creates the pod, then fails readiness at its first poll (see
@@ -1183,12 +1004,13 @@ func TestRun_NFSLockWon_CreatesClonePod(t *testing.T) {
 	assert.Equal(t, "sciontool", cmd[0])
 	assert.Equal(t, "provision", cmd[1])
 	assert.False(t, hasFlag(cmd, "--wait-for-sentinel"),
-		"lock-won pod should NOT have --wait-for-sentinel flag")
+		"pod should NOT have --wait-for-sentinel flag")
+	assert.Equal(t, 0, locker.acquires, "workspace provisioning must not take the Locker")
 }
 
 func TestRun_LocalBackend_NoLockAttempt(t *testing.T) {
 	// Local backend should never attempt the advisory lock, even if a
-	// Locker is provided. The lock is only for NFS.
+	// Locker is provided. The lock is only for an NFS home.
 	r := newNFSTestK8sRuntime()
 	locker := &errorLocker{err: errors.New("should not be called")}
 	config := RunConfig{
@@ -1738,7 +1560,7 @@ func TestNFSSharedDirSubPath(t *testing.T) {
 // (tf-lead/tf-review-nfsfix, BLOCKING): filepath.Join silently collapses
 // ".." segments, so an unvalidated shared-dir name can resolve outside
 // projects/<pid>/shared-dirs/ entirely — onto another project's real
-// workspace, which the winner init container (CHOWN/FOWNER/DAC_OVERRIDE,
+// workspace, which the provisioning init container (CHOWN/FOWNER/DAC_OVERRIDE,
 // F-111) would then recursively re-own. Defense in depth alongside
 // pkg/agent/shared_dir_storage.go's own validation gate.
 func TestNFSSharedDirSubPath_RejectsTraversalNames(t *testing.T) {
@@ -1935,7 +1757,7 @@ func effectiveProvisionID(t *testing.T, cmd []string, flag string) int64 {
 }
 
 // TestBuildPod_NFSInitOwnershipMatchesSecurityContext checks that the
-// lock-winner init container chowns the workspace to the identity the agent
+// provisioning init container chowns the workspace to the identity the agent
 // container actually runs as: --uid follows the pod RunAsUser and --gid
 // follows the pod fsGroup. A configured NFS uid is not applied to the pod
 // RunAsUser, so it must not reach the init container either; otherwise the

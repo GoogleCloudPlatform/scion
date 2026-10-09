@@ -111,10 +111,9 @@ func assertAgentHasNoProvisionState(t *testing.T, pod *corev1.Pod) {
 	}
 }
 
-// Shared-plain and worktree-per-agent (#2670): the init container, whether
-// it provisions or only waits for the sentinel, mounts the workspace and the
-// provisioning state directory and is told where the latter is; the agent
-// container's mounts are unchanged.
+// Shared-plain and worktree-per-agent (#2670): the init container mounts the
+// workspace and the provisioning state directory and is told where the
+// latter is; the agent container's mounts are unchanged.
 func TestBuildPod_NFSProvisionStateMount(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -124,15 +123,6 @@ func TestBuildPod_NFSProvisionStateMount(t *testing.T) {
 		{
 			name:      "shared-plain",
 			cfg:       nfsBaseConfig("sp"),
-			agentWant: []corev1.VolumeMount{{Name: "workspace", MountPath: "/workspace", SubPath: "projects/proj-123/workspace"}},
-		},
-		{
-			name: "shared-plain waiter",
-			cfg: func() RunConfig {
-				c := nfsBaseConfig("sp-wait")
-				c.nfsProvisionLockLost = true
-				return c
-			}(),
 			agentWant: []corev1.VolumeMount{{Name: "workspace", MountPath: "/workspace", SubPath: "projects/proj-123/workspace"}},
 		},
 		{
@@ -156,11 +146,7 @@ func TestBuildPod_NFSProvisionStateMount(t *testing.T) {
 			v, ok := envValue(ic.Env, NFSProvisionStateEnv)
 			assert.True(t, ok)
 			assert.Equal(t, "/scion-provision", v)
-			if tc.cfg.nfsProvisionLockLost {
-				assert.True(t, hasFlag(ic.Command, "--wait-for-sentinel"))
-			} else {
-				assert.False(t, hasFlag(ic.Command, "--wait-for-sentinel"))
-			}
+			assert.False(t, hasFlag(ic.Command, "--wait-for-sentinel"))
 
 			assert.Equal(t, tc.agentWant, pod.Spec.Containers[0].VolumeMounts)
 			assertAgentHasNoProvisionState(t, pod)
