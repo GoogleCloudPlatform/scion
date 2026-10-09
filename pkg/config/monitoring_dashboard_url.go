@@ -63,7 +63,7 @@ func ValidateMonitoringDashboardURL(raw string) error {
 	}
 	for _, r := range raw {
 		if isDisallowedMonitoringURLRune(r) {
-			return fmt.Errorf("%s: must not contain whitespace, control or bidirectional formatting characters", MonitoringDashboardURLKey)
+			return fmt.Errorf("%s: must not contain whitespace, control, bidirectional or invisible formatting characters, or U+FFFD", MonitoringDashboardURLKey)
 		}
 	}
 	u, err := url.Parse(raw)

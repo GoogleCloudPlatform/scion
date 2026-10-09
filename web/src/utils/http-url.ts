@@ -28,9 +28,10 @@ const DISALLOWED =
 
 /**
  * Whether value is an absolute http:// or https:// URL with a host and no
- * user credentials, whose port (if any) is 1 to 65535. Used to decide whether an operator-configured link is
- * rendered at all; the hub validates the same rule when the setting is
- * saved, so this is a second check on the display side.
+ * user credentials, whose port (if any) is 1 to 65535. Used to decide
+ * whether an operator-configured link is rendered at all; the hub
+ * validates the same rule when the setting is saved, so this is a second
+ * check on the display side.
  */
 export function isHttpUrl(value: string | null | undefined): value is string {
   if (typeof value !== 'string' || value === '' || DISALLOWED.test(value)) return false;
