@@ -831,7 +831,7 @@ gcloud compute ssh scion-hub-HUB_NAME \
 **Expected:** A successful response (HTTP 200).
 
 **Authentication before Phase 5.** `/healthz` needs no credentials. The
-Phase 3 `settings.yaml` sets `auth.mode: dev`, but that setting alone does
+Phase 3 `settings.yaml` sets `server.auth.mode: dev`, but that setting alone does
 not enable dev auth, so until the Phase 5 proxy settings are written every
 authenticated API call returns `401`. This is expected; do not treat it as a
 failed deploy. Dev auth is enabled only by `--dev-auth` or

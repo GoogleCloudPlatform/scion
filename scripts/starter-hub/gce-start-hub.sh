@@ -25,6 +25,11 @@
 #                   Caddy is not installed or restarted, agents use
 #                   http://<HUB_DOMAIN>:8080 (override with HUB_BASE_URL), and
 #                   the HTTPS health check is skipped; the on-VM check still runs.
+#                   gce-certs.sh is not run in this mode, so nothing creates a
+#                   DNS record: HUB_DOMAIN must resolve to the VM through your
+#                   own DNS, or set HUB_BASE_URL to an address agents can reach.
+#                   Behind an upstream TLS terminator, set HUB_BASE_URL (or
+#                   SCION_SERVER_BASE_URL in hub.env) to the https:// URL.
 #   --reset-db:     Deletes the hub database before starting (works in both modes)
 #   --branch <b>:   Checkout and build from a specific branch (default: current branch)
 #   --insecure-health-check:

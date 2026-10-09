@@ -145,6 +145,24 @@ test_deploy_requires_cert_email_before_provisioning() {
     assert_not_contains "$CALLS" "compute " "no compute calls"
 }
 
+test_deploy_skip_tls_does_not_require_cert_email() {
+    fresh_state
+    EXTRA_ENV=(SKIP_TLS=true)
+    run_script gce-demo-deploy.sh
+    # The sub-steps (preflight first) run for real against the stubs and may
+    # stop the run; this test only checks that the CERT_EMAIL guard lets
+    # SKIP_TLS=true through to the first step.
+    assert_not_contains "$OUT" "CERT_EMAIL is not set" "SKIP_TLS=true does not need CERT_EMAIL"
+    assert_contains "$OUT" "Step 0" "reaches the first step"
+
+    # Wiring: under SKIP_TLS the script skips gce-certs.sh and passes --no-tls.
+    local deploy
+    deploy="$(cat "${STARTER_DIR}/gce-demo-deploy.sh")"
+    assert_contains "$deploy" "SKIP_TLS=true: skipping DNS and certificate setup (gce-certs.sh)." \
+        "gce-certs.sh is guarded by SKIP_TLS"
+    assert_contains "$deploy" "gce-start-hub.sh --full --no-tls" "passes --no-tls under SKIP_TLS"
+}
+
 # --- gce-start-hub.sh final health check (#3360) ---
 
 HEALTHY='{"status":"healthy"}'
