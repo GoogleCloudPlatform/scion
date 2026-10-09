@@ -584,7 +584,7 @@ func TestAsyncHandler_ClonerMatchesPass1Accounting(t *testing.T) {
 		t.Fatalf("cloner bytes/attrs = %d/%d, pass 1 = %d/%d", cl.bytes, cl.attrs, acc.bytes, acc.attrs)
 	}
 	for _, bad := range []slog.Attr{
-		slog.Any("v", panicValuer{t}), slog.Any("v", 42), slog.Any("v", []int{1}),
+		slog.Any("v", panicValuer{t}), slog.Any("v", struct{ N int }{42}), slog.Any("v", []int{1}),
 		slog.Group("g", slog.Any("v", panicStringer{t})),
 	} {
 		c := cloner{}
