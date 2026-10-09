@@ -32,8 +32,9 @@ import (
 // This file covers the paged branch's page-size bound: the 500 clamp alone
 // does not keep every paged request inside the per-request decision ceiling
 // at every candidate count n, which needed the P_eff = min(limit,
-// floor((4000-n)/7)) page-size bound (effectivePagedPageSize,
-// agent_sorted_project_list.go).
+// floor((4000-n)/perRow)) page-size bound (effectivePagedPageSize,
+// agent_sorted_project_list.go), with perRow 7, or 8 for a scoped token
+// without agent:read.
 
 // --- sorted mode must clamp limit to 500, and the paged page size must
 // additionally stay inside the decision ceiling at every candidate count n --
@@ -70,7 +71,7 @@ func TestListProjectAgentsSorted_PagedPageSize_BoundedByN_DesignSizes(t *testing
 			// future change to either the formula or the ceiling constant is
 			// caught here too, not just silently diverges from this literal
 			// table.
-			require.Equal(t, wantPEff, effectivePagedPageSize(limit, n),
+			require.Equal(t, wantPEff, effectivePagedPageSize(limit, n, pageRowDecisions),
 				"this test's hard-coded table must track effectivePagedPageSize's actual behavior")
 			require.LessOrEqual(t, 5+n+7*wantPEff, sortedProjectDecisionCeiling,
 				"the whole point of the page-size bound: P_eff must keep the paged request inside the decision ceiling")
@@ -98,6 +99,45 @@ func TestListProjectAgentsSorted_PagedPageSize_BoundedByN_DesignSizes(t *testing
 			assert.Len(t, emitter.records, want, "decision cost must reflect the worked table's P_eff, not the requested/clamped limit")
 		})
 	}
+}
+
+// TestListProjectAgentsSorted_PagedPageSize_ScopedToken_StaysUnderCeiling
+// is the scoped-token case of the page-size bound: a token holding
+// agent:list but not agent:read pays one more decision per page row (the
+// plain read for the row's read capability), so its page size is
+// P_eff = min(limit, floor((4000-n)/8)), which at n=2,000 is 250 and keeps
+// the request at 5+n+8*P_eff = 4,005 decisions. The per-row-7 page size
+// (285) would cost 4,285 here.
+func TestListProjectAgentsSorted_PagedPageSize_ScopedToken_StaysUnderCeiling(t *testing.T) {
+	const limit, n = 500, 2000
+	const wantPEff = 250 // floor((4000-2000)/8) = 250
+	require.Equal(t, wantPEff, effectivePagedPageSize(limit, n, scopedPageRowDecisions),
+		"this test's hard-coded pEff must track effectivePagedPageSize's actual behavior")
+	require.Greater(t, 5+n+8*effectivePagedPageSize(limit, n, pageRowDecisions), sortedProjectDecisionCeiling,
+		"the per-row-7 page size must not be enough for a scoped token")
+
+	f := sortedListSetup(t)
+	f.createAgentsBulk(t, n, "e2scoped", string(state.PhaseStopped), nil)
+	key := mintScopedUAT(t, f.srv, f.owner.ID, f.project.ID, []string{"agent:list"})
+
+	emitter := &recordingDecisionAuditEmitter{}
+	f.srv.authzService.SetDecisionAuditEmitter(emitter)
+
+	rec := doRequestWithUAT(t, f.srv, key, http.MethodGet, f.listPath(fmt.Sprintf("sort=updated&limit=%d", limit)), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	resp := mustDecodeListAgentsResponse(t, rec.Body)
+
+	assert.Len(t, resp.Agents, wantPEff, "a scoped token's page is sized for 8 decisions per row")
+	assert.Equal(t, n, resp.TotalCount)
+	assert.NotEmpty(t, resp.NextCursor)
+	for _, a := range resp.Agents {
+		require.NotNil(t, a.Cap)
+		assert.NotContains(t, a.Cap.Actions, string(ActionRead), "no read capability without agent:read")
+	}
+
+	want := 5 + n + 8*wantPEff
+	assert.Len(t, emitter.records, want, "decision cost of a scoped-token paged request")
+	assert.LessOrEqual(t, len(emitter.records), sortedProjectDecisionCeiling, "the decision ceiling")
 }
 
 // TestListProjectAgentsSorted_PagedWalk_PageSizeBound_AllReadableReturnedOnce
@@ -178,7 +218,7 @@ func TestListProjectAgentsSorted_PagedRaced_PageSizeBound_StaysUnderRacedCeiling
 	const wantPEff = 499 // floor((4000-501)/7) = floor(3499/7) = 499
 	f.createAgentsBulk(t, n, "e2raced", string(state.PhaseStopped), nil)
 
-	require.Equal(t, wantPEff, effectivePagedPageSize(limit, n),
+	require.Equal(t, wantPEff, effectivePagedPageSize(limit, n, pageRowDecisions),
 		"this test's hard-coded pEff must track effectivePagedPageSize's actual behavior")
 	require.Less(t, wantPEff, n, "a race on every page item is only interesting if the page doesn't already cover every candidate")
 

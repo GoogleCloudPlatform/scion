@@ -197,6 +197,35 @@ type CreateBrokerRegistrationRequest struct {
 	// host. Set by the operator so the Hub can gate passthrough on actAs.
 	GCPHostServiceAccountEmail string `json:"gcpHostServiceAccountEmail,omitempty"`
 	GCPHostProjectID           string `json:"gcpHostProjectId,omitempty"`
+
+	// JoinTokenTTLSeconds is the lifetime of the issued join token. Zero
+	// means BrokerAuthConfig.JoinTokenExpiry; any other value must be within
+	// [MinJoinTokenTTLSeconds, MaxJoinTokenTTLSeconds].
+	JoinTokenTTLSeconds int `json:"joinTokenTtlSeconds,omitempty"`
+
+	// PreserveSettings, when the request matches an existing broker, leaves
+	// that broker's record unchanged (AutoProvide, labels and GCP host
+	// fields) and only issues a new join token. For a new broker it creates
+	// the record with AutoProvide off and no GCP host fields, whatever the
+	// request says; only Labels are applied. It skips only the
+	// broker.auto_provide check, because AutoProvide is never stored: the
+	// caller must still hold broker.create, and for a matched broker must be
+	// its creator or a super-admin presenting an interactive session or dev
+	// credential.
+	PreserveSettings bool `json:"preserveSettings,omitempty"`
+}
+
+// Join token lifetime bounds for CreateBrokerRegistrationRequest.JoinTokenTTLSeconds.
+const (
+	MinJoinTokenTTLSeconds = 300   // 5 minutes
+	MaxJoinTokenTTLSeconds = 86400 // 24 hours
+)
+
+// ValidJoinTokenTTLSeconds reports whether ttl is an acceptable
+// JoinTokenTTLSeconds value: zero (use the configured default) or within
+// [MinJoinTokenTTLSeconds, MaxJoinTokenTTLSeconds].
+func ValidJoinTokenTTLSeconds(ttl int) bool {
+	return ttl == 0 || (ttl >= MinJoinTokenTTLSeconds && ttl <= MaxJoinTokenTTLSeconds)
 }
 
 // CreateBrokerRegistrationResponse is the response for POST /api/v1/brokers.
@@ -205,6 +234,12 @@ type CreateBrokerRegistrationResponse struct {
 	JoinToken    string    `json:"joinToken"` // scion_join_<base64>
 	ExpiresAt    time.Time `json:"expiresAt"`
 	Reregistered bool      `json:"reregistered,omitempty"`
+	// Reissued is true when an earlier join token for this broker was
+	// replaced by this one. The earlier token no longer works.
+	Reissued bool `json:"reissued,omitempty"`
+	// JoinTokenTTL is the lifetime the token was issued with. It is
+	// recorded in the audit log and not sent to the client.
+	JoinTokenTTL time.Duration `json:"-"`
 }
 
 // BrokerJoinRequest is the request body for POST /api/v1/brokers/join.
@@ -291,18 +326,41 @@ func (s *BrokerAuthService) FindExistingBroker(ctx context.Context, name, broker
 	return existingBroker, nil
 }
 
+// brokerRegistrationLookupKey marks the context of the existing-broker
+// lookup that createBrokerRegistration performs itself, so a store wrapper
+// can tell it apart from the caller's authorization-time lookup.
+type brokerRegistrationLookupKey struct{}
+
+func withBrokerRegistrationLookup(ctx context.Context) context.Context {
+	return context.WithValue(ctx, brokerRegistrationLookupKey{}, true)
+}
+
+// isBrokerRegistrationLookup reports whether ctx belongs to the lookup that
+// createBrokerRegistration performs before it mutates the broker.
+func isBrokerRegistrationLookup(ctx context.Context) bool {
+	v, _ := ctx.Value(brokerRegistrationLookupKey{}).(bool)
+	return v
+}
+
 // ErrBrokerRegistrationAuthorizationStale is returned by
 // CreateBrokerRegistrationForAuthorizedMatch and
 // CreateBrokerRegistrationForAuthorizedNew when the existing-broker lookup
 // performed during the mutation no longer matches what the caller was
 // authorized against: the authorization decision and this call must agree
-// on whether an existing broker is being reused, and on which one.
+// on whether an existing broker is being reused, and on which one, and a
+// re-registration that keeps auto-provide on without the broker.auto_provide
+// check requires the re-read broker to still have it on.
 var ErrBrokerRegistrationAuthorizationStale = errors.New("broker registration authorization is stale; retry")
+
+// ErrJoinTokenTTLOutOfRange is returned when
+// CreateBrokerRegistrationRequest.JoinTokenTTLSeconds is outside the
+// accepted range.
+var ErrJoinTokenTTLOutOfRange = fmt.Errorf("joinTokenTtlSeconds must be between %d and %d", MinJoinTokenTTLSeconds, MaxJoinTokenTTLSeconds)
 
 // CreateBrokerRegistration creates a new broker with a join token.
 // Requires admin authentication.
 func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string) (*CreateBrokerRegistrationResponse, error) {
-	return s.createBrokerRegistration(ctx, req, createdBy, "", false)
+	return s.createBrokerRegistration(ctx, req, createdBy, "", false, true)
 }
 
 // CreateBrokerRegistrationForAuthorizedMatch is CreateBrokerRegistration for
@@ -312,11 +370,18 @@ func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req Cr
 // broker, or no longer finds a match at all, the registration is refused
 // (ErrBrokerRegistrationAuthorizationStale) rather than mutating a record
 // the caller was not authorized against.
-func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedMatch(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy, expectedExistingBrokerID string) (*CreateBrokerRegistrationResponse, error) {
+//
+// autoProvideAuthorized reports whether the caller passed the
+// broker.auto_provide check. When it is false and req.AutoProvide is true,
+// the caller was admitted only to keep an auto-provide setting that was
+// already on, so the broker re-read here must still have auto-provide on;
+// otherwise the registration is refused with
+// ErrBrokerRegistrationAuthorizationStale.
+func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedMatch(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy, expectedExistingBrokerID string, autoProvideAuthorized bool) (*CreateBrokerRegistrationResponse, error) {
 	if expectedExistingBrokerID == "" {
 		return nil, errors.New("expectedExistingBrokerID is required")
 	}
-	return s.createBrokerRegistration(ctx, req, createdBy, expectedExistingBrokerID, false)
+	return s.createBrokerRegistration(ctx, req, createdBy, expectedExistingBrokerID, false, autoProvideAuthorized)
 }
 
 // CreateBrokerRegistrationForAuthorizedNew is CreateBrokerRegistration for a
@@ -329,7 +394,7 @@ func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedMatch(ctx conte
 // implicit re-registration of a broker the caller was never authorized
 // against.
 func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedNew(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string) (*CreateBrokerRegistrationResponse, error) {
-	return s.createBrokerRegistration(ctx, req, createdBy, "", true)
+	return s.createBrokerRegistration(ctx, req, createdBy, "", true, true)
 }
 
 // createBrokerRegistration implements CreateBrokerRegistration,
@@ -344,9 +409,26 @@ func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedNew(ctx context
 //     exact broker.
 //   - expectNoExistingMatch true: the lookup below must resolve to no
 //     broker at all.
-func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy, expectedExistingBrokerID string, expectNoExistingMatch bool) (*CreateBrokerRegistrationResponse, error) {
+//
+// autoProvideAuthorized false with req.AutoProvide true means the caller was
+// admitted only to keep auto-provide on for the matched broker, so the
+// broker re-read below must still have it on. A first-time registration
+// always passes true: its caller checks broker.auto_provide whenever
+// req.AutoProvide is set, except for a PreserveSettings request, whose
+// AutoProvide is forced off below and by the HTTP handler.
+func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy, expectedExistingBrokerID string, expectNoExistingMatch, autoProvideAuthorized bool) (*CreateBrokerRegistrationResponse, error) {
 	if req.Name == "" {
 		return nil, errors.New("name is required")
+	}
+	if !ValidJoinTokenTTLSeconds(req.JoinTokenTTLSeconds) {
+		return nil, ErrJoinTokenTTLOutOfRange
+	}
+
+	if req.PreserveSettings {
+		// A token-only request never sets broker settings.
+		req.AutoProvide = false
+		req.GCPHostServiceAccountEmail = ""
+		req.GCPHostProjectID = ""
 	}
 
 	// GCP SA emails are case-insensitive; normalize to lowercase before
@@ -365,7 +447,7 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 	var brokerID string
 	var reregistered bool
 
-	existingBroker, err := s.FindExistingBroker(ctx, req.Name, req.BrokerID)
+	existingBroker, err := s.FindExistingBroker(withBrokerRegistrationLookup(ctx), req.Name, req.BrokerID)
 	if err != nil {
 		return nil, err
 	}
@@ -376,8 +458,16 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 	if expectNoExistingMatch && existingBroker != nil {
 		return nil, ErrBrokerRegistrationAuthorizationStale
 	}
+	if existingBroker != nil && req.AutoProvide && !autoProvideAuthorized && !existingBroker.AutoProvide {
+		return nil, ErrBrokerRegistrationAuthorizationStale
+	}
 
-	if existingBroker != nil {
+	if existingBroker != nil && req.PreserveSettings {
+		// Reuse existing broker and leave its record as it is: only a new
+		// join token is issued below.
+		brokerID = existingBroker.ID
+		reregistered = true
+	} else if existingBroker != nil {
 		// Reuse existing broker - update its metadata
 		brokerID = existingBroker.ID
 		reregistered = true
@@ -436,7 +526,11 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 	tokenHash := sha256Hash(joinToken)
 
 	// Calculate expiry
-	expiresAt := time.Now().Add(s.config.JoinTokenExpiry)
+	ttl := s.config.JoinTokenExpiry
+	if req.JoinTokenTTLSeconds > 0 {
+		ttl = time.Duration(req.JoinTokenTTLSeconds) * time.Second
+	}
+	expiresAt := time.Now().Add(ttl)
 
 	// Store the join token
 	joinTokenRecord := &store.BrokerJoinToken{
@@ -447,7 +541,10 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 		CreatedBy: createdBy,
 	}
 
-	if err := s.store.CreateJoinToken(ctx, joinTokenRecord); err != nil {
+	// One token per broker: issuing a new one replaces any earlier token
+	// that has not been used yet.
+	reissued, err := s.store.UpsertJoinToken(ctx, joinTokenRecord)
+	if err != nil {
 		// Clean up the broker record on failure (only if we just created it)
 		if !reregistered {
 			_ = s.store.DeleteRuntimeBroker(ctx, brokerID)
@@ -460,6 +557,8 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 		JoinToken:    joinToken,
 		ExpiresAt:    expiresAt,
 		Reregistered: reregistered,
+		Reissued:     reissued,
+		JoinTokenTTL: ttl,
 	}, nil
 }
 
@@ -476,60 +575,117 @@ func (s *BrokerAuthService) CompleteBrokerJoin(ctx context.Context, req BrokerJo
 	// Hash the provided token
 	tokenHash := sha256Hash(req.JoinToken)
 
-	// Look up the join token
-	joinToken, err := s.store.GetJoinToken(ctx, tokenHash)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("invalid join token")
-		}
-		return nil, fmt.Errorf("failed to validate join token: %w", err)
-	}
-
-	// Verify broker ID matches
-	if joinToken.BrokerID != req.BrokerID {
-		return nil, fmt.Errorf("join token does not match broker")
-	}
-
-	// Check expiry
-	if time.Now().After(joinToken.ExpiresAt) {
-		// Delete expired token
-		_ = s.store.DeleteJoinToken(ctx, joinToken.BrokerID)
-		return nil, fmt.Errorf("join token has expired")
-	}
-
 	// Generate shared secret
 	secretKey := make([]byte, s.config.SecretKeyLength)
 	if _, err := rand.Read(secretKey); err != nil {
 		return nil, fmt.Errorf("failed to generate secret key: %w", err)
 	}
 
-	// Delete any existing secret for this broker (re-registration case)
-	_ = s.store.DeleteBrokerSecret(ctx, req.BrokerID)
+	// Consume the token and install the secret in one transaction. The
+	// token is deleted by a single conditional statement, so only one of
+	// several concurrent joins with the same token gets past it. If any
+	// later step fails the transaction rolls back and the token is still
+	// usable, so a failed join can be retried.
+	now := time.Now()
+	err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.ConsumeJoinToken(ctx, tokenHash, req.BrokerID, now); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return errJoinTokenNotConsumed
+			}
+			return fmt.Errorf("failed to validate join token: %w", err)
+		}
 
-	// Store the broker secret
-	brokerSecret := &store.BrokerSecret{
-		BrokerID:  req.BrokerID,
-		SecretKey: secretKey,
-		Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
-		CreatedAt: time.Now(),
-		Status:    store.BrokerSecretStatusActive,
+		// Delete any existing secret for this broker (re-registration case)
+		if err := tx.DeleteBrokerSecret(ctx, req.BrokerID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("failed to replace broker secret: %w", err)
+		}
+
+		// Store the broker secret
+		brokerSecret := &store.BrokerSecret{
+			BrokerID:  req.BrokerID,
+			SecretKey: secretKey,
+			Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
+			CreatedAt: now,
+			Status:    store.BrokerSecretStatusActive,
+		}
+		if err := tx.CreateBrokerSecret(ctx, brokerSecret); err != nil {
+			return fmt.Errorf("failed to store broker secret: %w", err)
+		}
+
+		// Update the runtime broker with connection info
+		broker, err := tx.GetRuntimeBroker(ctx, req.BrokerID)
+		if err != nil {
+			return fmt.Errorf("failed to get runtime broker: %w", err)
+		}
+		applyBrokerJoinRequest(broker, req, now)
+		if err := tx.UpdateRuntimeBroker(ctx, broker); err != nil {
+			return fmt.Errorf("failed to update runtime broker: %w", err)
+		}
+		return nil
+	})
+	if errors.Is(err, errJoinTokenNotConsumed) {
+		return nil, s.classifyUnconsumedJoinToken(ctx, tokenHash, req.BrokerID, now)
 	}
-
-	if err := s.store.CreateBrokerSecret(ctx, brokerSecret); err != nil {
-		return nil, fmt.Errorf("failed to store broker secret: %w", err)
-	}
-
-	// Update the runtime broker with connection info
-	broker, err := s.store.GetRuntimeBroker(ctx, req.BrokerID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get runtime broker: %w", err)
+		return nil, err
 	}
 
+	return &BrokerJoinResponse{
+		SecretKey:   base64.StdEncoding.EncodeToString(secretKey),
+		HubEndpoint: hubEndpoint,
+		BrokerID:    req.BrokerID,
+	}, nil
+}
+
+// Join token errors returned by CompleteBrokerJoin. The handler maps the
+// first two to 401 invalid_join_token and the third to 401
+// expired_join_token.
+var (
+	ErrJoinTokenInvalid        = errors.New("invalid join token")
+	ErrJoinTokenBrokerMismatch = errors.New("join token does not match broker")
+	ErrJoinTokenExpired        = errors.New("join token has expired")
+)
+
+// errJoinTokenNotConsumed aborts the CompleteBrokerJoin transaction when no
+// token was consumed; the reason is worked out afterwards.
+var errJoinTokenNotConsumed = errors.New("join token not consumed")
+
+// classifyUnconsumedJoinToken explains why ConsumeJoinToken matched no row,
+// with a read outside the join transaction. The read only selects the error
+// returned; a concurrent change can at most change which of the three join
+// token errors the caller sees.
+func (s *BrokerAuthService) classifyUnconsumedJoinToken(ctx context.Context, tokenHash, brokerID string, now time.Time) error {
+	joinToken, err := s.store.GetJoinToken(ctx, tokenHash)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return ErrJoinTokenInvalid
+		}
+		return fmt.Errorf("failed to validate join token: %w", err)
+	}
+	if joinToken.BrokerID != brokerID {
+		return ErrJoinTokenBrokerMismatch
+	}
+	if !joinToken.ExpiresAt.After(now) {
+		// Best effort, and only this token while it is still expired: a
+		// token re-issued for the broker in the meantime has another hash
+		// and is kept. The cleanup job removes it otherwise.
+		_ = s.store.DeleteExpiredJoinToken(ctx, tokenHash, now)
+		return ErrJoinTokenExpired
+	}
+	// The token exists and is valid now, so another join consumed a token
+	// with this hash concurrently and has not finished, or this token
+	// replaced it in the meantime. Either way this request did not use it.
+	return ErrJoinTokenInvalid
+}
+
+// applyBrokerJoinRequest records the connection details a joining broker
+// reports on its broker record.
+func applyBrokerJoinRequest(broker *store.RuntimeBroker, req BrokerJoinRequest, now time.Time) {
 	broker.Version = req.Version
 	broker.Status = store.BrokerStatusOnline
 	broker.ConnectionState = "connected"
-	broker.LastHeartbeat = time.Now()
-	broker.Updated = time.Now()
+	broker.LastHeartbeat = now
+	broker.Updated = now
 
 	// Update profiles if provided in the join request
 	if len(req.Profiles) > 0 {
@@ -554,19 +710,6 @@ func (s *BrokerAuthService) CompleteBrokerJoin(ctx context.Context, req BrokerJo
 	if req.DefaultProfile != nil {
 		broker.DefaultProfile = *req.DefaultProfile
 	}
-
-	if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {
-		return nil, fmt.Errorf("failed to update runtime broker: %w", err)
-	}
-
-	// Delete the used join token
-	_ = s.store.DeleteJoinToken(ctx, joinToken.BrokerID)
-
-	return &BrokerJoinResponse{
-		SecretKey:   base64.StdEncoding.EncodeToString(secretKey),
-		HubEndpoint: hubEndpoint,
-		BrokerID:    req.BrokerID,
-	}, nil
 }
 
 // GenerateAndStoreSecret generates a new HMAC secret for an existing broker.

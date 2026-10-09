@@ -20,9 +20,11 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/critic"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 )
 
@@ -34,9 +36,28 @@ import (
 // the parameter changes nothing there.
 const paramStream = "stream"
 
+// paramResolve selects a CriticMarkup projection of a text file:
+// "clean" (reject every mark) or "accept" (accept every mark). It implies
+// stream, because the hub produces the bytes. Files that are not text are
+// served unchanged.
+const paramResolve = "resolve"
+
+// HeaderResolve names the projection applied to a streamed file. It is
+// absent when the bytes are the stored ones, so a client can tell whether
+// a resolve request applied.
+const HeaderResolve = "X-Artifact-Resolve"
+
 // signedURLTTL is the lifetime of the object-store URL a file read
 // redirects to. It only has to outlive the redirect.
 const signedURLTTL = 5 * time.Minute
+
+// HeaderRemoteStatus marks the 404 of a remote image whose fetch failed.
+const HeaderRemoteStatus = "X-Artifact-Remote-Status"
+
+// remoteCacheControl is the caching of a streamed remote image requested
+// by an explicit version: its path is fixed to its source URL within one
+// immutable version, so it never changes.
+const remoteCacheControl = "private, max-age=31536000, immutable"
 
 // fileCSP is the Content-Security-Policy of every streamed file response.
 // A file opened directly in the browser gets an opaque origin and no
@@ -54,9 +75,36 @@ const fileCSP = "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inl
 //  3. An unexpired artifact_grant row: a principal grant matching the
 //     caller, or a scope grant for a scope the host authorizes.
 //
-// An expired artifact is unreadable to everyone.
+// An expired artifact is unreadable to everyone. An artifact whose first
+// version is not finalized yet (CurrentSeq 0) is readable only by its
+// owner, on every route and in the list, because both use this check.
 func (s *Service) canRead(ctx context.Context, b backend, a *Artifact) bool {
-	kind, ref, _, ok := s.host.Principal(ctx)
+	ok, _ := s.canReadErr(ctx, b, a)
+	return ok
+}
+
+// canReadErr is canRead that also reports a failed grant read, so a route
+// can answer 500 instead of the 404 a working read might not give.
+func (s *Service) canReadErr(ctx context.Context, b backend, a *Artifact) (bool, error) {
+	var loadErr error
+	ok := canReadWith(ctx, s.host, a, func() ([]Grant, error) {
+		gs, err := b.store.ListGrants(ctx, a.ID)
+		loadErr = err
+		return gs, err
+	})
+	if loadErr != nil {
+		return false, loadErr
+	}
+	return ok, nil
+}
+
+// canReadWith is canRead asking host, with grants loading a's grants (all
+// of them, expired ones included) only if step 3 is reached. The list
+// endpoint passes a host that memoizes answers for the length of one
+// request, and a loader that reads the grants of a window of candidates at
+// a time (grantsWindow).
+func canReadWith(ctx context.Context, host Host, a *Artifact, grants func() ([]Grant, error)) bool {
+	kind, ref, _, ok := host.Principal(ctx)
 	if !ok {
 		return false
 	}
@@ -65,27 +113,51 @@ func (s *Service) canRead(ctx context.Context, b backend, a *Artifact) bool {
 		return false
 	}
 	// 1. Credential.
-	if !s.host.Permits(ctx, a.ScopeRef, PermissionRead) {
+	if !host.Permits(ctx, a.ScopeRef, PermissionRead) {
 		return false
 	}
-	// 2. Owner, or host policy in the home scope.
-	if kind == a.OwnerKind && ref == a.OwnerRef {
+	// 2. Owner, or host policy in the home scope. Before its first version
+	// is finalized, an artifact is shown only to its owner.
+	owner := kind == a.OwnerKind && ref == a.OwnerRef
+	if owner {
 		return true
 	}
-	if s.host.Authorize(ctx, a.ScopeRef, PermissionRead) {
+	if a.CurrentSeq == 0 {
+		return false
+	}
+	if host.Authorize(ctx, a.ScopeRef, PermissionRead) {
 		return true
 	}
 	// 3. Grants.
-	grants, err := b.store.ListGrants(ctx, a.ID)
+	gs, err := grants()
 	if err != nil {
 		slog.ErrorContext(ctx, "artifacts: list grants failed", "error", err)
 		return false
 	}
+	return grantAllows(ctx, host, a, gs, now, kind, ref, grantsForRead, PermissionRead, true)
+}
+
+// Permission sets a grant must carry for each kind of access.
+var (
+	grantsForRead  = []string{GrantRead, GrantWrite, GrantAdmin}
+	grantsForWrite = []string{GrantWrite, GrantAdmin}
+	grantsForAdmin = []string{GrantAdmin}
+)
+
+// grantAllows reports whether one of grants, unexpired at now and carrying
+// one of perms, gives the caller (kind, ref) access to a: a principal grant
+// naming the caller, or a scope grant for a scope in which the host
+// authorizes the caller for scopePerm. With excludeHome, a scope grant for
+// a's home scope does not count (the caller's checks already asked the
+// host about the home scope). Share links never count. It is the one place
+// grants are matched, for reading, writing and administering alike.
+func grantAllows(ctx context.Context, host Host, a *Artifact, grants []Grant, now time.Time,
+	kind, ref string, perms []string, scopePerm string, excludeHome bool) bool {
 	for _, g := range grants {
 		if g.ExpiresAt != nil && !now.Before(*g.ExpiresAt) {
 			continue
 		}
-		if g.Permission != GrantRead && g.Permission != GrantWrite && g.Permission != GrantAdmin {
+		if !slices.Contains(perms, g.Permission) {
 			continue
 		}
 		switch g.SubjectKind {
@@ -94,7 +166,10 @@ func (s *Service) canRead(ctx context.Context, b backend, a *Artifact) bool {
 				return true
 			}
 		case SubjectScope:
-			if g.SubjectRef != "" && g.SubjectRef != a.ScopeRef && s.host.Authorize(ctx, g.SubjectRef, PermissionRead) {
+			if g.SubjectRef == "" || (excludeHome && g.SubjectRef == a.ScopeRef) {
+				continue
+			}
+			if host.Authorize(ctx, g.SubjectRef, scopePerm) {
 				return true
 			}
 		}
@@ -121,7 +196,13 @@ func (s *Service) readableArtifact(w http.ResponseWriter, r *http.Request, id st
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the artifact")
 		return b, nil, false
 	}
-	if !s.canRead(r.Context(), b, a) {
+	readable, err := s.canReadErr(r.Context(), b, a)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "artifacts: list grants failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not read the artifact")
+		return b, nil, false
+	}
+	if !readable {
 		writeNotFound(w)
 		return b, nil, false
 	}
@@ -177,9 +258,19 @@ func (s *Service) handleGetArtifact(w http.ResponseWriter, r *http.Request, id s
 
 // handleGetFile serves one file of version seq (0 = current) of an
 // artifact.
+//
+// ?resolve=clean|accept serves a text file through a CriticMarkup
+// projection. The parameter is validated before the artifact is looked up,
+// so its errors are the same for every id.
 func (s *Service) handleGetFile(w http.ResponseWriter, r *http.Request, id string, seq int, filePath string) {
 	if _, err := cleanFilePath(filePath); err != nil {
 		writeNotFound(w)
+		return
+	}
+	resolveName := r.URL.Query().Get(paramResolve)
+	mode, ok := critic.ParseMode(resolveName)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "bad_request", "resolve must be clean or accept")
 		return
 	}
 	b, a, ok := s.readableArtifact(w, r, id)
@@ -200,13 +291,25 @@ func (s *Service) handleGetFile(w http.ResponseWriter, r *http.Request, id strin
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the file")
 		return
 	}
-	if f.SHA256 == "" {
-		// A manifest entry with no content (a remote fetch that failed)
-		// has no bytes to serve.
+	if f.Origin == FileOriginRemote && (f.FetchStatus != FetchStatusOK || f.SHA256 == "") {
+		// A remote image whose fetch failed has no bytes. The header lets
+		// the renderer show its placeholder; it carries no reason.
+		w.Header().Set(HeaderRemoteStatus, FetchStatusFailed)
 		writeNotFound(w)
 		return
 	}
-	serveFile(w, r, b, f, deliveryFor(r, b))
+	if f.SHA256 == "" || f.Pending {
+		// A manifest entry with no content has no bytes to serve.
+		writeNotFound(w)
+		return
+	}
+	if mode != critic.Raw && isText(f.MediaType) {
+		serveResolved(w, r, b, f, mode, resolveName)
+		return
+	}
+	// A remote image is cached as immutable only on a versioned URL; the
+	// current-version URL can point at another version later.
+	serveFile(w, r, b, f, deliveryFor(r, b), seq > 0 && f.Origin == FileOriginRemote)
 }
 
 // delivery is how file bytes reach the client.
@@ -220,10 +323,70 @@ const (
 	deliverRedirect
 )
 
+// serveResolved streams text file f through the projection mode, named
+// name in the response. It always streams: the bytes are the hub's. The
+// file is read whole; its size is bounded by the file size limit it was
+// published under, and a projection is never longer than its input.
+func serveResolved(w http.ResponseWriter, r *http.Request, b backend, f *File, mode critic.Mode, name string) {
+	ctx := r.Context()
+	h := w.Header()
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Content-Disposition", contentDisposition(f.MediaType, f.Path))
+	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("Cache-Control", "private, no-cache")
+	h.Set("Content-Security-Policy", fileCSP)
+	etag := `"sha256:` + f.SHA256 + `;` + name + `"`
+	h.Set("ETag", etag)
+	h.Set(HeaderResolve, name)
+	if match := r.Header.Get("If-None-Match"); match != "" && match == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	rc, _, err := b.blobs.Download(ctx, BlobPath(b.hubID, f.SHA256))
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: blob read failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not read the file")
+		return
+	}
+	src, err := readExactly(rc, f.Size)
+	_ = rc.Close()
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: blob read failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not read the file")
+		return
+	}
+	out := critic.Project(src, mode)
+	h.Set("Content-Type", responseContentType(f.MediaType))
+	h.Set("Content-Length", strconv.Itoa(len(out)))
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodHead {
+		return
+	}
+	if _, err := w.Write(out); err != nil {
+		slog.WarnContext(ctx, "artifacts: resolved stream interrupted", "error", err)
+	}
+}
+
+// errBlobSize reports a blob whose length differs from its manifest size.
+var errBlobSize = errors.New("artifacts: blob size does not match the manifest")
+
+// readExactly reads a blob of the given manifest size, reading at most one
+// byte more, and fails when the blob is shorter or longer.
+func readExactly(rc io.Reader, size int64) ([]byte, error) {
+	buf, err := io.ReadAll(io.LimitReader(rc, size+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(buf)) != size {
+		return nil, errBlobSize
+	}
+	return buf, nil
+}
+
 // deliveryFor picks the delivery for a request. The local provider has no
 // URL a client could follow, so it always streams. Otherwise ?stream=1
-// streams and the default redirects. Transforms of the bytes (a later
-// phase) must also stream, and belong here.
+// streams and the default redirects. A resolve projection always streams
+// (serveResolved).
 func deliveryFor(r *http.Request, b backend) delivery {
 	if b.blobs.Provider() == storage.ProviderLocal {
 		return deliverStream
@@ -239,7 +402,7 @@ func deliveryFor(r *http.Request, b backend) delivery {
 // happened. The headers that make a file safe to serve (disposition,
 // nosniff, private caching) are set here for every delivery, so all read
 // routes, now and in later phases, share one code path.
-func serveFile(w http.ResponseWriter, r *http.Request, b backend, f *File, how delivery) {
+func serveFile(w http.ResponseWriter, r *http.Request, b backend, f *File, how delivery, immutable bool) {
 	ctx := r.Context()
 	disposition := contentDisposition(f.MediaType, f.Path)
 	ctype := responseContentType(f.MediaType)
@@ -267,7 +430,11 @@ func serveFile(w http.ResponseWriter, r *http.Request, b backend, f *File, how d
 
 	etag := `"sha256:` + f.SHA256 + `"`
 	h.Set("ETag", etag)
-	h.Set("Cache-Control", "private, no-cache")
+	if immutable {
+		h.Set("Cache-Control", remoteCacheControl)
+	} else {
+		h.Set("Cache-Control", "private, no-cache")
+	}
 	h.Set("Content-Security-Policy", fileCSP)
 	if match := r.Header.Get("If-None-Match"); match != "" && match == etag {
 		w.WriteHeader(http.StatusNotModified)

@@ -107,6 +107,9 @@ const (
 	// deferred their message instead of dispatching it — distinct from
 	// SystemCategoryDeliveryFailed: the message was saved, not dropped.
 	SystemCategoryDeliveryDeferred = "delivery-deferred"
+	// SystemCategoryArtifactReview marks the notice sent to an artifact's
+	// owner when a review version of the artifact was published.
+	SystemCategoryArtifactReview = "artifact-review"
 )
 
 // validTypes is the set of valid message types.
@@ -150,6 +153,14 @@ type StructuredMessage struct {
 	// never accepted from request JSON. Consumers must branch on this, never on
 	// ConversationID != "" — non-emptiness only means "already resolved upstream".
 	ConversationAsserted bool `json:"-"`
+
+	// ArtifactRefsAdmitted records that the hub's admission step set the
+	// "artifacts" metadata value (ptone/scion#3222): the references were
+	// checked against the sender's own credential. Hub-internal like
+	// ConversationAsserted: never rendered, never accepted from request
+	// JSON. A consumer that persists references must require it and drop
+	// the value otherwise.
+	ArtifactRefsAdmitted bool `json:"-"`
 
 	// DeliveryText is the fully rendered agent-facing envelope, produced by
 	// the hub. When set, the broker delivers it verbatim and performs no

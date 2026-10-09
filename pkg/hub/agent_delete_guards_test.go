@@ -561,7 +561,7 @@ func (d *dispatchErrStore) HasOutstandingBrokerDispatch(context.Context, string,
 }
 
 // AgentStatusEvent always carries the deletion key: populated during a
-// delete, explicit null otherwise.
+// delete (the generic view), explicit null otherwise.
 func TestAgentStatusEvent_Deletion(t *testing.T) {
 	pub := NewChannelEventPublisher()
 	defer pub.Close()
@@ -586,7 +586,9 @@ func TestAgentStatusEvent_Deletion(t *testing.T) {
 				d, isMap := v.(map[string]interface{})
 				require.True(t, isMap)
 				assert.Equal(t, "deleting", d["state"])
-				assert.Equal(t, float64(2), d["claim"])
+				// The event carries the generic view for every
+				// subscriber: no claim (ptone/scion#3122).
+				assert.NotContains(t, d, "claim")
 			} else {
 				assert.Nil(t, v)
 			}

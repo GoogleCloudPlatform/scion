@@ -130,4 +130,4 @@ scion start <name> --non-interactive --model medium
 
 For troubleshooting agents that are stalled, have hit an error, or are stuck see references/troubleshooting.md
 
-For agent lifecycle rules — when to delete, when to stop, and who may authorize deletion — see references/agent-lifecycle.md
+For agent lifecycle rules — when to delete, when to stop, who may authorize deletion, and how to reincarnate or move an agent to another broker — see references/agent-lifecycle.md

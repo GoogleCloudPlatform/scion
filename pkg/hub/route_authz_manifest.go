@@ -180,6 +180,9 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/admin/project-defaults":             "admin", // Project defaults
 	"/api/v1/admin/agents/reset-auth-all":        "admin", // Reset all agent auth
 	"/api/v1/admin/gcp-quota":                    "admin", // GCP quota management
+	"/api/v1/admin/delegation-adoption":          "admin", // Delegation-provenance adoption status
+	"/api/v1/admin/delegation-adoption/previews": "admin", // Delegation-provenance adoption preview
+	"/api/v1/admin/delegation-adoption/commits":  "admin", // Delegation-provenance adoption commit
 	"/api/v1/admin/lifecycle-hooks":              "admin", // Lifecycle hooks
 	"/api/v1/admin/lifecycle-hooks/":             "admin", // Lifecycle hook by ID
 	"/api/v1/admin/validate-resources":           "admin", // Validate resources
@@ -192,6 +195,8 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/admin/messaging":                    "admin", // Admin messaging
 	"/api/v1/admin/messaging/divergence":         "admin", // Admin messaging divergence check
 	"/api/v1/admin/experiments":                  "admin", // Admin experiment overrides
+	"/api/v1/admin/profiling":                    "admin", // Admin profiling switches (session only)
+	"/api/v1/admin/conduit/grant-keys/rotate":    "admin", // POST: rotate the conduit grant signing key; returns kids and timestamps only; 404 when hub.conduit is off
 	"/api/v1/admin/limits":                       "admin", // Admin limits
 	"/api/v1/admin/limits/":                      "admin", // Admin limit by ID
 	"/api/v1/admin/entitlements/":                "admin", // Admin entitlement by ID
@@ -213,9 +218,9 @@ var routeAuthzManifest = map[string]string{
 	// ── Access constraint audit (method-scoped) ────────────────────────
 	"GET /api/v1/admin/access-constraints/{id}/audit": "admin", // Constraint audit history — hub.audit.read (super-admin) via Decide in handler; denials return 404
 
-	// ── Metrics dashboard (intentionally not admin-only) ───────────────
-	"/api/v1/metrics/":                "authenticated", // Metrics dashboard — any session
-	"/api/v1/admin/metrics-dashboard": "authenticated", // Legacy metrics dashboard alias — any session
+	// ── Metrics dashboard (route guard: hub.metrics.read) ──────────────
+	"/api/v1/metrics/":                "admin", // Hub-wide metrics dashboard — hub.metrics.read
+	"/api/v1/admin/metrics-dashboard": "admin", // Legacy metrics dashboard path — hub.metrics.read
 
 	// ── Notifications ──────────────────────────────────────────────────
 	"/api/v1/notifications":  "authenticated", // List notifications
@@ -254,9 +259,10 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/conduit":            "agent-token",   // GET (WebSocket): the agent's own conduit session; agent:port:forward; 404 when the experiment is off
 
 	// ── Artifacts (hub.artifacts experiment) ──────────────────────────
-	"/api/v1/artifacts":         "authenticated", // Artifact collection; service checks artifact.* through artifacts.Host; 404 when the experiment is off
+	"/api/v1/artifacts":         "authenticated", // Artifact collection (publish; ?mine=1 list filtered per row); service checks artifact.* through artifacts.Host; 404 when the experiment is off
 	"/api/v1/artifacts/":        "authenticated", // Artifact by ID; service checks artifact.* through artifacts.Host; 404 when the experiment is off
-	"/api/v1/artifacts/shared/": "authenticated", // Share links (RoutePublic in route metadata); still behind UnifiedAuthMiddleware until token-only access ships; 404 when the experiment is off
+	"/api/v1/artifacts/shared/": "public",        // GET/HEAD: share-link read; the service resolves the link token in the path (hashed, one lookup) and answers 303 to the view route; rate limited; no session used; 404 when the experiment is off
+	"/api/v1/artifacts/view/":   "public",        // GET/HEAD: one version's files under a short-lived view capability in the path, verified by the service on every request (no session used); 404 when the experiment is off
 
 	// ── Agent GCP identity ─────────────────────────────────────────────
 	"/api/v1/agent/gcp-token":          "agent-token", // Agent GCP access token
@@ -266,6 +272,7 @@ var routeAuthzManifest = map[string]string{
 	// ── Public settings ────────────────────────────────────────────────
 	"/api/v1/settings/public": "authenticated", // Public settings — requires session despite name
 	"/api/v1/experiments":     "authenticated", // Resolved experiment map — any signed-in identity (#2217)
+	"/api/v1/profiling":       "authenticated", // Profiling switches the web client acts on — any signed-in identity
 
 	// ── GitHub App integration (method-scoped) ────────────────────────
 	"GET /api/v1/github-app":                         "authenticated", // Get GitHub App config

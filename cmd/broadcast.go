@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
@@ -35,6 +34,10 @@ var (
 	bcastAll       bool
 	bcastInterrupt bool
 )
+
+// broadcastQueuedHook, if set (tests only), is called each time a broadcast
+// fan-out send has to wait for a free slot (see boundedFanOut).
+var broadcastQueuedHook func()
 
 // broadcastCmd represents the broadcast command
 var broadcastCmd = &cobra.Command{
@@ -118,9 +121,6 @@ func broadcastViaHub(hubCtx *HubContext, message string) error {
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to list agents via Hub: %w", err))
 	}
-	if resp == nil {
-		return fmt.Errorf("failed to list agents via Hub: server returned empty response")
-	}
 
 	if len(resp.Agents) == 0 {
 		fmt.Println("No running agents found to broadcast to.")
@@ -131,11 +131,10 @@ func broadcastViaHub(hubCtx *HubContext, message string) error {
 		fmt.Printf("Broadcasting message to %d agents...\n", len(resp.Agents))
 	}
 
-	var wg sync.WaitGroup
-	for _, a := range resp.Agents {
-		wg.Add(1)
-		go func(name string) {
-			defer wg.Done()
+	// ptone/scion#3521: at most maxFanOutConcurrency sends in flight at once.
+	boundedFanOut(context.Background(), len(resp.Agents), maxFanOutConcurrency, broadcastQueuedHook,
+		func(i int) {
+			name := resp.Agents[i].Name
 			ctx, cancel := context.WithTimeout(context.Background(), broadcastHubSendTimeout)
 			defer cancel()
 
@@ -148,9 +147,7 @@ func broadcastViaHub(hubCtx *HubContext, message string) error {
 			if !isJSONOutput() {
 				fmt.Printf("Message delivered to agent '%s' via Hub.\n", name)
 			}
-		}(a.Name)
-	}
-	wg.Wait()
+		}, func(int) {})
 	return nil
 }
 
@@ -201,11 +198,9 @@ func broadcastLocal(message string) error {
 	}
 
 	fmt.Printf("Broadcasting message to %d agents...\n", len(targets))
-	var wg sync.WaitGroup
-	for _, target := range targets {
-		wg.Add(1)
-		go func(name string) {
-			defer wg.Done()
+	boundedFanOut(context.Background(), len(targets), maxFanOutConcurrency, broadcastQueuedHook,
+		func(i int) {
+			name := targets[i]
 			sendCtx, sendCancel := context.WithTimeout(context.Background(), broadcastMessageTimeout)
 			defer sendCancel()
 			if err := mgr.Message(sendCtx, name, "", message, bcastInterrupt); err != nil {
@@ -213,9 +208,7 @@ func broadcastLocal(message string) error {
 				return
 			}
 			fmt.Printf("Message delivered to agent '%s'.\n", name)
-		}(target)
-	}
-	wg.Wait()
+		}, func(int) {})
 	return nil
 }
 

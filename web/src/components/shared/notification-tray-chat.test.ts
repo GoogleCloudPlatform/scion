@@ -111,7 +111,7 @@ describe('notification tray: chat notifications', () => {
     tray.dispatchBrowserNotification(notification('COMPLETED', 'agent-1'));
     tray.dispatchBrowserNotification(notification('WAITING_FOR_INPUT', 'agent-1'));
 
-    expect(popups.map((p) => p.title)).toEqual(['Agent Completed', 'Agent Needs Input']);
+    expect(popups.map((p) => p.title)).toEqual(['Agent Completed', 'Agent Waiting on Parent']);
   });
 
   it('honours the shared push preference for agent statuses', () => {
@@ -436,6 +436,6 @@ describe('notification tray: loading for the signed-in user', () => {
     stateManager.dispatchEvent(new CustomEvent('notification-created', { detail: {} }));
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(popups.map((p) => p.title)).toEqual(['Agent Needs Input']);
+    expect(popups.map((p) => p.title)).toEqual(['Agent Waiting on Parent']);
   });
 });

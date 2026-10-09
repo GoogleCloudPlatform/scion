@@ -23,6 +23,7 @@ import (
 	"maps"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -103,6 +104,12 @@ type Layer1Snapshot struct {
 	StartMaxDuration           string
 	StartUnconfirmedHold       string
 	StartCreateUnconfirmedHold string
+
+	// GCP service-account permission check (gcp_iam section). DB-backed
+	// snapshots only; "" means no stored or file value, and ApplySnapshot
+	// then uses the deploy-time value (resolveGCPIAMSettings).
+	GCPIAMCheckMode         string
+	GCPIAMDenyUnknownPolicy string
 
 	// Maintenance
 	AdminMode          bool
@@ -207,6 +214,16 @@ type OperationalSettings struct {
 	mu             sync.RWMutex
 	cache          map[string]sectionState // section name → cached value + revision
 
+	// Audit observation is copied under mu with the matching experiment snapshot.
+	// Mutations prevent a read begun across a write from certifying freshness.
+	decisionAuditObserver    atomic.Pointer[decisionAuditRouter]
+	decisionAuditObservation decisionAuditRefreshObservation
+	decisionAuditMutations   uint8
+
+	// remoteImagesWarnedRev is the artifacts revision whose invalid remote
+	// image setting was last logged.
+	remoteImagesWarnedRev atomic.Int64
+
 	// Event publisher for cross-replica propagation: LISTEN/NOTIFY on
 	// postgres, in-process channel on SQLite; nil until SetEventPublisher.
 	events EventPublisher
@@ -251,11 +268,58 @@ func NewOperationalSettings(
 // Refresh re-reads all hub_settings rows from the store, diffs revisions
 // against the cache, and returns the names of sections that changed.
 func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
+	return o.refreshForDecisionAuditAttachment(ctx, nil)
+}
+
+// Propagation reads retain their original attachment even if an explicit source
+// handoff occurs before their read begins. Generic cache ingestion is unchanged.
+func (o *OperationalSettings) refreshForDecisionAuditAttachment(ctx context.Context, attachment *decisionAuditPropagationAttachment) ([]string, error) {
+	observer := o.decisionAuditObserver.Load()
+	if attachment != nil {
+		observer = attachment.observer
+	}
+	var observation decisionAuditRefreshObservation
+	if observer != nil {
+		if attachment == nil {
+			observation = observer.beginRefresh(o)
+		} else {
+			observation = observer.beginRefreshForAttachment(o, &attachment.attachment)
+		}
+	}
 	rows, err := o.store.ListHubSettings(ctx)
 	if err != nil {
+		o.mu.Lock()
+		if observer != nil {
+			if _, current := observer.finishRefreshForAttachment(observation, ExperimentsSnapshot{}, err); current {
+				o.decisionAuditObservation = decisionAuditRefreshObservation{}
+			}
+		}
+		o.mu.Unlock()
 		return nil, fmt.Errorf("operational settings refresh: %w", err)
 	}
 
+	// Bound audit proof work only. Generic cache ingestion/changed-list behavior
+	// stays as before, including when these local proof caps reject the read.
+	var auditErr error
+	if auditErr == nil && observer != nil && observation.tracked {
+		if len(rows) > decisionAuditSettingsMaxRows {
+			auditErr = fmt.Errorf("audit read row cap")
+		} else {
+			size := 0
+			for _, row := range rows {
+				for _, n := range []int{len(row.Value), len(row.Section), len(row.UpdatedBy), len(row.Origin)} {
+					if n > decisionAuditSettingsMaxBytes-size {
+						auditErr = fmt.Errorf("audit read byte cap")
+						break
+					}
+					size += n
+				}
+				if auditErr != nil {
+					break
+				}
+			}
+		}
+	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
@@ -313,6 +377,18 @@ func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
 		}
 	}
 
+	if observer != nil {
+		if o.decisionAuditMutations != 0 {
+			auditErr = fmt.Errorf("audit source mutation in flight")
+		}
+		var snapshot ExperimentsSnapshot
+		if auditErr == nil && observation.tracked {
+			snapshot = o.experimentsSnapshotLocked()
+		}
+		if result, current := observer.finishRefreshForAttachment(observation, snapshot, auditErr); current {
+			o.decisionAuditObservation = result
+		}
+	}
 	return changed, nil
 }
 
@@ -568,6 +644,8 @@ func (o *OperationalSettings) Update(
 	expectedRevision int64,
 	origin string,
 ) (int64, error) {
+	o.beginDecisionAuditMutation()
+	defer o.endDecisionAuditMutation()
 	// Validate via opsettings registry.
 	if errs := opsettings.Validate(section, doc); len(errs) > 0 {
 		return 0, fmt.Errorf("validation failed for section %q: %v", section, errs)
@@ -607,6 +685,10 @@ func (o *OperationalSettings) Update(
 		Malformed:            malformed,
 		ExperimentsOverrides: experimentsOverrides,
 	}
+	o.decisionAuditObservation = decisionAuditRefreshObservation{}
+	if observer := o.decisionAuditObserver.Load(); observer != nil {
+		observer.invalidateSettings(o)
+	}
 	o.mu.Unlock()
 
 	// Publish admin.settings.updated event to propagate the change to other
@@ -637,12 +719,18 @@ func (o *OperationalSettings) Update(
 // cache, publishes an event so peers refresh, and self-applies. The section
 // falls back to bootstrap material immediately (design §3.2.4).
 func (o *OperationalSettings) DeleteSection(ctx context.Context, section string) error {
+	o.beginDecisionAuditMutation()
+	defer o.endDecisionAuditMutation()
 	if err := o.store.DeleteHubSetting(ctx, section); err != nil {
 		return err
 	}
 
 	o.mu.Lock()
 	delete(o.cache, section)
+	o.decisionAuditObservation = decisionAuditRefreshObservation{}
+	if observer := o.decisionAuditObserver.Load(); observer != nil {
+		observer.invalidateSettings(o)
+	}
 	o.mu.Unlock()
 
 	if o.events != nil {
@@ -697,7 +785,8 @@ func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Serv
 	o.server = server
 
 	propCtx, cancel := context.WithCancel(ctx)
-	o.stopPropagation = cancel
+	attachment := o.decisionAuditPropagationAttachment()
+	o.stopPropagation = func() { o.loseDecisionAuditPropagation(attachment); cancel() }
 
 	// --- Subscribe to admin.settings.updated events (§3.6 primary) ---
 	ch, unsub := o.events.Subscribe(settingsUpdatedSubject)
@@ -708,10 +797,11 @@ func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Serv
 		defer unsub()
 		defer func() {
 			if r := recover(); r != nil {
+				o.loseDecisionAuditPropagation(attachment)
 				slog.Error("Settings propagation subscription loop panicked — propagation stopped on this replica", "panic", r)
 			}
 		}()
-		o.runSubscriptionLoop(propCtx, ch, server)
+		o.runSubscriptionLoopForAttachment(propCtx, ch, server, attachment)
 	}()
 
 	// --- Poll backstop at 60s with jitter (§3.6 backstop) ---
@@ -720,10 +810,11 @@ func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Serv
 		defer o.propagationWg.Done()
 		defer func() {
 			if r := recover(); r != nil {
+				o.loseDecisionAuditPropagation(attachment)
 				slog.Error("Settings propagation poll backstop panicked — propagation stopped on this replica", "panic", r)
 			}
 		}()
-		o.runPollBackstop(propCtx, server)
+		o.runPollBackstopForAttachment(propCtx, server, attachment)
 	}()
 
 	// --- Reconnect refresh callback (§3.6 reconnect) ---
@@ -732,7 +823,7 @@ func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Serv
 	if pgPub, ok := o.events.(*PostgresEventPublisher); ok {
 		pgPub.SetOnReconnect(func() {
 			slog.Info("Event listener reconnected — refreshing operational settings unconditionally")
-			o.refreshAndApply(propCtx, server)
+			o.refreshAndApplyForAttachment(propCtx, server, &attachment)
 		})
 	}
 }
@@ -741,6 +832,8 @@ func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Serv
 func (o *OperationalSettings) StopPropagation() {
 	if o.stopPropagation != nil {
 		o.stopPropagation()
+	} else {
+		o.loseDecisionAuditPropagation(o.decisionAuditPropagationAttachment())
 	}
 	o.propagationWg.Wait()
 }
@@ -748,6 +841,10 @@ func (o *OperationalSettings) StopPropagation() {
 // runSubscriptionLoop listens for admin.settings.updated events and triggers
 // Refresh + apply on receipt.
 func (o *OperationalSettings) runSubscriptionLoop(ctx context.Context, ch <-chan Event, server *Server) {
+	o.runSubscriptionLoopForAttachment(ctx, ch, server, o.decisionAuditPropagationAttachment())
+}
+func (o *OperationalSettings) runSubscriptionLoopForAttachment(ctx context.Context, ch <-chan Event, server *Server, attachment decisionAuditPropagationAttachment) {
+	defer o.loseDecisionAuditPropagation(attachment)
 	for {
 		select {
 		case <-ctx.Done():
@@ -762,7 +859,7 @@ func (o *OperationalSettings) runSubscriptionLoop(ctx context.Context, ch <-chan
 			if err := json.Unmarshal(evt.Data, &payload); err == nil {
 				slog.Info("Received settings update event", "section", payload.Section, "revision", payload.Revision)
 			}
-			o.refreshAndApply(ctx, server)
+			o.refreshAndApplyForAttachment(ctx, server, &attachment)
 		}
 	}
 }
@@ -772,6 +869,9 @@ func (o *OperationalSettings) runSubscriptionLoop(ctx context.Context, ch <-chan
 // backstop for missed NOTIFY events (design §3.6). It also runs on SQLite,
 // where it is a cheap re-read of the local DB.
 func (o *OperationalSettings) runPollBackstop(ctx context.Context, server *Server) {
+	o.runPollBackstopForAttachment(ctx, server, o.decisionAuditPropagationAttachment())
+}
+func (o *OperationalSettings) runPollBackstopForAttachment(ctx context.Context, server *Server, attachment decisionAuditPropagationAttachment) {
 	interval := o.PollInterval
 	if interval == 0 {
 		interval = 60 * time.Second
@@ -796,7 +896,7 @@ func (o *OperationalSettings) runPollBackstop(ctx context.Context, server *Serve
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			o.refreshAndApply(ctx, server)
+			o.refreshAndApplyForAttachment(ctx, server, &attachment)
 		}
 	}
 }
@@ -806,7 +906,10 @@ func (o *OperationalSettings) runPollBackstop(ctx context.Context, server *Serve
 // ApplySnapshot writes the same values and ApplyMaintenanceFromSnapshot
 // is idempotent by design.
 func (o *OperationalSettings) refreshAndApply(ctx context.Context, server *Server) {
-	changed, err := o.Refresh(ctx)
+	o.refreshAndApplyForAttachment(ctx, server, nil)
+}
+func (o *OperationalSettings) refreshAndApplyForAttachment(ctx context.Context, server *Server, attachment *decisionAuditPropagationAttachment) {
+	changed, err := o.refreshForDecisionAuditAttachment(ctx, attachment)
 	if err != nil {
 		slog.Error("Settings propagation refresh failed", "error", err)
 		return
@@ -847,6 +950,10 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	snap.StartMaxDuration = k.String("server.hub.start_max_duration")
 	snap.StartUnconfirmedHold = k.String("server.hub.start_unconfirmed_hold")
 	snap.StartCreateUnconfirmedHold = k.String("server.hub.start_create_unconfirmed_hold")
+
+	// GCP service-account permission check
+	snap.GCPIAMCheckMode = k.String(gcpIAMCheckModeKey)
+	snap.GCPIAMDenyUnknownPolicy = k.String(gcpIAMDenyUnknownKey)
 
 	// Telemetry — extract via the section struct for full fidelity.
 	if k.Exists("telemetry.enabled") {
@@ -1087,6 +1194,10 @@ func (s *Server) startupHubNameOrDefault() string {
 func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	applied := []string{}
 
+	// GCP service-account permission check: decided before s.mu is taken
+	// (the decision reads the store), applied below under s.mu.
+	iamT, iamOK := s.decideGCPIAMReload(snap)
+
 	s.mu.Lock()
 
 	// Telemetry
@@ -1185,6 +1296,20 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	}
 	if s.setStartClaimSettings(sc) {
 		applied = append(applied, "start_claim")
+	}
+
+	// GCP service-account permission check: both keys are applied together
+	// under s.mu, only when admitted, and only if the applied pair is still
+	// the one the decision started from.
+	iamChanged := false
+	if iamOK && s.gcpIAMSettingsLocked() == iamT.From {
+		iamChanged = s.applyGCPIAMSettingsLocked(iamT.To)
+	}
+	if s.gcpIAMApproved != nil && *s.gcpIAMApproved == iamT {
+		s.gcpIAMApproved = nil
+	}
+	if iamChanged {
+		applied = append(applied, gcpIAMSection)
 	}
 
 	// User access mode
@@ -1296,6 +1421,10 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	s.config.AgentDefaults = newDefaults
 
 	s.mu.Unlock()
+
+	if iamChanged {
+		s.invalidateCallerPermissionCaches()
+	}
 
 	// Propagate hub_name to the GCP secret backend so new secrets get the
 	// correct label value. Log handlers have a similar limitation (§7.4).
@@ -1576,6 +1705,26 @@ func (o *OperationalSettings) CrossProjectMessagingEnabled() bool {
 	return false // field omitted → compiled default → OFF
 }
 
+// ReadinessMarks returns whether the web client writes readiness marks
+// (the "profiling" section's readiness_marks key). It is false when the
+// section is absent, the document is malformed or the key is unset.
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) ReadinessMarks() bool {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache["profiling"]
+	if !ok || state.Malformed {
+		return false
+	}
+	var ps opsettings.ProfilingSettings
+	if err := json.Unmarshal(state.Value, &ps); err != nil {
+		return false
+	}
+	return ps.ReadinessMarks != nil && *ps.ReadinessMarks
+}
+
 // Artifacts returns the resolved artifact service settings (the
 // "artifacts" section). It returns opsettings.DefaultArtifactsConfig when
 // the section is absent, and fails closed (opsettings.MalformedArtifactsConfig:
@@ -1597,6 +1746,12 @@ func (o *OperationalSettings) Artifacts() opsettings.ArtifactsConfig {
 	cfg, err := opsettings.ParseArtifactsDoc(state.Value)
 	if err != nil {
 		return opsettings.MalformedArtifactsConfig() // invalid value → fail closed
+	}
+	if cfg.RemoteImagesInvalid != "" && o.remoteImagesWarnedRev.Swap(state.Revision) != state.Revision {
+		// Writes refuse such a value; a stored one (written before that
+		// check existed) turns remote images off. Say so once per revision.
+		slog.Warn("artifacts settings: remote images are off because a remote image setting is invalid",
+			"problem", cfg.RemoteImagesInvalid, "revision", state.Revision)
 	}
 	return cfg
 }
@@ -1683,7 +1838,11 @@ type ExperimentsSnapshot struct {
 func (o *OperationalSettings) ExperimentsSnapshot() ExperimentsSnapshot {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
+	return o.experimentsSnapshotLocked()
+}
 
+// Caller holds mu. Snapshot mapping and cloning retain their existing semantics.
+func (o *OperationalSettings) experimentsSnapshotLocked() ExperimentsSnapshot {
 	state, ok := o.cache["experiments"]
 	if !ok {
 		return ExperimentsSnapshot{Overrides: map[string]bool{}}
@@ -1760,4 +1919,77 @@ func applySnapshotLogLevel(level string) {
 		lvl = slog.LevelError
 	}
 	slog.SetLogLoggerLevel(lvl)
+}
+
+// Lifecycle authority belongs to this captured router/source attachment, never
+// whichever attachment happens to be live when an old callback finally runs.
+type decisionAuditPropagationAttachment struct {
+	observer   *decisionAuditRouter
+	attachment uint64
+}
+
+func (o *OperationalSettings) decisionAuditPropagationAttachment() decisionAuditPropagationAttachment {
+	observer := o.decisionAuditObserver.Load()
+	if observer == nil {
+		return decisionAuditPropagationAttachment{}
+	}
+	return decisionAuditPropagationAttachment{observer: observer, attachment: observer.propagationAttachment(o)}
+}
+func (o *OperationalSettings) loseDecisionAuditPropagation(attachment decisionAuditPropagationAttachment) {
+	if attachment.observer == nil {
+		return
+	}
+	o.mu.Lock()
+	cancel, current := attachment.observer.losePropagation(o, attachment.attachment)
+	if current {
+		o.decisionAuditObservation = decisionAuditRefreshObservation{}
+	}
+	o.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (o *OperationalSettings) decisionAuditSnapshot() (ExperimentsSnapshot, decisionAuditRefreshObservation) {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	// Reject before cloning if a concurrent generic write installed uncapped data.
+	state, present := o.cache["experiments"]
+	if !present || len(state.Value) > decisionAuditSettingsMaxBytes || len(state.ExperimentsOverrides) > decisionAuditSettingsMaxRows {
+		return ExperimentsSnapshot{}, decisionAuditRefreshObservation{}
+	}
+	size := 0
+	for name := range state.ExperimentsOverrides {
+		if len(name) > decisionAuditSettingsMaxBytes-size {
+			return ExperimentsSnapshot{}, decisionAuditRefreshObservation{}
+		}
+		size += len(name)
+	}
+	observation := o.decisionAuditObservation
+	observation.snapshot = cloneDecisionAuditSnapshot(observation.snapshot)
+	return o.experimentsSnapshotLocked(), observation
+}
+
+func (o *OperationalSettings) beginDecisionAuditMutation() {
+	o.mu.Lock()
+	if o.decisionAuditMutations < 2 {
+		o.decisionAuditMutations++
+	}
+	o.decisionAuditObservation = decisionAuditRefreshObservation{}
+	if observer := o.decisionAuditObserver.Load(); observer != nil {
+		observer.mutation(o, true)
+	}
+	o.mu.Unlock()
+}
+
+func (o *OperationalSettings) endDecisionAuditMutation() {
+	o.mu.Lock()
+	if o.decisionAuditMutations > 0 {
+		o.decisionAuditMutations--
+	}
+	o.decisionAuditObservation = decisionAuditRefreshObservation{}
+	if observer := o.decisionAuditObserver.Load(); observer != nil {
+		observer.mutation(o, false)
+	}
+	o.mu.Unlock()
 }

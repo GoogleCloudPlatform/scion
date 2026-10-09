@@ -53,7 +53,18 @@ const (
 	// HeaderStaleReason names why the owner refused a stale route
 	// (404/409): a registry.Reason or "not_local".
 	HeaderStaleReason = "X-Conduit-Stale-Reason"
+	// HeaderRefusalReason carries the §3.3.1 reason when the owner itself
+	// refuses a request before admission (503). Only the owner sets it;
+	// callers treat a 503 without it as unexplained (design §3.5).
+	HeaderRefusalReason = "X-Conduit-Refusal-Reason"
 )
+
+// refuseUnavailable writes the owner's own pre-admission 503 with its
+// §3.3.1 reason.
+func refuseUnavailable(w http.ResponseWriter, why, msg string) {
+	w.Header().Set(HeaderRefusalReason, why)
+	http.Error(w, msg, http.StatusServiceUnavailable)
+}
 
 // rpcEnvelopeSlack bounds the encoded RpcRequest beyond the body limit
 // (method, path, query, headers).
@@ -124,7 +135,7 @@ func (r *Relay) serveInternal(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if killed {
-		http.Error(w, "relay unavailable", http.StatusServiceUnavailable)
+		refuseUnavailable(w, ReasonNotServing, "relay unavailable")
 		return
 	}
 	path := req.URL.Path
@@ -193,7 +204,7 @@ func (r *Relay) admitInternal(w http.ResponseWriter, req *http.Request, sessionI
 	switch {
 	case err != nil && d.Reason == registry.ReasonReadError:
 		// Fail closed.
-		http.Error(w, "registry unavailable", http.StatusServiceUnavailable)
+		refuseUnavailable(w, ReasonRegistryUnavailable, "registry unavailable")
 		return nil, want, false
 	case err != nil:
 		http.Error(w, err.Error(), http.StatusBadRequest)

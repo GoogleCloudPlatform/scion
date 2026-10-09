@@ -331,6 +331,8 @@ For every significant lifecycle event (session start/end, tool use, model call),
 
 The Scion Hub maintains internal operational metrics for infrastructure monitoring. These are available via the `/api/v1/admin/metrics` endpoint (requires `hub-admin` role) and can be exported to standard monitoring tools.
 
+When `server.hub.gcp_project_id` is set, the Hub also exports its database pool, dispatch, notification and launch reaper metrics to Cloud Monitoring. To chart them per Hub instance, import the ready-made [Hub Monitoring Dashboard](/scion/hosted/single-node/hub-monitoring-dashboard/).
+
 ### GCP Token Metrics
 
 With the introduction of GCP Identity emulation, the Hub tracks the health and performance of the token brokering pipeline:

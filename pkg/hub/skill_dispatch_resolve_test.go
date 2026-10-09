@@ -388,7 +388,7 @@ func (d *preResolvingDispatcher) DispatchAgentCreate(ctx context.Context, agent 
 // End to end through the scheduler: a dispatch_agent event created by a
 // regular member, naming a Hub template whose scion-agent.yaml requires a
 // private skill, stamps the template ID (#1795) and pre-resolves that skill as
-// the event's creator.
+// the principal of the event's latest revision.
 func TestSchedulerDispatch_PreResolvesTemplatePrivateSkill(t *testing.T) {
 	const skillURI = "skill://scion/global/sched-private@latest"
 	srv, s, alice, _, project := setupSkillAuthzTest(t)
@@ -405,13 +405,13 @@ func TestSchedulerDispatch_PreResolvesTemplatePrivateSkill(t *testing.T) {
 
 	payload, err := json.Marshal(DispatchAgentEventPayload{AgentName: "sched-skill-agent", Template: "sched-skill-tmpl"})
 	require.NoError(t, err)
-	require.NoError(t, srv.dispatchAgentEventHandler()(ctx, store.ScheduledEvent{
+	require.NoError(t, srv.dispatchAgentEventHandler()(ctx, withSessionRevision(store.ScheduledEvent{
 		ID:        tid("sched-skill-event"),
 		ProjectID: project.ID,
 		EventType: "dispatch_agent",
 		Payload:   string(payload),
 		CreatedBy: alice.ID,
-	}))
+	}, alice.ID)))
 
 	// #1795: the scheduled path stamps the resolved template's ID and hash,
 	// as the agent-create path does, so the broker can hydrate it and the

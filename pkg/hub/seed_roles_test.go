@@ -126,6 +126,8 @@ func TestBuiltInRoles_HubMemberContainsExpectedPermissions(t *testing.T) {
 		"hub.settings.read",
 		// project.create (replacing hub-member-create-projects policy)
 		"project.create",
+		// Self-scoped permissions on the holder's own records.
+		"inbox.read", "inbox.write", "user_skill_injection.update",
 	}
 	for _, p := range expected {
 		assert.True(t, permSet[p],
@@ -448,10 +450,10 @@ func TestReconcileBuiltInRole_LegacyIntegerMarkerTriggersReconciliation(t *testi
 	reconcileBuiltInRoles(ctx, s)
 
 	// After reconciliation, marker should now have the hash and the
-	// current revision (hub-member is at revision 3 after adding
-	// broker.create, ptone/scion#2138).
+	// current revision (hub-member is at revision 4 after adding the
+	// self-scoped permissions).
 	updatedMarker := getAppliedBuiltInRoleMarker(ctx, s, roleName)
-	assert.Equal(t, 3, updatedMarker.Revision)
+	assert.Equal(t, 4, updatedMarker.Revision)
 	assert.NotEmpty(t, updatedMarker.PermHash, "marker should have PermHash after reconciliation")
 	assert.Equal(t, permListHash(hubMemberPermissionIDs()), updatedMarker.PermHash)
 }
@@ -656,9 +658,8 @@ func TestNew_ReconcileDemotesToConfiguredDefaultRole(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.AdminEmails = []string{anchor.Email}
 	cfg.DefaultUserRole = store.UserRoleViewer
-	srv, err := New(cfg, s)
+	_, err := newTestHubServer(t, cfg, s)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	u, err := s.GetUser(context.Background(), demoted.ID)
 	require.NoError(t, err)
@@ -971,7 +972,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"harness_config.create", "harness_config.delete",
 				"harness_config.list", "harness_config.read", "harness_config.update",
 				"project.delete", "project.list", "project.manage",
-				"project.read", "project.secret_read", "project.update",
+				"project.read", "project.secret_read", "project.set_messaging_policy", "project.update",
 				"scheduled_event.create", "scheduled_event.delete",
 				"scheduled_event.list", "scheduled_event.read", "scheduled_event.update",
 				"skill.create", "skill.delete", "skill.list", "skill.read",
@@ -1027,7 +1028,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 // TestProjectRoleRevisions verifies the current revision of each project role.
 func TestProjectRoleRevisions(t *testing.T) {
 	wantRevisions := map[string]int{
-		store.ProjectRoleOwner:  6,
+		store.ProjectRoleOwner:  7,
 		store.ProjectRoleAdmin:  6,
 		store.ProjectRoleMember: 5,
 	}
@@ -1052,7 +1053,7 @@ func TestProjectRoleReconciliationConverges(t *testing.T) {
 		revision    int
 		permissions func() []string
 	}{
-		{store.ProjectRoleOwner, 6, projectOwnerPermissionIDs},
+		{store.ProjectRoleOwner, 7, projectOwnerPermissionIDs},
 		{store.ProjectRoleAdmin, 6, projectAdminPermissionIDs},
 		{store.ProjectRoleMember, 5, projectMemberCuratedPermissionIDs},
 	}
@@ -1590,9 +1591,9 @@ func TestR5_ReconciliationGrantsPortAccessToExistingOwnersAndAdmins(t *testing.T
 		require.NoError(t, err)
 		assert.Contains(t, rd.Permissions, "agent.port_access", "%s should carry agent.port_access after reconciliation", name)
 		assert.NotContains(t, rd.Permissions, "agent.attach", "%s must still lack agent.attach", name)
-		// R5 granted agent.port_access; the marker advances to the current
-		// revision (R6 added the artifact permissions).
-		assert.Equal(t, 6, getAppliedBuiltInRoleMarker(ctx, s, name).Revision, "%s marker should advance to the current revision", name)
+		// R5 granted agent.port_access; the marker advances to the role's
+		// current revision.
+		assert.Equal(t, builtInRoleRevision(t, name), getAppliedBuiltInRoleMarker(ctx, s, name).Revision, "%s marker should advance to the current revision", name)
 
 		d := authz.CheckAccess(ctx, caller, memberAgent, ActionPortAccess)
 		assert.True(t, d.Allowed, "%s should open a member's ports after reconciliation: %s", name, d.Reason)

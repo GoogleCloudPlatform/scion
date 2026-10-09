@@ -742,3 +742,45 @@ func TestChatV2Wake_ClientCancelDuringWake_ReplayGetsOutcome(t *testing.T) {
 	assert.Len(t, f.disp.getStartCalls(), 1, "one wake")
 	assert.Len(t, f.disp.getMessageCalls(), 1, "one dispatch")
 }
+
+// stallCreateMessageStore blocks CreateMessage until its context ends, or
+// for at most stallFor, simulating a store call that hangs.
+type stallCreateMessageStore struct {
+	store.Store
+	stallFor time.Duration
+}
+
+func (s *stallCreateMessageStore) CreateMessage(ctx context.Context, m *store.Message) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(s.stallFor):
+		return context.DeadlineExceeded
+	}
+}
+
+// A store call that stalls after the wake ends the send at the overall
+// deadline with a failure, and releases the idempotency key.
+func TestChatV2Wake_StalledStoreAfterWake_EndsAtDeadline(t *testing.T) {
+	budget := 3 * time.Second
+	orig := chatWakeSendBudget
+	chatWakeSendBudget = func(int) time.Duration { return budget }
+	t.Cleanup(func() { chatWakeSendBudget = orig })
+
+	f := chatWakeSetup(t, string(state.PhaseSuspended))
+	f.markReadySoon()
+	f.srv.store = &stallCreateMessageStore{Store: f.s, stallFor: 20 * time.Second}
+
+	start := time.Now()
+	rec := doRequest(t, f.srv, http.MethodPost, f.path(),
+		map[string]any{"content": "hello", "wake": true, "idempotency_key": "key-stall"})
+	elapsed := time.Since(start)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code, "body=%s", rec.Body.String())
+	assert.Less(t, elapsed, budget+5*time.Second, "send must end at the overall deadline")
+	assert.Len(t, f.disp.getStartCalls(), 1, "the wake ran before the stall")
+	assert.Empty(t, f.disp.getMessageCalls())
+
+	_, begin := f.srv.chatIdempotency.Begin(DevUserID, "key-stall")
+	assert.Equal(t, IdempotencyNew, begin, "the key must be released after the failed send")
+}

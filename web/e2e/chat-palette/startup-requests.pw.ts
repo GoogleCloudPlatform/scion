@@ -224,6 +224,7 @@ test('a cold /chat startup makes one spaces and one DMs request and no collapsed
   record('dms', String(countPath(requests, '/api/v1/chat/dms')));
   record('threads', String(threadCalls(requests).length));
   record('agents', String(countPath(requests, '/api/v1/agents')));
+  record('users', String(countPath(requests, '/api/v1/users')));
   record('api-total', String(requests.filter((r) => r.method === 'GET').length));
 
   expect.soft(countPath(requests, '/api/v1/chat/spaces')).toBe(1);
@@ -239,6 +240,8 @@ test('a cold /chat startup makes one spaces and one DMs request and no collapsed
   // The members sidebar walks the hub's agents once: the re-parse after
   // rail-loaded joins the finished walk instead of starting another.
   expect.soft(countPath(requests, '/api/v1/agents')).toBe(1);
+  // ... and the hub's users once, for the same reason.
+  expect.soft(countPath(requests, '/api/v1/users')).toBe(1);
   // Every space starts collapsed and none is selected.
   expect.soft(threadCalls(requests)).toEqual([]);
   // Activity order comes from the spaces response, not from thread lists.

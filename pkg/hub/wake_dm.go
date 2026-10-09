@@ -69,6 +69,19 @@ type WakeResult struct {
 // shortens it.
 const wakeReadyTimeout = 30 * time.Second
 
+// wakeDeleteWonError is the 409 delete_in_progress answer to a DM wake that
+// lost to a delete after its resume landed: the same code, message and
+// details.agentId as a start or restart that lost after landing
+// (writeDeleteWon with deletedWhileStartingMessage).
+func wakeDeleteWonError(agentID string) *AgentDMError {
+	return &AgentDMError{
+		Code:       ErrCodeDeleteInProgress,
+		Message:    deletedWhileStartingMessage,
+		HTTPStatus: http.StatusConflict,
+		Details:    map[string]interface{}{"agentId": agentID},
+	}
+}
+
 // wakeAgentForDM resumes a suspended target agent before DM delivery.
 // It validates the agent's lifecycle phase and runtime, dispatches a resume
 // command, and waits for the agent to become ready.
@@ -140,13 +153,54 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		// releases the claim like a success: the start itself was accepted.
 		var statusErr *AgentDMError
 		var readyErr error
-		// The caller's deadline, when it has one, bounds the resume
-		// dispatch and the readiness wait (KeepCallerDeadline, and the wait
-		// below); the post-start writes are not bounded by it. This path is
+		// From here the resume no longer follows the sender's request
+		// (ptone/scion#3471, as ptone/scion#1961 did for the other
+		// synchronous launches): a sender that disconnects or gives up must
+		// not cancel the broker launch, the readiness wait, the status
+		// writes or the rollback of a failed start. The admission checks
+		// and the start gate above stay on the request. What the sender
+		// sees is unchanged: a sender still connected gets the same answer,
+		// and a gone sender gets none.
+		//
+		// The resume dispatch is bounded by syncDispatchTimeout
+		// (SyncDispatchBound) and, when the caller has a deadline, by that
+		// deadline too (KeepCallerDeadline; the earlier wins). The caller's
+		// deadline also shortens the readiness wait below. This path is
 		// shared by the user and agent direct messages and the chat wake;
-		// only the chat wake carries a deadline today.
-		callerDeadline, hasCallerDeadline := ctx.Deadline()
-		err := s.startAgentCore(ctx, agent, StartOpts{Kind: store.StartClaimWake, Resume: true, KeepCallerDeadline: true, AfterStart: func(ctx context.Context, st startedState) error {
+		// only the chat wake carries a deadline today (its resume budget).
+		//
+		// A wake request that already ended (cancelled, or its time budget
+		// ran out) during the admission checks or the start gate gets no
+		// resume. On the direct-message paths the message is persisted on
+		// the request after the wake, so nobody would receive it; the chat
+		// wake persists on a detached context but answers the sender with
+		// an error once its wake budget is spent. Either way the resume
+		// would serve nobody. Nothing is claimed, dispatched or written.
+		if err := ctx.Err(); err != nil {
+			s.messageLog.Info("wake: skipped, the wake request ended or its time budget ran out before the resume",
+				"agent_id", agent.ID, "error", err)
+			return nil, requestEndedRefusal().dmError()
+		}
+		launchCtx, cancelLaunch := detachLaunchKeepDeadline(ctx)
+		defer cancelLaunch()
+		callerDeadline, hasCallerDeadline := launchCtx.Deadline()
+		err := s.startAgentCore(launchCtx, agent, StartOpts{Kind: store.StartClaimWake, Resume: true, KeepCallerDeadline: true, SyncDispatchBound: true, AfterStart: func(ctx context.Context, st startedState) error {
+			// deleteWon reports whether a delete won after the resume
+			// landed (the dispatch has already removed the landed run,
+			// compensateLandedRun) and, if so, sets the 409 answer, as
+			// start and restart answer (ptone/scion#3528). The message is
+			// not delivered. A refused start write returns nil (the store
+			// only neutralises it), so the wake checks for the delete
+			// itself at each stage.
+			deleteWon := func(stage string) bool {
+				if !s.deleteWonAfterLanding(ctx, agent.ID) {
+					return false
+				}
+				s.messageLog.Info("wake: agent was deleted while it was waking; message not delivered",
+					"agent_id", agent.ID, "stage", stage)
+				statusErr = wakeDeleteWonError(agent.ID)
+				return true
+			}
 			// Re-assert 'starting' (beginStartDispatch already wrote it) and
 			// clear the previous generation's leftovers while the lifecycle
 			// op is still held: a heartbeat guarded during the dispatch may
@@ -154,10 +208,15 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			// container status. Clearing them now, before the readiness
 			// wait, leaves alone anything the new container posts later
 			// (its first status, which is the readiness signal).
+			// StartWrite: a start's own write keeps the phase of a row a
+			// delete holds, a finalizing row with an expired lease included
+			// (ptone/scion#3528). The store neutralises such a write and
+			// returns nil, so the delete-won check below is what notices.
 			statusUpdate := store.AgentStatusUpdate{
 				Phase:                 string(state.PhaseStarting),
 				ClearTerminalRemnants: true,
 				ContainerStatus:       agent.ContainerStatus,
+				StartWrite:            true,
 			}
 			if err := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate); err != nil {
 				s.messageLog.Error("wake: failed to update agent phase to starting",
@@ -167,6 +226,11 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 					Message:    "failed to update agent status after resume",
 					HTTPStatus: http.StatusInternalServerError,
 				}
+				return nil
+			}
+			// A delete that won during the resume: answer at once rather
+			// than wait for readiness.
+			if deleteWon("resume") {
 				return nil
 			}
 			agent.Phase = string(state.PhaseStarting)
@@ -191,13 +255,21 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			}
 			readyErr = s.waitForAgentReady(ctx, agent.ID, wait)
 			if readyErr != nil {
+				// A delete that wins during the wait usually ends it with
+				// an unexpected phase (its claim writes stopping) or a
+				// gone row. That is the delete's answer, not a runtime
+				// error, and the row is the delete's: no readiness-failure
+				// message is written to it.
+				if deleteWon("readiness") {
+					readyErr = nil
+				}
 				return nil
 			}
 			// Agent is ready — transition to 'running', still under the
 			// claim, so a stop or start recorded meanwhile is never painted
 			// over. A plain phase write: the message, stalled marker and
 			// exit fields on the row now belong to the new generation.
-			if err := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}); err != nil {
+			if err := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning), StartWrite: true}); err != nil {
 				s.messageLog.Error("wake: failed to update agent phase to running",
 					"agent_id", agent.ID, "error", err)
 				statusErr = &AgentDMError{
@@ -205,6 +277,12 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 					Message:    "failed to update agent status after readiness",
 					HTTPStatus: http.StatusInternalServerError,
 				}
+				return nil
+			}
+			// A delete that won after the agent turned ready, or whose row
+			// a heartbeat kept looking ready: the running write above kept
+			// the delete's phase. Answer 409 rather than WakeResumed.
+			if deleteWon("running") {
 				return nil
 			}
 			agent.Phase = string(state.PhaseRunning)
@@ -257,7 +335,7 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			if ref := deleteClaimedDuringDispatch(err, agent.ID); ref != nil {
 				return nil, ref.dmError()
 			}
-			if refusal := s.launchRefusalFromError(ctx, agent.ID, err); refusal != nil {
+			if refusal := s.launchRefusalFromError(launchCtx, agent.ID, err); refusal != nil {
 				s.messageLog.Info("wake: skipped, agent create is launching or incomplete",
 					"agent_id", agent.ID, "code", refusal.Code)
 				return nil, refusal.dmError()
@@ -296,9 +374,9 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			// reconcileBrokerQuotaOnPhaseChange the normal way. The Message
 			// field is still recorded for visibility.
 			//
-			// Use a detached context so this cleanup write succeeds even if
-			// the parent context was cancelled (e.g. client disconnect).
-			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			// Use a context without the caller's deadline so this cleanup
+			// write succeeds even after the wake budget ran out.
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(launchCtx), 5*time.Second)
 			_ = s.store.UpdateAgentStatus(cleanupCtx, agent.ID, store.AgentStatusUpdate{
 				Message: "Failed to become ready after wake",
 			})
@@ -313,8 +391,9 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		// Agent is ready — transition to 'running'.
 		// The running write ran under the claim (above); publish from a
 		// re-read: a delete that claimed the row meanwhile
-		// must not be painted over (design ptone/scion#2483 note F).
-		s.publishAgentStatusFresh(ctx, agent)
+		// must not be painted over (design ptone/scion#2483 note F). On the
+		// launch context: a sender that left must not suppress it.
+		s.publishAgentStatusFresh(launchCtx, agent)
 
 		return &WakeResult{Outcome: WakeResumed}, nil
 

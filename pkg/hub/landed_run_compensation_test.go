@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
 
@@ -48,13 +49,16 @@ type landingClient struct {
 	reportRunID bool
 	deleteRuns  []string
 	deleteErr   error
+	// warnings, when set, are the hub-only env warnings the broker's
+	// answer carries (relayed to the dispatch warnings collector).
+	warnings []string
 }
 
 func (c *landingClient) answer(slug, runID string) *RemoteAgentResponse {
 	if c.onLand != nil {
 		c.onLand()
 	}
-	info := &RemoteAgentInfo{ID: slug, Slug: slug, Name: slug, Phase: string(state.PhaseRunning)}
+	info := &RemoteAgentInfo{ID: slug, Slug: slug, Name: slug, Phase: string(state.PhaseRunning), Warnings: c.warnings}
 	if c.reportRunID {
 		info.RunID = runID
 	}
@@ -320,4 +324,23 @@ func TestLandedRunCompensation_NoRow_NoDelete(t *testing.T) {
 	_, err := f.dispatcher.DispatchAgentCreate(context.Background(), &rowless)
 	require.NoError(t, err)
 	assert.Empty(t, c.deleteRuns)
+}
+
+// The broker refuses the compensating delete because a same-name successor
+// holds the name (ptone/scion#3080): the landed run is already gone, the
+// successor is left alone, and it counts as done, not as a failure.
+func TestLandedRunCompensation_SuccessorHoldsName_CountsDone(t *testing.T) {
+	f, c := newLandingFixture(t, "land-successor")
+	counters := compensationMetrics(t, f.dispatcher)
+	c.onLand = func() { require.NoError(t, f.store.DeleteAgent(context.Background(), f.agent.ID)) }
+	c.deleteErr = &DeleteRunMismatchError{RequestedRunID: "run-landed", CurrentRunID: "run-successor",
+		Err: &brokerStatusError{StatusCode: http.StatusNotFound}}
+	ctx, warns := withDispatchWarnings(context.Background())
+	_, err := f.dispatcher.DispatchAgentCreate(ctx, f.agent)
+	require.NoError(t, err)
+	assert.Len(t, c.deleteRuns, 1)
+	assert.Contains(t, warns.Warnings(), "agent was deleted while it was starting; its container was already replaced by another run")
+	done, failed := counters()
+	assert.Equal(t, int64(1), done)
+	assert.Zero(t, failed)
 }

@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -740,6 +741,17 @@ func (s *Server) handleHarnessConfigUpload(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+// maxRecordedSourceURLBytes caps the length of a recorded harness config
+// source URL.
+const maxRecordedSourceURLBytes = 2048
+
+// isDisallowedSourceURLRune reports whether r may not appear in a recorded
+// source URL: control characters and invisible formatting or line/paragraph
+// separator characters (Unicode categories Cc, Cf, Zl, Zp).
+func isDisallowedSourceURLRune(r rune) bool {
+	return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r)
+}
+
 // handleHarnessConfigFinalize finalizes a harness config after file upload.
 func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodPost {
@@ -757,6 +769,10 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 
 	var req struct {
 		Manifest *HarnessConfigManifest `json:"manifest"`
+		// SourceURL optionally records where the uploaded files came from
+		// (for example the URL given to 'scion harness-config install').
+		// When empty, the stored source URL is left unchanged.
+		SourceURL string `json:"sourceUrl,omitempty"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -765,6 +781,13 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 
 	if req.Manifest == nil || len(req.Manifest.Files) == 0 {
 		ValidationError(w, "manifest with files is required", nil)
+		return
+	}
+
+	sourceURL := strings.TrimSpace(req.SourceURL)
+	if sourceURL != "" && (!config.IsRemoteURI(sourceURL) || strings.ContainsFunc(sourceURL, isDisallowedSourceURLRune) ||
+		len(sourceURL) > maxRecordedSourceURLBytes) {
+		ValidationError(w, fmt.Sprintf("sourceUrl must be a single-line remote URI (http://, https://, or rclone) of at most %d bytes", maxRecordedSourceURLBytes), nil)
 		return
 	}
 
@@ -781,6 +804,9 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 	hc.Files = req.Manifest.Files
 	hc.ContentHash = contentHash
 	hc.Status = store.HarnessConfigStatusActive
+	if sourceURL != "" {
+		hc.SourceURL = sourceURL
+	}
 
 	if entry, ok := extractHarnessConfigEntryFromStorage(ctx, stor, hc.StoragePath); ok {
 		if entry.Image != "" {
@@ -876,7 +902,7 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 				var mu sync.Mutex
 				for i := range brokerResult.Items {
 					b := &brokerResult.Items[i]
-					if _, isPlugin := b.Labels["scion.io/plugin"]; isPlugin {
+					if isPluginBroker(b) {
 						continue
 					}
 					if !s.canDispatchToBroker(ctx, b) {
@@ -973,6 +999,12 @@ func (s *Server) handleHarnessConfigDownload(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		RuntimeError(w, fmt.Sprintf("harness-config %q: %s — run 'scion harness-config validate %s' to diagnose", hc.Name, err, hc.Name))
 		return
+	}
+
+	// For local storage, rewrite file:// URLs to HTTP proxy URLs: a file://
+	// URL names a hub-host path a remote broker cannot read.
+	if stor.Provider() == storage.ProviderLocal {
+		downloadURLs = rewriteLocalDownloadURLs(downloadURLs, requestBaseURL(r), "harness-configs", hc.ID)
 	}
 
 	writeJSON(w, http.StatusOK, DownloadResponse{
@@ -1335,7 +1367,7 @@ func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.R
 	var proxyEntries []ProxyBrokerEntry
 	for i := range brokerResult.Items {
 		b := &brokerResult.Items[i]
-		if _, isPlugin := b.Labels["scion.io/plugin"]; isPlugin {
+		if isPluginBroker(b) {
 			continue
 		}
 		if !s.canDispatchToBroker(ctx, b) {

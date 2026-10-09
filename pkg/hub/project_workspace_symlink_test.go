@@ -172,9 +172,9 @@ func symlinkBases() []symlinkBase {
 		{
 			name: "shareddir",
 			setup: func(t *testing.T, srv *Server, outside *outsideTree) (string, string, string) {
-				project, workspacePath := createTestHubManagedProject(t, srv, "Symlink SD")
+				project, _ := createTestHubManagedProject(t, srv, "Symlink SD")
 				addSharedDirToProject(t, srv, project.ID, "scratch")
-				sharedDirPath := resolveTestSharedDirPath(t, workspacePath, "scratch")
+				sharedDirPath := resolveTestSharedDirPath(t, project, "scratch")
 				// The handlers no longer create this directory on a read, so
 				// the test creates it the way agent provisioning would.
 				require.NoError(t, os.MkdirAll(sharedDirPath, 0755))
@@ -505,9 +505,9 @@ func TestSymlink_SharedDirBaseIsSymlink(t *testing.T) {
 	srv, _ := testServer(t)
 	outside := newOutsideTree(t)
 
-	project, workspacePath := createTestHubManagedProject(t, srv, "Symlink SD Base")
+	project, _ := createTestHubManagedProject(t, srv, "Symlink SD Base")
 	addSharedDirToProject(t, srv, project.ID, "scratch")
-	sharedDirPath := resolveTestSharedDirPath(t, workspacePath, "scratch")
+	sharedDirPath := resolveTestSharedDirPath(t, project, "scratch")
 
 	// Stand the whole shared directory up as a link to somewhere else.
 	require.NoError(t, os.MkdirAll(filepath.Dir(sharedDirPath), 0755))
@@ -543,9 +543,9 @@ func TestSymlink_SharedDirBaseIsSymlink(t *testing.T) {
 // meant the hub reached along a path it had not established was safe.
 func TestSymlink_ReadDoesNotCreateSharedDir(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubManagedProject(t, srv, "SD No Create On Read")
+	project, _ := createTestHubManagedProject(t, srv, "SD No Create On Read")
 	addSharedDirToProject(t, srv, project.ID, "scratch")
-	sharedDirPath := resolveTestSharedDirPath(t, workspacePath, "scratch")
+	sharedDirPath := resolveTestSharedDirPath(t, project, "scratch")
 	require.NoError(t, os.RemoveAll(sharedDirPath))
 
 	filesURL := fmt.Sprintf("/api/v1/projects/%s/shared-dirs/scratch/files", project.ID)

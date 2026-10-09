@@ -57,7 +57,9 @@ import { agentStatusBadge, stateLabel } from '../../shared/agent-state-display.j
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
+import { AgentSeedEpoch } from '../../client/agent-seed-epoch.js';
 import '../shared/status-badge.js';
+import '../shared/detail-header.js';
 import { DeletionLeaseController } from '../shared/deletion-badge.js';
 import '../shared/deletion-banner.js';
 import { runAgentDelete, lifecycleActionErrorMessage } from '../../client/agent-delete.js';
@@ -88,6 +90,7 @@ import { terminalHref } from '../../client/open-terminal.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { formatNumber } from '../../utils/format-number.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { DEFAULT_TRIGGERS } from '../../shared/notification-triggers.js';
 import { navigateTo, stripBasePath } from '../../client/navigation.js';
 
 /**
@@ -123,6 +126,11 @@ function parseDuration(s: string): number {
  * it and use fake timers.
  */
 export const DELETE_REDIRECT_DELAY_MS = 1000;
+
+/** Body of the Reincarnate confirm dialog (ptone/scion#3707). */
+export const REINCARNATE_CONFIRM_MESSAGE =
+  'The agent will be stopped and re-provisioned with its current settings and template. ' +
+  'Any work running in its current session is interrupted.';
 
 /**
  * Format seconds as "Xh Ym Zs".
@@ -199,6 +207,24 @@ export class ScionPageAgentDetail extends LitElement {
   @state()
   private cascadeDialogOpen = false;
 
+  /**
+   * True while a confirmed reincarnate request is in flight; drives the
+   * button's loading state (ptone/scion#3707).
+   */
+  @state()
+  private reincarnating = false;
+
+  /**
+   * Double-submit guard: true from the first click until the request
+   * settles, including while the confirm dialog is open. Not rendered, so
+   * no spinner shows behind the dialog.
+   */
+  private reincarnateBusy = false;
+
+  /** The hub's error text from the last failed reincarnate, if any. */
+  @state()
+  private reincarnateError: string | null = null;
+
   /** Whether the Chat|Log toggle is in "chat" mode (vs "log" mode). */
   @state()
   private chatViewActive = true;
@@ -234,49 +260,7 @@ export class ScionPageAgentDetail extends LitElement {
       color: var(--scion-primary, #3b82f6);
     }
 
-    /* ---- Header ---- */
-    .header {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      margin-bottom: 1.5rem;
-      gap: 1rem;
-    }
-    .header-info {
-      flex: 1;
-    }
-    .header-title {
-      display: flex;
-      align-items: flex-start;
-      gap: 0.75rem;
-      margin-bottom: 0.5rem;
-    }
-    .header-title > sl-icon {
-      flex-shrink: 0;
-      color: var(--scion-primary, #3b82f6);
-      font-size: 1.5rem;
-      /* Centre the icon on the first line of the name: (1.95rem h1 line box
-         - 1.5rem icon) / 2. */
-      margin-top: 0.225rem;
-    }
-    /* A long name wraps on its own line; the badges then follow on the next
-       line instead of floating beside a multi-line name. */
-    .header-title-text {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 0.5rem 0.75rem;
-      min-width: 0;
-    }
-    .header h1 {
-      font-size: 1.5rem;
-      font-weight: 700;
-      line-height: 1.3;
-      color: var(--scion-text, #1e293b);
-      margin: 0;
-      min-width: 0;
-      overflow-wrap: anywhere;
-    }
+    /* ---- Header (layout in scion-detail-header) ---- */
     .header-meta {
       display: flex;
       flex-wrap: wrap;
@@ -319,28 +303,6 @@ export class ScionPageAgentDetail extends LitElement {
     .broker-link:hover {
       color: var(--scion-primary, #3b82f6);
     }
-    .header-actions {
-      display: flex;
-      gap: 0.5rem;
-      flex-shrink: 0;
-    }
-    /* On a phone the actions drop below the title and wrap, rather than
-       pushing the last of them off the right edge. */
-    @media (max-width: 640px) {
-      .header {
-        flex-wrap: wrap;
-      }
-      .header-info {
-        min-width: 0;
-        flex-basis: 100%;
-      }
-      .header-actions {
-        flex-wrap: wrap;
-        flex-shrink: 1;
-        min-width: 0;
-      }
-    }
-
     /* ---- Error banner ---- */
     scion-deletion-banner.deletion-banner {
       margin-bottom: 1.5rem;
@@ -388,6 +350,14 @@ export class ScionPageAgentDetail extends LitElement {
     }
 
     /* ---- Cards ---- */
+    .reincarnate-help {
+      margin: 0 0 1rem;
+      color: var(--scion-text-secondary, #475569);
+      font-size: 0.875rem;
+    }
+    .reincarnate-error {
+      margin-bottom: 1rem;
+    }
     .card {
       background: var(--scion-surface, #ffffff);
       border: 1px solid var(--scion-border, #e2e8f0);
@@ -884,6 +854,12 @@ export class ScionPageAgentDetail extends LitElement {
   private async loadData(): Promise<void> {
     this.loading = true;
     this.error = null;
+    // Opened before the agent request, so a live change that lands while
+    // any request below is in flight is re-applied over the agent response
+    // when it is seeded.
+    let epoch = new AgentSeedEpoch();
+    let epochGeneration = stateManager.scopeGeneration;
+    const agentId = this.agentId;
 
     try {
       // Use SSR-prefetched agent data when available to avoid a redundant fetch.
@@ -911,6 +887,14 @@ export class ScionPageAgentDetail extends LitElement {
           projectId: this.agent.projectId,
           agentId: this.agentId,
         });
+      }
+
+      // A scope change (this setScope, or another) discards the epoch's
+      // store epoch: reopen it for the requests below.
+      if (stateManager.scopeGeneration !== epochGeneration) {
+        epoch.close();
+        epoch = new AgentSeedEpoch();
+        epochGeneration = stateManager.scopeGeneration;
       }
 
       // Fetch project and notifications in parallel — they are independent.
@@ -994,7 +978,7 @@ export class ScionPageAgentDetail extends LitElement {
       // Load metrics summary (non-blocking).
       this.loadMetricsSummary();
 
-      stateManager.seedAgents([this.agent]);
+      this.seedAgent(this.agent, agentId, epoch, epochGeneration);
       if (this.project) {
         stateManager.seedProjects([this.project]);
         dispatchPageTitle(this, this.agent.name, this.project.name || this.agent.projectId);
@@ -1005,6 +989,7 @@ export class ScionPageAgentDetail extends LitElement {
       console.error('Failed to load agent:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load agent';
     } finally {
+      epoch.close();
       this.loading = false;
     }
   }
@@ -1113,7 +1098,7 @@ export class ScionPageAgentDetail extends LitElement {
             scope: 'agent',
             agentId: this.agentId,
             projectId: this.agent.projectId,
-            triggerActivities: ['COMPLETED', 'WAITING_FOR_INPUT', 'LIMITS_EXCEEDED'],
+            triggerActivities: [...DEFAULT_TRIGGERS],
           }),
         });
         if (res.ok) {
@@ -1136,11 +1121,42 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   private async fetchAndMergeAgent(): Promise<void> {
-    const agentResponse = await apiFetch(`/api/v1/agents/${this.agentId}`);
-    if (!agentResponse.ok) return;
+    const epoch = new AgentSeedEpoch();
+    const epochGeneration = stateManager.scopeGeneration;
+    const agentId = this.agentId;
+    try {
+      const agentResponse = await apiFetch(`/api/v1/agents/${agentId}`);
+      if (!agentResponse.ok) return;
 
-    this.agent = (await agentResponse.json()) as Agent;
-    stateManager.seedAgents([this.agent]);
+      const agent = (await agentResponse.json()) as Agent;
+      this.seedAgent(agent, agentId, epoch, epochGeneration);
+    } finally {
+      epoch.close();
+    }
+  }
+
+  /**
+   * Seed the store with an agent response read under `epoch`, so live
+   * changes that landed while the request was in flight are re-applied
+   * over it, and show the result. A scope change since the epoch opened
+   * means the user left this view: the response may belong to a scope the
+   * store no longer holds, so it is not seeded, and it is shown only if
+   * the page still shows the agent it was requested for (`agentId`).
+   */
+  private seedAgent(
+    agent: Agent,
+    agentId: string,
+    epoch: AgentSeedEpoch,
+    epochGeneration: number
+  ): void {
+    if (stateManager.scopeGeneration !== epochGeneration) {
+      if (this.agentId === agentId) this.agent = agent;
+      return;
+    }
+    const seeded = epoch.seed([agent], { partial: false });
+    // Empty when the agent was deleted while the request was in flight;
+    // the deleted state then follows from the store's tombstone.
+    this.agent = seeded.agents[0] ?? agent;
   }
 
   private handleTabShow(e: CustomEvent<{ name: string }>): void {
@@ -1376,47 +1392,37 @@ export class ScionPageAgentDetail extends LitElement {
     const deleting = this.deletionLease.isDeleting(agent);
     const lifecycleOk = canLifecycle(agent._capabilities) && !deleting;
     return html`
-      <div class="header">
-        <div class="header-info">
-          <div class="header-title">
-            <sl-icon name="cpu"></sl-icon>
-            <div class="header-title-text">
-              <h1>${agent.name}</h1>
-              ${agentStatusBadge(agent)}
-              <scion-deletion-badge
-                .deletion=${this.deletingView(agent)}
-                live
-              ></scion-deletion-badge>
-              <scion-message-mode-badge
-                mode=${agent.messageMode || 'project'}
-                size="medium"
-              ></scion-message-mode-badge>
-            </div>
-          </div>
-          <div class="header-meta">
-            <span class="template-badge">
-              <sl-icon name="code-square"></sl-icon>
-              ${agent.template}
-            </span>
-            ${this.project
-              ? html`
-                  <a href="/projects/${this.project.id}" class="project-link">
-                    <sl-icon name="folder"></sl-icon>
-                    ${this.project.name}
-                  </a>
-                `
-              : ''}
-            ${agent.runtimeBrokerId
-              ? html`
-                  <a href="/brokers/${agent.runtimeBrokerId}" class="broker-link">
-                    <sl-icon name="hdd-rack"></sl-icon>
-                    ${agent.runtimeBrokerName || agent.runtimeBrokerId}
-                  </a>
-                `
-              : ''}
-          </div>
+      <scion-detail-header heading=${agent.name}>
+        <sl-icon slot="icon" name="cpu"></sl-icon>
+        ${agentStatusBadge(agent)}
+        <scion-deletion-badge .deletion=${this.deletingView(agent)} live></scion-deletion-badge>
+        <scion-message-mode-badge
+          mode=${agent.messageMode || 'project'}
+          size="medium"
+        ></scion-message-mode-badge>
+        <div slot="meta" class="header-meta">
+          <span class="template-badge">
+            <sl-icon name="code-square"></sl-icon>
+            ${agent.template}
+          </span>
+          ${this.project
+            ? html`
+                <a href="/projects/${this.project.id}" class="project-link">
+                  <sl-icon name="folder"></sl-icon>
+                  ${this.project.name}
+                </a>
+              `
+            : ''}
+          ${agent.runtimeBrokerId
+            ? html`
+                <a href="/brokers/${agent.runtimeBrokerId}" class="broker-link">
+                  <sl-icon name="hdd-rack"></sl-icon>
+                  ${agent.runtimeBrokerName || agent.runtimeBrokerId}
+                </a>
+              `
+            : ''}
         </div>
-        <div class="header-actions">
+        <div slot="actions" class="header-actions">
           <sl-tooltip content="See this agent in graph">
             <a
               href="/agents/graph?project=${encodeURIComponent(
@@ -1572,7 +1578,7 @@ export class ScionPageAgentDetail extends LitElement {
               `
             : nothing}
         </div>
-      </div>
+      </scion-detail-header>
     `;
   }
 
@@ -1958,7 +1964,7 @@ export class ScionPageAgentDetail extends LitElement {
     const inline = cfg?.inlineConfig;
 
     return html`
-      ${this.renderIdentityCard(agent)}
+      ${this.renderIdentityCard(agent)} ${this.renderReincarnateCard(agent)}
       <scion-effective-role-provenance
         principalType="agent"
         principalId=${this.agentId}
@@ -1974,6 +1980,81 @@ export class ScionPageAgentDetail extends LitElement {
       ${this.renderGCPIdentityCard(cfg?.gcpIdentity)} ${this.renderConfigLimitsCard(inline)}
       ${this.renderTelemetryCard(inline?.telemetry)} ${this.renderInitialTaskCard(cfg)}
     `;
+  }
+
+  /**
+   * Reincarnate action (ptone/scion#3707). The hub authorizes a user's
+   * reincarnate with the same `agent.lifecycle` permission as start/stop
+   * (authorizeAgentReincarnate), and the agent payload carries no separate
+   * `reincarnate` capability, so the card is gated on `lifecycle` exactly
+   * like the header's lifecycle buttons, and hidden while a delete runs.
+   */
+  private renderReincarnateCard(agent: Agent): TemplateResult | typeof nothing {
+    if (!canLifecycle(agent._capabilities) || this.deletionLease.isDeleting(agent)) {
+      return nothing;
+    }
+    return html`
+      <div class="card reincarnate-card">
+        <h3 class="card-title">Reincarnate</h3>
+        <p class="reincarnate-help">
+          Stop this agent and provision it again from its current settings and template. Use this to
+          apply configuration changes.
+        </p>
+        ${this.reincarnateError
+          ? html`<sl-alert variant="danger" open class="reincarnate-error">
+              <sl-icon slot="icon" name="exclamation-octagon"></sl-icon>
+              ${this.reincarnateError}
+            </sl-alert>`
+          : nothing}
+        <sl-button
+          size="small"
+          variant="default"
+          ?loading=${this.reincarnating}
+          ?disabled=${this.reincarnating}
+          @click=${() => void this.handleReincarnate()}
+        >
+          <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
+          Reincarnate
+        </sl-button>
+      </div>
+    `;
+  }
+
+  /**
+   * Confirm, then POST the reincarnate action on the agent-scoped route the
+   * page uses for every other lifecycle action. The hub decodes a JSON body
+   * (an empty body is a 400), so an empty object is sent. A second click
+   * while the confirm is open or the request runs is ignored.
+   */
+  private async handleReincarnate(): Promise<void> {
+    if (!this.agent || this.reincarnateBusy) return;
+    this.reincarnateBusy = true;
+    try {
+      const confirmed = await showConfirm(REINCARNATE_CONFIRM_MESSAGE, {
+        title: 'Reincarnate agent',
+        confirmText: 'Reincarnate',
+      });
+      if (!confirmed) return;
+
+      this.reincarnating = true;
+      this.reincarnateError = null;
+      const response = await apiFetch(`/api/v1/agents/${this.agentId}/reincarnate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      if (!response.ok) {
+        throw new Error(await lifecycleActionErrorMessage(response, 'Failed to reincarnate agent'));
+      }
+      this.backgroundRefresh();
+    } catch (err) {
+      console.error('Failed to reincarnate agent:', err);
+      this.reincarnateError = err instanceof Error ? err.message : 'Failed to reincarnate agent';
+      this.backgroundRefresh();
+    } finally {
+      this.reincarnating = false;
+      this.reincarnateBusy = false;
+    }
   }
 
   private renderMessagingCard() {

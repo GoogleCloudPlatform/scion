@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -65,6 +66,13 @@ type outboundSpokeFixture struct {
 // ChannelID, so the dm: backfill (Channel "web") targets it.
 func newOutboundSpokeFixture(t *testing.T, inproc eventbus.EventBus) *outboundSpokeFixture {
 	t.Helper()
+	return newOutboundSpokeFixtureWithPlugin(t, inproc, errSpokeBus{err: errPluginSpokeDown})
+}
+
+// newOutboundSpokeFixtureWithPlugin is newOutboundSpokeFixture with the
+// given bus as the "chatplugin" spoke.
+func newOutboundSpokeFixtureWithPlugin(t *testing.T, inproc, plugin eventbus.EventBus) *outboundSpokeFixture {
+	t.Helper()
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -87,7 +95,7 @@ func newOutboundSpokeFixture(t *testing.T, inproc eventbus.EventBus) *outboundSp
 		spokes = append(spokes, eventbus.NamedEventBus{Name: eventbus.InProcessBusName, Bus: inproc})
 	}
 	spokes = append(spokes, eventbus.NamedEventBus{
-		Name: "chatplugin", ChannelID: "web", Bus: errSpokeBus{err: errPluginSpokeDown},
+		Name: "chatplugin", ChannelID: "web", Bus: plugin,
 	})
 	fanout := eventbus.NewFanOutEventBus(spokes, slog.Default())
 	events := NewChannelEventPublisher()
@@ -106,8 +114,14 @@ func (f *outboundSpokeFixture) send(t *testing.T, msg string) *httptest.Response
 
 func (f *outboundSpokeFixture) sendRequest(t *testing.T, outReq OutboundMessageRequest) *httptest.ResponseRecorder {
 	t.Helper()
+	return f.sendRequestWithContext(t, context.Background(), outReq)
+}
+
+// sendRequestWithContext is sendRequest with ctx as the request context.
+func (f *outboundSpokeFixture) sendRequestWithContext(t *testing.T, ctx context.Context, outReq OutboundMessageRequest) *httptest.ResponseRecorder {
+	t.Helper()
 	body, _ := json.Marshal(outReq)
-	req := httptest.NewRequest(http.MethodPost,
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost,
 		"/api/v1/agents/"+f.agent.ID+"/outbound-message", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
@@ -129,6 +143,20 @@ func (f *outboundSpokeFixture) storedRows(t *testing.T) int {
 	return len(res.Items)
 }
 
+// requireStoredRowsStay asserts the stored row count stays at want for
+// 200ms. It polls on the test goroutine rather than using require.Never:
+// Never returns at its deadline without waiting for an in-flight condition
+// goroutine, which can then call storedRows (and require.NoError) after
+// cleanup has closed the store, failing the test from a goroutine after it
+// completed and panicking the whole test binary.
+func (f *outboundSpokeFixture) requireStoredRowsStay(t *testing.T, want int, msg string) {
+	t.Helper()
+	for deadline := time.Now().Add(200 * time.Millisecond); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		require.Equal(t, want, f.storedRows(t), msg)
+	}
+	require.Equal(t, want, f.storedRows(t), msg)
+}
+
 // requireSentOnce asserts the normal success response (status "sent" and a
 // message_id) and that exactly one row is stored, with no duplicate write.
 func (f *outboundSpokeFixture) requireSentOnce(t *testing.T, rr *httptest.ResponseRecorder) {
@@ -144,9 +172,7 @@ func (f *outboundSpokeFixture) requireSentOnce(t *testing.T, rr *httptest.Respon
 
 	require.Eventually(t, func() bool { return f.storedRows(t) >= 1 },
 		3*time.Second, 20*time.Millisecond, "expected a stored row")
-	require.Never(t, func() bool { return f.storedRows(t) > 1 },
-		200*time.Millisecond, 20*time.Millisecond, "expected exactly one stored row")
-	require.Equal(t, 1, f.storedRows(t))
+	f.requireStoredRowsStay(t, 1, "expected exactly one stored row")
 }
 
 // TestHandleAgentOutboundMessage_PluginSpokeFailureIsDelivered covers
@@ -212,7 +238,106 @@ func TestHandleAgentOutboundMessage_PluginSpokeFailureWithoutSubscriberFails(t *
 	var resp ErrorResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	require.Equal(t, ErrCodeDeliveryFailed, resp.Error.Code)
+	require.NotContains(t, rr.Body.String(), errPluginSpokeDown.Error(),
+		"the spoke's error text stays in the log, not the response")
 	require.Equal(t, 0, f.storedRows(t))
+}
+
+// countingSpokeBus is a plugin spoke that accepts every publish and counts
+// them.
+type countingSpokeBus struct{ n atomic.Int32 }
+
+func (b *countingSpokeBus) Publish(context.Context, string, *messages.StructuredMessage) error {
+	b.n.Add(1)
+	return nil
+}
+
+func (*countingSpokeBus) Subscribe(string, eventbus.EventHandler) (eventbus.Subscription, error) {
+	return nullSub{}, nil
+}
+
+func (*countingSpokeBus) Close() error { return nil }
+
+// With no persisting subscriber (no inprocess spoke) and a plugin spoke
+// that accepts the message, the handler stores the row itself, once,
+// emits the user message event, and does not publish to the plugin spoke
+// a second time.
+func TestHandleAgentOutboundMessage_NoPersistingSubscriberStoresRow(t *testing.T) {
+	plugin := &countingSpokeBus{}
+	f := newOutboundSpokeFixtureWithPlugin(t, nil, plugin)
+	ep := NewChannelEventPublisher()
+	t.Cleanup(ep.Close)
+	f.srv.SetEventPublisher(ep)
+	userEvents, unsub := ep.Subscribe("user." + f.user.ID + ".message")
+	t.Cleanup(unsub)
+	f.proxy.Start()
+	t.Cleanup(f.proxy.Stop)
+
+	rr := f.send(t, "hello with only a plugin spoke")
+	f.requireSentOnce(t, rr)
+	require.Equal(t, int32(1), plugin.n.Load(), "the plugin spoke gets the message once")
+
+	var resp struct {
+		MessageID string `json:"message_id"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	select {
+	case evt := <-userEvents:
+		var got UserMessageEvent
+		require.NoError(t, json.Unmarshal(evt.Data, &got))
+		require.Equal(t, resp.MessageID, got.ID, "the event names the stored message")
+		require.Equal(t, "hello with only a plugin spoke", got.Msg)
+	case <-time.After(3 * time.Second):
+		t.Fatal("expected a user message event for the stored row")
+	}
+}
+
+// cancellingSpokeBus is a plugin spoke that accepts every publish and then
+// cancels the request context, as when the client goes away once the
+// spokes already have the message.
+type cancellingSpokeBus struct{ cancel context.CancelFunc }
+
+func (b *cancellingSpokeBus) Publish(context.Context, string, *messages.StructuredMessage) error {
+	b.cancel()
+	return nil
+}
+
+func (*cancellingSpokeBus) Subscribe(string, eventbus.EventHandler) (eventbus.Subscription, error) {
+	return nullSub{}, nil
+}
+
+func (*cancellingSpokeBus) Close() error { return nil }
+
+// With no persisting subscriber, a request cancelled after the plugin
+// spoke accepted the message still stores the row and emits the user
+// message event.
+func TestHandleAgentOutboundMessage_NoPersistingSubscriberStoresRowAfterCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	f := newOutboundSpokeFixtureWithPlugin(t, nil, &cancellingSpokeBus{cancel: cancel})
+	ep := NewChannelEventPublisher()
+	t.Cleanup(ep.Close)
+	f.srv.SetEventPublisher(ep)
+	userEvents, unsub := ep.Subscribe("user." + f.user.ID + ".message")
+	t.Cleanup(unsub)
+	f.proxy.Start()
+	t.Cleanup(f.proxy.Stop)
+
+	rr := f.sendRequestWithContext(t, ctx, OutboundMessageRequest{
+		Recipient: "user:" + f.user.Email,
+		Msg:       "hello from a cancelled request",
+	})
+	require.Error(t, ctx.Err(), "the request context is cancelled during publish")
+	f.requireSentOnce(t, rr)
+
+	select {
+	case evt := <-userEvents:
+		var got UserMessageEvent
+		require.NoError(t, json.Unmarshal(evt.Data, &got))
+		require.Equal(t, "hello from a cancelled request", got.Msg)
+	case <-time.After(3 * time.Second):
+		t.Fatal("expected a user message event for the stored row")
+	}
 }
 
 // TestHandleAgentOutboundMessage_InProcessFailureStillFails pins that a
@@ -261,8 +386,7 @@ func (f *outboundSpokeFixture) requireDeliveryFailedNoRow(t *testing.T, rr *http
 	var resp ErrorResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	require.Equal(t, ErrCodeDeliveryFailed, resp.Error.Code)
-	require.Never(t, func() bool { return f.storedRows(t) > 0 },
-		200*time.Millisecond, 20*time.Millisecond, "expected no stored row")
+	f.requireStoredRowsStay(t, 0, "expected no stored row")
 }
 
 // TestHandleAgentOutboundMessage_PluginSpokeFailureAfterStopFails pins that
@@ -292,4 +416,58 @@ func TestHandleAgentOutboundMessage_PluginSpokeFailureSubscribeErrorFails(t *tes
 	t.Cleanup(f.proxy.Stop)
 
 	f.requireDeliveryFailedNoRow(t, f.send(t, "hello with a failed subscribe"))
+}
+
+// Channel validation matches the key FanOutEventBus routes on: a spoke
+// registered as Name "chat-app" with ChannelID "gchat" accepts "gchat"
+// and rejects "chat-app", which Publish could not deliver to.
+func TestValidateChannelRegistered_UsesRoutingKey(t *testing.T) {
+	srv, s := testServer(t)
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: eventbus.InProcessBusName, Bus: eventbus.NewInProcessEventBus(slog.Default())},
+		{Name: "chat-app", ChannelID: "gchat", Bus: nullSpokeEventBus{}},
+	}, slog.Default())
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	srv.SetMessageBrokerProxy(NewMessageBrokerProxy(fanout, s, events,
+		func() AgentDispatcher { return noopDispatcher{} }, slog.Default()))
+
+	rr := httptest.NewRecorder()
+	require.True(t, srv.validateChannelRegistered(rr, "gchat"), "routing key must pass: %s", rr.Body.String())
+
+	rr = httptest.NewRecorder()
+	require.False(t, srv.validateChannelRegistered(rr, "chat-app"))
+	require.Equal(t, http.StatusBadRequest, rr.Code, "body: %s", rr.Body.String())
+	require.Contains(t, rr.Body.String(), "available channels: gchat")
+}
+
+// A spoke whose ChannelID is the inprocess bus name passes channel
+// validation, but FanOutEventBus.Publish refuses that channel with
+// ErrReservedChannel. The handler reports it as a 400 validation error
+// and stores no row.
+func TestHandleAgentOutboundMessage_ReservedChannelIsBadRequest(t *testing.T) {
+	f := newOutboundSpokeFixture(t, eventbus.NewInProcessEventBus(slog.Default()))
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: eventbus.InProcessBusName, Bus: eventbus.NewInProcessEventBus(slog.Default())},
+		{Name: "chatplugin", ChannelID: eventbus.InProcessBusName, Bus: nullSpokeEventBus{}},
+	}, slog.Default())
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	f.proxy = NewMessageBrokerProxy(fanout, f.store, events,
+		func() AgentDispatcher { return noopDispatcher{} }, slog.Default())
+	f.srv.SetMessageBrokerProxy(f.proxy)
+	f.proxy.Start()
+	t.Cleanup(f.proxy.Stop)
+
+	rr := f.sendRequest(t, OutboundMessageRequest{
+		Recipient: "user:" + f.user.Email,
+		Msg:       "hello on a reserved channel",
+		Channel:   eventbus.InProcessBusName,
+	})
+	require.Equal(t, http.StatusBadRequest, rr.Code, "handler response: %s", rr.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Equal(t, ErrCodeValidationError, resp.Error.Code)
+	require.Contains(t, resp.Error.Message, "reserved for internal use")
+	f.requireStoredRowsStay(t, 0, "a refused send stores no row")
 }

@@ -241,9 +241,12 @@ func TestHeartbeatExitCode_StructuredCleanExit(t *testing.T) {
 // a generic crash, in both the non-zero-exit-code path (promotes stopped to
 // error) and the zero-exit-code path (stays stopped).
 func TestHeartbeatExitCode_PreemptedEvictedMessage(t *testing.T) {
-	t.Run("preempted with a non-zero exit code promotes to error", func(t *testing.T) {
+	t.Run("preempted with a non-zero exit code keeps the broker's stopped phase", func(t *testing.T) {
 		srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
 
+		// The broker reports stopped for a disruption whose workspace
+		// survives the pod (k8sDisruptionPhase); the SIGTERM/SIGKILL exit
+		// code does not make it a crash (ptone/scion#2669).
 		ec := 137
 		code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{
 			Slug:       agentSlug,
@@ -254,7 +257,7 @@ func TestHeartbeatExitCode_PreemptedEvictedMessage(t *testing.T) {
 		assert.Equal(t, http.StatusOK, code)
 
 		got := getAgentState(t, s, agentSlug, projectID)
-		assert.Equal(t, "error", got.Phase, "non-zero ExitCode should still promote stopped to error")
+		assert.Equal(t, "stopped", got.Phase, "a disruption reported as stopped is not promoted to error")
 		assert.Equal(t, "preempted", got.ExitReason)
 		assert.Equal(t, "Agent pod was preempted, exit code 137", got.Message)
 	})
@@ -465,7 +468,7 @@ func TestHeartbeatExitCode_GracefulPreemptionAfterPlainStop(t *testing.T) {
 		assert.Equal(t, 0, *got.ExitCode)
 	})
 
-	t.Run("a heartbeat phase differing from the stored phase does not move it", func(t *testing.T) {
+	t.Run("a non-recoverable disruption moves a plain stop to error", func(t *testing.T) {
 		srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
 
 		agent := getAgentState(t, s, agentSlug, projectID)
@@ -473,6 +476,8 @@ func TestHeartbeatExitCode_GracefulPreemptionAfterPlainStop(t *testing.T) {
 		agent.Message = "Agent stopped"
 		require.NoError(t, s.UpdateAgent(context.Background(), agent))
 
+		// The broker reports error for a disruption whose workspace did not
+		// survive the pod (ptone/scion#2669).
 		ec := 137
 		code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{
 			Slug:       agentSlug,
@@ -483,10 +488,30 @@ func TestHeartbeatExitCode_GracefulPreemptionAfterPlainStop(t *testing.T) {
 		assert.Equal(t, http.StatusOK, code)
 
 		got := getAgentState(t, s, agentSlug, projectID)
-		assert.Equal(t, "stopped", got.Phase, "the stored phase must win even though the heartbeat reports a different one")
+		assert.Equal(t, "error", got.Phase, "the agent's own clean stop must not hide a non-recoverable disruption")
 		assert.Equal(t, "preempted", got.ExitReason)
+		assert.Equal(t, "Agent pod was preempted, exit code 137", got.Message)
 		require.NotNil(t, got.ExitCode)
 		assert.Equal(t, 137, *got.ExitCode)
+	})
+
+	t.Run("a non-disruption error does not move a plain stop", func(t *testing.T) {
+		srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
+
+		agent := getAgentState(t, s, agentSlug, projectID)
+		agent.Phase = "stopped"
+		agent.Message = "Agent stopped"
+		require.NoError(t, s.UpdateAgent(context.Background(), agent))
+
+		ec := 1
+		code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{
+			Slug:       agentSlug,
+			Phase:      "error",
+			ExitCode:   &ec,
+			ExitReason: "crashed",
+		})
+		assert.Equal(t, http.StatusOK, code)
+		assert.Equal(t, "stopped", getAgentState(t, s, agentSlug, projectID).Phase)
 	})
 
 	t.Run("a non-disruption reason is not backfilled", func(t *testing.T) {

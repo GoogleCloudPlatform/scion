@@ -155,9 +155,14 @@ func rsSeedSecret(t *testing.T, rt *KubernetesRuntime, name, uid string, labels 
 
 func rsSeedSPC(t *testing.T, rt *KubernetesRuntime, uid string, labels map[string]string) {
 	t.Helper()
+	rsSeedSPCNamed(t, rt, rsSPC, uid, labels)
+}
+
+func rsSeedSPCNamed(t *testing.T, rt *KubernetesRuntime, name, uid string, labels map[string]string) {
+	t.Helper()
 	spc := &unstructured.Unstructured{}
 	spc.SetGroupVersionKind(schema.GroupVersionKind{Group: "secrets-store.csi.x-k8s.io", Version: "v1", Kind: "SecretProviderClass"})
-	spc.SetName(rsSPC)
+	spc.SetName(name)
 	spc.SetNamespace(rt.DefaultNamespace)
 	spc.SetUID(types.UID(uid))
 	spc.SetLabels(labels)
@@ -484,15 +489,19 @@ func TestK8sRun_NoRunID_PreCleansByName(t *testing.T) {
 type rsCreateSite struct {
 	name   string
 	create func(rt *KubernetesRuntime, labels map[string]string) error
-	seed   func(t *testing.T, rt *KubernetesRuntime, uid string, labels map[string]string)
-	exists func(t *testing.T, rt *KubernetesRuntime) (bool, map[string]string)
+	// seed and exists act on the name a create for run createRun uses
+	// (k8sAgentObjectNames): an existing object under that name is a
+	// retry of the same run, a legacy object, or a name collision.
+	seed   func(t *testing.T, rt *KubernetesRuntime, createRun, uid string, labels map[string]string)
+	exists func(t *testing.T, rt *KubernetesRuntime, createRun string) (bool, map[string]string)
 }
 
 func rsCreateSites() []rsCreateSite {
 	secrets := []api.ResolvedSecret{{Name: "API_KEY", Type: "environment", Target: "API_KEY", Value: "v", Source: "user", Ref: "projects/p/secrets/k"}}
 	ctx := context.Background()
-	secretState := func(name string) func(t *testing.T, rt *KubernetesRuntime) (bool, map[string]string) {
-		return func(t *testing.T, rt *KubernetesRuntime) (bool, map[string]string) {
+	secretState := func(nameOf func(k8sObjectNames) string) func(t *testing.T, rt *KubernetesRuntime, createRun string) (bool, map[string]string) {
+		return func(t *testing.T, rt *KubernetesRuntime, createRun string) (bool, map[string]string) {
+			name := nameOf(k8sAgentObjectNames(rsAgent, createRun))
 			s, err := rt.Client.Clientset.CoreV1().Secrets(rt.DefaultNamespace).Get(ctx, name, metav1.GetOptions{})
 			if err != nil {
 				return false, nil
@@ -507,20 +516,20 @@ func rsCreateSites() []rsCreateSite {
 				_, err := rt.createAgentSecret(ctx, rt.DefaultNamespace, rsAgent, secrets, labels)
 				return err
 			},
-			seed: func(t *testing.T, rt *KubernetesRuntime, uid string, labels map[string]string) {
-				rsSeedSecret(t, rt, rsAgentSecret, uid, labels)
+			seed: func(t *testing.T, rt *KubernetesRuntime, createRun, uid string, labels map[string]string) {
+				rsSeedSecret(t, rt, k8sAgentObjectNames(rsAgent, createRun).Secret, uid, labels)
 			},
-			exists: secretState(rsAgentSecret),
+			exists: secretState(func(n k8sObjectNames) string { return n.Secret }),
 		},
 		{
 			name: "auth secret",
 			create: func(rt *KubernetesRuntime, labels map[string]string) error {
 				return rt.createAuthFileSecret(ctx, rt.DefaultNamespace, rsAgent, nil, labels)
 			},
-			seed: func(t *testing.T, rt *KubernetesRuntime, uid string, labels map[string]string) {
-				rsSeedSecret(t, rt, rsAuthSecret, uid, labels)
+			seed: func(t *testing.T, rt *KubernetesRuntime, createRun, uid string, labels map[string]string) {
+				rsSeedSecret(t, rt, k8sAgentObjectNames(rsAgent, createRun).Auth, uid, labels)
 			},
-			exists: secretState(rsAuthSecret),
+			exists: secretState(func(n k8sObjectNames) string { return n.Auth }),
 		},
 		{
 			name: "secret provider class",
@@ -528,11 +537,12 @@ func rsCreateSites() []rsCreateSite {
 				_, err := rt.createSecretProviderClass(ctx, rt.DefaultNamespace, rsAgent, secrets, labels)
 				return err
 			},
-			seed: func(t *testing.T, rt *KubernetesRuntime, uid string, labels map[string]string) {
-				rsSeedSPC(t, rt, uid, labels)
+			seed: func(t *testing.T, rt *KubernetesRuntime, createRun, uid string, labels map[string]string) {
+				rsSeedSPCNamed(t, rt, k8sAgentObjectNames(rsAgent, createRun).SPC, uid, labels)
 			},
-			exists: func(t *testing.T, rt *KubernetesRuntime) (bool, map[string]string) {
-				o, err := rt.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace(rt.DefaultNamespace).Get(ctx, rsSPC, metav1.GetOptions{})
+			exists: func(t *testing.T, rt *KubernetesRuntime, createRun string) (bool, map[string]string) {
+				name := k8sAgentObjectNames(rsAgent, createRun).SPC
+				o, err := rt.Client.Dynamic().Resource(k8s.SecretProviderClassGVR).Namespace(rt.DefaultNamespace).Get(ctx, name, metav1.GetOptions{})
 				if err != nil {
 					return false, nil
 				}
@@ -542,19 +552,20 @@ func rsCreateSites() []rsCreateSite {
 	}
 }
 
-// An existing object of another run (created by a concurrent start after
-// this start's pre-clean) is never deleted: the create fails with
-// ErrRunConflict.
+// An existing object of another run under the name this start's create
+// uses (with per-run names, a run-token collision, ptone/scion#3101; for a
+// fixed name, a concurrent start after this start's pre-clean) is never
+// deleted: the create fails with ErrRunConflict.
 func TestK8sCreate_AlreadyExistsOtherRun_Conflicts(t *testing.T) {
 	for _, site := range rsCreateSites() {
 		t.Run(site.name, func(t *testing.T) {
 			rt, _, _, enf := newRunScopeRuntime(t)
-			site.seed(t, rt, "uid-b", rsLabels(rsRunB, ""))
+			site.seed(t, rt, rsRunA, "uid-b", rsLabels(rsRunB, ""))
 			err := site.create(rt, rsLabels(rsRunA, ""))
 			if !errors.Is(err, ErrRunConflict) {
 				t.Fatalf("create error = %v, want ErrRunConflict", err)
 			}
-			ok, labels := site.exists(t, rt)
+			ok, labels := site.exists(t, rt, rsRunA)
 			if !ok || labels[api.LabelRunID] != rsRunB {
 				t.Errorf("run B's object was replaced (present=%v labels=%v)", ok, labels)
 			}
@@ -572,11 +583,11 @@ func TestK8sCreate_AlreadyExistsSameRunOrLegacy_Replaced(t *testing.T) {
 		for _, existingRun := range []string{rsRunA, ""} {
 			t.Run(site.name+"/existing run "+existingRun, func(t *testing.T) {
 				rt, _, _, enf := newRunScopeRuntime(t)
-				site.seed(t, rt, "uid-old", rsLabels(existingRun, "old-start"))
+				site.seed(t, rt, rsRunA, "uid-old", rsLabels(existingRun, "old-start"))
 				if err := site.create(rt, rsLabels(rsRunA, "new-start")); err != nil {
 					t.Fatalf("create: %v", err)
 				}
-				ok, labels := site.exists(t, rt)
+				ok, labels := site.exists(t, rt, rsRunA)
 				if !ok || labels[labelStartID] != "new-start" {
 					t.Errorf("object not replaced (present=%v labels=%v)", ok, labels)
 				}
@@ -591,11 +602,11 @@ func TestK8sCreate_AlreadyExistsNoRunID_ReplacesByName(t *testing.T) {
 	for _, site := range rsCreateSites() {
 		t.Run(site.name, func(t *testing.T) {
 			rt, _, _, _ := newRunScopeRuntime(t)
-			site.seed(t, rt, "uid-b", rsLabels(rsRunB, ""))
+			site.seed(t, rt, "", "uid-b", rsLabels(rsRunB, ""))
 			if err := site.create(rt, rsLabels("", "new-start")); err != nil {
 				t.Fatalf("create: %v", err)
 			}
-			ok, labels := site.exists(t, rt)
+			ok, labels := site.exists(t, rt, "")
 			if !ok || labels[labelStartID] != "new-start" {
 				t.Errorf("object not replaced (present=%v labels=%v)", ok, labels)
 			}
@@ -655,12 +666,7 @@ func TestK8sRun_PreClean_FinishedOtherRun_StartsNewRun(t *testing.T) {
 	if got := submitted.Labels[api.LabelRunID]; got != rsRunA {
 		t.Errorf("new pod run label = %q, want %q", got, rsRunA)
 	}
-	for _, name := range []string{rsAgentSecret, rsAuthSecret} {
-		s, err := cs.CoreV1().Secrets(rt.DefaultNamespace).Get(context.Background(), name, metav1.GetOptions{})
-		if err != nil || s.Labels[api.LabelRunID] != rsRunA {
-			t.Errorf("Secret %s not recreated for run A (err=%v)", name, err)
-		}
-	}
+	rsExpectRunAObjects(t, rt, cs)
 	enf.assertAllConditional(t)
 }
 
@@ -726,7 +732,7 @@ func TestK8sCreate_AlreadyExistsReplaceConflict_RunConflict(t *testing.T) {
 	for _, site := range rsCreateSites() {
 		t.Run(site.name, func(t *testing.T) {
 			rt, cs, dyn, _ := newRunScopeRuntime(t)
-			site.seed(t, rt, "uid-old", rsLabels(rsRunA, "old-start"))
+			site.seed(t, rt, rsRunA, "uid-old", rsLabels(rsRunA, "old-start"))
 			cs.PrependReactor("delete", "secrets", conflict)
 			dyn.PrependReactor("delete", "secretproviderclasses", conflict)
 			err := site.create(rt, rsLabels(rsRunA, "new-start"))
@@ -753,13 +759,27 @@ func TestK8sRun_PreClean_StaleOtherProjectRunObjects_Cleaned(t *testing.T) {
 	if got := pod.Labels[api.LabelRunID]; got != rsRunA {
 		t.Errorf("new pod run label = %q, want %q", got, rsRunA)
 	}
-	for _, name := range []string{rsAgentSecret, rsAuthSecret} {
+	rsExpectRunAObjects(t, rt, cs)
+	enf.assertAllConditional(t)
+}
+
+// rsExpectRunAObjects checks that run A's start created its per-run Secrets
+// (ptone/scion#3101) and that the fixed-name Secrets of the earlier run are
+// gone.
+func rsExpectRunAObjects(t *testing.T, rt *KubernetesRuntime, cs *k8sfake.Clientset) {
+	t.Helper()
+	n := k8sAgentObjectNames(rsAgent, rsRunA)
+	for _, name := range []string{n.Secret, n.Auth} {
 		s, err := cs.CoreV1().Secrets(rt.DefaultNamespace).Get(context.Background(), name, metav1.GetOptions{})
 		if err != nil || s.Labels[api.LabelRunID] != rsRunA {
-			t.Errorf("Secret %s not recreated for run A (err=%v)", name, err)
+			t.Errorf("Secret %s not created for run A (err=%v)", name, err)
 		}
 	}
-	enf.assertAllConditional(t)
+	for _, name := range []string{rsAgentSecret, rsAuthSecret} {
+		if secretExists(t, rt, rt.DefaultNamespace, name) {
+			t.Errorf("fixed-name Secret %s of the earlier run was not removed", name)
+		}
+	}
 }
 
 // runUntilPodSubmittedLate drives Run until it submits its pod, failing

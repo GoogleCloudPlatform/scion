@@ -35,8 +35,36 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch, apiFetchAllPages, extractApiError } from '../../client/api.js';
 import { showToast } from '../../utils/toast.js';
 import { navigateTo } from '../../client/navigation.js';
+import { isTemplateSourceRefreshable } from '../../shared/source-url.js';
 
 export type ResourceKind = 'template' | 'harness-config';
+
+/** How many refreshes "Refresh All from Source" runs at the same time. */
+export const REFRESH_ALL_CONCURRENCY = 4;
+
+/**
+ * Runs fn over items with at most limit calls in flight, and returns the
+ * results in item order.
+ */
+export async function runWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i]);
+    }
+  };
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, () =>
+    worker()
+  );
+  await Promise.all(workers);
+  return results;
+}
 
 interface ResourceItem {
   id: string;
@@ -573,9 +601,19 @@ export class ScionResourceList extends LitElement {
     }
   }
 
+  /**
+   * Whether an item can be refreshed from its source. Templates need a GitHub
+   * source URL (built-in templates and templates without a source are not
+   * refreshable); harness configs need any stored source URL.
+   */
+  private isRefreshable(item: ResourceItem): boolean {
+    if (this.kind === 'template') return isTemplateSourceRefreshable(item.sourceUrl);
+    return !!item.sourceUrl;
+  }
+
   private async _handleRefreshAll(): Promise<void> {
     if (this._refreshAllRunning) return;
-    const refreshable = this.items.filter((item) => item.sourceUrl);
+    const refreshable = this.items.filter((item) => this.isRefreshable(item));
     if (refreshable.length === 0) return;
 
     // Clear any pending status-clear timer from a previous run
@@ -593,40 +631,39 @@ export class ScionResourceList extends LitElement {
     }
     this.requestUpdate();
 
-    // Fire all in parallel
-    const results = await Promise.allSettled(
-      refreshable.map(async (item) => {
-        this._itemRefreshStatus.set(item.id, 'running');
-        this.requestUpdate();
-        try {
-          const response = await apiFetch(`/api/v1/${this.apiResource}/${item.id}/reimport`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({}),
-          });
-          if (!response.ok) {
-            const errMsg = await extractApiError(response, `HTTP ${response.status}`);
-            throw new Error(errMsg);
-          }
-          this._itemRefreshStatus.set(item.id, 'success');
-          this.requestUpdate();
-          return { id: item.id, name: item.name, success: true };
-        } catch (err) {
-          this._itemRefreshStatus.set(item.id, 'error');
-          this.requestUpdate();
-          return { id: item.id, name: item.name, success: false, error: err };
+    // Run a few at a time: each refresh downloads its whole source on the hub.
+    const results = await runWithConcurrency(refreshable, REFRESH_ALL_CONCURRENCY, async (item) => {
+      this._itemRefreshStatus.set(item.id, 'running');
+      this.requestUpdate();
+      try {
+        const response = await apiFetch(`/api/v1/${this.apiResource}/${item.id}/reimport`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        if (!response.ok) {
+          const errMsg = await extractApiError(response, `HTTP ${response.status}`);
+          throw new Error(errMsg);
         }
-      })
-    );
+        this._itemRefreshStatus.set(item.id, 'success');
+        this.requestUpdate();
+        return { id: item.id, name: item.name, success: true };
+      } catch (err) {
+        this._itemRefreshStatus.set(item.id, 'error');
+        this.requestUpdate();
+        return { id: item.id, name: item.name, success: false, error: err };
+      }
+    });
 
     this._refreshAllRunning = false;
 
     // Show summary toast
-    const succeeded = results.filter((r) => r.status === 'fulfilled' && r.value.success).length;
+    const succeeded = results.filter((r) => r.success).length;
     const failed = refreshable.length - succeeded;
+    const noun = this.kindLabel;
     if (failed === 0) {
       showToast(
-        `Refreshed ${succeeded} harness config${succeeded !== 1 ? 's' : ''} successfully`,
+        `Refreshed ${succeeded} ${noun}${succeeded !== 1 ? 's' : ''} successfully`,
         'success'
       );
     } else {
@@ -656,8 +693,7 @@ export class ScionResourceList extends LitElement {
 
     const hasActions = this.canClone || this.canDelete || this.canRename;
 
-    const showRefreshAll =
-      this.kind === 'harness-config' && this.items.some((item) => item.sourceUrl);
+    const showRefreshAll = this.items.some((item) => this.isRefreshable(item));
 
     const hasListHeader =
       (this.cloneFromGlobal && this.canClone) || showRefreshAll || this.canCreate;

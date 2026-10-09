@@ -113,6 +113,9 @@ test('navigation away during URL restoration aborts later agent opens', async ({
   // First, navigate to / so the SPA router is initialized
   await page.goto('/');
   await expect(page).toHaveURL('/');
+  // The router listens for nav-click only once app init has rendered the
+  // first route; dispatching earlier drops the event.
+  await expect(page.locator('scion-page-home')).toBeVisible();
 
   // Record initial attaches
   const initialAttaches = socket.attaches;

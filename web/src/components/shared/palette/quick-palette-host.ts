@@ -67,6 +67,7 @@ import type { ScionQuickPalette } from './quick-palette.js';
 import { hasOpenModalDescendant } from '../open-modal.js';
 import { deepActiveElement } from '../deep-active-element.js';
 import { PaletteTypeahead } from './palette-typeahead.js';
+import { isMacTextFieldCtrlKey } from '../text-field-keys.js';
 
 /** What {@link QuickPaletteHostOptions.load} receives for one load. */
 export interface QuickPaletteLoadContext {
@@ -106,13 +107,16 @@ export interface QuickPaletteHostOptions {
 /**
  * Whether `e` is the quick palette's shortcut: K with exactly one of Ctrl
  * and Meta, no Alt or Shift, not a repeat, not mid-composition, and not
- * already handled.
+ * already handled. On macOS, Ctrl+K typed in an editable text field
+ * deletes to the end of the line and is left to the field; Cmd+K is the
+ * shortcut there.
  */
 export function isQuickPaletteShortcut(e: KeyboardEvent): boolean {
   if (e.defaultPrevented || e.repeat || e.isComposing) return false;
   if (e.altKey || e.shiftKey) return false;
   if (e.metaKey === e.ctrlKey) return false;
-  return e.key.toLowerCase() === 'k';
+  if (e.key.toLowerCase() !== 'k') return false;
+  return !isMacTextFieldCtrlKey(e);
 }
 
 /** Whether `e` was fired by `palette`'s own dialog, not by something inside it. */
@@ -241,8 +245,10 @@ export class QuickPaletteHost {
    * Closes the palette, if it is open, and moves focus nowhere when the
    * close settles: neither to the invoker nor through `onSelectionSettled`,
    * even for a close already animating or one that has settled but not yet
-   * run `onSelectionSettled`. For a surface going off screen,
-   * whose invoker goes with it. Closing also releases Shoelace's focus trap
+   * run `onSelectionSettled`, nor at once from the hidden field that holds
+   * the on-screen keyboard while an open is pending (see
+   * {@link PaletteTypeahead}). For a surface going off screen, whose
+   * invoker goes with it. Closing also releases Shoelace's focus trap
    * and scroll lock, which would otherwise stay active on whatever is shown
    * next.
    */
@@ -250,6 +256,7 @@ export class QuickPaletteHost {
     clearTimeout(this.settleTimer);
     this.invoker = null;
     this.closedBySelection = false;
+    this.typeahead.stop({ restoreFocus: false });
     this.close();
   }
 

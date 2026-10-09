@@ -16,10 +16,9 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -433,10 +432,8 @@ func runEnvGet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get environment variable: %w", err)
 	}
 
-	if envOutputJSON {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(envVar)
+	if wantJSON(envOutputJSON) {
+		return outputJSON(newEnvVarOutput(envVar))
 	}
 
 	if envVar.Sensitive {
@@ -464,10 +461,12 @@ func runEnvList(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to list environment variables: %w", err)
 	}
 
-	if envOutputJSON {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(resp)
+	if wantJSON(envOutputJSON) {
+		listScope := resp.Scope
+		if listScope == "" {
+			listScope = scope
+		}
+		return outputJSON(newEnvListOutput(listScope, resp.ScopeID, resp.EnvVars))
 	}
 
 	if len(resp.EnvVars) == 0 {
@@ -485,6 +484,69 @@ func runEnvList(cmd *cobra.Command, _ []string) error {
 	}
 
 	return nil
+}
+
+// envVarOutput is the JSON shape of one env var in "scion hub env get"
+// and "scion hub env list". It keeps the field names of the Hub record
+// and their omitempty rules so existing readers keep working. The one
+// change is Value: it is always present for a non-sensitive variable,
+// even when empty, and left out for a sensitive one, as in the text
+// output.
+type envVarOutput struct {
+	ID            string    `json:"id"`
+	Key           string    `json:"key"`
+	Value         *string   `json:"value,omitempty"`
+	Scope         string    `json:"scope"`
+	ScopeID       string    `json:"scopeId"`
+	Description   string    `json:"description,omitempty"`
+	Sensitive     bool      `json:"sensitive,omitempty"`
+	InjectionMode string    `json:"injectionMode,omitempty"`
+	Secret        bool      `json:"secret,omitempty"`
+	Created       time.Time `json:"created"`
+	Updated       time.Time `json:"updated"`
+	CreatedBy     string    `json:"createdBy,omitempty"`
+}
+
+// envListOutput is the JSON shape of "scion hub env list". It keeps the
+// top-level fields of the Hub list response. Scope is taken from the
+// response and falls back to the scope the command asked for.
+type envListOutput struct {
+	EnvVars []envVarOutput `json:"envVars"`
+	Scope   string         `json:"scope"`
+	ScopeID string         `json:"scopeId"`
+}
+
+func newEnvVarOutput(v *hubclient.EnvVar) envVarOutput {
+	out := envVarOutput{
+		ID:            v.ID,
+		Key:           v.Key,
+		Scope:         v.Scope,
+		ScopeID:       v.ScopeID,
+		Description:   v.Description,
+		Sensitive:     v.Sensitive,
+		InjectionMode: v.InjectionMode,
+		Secret:        v.Secret,
+		Created:       v.Created,
+		Updated:       v.Updated,
+		CreatedBy:     v.CreatedBy,
+	}
+	if !v.Sensitive {
+		value := v.Value
+		out.Value = &value
+	}
+	return out
+}
+
+func newEnvListOutput(scope, scopeID string, vars []hubclient.EnvVar) envListOutput {
+	out := envListOutput{
+		EnvVars: make([]envVarOutput, 0, len(vars)),
+		Scope:   scope,
+		ScopeID: scopeID,
+	}
+	for i := range vars {
+		out.EnvVars = append(out.EnvVars, newEnvVarOutput(&vars[i]))
+	}
+	return out
 }
 
 // formatEnvAnnotations builds an annotation string for injection mode and secret status.

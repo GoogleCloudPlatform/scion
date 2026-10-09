@@ -89,7 +89,7 @@ func TestCreateAgent_ProjectLimitRefusal_ReleasesBrokerReservation(t *testing.T)
 // TestCreateAgent_RowWriteFailure_ReleasesBothReservations pins the second
 // releaseAgentQuotas call in createAgentInProject (ptone/scion#2018): both
 // reservations succeed, then the agent row write
-// (createAgentWithIdentityKeyAndEdge) fails. Both reservations must be
+// (commitAgentCreate) fails. Both reservations must be
 // released.
 //
 // The row write is made to fail the way it fails in production: another

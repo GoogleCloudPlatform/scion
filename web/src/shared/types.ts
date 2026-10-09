@@ -117,6 +117,8 @@ export interface PageData {
   user?: User | undefined;
   /** Additional page-specific data */
   data?: Record<string, unknown> | undefined;
+  /** Hub profiling readiness_marks setting; present (true) only when on, for a signed-in user */
+  readinessMarks?: boolean | undefined;
 }
 
 /**
@@ -216,6 +218,47 @@ export function isWorktreeWorkspace(project: Project): boolean {
   return (
     !!project.gitRemote && project.labels?.['scion.dev/workspace-mode'] === 'worktree-per-agent'
   );
+}
+
+/**
+ * Check whether a git project gives each agent its own clone. Matches the
+ * hub's ResolveProjectSharingMode: only a per-agent (or clone-per-agent)
+ * label means clone per agent; an unlabelled or unknown git project is
+ * shared.
+ */
+export function isClonePerAgentWorkspace(project: Project): boolean {
+  const mode = project.labels?.['scion.dev/workspace-mode'];
+  return !!project.gitRemote && (mode === 'per-agent' || mode === 'clone-per-agent');
+}
+
+/**
+ * Icon and accessible label for a project's workspace mode, as shown in the
+ * project list (#2917). Derived from the git remote, the project type and
+ * the hub-owned scion.dev/workspace-mode label; no extra API data needed.
+ */
+export interface ProjectWorkspaceModeIcon {
+  icon: string;
+  label: string;
+}
+
+export function projectWorkspaceModeIcon(project: Project): ProjectWorkspaceModeIcon {
+  if (project.gitRemote) {
+    if (isClonePerAgentWorkspace(project)) {
+      return { icon: 'git', label: 'Git repository, clone per agent' };
+    }
+    if (isWorktreeWorkspace(project)) {
+      return { icon: 'git', label: 'Git repository, worktree per agent' };
+    }
+    // Unlabelled or unknown git modes are shared, as on the hub.
+    return { icon: 'git', label: 'Git repository, shared workspace' };
+  }
+  if (isEmptyPerAgentWorkspace(project)) {
+    return { icon: 'folder-plus', label: 'Empty directory per agent' };
+  }
+  if (project.projectType === 'linked') {
+    return { icon: 'folder-symlink', label: 'Linked project directory' };
+  }
+  return { icon: 'folder-fill', label: 'Shared directory' };
 }
 
 /**
@@ -678,13 +721,17 @@ export type DeletionCode =
  * The hub's computed delete view for an agent (Go `store.DeletionInfo`).
  * While `deleting`, the engine renews `leaseExpiresAt` about every 20s; a
  * view whose lease passes without renewal reads as `failed`/`abandoned`.
+ *
+ * `code`, `error` and `claim` are sent to platform admins only
+ * (ptone/scion#3122). Every other caller, and every SSE delta, gets the
+ * generic view without them: same state, stage and timestamps.
  */
 export interface DeletionInfo {
   state: DeletionState;
   code?: DeletionCode;
   error?: string;
   soft: boolean;
-  claim: number;
+  claim?: number;
   startedAt: string;
   /** Set while `deleting`. */
   leaseExpiresAt?: string;
@@ -732,6 +779,8 @@ export interface Template {
   scope: string;
   scopeId?: string;
   contentHash?: string;
+  /** URL the template was imported from, when it was imported. */
+  sourceUrl?: string;
   files?: TemplateFileInfo[];
   config?: TemplateConfig;
   /** Creation and last-update times, as the hub sends them. */

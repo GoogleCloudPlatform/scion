@@ -15,13 +15,13 @@
 package entadapter
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
-	"sync"
 	"time"
 
 	"entgo.io/ent/dialect"
@@ -61,12 +61,7 @@ const (
 //     listings via an Ent predicate.
 type AgentStore struct {
 	client *ent.Client
-
-	// dialect is detected lazily on first use of a lock-taking path and
-	// memoized. SELECT ... FOR UPDATE is only emitted on Postgres; the SQLite
-	// driver rejects the clause outright, so it must be elided there.
-	dialectOnce sync.Once
-	dialectName string
+	inTx   bool // true when client wraps an ambient WithTx transaction
 
 	// afterRunIDRead, when set (tests only), runs between SetAgentRunID's
 	// read and its swap, to simulate a concurrent writer.
@@ -79,14 +74,13 @@ func NewAgentStore(client *ent.Client) *AgentStore {
 }
 
 // usesRowLocks reports whether the backend supports SELECT ... FOR UPDATE.
-// The dialect is captured from a no-op selector the first time it is needed.
-func (s *AgentStore) usesRowLocks(ctx context.Context) bool {
-	s.dialectOnce.Do(func() {
-		_, _ = s.client.Agent.Query().
-			Where(func(sel *entsql.Selector) { s.dialectName = sel.Dialect() }).
-			Exist(ctx)
-	})
-	return s.dialectName == dialect.Postgres
+// SELECT ... FOR UPDATE is only emitted on Postgres; the SQLite driver
+// rejects the clause outright, so it must be elided there. The dialect is
+// read from the driver (a construction-time property) with no query, so it
+// cannot be lost to a failed or cancelled probe and never contends for a
+// connection -- the same idiom as BrokerSettingStore.usesRowLocks.
+func (s *AgentStore) usesRowLocks() bool {
+	return s.client.Driver().Dialect() == dialect.Postgres
 }
 
 // Compile-time assertion that AgentStore satisfies the store.AgentStore
@@ -327,6 +321,9 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 		create.SetAnnotations(a.Annotations)
 	}
 	if len(a.Ancestry) > 0 {
+		// Principal IDs are stored in canonical UUID form so lookups by ID
+		// (the delegation descendant walk, ancestry filters) match them.
+		a.Ancestry = canonicalPrincipalIDs(a.Ancestry)
 		create.SetAncestry(a.Ancestry)
 	}
 	if cfg := marshalAppliedConfig(a.AppliedConfig); cfg != "" {
@@ -857,6 +854,63 @@ func (s *AgentStore) DeleteAgent(ctx context.Context, id string) error {
 	return nil
 }
 
+// lockAgentRowsBatch bounds the IDs locked by one statement. Batches are
+// taken in ascending ID order, so batching keeps the global lock order.
+const lockAgentRowsBatch = 1000
+
+// LockAgentRows locks the existing rows among ids, in ascending ID order,
+// with SELECT id FROM agents WHERE id IN (...) ORDER BY id FOR UPDATE on
+// PostgreSQL. PostgreSQL locks rows in the order the sorted scan returns
+// them, so every caller acquires shared rows in the same order. On SQLite the
+// same SELECT runs without the locking clause.
+func (s *AgentStore) LockAgentRows(ctx context.Context, ids []string) error {
+	if !s.inTx {
+		return fmt.Errorf("%w: LockAgentRows must be called inside WithTx", store.ErrInvalidInput)
+	}
+	uids, err := sortedUniqueUUIDs(ids)
+	if err != nil {
+		return err
+	}
+	if len(uids) == 0 {
+		return nil
+	}
+	pg := s.client.Driver().Dialect() == dialect.Postgres
+	for start := 0; start < len(uids); start += lockAgentRowsBatch {
+		end := min(start+lockAgentRowsBatch, len(uids))
+		q := s.client.Agent.Query().
+			Where(agent.IDIn(uids[start:end]...)).
+			Order(ent.Asc(agent.FieldID))
+		if pg {
+			q = q.ForUpdate()
+		}
+		if _, err := q.IDs(ctx); err != nil {
+			return fmt.Errorf("lock agent rows: %w", mapError(err))
+		}
+	}
+	return nil
+}
+
+// sortedUniqueUUIDs parses ids (ErrInvalidInput for a malformed one) and
+// returns them de-duplicated in ascending byte order, which is PostgreSQL's
+// uuid ordering.
+func sortedUniqueUUIDs(ids []string) ([]uuid.UUID, error) {
+	seen := make(map[uuid.UUID]struct{}, len(ids))
+	out := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		uid, err := parseUUID(id)
+		if err != nil {
+			return nil, err
+		}
+		if _, dup := seen[uid]; dup {
+			continue
+		}
+		seen[uid] = struct{}{}
+		out = append(out, uid)
+	}
+	sort.Slice(out, func(i, j int) bool { return bytes.Compare(out[i][:], out[j][:]) < 0 })
+	return out, nil
+}
+
 // ListAgents returns agents matching the filter criteria. See the
 // store.AgentStore interface doc for the legacy/sorted-mode split:
 // opts.SortBy empty is the
@@ -1275,6 +1329,13 @@ func agentFilterPredicates(filter store.AgentFilter) ([]predicate.Agent, error) 
 	if filter.AncestorID != "" {
 		preds = append(preds, ancestryContains(filter.AncestorID))
 	}
+	if filter.CreatedBy != "" {
+		createdByUID, err := parseUUID(filter.CreatedBy)
+		if err != nil {
+			return nil, err
+		}
+		preds = append(preds, agent.CreatedByEQ(createdByUID))
+	}
 	for k, v := range filter.Labels {
 		preds = append(preds, labelContains(k, v))
 	}
@@ -1373,10 +1434,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		return err
 	}
 
-	// Prime dialect detection before opening the transaction: the detection
-	// probe runs on s.client, which would contend with the open transaction on
-	// single-connection SQLite.
-	useLock := s.usesRowLocks(ctx)
+	useLock := s.usesRowLocks()
 
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
@@ -1548,6 +1606,54 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	return tx.Commit()
 }
 
+// SetAgentAnnotation implements store.AgentStore.SetAgentAnnotation. The
+// annotations are read and written back in one transaction (with a row lock
+// where the dialect has one), so two narrow writes of different keys do not
+// drop each other.
+func (s *AgentStore) SetAgentAnnotation(ctx context.Context, agentID, key, value string) error {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return err
+	}
+	useLock := s.usesRowLocks()
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	q := tx.Agent.Query().Where(agent.IDEQ(uid), agent.DeletedAtIsNil())
+	if useLock {
+		q = q.ForUpdate()
+	}
+	current, err := q.Only(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	annotations := make(map[string]string, len(current.Annotations)+1)
+	for k, v := range current.Annotations {
+		annotations[k] = v
+	}
+	if value == "" {
+		if _, ok := annotations[key]; !ok {
+			return tx.Commit()
+		}
+		delete(annotations, key)
+	} else {
+		annotations[key] = value
+	}
+	upd := tx.Agent.UpdateOneID(uid)
+	if len(annotations) == 0 {
+		upd.ClearAnnotations()
+	} else {
+		upd.SetAnnotations(annotations)
+	}
+	if err := upd.Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	return tx.Commit()
+}
+
 // SetAgentWorkspacePlacement implements store.AgentStore.SetAgentWorkspacePlacement.
 func (s *AgentStore) SetAgentWorkspacePlacement(ctx context.Context, agentID, placement string) error {
 	uid, err := parseUUID(agentID)
@@ -1608,17 +1714,6 @@ func utcExposedPorts(ports []store.ExposedPort) []store.ExposedPort {
 	return out
 }
 
-// PurgeDeletedAgents permanently removes soft-deleted agents older than cutoff.
-func (s *AgentStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error) {
-	deleted, err := s.client.Agent.Delete().
-		Where(agent.DeletedAtNotNil(), agent.DeletedAtLT(cutoff)).
-		Exec(ctx)
-	if err != nil {
-		return 0, err
-	}
-	return deleted, nil
-}
-
 // staleOfflineExcluded lists the terminal/sticky activities that must not be
 // overwritten when sweeping stale agents to "offline".
 var staleOfflineExcluded = []string{"completed", "limits_exceeded", "blocked", "offline"}
@@ -1626,7 +1721,7 @@ var staleOfflineExcluded = []string{"completed", "limits_exceeded", "blocked", "
 // MarkStaleAgentsOffline marks running agents whose last heartbeat predates
 // threshold as offline, returning the updated records for event publishing.
 func (s *AgentStore) MarkStaleAgentsOffline(ctx context.Context, threshold time.Time) ([]store.Agent, error) {
-	useLock := s.usesRowLocks(ctx)
+	useLock := s.usesRowLocks()
 
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
@@ -1693,6 +1788,31 @@ var containerMissingKeptExitReasons = []string{"preempted", "evicted"}
 // first changed nothing, matches every other row and records
 // container_missing.
 func (s *AgentStore) MarkAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, message string) (*store.Agent, error) {
+	return s.markAgentContainerMissing(ctx, id, brokerID, cutoff, message)
+}
+
+// MarkAgentContainerMissingIfUnchanged implements store.AgentStore: it is
+// MarkAgentContainerMissing with the state_version, run_id and start claim
+// checks added to the same conditional UPDATEs.
+func (s *AgentStore) MarkAgentContainerMissingIfUnchanged(ctx context.Context, id, brokerID string, cutoff time.Time, pre store.ContainerMissingPrecondition, message string) (*store.Agent, error) {
+	runID := agent.RunIDEQ(pre.RunID)
+	if pre.RunID == "" {
+		runID = agent.Or(agent.RunIDIsNil(), agent.RunIDEQ(""))
+	}
+	return s.markAgentContainerMissing(ctx, id, brokerID, cutoff, message,
+		// The exec agent_not_found path concludes only for an agent that
+		// was running; the heartbeat reconcile also settles stopping.
+		agent.PhaseEQ(string(state.PhaseRunning)),
+		agent.StateVersionEQ(pre.StateVersion),
+		runID,
+		agent.StartClaimIDIsNil(),
+	)
+}
+
+// markAgentContainerMissing is the shared body of MarkAgentContainerMissing
+// and MarkAgentContainerMissingIfUnchanged; extra predicates are added to
+// both conditional UPDATEs.
+func (s *AgentStore) markAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, message string, extra ...predicate.Agent) (*store.Agent, error) {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return nil, err
@@ -1710,7 +1830,9 @@ func (s *AgentStore) MarkAgentContainerMissing(ctx context.Context, id, brokerID
 				agent.IDEQ(uid),
 				agent.DeletedAtIsNil(),
 				agent.RuntimeBrokerIDEQ(brokerID),
-				agent.PhaseEQ("running"),
+				// stopping: the container's own shutdown report arrived
+				// but its final stopped report never did (ptone/scion#2669).
+				agent.PhaseIn(string(state.PhaseRunning), string(state.PhaseStopping)),
 				agent.Or(
 					agent.ReincarnationStateIsNil(),
 					agent.ReincarnationStateIn(store.ReincarnationStateNone, store.ReincarnationStateFailed),
@@ -1726,6 +1848,7 @@ func (s *AgentStore) MarkAgentContainerMissing(ctx context.Context, id, brokerID
 				),
 				reason,
 			).
+			Where(extra...).
 			SetPhase("error").
 			SetActivity("").
 			SetStalledFromActivity("").
@@ -1792,9 +1915,7 @@ func (s *AgentStore) ClearAgentRuntimeTarget(ctx context.Context, id string) (bo
 	if err != nil {
 		return false, 0, err
 	}
-	// Prime dialect detection before opening a transaction (see
-	// UpdateAgentStatus).
-	useLock := s.usesRowLocks(ctx)
+	useLock := s.usesRowLocks()
 	for i := 0; i < clearRuntimeTargetAttempts; i++ {
 		res, err := s.clearRuntimeTargetOnce(ctx, uid, id, useLock)
 		if err != nil {
@@ -1911,9 +2032,7 @@ func (s *AgentStore) SetAgentRuntimeTarget(ctx context.Context, id string, expec
 	if err != nil {
 		return false, err
 	}
-	// Prime dialect detection before opening a transaction (see
-	// UpdateAgentStatus).
-	useLock := s.usesRowLocks(ctx)
+	useLock := s.usesRowLocks()
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
 		return false, err
@@ -1990,7 +2109,7 @@ var stalledExcluded = []string{"completed", "limits_exceeded", "blocked", "stall
 // activityThreshold but whose heartbeat is still recent (>= heartbeatRecency)
 // as stalled, preserving the prior activity in stalled_from_activity.
 func (s *AgentStore) MarkStalledAgents(ctx context.Context, activityThreshold, heartbeatRecency time.Time) ([]store.Agent, error) {
-	useLock := s.usesRowLocks(ctx)
+	useLock := s.usesRowLocks()
 
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
@@ -2230,36 +2349,55 @@ func (s *AgentStore) ReassignProjectBroker(ctx context.Context, oldBrokerID, new
 }
 
 // AggregateAgentHealth computes health-oriented counts via GROUP BY queries
-// instead of loading full agent records. The approach uses three lightweight
-// queries:
-//  1. COUNT(*) GROUP BY phase            → ByPhase + Total
+// instead of loading full agent records:
+//  1. COUNT(*) GROUP BY phase, activity → ByPhase, Total, Considered,
+//     Errored and each problem group's true count
 //  2. COUNT(*) GROUP BY runtime_broker_id, phase, activity → ByBroker
-//  3. SELECT name WHERE phase/activity ∈ unhealthy (limit 100 each)
+//  3. one capped SELECT per problem group for its references
+//
+// Nothing here reads activity "stalled": stalls are not a health signal.
 func (s *AgentStore) AggregateAgentHealth(ctx context.Context) (*store.AgentHealthAggregate, error) {
 	result := &store.AgentHealthAggregate{
 		ByPhase:  make(map[string]int),
 		ByBroker: make(map[string]store.AgentBrokerCounts),
 	}
 
-	// 1. Count agents by phase (non-deleted only).
-	var phaseCounts []struct {
-		Phase string `json:"phase"`
-		Count int    `json:"count"`
+	// 1. Fleet-wide counts by phase and activity (non-deleted only).
+	var stateCounts []struct {
+		Phase    string `json:"phase"`
+		Activity string `json:"activity"`
+		Count    int    `json:"count"`
 	}
 	err := s.client.Agent.Query().
 		Where(agent.DeletedAtIsNil()).
-		GroupBy(agent.FieldPhase).
+		GroupBy(agent.FieldPhase, agent.FieldActivity).
 		Aggregate(ent.Count()).
-		Scan(ctx, &phaseCounts)
+		Scan(ctx, &stateCounts)
 	if err != nil {
-		return nil, fmt.Errorf("aggregate phase counts: %w", err)
+		return nil, fmt.Errorf("aggregate agent state counts: %w", err)
 	}
-	for _, pc := range phaseCounts {
-		result.ByPhase[pc.Phase] += pc.Count
-		result.Total += pc.Count
+	for _, sc := range stateCounts {
+		result.ByPhase[sc.Phase] += sc.Count
+		result.Total += sc.Count
+		if sc.Phase == string(state.PhaseStopped) {
+			continue
+		}
+		result.Considered += sc.Count
+		if sc.Phase == string(state.PhaseError) || sc.Activity == string(state.ActivityCrashed) {
+			result.Errored += sc.Count
+		}
+		if sc.Phase == string(state.PhaseError) {
+			result.ErrorPhase.Count += sc.Count
+		}
+		switch sc.Activity {
+		case string(state.ActivityCrashed):
+			result.Crashed.Count += sc.Count
+		case string(state.ActivityOffline):
+			result.Offline.Count += sc.Count
+		}
 	}
 
-	// 2. Count agents by broker, phase, and activity for per-broker health tallies.
+	// 2. Per-broker running and needing-attention tallies.
 	var brokerCounts []struct {
 		BrokerID string `json:"runtime_broker_id"`
 		Phase    string `json:"phase"`
@@ -2275,58 +2413,81 @@ func (s *AgentStore) AggregateAgentHealth(ctx context.Context) (*store.AgentHeal
 		return nil, fmt.Errorf("aggregate broker counts: %w", err)
 	}
 	for _, bc := range brokerCounts {
-		bid := bc.BrokerID
-		if bid == "" {
+		if bc.BrokerID == "" {
 			continue
 		}
-		entry := result.ByBroker[bid]
-		entry.Count += bc.Count
-		if bc.Phase != "error" && bc.Activity != "stalled" && bc.Activity != "crashed" {
-			entry.Healthy += bc.Count
+		entry := result.ByBroker[bc.BrokerID]
+		if bc.Phase == string(state.PhaseRunning) {
+			entry.Running += bc.Count
 		}
-		result.ByBroker[bid] = entry
+		if agentNeedsAttention(bc.Phase, bc.Activity) {
+			entry.Attention += bc.Count
+		}
+		result.ByBroker[bc.BrokerID] = entry
 	}
 
-	// 3. Fetch names of unhealthy agents (capped lists).
-	const unhealthyCap = 100
-
-	stalledAgents, err := s.client.Agent.Query().
-		Where(agent.DeletedAtIsNil(), agent.ActivityEQ("stalled")).
-		Select(agent.FieldName).
-		Limit(unhealthyCap).
-		All(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("query stalled agents: %w", err)
+	// 3. Capped references per problem group. Only query a group that has
+	// members.
+	notStopped := agent.Or(agent.PhaseNEQ(string(state.PhaseStopped)), agent.PhaseIsNil())
+	groups := []struct {
+		kind  string
+		group *store.AgentProblemGroup
+		where []predicate.Agent
+	}{
+		{"errored", &result.ErrorPhase, []predicate.Agent{agent.PhaseEQ(string(state.PhaseError))}},
+		{"crashed", &result.Crashed, []predicate.Agent{agent.ActivityEQ(string(state.ActivityCrashed)), notStopped}},
+		{"offline", &result.Offline, []predicate.Agent{agent.ActivityEQ(string(state.ActivityOffline)), notStopped}},
 	}
-	for _, a := range stalledAgents {
-		result.StalledNames = append(result.StalledNames, a.Name)
-	}
-
-	crashedAgents, err := s.client.Agent.Query().
-		Where(agent.DeletedAtIsNil(), agent.ActivityEQ("crashed")).
-		Select(agent.FieldName).
-		Limit(unhealthyCap).
-		All(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("query crashed agents: %w", err)
-	}
-	for _, a := range crashedAgents {
-		result.CrashedNames = append(result.CrashedNames, a.Name)
-	}
-
-	erroredAgents, err := s.client.Agent.Query().
-		Where(agent.DeletedAtIsNil(), agent.PhaseEQ("error")).
-		Select(agent.FieldName).
-		Limit(unhealthyCap).
-		All(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("query errored agents: %w", err)
-	}
-	for _, a := range erroredAgents {
-		result.ErroredNames = append(result.ErroredNames, a.Name)
+	for _, g := range groups {
+		if g.group.Count == 0 {
+			continue
+		}
+		refs, err := s.agentHealthRefs(ctx, g.where...)
+		if err != nil {
+			return nil, fmt.Errorf("query %s agents: %w", g.kind, err)
+		}
+		g.group.Refs = refs
 	}
 
 	return result, nil
+}
+
+// agentNeedsAttention reports whether an agent in this phase and activity
+// needs an operator: phase error, or activity crashed or offline outside
+// phase stopped. Activity stalled never counts.
+func agentNeedsAttention(phase, activity string) bool {
+	if phase == string(state.PhaseError) {
+		return true
+	}
+	if phase == string(state.PhaseStopped) {
+		return false
+	}
+	return activity == string(state.ActivityCrashed) || activity == string(state.ActivityOffline)
+}
+
+// agentHealthRefs returns up to store.AgentHealthRefCap non-deleted agents
+// matching where, most recently updated first (ID breaks ties so the list is
+// stable across polls), reading only the reference columns.
+func (s *AgentStore) agentHealthRefs(ctx context.Context, where ...predicate.Agent) ([]store.AgentHealthRef, error) {
+	rows, err := s.client.Agent.Query().
+		Where(append([]predicate.Agent{agent.DeletedAtIsNil()}, where...)...).
+		Order(agent.ByUpdated(entsql.OrderDesc()), agent.ByID()).
+		Select(agent.FieldID, agent.FieldName, agent.FieldProjectID, agent.FieldRuntimeBrokerID).
+		Limit(store.AgentHealthRefCap).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	refs := make([]store.AgentHealthRef, 0, len(rows))
+	for _, a := range rows {
+		refs = append(refs, store.AgentHealthRef{
+			ID:        a.ID.String(),
+			Name:      a.Name,
+			ProjectID: a.ProjectID.String(),
+			BrokerID:  a.RuntimeBrokerID,
+		})
+	}
+	return refs, nil
 }
 
 // setAgentRunIDAttempts bounds SetAgentRunID's read-then-swap loop. Each
@@ -2337,8 +2498,9 @@ const setAgentRunIDAttempts = 8
 // SetAgentRunID implements store.AgentStore.SetAgentRunID. It reads the
 // current value and swaps it under a compare-and-swap, retrying if another
 // writer got in between, so the returned previous value is exactly the one
-// this write replaced. That needs no transaction or row lock, and so works
-// the same on every dialect.
+// this write replaced. The compare-and-swap needs no row lock, and so works
+// the same on every dialect; a transaction is used only to create a
+// credential together with the swap.
 //
 // The same write appends the replaced run to previous_run_ids
 // (store.AppendPreviousRunID, ptone/scion#3097): until the new run settles,
@@ -2353,48 +2515,106 @@ const setAgentRunIDAttempts = 8
 // claim is itself a single-row write, so the database orders the two: a
 // claim that lands first refuses this write, and one that lands after it
 // snapshots the new run ID (ptone/scion#2550 P1 round 3).
-func (s *AgentStore) SetAgentRunID(ctx context.Context, agentID, runID string) (string, error) {
+func (s *AgentStore) SetAgentRunID(ctx context.Context, agentID, runID string, cred *store.AgentCredential) (string, error) {
 	uid, err := parseUUID(agentID)
 	if err != nil {
 		return "", err
 	}
 	for attempt := 0; attempt < setAgentRunIDAttempts; attempt++ {
-		row, err := s.client.Agent.Query().
-			Where(agent.IDEQ(uid)).
-			Select(agent.FieldRunID, agent.FieldPreviousRunIds, agent.FieldDeletedAt, agent.FieldDeletionState, agent.FieldDeletionLeaseAt).
-			Only(ctx)
+		previous, written, err := s.setAgentRunIDOnce(ctx, uid, agentID, runID, cred)
 		if err != nil {
-			return "", mapError(err)
+			return "", err
 		}
-		now := time.Now()
-		if row.DeletedAt != nil || store.DeletionHoldsRow(row.DeletionState, row.DeletionLeaseAt, now) {
-			return "", store.ErrDeleteInProgress
-		}
-		if s.afterRunIDRead != nil {
-			s.afterRunIDRead(agentID)
-		}
-		previous, dropped := store.AppendPreviousRunID(row.PreviousRunIds, row.RunID, runID)
-		upd := s.client.Agent.Update().
-			Where(agent.IDEQ(uid), agent.RunIDEQ(row.RunID), runIDWritable(now)).
-			SetRunID(runID)
-		if len(previous) > 0 {
-			upd = upd.SetPreviousRunIds(previous)
-		} else {
-			upd = upd.ClearPreviousRunIds()
-		}
-		n, err := upd.Save(ctx)
-		if err != nil {
-			return "", mapError(err)
-		}
-		if n > 0 {
-			if len(dropped) > 0 {
-				slog.Warn("agent store: too many unsettled runs; no longer tracking the oldest",
-					"agent_id", agentID, "dropped_run_ids", dropped, "cap", store.MaxPreviousRunIDs)
-			}
-			return row.RunID, nil
+		if written {
+			return previous, nil
 		}
 	}
 	return "", fmt.Errorf("agent store: run_id for agent %s kept changing; giving up after %d attempts", agentID, setAgentRunIDAttempts)
+}
+
+// setAgentRunIDOnce is one read-then-swap attempt of SetAgentRunID.
+// written is false, with nothing recorded, when run_id changed between the
+// read and the swap. The read is outside any transaction (the swap is a
+// compare-and-swap on run_id); the swap and the creation of cred (when
+// non-nil) commit together.
+func (s *AgentStore) setAgentRunIDOnce(ctx context.Context, uid uuid.UUID, agentID, runID string, cred *store.AgentCredential) (previous string, written bool, err error) {
+	row, err := s.client.Agent.Query().
+		Where(agent.IDEQ(uid)).
+		Select(agent.FieldRunID, agent.FieldPreviousRunIds, agent.FieldDeletedAt, agent.FieldDeletionState, agent.FieldDeletionLeaseAt).
+		Only(ctx)
+	if err != nil {
+		return "", false, mapError(err)
+	}
+	now := time.Now()
+	if row.DeletedAt != nil || store.DeletionHoldsRow(row.DeletionState, row.DeletionLeaseAt, now) {
+		return "", false, store.ErrDeleteInProgress
+	}
+	if s.afterRunIDRead != nil {
+		s.afterRunIDRead(agentID)
+	}
+	prevList, dropped := store.AppendPreviousRunID(row.PreviousRunIds, row.RunID, runID)
+	swap := func(c *ent.AgentClient) (int, error) {
+		upd := c.Update().
+			Where(agent.IDEQ(uid), agent.RunIDEQ(row.RunID), runIDWritable(now)).
+			SetRunID(runID)
+		if len(prevList) > 0 {
+			upd = upd.SetPreviousRunIds(prevList)
+		} else {
+			upd = upd.ClearPreviousRunIds()
+		}
+		return upd.Save(ctx)
+	}
+	var n int
+	if cred == nil {
+		n, err = swap(s.client.Agent)
+		if err != nil {
+			return "", false, mapError(err)
+		}
+	} else {
+		n, err = s.swapWithCredential(ctx, swap, runID, cred)
+		if err != nil {
+			return "", false, err
+		}
+	}
+	if n == 0 {
+		return "", false, nil
+	}
+	if len(dropped) > 0 {
+		slog.Warn("agent store: too many unsettled runs; no longer tracking the oldest",
+			"agent_id", agentID, "dropped_run_ids", dropped, "cap", store.MaxPreviousRunIDs)
+	}
+	return row.RunID, true, nil
+}
+
+// swapWithCredential runs swap and, when it updated the row, creates cred
+// (with RunID set to runID) in one transaction. On any failure, or when
+// the swap matched no row, nothing is committed and cred.ID is left empty.
+// A failure to create cred or to commit wraps store.ErrCredentialNotRecorded.
+func (s *AgentStore) swapWithCredential(ctx context.Context, swap func(*ent.AgentClient) (int, error), runID string, cred *store.AgentCredential) (int, error) {
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	n, err := swap(tx.Agent)
+	if err != nil {
+		_ = tx.Rollback()
+		return 0, mapError(err)
+	}
+	if n == 0 {
+		_ = tx.Rollback()
+		return 0, nil
+	}
+	cred.RunID = runID
+	if err := createAgentCredential(ctx, tx.AgentCredential, cred); err != nil {
+		_ = tx.Rollback()
+		cred.ID = ""
+		return 0, fmt.Errorf("%w: %w", store.ErrCredentialNotRecorded, err)
+	}
+	if err := tx.Commit(); err != nil {
+		cred.ID = ""
+		return 0, fmt.Errorf("%w: %w", store.ErrCredentialNotRecorded, mapError(err))
+	}
+	return n, nil
 }
 
 // runIDWritable is store.DeletionHoldsRow negated, plus deleted_at IS NULL,

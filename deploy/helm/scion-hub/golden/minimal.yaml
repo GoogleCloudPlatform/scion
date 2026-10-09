@@ -135,12 +135,13 @@ data:
   # true unless config.existingSecret was set, because nothing the chart
   # rendered could satisfy the flag: the hub resolves a stable key from a
   # pre-configured key, then SharedSigningSecret, then a secret backend, then
-  # the store (pkg/hub/server.go:1445); SharedSigningSecret comes only from
-  # resolveSessionSecret (cmd/server_foreground.go:1452-1463), which reads
+  # the store (Server.ensureSigningKey, pkg/hub/server.go); SharedSigningSecret
+  # comes only from resolveSessionSecret (cmd/server_foreground.go), which reads
   # --session-secret, SCION_SERVER_SESSION_SECRET and bare SESSION_SECRET; the
   # chart rendered none of the three, and a first boot has an empty store. With
-  # true and no key, pkg/hub/server.go:1634 errors, pkg/hub/server.go:1008 makes
-  # it fatal, and cmd/server_foreground.go:259 turns it into log.Fatalf. Measured
+  # true and no key, Server.ensureSigningKey (pkg/hub/server.go) errors, New
+  # (pkg/hub/server.go) makes it fatal, and runServerStart
+  # (cmd/server_foreground.go) turns it into log.Fatalf. Measured
   # end-to-end through hub.New by gd-p1-dev, not inferred from the citations.
   #
   # WHAT MAKES true SAFE NOW IS NOT THIS DEFAULT - IT IS THAT THE SECRET IS
@@ -267,7 +268,7 @@ spec:
         app.kubernetes.io/part-of: scion
       annotations:
         scion.io/hub-id: "ci-minimal"
-        checksum/env-config: 576ca82a75226a5ff18c57d4eaf8120674b3a3dd8bc0d19a62351952fdc40c3e
+        checksum/env-config: ea416bbbb984f5095e4169c5d94629b33d80b85936a2b7d88c9529e7f98c3256
         checksum/settings: 7b5dd47c65d9b0cd2424b4229afd6efa5d5cbd72b67cc5909c3afeebc332947a
     spec:
       serviceAccountName: scion-scion-hub
@@ -305,6 +306,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
           ports:
             - name: http
               containerPort: 8080

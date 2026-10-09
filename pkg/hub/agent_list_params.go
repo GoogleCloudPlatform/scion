@@ -18,7 +18,11 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 
+	"github.com/google/uuid"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/agentsort"
 )
 
@@ -38,6 +42,112 @@ type agentListParams struct {
 	// the per-item response shape, so it is not part of the cursor
 	// binding: a cursor works across views.
 	view string
+	// ids, when non-nil, narrows the request to these agent ids (the
+	// ids= parameter, see parseAgentListIDs). It is applied as
+	// store.AgentFilter.IDs, ANDed with every other filter, before the
+	// per-row read pass, so it can only narrow the result.
+	ids []string
+}
+
+// maxAgentListIDs bounds the ids= parameter regardless of limit: the web
+// client asks for one page of a frozen walk order, and its largest page
+// size is 100. Keeping a request well under the paged branch's decision
+// budget also means an ids request is always answered in one page.
+const maxAgentListIDs = 100
+
+// parseAgentListIDs validates the ids= parameter: a comma-separated list
+// of canonical agent UUIDs, at most min(limit, 100) entries, duplicates
+// included (duplicates are then dropped), never together with cursor or
+// fit. It only checks the format of the request, before any store or
+// authorization call, and its error messages never name an id, so a 400
+// says nothing about whether any id exists or is readable. An absent or
+// empty ids= returns nil.
+//
+// The web client uses it to page a frozen walk order: page 0 returns the
+// readable population in sort order (stats=1), and later pages ask for the
+// next slice of those ids, so an agent whose sort key changes mid-walk is
+// neither skipped nor repeated (ptone/scion#3744).
+func parseAgentListIDs(query url.Values, limit int) ([]string, string) {
+	raw := query.Get("ids")
+	if raw == "" {
+		return nil, ""
+	}
+	if query.Get("cursor") != "" {
+		return nil, "ids is not valid together with cursor"
+	}
+	if query.Get("fit") != "" {
+		return nil, "ids is not valid together with fit"
+	}
+	maxIDs := maxAgentListIDs
+	if limit > maxSortedLimit {
+		limit = maxSortedLimit
+	}
+	if limit > 0 && limit < maxIDs {
+		maxIDs = limit
+	}
+	parts := strings.Split(raw, ",")
+	if len(parts) > maxIDs {
+		return nil, "too many ids"
+	}
+	seen := make(map[string]struct{}, len(parts))
+	ids := make([]string, 0, len(parts))
+	for _, part := range parts {
+		parsed, err := uuid.Parse(part)
+		if err != nil || parsed.String() != part {
+			return nil, "invalid ids"
+		}
+		if _, dup := seen[part]; dup {
+			continue
+		}
+		seen[part] = struct{}{}
+		ids = append(ids, part)
+	}
+	return ids, ""
+}
+
+// narrowFilterByIDs applies the ids= set to filter as one more ANDed
+// restriction: when filter.IDs is already set (the global endpoint's id=
+// filter), the result is the intersection, which may be a non-nil empty
+// slice that matches nothing; otherwise it is ids itself. ids never widens
+// the filter.
+func narrowFilterByIDs(filter *store.AgentFilter, ids []string) {
+	if filter == nil || ids == nil {
+		return
+	}
+	if filter.IDs == nil {
+		filter.IDs = append([]string{}, ids...)
+		return
+	}
+	existing := make(map[string]struct{}, len(filter.IDs))
+	for _, id := range filter.IDs {
+		existing[id] = struct{}{}
+	}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := existing[id]; ok {
+			out = append(out, id)
+		}
+	}
+	filter.IDs = out
+}
+
+// validateAgentListIDs runs parseAgentListIDs for a list request before any
+// store or authorization call, writing the 400 itself. ids is only valid
+// in sorted mode; the legacy (unsorted) pages reject it rather than
+// silently ignoring it.
+func validateAgentListIDs(w http.ResponseWriter, query url.Values, limit int, sorted bool) bool {
+	if query.Get("ids") == "" {
+		return true
+	}
+	if !sorted {
+		BadRequest(w, "ids requires sort")
+		return false
+	}
+	if _, msg := parseAgentListIDs(query, limit); msg != "" {
+		BadRequest(w, msg)
+		return false
+	}
+	return true
 }
 
 // maxSortedLimit is the sorted-mode page size ceiling: limit stays in
@@ -120,6 +230,13 @@ func parseAgentListParamsAfterSortDir(w http.ResponseWriter, query url.Values, l
 	}
 
 	p.stats = query.Get("stats") == "1"
+
+	ids, msg := parseAgentListIDs(query, limit)
+	if msg != "" {
+		BadRequest(w, msg)
+		return p, false
+	}
+	p.ids = ids
 
 	view, ok := parseSortedAgentListView(w, query)
 	if !ok {

@@ -19,7 +19,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -95,9 +94,7 @@ func setupRoutedTestEnv(t *testing.T) routedTestEnv {
 	enableWriteDenySwitch(t, srv)
 
 	// Wire webChatStore for reply affinity assertions.
-	wcsDB, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = wcsDB.Close() })
+	wcsDB := openTestMemorySQLite(t, "sqlite3")
 	wcs := NewWebChatStore(wcsDB, "sqlite3")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)

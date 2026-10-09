@@ -34,8 +34,10 @@ var settingsFileMu sync.Mutex
 // write (rename) of its replacement, so a concurrent writer's change is not
 // lost.
 //
-// UpdateVersionedSetting and SaveVersionedSettings take it themselves, so a
-// caller must not hold it when calling them (the lock is not re-entrant).
+// UpdateVersionedSetting, SaveVersionedSettings and MigrateSettingsFile (and
+// so UpdateSetting, which calls MigrateSettingsFile and
+// UpdateVersionedSetting) take it themselves, so a caller must not hold it
+// when calling them (the lock is not re-entrant).
 //
 // Lock order: the settings-file lock is taken before any database write and
 // may be held across database writes (the workstation server-config PUT

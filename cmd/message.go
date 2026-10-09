@@ -229,7 +229,7 @@ Examples:
 		}
 
 		// Ensure we have a message body
-		if message == "" {
+		if message == "" && len(msgArtifacts) == 0 {
 			return fmt.Errorf("message body is empty; provide a message via positional args, --body-file, or pipe to stdin with '-'")
 		}
 
@@ -307,6 +307,23 @@ Examples:
 				}
 				return fmt.Errorf("attachment %q: is not a regular file", p)
 			}
+		}
+
+		// Validate artifact references (ptone/scion#3223). They are carried
+		// in message metadata and as URLs in the body.
+		artifactRefs, err := parseArtifactFlags(msgArtifacts)
+		if err != nil {
+			return err
+		}
+		msgArtifactRefs = artifactRefs
+		if len(artifactRefs) > 0 {
+			if msgIn != "" || msgAt != "" {
+				return newUsageError("--artifact cannot be combined with --in or --at")
+			}
+			if len(groupRecipients) > 0 {
+				return newUsageError("--artifact cannot be used with group[] recipients")
+			}
+			message = appendArtifactRefsToBody(message, artifactRefs)
 		}
 
 		// Cross-project detection: when running as an agent and --project
@@ -448,6 +465,11 @@ Examples:
 			return fmt.Errorf("--wake requires Hub mode (use 'scion hub enable' first)")
 		}
 
+		// --artifact requires Hub mode: references are resolved by the Hub.
+		if len(msgArtifactRefs) > 0 {
+			return fmt.Errorf("--artifact requires Hub mode (use 'scion hub enable' first)")
+		}
+
 		// --attach requires Hub mode: attachments are delivered through Hub
 		// storage, while local mode writes plain text to the agent terminal
 		// and cannot transfer files.
@@ -512,7 +534,28 @@ func buildStructuredMessage(sender, recipient, message string, attachments []str
 	}
 	msg.Channel = msgChannel
 	msg.ThreadID = msgThreadID
+	msg.Metadata = artifactRefsMetadata(msgArtifactRefs)
 	return msg
+}
+
+// messageIDSuffix renders the created message's ID as the " (message <id>)"
+// suffix the send confirmations append (ptone/scion#3881), matching the
+// wording the deferred and outbound confirmations already use. It returns ""
+// when the hub reported no ID, leaving the confirmation as it was.
+func messageIDSuffix(id string) string {
+	if id == "" {
+		return ""
+	}
+	return " (message " + id + ")"
+}
+
+// messageResponseID returns the message ID from an agent-message send
+// response, or "" when there is no response.
+func messageResponseID(resp *hubclient.MessageResponse) string {
+	if resp == nil {
+		return ""
+	}
+	return resp.MessageID
 }
 
 // agentMessageSendError renders a failed agent-message send. A 404 with the
@@ -593,18 +636,24 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 		}
 		return nil
 	}
+	// Mention outcomes print before the confirmation so the last line
+	// reports the send itself; a skipped mention never means a failed send.
+	if resp != nil {
+		printMentionResults(resp.MentionResults)
+		printArtifactWarning(resp.ArtifactWarning)
+	}
 	if resp != nil && resp.Status == "deferred" {
 		// Design agent-reincarnate §3.7: the recipient is mid-`scion
 		// reincarnate`. The message was saved to history, not dropped.
 		fmt.Printf("agent %s is reincarnating; message saved to history and will be seen on catch-up (message %s).\n", agentName, resp.MessageID)
 	} else {
-		fmt.Printf("Message delivered to agent '%s'.\n", agentName)
+		fmt.Printf("Message delivered to agent '%s'%s.\n", agentName, messageIDSuffix(messageResponseID(resp)))
 	}
 	if notify {
 		fmt.Printf("Subscribed to notifications for agent '%s'.\n", agentName)
 	}
 	if resp != nil {
-		printMentionResults(resp.MentionResults)
+		printAttachmentWarnings(resp.AttachmentWarnings)
 	}
 
 	return nil
@@ -660,10 +709,14 @@ func sendCrossProjectMessage(hubCtx *HubContext, targetProject, agentSlug, messa
 		}
 		return nil
 	}
-	fmt.Printf("Message delivered to agent '%s' in project '%s'.\n", agentSlug, targetProject)
+	// No attachment warnings here: an agent sender's cross-project send
+	// with attachments is rejected with a 422, and a human sender's
+	// attachments are not ingested, so neither case carries warnings.
 	if resp != nil {
 		printMentionResults(resp.MentionResults)
+		printArtifactWarning(resp.ArtifactWarning)
 	}
+	fmt.Printf("Message delivered to agent '%s' in project '%s'%s.\n", agentSlug, targetProject, messageIDSuffix(messageResponseID(resp)))
 
 	return nil
 }
@@ -734,16 +787,20 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 				}
 				return nil
 			}
+			if resp != nil {
+				printMentionResults(resp.MentionResults)
+				printArtifactWarning(resp.ArtifactWarning)
+			}
 			if resp != nil && resp.Status == "deferred" {
 				// Design agent-reincarnate §3.7: the recipient is
 				// mid-`scion reincarnate`. The message was saved to
 				// history, not dropped.
 				fmt.Printf("agent %s is reincarnating; message saved to history and will be seen on catch-up (message %s).\n", ref.Value, resp.MessageID)
 			} else {
-				fmt.Printf("Message delivered to agent '%s'.\n", ref.Value)
+				fmt.Printf("Message delivered to agent '%s'%s.\n", ref.Value, messageIDSuffix(messageResponseID(resp)))
 			}
 			if resp != nil {
-				printMentionResults(resp.MentionResults)
+				printAttachmentWarnings(resp.AttachmentWarnings)
 			}
 			return nil
 		}
@@ -758,6 +815,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			ConversationRef: ref.Raw,
 			Attachments:     attachments,
 			Wake:            wake,
+			Metadata:        artifactRefsMetadata(msgArtifactRefs),
 		}
 		if ref.Kind == messaging.RefEmail {
 			outMsg.Recipient = "user:" + ref.Value
@@ -798,6 +856,9 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			fmt.Printf("Message dispatched to %s.\n", ref.Raw)
 			return nil
 		}
+		// Mention outcomes first, so the confirmation is the last line.
+		printMentionResults(result.MentionResults)
+		printArtifactWarning(result.ArtifactWarning)
 		// Distinguish accepted dispatch from confirmed delivery.
 		switch result.Status {
 		case "sent":
@@ -809,7 +870,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		default:
 			fmt.Printf("Message dispatched to %s (message %s, status: %s).\n", ref.Raw, result.MessageID, result.Status)
 		}
-		printMentionResults(result.MentionResults)
+		printAttachmentWarnings(result.AttachmentWarnings)
 		return nil
 	}
 
@@ -832,11 +893,20 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		return fmt.Errorf("message validation failed: %w", err)
 	}
 
-	if _, err := agentSvc.SendStructuredMessage(ctx, ref.Value, agentMsg, interrupt, false, wake); err != nil {
+	// The hub ingests attachments, and so reports attachment warnings,
+	// only for agent senders; this human path has none to print. It can
+	// report an artifact warning.
+	humanResp, err := agentSvc.SendStructuredMessage(ctx, ref.Value, agentMsg, interrupt, false, wake)
+	if err != nil {
 		return agentMessageSendError(ref.Value, err)
 	}
+	// This path prints no JSON body, so the warning goes to stderr in
+	// either output mode.
+	if humanResp != nil {
+		printArtifactWarning(humanResp.ArtifactWarning)
+	}
 	if !isJSONOutput() {
-		fmt.Printf("Message delivered to agent '%s'.\n", ref.Value)
+		fmt.Printf("Message delivered to agent '%s'%s.\n", ref.Value, messageIDSuffix(messageResponseID(humanResp)))
 	}
 	return nil
 }
@@ -907,6 +977,7 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 		Attachments: msgAttach,
 		Channel:     msgChannel,
 		ThreadID:    msgThreadID,
+		Metadata:    artifactRefsMetadata(msgArtifactRefs),
 	}
 
 	result, err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg)
@@ -920,15 +991,26 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 		}
 		return nil
 	}
+	if result != nil {
+		printMentionResults(result.MentionResults)
+		printArtifactWarning(result.ArtifactWarning)
+	}
 	// #2026: name the conversation the message landed in when the hub
 	// reports it, so a send with --channel/--thread-id shows where it went.
-	if result != nil && result.ConversationID != "" {
+	// ptone/scion#3881: also name the created message when the hub
+	// reports its ID.
+	switch {
+	case result != nil && result.ConversationID != "" && result.MessageID != "":
+		fmt.Printf("Message sent to %s via Hub (conversation %s, message %s).\n", userRecipient, result.ConversationID, result.MessageID)
+	case result != nil && result.ConversationID != "":
 		fmt.Printf("Message sent to %s via Hub (conversation %s).\n", userRecipient, result.ConversationID)
-	} else {
+	case result != nil && result.MessageID != "":
+		fmt.Printf("Message sent to %s via Hub (message %s).\n", userRecipient, result.MessageID)
+	default:
 		fmt.Printf("Message sent to %s via Hub.\n", userRecipient)
 	}
 	if result != nil {
-		printMentionResults(result.MentionResults)
+		printAttachmentWarnings(result.AttachmentWarnings)
 	}
 	return nil
 }
@@ -960,6 +1042,13 @@ type groupRecipientResult struct {
 	Recipient string `json:"recipient"`
 	Status    string `json:"status"`
 	Error     string `json:"error,omitempty"`
+	// MessageID is the ID of the message the hub stored for this recipient
+	// (ptone/scion#3881), for delivered, deferred and ambiguous (unknown)
+	// sends. Empty when the send failed or the hub did not report one.
+	MessageID string `json:"message_id,omitempty"`
+	// AttachmentWarnings lists attachments the hub could not record on this
+	// recipient's copy of the message (ptone/scion#3667).
+	AttachmentWarnings []hubclient.AttachmentWarning `json:"attachment_warnings,omitempty"`
 }
 
 // retryRecipientArg builds a recipient argument for scion message naming the
@@ -1093,6 +1182,9 @@ type groupSendHooks struct {
 	fanOutContext func(context.Context) (context.Context, context.CancelFunc)
 	// onRecord, if set, is called after each recipient's result is stored.
 	onRecord func(groupRecipientResult)
+	// onQueued, if set, is called each time a recipient has to wait for a
+	// free fan-out slot (see boundedFanOut).
+	onQueued func()
 }
 
 func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecipient, message string, interrupt bool) error {
@@ -1143,7 +1235,6 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 	// cutShort[i] is set when recipient i's send was stopped by an interrupt
 	// (never sent, or cancelled in flight), as opposed to finishing on its own.
 	cutShort := make([]bool, len(recipients))
-	var wg sync.WaitGroup
 
 	// record stores one recipient's result and streams a progress line, so
 	// a send that is killed outright still leaves the delivered lines behind.
@@ -1157,9 +1248,9 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 		}
 		switch res.Status {
 		case groupStatusDelivered:
-			fmt.Printf("  Delivered: %s\n", res.Recipient)
+			fmt.Printf("  Delivered: %s%s\n", res.Recipient, messageIDSuffix(res.MessageID))
 		case groupStatusDeferred:
-			fmt.Printf("  Deferred: %s (agent is reincarnating; saved)\n", res.Recipient)
+			fmt.Printf("  Deferred: %s (agent is reincarnating; saved)%s\n", res.Recipient, messageIDSuffix(res.MessageID))
 		case groupStatusUnknown:
 			fmt.Printf("  Unknown: %s: %s\n", res.Recipient, res.Error)
 		default:
@@ -1181,89 +1272,109 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 	}
 	// recordAmbiguous handles the Hub's 202 "ambiguous" outcome: it may or
 	// may not have dispatched the message, so it is unknown, not delivered.
-	recordAmbiguous := func(idx int, recipStr, messageID string) {
+	// The attachment warnings are kept: the message was persisted either way.
+	recordAmbiguous := func(idx int, recipStr, messageID string, warnings []hubclient.AttachmentWarning) {
 		record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusUnknown,
-			Error: fmt.Sprintf("Hub reported delivery as ambiguous (message %s); it may have been delivered", messageID)})
+			Error:              fmt.Sprintf("Hub reported delivery as ambiguous (message %s); it may have been delivered", messageID),
+			MessageID:          messageID,
+			AttachmentWarnings: warnings})
 	}
 
-	for i, r := range recipients {
-		wg.Add(1)
-		go func(idx int, recip messages.GroupRecipient) {
-			defer wg.Done()
-			recipStr := recip.String()
+	// An interrupt before a recipient's request was started means it was
+	// never sent, so nothing was delivered and it is safe to retry: report it
+	// failed (and so in retry_recipient), not unknown. Once the request has
+	// started there is no telling whether the Hub acted on it, so a later
+	// cancellation is unknown. This covers recipients still queued for a
+	// fan-out slot (ptone/scion#3521) as well as ones whose slot was taken
+	// just as the interrupt arrived.
+	recordNotSent := func(idx int) {
+		cutShort[idx] = true
+		record(idx, groupRecipientResult{Recipient: recipients[idx].String(), Status: groupStatusFailed,
+			Error: "not sent: interrupted before the request was sent"})
+	}
 
-			// An interrupt before this request was started means it was
-			// never sent, so nothing was delivered and it is safe to retry:
-			// report it failed (and so in retry_recipient), not unknown. Once
-			// the request has started there is no telling whether the Hub
-			// acted on it, so a later cancellation is unknown.
-			if fanCtx.Err() != nil {
-				cutShort[idx] = true
-				record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusFailed,
-					Error: "not sent: interrupted before the request was sent"})
+	// ptone/scion#3521: at most maxFanOutConcurrency sends are in flight at
+	// once; results stay in recipient order because each is stored by index.
+	sendOne := func(idx int) {
+		recip := recipients[idx]
+		recipStr := recip.String()
+
+		if fanCtx.Err() != nil {
+			recordNotSent(idx)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(fanCtx, 30*time.Second)
+		defer cancel()
+
+		switch recip.Kind {
+		case messages.RecipientAgent:
+			slug := api.Slugify(recip.Name)
+			msg := buildStructuredMessage(sender, "agent:"+slug, message, msgAttach, msgPlain, interrupt)
+			msg.Type = messages.TypeGroupSet
+			msg.Recipients = recipientsStr
+			msg.Metadata = map[string]string{"group_id": groupID}
+			sendResp, err := agentSvc.SendStructuredMessage(ctx, slug, msg, interrupt, false, false)
+			if err != nil {
+				recordErr(idx, recipStr, err)
 				return
 			}
-
-			ctx, cancel := context.WithTimeout(fanCtx, 30*time.Second)
-			defer cancel()
-
-			switch recip.Kind {
-			case messages.RecipientAgent:
-				slug := api.Slugify(recip.Name)
-				msg := buildStructuredMessage(sender, "agent:"+slug, message, msgAttach, msgPlain, interrupt)
-				msg.Type = messages.TypeGroupSet
-				msg.Recipients = recipientsStr
-				msg.Metadata = map[string]string{"group_id": groupID}
-				sendResp, err := agentSvc.SendStructuredMessage(ctx, slug, msg, interrupt, false, false)
-				if err != nil {
-					recordErr(idx, recipStr, err)
-					return
-				}
-				if sendResp != nil && sendResp.Status == "deferred" {
-					record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDeferred})
-					return
-				}
-				if sendResp != nil && sendResp.Status == "ambiguous" {
-					recordAmbiguous(idx, recipStr, sendResp.MessageID)
-					return
-				}
-				record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDelivered})
-
-			case messages.RecipientUser:
-				senderAgent := os.Getenv("SCION_AGENT_NAME")
-				if senderAgent == "" {
-					record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusFailed,
-						Error: "sending to users requires agent context (SCION_AGENT_NAME not set)"})
-					return
-				}
-				userRecip := recipStr
-				if !strings.HasPrefix(userRecip, "user:") {
-					userRecip = "user:" + recip.Name
-				}
-				outMsg := &hubclient.OutboundMessageRequest{
-					Recipient:   userRecip,
-					Msg:         message,
-					Type:        messages.TypeGroupSet,
-					Urgent:      interrupt,
-					Attachments: msgAttach,
-					Channel:     msgChannel,
-					ThreadID:    msgThreadID,
-					Metadata:    map[string]string{"recipients": recipientsStr, "group_id": groupID},
-				}
-				outResp, err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg)
-				if err != nil {
-					recordErr(idx, recipStr, err)
-					return
-				}
-				if outResp != nil && outResp.Status == "ambiguous" {
-					recordAmbiguous(idx, recipStr, outResp.MessageID)
-					return
-				}
-				record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDelivered})
+			var warnings []hubclient.AttachmentWarning
+			if sendResp != nil {
+				warnings = sendResp.AttachmentWarnings
 			}
-		}(i, r)
+			if sendResp != nil && sendResp.Status == "deferred" {
+				record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDeferred, MessageID: sendResp.MessageID, AttachmentWarnings: warnings})
+				return
+			}
+			if sendResp != nil && sendResp.Status == "ambiguous" {
+				recordAmbiguous(idx, recipStr, sendResp.MessageID, warnings)
+				return
+			}
+			record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDelivered, MessageID: messageResponseID(sendResp), AttachmentWarnings: warnings})
+
+		case messages.RecipientUser:
+			senderAgent := os.Getenv("SCION_AGENT_NAME")
+			if senderAgent == "" {
+				record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusFailed,
+					Error: "sending to users requires agent context (SCION_AGENT_NAME not set)"})
+				return
+			}
+			userRecip := recipStr
+			if !strings.HasPrefix(userRecip, "user:") {
+				userRecip = "user:" + recip.Name
+			}
+			outMsg := &hubclient.OutboundMessageRequest{
+				Recipient:   userRecip,
+				Msg:         message,
+				Type:        messages.TypeGroupSet,
+				Urgent:      interrupt,
+				Attachments: msgAttach,
+				Channel:     msgChannel,
+				ThreadID:    msgThreadID,
+				Metadata:    map[string]string{"recipients": recipientsStr, "group_id": groupID},
+			}
+			outResp, err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg)
+			if err != nil {
+				recordErr(idx, recipStr, err)
+				return
+			}
+			var warnings []hubclient.AttachmentWarning
+			if outResp != nil {
+				warnings = outResp.AttachmentWarnings
+			}
+			if outResp != nil && outResp.Status == "ambiguous" {
+				recordAmbiguous(idx, recipStr, outResp.MessageID, warnings)
+				return
+			}
+			var outMsgID string
+			if outResp != nil {
+				outMsgID = outResp.MessageID
+			}
+			record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDelivered, MessageID: outMsgID, AttachmentWarnings: warnings})
+		}
 	}
-	wg.Wait()
+	boundedFanOut(fanCtx, len(recipients), maxFanOutConcurrency, hooks.onQueued, sendOne, recordNotSent)
 	// signalled must be read before stopFanOut, which cancels fanCtx.
 	signalled := fanCtx.Err() != nil
 	stopFanOut()
@@ -1300,8 +1411,6 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 		if err := outputJSON(summary); err != nil {
 			return err
 		}
-	} else {
-		printGroupSendSummary(summary, interrupted)
 	}
 
 	// @mention and --cc fan-out for group messages: mentioned agents that are
@@ -1339,6 +1448,16 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 		}
 	}
 
+	// The delivery summary (counts plus the per-outcome recipient lists)
+	// prints after the mention fan-out so it ends the output; mention notes
+	// above it never change the delivery result or the exit code. The
+	// per-recipient progress lines printed during the fan-out necessarily
+	// come first, since mentions are only sent once the group sends finish.
+	if !isJSONOutput() {
+		printGroupSendSummary(summary, interrupted)
+		printAttachmentWarnings(groupAttachmentWarnings(results))
+	}
+
 	// A25.6 F2: a deferred recipient is not a failure (design agent-reincarnate
 	// §3.7 — the message is saved for catch-up, not dropped), so it must not
 	// trip the partial-failure error below on its own.
@@ -1367,6 +1486,23 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 		msg += "; do not resend to the whole group"
 	}
 	return &groupSendError{msg: msg, partial: true}
+}
+
+// groupAttachmentWarnings collects the attachment warnings across a group
+// send's recipients. Every recipient is sent the same attachments, so the same
+// file usually fails for each of them; it is reported once.
+func groupAttachmentWarnings(results []groupRecipientResult) []hubclient.AttachmentWarning {
+	var out []hubclient.AttachmentWarning
+	seen := make(map[hubclient.AttachmentWarning]bool)
+	for _, r := range results {
+		for _, w := range r.AttachmentWarnings {
+			if !seen[w] {
+				seen[w] = true
+				out = append(out, w)
+			}
+		}
+	}
+	return out
 }
 
 // groupSendCounts formats a group send's outcome counts.
@@ -1589,7 +1725,8 @@ func filterMentionNames(names []string, selfSlug, primarySlug string) []string {
 // printMentionResults prints one line per mention result to stderr,
 // describing the outcome for names that were not cleanly delivered. Skipped
 // entirely under --json output, where the caller includes the results in the
-// JSON response instead.
+// JSON response instead. Callers must call it before printing the send
+// confirmation, so the confirmation stays the last line of output.
 func printMentionResults(results []messages.MentionResult) {
 	if isJSONOutput() {
 		return
@@ -1608,7 +1745,7 @@ func printMentionResults(results []messages.MentionResult) {
 				fmt.Fprintf(os.Stderr, "Mention notification sent to @%s.\n", r.Slug)
 			}
 		case "not_found":
-			fmt.Fprintf(os.Stderr, "Warning: @%s does not match any agent in this project; skipping mention\n", r.Slug)
+			fmt.Fprintf(os.Stderr, "Note: @%s is not an agent in this project; no agent was notified.\n", r.Slug)
 		case "unauthorized":
 			fmt.Fprintf(os.Stderr, "Warning: mention to @%s was denied (message delivery not authorized)\n", r.Slug)
 		case "suppressed":
@@ -1629,10 +1766,29 @@ func printMentionResults(results []messages.MentionResult) {
 	}
 }
 
+// printAttachmentWarnings prints one stderr line per attachment the hub
+// could not record on a sent message (ptone/scion#3667). The message itself
+// was sent, so this is a warning and the exit status is unchanged. Skipped
+// under --json output, where the warnings are part of the JSON response.
+//
+// The hub ingests attachments only when the sender is an agent: an agent
+// DM to another agent (including each per-recipient send of a CLI group
+// fan-out) and an agent's outbound message. Human sends and cross-project
+// sends never carry warnings. Paths shared by humans and agents still call
+// this; for a human sender the list is simply empty.
+func printAttachmentWarnings(warnings []hubclient.AttachmentWarning) {
+	if isJSONOutput() {
+		return
+	}
+	for _, w := range warnings {
+		fmt.Fprintf(os.Stderr, "Warning: attachment %s was not delivered: %s\n", w.Path, w.Reason)
+	}
+}
+
 // sendMentionMessages resolves @mentions and --cc names against project agents
 // and sends TypeMention messages to each resolved agent. The primary recipient
-// is excluded from mentions. Unresolved names produce stderr warnings but do
-// not fail the primary send.
+// is excluded from mentions. Unresolved names produce a non-fatal stderr note
+// and do not fail the primary send.
 func sendMentionMessages(hubCtx *HubContext, sender, primaryRecipient, messageText string, mentionNames []string, agentSvc hubclient.AgentService) {
 	if len(mentionNames) == 0 {
 		return
@@ -1681,7 +1837,7 @@ func sendMentionMessages(hubCtx *HubContext, sender, primaryRecipient, messageTe
 
 		slug, ok := knownAgents[lower]
 		if !ok {
-			fmt.Fprintf(os.Stderr, "Warning: @%s does not match any agent in this project; skipping mention\n", name)
+			fmt.Fprintf(os.Stderr, "Note: @%s is not an agent in this project; no agent was notified.\n", name)
 			continue
 		}
 		resolved = append(resolved, slug)
@@ -1763,7 +1919,8 @@ func init() {
 	// Retained flags (core message functionality)
 	messageCmd.Flags().BoolVarP(&msgInterrupt, "interrupt", "i", false, "Interrupt the harness before sending the message")
 	messageCmd.Flags().BoolVarP(&msgWake, "wake", "w", false, "Resume a suspended agent before delivering the message")
-	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable; use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace). Absolute paths outside these roots are silently dropped on delivery.")
+	messageCmd.Flags().StringArrayVar(&msgArtifacts, "artifact", nil, "Reference a published artifact (scion://artifact/<id>[@<seq>]), repeatable, at most 10. The reference is added to the message text and the recipient is shown how to fetch it; the hub attaches only artifacts you can read.")
+	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable; use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace). Absolute paths outside these roots are skipped with a warning; attachments the hub cannot read are reported as warnings after the message is sent.")
 	messageCmd.Flags().StringVar(&msgBodyFile, "body-file", "", "Read message body from a file instead of positional args ('-' reads stdin; trailing CR/LF characters are trimmed)")
 
 	// Deprecated flags — still functional, emit warnings when used.

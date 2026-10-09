@@ -1264,13 +1264,35 @@ func (s *session) RefreshAuth(credential []byte, streamID uint32) error {
 	return s.sendControl(s.ctx, &conduitv1.Frame{Body: &conduitv1.Frame_AuthRefresh{AuthRefresh: &conduitv1.AuthRefresh{Credential: credential, StreamId: streamID}}})
 }
 
+// reasonBadFrame is the §3.3.1 reason token of a 4400 frame violation.
+const reasonBadFrame = "bad_frame"
+
 // handleAuthRefresh validates refreshes one at a time, in arrival order;
 // refreshes arriving while one is in flight collapse to the latest (a
 // newer credential supersedes older ones). A failed validation closes the
 // session.
 func (s *session) handleAuthRefresh(ar *conduitv1.AuthRefresh) {
 	if s.adm == nil {
-		return // only the relay side validates credentials
+		// Only the relay side validates credentials. On the target side,
+		// an AuthRefresh{stream_id} is the hub's renewal notice for a
+		// stream it holds the deadline of (design §3.5): it is accepted
+		// and needs no action, and a notice for a stream that already
+		// ended is ignored. Stream lifetime never depends on it.
+		return
+	}
+	if id := ar.GetStreamId(); id != 0 {
+		// Stream renewal (AuthRefresh{stream_id}) only travels from the
+		// relay toward the target. One sent by a dialer is a protocol
+		// error: it is logged and ends the session, and never reaches the
+		// Admitter, so it cannot move any stream's authorization.
+		info := s.Info()
+		s.cfg.Logger.Warn("conduit: dialer sent AuthRefresh with a stream id",
+			"session_id", info.SessionID,
+			"principal_kind", info.PrincipalKind,
+			"principal_id", info.PrincipalID,
+			"stream_id", id)
+		s.closeWithCode(CloseProtocolError, reasonBadFrame+": auth_refresh with stream_id")
+		return
 	}
 	s.mu.Lock()
 	if s.refreshing {

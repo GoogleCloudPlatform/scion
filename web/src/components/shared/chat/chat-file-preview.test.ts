@@ -623,6 +623,93 @@ describe('scion-chat-file-preview', () => {
     revokeSpy.mockRestore();
   });
 
+  describe('image decode error', () => {
+    function imageResponse() {
+      return {
+        ok: true,
+        status: 200,
+        blob: () => Promise.resolve(new Blob(['not-a-png'], { type: 'image/png' })),
+      };
+    }
+
+    function previewImg(el: ScionChatFilePreview): HTMLImageElement | null {
+      return (dialog(el)?.querySelector('img.file-preview-image') as HTMLImageElement) ?? null;
+    }
+
+    it('shows the error state with Retry instead of a broken image', async () => {
+      apiFetchMock.mockImplementation(() => Promise.resolve(imageResponse()));
+      const el = await mount();
+      el.target = IMAGE_ATTACHMENT;
+      await settle(el);
+      const img = previewImg(el);
+      expect(img).not.toBeNull();
+
+      img!.dispatchEvent(new Event('error'));
+      await settle(el);
+
+      expect(previewImg(el)).toBeNull();
+      const placeholder = dialog(el)?.querySelector('.file-preview-placeholder.error');
+      expect(placeholder?.textContent).toContain("This image couldn't be displayed.");
+      const retry = Array.from(dialog(el)?.querySelectorAll('sl-button') ?? []).find((b) =>
+        b.textContent?.includes('Retry')
+      );
+      expect(retry).toBeDefined();
+    });
+
+    it('revokes the object URL exactly once across error, retry and disconnect', async () => {
+      const revokeSpy = vi.spyOn(URL, 'revokeObjectURL');
+      apiFetchMock
+        .mockImplementationOnce(() => Promise.resolve(imageResponse()))
+        .mockImplementation(() => new Promise(() => {}));
+      const el = await mount();
+      el.target = IMAGE_ATTACHMENT;
+      await settle(el);
+      const img = previewImg(el)!;
+      const url = img.getAttribute('src');
+      expect(url).toMatch(/^blob:/);
+
+      img.dispatchEvent(new Event('error'));
+      // A duplicate event for the same image must not revoke again.
+      img.dispatchEvent(new Event('error'));
+      await settle(el);
+      expect(revokeSpy).toHaveBeenCalledTimes(1);
+      expect(revokeSpy).toHaveBeenCalledWith(url);
+
+      const retry = Array.from(dialog(el)!.querySelectorAll('sl-button')).find((b) =>
+        b.textContent?.includes('Retry')
+      ) as HTMLElement;
+      retry.click();
+      await settle(el);
+      el.remove();
+
+      expect(revokeSpy.mock.calls.filter(([u]) => u === url)).toHaveLength(1);
+      revokeSpy.mockRestore();
+    });
+
+    it('re-fetches and renders the image again on Retry after a decode error', async () => {
+      apiFetchMock.mockImplementation(() => Promise.resolve(imageResponse()));
+      const el = await mount();
+      el.target = IMAGE_ATTACHMENT;
+      await settle(el);
+      const firstUrl = previewImg(el)!.getAttribute('src');
+      previewImg(el)!.dispatchEvent(new Event('error'));
+      await settle(el);
+      expect(previewImg(el)).toBeNull();
+
+      const retry = Array.from(dialog(el)!.querySelectorAll('sl-button')).find((b) =>
+        b.textContent?.includes('Retry')
+      ) as HTMLElement;
+      retry.click();
+      await settle(el);
+
+      expect(apiFetchMock).toHaveBeenCalledTimes(2);
+      const src = previewImg(el)?.getAttribute('src');
+      expect(src).toMatch(/^blob:/);
+      expect(src).not.toBe(firstUrl);
+      expect(dialog(el)?.querySelector('.file-preview-placeholder.error')).toBeNull();
+    });
+  });
+
   describe('reconnect after disconnect (e.g. a keyed repeat move)', () => {
     function imageResponse() {
       return {

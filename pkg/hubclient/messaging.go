@@ -95,7 +95,7 @@ func (s *messagingService) Capabilities(ctx context.Context) (*MessagingCapabili
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[MessagingCapabilities](resp)
+	return apiclient.DecodeRequired[MessagingCapabilities](resp)
 }
 
 // ResolveTarget resolves a cross-project messaging target.
@@ -108,7 +108,7 @@ func (s *messagingService) ResolveTarget(ctx context.Context, projectRef, agentR
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[TargetResolveResult](resp)
+	return apiclient.DecodeRequired[TargetResolveResult](resp)
 }
 
 // ResolveConversation resolves a conversation reference without creating rows.
@@ -123,7 +123,7 @@ func (s *messagingService) ResolveConversation(ctx context.Context, reference st
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ConversationResolveResult](resp)
+	return apiclient.DecodeRequired[ConversationResolveResult](resp)
 }
 
 // ---------------------------------------------------------------------------
@@ -150,7 +150,7 @@ func (s *messagingService) GetHubMessagingSettings(ctx context.Context) (*HubMes
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[HubMessagingSettings](resp)
+	return apiclient.DecodeRequired[HubMessagingSettings](resp)
 }
 
 // UpdateHubMessagingSettings updates the hub-level messaging admin settings.
@@ -159,7 +159,7 @@ func (s *messagingService) UpdateHubMessagingSettings(ctx context.Context, req *
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[HubMessagingSettings](resp)
+	return apiclient.DecodeRequired[HubMessagingSettings](resp)
 }
 
 // ---------------------------------------------------------------------------
@@ -186,7 +186,7 @@ func (s *messagingService) GetProjectMessagingPolicy(ctx context.Context, projec
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ProjectMessagingPolicy](resp)
+	return apiclient.DecodeRequired[ProjectMessagingPolicy](resp)
 }
 
 // UpdateProjectMessagingPolicy updates a project's cross-project inbound policy.
@@ -195,5 +195,5 @@ func (s *messagingService) UpdateProjectMessagingPolicy(ctx context.Context, pro
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ProjectMessagingPolicy](resp)
+	return apiclient.DecodeRequired[ProjectMessagingPolicy](resp)
 }

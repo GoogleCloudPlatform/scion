@@ -93,7 +93,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleSuperAdmin,
 			Description: "Full platform administrator with all permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    1,
+			Revision:    2, // R2: add broker.auto_provide (ptone/scion#2104)
 			Permissions: allPermissionIDs(),
 		},
 		{
@@ -124,7 +124,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleHubMember,
 			Description: "Hub member with read access to directory resources and project creation",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    3, // R3: add broker.create (ptone/scion#2138) — explicit hub-member grant for broker registration
+			Revision:    4, // R4: self-scoped inbox.read, inbox.write, user_skill_injection.update; R3: add broker.create (ptone/scion#2138)
 			Permissions: hubMemberPermissionIDs(),
 		},
 		{
@@ -143,7 +143,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.ProjectRoleOwner,
 			Description: "Project owner with full project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    6, // R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    7, // R7: project.set_messaging_policy; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectOwnerPermissionIDs(),
 		},
 		{
@@ -240,6 +240,12 @@ func hubMemberPermissionIDs() []string {
 		"hub.settings.read",
 		// Project creation — hub members may create projects
 		"project.create",
+		// Self-scoped permissions: each acts only on the holder's own
+		// records (permissions.IsSelfPermission), so a system-scope grant
+		// reaches no other user's or project's records.
+		"inbox.read",
+		"inbox.write",
+		"user_skill_injection.update",
 	}
 }
 
@@ -335,6 +341,9 @@ func projectOwnerPermissionIDs() []string {
 		"project.manage",
 		"project.read",
 		"project.secret_read",
+		// Project owners hold project.set_messaging_policy; the messaging
+		// policy handler also applies the direct-owner rule.
+		"project.set_messaging_policy",
 		"project.update",
 		// Scheduled event management
 		"scheduled_event.create",
@@ -1973,6 +1982,13 @@ func removeHubMembershipTx(ctx context.Context, tx store.Store, userID string) e
 	err = tx.RemoveGroupMember(ctx, group.ID, store.GroupMemberTypeUser, userID)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return fmt.Errorf("remove user from hub-members group: %w", err)
+	}
+	if err == nil {
+		// A hub-scope change: re-evaluate the user's project standing in
+		// the caller's transaction (ptone/scion#3433).
+		if err := enqueueMembershipLossTx(ctx, tx, userID, "", store.MembershipLossTriggerSystemScopeChange, auditActorFromContext(ctx)); err != nil {
+			return err
+		}
 	}
 	return nil
 }

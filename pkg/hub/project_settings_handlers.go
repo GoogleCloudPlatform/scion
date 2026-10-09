@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -325,10 +326,6 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 	// enumerate other projects' service account IDs by watching which ones fail
 	// differently. "Does not exist" and "exists but is not yours" are one answer.
 	//
-	// The literal moved to msgSANotAvailableInProject — same string, no wire
-	// change here — because the agent create and PATCH paths had NOT followed
-	// this rule and now do. Three copies of a string whose entire value is that
-	// they match is three chances to stop matching.
 	// The check itself lives in validateProjectDefaultSAID, shared with the
 	// per-profile map.
 	return s.validateProjectDefaultSAID(w, ctx, project, req.DefaultGCPIdentityServiceAccountID, "the project default")
@@ -343,11 +340,19 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 func (s *Server) validateProjectDefaultSAID(w http.ResponseWriter, ctx context.Context, project *store.Project, saID, what string) bool {
 	// See validateDefaultGCPIdentity: not-found and not-reachable share one
 	// message so the endpoint is not an existence oracle.
+	//
+	// This helper shares the msgSANotAvailableInProject literal with the agent
+	// create and PATCH paths, so the project default, each per-profile default,
+	// agent create and agent PATCH all give the same message text. Separate
+	// copies of a string whose entire value is that they match would be
+	// separate chances to stop matching.
 	const notAvailable = msgSANotAvailableInProject
 
 	sa, err := s.store.GetGCPServiceAccount(ctx, saID)
 	if err != nil {
-		if err == store.ErrNotFound {
+		// errors.Is, as on agent create and PATCH: a wrapped ErrNotFound must
+		// get the same answer as the not-reachable case below, not a 404.
+		if errors.Is(err, store.ErrNotFound) {
 			BadRequest(w, notAvailable)
 			return false
 		}

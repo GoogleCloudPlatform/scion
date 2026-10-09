@@ -251,10 +251,13 @@ func TestResolveSharedDirsPerDir_NoOverridesMatchesResolveSharedDirs(t *testing.
 	dirs := notesAndCache()
 	want, wantRes, err := resolveSharedDirs(nil, projectDir, "", "docker", dirs, "/workspace", false)
 	require.NoError(t, err)
-	got, gotRes, err := resolveSharedDirsPerDir(nil, nil, projectDir, "", "docker", dirs, "/workspace", false)
+	got, gotRes, gotByName, err := resolveSharedDirsPerDir(nil, nil, projectDir, "", "docker", dirs, "/workspace", false)
 	require.NoError(t, err)
 	assert.Equal(t, want, got)
 	assert.Equal(t, wantRes, gotRes)
+	require.Len(t, gotByName, 2)
+	assert.Equal(t, want[0], gotByName["notes"])
+	assert.Equal(t, want[1], gotByName["gocache"])
 }
 
 // Mixed backends on docker: the nfs dir is bind-mounted from the export,
@@ -269,7 +272,7 @@ func TestResolveSharedDirsPerDir_MixedDocker(t *testing.T) {
 
 	dirs := []api.SharedDir{{Name: "gocache"}, {Name: "notes", InWorkspace: true}, {Name: "scratch"}}
 	overrides := map[string]*config.V1SharedDirStorageConfig{"notes": nfsCfg}
-	vols, res, err := resolveSharedDirsPerDir(&config.V1SharedDirStorageConfig{Backend: "local"}, overrides, projectDir, "pid-1", "docker", dirs, "/workspace", false)
+	vols, res, byName, err := resolveSharedDirsPerDir(&config.V1SharedDirStorageConfig{Backend: "local"}, overrides, projectDir, "pid-1", "docker", dirs, "/workspace", false)
 	require.NoError(t, err)
 	require.Len(t, vols, 3)
 
@@ -280,6 +283,8 @@ func TestResolveSharedDirsPerDir_MixedDocker(t *testing.T) {
 	assert.Equal(t, filepath.Join(hostBase, "projects", "pid-1", "shared-dirs", "notes"), vols[1].Source)
 	assert.Equal(t, "/workspace/.scion-volumes/notes", vols[1].Target)
 	assert.Equal(t, filepath.Join(localBase, "scratch"), vols[2].Source)
+
+	assert.Equal(t, map[string]api.VolumeMount{"gocache": vols[0], "notes": vols[1], "scratch": vols[2]}, byName)
 
 	require.NotNil(t, res)
 	assert.Equal(t, map[string]string{"notes": "projects/pid-1/shared-dirs/notes"}, res.SubPaths)
@@ -302,9 +307,10 @@ func TestResolveSharedDirsPerDir_LocalOverrideOnNFSDefault(t *testing.T) {
 	nfsCfg := nfsSharedDirStorageCfg(mountRoot)
 
 	overrides := map[string]*config.V1SharedDirStorageConfig{"gocache": {Backend: "local"}}
-	vols, res, err := resolveSharedDirsPerDir(nfsCfg, overrides, projectDir, "pid-1", "kubernetes", notesAndCache(), "/workspace", false)
+	vols, res, byName, err := resolveSharedDirsPerDir(nfsCfg, overrides, projectDir, "pid-1", "kubernetes", notesAndCache(), "/workspace", false)
 	require.NoError(t, err)
 	require.Len(t, vols, 2)
+	assert.Len(t, byName, 2)
 	require.NotNil(t, res)
 	assert.Equal(t, "scion-shared", res.PVClaimName)
 	assert.Equal(t, map[string]string{"notes": "projects/pid-1/shared-dirs/notes"}, res.SubPaths)
@@ -316,7 +322,7 @@ func TestResolveSharedDirsPerDir_LocalOverrideOnNFSDefault(t *testing.T) {
 func TestResolveSharedDirsPerDir_NFSDirFailsClosed(t *testing.T) {
 	projectDir := newTestProjectDir(t)
 	overrides := map[string]*config.V1SharedDirStorageConfig{"notes": nfsSharedDirStorageCfg(t.TempDir())}
-	_, _, err := resolveSharedDirsPerDir(nil, overrides, projectDir, "", "docker", notesAndCache(), "/workspace", false)
+	_, _, _, err := resolveSharedDirsPerDir(nil, overrides, projectDir, "", "docker", notesAndCache(), "/workspace", false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no hub project ID")
 }
@@ -325,7 +331,7 @@ func TestResolveSharedDirsPerDir_NFSDirFailsClosed(t *testing.T) {
 func TestResolveSharedDirsPerDir_InvalidDefaultFailsClosed(t *testing.T) {
 	projectDir := newTestProjectDir(t)
 	overrides := map[string]*config.V1SharedDirStorageConfig{"notes": {Backend: "local"}, "gocache": {Backend: "local"}}
-	_, _, err := resolveSharedDirsPerDir(&config.V1SharedDirStorageConfig{Backend: "NFS"}, overrides, projectDir, "", "docker", notesAndCache(), "/workspace", false)
+	_, _, _, err := resolveSharedDirsPerDir(&config.V1SharedDirStorageConfig{Backend: "NFS"}, overrides, projectDir, "", "docker", notesAndCache(), "/workspace", false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "server.shared_dir_storage")
 }

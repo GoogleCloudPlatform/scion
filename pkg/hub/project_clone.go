@@ -274,9 +274,25 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 		}
 	}()
 
-	// ── Step 4: Create project row ───────────────────────────────────────
+	// The caller becomes the clone's owner: the request credential must
+	// cover the owner role before anything is written.
+	if !s.authorizeProjectOwnerGrant(w, ctx) {
+		return
+	}
 
-	if err := s.store.CreateProject(ctx, clone); err != nil {
+	// ── Steps 4 and 5: Create project row and owner role binding ─────────
+	// The clone creator becomes the project owner via a direct role binding
+	// (PM1), written with the project row and its audit record in one
+	// transaction. This is the canonical project membership source.
+
+	if err := s.createProjectWithOwner(ctx, clone, callerID); err != nil {
+		if errors.Is(err, errProjectOwnerBinding) {
+			slog.Error("project clone: failed to create owner role binding",
+				"clone_id", clone.ID, "user_id", callerID, "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"Failed to create owner role binding: "+err.Error(), nil)
+			return
+		}
 		writeErrorFromErr(w, err, "")
 		return
 	}
@@ -292,20 +308,6 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 				"clone_id", clone.ID, "error", delErr)
 		}
 	})
-
-	// ── Step 5: Create owner role binding (PM1: atomic with project) ─────
-	// The clone creator becomes the project owner via a direct role binding.
-	// This is the canonical project membership source. The step 4 rollback
-	// already cascade-deletes all project-scoped bindings.
-	if callerID != "" {
-		if rbErr := s.createProjectOwnerRoleBinding(ctx, clone.ID, callerID); rbErr != nil {
-			slog.Error("project clone: failed to create owner role binding",
-				"clone_id", clone.ID, "user_id", callerID, "error", rbErr)
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-				"Failed to create owner role binding: "+rbErr.Error(), nil)
-			return
-		}
-	}
 
 	// ── Step 6: Create groups ────────────────────────────────────────────
 
@@ -414,11 +416,18 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 		}
 	}
 
-	// ── Step 14: Auto-link providers (best-effort) ───────────────────────
+	// ── Step 15: Auto-link providers (best-effort) ───────────────────────
 
-	s.autoLinkProviders(ctx, clone)
+	s.autoLinkClonedProviders(ctx, clone)
 
-	// ── Step 15: Publish event (best-effort) ─────────────────────────────
+	// ── Step 16: Ensure the #general chat topic (best-effort) ────────────
+	// Runs after every step that can fail and roll the clone back, so a
+	// rolled-back clone never leaves an orphaned topic behind. Skipped for
+	// template clones (asTemplate), which are not chat spaces.
+
+	s.ensureProjectGeneralTopic(ctx, clone)
+
+	// ── Step 17: Publish event (best-effort) ─────────────────────────────
 
 	s.events.PublishProjectCreated(ctx, clone)
 
@@ -1151,6 +1160,33 @@ func isGitSourceLabel(k string) bool {
 		return true
 	}
 	return false
+}
+
+// autoLinkClonedProviders auto-links the auto-provide brokers to a new clone
+// and settles its default runtime broker. A default runtime broker must be
+// a provider of the project: the default copied from the source is kept
+// only when the clone has that provider row after auto-linking; otherwise
+// the first auto-linked broker becomes the default, or the default is
+// cleared when there is none. The stored default is read back and written
+// whenever it differs from the settled one, so the store and the returned
+// clone agree. Best-effort: store errors are logged.
+func (s *Server) autoLinkClonedProviders(ctx context.Context, clone *store.Project) {
+	copied := clone.DefaultRuntimeBrokerID
+	clone.DefaultRuntimeBrokerID = ""
+	s.autoLinkProviders(ctx, clone)
+	if copied != "" {
+		if _, err := s.store.GetProjectProvider(ctx, clone.ID, copied); err == nil {
+			clone.DefaultRuntimeBrokerID = copied
+		}
+	}
+	if current, err := s.store.GetProject(ctx, clone.ID); err == nil &&
+		current.DefaultRuntimeBrokerID == clone.DefaultRuntimeBrokerID {
+		return
+	}
+	if err := s.store.UpdateProject(ctx, clone); err != nil {
+		slog.Warn("project clone: failed to settle default runtime broker",
+			"clone_id", clone.ID, "error", err)
+	}
 }
 
 // validateCloneURLLabelValue checks the clone-url label in labels (if any)

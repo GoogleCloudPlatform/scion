@@ -41,7 +41,7 @@ func (f *relayFixture) setRunID(t *testing.T, runID string) {
 		require.NoError(t, err)
 		require.True(t, ok)
 	} else {
-		_, err := f.store.SetAgentRunID(ctx, f.launched.ID, runID)
+		_, err := f.store.SetAgentRunID(ctx, f.launched.ID, runID, nil)
 		require.NoError(t, err)
 	}
 	a, err := f.store.GetAgent(ctx, f.launched.ID)
@@ -168,7 +168,7 @@ func TestConduitAdmission_ReusedContainerAdoptedRunID(t *testing.T) {
 
 	d := NewHTTPAgentDispatcherWithClient(f.store, nil, false, slog.Default())
 	agent := *f.launched
-	minted, _, _, err := d.beginRun(ctx, &agent)
+	minted, _, _, _, err := d.beginRun(ctx, &agent, nil)
 	require.NoError(t, err)
 	require.NotEqual(t, containerRun, minted)
 

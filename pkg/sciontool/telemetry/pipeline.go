@@ -827,11 +827,7 @@ func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricp
 		}
 		bytes, records = processedBytes, processedRecords
 		p.metricStateMu.Lock()
-		if p.metricStreams == nil {
-			p.metricStreams = newMetricStreams()
-			p.metricStreams.gcp = p.config.IsGCP()
-			p.metricStreams.now = p.now
-		}
+		p.ensureMetricStreamsLocked()
 		candidate := p.metricStreams.clone()
 		if err := candidate.add(processed); err != nil {
 			p.metricDiagnostics.rejected.Add(int64(records))
@@ -1012,6 +1008,22 @@ func (p *Pipeline) flushMetricsOnStop(ctx context.Context) {
 	}
 }
 
+// ensureMetricStreamsLocked lazily creates the cumulative stream state with
+// the provider mode and clock this pipeline uses. Both the admission path
+// and the flush loop may be first to need it — the flush loop ticks every
+// second from Start, so it usually wins — and whichever creates it must set
+// gcp, or every later stream is admitted without the GCP-only guards and
+// hook counters get no collector epoch (a zero cumulative start time that
+// Cloud Monitoring rejects). Caller holds metricStateMu.
+func (p *Pipeline) ensureMetricStreamsLocked() {
+	if p.metricStreams != nil {
+		return
+	}
+	p.metricStreams = newMetricStreams()
+	p.metricStreams.gcp = p.config.IsGCP()
+	p.metricStreams.now = p.now
+}
+
 // flushMetricBuffer exports one immutable cumulative snapshot at a time.
 //
 // Cloud Monitoring requires at least five seconds between point end times in
@@ -1029,9 +1041,7 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) bool {
 		log.Debug("Skipping metric flush — last export was %v ago (minimum %v)", sinceLastFlush.Round(time.Millisecond), metricFlushInterval)
 		return false
 	}
-	if p.metricStreams == nil {
-		p.metricStreams = newMetricStreams()
-	}
+	p.ensureMetricStreamsLocked()
 	if len(p.metricPending) == 0 {
 		if p.config.IsGCP() {
 			batch, ends, eligible := p.metricStreams.snapshotGCP(p.now(), p.metricPossibleEnds)

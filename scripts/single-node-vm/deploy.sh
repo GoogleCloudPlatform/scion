@@ -21,7 +21,8 @@
 # enables IAP, configures the hub for proxy auth, and prints the access URL.
 #
 # The VM has no public IP; authenticated access is via the Cloud Run IAP proxy.
-# Agents running on the VM connect via localhost (no IAP needed).
+# Agents running on the VM reach the hub directly on the VM's port 8080 over
+# the Docker bridge (hostname scion-hub.internal), bypassing IAP.
 #
 # The script is idempotent: re-running converges without duplication.
 #
@@ -65,6 +66,13 @@
 #                                 marker and images already match VERSION.
 #   admin_email                  Granted super-admin on first login. Empty =
 #                                 active gcloud account.
+#   hub_sa_minting               true (the default) or false. When true,
+#                                 the hub VM's service account is granted
+#                                 roles/iam.serviceAccountAdmin on the
+#                                 project so the hub can mint service
+#                                 accounts for agents. false skips the
+#                                 grant (and does not revoke an earlier
+#                                 one).
 #   update_policy                auto, notify, or disabled. Requires the
 #                                 binary auto-update feature.
 #   release_channel              stable, preview, or nightly. Defaults to
@@ -1166,6 +1174,16 @@ if [[ "$CLI_REBUILD_IMAGES" == "true" ]]; then
   CFG_FORCE_REBUILD="true"
 fi
 
+# --- Hub service account minting ---
+# On by default: the hub VM's SA is granted roles/iam.serviceAccountAdmin
+# (Phase 2) so the hub can mint service accounts for agents. Set
+# hub_sa_minting: false to skip that grant.
+HUB_SA_MINTING="$(config_get 'hub_sa_minting' 'true')"
+case "$HUB_SA_MINTING" in
+  true|false) ;;
+  *) err "Invalid hub_sa_minting in config: '${HUB_SA_MINTING}' (expected: true or false)"; exit 1 ;;
+esac
+
 # --- Admin email ---
 ADMIN_EMAIL="$(config_get 'admin_email' '')"
 if [[ -z "$ADMIN_EMAIL" ]]; then
@@ -1419,6 +1437,7 @@ REQUIRED_APIS=(
   artifactregistry.googleapis.com
   aiplatform.googleapis.com
   iam.googleapis.com
+  iamcredentials.googleapis.com
 )
 if [[ "$HYBRID_ENABLED" == "true" ]]; then
   REQUIRED_APIS+=(container.googleapis.com)
@@ -1794,8 +1813,17 @@ fi
 # Bind minimal IAM roles (idempotent)
 # artifactregistry.writer lets the VM build and push the Cloud Run IAP proxy
 # image directly to Artifact Registry (see Phase 4).
+# iam.serviceAccountAdmin lets the hub mint service accounts for agents: the
+# hub calls the IAM API with this SA's credentials to create the account,
+# read and set IAM policy on it, and delete it if a follow-up grant fails.
+# serviceAccountCreator alone is not enough for that flow. Skipped when
+# hub_sa_minting is false.
+HUB_SA_ROLES=(roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtrace.agent roles/artifactregistry.writer roles/aiplatform.user)
+if [[ "$HUB_SA_MINTING" == "true" ]]; then
+  HUB_SA_ROLES+=(roles/iam.serviceAccountAdmin)
+fi
 info "Binding IAM roles..."
-for ROLE in roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtrace.agent roles/artifactregistry.writer roles/aiplatform.user; do
+for ROLE in "${HUB_SA_ROLES[@]}"; do
   if ! BIND_ERR="$(gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${SA_EMAIL}" \
     --role="${ROLE}" \
@@ -1806,7 +1834,14 @@ for ROLE in roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtra
     exit 1
   fi
 done
-echo "  Roles bound: logging.logWriter, monitoring.metricWriter, cloudtrace.agent, artifactregistry.writer, aiplatform.user"
+if [[ "$HUB_SA_MINTING" == "true" ]]; then
+  echo "  Roles bound: logging.logWriter, monitoring.metricWriter, cloudtrace.agent, artifactregistry.writer, aiplatform.user, iam.serviceAccountAdmin"
+else
+  echo "  Roles bound: logging.logWriter, monitoring.metricWriter, cloudtrace.agent, artifactregistry.writer, aiplatform.user"
+  echo "  Skipped iam.serviceAccountAdmin (hub_sa_minting is false): the hub cannot mint service accounts."
+  echo "  A binding granted by an earlier deploy is not removed; remove it with:"
+  echo "    gcloud projects remove-iam-policy-binding ${PROJECT_ID} --member=serviceAccount:${SA_EMAIL} --role=roles/iam.serviceAccountAdmin --condition=None"
+fi
 
 # --- Proxy service account ---
 # A separate, minimally-privileged identity for the Cloud Run IAP proxy
@@ -3136,7 +3171,7 @@ echo "  ${PROXY_URL}"
 echo ""
 echo "You will be prompted to authenticate via Google IAP."
 echo ""
-echo "Agents running on the VM connect via localhost:8080 (no IAP needed)."
+echo "Agents running on the VM reach the hub at http://scion-hub.internal:8080 over the Docker bridge (no IAP needed)."
 echo ""
 echo "To view service logs:"
 echo ""

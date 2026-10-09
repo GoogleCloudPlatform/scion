@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -119,6 +120,15 @@ func TestClassifyStartError(t *testing.T) {
 		code, _ := classifyStartError(context.Background(), config.ErrHarnessConfigNotFound, "")
 		if code != "template_not_found" {
 			t.Fatalf("code = %q, want template_not_found", code)
+		}
+	})
+
+	t.Run("harness-config policy refusal", func(t *testing.T) {
+		d := harnessPolicyDecision{OK: false, Code: ErrCodeForbidden, HTTPStatus: 403, Message: "refused: set allow_container_script_harnesses=true"}
+		err := fmt.Errorf("%w: %w", agent.ErrHarnessConfigPolicy, &harnessPolicyRefusal{d: d})
+		code, msg := classifyStartError(context.Background(), err, "")
+		if code != "harness_config_policy" || msg != d.Message {
+			t.Errorf("got (%q, %q), want (harness_config_policy, %q)", code, msg, d.Message)
 		}
 	})
 
@@ -795,8 +805,13 @@ func TestRunLaunch_DownloadValidatesWorkspaceDirBeforeCreatingIt(t *testing.T) {
 	if got.ErrorCode != "runtime_error" {
 		t.Fatalf("terminal error code = %q, want runtime_error", got.ErrorCode)
 	}
-	if !strings.Contains(got.Message, "invalid workspace directory") {
-		t.Fatalf("terminal message = %q, want it to name the invalid workspace directory", got.Message)
+	// The same text the synchronous 400 carries (ptone/scion#3496).
+	_, verr := runtime.ValidateWorkspaceSource(filepath.Join(srv.config.WorktreeBase, name, "workspace"), srv.config.WorktreeBase)
+	if verr == nil {
+		t.Fatal("expected the symlinked workspace directory to fail validation")
+	}
+	if want := "Invalid workspace directory: " + verr.Error(); got.Message != want {
+		t.Fatalf("terminal message = %q, want the synchronous 400 text %q", got.Message, want)
 	}
 }
 

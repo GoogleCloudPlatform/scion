@@ -24,6 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -85,7 +86,52 @@ func entScheduleToStore(e *ent.Schedule) *store.Schedule {
 		e.InitiatorCredentialKind, e.InitiatorCredentialID, e.InitiatorCredentialSnapshot,
 		e.AttributionVersion, e.AuthorizationRevision,
 	)
+	sc.AuthorityCeiling = authorityCeilingFromColumns(
+		e.AuthorityCeilingKind, e.AuthorityCeilingVersion, e.AuthorityCeilingPermissionIds,
+		e.AuthorityCeilingBoundaryKind, e.AuthorityCeilingBoundaryProjectID, e.AuthorityCeilingSourceExpiresAt,
+	)
 	return sc
+}
+
+// authorityCeilingFromColumns collapses the authority_ceiling_* columns
+// (identical on Schedule and ScheduledEvent, via one ent mixin) into a
+// store.EffectCeiling. Only a bounded ceiling carries permission IDs: a
+// stored list on any other kind is ignored, and a bounded ceiling with a
+// NULL or malformed list reads back as an empty list, which allows nothing.
+// A row written before these columns existed reads back as unrecorded.
+func authorityCeilingFromColumns(
+	kind string, version int32, permissionIDs *string,
+	boundaryKind, boundaryProjectID string, sourceExpiresAt *time.Time,
+) store.EffectCeiling {
+	c := store.EffectCeiling{
+		Kind:              store.EffectCeilingKind(kind),
+		Version:           permissions.CeilingVersion(version),
+		BoundaryKind:      boundaryKind,
+		BoundaryProjectID: boundaryProjectID,
+		SourceExpiresAt:   sourceExpiresAt,
+	}
+	if c.Kind == store.EffectCeilingBounded {
+		ids := unmarshalCeilingPermissionIDs(permissionIDs)
+		if ids == nil {
+			ids = []string{}
+		}
+		c.PermissionIDs = ids
+	}
+	return c
+}
+
+// authorityCeilingPermissionIDsColumn returns the authority_ceiling_permission_ids
+// value for c: a JSON array (possibly empty) for a bounded ceiling, and nil
+// (SQL NULL) for every other kind.
+func authorityCeilingPermissionIDsColumn(c store.EffectCeiling) *string {
+	if c.Kind != store.EffectCeilingBounded {
+		return nil
+	}
+	ids := c.PermissionIDs
+	if ids == nil {
+		ids = []string{}
+	}
+	return marshalCeilingPermissionIDs(ids)
 }
 
 // initiatorAttributionFromColumns collapses E.2b's nullable attribution
@@ -155,6 +201,9 @@ func (s *ScheduleStore) CreateSchedule(ctx context.Context, sc *store.Schedule) 
 	if sc.Status == "" {
 		sc.Status = store.ScheduleStatusActive
 	}
+	if err := validateEdgeCeiling(sc.AuthorityCeiling); err != nil {
+		return err
+	}
 
 	create := s.client.Schedule.Create().
 		SetID(uid).
@@ -191,6 +240,13 @@ func (s *ScheduleStore) CreateSchedule(ctx context.Context, sc *store.Schedule) 
 		create.SetUpdated(sc.UpdatedAt)
 	}
 	setScheduleInitiatorAttribution(create, sc.InitiatorAttribution)
+	c := sc.AuthorityCeiling
+	create.SetAuthorityCeilingKind(string(c.Kind)).
+		SetAuthorityCeilingVersion(int32(c.Version)).
+		SetNillableAuthorityCeilingPermissionIds(authorityCeilingPermissionIDsColumn(c)).
+		SetAuthorityCeilingBoundaryKind(c.BoundaryKind).
+		SetAuthorityCeilingBoundaryProjectID(c.BoundaryProjectID).
+		SetNillableAuthorityCeilingSourceExpiresAt(c.SourceExpiresAt)
 
 	created, err := create.Save(ctx)
 	if err != nil {
@@ -393,7 +449,11 @@ func (s *ScheduleStore) ListActiveZonePrefixedSchedules(ctx context.Context, lim
 //
 // When attribution is non-nil, the same conditional write also replaces the
 // row's InitiatorAttribution (old and new authority are never unioned; a
-// re-attribution is atomic with the revision bump).
+// re-attribution is atomic with the revision bump) and its AuthorityCeiling,
+// taken from sc.AuthorityCeiling. When attribution is nil, the ceiling
+// columns are not written. A caller that re-attributes without setting
+// sc.AuthorityCeiling therefore writes the unrecorded zero value, never a
+// stale ceiling.
 //
 // Returns store.ErrRevisionConflict when the schedule exists but its
 // revision no longer matches, and store.ErrNotFound if the schedule itself
@@ -406,6 +466,11 @@ func (s *ScheduleStore) UpdateSchedule(
 	uid, err := parseUUID(sc.ID)
 	if err != nil {
 		return err
+	}
+	if attribution != nil {
+		if err := validateEdgeCeiling(sc.AuthorityCeiling); err != nil {
+			return err
+		}
 	}
 
 	update := s.client.Schedule.Update().Where(schedule.IDEQ(uid))
@@ -439,6 +504,7 @@ func (s *ScheduleStore) UpdateSchedule(
 	}
 	if attribution != nil {
 		update = setScheduleAttributionUpdate(update, *attribution)
+		update = setScheduleAuthorityCeilingUpdate(update, sc.AuthorityCeiling)
 	}
 
 	affected, err := update.Save(ctx)
@@ -507,6 +573,27 @@ func setScheduleAttributionUpdate(u *ent.ScheduleUpdate, attr store.InitiatorAtt
 		u = u.SetAuthorizationRevision(attr.AuthorizationRevision)
 	} else {
 		u = u.ClearAuthorizationRevision()
+	}
+	return u
+}
+
+// setScheduleAuthorityCeilingUpdate sets every authority_ceiling_* column of
+// a bulk ScheduleUpdate from c, clearing the nullable ones c leaves empty,
+// so the previous revision's ceiling is replaced, never merged.
+func setScheduleAuthorityCeilingUpdate(u *ent.ScheduleUpdate, c store.EffectCeiling) *ent.ScheduleUpdate {
+	u = u.SetAuthorityCeilingKind(string(c.Kind)).
+		SetAuthorityCeilingVersion(int32(c.Version)).
+		SetAuthorityCeilingBoundaryKind(c.BoundaryKind).
+		SetAuthorityCeilingBoundaryProjectID(c.BoundaryProjectID)
+	if ids := authorityCeilingPermissionIDsColumn(c); ids != nil {
+		u = u.SetAuthorityCeilingPermissionIds(*ids)
+	} else {
+		u = u.ClearAuthorityCeilingPermissionIds()
+	}
+	if c.SourceExpiresAt != nil {
+		u = u.SetAuthorityCeilingSourceExpiresAt(*c.SourceExpiresAt)
+	} else {
+		u = u.ClearAuthorityCeilingSourceExpiresAt()
 	}
 	return u
 }
@@ -646,6 +733,10 @@ func entScheduledEventToStore(e *ent.ScheduledEvent) *store.ScheduledEvent {
 		e.InitiatorCredentialKind, e.InitiatorCredentialID, e.InitiatorCredentialSnapshot,
 		e.AttributionVersion, e.AuthorizationRevision,
 	)
+	evt.AuthorityCeiling = authorityCeilingFromColumns(
+		e.AuthorityCeilingKind, e.AuthorityCeilingVersion, e.AuthorityCeilingPermissionIds,
+		e.AuthorityCeilingBoundaryKind, e.AuthorityCeilingBoundaryProjectID, e.AuthorityCeilingSourceExpiresAt,
+	)
 	return evt
 }
 
@@ -668,6 +759,9 @@ func (s *ScheduleStore) CreateScheduledEvent(ctx context.Context, event *store.S
 	}
 	if event.Status == "" {
 		event.Status = store.ScheduledEventPending
+	}
+	if err := validateEdgeCeiling(event.AuthorityCeiling); err != nil {
+		return err
 	}
 
 	create := s.client.ScheduledEvent.Create().
@@ -694,6 +788,13 @@ func (s *ScheduleStore) CreateScheduledEvent(ctx context.Context, event *store.S
 		create.SetCreated(event.CreatedAt)
 	}
 	setScheduledEventInitiatorAttribution(create, event.InitiatorAttribution)
+	c := event.AuthorityCeiling
+	create.SetAuthorityCeilingKind(string(c.Kind)).
+		SetAuthorityCeilingVersion(int32(c.Version)).
+		SetNillableAuthorityCeilingPermissionIds(authorityCeilingPermissionIDsColumn(c)).
+		SetAuthorityCeilingBoundaryKind(c.BoundaryKind).
+		SetAuthorityCeilingBoundaryProjectID(c.BoundaryProjectID).
+		SetNillableAuthorityCeilingSourceExpiresAt(c.SourceExpiresAt)
 
 	created, err := create.Save(ctx)
 	if err != nil {

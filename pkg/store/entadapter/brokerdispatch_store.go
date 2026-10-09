@@ -305,6 +305,32 @@ func (s *BrokerDispatchStore) MarkMessageFailed(ctx context.Context, id string, 
 	return nil
 }
 
+// CountBrokerDispatchHealth returns the number of in_progress dispatches whose
+// updated_at is before stuckBefore, and the number of failed dispatches whose
+// updated_at is at or after failedSince. Each is a COUNT over the
+// (state, updated_at) index: an equality on state plus a range on updated_at.
+func (s *BrokerDispatchStore) CountBrokerDispatchHealth(ctx context.Context, stuckBefore, failedSince time.Time) (stuck, failed int, err error) {
+	stuck, err = s.client.BrokerDispatch.Query().
+		Where(
+			brokerdispatch.StateEQ(store.DispatchStateInProgress),
+			brokerdispatch.UpdatedAtLT(stuckBefore),
+		).
+		Count(ctx)
+	if err != nil {
+		return 0, 0, mapError(err)
+	}
+	failed, err = s.client.BrokerDispatch.Query().
+		Where(
+			brokerdispatch.StateEQ(store.DispatchStateFailed),
+			brokerdispatch.UpdatedAtGTE(failedSince),
+		).
+		Count(ctx)
+	if err != nil {
+		return 0, 0, mapError(err)
+	}
+	return stuck, failed, nil
+}
+
 // CountStuckPendingMessages returns the number of messages still in
 // dispatch_state='pending' whose created timestamp is before the given
 // cutoff. Scoped to agent recipients only (message.RecipientHasPrefix

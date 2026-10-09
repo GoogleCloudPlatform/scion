@@ -17,7 +17,6 @@ package runtimebroker
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -589,98 +588,6 @@ func TestDedupeAgentEntries_OperationID(t *testing.T) {
 				t.Errorf("len(dedupeAgentEntries) = %d, want %d", got, tc.want)
 			}
 		})
-	}
-}
-
-// preferRunEntries: the requested run's entries win, then unlabelled legacy
-// entries; with neither, every entry is kept so another run holding the
-// name is still seen. No run keeps the list unchanged.
-func TestPreferRunEntries(t *testing.T) {
-	e := func(id, run string) api.AgentInfo { return api.AgentInfo{ContainerID: id, RunID: run} }
-	all := []api.AgentInfo{e("a", "run-1"), e("b", "run-2"), e("c", "")}
-	ids := func(in []api.AgentInfo) string {
-		var out []string
-		for _, a := range in {
-			out = append(out, a.ContainerID)
-		}
-		return strings.Join(out, ",")
-	}
-	for _, tc := range []struct {
-		name string
-		in   []api.AgentInfo
-		run  string
-		want string
-	}{
-		{"exact run wins", all, "run-2", "b"},
-		{"legacy entry when no exact", all, "run-3", "c"},
-		{"other runs only: all kept", all[:2], "run-3", "a,b"},
-		{"no run: unchanged", all, "", "a,b,c"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := ids(preferRunEntries(tc.in, tc.run)); got != tc.want {
-				t.Errorf("preferRunEntries(%q) = %s, want %s", tc.run, got, tc.want)
-			}
-		})
-	}
-}
-
-// runAgentMatchFrom: with a run, only distinct entries of other runs give
-// otherRunsHoldNameError (the run-mismatch answer), naming the run when
-// they share one; an own-run or legacy entry is matched; two entries of the
-// requested run, or two legacy entries, stay an ambiguity, as does any
-// ambiguity without a run.
-func TestRunAgentMatchFrom(t *testing.T) {
-	pod := func(ns, run string) api.AgentInfo {
-		return api.AgentInfo{Name: "dev", ContainerID: "dev", RunID: run,
-			Kubernetes: &api.AgentK8sMetadata{Namespace: ns, PodName: "dev"}}
-	}
-	for _, tc := range []struct {
-		name          string
-		agents        []api.AgentInfo
-		run           string
-		wantOther     bool
-		wantCurrent   string
-		wantMatch     string
-		wantAmbiguous bool
-	}{
-		{"two other runs", []api.AgentInfo{pod("a", "run-1"), pod("b", "run-2")}, "run-3", true, "", "", false},
-		{"one other run in two namespaces", []api.AgentInfo{pod("a", "run-1"), pod("b", "run-1")}, "run-3", true, "run-1", "", false},
-		{"own run beside another", []api.AgentInfo{pod("a", "run-1"), pod("b", "run-2")}, "run-2", false, "", "run-2", false},
-		{"legacy beside another run", []api.AgentInfo{pod("a", "run-1"), pod("b", "")}, "run-3", false, "", "", false},
-		{"single other-run entry is a match (entry check refuses it)", []api.AgentInfo{pod("a", "run-1")}, "run-3", false, "", "run-1", false},
-		{"two entries of the requested run stay ambiguous", []api.AgentInfo{pod("a", "run-3"), pod("b", "run-3")}, "run-3", false, "", "", true},
-		{"two legacy entries stay ambiguous", []api.AgentInfo{pod("a", ""), pod("b", "")}, "run-3", false, "", "", true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			m, err := runAgentMatchFrom("dev", tc.run, tc.agents, nil, nil)
-			var other *otherRunsHoldNameError
-			if got := errors.As(err, &other); got != tc.wantOther {
-				t.Fatalf("otherRunsHoldNameError = %v (err %v), want %v", got, err, tc.wantOther)
-			}
-			if tc.wantOther {
-				if other.currentRunID != tc.wantCurrent {
-					t.Errorf("currentRunID = %q, want %q", other.currentRunID, tc.wantCurrent)
-				}
-				return
-			}
-			if tc.wantAmbiguous {
-				if err == nil || !strings.Contains(err.Error(), "ambiguous") {
-					t.Fatalf("err = %v, want the ambiguity error", err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("err = %v", err)
-			}
-			if m.entry.RunID != tc.wantMatch {
-				t.Errorf("matched run = %q, want %q", m.entry.RunID, tc.wantMatch)
-			}
-		})
-	}
-	_, err := runAgentMatchFrom("dev", "", []api.AgentInfo{pod("a", "run-1"), pod("b", "run-2")}, nil, nil)
-	var other *otherRunsHoldNameError
-	if err == nil || errors.As(err, &other) || !strings.Contains(err.Error(), "ambiguous") {
-		t.Errorf("no run: err = %v, want the ambiguity error", err)
 	}
 }
 

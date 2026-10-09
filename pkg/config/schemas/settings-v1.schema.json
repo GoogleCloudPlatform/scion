@@ -1222,6 +1222,13 @@
           "x-env-var": "SCION_SERVER_HUB_ASYNCAGENTLAUNCH",
           "x-since": "1"
         },
+        "perf_trace": {
+          "type": "boolean",
+          "default": false,
+          "description": "Turns on per-request performance tracing, off by default. Each Hub API request and SSE connection then logs one perf_trace line with phase timings, authorization store-call and decision-audit counts and DB pool waits; an unscoped local platform admin who sends X-Scion-Perf-Trace: 1 also gets them in X-Scion-Perf-* response headers; no other caller does. Observe only: decisions, audit records and response bodies are unchanged. For diagnosis; not for routine production use. Restart required to change.",
+          "x-env-var": "SCION_SERVER_HUB_PERFTRACE",
+          "x-since": "1"
+        },
         "launch_timeout": {
           "type": "string",
           "description": "Whole-launch budget for an asynchronous create, from the start of the launch to a terminal Hub state (Go duration, e.g. '15m'; default '5m'). A launch that has not reached a terminal Hub state by the deadline is ended. A non-zero value below 30s is rejected and the default is used, since the broker's fixed 20s abort margin would leave no time for a launch to run. Restart required to change.",
@@ -1301,6 +1308,38 @@
               "maxLength": 128,
               "description": "This node's relay instance id; must be unique among live hub processes. Default: POD_NAME when set, else the host name plus a random per-process suffix.",
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_INSTANCEID",
+              "x-since": "1"
+            },
+            "authz_recheck_interval": {
+              "type": "string",
+              "description": "Period of the re-check sweep of open user streams: a stream whose authorization was revoked is re-checked within one interval even if the revocation event is missed (e.g. '60s'; default '60s', between '1s' and '10m').",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_AUTHZRECHECKINTERVAL",
+              "x-since": "1"
+            },
+            "stream_authz_max": {
+              "type": "object",
+              "description": "Authorization interval of open streams, per originating principal kind: when a stream reaches it, the hub re-checks the principal and renews the stream (AuthRefresh) or closes it with 4401 authz_expired. Each value is a duration between '1m' and '168h'. Enforced on user streams; the broker and agent values apply once those streams are tracked.",
+              "additionalProperties": false,
+              "properties": {
+                "user": {
+                  "type": "string",
+                  "description": "Interval of user-originated streams (port proxy, PTY) (default '8h').",
+                  "x-env-var": "SCION_SERVER_HUB_CONDUIT_STREAMAUTHZMAX_USER",
+                  "x-since": "1"
+                },
+                "broker": {
+                  "type": "string",
+                  "description": "Interval of broker-originated streams (default '24h'; not yet enforced).",
+                  "x-env-var": "SCION_SERVER_HUB_CONDUIT_STREAMAUTHZMAX_BROKER",
+                  "x-since": "1"
+                },
+                "agent": {
+                  "type": "string",
+                  "description": "Interval of agent-originated streams (default '24h'; not yet enforced).",
+                  "x-env-var": "SCION_SERVER_HUB_CONDUIT_STREAMAUTHZMAX_AGENT",
+                  "x-since": "1"
+                }
+              },
               "x-since": "1"
             }
           }
@@ -1419,6 +1458,21 @@
           "enum": ["member", "viewer"],
           "default": "member",
           "x-env-var": "SCION_SERVER_AUTH_DEFAULTUSERROLE",
+          "x-since": "1"
+        },
+        "agent_run_scope": {
+          "type": "string",
+          "description": "How the hub treats the run an agent token was issued for: 'off' (default) or 'observe' (log and count only).",
+          "enum": ["off", "observe"],
+          "default": "off",
+          "x-env-var": "SCION_SERVER_AUTH_AGENTRUNSCOPE",
+          "x-since": "1"
+        },
+        "agent_run_scope_legacy_until": {
+          "type": "string",
+          "description": "RFC 3339 time after which agent tokens issued without a run are no longer accepted by run-scope checks. Empty means no cut-off.",
+          "format": "date-time",
+          "x-env-var": "SCION_SERVER_AUTH_AGENTRUNSCOPELEGACYUNTIL",
           "x-since": "1"
         }
       }

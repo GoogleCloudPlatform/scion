@@ -463,6 +463,8 @@ func (Agent) Edges() []ent.Edge {
 			Ref("agent"),
 		edge.From("policy_bindings", PolicyBinding.Type).
 			Ref("agent"),
+		edge.To("holds", AgentHold.Type).
+			Annotations(entsql.OnDelete(entsql.Cascade)),
 	}
 }
 
@@ -471,6 +473,10 @@ func (Agent) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("slug", "project_id").
 			Unique(),
+		// Per-project lookups by owner and by creator (the legacy links of
+		// the delegation descendant query).
+		index.Fields("project_id", "owner_id"),
+		index.Fields("project_id", "created_by"),
 		// Partial index backing the T1 launch reaper's deadline scan (design
 		// §3.3): a range scan on launch_deadline restricted to in-flight
 		// launches, so it stays cheap regardless of table size. Same shape as

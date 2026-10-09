@@ -336,6 +336,9 @@ func TestOutboundDMAuthz_CrossProject_TargetModeRevoked_Denied(t *testing.T) {
 		Slug: "cprev-project-a",
 	}
 	require.NoError(t, s.CreateProject(ctx, projectA))
+	// The agents' ancestry root is a member of the project, so they are
+	// in good standing (ptone/scion#3433).
+	ensureStandingRoot(t, s, projectA.ID, ownerA.ID)
 
 	projectB := &store.Project{
 		ID:   tid("authz-cprev-project-b"),
@@ -456,6 +459,9 @@ func TestOutboundDMAuthz_CrossProject_HubFlagDisabled_Denied(t *testing.T) {
 		Created: time.Now(),
 	}
 	require.NoError(t, s.CreateUser(ctx, ownerA))
+	// The agents' ancestry root is a member of the sender's project, so they
+	// are in good standing (ptone/scion#3433).
+	ensureStandingRoot(t, s, projectA.ID, ownerA.ID)
 
 	brokerID := tid("authz-cp-broker")
 	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
@@ -533,6 +539,9 @@ func TestOutboundDMAuthz_CrossProject_InboundNone_Denied(t *testing.T) {
 		Slug: "inb-project-a",
 	}
 	require.NoError(t, s.CreateProject(ctx, projectA))
+	// The agents' ancestry root is a member of the project, so they are
+	// in good standing (ptone/scion#3433).
+	ensureStandingRoot(t, s, projectA.ID, ownerA.ID)
 
 	projectB := &store.Project{
 		ID:                  tid("authz-inb-project-b"),
@@ -620,6 +629,9 @@ func TestOutboundDMAuthz_CrossProject_OriginNotMember_Denied(t *testing.T) {
 		Slug: "mem-project-a",
 	}
 	require.NoError(t, s.CreateProject(ctx, projectA))
+	// The agents' ancestry root is a member of the project, so they are
+	// in good standing (ptone/scion#3433).
+	ensureStandingRoot(t, s, projectA.ID, ownerA.ID)
 
 	projectB := &store.Project{
 		ID:   tid("authz-mem-project-b"),
@@ -713,6 +725,9 @@ func TestOutboundDMAuthz_CrossProject_Allowed(t *testing.T) {
 		CreatedBy: ownerA.ID,
 	}
 	require.NoError(t, s.CreateProject(ctx, projectA))
+	// The agents' ancestry root is a member of the project, so they are
+	// in good standing (ptone/scion#3433).
+	ensureStandingRoot(t, s, projectA.ID, ownerA.ID)
 
 	projectB := &store.Project{
 		ID:   tid("authz-ok-project-b"),
@@ -902,6 +917,9 @@ func TestOutboundDMAuthz_CrossProject_SenderModeNotHub_Denied(t *testing.T) {
 		Slug: "smode-project-a",
 	}
 	require.NoError(t, s.CreateProject(ctx, projectA))
+	// The agents' ancestry root is a member of the project, so they are
+	// in good standing (ptone/scion#3433).
+	ensureStandingRoot(t, s, projectA.ID, ownerA.ID)
 
 	projectB := &store.Project{
 		ID:   tid("authz-smode-project-b"),

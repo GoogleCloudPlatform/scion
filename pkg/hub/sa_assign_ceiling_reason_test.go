@@ -288,7 +288,7 @@ func (s *scaGetUserErrorStore) GetUser(ctx context.Context, id string) (*store.U
 // does not support, and the ceiling classification this test targets lives
 // entirely in AuthzService.Decide, one layer below evaluateSAAssignment.
 func TestDelegationCeiling_StoreErrorSetsCeilingErrorCause(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Skipf("skipping: test store unavailable (%v)", err)
 	}

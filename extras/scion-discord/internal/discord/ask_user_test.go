@@ -126,7 +126,7 @@ func askUserQuestion(text, choicesJSON string) *messages.StructuredMessage {
 		Recipient: "user:alice@example.com",
 		Msg:       text,
 		Type:      messages.TypeInputNeeded,
-		ThreadID:  "chan-ask",
+		ThreadID:  "930000000000000001",
 	}
 	if choicesJSON != "" {
 		msg.Metadata = map[string]string{"choices": choicesJSON}
@@ -142,7 +142,7 @@ func askUserMember(userID string) *discordgo.Member {
 // to the answer delivered to the asking agent through a choice button.
 func TestAskUser_ButtonAnswerDelivered(t *testing.T) {
 	ctx := context.Background()
-	const channelID = "chan-ask"
+	const channelID = "930000000000000001"
 	b, rt, delivered, deliver := newAskUserFixture(t, channelID)
 
 	topic := projectkeys.UserTopic("proj-1", "alice")
@@ -192,7 +192,7 @@ func TestAskUser_ButtonAnswerDelivered(t *testing.T) {
 // the answer delivered through the Reply button and its modal.
 func TestAskUser_ModalAnswerDelivered(t *testing.T) {
 	ctx := context.Background()
-	const channelID = "chan-ask"
+	const channelID = "930000000000000001"
 	b, rt, delivered, deliver := newAskUserFixture(t, channelID)
 
 	topic := projectkeys.UserTopic("proj-1", "alice")
@@ -318,7 +318,7 @@ func askUserClick(channelID, customID string) *discordgo.InteractionCreate {
 // place so the user can answer again.
 func TestAskUser_FailedDeliveryKeepsQuestion(t *testing.T) {
 	ctx := context.Background()
-	const channelID = "chan-ask"
+	const channelID = "930000000000000001"
 	b, rt, _, _ := newAskUserFixture(t, channelID)
 
 	require.NoError(t, b.Publish(ctx, projectkeys.UserTopic("proj-1", "alice"),
@@ -355,7 +355,7 @@ func TestAskUser_FailedDeliveryKeepsQuestion(t *testing.T) {
 // looking up the request leaves the question and its buttons in place.
 func TestAskUser_LookupErrorKeepsQuestion(t *testing.T) {
 	ctx := context.Background()
-	const channelID = "chan-ask"
+	const channelID = "930000000000000001"
 	b, rt, delivered, deliver := newAskUserFixture(t, channelID)
 
 	require.NoError(t, b.Publish(ctx, projectkeys.UserTopic("proj-1", "alice"),
@@ -436,7 +436,7 @@ func TestAskUser_ChoiceButtonLimits(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
-			const channelID = "chan-ask"
+			const channelID = "930000000000000001"
 			b, rt, _, _ := newAskUserFixture(t, channelID)
 
 			require.NoError(t, b.Publish(ctx, projectkeys.UserTopic("proj-1", "alice"),
@@ -482,7 +482,7 @@ func TestAskUser_ChoiceButtonLimits(t *testing.T) {
 // answer carries the full choice.
 func TestAskUser_LongChoiceEditFits(t *testing.T) {
 	ctx := context.Background()
-	const channelID = "chan-ask"
+	const channelID = "930000000000000001"
 	b, rt, delivered, deliver := newAskUserFixture(t, channelID)
 
 	long := strings.Repeat("é", 3000)
@@ -535,7 +535,7 @@ func TestAskUser_FallbackPostsPlainText(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
-			const channelID = "chan-ask"
+			const channelID = "930000000000000001"
 			b, rt, _, _ := newAskUserFixture(t, channelID)
 			if tt.noStore {
 				b.store = nil
@@ -592,7 +592,7 @@ func (c *cleanupCountingStore) count() int {
 // its pending entry.
 func TestAskUser_ExpiredCleanupRunsOncePerInterval(t *testing.T) {
 	ctx := context.Background()
-	const channelID = "chan-ask"
+	const channelID = "930000000000000001"
 	b, _, _, _ := newAskUserFixture(t, channelID)
 	store := &cleanupCountingStore{Store: b.store}
 	b.store = store
@@ -626,7 +626,7 @@ func TestAskUser_ExpiredCleanupRunsOncePerInterval(t *testing.T) {
 // passed, delete expired ask-user entries exactly once between them.
 func TestAskUser_ExpiredCleanupRunsOnceForConcurrentSends(t *testing.T) {
 	ctx := context.Background()
-	const channelID = "chan-ask"
+	const channelID = "930000000000000001"
 	const senders = 16
 	b, _, _, _ := newAskUserFixture(t, channelID)
 	store := &cleanupCountingStore{Store: b.store}

@@ -32,11 +32,10 @@ import (
 
 func TestAuthenticatedBrokerClient_CreateAgent(t *testing.T) {
 	// Create a test store with a broker secret
-	db, err := newTestStore(":memory:")
+	db, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	defer func() { _ = db.Close() }()
 
 	if err := db.Migrate(context.Background()); err != nil {
 		t.Fatalf("failed to migrate: %v", err)
@@ -146,11 +145,10 @@ func TestAuthenticatedBrokerClient_CreateAgent(t *testing.T) {
 
 func TestAuthenticatedBrokerClient_StartAgent(t *testing.T) {
 	// Create a test store with a broker secret
-	db, err := newTestStore(":memory:")
+	db, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	defer func() { _ = db.Close() }()
 
 	if err := db.Migrate(context.Background()); err != nil {
 		t.Fatalf("failed to migrate: %v", err)
@@ -255,11 +253,10 @@ func TestAuthenticatedBrokerClient_StartAgent(t *testing.T) {
 
 func TestAuthenticatedBrokerClient_MissingSecretFailsClosed(t *testing.T) {
 	// Create a test store without a secret
-	db, err := newTestStore(":memory:")
+	db, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	defer func() { _ = db.Close() }()
 
 	if err := db.Migrate(context.Background()); err != nil {
 		t.Fatalf("failed to migrate: %v", err)
@@ -313,11 +310,10 @@ func TestAuthenticatedBrokerClient_MissingSecretFailsClosed(t *testing.T) {
 
 func TestAuthenticatedBrokerClient_ExpiredSecretFailsClosed(t *testing.T) {
 	// Create a test store with an expired secret
-	db, err := newTestStore(":memory:")
+	db, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	defer func() { _ = db.Close() }()
 
 	if err := db.Migrate(context.Background()); err != nil {
 		t.Fatalf("failed to migrate: %v", err)
@@ -383,11 +379,10 @@ func TestAuthenticatedBrokerClient_ExpiredSecretFailsClosed(t *testing.T) {
 }
 
 func TestAuthenticatedBrokerClient_StartAgent_InvalidJSONFails(t *testing.T) {
-	db, err := newTestStore(":memory:")
+	db, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	defer func() { _ = db.Close() }()
 
 	if err := db.Migrate(context.Background()); err != nil {
 		t.Fatalf("failed to migrate: %v", err)
@@ -436,11 +431,10 @@ func TestAuthenticatedBrokerClient_StartAgent_InvalidJSONFails(t *testing.T) {
 
 func TestAuthenticatedBrokerClient_AllOperations(t *testing.T) {
 	// Create a test store with a broker secret
-	db, err := newTestStore(":memory:")
+	db, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	defer func() { _ = db.Close() }()
 
 	if err := db.Migrate(context.Background()); err != nil {
 		t.Fatalf("failed to migrate: %v", err)

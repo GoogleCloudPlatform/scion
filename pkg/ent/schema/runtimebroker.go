@@ -88,6 +88,11 @@ func (RuntimeBroker) Fields() []ent.Field {
 		// and refreshed on every heartbeat. Empty means never reported.
 		field.String("workspace_storage").
 			Optional(),
+		// health is the broker's JSON-encoded api.BrokerHealthReport, its
+		// self-reported health from the heartbeat. Empty means never
+		// reported (an older broker). It never affects status.
+		field.String("health").
+			Optional(),
 		field.JSON("labels", map[string]string{}).
 			Optional(),
 		field.JSON("annotations", map[string]string{}).

@@ -101,10 +101,21 @@ interface GlobalAgentsResponse {
   agents?: Agent[];
   nextCursor?: string;
   totalCount?: number;
+  /** `totalCount` is a lower bound. */
+  totalCountApproximate?: boolean;
   /** Only when `fit` was sent: whether the whole set fit in this response. */
   complete?: boolean;
-  /** Only with `stats=1`. `agents` is omitted when `total` is above 2,000 (count-only). */
-  stats?: { total: number; running: number; agents?: Array<[string, string]> };
+  /**
+   * Only with `stats=1`. `agents` is omitted when `total` is above 2,000
+   * (count-only); `totalApproximate` marks `total` and `running` as lower
+   * bounds.
+   */
+  stats?: {
+    total: number;
+    running: number;
+    agents?: Array<[string, string]>;
+    totalApproximate?: boolean;
+  };
   _capabilities?: Capabilities;
 }
 
@@ -636,14 +647,14 @@ export class ScionPageAgents extends LitElement {
     this.agentWindow.setViewState(this.windowViewState());
 
     // Set SSE scope to dashboard (all project summaries).
-    // This must happen before checking hydrated data because setScope clears
+    // This must happen before checking the store because setScope clears
     // state maps when the scope changes (e.g. from agent-detail to dashboard).
     stateManager.setScope({ type: 'dashboard' });
 
-    // Use hydrated data from SSR if available, avoiding the initial fetch.
-    // Only trust it when scope was previously null (initial SSR page load);
-    // on client-side navigations the maps were just cleared by setScope above.
-    // Skip hydrated data when a scope filter is active — SSR data is unfiltered.
+    // Reuse the agents already in the store, avoiding the initial fetch, when
+    // this page loaded the complete set earlier in the same dashboard scope
+    // (returning from home, projects or the graph); after a scope change the
+    // maps were just cleared above. Skip it when a scope filter is active.
     // Also require scope capabilities — without them the "New Agent" button
     // won't render, so we must fetch from the API to get them. And require
     // the state store to hold the complete dashboard set with full objects:
@@ -1050,6 +1061,7 @@ export class ScionPageAgents extends LitElement {
     qs.set('dir', this.sortDir);
     qs.set('limit', String(params.limit));
     if (params.cursor) qs.set('cursor', params.cursor);
+    if (params.ids?.length) qs.set('ids', params.ids.join(','));
     if (params.wantStats) qs.set('stats', '1');
     if (this.loadedScope !== 'all') qs.set('scope', this.loadedScope);
     if (label.includes('=')) qs.set('label', label);
@@ -1093,6 +1105,7 @@ export class ScionPageAgents extends LitElement {
       agents: seeded.agents,
       nextCursor: data.nextCursor,
       totalCount: data.totalCount ?? seeded.agents.length,
+      totalCountApproximate: data.totalCountApproximate,
       stats,
       liveChanged: epoch.changedIds,
       liveUnknown: epoch.unknownChanges,
@@ -1660,9 +1673,9 @@ export class ScionPageAgents extends LitElement {
     const win = this.agentWindow;
     if (win.state !== 'paged' || !win.memberIndex.countOnly) return nothing;
     const { total, running } = win.stats;
-    return html`<div class="agent-counts">
-      ${formatNumber(total)} agents · ${formatNumber(running)} running, as of last refresh
-    </div>`;
+    const mark = win.memberIndex.approximate ? '+' : '';
+    const counts = `${formatNumber(total)}${mark} agents · ${formatNumber(running)}${mark} running`;
+    return html`<div class="agent-counts">${counts}, as of last refresh</div>`;
   }
 
   /** The empty state of the current scope. */
@@ -1716,6 +1729,7 @@ export class ScionPageAgents extends LitElement {
       .rangeStart=${win.rangeStart}
       .rowsOnPage=${rowsOnPage}
       .total=${win.total}
+      .approximate=${win.totalApproximate}
       .pageSize=${this.pagerPageSize}
       .hasNext=${win.hasNext}
       .hasPrev=${win.hasPrev}

@@ -63,23 +63,88 @@ func ParseRef(ref string) (id string, seq int, err error) {
 // successful publish.
 type ArtifactResponse struct {
 	Artifact ArtifactInfo `json:"artifact"`
-	// Version is the current version.
+	// Version is the current version, or the version a write created or
+	// finalized.
 	Version *VersionInfo `json:"version,omitempty"`
+	// Warnings are notes about the write that did not fail it.
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// CreateVersionRequest is the body of POST /api/v1/artifacts (create an
+// artifact with a pending first version, or append to the caller's
+// artifact with the same key) and of POST /api/v1/artifacts/{id}/versions
+// (append a pending version). Title, Key and Scope apply to the first form
+// only.
+type CreateVersionRequest struct {
+	Title string `json:"title,omitempty"`
+	Key   string `json:"key,omitempty"`
+	Scope string `json:"scope,omitempty"`
+	// Kind is the version kind; "" means publish.
+	Kind  string `json:"kind,omitempty"`
+	Entry string `json:"entry"`
+	Note  string `json:"note,omitempty"`
+	// Files is the version's manifest.
+	Files []ManifestFile `json:"files"`
+}
+
+// FinalizeRequest is the optional JSON body of a finalize request.
+type FinalizeRequest struct {
+	// Base is the version a review was started from. It is required to
+	// finalize a review and ignored otherwise.
+	Base int `json:"base,omitempty"`
+}
+
+// ManifestFile is one file of a version manifest.
+type ManifestFile struct {
+	Path   string `json:"path"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+	// MediaType is optional; the service derives one from the path and the
+	// bytes when it is empty or generic.
+	MediaType string `json:"mediaType,omitempty"`
+}
+
+// PendingVersionResponse answers a request that created a pending
+// version.
+type PendingVersionResponse struct {
+	Artifact ArtifactInfo `json:"artifact"`
+	Version  *VersionInfo `json:"version"`
+	Upload   UploadInfo   `json:"upload"`
+}
+
+// UploadInfo tells the publisher what to upload before finalizing.
+type UploadInfo struct {
+	// Required lists the manifest paths whose bytes must be uploaded with
+	// PUT .../versions/{seq}/files/{path}. A file identical to one of the
+	// artifact's current version needs no upload, and of several files with
+	// the same bytes only one is listed (uploading it covers the others).
+	Required []string `json:"required"`
+}
+
+// VersionListResponse is the body of GET /api/v1/artifacts/{id}/versions:
+// the ready versions, newest first, without their files.
+type VersionListResponse struct {
+	Versions []VersionInfo `json:"versions"`
+	// NextBefore, when set, is the before= value of the next page.
+	NextBefore int `json:"nextBefore,omitempty"`
 }
 
 // ArtifactInfo describes an artifact.
 type ArtifactInfo struct {
-	ID         string    `json:"id"`
-	Ref        string    `json:"ref"`
-	ScopeKind  string    `json:"scopeKind"`
-	ScopeRef   string    `json:"scopeRef"`
-	OwnerKind  string    `json:"ownerKind"`
-	OwnerRef   string    `json:"ownerRef"`
-	Key        string    `json:"key,omitempty"`
-	Title      string    `json:"title"`
-	CurrentSeq int       `json:"currentSeq"`
-	CreatedAt  time.Time `json:"createdAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
+	ID         string `json:"id"`
+	Ref        string `json:"ref"`
+	ScopeKind  string `json:"scopeKind"`
+	ScopeRef   string `json:"scopeRef"`
+	OwnerKind  string `json:"ownerKind"`
+	OwnerRef   string `json:"ownerRef"`
+	Key        string `json:"key,omitempty"`
+	Title      string `json:"title"`
+	CurrentSeq int    `json:"currentSeq"`
+	// ExpiresAt is when the artifact expires and is deleted, or absent
+	// when it is kept until deleted.
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
+	CreatedAt time.Time  `json:"createdAt"`
+	UpdatedAt time.Time  `json:"updatedAt"`
 }
 
 // VersionInfo describes one version and its files.
@@ -95,7 +160,7 @@ type VersionInfo struct {
 	CreatedByRef  string     `json:"createdByRef,omitempty"`
 	CreatedAt     time.Time  `json:"createdAt"`
 	State         string     `json:"state"`
-	Files         []FileInfo `json:"files"`
+	Files         []FileInfo `json:"files,omitempty"`
 }
 
 // FileInfo describes one file of a version.
@@ -104,13 +169,19 @@ type FileInfo struct {
 	Size      int64  `json:"size"`
 	SHA256    string `json:"sha256"`
 	MediaType string `json:"mediaType"`
+	// Origin is "remote" for an image the hub fetched at publish time and
+	// omitted for uploaded files. SourceURL is the URL it was fetched from
+	// and FetchStatus is "ok" or "failed".
+	Origin      string `json:"origin,omitempty"`
+	SourceURL   string `json:"sourceUrl,omitempty"`
+	FetchStatus string `json:"fetchStatus,omitempty"`
 }
 
 func artifactInfo(a *Artifact) ArtifactInfo {
 	return ArtifactInfo{
 		ID: a.ID, Ref: FormatRef(a.ID, 0), ScopeKind: a.ScopeKind, ScopeRef: a.ScopeRef,
 		OwnerKind: a.OwnerKind, OwnerRef: a.OwnerRef, Key: a.Key, Title: a.Title,
-		CurrentSeq: a.CurrentSeq, CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt,
+		CurrentSeq: a.CurrentSeq, ExpiresAt: a.ExpiresAt, CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt,
 	}
 }
 
@@ -121,7 +192,11 @@ func versionInfo(v *Version, files []File) *VersionInfo {
 		CreatedByRef: v.CreatedByRef, CreatedAt: v.CreatedAt, State: v.State, Files: []FileInfo{},
 	}
 	for _, f := range files {
-		out.Files = append(out.Files, FileInfo{Path: f.Path, Size: f.Size, SHA256: f.SHA256, MediaType: f.MediaType})
+		fi := FileInfo{Path: f.Path, Size: f.Size, SHA256: f.SHA256, MediaType: f.MediaType}
+		if f.Origin == FileOriginRemote {
+			fi.Origin, fi.SourceURL, fi.FetchStatus = f.Origin, f.SourceURL, f.FetchStatus
+		}
+		out.Files = append(out.Files, fi)
 	}
 	return out
 }

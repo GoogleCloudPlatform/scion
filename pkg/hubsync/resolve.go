@@ -103,7 +103,7 @@ func resolveHubProjectRef(ref string, opts EnsureHubReadyOptions) (*HubContext, 
 
 	if !settings.IsHubEnabled() {
 		return nil, fmt.Errorf("hub project references (slugs, names, git URLs) require hub mode to be enabled\n\n" +
-			"Enable with: scion config set hub.enabled true")
+			"Enable with: scion hub enable")
 	}
 
 	endpoint := opts.EndpointOverride

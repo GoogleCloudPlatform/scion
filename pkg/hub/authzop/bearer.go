@@ -106,6 +106,9 @@ var validSessionOnlyReasons = map[SessionOnlyReason]bool{
 	ReasonGovernancePending:    true,
 }
 
+// Valid reports whether r is a catalog session-only reason.
+func (r SessionOnlyReason) Valid() bool { return validSessionOnlyReasons[r] }
+
 // BearerBoundary is a token boundary kind an admitted operation accepts.
 // Values match the credential boundary kinds.
 type BearerBoundary string
@@ -138,18 +141,29 @@ const (
 	// BearerTargetProjectQuery is a project named by a query parameter (or
 	// the caller's own project when none is named).
 	BearerTargetProjectQuery BearerTarget = "project_query"
+	// BearerTargetSelfRecord is one of the holder's own records (an inbox
+	// message, notification, subscription, template or conversation).
+	// The record's project, or none for a record with no project, must be
+	// inside the boundary, and a project-boundary holder must be a member
+	// of that project.
+	BearerTargetSelfRecord BearerTarget = "self_record"
+	// BearerTargetConversationRecord is a conversation's project, read
+	// from the conversation record.
+	BearerTargetConversationRecord BearerTarget = "conversation_record"
 )
 
 var validBearerTargets = map[BearerTarget]bool{
-	BearerTargetProjectPath:       true,
-	BearerTargetProjectBody:       true,
-	BearerTargetAgentRecord:       true,
-	BearerTargetCatalogRecord:     true,
-	BearerTargetHubInstance:       true,
-	BearerTargetHubCollection:     true,
-	BearerTargetProjectCollection: true,
-	BearerTargetArtifactRecord:    true,
-	BearerTargetProjectQuery:      true,
+	BearerTargetProjectPath:        true,
+	BearerTargetProjectBody:        true,
+	BearerTargetAgentRecord:        true,
+	BearerTargetCatalogRecord:      true,
+	BearerTargetHubInstance:        true,
+	BearerTargetHubCollection:      true,
+	BearerTargetProjectCollection:  true,
+	BearerTargetArtifactRecord:     true,
+	BearerTargetProjectQuery:       true,
+	BearerTargetSelfRecord:         true,
+	BearerTargetConversationRecord: true,
 }
 
 // BearerSelfFilter is the result filter an admit_self operation applies.
@@ -175,12 +189,10 @@ type BearerOwner string
 
 const (
 	BearerOwnerBrokerRegistration BearerOwner = "broker-registration"
-	BearerOwnerUserProvisioning   BearerOwner = "user-provisioning"
 )
 
 var validBearerOwners = map[BearerOwner]bool{
 	BearerOwnerBrokerRegistration: true,
-	BearerOwnerUserProvisioning:   true,
 }
 
 // BearerDisposition records how an operation treats a user access token.

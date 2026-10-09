@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -51,6 +52,35 @@ func (e *StaleRouteError) Error() string { return "conduit relay: stale route: "
 
 // Unwrap makes errors.Is(err, ErrStaleRoute) true.
 func (e *StaleRouteError) Unwrap() error { return ErrStaleRoute }
+
+// ErrOwnerUnreachable marks a failure that happened before the owning
+// relay acted on the request: the internal dial failed, or the owner
+// refused it before admission with an explicit reason (a 503 carrying
+// HeaderRefusalReason). Nothing reached the target, so the
+// router may exclude that relay and re-resolve (design §3.5). A failure
+// after the request may have been delivered is never marked.
+var ErrOwnerUnreachable = errors.New("conduit relay: owner relay unreachable")
+
+// ownerUnreachableError marks err with ErrOwnerUnreachable. Its message
+// and its chain (for example a *conduit.CloseError) stay those of err.
+type ownerUnreachableError struct{ err error }
+
+func (e *ownerUnreachableError) Error() string   { return e.err.Error() }
+func (e *ownerUnreachableError) Unwrap() []error { return []error{e.err, ErrOwnerUnreachable} }
+
+func ownerUnreachable(err error) error { return &ownerUnreachableError{err: err} }
+
+// isDialFailure reports whether err is a failure to establish the
+// connection (connect or name resolution), as opposed to one on an
+// established connection, where the request may have been delivered.
+func isDialFailure(err error) bool {
+	var oe *net.OpError
+	if errors.As(err, &oe) && oe.Op == "dial" {
+		return true
+	}
+	var dnsErr *net.DNSError
+	return errors.As(err, &dnsErr)
+}
 
 // PeerClient calls other relays' internal APIs. It is the injectable seam
 // for tests (two relays over httptest).
@@ -198,8 +228,13 @@ func (s *RemoteSession) Call(ctx context.Context, rpc *conduitv1.RpcRequest) (*c
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		// The owner is unreachable: treat like a lost link.
-		return nil, closeErr(conduit.CloseRelayTimeout, ReasonUpstreamUnreachable, "owner relay unreachable")
+		// The owner is unreachable: treat like a lost link. Only a failed
+		// dial proves the request was not delivered.
+		ce := closeErr(conduit.CloseRelayTimeout, ReasonUpstreamUnreachable, "owner relay unreachable")
+		if isDialFailure(err) {
+			return nil, ownerUnreachable(ce)
+		}
+		return nil, ce
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if err := statusErr(resp); err != nil {
@@ -216,6 +251,29 @@ func (s *RemoteSession) Call(ctx context.Context, rpc *conduitv1.RpcRequest) (*c
 	return rr, nil
 }
 
+// ownerRefusalReasons are the §3.3.1 reasons an owner gives when it
+// refuses a request before admission (design §3.5).
+var ownerRefusalReasons = map[string]bool{
+	ReasonNotServing:           true,
+	ReasonDraining:             true,
+	ReasonRelayRestart:         true,
+	ReasonRegistryUnavailable:  true,
+	ReasonGrantKeysUnavailable: true,
+}
+
+// unavailableErr maps an internal API 503. Only the owner's own
+// pre-admission refusal, which names its reason in HeaderRefusalReason,
+// is marked ErrOwnerUnreachable: the target was not reached. A 503
+// without a known reason (for example from a proxy in front of the
+// owner) is not.
+func unavailableErr(h http.Header) error {
+	why := h.Get(HeaderRefusalReason)
+	if !ownerRefusalReasons[why] {
+		return closeErr(conduit.CloseRelayTimeout, ReasonUpstreamUnreachable, "owner relay unavailable")
+	}
+	return ownerUnreachable(closeErr(conduit.CloseRelayTimeout, ReasonUpstreamUnreachable, "owner relay refused: "+why))
+}
+
 // statusErr maps an internal API status to an error (nil for 200).
 func statusErr(resp *http.Response) error {
 	switch resp.StatusCode {
@@ -226,7 +284,7 @@ func statusErr(resp *http.Response) error {
 	case http.StatusUnauthorized:
 		return errors.New("conduit relay: owner refused relay-peer identity (401)")
 	case http.StatusServiceUnavailable:
-		return closeErr(conduit.CloseRelayTimeout, ReasonUpstreamUnreachable, "owner relay unavailable")
+		return unavailableErr(resp.Header)
 	case http.StatusBadGateway:
 		code, why := conduit.CloseRelayTimeout, reason(ReasonUpstreamUnreachable, "target session call failed")
 		if v, err := strconv.ParseUint(resp.Header.Get(HeaderCloseCode), 10, 32); err == nil && v != 0 {
@@ -284,13 +342,19 @@ func (s *RemoteSession) OpenStream(ctx context.Context, open *conduitv1.StreamOp
 			case http.StatusNotFound, http.StatusConflict:
 				return nil, &StaleRouteError{Reason: fmt.Sprintf("HTTP %d", de.StatusCode)}
 			case http.StatusServiceUnavailable:
-				return nil, closeErr(conduit.CloseRelayTimeout, ReasonUpstreamUnreachable, "owner relay unavailable")
+				return nil, unavailableErr(de.Header)
 			}
 		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("conduit relay: dialing owner relay: %w", err)
+		err = fmt.Errorf("conduit relay: dialing owner relay: %w", err)
+		if de != nil && de.StatusCode == 0 {
+			// No HTTP answer (connect, TLS or handshake failure): the
+			// StreamOpen was never sent.
+			return nil, ownerUnreachable(err)
+		}
+		return nil, err
 	}
 	win := open.GetInitialWindow()
 	if win == 0 {

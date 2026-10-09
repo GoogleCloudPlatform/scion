@@ -1436,6 +1436,8 @@ type V1ServerHubConfig struct {
 	DisableLegacyStorageFallback *bool `json:"disable_legacy_storage_fallback,omitempty" yaml:"disable_legacy_storage_fallback,omitempty" koanf:"disable_legacy_storage_fallback"`
 	// AsyncAgentLaunch is the non-blocking agent create kill switch.
 	AsyncAgentLaunch *bool `json:"async_agent_launch,omitempty" yaml:"async_agent_launch,omitempty" koanf:"async_agent_launch"`
+	// PerfTrace turns on per-request performance tracing. Off by default.
+	PerfTrace *bool `json:"perf_trace,omitempty" yaml:"perf_trace,omitempty" koanf:"perf_trace"`
 	// LaunchTimeout is the whole-launch budget for an opted-in launch (e.g., "5m").
 	LaunchTimeout string `json:"launch_timeout,omitempty" yaml:"launch_timeout,omitempty" koanf:"launch_timeout"`
 	// LaunchKeepaliveSeconds is the broker keepalive interval, in seconds.
@@ -1485,6 +1487,22 @@ type V1ServerHubConduitConfig struct {
 	// live hub processes (default: POD_NAME, else the host name plus a
 	// random per-process suffix).
 	InstanceID string `json:"instance_id,omitempty" yaml:"instance_id,omitempty" koanf:"instance_id"`
+	// AuthzRecheckInterval is the period of the re-check sweep of open
+	// user streams (e.g. "60s"; default "60s", 1s-10m).
+	AuthzRecheckInterval string `json:"authz_recheck_interval,omitempty" yaml:"authz_recheck_interval,omitempty" koanf:"authz_recheck_interval"`
+	// StreamAuthzMax is the authorization interval of open streams per
+	// originating principal kind: when a stream reaches it, the hub
+	// re-checks the principal and renews or closes the stream (defaults
+	// "8h" for user, "24h" for broker and agent; each 1m-168h).
+	StreamAuthzMax *V1ServerHubConduitStreamAuthzMax `json:"stream_authz_max,omitempty" yaml:"stream_authz_max,omitempty" koanf:"stream_authz_max"`
+}
+
+// V1ServerHubConduitStreamAuthzMax holds
+// server.hub.conduit.stream_authz_max.
+type V1ServerHubConduitStreamAuthzMax struct {
+	User   string `json:"user,omitempty" yaml:"user,omitempty" koanf:"user"`
+	Broker string `json:"broker,omitempty" yaml:"broker,omitempty" koanf:"broker"`
+	Agent  string `json:"agent,omitempty" yaml:"agent,omitempty" koanf:"agent"`
 }
 
 // V1BrokerConfig holds Runtime Broker configuration.
@@ -1523,18 +1541,24 @@ type V1DatabaseConfig struct {
 type V1AuthConfig struct {
 	// Mode selects the exclusive human auth mode: "oauth" (default), "proxy", or "dev".
 	// In proxy mode, OAuth handlers are disabled; in dev mode, dev token auth is used.
-	Mode              string             `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
-	DevMode           bool               `json:"dev_mode,omitempty" yaml:"dev_mode,omitempty" koanf:"dev_mode"`
-	DevToken          string             `json:"dev_token,omitempty" yaml:"dev_token,omitempty" koanf:"dev_token"`
-	DevTokenFile      string             `json:"dev_token_file,omitempty" yaml:"dev_token_file,omitempty" koanf:"dev_token_file"`
-	AuthorizedDomains []string           `json:"authorized_domains,omitempty" yaml:"authorized_domains,omitempty" koanf:"authorized_domains"`
-	UserAccessMode    string             `json:"user_access_mode,omitempty" yaml:"user_access_mode,omitempty" koanf:"user_access_mode"`
-	DefaultUserRole   string             `json:"default_user_role,omitempty" yaml:"default_user_role,omitempty" koanf:"default_user_role"`
-	Proxy             *V1ProxyConfig     `json:"proxy,omitempty" yaml:"proxy,omitempty" koanf:"proxy"`
-	Transport         *V1TransportConfig `json:"transport,omitempty" yaml:"transport,omitempty" koanf:"transport"`
-	Username          string             `json:"username,omitempty" yaml:"username,omitempty" koanf:"username"`
-	DisplayName       string             `json:"display_name,omitempty" yaml:"display_name,omitempty" koanf:"display_name"`
-	Email             string             `json:"email,omitempty" yaml:"email,omitempty" koanf:"email"`
+	Mode              string   `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
+	DevMode           bool     `json:"dev_mode,omitempty" yaml:"dev_mode,omitempty" koanf:"dev_mode"`
+	DevToken          string   `json:"dev_token,omitempty" yaml:"dev_token,omitempty" koanf:"dev_token"`
+	DevTokenFile      string   `json:"dev_token_file,omitempty" yaml:"dev_token_file,omitempty" koanf:"dev_token_file"`
+	AuthorizedDomains []string `json:"authorized_domains,omitempty" yaml:"authorized_domains,omitempty" koanf:"authorized_domains"`
+	UserAccessMode    string   `json:"user_access_mode,omitempty" yaml:"user_access_mode,omitempty" koanf:"user_access_mode"`
+	DefaultUserRole   string   `json:"default_user_role,omitempty" yaml:"default_user_role,omitempty" koanf:"default_user_role"`
+	// AgentRunScope selects how the hub treats the run an agent token was
+	// issued for: "off" (default) or "observe".
+	AgentRunScope string `json:"agent_run_scope,omitempty" yaml:"agent_run_scope,omitempty" koanf:"agent_run_scope"`
+	// AgentRunScopeLegacyUntil (RFC 3339) is when tokens issued without a
+	// run stop being accepted by run-scope checks.
+	AgentRunScopeLegacyUntil string             `json:"agent_run_scope_legacy_until,omitempty" yaml:"agent_run_scope_legacy_until,omitempty" koanf:"agent_run_scope_legacy_until"`
+	Proxy                    *V1ProxyConfig     `json:"proxy,omitempty" yaml:"proxy,omitempty" koanf:"proxy"`
+	Transport                *V1TransportConfig `json:"transport,omitempty" yaml:"transport,omitempty" koanf:"transport"`
+	Username                 string             `json:"username,omitempty" yaml:"username,omitempty" koanf:"username"`
+	DisplayName              string             `json:"display_name,omitempty" yaml:"display_name,omitempty" koanf:"display_name"`
+	Email                    string             `json:"email,omitempty" yaml:"email,omitempty" koanf:"email"`
 }
 
 // V1TransportConfig holds transport-layer auth settings for agent outbound requests.
@@ -2685,9 +2709,10 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 
 	// 4. Load environment variables (SCION_ prefix)
 	_ = k.Load(env.ProviderWithValue("SCION_", ".", func(key, value string) (string, interface{}) {
-		// An empty plaintext switch is unset, not a request to disable TLS.
-		// Skip it before koanf maps the empty value onto tls.enabled.
-		if key == "SCION_OTEL_INSECURE" && value == "" {
+		// An exported but empty variable is treated as unset, so it never
+		// blanks a value from the settings files. This also keeps an empty
+		// SCION_OTEL_INSECURE from being mapped onto tls.enabled.
+		if value == "" {
 			return "", nil
 		}
 		return versionedEnvKeyMapper(key), value
@@ -2782,16 +2807,16 @@ func versionedEnvKeyMapper(s string) string {
 		// set (e.g. a broker started inside an agent container, which the
 		// hub sets it in). Returning "" makes the env provider drop the
 		// variable entirely, the same idiom used below for a removed
-		// legacy env var and for SCION_OTEL_INSECURE's empty-value case.
+		// legacy env var and by the env callback for an empty value.
 		return ""
 	}
 	if isRemovedLegacyEnv(s) {
 		// SCION_HUB_GROVE_ID is no longer read, not even via the generic
 		// "hub_" mapping below, which would otherwise land on the
 		// unrecognised key hub.grove_id. Returning "" makes the env
-		// provider drop the variable entirely, the same idiom used for
-		// SCION_OTEL_INSECURE above. WarnRemovedLegacyEnv reports it
-		// separately.
+		// provider drop the variable entirely, the same idiom the env
+		// callback uses for an empty value. WarnRemovedLegacyEnv reports
+		// it separately.
 		return ""
 	}
 	key := strings.ToLower(strings.TrimPrefix(s, "SCION_"))
@@ -2837,7 +2862,9 @@ var knownCompoundFields = []string{
 	"require_trusted_proxy_ip",
 	"soft_delete_retain_files",
 	"start_unconfirmed_hold",
+	"authz_recheck_interval",
 	"start_claim_lease_ttl",
+	"stream_authz_max",
 	"soft_delete_retention",
 	"peer_service_accounts",
 	"grant_key_activation",
@@ -3149,6 +3176,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.AsyncAgentLaunch != nil {
 			gc.Hub.AsyncAgentLaunch = *v1.Hub.AsyncAgentLaunch
 		}
+		if v1.Hub.PerfTrace != nil {
+			gc.Hub.PerfTrace = *v1.Hub.PerfTrace
+		}
 		if v1.Hub.LaunchTimeout != "" {
 			if d, err := time.ParseDuration(v1.Hub.LaunchTimeout); err == nil {
 				gc.Hub.LaunchTimeout = d
@@ -3183,15 +3213,19 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		if c := v1.Hub.Conduit; c != nil {
 			gc.Hub.Conduit = HubConduitConfig{
-				GrantKeyActivation:  c.GrantKeyActivation,
-				TCPAllowedPorts:     append([]int(nil), c.TCPAllowedPorts...),
-				InternalListen:      c.InternalListen,
-				InternalAdvertise:   c.InternalAdvertise,
-				PeerAuth:            c.PeerAuth,
-				PeerServiceAccounts: append([]string(nil), c.PeerServiceAccounts...),
-				PeerAudience:        c.PeerAudience,
-				ReconnectWindow:     c.ReconnectWindow,
-				InstanceID:          c.InstanceID,
+				GrantKeyActivation:   c.GrantKeyActivation,
+				TCPAllowedPorts:      append([]int(nil), c.TCPAllowedPorts...),
+				InternalListen:       c.InternalListen,
+				InternalAdvertise:    c.InternalAdvertise,
+				PeerAuth:             c.PeerAuth,
+				PeerServiceAccounts:  append([]string(nil), c.PeerServiceAccounts...),
+				PeerAudience:         c.PeerAudience,
+				ReconnectWindow:      c.ReconnectWindow,
+				InstanceID:           c.InstanceID,
+				AuthzRecheckInterval: c.AuthzRecheckInterval,
+			}
+			if m := c.StreamAuthzMax; m != nil {
+				gc.Hub.Conduit.StreamAuthzMax = HubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
 			}
 		}
 	}
@@ -3323,6 +3357,8 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				}
 			}
 		}
+		gc.Auth.AgentRunScope = v1.Auth.AgentRunScope
+		gc.Auth.AgentRunScopeLegacyUntil = v1.Auth.AgentRunScopeLegacyUntil
 		if v1.Auth.Transport != nil {
 			gc.Auth.Transport = &TransportAuthConfig{
 				Mode:           v1.Auth.Transport.Mode,
@@ -3518,15 +3554,19 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if c := gc.Hub.Conduit; !c.IsZero() {
 		v1Hub.Conduit = &V1ServerHubConduitConfig{
-			GrantKeyActivation:  c.GrantKeyActivation,
-			TCPAllowedPorts:     append([]int(nil), c.TCPAllowedPorts...),
-			InternalListen:      c.InternalListen,
-			InternalAdvertise:   c.InternalAdvertise,
-			PeerAuth:            c.PeerAuth,
-			PeerServiceAccounts: append([]string(nil), c.PeerServiceAccounts...),
-			PeerAudience:        c.PeerAudience,
-			ReconnectWindow:     c.ReconnectWindow,
-			InstanceID:          c.InstanceID,
+			GrantKeyActivation:   c.GrantKeyActivation,
+			TCPAllowedPorts:      append([]int(nil), c.TCPAllowedPorts...),
+			InternalListen:       c.InternalListen,
+			InternalAdvertise:    c.InternalAdvertise,
+			PeerAuth:             c.PeerAuth,
+			PeerServiceAccounts:  append([]string(nil), c.PeerServiceAccounts...),
+			PeerAudience:         c.PeerAudience,
+			ReconnectWindow:      c.ReconnectWindow,
+			InstanceID:           c.InstanceID,
+			AuthzRecheckInterval: c.AuthzRecheckInterval,
+		}
+		if m := c.StreamAuthzMax; !m.IsZero() {
+			v1Hub.Conduit.StreamAuthzMax = &V1ServerHubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
 		}
 	}
 	if gc.Hub.StartClaimLeaseTTL > 0 {
@@ -3552,6 +3592,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	if gc.Hub.AsyncAgentLaunch {
 		asyncLaunch := true
 		v1Hub.AsyncAgentLaunch = &asyncLaunch
+	}
+	if gc.Hub.PerfTrace {
+		perfTrace := true
+		v1Hub.PerfTrace = &perfTrace
 	}
 	if gc.Hub.LaunchTimeout > 0 {
 		v1Hub.LaunchTimeout = gc.Hub.LaunchTimeout.String()
@@ -3638,6 +3682,8 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			}
 		}
 	}
+	v1.Auth.AgentRunScope = gc.Auth.AgentRunScope
+	v1.Auth.AgentRunScopeLegacyUntil = gc.Auth.AgentRunScopeLegacyUntil
 	if gc.Auth.Transport != nil {
 		v1.Auth.Transport = &V1TransportConfig{
 			Mode:           gc.Auth.Transport.Mode,
@@ -5265,9 +5311,18 @@ func writeVersionedSettingsFile(dir, targetPath string, vs *VersionedSettings) e
 // MigrateSettingsFile migrates a single legacy settings file in dir to versioned format.
 // If a server.yaml exists in the same directory, it is also merged into the settings
 // under the "server" key and backed up.
+// Top-level keys the legacy Settings struct does not decode (v1-only keys such
+// as server and image_registry, or any unknown key) are carried into the
+// migrated file unchanged; see legacyCarriedTopLevelKeys.
 // If dryRun is true, no files are written.
 // Returns MigrationResult describing what was (or would be) done.
 func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
+	// Held from the first read to the final write, so the read, backup
+	// rename and write are one step for in-process writers (see
+	// LockSettingsFile). Nothing below takes the lock again.
+	unlock := LockSettingsFile()
+	defer unlock()
+
 	result := &MigrationResult{}
 
 	// 1. Find settings file
@@ -5316,6 +5371,14 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 	vs, warnings := AdaptLegacySettings(&legacy)
 	result.Warnings = warnings
 
+	// 4a. Top-level keys the legacy struct does not decode (v1-only keys
+	// such as server and image_registry) are carried through unchanged
+	// (ptone/scion#3497).
+	carried, err := legacyCarriedTopLevelKeys(data, result.WasJSON)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse settings: %w", err)
+	}
+
 	// 4b. Check for server.yaml and merge if present
 	serverPath := GetServerConfigPath(dir)
 	if serverPath != "" {
@@ -5350,19 +5413,11 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 		}
 	}
 
-	// 5. Handle hub.lastSyncedAt: migrate to state.yaml
+	// 5. Handle hub.lastSyncedAt: migrate to state.yaml (written in step 7b,
+	// once the output has passed every check, so a failed migration leaves
+	// nothing changed).
 	if legacy.Hub != nil && legacy.Hub.LastSyncedAt != "" {
 		result.StateMigrated = true
-		if !dryRun {
-			state, err := LoadProjectState(dir)
-			if err != nil {
-				return nil, fmt.Errorf("failed to load project state: %w", err)
-			}
-			state.LastSyncedAt = legacy.Hub.LastSyncedAt
-			if err := SaveProjectState(dir, state); err != nil {
-				return nil, fmt.Errorf("failed to save project state: %w", err)
-			}
-		}
 	}
 
 	// 6. Validate the output
@@ -5383,9 +5438,48 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 		return nil, fmt.Errorf("migrated settings failed validation: %s", strings.Join(errMsgs, "; "))
 	}
 
+	// 6b. Merge the carried keys into the output. They are the file's own
+	// data, so a value the loaders cannot decode (a wrong type, such as
+	// "server: hello") fails the migration with the file untouched, while
+	// any other schema mismatch (such as an unknown key) is a warning:
+	// dropping such a key is the data loss this step prevents.
+	if len(carried) > 0 {
+		var dropped []string
+		if outputData, dropped, err = marshalMigratedSettings(vs, carried); err != nil {
+			return nil, fmt.Errorf("failed to marshal converted settings: %w", err)
+		}
+		for _, p := range dropped {
+			result.Warnings = append(result.Warnings,
+				fmt.Sprintf("kept setting %s dropped: it conflicts with the value converted from the legacy settings, which is used instead", p))
+		}
+		if err := checkCarriedSettingsDecode(vs, carried, outputData); err != nil {
+			return nil, fmt.Errorf("cannot migrate %s (left unchanged): %w; fix or remove the key and retry", settingsPath, err)
+		}
+		carriedErrors, err := ValidateSettings(outputData, "1")
+		if err != nil {
+			return nil, fmt.Errorf("validation error: %w", err)
+		}
+		for _, ve := range carriedErrors {
+			result.Warnings = append(result.Warnings,
+				fmt.Sprintf("kept setting does not match the v1 schema: %s", ve.Error()))
+		}
+	}
+
 	// 7. If dryRun, return result without writing
 	if dryRun {
 		return result, nil
+	}
+
+	// 7b. Write hub.lastSyncedAt to state.yaml (see step 5).
+	if result.StateMigrated {
+		state, err := LoadProjectState(dir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load project state: %w", err)
+		}
+		state.LastSyncedAt = legacy.Hub.LastSyncedAt
+		if err := SaveProjectState(dir, state); err != nil {
+			return nil, fmt.Errorf("failed to save project state: %w", err)
+		}
 	}
 
 	// 8. Back up the original settings file
@@ -5408,7 +5502,7 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 	}
 
 	// 9. Write versioned settings
-	if err := SaveVersionedSettings(dir, vs); err != nil {
+	if err := saveVersionedSettingsData(dir, outputData); err != nil {
 		// Attempt to restore backups on failure
 		_ = os.Rename(backupPath, settingsPath)
 		if result.ServerBackupPath != "" {

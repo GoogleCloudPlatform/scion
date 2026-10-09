@@ -23,6 +23,7 @@ Scion features an interactive, top-level **Native Web Chat** interface in the We
 ### Core Layout & Navigation
 
 - **Project-Scoped Spaces & Shared Threads**: Chat is organized into distinct spaces scoped to specific Projects. Within a project-scoped space, users and agents participate in shared discussion threads, creating focused hubs of collaboration.
+  - **Un-mentioned thread replies**: In a thread with no default agent, a reply with no mention and no target would reach nobody. When the latest message from someone else in that thread came from an agent, Scion appends a short note to the reply that mentions the most recent other human poster (or the thread creator) and names that agent, so that human receives a mention notification. Otherwise the reply is still delivered to no one.
 - **Project Context Preservation (Dashboard ↔ Chat Toggle)**: When you switch between dashboard and chat modes using the navigation icons in the header, Scion automatically maintains your active project context to avoid losing your work state:
   - **Dashboard → Chat**: Clicking the **Chat** icon while on a project-scoped dashboard page (e.g., `/projects/:id/...` or inside an agent view) takes you straight to that project's chat space (`/chat/space/:id`).
   - **Chat → Dashboard**: Clicking the **Dashboard** icon while in a project chat space (`/chat/space/:id/...` or `/chat/:slug/...`) takes you directly back to that project's detail page (`/projects/:id`).
@@ -95,6 +96,7 @@ Right-clicking a message (on desktop) or tapping it (on touch devices without ho
 
 The web composer features a security-hardened, developer-friendly file upload system:
 - **Executable Deny-List Strategy**: To maximize flexibility for developers, attachment uploads use a security-first deny-list rather than a restrictive mime-type allow-list. It blocks executable binaries/scripts but permits **34+ developer file types** (including configuration files, source code, and data structures).
+- **Artifact References**: With the `hub.artifacts` experiment on, the paperclip also offers **Attach artifact…**, which picks published artifacts to reference in the message. Artifact chips and `scion://artifact/` links in messages open a preview in place; see [Artifacts](/scion/reference/artifacts/#artifacts-in-messages).
 - **Paste-to-Upload**: Paste images or file content directly from your clipboard into the composer for instant attachment.
 - **Markdown Attachment Rendering**: Markdown files uploaded as attachments render directly within the chat bubble, featuring a source/preview toggle and a one-click clipboard copy.
 - **Partial Success Reporting**: When uploading multiple files simultaneously, the system supports partial success—successful uploads are staged instantly while failed individual files report explicit inline errors.
@@ -160,6 +162,9 @@ scion message agent:tech-lead "Please review the auth module."
 
 # Attach a file
 scion message @tech-lead "See the test results." --attach ./results.json
+
+# Point at a published artifact (see Artifacts); the recipient is told how to fetch it
+scion message @tech-lead "Design ready for review." --artifact scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d
 
 # Read message body from a file (useful for long messages or scripted workflows)
 scion message @tech-lead --body-file ./review-notes.md
@@ -412,32 +417,40 @@ Scion does not forward an agent's end-of-turn text to anyone. A user, an agent o
 
 ### 3. Inbound Message Type Discrimination
 
-When an agent receives an inbound message, it arrives wrapped in standard delimiters and includes metadata:
+When an agent receives an inbound message in Hub mode, it arrives as a JSON object wrapped in standard delimiters:
 
 ```text
+You are receiving a message from the orchestration system:
+
 ---BEGIN SCION MESSAGE---
-sender: agent:tech-lead
-type: instruction
-thread_id: 1234
----
-Write a unit test for the auth package.
+{
+  "timestamp": "2026-10-08T21:00:41Z",
+  "message_id": "5d0c8a2e-7f41-4b8e-9c1a-2f6e0b3d9a17",
+  "conversation": {
+    "id": "af3cd254-0489-408f-a876-a749ec6e7f98",
+    "kind": "direct",
+    "surface": "native"
+  },
+  "from": "agent:tech-lead",
+  "type": "message",
+  "msg": "Write a unit test for the auth package."
+}
 ---END SCION MESSAGE---
 ```
+
+The `timestamp` is when the message was created, and `message_id` is the ID of the message the Hub stored for this delivery, so an agent can name the exact message it received, for example to tell the sender which message it is answering. When the envelope names a conversation, the agent can also fetch the message with `scion conversation get-message conv:<conversation.id> <message_id>`; when `conversation` is omitted (for example on a broadcast), there is no conversation to pass and the message cannot be fetched that way. `message_id` is omitted when the Hub stored no message for the delivery: scheduled messages, status notifications, artifact review notices, and plain (`--plain`) deliveries, which carry only the text. In a reply, `reply_to` still names the message being replied to; `message_id` names the reply itself.
 
 **Always check the `type` field before acting or replying:**
 
 | Type | Meaning | Action Required |
 |---|---|---|
-| **`instruction`** | Direct instruction sent to you. | Read and act on it. |
-| **`reply`** | A reply to a message you previously sent. Routes to the original sender agent, not the thread default. Includes `reply_context` metadata with the first 32 characters of the replied-to message. | Read and act on it like an `instruction`. |
-| **`state-change`** | A notification that another agent changed phase (e.g. stopped or stalled). | Treat as FYI — no reply or action needed. |
-| **`input-needed`** | A broadcast that an agent has called `sciontool status ask_user`. | See handling rules below. |
-| **`mention`** | You were CC'd or mentioned in a message. | Treat as FYI unless explicitly directed otherwise. |
-| **`group-set`** | An `@-mention` targeting multiple agents. | Act on it like an `instruction`. |
-| **`system`** | Operational notices generated by the Hub (e.g. `delivery-failed`, `scheduler`, `port-forward`). | Treat as FYI or follow troubleshooting instructions in the notice. |
+| **`message`** | A message for you: a direct message, a group message, or a message routed to you in a chat thread. An @mention fanned out from another agent's `scion message` also arrives as `message`, and so does a notification that an agent you subscribe to is waiting for input (see below). When the message went to several agents, `to` may list them. | Read and act on it. |
+| **`reply`** | A reply to a message you previously sent. Routes to the original sender agent, not the thread default. `reply_to` is the ID of the message being replied to, and `reply_context` holds its first 32 characters. | Read and act on it like a `message`. |
+| **`mention`** | You were @mentioned in a chat message whose primary recipient is someone else. `to` lists every agent the message engaged, including you. | Treat as FYI unless explicitly directed otherwise. |
+| **`event`** | A notice generated by Scion rather than written to you. The `event` object says what happened: `event.type` is one of `agent.state-changed` (an agent you subscribe to changed state; `event.subject` names the agent and `event.status` the state, for example `COMPLETED` or `STALLED`), `schedule.fired` (a scheduled message; `msg` is the scheduled text), `delivery.failed` (a message you sent was not delivered; `event.status` is `DELIVERY_FAILED`, or `DELIVERY_DEFERRED` when it was saved for an agent that is reincarnating), `port.exposed`, or `artifact.review`. | Act on a `schedule.fired` message's text; treat the others as FYI or follow the instructions in the notice. |
 
 :::note[Conversation Model Migration]
-The messaging system has transitioned to a conversation-based model where messages carry a `conversation_id` and are addressed to conversations rather than agents directly. The `scion conversation` CLI command (alias `conv`) provides full management of conversations — listing, viewing messages, creating group conversations, managing participants, and more (see [Conversation Management](#conversation-management) above). During this transition, inbound messages continue to arrive with the `type` fields described above, and agents should continue to discriminate on the `type` field as documented. 
+The messaging system has transitioned to a conversation-based model where messages carry a `conversation_id` and are addressed to conversations rather than agents directly. The `scion conversation` CLI command (alias `conv`) provides full management of conversations — listing, viewing messages, creating group conversations, managing participants, and more (see [Conversation Management](#conversation-management) above). Inbound messages name their conversation in the envelope's `conversation` object (`id`, `kind`, `surface`, and `name` when it has one). The object is omitted when a delivery has no conversation, for example broadcasts, mentions fanned out from an agent's message, and notifications. Agents should discriminate on the envelope `type` values described above; the send types used by `scion message` and the API (such as `instruction`, `state-change` or `group-set`) are not shown to the recipient.
 
 To migrate historical messages that predate the conversation model, administrators can use the `scion server backfill` command.
 
@@ -449,12 +462,12 @@ If a backfill operation is interrupted, it can be safely resumed from its last p
 The backfill uses a robust **compound keyset cursor** `(created, id)` (rather than a strictly-greater-than timestamp). This eliminates the potential for permanent row loss on resume, ensuring that any messages sharing identical timestamps are correctly processed and never skipped during resumes.
 :::
 
-#### Handling `input-needed` Notifications
+#### Handling Waiting-for-Input Notifications
 
-When an agent signals `WAITING_FOR_INPUT` (by calling `sciontool status ask_user`), a notification of type `input-needed` is dispatched to all subscribed agents (including its creator).
+When an agent signals `WAITING_FOR_INPUT` (by calling `sciontool status ask_user`), a notification is dispatched to all subscribed agents (including its creator). It arrives as a `message` from the waiting agent, with text such as `<agent> is WAITING_FOR_INPUT: <question>`.
 
 * **Parent Agent Role**: If you are the parent agent that created the waiting agent, you may be the intended respondent. Use `scion message @<name>` to reply with the answer.
-* **Peer Agent Rule**: Unrelated peer agents should **NOT** reply to `input-needed` notifications. Answering a peer's input prompt wastes context tokens, causes false loop signals, and violates project-scoped boundaries. To request a peer's input, always send an explicit `instruction` instead.
+* **Peer Agent Rule**: Unrelated peer agents should **NOT** reply to waiting-for-input notifications. Answering a peer's input prompt wastes context tokens, causes false loop signals, and violates project-scoped boundaries. To request a peer's input, always send it an explicit message instead.
 
 :::tip[Project-Scoped Message Isolation]
 When using slug-based query paths or addressing agents via `agent:<name>` (e.g., `scion message agent:<name>`), Scion strictly scopes all message queries and deliveries by the active `ProjectID`. This ensures that even if different projects contain agents with identical names or slugs, messages are completely isolated within each project and never leak across project boundaries.

@@ -209,8 +209,10 @@ type LocalSession interface {
 	// ErrSessionClosed if the session already ended; Done reports when
 	// the close completed.
 	CloseWithCode(code uint32, reason string) error
-	// RefreshAuth sends AuthRefresh{credential, stream_id} (dialer side).
-	// The receiving side validates refreshes one at a time; if several
+	// RefreshAuth sends AuthRefresh{credential, stream_id}: from the
+	// dialer, a refreshed credential (stream_id 0); from the relay, the
+	// hub's renewal notice for one stream (stream_id set, no credential).
+	// The relay validates credential refreshes one at a time; if several
 	// arrive while one is being validated, only the latest is kept.
 	RefreshAuth(credential []byte, streamID uint32) error
 	// Stats returns scheduler and buffer counters.

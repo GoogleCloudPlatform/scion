@@ -300,20 +300,33 @@ func (c *httpHubClient) CreateAgent(ctx context.Context, projectID string, req C
 		return nil, fmt.Errorf("an agent with this slug already exists — try a different title")
 
 	case http.StatusNotFound: // 404 — template or project not found
-		he := parseHubError(resp)
-		return nil, fmt.Errorf("not found: %s", he.Message)
+		he := newHubError("create agent", resp)
+		he.text = "not found: " + createAgentErrorMessage(he)
+		return nil, he
 
 	case http.StatusBadRequest: // 400 — validation error
-		he := parseHubError(resp)
-		return nil, fmt.Errorf("validation error: %s", he.Message)
+		he := newHubError("create agent", resp)
+		he.text = "validation error: " + createAgentErrorMessage(he)
+		return nil, he
 
 	case http.StatusForbidden: // 403 — permission denied
 		return nil, newHubError("create agent", resp)
 
 	default:
-		he := parseHubError(resp)
-		return nil, fmt.Errorf("create agent returned status %d: %s", resp.StatusCode, he.Message)
+		he := newHubError("create agent", resp)
+		he.text = fmt.Sprintf("create agent returned status %d: %s", resp.StatusCode, createAgentErrorMessage(he))
+		return nil, he
 	}
+}
+
+// createAgentErrorMessage returns the hub's error message for a failed
+// create agent response, or the HTTP status text when the response has no
+// error envelope with a code.
+func createAgentErrorMessage(he *HubError) string {
+	if he.Code == "" {
+		return http.StatusText(he.StatusCode)
+	}
+	return he.Message
 }
 
 func (c *httpHubClient) HubBaseURL() string {

@@ -16,10 +16,16 @@ package hub
 
 import (
 	"context"
+	"crypto/rand"
+	"fmt"
+	"log/slog"
+	"net"
 	"net/http"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 )
 
 // SetArtifactStore installs the artifact service's store. The store owns the
@@ -51,7 +57,20 @@ func (s *Server) artifactsConfig() opsettings.ArtifactsConfig {
 // artifactLimits feeds the artifacts settings section to the service on
 // every write, so a limit change applies without a restart.
 func (s *Server) artifactLimits(context.Context) artifacts.Limits {
-	return artifacts.Limits{MaxFileBytes: s.artifactsConfig().MaxFileBytes}
+	c := s.artifactsConfig()
+	return artifacts.Limits{
+		MaxFileBytes: c.MaxFileBytes, MaxBundleBytes: c.MaxBundleBytes, MaxFiles: c.MaxFiles,
+		LinkDefaultTTL:   time.Duration(c.LinkDefaultTTLHours) * time.Hour,
+		LinkMaxTTL:       time.Duration(c.LinkMaxTTLHours) * time.Hour,
+		DefaultRetention: time.Duration(c.DefaultRetentionDays) * 24 * time.Hour,
+		RemoteImages: artifacts.RemoteImageLimits{
+			Enabled:      c.RemoteImagesEnabled,
+			MaxCount:     c.RemoteImageMaxCount,
+			MaxBytes:     c.RemoteImageMaxBytes,
+			FetchTimeout: time.Duration(c.RemoteImageFetchTimeoutS) * time.Second,
+			TotalBudget:  time.Duration(c.RemoteImageTotalBudgetS) * time.Second,
+		},
+	}
 }
 
 // artifactsHandler returns the artifact service's handler, built over this
@@ -66,7 +85,23 @@ func (s *Server) artifactsHandler() http.Handler {
 	svc := artifacts.NewService(newArtifactHost(s))
 	svc.SetLimits(s.artifactLimits)
 	svc.SetBackendProvider(s.artifactBackend)
+	svc.SetReviewNotifier(s.notifyArtifactReview)
+	// Share-link reads are rate limited per client, read through the
+	// hub's trusted proxies the same way as its other pre-auth limits.
+	trusted := parseTrustedProxies(s.config.TrustedProxies)
+	svc.SetClientKey(func(r *http.Request) string { return shareLinkClientKey(r, trusted) })
 	return svc.Handler()
+}
+
+// artifactRefResolver returns the artifact service for resolving message
+// references (resolveArtifactRefs, its only caller). Like artifactsHandler
+// it is built over this server's artifacts.Host; resolveArtifactRefs
+// admits only request-authenticated contexts, so the host still sees only
+// identities derived from request credentials.
+func (s *Server) artifactRefResolver() *artifacts.Service {
+	svc := artifacts.NewService(newArtifactHost(s))
+	svc.SetBackendProvider(s.artifactBackend)
+	return svc
 }
 
 // artifactBackend reports the server's current artifact store, resource
@@ -74,5 +109,118 @@ func (s *Server) artifactsHandler() http.Handler {
 func (s *Server) artifactBackend() artifacts.Backend {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return artifacts.Backend{Store: s.artifactStore, Blobs: s.storage, HubID: s.hubID}
+	return artifacts.Backend{Store: s.artifactStore, Blobs: s.storage, HubID: s.hubID, ViewKey: s.artifactViewKey}
+}
+
+// artifactReapInterval is how often the hub reaps abandoned pending
+// artifact versions.
+const artifactReapInterval = 10 * time.Minute
+
+// artifactReapBatch caps the versions one reap pass handles.
+const artifactReapBatch = 500
+
+// startArtifactReaper runs the artifact maintenance pass
+// (reapArtifactVersions) every artifactReapInterval until ctx ends. It
+// runs whether or not the experiment is on: it only retires abandoned
+// uploads and expired artifacts and reclaims unreferenced blobs.
+func (s *Server) startArtifactReaper(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(artifactReapInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.reapArtifactVersions(ctx)
+			}
+		}
+	}()
+}
+
+// reapArtifactVersions runs one maintenance pass, in the order the blob
+// sweep relies on: abandoned pending versions are reaped and expired
+// artifacts deleted first, so their files stop counting as references,
+// then one blob sweep pass runs.
+func (s *Server) reapArtifactVersions(ctx context.Context) {
+	st := s.ArtifactStore()
+	if st == nil {
+		return
+	}
+	now := time.Now()
+	n, err := st.ReapPending(ctx, now.Add(-artifacts.PendingVersionTTL), artifactReapBatch)
+	if err != nil {
+		slog.WarnContext(ctx, "artifacts: reaping pending versions failed", "error", err)
+		return
+	}
+	if n > 0 {
+		slog.InfoContext(ctx, "artifacts: reaped abandoned pending versions", "count", n)
+	}
+	n, err = st.SweepExpired(ctx, now, artifactReapBatch)
+	if err != nil {
+		slog.WarnContext(ctx, "artifacts: deleting expired artifacts failed", "error", err)
+		return
+	}
+	if n > 0 {
+		slog.InfoContext(ctx, "artifacts: deleted expired artifacts", "count", n)
+	}
+	b := s.artifactBackend()
+	if b.Blobs == nil || b.HubID == "" {
+		return
+	}
+	grace := time.Duration(s.artifactsConfig().GCGraceHours) * time.Hour
+	listed, deleted, err := s.artifactBlobSweeper.Sweep(ctx, st, b.Blobs, b.HubID, grace, now)
+	if err != nil {
+		slog.WarnContext(ctx, "artifacts: blob sweep failed", "error", err, "listed", listed, "deleted", deleted)
+		return
+	}
+	if deleted > 0 {
+		slog.InfoContext(ctx, "artifacts: deleted unreferenced blobs", "count", deleted)
+	}
+}
+
+// SecretKeyArtifactViewKey is the secret key name of the key that signs
+// artifact view capabilities. It is separate from every other hub key.
+const SecretKeyArtifactViewKey = "artifact_view_signing_key"
+
+// initArtifactViewKey loads or creates the artifact view capability key,
+// with the same stable-key policy as the download signing key: required
+// on deployments that need stable keys, otherwise an in-memory key, since
+// losing it only ends views within artifacts.ViewTTL.
+func (s *Server) initArtifactViewKey(ctx context.Context) error {
+	key, err := s.ensureSigningKey(ctx, SecretKeyArtifactViewKey, nil)
+	if err == nil && len(key) == 0 {
+		err = fmt.Errorf("artifact view key resolved to an empty value")
+	}
+	if err != nil {
+		_, isGCPBackend := s.secretBackend.(*secret.GCPBackend)
+		if isGCPBackend || s.config.RequireStableSigningKey {
+			return fmt.Errorf("artifact view key: %w", err)
+		}
+		slog.Warn("Artifact view key could not be loaded or persisted; using an ephemeral in-memory key "+
+			"(artifact views will not load on other replicas or after restart)", "error", err)
+		key = make([]byte, 32)
+		if _, rerr := rand.Read(key); rerr != nil {
+			return fmt.Errorf("generate ephemeral artifact view key: %w", rerr)
+		}
+	}
+	s.mu.Lock()
+	s.artifactViewKey = key
+	s.mu.Unlock()
+	return nil
+}
+
+// shareLinkClientKey is the client a share-link read is charged to: the
+// client address as geExchangeClientIP reads it through trusted proxies,
+// with an IPv6 address keyed on its /64 prefix (the usual allocation to
+// one network interface) and an IPv4 address keyed as is. A larger IPv6
+// allocation still spans many /64 prefixes; the service's limit across all
+// clients bounds those.
+func shareLinkClientKey(r *http.Request, trusted []*net.IPNet) string {
+	key := geExchangeClientIP(r, trusted)
+	ip := net.ParseIP(key)
+	if ip == nil || ip.To4() != nil {
+		return key
+	}
+	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
 }

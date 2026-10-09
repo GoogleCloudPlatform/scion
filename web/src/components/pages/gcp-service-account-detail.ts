@@ -50,6 +50,7 @@ import { can } from '../../shared/types.js';
 import { saRef, saVerifyUrl } from '../../shared/gcp-service-account-urls.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
+import '../shared/detail-header.js';
 
 @customElement('scion-page-gcp-service-account-detail')
 export class ScionPageGCPServiceAccountDetail extends LitElement {
@@ -78,27 +79,6 @@ export class ScionPageGCPServiceAccountDetail extends LitElement {
     .breadcrumb a {
       color: var(--scion-primary, #3b82f6);
       text-decoration: none;
-    }
-
-    .header {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 1rem;
-      margin-bottom: 1.5rem;
-    }
-
-    .header h1 {
-      font-size: 1.25rem;
-      font-weight: 700;
-      margin: 0 0 0.25rem 0;
-      word-break: break-all;
-    }
-
-    .actions {
-      display: flex;
-      gap: 0.5rem;
-      flex-shrink: 0;
     }
 
     .panel {
@@ -257,6 +237,8 @@ export class ScionPageGCPServiceAccountDetail extends LitElement {
 
     const account = this.account;
     const status = this.status();
+    const canVerify = can(account._capabilities, 'verify');
+    const canDelete = can(account._capabilities, 'delete');
 
     return html`
       <div class="breadcrumb">
@@ -265,37 +247,40 @@ export class ScionPageGCPServiceAccountDetail extends LitElement {
         <span>Service Accounts</span>
       </div>
 
-      <div class="header">
-        <div>
-          <h1>${account.email}</h1>
-          ${account.displayName ? html`<div>${account.displayName}</div>` : nothing}
-        </div>
-        <div class="actions">
-          ${can(account._capabilities, 'verify')
-            ? html`<sl-button
-                size="small"
-                ?loading=${this.verifying}
-                ?disabled=${this.deleting}
-                @click=${this.handleVerify}
-              >
-                <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
-                Re-verify
-              </sl-button>`
-            : nothing}
-          ${can(account._capabilities, 'delete')
-            ? html`<sl-button
-                size="small"
-                variant="danger"
-                ?loading=${this.deleting}
-                ?disabled=${this.verifying}
-                @click=${this.handleDelete}
-              >
-                <sl-icon slot="prefix" name="trash"></sl-icon>
-                Delete
-              </sl-button>`
-            : nothing}
-        </div>
-      </div>
+      <scion-detail-header heading=${account.email}>
+        ${account.displayName
+          ? html`<div slot="meta" class="display-name">${account.displayName}</div>`
+          : nothing}
+        ${canVerify || canDelete
+          ? html`
+              <div slot="actions" class="header-actions">
+                ${canVerify
+                  ? html`<sl-button
+                      size="small"
+                      ?loading=${this.verifying}
+                      ?disabled=${this.deleting}
+                      @click=${this.handleVerify}
+                    >
+                      <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                      Re-verify
+                    </sl-button>`
+                  : nothing}
+                ${canDelete
+                  ? html`<sl-button
+                      size="small"
+                      variant="danger"
+                      ?loading=${this.deleting}
+                      ?disabled=${this.verifying}
+                      @click=${this.handleDelete}
+                    >
+                      <sl-icon slot="prefix" name="trash"></sl-icon>
+                      Delete
+                    </sl-button>`
+                  : nothing}
+              </div>
+            `
+          : nothing}
+      </scion-detail-header>
 
       <div class="panel">
         <dl>

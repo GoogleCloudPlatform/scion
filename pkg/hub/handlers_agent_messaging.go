@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -38,14 +39,15 @@ import (
 // sanitizeCrossProjectObserver strips body and attachment content from an
 // observer StructuredMessage so that cross-project broker publications do not
 // leak payload to unrelated project members. Metadata keys unrelated to
-// attachments are preserved.
+// attachments and artifact references are preserved.
 func sanitizeCrossProjectObserver(msg *messages.StructuredMessage) {
 	msg.Msg = ""
 	msg.Attachments = nil
+	msg.ArtifactRefsAdmitted = false
 	if msg.Metadata != nil {
 		sanitized := make(map[string]string, len(msg.Metadata))
 		for k, v := range msg.Metadata {
-			if k != attachmentsMetadataKey {
+			if k != attachmentsMetadataKey && k != artifacts.MessageMetadataKey {
 				sanitized[k] = v
 			}
 		}
@@ -180,6 +182,22 @@ const (
 func outboundThreadGateApplies(channel string) bool {
 	surface, err := messaging.ChannelToSurfaceStrict(channel)
 	return err == nil && surface == "native"
+}
+
+// outboundThreadSurface returns the conversation surface for an outbound
+// thread send (kind "group") on an external channel, matching the surface
+// the inbound path stores the same thread under. It returns "" for other
+// kinds, native channels and channels with no known surface, which keep
+// the default native surface.
+func outboundThreadSurface(kind, channel string) string {
+	if kind != "group" {
+		return ""
+	}
+	surface, err := messaging.ChannelToSurfaceStrict(channel)
+	if err != nil || surface == "native" {
+		return ""
+	}
+	return surface
 }
 
 // outboundThreadConversationState reports whether a free-text thread key
@@ -656,6 +674,13 @@ func (s *Server) resolveOutboundRouting(
 			}
 			if wcs != nil {
 				keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
+			}
+			// A thread on an external channel is stored under that
+			// channel's surface, the same key the inbound path uses for
+			// replies on the thread, so both directions share one
+			// conversation.
+			if surface := outboundThreadSurface(kind, req.Channel); surface != "" {
+				keyOpts = append(keyOpts, messaging.WithSurface(surface))
 			}
 			// A25.6 F1/F3: register both DM principals as participants so
 			// the conversation is discoverable via `conversation list`.
@@ -1318,13 +1343,51 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	// Artifact references (ptone/scion#3222): keep only those the sending
+	// agent can read under its own request credential. The flag lets
+	// deliverToUser record them on the broker path.
+	outboundArtifactRefs, outboundArtifactWarning := []artifacts.MessageRef(nil), ""
+	structuredMsg.Metadata, outboundArtifactRefs, outboundArtifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata)
+	structuredMsg.ArtifactRefsAdmitted = len(outboundArtifactRefs) > 0
+
 	// Process attachments.
-	attachmentRefs := s.ingestAgentAttachments(ctx, agent.ProjectID, agent.ID, req.Attachments)
+	attachmentRefs, attachmentWarnings := s.ingestAgentAttachments(ctx, agent.ProjectID, agent.ID, req.Attachments)
 	if encoded, ok := attachmentRefsMetadata(attachmentRefs); ok {
 		if structuredMsg.Metadata == nil {
 			structuredMsg.Metadata = make(map[string]string, 1)
 		}
 		structuredMsg.Metadata[attachmentsMetadataKey] = encoded
+	}
+
+	// W6-mention: human members @mentioned in an agent → group (thread)
+	// message, matched against the member list resolved above.
+	var mentionedHumans []string
+	if req.ThreadID != "" && !strings.HasPrefix(req.ThreadID, "dm:") && !strings.HasPrefix(req.ThreadID, "agent:") {
+		if names := messages.ExtractMentions(req.Msg); len(names) > 0 {
+			mentionedHumans = mentionedHumanIDs(humanMembers, names, "")
+		}
+	}
+
+	// storeOutboundRow persists storeMsg, records its mentions, attachments
+	// and artifacts, and emits the SSE event. It does not dispatch to
+	// channel spokes. Every store and publish call uses storeCtx, so the
+	// caller decides whether request cancellation can cut it short.
+	storeOutboundRow := func(storeCtx context.Context) error {
+		if err := s.store.CreateMessage(storeCtx, storeMsg); err != nil {
+			return err
+		}
+		// Record mention rows before publish: clients refetch the thread
+		// list and its mention dots on the SSE event.
+		s.recordHumanMentions(storeCtx, req.ThreadID, storeMsg.ID, mentionedHumans)
+		// W7: Link before publishing so a client that refetches on the SSE
+		// event already sees the attachments.
+		s.mu.RLock()
+		wcs := s.webChatStore
+		s.mu.RUnlock()
+		linkAttachmentRefs(storeCtx, wcs, storeMsg.ID, attachmentRefs, s.messageLog)
+		s.recordMessageArtifacts(storeCtx, storeMsg.ID, outboundArtifactRefs)
+		s.events.PublishUserMessage(storeCtx, storeMsg, attachmentRefs)
+		return nil
 	}
 
 	// Dispatch based on delivery path.
@@ -1337,6 +1400,14 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			// lifecycle events.
 			persisting := bp.subscribeProjectUserMessages(agent.ProjectID)
 			err := bp.PublishUserMessage(ctx, agent.ProjectID, result.RecipientID, structuredMsg)
+			if errors.Is(err, eventbus.ErrReservedChannel) {
+				// Nothing was published or stored: the request named a
+				// channel the hub keeps for itself.
+				s.messageLog.Warn("Outbound message names a reserved channel",
+					"agent_id", agent.ID, "channel", structuredMsg.Channel)
+				ValidationError(w, fmt.Sprintf("channel %q is reserved for internal use", structuredMsg.Channel), nil)
+				return
+			}
 			if err != nil && persisting && !errors.Is(err, eventbus.ErrSubscriberBufferFull) && !inProcessPublishFailed(err) {
 				// The inprocess spoke queued the persisting deliverToUser, so
 				// the message is stored; only channel spoke delivery failed (a
@@ -1368,9 +1439,26 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 						"Message delivery failed: recipient is temporarily overloaded, retry later", nil)
 					return
 				}
+				// The cause stays in the log line above: it can carry a
+				// channel spoke's own error text.
 				writeError(w, http.StatusBadGateway, ErrCodeDeliveryFailed,
-					"Message delivery failed: "+err.Error(), nil)
+					"Message delivery failed", nil)
 				return
+			}
+			if !persisting {
+				// No persisting subscriber received the publish, so only
+				// the channel spokes have the message. Store the row and
+				// emit the SSE event here, as the notification path does,
+				// without dispatching to the spokes a second time. The
+				// spokes already delivered it, so a store failure is
+				// logged rather than reported back for a retry. The
+				// spokes already have the message, so a cancelled request
+				// must not stop the store and SSE event either.
+				if err := storeOutboundRow(context.WithoutCancel(ctx)); err != nil {
+					s.messageLog.Error("Failed to persist outbound message after broker publish",
+						"agent_id", agent.ID, "recipient_id", result.RecipientID,
+						"project_id", agent.ProjectID, "error", err)
+				}
 			}
 			s.messageLog.Info("Outbound message dispatched through broker",
 				"agent_id", agent.ID, "recipient_id", result.RecipientID, "project_id", agent.ProjectID)
@@ -1378,21 +1466,16 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 
 	case deliveryUserDirect:
 		// Direct path: persist, link attachments, publish SSE, dispatch to channels.
-		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
+		if err := storeOutboundRow(ctx); err != nil {
 			s.messageLog.Error("Failed to persist outbound message", "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				"Failed to persist message", nil)
 			return
 		}
-		// W7: Link before publishing so a client that refetches on the SSE
-		// event already sees the attachments.
 		s.mu.RLock()
-		wcs := s.webChatStore
 		cr := s.channelRegistry
 		s.mu.RUnlock()
-		linkAttachmentRefs(ctx, wcs, storeMsg.ID, attachmentRefs, s.messageLog)
 		delete(structuredMsg.Metadata, attachmentsMetadataKey) // strip internal transport key
-		s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
 		if cr != nil && cr.Len() > 0 {
 			cr.Dispatch(ctx, structuredMsg)
 		}
@@ -1424,16 +1507,13 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 
 	// Fire notifications (both broker and non-broker paths).
 	// W6-mention: mention notifications for agent → group messages.
-	if req.ThreadID != "" && !strings.HasPrefix(req.ThreadID, "dm:") && !strings.HasPrefix(req.ThreadID, "agent:") {
-		names := messages.ExtractMentions(req.Msg)
-		if len(names) > 0 {
-			senderName := agent.Name
-			if senderName == "" {
-				senderName = agent.Slug
-			}
-			go s.fireHumanMentionNotifications(context.Background(), names, agent.ProjectID,
-				req.ThreadID, "", senderName, req.Msg)
+	if len(mentionedHumans) > 0 && s.getChatNotifier() != nil {
+		senderName := agent.Name
+		if senderName == "" {
+			senderName = agent.Slug
 		}
+		go s.notifyHumanMentions(context.Background(), mentionedHumans, agent.ProjectID,
+			req.ThreadID, "", senderName, req.Msg)
 	}
 
 	// W6: DM notification for agent → human replies (non-broker path only).
@@ -1479,6 +1559,14 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	if len(mentionResults) > 0 {
 		respBody["mention_results"] = mentionResults
 	}
+	// ptone/scion#3667: attachments the hub could not record. Additive: the
+	// message was still sent, and the status is unchanged.
+	if len(attachmentWarnings) > 0 {
+		respBody["attachment_warnings"] = attachmentWarnings
+	}
+	if outboundArtifactWarning != "" {
+		respBody["artifact_warning"] = outboundArtifactWarning
+	}
 	writeJSON(w, http.StatusOK, respBody)
 }
 
@@ -1520,6 +1608,12 @@ func (s *Server) handleAgentGitHubTokenRefresh(w http.ResponseWriter, r *http.Re
 	if agent.ProjectID == "" {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
 			"agent has no project associated", nil)
+		return
+	}
+
+	// No external token for an agent that is not in good standing
+	// (ptone/scion#3433); a lookup fault refuses.
+	if s.agentStandingForbidden(ctx, w, agent.ID) {
 		return
 	}
 
@@ -1609,10 +1703,20 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 	// The same transaction checks that every delegator of the edges the soft
 	// delete deactivated is live (otherwise a 409, or a 503 when the lookup
 	// fails), reactivates those edges (a conflicting active edge is a 409)
-	// and writes the agent_restore audit record.
+	// and writes the agent_restore audit record. It also refuses an agent
+	// whose guard user (its owner, ancestry root or, for a scheduled agent,
+	// the principal of its schedule's latest revision) does not exist,
+	// normally a deleted user but possibly a purged legacy root agent
+	// (ptone/scion#2769; errAgentOwnerUserMissing, see
+	// lockAgentGuardUserTx).
 	if err := s.restoreAgentTx(ctx, agent, auditActorFromContext(ctx)); err != nil {
 		if errors.Is(err, errAgentNotSoftDeleted) {
 			BadRequest(w, "Agent is not in deleted state")
+			return
+		}
+		if errors.Is(err, errAgentOwnerUserMissing) {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				"cannot restore the agent: the user or agent it belongs to no longer exists", nil)
 			return
 		}
 		if errors.Is(err, errRestoreEdgeConflict) {
@@ -2099,6 +2203,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// Persist to message store before delivery attempt. Set dispatch_state
 	// to "dispatched" (no new pending rows per delivery policy).
 	var persistedMsgID string
+	// artifactWarning reports artifact references not attached on the
+	// non-agent-sender path below (admitMessageArtifacts).
+	var artifactWarning string
 	// dispatchMsg (#2257, design auto-offload-large-dm §4.4) is the object
 	// actually rendered a second time and dispatched below; it defaults to
 	// today's structuredMsg (possibly nil) and is only replaced with an
@@ -2537,6 +2644,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				AgentPhase:     agent.Phase,
 				MentionResults: mentionResults,
 				Deferred:       deferredNote,
+				// ptone/scion#3667: attachments the hub could not record.
+				AttachmentWarnings: dmResult.AttachmentWarnings,
+				ArtifactWarning:    dmResult.ArtifactWarning,
 			})
 			return
 		}
@@ -2544,12 +2654,18 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// #2257 P1 (design auto-offload-large-dm §4.2 item 1): strip
 		// hub-reserved offload metadata keys before persist/render/dispatch,
 		// so a client cannot spoof body_offloaded/body_chars/body_sha256.
-		structuredMsg.Metadata = messaging.StripReservedMetadata(structuredMsg.Metadata)
+		// admitMessageArtifacts performs that strip, then re-adds only the
+		// artifact references the sender can read under its own request
+		// credential (ptone/scion#3222).
+		var artifactRefs []artifacts.MessageRef
+		structuredMsg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata)
+		structuredMsg.ArtifactRefsAdmitted = len(artifactRefs) > 0
 
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 			s.messageLog.Error("Failed to persist message", "error", err)
 		} else {
 			persistedMsgID = storeMsg.ID
+			s.recordMessageArtifacts(ctx, storeMsg.ID, artifactRefs)
 		}
 		messaging.RecordStep(ctx, "message_persisted")
 		// B11/B13: only publish when persistence succeeded — publishing an
@@ -2792,12 +2908,13 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(MessageDeliveryResponse{
-			MessageID:      persistedMsgID,
-			Status:         "deferred",
-			Agent:          agent.Slug,
-			AgentPhase:     agent.Phase,
-			MentionResults: mentionResults,
-			Deferred:       deferredReason(agent),
+			MessageID:       persistedMsgID,
+			Status:          "deferred",
+			Agent:           agent.Slug,
+			AgentPhase:      agent.Phase,
+			MentionResults:  mentionResults,
+			Deferred:        deferredReason(agent),
+			ArtifactWarning: artifactWarning,
 		})
 		return
 	}
@@ -2805,11 +2922,12 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(MessageDeliveryResponse{
-		MessageID:      persistedMsgID,
-		Status:         deliveryStatus,
-		Agent:          agent.Slug,
-		AgentPhase:     agent.Phase,
-		MentionResults: mentionResults,
+		MessageID:       persistedMsgID,
+		Status:          deliveryStatus,
+		Agent:           agent.Slug,
+		AgentPhase:      agent.Phase,
+		MentionResults:  mentionResults,
+		ArtifactWarning: artifactWarning,
 	})
 }
 
@@ -2825,6 +2943,13 @@ type MessageDeliveryResponse struct {
 	// saved to conversation history, and dispatch was deliberately skipped.
 	// The CLI keys on this field to print its deferred notice.
 	Deferred string `json:"deferred,omitempty"`
+	// AttachmentWarnings lists attachments the hub could not record on this
+	// message (ptone/scion#3667). The message was still delivered without
+	// them. Omitted when every attachment was recorded.
+	AttachmentWarnings []AttachmentWarning `json:"attachment_warnings,omitempty"`
+	// ArtifactWarning is set when artifact references the request named
+	// were not attached (ptone/scion#3222).
+	ArtifactWarning string `json:"artifact_warning,omitempty"`
 }
 
 // GroupMessageRecipientResult represents the delivery status for one recipient in a group[] delivery.
@@ -3585,9 +3710,16 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 		// Phase 9b(ii): render the delivery envelope for this broadcast
 		// recipient. ConvResult is nil — broadcasts deliberately skip
 		// conversation resolution (no conversation for broadcasts).
+		// The envelope's message_id names the stored row, so it is passed
+		// only when the row was written (ptone/scion#3881); an empty ID
+		// omits the key.
 		if s.writeDenyEnabled() {
+			renderID := ""
+			if persisted {
+				renderID = storeMsg.ID
+			}
 			agentMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
-				MessageID:  storeMsg.ID,
+				MessageID:  renderID,
 				ConvResult: nil,
 				Msg:        &agentMsg,
 				CreatedAt:  storeMsg.CreatedAt,
@@ -4009,15 +4141,17 @@ func (s *Server) validateChannelRegistered(w http.ResponseWriter, channel string
 			"cannot validate channel: message broker is not available", nil)
 		return false
 	}
+	// Match on the routing key FanOutEventBus.Publish uses (ChannelID,
+	// else Name), so a channel that passes here has a spoke to reach.
 	channels := bp.ListChannels()
 	for _, ch := range channels {
-		if ch.Name == channel {
+		if ch.RoutingKey() == channel {
 			return true
 		}
 	}
 	available := make([]string, len(channels))
 	for i, ch := range channels {
-		available[i] = ch.Name
+		available[i] = ch.RoutingKey()
 	}
 	if len(available) == 0 {
 		ValidationError(w, fmt.Sprintf("channel %q is not registered; no channels are currently available", channel), nil)

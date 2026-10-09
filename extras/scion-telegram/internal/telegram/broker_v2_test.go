@@ -1133,6 +1133,78 @@ func TestV2_HandleGroupMessage_ReplyToBotMessage(t *testing.T) {
 	assert.Equal(t, "agent:reviewer", deliveredMsg.Recipient)
 }
 
+// TestV2_HandleGroupMessage_ReplyToBot_ConcurrentBotInfoRefresh checks
+// that the reply-to routing path reads the bot info under the broker lock
+// while the bot info is replaced concurrently. Run with -race.
+func TestV2_HandleGroupMessage_ReplyToBot_ConcurrentBotInfoRefresh(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	hub := newFakeHubClient()
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+
+	ctx := context.Background()
+	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "456",
+		ScionEmail:     "alice@example.com",
+		LinkedAt:       time.Now().UTC(),
+	}))
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID:       -200,
+		ProjectID:    "proj-1",
+		ProjectSlug:  "my-project",
+		DefaultAgent: "coder",
+		LinkedAt:     time.Now().UTC(),
+		Active:       true,
+	}))
+	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
+		ProjectID:   "proj-1",
+		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
+		RefreshedAt: time.Now(),
+	}))
+	b.InboundHandler = func(string, *messages.StructuredMessage) {}
+
+	b.mu.RLock()
+	bot := *b.botInfo
+	b.mu.RUnlock()
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			refreshed := bot
+			b.mu.Lock()
+			b.botInfo = &refreshed
+			b.mu.Unlock()
+		}
+	}()
+
+	for i := 0; i < 20; i++ {
+		b.handleGroupMessage(&TGMessage{
+			MessageID: int64(100 + i),
+			From:      &TGUser{ID: 456, Username: "alice"},
+			Chat:      TGChat{ID: -200, Type: "group"},
+			Date:      time.Now().Unix(),
+			Text:      "yes, looks good to me",
+			ReplyToMessage: &TGMessage{
+				MessageID: 50,
+				From:      &TGUser{ID: bot.ID, IsBot: true, Username: bot.Username},
+				Chat:      TGChat{ID: -200, Type: "group"},
+				Text:      "🤖 reviewer\n\nPlease review the PR",
+			},
+		})
+	}
+	close(stop)
+	wg.Wait()
+}
+
 func TestV2_HandleGroupMessage_ReplyToBotMessage_MentionTakesPriority(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
 	hub := newFakeHubClient()
@@ -3599,18 +3671,82 @@ func TestV2_ResolveAttachmentPath_WorkspacePaths(t *testing.T) {
 			projectID: "proj-1",
 			want:      "/home/scion/.scion/projects/my-project/file.txt",
 		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := b.resolveAttachmentPath(ctx, nil, tt.path, tt.projectID)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestV2_ResolveAttachmentPath_UntranslatableIsError covers each workspace
+// path that cannot be translated: each returns an error and no path, and
+// the outbound path skips the attachment without opening any file.
+func TestV2_ResolveAttachmentPath_UntranslatableIsError(t *testing.T) {
+	tests := []struct {
+		name      string
+		path      string
+		projectID string
+		slugs     map[string]string
+	}{
 		{
-			name:      "no project slug returns original",
+			name:      "dot-dot climbs out of the workspace",
+			path:      "/workspace/../etc/hosts",
+			projectID: "proj-1",
+			slugs:     map[string]string{"proj-1": "my-project"},
+		},
+		{
+			name:      "other absolute path",
+			path:      "/etc/hosts",
+			projectID: "proj-1",
+			slugs:     map[string]string{"proj-1": "my-project"},
+		},
+		{
+			name:      "no project slug",
 			path:      "/workspace/file.txt",
 			projectID: "unknown-proj",
-			want:      "/workspace/file.txt",
+			slugs:     map[string]string{"proj-1": "my-project"},
+		},
+		{
+			// A slug that cleans the project directory to the root puts
+			// the joined path outside it.
+			name:      "outside the project directory",
+			path:      "/workspace/file.txt",
+			projectID: "proj-1",
+			slugs:     map[string]string{"proj-1": "../../../../.."},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := b.resolveAttachmentPath(ctx, nil, tt.path, tt.projectID)
-			assert.Equal(t, tt.want, got)
+			tgSrv := newFakeTGServerV2(t)
+			b := newTestBrokerV2(t, tgSrv)
+			b.projectSlugMap = tt.slugs
+
+			got, err := b.resolveAttachmentPath(context.Background(), nil, tt.path, tt.projectID)
+			require.Error(t, err)
+			assert.Empty(t, got)
+
+			var opened []string
+			orig := openAttachmentFile
+			t.Cleanup(func() { openAttachmentFile = orig })
+			openAttachmentFile = func(name string) (*os.File, error) {
+				opened = append(opened, name)
+				return nil, os.ErrNotExist
+			}
+
+			msg := messages.NewInstruction("agent:coder", "user:alice", "report attached")
+			msg.Attachments = []string{tt.path}
+			msg.Metadata = map[string]string{"telegram_chat_id": "-300"}
+			require.NoError(t, b.Publish(context.Background(), "scion.project."+tt.projectID+".agent.coder.messages", msg))
+
+			assert.Empty(t, opened, "no attachment path may be opened")
+			sent := tgSrv.getSentMessages()
+			require.Len(t, sent, 1, "the message text is delivered without the attachment")
+			assert.Contains(t, sent[0].Text, "report attached")
 		})
 	}
 }
@@ -3632,6 +3768,7 @@ func TestV2_ResolveAttachmentPath_SharedDirPaths(t *testing.T) {
 		path      string
 		projectID string
 		wantEnd   string // suffix to match (avoids hardcoding HOME)
+		wantErr   bool   // unresolvable: an error and no path, never the input
 	}{
 		{
 			name:      "scion-volumes path with file",
@@ -3658,28 +3795,34 @@ func TestV2_ResolveAttachmentPath_SharedDirPaths(t *testing.T) {
 			wantEnd:   "project-configs/my-project__550e8400/shared-dirs/cache/data.bin",
 		},
 		{
-			name:      "no project slug returns original",
+			name:      "no project slug is an error",
 			path:      "/scion-volumes/scratchpad/file.txt",
 			projectID: "unknown-proj",
-			wantEnd:   "/scion-volumes/scratchpad/file.txt",
+			wantErr:   true,
 		},
 		{
 			name:      "path traversal rejected",
 			path:      "/scion-volumes/scratchpad/../../etc/passwd",
 			projectID: "550e8400-e29b-41d4-a716-446655440000",
-			wantEnd:   "/scion-volumes/scratchpad/../../etc/passwd",
+			wantErr:   true,
 		},
 		{
 			name:      "path traversal in shared dir name rejected",
 			path:      "/scion-volumes/../.scion/settings.yaml",
 			projectID: "550e8400-e29b-41d4-a716-446655440000",
-			wantEnd:   "/scion-volumes/../.scion/settings.yaml",
+			wantErr:   true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := b.resolveAttachmentPath(ctx, nil, tt.path, tt.projectID)
+			got, err := b.resolveAttachmentPath(ctx, nil, tt.path, tt.projectID)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Empty(t, got)
+				return
+			}
+			require.NoError(t, err)
 			assert.True(t, strings.HasSuffix(got, filepath.FromSlash(tt.wantEnd)),
 				"resolveAttachmentPath(%q) = %q, want suffix %q", tt.path, got, tt.wantEnd)
 		})

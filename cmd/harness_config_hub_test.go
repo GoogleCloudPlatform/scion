@@ -175,7 +175,7 @@ func TestSyncHarnessConfigToHub_FallsBackToHubFileAPIForLocalStorageURLs(t *test
 		Endpoint: server.URL,
 	}
 
-	err = syncHarnessConfigToHub(hubCtx, "codex", localPath, "global", "", "codex")
+	err = syncHarnessConfigToHub(hubCtx, "codex", localPath, "global", "", "codex", "")
 	require.NoError(t, err)
 	require.Contains(t, uploadedPaths, "config.yaml")
 }
@@ -199,7 +199,7 @@ func TestSyncHarnessConfigToHub_SkipsBackupAndTempFiles(t *testing.T) {
 	require.NoError(t, err)
 	hubCtx := &HubContext{Client: client, Endpoint: server.URL}
 
-	require.NoError(t, syncHarnessConfigToHub(hubCtx, "codex", localPath, "global", "", "codex"))
+	require.NoError(t, syncHarnessConfigToHub(hubCtx, "codex", localPath, "global", "", "codex", ""))
 	require.ElementsMatch(t, []string{"config.yaml", "dialect.yaml"}, uploadedPaths)
 }
 
@@ -288,7 +288,7 @@ func TestSyncHarnessConfigToHub_DropsStaleBackupEntriesFromHub(t *testing.T) {
 	require.NoError(t, err)
 	hubCtx := &HubContext{Client: client, Endpoint: server.URL}
 
-	require.NoError(t, syncHarnessConfigToHub(hubCtx, "codex", localPath, "global", "", "codex"))
+	require.NoError(t, syncHarnessConfigToHub(hubCtx, "codex", localPath, "global", "", "codex", ""))
 
 	require.Equal(t, 0, calls.uploadRequests, "nothing changed, so nothing should be uploaded")
 	require.NotNil(t, calls.finalized, "stale backup entry must trigger Finalize")
@@ -331,7 +331,7 @@ func TestSyncHarnessConfigToHub_UpToDateDoesNotFinalize(t *testing.T) {
 	hubCtx := &HubContext{Client: client, Endpoint: server.URL}
 
 	out := captureStdout(t, func() {
-		require.NoError(t, syncHarnessConfigToHub(hubCtx, "codex", localPath, "global", "", "codex"))
+		require.NoError(t, syncHarnessConfigToHub(hubCtx, "codex", localPath, "global", "", "codex", ""))
 	})
 
 	require.Equal(t, 0, calls.uploadRequests)
@@ -360,7 +360,7 @@ func TestSyncHarnessConfigToHub_DropsLocallyDeletedFileFromHub(t *testing.T) {
 	hubCtx := &HubContext{Client: client, Endpoint: server.URL}
 
 	out := captureStdout(t, func() {
-		require.NoError(t, syncHarnessConfigToHub(hubCtx, "codex", localPath, "global", "", "codex"))
+		require.NoError(t, syncHarnessConfigToHub(hubCtx, "codex", localPath, "global", "", "codex", ""))
 	})
 
 	require.Equal(t, 0, calls.uploadRequests, "nothing changed locally, so nothing should be uploaded")
@@ -391,7 +391,7 @@ func TestSyncHarnessConfigToHub_DeletionWithChangedFile(t *testing.T) {
 	hubCtx := &HubContext{Client: client, Endpoint: server.URL}
 
 	out := captureStdout(t, func() {
-		require.NoError(t, syncHarnessConfigToHub(hubCtx, "codex", localPath, "global", "", "codex"))
+		require.NoError(t, syncHarnessConfigToHub(hubCtx, "codex", localPath, "global", "", "codex", ""))
 	})
 
 	require.Equal(t, []string{"dialect.yaml"}, calls.uploadRequested)
@@ -422,7 +422,7 @@ func TestSyncHarnessConfigToHub_DropsStaleTransientDirectoryFromHub(t *testing.T
 	require.NoError(t, err)
 	hubCtx := &HubContext{Client: client, Endpoint: server.URL}
 
-	require.NoError(t, syncHarnessConfigToHub(hubCtx, "codex", localPath, "global", "", "codex"))
+	require.NoError(t, syncHarnessConfigToHub(hubCtx, "codex", localPath, "global", "", "codex", ""))
 
 	require.Equal(t, 0, calls.uploadRequests)
 	require.Equal(t, []string{"config.yaml"}, finalizedPaths(t, &calls))
@@ -446,7 +446,7 @@ func TestSyncHarnessConfigToHub_RefusesEmptyLocalDirectory(t *testing.T) {
 	require.NoError(t, err)
 	hubCtx := &HubContext{Client: client, Endpoint: server.URL}
 
-	err = syncHarnessConfigToHub(hubCtx, "codex", localPath, "global", "", "codex")
+	err = syncHarnessConfigToHub(hubCtx, "codex", localPath, "global", "", "codex", "")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no files to sync")
 	require.Equal(t, 0, hubCalls, "sync must not call the Hub for an empty directory")

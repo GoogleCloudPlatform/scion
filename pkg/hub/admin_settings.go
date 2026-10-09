@@ -15,7 +15,6 @@
 package hub
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -259,6 +258,12 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 		return
 	}
 
+	// A user access token resets only a section with no refused key.
+	if !serverConfigSectionTokenResettable(sectionName) &&
+		writeTokenRefusedSettingsKeys(w, r.Context(), []string{sectionName}) {
+		return
+	}
+
 	// The "experiments" section has its own compare-and-set reset with a
 	// per-name audit log (DELETE /api/v1/admin/experiments), gated on
 	// hub.experiments.update. This generic route has no compare-and-set and
@@ -278,7 +283,41 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 		return
 	}
 
-	if err := ops.DeleteSection(r.Context(), sectionName); err != nil {
+	// Resetting the GCP permission-check section returns both keys to their
+	// deploy-time values: the same transition rule and audit record as a
+	// PUT apply.
+	var gcpIAMCur, gcpIAMNext gcpIAMSettings
+	gcpIAMChange := false
+	if sectionName == gcpIAMSection {
+		if !requireGCPIAMHubAdmin(w, r.Context()) {
+			return
+		}
+		gcpIAMCur = s.currentGCPIAMSettings()
+		gcpIAMNext = s.gcpIAMEffectiveFor(nil)
+		if gcpIAMChange = gcpIAMCur != gcpIAMNext; gcpIAMChange {
+			if err := s.checkGCPIAMTransition(r.Context(), gcpIAMCur, gcpIAMNext, false); err != nil {
+				writeGCPIAMTransitionError(w, err)
+				return
+			}
+			if err := s.auditGCPIAMChange(r.Context(), gcpIAMSurfaceReset, gcpIAMCur, gcpIAMNext); err != nil {
+				slog.Error("Failed to record GCP permission-check change", "error", err)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"Failed to reset section", nil)
+				return
+			}
+			s.approveGCPIAMTransition(gcpIAMTransition{From: gcpIAMCur, To: gcpIAMNext})
+		}
+	}
+
+	err := ops.DeleteSection(r.Context(), sectionName)
+	if gcpIAMChange {
+		// The approval covers only this reset's own self-apply.
+		s.clearGCPIAMApproval()
+		if err != nil {
+			s.auditGCPIAMNotApplied(r.Context(), gcpIAMCur, gcpIAMNext, err)
+		}
+	}
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, ErrCodeNotFound,
 				"Section not found in database: "+sectionName, nil)
@@ -427,14 +466,21 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
 		return
 	}
+	if rejectRepeatedJSONMembers(w, rawBody) {
+		return
+	}
 	var req ServerConfigUpdateRequest
-	if err := json.NewDecoder(bytes.NewReader(rawBody)).Decode(&req); err != nil {
+	if err := json.Unmarshal(rawBody, &req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
 		return
 	}
 	// The typed decode above silently drops a removed profiles.<name>.timezone
 	// key, so check the raw body before settings.yaml is touched.
 	if rejectRemovedProfileTimezone(w, rawBody) {
+		return
+	}
+	// A user access token writes configuration keys only.
+	if writeTokenRefusedSettingsKeys(w, r.Context(), tokenRefusedServerConfigKeys(rawBody)) {
 		return
 	}
 	// Any other key the typed decode drops (unknown, misspelt, or a flat
@@ -582,8 +628,19 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Apply updates by marshaling the request fields and merging
-	applySettingsUpdates(raw, &req)
+	// Apply updates by marshaling the request fields and merging. The raw
+	// server object tells the merge which server fields were sent.
+	rawServer := rawServerObject(rawBody)
+	applySettingsUpdatesFromBody(raw, &req, rawServer)
+
+	// The server section is deep-merged, so a section the request changes
+	// only in part is validated again as merged with the stored fields.
+	if req.Server != nil {
+		if err := validateMergedServerSections(raw, rawServer); err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			return
+		}
+	}
 
 	// Validate the effective hub default GCP identity (the merged result, so
 	// a PUT that changes only one of the pair is checked against the other's
@@ -738,7 +795,23 @@ func setOrDeleteString(raw map[string]interface{}, key string, v *string) {
 }
 
 // applySettingsUpdates merges the update request into the raw settings map.
+// It is used only by tests of the non-server settings; the PUT handler
+// uses applySettingsUpdatesFromBody. The two differ for the server
+// section: here it is deep-merged from the typed request alone, so a zero
+// value in req.Server cannot be told apart from an omitted field and keeps
+// the stored value, while the PUT handler passes the request body so that
+// an explicit null, or the zero value of a non-pointer field, clears a
+// server field (see mergeServerSettings). Tests that
+// assert on server fields must use applySettingsUpdatesFromBody with a
+// real body.
 func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateRequest) {
+	applySettingsUpdatesFromBody(raw, req, nil)
+}
+
+// applySettingsUpdatesFromBody is applySettingsUpdates with the request's
+// raw "server" JSON object, which tells mergeServerSettings which server
+// fields the client sent. A nil rawServer derives that from req.Server.
+func applySettingsUpdatesFromBody(raw map[string]interface{}, req *ServerConfigUpdateRequest, rawServer json.RawMessage) {
 	if req.SchemaVersion != nil {
 		raw["schema_version"] = *req.SchemaVersion
 	}
@@ -751,20 +824,7 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 	setOrDeleteString(raw, "workspace_path", req.WorkspacePath)
 
 	if req.Server != nil {
-		newServer := marshalToMap(req.Server)
-		// Merge into existing server section to preserve keys not present in the
-		// update (e.g. github_app managed via its own endpoint).
-		if existing, ok := raw["server"]; ok {
-			if existingMap, ok := existing.(map[string]interface{}); ok {
-				if newMap, ok := newServer.(map[string]interface{}); ok {
-					for k, v := range newMap {
-						existingMap[k] = v
-					}
-					newServer = existingMap
-				}
-			}
-		}
-		raw["server"] = newServer
+		mergeServerSettings(raw, req.Server, rawServer)
 	}
 	if req.Telemetry != nil {
 		raw["telemetry"] = marshalToMap(req.Telemetry)

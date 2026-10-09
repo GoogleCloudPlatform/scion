@@ -38,13 +38,13 @@ import (
 func TestSharedDirCreate_BackingDirCreatedOnFirstUse(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubManagedProject(t, srv, "SD First Use Contract")
+	project, _ := createTestHubManagedProject(t, srv, "SD First Use Contract")
 
 	rec := doRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/projects/%s/shared-dirs", project.ID),
 		map[string]interface{}{"name": "results"})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
-	sdPath := resolveTestSharedDirPath(t, workspacePath, "results")
+	sdPath := resolveTestSharedDirPath(t, project, "results")
 	_, err := os.Lstat(sdPath)
 	assert.True(t, os.IsNotExist(err), "POST must record the declaration only, not create %s", sdPath)
 

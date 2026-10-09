@@ -19,7 +19,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -2137,18 +2136,11 @@ func TestHandleAgentOutboundMessage_DMSyncBackfill(t *testing.T) {
 	ctx := context.Background()
 
 	// Set up a WebChatStore so registerDMParticipants can write webchat_dm rows.
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	// Limit to a single connection so all goroutines share the same in-memory
-	// database (each `:memory:` connection gets its own empty DB otherwise).
-	db.SetMaxOpenConns(1)
-	// Use t.Cleanup instead of defer so that db.Close runs after the W6
-	// notification goroutine (go cn.NotifyDMReceived) has finished — the
-	// backfill now populates req.ThreadID, which makes the non-broker
-	// notification path fire.
-	t.Cleanup(func() { _ = db.Close() })
+	// openTestMemorySQLite closes db in t.Cleanup, not defer, so db.Close
+	// runs after the W6 notification goroutine (go cn.NotifyDMReceived) has
+	// finished — the backfill now populates req.ThreadID, which makes the
+	// non-broker notification path fire.
+	db := openTestMemorySQLite(t, "sqlite3")
 	wcs := NewWebChatStore(db, "sqlite3")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init WebChatStore: %v", err)
@@ -2264,15 +2256,11 @@ func TestHandleAgentOutboundMessage_DMSyncBrokerPath(t *testing.T) {
 	ctx := context.Background()
 
 	// Set up a WebChatStore.
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	// Register db.Close as a t.Cleanup BEFORE proxy.Stop so that LIFO
-	// ordering guarantees proxy.Stop runs first — draining in-flight
-	// deliverToUser callbacks (including TouchDMActivity) before the
-	// database handle is closed.
-	t.Cleanup(func() { _ = db.Close() })
+	// openTestMemorySQLite registers db.Close as a t.Cleanup BEFORE
+	// proxy.Stop, so LIFO ordering guarantees proxy.Stop runs first —
+	// draining in-flight deliverToUser callbacks (including TouchDMActivity)
+	// before the database handle is closed.
+	db := openTestMemorySQLite(t, "sqlite3")
 	wcs := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
