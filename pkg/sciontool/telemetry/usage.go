@@ -620,6 +620,11 @@ type UsageDeriver struct {
 
 	derived, duplicate, malformed atomic.Int64
 	malformedWarnOnce             sync.Once
+
+	// sessionUsage, if set, also receives each recorded increment for the
+	// session metrics aggregator (see SessionUsageSink). Set by the
+	// Pipeline before the deriver is published.
+	sessionUsage func(SessionUsage)
 }
 
 // UsageDiagnostics are fixed-cardinality usage-derivation counters, exposed
@@ -944,6 +949,12 @@ func (d *UsageDeriver) fingerprint(scopeName, eventName string, record *logspb.L
 // harness, model, status (matching the existing hook descriptor);
 // scion.usage.tokens gets harness, model, token_type only.
 func (d *UsageDeriver) record(ctx context.Context, increment usageIncrement) {
+	if d.sessionUsage != nil {
+		if u := sessionUsageFromIncrement(increment); !u.IsZero() {
+			d.sessionUsage(u)
+		}
+	}
+
 	model := telemetrycontract.ResolveModelLabel(increment.Model, os.Getenv("SCION_MODEL"))
 	harness := os.Getenv("SCION_HARNESS")
 

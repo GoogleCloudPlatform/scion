@@ -3231,12 +3231,13 @@ func TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD(t *testi
 		hookMu      sync.Mutex
 		gitFailures []string
 	)
+	oldHook := gitConfigFailureHook
 	gitConfigFailureHook = func(args []string, err error) {
 		hookMu.Lock()
 		defer hookMu.Unlock()
 		gitFailures = append(gitFailures, fmt.Sprintf("git config %v: %v", args, err))
 	}
-	t.Cleanup(func() { gitConfigFailureHook = nil })
+	t.Cleanup(func() { gitConfigFailureHook = oldHook })
 
 	const iterations = 50
 	// Pre-create every agentHome serially: t.TempDir() and t.Fatal are not

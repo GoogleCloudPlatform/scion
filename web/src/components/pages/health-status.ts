@@ -33,7 +33,7 @@ export type HealthTone = 'ok' | 'warn' | 'bad' | 'neutral';
  * the colon decides the tone.
  */
 export function healthTone(status: string | null | undefined): HealthTone {
-  const word = (status ?? '').split(':', 1)[0]!.trim().toLowerCase();
+  const word = (status ?? '').split(':', 1)[0].trim().toLowerCase();
   switch (word) {
     case 'healthy':
     case 'online':

@@ -38,6 +38,13 @@ import (
 // reference.
 const auditWriteTimeout = 1 * time.Second
 
+// noopDecisionAuditEmitter preserves the in-memory decision seam without persistence.
+type noopDecisionAuditEmitter struct{ _ byte }
+
+var inertDecisionAuditTarget = &noopDecisionAuditEmitter{}
+
+func (*noopDecisionAuditEmitter) EmitDecisionAudit(context.Context, *store.DecisionAuditRecord) {}
+
 // emitDecisionAudit builds and emits a decision audit record from a Decide call.
 func (a *AuthzService) emitDecisionAudit(ctx context.Context, request AuthzRequest, decision Decision) {
 	// Sampling: always audit deny decisions; sample allow decisions, unless
@@ -318,7 +325,7 @@ func canonicalizeExplainPermission(resourceType string, action string) string {
 // handleAuthzExplain handles POST /api/v1/authz/explain.
 func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, ErrCodeInvalidRequest, "Method not allowed", nil)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -806,18 +813,12 @@ func newAgentIdentityFromStore(agent *store.Agent) AgentIdentity {
 func (s *Server) CleanupAuditRecords(ctx context.Context, retentionDays int) error {
 	cutoff := time.Now().AddDate(0, 0, -retentionDays)
 
-	decisionCount, err := s.store.DeleteDecisionAuditsBefore(ctx, cutoff)
-	if err != nil {
-		return fmt.Errorf("failed to cleanup decision audit records: %w", err)
-	}
-
 	mutationCount, err := s.store.DeleteMutationAuditsBefore(ctx, cutoff)
 	if err != nil {
 		return fmt.Errorf("failed to cleanup mutation audit records: %w", err)
 	}
 
 	slog.Info("audit records cleaned up",
-		"decision_records_deleted", decisionCount,
 		"mutation_records_deleted", mutationCount,
 		"retention_days", retentionDays,
 		"cutoff", cutoff)

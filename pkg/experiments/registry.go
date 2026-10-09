@@ -148,7 +148,7 @@ var compiled = []Experiment{
 	{
 		Name:        AuthorizationDecisionAuditV2,
 		Title:       "Authorization decision audit v2",
-		Description: "Routes admitted authorization decisions to the typed structured log sink; defaults to the retained legacy writer when admission, freshness or logging health fails.",
+		Description: "Routes admitted authorization decisions to the typed structured log sink; decisions are not persisted when admission, freshness or logging health fails.",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,

@@ -40,7 +40,7 @@ export function block(cssText: string, selectorStart: string): string {
 export function decls(body: string): Map<string, string> {
   const out = new Map<string, string>();
   for (const m of body.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)) {
-    out.set(m[1]!, m[2]!.trim());
+    out.set(m[1], m[2].trim());
   }
   return out;
 }
@@ -48,13 +48,13 @@ export function decls(body: string): Map<string, string> {
 export function parseColor(v: string): RGBA {
   const hex = /^#([0-9a-f]{6})$/i.exec(v);
   if (hex) {
-    const n = parseInt(hex[1]!, 16);
+    const n = parseInt(hex[1], 16);
     return [(n >> 16) & 255, (n >> 8) & 255, n & 255, 1];
   }
   const rgba = /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)$/.exec(
     v
   );
-  if (rgba) return [+rgba[1]!, +rgba[2]!, +rgba[3]!, rgba[4] === undefined ? 1 : +rgba[4]];
+  if (rgba) return [+rgba[1], +rgba[2], +rgba[3], rgba[4] === undefined ? 1 : +rgba[4]];
   throw new Error(`unparsed colour ${v}`);
 }
 
@@ -63,14 +63,14 @@ export function resolver(vars: Map<string, string>) {
     const v = vars.get(name);
     if (v === undefined || depth > 10) throw new Error(`unresolved ${name}`);
     const ref = /^var\((--[\w-]+)\)$/.exec(v);
-    return ref ? get(ref[1]!, depth + 1) : parseColor(v);
+    return ref ? get(ref[1], depth + 1) : parseColor(v);
   };
   return get;
 }
 
 export function over(fg: RGBA, bg: RGBA): RGBA {
   const a = fg[3];
-  return [0, 1, 2].map((i) => fg[i]! * a + bg[i]! * (1 - a)).concat(1) as RGBA;
+  return [0, 1, 2].map((i) => fg[i] * a + bg[i] * (1 - a)).concat(1) as RGBA;
 }
 
 export function luminance([r, g, b]: RGBA): number {
@@ -83,7 +83,7 @@ export function luminance([r, g, b]: RGBA): number {
 
 export function contrast(a: RGBA, b: RGBA): number {
   const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
-  return (hi! + 0.05) / (lo! + 0.05);
+  return (hi + 0.05) / (lo + 0.05);
 }
 
 /** The light and dark token maps of theme.css (dark overrides light). */
