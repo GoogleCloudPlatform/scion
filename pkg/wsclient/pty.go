@@ -433,8 +433,10 @@ func (c *PTYClient) Run() error {
 
 	stdinCh := c.startStdinReader()
 
-	// pendingClose is the close that triggered the reconnect now in
-	// progress; the new connection must deliver data before it is live.
+	// pendingClose is the close that led to the current connection: nil for
+	// the first connection, and set again after every successful reconnect
+	// (every later connection is a reconnect). A reconnected connection
+	// must deliver data before it is live.
 	var pendingClose *PTYCloseError
 	backoffAttempt := 0
 	shortCloses := 0
@@ -452,7 +454,6 @@ func (c *PTYClient) Run() error {
 			runErr = &PTYReconnectError{Close: pendingClose, Err: err}
 			return runErr
 		}
-		pendingClose = nil
 
 		var closeErr *PTYCloseError
 		timing := wsprotocol.ReconnectNever
