@@ -74,7 +74,7 @@ func serveTemplateUpload(t *testing.T, srv *Server, req *http.Request) {
 	}
 }
 
-func storedTelemetry(t *testing.T, s store.Store, id string) *api.TelemetryConfig {
+func storedTemplateTelemetry(t *testing.T, s store.Store, id string) *api.TelemetryConfig {
 	t.Helper()
 	got, err := s.GetTemplate(context.Background(), id)
 	if err != nil {
@@ -108,7 +108,7 @@ func TestTemplateUpload_YAMLFillsUnsetTelemetry(t *testing.T) {
 
 			upload(t, srv, tmpl.ID, yamlTelemetryOff)
 
-			got := storedTelemetry(t, s, tmpl.ID)
+			got := storedTemplateTelemetry(t, s, tmpl.ID)
 			if got == nil || got.Enabled == nil || *got.Enabled {
 				t.Fatalf("expected telemetry enabled=false from the YAML, got %+v", got)
 			}
@@ -128,7 +128,7 @@ func TestTemplateUpload_JSONTelemetryWins(t *testing.T) {
 
 			upload(t, srv, tmpl.ID, yamlTelemetryOff)
 
-			got := storedTelemetry(t, s, tmpl.ID)
+			got := storedTemplateTelemetry(t, s, tmpl.ID)
 			if got == nil || got.Enabled == nil || !*got.Enabled || got.Cloud != nil {
 				t.Fatalf("expected the JSON-set telemetry (enabled=true) to be kept, got %+v", got)
 			}
@@ -143,17 +143,17 @@ func TestTemplateUpload_LaterUploadClearsYAMLTelemetry(t *testing.T) {
 			tmpl := createTestTemplate(t, s, stor, map[string]string{"scion-agent.yaml": yamlNoTelemetry})
 
 			upload(t, srv, tmpl.ID, yamlTelemetryOff)
-			if storedTelemetry(t, s, tmpl.ID) == nil {
+			if storedTemplateTelemetry(t, s, tmpl.ID) == nil {
 				t.Fatal("fixture: first upload did not set telemetry")
 			}
 			// A changed block replaces the file-sourced value.
 			upload(t, srv, tmpl.ID, yamlTelemetryOn)
-			if got := storedTelemetry(t, s, tmpl.ID); got == nil || got.Enabled == nil || !*got.Enabled || got.Cloud != nil {
+			if got := storedTemplateTelemetry(t, s, tmpl.ID); got == nil || got.Enabled == nil || !*got.Enabled || got.Cloud != nil {
 				t.Fatalf("expected the second file's telemetry, got %+v", got)
 			}
 			// Dropping the block clears it.
 			upload(t, srv, tmpl.ID, yamlNoTelemetry)
-			if got := storedTelemetry(t, s, tmpl.ID); got != nil {
+			if got := storedTemplateTelemetry(t, s, tmpl.ID); got != nil {
 				t.Errorf("expected file-sourced telemetry to be cleared, got %+v", got)
 			}
 		})
@@ -171,7 +171,7 @@ func TestTemplateUpload_LaterUploadKeepsJSONTelemetry(t *testing.T) {
 
 			upload(t, srv, tmpl.ID, yamlNoTelemetry)
 
-			got := storedTelemetry(t, s, tmpl.ID)
+			got := storedTemplateTelemetry(t, s, tmpl.ID)
 			if got == nil || got.Enabled == nil || !*got.Enabled {
 				t.Fatalf("expected the JSON-set telemetry to survive, got %+v", got)
 			}
@@ -200,7 +200,7 @@ func TestTemplateUpload_JSONTelemetryEqualToFileFollowsFile(t *testing.T) {
 
 			upload(t, srv, tmpl.ID, yamlNoTelemetry)
 
-			if got := storedTelemetry(t, s, tmpl.ID); got != nil {
+			if got := storedTemplateTelemetry(t, s, tmpl.ID); got != nil {
 				t.Errorf("expected the value equal to the replaced file to be cleared, got %+v", got)
 			}
 		})
