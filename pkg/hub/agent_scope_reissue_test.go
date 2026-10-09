@@ -122,7 +122,7 @@ func (f *reissueFixture) grant(t *testing.T, a *store.Agent) []AgentTokenScope {
 
 func (f *reissueFixture) run(t *testing.T, a *store.Agent, dryRun bool) *ScopeReissueResponse {
 	t.Helper()
-	resp, err := f.srv.runScopeReissue(context.Background(), f.reload(t, a), f.operator, dryRun)
+	resp, err := f.srv.runScopeReissue(context.Background(), f.reload(t, a), f.operator, dryRun, "")
 	require.NoError(t, err)
 	return resp
 }
@@ -385,7 +385,7 @@ func TestScopeReissue_T3_FailClosed(t *testing.T) {
 				f.srv.store = w
 			}
 
-			_, err := f.srv.runScopeReissue(context.Background(), f.reload(t, f.child), f.operator, false)
+			_, err := f.srv.runScopeReissue(context.Background(), f.reload(t, f.child), f.operator, false, "")
 			require.Error(t, err)
 			f.srv.authzService.store = f.store
 			f.srv.store = f.store
@@ -464,7 +464,7 @@ func TestScopeReissue_T3a_ParentLookupErrorRefuses(t *testing.T) {
 	assert.True(t, issueErr.Lookup, "lookup fault, not a computed result")
 	assert.Equal(t, mintSiteReissue, issueErr.Site)
 
-	resp, err := f.srv.runScopeReissue(context.Background(), child, f.operator, false)
+	resp, err := f.srv.runScopeReissue(context.Background(), child, f.operator, false, "")
 	require.Error(t, err)
 	assert.Nil(t, resp, "no result: never a baseline-role computation")
 	f.srv.store = f.store

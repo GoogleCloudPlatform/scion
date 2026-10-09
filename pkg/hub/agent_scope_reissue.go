@@ -162,6 +162,7 @@ type ScopeReissueResponse struct {
 // reissueAuditSummary is the AfterSummary of agent_scopes_reissued.
 type reissueAuditSummary struct {
 	OpID               string                 `json:"op_id"`
+	BatchOpID          string                 `json:"batch_op_id,omitempty"`
 	DryRun             bool                   `json:"dry_run"`
 	ScopesAdded        []string               `json:"scopes_added"`
 	ScopesRemoved      []string               `json:"scopes_removed"`
@@ -178,6 +179,7 @@ type reissueAuditSummary struct {
 // agent_scopes_reissue_dispatch. It names no scopes.
 type reissueDispatchSummary struct {
 	OpID               string `json:"op_id"`
+	BatchOpID          string `json:"batch_op_id,omitempty"`
 	CredentialsRevoked int    `json:"credentials_revoked"`
 	Dispatched         bool   `json:"dispatched"`
 	Skipped            string `json:"skipped,omitempty"`
@@ -893,13 +895,14 @@ func removeString(list []string, v string) []string {
 }
 
 // reissueAuditRecord builds the agent_scopes_reissued record for plan.
-func reissueAuditRecord(plan *scopeReissuePlan, opID string, dryRun bool, edgeNew string, revoked int, actor AuditActor, now time.Time) (*store.MutationAuditRecord, error) {
+func reissueAuditRecord(plan *scopeReissuePlan, opID, batchOpID string, dryRun bool, edgeNew string, revoked int, actor AuditActor, now time.Time) (*store.MutationAuditRecord, error) {
 	withheld := plan.withheld
 	if withheld == nil {
 		withheld = []reissueWithheldScope{}
 	}
 	return lifecycleAudit(mutationTypeAgentScopesReissued, plan.agent.ID, actor, now, reissueAuditSummary{
 		OpID:               opID,
+		BatchOpID:          batchOpID,
 		DryRun:             dryRun,
 		ScopesAdded:        scopeStrings(plan.added),
 		ScopesRemoved:      scopeStrings(plan.removed),
@@ -918,7 +921,7 @@ func reissueAuditRecord(plan *scopeReissuePlan, opID string, dryRun bool, edgeNe
 // lower the stored role when it went down, revoke every active credential
 // of the agent, and write the agent_scopes_reissued record. Nothing is
 // written when any step fails. It returns E' and the revoked count.
-func (s *Server) commitScopeReissue(ctx context.Context, plan *scopeReissuePlan, operator reissueOperator, opID string) (*store.DelegationEdge, int, error) {
+func (s *Server) commitScopeReissue(ctx context.Context, plan *scopeReissuePlan, operator reissueOperator, opID, batchOpID string) (*store.DelegationEdge, int, error) {
 	actor := auditActorFromContext(ctx)
 	now := time.Now()
 	old := plan.edge
@@ -990,7 +993,7 @@ func (s *Server) commitScopeReissue(ctx context.Context, plan *scopeReissuePlan,
 			return fmt.Errorf("scope re-issue: revoke credentials: %w", err)
 		}
 		revoked = n
-		record, err := reissueAuditRecord(plan, opID, false, newEdge.ID, revoked, actor, now)
+		record, err := reissueAuditRecord(plan, opID, batchOpID, false, newEdge.ID, revoked, actor, now)
 		if err != nil {
 			return err
 		}
@@ -1036,7 +1039,9 @@ func reissueDispatchErrorClass(err error) string {
 // runScopeReissue runs a re-issue for agent: compute, then for a dry run
 // write the dry-run record; for a no-op write nothing; otherwise commit and
 // dispatch the new token to a running agent.
-func (s *Server) runScopeReissue(ctx context.Context, agent *store.Agent, operator reissueOperator, dryRun bool) (*ScopeReissueResponse, error) {
+//
+// batchOpID, when set, is recorded on every row the run writes (bulk mode).
+func (s *Server) runScopeReissue(ctx context.Context, agent *store.Agent, operator reissueOperator, dryRun bool, batchOpID string) (*ScopeReissueResponse, error) {
 	opID := api.NewUUID()
 	plan, err := s.computeScopeReissue(ctx, agent)
 	if err != nil {
@@ -1066,7 +1071,7 @@ func (s *Server) runScopeReissue(ctx context.Context, agent *store.Agent, operat
 	}
 
 	if dryRun {
-		record, err := reissueAuditRecord(plan, opID, true, "", 0, auditActorFromContext(ctx), time.Now())
+		record, err := reissueAuditRecord(plan, opID, batchOpID, true, "", 0, auditActorFromContext(ctx), time.Now())
 		if err == nil {
 			err = s.store.CreateMutationAudit(ctx, record)
 		}
@@ -1081,14 +1086,14 @@ func (s *Server) runScopeReissue(ctx context.Context, agent *store.Agent, operat
 		return resp, nil
 	}
 
-	newEdge, revoked, err := s.commitScopeReissue(ctx, plan, operator, opID)
+	newEdge, revoked, err := s.commitScopeReissue(ctx, plan, operator, opID, batchOpID)
 	if err != nil {
 		return nil, err
 	}
 	resp.EdgeNew = newEdge.ID
 	resp.CredentialsRevoked = revoked
 
-	summary := reissueDispatchSummary{OpID: opID, CredentialsRevoked: revoked}
+	summary := reissueDispatchSummary{OpID: opID, BatchOpID: batchOpID, CredentialsRevoked: revoked}
 	fresh, err := s.store.GetAgent(ctx, agent.ID)
 	if err != nil {
 		summary.ErrorClass = mintErrorClassLookup
@@ -1140,7 +1145,7 @@ func (s *Server) handleAgentScopeReissue(w http.ResponseWriter, r *http.Request,
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	resp, err := s.runScopeReissue(ctx, agent, operator, req.DryRun)
+	resp, err := s.runScopeReissue(ctx, agent, operator, req.DryRun, "")
 	if err != nil {
 		writeScopeReissueError(w, err)
 		return

@@ -47,6 +47,34 @@ var hubOperations = []OperationSpec{
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 
+	{
+		ID:          "hub.authreset.reissuescopes",
+		Domain:      "hub",
+		Description: "Re-issue every agent's role scopes from its delegator's current authority (dispatched from POST /api/v1/admin/agents/reset-auth-all when reissue_scopes is set; dry run by default; hub super-admin only)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointInternalDispatch, Pattern: "handleAdminResetAuthAll:reissue-scopes"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.auth_reset.execute",
+		Effects:          []SecurityEffect{EffectChangeAuthority, EffectRevokeAuthority},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "agent_scopes_reissue_batch",
+			ContextFields: []string{"actor_id"},
+			AfterFields:   []string{"dry_run", "total", "succeeded", "noop", "refused", "push_failed"},
+			Atomic:        false,
+		},
+		DenialCodes: []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestScopeReissueBulk_OperatorRefusals"},
+		},
+		Bearer: SessionOnly(ReasonGovernancePending),
+	},
+
 	// =====================================================================
 	// Domain: hub — hub admin reads and configuration
 	// =====================================================================
