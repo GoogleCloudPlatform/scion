@@ -704,7 +704,7 @@ describe('artifact page', () => {
     mockFetch(artifact('notes.md', 'text/markdown'));
     let el = await mount(true);
     const shareButton = (): HTMLElement | undefined =>
-      Array.from(el.shadowRoot!.querySelectorAll('.actions sl-button')).find((b) =>
+      Array.from(el.shadowRoot!.querySelectorAll('.header-actions sl-button')).find((b) =>
         b.textContent!.includes('Share')
       ) as HTMLElement | undefined;
     expect(shareButton()).toBeUndefined();

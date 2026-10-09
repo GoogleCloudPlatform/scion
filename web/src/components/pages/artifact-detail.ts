@@ -654,9 +654,9 @@ export class ScionPageArtifactDetail extends LitElement {
     const owner = this.label(a.ownerKind, a.ownerRef);
     const f = this.entry;
     const ownFiles = v ? v.files.filter((x) => !isRemoteFile(x)) : [];
-    // Every action needs a version or edit rights (Download needs a
-    // version), and all are hidden while editing.
-    const hasActions = !this.editing && (!!v || this.canEdit);
+    // Every action needs a version, edit rights or (for Share) the right
+    // to manage the artifact; all are hidden while editing.
+    const hasActions = !this.editing && (!!v || this.canEdit || !!this.data?.canManage);
     return html`
       <scion-detail-header heading=${a.title}>
         <sl-icon slot="icon" name="file-earmark-richtext"></sl-icon>
