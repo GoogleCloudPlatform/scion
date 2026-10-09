@@ -37,14 +37,16 @@ package hub
 // Baselines are the values measured on main (commit in perfBudgetBaseline)
 // with this fixture. A budget's limit is its baseline plus a margin:
 //
-//   - counts: baseline + max(2, 10% of baseline, rounded up)
-//   - bytes:  baseline + 2%, rounded up
+//   - counts: baseline + max(2, 2% of baseline, rounded up)
+//   - bytes:  baseline + 1%, rounded up
 //
-// At 100 agents a per-agent regression (one more store read, decision or
-// row read per agent) adds about 100 to a full-list count, well beyond the
-// margin; the margin only absorbs small, intended per-request changes.
-// Bytes vary by a few bytes per run (serverTime and the agents' created and
-// updated times, which the store stamps), which the 2% covers.
+// The counts are exact: they repeat on every run and every machine. The
+// margin only absorbs small, intended per-request changes (a read or two).
+// One more store read, decision or row read per returned agent (25 on a
+// first page, 100 on a full list) is over every count budget, and so is
+// about 20 more bytes per agent on a full list. Bytes vary by under 0.01%
+// between runs (serverTime and the agents' created and updated times,
+// which the store stamps), well inside the 1%.
 //
 // Updating a budget for an intended change: run
 //
@@ -163,7 +165,7 @@ var perfBudgets = []perfBudget{
 // perfBudgetLimit applies the margin policy in the file comment.
 func perfBudgetLimit(b perfBudgetCounts) perfBudgetCounts {
 	count := func(v int64) int64 {
-		m := (v + 9) / 10
+		m := (v*2 + 99) / 100
 		if m < 2 {
 			m = 2
 		}
@@ -173,7 +175,7 @@ func perfBudgetLimit(b perfBudgetCounts) perfBudgetCounts {
 		authzStoreCalls: count(b.authzStoreCalls),
 		decisions:       count(b.decisions),
 		dbReads:         count(b.dbReads),
-		bytes:           b.bytes + (b.bytes*2+99)/100,
+		bytes:           b.bytes + (b.bytes+99)/100,
 	}
 }
 
