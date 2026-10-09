@@ -494,7 +494,7 @@ type reincarnateAuthority struct {
 // Without sa the existing assignment stays in force: the agent ID and its
 // account do not change. If the reincarnation later fails and restores the
 // previous configuration, a replaced assignment is not restored with it, so
-// the restored account no longer matches the active assignment and its use
+// the restored account differs from the active assignment and its use
 // is refused until the account is assigned again.
 func (s *Server) reincarnateClaimTx(ctx context.Context, agent *store.Agent, rec *store.AgentReincarnation, auth *reincarnateAuthority, sa *store.AgentServiceAccountAssignment, actor AuditActor) error {
 	if agent == nil {

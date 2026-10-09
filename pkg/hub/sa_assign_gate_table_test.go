@@ -66,7 +66,7 @@ func TestSAAssignGate_BeforeAfterTable(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, outsider))
 	ensureHubMembership(ctx, s, outsider.ID)
 
-	// An agent whose creator no longer exists (orphaned chain).
+	// An agent whose creator does not exist (orphaned chain).
 	orphanAgentID := tid("gate-table-orphan-agent")
 	createDCAgent(t, s, orphanAgentID, f.project.ID, tid("gate-table-gone-user"), AgentRoleFull)
 	createDCEdge(t, s, store.DelegationPrincipalUser, tid("gate-table-gone-user"),

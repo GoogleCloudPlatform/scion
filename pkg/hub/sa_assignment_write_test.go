@@ -552,8 +552,8 @@ func TestSAParentCeiling_ReincarnateWithServiceAccountReplacesAssignment(t *test
 
 // TestSAParentCeiling_ReincarnateFailedRestoreWithholdsUntilReassigned pins
 // the behaviour when a reincarnation that replaced the assignment fails and
-// the previous configuration is restored: the restored account no longer
-// matches the active assignment, so its token scope is withheld and the
+// the previous configuration is restored: the restored account differs
+// from the active assignment, so its token scope is withheld and the
 // parent ceiling denies until the account is assigned again.
 func TestSAParentCeiling_ReincarnateFailedRestoreWithholdsUntilReassigned(t *testing.T) {
 	f := newSPCFixture(t)

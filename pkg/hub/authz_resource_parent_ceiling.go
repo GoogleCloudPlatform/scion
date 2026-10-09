@@ -27,7 +27,7 @@ import (
 // This file holds the resource-aware parent ceiling for agent use of a GCP
 // service account. The decision permission for minting a GCP token through
 // an assignment is gcp_service_account.use. Its parent proof is that the
-// principal recorded as the assignment's source still holds
+// principal recorded as the assignment's source currently holds
 // gcp_service_account.assign on that exact, freshly loaded service account,
 // within the effect ceiling recorded with the assignment. A past successful
 // assignment is not enough, and a configured default grants nothing.

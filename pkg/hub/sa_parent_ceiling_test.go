@@ -403,7 +403,7 @@ func uatRow(ids ...string) func(*store.AgentServiceAccountAssignment) {
 	}
 }
 
-func TestSAParentCeiling_UATCeilingWithoutAssignDenies(t *testing.T) {
+func TestSAParentCeiling_AccessTokenCeilingWithoutAssignDenies(t *testing.T) {
 	f := newSPCFixture(t)
 	f.record(t, uatRow("agent.create", "agent.read"))
 	// The user's live role includes assign: the recorded ceiling decides.
@@ -413,10 +413,10 @@ func TestSAParentCeiling_UATCeilingWithoutAssignDenies(t *testing.T) {
 	assertParentCeilingDenied(t, f.eval(t), DenyCauseCeilingEffectExceeded)
 }
 
-func TestSAParentCeiling_UATSourceRevokedLaterStillEvaluatesUser(t *testing.T) {
+func TestSAParentCeiling_AccessTokenSourceRevokedLaterEvaluatesUser(t *testing.T) {
 	f := newSPCFixture(t)
 	// The recorded access token does not exist any more: the assignment is
-	// still evaluated against the user's live authority within the recorded
+	// evaluated against the user's live authority within the recorded
 	// ceiling.
 	f.record(t, uatRow("agent.create", "gcp_service_account.assign"))
 	assertParentCeilingAllowed(t, f.eval(t))
@@ -685,7 +685,7 @@ func TestSAParentCeiling_UseHasNoAgentScopeAndNoSeededRole(t *testing.T) {
 }
 
 // TestSAParentCeiling_NotCalledFromTokenHandlers pins that the evaluator is
-// not wired into a handler yet: the GCP token endpoints compose it with the
+// not wired into a handler: the GCP token endpoints compose it with the
 // actAs check in a later change, which removes this test.
 func TestSAParentCeiling_NotCalledFromTokenHandlers(t *testing.T) {
 	entries, err := os.ReadDir(".")
@@ -698,6 +698,6 @@ func TestSAParentCeiling_NotCalledFromTokenHandlers(t *testing.T) {
 		}
 		src, err := os.ReadFile(name)
 		require.NoError(t, err)
-		assert.NotContains(t, string(src), "EvaluateServiceAccountParentCeiling", "%s must not call the evaluator yet", name)
+		assert.NotContains(t, string(src), "EvaluateServiceAccountParentCeiling", "%s must not call the evaluator", name)
 	}
 }

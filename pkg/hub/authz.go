@@ -485,7 +485,7 @@ const (
 	DenyCauseCeilingProvenanceAmbiguous DenyCause = "ceiling_provenance_ambiguous"
 
 	// DenyCauseCeilingProvenanceStale marks a deny where the recorded
-	// authority does not refer to the resource now in use: the recorded
+	// authority does not refer to the resource in use: the recorded
 	// service account, the agent's applied service account and the
 	// requested one are not all the same.
 	DenyCauseCeilingProvenanceStale DenyCause = "ceiling_provenance_stale"
