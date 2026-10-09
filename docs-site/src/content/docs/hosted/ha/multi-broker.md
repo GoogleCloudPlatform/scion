@@ -81,12 +81,14 @@ Tier 3 matches on the profile type that the broker registered, which is currentl
 
 Rules that apply across the tiers:
 
-- The creating agent's profile is inherited only when the selected broker is the creating agent's own broker. An explicit `--broker` that names a different broker does not carry the profile with it.
+- The creating agent's profile is inherited only when the broker the create resolves to is the creating agent's own broker. An explicit `--broker` that resolves to a different broker does not carry the profile with it. If the creating agent's profile is not available on its broker, a create that would inherit it is refused.
 - With `-p` alone, the creating agent's broker is still inherited. If that broker does not offer the requested profile, the create is refused, and the error names the profile and the broker. Pass `--broker` as well to run the profile on another broker.
 - A broker offers a profile when it registers a profile of that name and reports it available.
 - **Which creators count as Kubernetes.** The Hub decides from the `type` that the creating agent's broker registered for its profile. Today brokers register the profile's runtime **key** (the `runtime:` value in `profiles`) as that type, not the runtime entry's resolved `type:`. Tier 3 applies only when that key is `kubernetes`, `k8s` or `remote`. A custom key such as `runtime: gke` with `type: kubernetes` in its `runtimes` entry is not recognized, so tier 3 does not apply to it; use the tier 2 settings, or key the runtime entry `kubernetes`. Likewise, a runtime keyed `kubernetes` with `type: docker` is treated as Kubernetes here.
 - A value from tier 2 or 3 is checked exactly like the same flag would be, under the caller's own permissions: dispatch access to the broker, the per-profile default identity, and env and secret resolution. Nothing else is taken from the creating agent: no credentials, identity or user scope.
 - **Fail closed.** If tier 2 or 3 applies but the broker no longer serves the project, is offline, or the caller may not dispatch to it, or a profile from tier 2 is not offered by the selected broker, the create is refused. It does not fall back to another broker. The error names the source (the setting or the creating agent), never an ID.
+- Placement is applied before the Hub checks for an existing agent of the same name, as broker selection already is. Re-running `scion start` for an existing agent therefore meets the same refusals as a new create, for example `503` when the inherited broker is offline.
+- Tier 2 does not need the experiment: the settings are an explicit opt-in by a project editor.
 - The agent record and the create response carry `appliedConfig.placement` with `brokerSource` and `profileSource`, each one of `flag`, `setting`, `inherited` or `default`. A placement from tier 2 or 3 is also recorded, by name, in the create's audit record.
 
 Setting the project defaults (the broker may be given by ID, name or slug; it is stored as the ID and must serve the project, and the profile must be offered by that broker, or by at least one of the project's brokers if no broker is set):

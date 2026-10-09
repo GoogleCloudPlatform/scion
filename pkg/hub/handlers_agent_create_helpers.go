@@ -1803,28 +1803,10 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		// findBrokerByIDOrSlug does, so a case variant of an existing
 		// provider never falls through to the auto-link path below (which
 		// would rewrite the provider row).
-		matchedID := ""
-		for _, p := range allProviders {
-			if p.BrokerID == requestedBrokerID || strings.EqualFold(p.BrokerName, requestedBrokerID) {
-				matchedID = p.BrokerID
-				break
-			}
-		}
-		var matched *store.RuntimeBroker
-		var matchedErr error
-		if matchedID != "" {
-			matched, matchedErr = s.store.GetRuntimeBroker(ctx, matchedID)
-		} else {
-			// Slug lives on the broker record, so fetch per provider only
-			// when ID and name did not match.
-			for _, p := range allProviders {
-				b, err := s.store.GetRuntimeBroker(ctx, p.BrokerID)
-				if err == nil && b.Slug != "" && strings.EqualFold(b.Slug, requestedBrokerID) {
-					matchedID, matched = b.ID, b
-					break
-				}
-			}
-		}
+		// matchProjectProvider is shared with the agent-create placement
+		// settings (projectProviderBroker), so both resolve a reference to
+		// the same broker.
+		matchedID, matched, matchedErr := s.matchProjectProvider(ctx, allProviders, requestedBrokerID)
 		if matchedID != "" {
 			if matchedErr != nil {
 				matched = nil

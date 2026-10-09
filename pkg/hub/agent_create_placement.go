@@ -35,8 +35,9 @@ import (
 // runs. Precedence, per field, highest first:
 //
 //  1. the request (the CLI's --broker / -p flags);
-//  2. the project's agent-create settings (scion.io/agent-create-broker and
-//     scion.io/agent-create-profile);
+//  2. the project's agent-create settings (projectSettingAgentCreateBroker
+//     and projectSettingAgentCreateProfile). These apply without any
+//     experiment: they are an explicit opt-in by a project editor;
 //  3. the creating agent's own broker and profile, when the
 //     hub.agent_create_inherit_placement experiment is on, the creator runs
 //     on a Kubernetes profile and its broker serves the target project.
@@ -47,10 +48,13 @@ import (
 //     active profile, hub defaults, broker default, automatic selection).
 //
 // A profile is inherited only when the broker that ends up selected is the
-// creator's broker, so an explicit --broker elsewhere never carries the
-// creator's profile with it. With -p alone the creator's broker is still
-// inherited, and the create is refused when that broker does not offer the
-// requested profile (the error names the profile and the broker). A profile
+// creator's broker, compared by ID after resolveRuntimeBroker
+// (inheritCreatorProfile), so an explicit --broker elsewhere never carries
+// the creator's profile with it. An inherited profile the creator's broker
+// does not report available refuses the create. With -p alone the
+// creator's broker is still inherited, and the create is refused when that
+// broker does not offer the requested profile (the error names the profile
+// and the broker). A profile
 // from the agent-create profile setting that the creator's broker does not
 // offer does not inherit the broker; the regular chain picks one, and the
 // setting check below applies to it.
@@ -79,6 +83,19 @@ type agentCreatePlacement struct {
 	brokerName string
 	// profile is the profile chosen by tier 2 or 3, for audit.
 	profile string
+
+	// Tier 3 profile inheritance is decided after the regular chain has
+	// resolved the broker (inheritCreatorProfile), so it compares broker IDs
+	// rather than the request's broker reference. creatorBrokerID is set
+	// when tier 3 applies and the request named no profile.
+	creatorBrokerID         string
+	creatorBrokerName       string
+	creatorProfile          string
+	creatorProfileAvailable bool
+
+	// For the placement log line.
+	projectID     string
+	parentAgentID string
 }
 
 // record returns the placement record stored on the agent, with the default
@@ -148,6 +165,7 @@ func (s *Server) applyAgentCreatePlacement(ctx context.Context, w http.ResponseW
 	if agentIdent == nil || project == nil {
 		return p, true
 	}
+	p.projectID, p.parentAgentID = project.ID, agentIdent.ID()
 
 	// Tier 2: the project's agent-create settings.
 	settings := projectSettingsFromAnnotations(project)
@@ -194,10 +212,13 @@ func (s *Server) applyAgentCreatePlacement(ctx context.Context, w http.ResponseW
 				p.brokerSource = store.PlacementSourceInherited
 				p.brokerName = broker.Name
 			}
-			if req.Profile == "" && brokerMatches(creatorBroker, req.RuntimeBrokerID) {
-				req.Profile = creatorProfile
-				p.profileSource = store.PlacementSourceInherited
-				p.profile = creatorProfile
+			// The creator's profile is applied by inheritCreatorProfile
+			// once the broker is resolved, and only if it is the creator's.
+			if req.Profile == "" {
+				p.creatorBrokerID = creatorBroker.ID
+				p.creatorBrokerName = creatorBroker.Name
+				p.creatorProfile = creatorProfile
+				p.creatorProfileAvailable = brokerOffersProfile(creatorBroker, creatorProfile)
 			}
 		}
 	}
@@ -210,14 +231,40 @@ func (s *Server) applyAgentCreatePlacement(ctx context.Context, w http.ResponseW
 		return nil, false
 	}
 
+	return p, true
+}
+
+// inheritCreatorProfile completes tier 3 after resolveRuntimeBroker has
+// resolved the broker. The creator's profile is inherited only when the
+// resolved broker is the creator's broker, compared by ID: an explicit
+// --broker is a raw ID, name or slug, and a name can match a stale provider
+// row of another broker, so the request's reference is not compared. An
+// inherited profile the creator's broker does not report available refuses
+// the create. It writes the error response and returns false when the
+// caller must stop.
+func (s *Server) inheritCreatorProfile(w http.ResponseWriter, p *agentCreatePlacement, resolvedBrokerID string, req *CreateAgentRequest) bool {
+	if p == nil {
+		return true
+	}
+	if p.creatorBrokerID != "" && req.Profile == "" && resolvedBrokerID == p.creatorBrokerID {
+		if !p.creatorProfileAvailable {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeNoRuntimeBroker,
+				fmt.Sprintf("The creating agent's profile %q is not available on its broker %q; pass -p to choose another profile", p.creatorProfile, p.creatorBrokerName),
+				map[string]interface{}{"source": store.PlacementSourceInherited})
+			return false
+		}
+		req.Profile = p.creatorProfile
+		p.profileSource = store.PlacementSourceInherited
+		p.profile = p.creatorProfile
+	}
 	if p.brokerSource == store.PlacementSourceSetting || p.brokerSource == store.PlacementSourceInherited ||
 		p.profileSource == store.PlacementSourceSetting || p.profileSource == store.PlacementSourceInherited {
 		slog.Info("Agent-launched create placement",
-			"project_id", project.ID, "parent_agent_id", agentIdent.ID(),
+			"project_id", p.projectID, "parent_agent_id", p.parentAgentID,
 			"broker", p.brokerName, "broker_source", p.record().BrokerSource,
 			"profile", p.profile, "profile_source", p.record().ProfileSource)
 	}
-	return p, true
+	return true
 }
 
 // checkAgentCreateProfileSetting refuses a create whose profile came from the
@@ -280,9 +327,12 @@ func (s *Server) placementBroker(ctx context.Context, w http.ResponseWriter, pro
 }
 
 // projectProviderBroker returns the broker record of a provider of
-// projectID matching ref by ID, or by name or slug case-insensitively. It
-// returns store.ErrNotFound when no provider matches or its broker record
-// no longer exists.
+// projectID matching ref. It matches in the same order as an explicit
+// --broker in resolveRuntimeBroker (matchProjectProvider: ID or provider-row
+// name, then broker slug, then the broker's current name), so a setting
+// resolves to the same broker a flag with the same value would. It returns
+// store.ErrNotFound when no provider matches or its broker record no longer
+// exists.
 func (s *Server) projectProviderBroker(ctx context.Context, projectID, ref string) (*store.RuntimeBroker, error) {
 	if ref == "" {
 		return nil, store.ErrNotFound
@@ -291,11 +341,14 @@ func (s *Server) projectProviderBroker(ctx context.Context, projectID, ref strin
 	if err != nil {
 		return nil, err
 	}
-	for _, pv := range providers {
-		if pv.BrokerID == ref {
-			return s.store.GetRuntimeBroker(ctx, pv.BrokerID)
+	if id, broker, err := s.matchProjectProvider(ctx, providers, ref); id != "" {
+		if err != nil {
+			return nil, err
 		}
+		return broker, nil
 	}
+	// resolveRuntimeBroker also accepts a provider found by its broker's
+	// current name after a rename (provider rows keep the link-time name).
 	for _, pv := range providers {
 		broker, err := s.store.GetRuntimeBroker(ctx, pv.BrokerID)
 		if err != nil {
@@ -372,12 +425,28 @@ func brokerOffersProfile(broker *store.RuntimeBroker, profile string) bool {
 	return false
 }
 
-// brokerMatches reports whether ref names broker by ID, name or slug.
-func brokerMatches(broker *store.RuntimeBroker, ref string) bool {
-	if broker == nil || ref == "" {
-		return false
+// matchProjectProvider finds the provider of providers that ref names, in
+// the order resolveRuntimeBroker matches an explicit broker: the broker ID
+// exactly or the provider row's broker name case-insensitively, then the
+// broker record's slug case-insensitively. It returns the broker ID, the
+// broker record and the error reading it (store.ErrNotFound when the record
+// is gone), or an empty ID when nothing matches.
+func (s *Server) matchProjectProvider(ctx context.Context, providers []store.ProjectProvider, ref string) (string, *store.RuntimeBroker, error) {
+	for _, pv := range providers {
+		if pv.BrokerID == ref || strings.EqualFold(pv.BrokerName, ref) {
+			broker, err := s.store.GetRuntimeBroker(ctx, pv.BrokerID)
+			return pv.BrokerID, broker, err
+		}
 	}
-	return ref == broker.ID || strings.EqualFold(ref, broker.Name) || strings.EqualFold(ref, broker.Slug)
+	// Slug lives on the broker record, so fetch per provider only when ID
+	// and name did not match.
+	for _, pv := range providers {
+		broker, err := s.store.GetRuntimeBroker(ctx, pv.BrokerID)
+		if err == nil && broker.Slug != "" && strings.EqualFold(broker.Slug, ref) {
+			return broker.ID, broker, nil
+		}
+	}
+	return "", nil, nil
 }
 
 // validateAgentCreatePlacementSettings checks the agent-create placement

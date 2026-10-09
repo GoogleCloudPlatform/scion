@@ -1633,6 +1633,12 @@ func (s *Server) createAgentInProject(
 		return
 	}
 
+	// Tier 3: inherit the creating agent's profile only if the resolved
+	// broker is the creator's broker (agent_create_placement.go).
+	if !s.inheritCreatorProfile(w, placement, runtimeBrokerID, &req) {
+		return
+	}
+
 	// Enforce broker-level dispatch authorization: an auto-provide broker, a
 	// broker associated with this project with its owner's consent, or
 	// broker.dispatch on the broker (canUseBrokerForProject).

@@ -348,8 +348,11 @@ func TestAgentCreatePlacement_InheritedBrokerDispatchUsesCallerAuthority(t *test
 	placement, ok = pf.srv.applyAgentCreatePlacement(allowedCtx, rec, proj, &req)
 	require.True(t, ok, rec.Body.String())
 	assert.Equal(t, pf.k8sBroker.ID, req.RuntimeBrokerID)
-	assert.Equal(t, "gke", req.Profile)
 	assert.Equal(t, store.PlacementSourceInherited, placement.brokerSource)
+	// The profile is inherited once the broker is resolved.
+	require.True(t, pf.srv.inheritCreatorProfile(rec, placement, req.RuntimeBrokerID, &req), rec.Body.String())
+	assert.Equal(t, "gke", req.Profile)
+	assert.Equal(t, store.PlacementSourceInherited, placement.profileSource)
 }
 
 // Handler level: an inherited broker that is not auto-provide passes both
@@ -755,4 +758,126 @@ func TestAgentCreatePlacementSettings_Validation(t *testing.T) {
 		require.NotNil(t, resp.AgentCreateProfile)
 		assert.Nil(t, resp.AgentCreateBroker)
 	})
+}
+
+// setProviderName rewrites the provider row's broker name, as left behind
+// when a broker is renamed after it was linked to the project.
+func (pf *placementFixture) setProviderName(t *testing.T, brokerID, name string) {
+	t.Helper()
+	ctx := context.Background()
+	pv, err := pf.store.GetProjectProvider(ctx, pf.proj.ID, brokerID)
+	require.NoError(t, err)
+	pv.BrokerName = name
+	require.NoError(t, pf.store.AddProjectProvider(ctx, pv))
+}
+
+// staleProviderNames sets up two renames: the creator's broker (record
+// name "k8s-broker") was linked as "old-k8s-name", and the docker broker
+// was linked under the name "k8s-broker", so a --broker of "k8s-broker"
+// matches the docker broker's provider row.
+func (pf *placementFixture) staleProviderNames(t *testing.T) {
+	t.Helper()
+	pf.setProviderName(t, pf.k8sBroker.ID, "old-k8s-name")
+	pf.setProviderName(t, pf.dockerBroker.ID, "k8s-broker")
+}
+
+// The creator's profile is inherited only onto the broker the create
+// actually resolves to. A --broker name that matches another broker's stale
+// provider row resolves to that broker, so the profile is not inherited,
+// even though the name equals the creator broker's current name.
+func TestAgentCreatePlacement_RenamedBrokerResolvesByIDBeforeInheritingProfile(t *testing.T) {
+	pf := newPlacementFixture(t)
+	enableInheritPlacement(t, pf.srv)
+	pf.staleProviderNames(t)
+
+	agent := pf.createAsCreator(t, CreateAgentRequest{Name: "renamed-broker", RuntimeBrokerID: "k8s-broker"})
+	assertPlacement(t, agent, pf.dockerBroker.ID, store.PlacementSourceFlag, "", store.PlacementSourceDefault)
+	assert.NotEqual(t, "gke", agent.AppliedConfig.Profile)
+}
+
+// The agent-create broker setting resolves a name to the same broker a
+// --broker flag with that name resolves to, stale provider rows included.
+func TestAgentCreatePlacementSettings_RenamedBrokerMatchesFlagResolution(t *testing.T) {
+	pf := newPlacementFixture(t)
+	pf.staleProviderNames(t)
+
+	rec, resp := putPlacementSettings(t, pf, hubclient.ProjectSettings{AgentCreateBroker: strPtr("k8s-broker")})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NotNil(t, resp.AgentCreateBroker)
+	assert.Equal(t, pf.dockerBroker.ID, *resp.AgentCreateBroker)
+
+	broker, err := pf.srv.projectProviderBroker(context.Background(), pf.proj.ID, "old-k8s-name")
+	require.NoError(t, err)
+	assert.Equal(t, pf.k8sBroker.ID, broker.ID, "a provider-row name still resolves")
+}
+
+// Fail closed: inheritance applies but the creator's profile is not
+// available on its broker, so a create that would inherit it is refused,
+// naming the profile and the broker. A create that passes -p is not
+// affected, since it does not inherit the profile.
+func TestAgentCreatePlacement_InheritedProfileUnavailableRefuses(t *testing.T) {
+	pf := newPlacementFixture(t)
+	enableInheritPlacement(t, pf.srv)
+	ctx := context.Background()
+	k8s, err := pf.store.GetRuntimeBroker(ctx, pf.k8sBroker.ID)
+	require.NoError(t, err)
+	k8s.Profiles = []store.BrokerProfile{
+		{Name: "gke", Type: "kubernetes", Available: false},
+		{Name: "local", Type: "docker", Available: true},
+	}
+	require.NoError(t, pf.store.UpdateRuntimeBroker(ctx, k8s))
+
+	rec := createAsAgent(t, pf.bypassAgentsFixture, pf.caller.ID, CreateAgentRequest{Name: "inherit-unavailable"})
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `\"gke\"`, "the error names the profile")
+	assert.Contains(t, rec.Body.String(), "k8s-broker", "the error names the broker")
+	pf.assertNoIDs(t, rec)
+	_, err = pf.store.GetAgentBySlug(ctx, pf.proj.ID, "inherit-unavailable")
+	assert.ErrorIs(t, err, store.ErrNotFound, "a refused create must store nothing")
+
+	agent := pf.createAsCreator(t, CreateAgentRequest{Name: "inherit-unavailable-p", Profile: "local"})
+	assertPlacement(t, agent, pf.k8sBroker.ID, store.PlacementSourceInherited, "local", store.PlacementSourceFlag)
+}
+
+// --broker alone ignores the agent-create profile setting.
+func TestAgentCreatePlacement_ExplicitBrokerIgnoresProfileSetting(t *testing.T) {
+	pf := newPlacementFixture(t)
+	pf.setAnnotations(t, map[string]string{projectSettingAgentCreateProfile: "docker-only"})
+
+	agent := pf.createAsCreator(t, CreateAgentRequest{Name: "broker-ignores-setting", RuntimeBrokerID: pf.dockerBroker.ID})
+	assertPlacement(t, agent, pf.dockerBroker.ID, store.PlacementSourceFlag, "", store.PlacementSourceDefault)
+	assert.NotEqual(t, "docker-only", agent.AppliedConfig.Profile)
+}
+
+// With the experiment on, a profile setting the creator's broker does not
+// offer does not inherit the broker; the regular chain picks one that
+// offers it.
+func TestAgentCreatePlacement_ProfileSettingNotOnCreatorBrokerUsesRegularChain(t *testing.T) {
+	pf := newPlacementFixture(t)
+	enableInheritPlacement(t, pf.srv)
+	pf.setAnnotations(t, map[string]string{projectSettingAgentCreateProfile: "docker-only"})
+
+	agent := pf.createAsCreator(t, CreateAgentRequest{Name: "setting-regular-chain"})
+	assertPlacement(t, agent, pf.dockerBroker.ID, store.PlacementSourceDefault, "docker-only", store.PlacementSourceSetting)
+}
+
+// Placement runs before the existing-agent check, like broker resolution
+// does today: re-running a create for an existing agent name meets the
+// same placement refusals as a new create. Here the inherited broker has
+// gone offline, so the re-run gets 503 rather than starting the agent.
+func TestAgentCreatePlacement_ExistingAgentRerunMeetsPlacementRefusal(t *testing.T) {
+	pf := newPlacementFixture(t)
+	enableInheritPlacement(t, pf.srv)
+	pf.createAsCreator(t, CreateAgentRequest{Name: "rerun-child"})
+
+	ctx := context.Background()
+	k8s, err := pf.store.GetRuntimeBroker(ctx, pf.k8sBroker.ID)
+	require.NoError(t, err)
+	k8s.Status = store.BrokerStatusOffline
+	require.NoError(t, pf.store.UpdateRuntimeBroker(ctx, k8s))
+
+	rec := createAsAgent(t, pf.bypassAgentsFixture, pf.caller.ID, CreateAgentRequest{Name: "rerun-child"})
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "creating agent's broker")
+	pf.assertNoIDs(t, rec)
 }
