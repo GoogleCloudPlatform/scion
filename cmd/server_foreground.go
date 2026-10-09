@@ -1937,6 +1937,8 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		LaunchKeepaliveSeconds:       cfg.Hub.LaunchKeepaliveSeconds,
 		ConduitTCPAllowedPorts:       append([]int(nil), cfg.Hub.Conduit.TCPAllowedPorts...),
 		ConduitGrantKeyActivation:    conduitGrantKeyActivationSetting(cfg),
+		ConduitAuthzRecheckInterval:  conduitAuthzRecheckIntervalSetting(cfg),
+		ConduitUserStreamAuthzMax:    conduitUserStreamAuthzMaxSetting(cfg),
 		AgentRunScope:                agentRunScopeSetting(cfg),
 		AdminMode:                    adminMode,
 		MaintenanceMessage:           maintenanceMessage,
@@ -2078,6 +2080,12 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		log.Printf("WARNING: hub decision audit metrics disabled: %v", auditErr)
 	} else {
 		hubSrv.SetDecisionAuditMetrics(auditRec)
+	}
+
+	if authzRec, err := hub.NewOTelConduitStreamAuthzMetrics(mp); err != nil {
+		log.Printf("WARNING: hub conduit stream authz metrics disabled: %v", err)
+	} else {
+		hubSrv.SetConduitStreamAuthzMetrics(authzRec)
 	}
 
 	runScopeRec, runScopeErr := hub.NewOTelAgentRunScopeMetrics(mp)
@@ -2271,6 +2279,11 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 				hubSAEmail = gcpGen.ServiceAccountEmail()
 			}
 			checker := hub.NewPolicyTroubleshooterChecker(ptClient, hubSAEmail, hubSrv.DenyUnknownFailOpen())
+			// Follow reloads of the deny-unknown fallback policy.
+			checker.SetDenyUnknownPolicySource(hubSrv.DenyUnknownFailOpen)
+			// Report real API calls, not cached results, to the admin
+			// diagnostic for the assignment check.
+			checker.SetCallObserver(hubSrv.NoteSAAssignCheckCall)
 			cached := hub.NewCachedCallerPermissionChecker(checker,
 				60*time.Second, // allowTTL
 				10*time.Second, // denyTTL
@@ -2815,6 +2828,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		hubSrv.SetEventPublisher(eventPub)
 		startSettingsPropagation(ctx, hubSrv, eventPub)
 		webSrv.SetAccessSettingsProvider(hubSrv)
+		webSrv.SetProfilingSettingsProvider(hubSrv)
 		webSrv.SetOAuthService(hubSrv.GetOAuthService())
 		webSrv.SetStore(hubSrv.GetStore())
 		webSrv.SetUserTokenService(hubSrv.GetUserTokenService())

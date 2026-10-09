@@ -1487,6 +1487,22 @@ type V1ServerHubConduitConfig struct {
 	// live hub processes (default: POD_NAME, else the host name plus a
 	// random per-process suffix).
 	InstanceID string `json:"instance_id,omitempty" yaml:"instance_id,omitempty" koanf:"instance_id"`
+	// AuthzRecheckInterval is the period of the re-check sweep of open
+	// user streams (e.g. "60s"; default "60s", 1s-10m).
+	AuthzRecheckInterval string `json:"authz_recheck_interval,omitempty" yaml:"authz_recheck_interval,omitempty" koanf:"authz_recheck_interval"`
+	// StreamAuthzMax is the authorization interval of open streams per
+	// originating principal kind: when a stream reaches it, the hub
+	// re-checks the principal and renews or closes the stream (defaults
+	// "8h" for user, "24h" for broker and agent; each 1m-168h).
+	StreamAuthzMax *V1ServerHubConduitStreamAuthzMax `json:"stream_authz_max,omitempty" yaml:"stream_authz_max,omitempty" koanf:"stream_authz_max"`
+}
+
+// V1ServerHubConduitStreamAuthzMax holds
+// server.hub.conduit.stream_authz_max.
+type V1ServerHubConduitStreamAuthzMax struct {
+	User   string `json:"user,omitempty" yaml:"user,omitempty" koanf:"user"`
+	Broker string `json:"broker,omitempty" yaml:"broker,omitempty" koanf:"broker"`
+	Agent  string `json:"agent,omitempty" yaml:"agent,omitempty" koanf:"agent"`
 }
 
 // V1BrokerConfig holds Runtime Broker configuration.
@@ -2693,9 +2709,10 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 
 	// 4. Load environment variables (SCION_ prefix)
 	_ = k.Load(env.ProviderWithValue("SCION_", ".", func(key, value string) (string, interface{}) {
-		// An empty plaintext switch is unset, not a request to disable TLS.
-		// Skip it before koanf maps the empty value onto tls.enabled.
-		if key == "SCION_OTEL_INSECURE" && value == "" {
+		// An exported but empty variable is treated as unset, so it never
+		// blanks a value from the settings files. This also keeps an empty
+		// SCION_OTEL_INSECURE from being mapped onto tls.enabled.
+		if value == "" {
 			return "", nil
 		}
 		return versionedEnvKeyMapper(key), value
@@ -2790,16 +2807,16 @@ func versionedEnvKeyMapper(s string) string {
 		// set (e.g. a broker started inside an agent container, which the
 		// hub sets it in). Returning "" makes the env provider drop the
 		// variable entirely, the same idiom used below for a removed
-		// legacy env var and for SCION_OTEL_INSECURE's empty-value case.
+		// legacy env var and by the env callback for an empty value.
 		return ""
 	}
 	if isRemovedLegacyEnv(s) {
 		// SCION_HUB_GROVE_ID is no longer read, not even via the generic
 		// "hub_" mapping below, which would otherwise land on the
 		// unrecognised key hub.grove_id. Returning "" makes the env
-		// provider drop the variable entirely, the same idiom used for
-		// SCION_OTEL_INSECURE above. WarnRemovedLegacyEnv reports it
-		// separately.
+		// provider drop the variable entirely, the same idiom the env
+		// callback uses for an empty value. WarnRemovedLegacyEnv reports
+		// it separately.
 		return ""
 	}
 	key := strings.ToLower(strings.TrimPrefix(s, "SCION_"))
@@ -2845,7 +2862,9 @@ var knownCompoundFields = []string{
 	"require_trusted_proxy_ip",
 	"soft_delete_retain_files",
 	"start_unconfirmed_hold",
+	"authz_recheck_interval",
 	"start_claim_lease_ttl",
+	"stream_authz_max",
 	"soft_delete_retention",
 	"peer_service_accounts",
 	"grant_key_activation",
@@ -3194,15 +3213,19 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		if c := v1.Hub.Conduit; c != nil {
 			gc.Hub.Conduit = HubConduitConfig{
-				GrantKeyActivation:  c.GrantKeyActivation,
-				TCPAllowedPorts:     append([]int(nil), c.TCPAllowedPorts...),
-				InternalListen:      c.InternalListen,
-				InternalAdvertise:   c.InternalAdvertise,
-				PeerAuth:            c.PeerAuth,
-				PeerServiceAccounts: append([]string(nil), c.PeerServiceAccounts...),
-				PeerAudience:        c.PeerAudience,
-				ReconnectWindow:     c.ReconnectWindow,
-				InstanceID:          c.InstanceID,
+				GrantKeyActivation:   c.GrantKeyActivation,
+				TCPAllowedPorts:      append([]int(nil), c.TCPAllowedPorts...),
+				InternalListen:       c.InternalListen,
+				InternalAdvertise:    c.InternalAdvertise,
+				PeerAuth:             c.PeerAuth,
+				PeerServiceAccounts:  append([]string(nil), c.PeerServiceAccounts...),
+				PeerAudience:         c.PeerAudience,
+				ReconnectWindow:      c.ReconnectWindow,
+				InstanceID:           c.InstanceID,
+				AuthzRecheckInterval: c.AuthzRecheckInterval,
+			}
+			if m := c.StreamAuthzMax; m != nil {
+				gc.Hub.Conduit.StreamAuthzMax = HubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
 			}
 		}
 	}
@@ -3531,15 +3554,19 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if c := gc.Hub.Conduit; !c.IsZero() {
 		v1Hub.Conduit = &V1ServerHubConduitConfig{
-			GrantKeyActivation:  c.GrantKeyActivation,
-			TCPAllowedPorts:     append([]int(nil), c.TCPAllowedPorts...),
-			InternalListen:      c.InternalListen,
-			InternalAdvertise:   c.InternalAdvertise,
-			PeerAuth:            c.PeerAuth,
-			PeerServiceAccounts: append([]string(nil), c.PeerServiceAccounts...),
-			PeerAudience:        c.PeerAudience,
-			ReconnectWindow:     c.ReconnectWindow,
-			InstanceID:          c.InstanceID,
+			GrantKeyActivation:   c.GrantKeyActivation,
+			TCPAllowedPorts:      append([]int(nil), c.TCPAllowedPorts...),
+			InternalListen:       c.InternalListen,
+			InternalAdvertise:    c.InternalAdvertise,
+			PeerAuth:             c.PeerAuth,
+			PeerServiceAccounts:  append([]string(nil), c.PeerServiceAccounts...),
+			PeerAudience:         c.PeerAudience,
+			ReconnectWindow:      c.ReconnectWindow,
+			InstanceID:           c.InstanceID,
+			AuthzRecheckInterval: c.AuthzRecheckInterval,
+		}
+		if m := c.StreamAuthzMax; !m.IsZero() {
+			v1Hub.Conduit.StreamAuthzMax = &V1ServerHubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
 		}
 	}
 	if gc.Hub.StartClaimLeaseTTL > 0 {

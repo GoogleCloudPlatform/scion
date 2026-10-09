@@ -1132,16 +1132,12 @@ The precedence packages can be exercised directly:
 ```sh
 go build ./...
 go test ./pkg/config ./pkg/agent -count=1
-go test ./pkg/hub -count=1          # slow (~3 min); do not add -race, it hangs
+go test ./pkg/hub -count=1 -timeout 60m   # slow (see below); -race needs far more memory and time
 ```
 
-:::caution[A whole-repo `go test ./...` is not currently green]
-Some tests outside the precedence packages fail on `main` for reasons unrelated to settings
-precedence, and they are **excluded** from the checks above.
-
-Do not treat a whole-repo green as an achievable baseline right now, and do not "fix" such
-failures as part of a settings change.
-:::
+A whole-repo `go test ./...` passes on `main` given enough time: CI's Full Test Suite runs
+`go test -timeout 60m ./...`. With the default 10-minute timeout it fails in `pkg/hub`, whose
+SQLite-enabled run takes longer than that (ptone/scion#1847), so pass `-timeout 60m`.
 
 ## See also
 

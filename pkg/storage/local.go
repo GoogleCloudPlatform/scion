@@ -16,13 +16,17 @@ package storage
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -114,30 +118,17 @@ func (s *LocalStorage) Upload(ctx context.Context, objectPath string, reader io.
 	fullPath := s.fullPath(objectPath)
 
 	// Ensure parent directory exists
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+	if err := mkdirAllSynced(filepath.Dir(fullPath)); err != nil {
 		return nil, fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	// Create the file
-	file, err := os.Create(fullPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create file: %w", err)
-	}
-	defer func() { _ = file.Close() }()
-
-	// Copy data and compute hash
+	// Write to a temporary file beside the target and rename it over the
+	// target once complete, so a reader never sees a partial file and a
+	// failed or interrupted write leaves the old content in place.
 	hash := sha256.New()
-	tee := io.TeeReader(reader, hash)
-
-	size, err := io.Copy(file, tee)
+	size, info, err := writeFileAtomic(fullPath, io.TeeReader(reader, hash))
 	if err != nil {
-		return nil, fmt.Errorf("failed to write data: %w", err)
-	}
-
-	// Get file info
-	info, err := file.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("failed to stat file: %w", err)
+		return nil, err
 	}
 
 	etag := hex.EncodeToString(hash.Sum(nil))
@@ -250,8 +241,14 @@ func (s *LocalStorage) List(ctx context.Context, opts ListOptions) (*ListResult,
 			return filepath.SkipDir
 		}
 
-		// Skip directories
-		if info.IsDir() {
+		// Skip directories, and temporary files of uploads in progress
+		// (or stranded by a crash).
+		if info.IsDir() || strings.HasPrefix(info.Name(), UploadTempPrefix) {
+			return nil
+		}
+
+		// Objects before StartOffset were returned by an earlier page.
+		if opts.StartOffset != "" && relPath < opts.StartOffset {
 			return nil
 		}
 
@@ -342,24 +339,15 @@ func (s *LocalStorage) Copy(ctx context.Context, srcPath, dstPath string) (*Obje
 	defer func() { _ = src.Close() }()
 
 	// Ensure destination directory exists
-	if err := os.MkdirAll(filepath.Dir(dstFullPath), 0755); err != nil {
+	if err := mkdirAllSynced(filepath.Dir(dstFullPath)); err != nil {
 		return nil, fmt.Errorf("failed to create destination directory: %w", err)
 	}
 
-	// Create destination file
-	dst, err := os.Create(dstFullPath)
+	// Copy through a temporary file and rename it over the destination.
+	size, info, err := writeFileAtomic(dstFullPath, src)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create destination file: %w", err)
+		return nil, err
 	}
-	defer func() { _ = dst.Close() }()
-
-	// Copy content
-	size, err := io.Copy(dst, src)
-	if err != nil {
-		return nil, fmt.Errorf("failed to copy data: %w", err)
-	}
-
-	info, _ := dst.Stat()
 
 	return &Object{
 		Name:    dstPath,
@@ -377,3 +365,167 @@ func (s *LocalStorage) Close() error {
 
 // Ensure LocalStorage implements Storage interface.
 var _ Storage = (*LocalStorage)(nil)
+
+// UploadTempPrefix starts the name of the temporary file an upload writes
+// before renaming it over its target. Such files are never listed, and
+// RemoveStaleTemps deletes the ones a crash left behind.
+const UploadTempPrefix = ".scion-upload-"
+
+// writeFileAtomic writes r to a temporary file in path's directory, syncs
+// it, renames it over path and syncs the directory, so the new content is
+// durable once it returns. On any error the temporary file is removed and
+// path is left as it was. The file is created with mode 0666 less the
+// umask, as os.Create would.
+func writeFileAtomic(path string, r io.Reader) (int64, os.FileInfo, error) {
+	dir := filepath.Dir(path)
+	tmp, tmpName, err := createTemp(dir, UploadTempPrefix+filepath.Base(path)+"-")
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to create file: %w", err)
+	}
+	done := false
+	defer func() {
+		if !done {
+			_ = tmp.Close()
+			_ = os.Remove(tmpName)
+		}
+	}()
+	size, err := io.Copy(tmp, r)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to write data: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return 0, nil, fmt.Errorf("failed to sync file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return 0, nil, fmt.Errorf("failed to close file: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		done = true
+		return 0, nil, fmt.Errorf("failed to move file into place: %w", err)
+	}
+	done = true
+	if err := syncDir(dir); err != nil {
+		return 0, nil, fmt.Errorf("failed to sync directory: %w", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to stat file: %w", err)
+	}
+	return size, info, nil
+}
+
+// createTemp creates a new file in dir named prefix followed by random
+// hex, with mode 0666 less the umask (os.CreateTemp would use 0600).
+func createTemp(dir, prefix string) (*os.File, string, error) {
+	for range 10 {
+		var b [8]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return nil, "", err
+		}
+		name := filepath.Join(dir, prefix+hex.EncodeToString(b[:]))
+		f, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o666)
+		if os.IsExist(err) {
+			continue
+		}
+		return f, name, err
+	}
+	return nil, "", errors.New("could not create a unique temporary file")
+}
+
+// syncDirHook, when set (by tests), is called with each directory synced.
+var syncDirHook func(dir string)
+
+// dirSync syncs an open directory; tests replace it to inject results.
+var dirSync = func(d *os.File) error { return d.Sync() }
+
+// syncDir fsyncs a directory, so a rename or a new entry in it is
+// durable. Windows cannot sync a directory and is skipped. A file system
+// that does not support syncing a directory (see syncUnsupported) is not
+// an error; any other failure is.
+func syncDir(dir string) error {
+	if syncDirHook != nil {
+		syncDirHook(dir)
+	}
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = d.Close() }()
+	if err := dirSync(d); err != nil && !syncUnsupported(err) {
+		return err
+	}
+	return nil
+}
+
+// syncUnsupported reports whether a directory sync failed only because the
+// file system does not support it: EINVAL (Linux, for file systems without
+// directory fsync), ENOTSUP and EOPNOTSUPP (distinct values on macOS and
+// the BSDs, for example on network mounts; the same value on Linux).
+func syncUnsupported(err error) bool {
+	return errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.EOPNOTSUPP)
+}
+
+// mkdirAllSynced is os.MkdirAll that also syncs the parent of each
+// directory it creates, so the new directories are durable.
+func mkdirAllSynced(dir string) error {
+	var created []string
+	for d := dir; ; d = filepath.Dir(d) {
+		if _, err := os.Stat(d); err == nil {
+			break
+		}
+		created = append(created, d)
+		if filepath.Dir(d) == d {
+			break
+		}
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	for i := len(created) - 1; i >= 0; i-- {
+		if err := syncDir(filepath.Dir(created[i])); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// TempCleaner is implemented by providers whose writes leave temporary
+// files a crash can strand (local storage).
+type TempCleaner interface {
+	// RemoveStaleTemps deletes the temporary upload files under prefix
+	// last modified before olderThan ago, and returns how many it deleted.
+	RemoveStaleTemps(ctx context.Context, prefix string, olderThan time.Duration) (int, error)
+}
+
+// RemoveStaleTemps implements TempCleaner.
+func (s *LocalStorage) RemoveStaleTemps(ctx context.Context, prefix string, olderThan time.Duration) (int, error) {
+	root := s.fullPath(prefix)
+	cutoff := time.Now().Add(-olderThan)
+	n := 0
+	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if info.IsDir() || !strings.HasPrefix(info.Name(), UploadTempPrefix) || !info.ModTime().Before(cutoff) {
+			return nil
+		}
+		if err := os.Remove(p); err == nil {
+			n++
+		}
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		return n, fmt.Errorf("failed to remove stale temporary files: %w", err)
+	}
+	return n, nil
+}

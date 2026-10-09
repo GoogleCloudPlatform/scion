@@ -43,10 +43,36 @@ import './health-dispatch-card.js';
 
 export { formatHeartbeatAge } from './health-broker-table.js';
 
+/** One entry of the summary's ranked "Needs attention" list (server-composed). */
+export interface HealthAttentionItem {
+  severity: 'critical' | 'warning';
+  /** hub_check | broker_offline | broker_degraded | broker_nfs | integration | dispatch | agents */
+  kind: string;
+  /** What the item is about; fields that do not apply are omitted. */
+  subject: { type: string; id?: string; name?: string; project_id?: string };
+  /** Fixed, server-composed sentence. */
+  message: string;
+}
+
+/** Non-identifying integration aggregate, returned to every caller. */
+export interface HealthSummaryIntegrationCounts {
+  total: number;
+  healthy: number;
+  degraded: number;
+  unhealthy: number;
+  unknown: number;
+}
+
 interface HealthSummary {
   status: string;
+  /** When the serving hub instance built the summary (RFC 3339). */
+  generated_at: string;
+  /** Ranked attention items; see deriveHealthSummaryStatus on the server. */
+  attention: HealthAttentionItem[];
   hub: {
     status: string;
+    /** The hub instance that served this summary ("this instance"). */
+    instance_id: string;
     version: string;
     uptime: string;
     connected_brokers: number;
@@ -65,12 +91,33 @@ interface HealthSummary {
     pool_idle: number;
   };
   runtime_brokers: HealthSummaryBrokerList;
-  /** Chat and messaging plugins; empty when none are configured. */
-  integrations?: HealthSummaryIntegration[];
+  /**
+   * Chat and messaging plugins; empty when none are configured, or when the
+   * caller lacks hub.integrations.read (integrations_detail false).
+   */
+  integrations: HealthSummaryIntegration[];
+  /** True when integrations and integration attention items carry identity. */
+  integrations_detail: boolean;
+  integration_counts: HealthSummaryIntegrationCounts;
   /** Null when the hub could not aggregate agents (not reported). */
   agents: HealthSummaryAgents | null;
   /** Null when the hub could not count dispatch health (not reported). */
   dispatch: HealthSummaryDispatch | null;
+  /**
+   * Present only while the service account assignment check cannot run
+   * because the hub's identity lacks the access it needs.
+   */
+  service_account_check?: HealthSummaryServiceAccountCheck;
+}
+
+/** The service_account_check section of GET /api/v1/admin/health/summary. */
+export interface HealthSummaryServiceAccountCheck {
+  status: string;
+  cause: string;
+  remedy: string;
+  docs_url: string;
+  since: string;
+  last_seen: string;
 }
 
 @customElement('scion-page-health-dashboard')
@@ -250,6 +297,11 @@ export class ScionPageHealthDashboard extends LitElement {
       padding: 1.25rem;
     }
 
+    .sa-check-remedy {
+      font-size: 0.875rem;
+      margin: 0.5rem 0;
+    }
+
     .card-title {
       font-size: 0.875rem;
       font-weight: 600;
@@ -378,6 +430,9 @@ export class ScionPageHealthDashboard extends LitElement {
       <!-- Hub & Database -->
       <div class="grid-2">${this.renderHubCard(d)} ${this.renderDatabaseCard(d)}</div>
 
+      <!-- Service account assignment check (only while it cannot run) -->
+      ${this.renderServiceAccountCheckCard(d)}
+
       <!-- Brokers -->
       ${this.renderBrokersCard(d)}
 
@@ -456,6 +511,27 @@ export class ScionPageHealthDashboard extends LitElement {
     return html`
       <div class="grid-full">
         <scion-health-broker-table .brokers=${d.runtime_brokers}></scion-health-broker-table>
+      </div>
+    `;
+  }
+
+  private renderServiceAccountCheckCard(d: HealthSummary) {
+    const c = d.service_account_check;
+    if (!c) return nothing;
+    return html`
+      <div class="grid-full">
+        <div class="card sa-check">
+          <div class="card-title">Service Account Assignment Check</div>
+          <div class="status-line">
+            <span style="color: ${this.statusColor(c.status)}">Cannot run</span>
+          </div>
+          <p class="sa-check-remedy">${c.remedy}</p>
+          ${c.docs_url.startsWith('https://')
+            ? html`<a href=${c.docs_url} target="_blank" rel="noopener noreferrer"
+                >Access the hub's identity needs</a
+              >`
+            : nothing}
+        </div>
       </div>
     `;
   }

@@ -104,7 +104,11 @@ func (s *Server) handleChatSpaces(w http.ResponseWriter, r *http.Request) {
 	// List every project as a summary: the rail needs only identity, naming,
 	// the emoji annotation and the authorization inputs, not the agent,
 	// contributor and broker counts ListProjects computes per project.
-	allProjects, err := s.store.ListProjectSummaries(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 1000})
+	// Project templates are blueprints, not chat spaces: exclude them here
+	// so no client lists them in the rail.
+	allProjects, err := s.store.ListProjectSummaries(ctx, store.ProjectFilter{
+		IsTemplate: new(bool), // exclude templates
+	}, store.ListOptions{Limit: 1000})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list projects", nil)
 		return
@@ -446,6 +450,23 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request, proje
 		return
 	}
 
+	// Lazy backfill: a project with no threads at all never got its
+	// #general topic (created before every creation path ensured one).
+	// The last thread of a space cannot be deleted, so zero threads never
+	// means a user removed them, and a #general a user deleted while other
+	// threads remain is not resurrected. Templates are not chat spaces.
+	// Best-effort: if the re-list fails, answer with the original (empty)
+	// list rather than failing the open; the next open retries.
+	if len(topics) == 0 && !project.IsTemplate() {
+		s.ensureProjectGeneralTopic(r.Context(), project)
+		if relisted, relistErr := wcs.ListTopics(r.Context(), projectID); relistErr != nil {
+			slog.Warn("chat threads: re-list after #general backfill failed",
+				"project_id", projectID, "error", relistErr)
+		} else {
+			topics = relisted
+		}
+	}
+
 	// Batch-fetch read states.
 	convKeys := make([]string, 0, len(topics))
 	for _, t := range topics {
@@ -535,6 +556,13 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 	if !s.authorize(w, r, projectResource(project), ActionRead) {
+		return
+	}
+
+	// Templates are not chat spaces, mirroring the agent-create rejection.
+	if project.IsTemplate() {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			"cannot create threads in a template project", nil)
 		return
 	}
 
@@ -796,6 +824,7 @@ func (s *Server) handleTopicDelete(w http.ResponseWriter, r *http.Request, topic
 	}
 
 	s.events.PublishChatTopicEvent(r.Context(), topic.ProjectID, "deleted", *topic)
+	s.deleteScheduledMessagesOfConversation(r.Context(), topicID)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
@@ -1192,17 +1221,32 @@ var unreachablePhases = map[string]bool{
 	string(state.PhaseError):     true,
 }
 
+// agentGoneReason is the failure reason recorded when the primary agent no
+// longer resolves to a live agent. A soft-deleted agent and an agent whose
+// record is missing get this same reason, so the two cases read alike.
+const agentGoneReason = "Agent unreachable"
+
+// agentUnreachableReason returns the failure reason for an unreachable
+// primary given the suffix from isAgentUnreachable.
+func agentUnreachableReason(suffix string) string {
+	if suffix == "" {
+		return agentGoneReason
+	}
+	return fmt.Sprintf("Agent unreachable (%s)", suffix)
+}
+
 // isAgentUnreachable reports whether agent is unreachable for chat v2 primary
 // dispatch: soft-deleted, or in a phase whose container cannot accept a
 // buffered message (suspended, stopping, stopped, error). The returned string
-// is a short reason suffix for the "Agent unreachable (<reason>)" message
-// (e.g. "deleted" or the phase name); it is empty when reachable.
+// is a short reason suffix for agentUnreachableReason: the phase name, or
+// empty for a soft-deleted agent (reported like a missing one) and when
+// reachable.
 func isAgentUnreachable(agent *store.Agent) (bool, string) {
 	if agent == nil {
 		return false, ""
 	}
 	if !agent.DeletedAt.IsZero() {
-		return true, "deleted"
+		return true, ""
 	}
 	if unreachablePhases[agent.Phase] {
 		return true, agent.Phase
@@ -1266,6 +1310,13 @@ func chatWakeWriteBudget(recipients int) time.Duration {
 	return chatWakeResumeBudget + time.Duration(recipients)*chatWakeDeliveryBudget + chatWakeWriteSlack
 }
 
+// chatWakeSendBudget is the overall deadline of a wake send once it is
+// detached from the request: the wake, persistence, every dispatch and
+// the store and event calls in between. It matches the write deadline,
+// so the send ends no later than the connection can still answer.
+// A variable so tests can shorten it.
+var chatWakeSendBudget = chatWakeWriteBudget
+
 // extendWriteDeadlineForWake moves the connection's write deadline past
 // the server-wide WriteTimeout to chatWakeWriteBudget(recipients) from
 // now. A ResponseWriter without deadline support is logged and ignored.
@@ -1288,6 +1339,10 @@ func (s *Server) suspendedPrimaryWakeable(ctx context.Context, user UserIdentity
 		return false
 	}
 	if isManagedAgentRuntime(agent.Runtime) || agent.RuntimeBrokerID == "" {
+		return false
+	}
+	// A held agent is not offered a wake (ptone/scion#3433).
+	if held, err := s.agentHeld(ctx, agent.ID); err != nil || held {
 		return false
 	}
 	return s.agentLifecycleAllowed(ctx, user, agent)
@@ -1419,11 +1474,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			"target_agent", primaryAgent.ID,
 			"reason", reason,
 		)
-		return nil, newChatSendError(http.StatusForbidden, ErrCodeMessageDenied, "Message delivery denied", map[string]interface{}{
-			"reason":        mapReasonToCode(reason),
-			"senderMode":    "user",
-			"recipientMode": primaryAgent.MessageMode,
-		})
+		return nil, chatSendMessageDenied(reason, primaryAgent)
 	}
 
 	// #2257 P2 (design auto-offload-large-dm §4.2 item 1): strip hub-reserved
@@ -1450,6 +1501,13 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	// land once the agent comes up. Modeled on the phase check in
 	// dispatchRoutedRecipient (handlers_broker_inbound_routed.go).
 	primaryUnreachable, primaryUnreachableReason := isAgentUnreachable(primaryAgent)
+	// A held primary (ptone/scion#3433) is unreachable whatever its phase:
+	// the row is kept, never dispatched. A lookup fault is treated the same.
+	if !primaryUnreachable && primaryAgent != nil {
+		if held, holdErr := s.agentHeld(ctx, primaryAgent.ID); holdErr != nil || held {
+			primaryUnreachable, primaryUnreachableReason = true, string(state.PhaseSuspended)
+		}
+	}
 	var dispatchFailureCode string
 
 	// Migration gate (design agent-reincarnate §3.7, R3 p2a-r1 review):
@@ -1527,7 +1585,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		// Not a failure: the message is saved for catch-up, not dropped.
 		storeMsg.DispatchState = store.MessageDispatchDeferred
 	} else if primaryUnreachable {
-		unreachableReason := fmt.Sprintf("Agent unreachable (%s)", primaryUnreachableReason)
+		unreachableReason := agentUnreachableReason(primaryUnreachableReason)
 		storeMsg.DispatchState = store.MessageDispatchFailed
 		storeMsg.DispatchFailureReason = &unreachableReason
 		dispatchFailureCode = dispatchFailureCodeAgentUnreachable
@@ -1599,12 +1657,15 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		// abort a wake in progress, nor the persist and dispatch after it.
 		// The send then runs to its end with its idempotency key in flight
 		// (a retry is told send_in_progress), so the client's retry finds
-		// the finished outcome. Only some steps carry a deadline: the wake
-		// (chatWakeResumeBudget), each dispatch (30s) and markFailed (its
-		// finalization timeout). The store and event calls after the wake
-		// have none, as on the request context, which had no deadline
-		// either.
-		ctx = context.WithoutCancel(ctx)
+		// the finished outcome. The detached context carries one overall
+		// deadline (chatWakeSendBudget), so a stalled store or event call
+		// ends the send instead of keeping the key in flight forever.
+		// Within it the wake (chatWakeResumeBudget) and each dispatch
+		// (30s) have their own bounds; markFailed uses its finalization
+		// timeout and still runs after the deadline.
+		var cancelSend context.CancelFunc
+		ctx, cancelSend = context.WithTimeout(context.WithoutCancel(ctx), chatWakeSendBudget(len(agents)))
+		defer cancelSend()
 		wakeCtx, cancelWake := context.WithTimeout(ctx, chatWakeResumeBudget)
 		// wakeAgentForDM reports managed runtimes, a missing broker, the
 		// start gate and readiness failures as typed errors.
@@ -1938,6 +1999,21 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			}
 
 			mentionDispatchOK := true
+			// A held secondary (ptone/scion#3433) keeps its row but is
+			// never dispatched to; a lookup fault is treated the same.
+			if held, holdErr := s.agentHeld(ctx, mentionAgent.ID); holdErr != nil || held {
+				if mentionPersisted {
+					_ = s.markFailed(ctx, mentionStoreMsg.ID, "Agent unreachable (suspended)")
+				}
+				for i, mr := range mentionResults {
+					if strings.EqualFold(mr.Slug, mentionAgent.Slug) {
+						mentionResults[i].Status = "error"
+						mentionResults[i].Error = "Agent unreachable (suspended)"
+						break
+					}
+				}
+				continue
+			}
 			if dispatcher != nil {
 				// withDispatchMessageID: same rationale as the primary dispatch
 				// above, so a buffered-delivery failure on this mention row can
@@ -2049,7 +2125,7 @@ func groupCoAddressees(agents []*store.Agent) []messaging.Addressee {
 type unreachableAgentOverride struct {
 	AgentSlug string // resolved or best-effort slug of the named agent
 	AgentID   string // resolved agent ID, or "" if it never resolved at all
-	Reason    string // e.g. "Agent unreachable (deleted)"
+	Reason    string // e.g. agentGoneReason
 	Code      string // dispatchFailureCode, e.g. dispatchFailureCodeAgentUnreachable
 }
 
@@ -2060,9 +2136,10 @@ type unreachableAgentOverride struct {
 // message type, and response differ, but conversation resolution, SSE
 // publish, watermark updates, and notification firing (including
 // fireHumanMentionNotifications) are shared with the ordinary human-to-human
-// path. unreachable is only ever used for the topic case (isDM is always
-// false alongside it). It returns the response body of the persisted
-// message, or the error the send handler answers with.
+// path. With isDM (an agent DM whose agent record is gone) the DM is
+// registered as usual but no DM notification is sent. It returns the
+// response body of the persisted message, or the error the send handler
+// answers with.
 func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, user UserIdentity,
 	content, senderLabel string, isDM, noRecipient bool, mentionNames []string, attachmentRefs []AttachmentRef, now time.Time, replyToID string,
 	unreachable *unreachableAgentOverride) (*chatMessageResponse, *chatSendError) {
@@ -2248,7 +2325,7 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 	// that topic.
 	if cn := s.getChatNotifier(); cn != nil {
 		// DM received notification: notify the peer when a DM is sent.
-		if isDM && recipientID != "" && recipientID != user.ID() {
+		if isDM && unreachable == nil && recipientID != "" && recipientID != user.ID() {
 			go cn.NotifyDMReceived(context.Background(), recipientID, ChatMessageContext{
 				SenderID:        user.ID(),
 				SenderName:      senderLabel,

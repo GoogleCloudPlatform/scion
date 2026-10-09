@@ -184,6 +184,22 @@ func outboundThreadGateApplies(channel string) bool {
 	return err == nil && surface == "native"
 }
 
+// outboundThreadSurface returns the conversation surface for an outbound
+// thread send (kind "group") on an external channel, matching the surface
+// the inbound path stores the same thread under. It returns "" for other
+// kinds, native channels and channels with no known surface, which keep
+// the default native surface.
+func outboundThreadSurface(kind, channel string) string {
+	if kind != "group" {
+		return ""
+	}
+	surface, err := messaging.ChannelToSurfaceStrict(channel)
+	if err != nil || surface == "native" {
+		return ""
+	}
+	return surface
+}
+
 // outboundThreadConversationState reports whether a free-text thread key
 // (extRef = "thread:<project>:<threadID>") names a conversation that
 // ResolveOrCreateConversationByKey would reuse rather than mint, and whether
@@ -658,6 +674,13 @@ func (s *Server) resolveOutboundRouting(
 			}
 			if wcs != nil {
 				keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
+			}
+			// A thread on an external channel is stored under that
+			// channel's surface, the same key the inbound path uses for
+			// replies on the thread, so both directions share one
+			// conversation.
+			if surface := outboundThreadSurface(kind, req.Channel); surface != "" {
+				keyOpts = append(keyOpts, messaging.WithSurface(surface))
 			}
 			// A25.6 F1/F3: register both DM principals as participants so
 			// the conversation is discoverable via `conversation list`.
@@ -1345,6 +1368,28 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	// storeOutboundRow persists storeMsg, records its mentions, attachments
+	// and artifacts, and emits the SSE event. It does not dispatch to
+	// channel spokes. Every store and publish call uses storeCtx, so the
+	// caller decides whether request cancellation can cut it short.
+	storeOutboundRow := func(storeCtx context.Context) error {
+		if err := s.store.CreateMessage(storeCtx, storeMsg); err != nil {
+			return err
+		}
+		// Record mention rows before publish: clients refetch the thread
+		// list and its mention dots on the SSE event.
+		s.recordHumanMentions(storeCtx, req.ThreadID, storeMsg.ID, mentionedHumans)
+		// W7: Link before publishing so a client that refetches on the SSE
+		// event already sees the attachments.
+		s.mu.RLock()
+		wcs := s.webChatStore
+		s.mu.RUnlock()
+		linkAttachmentRefs(storeCtx, wcs, storeMsg.ID, attachmentRefs, s.messageLog)
+		s.recordMessageArtifacts(storeCtx, storeMsg.ID, outboundArtifactRefs)
+		s.events.PublishUserMessage(storeCtx, storeMsg, attachmentRefs)
+		return nil
+	}
+
 	// Dispatch based on delivery path.
 	switch result.DeliveryPath {
 	case deliveryUserBroker:
@@ -1355,6 +1400,14 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			// lifecycle events.
 			persisting := bp.subscribeProjectUserMessages(agent.ProjectID)
 			err := bp.PublishUserMessage(ctx, agent.ProjectID, result.RecipientID, structuredMsg)
+			if errors.Is(err, eventbus.ErrReservedChannel) {
+				// Nothing was published or stored: the request named a
+				// channel the hub keeps for itself.
+				s.messageLog.Warn("Outbound message names a reserved channel",
+					"agent_id", agent.ID, "channel", structuredMsg.Channel)
+				ValidationError(w, fmt.Sprintf("channel %q is reserved for internal use", structuredMsg.Channel), nil)
+				return
+			}
 			if err != nil && persisting && !errors.Is(err, eventbus.ErrSubscriberBufferFull) && !inProcessPublishFailed(err) {
 				// The inprocess spoke queued the persisting deliverToUser, so
 				// the message is stored; only channel spoke delivery failed (a
@@ -1386,9 +1439,26 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 						"Message delivery failed: recipient is temporarily overloaded, retry later", nil)
 					return
 				}
+				// The cause stays in the log line above: it can carry a
+				// channel spoke's own error text.
 				writeError(w, http.StatusBadGateway, ErrCodeDeliveryFailed,
-					"Message delivery failed: "+err.Error(), nil)
+					"Message delivery failed", nil)
 				return
+			}
+			if !persisting {
+				// No persisting subscriber received the publish, so only
+				// the channel spokes have the message. Store the row and
+				// emit the SSE event here, as the notification path does,
+				// without dispatching to the spokes a second time. The
+				// spokes already delivered it, so a store failure is
+				// logged rather than reported back for a retry. The
+				// spokes already have the message, so a cancelled request
+				// must not stop the store and SSE event either.
+				if err := storeOutboundRow(context.WithoutCancel(ctx)); err != nil {
+					s.messageLog.Error("Failed to persist outbound message after broker publish",
+						"agent_id", agent.ID, "recipient_id", result.RecipientID,
+						"project_id", agent.ProjectID, "error", err)
+				}
 			}
 			s.messageLog.Info("Outbound message dispatched through broker",
 				"agent_id", agent.ID, "recipient_id", result.RecipientID, "project_id", agent.ProjectID)
@@ -1396,27 +1466,16 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 
 	case deliveryUserDirect:
 		// Direct path: persist, link attachments, publish SSE, dispatch to channels.
-		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
+		if err := storeOutboundRow(ctx); err != nil {
 			s.messageLog.Error("Failed to persist outbound message", "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				"Failed to persist message", nil)
 			return
 		}
-		// Record mention rows before publish: clients refetch the thread
-		// list and its mention dots on the SSE event. Only this path
-		// persists storeMsg under this ID; the broker path stores its own
-		// row.
-		s.recordHumanMentions(ctx, req.ThreadID, storeMsg.ID, mentionedHumans)
-		// W7: Link before publishing so a client that refetches on the SSE
-		// event already sees the attachments.
 		s.mu.RLock()
-		wcs := s.webChatStore
 		cr := s.channelRegistry
 		s.mu.RUnlock()
-		linkAttachmentRefs(ctx, wcs, storeMsg.ID, attachmentRefs, s.messageLog)
 		delete(structuredMsg.Metadata, attachmentsMetadataKey) // strip internal transport key
-		s.recordMessageArtifacts(ctx, storeMsg.ID, outboundArtifactRefs)
-		s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
 		if cr != nil && cr.Len() > 0 {
 			cr.Dispatch(ctx, structuredMsg)
 		}
@@ -1549,6 +1608,12 @@ func (s *Server) handleAgentGitHubTokenRefresh(w http.ResponseWriter, r *http.Re
 	if agent.ProjectID == "" {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
 			"agent has no project associated", nil)
+		return
+	}
+
+	// No external token for an agent that is not in good standing
+	// (ptone/scion#3433); a lookup fault refuses.
+	if s.agentStandingForbidden(ctx, w, agent.ID) {
 		return
 	}
 
@@ -3645,9 +3710,16 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 		// Phase 9b(ii): render the delivery envelope for this broadcast
 		// recipient. ConvResult is nil — broadcasts deliberately skip
 		// conversation resolution (no conversation for broadcasts).
+		// The envelope's message_id names the stored row, so it is passed
+		// only when the row was written (ptone/scion#3881); an empty ID
+		// omits the key.
 		if s.writeDenyEnabled() {
+			renderID := ""
+			if persisted {
+				renderID = storeMsg.ID
+			}
 			agentMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
-				MessageID:  storeMsg.ID,
+				MessageID:  renderID,
 				ConvResult: nil,
 				Msg:        &agentMsg,
 				CreatedAt:  storeMsg.CreatedAt,
@@ -4069,15 +4141,17 @@ func (s *Server) validateChannelRegistered(w http.ResponseWriter, channel string
 			"cannot validate channel: message broker is not available", nil)
 		return false
 	}
+	// Match on the routing key FanOutEventBus.Publish uses (ChannelID,
+	// else Name), so a channel that passes here has a spoke to reach.
 	channels := bp.ListChannels()
 	for _, ch := range channels {
-		if ch.Name == channel {
+		if ch.RoutingKey() == channel {
 			return true
 		}
 	}
 	available := make([]string, len(channels))
 	for i, ch := range channels {
-		available[i] = ch.Name
+		available[i] = ch.RoutingKey()
 	}
 	if len(available) == 0 {
 		ValidationError(w, fmt.Sprintf("channel %q is not registered; no channels are currently available", channel), nil)

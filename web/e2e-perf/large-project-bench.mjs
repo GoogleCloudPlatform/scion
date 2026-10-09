@@ -109,6 +109,11 @@ import {
   summarizePageChanges,
   walkEndReason,
   mapWithConcurrency,
+  READINESS_MARK_PREFIX,
+  expectedReadinessMarks,
+  readinessMarksFrom,
+  checkReadinessMarks,
+  summarizeReadinessMarks,
 } from './lib.mjs';
 
 // ---- CLI args --------------------------------------------------------
@@ -160,6 +165,13 @@ const notes = args.notes || '';
 // most of a run's wall-clock time at 500 agents and whose numbers such a
 // change would not affect.
 const burstOnly = Boolean(args['burst-only']);
+// The hub under test has the profiling readiness_marks setting on: each
+// populated run waits briefly for its scenario's readiness marks and
+// counts a run that lacks one. Without the flag the setting is expected
+// off, and any readiness mark a run finds is reported as unexpected.
+const expectReadinessMarks = Boolean(args['expect-readiness-marks']);
+// How long a populated run waits for its expected readiness marks.
+const READINESS_MARK_WAIT_MS = 3000;
 
 const seed = JSON.parse(fs.readFileSync(seedPath, 'utf8'));
 
@@ -753,6 +765,40 @@ async function runOneScenarioAttempt(page, scenario, expectedCount, runIndex, co
   const domCount = navError ? null : await countAllDeep(page);
   const longTasks = navError ? [] : await page.evaluate(() => window.__benchLongTasks || []);
 
+  // Readiness marks, read before any interaction or page change so they
+  // describe the first load only.
+  let readinessFields = {};
+  if (isPopulated) {
+    const expected = expectedReadinessMarks(scenario.key);
+    const readMarks = async () =>
+      readinessMarksFrom(
+        await page.evaluate(
+          (prefix) =>
+            performance
+              .getEntriesByType('mark')
+              .filter((m) => m.name.startsWith(prefix))
+              .map((m) => ({ name: m.name, startTime: m.startTime })),
+          READINESS_MARK_PREFIX
+        )
+      );
+    let found = await readMarks();
+    const waitUntil = Date.now() + READINESS_MARK_WAIT_MS;
+    while (
+      expectReadinessMarks &&
+      checkReadinessMarks(found, expected, true).missing.length > 0 &&
+      Date.now() < waitUntil
+    ) {
+      await page.waitForTimeout(100);
+      found = await readMarks();
+    }
+    const check = checkReadinessMarks(found, expected, expectReadinessMarks);
+    readinessFields = {
+      readinessMarks: found,
+      readinessMarksMissing: check.missing,
+      readinessMarksUnexpected: check.unexpected,
+    };
+  }
+
   let graphInteraction = null;
   if (isPopulated && scenario.isGraph) {
     graphInteraction = await performGraphInteraction(page);
@@ -811,6 +857,7 @@ async function runOneScenarioAttempt(page, scenario, expectedCount, runIndex, co
     networkObservedAtMs: netWatch.state.atMs,
     consoleErrorCount: consoleErrors.length,
     consoleErrorsSample: consoleErrors.slice(0, 5),
+    ...readinessFields,
     ...pagedFields,
   };
 }
@@ -1326,6 +1373,7 @@ async function main() {
     burstRuns,
     effectiveTimeouts: { navTimeoutMs, populateTimeoutMs, settleTimeoutMs, burstCount },
     pageChangesPerRun: pageChanges,
+    expectReadinessMarks,
     notes,
     machine: { loadAvg1, loadAvg5, loadAvg15 },
     scenarios: {},
@@ -1343,6 +1391,7 @@ async function main() {
         const results = await runScenario(browser, scenario, seed.agentCount);
         report.scenarios[scenario.key] = {
           ...summarizeScenario(scenario, results),
+          ...summarizeReadinessMarks(results),
           ...(scenario.paged ? { paged: true, ...summarizePageChanges(results) } : {}),
         };
         const s = report.scenarios[scenario.key];
@@ -1350,6 +1399,14 @@ async function main() {
           `  ${s.successCount}/${results.length} populated; outcomes=${JSON.stringify(s.outcomeCounts)}; ` +
             `median nav->populated: ${s.medianNavToPopulatedMs}ms (cold=${s.medianNavToPopulatedMsCold}ms, warm=${s.medianNavToPopulatedMsWarm}ms); ` +
             `median DOM count: ${s.medianDomElementCount} [${s.minDomElementCount}, ${s.maxDomElementCount}]`
+        );
+        console.log(
+          `  readiness marks (expected ${expectReadinessMarks ? 'on' : 'off'}): ` +
+            Object.entries(s.readinessMarks)
+              .map(([name, m]) => `${name} median ${m.medianMs}ms (${m.count} runs)`)
+              .join(', ') +
+            `; runs missing a mark: ${s.readinessMarksMissingRunCount}, ` +
+            `runs with an unexpected mark: ${s.readinessMarksUnexpectedRunCount}`
         );
         if (scenario.paged) {
           console.log(

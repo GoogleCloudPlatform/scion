@@ -663,7 +663,7 @@ func TestSyncLaunch_HubManagedWorkspaceUpload_ClientCancel(t *testing.T) {
 			disp := &launchProbeDispatcher{mode: probeCancelRequest}
 			srv, s, project := setupCreateAgentServer(t, disp) // hub-managed: no GitRemote.
 			disp.s = s
-			srv.SetStorage(newContentMockStorage("test-bucket"))
+			srv.SetStorage(newGCSContentMockStorage("test-bucket"))
 			t.Cleanup(func() {
 				if p, err := hubManagedProjectPath(project.Slug); err == nil {
 					_ = os.RemoveAll(p)
@@ -722,7 +722,7 @@ func TestSyncLaunch_HubManagedWorkspaceUpload_OwnBudgetExpired(t *testing.T) {
 
 	disp := &launchProbeDispatcher{mode: probeCancelRequest}
 	srv, s, project := setupCreateAgentServer(t, disp) // hub-managed: no GitRemote.
-	srv.SetStorage(newContentMockStorage("test-bucket"))
+	srv.SetStorage(newGCSContentMockStorage("test-bucket"))
 	setAgentQuotaLimits(t, s)
 	t.Cleanup(func() {
 		if p, err := hubManagedProjectPath(project.Slug); err == nil {

@@ -186,11 +186,26 @@ var projectOperations = []OperationSpec{
 		Credentials:      []CredentialKind{CredentialSessionJWT},
 		ResourceResolver: "hub-scoped",
 		BasePermission:   "project.create",
-		Effects:          []SecurityEffect{EffectCreateResource},
-		DelegationKind:   DelegationNone,
-		AuthorityEval:    AuthorityEvalNone,
-		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		Effects:          []SecurityEffect{EffectCreateResource, EffectGrantAuthority},
+		DelegationKind:   DelegationNonAmplification,
+		DelegationDescription: "The creator is bound to the project-owner role on the project the call creates. " +
+			"A credential with a permission ceiling must cover every permission of that role before any write (projectOwnerGrantDenial); " +
+			"for other callers project.create gates the grant",
+		AuthorityEval: AuthorityEvalNone,
+		// createProjectWithOwner writes the project row, the owner binding
+		// and this record in one transaction.
+		AuditObligation: &AuditObligation{
+			EventType:     "project_member_add",
+			ContextFields: []string{"actor_id", "project_id"},
+			AfterFields:   []string{"user_id", "role"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestOwnerGrantCoverageCheck"},
+			{Package: "pkg/hub", Function: "TestOwnerBindingAuditFailureRollsBack"},
+		},
 	},
 	{
 		ID:          "project.lifecycle.delete",
@@ -334,72 +349,144 @@ var projectOperations = []OperationSpec{
 		Credentials:      []CredentialKind{CredentialSessionJWT},
 		ResourceResolver: "project-from-body",
 		BasePermission:   "project.register",
-		Effects:          []SecurityEffect{EffectCreateResource},
-		DelegationKind:   DelegationNone,
-		AuthorityEval:    AuthorityEvalNone,
-		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		Effects:          []SecurityEffect{EffectCreateResource, EffectGrantAuthority},
+		DelegationKind:   DelegationNonAmplification,
+		DelegationDescription: "When the call creates the project, the creator is bound to the project-owner role on it; " +
+			"registering an existing project binds no owner. " +
+			"A credential with a permission ceiling must cover every permission of that role before any write (projectOwnerGrantDenial); " +
+			"for other callers project.register gates the grant",
+		AuthorityEval: AuthorityEvalNone,
+		// createProjectWithOwner writes the project row, the owner binding
+		// and this record in one transaction.
+		AuditObligation: &AuditObligation{
+			EventType:     "project_member_add",
+			ContextFields: []string{"actor_id", "project_id"},
+			AfterFields:   []string{"user_id", "role"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestOwnerGrantCoverageCheck"},
+			{Package: "pkg/hub", Function: "TestOwnerBindingAuditFailureRollsBack"},
+		},
 	},
 
 	// =====================================================================
-	// Domain: schedule — scheduled event management
+	// Domain: schedule — scheduled events and recurring schedules. Reads,
+	// cancellation, deletion and pause admit tokens. Authoring (create,
+	// update, resume) refuses every user access token before any target
+	// lookup (authorizeScheduleAuthoringCredential).
 	// =====================================================================
 	{
-		ID:          "schedule.event.read",
+		ID:          "schedule.event.list",
 		Domain:      "schedule",
-		Description: "Read scheduled events or list events in a project",
+		Description: "List scheduled events or recurring schedules in a project",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/scheduled-events", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/scheduled-events/{id}", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/schedules", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/schedules/{id}", Method: "GET"},
 		},
-		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
 		ResourceResolver: "project-from-url",
-		BasePermission:   "scheduled_event.read",
-		Effects:          []SecurityEffect{EffectReadOne, EffectListScoped},
+		BasePermission:   "scheduled_event.list",
+		Effects:          []SecurityEffect{EffectListScoped},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestBearerDispositionMatrix_CatalogEntryPoints"}},
+		Bearer:           AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
+		ID:          "schedule.event.read",
+		Domain:      "schedule",
+		Description: "Read a scheduled event, a recurring schedule or a schedule's run history",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/scheduled-events/{id}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/schedules/{id}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/schedules/{id}/history", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "project-from-url",
+		BasePermission:   "scheduled_event.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestBearerDispositionMatrix_CatalogEntryPoints"}},
+		Bearer:           AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "schedule.event.create",
 		Domain:      "schedule",
-		Description: "Create a scheduled event or recurring schedule",
+		Description: "Create a scheduled event or recurring schedule of any event type. Every user access token is refused before any target lookup",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/scheduled-events", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/schedules", Method: "POST"},
 		},
-		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialAgentJWT},
 		ResourceResolver: "project-from-url",
 		BasePermission:   "scheduled_event.create",
-		Effects:          []SecurityEffect{EffectCreateResource},
-		DelegationKind:   DelegationNone,
+		Effects:          []SecurityEffect{EffectCreateResource, EffectGrantAuthority},
+		DelegationKind:   DelegationNonAmplification,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestScheduledMessageAuthoring_RefusesTokensBeforeTargetLookup"}},
+		Bearer:           SessionOnly(ReasonGovernancePending),
+		DelegationDescription: "Only the dispatch_agent event type grants authority. Authoring any event type records the author's frozen effect ceiling " +
+			"(revisionAuthorityCeiling); a dispatch_agent event or schedule then creates an agent at fire time, with a delegation edge from the recorded principal, " +
+			"after CanDelegate for that principal. A message event or schedule grants no authority. " +
+			"Effects are listed per operation, not per event type, so grant-authority is listed for the whole operation",
+		AuditObligation: &AuditObligation{
+			EventType:     "agent_delegation",
+			ContextFields: []string{"actor_id"},
+			AfterFields:   []string{"agent_id", "can_delegate_result"},
+			Atomic:        false,
+			NonAtomicJustification: "The authoring write records no mutation audit record: it stores the initiator attribution and the frozen effect ceiling " +
+				"on the event or schedule row in the same insert. The agent_delegation record is written when a dispatch_agent event fires, " +
+				"in the agent-create transaction with the agent row and its delegation edge. A message event writes none",
+		},
 	},
 	{
 		ID:          "schedule.event.update",
 		Domain:      "schedule",
-		Description: "Update a recurring schedule",
+		Description: "Update or resume a recurring schedule of any event type. Every user access token is refused, including one holding scheduled_event:update",
 		EntryPoints: []EntryPoint{
 			// handleSchedules (handlers_schedules.go) dispatches on
 			// r.Method: PATCH, not PUT.
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/schedules/{id}", Method: "PATCH"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/schedules/{id}/resume", Method: "POST"},
 		},
-		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialAgentJWT},
 		ResourceResolver: "project-from-url",
 		BasePermission:   "scheduled_event.update",
 		Effects:          []SecurityEffect{EffectUpdateResource},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestScheduleUpdateSelector_DoesNotAdmitAuthoring"}},
+		Bearer:           SessionOnly(ReasonGovernancePending),
+	},
+	{
+		ID:          "schedule.event.pause",
+		Domain:      "schedule",
+		Description: "Pause a recurring schedule. Pausing only stops future runs, so a token with scheduled_event:update is admitted",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/schedules/{id}/pause", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "project-from-url",
+		BasePermission:   "scheduled_event.update",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestSchedulePause_AdmitsTokenWithUpdateSelector"}},
+		Bearer:           AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "schedule.event.delete",
@@ -409,8 +496,8 @@ var projectOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/scheduled-events/{id}", Method: "DELETE"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/schedules/{id}", Method: "DELETE"},
 		},
-		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
 		ResourceResolver: "project-from-url",
 		BasePermission:   "scheduled_event.delete",
 		Effects:          []SecurityEffect{EffectDeleteResource},
@@ -423,7 +510,8 @@ var projectOperations = []OperationSpec{
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
-		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs:    []TestRef{{Package: "pkg/hub", Function: "TestBearerDispositionMatrix_CatalogEntryPoints"}},
+		Bearer:      AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
 	},
 
 	// =====================================================================

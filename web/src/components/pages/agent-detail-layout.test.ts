@@ -19,15 +19,12 @@ import { render, type TemplateResult } from 'lit';
 
 import type { Agent } from '../../shared/types.js';
 import { PROVISIONED_ONLY_LABEL } from '../../shared/agent-state-display.js';
-import { styleRules } from './__fixtures__/card-layout.js';
+import { styleRules } from './__fixtures__/css-rules.js';
 
 // chat-thread (imported by agent-detail) pulls in the app entry point,
 // which bootstraps the SPA on load; stub it as the header tests do.
 // Remove once chat-thread stops importing client/main (chat lane, ptone/scion#3118).
-vi.mock('../../client/main.js', () => ({
-  navigateTo: vi.fn(),
-  stateManager: new EventTarget(),
-}));
+vi.mock('../../client/main.js', () => import('../../client/__fixtures__/main-stub.js'));
 
 describe('agent detail layout', () => {
   let rules: Map<string, string>;
@@ -40,12 +37,12 @@ describe('agent detail layout', () => {
     rules = styleRules(ctor.styles.cssText);
   }, 30_000);
 
-  it('wraps a long agent name with its badges instead of floating them beside it', () => {
-    const text = rules.get('.header-title-text') ?? '';
-    expect(text).toMatch(/display:\s*flex/);
-    expect(text).toMatch(/flex-wrap:\s*wrap/);
-    expect(text).toMatch(/min-width:\s*0/);
-    expect(rules.get('.header h1') ?? '').toMatch(/overflow-wrap:\s*anywhere/);
+  it('leaves the header layout to the shared detail header', () => {
+    // The wrapping rules live in scion-detail-header (detail-header.test.ts);
+    // a page copy would drift from them.
+    for (const sel of ['.header', '.header-title', '.header-title-text', '.header h1']) {
+      expect(rules.has(sel), sel).toBe(false);
+    }
   });
 
   it('wraps the template, project and broker links under the name', () => {
@@ -147,28 +144,40 @@ describe('agent detail layout', () => {
     ],
   ];
 
-  it.each(states)('puts the name and every badge in the wrapping row (%s)', (_label, overrides) => {
-    const host = renderHeader(makeAgent(overrides));
-    const title = host.querySelector('.header-title');
-    expect(title).not.toBeNull();
-    // The title row holds only the icon and the wrapping text row, so no
-    // badge can float beside a multi-line name.
-    expect(
-      Array.from(title!.children).map((c) => c.tagName.toLowerCase() + '.' + c.className)
-    ).toEqual(['sl-icon.', 'div.header-title-text']);
-    const row = title!.querySelector(':scope > .header-title-text')!;
-    const tags = Array.from(row.children).map((c) => c.tagName.toLowerCase());
-    expect(tags).toEqual([
-      'h1',
-      'scion-status-badge',
-      'scion-deletion-badge',
-      'scion-message-mode-badge',
-    ]);
-  });
+  /** The page's scion-detail-header and its unslotted (badge) children. */
+  function headerParts(agent: Agent): { header: Element; badges: Element[] } {
+    const host = renderHeader(agent);
+    const headers = host.querySelectorAll('scion-detail-header');
+    expect(headers).toHaveLength(1);
+    const header = headers[0];
+    return { header, badges: Array.from(header.children).filter((c) => !c.hasAttribute('slot')) };
+  }
+
+  it.each(states)(
+    'puts every badge in the wrapping row after the name (%s)',
+    (_label, overrides) => {
+      const agent = makeAgent(overrides);
+      const { header, badges } = headerParts(agent);
+      expect((header as HTMLElement & { heading: string }).heading).toBe(agent.name);
+      // Unslotted children go to the default slot, the wrapping row after the
+      // h1, so no badge can float beside a multi-line name.
+      expect(badges.map((c) => c.tagName.toLowerCase())).toEqual([
+        'scion-status-badge',
+        'scion-deletion-badge',
+        'scion-message-mode-badge',
+      ]);
+      expect(header.querySelector(':scope > sl-icon[slot="icon"]')?.getAttribute('name')).toBe(
+        'cpu'
+      );
+      expect(header.querySelector(':scope > .header-meta')?.getAttribute('slot')).toBe('meta');
+      expect(header.querySelector(':scope > .header-actions')?.getAttribute('slot')).toBe(
+        'actions'
+      );
+    }
+  );
 
   it('keeps the provisioned-not-started label in the wrapping row', () => {
-    const host = renderHeader(makeAgent({ phase: 'created', provisionedOnly: true }));
-    const badge = host.querySelector('.header-title-text > scion-status-badge');
-    expect(badge?.getAttribute('label')).toBe(PROVISIONED_ONLY_LABEL);
+    const { badges } = headerParts(makeAgent({ phase: 'created', provisionedOnly: true }));
+    expect(badges[0].getAttribute('label')).toBe(PROVISIONED_ONLY_LABEL);
   });
 });

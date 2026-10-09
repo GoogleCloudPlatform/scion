@@ -146,13 +146,12 @@ func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key s
 	target := &chatSendTarget{Key: key, wcs: wcs}
 	if strings.HasPrefix(key, "dm:") {
 		target.IsDM = true
-		// Validate DM key format before any further processing.
-		if !validDMKey(key) {
-			return nil, chatSendBadRequest("invalid DM key format")
+		if serr := authorizeDMKeyParticipant(key, user.ID()); serr != nil {
+			return nil, serr
 		}
-		// DM key: verify the caller is one of the two participants.
-		if !isDMParticipant(key, user.ID()) {
-			return nil, chatSendForbidden()
+		// The other participant must be a principal the caller may message.
+		if serr := s.authorizeDMPeer(ctx, user, key); serr != nil {
+			return nil, serr
 		}
 		// DMs are not project-scoped; the project is derived from the
 		// agent for an agent DM, and user-user DMs have none.
@@ -186,6 +185,108 @@ func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key s
 	target.ProjectID = topic.ProjectID
 	target.Topic = topic
 	return target, nil
+}
+
+// authorizeDMKeyParticipant runs the first two DM steps of
+// authorizeChatSend: the key is well formed, and userID is one of its two
+// participants. Callers that need only these steps use it so their
+// responses are the same as authorizeChatSend's.
+func authorizeDMKeyParticipant(key, userID string) *chatSendError {
+	// Validate DM key format before any further processing.
+	if !validDMKey(key) {
+		return chatSendBadRequest("invalid DM key format")
+	}
+	// DM key: verify the caller is one of the two participants.
+	if !isDMParticipant(key, userID) {
+		return chatSendForbidden()
+	}
+	return nil
+}
+
+// chatSendMessageDenied is the refusal for a sender the messaging rules do
+// not allow to message agent. authorizeDMPeer and sendAgentRouted both use
+// it, so the two refusals are the same.
+func chatSendMessageDenied(reason string, agent *store.Agent) *chatSendError {
+	return newChatSendError(http.StatusForbidden, ErrCodeMessageDenied, "Message delivery denied", map[string]interface{}{
+		"reason":        mapReasonToCode(reason),
+		"senderMode":    "user",
+		"recipientMode": agent.MessageMode,
+	})
+}
+
+// authorizeDMPeer checks the participant of a DM key that is not the
+// caller (the peer). The caller has already been matched to a user slot
+// by isDMParticipant.
+//
+//   - The key must be canonical (messages.DMConversationKey). Anything else
+//     is the same 400 as a malformed key, decided from the key text alone.
+//   - A user peer must exist, not be suspended, and be readable by the
+//     caller (the user directory the chat palette offers).
+//   - An agent peer must exist and authorizeAgentMessage must allow the
+//     caller to message it. A refusal for an agent the caller can read is
+//     the usual MESSAGE_DENIED response.
+//
+// Every other outcome is chatSendForbidden, the same response as for a
+// caller who is not a participant, so the response does not depend on
+// which check failed. A store error other than not found fails closed
+// with 503.
+func (s *Server) authorizeDMPeer(ctx context.Context, user UserIdentity, key string) *chatSendError {
+	kindA, idA, kindB, idB, err := messages.ParseDMKey(key)
+	if err != nil {
+		return chatSendBadRequest("invalid DM key format")
+	}
+	if canonical, cerr := messages.DMConversationKey(kindA, idA, kindB, idB); cerr != nil || canonical != key {
+		return chatSendBadRequest("invalid DM key format")
+	}
+	peerKind, peerID := kindA, idA
+	if kindA == "user" && idA == user.ID() {
+		peerKind, peerID = kindB, idB
+	}
+
+	switch peerKind {
+	case "user":
+		peer, err := s.store.GetUser(ctx, peerID)
+		if err != nil || peer == nil {
+			return s.dmPeerLookupFailure(err)
+		}
+		if peer.Status == store.UserStatusSuspended {
+			return chatSendForbidden()
+		}
+		if !s.authzService.CheckAccess(ctx, user, userResource(peer), ActionRead).Allowed {
+			return chatSendForbidden()
+		}
+		return nil
+	case "agent":
+		agent, err := s.store.GetAgent(ctx, peerID)
+		if err != nil || agent == nil {
+			return s.dmPeerLookupFailure(err)
+		}
+		allowed, reason, _ := s.authorizeAgentMessage(ctx, user, agent, false)
+		if allowed {
+			return nil
+		}
+		if s.authzService.CheckAccess(ctx, user, agentResource(agent), ActionRead).Allowed {
+			slog.Warn("chat v2 message authorization denied",
+				"user", user.ID(),
+				"target_agent", agent.ID,
+				"reason", reason,
+			)
+			return chatSendMessageDenied(reason, agent)
+		}
+		return chatSendForbidden()
+	default:
+		return chatSendForbidden()
+	}
+}
+
+// dmPeerLookupFailure maps a failed DM peer lookup: not found is the
+// uniform refusal, any other store error fails closed.
+func (s *Server) dmPeerLookupFailure(err error) *chatSendError {
+	if err == nil || errors.Is(err, store.ErrNotFound) {
+		return chatSendForbidden()
+	}
+	slog.Warn("chat v2 DM peer lookup failed", "error", err)
+	return newChatSendError(http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
 }
 
 // validateChatSendInput checks the content and attachments of a send and
@@ -285,8 +386,15 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 	routingLookupFailed := false
 	if isDM {
 		if agentID := parseAgentDMKey(key); agentID != "" {
-			if dmAgent, err := s.store.GetAgent(ctx, agentID); err == nil && dmAgent != nil {
+			dmAgent, err := s.store.GetAgent(ctx, agentID)
+			switch {
+			case err == nil && dmAgent != nil:
 				defaultAgent = dmAgent
+			case errors.Is(err, store.ErrNotFound):
+				// The agent record is gone: report the DM undelivered
+				// exactly like a soft-deleted agent, instead of
+				// recording it as a delivered human-to-human DM.
+				unresolvedDefaultAgent = &store.Agent{ID: agentID, Slug: agentID}
 			}
 		}
 	} else if projectID != "" {
@@ -306,8 +414,8 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 			// missing default. Before nc-delivery-unreachable, that hiccup
 			// degraded to an ordinary human-to-human message; keep that
 			// fallthrough (leave defaultAgent and unresolvedDefaultAgent
-			// nil) instead of permanently persisting "Agent unreachable
-			// (deleted)" rows for a transient failure.
+			// nil) instead of permanently persisting "Agent unreachable"
+			// rows for a transient failure.
 			transientLookupErr := false
 			if daErr != nil && !errors.Is(daErr, store.ErrNotFound) {
 				transientLookupErr = true
@@ -322,8 +430,8 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 					// soft-deleted agents — DEF-31.
 					if da.ProjectID == projectID {
 						// Same project, soft-deleted: keep the row around so
-						// the caller can report "Agent unreachable (deleted)"
-						// with the real slug/ID instead of a generic one.
+						// the caller can report "Agent unreachable" with the
+						// real slug/ID instead of a generic one.
 						unresolvedDefaultAgent = da
 					} else {
 						foreignProjectDefault = true
@@ -363,8 +471,7 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 	// override below (review round 2, Consider 2): plan.Agents being empty
 	// because of a planning error is not evidence the default agent is
 	// unreachable, so that case must keep the pre-existing human-to-human
-	// fallthrough instead of mislabelling the send "Agent unreachable
-	// (deleted)".
+	// fallthrough instead of mislabelling the send "Agent unreachable".
 	var planErr error
 	if projectID != "" {
 		plan, planErr = resolveRoutingAgents(ctx, s.store, projectID, content, defaultAgent)
@@ -400,11 +507,11 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 	// plan reflects a routing-plan failure, not the deleted default, so keep
 	// the pre-existing human-to-human error handling below instead.
 	if unresolvedDefaultAgent != nil && planErr == nil {
-		return s.sendHumanToHuman(ctx, key, projectID, user, content, senderLabel, false, false, plan.MentionNames, attachmentRefs, now, in.ReplyToID,
+		return s.sendHumanToHuman(ctx, key, projectID, user, content, senderLabel, isDM, false, plan.MentionNames, attachmentRefs, now, in.ReplyToID,
 			&unreachableAgentOverride{
 				AgentSlug: unresolvedDefaultAgent.Slug,
 				AgentID:   unresolvedDefaultAgent.ID,
-				Reason:    "Agent unreachable (deleted)",
+				Reason:    agentGoneReason,
 				Code:      dispatchFailureCodeAgentUnreachable,
 			})
 	}

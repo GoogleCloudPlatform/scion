@@ -197,8 +197,10 @@ func (s *afterRunningWriteStore) UpdateAgent(ctx context.Context, a *store.Agent
 // stops the interaction itself and reports it. A delete that holds or
 // removed the row (claimed, finalizing, hard or soft delete written straight
 // to the store) answers 409. A delete that gave up (failed, or its lease
-// lapsed) leaves the agent live, so the unrecorded create is rolled back and
-// answers 500 (ptone/scion#3557). With no delete, the create answers 201.
+// lapsed) leaves the agent live: the create re-reads the row once, re-applies
+// its fields and retries the write, and answers 201 with the interaction
+// recorded and running (ptone/scion#3746). With no delete, the create
+// answers 201.
 func TestManagedCreate_DeleteWon_BeforeWrite_StopsInteraction(t *testing.T) {
 	for i, del := range landingDeletes {
 		t.Run(del.name, func(t *testing.T) {
@@ -219,13 +221,16 @@ func TestManagedCreate_DeleteWon_BeforeWrite_StopsInteraction(t *testing.T) {
 			if !del.compensate && del.name != "none" {
 				// A delete that gave up (failed, or its lease lapsed)
 				// still bumped state_version, so the post-create write
-				// conflicted while the agent stays live: the create is
-				// rolled back and answers 500 (ptone/scion#3557).
-				bodyID, warnings := requireManagedCreateUnrecorded(t, rec)
-				assert.Equal(t, agentID, bodyID)
-				assert.Len(t, warnings, 1)
-				assert.Equal(t, []string{"interaction-1"}, backend.cancels(), "the create stops the interaction")
-				assert.Zero(t, pub.count("created"), "no created: %v", pub.kinds())
+				// conflicted while the agent stays live: the create
+				// re-reads the row, retries once and answers 201 with the
+				// interaction recorded (ptone/scion#3746).
+				require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+				row, err := s.GetAgent(context.Background(), agentID)
+				require.NoError(t, err)
+				assert.True(t, isManagedAgentRuntime(row.Runtime), "the managed Runtime is persisted")
+				assert.Equal(t, "interaction-1", row.Annotations[annotationInteractionID])
+				assert.Empty(t, backend.cancels(), "a live agent's interaction is left running")
+				assert.Equal(t, 1, pub.count("created"), "created is published: %v", pub.kinds())
 				return
 			}
 			if !del.compensate {

@@ -19,13 +19,64 @@ package hub
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 
+	entgo "entgo.io/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/hook"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
+	"github.com/google/uuid"
 )
+
+// rootlessTestAgents holds the IDs of agents a test creates on purpose with
+// no owner, creator or ancestry (markRootlessTestAgent).
+var rootlessTestAgents sync.Map
+
+// testAgentOwnerHookDisabled turns defaultTestAgentOwner off, for tests
+// that prove a production create path writes a resolvable root on its own.
+// Tests that set it must not run in parallel.
+var testAgentOwnerHookDisabled atomic.Bool
+
+// markRootlessTestAgent exempts the agent from defaultTestAgentOwner, for a
+// test that needs an agent with no resolvable root.
+func markRootlessTestAgent(id string) { rootlessTestAgents.Store(id, true) }
+
+// defaultTestAgentOwner is an Agent create hook on the test store: an agent
+// fixture created with no owner, no creator and no ancestry gets the dev user
+// (a seeded platform admin) as its owner. Such a row has no resolvable root,
+// and the hub refuses it at every agent standing check (ptone/scion#3433);
+// fixtures that write bare agent rows stand for agents the test's admin
+// created. Tests of the no-root refusal mark their agents with
+// markRootlessTestAgent.
+func defaultTestAgentOwner(next ent.Mutator) ent.Mutator {
+	return hook.AgentFunc(func(ctx context.Context, m *ent.AgentMutation) (ent.Value, error) {
+		if m.Op().Is(entgo.OpCreate) && !testAgentOwnerHookDisabled.Load() {
+			_, hasOwner := m.OwnerID()
+			_, hasCreator := m.CreatedBy()
+			ancestry, _ := m.Ancestry()
+			id, _ := m.ID()
+			if _, rootless := rootlessTestAgents.Load(id.String()); !rootless && !hasOwner && !hasCreator && len(ancestry) == 0 {
+				m.SetOwnerID(uuid.MustParse(DevUserID))
+			}
+		}
+		// A full-row UpdateAgent from the fixture's own (ownerless) struct
+		// keeps the owner this hook gave the row.
+		if m.Op().Is(entgo.OpUpdate|entgo.OpUpdateOne) && m.OwnerIDCleared() && !testAgentOwnerHookDisabled.Load() {
+			if ids, err := m.IDs(ctx); err == nil && len(ids) == 1 {
+				if row, err := m.Client().Agent.Get(ctx, ids[0]); err == nil && row.OwnerID != nil &&
+					row.OwnerID.String() == DevUserID && row.CreatedBy == nil && len(row.Ancestry) == 0 {
+					m.ResetOwnerID()
+					m.SetOwnerID(uuid.MustParse(DevUserID))
+				}
+			}
+		}
+		return next.Mutate(ctx, m)
+	})
+}
 
 // testStoreSeq generates unique in-memory database names so each call to
 // newTestStore(t, ":memory:") gets an isolated database.
@@ -69,6 +120,7 @@ func newTestStoreAt(t testing.TB, dsn string) (store.Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	client.Agent.Use(defaultTestAgentOwner)
 	s := entadapter.NewCompositeStore(client)
 	if err := s.Migrate(context.Background()); err != nil {
 		_ = s.Close()

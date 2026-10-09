@@ -129,10 +129,15 @@ func (s *Service) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if req.Kind == VersionKindReview {
+		writeError(w, http.StatusConflict, CodeNothingToReview, "a review needs an artifact with a published version")
+		return
+	}
 	now := time.Now().UTC()
 	a := &Artifact{
 		ID: uuid.NewString(), ScopeKind: ScopeKindProject, ScopeRef: scope,
 		OwnerKind: kind, OwnerRef: ref, Key: key, Title: title, CreatedAt: now, UpdatedAt: now,
+		ExpiresAt: retentionExpiry(b.currentLimits(ctx), now),
 	}
 	v, files := pendingVersion(a.ID, req, kind, ref, now, nil)
 	v.Seq = 1
@@ -197,6 +202,10 @@ func (s *Service) appendVersion(w http.ResponseWriter, r *http.Request, b backen
 		writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish versions of this artifact")
 		return
 	}
+	if req.Kind == VersionKindReview && a.CurrentSeq == 0 {
+		writeError(w, http.StatusConflict, CodeNothingToReview, "a review needs an artifact with a published version")
+		return
+	}
 	var current map[string]File
 	if a.CurrentSeq > 0 {
 		if cv, err := b.store.GetVersion(ctx, a.ID, a.CurrentSeq); err == nil {
@@ -233,7 +242,7 @@ func (s *Service) appendVersion(w http.ResponseWriter, r *http.Request, b backen
 // already received.
 func pendingVersion(artifactID string, req *CreateVersionRequest, kind, ref string, now time.Time, current map[string]File) (*Version, []File) {
 	v := &Version{
-		ID: uuid.NewString(), ArtifactID: artifactID, Kind: VersionKindPublish, EntryPath: req.Entry,
+		ID: uuid.NewString(), ArtifactID: artifactID, Kind: versionKind(req.Kind), EntryPath: req.Entry,
 		Note: strings.TrimSpace(req.Note), FileCount: len(req.Files), CreatedByKind: kind, CreatedByRef: ref,
 		CreatedAt: now, State: VersionStatePending,
 	}
@@ -252,10 +261,22 @@ func pendingVersion(artifactID string, req *CreateVersionRequest, kind, ref stri
 	return v, files
 }
 
+// versionKind maps a request's kind to a stored kind; "" means publish.
+func versionKind(k string) string {
+	if k == VersionKindReview {
+		return VersionKindReview
+	}
+	return VersionKindPublish
+}
+
 func writePending(w http.ResponseWriter, a *Artifact, v *Version, files []File) {
 	resp := PendingVersionResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files), Upload: UploadInfo{Required: []string{}}}
+	// One upload per digest: files with the same bytes share the stored
+	// object, and uploading one marks the others received.
+	seen := map[string]bool{}
 	for _, f := range files {
-		if f.Pending {
+		if f.Pending && !seen[f.SHA256] {
+			seen[f.SHA256] = true
 			resp.Upload.Required = append(resp.Upload.Required, f.Path)
 		}
 	}
@@ -314,9 +335,8 @@ func validateManifest(w http.ResponseWriter, req *CreateVersionRequest, l Limits
 	switch req.Kind {
 	case "", VersionKindPublish:
 	case VersionKindReview:
-		return bad("review versions are not supported yet")
 	default:
-		return bad("kind must be publish")
+		return bad("kind must be publish or review")
 	}
 	if !utf8.ValidString(req.Note) || utf8.RuneCountInString(req.Note) > maxNoteRunes {
 		return bad(fmt.Sprintf("note must be valid UTF-8 of at most %d characters", maxNoteRunes))
@@ -467,25 +487,7 @@ func (s *Service) canWritePermitted(ctx context.Context, b backend, a *Artifact,
 		slog.ErrorContext(ctx, "artifacts: list grants failed", "error", err)
 		return false
 	}
-	for _, g := range grants {
-		if g.ExpiresAt != nil && !now.Before(*g.ExpiresAt) {
-			continue
-		}
-		if g.Permission != GrantWrite && g.Permission != GrantAdmin {
-			continue
-		}
-		switch g.SubjectKind {
-		case SubjectPrincipal:
-			if g.SubjectRef == PrincipalRef(kind, ref) {
-				return true
-			}
-		case SubjectScope:
-			if g.SubjectRef != "" && s.host.Authorize(ctx, g.SubjectRef, PermissionCreate) {
-				return true
-			}
-		}
-	}
-	return false
+	return grantAllows(ctx, s.host, a, grants, now, kind, ref, grantsForWrite, PermissionCreate, false)
 }
 
 // writableArtifact loads an artifact the caller may write. An artifact the
@@ -591,7 +593,22 @@ func (s *Service) handlePutFile(w http.ResponseWriter, r *http.Request, id strin
 		writeError(w, http.StatusInternalServerError, "internal", "could not store the file")
 		return
 	}
-	switch err := b.store.MarkReceived(ctx, v.ID, filePath, mediaType); {
+	// The other pending files of the version with the same bytes share the
+	// stored object: they arrive with this upload, each with the media type
+	// detected for its own path.
+	files, err := b.store.ListFiles(ctx, v.ID)
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: list files failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not record the file")
+		return
+	}
+	siblings := map[string]string{}
+	for _, o := range files {
+		if o.Path != filePath && o.Pending && o.SHA256 == f.SHA256 && fileOrigin(o.Origin) == FileOriginUpload {
+			siblings[o.Path] = detectMediaType(o.Path, o.MediaType, spool.head)
+		}
+	}
+	switch err := b.store.MarkReceived(ctx, v.ID, filePath, mediaType, siblings); {
 	case errors.Is(err, ErrConflict), errors.Is(err, ErrNotFound):
 		// ErrNotFound: the version was reaped since it was loaded.
 		writeError(w, http.StatusConflict, "conflict", "the version is not pending")
@@ -608,14 +625,27 @@ func (s *Service) handlePutFile(w http.ResponseWriter, r *http.Request, id strin
 // handleFinalize implements POST /{id}/versions/{seq}/finalize: it checks
 // every manifest file has arrived, flips the version to ready and makes it
 // the artifact's current version (unless a later version already is).
+//
+// A review names the version it was started from in the body
+// ({"base": <seq>}); see finalizeReviewCheck. The body is decoded before
+// the artifact is looked up, so its errors are the same for every id.
 func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id string, seq int) {
 	ctx := r.Context()
+	freq, ok := decodeFinalize(w, r)
+	if !ok {
+		return
+	}
 	b, a, ok := s.writableArtifact(w, r, id)
 	if !ok {
 		return
 	}
 	v, ok := s.pendingVersionOf(w, r, b, a, seq, true)
 	if !ok {
+		return
+	}
+	if v.Kind == VersionKindReview && freq.Base <= 0 {
+		writeError(w, http.StatusBadRequest, CodeBaseRequired,
+			`finalizing a review needs the version it was started from: send {"base": <seq>}`)
 		return
 	}
 	files, err := b.store.ListFiles(ctx, v.ID)
@@ -677,8 +707,25 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 	// given up, before another one may take its claim over.
 	work, cancel := context.WithTimeout(ctx, finalizeWorkLimit)
 	defer cancel()
+	base := 0
+	if v.Kind == VersionKindReview {
+		var done bool
+		if base, done = s.finalizeReviewCheck(w, r.WithContext(work), b, a, v, files, claim, freq.Base); done {
+			return
+		}
+	}
 	extra, warnings := s.finalizeExtras(w, r.WithContext(work), b, v, files)
-	updated, err := b.store.FinalizeVersion(work, a.ID, seq, claim, extra)
+	updated, err := b.store.FinalizeVersion(work, a.ID, seq, claim, extra, base)
+	if errors.Is(err, ErrStaleBase) {
+		// A version was published between the review check and now.
+		s.discardStaleReview(w, r, b, a.ID, seq, claim)
+		return
+	}
+	if errors.Is(err, ErrPendingNewer) {
+		s.discardReview(w, r, b, a.ID, seq, claim,
+			"a newer version of the artifact is being published; the review was discarded. Review that version once it is finalized")
+		return
+	}
 	if err != nil && !errors.Is(err, ErrConflict) && !errors.Is(err, ErrNotFound) {
 		// Let the publisher try again, unless another request has claimed
 		// the version since.
@@ -707,7 +754,32 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the version")
 		return
 	}
+	if ready.Kind == VersionKindReview {
+		s.notifyReview(ctx, updated, ready)
+	}
 	writeJSON(w, http.StatusOK, ArtifactResponse{Artifact: artifactInfo(updated), Version: versionInfo(ready, files), Warnings: warnings})
+}
+
+// maxFinalizeBodyBytes caps the JSON body of a finalize request.
+const maxFinalizeBodyBytes = 4 << 10
+
+// decodeFinalize reads the optional finalize body. An empty body is an
+// empty request. ok=false means the response was written.
+func decodeFinalize(w http.ResponseWriter, r *http.Request) (FinalizeRequest, bool) {
+	var req FinalizeRequest
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxFinalizeBodyBytes+1))
+	if err != nil || len(raw) > maxFinalizeBodyBytes {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid finalize body")
+		return req, false
+	}
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return req, true
+	}
+	if err := json.Unmarshal(raw, &req); err != nil || req.Base < 0 {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid finalize body")
+		return req, false
+	}
+	return req, true
 }
 
 // finalizeExtras returns the manifest rows the hub adds to a version at

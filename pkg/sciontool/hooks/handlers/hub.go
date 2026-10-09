@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+	"unicode/utf8"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
@@ -18,19 +19,52 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
+// hubCallTimeout caps a single Hub call made by a HubHandler.
+const hubCallTimeout = 5 * time.Second
+
 // HubHandler sends status updates to the Scion Hub.
 type HubHandler struct {
 	client *hub.Client
+	// budget, when set, bounds every call this handler makes: each call's
+	// context is derived from it, so a call gets min(hubCallTimeout, time
+	// left in budget). A hook process sets one budget for all of its Hub
+	// calls so they cannot add up past the harness's hook timeout.
+	budget context.Context
 }
 
 // NewHubHandler creates a new hub handler.
 // Returns nil if the Hub client is not configured.
 func NewHubHandler() *HubHandler {
-	client := hub.NewClient()
+	return NewHubHandlerForClient(hub.NewClient())
+}
+
+// NewHubHandlerForClient creates a hub handler that uses client, so callers
+// can share one client between handlers. Returns nil if client is nil or not
+// configured.
+func NewHubHandlerForClient(client *hub.Client) *HubHandler {
 	if client == nil || !client.IsConfigured() {
 		return nil
 	}
 	return &HubHandler{client: client}
+}
+
+// WithBudget makes every later call on h derive its context from budget, so
+// all calls share budget's deadline. It returns h and is safe on a nil h.
+func (h *HubHandler) WithBudget(budget context.Context) *HubHandler {
+	if h != nil {
+		h.budget = budget
+	}
+	return h
+}
+
+// callContext returns the context for one Hub call: hubCallTimeout, cut
+// short by the handler's budget when one is set.
+func (h *HubHandler) callContext() (context.Context, context.CancelFunc) {
+	parent := h.budget
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithTimeout(parent, hubCallTimeout)
 }
 
 // Handle processes an event and sends a status update to the Hub.
@@ -41,7 +75,7 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := h.callContext()
 	defer cancel()
 
 	// callStart times the hub call this event triggers (if any), for
@@ -242,7 +276,7 @@ func (h *HubHandler) ReportWaitingForInput(message string) error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := h.callContext()
 	defer cancel()
 
 	log.Debug("Hub: Reporting waiting_for_input (ask_user: %s)", truncateMessage(message, 50))
@@ -260,7 +294,7 @@ func (h *HubHandler) ReportTaskCompleted(taskSummary string) error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := h.callContext()
 	defer cancel()
 
 	log.Debug("Hub: Reporting task completed: %s", truncateMessage(taskSummary, 50))
@@ -278,7 +312,7 @@ func (h *HubHandler) ReportLimitsExceeded(message string) error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := h.callContext()
 	defer cancel()
 
 	log.Debug("Hub: Reporting limits_exceeded: %s", truncateMessage(message, 50))
@@ -296,7 +330,7 @@ func (h *HubHandler) ReportCounts(turnCount, modelCallCount int) error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := h.callContext()
 	defer cancel()
 
 	log.Debug("Hub: Reporting counts (turns=%d, model_calls=%d)", turnCount, modelCallCount)
@@ -306,10 +340,15 @@ func (h *HubHandler) ReportCounts(turnCount, modelCallCount int) error {
 	})
 }
 
-// truncateMessage truncates a message to the specified length.
+// truncateMessage truncates a message to at most maxLen bytes, ending in
+// "...". It cuts on a rune boundary so a multibyte character is never split.
 func truncateMessage(msg string, maxLen int) string {
 	if len(msg) <= maxLen {
 		return msg
 	}
-	return msg[:maxLen-3] + "..."
+	cut := maxLen - 3
+	for cut > 0 && !utf8.RuneStart(msg[cut]) {
+		cut--
+	}
+	return msg[:cut] + "..."
 }

@@ -43,13 +43,13 @@ import { guard } from 'lit/directives/guard.js';
 import { repeat } from 'lit/directives/repeat.js';
 import { apiFetch, extractApiError } from '../../../client/api.js';
 import type { Agent, Message } from '../../../shared/types.js';
-import type { ChatScheduleDetail, ChatSendDetail } from './chat-composer.js';
+import type { ChatScheduleDetail, ChatSendDetail, ScionChatComposer } from './chat-composer.js';
 import {
   conversationSupportsScheduledSend,
   createScheduledMessage,
   scheduledSendEnabled,
 } from '../../../client/chat-scheduled.js';
-import type { ScionChatScheduledList } from './chat-scheduled-list.js';
+import type { ScheduledRestoreDetail, ScionChatScheduledList } from './chat-scheduled-list.js';
 import './chat-scheduled-list.js';
 import { navigateTo, stateManager } from '../../../client/main.js';
 import { agentIndexOf, agentStore } from '../../../client/agent-store.js';
@@ -2602,14 +2602,10 @@ export class ScionChatThread extends LitElement {
 
   /**
    * Whether scheduled send is offered in this conversation: the experiment
-   * is on and the conversation is a topic (not a DM).
+   * is on and the conversation supports it (topics and DMs).
    */
   private get scheduleSendAvailable(): boolean {
-    return (
-      !this.isDM &&
-      conversationSupportsScheduledSend(this.conversationKey) &&
-      scheduledSendEnabled()
-    );
+    return conversationSupportsScheduledSend(this.conversationKey) && scheduledSendEnabled();
   }
 
   /**
@@ -2640,6 +2636,24 @@ export class ScionChatThread extends LitElement {
       const msg = err instanceof Error ? err.message : 'Failed to schedule message';
       onError?.(msg);
       showToast(msg, 'danger');
+    }
+  };
+
+  /**
+   * Put a scheduled message's text into the composer: after Cancel (only
+   * into an empty composer) or Copy to composer.
+   */
+  private readonly handleScheduledRestore = (e: CustomEvent<ScheduledRestoreDetail>): void => {
+    const composer = this.renderRoot.querySelector<ScionChatComposer>('scion-chat-composer');
+    if (!composer) return;
+    const placed = composer.restoreText(e.detail.text, { onlyIfEmpty: e.detail.onlyIfEmpty });
+    if (!placed && !e.detail.onlyIfEmpty) {
+      showToast(
+        composer.editMessage
+          ? 'Finish the message being edited first'
+          : 'The message could not be copied into the composer',
+        'warning'
+      );
     }
   };
 
@@ -3460,11 +3474,15 @@ export class ScionChatThread extends LitElement {
 
   private async loadOlderMessagesV2(scrollEl: HTMLElement): Promise<void> {
     const loadId = this.fetchId;
+    const jumpSeq = this._jumpSeq;
+    // A jump that started after this load replaced the view with the page
+    // around its target: this older page is not contiguous with it.
+    const jumpedSince = (): boolean => jumpSeq !== this._jumpSeq;
     this.loadingOlder = true;
     const prevScrollHeight = scrollEl.scrollHeight;
 
     try {
-      await this.fetchHistoryV2(this.nextCursor || undefined);
+      await this.fetchHistoryV2(this.nextCursor || undefined, () => !jumpedSince());
     } catch {
       // Silently fail for older messages
     } finally {
@@ -3473,8 +3491,13 @@ export class ScionChatThread extends LitElement {
       if (loadId === this.fetchId) {
         this.loadingOlder = false;
         await this.updateComplete;
-        const newScrollHeight = scrollEl.scrollHeight;
-        scrollEl.scrollTop += newScrollHeight - prevScrollHeight;
+        // No scroll correction after a jump took over the view, or while a
+        // jump's smooth scroll is still settling: a scrollTop write would
+        // cancel that scroll, and its settle check corrects the landing.
+        if (!jumpedSince() && this._jumpScrollCleanup === null) {
+          const newScrollHeight = scrollEl.scrollHeight;
+          scrollEl.scrollTop += newScrollHeight - prevScrollHeight;
+        }
       }
     }
   }
@@ -5218,6 +5241,7 @@ export class ScionChatThread extends LitElement {
         <scion-chat-scheduled-list
           .conversationKey=${this.conversationKey}
           ?enabled=${this.scheduleSendAvailable}
+          @chat-scheduled-restore=${this.handleScheduledRestore}
         ></scion-chat-scheduled-list>
         ${this.renderSendError()}
         <scion-chat-composer

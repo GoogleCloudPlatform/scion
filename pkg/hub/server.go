@@ -131,6 +131,16 @@ type ServerConfig struct {
 	// hub's ring refresh interval (1m). Only used behind the hub.conduit
 	// experiment.
 	ConduitGrantKeyActivation time.Duration
+	// ConduitAuthzRecheckInterval is the period of the re-check sweep of
+	// open user streams (conduit.authz_recheck_interval; 0 = 60s). Only
+	// used behind the hub.conduit experiment.
+	ConduitAuthzRecheckInterval time.Duration
+	// ConduitUserStreamAuthzMax is the authorization interval of
+	// user-originated streams (conduit.stream_authz_max.user; 0 = 8h,
+	// negative disables the deadline, for tests): when a stream reaches
+	// it, the hub re-checks the user and renews or closes the stream.
+	// Only used behind the hub.conduit experiment.
+	ConduitUserStreamAuthzMax time.Duration
 	// AuthMode is the exclusive human auth mode: "oauth" (default), "proxy", "dev".
 	AuthMode string
 	// ProxyAuthenticator is the configured proxy authenticator (when AuthMode == "proxy").
@@ -1380,6 +1390,11 @@ type RemoteAgentInfo struct {
 
 // Server is the Hub API HTTP server.
 type Server struct {
+	// generalTopicWarned records project IDs whose #general ensure already
+	// logged a Warn, so a space that keeps failing (it is retried on every
+	// open) logs later failures at Debug. Cleared on success.
+	generalTopicWarned sync.Map
+
 	config ServerConfig
 	// startupHubName is the name resolved at startup (ServerConfig.HubName,
 	// from LoadGlobalConfig(serverConfigPath), else the hostname).
@@ -1410,7 +1425,15 @@ type Server struct {
 	conduitGrants     *conduitGrantKeys
 	// conduit is the in-process conduit relay (conduit_relay.go); nil
 	// unless hub.conduit was on at startup.
-	conduit                atomic.Pointer[conduitRuntime]
+	conduit atomic.Pointer[conduitRuntime]
+	// conduitAuthz re-checks the user streams this node owns (nil while
+	// no relay runs); conduitAuthzMetrics is its counter.
+	conduitAuthz        atomic.Pointer[conduitStreamAuthz]
+	conduitAuthzMetrics atomic.Pointer[conduitStreamAuthzMetrics]
+	// conduitAuthzBindMu guards conduitAuthzUnbind, which releases the
+	// re-check's binding to the current event publisher.
+	conduitAuthzBindMu     sync.Mutex
+	conduitAuthzUnbind     func()
 	listCursorSealer       *listCursorSealer       // AEAD sealer for authorizedList's opaque pagination cursors (ptone/scion#2124)
 	uatService             *UserAccessTokenService // User access token service
 	inviteService          *InviteService          // Invite code service
@@ -1501,12 +1524,21 @@ type Server struct {
 
 	// Plugin manager for broker integration admin API (nil = no integrations)
 	pluginManager IntegrationManager
+	// healthIntegrationFlights holds the running health summary query of
+	// each plugin, shared by concurrent summaries (see
+	// integrationHealthQuery), so a hung plugin has at most one query
+	// running. Guarded by healthIntegrationMu.
+	healthIntegrationMu      sync.Mutex
+	healthIntegrationFlights map[string]*integrationHealthFlight
 
 	// Web chat store for webchat_* tables (thread prefs, chat threads, etc.) — nil = disabled.
 	webChatStore WebChatStore
 
 	// Artifact store for the artifact_* tables (pkg/artifacts) — nil = artifacts unavailable.
 	artifactStore artifacts.Store
+	// artifactBlobSweeper keeps the blob sweep's position between passes
+	// of the artifact maintenance loop (its only user).
+	artifactBlobSweeper artifacts.BlobSweeper
 
 	// Chat notifier for human mention + DM received notifications (W6). Nil-safe.
 	chatNotifier *ChatNotifier
@@ -1592,9 +1624,26 @@ type Server struct {
 	// a way to switch the check off. Turning the check off is done by
 	// installing store.NewDisabledCallerPermissionChecker, which is a value
 	// somebody has to construct and pass. See saAssignCheckerFor.
-	saAssignChecker     store.CallerPermissionChecker
-	saAssignCheckMode   string
-	denyUnknownFailOpen bool
+	saAssignChecker   store.CallerPermissionChecker
+	saAssignCheckMode string
+	// denyUnknownFailOpen is written with saAssignCheckMode under s.mu
+	// (applyGCPIAMSettingsLocked) and read lock-free by the checker.
+	denyUnknownFailOpen atomic.Bool
+	// saAssignCheckDiag is set while the assignment check cannot run because
+	// the hub's identity lacks the access it needs, and cleared once a
+	// check call succeeds or the check stops being enforced. Updated only
+	// by NoteSAAssignCheckCall. Shown on the admin health summary.
+	saAssignCheckDiag atomic.Pointer[saAssignCheckDiagnostic]
+	// gcpIAMStartup is the deploy-time pair of GCP permission-check
+	// settings, resolved once in New. A stored value that is absent or
+	// cannot be used resolves to it (resolveGCPIAMSettings).
+	gcpIAMStartup gcpIAMSettings
+	// gcpIAMApproved is the transition a guarded write on this replica has
+	// admitted for the next ApplySnapshot (approveGCPIAMTransition).
+	gcpIAMApproved *gcpIAMTransition
+	// gcpIAMLastRefusal identifies the last refused reload that was
+	// recorded (recordGCPIAMRefusal), so it is recorded once.
+	gcpIAMLastRefusal string
 
 	// The same pair for the lifecycle-hook execution-identity surface. A
 	// SEPARATE field rather than a shared one, deliberately: the two surfaces
@@ -1713,6 +1762,10 @@ type Server struct {
 	// perfTraceLog receives the per-request perf_trace lines. Set only when
 	// server.hub.perf_trace is on; nil otherwise.
 	perfTraceLog *slog.Logger
+
+	// templateSourceFetcher downloads template sources for reimport. nil
+	// selects the default fetcher (newTemplateSourceFetcher); tests replace it.
+	templateSourceFetcher templateSourceFetcher
 
 	// Cached rate limit info from the most recent GitHub App API call
 	githubAppRateLimit *githubapp.RateLimitInfo
@@ -2261,6 +2314,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		s, srv.authzService,
 		logging.Subsystem("hub.membership"),
 	)
+	// Process membership loss checks right after the removal commits
+	// (ptone/scion#3433).
+	srv.membershipService.onMembershipLoss = srv.kickMembershipLossChecks
 
 	// RS3: Initialize the project deletion domain service.
 	srv.deletionService = NewProjectDeletionService(
@@ -2292,35 +2348,17 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// Installed explicitly rather than left nil on purpose: a nil checker
 	// denies, so "forgot to wire it" and "chose to switch it off" cannot be
 	// confused for one another. See NewDisabledCallerPermissionChecker.
-	gcpIAMMode := cfg.GCPIAMCheckMode
-	switch gcpIAMMode {
-	case SAAssignCheckEnforce:
-		srv.saAssignCheckMode = SAAssignCheckEnforce
-		srv.hookIdentityCheckMode = SAAssignCheckEnforce
-	case SAAssignCheckOff, "":
-		srv.saAssignCheckMode = SAAssignCheckOff
-		srv.hookIdentityCheckMode = SAAssignCheckOff
-	default:
-		slog.Warn("unrecognised gcpIamCheckMode value, defaulting to off",
-			"value", gcpIAMMode)
-		srv.saAssignCheckMode = SAAssignCheckOff
-		srv.hookIdentityCheckMode = SAAssignCheckOff
-	}
-
-	// Parse deny-unknown fallback policy (default: fail-open).
-	srv.denyUnknownFailOpen = true
-	switch cfg.GCPIAMDenyUnknownPolicy {
-	case "fail-closed":
-		srv.denyUnknownFailOpen = false
-	case "fail-open", "":
-		srv.denyUnknownFailOpen = true
-	default:
-		slog.Warn("unrecognised gcpIamDenyUnknownPolicy value, defaulting to fail-open",
-			"value", cfg.GCPIAMDenyUnknownPolicy)
-	}
+	//
+	// The pair is reloadable (gcp_iam_settings.go): ApplySnapshot replaces it
+	// when the gcp_iam section changes. An unset key takes its documented
+	// default; a set but unrecognised value takes the stricter value.
+	srv.gcpIAMStartup = startupGCPIAMSettings(cfg.GCPIAMCheckMode, cfg.GCPIAMDenyUnknownPolicy)
+	srv.saAssignCheckMode = srv.gcpIAMStartup.CheckMode
+	srv.hookIdentityCheckMode = srv.gcpIAMStartup.CheckMode
+	srv.denyUnknownFailOpen.Store(srv.gcpIAMStartup.DenyUnknownFailOpen)
 	slog.Info("GCP deny-unknown fallback policy",
-		"policy", cfg.GCPIAMDenyUnknownPolicy,
-		"failOpen", srv.denyUnknownFailOpen)
+		"policy", srv.gcpIAMStartup.denyUnknownPolicy(),
+		"failOpen", srv.gcpIAMStartup.DenyUnknownFailOpen)
 
 	srv.saAssignChecker = store.NewDisabledCallerPermissionChecker()
 	if srv.saAssignCheckMode == SAAssignCheckOff {
@@ -2495,6 +2533,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		ProxyAuthenticator: cfg.ProxyAuth,
 		FederationAuth:     &srv.federationAuth,
 		CredentialStore:    s,
+		HoldStore:          s,
 		UserStore:          s,
 		AuthMode:           cfg.AuthMode,
 		Debug:              cfg.Debug,
@@ -2512,6 +2551,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		}
 		slog.Info("Agent token run scope enabled", "mode", cfg.AgentRunScope.String())
 	}
+	// A restored agent whose root user is no longer admitted to its project
+	// comes back held (ptone/scion#3433).
+	srv.registerMembershipRestoreHook()
+
 	// Wire the proxy user provisioner (wraps provisionUser with 60s cache)
 	if cfg.ProxyAuth != nil {
 		srv.authConfig.ProxyUserProvisioner = MakeProxyUserProvisioner(srv)
@@ -3057,7 +3100,14 @@ func signingKeySecretID(keyName, hubID string) string {
 }
 
 // SetDispatcher sets the agent dispatcher for co-located runtime broker operations.
+//
+// An HTTPAgentDispatcher attached here always gets the hub's required
+// standing check (ptone/scion#3433), so no attached dispatcher can start or
+// restart an agent that is held or not in good standing.
 func (s *Server) SetDispatcher(d AgentDispatcher) {
+	if hd, ok := d.(*HTTPAgentDispatcher); ok && hd != nil {
+		hd.SetRequiredStandingCheck(s.dispatchStandingCheck)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dispatcher = d
@@ -3788,9 +3838,11 @@ func (s *Server) SetGCPServiceAccountAdmin(a GCPServiceAccountAdmin) {
 }
 
 // DenyUnknownFailOpen returns the configured deny-unknown fallback policy.
-// Used by server_foreground.go to pass the setting to the PT checker constructor.
+// server_foreground.go passes it to the PT checker as its policy source.
+// It reflects reloads of server.hub.gcp_iam_deny_unknown_policy, so a
+// checker that calls it per check follows the applied setting.
 func (s *Server) DenyUnknownFailOpen() bool {
-	return s.denyUnknownFailOpen
+	return s.denyUnknownFailOpen.Load()
 }
 
 // SetSAAssignChecker replaces the caller-permission checker for the agent
@@ -3852,8 +3904,10 @@ func (s *Server) SetGCPProjectID(projectID string) {
 
 func (s *Server) SetEventPublisher(ep EventPublisher) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.events = ep
+	s.mu.Unlock()
+	// A running conduit stream re-check follows the new publisher.
+	s.bindConduitAuthzEvents()
 }
 
 // SetCommandBus sets the inter-node dispatch signal bus. Nil is safe (treated
@@ -4112,6 +4166,11 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// (ptone/scion#1994).
 	dispatcher.SetCreatorSkillPreResolver(s.preResolveAgentSkillsAsCreator)
 
+	// Refuse a start or restart of an agent that is held or not in good
+	// standing before any broker call (ptone/scion#3433). SetDispatcher
+	// installs it too, for every dispatcher attached to the server.
+	dispatcher.SetRequiredStandingCheck(s.dispatchStandingCheck)
+
 	// Wire the hub's operational agent_defaults so dispatch can carry the
 	// limit/resource ones to the broker's low-precedence tier. The accessor
 	// takes s.mu; it returns the zero value in file mode, where the wire field
@@ -4342,18 +4401,33 @@ type MessageEventPayload struct {
 	Plain     bool   `json:"plain,omitempty"`
 }
 
-// errScheduledMessageRefused is the one public refusal a scheduled message
-// records when its target cannot be resolved or fire-time authorization
-// refuses it. The specific cause is logged, never stored on the event.
+// errScheduledMessageRefused is the public refusal a scheduled message
+// records when its authority is denied, its target cannot be resolved or
+// fire-time authorization refuses it. The specific cause is logged, never
+// stored on the event. scheduledMessageRefusal names the one exception.
 var errScheduledMessageRefused = errors.New("scheduled_message_denied: message delivery refused")
+
+// scheduledMessageRefusal returns the error a refused scheduled message
+// records on the event for the authority error err: the remedy text of
+// errScheduledAuthorityUnrecorded when the event carries no recorded
+// authority (a property of the event alone, decided before the target is
+// looked up), otherwise errScheduledMessageRefused.
+func scheduledMessageRefusal(err error) error {
+	if errors.Is(err, errScheduledAuthorityUnrecorded) {
+		return errScheduledAuthorityUnrecorded
+	}
+	return errScheduledMessageRefused
+}
 
 // messageEventHandler returns an EventHandler that dispatches scheduled messages
 // to agents via the AgentDispatcher.
 //
-// C1 containment: this handler now performs fire-time authorization via
-// authorizeScheduledMessageFire before any dispatch. Scheduled messages are
-// request-derived (not system-plane) and must pass the production
-// authorizeAgentMessage choke point with isSystemPlane=false.
+// Each fire runs under the event's authorization revision: the authority
+// is resolved (resolveScheduledAuthority) before the target is looked up,
+// and authorizeScheduledMessageFire then decides the send for the resolved
+// identity before any dispatch. Scheduled messages are request-derived (not
+// system-plane) and pass the production authorizeAgentMessage choke point
+// with isSystemPlane=false. CreatedBy is never read for authority.
 func (s *Server) messageEventHandler() EventHandler {
 	return func(ctx context.Context, evt store.ScheduledEvent) error {
 		var payload MessageEventPayload
@@ -4381,16 +4455,30 @@ func (s *Server) messageEventHandler() EventHandler {
 		if targetName == "" {
 			targetName = payload.AgentID
 		}
+		if payload.AgentID == "" && (payload.AgentName == "" || evt.ProjectID == "") {
+			return fmt.Errorf("message payload must include agentId or agentName")
+		}
+
+		// Resolve the authority of the event's authorization revision. A
+		// denial fails the fire before the target is looked up, so its
+		// outcome does not depend on the target.
+		auth, identity, err := s.resolveScheduledAuthority(ctx, evt)
+		if err != nil {
+			slog.Warn("Scheduler: scheduled message authority denied at fire time",
+				"eventID", evt.ID,
+				"scheduleID", evt.ScheduleID,
+				"projectID", evt.ProjectID,
+				"authorization_revision", evt.AuthorizationRevision,
+				"error", err)
+			return scheduledMessageRefusal(err)
+		}
 
 		// Resolve the agent
 		var agent *store.Agent
-		var err error
 		if payload.AgentID != "" {
 			agent, err = s.store.GetAgent(ctx, payload.AgentID)
-		} else if payload.AgentName != "" && evt.ProjectID != "" {
-			agent, err = s.store.GetAgentBySlug(ctx, evt.ProjectID, payload.AgentName)
 		} else {
-			return fmt.Errorf("message payload must include agentId or agentName")
+			agent, err = s.store.GetAgentBySlug(ctx, evt.ProjectID, payload.AgentName)
 		}
 		if err != nil {
 			// The returned error is persisted as ScheduledEvent.Error, which
@@ -4415,20 +4503,25 @@ func (s *Server) messageEventHandler() EventHandler {
 			return errScheduledMessageRefused
 		}
 
-		// ---- C1 containment: fire-time authorization ----
-		// Re-resolve the creator identity and authorize the message through
-		// the production choke point (authorizeAgentMessage, isSystemPlane=false).
-		// Denial returns an error — the enclosing scheduler wrapper owns
-		// status recording. No external effect occurs on denial.
-		_, authErr := s.authorizeScheduledMessageFire(ctx, evt, agent)
-		if authErr != nil {
+		// ---- Fire-time authorization ----
+		// Authorize the send for the revision's identity through the
+		// production choke point (authorizeAgentMessage,
+		// isSystemPlane=false). Denial returns an error — the enclosing
+		// scheduler wrapper owns status recording. No external effect
+		// occurs on denial.
+		if authErr := s.authorizeScheduledMessageFire(ctx, evt, auth, identity, agent); authErr != nil {
 			slog.Warn("Scheduler: scheduled message refused at fire time",
 				"eventID", evt.ID,
 				"agent_id", agent.ID,
 				"projectID", evt.ProjectID,
-				"creator", evt.CreatedBy,
+				"principal_kind", auth.PrincipalKind,
+				"principal_id", auth.PrincipalID,
+				"authorization_revision", auth.Revision,
 				"error", authErr)
 			return errScheduledMessageRefused
+		}
+		if err := s.scheduledFireStanding(ctx, evt, agent); err != nil {
+			return err
 		}
 
 		// Migration gate (design agent-reincarnate §3.7, R3 p2a-r1 review).
@@ -4478,17 +4571,16 @@ func (s *Server) messageEventHandler() EventHandler {
 		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, payload.Message, payload.Interrupt, structuredMsg); err != nil {
 			return fmt.Errorf("failed to dispatch message to agent %s: %w", agent.Name, err)
 		}
-		// Log the recorded initiator alongside the executor context set by
-		// the caller (fireEvent / executeSchedule), so a scheduled message is
-		// distinguishable in logs from a live send without changing the live
-		// authorization identity above (cutover rule).
-		initiator := s.scheduledInitiator(evt.InitiatorAttribution)
+		// Log the revision authority the send ran under alongside the
+		// executor context set by the caller (fireEvent / executeSchedule),
+		// so a scheduled message is distinguishable in logs from a live send.
 		executor, _ := ExecutorContextFromContext(ctx)
 		slog.Info("Scheduler: message delivered to agent",
 			"eventID", evt.ID, "agent_id", agent.ID, "agentName", agent.Name,
-			"initiator_principal_kind", initiator.PrincipalKind,
-			"initiator_credential_kind", initiator.CredentialKind,
-			"initiator_credential_id", initiator.CredentialID,
+			"initiator_principal_kind", auth.PrincipalKind,
+			"initiator_credential_kind", auth.CredentialKind,
+			"initiator_credential_id", auth.CredentialID,
+			"authorization_revision", auth.Revision,
 			"executor_kind", executor.Kind,
 			"executor_id", executor.ID)
 		return nil
@@ -4780,6 +4872,9 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		if err != nil {
 			return err
 		}
+		if err := s.scheduledFireStanding(ctx, evt, nil); err != nil {
+			return err
+		}
 
 		// Log staleness for late fires
 		staleness := time.Since(evt.FireAt)
@@ -4821,6 +4916,12 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 				"agentName", slug,
 				"projectID", evt.ProjectID,
 				"existingPhase", existingAgent.Phase)
+			if existingAgent.Phase == string(state.PhaseError) {
+				// Only deleting the errored row unblocks the name
+				// (ptone/scion#3701): say so, and tell the owner.
+				s.notifyScheduleBlocked(ctx, evt, existingAgent)
+				return scheduleBlockedError(existingAgent)
+			}
 			return fmt.Errorf("agent %q already exists in project", slug)
 		}
 
@@ -5312,6 +5413,10 @@ func (s *Server) registerSchedulerHandlers() {
 	// feature off.
 	s.registerLaunchReaper()
 
+	// Membership standing (ptone/scion#3433): outbox drain and stop
+	// retry, expiry scan and full sweep. Not gated by any setting.
+	s.registerMembershipStandingReconciler()
+
 	s.scheduler.RegisterRecurringSingleton("agent-heartbeat-timeout", 5, store.LockAgentHeartbeatTimeout, s.agentHeartbeatTimeoutHandler())
 	s.scheduler.RegisterRecurringSingleton("agent-stalled-detection", 5, store.LockAgentStalledDetection, s.agentStalledDetectionHandler())
 	if s.config.SoftDeleteRetention > 0 {
@@ -5333,6 +5438,7 @@ func (s *Server) registerSchedulerHandlers() {
 	s.scheduler.RegisterRecurringSingleton("failed-message-retention", 60, store.LockFailedMessageRetention, s.failedMessageRetentionHandler())
 	s.scheduler.RegisterRecurringSingleton("exposed-ports-sweep", 5, store.LockExposedPortsSweep, s.exposedPortsSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("notification-dispatch-sweep", 5, store.LockNotificationDispatchSweep, s.notificationDispatchSweepHandler())
+	s.scheduler.RegisterRecurringSingleton("notification-orphan-gc", 60, store.LockNotificationOrphanGC, s.notificationOrphanGCHandler())
 	// Reconcile stale max_agents_per_broker reservations (ptone/scion#1963):
 	// runs immediately at tick 0 (startup) and then hourly, fixing rows left
 	// with released_at IS NULL by the pre-fix stop/suspend paths (or any
@@ -5986,6 +6092,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/project-defaults", s.guarded("/api/v1/admin/project-defaults", s.handleAdminProjectDefaults))
 	s.mux.HandleFunc("/api/v1/admin/messaging", s.guarded("/api/v1/admin/messaging", s.handleAdminMessaging))
 	s.mux.HandleFunc("/api/v1/admin/experiments", s.guarded("/api/v1/admin/experiments", s.handleAdminExperiments))
+	s.mux.HandleFunc("/api/v1/admin/profiling", s.guarded("/api/v1/admin/profiling", s.handleAdminProfiling))
 	s.mux.HandleFunc("/api/v1/admin/conduit/grant-keys/rotate", s.guarded("/api/v1/admin/conduit/grant-keys/rotate", s.handleAdminConduitGrantKeyRotate))
 	s.mux.HandleFunc("/api/v1/admin/agents/reset-auth-all", s.guarded("/api/v1/admin/agents/reset-auth-all", s.handleAdminResetAuthAll))
 	s.mux.HandleFunc("/api/v1/admin/delegation-adoption", s.guarded("/api/v1/admin/delegation-adoption", s.handleDelegationAdoption))
@@ -6082,6 +6189,9 @@ func (s *Server) registerRoutes() {
 
 	// Resolved experiments map for signed-in callers (ptone/scion#2217).
 	s.mux.HandleFunc("/api/v1/experiments", s.guarded("/api/v1/experiments", s.handleExperiments))
+
+	// Profiling switches the web client acts on, for signed-in callers.
+	s.mux.HandleFunc("/api/v1/profiling", s.guarded("/api/v1/profiling", s.handleProfiling))
 
 	// GitHub App integration endpoints: method-aware permission enforcement.
 	// Read operations use hub.github_app.read; mutations use hub.github_app.update.
@@ -6201,9 +6311,20 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	}
 
 	// OTel HTTP tracing (outermost - wraps all middleware for full request lifecycle)
-	h = otelhttp.NewHandler(h, "hub")
+	// Requests whose path carries a bearer credential (artifact share-link
+	// tokens, artifact view capabilities) are not traced, so the path
+	// never reaches a span attribute.
+	h = otelhttp.NewHandler(h, "hub", otelhttp.WithFilter(traceableRequest))
 
 	return h
+}
+
+// traceableRequest reports whether r may be traced: not when its path may
+// carry a bearer credential (logging.IsCredentialURL, the predicate the
+// request logs redact with, which checks the decoded and the escaped
+// path).
+func traceableRequest(r *http.Request) bool {
+	return !logging.IsCredentialURL(r.URL)
 }
 
 // corsMiddleware adds CORS headers.
@@ -6277,7 +6398,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 
 		attrs := []slog.Attr{
 			slog.String("method", r.Method),
-			slog.String("path", r.URL.Path),
+			slog.String("path", logging.RequestPath(r)),
 			slog.String("remote_addr", r.RemoteAddr),
 		}
 		if traceID != "" {
@@ -6287,7 +6408,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		if s.config.Debug {
 			slog.Debug("Incoming request",
 				slog.String("method", r.Method),
-				slog.String("path", r.URL.Path),
+				slog.String("path", logging.RequestPath(r)),
 				slog.String("remote_addr", r.RemoteAddr),
 				slog.String("query", logging.RedactQuery(r.URL.RawQuery)),
 			)
@@ -6314,7 +6435,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		if !isStreaming && !isUpgrade && duration > slowThreshold {
 			slog.Info("Slow request",
 				slog.String("method", r.Method),
-				slog.String("path", r.URL.Path),
+				slog.String("path", logging.RequestPath(r)),
 				slog.Duration("elapsed", duration),
 				slog.Int("status", wrapped.statusCode),
 			)
@@ -6348,7 +6469,7 @@ func (s *Server) recoveryMiddleware(next http.Handler) http.Handler {
 				}
 				slog.Error("Panic recovered",
 					slog.Any("error", err),
-					slog.String("path", r.URL.Path),
+					slog.String("path", logging.RequestPath(r)),
 				)
 				InternalError(w)
 			}

@@ -20,12 +20,14 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/spf13/cobra"
 )
 
@@ -85,13 +87,13 @@ currently select and why.
 Available scopes:
 %s
 
-Expiry can be specified as a duration (e.g., 30d, 90d, 1y) or an
-RFC 3339 date (e.g., 2026-12-31T00:00:00Z). Default: 90 days.
-Maximum: 1 year.
+Expiry (--expires) accepts %s.
+%s.
+Default: 90 days. Maximum: 1 year.
 
 Examples:
   scion hub token create --project my-project --name ci-token --scopes agent:create,agent:read
-  scion hub token create --project my-project --name deploy --scopes agent:manage --expires 30d`, permissions.UATScopeHelp()),
+  scion hub token create --project my-project --name deploy --scopes agent:manage --expires 30d`, permissions.UATScopeHelp(), expiryAcceptedForms, expiryUnitNote),
 	Args: cobra.NoArgs,
 	RunE: runTokenCreate,
 }
@@ -175,7 +177,7 @@ func init() {
 	hubTokenCreateCmd.Flags().StringVar(&tokenCreateProject, "project", "", "Project name or ID to scope the token to (required)")
 
 	hubTokenCreateCmd.Flags().StringArrayVar(&tokenCreateScopes, "scopes", nil, "Scope to grant (required, repeatable; also accepts a comma-separated list)")
-	hubTokenCreateCmd.Flags().StringVar(&tokenCreateExpires, "expires", "", "Expiry duration (e.g., 30d, 90d, 1y) or RFC 3339 date (default: 90d)")
+	hubTokenCreateCmd.Flags().StringVar(&tokenCreateExpires, "expires", "", "Expiry: "+expiryAcceptedForms+" (default: 90d)")
 	// --json was checked in runTokenCreate but never registered here, so it
 	// silently fell back to text output. Register it explicitly.
 	hubTokenCreateCmd.Flags().BoolVar(&tokenOutputJSON, "json", false, "Output in JSON format")
@@ -501,35 +503,72 @@ func formatLabels(labels map[string]string) string {
 	return strings.Join(parts, ", ")
 }
 
-// parseExpiry parses an expiry string as either a duration shorthand (30d, 90d, 1y)
-// or an RFC 3339 timestamp.
+// expiryAcceptedForms describes every --expires form parseExpiry accepts. It
+// is shared by the --expires flag usage, the command's long help and the
+// parse error so the three cannot drift apart.
+const expiryAcceptedForms = "a positive duration in minutes (90m), hours (2h), days (30d) or years (1y), or an RFC 3339 date (2026-12-31T00:00:00Z)"
+
+// expiryUnitNote spells out that "m" is minutes, since it could be read as
+// months. It is shown in the command's long help.
+const expiryUnitNote = "m means minutes; there is no month unit (use 30d or 1y for longer)"
+
+// parseExpiry parses an expiry string as either a duration shorthand
+// (90m, 2h, 30d, 1y) or an RFC 3339 timestamp.
 func parseExpiry(s string) (time.Time, error) {
+	return parseExpiryAt(s, time.Now().UTC())
+}
+
+// parseExpiryAt is parseExpiry with an explicit reference time, so tests can
+// assert exact results.
+func parseExpiryAt(s string, now time.Time) (time.Time, error) {
 	// Try RFC 3339 first
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
 		return t, nil
 	}
 
-	// Try duration shorthand: Nd (days) or Ny (years)
+	invalid := fmt.Errorf("%q is not a valid expiry: expected %s", s, expiryAcceptedForms)
+
+	// Try duration shorthand: Nm (minutes), Nh (hours), Nd (days) or Ny (years)
 	s = strings.TrimSpace(s)
 	if len(s) < 2 {
-		return time.Time{}, fmt.Errorf("expected a duration like '30d' or '1y', or an RFC 3339 date")
+		return time.Time{}, invalid
 	}
 
 	unit := s[len(s)-1]
 	numStr := s[:len(s)-1]
 
-	var n int
-	if _, err := fmt.Sscanf(numStr, "%d", &n); err != nil || n <= 0 {
-		return time.Time{}, fmt.Errorf("expected a positive number followed by 'd' (days) or 'y' (years)")
-	}
-
-	now := time.Now().UTC()
+	// Every unit parses its number strictly, so Go-style or fractional
+	// inputs such as 1h30m, 1.5h, 1.5d or 3xd are rejected rather than read
+	// as a shorter duration.
+	var step time.Duration
 	switch unit {
+	case 'm':
+		step = time.Minute
+	case 'h':
+		step = time.Hour
 	case 'd':
-		return now.Add(time.Duration(n) * 24 * time.Hour), nil
+		step = 24 * time.Hour
 	case 'y':
-		return now.AddDate(n, 0, 0), nil
+		// A year is measured in calendar years below; for the limit check
+		// it counts as the hub's 1-year maximum.
+		step = store.UATMaxExpiry
 	default:
-		return time.Time{}, fmt.Errorf("unknown duration unit %q: use 'd' (days) or 'y' (years)", string(unit))
+		return time.Time{}, invalid
 	}
+	n, err := strconv.Atoi(numStr)
+	if err != nil || n <= 0 {
+		return time.Time{}, invalid
+	}
+	// Values above the hub's maximum token lifetime (1y, 365d, 8760h or
+	// 525600m) are rejected here, before multiplying, so a huge number
+	// cannot overflow into a negative duration (an expiry in the past).
+	if int64(n) > int64(store.UATMaxExpiry/step) {
+		return time.Time{}, fmt.Errorf("%q exceeds the maximum expiry of 1 year (1y, %dd, %dh or %dm)",
+			s, int64(store.UATMaxExpiry/(24*time.Hour)), int64(store.UATMaxExpiry/time.Hour),
+			int64(store.UATMaxExpiry/time.Minute))
+	}
+	if unit == 'y' {
+		return now.AddDate(n, 0, 0), nil
+	}
+	return now.Add(time.Duration(n) * step), nil
 }

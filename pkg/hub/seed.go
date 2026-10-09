@@ -93,7 +93,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleSuperAdmin,
 			Description: "Full platform administrator with all permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    1,
+			Revision:    2, // R2: add broker.auto_provide (ptone/scion#2104)
 			Permissions: allPermissionIDs(),
 		},
 		{
@@ -1982,6 +1982,13 @@ func removeHubMembershipTx(ctx context.Context, tx store.Store, userID string) e
 	err = tx.RemoveGroupMember(ctx, group.ID, store.GroupMemberTypeUser, userID)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return fmt.Errorf("remove user from hub-members group: %w", err)
+	}
+	if err == nil {
+		// A hub-scope change: re-evaluate the user's project standing in
+		// the caller's transaction (ptone/scion#3433).
+		if err := enqueueMembershipLossTx(ctx, tx, userID, "", store.MembershipLossTriggerSystemScopeChange, auditActorFromContext(ctx)); err != nil {
+			return err
+		}
 	}
 	return nil
 }

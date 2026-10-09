@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 171
+**Operations:** 178
 
 ## Table of Contents
 
@@ -13,6 +13,7 @@
 - [agent.lifecycle.exec](#agentlifecycleexec) — Run a command in an agent's container
 - [agent.lifecycle.env](#agentlifecycleenv) — Submit environment values to an agent
 - [agent.lifecycle.resetauth](#agentlifecycleresetauth) — Reset an agent's harness authentication
+- [agent.hold.lift](#agentholdlift) — Lift the holds of a suspended agent whose owners are admitted to its project again (hub admin)
 - [agent.lifecycle.reincarnate](#agentlifecyclereincarnate) — Reincarnate an agent
 - [agent.read](#agentread) — Read a single agent's metadata by ID
 - [agent.list](#agentlist) — List agents within the caller's authorized project scope
@@ -36,9 +37,11 @@
 - [project.list](#projectlist) — List projects within the caller's authorized scope
 - [project.update](#projectupdate) — Update project settings and metadata
 - [project.register](#projectregister) — Register a project from an external source
-- [schedule.event.read](#scheduleeventread) — Read scheduled events or list events in a project
-- [schedule.event.create](#scheduleeventcreate) — Create a scheduled event or recurring schedule
-- [schedule.event.update](#scheduleeventupdate) — Update a recurring schedule
+- [schedule.event.list](#scheduleeventlist) — List scheduled events or recurring schedules in a project
+- [schedule.event.read](#scheduleeventread) — Read a scheduled event, a recurring schedule or a schedule's run history
+- [schedule.event.create](#scheduleeventcreate) — Create a scheduled event or recurring schedule of any event type. Every user access token is refused before any target lookup
+- [schedule.event.update](#scheduleeventupdate) — Update or resume a recurring schedule of any event type. Every user access token is refused, including one holding scheduled_event:update
+- [schedule.event.pause](#scheduleeventpause) — Pause a recurring schedule. Pausing only stops future runs, so a token with scheduled_event:update is admitted
 - [schedule.event.delete](#scheduleeventdelete) — Cancel a scheduled event or delete a recurring schedule
 - [artifact.read](#artifactread) — Read an artifact's metadata or file bytes (owner, home-project readers via the scope grant, or principal grants); unreadable artifacts answer 404
 - [artifact.list](#artifactlist) — List the artifacts the caller owns, holds a grant on, or that are shared to a project it is a member of (?mine=1); each row passes the artifact.read check, so an artifact the caller cannot read is omitted, never denied
@@ -127,13 +130,14 @@
 - [hub.config.read](#hubconfigread) — Read server configuration and schema
 - [hub.config.update](#hubconfigupdate) — Update server configuration sections. The route guard checks hub.config.read, so a token needs hub_config:read and hub_config:update, and writes configuration keys only
 - [hub.messaging.update](#hubmessagingupdate) — Read and update messaging configuration switches
+- [hub.profiling.update](#hubprofilingupdate) — Read and update the profiling switches (session only)
 - [hub.experiments.update](#hubexperimentsupdate) — Read and update hub-wide experiment overrides
 - [hub.conduitgrantkeys.rotate](#hubconduitgrantkeysrotate) — Rotate the conduit grant signing key (kids and timestamps only in the response)
 - [hub.maintenance.execute](#hubmaintenanceexecute) — Execute maintenance operations including migrations and restarts
 - [hub.adminmode.update](#hubadminmodeupdate) — Toggle admin/maintenance mode
 - [hub.allowlist.update](#huballowlistupdate) — Manage the platform email allow list
 - [hub.health.read](#hubhealthread) — Read platform health summary and GCP quota status
-- [hub.diagnostics.read](#hubdiagnosticsread) — Read diagnostic logs and messaging divergence data
+- [hub.diagnostics.read](#hubdiagnosticsread) — Read diagnostic logs, the diagnostic log stream and messaging divergence data. The log stream re-checks a token credential on every heartbeat and ends once the token stops validating or loses hub.diagnostics.read
 - [hub.scheduler.read](#hubschedulerread) — Read scheduler status and configuration
 - [hub.projectdefaults.read](#hubprojectdefaultsread) — Read project default settings
 - [hub.lifecyclehooks.read](#hublifecyclehooksread) — Read lifecycle hook definitions
@@ -141,11 +145,14 @@
 - [hub.lifecyclehooks.update](#hublifecyclehooksupdate) — Create, update, delete and activate hub lifecycle hooks and hub pre-start hooks. The admin lifecycle-hook route guard checks hub.lifecycle_hooks.read, so a token writing there needs hub_lifecycle_hooks:read and hub_lifecycle_hooks:update
 - [hub.settings.update](#hubsettingsupdate) — Set the user-defined hub injected skills; system entries are preserved
 - [hub.validate.execute](#hubvalidateexecute) — Validate resource definitions against schema
-- [hub.integrations.read](#hubintegrationsread) — Read integration configurations
+- [hub.integrations.read](#hubintegrationsread) — Read integration configurations, the available-integrations list, integration health and integration update status
+- [hub.integrations.update](#hubintegrationsupdate) — Update an integration's settings and restart an integration. The route guard checks hub.integrations.read, so a token needs hub_integrations:read and hub_integrations:update. A config update that sets secrets or any settings key outside the configuration set requires an interactive session
+- [hub.integrations.install](#hubintegrationsinstall) — Install an integration and start an integration update; both build and install code on the hub host, so an interactive session only
 - [hub.teamsmanifest.read](#hubteamsmanifestread) — Read Teams integration manifest
 - [hub.metrics.read](#hubmetricsread) — Read metrics dashboard data
 - [hub.githubapp.read](#hubgithubappread) — Read GitHub App configuration and installations
-- [hub.githubapp.update](#hubgithubappupdate) — Update GitHub App configuration, manage installations, discover and sync
+- [hub.githubapp.update](#hubgithubappupdate) — Create, update and delete GitHub App installations, discover installations and sync permissions
+- [hub.githubapp.config.update](#hubgithubappconfigupdate) — Update the GitHub App configuration, which sets the hub's app credentials; an interactive session only
 - [quota.read](#quotaread) — Read limit definitions, entitlements, and usage
 - [quota.create](#quotacreate) — Create limit definitions and entitlement bindings
 - [quota.update](#quotaupdate) — Update limit definitions and entitlement bindings
@@ -202,12 +209,19 @@
 
 **Resource Resolver:** project-from-body
 
-**Effects:** `create-resource`
+**Effects:** `create-resource`, `grant-authority`
 
 ### Delegation
 
 - **Kind:** `non_amplification`
 - Actor must hold the role and scopes delegated to the new agent (CanDelegate non-amplification); an agent actor is also evaluated against the delegation ceiling of its live delegation chain for agent.create on the target project
+
+### Audit
+
+- **Event Type:** `agent_delegation`
+- **Context Fields:** actor_id
+- **After Fields:** agent_id, can_delegate_result
+- **Atomic:** Yes
 
 **Denial Codes:** `forbidden`, `conflict`
 
@@ -216,6 +230,7 @@
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestAgentCreate_ExplicitRoleAboveParentDenied`
 - `pkg/hub:TestAgentCreate_RequiresLiveDelegator`
+- `pkg/hub:TestCreateAuditFailureRollsBack`
 
 ---
 
@@ -426,6 +441,39 @@
 ### Tests
 
 - `pkg/hub:TestAgentSubRoute_CatalogDrift`
+
+---
+
+## agent.hold.lift
+
+**Domain:** agent
+
+**Description:** Lift the holds of a suspended agent whose owners are admitted to its project again (hub admin)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/hold/lift` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `agent.update`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAgentSubRoute_CatalogDrift`
+- `pkg/hub:TestAgentHoldLift`
 
 ---
 
@@ -1131,13 +1179,27 @@
 
 **Resource Resolver:** hub-scoped
 
-**Effects:** `create-resource`
+**Effects:** `create-resource`, `grant-authority`
+
+### Delegation
+
+- **Kind:** `non_amplification`
+- The creator is bound to the project-owner role on the project the call creates. A credential with a permission ceiling must cover every permission of that role before any write (projectOwnerGrantDenial); for other callers project.create gates the grant
+
+### Audit
+
+- **Event Type:** `project_member_add`
+- **Context Fields:** actor_id, project_id
+- **After Fields:** user_id, role
+- **Atomic:** Yes
 
 **Denial Codes:** `forbidden`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestOwnerGrantCoverageCheck`
+- `pkg/hub:TestOwnerBindingAuditFailureRollsBack`
 
 ---
 
@@ -1342,13 +1404,60 @@
 
 **Resource Resolver:** project-from-body
 
-**Effects:** `create-resource`
+**Effects:** `create-resource`, `grant-authority`
+
+### Delegation
+
+- **Kind:** `non_amplification`
+- When the call creates the project, the creator is bound to the project-owner role on it; registering an existing project binds no owner. A credential with a permission ceiling must cover every permission of that role before any write (projectOwnerGrantDenial); for other callers project.register gates the grant
+
+### Audit
+
+- **Event Type:** `project_member_add`
+- **Context Fields:** actor_id, project_id
+- **After Fields:** user_id, role
+- **Atomic:** Yes
 
 **Denial Codes:** `forbidden`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestOwnerGrantCoverageCheck`
+- `pkg/hub:TestOwnerBindingAuditFailureRollsBack`
+
+---
+
+## schedule.event.list
+
+**Domain:** schedule
+
+**Description:** List scheduled events or recurring schedules in a project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{projectId}/scheduled-events` |
+| http_route | GET | `/api/v1/projects/{projectId}/schedules` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `scheduled_event.list`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
@@ -1356,32 +1465,33 @@
 
 **Domain:** schedule
 
-**Description:** Read scheduled events or list events in a project
+**Description:** Read a scheduled event, a recurring schedule or a schedule's run history
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | GET | `/api/v1/projects/{projectId}/scheduled-events` |
 | http_route | GET | `/api/v1/projects/{projectId}/scheduled-events/{id}` |
-| http_route | GET | `/api/v1/projects/{projectId}/schedules` |
 | http_route | GET | `/api/v1/projects/{projectId}/schedules/{id}` |
+| http_route | GET | `/api/v1/projects/{projectId}/schedules/{id}/history` |
 
-**Principals:** `user`
+**Principals:** `user`, `agent`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
 
 **Base Permission:** `scheduled_event.read`
 
 **Resource Resolver:** project-from-url
 
-**Effects:** `read-one`, `list-scoped`
+**Effects:** `read-one`
 
 **Denial Codes:** `forbidden`
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
@@ -1389,7 +1499,7 @@
 
 **Domain:** schedule
 
-**Description:** Create a scheduled event or recurring schedule
+**Description:** Create a scheduled event or recurring schedule of any event type. Every user access token is refused before any target lookup
 
 ### Entry Points
 
@@ -1398,21 +1508,36 @@
 | http_route | POST | `/api/v1/projects/{projectId}/scheduled-events` |
 | http_route | POST | `/api/v1/projects/{projectId}/schedules` |
 
-**Principals:** `user`
+**Principals:** `user`, `agent`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `agent_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
 
 **Base Permission:** `scheduled_event.create`
 
 **Resource Resolver:** project-from-url
 
-**Effects:** `create-resource`
+**Effects:** `create-resource`, `grant-authority`
+
+### Delegation
+
+- **Kind:** `non_amplification`
+- Only the dispatch_agent event type grants authority. Authoring any event type records the author's frozen effect ceiling (revisionAuthorityCeiling); a dispatch_agent event or schedule then creates an agent at fire time, with a delegation edge from the recorded principal, after CanDelegate for that principal. A message event or schedule grants no authority. Effects are listed per operation, not per event type, so grant-authority is listed for the whole operation
+
+### Audit
+
+- **Event Type:** `agent_delegation`
+- **Context Fields:** actor_id
+- **After Fields:** agent_id, can_delegate_result
+- **Atomic:** No
+- **Non-Atomic Justification:** The authoring write records no mutation audit record: it stores the initiator attribution and the frozen effect ceiling on the event or schedule row in the same insert. The agent_delegation record is written when a dispatch_agent event fires, in the agent-create transaction with the agent row and its delegation edge. A message event writes none
 
 **Denial Codes:** `forbidden`
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestScheduledMessageAuthoring_RefusesTokensBeforeTargetLookup`
 
 ---
 
@@ -1420,17 +1545,20 @@
 
 **Domain:** schedule
 
-**Description:** Update a recurring schedule
+**Description:** Update or resume a recurring schedule of any event type. Every user access token is refused, including one holding scheduled_event:update
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | PATCH | `/api/v1/projects/{projectId}/schedules/{id}` |
+| http_route | POST | `/api/v1/projects/{projectId}/schedules/{id}/resume` |
 
-**Principals:** `user`
+**Principals:** `user`, `agent`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `agent_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
 
 **Base Permission:** `scheduled_event.update`
 
@@ -1442,7 +1570,39 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestScheduleUpdateSelector_DoesNotAdmitAuthoring`
+
+---
+
+## schedule.event.pause
+
+**Domain:** schedule
+
+**Description:** Pause a recurring schedule. Pausing only stops future runs, so a token with scheduled_event:update is admitted
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/{projectId}/schedules/{id}/pause` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `scheduled_event.update`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestSchedulePause_AdmitsTokenWithUpdateSelector`
 
 ---
 
@@ -1459,9 +1619,11 @@
 | http_route | DELETE | `/api/v1/projects/{projectId}/scheduled-events/{id}` |
 | http_route | DELETE | `/api/v1/projects/{projectId}/schedules/{id}` |
 
-**Principals:** `user`
+**Principals:** `user`, `agent`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
 
 **Base Permission:** `scheduled_event.delete`
 
@@ -1480,7 +1642,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
@@ -4644,6 +4806,39 @@
 
 ---
 
+## hub.profiling.update
+
+**Domain:** hub
+
+**Description:** Read and update the profiling switches (session only)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/profiling` |
+| http_route | PUT | `/api/v1/admin/profiling` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `HOST_OPERATIONS`)
+
+**Base Permission:** `hub.config.update`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAdminProfiling_TokenRefused`
+
+---
+
 ## hub.experiments.update
 
 **Domain:** hub
@@ -4824,7 +5019,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.health.read`
 
@@ -4836,7 +5033,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
@@ -4844,7 +5041,7 @@
 
 **Domain:** hub
 
-**Description:** Read diagnostic logs and messaging divergence data
+**Description:** Read diagnostic logs, the diagnostic log stream and messaging divergence data. The log stream re-checks a token credential on every heartbeat and ends once the token stops validating or loses hub.diagnostics.read
 
 ### Entry Points
 
@@ -4856,7 +5053,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.diagnostics.read`
 
@@ -4868,7 +5067,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestDiagnosticsLogStream_EndsWhenTokenStopsValidating`
 
 ---
 
@@ -4886,7 +5085,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.scheduler.read`
 
@@ -4898,7 +5099,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
@@ -5085,7 +5286,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.validate.execute`
 
@@ -5097,7 +5300,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
@@ -5105,7 +5308,7 @@
 
 **Domain:** hub
 
-**Description:** Read integration configurations
+**Description:** Read integration configurations, the available-integrations list, integration health and integration update status
 
 ### Entry Points
 
@@ -5113,10 +5316,15 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/admin/integrations` |
 | http_route | GET | `/api/v1/admin/integrations/{name}` |
+| http_route | GET | `/api/v1/admin/integrations/available` |
+| http_route | GET | `/api/v1/admin/integrations/{name}/health` |
+| http_route | GET | `/api/v1/admin/integrations/{name}/update/{id}` |
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.integrations.read`
 
@@ -5128,7 +5336,73 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## hub.integrations.update
+
+**Domain:** hub
+
+**Description:** Update an integration's settings and restart an integration. The route guard checks hub.integrations.read, so a token needs hub_integrations:read and hub_integrations:update. A config update that sets secrets or any settings key outside the configuration set requires an interactive session
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/admin/integrations/{name}/config` |
+| http_route | POST | `/api/v1/admin/integrations/{name}/restart` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+
+**Base Permission:** `hub.integrations.update`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestIntegrationConfigUpdate_SecretsSessionOnlyForTokens`
+
+---
+
+## hub.integrations.install
+
+**Domain:** hub
+
+**Description:** Install an integration and start an integration update; both build and install code on the hub host, so an interactive session only
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/admin/integrations/{name}/install` |
+| http_route | POST | `/api/v1/admin/integrations/{name}/update` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `HOST_OPERATIONS`)
+
+**Base Permission:** `hub.integrations.update`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestIntegrationInstall_SessionOnlyForTokens`
 
 ---
 
@@ -5146,7 +5420,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.teams_manifest.read`
 
@@ -5158,7 +5434,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
@@ -5177,7 +5453,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.metrics.read`
 
@@ -5189,7 +5467,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestMetricsDashboard_RequiresMetricsSelector`
 
 ---
 
@@ -5209,7 +5487,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.github_app.read`
 
@@ -5221,7 +5501,7 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
@@ -5229,13 +5509,12 @@
 
 **Domain:** hub
 
-**Description:** Update GitHub App configuration, manage installations, discover and sync
+**Description:** Create, update and delete GitHub App installations, discover installations and sync permissions
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | PUT | `/api/v1/github-app` |
 | http_route | POST | `/api/v1/github-app/installations` |
 | http_route | PUT | `/api/v1/github-app/installations/{id}` |
 | http_route | DELETE | `/api/v1/github-app/installations/{id}` |
@@ -5244,7 +5523,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.github_app.update`
 
@@ -5256,7 +5537,39 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## hub.githubapp.config.update
+
+**Domain:** hub
+
+**Description:** Update the GitHub App configuration, which sets the hub's app credentials; an interactive session only
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/github-app` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Base Permission:** `hub.github_app.update`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestGitHubAppConfigUpdate_SessionOnlyForTokens`
 
 ---
 

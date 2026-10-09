@@ -63,6 +63,7 @@ type lifecycleDispatchRule struct {
 var lifecycleDispatchCallers = map[string]lifecycleDispatchRule{
 	"Server.handleAgentLifecycle":          {kind: intentRecorded},
 	"Server.suspendAgent":                  {kind: intentRecorded},
+	"Server.stopHeldAgent":                 {kind: intentRecorded},
 	"Server.handleStopAllAgents":           {kind: intentRecorded},
 	"Server.autoSuspendStalledAgents":      {kind: intentRecorded},
 	"Server.dispatchAgentEventHandler":     {kind: intentRecorded, recordedBy: "Server.withStartClaim"},
