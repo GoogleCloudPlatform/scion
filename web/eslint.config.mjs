@@ -36,10 +36,13 @@ const sharedRules = {
   'prettier/prettier': 'error',
 };
 
-// Curated test files linted against their own TS project. They are
-// lint-clean under the full rule set, so the test-file relaxation below
-// does not apply to them. Explicit lists, not globs (terminal tests
-// excepted): other files in the same directories are not lint-clean.
+// Curated test files. They are lint-clean under the full rule set, so
+// the test-file relaxation below does not apply to them. Explicit lists,
+// not globs (terminal tests excepted): other files in the same
+// directories are not lint-clean.
+// tsconfig.component-tests.json also type-checks
+// pages/chat-palette-shortcut.test.ts, which is not lint-clean under
+// the full rule set, so it is left out of componentTests.
 const terminalTests = ['src/client/terminal-*.test.ts'];
 const clientTests = [
   'src/client/agent-palette-candidate.test.ts',
@@ -112,9 +115,6 @@ export default defineConfig([
   project(['e2e/agent-store-count/*.ts'], './e2e/agent-store-count/tsconfig.json'),
   project(['e2e/chat-file-preview/*.ts'], './e2e/chat-file-preview/tsconfig.json'),
   project(['e2e/project-files-tabs/*.ts'], './e2e/project-files-tabs/tsconfig.json'),
-  project(terminalTests, './src/client/tsconfig.terminal-tests.json'),
-  project(clientTests, './src/client/tsconfig.client-tests.json'),
-  project(componentTests, './src/components/tsconfig.component-tests.json'),
   project(
     [
       'e2e/chat-palette/accessibility.pw.ts',
