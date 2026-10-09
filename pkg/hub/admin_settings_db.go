@@ -833,7 +833,11 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	}
 
 	// The start-claim keys are checked on the merged lifecycle document,
-	// so a value carried from the row counts as well.
+	// so a value carried from the row counts as well. They follow the same
+	// contract as the other lifecycle keys: omitted keeps, "" or null
+	// clears (an absent key applies the startup value). The earlier rule
+	// that an empty value keeps them stood in for "omitted keeps" before
+	// lifecycle saves were presence-aware.
 	if doc, ok := sectionDocs["lifecycle"]; ok {
 		var lc opsettings.LifecycleSettings
 		if err := json.Unmarshal(doc, &lc); err == nil {
