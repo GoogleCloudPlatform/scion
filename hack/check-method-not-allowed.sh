@@ -11,10 +11,11 @@
 #    extras/scion-telegram). These packages do not use a helper; they write
 #    http.StatusMethodNotAllowed themselves (http.Error, writeError, ...).
 #    Every such write must be preceded, within the ALLOW_WINDOW lines above
-#    it (or on the same line), by a line that sets the "Allow" header
-#    (ptone/scion#2858). Comparisons (== / !=) and comment lines are not
-#    writes and are ignored. The pkg/hub and pkg/runtimebroker helper bodies
-#    write the status from a variable list, so those packages stay on rule 1.
+#    it (or on the same line) and in the same func, by a line that sets the
+#    "Allow" header (ptone/scion#2858). Comparisons (== / !=) and comment
+#    lines are not writes and are ignored. The pkg/hub and pkg/runtimebroker
+#    helper bodies write the status from a variable list, so those packages
+#    stay on rule 1.
 #
 # Matches "MethodNotAllowed(w)" anywhere on a line, not only at line end, so
 # `return MethodNotAllowed(w) // ...` or a call inside a larger expression is
@@ -81,6 +82,7 @@ scan_status() {
   # shellcheck disable=SC2086 # candidates is a newline-separated path list
   awk -v win="$ALLOW_WINDOW" '
     FNR == 1 { last_allow = -1000 }
+    /^[ \t]*func / { last_allow = -1000 }  # an Allow in one func cannot cover the next
     /"Allow"/ { last_allow = FNR }
     /StatusMethodNotAllowed/ {
       if ($0 ~ /^[ \t]*\/\//) next          # comment line
