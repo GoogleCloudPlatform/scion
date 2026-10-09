@@ -1281,6 +1281,12 @@ type startContextError struct {
 	Message     string
 	IsHubError  bool
 	OriginalErr error
+	// Code is the error code written for a 4xx Status; empty means
+	// validation_error. Details, when set, go into the error body with it.
+	// Both let a caller such as the hub recognise a specific refusal
+	// without matching on Message.
+	Code    string
+	Details map[string]interface{}
 }
 
 func (e *startContextError) Error() string {

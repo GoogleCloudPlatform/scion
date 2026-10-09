@@ -3349,6 +3349,9 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		if relayWorkspaceStorageUnconfigured(w, err) {
 			return
 		}
+		if relayIdentityMappingError(w, err) {
+			return
+		}
 		if relayHarnessConfigRefusal(w, err) {
 			return
 		}
@@ -5131,6 +5134,8 @@ func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID strin
 	case relayWorkspaceStorageUnconfigured(w, err):
 		// Response already written.
 	case relayHarnessConfigRefusal(w, err):
+		// Response already written.
+	case relayIdentityMappingError(w, err):
 		// Response already written.
 	case isBrokerStatus(err, http.StatusNotFound):
 		message := err.Error()

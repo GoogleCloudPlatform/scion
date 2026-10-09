@@ -1358,6 +1358,8 @@ func (s *Server) handleExistingAgent(
 				// Required-skill resolution failure relayed with the broker's status.
 			case relayHarnessConfigRefusal(w, err):
 				// Harness-config refusal relayed with the broker's status.
+			case relayIdentityMappingError(w, err):
+				// Kubernetes identity mapping refusal relayed as a 400.
 			default:
 				RuntimeError(w, "Failed to resume suspended agent: "+err.Error())
 			}
@@ -1489,6 +1491,8 @@ func (s *Server) handleExistingAgent(
 					// Required-skill resolution failure relayed with the broker's status.
 				case relayHarnessConfigRefusal(w, err):
 					// Harness-config refusal relayed with the broker's status.
+				case relayIdentityMappingError(w, err):
+					// Kubernetes identity mapping refusal relayed as a 400.
 				default:
 					RuntimeError(w, "Failed to resume stopped agent: "+err.Error())
 				}
@@ -1678,6 +1682,8 @@ func (s *Server) handleExistingAgent(
 				// Required-skill resolution failure relayed with the broker's status.
 			case relayHarnessConfigRefusal(w, err):
 				// Harness-config refusal relayed with the broker's status.
+			case relayIdentityMappingError(w, err):
+				// Kubernetes identity mapping refusal relayed as a 400.
 			default:
 				RuntimeError(w, "Failed to start agent: "+err.Error())
 			}
