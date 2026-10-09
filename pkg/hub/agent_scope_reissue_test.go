@@ -573,6 +573,7 @@ func TestScopeReissue_OperatorRefusals(t *testing.T) {
 	require.NoError(t, f.store.CreateUser(context.Background(), &store.User{
 		ID: tid("rs-op-admin"), Email: "admin@test.com", DisplayName: "Admin", Role: "admin", Status: "active",
 	}))
+	grantSuperAdmin(t, f.store, tid("rs-op-admin"))
 	admin := NewAuthenticatedUser(tid("rs-op-admin"), "admin@test.com", "Admin", "admin", "")
 	member := NewAuthenticatedUser(f.userID, "owner@test.com", "Owner", "member", "")
 	selfClaims := &AgentTokenClaims{ProjectID: f.projectID, Scopes: ScopesForRole(AgentRoleFull), Ancestry: f.child.Ancestry}
@@ -792,4 +793,19 @@ func TestScopeReissue_EqualsCreateToday(t *testing.T) {
 func effectCeilingsWithoutBoundary(c store.EffectCeiling) store.EffectCeiling {
 	c.PermissionIDs = sortedUniqueIDs(c.PermissionIDs)
 	return c
+}
+
+// grantSuperAdmin binds the system super-admin role to userID.
+func grantSuperAdmin(t *testing.T, s store.Store, userID string) {
+	t.Helper()
+	ctx := context.Background()
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: userID,
+		ScopeType: store.RoleScopeSystem, CreatedBy: "test",
+	})
+	if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		require.NoError(t, err)
+	}
 }
