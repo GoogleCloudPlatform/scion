@@ -1379,8 +1379,8 @@ func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.R
 	registryStatus := s.checkRegistryImage(ctx, longImage)
 
 	if s.brokerClient == nil {
-		if s.imageManager != nil {
-			entry := s.buildLocalImageEntry(ctx, shortImage, longImage, registryStatus)
+		if mgr := s.getImageManager(); mgr != nil {
+			entry := s.buildLocalImageEntry(ctx, mgr, shortImage, longImage, registryStatus)
 			writeJSON(w, http.StatusOK, AggregatedImageStatusResponse{
 				Image:    image,
 				Registry: &registryStatus,
@@ -1480,8 +1480,8 @@ func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.R
 	}
 	wg.Wait()
 
-	if len(nodeBound) == 0 && s.imageManager != nil {
-		entry := s.buildLocalImageEntry(ctx, shortImage, longImage, registryStatus)
+	if mgr := s.getImageManager(); len(nodeBound) == 0 && mgr != nil {
+		entry := s.buildLocalImageEntry(ctx, mgr, shortImage, longImage, registryStatus)
 		brokerEntries = append(brokerEntries, entry)
 	}
 
@@ -1498,11 +1498,11 @@ func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.R
 // co-located container runtime (Docker/Podman) when no broker client is
 // available. This ensures workstation-mode users see pulled image state
 // and the Build Image option.
-func (s *Server) buildLocalImageEntry(ctx context.Context, shortImage, longImage string, registryStatus RegistryImageStatus) BrokerImageEntry {
+func (s *Server) buildLocalImageEntry(ctx context.Context, mgr imageManager, shortImage, longImage string, registryStatus RegistryImageStatus) BrokerImageEntry {
 	result := s.imageChecker.CheckAll(ctx, shortImage, longImage)
 
 	brokerName := "Local Runtime"
-	if namer, ok := s.imageManager.(interface{ Name() string }); ok {
+	if namer, ok := mgr.(interface{ Name() string }); ok {
 		if n := namer.Name(); n != "" {
 			brokerName = n
 		}
@@ -1583,12 +1583,13 @@ func (s *Server) handleHarnessConfigDeleteLocalImage(w http.ResponseWriter, r *h
 		return
 	}
 
-	if s.imageManager == nil {
+	mgr := s.getImageManager()
+	if mgr == nil {
 		writeError(w, http.StatusServiceUnavailable, "no_runtime", "Container runtime not available", nil)
 		return
 	}
 
-	exists, err := s.imageManager.ImageExists(ctx, image)
+	exists, err := mgr.ImageExists(ctx, image)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "check_failed", fmt.Sprintf("Failed to check image: %v", err), nil)
 		return
@@ -1598,7 +1599,7 @@ func (s *Server) handleHarnessConfigDeleteLocalImage(w http.ResponseWriter, r *h
 		return
 	}
 
-	if err := s.imageManager.RemoveImage(ctx, image); err != nil {
+	if err := mgr.RemoveImage(ctx, image); err != nil {
 		writeError(w, http.StatusInternalServerError, "remove_failed", fmt.Sprintf("Failed to remove image: %v", err), nil)
 		return
 	}
@@ -1652,12 +1653,13 @@ func (s *Server) handleHarnessConfigPullImage(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	if s.imageManager == nil {
+	mgr := s.getImageManager()
+	if mgr == nil {
 		writeError(w, http.StatusServiceUnavailable, "no_runtime", "Container runtime not available", nil)
 		return
 	}
 
-	if err := s.imageManager.PullImage(ctx, pullImage); err != nil {
+	if err := mgr.PullImage(ctx, pullImage); err != nil {
 		writeError(w, http.StatusInternalServerError, "pull_failed", fmt.Sprintf("Failed to pull image: %v", err), nil)
 		return
 	}

@@ -46,6 +46,7 @@ const clientTests = [
   'src/client/agent-store.test.ts',
   'src/client/agent-store-feed.test.ts',
   'src/client/agent-store-probe.test.ts',
+  'src/client/chat-routes.test.ts',
   'src/client/paginate-all.test.ts',
   'src/client/state.test.ts',
   'src/client/__fixtures__/agent-store-harness.ts',
