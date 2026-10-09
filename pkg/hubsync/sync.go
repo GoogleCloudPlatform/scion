@@ -430,7 +430,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		if idMatchProject != nil {
 			// Exact ID match found - this is the same project, no prompt needed
 			debugf("Found project with exact matching ID on Hub: %s (name: %s)", idMatchProject.ID, idMatchProject.Name)
-			fmt.Fprintf(promptOut, "Linked to existing project: %s (ID: %s)\n", idMatchProject.Name, idMatchProject.ID)
+			_, _ = fmt.Fprintf(promptOut, "Linked to existing project: %s (ID: %s)\n", idMatchProject.Name, idMatchProject.ID)
 		} else {
 			// No ID match - fall back to name-based matching
 			matches, err := findMatchingProjects(ctx, hubCtx, projectName)
@@ -447,7 +447,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 				for _, m := range matches {
 					if m.ID == hubCtx.ProjectID {
 						debugf("Found exact ID match in name-based results: %s", m.ID)
-						fmt.Fprintf(promptOut, "Linked to existing project: %s (ID: %s)\n", m.Name, m.ID)
+						_, _ = fmt.Fprintf(promptOut, "Linked to existing project: %s (ID: %s)\n", m.Name, m.ID)
 						idMatched = true
 						break
 					}
@@ -552,17 +552,17 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 				// Continue with sync attempt - the error will surface during ExecuteSync
 			} else if !hasOnlineBroker {
 				// No brokers available - print warning and skip sync
-				fmt.Fprintln(promptOut)
-				fmt.Fprintln(promptOut, "Warning: No runtime brokers are available for this project.")
-				fmt.Fprintln(promptOut, "Agent sync cannot be performed without an online broker.")
-				fmt.Fprintln(promptOut)
-				fmt.Fprintln(promptOut, "Local agents not synced to Hub:")
+				_, _ = fmt.Fprintln(promptOut)
+				_, _ = fmt.Fprintln(promptOut, "Warning: No runtime brokers are available for this project.")
+				_, _ = fmt.Fprintln(promptOut, "Agent sync cannot be performed without an online broker.")
+				_, _ = fmt.Fprintln(promptOut)
+				_, _ = fmt.Fprintln(promptOut, "Local agents not synced to Hub:")
 				for _, name := range effectiveSyncResult.ToRegister {
-					fmt.Fprintf(promptOut, "  + %s\n", name)
+					_, _ = fmt.Fprintf(promptOut, "  + %s\n", name)
 				}
-				fmt.Fprintln(promptOut)
-				fmt.Fprintln(promptOut, "To sync agents, ensure a runtime broker is running and connected.")
-				fmt.Fprintln(promptOut)
+				_, _ = fmt.Fprintln(promptOut)
+				_, _ = fmt.Fprintln(promptOut, "To sync agents, ensure a runtime broker is running and connected.")
+				_, _ = fmt.Fprintln(promptOut)
 				// Continue without syncing - this allows read operations like list to proceed
 				return hubCtx, nil
 			}
@@ -897,7 +897,7 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 	// Note: We don't specify a runtime broker ID - the hub will resolve it based on
 	// available project providers (single provider = auto-select, multiple = error)
 	for _, name := range result.ToRegister {
-		fmt.Fprintf(promptOut, "Registering agent '%s' on Hub...\n", name)
+		_, _ = fmt.Fprintf(promptOut, "Registering agent '%s' on Hub...\n", name)
 		debugf("Creating agent: name=%s, projectID=%s (hub will resolve runtime broker)", name, hubCtx.ProjectID)
 		req := &hubclient.CreateAgentRequest{
 			Name:      name,
@@ -952,7 +952,7 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 				if isDefault {
 					defaultLabel = " (default)"
 				}
-				fmt.Fprintf(promptOut, "\nUse runtime broker %s (%s)%s for agent '%s'? [y/N]: ", brokerName, status, defaultLabel, name)
+				_, _ = fmt.Fprintf(promptOut, "\nUse runtime broker %s (%s)%s for agent '%s'? [y/N]: ", brokerName, status, defaultLabel, name)
 				input, err := reader.ReadString('\n')
 				if err != nil {
 					return fmt.Errorf("failed to read input: %w", err)
@@ -964,7 +964,7 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 				req.RuntimeBrokerID, _ = brokerMap["id"].(string)
 			} else {
 				// Multiple brokers - selection prompt
-				fmt.Fprintf(promptOut, "\nMultiple runtime brokers available for project:\n")
+				_, _ = fmt.Fprintf(promptOut, "\nMultiple runtime brokers available for project:\n")
 				for i, h := range availableBrokers {
 					brokerMap, _ := h.(map[string]interface{})
 					brokerName, _ := brokerMap["name"].(string)
@@ -974,12 +974,12 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 					if isDefault {
 						defaultLabel = " (default)"
 					}
-					fmt.Fprintf(promptOut, "  [%d] %s (%s)%s\n", i+1, brokerName, status, defaultLabel)
+					_, _ = fmt.Fprintf(promptOut, "  [%d] %s (%s)%s\n", i+1, brokerName, status, defaultLabel)
 				}
-				fmt.Fprintln(promptOut)
+				_, _ = fmt.Fprintln(promptOut)
 
 				for {
-					fmt.Fprint(promptOut, "Select a broker for agent registration (or 'c' to cancel): ")
+					_, _ = fmt.Fprint(promptOut, "Select a broker for agent registration (or 'c' to cancel): ")
 					input, err := reader.ReadString('\n')
 					if err != nil {
 						return fmt.Errorf("failed to read input: %w", err)
@@ -992,7 +992,7 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 
 					var choice int
 					if _, err := fmt.Sscanf(input, "%d", &choice); err != nil || choice < 1 || choice > len(availableBrokers) {
-						fmt.Fprintf(promptOut, "Invalid choice. Please enter 1-%d.\n", len(availableBrokers))
+						_, _ = fmt.Fprintf(promptOut, "Invalid choice. Please enter 1-%d.\n", len(availableBrokers))
 						continue
 					}
 
@@ -1007,7 +1007,7 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 
 	// Remove Hub agents that are not on this broker
 	for _, ref := range result.ToRemove {
-		fmt.Fprintf(promptOut, "Removing agent '%s' from Hub...\n", ref.Name)
+		_, _ = fmt.Fprintf(promptOut, "Removing agent '%s' from Hub...\n", ref.Name)
 		debugf("Deleting agent via project-scoped endpoint: name=%s, id=%s, projectID=%s",
 			ref.Name, ref.ID, hubCtx.ProjectID)
 		// Use project-scoped endpoint which supports both ID and slug lookup
@@ -1019,7 +1019,7 @@ func ExecuteSync(ctx context.Context, hubCtx *HubContext, result *SyncResult, au
 	}
 
 	if len(result.ToRegister) > 0 || len(result.ToRemove) > 0 {
-		fmt.Fprintln(promptOut, "Agent synchronization complete.")
+		_, _ = fmt.Fprintln(promptOut, "Agent synchronization complete.")
 	}
 
 	// Update lastSyncedAt watermark after successful sync
@@ -1345,37 +1345,37 @@ func registerProject(ctx context.Context, hubCtx *HubContext, projectName string
 	// These are broker-level credentials, not project-specific.
 	globalDir, globalErr := config.GetGlobalDir()
 	if globalErr != nil {
-		fmt.Fprintf(promptOut, "Warning: failed to get global directory: %v\n", globalErr)
+		_, _ = fmt.Fprintf(promptOut, "Warning: failed to get global directory: %v\n", globalErr)
 	} else {
 		if resp.BrokerToken != "" {
 			if err := config.UpdateSetting(globalDir, "hub.brokerToken", resp.BrokerToken, true); err != nil {
-				fmt.Fprintf(promptOut, "Warning: failed to save broker token: %v\n", err)
+				_, _ = fmt.Fprintf(promptOut, "Warning: failed to save broker token: %v\n", err)
 			}
 		}
 		if resp.Broker != nil && resp.Broker.ID != "" {
 			if err := config.UpdateSetting(globalDir, "hub.brokerId", resp.Broker.ID, true); err != nil {
-				fmt.Fprintf(promptOut, "Warning: failed to save broker ID: %v\n", err)
+				_, _ = fmt.Fprintf(promptOut, "Warning: failed to save broker ID: %v\n", err)
 			}
 		}
 	}
 
 	if resp.Created {
-		fmt.Fprintf(promptOut, "Created new project: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
+		_, _ = fmt.Fprintf(promptOut, "Created new project: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
 	} else {
-		fmt.Fprintf(promptOut, "Linked to existing project: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
+		_, _ = fmt.Fprintf(promptOut, "Linked to existing project: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
 	}
 	// Store the hub project ID separately if it differs from the local project_id.
 	// Don't overwrite project_id — changing it shifts the external config
 	// directory, orphaning settings.
 	if resp.Project.ID != hubCtx.ProjectID {
 		if err := config.UpdateSetting(hubCtx.ProjectPath, "hub.projectId", resp.Project.ID, isGlobal); err != nil {
-			fmt.Fprintf(promptOut, "Warning: failed to save hub project ID: %v\n", err)
+			_, _ = fmt.Fprintf(promptOut, "Warning: failed to save hub project ID: %v\n", err)
 		} else {
 			hubCtx.ProjectID = resp.Project.ID
 		}
 	}
 	if resp.Broker != nil {
-		fmt.Fprintf(promptOut, "Broker registered: %s (ID: %s)\n", resp.Broker.Name, resp.Broker.ID)
+		_, _ = fmt.Fprintf(promptOut, "Broker registered: %s (ID: %s)\n", resp.Broker.Name, resp.Broker.ID)
 	}
 
 	return nil

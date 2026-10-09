@@ -174,8 +174,8 @@ func TestRunHubProjectsDelete_ConfirmationUnchanged(t *testing.T) {
 		assert.Empty(t, hub.deletes)
 	})
 
-	// Stdin under go test is not a terminal, so the prompt is not read and
-	// confirmation is given the non-interactive way, with --yes.
+	// Without a terminal the prompt is not read, so acceptance is given the
+	// non-interactive way, with --yes.
 	t.Run("accepted", func(t *testing.T) {
 		hub := setupProjectsDeleteTest(t, true)
 
