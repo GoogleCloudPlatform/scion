@@ -5288,9 +5288,11 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_InjectsWorkspaceMode(t *testing.
 			wantGit:            true,
 		},
 		{
-			// When no workspace mode label is set, the hub does not inject
-			// SCION_WORKSPACE_MODE. The broker applies the shared-plain default
-			// in buildStartContext when the key is absent from resolvedEnv.
+			// A non-git project with no workspace mode label: the hub does
+			// not inject SCION_WORKSPACE_MODE (an unlabelled git project gets
+			// clone-per-agent, see the case above). The broker applies the
+			// shared-plain default in buildStartContext when the key is
+			// absent from resolvedEnv.
 			name:               "empty label: hub does not inject mode",
 			workspaceModeLabel: "",
 			wantMode:           "", // absent from hub-injected resolvedEnv

@@ -820,9 +820,9 @@ func ResolveWorkspaceSharingMode(label string) WorkspaceSharingMode {
 
 // ResolveProjectSharingMode is the single source of truth mapping a project's
 // workspace-mode label and git-ness to the canonical WorkspaceSharingMode.
-// For git projects, "shared" (or "shared-plain") resolves to
-// SharingModeSharedPlain, "worktree-per-agent" to SharingModeWorktreePerAgent,
-// and everything else, including no label, an unknown value and a raw
+// For git projects, "shared" resolves to SharingModeSharedPlain,
+// "worktree-per-agent" to SharingModeWorktreePerAgent, and everything else,
+// including no label, an unknown value (even "shared-plain") and a raw
 // "empty-per-agent" (a non-git-only mode), to SharingModeClonePerAgent: agent
 // create gives such projects a per-agent git clone (only the "shared" label
 // selects the shared checkout, see Project.IsSharedWorkspace). For non-git
@@ -831,7 +831,7 @@ func ResolveWorkspaceSharingMode(label string) WorkspaceSharingMode {
 func ResolveProjectSharingMode(label string, isGit bool) WorkspaceSharingMode {
 	if isGit {
 		switch label {
-		case WorkspaceModeShared, string(SharingModeSharedPlain):
+		case WorkspaceModeShared:
 			return SharingModeSharedPlain
 		case WorkspaceModeWorktreePerAgent:
 			return SharingModeWorktreePerAgent

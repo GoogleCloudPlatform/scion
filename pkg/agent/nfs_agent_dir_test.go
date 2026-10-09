@@ -220,6 +220,46 @@ func TestStartNFSAgentDir_ExistingAgentLayoutIsSticky(t *testing.T) {
 	})
 }
 
+// A provision-only create (scion create) followed by a plain start: the
+// create writes the record, so the start gives the new agent its own
+// directory, both for an unlabelled git project (canonical clone-per-agent)
+// and for a labelled per-agent one.
+func TestStartNFSAgentDir_ProvisionThenStart(t *testing.T) {
+	for _, mode := range []string{"clone-per-agent", "per-agent"} {
+		t.Run(mode, func(t *testing.T) {
+			mountRoot := filepath.Join(t.TempDir(), "nfs")
+			require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share-1"), 0o755))
+			f := newSharedDirStorageRunFixture(t)
+			f.writeGlobalSettings(t, fmt.Sprintf(nfsWorkspaceStartYAML, mountRoot))
+			var cfg runtime.RunConfig
+			mgr := NewManager(&runtime.MockRuntime{
+				NameFunc: func() string { return "kubernetes" },
+				RunFunc: func(ctx context.Context, rc runtime.RunConfig) (string, error) {
+					cfg = rc
+					return "mock-id", nil
+				},
+			})
+			env := func() map[string]string {
+				return map[string]string{"SCION_PROJECT_ID": testNFSWorkspaceProjectID, "SCION_WORKSPACE_MODE": mode}
+			}
+			opts := api.StartOptions{Name: "test-agent", ProjectPath: f.projectScionDir, NoAuth: true, GitClone: testGitClone}
+			provisionOpts := opts
+			provisionOpts.Env = env()
+			provisionOpts.FreshProvision = true
+			_, err := mgr.Provision(context.Background(), provisionOpts)
+			require.NoError(t, err)
+			assert.FileExists(t, filepath.Join(f.projectScionDir, "agents", "test-agent", nfsAgentDirRecordFile))
+
+			opts.Env = env()
+			_, err = mgr.Start(context.Background(), opts)
+			require.NoError(t, err)
+			assert.Equal(t, "test-agent", cfg.NFSAgentDirName)
+			assert.NotContains(t, cfg.Env, "SCION_WORKSPACE_MODE=shared-plain")
+			assert.DirExists(t, nfsTestAgentDir(mountRoot, "test-agent"))
+		})
+	}
+}
+
 func TestNFSKeepSharedCheckout(t *testing.T) {
 	mountRoot := filepath.Join(t.TempDir(), "nfs")
 	resolved := resolveTestNFSWorkspace(t, mountRoot)

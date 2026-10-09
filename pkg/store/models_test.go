@@ -263,7 +263,9 @@ func TestResolveProjectSharingMode(t *testing.T) {
 		// does (ptone/scion#3998).
 		{"", true, SharingModeClonePerAgent},
 		{"shared", true, SharingModeSharedPlain},
-		{"shared-plain", true, SharingModeSharedPlain},
+		// Only the "shared" label selects the shared checkout, as in
+		// Project.IsSharedWorkspace.
+		{"shared-plain", true, SharingModeClonePerAgent},
 		{"per-agent", true, SharingModeClonePerAgent},
 		{"clone-per-agent", true, SharingModeClonePerAgent},
 		{"worktree-per-agent", true, SharingModeWorktreePerAgent},

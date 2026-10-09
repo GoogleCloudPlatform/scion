@@ -149,8 +149,11 @@ func (m *AgentManager) removeNFSAgentWorkspace(ctx context.Context, projectPath,
 
 // nfsAgentDirRecordFile is the per-agent file, in the agent's broker
 // directory next to home-storage.json, that records that the agent uses its
-// own NFS agent directory (agents/<agent name>). It is removed with that
-// directory when the agent is deleted.
+// own NFS agent directory (agents/<agent name>) whenever its mode selects
+// one. Every create writes it (Provision and Start with FreshProvision,
+// whatever the mode or runtime), so only an agent created before
+// ptone/scion#3998 can lack it; a start that uses agents/<agent name> also
+// writes it. It is removed with that directory when the agent is deleted.
 const nfsAgentDirRecordFile = "nfs-agent-dir.json"
 
 // nfsKeepSharedCheckout reports whether an agent that nfsAgentDirSelection
@@ -158,7 +161,8 @@ const nfsAgentDirRecordFile = "nfs-agent-dir.json"
 // checkout instead, and why. That holds only for an agent created before
 // unlabelled git projects were dispatched as clone-per-agent
 // (ptone/scion#3998), which worked in the shared checkout: a start that is
-// not a create, with no record in agentDir, on a broker with the export
+// not a create, with no record in agentDir (every create since writes one,
+// including a provision-only create), on a broker with the export
 // mounted, where the agent's directory does not exist. A create, a record,
 // an existing directory, an unmounted export or any other stat error all
 // keep the agent directory. The record is broker-local, so on another

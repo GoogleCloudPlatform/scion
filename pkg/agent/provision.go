@@ -845,6 +845,11 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 	if err := m.finishProvision(opts, agentDir, agentHome, cfg); err != nil {
 		return cfg, err
 	}
+	// A create: the later start must not mistake this agent for one that
+	// predates per-agent NFS directories (see nfsKeepSharedCheckout).
+	if opts.FreshProvision {
+		recordNFSAgentDir(agentDir, opts.Name)
+	}
 
 	// A provision-only create carries no run (the hub mints runs only for
 	// starts), yet it may reuse, or newly provision, files under a name an

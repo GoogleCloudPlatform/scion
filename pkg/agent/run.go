@@ -283,6 +283,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if err != nil {
 		return nil, err
 	}
+	if opts.FreshProvision {
+		recordNFSAgentDir(agentDir, opts.Name)
+	}
 	// Empty-per-agent (design #2703): the request's mode, or the mode
 	// persisted at provision, so a start that lost it (e.g. a dropped or
 	// undecodable request body) still gets the private workspace, no repo
