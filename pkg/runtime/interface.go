@@ -135,6 +135,13 @@ type RunConfig struct {
 	// config.DefaultWorkspaceSubPathRoot. The Cloud Run runtime builds its
 	// NFS export and host paths from it (via config.ResolveSubPathRoot).
 	NFSSubPathRoot string
+	// NFSShareServer and NFSShareExport are the server and export of
+	// workspace_storage.nfs.shares[0], set when WorkspaceBackendName is
+	// "nfs". The broker provisions the workspace on that share, so the Cloud
+	// Run runtime mounts the same server and export (see
+	// resolveCloudRunNFSTarget).
+	NFSShareServer string
+	NFSShareExport string
 	// NFSWorkspacePreCreated is true when, before the pod was built, the
 	// broker either created the NFSSubPath directory (and the directory of
 	// each shared dir served from the same claim) on its own mount of the

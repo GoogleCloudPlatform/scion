@@ -1803,6 +1803,8 @@ authDone:
 	nfsPVClaimName := ""
 	nfsSubPath := ""
 	nfsSubPathRoot := ""
+	nfsShareServer := ""
+	nfsShareExport := ""
 	nfsStorageClass := ""
 	nfsWorkspacePreCreated := false
 	nfsWorktreeName := ""
@@ -1953,6 +1955,10 @@ authDone:
 				nfsUID = settings.Server.WorkspaceStorage.NFS.UID
 				nfsGID = settings.Server.WorkspaceStorage.NFS.GID
 				nfsStorageClass = settings.Server.WorkspaceStorage.NFS.StorageClass
+				if shares := settings.Server.WorkspaceStorage.NFS.Shares; len(shares) > 0 {
+					nfsShareServer = shares[0].Server
+					nfsShareExport = shares[0].Export
+				}
 			}
 		}
 	}
@@ -2105,6 +2111,8 @@ authDone:
 		NFSPVClaimName:       nfsPVClaimName,
 		NFSSubPath:           nfsSubPath,
 		NFSSubPathRoot:       nfsSubPathRoot,
+		NFSShareServer:       nfsShareServer,
+		NFSShareExport:       nfsShareExport,
 		NFSStorageClass:      nfsStorageClass,
 		// Lets the provisioning init container treat a failed chown as a
 		// warning for a workspace directory the broker created.
