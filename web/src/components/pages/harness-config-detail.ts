@@ -41,6 +41,46 @@ import '../shared/hash-display.js';
 import { showToast } from '../../utils/toast.js';
 import { describeSourceUrl } from '../../shared/source-url.js';
 
+/** Image availability from GET /api/v1/harness-configs/{id}/image-status. */
+interface HarnessConfigImageStatus {
+  image?: string;
+  registry?: {
+    image: string;
+    exists: boolean;
+    hash: string;
+    checked_at: string;
+  };
+  brokers?: Array<{
+    broker_id: string;
+    broker_name: string;
+    reachable: boolean;
+    unsupported?: boolean;
+    local_short?: { exists: boolean; hash: string };
+    local_long?: { exists: boolean; hash: string };
+    newer_in_registry?: boolean;
+    resolved_image?: string;
+    resolution_source?: string;
+  }>;
+  proxy_brokers?: Array<{
+    broker_id: string;
+    broker_name: string;
+    runtime: string;
+  }>;
+}
+
+/** Result of POST /api/v1/harness-configs/{id}/reimport. */
+interface HarnessConfigReimportResult {
+  count?: number;
+  harnessConfigs?: HarnessConfig[];
+  failed?: Array<{ name: string; reason: string }>;
+}
+
+/** The fields of a maintenance run that the image build polling reads. */
+interface ImageBuildRun {
+  log?: string;
+  status?: string;
+}
+
 @customElement('scion-page-harness-config-detail')
 export class ScionPageHarnessConfigDetail extends LitElement {
   @property({ type: Object })
@@ -122,31 +162,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
   private deleteError = '';
 
   @state()
-  private imageStatus: {
-    image?: string;
-    registry?: {
-      image: string;
-      exists: boolean;
-      hash: string;
-      checked_at: string;
-    };
-    brokers?: Array<{
-      broker_id: string;
-      broker_name: string;
-      reachable: boolean;
-      unsupported?: boolean;
-      local_short?: { exists: boolean; hash: string };
-      local_long?: { exists: boolean; hash: string };
-      newer_in_registry?: boolean;
-      resolved_image?: string;
-      resolution_source?: string;
-    }>;
-    proxy_brokers?: Array<{
-      broker_id: string;
-      broker_name: string;
-      runtime: string;
-    }>;
-  } | null = null;
+  private imageStatus: HarnessConfigImageStatus | null = null;
 
   @state()
   private expandedBrokers: Set<string> = new Set();
@@ -1181,7 +1197,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
     try {
       const resp = await apiFetch(`/api/v1/harness-configs/${this.harnessConfigId}/image-status`);
       if (resp.ok) {
-        this.imageStatus = await resp.json();
+        this.imageStatus = (await resp.json()) as HarnessConfigImageStatus;
       } else {
         const msg = await extractApiError(resp, `HTTP ${resp.status}`);
         showToast(msg);
@@ -1248,7 +1264,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         return;
       }
 
-      const result = await response.json();
+      const result = (await response.json()) as HarnessConfigReimportResult | null;
       const count = result?.count ?? result?.harnessConfigs?.length ?? 0;
       const failed: Array<{ name: string; reason: string }> = result?.failed ?? [];
 
@@ -1347,7 +1363,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         return;
       }
 
-      const result = await response.json();
+      const result = (await response.json()) as { runId?: string } | null;
       if (!result?.runId) {
         this.buildError = 'Build started but no run ID was returned';
         this.buildRunning = false;
@@ -1397,7 +1413,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
       }
 
       this.buildPollErrors = 0;
-      const run = await resp.json();
+      const run = (await resp.json()) as ImageBuildRun;
       this.buildLog = run.log ?? '';
       this.buildStatus = run.status ?? '';
       void this.updateComplete.then(() => this.scrollBuildLog());

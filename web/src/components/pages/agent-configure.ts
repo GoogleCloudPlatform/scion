@@ -210,6 +210,9 @@ interface AgentWithConfig extends Omit<Agent, 'appliedConfig'> {
   appliedConfig?: AppliedConfig;
 }
 
+/** The model choices offered by the configure form's model select. */
+type ModelSelection = '' | 'small' | 'medium' | 'large' | 'extra-large' | 'other';
+
 @customElement('scion-page-agent-configure')
 export class ScionPageAgentConfigure extends LitElement {
   @state() private agent: AgentWithConfig | null = null;
@@ -222,7 +225,7 @@ export class ScionPageAgentConfigure extends LitElement {
 
   // Form fields — General
   @state() private model = '';
-  @state() private modelSelection: '' | 'small' | 'medium' | 'large' | 'extra-large' | 'other' = '';
+  @state() private modelSelection: ModelSelection = '';
   @state() private customModelId = '';
   @state() private thinkingLevel: number | null = null;
   @state() private image = '';
@@ -1513,9 +1516,9 @@ export class ScionPageAgentConfigure extends LitElement {
           placeholder="use harness default"
           .value=${this.modelSelection}
           clearable
-          @sl-change=${(e: any) => {
-            this.modelSelection = e.target.value;
-            if (e.target.value !== 'other') this.customModelId = '';
+          @sl-change=${(e: Event) => {
+            this.modelSelection = (e.target as HTMLSelectElement).value as ModelSelection;
+            if ((e.target as HTMLSelectElement).value !== 'other') this.customModelId = '';
           }}
         >
           <sl-option value="small">Small</sl-option>
@@ -1531,8 +1534,8 @@ export class ScionPageAgentConfigure extends LitElement {
                 label="Model ID"
                 placeholder="e.g. claude-opus-4-8"
                 .value=${this.customModelId}
-                @sl-input=${(e: any) => {
-                  this.customModelId = e.target.value;
+                @sl-input=${(e: Event) => {
+                  this.customModelId = (e.target as HTMLInputElement).value;
                 }}
                 style="margin-top: 0.75rem"
               >
@@ -1558,14 +1561,15 @@ export class ScionPageAgentConfigure extends LitElement {
             .value=${this.thinkingLevel ?? 50}
             ?disabled=${this.thinkingLevel === null}
             style="flex:1"
-            @sl-input=${(e: any) => {
-              this.thinkingLevel = e.target.value;
+            @sl-input=${(e: Event) => {
+              // sl-range reports its value as a number.
+              this.thinkingLevel = (e.target as unknown as { value: number }).value;
             }}
           ></sl-range>
           <sl-checkbox
             ?checked=${this.thinkingLevel !== null}
-            @sl-change=${(e: any) => {
-              this.thinkingLevel = e.target.checked ? 50 : null;
+            @sl-change=${(e: Event) => {
+              this.thinkingLevel = (e.target as HTMLInputElement).checked ? 50 : null;
             }}
             >Set</sl-checkbox
           >

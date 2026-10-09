@@ -1544,7 +1544,7 @@ export class ScionPageAgentCreate extends LitElement {
             requestAnimationFrame(() => {
               const tabGroup = this.shadowRoot?.querySelector('sl-tab-group');
               if (tabGroup) {
-                (tabGroup as any).show?.('general');
+                (tabGroup as Element & { show?: (panel: string) => void }).show?.('general');
               }
             });
           }}

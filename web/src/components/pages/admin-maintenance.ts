@@ -107,6 +107,19 @@ interface UpdateAvailableResponse {
   };
 }
 
+/** Maintenance mode state from GET and PUT /api/v1/admin/maintenance. */
+interface MaintenanceStateResponse {
+  enabled: boolean;
+  break_glass?: boolean;
+}
+
+/** Result of POST /api/v1/admin/agents/reset-auth-all. */
+interface ResetAuthAllResult {
+  succeeded: { id: string; name: string }[];
+  failed: { id: string; name: string; error: string }[];
+  total: number;
+}
+
 @customElement('scion-page-admin-maintenance')
 export class ScionPageAdminMaintenance extends LitElement {
   /** Re-renders absolute times when the display timezone changes. */
@@ -181,11 +194,7 @@ export class ScionPageAdminMaintenance extends LitElement {
 
   /** Result of the last bulk reset-auth request. */
   @state()
-  private resetAuthAllResult: {
-    succeeded: { id: string; name: string }[];
-    failed: { id: string; name: string; error: string }[];
-    total: number;
-  } | null = null;
+  private resetAuthAllResult: ResetAuthAllResult | null = null;
 
   /** Deployment tier: "binary" or "source" (default). */
   @state()
@@ -711,7 +720,7 @@ export class ScionPageAdminMaintenance extends LitElement {
     try {
       const res = await apiFetch('/api/v1/admin/maintenance');
       if (res.ok) {
-        const data = await res.json();
+        const data = (await res.json()) as MaintenanceStateResponse;
         this.maintenanceEnabled = data.enabled;
         this.maintenanceBreakGlass = data.break_glass === true;
       }
@@ -729,7 +738,7 @@ export class ScionPageAdminMaintenance extends LitElement {
         body: JSON.stringify({ enabled: newValue }),
       });
       if (res.ok) {
-        const data = await res.json();
+        const data = (await res.json()) as MaintenanceStateResponse;
         this.maintenanceEnabled = data.enabled;
         this.maintenanceBreakGlass = data.break_glass === true;
       }
@@ -1232,7 +1241,7 @@ export class ScionPageAdminMaintenance extends LitElement {
         const errMsg = await extractApiError(response, `HTTP ${response.status}`);
         throw new Error(errMsg);
       }
-      this.resetAuthAllResult = await response.json();
+      this.resetAuthAllResult = (await response.json()) as ResetAuthAllResult;
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Failed to reset auth for all agents');
     } finally {
