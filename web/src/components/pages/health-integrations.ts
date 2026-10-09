@@ -21,6 +21,10 @@
  * integrations list. The section renders nothing when there are no
  * plugins. Plugin messages and details are not part of the summary; the
  * Integrations admin page has them.
+ *
+ * When the summary carries no integration identity (integrations_detail
+ * false, ptone/scion#3595), the section shows only the server's aggregate
+ * counts: no names, rows or links.
  */
 
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
@@ -37,6 +41,38 @@ export interface HealthSummaryIntegration {
   version: string;
   /** Fixed server reason, e.g. "not managed by this hub instance". */
   reason?: string;
+}
+
+/** Non-identifying integration aggregate, returned to every caller. */
+export interface HealthSummaryIntegrationCounts {
+  total: number;
+  healthy: number;
+  degraded: number;
+  unhealthy: number;
+  unknown: number;
+}
+
+/** The aggregate figures in display order, with their tones. */
+const COUNT_FIELDS: ReadonlyArray<{
+  key: Exclude<keyof HealthSummaryIntegrationCounts, 'total'>;
+  tone: 'ok' | 'warn' | 'bad' | 'neutral';
+}> = [
+  { key: 'healthy', tone: 'ok' },
+  { key: 'degraded', tone: 'warn' },
+  { key: 'unhealthy', tone: 'bad' },
+  { key: 'unknown', tone: 'neutral' },
+];
+
+/**
+ * Whether the Integrations section has anything to show: the rows when the
+ * summary carries integration identity, otherwise the aggregate counts.
+ */
+export function integrationsSectionVisible(
+  detail: boolean,
+  items: readonly HealthSummaryIntegration[] | null | undefined,
+  counts: HealthSummaryIntegrationCounts | null | undefined
+): boolean {
+  return detail ? (items?.length ?? 0) > 0 : (counts?.total ?? 0) > 0;
 }
 
 /** The Integrations admin page. */
@@ -59,6 +95,14 @@ export function integrationHealthTone(health: string): 'ok' | 'warn' | 'bad' | '
 export class ScionHealthIntegrations extends LitElement {
   @property({ attribute: false })
   integrations: HealthSummaryIntegration[] | null = null;
+
+  /** The summary's integrations_detail: false means aggregate counts only. */
+  @property({ attribute: false })
+  detail = true;
+
+  /** The summary's integration_counts. */
+  @property({ attribute: false })
+  counts: HealthSummaryIntegrationCounts | null = null;
 
   static override styles = css`
     :host {
@@ -169,6 +213,15 @@ export class ScionHealthIntegrations extends LitElement {
       font-weight: 600;
     }
 
+    .counts {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.875rem;
+      color: var(--scion-text);
+    }
+
     .tone-ok {
       background: var(--scion-badge-success-bg);
       color: var(--scion-badge-success-text);
@@ -191,8 +244,9 @@ export class ScionHealthIntegrations extends LitElement {
   `;
 
   override render(): TemplateResult | typeof nothing {
+    if (!integrationsSectionVisible(this.detail, this.integrations, this.counts)) return nothing;
+    if (!this.detail) return this.renderCounts();
     const items = this.integrations ?? [];
-    if (items.length === 0) return nothing;
     return html`
       <section class="card" aria-labelledby="integrations-title">
         <div class="card-head">
@@ -214,6 +268,27 @@ export class ScionHealthIntegrations extends LitElement {
               ${items.map((it) => this.renderRow(it))}
             </tbody>
           </table>
+        </div>
+      </section>
+    `;
+  }
+
+  private renderCounts(): TemplateResult | typeof nothing {
+    const c = this.counts;
+    if (!c) return nothing;
+    return html`
+      <section class="card" aria-labelledby="integrations-title">
+        <div class="card-head">
+          <span class="card-title" id="integrations-title">Integrations</span>
+        </div>
+        <div class="counts" data-role="counts">
+          <span class="total">${c.total} ${c.total === 1 ? 'integration' : 'integrations'}</span>
+          ${COUNT_FIELDS.filter((f) => (c[f.key] ?? 0) > 0).map(
+            (f) =>
+              html`<span class="pill tone-${f.tone}" data-count=${f.key}
+                >${c[f.key]} ${f.key}</span
+              >`
+          )}
         </div>
       </section>
     `;

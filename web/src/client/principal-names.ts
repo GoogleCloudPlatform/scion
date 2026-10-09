@@ -76,3 +76,34 @@ export function principalLabel(kind: string, ref: string, name: string, me?: str
   const shown = name || shortId(ref);
   return kind === 'agent' ? `${shown} (agent)` : shown;
 }
+
+/**
+ * The display name of a project: its name or slug, or '' when it cannot be
+ * looked up (the caller may not see it, or it was deleted). Each project is
+ * fetched at most once.
+ */
+export function projectName(id: string): Promise<string> {
+  if (!id) return Promise.resolve('');
+  const key = `project:${id}`;
+  let p = cache.get(key);
+  if (!p) {
+    p = (async (): Promise<string> => {
+      try {
+        const res = await apiFetch(`/api/v1/projects/${encodeURIComponent(id)}`, {
+          suppressAccessDeniedToast: true,
+        });
+        if (res.ok) {
+          const body = (await res.json()) as { name?: string; slug?: string };
+          return body.name || body.slug || '';
+        }
+        if (res.status !== 403 && res.status !== 404) cache.delete(key);
+        return '';
+      } catch {
+        cache.delete(key);
+        return '';
+      }
+    })();
+    cache.set(key, p);
+  }
+  return p;
+}

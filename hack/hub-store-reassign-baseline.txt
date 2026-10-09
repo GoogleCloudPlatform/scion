@@ -1,0 +1,132 @@
+# Baseline for hack/check-hub-store-reassign.sh (ptone/scion#3435).
+#
+#   <file> | <count of direct srv.store reassignments, comment lines excluded>
+#
+# This is a ratchet: counts may only go down. Do not raise a count or add a
+# file to make a new reassignment pass; use installStoreFault /
+# testServerWithStoreFault (pkg/hub/store_fault_helpers_test.go) instead.
+# When a change migrates call sites, lower the count (or delete the entry)
+# in the same change, or the gate fails as stale.
+#
+# store_fault_helpers_test.go is the fault-switch helper itself. Its count
+# of 2 is the one real assignment (installing the wrapper before setup runs)
+# plus a t.Fatalf message string that the textual match also counts.
+#
+pkg/hub/agent_compact_view_test.go | 2
+pkg/hub/agent_create_chain_ceiling_test.go | 2
+pkg/hub/agent_create_stage_test.go | 3
+pkg/hub/agent_create_tx_test.go | 7
+pkg/hub/agent_created_publish_test.go | 1
+pkg/hub/agent_delete_engine_deferred_test.go | 3
+pkg/hub/agent_delete_engine_routed_test.go | 6
+pkg/hub/agent_delete_fence_test.go | 1
+pkg/hub/agent_delete_guards_test.go | 5
+pkg/hub/agent_list_readable_test.go | 4
+pkg/hub/agent_mention_fanout_test.go | 6
+pkg/hub/agent_sorted_gap_test.go | 2
+pkg/hub/agent_sorted_global_list_cursor_test.go | 1
+pkg/hub/agent_sorted_project_list_complete_budget_test.go | 1
+pkg/hub/agent_standing_test.go | 2
+pkg/hub/auth_me_timezone_test.go | 1
+pkg/hub/authorize_agentkeys_route_test.go | 5
+pkg/hub/authz_relationship_project_access_federated_test.go | 2
+pkg/hub/authz_relationship_project_access_test.go | 2
+pkg/hub/auto_expose_patch_test.go | 1
+pkg/hub/broker_health_test.go | 4
+pkg/hub/broker_heartbeat_reconcile_test.go | 2
+pkg/hub/broker_profile_attach_test.go | 2
+pkg/hub/broker_provider_selfheal_test.go | 3
+pkg/hub/broker_quota_dispatch_test.go | 2
+# Temporary exception: added after the guard by GoogleCloudPlatform/scion#2943; migrate to installStoreFault and lower (ptone/scion#4068).
+pkg/hub/broker_scoped_reservations_test.go | 1
+pkg/hub/capabilities_test.go | 1
+pkg/hub/conduit_authz_recheck_test.go | 4
+pkg/hub/create_bootstrap_managed_delete_won_test.go | 3
+pkg/hub/create_deleted_during_create_test.go | 1
+pkg/hub/deletion_redact_test.go | 1
+pkg/hub/e2b_initiator_attribution_test.go | 4
+pkg/hub/ephemeral_workspace_test.go | 1
+pkg/hub/execute_agent_keys_test.go | 6
+pkg/hub/fix_2087_create_cleanup_detached_test.go | 2
+pkg/hub/fix_3471_dm_wake_detached_test.go | 2
+pkg/hub/fix_3557_managed_create_unrecorded_test.go | 12
+# Temporary exception: added after the guard by GoogleCloudPlatform/scion#2981; migrate to installStoreFault and lower (ptone/scion#4068).
+pkg/hub/fix_3730_workspace_storage_path_test.go | 10
+pkg/hub/fix_3746_managed_create_conflict_retry_test.go | 10
+pkg/hub/gcp_iam_settings_test.go | 2
+pkg/hub/gcs_link_test.go | 3
+pkg/hub/grant_audit_tx_test.go | 6
+pkg/hub/group_role_binding_token_test.go | 2
+pkg/hub/handlers_access_constraint_audit_history_test.go | 2
+pkg/hub/handlers_agent_create_helpers_test.go | 1
+pkg/hub/handlers_agent_reincarnate_test.go | 9
+pkg/hub/handlers_agent_test.go | 4
+pkg/hub/handlers_agents_edge_test.go | 2
+pkg/hub/handlers_auth_test.go | 5
+pkg/hub/handlers_broker_inbound_group_user_participant_test.go | 3
+pkg/hub/handlers_chat_dms_batch_test.go | 2
+pkg/hub/handlers_chat_mention_dot_test.go | 1
+pkg/hub/handlers_chat_v2_no_recipient_test.go | 5
+pkg/hub/handlers_chat_v2_space_members_authz_test.go | 1
+pkg/hub/handlers_chat_v2_space_members_paginate_test.go | 5
+pkg/hub/handlers_chat_v2_test.go | 6
+pkg/hub/handlers_chat_v2_unreachable_test.go | 2
+pkg/hub/handlers_chat_v2_wake_test.go | 1
+pkg/hub/handlers_conversations_test.go | 1
+pkg/hub/handlers_conversations_topic_test.go | 2
+pkg/hub/handlers_gcp_identity_mint_authz_test.go | 2
+pkg/hub/handlers_group_participants_test.go | 1
+pkg/hub/handlers_groups_member_lookup_error_test.go | 1
+pkg/hub/handlers_groups_parent_authz_test.go | 5
+pkg/hub/handlers_health_summary_dispatch_test.go | 2
+pkg/hub/handlers_health_summary_test.go | 5
+pkg/hub/handlers_health_test.go | 2
+pkg/hub/handlers_project_provider_localpath_test.go | 1
+pkg/hub/handlers_project_providers_capacity_test.go | 2
+pkg/hub/handlers_runtime_brokers_capacity_test.go | 1
+pkg/hub/handlers_runtime_brokers_test.go | 8
+pkg/hub/handlers_user_terminal_workspace_test.go | 4
+pkg/hub/health_summary_integrations_test.go | 2
+pkg/hub/hub_agent_defaults_ladder_test.go | 1
+pkg/hub/hub_gcp_identity_default_settings_test.go | 2
+pkg/hub/launch_reaper_handler_test.go | 4
+pkg/hub/lifecycle_landed_delete_test.go | 3
+pkg/hub/lifecycle_post_reload_delete_test.go | 5
+pkg/hub/material_precheck_test.go | 2
+pkg/hub/material_user_scope_test.go | 1
+pkg/hub/material_value_audit_test.go | 2
+# Temporary exception: added after the guard by GoogleCloudPlatform/scion#2973; migrate to installStoreFault and lower (ptone/scion#4068).
+pkg/hub/membership_loss_test.go | 10
+pkg/hub/offload_integration_test.go | 1
+pkg/hub/offload_route_authz_test.go | 4
+pkg/hub/platform_skills_seed_test.go | 1
+pkg/hub/project_clone_default_broker_test.go | 1
+pkg/hub/project_owner_grant_test.go | 2
+pkg/hub/project_profile_default_sa_test.go | 2
+pkg/hub/project_settings_handlers_test.go | 1
+pkg/hub/provider_localpath_test.go | 1
+pkg/hub/provisioned_start_test.go | 2
+pkg/hub/pty_conduit_test.go | 2
+pkg/hub/publish_guard_test.go | 4
+pkg/hub/queued_stop_delete_test.go | 1
+pkg/hub/queued_stop_test.go | 6
+pkg/hub/reincarnate_keep_edge_test.go | 1
+pkg/hub/reincarnate_move_worker_test.go | 7
+pkg/hub/reincarnation_gate_r1_test.go | 1
+pkg/hub/reincarnation_gate_r2_test.go | 3
+pkg/hub/reincarnation_gate_r3_test.go | 1
+pkg/hub/reincarnation_gate_r9_test.go | 2
+pkg/hub/rs2_r1_fixes_test.go | 6
+pkg/hub/run_id_stop_miss_test.go | 1
+pkg/hub/run_intent_delete_claim_test.go | 5
+pkg/hub/sa_unavailable_message_test.go | 2
+pkg/hub/schedule_cron_test.go | 2
+pkg/hub/schedule_revision_authoring_test.go | 7
+pkg/hub/scheduled_authority_test.go | 3
+pkg/hub/scheduled_message_authority_test.go | 1
+pkg/hub/start_claim_reaper_test.go | 2
+pkg/hub/start_claim_test.go | 4
+pkg/hub/start_claim_wiring_test.go | 8
+pkg/hub/start_final_read_delete_won_test.go | 6
+pkg/hub/store_fault_helpers_test.go | 2
+pkg/hub/user_delete_data_test.go | 14
