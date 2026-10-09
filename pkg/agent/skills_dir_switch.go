@@ -65,7 +65,7 @@ func carryOverSkillsDir(agentHome, oldSkillsDir, newSkillsDir string) ([]string,
 		}
 		return nil, fmt.Errorf("open agent home: %w", err)
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 
 	// The source and every parent component of both directories must be
 	// real directories, not symbolic links.
@@ -175,7 +175,7 @@ func readRootDir(root *os.Root, rel string) ([]os.DirEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	entries, err := f.ReadDir(-1)
 	slices.SortFunc(entries, func(a, b os.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
 	return entries, err
@@ -236,7 +236,7 @@ func copyRootFile(root *os.Root, src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 	out, err := root.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, fi.Mode().Perm())
 	if err != nil {
 		return err
