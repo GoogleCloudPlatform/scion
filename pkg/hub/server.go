@@ -1491,8 +1491,7 @@ type Server struct {
 	userScopedDataSweepDone <-chan struct{}
 
 	// decisionAuditRouter preserves the in-memory decision emission seam.
-	decisionAuditRouter        *decisionAuditRouter
-	decisionAuditCloseDeferred atomic.Bool
+	decisionAuditRouter *decisionAuditRouter
 
 	// githubWebhookNoSecretWarnOnce ensures the "no webhook secret configured"
 	// rejection is logged at most once per process, so a hub being repeatedly
@@ -1973,12 +1972,11 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// A New that fails part-way must not leak what it already started: the
 	// link-service and preview cleanup loops, the decision router,
 	// the OIDC key loops. The caller gets no *Server to shut down, so tear
-	// it down here (ptone/scion#3641). Both calls are idempotent and
+	// it down here (ptone/scion#3641). Cleanup is idempotent and
 	// nil-safe on a partly built Server.
 	defer func() {
 		if retErr != nil {
 			_ = srv.CleanupResources(context.Background())
-			srv.CloseDecisionAudit(context.Background())
 		}
 	}()
 	// The startup-resolved hub name, which ApplySnapshot returns to when
@@ -2279,7 +2277,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	srv.authzService.mintDevAuthOverride = cfg.DevAuthToken != ""
 
 	// Wire decision audit emitter
-	auditEmitter := noopDecisionAuditEmitter{}
+	auditEmitter := inertDecisionAuditTarget
 	srv.decisionAuditRouter = newDecisionAuditRouter(auditEmitter, srv)
 	// With server.hub.perf_trace on, records pass through a counting
 	// decorator on their way to the same emitter (perftrace_audit.go).
@@ -3663,19 +3661,6 @@ func (s *Server) SetGCPTokenMetrics(m GCPTokenMetricsRecorder) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.gcpTokenMetrics = m
-}
-
-// DeferDecisionAuditClose leaves the router open until every HTTP listener drains.
-func (s *Server) DeferDecisionAuditClose() {
-	s.decisionAuditCloseDeferred.Store(true)
-}
-
-// CloseDecisionAudit closes the decision router after HTTP listeners drain.
-// Safe to call more than once.
-func (s *Server) CloseDecisionAudit(ctx context.Context) {
-	if s.decisionAuditRouter != nil {
-		_ = s.decisionAuditRouter.CloseNew(ctx)
-	}
 }
 
 // SetAgentRunScopeMetrics wires the agent token run-scope counter. It does
@@ -5609,8 +5594,7 @@ func (s *Server) Start(ctx context.Context) error {
 // listener to shut down. It is also safe to call more than once, or
 // together with CleanupResources, since CleanupResources is idempotent and
 // http.Server.Shutdown tolerates repeated calls. The order is:
-// CleanupResources, then the HTTP drain, then the decision router
-// close (skipped if DeferDecisionAuditClose was called).
+// CleanupResources, then the HTTP drain.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.RLock()
 	srv := s.httpServer
@@ -5631,10 +5615,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		cancel()
 	}
 
-	// Complete decision-router teardown after the HTTP drain.
-	if !s.decisionAuditCloseDeferred.Load() {
-		s.CloseDecisionAudit(ctx)
-	}
 	return err
 }
 
@@ -5643,8 +5623,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // where the Hub API is mounted on the WebServer and has no listener of its own.
 // It is also called internally by Shutdown, and is safe to call more than
 // once, including after Shutdown: the teardown below runs at most once.
-// It closes the NEW admission side; in combined mode, call
-// CloseDecisionAudit again after the WebServer's HTTP drain.
+// It closes the NEW admission side.
 func (s *Server) CleanupResources(ctx context.Context) error {
 	s.cleanupOnce.Do(func() {
 		if s.decisionAuditRouter != nil {

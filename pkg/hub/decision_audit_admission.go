@@ -714,7 +714,7 @@ func (r *decisionAuditRouter) inspect() decisionAuditRouterState {
 	return state
 }
 
-func (r *decisionAuditRouter) healthProjection() (string, string) {
+func (r *decisionAuditRouter) healthProjection() string {
 	r.gate.Lock()
 	fault := r.state.fault
 	r.gate.Unlock()
@@ -722,6 +722,5 @@ func (r *decisionAuditRouter) healthProjection() (string, string) {
 	if fault {
 		newHealth = decisionAuditFaultWarning
 	}
-	// The retired persistence writer has no health state.
-	return newHealth, "healthy"
+	return newHealth
 }

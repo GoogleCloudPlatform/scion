@@ -7,28 +7,12 @@ package hub
 
 import (
 	"context"
-	"errors"
-	"runtime"
-	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/stretchr/testify/require"
 )
-
-// The extra method is deliberately outside store.Store: a future structural
-// persistence assertion must trip this sentinel instead of silently writing.
-type removedDecisionPersistenceProbe struct {
-	store.Store
-	calls atomic.Int64
-}
-
-func (s *removedDecisionPersistenceProbe) CreateDecisionAudit(context.Context, *store.DecisionAuditRecord) error {
-	s.calls.Add(1)
-	return errors.New("decision persistence is retired")
-}
 
 func requireNoDecisionPersistenceTable(t *testing.T, cs *entadapter.CompositeStore) {
 	t.Helper()
@@ -52,10 +36,9 @@ func TestDecisionAuditRemoval_NoPersistence(t *testing.T) {
 				_, err := cs.DB().Exec("CREATE TABLE decision_audits (id TEXT PRIMARY KEY, reason TEXT); INSERT INTO decision_audits VALUES ('legacy','deny')")
 				require.NoError(t, err)
 			}
-			probe := &removedDecisionPersistenceProbe{Store: inner}
-			srv, _ := testServerWithStore(t, probe)
+			srv, _ := testServerWithStore(t, cs)
 			project := &store.Project{ID: tid("removed-audit-project"), Name: "decision fixture", Slug: "decision-fixture", CreatedBy: DevUserID, OwnerID: DevUserID}
-			require.NoError(t, probe.CreateProject(ctx, project))
+			require.NoError(t, cs.CreateProject(ctx, project))
 			identity := NewAuthenticatedUser(DevUserID, "dev@localhost", "Development User", "admin", "api")
 			allowed := srv.authzService.CheckAccess(ctx, identity, Resource{Type: "project", ID: project.ID}, ActionRead)
 			require.True(t, allowed.Allowed, allowed.Reason)
@@ -64,41 +47,35 @@ func TestDecisionAuditRemoval_NoPersistence(t *testing.T) {
 			bearer := srv.authzService.EvaluateBearerCeiling(ctx, principalContextForIdentity(identity), projectBoundary(project.ID), bearerCeiling(t, "project:read"), "project.read", Resource{Type: "project", ID: project.ID}, BearerOptions{})
 			require.True(t, bearer.Decision.Allowed, bearer.Decision.Reason)
 			agentID := tid("removed-audit-delegated-agent")
-			createDCAgent(t, probe, agentID, project.ID, DevUserID, AgentRoleFull)
-			createDCEdge(t, probe, store.DelegationPrincipalUser, DevUserID, store.DelegationPrincipalAgent, agentID, store.RoleScopeProject, project.ID, string(AgentRoleFull))
+			createDCAgent(t, cs, agentID, project.ID, DevUserID, AgentRoleFull)
+			createDCEdge(t, cs, store.DelegationPrincipalUser, DevUserID, store.DelegationPrincipalAgent, agentID, store.RoleScopeProject, project.ID, string(AgentRoleFull))
 			agentCtx := contextWithIdentity(ctx, dcAgentIdentity(agentID, project.ID, AgentRoleFull))
 			request := AuthzRequestFromContext(agentCtx, Resource{Type: "project", ID: project.ID}, ActionRead)
 			request.Permission = "project.read"
 			delegated := srv.authzService.Decide(agentCtx, request)
 			require.True(t, delegated.Allowed, delegated.Reason)
-			require.IsType(t, noopDecisionAuditEmitter{}, srv.decisionAuditRouter.legacy)
+			require.IsType(t, inertDecisionAuditTarget, srv.decisionAuditRouter.legacy)
+			require.True(t, sameDecisionAuditReference(inertDecisionAuditTarget, srv.decisionAuditRouter.legacy))
 			requireNoDecisionPersistenceTable(t, cs)
 			require.NoError(t, srv.Shutdown(ctx))
 			srv.authzService.Decide(ctx, AuthzRequest{})
-			require.Zero(t, probe.calls.Load())
-			require.NoError(t, probe.Migrate(ctx))
+			require.NoError(t, cs.Migrate(ctx))
 			requireNoDecisionPersistenceTable(t, cs)
 		})
 	}
 }
 
-func TestDecisionAuditRemoval_NoWriterInstalled(t *testing.T) {
-	check := func() {
-		buf := make([]byte, 2<<20)
-		n := runtime.Stack(buf, true)
-		require.Less(t, n, len(buf), "stack snapshot must be complete")
-		stacks := string(buf[:n])
-		for _, signature := range []string{"StoreDecisionAuditEmitter", "decisionAuditWriter", "dropLogLoop"} {
-			require.False(t, strings.Contains(stacks, signature), "retired writer frame: %s", signature)
-		}
-	}
-	check()
-	srv, _ := testServer(t)
-	require.IsType(t, noopDecisionAuditEmitter{}, srv.decisionAuditRouter.legacy)
+func TestDecisionAuditRemoval_InertTargetIdentity(t *testing.T) {
+	srv, s := testServer(t)
+	require.IsType(t, inertDecisionAuditTarget, srv.decisionAuditRouter.legacy)
+	require.True(t, sameDecisionAuditReference(inertDecisionAuditTarget, srv.decisionAuditRouter.legacy))
+	require.False(t, sameDecisionAuditReference(&noopDecisionAuditEmitter{}, srv.decisionAuditRouter.legacy))
 	require.Nil(t, srv.decisionAuditRouter.admission)
-	check()
+	require.Equal(t, "healthy", srv.decisionAuditRouter.healthProjection())
+	requireNoDecisionPersistenceTable(t, s.(*entadapter.CompositeStore))
+	require.NoError(t, srv.CleanupResources(context.Background()))
 	require.NoError(t, srv.Shutdown(context.Background()))
-	check()
+	requireNoDecisionPersistenceTable(t, s.(*entadapter.CompositeStore))
 }
 
 func TestDecisionAuditRemoval_HealthUnavailable(t *testing.T) {

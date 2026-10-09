@@ -39,9 +39,11 @@ import (
 const auditWriteTimeout = 1 * time.Second
 
 // noopDecisionAuditEmitter preserves the in-memory decision seam without persistence.
-type noopDecisionAuditEmitter struct{}
+type noopDecisionAuditEmitter struct{ identity byte }
 
-func (noopDecisionAuditEmitter) EmitDecisionAudit(context.Context, *store.DecisionAuditRecord) {}
+var inertDecisionAuditTarget = &noopDecisionAuditEmitter{}
+
+func (*noopDecisionAuditEmitter) EmitDecisionAudit(context.Context, *store.DecisionAuditRecord) {}
 
 // emitDecisionAudit builds and emits a decision audit record from a Decide call.
 func (a *AuthzService) emitDecisionAudit(ctx context.Context, request AuthzRequest, decision Decision) {
