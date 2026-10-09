@@ -280,7 +280,8 @@ var (
 // The stop runs detached from the request with its own budget, as
 // compensateLandedRun's delete does: a client that goes away must not leave
 // an interaction running that nothing else can stop. Unlike
-// managedAgentDelete, a failure is reported (stopManagedInteraction).
+// managedAgentStop, which is best-effort, a failure is reported
+// (stopManagedInteraction).
 func (s *Server) compensateManagedCreate(ctx context.Context, agent *store.Agent, recorded bool) []string {
 	return s.stopManagedCreateInteraction(ctx, agent, recorded).warnings(managedCreateDeleteWon)
 }

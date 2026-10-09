@@ -206,7 +206,6 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 				// (ptone/scion#2890).
 				finalizing := store.DeletionStateFinalizing
 				f.State = &finalizing
-				f.Phase = nil
 				post.DeletionState = store.DeletionStateFinalizing
 			} else {
 				f.State = &deleting
