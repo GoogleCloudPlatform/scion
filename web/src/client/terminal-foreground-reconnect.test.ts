@@ -1013,7 +1013,11 @@ describe('the reconnect after a 4503 close waits a full-jitter delay of 0-5s', (
         expect(session.reconnecting).toBe(false);
         expect(FakeSocket.instances).toHaveLength(1);
       }
-      await vi.advanceTimersByTimeAsync(1);
+      // Synchronous advance: the timer callback starts the attempt, and
+      // `reconnecting` is observed before the (mocked, instantly resolving)
+      // attempt settles. The async variant would also flush the attempt's
+      // promises, clearing `pending` before the assertion.
+      vi.advanceTimersByTime(1);
       expect(session.reconnecting).toBe(true); // the jitter timer, not connect(), dialed
 
       await session.connect();
@@ -1033,7 +1037,7 @@ describe('the reconnect after a 4503 close waits a full-jitter delay of 0-5s', (
     session.setFrontmost(true);
     socket0.readyState = 3;
     socket0.onclose?.({ code: 4503 });
-    await vi.advanceTimersByTimeAsync(PROMPT_RECONNECT_MAX_DELAY_MS);
+    vi.advanceTimersByTime(PROMPT_RECONNECT_MAX_DELAY_MS); // synchronous: see above
     expect(session.reconnecting).toBe(true);
   });
 
@@ -1082,7 +1086,7 @@ describe('the reconnect after a 4503 close waits a full-jitter delay of 0-5s', (
 
     session.setFrontmost(true);
     expect(session.reconnecting).toBe(false);
-    await vi.advanceTimersByTimeAsync(3_000);
+    vi.advanceTimersByTime(3_000); // synchronous: see above
     expect(session.reconnecting).toBe(true);
   });
 

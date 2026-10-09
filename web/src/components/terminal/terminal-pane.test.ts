@@ -549,8 +549,9 @@ describe('overlay strings', () => {
     await mountConnected();
     FakeSocket.instances[0].readyState = 3;
     FakeSocket.instances[0].onclose?.({ code: 4503 });
-    await page.updateComplete;
-    expect(page.shadowRoot?.textContent).toContain('RECONNECTING...');
+    // The automatic attempt starts from the (zero) jitter timer, a macrotask
+    // after the close, so wait for it rather than for one render.
+    await vi.waitFor(() => expect(page.shadowRoot?.textContent).toContain('RECONNECTING...'));
     expect(page.shadowRoot?.querySelector('.disconnected-overlay sl-spinner')).toBeTruthy();
   });
 
