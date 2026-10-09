@@ -25,11 +25,10 @@ start. The token carries the same scopes a refresh would.
 
 ## Scope re-issue
 
-An agent's token scopes come from its role, bounded by the delegation record written when the
-agent was created: the user or agent that created it, and the authority that creator held then.
-Every refresh reads that record, so a scope added to an agent role later does not reach some
-existing agents. Artifact access (`project:artifact:read` and `project:artifact:write`) is the
-common case. A scope re-issue brings such an agent up to date without recreating it.
+A scope added to an agent role later does not reach some existing agents. Artifact access
+(`project:artifact:read` and `project:artifact:write`) is the common case. A scope re-issue
+recomputes the agent's role scopes from its delegator's current authority, without recreating the
+agent.
 
 ```bash
 scion reset-auth <agent-name> --reissue-scopes --dry-run   # show the change
