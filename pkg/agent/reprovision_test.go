@@ -314,38 +314,51 @@ func TestReprovision_PreStartHookReStagedOrRemoved(t *testing.T) {
 	}
 }
 
-// TestReprovision_PromptMDUntouched covers the design §3.4 note that the new
-// generation's task is delivered by DispatchAgentStart, not pre-staged as a
-// file: Reprovision must never write or clear prompt.md.
-func TestReprovision_PromptMDUntouched(t *testing.T) {
-	scionDir, _ := reprovisionSetup(t)
-	agentName := "prompt-agent"
-	gc := &api.GitCloneConfig{URL: "https://example.com/repo.git"}
-	ctx := api.ContextWithGitClone(context.Background(), gc)
-	if _, _, _, err := ProvisionAgent(ctx, agentName, "default", "", "", scionDir, "", "created", "", ""); err != nil {
-		t.Fatalf("initial ProvisionAgent: %v", err)
-	}
-	ws := filepath.Join(scionDir, "agents", agentName, "workspace")
-	_ = os.MkdirAll(filepath.Join(ws, ".git"), 0755)
+// TestReprovision_PromptMDReplaced pins ptone/scion#3985: once Reprovision
+// re-renders the disk for a new generation, prompt.md never holds the
+// previous generation's task, even if no Start follows. It holds the
+// request's task, or is empty when the request carries none.
+func TestReprovision_PromptMDReplaced(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		task string
+	}{
+		{name: "with task", task: "gen 2 task"},
+		{name: "without task", task: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scionDir, _ := reprovisionSetup(t)
+			agentName := "prompt-agent"
+			gc := &api.GitCloneConfig{URL: "https://example.com/repo.git"}
+			ctx := api.ContextWithGitClone(context.Background(), gc)
+			if _, _, _, err := ProvisionAgent(ctx, agentName, "default", "", "", scionDir, "", "created", "", ""); err != nil {
+				t.Fatalf("initial ProvisionAgent: %v", err)
+			}
+			ws := filepath.Join(scionDir, "agents", agentName, "workspace")
+			_ = os.MkdirAll(filepath.Join(ws, ".git"), 0755)
 
-	promptPath := filepath.Join(scionDir, "agents", agentName, "prompt.md")
-	if err := os.WriteFile(promptPath, []byte("gen 1 task"), 0644); err != nil {
-		t.Fatal(err)
-	}
+			promptPath := filepath.Join(scionDir, "agents", agentName, "prompt.md")
+			if err := os.WriteFile(promptPath, []byte("gen 1 task"), 0644); err != nil {
+				t.Fatal(err)
+			}
 
-	mgr := NewManager(&runtime.MockRuntime{})
-	if _, err := mgr.Reprovision(context.Background(), api.StartOptions{
-		Name: agentName, Template: "default", ProjectPath: scionDir, BrokerMode: true, GitClone: gc,
-		Task: "this must not be written to prompt.md",
-	}); err != nil {
-		t.Fatalf("Reprovision: %v", err)
-	}
-	data, err := os.ReadFile(promptPath)
-	if err != nil {
-		t.Fatalf("prompt.md must survive: %v", err)
-	}
-	if string(data) != "gen 1 task" {
-		t.Fatalf("prompt.md was modified by Reprovision: got %q", data)
+			// No Start follows: this is the state a later start finds if
+			// the reincarnation's own start never reached the broker.
+			mgr := NewManager(&runtime.MockRuntime{})
+			if _, err := mgr.Reprovision(context.Background(), api.StartOptions{
+				Name: agentName, Template: "default", ProjectPath: scionDir, BrokerMode: true, GitClone: gc,
+				Task: tc.task,
+			}); err != nil {
+				t.Fatalf("Reprovision: %v", err)
+			}
+			data, err := os.ReadFile(promptPath)
+			if err != nil {
+				t.Fatalf("read prompt.md: %v", err)
+			}
+			if string(data) != tc.task {
+				t.Fatalf("prompt.md = %q, want %q (never the previous generation's task)", data, tc.task)
+			}
+		})
 	}
 }
 

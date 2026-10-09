@@ -119,12 +119,24 @@ func TestMembershipLossProcessor_vs_ProjectDelete_Postgres(t *testing.T) {
 func TestMembershipLossProcessor_vs_AgentHardDelete_Postgres(t *testing.T) {
 	f := newMSPostgresFixture(t, "harddel")
 	ctx := context.Background()
+	// When the delete commits between the processor's descendant walk and
+	// its hold insert, that attempt fails ("agent hold names agent ...,
+	// which has no row") and the check is retried once its lease expires;
+	// the retry's walk no longer returns the deleted agent. A short lease
+	// lets the drains below run that retry (ptone/scion#4051).
+	origLease := membershipLossLease
+	membershipLossLease = time.Millisecond
+	t.Cleanup(func() { membershipLossLease = origLease })
 	f.prepareRemoval()
 	var delErr error
 	runConcurrently(t,
 		func() { f.srv.drainMembershipLossChecks(ctx) },
 		func() { delErr = f.s.DeleteAgent(ctx, f.childC.ID) })
 	assertNoDeadlock(t, delErr)
+	for i := 0; i < 5 && !f.held(f.agentA.ID); i++ {
+		time.Sleep(5 * time.Millisecond)
+		f.srv.drainMembershipLossChecks(ctx)
+	}
 	if _, err := f.s.GetAgent(ctx, f.childC.ID); err != nil {
 		holds, lerr := f.s.ListActiveAgentHolds(ctx, f.childC.ID)
 		require.NoError(t, lerr)

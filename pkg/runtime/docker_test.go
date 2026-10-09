@@ -277,10 +277,13 @@ func writeFailNTimesScript(t *testing.T, dir string, failCount int) (mockDocker,
 		t.Fatalf("failed to seed counter file: %v", err)
 	}
 
+	// Write the counter via a temp file and rename so a concurrent
+	// readCounter never sees a truncated, empty file (ptone/scion#3694).
 	script := `#!/bin/sh
 n=$(cat "` + counterFile + `")
 n=$((n + 1))
-echo "$n" > "` + counterFile + `"
+echo "$n" > "` + counterFile + `.tmp.$$"
+mv -f "` + counterFile + `.tmp.$$" "` + counterFile + `"
 if [ "$n" -le ` + strconv.Itoa(failCount) + ` ]; then
   echo "ps failed: transient snapshotter error" >&2
   exit 1
@@ -348,6 +351,17 @@ func TestDockerRuntime_List_StopsRetryingWhenContextDone(t *testing.T) {
 	mockDocker, counterFile := writeFailNTimesScript(t, tmpDir, dockerListMaxAttempts+5)
 
 	rt := &DockerRuntime{Command: mockDocker}
+	// List returns as soon as the caller's ctx is done, but the shared
+	// singleflight exec keeps retrying on its own detached context and keeps
+	// writing the counter file in tmpDir. Without this, t.TempDir's RemoveAll
+	// can race that straggler and fail with "directory not empty"
+	// (ptone/scion#3694). Cleanups run LIFO, so this drain runs before the
+	// TempDir removal registered above: joining the "ps" key blocks until the
+	// in-flight call (if any) has finished, and every exec it started has
+	// been waited on.
+	t.Cleanup(func() {
+		<-rt.listGroup.DoChan("ps", func() (any, error) { return nil, nil })
+	})
 	// Cancel before the first retry's backoff can elapse so we can assert
 	// the loop doesn't keep sleeping/retrying past a dead context.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)

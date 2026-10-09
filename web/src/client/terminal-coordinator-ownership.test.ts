@@ -159,6 +159,9 @@ function createLockMock(): {
                 await callback(lock);
                 resolve();
               } catch (e) {
+                // Mirrors navigator.locks: the callback's rejection reason is
+                // passed through unchanged, whatever it is.
+                // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
                 reject(e);
               }
             },

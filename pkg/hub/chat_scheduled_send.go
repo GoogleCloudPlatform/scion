@@ -292,7 +292,7 @@ func (s *Server) handleScheduledCreate(w http.ResponseWriter, r *http.Request, k
 		ValidationError(w, fmt.Sprintf("idempotency_key exceeds %d characters", scheduledMaxIdempotencyKeyLen), nil)
 		return
 	}
-	content, _, serr := s.validateChatSendInput(ctx, target, chatSendInput{Content: body.Content})
+	content, _, serr := s.validateChatSendInput(ctx, user, target, chatSendInput{Content: body.Content})
 	if serr != nil {
 		serr.write(w)
 		return
@@ -408,7 +408,7 @@ func (s *Server) handleScheduledList(w http.ResponseWriter, r *http.Request, key
 		// nothing, since rows exist only under canonical keys (create runs
 		// the full check), and the rows are the caller's own, as for
 		// cancel and dismiss.
-		if serr := authorizeDMKeyParticipant(key, user.ID()); serr != nil {
+		if serr := authorizeDMKeyParticipant(ctx, user, key, logging.RequestPath(r)); serr != nil {
 			serr.write(w)
 			return
 		}
@@ -544,7 +544,7 @@ func (s *Server) handleScheduledSendNow(w http.ResponseWriter, r *http.Request, 
 			map[string]interface{}{"status": row.Status, "failureReason": row.FailureReason})
 		return
 	}
-	if _, _, serr := s.validateChatSendInput(ctx, target, chatSendInput{Content: row.Content}); serr != nil {
+	if _, _, serr := s.validateChatSendInput(ctx, user, target, chatSendInput{Content: row.Content}); serr != nil {
 		serr.write(w)
 		return
 	}
@@ -1124,10 +1124,12 @@ func (s *Server) checkScheduledTopicFire(ctx context.Context, user UserIdentity,
 // nothing is sent to it. done is false when every check passed.
 func (s *Server) checkScheduledDMFire(ctx context.Context, user UserIdentity, m *ScheduledChatMessage) (scheduledFireCheck, bool) {
 	if _, serr := s.authorizeChatSend(ctx, user, m.ConversationKey); serr != nil {
-		switch serr.Status {
-		case http.StatusServiceUnavailable:
+		// A refusal of the sender's access is answered as not found but
+		// marked accessRefused; it is no_access, like a 403.
+		switch {
+		case serr.Status == http.StatusServiceUnavailable:
 			return scheduledFireCheck{transient: true}, true
-		case http.StatusForbidden:
+		case serr.Status == http.StatusForbidden || serr.accessRefused:
 			return scheduledFireCheck{reason: ScheduledFailureNoAccess}, true
 		default:
 			return scheduledFireCheck{reason: ScheduledFailureConversationGone}, true
@@ -1149,11 +1151,14 @@ func (s *Server) checkScheduledDMFire(ctx context.Context, user UserIdentity, m 
 }
 
 // scheduledFailureFromSendError maps a sendChatMessage error at fire time
-// to a failure reason. A 404 is a delivery error, not conversation_gone:
-// the conversation checks have just passed, and sendChatMessage also
-// answers 404 for a store error while reading the conversation.
+// to a failure reason. sendChatMessage answers a refusal of the sender's
+// access as not found (404); such a refusal is marked accessRefused and is
+// no_access, like a 403. Any other 404 is a delivery error, not
+// conversation_gone: the conversation checks have just passed, and
+// sendChatMessage also answers 404 for a store error while reading the
+// conversation.
 func scheduledFailureFromSendError(serr *chatSendError) string {
-	if serr.Status == http.StatusForbidden {
+	if serr.Status == http.StatusForbidden || serr.accessRefused {
 		return ScheduledFailureNoAccess
 	}
 	return ScheduledFailureDeliveryError
