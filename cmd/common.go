@@ -709,6 +709,14 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		return asUsageError(err)
 	}
 
+	if err := validateTaskFileStdin(); err != nil {
+		return err
+	}
+	task, err := applyTaskFile(task, taskFilePath, os.Stdin)
+	if err != nil {
+		return asUsageError(err)
+	}
+
 	// Pre-flight: verify .scion/agents/ is gitignored (once, before any provisioning).
 	if err := CheckAgentsGitignore(projectPath); err != nil {
 		return err
