@@ -105,7 +105,7 @@ func userRequest(t *testing.T, srv *Server, user *store.User, method, path strin
 
 func membersPath(projectID string) string { return "/api/v1/projects/" + projectID + "/members" }
 
-func group(t *testing.T, line map[string]any, key string) map[string]any {
+func auditGroup(t *testing.T, line map[string]any, key string) map[string]any {
 	t.Helper()
 	g, ok := line[key].(map[string]any)
 	require.True(t, ok, "missing group %q in %v", key, line)
@@ -143,10 +143,10 @@ func TestDecisionLog_P1_3_ProductionConstructorProjectRoute(t *testing.T) {
 	assert.Equal(t, "info", line["severity"])
 	assert.Equal(t, "INFO", line["level"])
 	assert.Equal(t, allowID, line["correlation_id"])
-	assert.Equal(t, allowID, group(t, line, "request")["id"])
-	assert.Equal(t, map[string]any{"kind": "user", "id": member.ID}, group(t, line, "principal"))
-	assert.Equal(t, map[string]any{"kind": "project", "id": projectID}, group(t, line, "resource"))
-	payload := group(t, line, "payload")
+	assert.Equal(t, allowID, auditGroup(t, line, "request")["id"])
+	assert.Equal(t, map[string]any{"kind": "user", "id": member.ID}, auditGroup(t, line, "principal"))
+	assert.Equal(t, map[string]any{"kind": "project", "id": projectID}, auditGroup(t, line, "resource"))
+	payload := auditGroup(t, line, "payload")
 	assert.Equal(t, "project.read", payload["permission_id"])
 	assert.Equal(t, "read", payload["permission"])
 	assert.Equal(t, "false", payload["sampled"])
@@ -165,7 +165,7 @@ func TestDecisionLog_P1_3_ProductionConstructorProjectRoute(t *testing.T) {
 	assert.Equal(t, "deny", deny[0]["outcome"])
 	assert.Equal(t, "warning", deny[0]["severity"])
 	assert.Equal(t, "WARN", deny[0]["level"])
-	assert.Equal(t, map[string]any{"kind": "user", "id": outsider.ID}, group(t, deny[0], "principal"))
+	assert.Equal(t, map[string]any{"kind": "user", "id": outsider.ID}, auditGroup(t, deny[0], "principal"))
 
 	counts := srv.decisionAuditLogger.counts
 	assert.GreaterOrEqual(t, counts.get(decisionAuditEnqueued, true), uint64(1))
