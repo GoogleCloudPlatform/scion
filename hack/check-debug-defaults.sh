@@ -308,6 +308,7 @@ EOF
   printf 'SCION_LOG_LEVEL=debug\n' >"$fx/docs-site/src/content/docs/hosted/notes.txt"
   # Line 1 is allowlisted; line 2 is a near miss in the same file; line 3
   # names the flag in backticks only, which is not a token match.
+  # shellcheck disable=SC2016  # backticks are literal markdown fixture text
   printf '%s\n' 'To troubleshoot, set `SCION_LOG_LEVEL=debug` temporarily.' \
     'SCION_LOG_LEVEL=debug' 'Use `--debug` only while troubleshooting.' \
     >"$fx/docs-site/src/content/docs/hosted/page.md"
