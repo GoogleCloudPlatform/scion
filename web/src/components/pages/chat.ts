@@ -4027,7 +4027,7 @@ export class ScionPageChat extends LitElement {
 
   /**
    * The thread reported the open agent DM's peer: name the DM after it if
-   * nothing else has (a raw id counts as no name), and give a DM opened from its URL the agent's project
+   * nothing else has, and give a DM opened from its URL the agent's project
    * and that project's members (see `takesPeerProject`).
    */
   private handlePeerAgentResolved = (e: CustomEvent<PeerAgentResolvedDetail>): void => {
