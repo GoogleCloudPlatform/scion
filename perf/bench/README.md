@@ -527,6 +527,22 @@ scenarios waited for one card per agent, which a paged view never renders
 above one page, so at 100 and 500 agents they always ended
 `loaded-not-rendered`.
 
+**Readiness marks.** Every populated run also reads the web client's
+readiness marks (`scion:ready:agents-data`, `scion:ready:rows-grid`,
+`scion:ready:rows-list`, `scion:ready:graph`), which the client writes
+only while the hub's `profiling.readiness_marks` setting is on (turn it on
+with `PUT /api/v1/admin/profiling` as an admin; see the perf tracing
+guide's "Readiness marks" section). Each run adds `readinessMarks` (name to
+ms since navigation start), `readinessMarksMissing` and
+`readinessMarksUnexpected`. Each scenario adds `readinessMarks` (per mark:
+`count`, `medianMs`, `minMs`, `maxMs`, `medianMsCold`, `medianMsWarm`),
+`readinessMarksMissingRunCount` and `readinessMarksUnexpectedRunCount`, and
+the report top level adds `expectReadinessMarks`. Pass
+`--expect-readiness-marks` when the setting is on: each run then waits up
+to 3 seconds for its scenario's data mark and view mark, and a run still
+lacking one is counted as missing. Without the flag the setting is expected
+off, and a run that finds any readiness mark is counted as unexpected.
+
 For the two graph scenarios, a populated run also performs a short
 pan/zoom/hover interaction sequence (hover over up to 5 nodes, wheel-zoom
 in and out, drag-pan) and reports the long-task cost specifically
@@ -730,13 +746,6 @@ derive budgets from directly.
 
 Tracked here rather than silently dropped:
 
-- **In-app readiness marks** (data arrival / visible rows / graph ready)
-  -- infeasible without web source changes: there are currently no such
-  marks anywhere in the app (confirmed by grepping for
-  `performance.mark`/custom ready events), so exposing them requires
-  instrumenting `web/src/components/pages/project-detail.ts` and
-  `agent-tree-view.ts` themselves. This harness only measures from the
-  outside, per the brief's "no hub or web source changes" constraint.
 - **Large-file-list dataset** -- infeasible in this PR: `perf/bench/seed`
   only seeds agents/projects/users, not file-browser data sources. Adding
   realistic file trees is a separate, non-trivial seeding surface.

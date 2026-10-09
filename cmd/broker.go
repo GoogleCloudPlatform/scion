@@ -132,7 +132,16 @@ agent operations to this broker.
 Prerequisites:
 - The broker server must be running (scion runtime-broker start)
 - The Hub endpoint must be configured
-- You must be authenticated with the Hub
+- You must be authenticated with the Hub: a sign-in (scion hub auth login),
+  or a hub-boundary user access token carrying broker:create (and
+  broker:read) in SCION_HUB_TOKEN. Either way, your user must hold
+  broker.create, which hub members do.
+
+The broker is owned by the signed-in user, or by the token's user.
+Re-registering an existing broker requires its owner, or a super-admin
+with a sign-in (a token re-registers only a broker its user created).
+Registration never associates the broker with a project: the owner runs
+'scion runtime-broker provide' for each project the broker should serve.
 
 This command will:
 1. Verify the local broker server is running
@@ -144,10 +153,14 @@ Examples:
   # Register this host as a broker
   scion runtime-broker register
 
+  # Register a headless host with a hub-boundary token
+  SCION_HUB_ENDPOINT=https://hub.example.com SCION_HUB_TOKEN=scion_pat_... \
+    scion runtime-broker register -y
+
   # Force re-registration even if already registered
   scion runtime-broker register --force
 
-  # Register with auto-provide enabled
+  # Register with auto-provide enabled (requires broker.auto_provide)
   scion runtime-broker register --auto-provide
 
   # Register under a custom broker name instead of the hostname, for
@@ -228,6 +241,10 @@ broker when agents are created in the project.
 If --project is not specified, uses the current local project.
 If --broker is not specified, uses the local broker registration.
 
+Providing a broker requires update permission on the project and the
+broker owner's consent: the caller must be the broker's owner or a
+super-admin. Once provided, members of the project can run agents on it.
+
 Use --make-default to set the broker as the default for the project. If the
 project already has a different default broker, you will be prompted to confirm
 the change.
@@ -245,7 +262,7 @@ Examples:
   # Add local broker as provider for a project linked to a local checkout
   scion runtime-broker provide --project <project-id> --path /path/to/checkout
 
-  # Add a remote broker as provider for a project (admin only)
+  # Add a remote broker as provider for a project (its owner or a super-admin)
   scion runtime-broker provide --broker <broker-id> --project <project-id>
 
   # Add broker as provider and set as default
@@ -396,7 +413,7 @@ func init() {
 
 	// Register flags
 	brokerRegisterCmd.Flags().BoolVar(&brokerForceRegister, "force", false, "Force re-registration even if already registered")
-	brokerRegisterCmd.Flags().BoolVar(&brokerAutoProvide, "auto-provide", false, "Automatically add as provider for new projects")
+	brokerRegisterCmd.Flags().BoolVar(&brokerAutoProvide, "auto-provide", false, "Automatically add as provider for new projects (requires the broker.auto_provide permission, held by super-admins)")
 	brokerRegisterCmd.Flags().StringVar(&brokerHubName, "name", "", "Name for this hub connection (derived from endpoint if not specified)")
 	brokerRegisterCmd.Flags().StringVar(&brokerRegisterName, "broker-name", "", "Name this broker registers under on the hub, saved in the global settings (server.broker.broker_nickname) for later commands and the broker server; when not set, the saved name, else the hostname")
 	brokerRegisterCmd.Flags().StringVar(&brokerTransportMode, "transport-mode", "", "Transport auth mode: 'iap' or 'cloudrun_invoker' (overrides SCION_TRANSPORT_MODE)")
@@ -589,57 +606,19 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 
 	// Phase 1 & 2: Create broker and complete join if needed
 	if needsJoin || brokerID == "" {
-		fmt.Printf("Registering broker with Hub...\n")
-
-		// Phase 1: Create broker registration
-		createReq := &hubclient.CreateBrokerRequest{
-			BrokerID:     stableBrokerID,
-			Name:         brokerName,
-			Capabilities: brokerRegistrationCapabilities(),
-			AutoProvide:  brokerAutoProvide,
-			Labels: map[string]string{
-				"scion.io/broker-role": "remote",
-			},
-		}
-
-		createResp, err := client.RuntimeBrokers().Create(ctx, createReq)
-		if err != nil {
-			return fmt.Errorf("failed to create broker registration: %w", err)
-		}
-
-		if createResp.Reregistered {
-			// The hub matches a re-registration by name, then by broker
-			// ID, and keeps the existing name on an ID match. Read back
-			// the name it kept so that is what gets reported (and saved
-			// when --broker-name was given).
-			if b, err := client.RuntimeBrokers().Get(ctx, createResp.BrokerID); err == nil && b != nil && b.Name != "" {
-				brokerName = keepHubBrokerName(os.Stdout, brokerName, b.Name, brokerNameSet)
-			}
-			fmt.Printf("Found existing broker registration for '%s' (ID: %s), re-registering...\n", brokerName, createResp.BrokerID)
-			warnBrokerIdentityTakeover(os.Stdout, brokerName, createResp.BrokerID, stableBrokerID, stableBrokerIDSaved)
-		} else {
-			fmt.Printf("Broker created (ID: %s), completing join...\n", createResp.BrokerID)
-		}
-
-		joined, err := completeJoinAndPersist(ctx, client, brokerJoinParams{
-			Settings:          settings,
-			Endpoint:          endpoint,
-			HubName:           hubName,
-			BrokerID:          createResp.BrokerID,
-			JoinToken:         createResp.JoinToken,
-			Hostname:          brokerName,
-			TransportMode:     brokerTransportMode,
-			TransportAudience: brokerTransportAudience,
-			CredStore:         multiStore,
+		brokerID, err = registerBrokerWithHub(ctx, client, multiStore, brokerHubRegistration{
+			BrokerID:      stableBrokerID,
+			BrokerIDSaved: stableBrokerIDSaved,
+			Name:          brokerName,
+			NameSet:       brokerNameSet,
+			KeptName:      &brokerName,
+			AutoProvide:   brokerAutoProvide,
+			Settings:      settings,
+			HubName:       hubName,
+			Endpoint:      endpoint,
 		})
 		if err != nil {
 			return err
-		}
-		brokerID = joined.BrokerID
-		if joined.SaveErr != nil {
-			fmt.Printf("Warning: failed to save broker credentials: %v\n", joined.SaveErr)
-		} else {
-			fmt.Printf("Broker credentials saved to %s\n", multiStore.Dir())
 		}
 	}
 
@@ -753,6 +732,97 @@ func persistBrokerName(w io.Writer, name string) {
 		return
 	}
 	_, _ = fmt.Fprintf(w, "Broker name '%s' saved to global settings. Restart the broker (scion runtime-broker restart, or scion server restart if the server runs the broker) so it uses the new name locally.\n", name)
+}
+
+// brokerHubRegistration is the input of registerBrokerWithHub.
+type brokerHubRegistration struct {
+	// BrokerID is the stable broker ID requested for a first registration.
+	BrokerID string
+	// BrokerIDSaved is true when BrokerID was loaded from the global
+	// settings rather than generated for this registration.
+	BrokerIDSaved bool
+	Name          string
+	// NameSet is true when --broker-name set Name.
+	NameSet bool
+	// KeptName, when non-nil, is set to the name the broker is registered
+	// under: Name, or on a re-registration the name the hub kept.
+	KeptName    *string
+	AutoProvide bool
+	// Settings supply the broker profiles and default profile reported at
+	// join; nil reports none and leaves the hub's default profile as it is.
+	Settings *config.Settings
+	// HubName names the hub connection the credentials are saved under.
+	HubName  string
+	Endpoint string
+}
+
+// registerBrokerWithHub runs the two-phase broker registration against the
+// hub: POST /api/v1/brokers for a join token, then POST /api/v1/brokers/join
+// (completeJoinAndPersist) for the broker's HMAC secret, which it saves to
+// multiStore under reg.HubName. It returns the joined broker's ID. client
+// carries whichever credential getHubClient selected, for example a hub
+// user access token from SCION_HUB_TOKEN.
+func registerBrokerWithHub(ctx context.Context, client hubclient.Client, multiStore *brokercredentials.MultiStore, reg brokerHubRegistration) (string, error) {
+	fmt.Printf("Registering broker with Hub...\n")
+
+	// Phase 1: Create broker registration
+	createReq := &hubclient.CreateBrokerRequest{
+		BrokerID:     reg.BrokerID,
+		Name:         reg.Name,
+		Capabilities: brokerRegistrationCapabilities(),
+		AutoProvide:  reg.AutoProvide,
+		Labels: map[string]string{
+			"scion.io/broker-role": "remote",
+		},
+	}
+
+	createResp, err := client.RuntimeBrokers().Create(ctx, createReq)
+	if err != nil {
+		if reg.AutoProvide && apiclient.IsForbiddenError(err) {
+			return "", fmt.Errorf("failed to create broker registration: %w (--auto-provide requires the broker.auto_provide permission, held by super-admins; retry without --auto-provide)", err)
+		}
+		return "", fmt.Errorf("failed to create broker registration: %w", err)
+	}
+
+	name := reg.Name
+	if createResp.Reregistered {
+		// The hub matches a re-registration by name, then by broker ID,
+		// and keeps the existing name on an ID match. Read back the name
+		// it kept so that is what gets reported (and saved when
+		// --broker-name was given).
+		if b, err := client.RuntimeBrokers().Get(ctx, createResp.BrokerID); err == nil && b != nil && b.Name != "" {
+			name = keepHubBrokerName(os.Stdout, name, b.Name, reg.NameSet)
+		}
+		fmt.Printf("Found existing broker registration for '%s' (ID: %s), re-registering...\n", name, createResp.BrokerID)
+		warnBrokerIdentityTakeover(os.Stdout, name, createResp.BrokerID, reg.BrokerID, reg.BrokerIDSaved)
+	} else {
+		fmt.Printf("Broker created (ID: %s), completing join...\n", createResp.BrokerID)
+	}
+
+	// Phase 2: Complete broker join with join token
+	joined, err := completeJoinAndPersist(ctx, client, brokerJoinParams{
+		Settings:          reg.Settings,
+		Endpoint:          reg.Endpoint,
+		HubName:           reg.HubName,
+		BrokerID:          createResp.BrokerID,
+		JoinToken:         createResp.JoinToken,
+		Hostname:          name,
+		TransportMode:     brokerTransportMode,
+		TransportAudience: brokerTransportAudience,
+		CredStore:         multiStore,
+	})
+	if err != nil {
+		return "", err
+	}
+	if joined.SaveErr != nil {
+		fmt.Printf("Warning: failed to save broker credentials: %v\n", joined.SaveErr)
+	} else {
+		fmt.Printf("Broker credentials saved to %s\n", multiStore.Dir())
+	}
+	if reg.KeptName != nil {
+		*reg.KeptName = name
+	}
+	return joined.BrokerID, nil
 }
 
 func runBrokerDeregister(cmd *cobra.Command, args []string) error {
@@ -1357,20 +1427,13 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 	}
 
 	// Add broker as provider
-	req := &hubclient.RegisterProjectRequest{
-		ID:       projectID,
-		Name:     projectName,
-		BrokerID: brokerID,
-		Path:     localProjectPath,
-	}
-
-	resp, err := client.Projects().Register(ctx, req)
+	project, err := provideBrokerToProject(ctx, client, projectID, brokerID, localProjectPath)
 	if err != nil {
 		return fmt.Errorf("failed to add broker as provider: %w", err)
 	}
 
 	fmt.Println()
-	fmt.Printf("Broker '%s' added as provider for project '%s'\n", brokerName, resp.Project.Name)
+	fmt.Printf("Broker '%s' added as provider for project '%s'\n", brokerName, project.Name)
 	if localProjectPath != "" {
 		fmt.Println(providePathSummary(localProjectPath, brokerName, isRemoteBroker && brokerID != getLocalBrokerID()))
 	} else {
@@ -1379,22 +1442,22 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 
 	// Handle --make-default flag
 	if brokerMakeDefault {
-		currentDefault := resp.Project.DefaultRuntimeBrokerID
+		currentDefault := project.DefaultRuntimeBrokerID
 
 		switch currentDefault {
 		case brokerID:
 			// Already the default, nothing to do
-			fmt.Printf("Broker '%s' is already the default for project '%s'\n", brokerName, resp.Project.Name)
+			fmt.Printf("Broker '%s' is already the default for project '%s'\n", brokerName, project.Name)
 		case "":
 			// No default set - the server should have auto-set it during provide,
 			// but set it explicitly to be sure
-			_, err := client.Projects().Update(ctx, resp.Project.ID, &hubclient.UpdateProjectRequest{
+			_, err := client.Projects().Update(ctx, project.ID, &hubclient.UpdateProjectRequest{
 				DefaultRuntimeBrokerID: brokerID,
 			})
 			if err != nil {
 				return fmt.Errorf("failed to set default broker: %w", err)
 			}
-			fmt.Printf("Broker '%s' set as default for project '%s'\n", brokerName, resp.Project.Name)
+			fmt.Printf("Broker '%s' set as default for project '%s'\n", brokerName, project.Name)
 		default:
 			// Different default already set - resolve its name and confirm
 			currentDefaultName := currentDefault[:8] // fallback to truncated ID
@@ -1403,21 +1466,38 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 				currentDefaultName = currentBroker.Name
 			}
 
-			if !hubsync.ShowChangeDefaultBrokerPrompt(resp.Project.Name, currentDefaultName, brokerName, autoConfirm) {
+			if !hubsync.ShowChangeDefaultBrokerPrompt(project.Name, currentDefaultName, brokerName, autoConfirm) {
 				fmt.Println("Default broker not changed.")
 			} else {
-				_, err := client.Projects().Update(ctx, resp.Project.ID, &hubclient.UpdateProjectRequest{
+				_, err := client.Projects().Update(ctx, project.ID, &hubclient.UpdateProjectRequest{
 					DefaultRuntimeBrokerID: brokerID,
 				})
 				if err != nil {
 					return fmt.Errorf("failed to update default broker: %w", err)
 				}
-				fmt.Printf("Default broker for project '%s' changed from '%s' to '%s'\n", resp.Project.Name, currentDefaultName, brokerName)
+				fmt.Printf("Default broker for project '%s' changed from '%s' to '%s'\n", project.Name, currentDefaultName, brokerName)
 			}
 		}
 	}
 
 	return nil
+}
+
+// provideBrokerToProject links brokerID to projectID through the project
+// providers API (POST /api/v1/projects/{id}/providers), which requires
+// project update on the project and broker update on the broker (its owner
+// or a super-admin). localPath is sent as given; an empty localPath sends no
+// path, and the hub decides what an existing provider keeps. Returns the
+// project as it is after the link.
+func provideBrokerToProject(ctx context.Context, client hubclient.Client, projectID, brokerID, localPath string) (*hubclient.Project, error) {
+	if _, err := client.Projects().AddProvider(ctx, projectID, &hubclient.AddProviderRequest{
+		BrokerID:  brokerID,
+		LocalPath: localPath,
+	}); err != nil {
+		return nil, err
+	}
+
+	return client.Projects().Get(ctx, projectID)
 }
 
 // resolveProvidePath resolves an explicit provide --path to the project

@@ -17,7 +17,13 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { pushRouteEntry, type RouteShell } from './route-history.js';
+import {
+  IN_PAGE_STATE_KEY,
+  hasInPageState,
+  isInPagePop,
+  pushRouteEntry,
+  type RouteShell,
+} from './route-history.js';
 
 describe('pushRouteEntry', () => {
   afterEach(() => {
@@ -52,5 +58,40 @@ describe('pushRouteEntry', () => {
   it('still pushes the URL when there is no shell yet', async () => {
     await pushRouteEntry(undefined, '/chat', '/chat');
     expect(window.location.pathname).toBe('/chat');
+  });
+
+  it('records the given history state on the entry', async () => {
+    await pushRouteEntry(undefined, '/chat/a/t', '/chat/a/t', { [IN_PAGE_STATE_KEY]: { x: 1 } });
+    expect(window.history.state).toEqual({ [IN_PAGE_STATE_KEY]: { x: 1 } });
+  });
+});
+
+describe('isInPagePop', () => {
+  const marked = { [IN_PAGE_STATE_KEY]: { panel: 'left', below: [] } };
+  const shell = (currentPath: string): RouteShell => ({ currentPath }) as unknown as RouteShell;
+
+  it('leaves an in-page entry of the shown path to the page', () => {
+    expect(isInPagePop(marked, '/chat/a/t', shell('/chat/a/t'), false)).toBe(true);
+    // The fragment is not part of which page is showing.
+    expect(isInPagePop(marked, '/chat/a/t', shell('/chat/a/t#msg-1'), false)).toBe(true);
+    expect(isInPagePop(marked, '/chat/a/t?x=1', shell('/chat/a/t?x=1'), false)).toBe(true);
+  });
+
+  it('renders any other path, or a state without the marker', () => {
+    expect(isInPagePop(marked, '/chat/a/other', shell('/chat/a/t'), false)).toBe(false);
+    expect(isInPagePop(marked, '/chat/a/t?x=1', shell('/chat/a/t'), false)).toBe(false);
+    expect(isInPagePop({}, '/chat/a/t', shell('/chat/a/t'), false)).toBe(false);
+    expect(isInPagePop(null, '/chat/a/t', shell('/chat/a/t'), false)).toBe(false);
+    expect(isInPagePop(marked, '/chat/a/t', undefined, false)).toBe(false);
+  });
+
+  it('renders on the way back from the terminal workspace, which hides the outlet', () => {
+    expect(isInPagePop(marked, '/chat/a/t', shell('/chat/a/t'), true)).toBe(false);
+  });
+
+  it('recognises the marker only as an object', () => {
+    expect(hasInPageState(marked)).toBe(true);
+    expect(hasInPageState({ [IN_PAGE_STATE_KEY]: null })).toBe(false);
+    expect(hasInPageState({ [IN_PAGE_STATE_KEY]: 'x' })).toBe(false);
   });
 });

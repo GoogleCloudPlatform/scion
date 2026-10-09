@@ -67,7 +67,7 @@ func TestInstallIntegration_SelfManaged_BridgeConfigUsesHubEndpoint(t *testing.T
 	srv.config.AgentEndpoint = "http://192.0.2.10:8080"
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/a2a-bridge/install", nil)
-	req = req.WithContext(contextWithIdentity(ctx, admin))
+	req = req.WithContext(integSessionContext(ctx, admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 

@@ -26,6 +26,7 @@ import { customElement, state } from 'lit/decorators.js';
 import type { SkillRegistry } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { formatRelative } from '../../utils/time.js';
+import '../shared/detail-header.js';
 import '../shared/status-badge.js';
 import '../shared/hash-display.js';
 import { showToast } from '../../utils/toast.js';
@@ -82,35 +83,6 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
     }
     .back-link:hover {
       color: var(--scion-primary, #3b82f6);
-    }
-
-    .header {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      /* A long name takes its own line and the actions drop below it. */
-      flex-wrap: wrap;
-      margin-bottom: 1.5rem;
-      gap: 1rem;
-    }
-    .header h1 {
-      font-size: 1.5rem;
-      font-weight: 700;
-      color: var(--scion-text, #1e293b);
-      margin: 0;
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      overflow-wrap: anywhere;
-    }
-    .header h1 sl-icon {
-      flex-shrink: 0;
-    }
-    .header-actions {
-      display: flex;
-      gap: 0.5rem;
-      flex-shrink: 0;
-      margin-left: auto;
     }
 
     .card {
@@ -515,14 +487,9 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
   private renderHeader() {
     const r = this.registry!;
     return html`
-      <div class="header">
-        <div>
-          <h1>
-            <sl-icon name="cloud-arrow-down"></sl-icon>
-            ${r.name}
-          </h1>
-        </div>
-        <div class="header-actions">
+      <scion-detail-header heading=${r.name}>
+        <sl-icon slot="icon" name="cloud-arrow-down"></sl-icon>
+        <div slot="actions" class="header-actions">
           <sl-button variant="default" size="small" outline @click=${() => this.startEditing()}>
             <sl-icon slot="prefix" name="pencil"></sl-icon>
             Edit
@@ -547,7 +514,7 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
             Delete
           </sl-button>
         </div>
-      </div>
+      </scion-detail-header>
     `;
   }
 

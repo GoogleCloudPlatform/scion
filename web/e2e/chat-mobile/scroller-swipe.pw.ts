@@ -236,16 +236,35 @@ test.describe('a sideways scroller in a message owns the sideways drag', () => {
       // The scroller starts its own touch-action chain, so the browser would
       // otherwise take the unused pan as a history swipe.
       await page.evaluate(() => {
-        const w = window as unknown as { __popstates: string[] };
+        const w = window as unknown as { __popstates: string[]; __traversals: string[] };
         w.__popstates = [];
+        w.__traversals = [];
         window.addEventListener('popstate', () => w.__popstates.push(location.pathname));
+        // Record the traversals scripts start: the app steps back with
+        // history.go(-1); a browser history swipe starts none.
+        const go = history.go.bind(history);
+        const back = history.back.bind(history);
+        history.go = (delta?: number): void => {
+          w.__traversals.push(`go(${delta ?? 0})`);
+          go(delta);
+        };
+        history.back = (): void => {
+          w.__traversals.push('back()');
+          back();
+        };
       });
       const url = page.url();
       await dragRight(page, box);
-      expect(
-        await page.evaluate(() => (window as unknown as { __popstates: string[] }).__popstates),
-        'no history navigation'
-      ).toEqual([]);
+      // The panel swipe goes back to the rail's history entry on the same
+      // URL: exactly one popstate, from the app's own history.go(-1). A
+      // browser history swipe lands on the same entry but starts no
+      // traversal, so it fails the second check.
+      const seen = await page.evaluate(() => {
+        const w = window as unknown as { __popstates: string[]; __traversals: string[] };
+        return { popstates: w.__popstates, traversals: w.__traversals };
+      });
+      expect(seen.popstates, 'only the panel step back').toEqual([new URL(url).pathname]);
+      expect(seen.traversals, "the step back is the app's").toEqual(['go(-1)']);
       expect(page.url(), 'the URL is unchanged').toBe(url);
       expect(await currentPanel(page), 'the drag swiped to the rail').toBe('left');
     });

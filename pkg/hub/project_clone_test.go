@@ -266,8 +266,9 @@ func TestProjectClone_HappyPath(t *testing.T) {
 	// Git remote copied
 	assert.Equal(t, src.GitRemote, clone.GitRemote)
 
-	// Default broker copied
-	assert.Equal(t, src.DefaultRuntimeBrokerID, clone.DefaultRuntimeBrokerID)
+	// The source's default broker is not a provider of the clone, so the
+	// clone has no default.
+	assert.Empty(t, clone.DefaultRuntimeBrokerID)
 
 	// SharedDirs copied
 	require.Len(t, clone.SharedDirs, 1)

@@ -191,4 +191,30 @@ describe('composer — schedule send', () => {
     await el.updateComplete;
     expect(dialog().open).toBe(false);
   });
+
+  it('restoreText fills an empty composer, and leaves a draft alone when asked', async () => {
+    el.text = '';
+    el.runeCount = 0;
+    await el.updateComplete;
+    expect(el.restoreText('cancelled text', { onlyIfEmpty: true })).toBe(true);
+    expect(el.text).toBe('cancelled text');
+    expect(el.runeCount).toBe('cancelled text'.length);
+
+    expect(el.restoreText('another', { onlyIfEmpty: true })).toBe(false);
+    expect(el.text).toBe('cancelled text');
+
+    // Copy to composer appends to a draft on a new line.
+    expect(el.restoreText('copied')).toBe(true);
+    expect(el.text).toBe('cancelled text\ncopied');
+  });
+
+  it('restoreText does nothing while editing a message', async () => {
+    el.text = '';
+    el.runeCount = 0;
+    el.editMessage = { messageId: 'm1', content: 'x' };
+    await el.updateComplete;
+    const editing = el.text;
+    expect(el.restoreText('copied')).toBe(false);
+    expect(el.text).toBe(editing);
+  });
 });
