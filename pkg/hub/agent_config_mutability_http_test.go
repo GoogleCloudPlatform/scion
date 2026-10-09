@@ -238,7 +238,9 @@ func TestAgentConfigPatch_ReincarnateOnlyWarnings(t *testing.T) {
 	assert.Equal(t, []string{"annotations", "config.max_duration", "config.max_turns", "config.system_prompt", "name"}, resp.Disposition.Applied)
 	require.Len(t, resp.Warnings, 2, "%v", resp.Warnings)
 	assert.Contains(t, resp.Warnings[0], "config.system_prompt: stored now; rendered at the next reincarnation")
-	assert.Contains(t, resp.Warnings[1], "config.max_duration, config.max_turns: cleared now")
+	// max_duration was not set, so its null changes nothing and is not named.
+	assert.Contains(t, resp.Warnings[1], "config.max_turns: cleared now")
+	assert.NotContains(t, resp.Warnings[1], "config.max_duration")
 	assert.Equal(t, "be brief", resp.AppliedConfig.InlineConfig.SystemPrompt)
 	assert.Equal(t, 0, resp.AppliedConfig.InlineConfig.MaxTurns)
 }

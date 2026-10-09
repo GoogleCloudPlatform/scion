@@ -343,7 +343,11 @@ func TestReincarnateOnlyConfigEdits(t *testing.T) {
 		provision, cleared := reincarnateOnlyConfigEdits(raw, &req, same)
 		assert.Empty(t, provision)
 		assert.Empty(t, cleared)
-		assert.Empty(t, reincarnateOnlyEditWarnings(raw, &req, nil), "nothing stored: only the new system prompt would count")
+		// With nothing stored, only the new system prompt is a change: the
+		// clears and the empty skills list clear nothing.
+		provision, cleared = reincarnateOnlyConfigEdits(raw, &req, nil)
+		assert.Equal(t, []string{"config.system_prompt"}, provision)
+		assert.Empty(t, cleared)
 	})
 
 	five := rawConfigOf(t, `{"model":"m","max_turns":5}`)
