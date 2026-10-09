@@ -64,6 +64,35 @@ When starting an agent, the Hub resolves a broker through a priority cascade:
   ```
   On a broker machine, `scion runtime-broker status` shows that broker's own state.
 
+### Agents that start other agents
+
+When an agent runs `scion start` inside its container, the CLI reads the Hub endpoint from the agent's own environment (`SCION_HUB_ENDPOINT`, then `SCION_HUB_URL`), so it needs no `--hub` flag. The Hub can also fill in the broker and profile when the request names neither. For a create made by an agent, each field is resolved separately, highest first:
+
+| Priority | Source | Applies when |
+| :--- | :--- | :--- |
+| 1 | **Explicit `--broker` / `-p` flag** | Always wins. |
+| 2 | **Project agent-create settings**: `agentCreateBroker` and `agentCreateProfile` (annotations `scion.io/agent-create-broker`, `scion.io/agent-create-profile`) | Set by a project editor through the project settings API. Ignored for creates made by users. Not used when `--broker` is given. |
+| 3 | **Creating agent's broker and profile** | The `hub.agent_create_inherit_placement` [experiment](/scion/reference/experiments/) is on, the creating agent runs on a Kubernetes profile, and its broker serves the target project. |
+| 4 | **The regular cascade above**, then the project's active profile and the broker's default profile | Everything else. This is unchanged for users, and for agents unless tier 2 or 3 applies. |
+
+Rules that apply across the tiers:
+
+- The creating agent's profile is inherited only when the selected broker is the creating agent's own broker. An explicit `--broker` that names a different broker does not carry the profile with it.
+- With `-p` alone, the broker is inherited only when the creating agent's broker offers that profile.
+- A value from tier 2 or 3 is checked exactly like the same flag would be, under the caller's own permissions: dispatch access to the broker, the per-profile default identity, and env and secret resolution. Nothing else is taken from the creating agent: no credentials, identity or user scope.
+- **Fail closed.** If tier 2 or 3 applies but the broker no longer serves the project, is offline, or the caller may not dispatch to it, or a profile from tier 2 is not offered by the selected broker, the create is refused. It does not fall back to another broker. The error names the source (the setting or the creating agent), never an ID.
+- The agent record and the create response carry `appliedConfig.placement` with `brokerSource` and `profileSource`, each one of `flag`, `setting`, `inherited` or `default`. A placement from tier 2 or 3 is also recorded, by name, in the create's audit record.
+
+Setting the project defaults (the broker may be given by ID, name or slug; it is stored as the ID and must serve the project, and the profile must be offered by that broker, or by at least one of the project's brokers if no broker is set):
+
+```bash
+curl -X PUT "$HUB/api/v1/projects/$PROJECT_ID/settings" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"agentCreateBroker": "gke-broker", "agentCreateProfile": "gke"}'
+```
+
+Leaving a field out of the PUT body keeps its stored value. Sending `""` clears it.
+
 ## Moving an Agent to Another Runtime Broker
 
 `scion reincarnate <agent> --broker <name|id>` moves an agent to another Runtime Broker, for example to drain a broker or to reach different hardware. The agent keeps its ID, slug, and generation chain, and its workspace, uncommitted and unpushed changes included. The move is a [reincarnation](/scion/reference/cli/#scion-reincarnate): the agent starts a new generation on the target with a Hub-built preamble and the handoff you provide.

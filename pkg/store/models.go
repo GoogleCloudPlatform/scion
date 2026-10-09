@@ -308,6 +308,27 @@ type ExposedPort struct {
 	ExposedBy string    `json:"exposedBy"`
 }
 
+// Placement sources recorded in AgentPlacement.
+const (
+	// PlacementSourceFlag: the create request named the value.
+	PlacementSourceFlag = "flag"
+	// PlacementSourceSetting: the project's agent-create setting supplied it.
+	PlacementSourceSetting = "setting"
+	// PlacementSourceInherited: it was taken from the creating agent.
+	PlacementSourceInherited = "inherited"
+	// PlacementSourceDefault: the regular default chain decided it (project
+	// or hub default, broker default, or automatic selection).
+	PlacementSourceDefault = "default"
+)
+
+// AgentPlacement records the source of an agent's broker and profile at
+// create time. BrokerSource and ProfileSource hold one of the
+// PlacementSource* values. It names sources only, never credentials.
+type AgentPlacement struct {
+	BrokerSource  string `json:"brokerSource,omitempty"`
+	ProfileSource string `json:"profileSource,omitempty"`
+}
+
 // AgentAppliedConfig stores the effective configuration of an agent.
 type AgentAppliedConfig struct {
 	Image         string            `json:"image,omitempty"`
@@ -317,6 +338,9 @@ type AgentAppliedConfig struct {
 	Model         string            `json:"model,omitempty"`
 	ThinkingLevel *int              `json:"thinkingLevel,omitempty"`
 	Profile       string            `json:"profile,omitempty"` // Settings profile for the runtime broker
+	// Placement records where the agent's broker and profile came from at
+	// create time. Nil for agents created before it was recorded.
+	Placement *AgentPlacement `json:"placement,omitempty"`
 	// RuntimeTarget is the broker runtime target (runtime name, plus cluster
 	// context and namespace for Kubernetes) whose listing reported the agent.
 	// Recorded from heartbeats once two consecutive reports name the same

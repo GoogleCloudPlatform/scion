@@ -45,6 +45,11 @@ const (
 	projectSettingAutoExposePortsEnabled = "scion.io/auto-expose-ports-enabled"
 	projectSettingActiveProfile          = "scion.io/active-profile"
 
+	// Placement for agents created by another agent (see
+	// agent_create_placement.go). The broker is stored as a broker ID.
+	projectSettingAgentCreateProfile = "scion.io/agent-create-profile"
+	projectSettingAgentCreateBroker  = "scion.io/agent-create-broker"
+
 	// Default agent limits
 	projectSettingDefaultMaxTurns      = "scion.io/default-max-turns"
 	projectSettingDefaultMaxModelCalls = "scion.io/default-max-model-calls"
@@ -139,6 +144,10 @@ var projectSettingKeys = []string{
 	projectSettingTelemetryEnabled,
 	projectSettingAutoExposePortsEnabled,
 	projectSettingActiveProfile,
+
+	// Placement for agents created by another agent
+	projectSettingAgentCreateProfile,
+	projectSettingAgentCreateBroker,
 
 	// Default agent limits
 	projectSettingDefaultMaxTurns,
@@ -242,6 +251,10 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 		}
 
 		if !s.validateDefaultGCPIdentity(w, ctx, project, &req) {
+			return
+		}
+
+		if !s.validateAgentCreatePlacementSettings(w, ctx, project, &req) {
 			return
 		}
 
@@ -581,6 +594,12 @@ func projectSettingsFromAnnotations(project *store.Project) *hubclient.ProjectSe
 	if v := project.Annotations[projectSettingActiveProfile]; v != "" {
 		settings.ActiveProfile = &v
 	}
+	if v := project.Annotations[projectSettingAgentCreateProfile]; v != "" {
+		settings.AgentCreateProfile = &v
+	}
+	if v := project.Annotations[projectSettingAgentCreateBroker]; v != "" {
+		settings.AgentCreateBroker = &v
+	}
 
 	if val, ok := project.Annotations[projectSettingTelemetryEnabled]; ok {
 		if b, err := strconv.ParseBool(val); err == nil {
@@ -668,6 +687,14 @@ func applyProjectSettingsToAnnotations(project *store.Project, settings *hubclie
 	// not wipe it (ptone/scion#3383). An explicit empty string clears it.
 	if settings.ActiveProfile != nil {
 		setOrDelete(project.Annotations, projectSettingActiveProfile, *settings.ActiveProfile)
+	}
+	// The agent-create placement settings follow the active profile's rule:
+	// absent keeps the stored value, an explicit empty string clears it.
+	if settings.AgentCreateProfile != nil {
+		setOrDelete(project.Annotations, projectSettingAgentCreateProfile, *settings.AgentCreateProfile)
+	}
+	if settings.AgentCreateBroker != nil {
+		setOrDelete(project.Annotations, projectSettingAgentCreateBroker, *settings.AgentCreateBroker)
 	}
 
 	if settings.TelemetryEnabled != nil {

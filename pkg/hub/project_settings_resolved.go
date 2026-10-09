@@ -262,6 +262,14 @@ var resolvedSettingDescriptors = map[string]resolvedSettingDescriptor{
 	projectSettingActiveProfile: {
 		source: hubSourceNone,
 	},
+	// No hub-level counterpart: hub default broker and profile apply to
+	// every create and are reported against the regular default chain.
+	projectSettingAgentCreateProfile: {
+		source: hubSourceNone,
+	},
+	projectSettingAgentCreateBroker: {
+		source: hubSourceNone,
+	},
 
 	// Default agent limits
 	projectSettingDefaultMaxTurns: {

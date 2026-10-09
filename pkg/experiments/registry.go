@@ -132,6 +132,12 @@ const Artifacts = "hub.artifacts"
 // the delivery sweeper, which holds pending messages while it is off.
 const ChatScheduledSend = "web.chat_scheduled_send"
 
+// AgentCreateInheritPlacement gates placement inheritance for agent-launched
+// creates: when an agent running on a Kubernetes profile creates another
+// agent without naming a broker or profile, the child is placed on the
+// creator's broker and profile, as if the creator had passed them.
+const AgentCreateInheritPlacement = "hub.agent_create_inherit_placement"
+
 // AuthorizationDecisionAuditV2 identifies the default-off decision-audit slice.
 // Registration alone never grants production admission.
 const AuthorizationDecisionAuditV2 = "hub.authorization_decision_audit_v2"
@@ -215,6 +221,17 @@ var compiled = []Experiment{
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#3666",
 		Owner:       "native-chat",
+		ReviewBy:    "2027-01-31",
+	},
+	{
+		Name:        AgentCreateInheritPlacement,
+		Title:       "Inherit placement for agent-launched creates",
+		Description: "When an agent running on a Kubernetes profile creates another agent in a project its broker serves, and names no broker or profile, the child runs on the creator's broker and profile. Explicit flags and the project's agent-create broker and profile settings still win. The caller's own authority decides whether the create is allowed.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#3933",
+		Owner:       "k8s-runtime",
 		ReviewBy:    "2027-01-31",
 	},
 }

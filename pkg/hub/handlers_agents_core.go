@@ -1617,6 +1617,15 @@ func (s *Server) createAgentInProject(
 		req.NoAuth = true
 	}
 
+	// Agent-launched creates: fill an unnamed broker/profile from the
+	// project's agent-create settings or the creating agent's placement
+	// (agent_create_placement.go). Written into req so every check below
+	// treats them exactly like explicit --broker / -p values.
+	placement, ok := s.applyAgentCreatePlacement(ctx, w, project, &req)
+	if !ok {
+		return
+	}
+
 	// Resolve the runtime broker
 	runtimeBrokerID, err := s.resolveRuntimeBroker(ctx, w, req.RuntimeBrokerID, project)
 	if err != nil {
@@ -1631,6 +1640,10 @@ func (s *Server) createAgentInProject(
 		if !s.checkBrokerDispatchAccess(ctx, w, runtimeBrokerID, project) {
 			return
 		}
+	}
+
+	if !s.checkAgentCreateProfileSetting(ctx, w, placement, runtimeBrokerID, req.Profile) {
+		return
 	}
 
 	// Empty-per-agent projects only dispatch to brokers that advertise the
@@ -1917,6 +1930,7 @@ func (s *Server) createAgentInProject(
 	// default) happens later, in deriveAgentConfig, along with the rest of
 	// create's config-resolution pipeline — not here.
 	agent.AppliedConfig = s.buildAppliedConfig(req, creatorName, effectiveRole)
+	agent.AppliedConfig.Placement = placement.record()
 
 	// Resolve message_mode (D10 spawn defaults):
 	//   1. Explicit req.MessageMode from CLI flag → use it (after validation).
@@ -2241,6 +2255,9 @@ func (s *Server) createAgentInProject(
 		MutationType:      mutationTypeAgentDelegation,
 		CanDelegateResult: "allow",
 		CanDelegateReason: delegateDecision.Reason,
+		// Names and sources of a broker/profile chosen by an agent-create
+		// setting or inherited from the creating agent; "" otherwise.
+		AfterSummary: placement.auditSummary(),
 	}
 	var subscription *store.NotificationSubscription
 	if req.Notify {

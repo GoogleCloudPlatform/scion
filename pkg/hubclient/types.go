@@ -231,6 +231,17 @@ type ProjectSettings struct {
 	// Agent authorization
 	MaxAgentRole     string `json:"maxAgentRole,omitempty"`
 	DefaultAgentRole string `json:"defaultAgentRole,omitempty"`
+
+	// AgentCreateProfile and AgentCreateBroker are the profile and broker
+	// for agents created by another agent in this project when the create
+	// names none. They rank below an explicit profile or broker in the
+	// request and above placement inherited from the creating agent and the
+	// project's general defaults; creates by users ignore them. On PUT, an
+	// absent (null) field keeps the stored value and an empty string clears
+	// it. A broker may be given by ID, name or slug; it is stored as the
+	// broker ID and must be a provider of the project.
+	AgentCreateProfile *string `json:"agentCreateProfile,omitempty"`
+	AgentCreateBroker  *string `json:"agentCreateBroker,omitempty"`
 }
 
 // ResolvedHubDefault reports whether a hub-level default exists for a project
