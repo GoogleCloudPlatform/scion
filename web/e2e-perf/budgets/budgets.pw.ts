@@ -102,6 +102,17 @@ const VIEWS: ViewBudget[] = [
   },
 ];
 
+// Long-task margin: max(3, 50% of baseline). It is wide on purpose: long
+// tasks are the one host-sensitive counter, and GitHub-runner variance is
+// not yet measured, so revisit the margin (and the baselines) against the
+// first 3 CI runs of this job at PR time. Observed spread per view, normal
+// loads only, 3 runs of 3 loads each:
+//   main 48a6715: grid per load 2-7, run medians 3-7; list 3-7, medians
+//                 5-7; graph 4-9, medians 5-7.
+//   main 7049f53: grid per load 3-7, run medians 4-6; list 4-8, medians
+//                 5-6; graph 3-7, medians 4-6.
+// The DOM margin (+10) has no such spread: DOM counts were identical on
+// every load, slowed loads included.
 function limits(b: ViewBudget['baseline']): ViewBudget['baseline'] {
   return {
     domElements: b.domElements + DOM_MARGIN,
