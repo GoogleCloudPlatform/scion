@@ -17,22 +17,24 @@
 #   deploy/helm/<chart>/tests/   chart test scripts
 #   deploy/helm/<chart>/hack/    chart verification scripts
 #
-# A line is flagged when it is not a comment (first non-blank character is
-# not '#') and matches one of (case-insensitive):
-#   - `server start ... --debug` or `runtime-broker start ... --debug`
-#   - `--debug ... server start` (the flag given before the subcommand)
-#   - a command continuation line that starts with `--debug` (followed by
-#     nothing, a trailing `\` or further flags), or a YAML list item
-#     `- --debug`; prose that merely names the flag is not flagged
-#   - `--debug` as an element of an inline list, quoted or not
-#     (`args: ["--debug"]`, `args = ["server", "start", "--debug"]`,
-#     `command: [scion, server, start, --debug]`)
-#   - SCION_LOG_LEVEL set to debug (`=debug`, `: debug`, quoted or not)
-#   - SCION_DEBUG set to a non-empty value
-#   - log_level / logLevel set to debug (`log_level: debug`,
-#     `logLevel: debug`, `log_level = "debug"`)
-# In the flag forms, `--debug=true` (also `=t` and `=1`) counts as `--debug`;
-# `--debug=false` is not flagged.
+# Contract: on every uncommented line in scope, the check flags a standalone
+# `--debug` token (bare or =true, =t, =1) wherever it appears, and any
+# assignment of `debug` to SCION_LOG_LEVEL, log_level or logLevel, or of a
+# non-empty value to SCION_DEBUG (including shell defaults and the Dockerfile
+# `ENV KEY value` form). It is deliberately fail-closed: prose that names the
+# flag is flagged too. Intentional mentions go in the commented ALLOWLIST below.
+#
+# Details. Matching is case-insensitive. A line is a comment when its first
+# non-blank character is '#'. `--debug` must be preceded by start of line,
+# whitespace, a quote, `[` or `,`, and followed by end of line, whitespace, a
+# quote, `]`, `,` or a backslash; so `--debug=false`, `--debug-port` and
+# `--debugx` pass, and so does a flag alone in markdown backticks
+# (`` `--debug` ``), while a backticked command such as
+# `scion server start --debug` is flagged. A value of `debug` must be followed
+# by end of line or a character that is not a letter, digit, `_` or `-`, so
+# `debug_off` and `debugx` pass. Shell defaults covered:
+# ${SCION_LOG_LEVEL:-debug}, ${SCION_LOG_LEVEL:=debug}, and ${SCION_DEBUG:-1}
+# or ${SCION_DEBUG:=1} with any non-empty default.
 #
 # Intentional mentions (for example, docs that explain how to turn debug on
 # temporarily) go in the ALLOWLIST array below, anchored on file path plus a
@@ -41,9 +43,11 @@
 # every run proves the scan reached the allowlisted files.
 #
 # LIMITATIONS
-# The check is textual and line-oriented. A value split across lines (for
-# example a Kubernetes env entry with `name: SCION_DEBUG` and `value: "1"` on
-# separate lines) or supplied through a variable is not detected.
+# The check is textual and line-oriented. It does not detect:
+#   - a key and value split across lines, such as a Kubernetes env entry
+#     (`name: SCION_DEBUG` / `value: "1"`) or an HCL env block
+#     (`name = "SCION_LOG_LEVEL"` / `value = "debug"`)
+#   - a value supplied through a variable (`SCION_DEBUG=$X`, `${X}`)
 #
 # Usage:
 #   hack/check-debug-defaults.sh              scan the repository
@@ -86,21 +90,37 @@ ALLOWLIST=(
   # Examples of storing an arbitrary agent environment variable with
   # `scion hub env set`; LOG_LEVEL here is not a Hub setting.
   "docs-site/src/content/docs/hosted/user/secrets.md::^scion hub env set .*[[:space:]]LOG_LEVEL=debug$"
+  # Chart template comments ({{/* ... */}}) that describe the server flag set;
+  # they are not rendered and do not set the flag.
+  "deploy/helm/scion-hub/templates/_helpers.tpl::--debug is on, no log line either"
+  "deploy/helm/scion-hub/templates/_helpers.tpl::^  --debug \\(cmd/server\\.go, init\\)\\. Logging verbosity"
+  "deploy/helm/scion-hub/templates/_helpers.tpl::^    --debug registered in cmd/root\\.go"
 )
 
 # --- Patterns (POSIX ERE, matched case-insensitively) ---
 # Do not use \b, \| or other GNU extensions: BSD grep would silently match
-# nothing and the check would report a false clean.
-q="[\"']"                    # optional quote around a key or value
-dbg="--debug(=(true|t|1))?"  # the flag, bare or with an explicit true value
+# nothing and the check would report a false clean. A literal `]` is written
+# outside any bracket expression (where it is ordinary in ERE), and `$` and `{`
+# as the bracket expressions [$] and [{].
+# The key rules do not start inside ${...}: a `{` before the key hands those
+# forms to the shell-default rules, so ${SCION_DEBUG:-} (empty) passes.
+q="[\"']"                                 # optional quote
+dflt="([$][{][A-Za-z0-9_]+:?[-=])?"        # optional shell default ${VAR:-...
+lvl="${q}?${dflt}debug(\$|[^A-Za-z0-9_-])" # the value debug, then a boundary
+set1="([^\"'[:space:]$}]|[$][{][A-Za-z0-9_]+:?[-=][^\"'[:space:]}])" # non-empty
 PATTERNS=(
-  "(server|runtime-broker) start.*${dbg}([^=A-Za-z0-9_-]|$)"
-  "${dbg}[[:space:]].*(server|runtime-broker) start"
-  "^[[:space:]]*(-[[:space:]]+)?${q}?${dbg}${q}?([[:space:]]*(\\\\|--.*))?$"
-  "[[,][[:space:]]*${q}?${dbg}${q}?[[:space:]]*[],]"
-  "SCION_LOG_LEVEL${q}?[[:space:]]*[=:][[:space:]]*${q}?debug"
-  "SCION_DEBUG${q}?[[:space:]]*[=:][[:space:]]*${q}?[^\"'[:space:]]"
-  "(^|[^A-Za-z_])log_?level${q}?[[:space:]]*[:=][[:space:]]*${q}?debug"
+  # The --debug token.
+  "(^|[[:space:]\"'[,])--debug(=(true|t|1))?(\$|[[:space:]\"',\\]|])"
+  # SCION_LOG_LEVEL / log_level / logLevel = or : debug.
+  "(^|[^A-Za-z0-9_{])(SCION_LOG_LEVEL|log_?level)${q}?[[:space:]]*[=:][[:space:]]*${lvl}"
+  # Shell default for the level: ${SCION_LOG_LEVEL:-debug}, ${SCION_LOG_LEVEL:=debug}.
+  "[$][{]SCION_LOG_LEVEL:?[-=]${lvl}"
+  # SCION_DEBUG = or : a non-empty value (also via a non-empty shell default).
+  "(^|[^A-Za-z0-9_{])SCION_DEBUG${q}?[[:space:]]*[=:][[:space:]]*${q}?${set1}"
+  # Shell default for SCION_DEBUG: ${SCION_DEBUG:-1}, ${SCION_DEBUG:=1}.
+  "[$][{]SCION_DEBUG:?[-=][^\"'[:space:]}]"
+  # Dockerfile ENV with a space separator: ENV SCION_LOG_LEVEL debug.
+  "^[[:space:]]*ENV[[:space:]]+(SCION_LOG_LEVEL[[:space:]]+${lvl}|SCION_DEBUG[[:space:]]+${q}?${set1})"
 )
 
 # analyse: scan SCAN_ROOTS (relative to the current directory), apply
@@ -195,31 +215,42 @@ analyse() {
 }
 
 self_test() {
-  local fx="$WORK/fx" out rc expected got
+  local fx="$WORK/fx" out rc expected got bad_lines i
   mkdir -p "$fx/scripts/starter-hub" "$fx/deploy/helm/chart/ci" \
     "$fx/deploy/helm/chart/templates/ci" "$fx/docs-site/src/content/docs/hosted"
 
+  # Every line of bad.sh must be flagged; no line of good.sh may be.
   cat >"$fx/scripts/starter-hub/bad.sh" <<'EOF'
 ExecStart=/usr/local/bin/scion server start --foreground --debug --enable-hub
 ExecStart=/usr/local/bin/scion --global --debug server start --foreground
-exec scion server start \
   --debug \
   --debug=true \
-  --enable-hub
-SCION_LOG_LEVEL=debug
-export SCION_LOG_LEVEL="debug"
-SCION_DEBUG=1
-    log_level: debug
-args:
   - --debug
-logLevel: debug
-log_level = "debug"
 scion server start --debug=true --enable-hub
 args: ["--debug"]
 args = ["server", "start", "--debug"]
 command: [scion, server, start, --debug]
 args: ['--debug=true', '--enable-hub']
+  --foreground --production --debug \
+  --foreground --debug
+  "--debug",
+scion server  start --debug
+The --debug flag turns on debug logging.
+SCION_LOG_LEVEL=debug
+export SCION_LOG_LEVEL="debug"
+SCION_DEBUG=1
+    log_level: debug
+logLevel: debug
+log_level = "debug"
+SCION_LOG_LEVEL=${SCION_LOG_LEVEL:-debug}
+: "${SCION_LOG_LEVEL:=debug}"
+SCION_DEBUG=${SCION_DEBUG:-1}
+: "${SCION_DEBUG:=1}"
+ENV SCION_LOG_LEVEL debug
+ENV SCION_DEBUG 1
 EOF
+  # A tab between the words (heredoc tabs are easy to lose in an edit).
+  printf 'scion server\tstart --debug\n' >>"$fx/scripts/starter-hub/bad.sh"
   cat >"$fx/scripts/starter-hub/good.sh" <<'EOF'
 # SCION_LOG_LEVEL=debug
   # scion server start --debug
@@ -227,18 +258,23 @@ ExecStart=/usr/local/bin/scion server start --foreground --enable-hub
 scion server start --debug=false --enable-hub
 scion --debug=false server start
   --debug=false \
+  --foreground --debug=false \
 scion server start --debug-port 9000
-SCION_LOG_LEVEL=info
-SCION_DEBUG=
-SCION_DEBUG=""
-SCION_DEBUG_EXTRA=1
-log_level: info
-logLevel: "info"
-The --debug flag turns on debug logging.
-  --debug is on, no log line either.
+scion server start --debugx
 args: ["--debug=false"]
 args: ["--debug-port", "9000"]
 args: []
+SCION_LOG_LEVEL=info
+SCION_LOG_LEVEL=${SCION_LOG_LEVEL:-info}
+SCION_LOG_LEVEL: debugx
+log_level: debug_off
+log_level: info
+logLevel: "info"
+SCION_DEBUG=
+SCION_DEBUG=""
+SCION_DEBUG=${SCION_DEBUG:-}
+SCION_DEBUG_EXTRA=1
+ENV SCION_LOG_LEVEL info
 EOF
   # Pruned: top-level ci/ of a chart.
   printf 'log_level: debug\n' >"$fx/deploy/helm/chart/ci/values.yaml"
@@ -246,9 +282,12 @@ EOF
   printf 'SCION_LOG_LEVEL=debug\n' >"$fx/deploy/helm/chart/templates/ci/env.yaml"
   # Ignored: docs are scanned only for *.md and *.mdx.
   printf 'SCION_LOG_LEVEL=debug\n' >"$fx/docs-site/src/content/docs/hosted/notes.txt"
-  # Line 1 is allowlisted; line 2 is a near miss in the same file.
+  # Line 1 is allowlisted; line 2 is a near miss in the same file; line 3
+  # names the flag in backticks only, which is not a token match.
   printf '%s\n' 'To troubleshoot, set `SCION_LOG_LEVEL=debug` temporarily.' \
-    'SCION_LOG_LEVEL=debug' >"$fx/docs-site/src/content/docs/hosted/page.md"
+    'SCION_LOG_LEVEL=debug' 'Use `--debug` only while troubleshooting.' \
+    >"$fx/docs-site/src/content/docs/hosted/page.md"
+  bad_lines="$(wc -l <"$fx/scripts/starter-hub/bad.sh" | tr -d ' ')"
 
   rc=0
   out="$(
@@ -263,23 +302,13 @@ EOF
 
   expected="deploy/helm/chart/templates/ci/env.yaml:1
 docs-site/src/content/docs/hosted/page.md:2
-scripts/starter-hub/bad.sh:1
-scripts/starter-hub/bad.sh:10
-scripts/starter-hub/bad.sh:12
-scripts/starter-hub/bad.sh:13
-scripts/starter-hub/bad.sh:14
-scripts/starter-hub/bad.sh:15
-scripts/starter-hub/bad.sh:16
-scripts/starter-hub/bad.sh:17
-scripts/starter-hub/bad.sh:18
-scripts/starter-hub/bad.sh:19
-scripts/starter-hub/bad.sh:2
-scripts/starter-hub/bad.sh:4
-scripts/starter-hub/bad.sh:5
-scripts/starter-hub/bad.sh:7
-scripts/starter-hub/bad.sh:8
-scripts/starter-hub/bad.sh:9
 stale-allowlist:docs-site/src/content/docs/hosted/page.md"
+  i=1
+  while [[ "$i" -le "$bad_lines" ]]; do
+    expected="${expected}
+scripts/starter-hub/bad.sh:${i}"
+    i=$((i + 1))
+  done
   got="$(printf '%s\n' "$out" | cut -d: -f1,2 | LC_ALL=C sort)"
   expected="$(printf '%s\n' "$expected" | LC_ALL=C sort)"
   if [[ "$rc" -ne 1 || "$got" != "$expected" ]]; then
@@ -300,7 +329,7 @@ stale-allowlist:docs-site/src/content/docs/hosted/page.md"
     analyse
   )" || rc=$?
   got="$(printf '%s\n' "$out" | cut -d: -f1,2 | grep -c -e '^docs-site/src/content/docs/hosted/page.md:[12]$' -e '^scripts/starter-hub/bad.sh:' || true)"
-  if [[ "$rc" -ne 1 ]] || [[ "$got" -ne 18 ]] || printf '%s\n' "$out" | grep -q '^stale-allowlist:'; then
+  if [[ "$rc" -ne 1 ]] || [[ "$got" -ne $((bad_lines + 2)) ]] || printf '%s\n' "$out" | grep -q '^stale-allowlist:'; then
     echo "$NAME --self-test: FAIL, empty ALLOWLIST gave exit $rc with output:" >&2
     printf '%s\n' "$out" >&2
     exit 1
@@ -314,7 +343,7 @@ stale-allowlist:docs-site/src/content/docs/hosted/page.md"
     exit 1
   fi
 
-  echo "$NAME --self-test: ok (18 violations and 1 stale allowlist entry flagged; clean, commented, pruned and non-doc lines ignored; empty allowlist works; missing root exits 4)"
+  echo "$NAME --self-test: ok ($((bad_lines + 2)) violations and 1 stale allowlist entry flagged; clean, commented, pruned and non-doc lines ignored; empty allowlist works; missing root exits 4)"
 }
 
 if [[ "${1:-}" == "--self-test" ]]; then
