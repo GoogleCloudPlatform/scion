@@ -12,6 +12,12 @@ Patch flags (`--model`, `--image`, `--role`, `--service-account`, `--thinking-le
 `--harness-auth`) change that setting on the new generation.
 Reincarnating another agent needs permission to delegate its role, but the agent keeps
 its existing delegator (and so its authority) unless you change its role with `--role`.
+An agent denied with `ceiling_unrecorded` (for example, it cannot assign a service
+account after a hub upgrade) has a delegation chain without recorded provenance. Ask an
+authorized user to reincarnate it, or to recreate it directly: a user's reincarnation
+re-records the agent's delegation with that user as delegator, even without a role
+change. Reincarnating it yourself, or from another agent, keeps the chain and does not
+clear the denial.
 
 ### Moving to another Runtime Broker
 

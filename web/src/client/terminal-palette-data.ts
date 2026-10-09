@@ -32,9 +32,8 @@
 
 import { agentStore } from './agent-store.js';
 import type { AgentListSnapshot, AgentStore } from './agent-store.js';
-import type { RawPaletteAgent } from './chat-palette-data.js';
 import { buildAgentCandidate } from './agent-palette-candidate.js';
-import type { PaletteCandidate } from './chat-palette-types.js';
+import type { PaletteCandidate, RawPaletteAgent } from './palette-types.js';
 import { can, isTerminalAvailable } from '../shared/types.js';
 
 /** The part of the agent store the terminal palette reads. */

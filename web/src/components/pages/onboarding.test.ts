@@ -163,7 +163,7 @@ describe('onboarding harness step: gcloud ADC preference', () => {
     expect(calls).toHaveLength(2);
     expect(calls[1][0]).toBe('/api/v1/system/workstation-settings');
     expect(calls[1][1]?.method).toBe('PATCH');
-    expect(JSON.parse(String(calls[1][1]?.body))).toEqual({ auto_inject_gcloud_adc: true });
+    expect(JSON.parse(calls[1][1]?.body as string)).toEqual({ auto_inject_gcloud_adc: true });
     expect(calls.some((c) => c[0] === '/api/v1/admin/server-config')).toBe(false);
     expect(el.error).toBeNull();
     expect(el.currentStep).toBe(5);
