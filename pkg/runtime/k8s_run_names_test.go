@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 )
 
@@ -829,17 +830,159 @@ func TestK8sRun_NoRunID_PreClean_RemovesPreviousPodsPerRunObjects(t *testing.T) 
 	}
 }
 
-// A no-run start replacing a live run-ID pod leaves that pod's per-run
-// objects (nothing a live pod uses is removed here).
-func TestK8sRun_NoRunID_PreClean_LivePodsPerRunObjectsKept(t *testing.T) {
+// A no-run start replacing a live run-ID pod removes that pod's run's
+// per-run objects once a re-read shows the pod gone (ptone/scion#3753),
+// and leaves another run's, another agent's and its own new objects.
+func TestK8sRun_NoRunID_PreClean_LivePodGone_RemovesItsRunsObjects(t *testing.T) {
 	rt, cs, _, _ := newRunScopeRuntime(t)
 	prClock(rt, prNow)
 	x := k8sAgentObjectNames(rsAgent, rsRunA)
 	prSeedPodRefs(t, rt, rsRunA, corev1.PodRunning, x.Secret, x.Auth)
 	prSeedRunObjects(t, rt, rsRunA, "300", prNow)
+	y := prSeedRunObjects(t, rt, rsRunB, "300", prNow)
+	other := k8sAgentObjectNames("proj1--other", rsRunA)
+	prSeed(t, rt, "Secret", other.Secret, "sec-other", rsLabels(rsRunA, "start-o"), nil, prNow)
+	pod := runUntilPodSubmittedLate(t, rt, cs, rsRunConfig(""))
+	if got := prPresent(t, rt, x); got != prNone {
+		t.Errorf("replaced live pod's run objects = %v, want none", got)
+	}
+	if got := prPresent(t, rt, y); got != prAll {
+		t.Errorf("another run's objects = %v, want all", got)
+	}
+	if !secretExists(t, rt, rt.DefaultNamespace, other.Secret) {
+		t.Error("another agent's per-run Secret of the same run was removed")
+	}
+	refs := podSecretRefs(pod)
+	if len(refs) == 0 {
+		t.Fatal("the new pod references no Secrets")
+	}
+	for _, ref := range refs {
+		if !secretExists(t, rt, rt.DefaultNamespace, ref) && !spcExists(t, rt, rt.DefaultNamespace, ref) {
+			t.Errorf("the new start's object %s is gone", ref)
+		}
+	}
+}
+
+// A no-run start replacing a live run-ID pod leaves that pod's run's
+// per-run objects while the pod is still there with the same UID: its
+// delete failed (cleanupStalePod swallows the error) or it is still
+// terminating.
+func TestK8sRun_NoRunID_PreClean_LivePodStillPresent_ObjectsKept(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(cs *k8sfake.Clientset)
+	}{
+		{"delete fails", func(cs *k8sfake.Clientset) {
+			cs.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+				return true, nil, errors.New("simulated pod delete failure")
+			})
+		}},
+		{"still terminating", func(cs *k8sfake.Clientset) { keepPodsOnDelete(cs) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, cs, _, _ := newRunScopeRuntime(t)
+			prClock(rt, prNow)
+			x := k8sAgentObjectNames(rsAgent, rsRunA)
+			prSeedPodRefs(t, rt, rsRunA, corev1.PodRunning, x.Secret, x.Auth)
+			prSeedRunObjects(t, rt, rsRunA, "300", prNow)
+			tc.setup(cs)
+			runUntilPodSubmittedLate(t, rt, cs, rsRunConfig(""))
+			if got := prPresent(t, rt, x); got != prAll {
+				t.Errorf("live pod's run objects = %v, want all", got)
+			}
+		})
+	}
+}
+
+// The re-read of the previous pod fails after its delete: the pod cannot
+// be confirmed gone, so its run's per-run objects are left.
+func TestK8sRun_NoRunID_PreClean_LivePodReReadFails_ObjectsKept(t *testing.T) {
+	rt, cs, _, _ := newRunScopeRuntime(t)
+	prClock(rt, prNow)
+	x := k8sAgentObjectNames(rsAgent, rsRunA)
+	prSeedPodRefs(t, rt, rsRunA, corev1.PodRunning, x.Secret, x.Auth)
+	prSeedRunObjects(t, rt, rsRunA, "300", prNow)
+	var mu sync.Mutex
+	deleted, failed := false, false
+	cs.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		deleted = true
+		return false, nil, nil // the default reactor removes the pod
+	})
+	cs.PrependReactor("get", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if deleted && !failed {
+			failed = true
+			return true, nil, errors.New("simulated pod read failure")
+		}
+		return false, nil, nil
+	})
+	runUntilPodSubmittedLate(t, rt, cs, rsRunConfig(""))
+	if !failed {
+		t.Fatal("the previous pod was not re-read after its delete")
+	}
+	if got := prPresent(t, rt, x); got != prAll {
+		t.Errorf("run objects of a pod not confirmed gone = %v, want all", got)
+	}
+}
+
+// A pod of another UID holding the name after the previous pod's delete
+// counts as the previous pod gone: its run's per-run objects are removed,
+// and the replacement pod's run's objects are left.
+func TestK8sRun_NoRunID_PreClean_LivePodReplaced_RemovesItsRunsObjects(t *testing.T) {
+	rt, cs, _, _ := newRunScopeRuntime(t)
+	prClock(rt, prNow)
+	x := k8sAgentObjectNames(rsAgent, rsRunA)
+	prSeedPodRefs(t, rt, rsRunA, corev1.PodRunning, x.Secret, x.Auth)
+	prSeedRunObjects(t, rt, rsRunA, "300", prNow)
+	y := prSeedRunObjects(t, rt, rsRunB, "300", prNow)
+	podGVR := corev1.SchemeGroupVersion.WithResource("pods")
+	var once sync.Once
+	cs.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		once.Do(func() {
+			_ = cs.Tracker().Delete(podGVR, action.GetNamespace(), rsAgent)
+			_ = cs.Tracker().Add(&corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: rsAgent, Namespace: action.GetNamespace(), UID: "pod-replacement", Labels: rsLabels(rsRunB, "start-b")},
+				Status:     corev1.PodStatus{Phase: corev1.PodPending},
+			})
+		})
+		return true, nil, nil
+	})
+	runUntilPodSubmittedLate(t, rt, cs, rsRunConfig(""))
+	if got := prPresent(t, rt, x); got != prNone {
+		t.Errorf("replaced pod's run objects = %v, want none", got)
+	}
+	if got := prPresent(t, rt, y); got != prAll {
+		t.Errorf("replacement pod's run objects = %v, want all", got)
+	}
+}
+
+// A pod of the same run (a retrying start of that run) holding the name
+// after the previous pod's delete is not the previous pod gone: that
+// run's per-run objects, which the replacement mounts, are kept.
+func TestK8sRun_NoRunID_PreClean_LivePodReplacedBySameRun_ObjectsKept(t *testing.T) {
+	rt, cs, _, _ := newRunScopeRuntime(t)
+	prClock(rt, prNow)
+	x := k8sAgentObjectNames(rsAgent, rsRunA)
+	prSeedPodRefs(t, rt, rsRunA, corev1.PodRunning, x.Secret, x.Auth)
+	prSeedRunObjects(t, rt, rsRunA, "300", prNow)
+	podGVR := corev1.SchemeGroupVersion.WithResource("pods")
+	var once sync.Once
+	cs.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		once.Do(func() {
+			_ = cs.Tracker().Delete(podGVR, action.GetNamespace(), rsAgent)
+			_ = cs.Tracker().Add(&corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: rsAgent, Namespace: action.GetNamespace(), UID: "pod-retry", Labels: rsLabels(rsRunA, "start-retry")},
+				Status:     corev1.PodStatus{Phase: corev1.PodPending},
+			})
+		})
+		return true, nil, nil
+	})
 	runUntilPodSubmittedLate(t, rt, cs, rsRunConfig(""))
 	if got := prPresent(t, rt, x); got != prAll {
-		t.Errorf("live pod's run objects = %v, want all", got)
+		t.Errorf("run objects under a same-run replacement pod = %v, want all", got)
 	}
 }
 
@@ -1381,5 +1524,31 @@ func TestDeleteAgentSecretsBySelector_OnDeleteSeesConflict(t *testing.T) {
 	}
 	if !secretExists(t, rt, rt.DefaultNamespace, a.Auth) {
 		t.Error("the conflicting Secret was removed")
+	}
+}
+
+// An NFS-home start without a run ID over a live run-ID pod removes the
+// previous run's per-run objects once the pod is gone (ptone/scion#3753),
+// as the non-NFS path does.
+func TestK8sRun_NoRunID_NFSHome_LivePodGone_RemovesItsRunsObjects(t *testing.T) {
+	rt, cs, _ := newTestK8sRuntime()
+	seedNFSPod(t, rt, rsRunA, corev1.PodRunning, nil)
+	x := prSeedNFSRunObjects(t, rt, rsRunA)
+	cfg := nfsHomeTestConfig(true)
+	cfg.Name = "a"
+	// The error is expected and otherwise ignored: Run fails after its
+	// pre-clean, when it creates the auth Secret from a test auth file that
+	// does not exist. Asserting that failure keeps a failure that moves
+	// before the pre-clean explicit.
+	if _, err := rt.Run(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "failed to read auth file") {
+		t.Fatalf("Run error = %v, want the auth-file failure after the pre-clean", err)
+	}
+	if _, err := cs.CoreV1().Pods("default").Get(context.Background(), "a", metav1.GetOptions{}); !k8serrors.IsNotFound(err) {
+		t.Fatalf("previous pod still present (err %v)", err)
+	}
+	for _, name := range []string{x.Secret, x.Auth} {
+		if secretExists(t, rt, "default", name) {
+			t.Errorf("previous live run's per-run Secret %s not removed after its pod was gone", name)
+		}
 	}
 }

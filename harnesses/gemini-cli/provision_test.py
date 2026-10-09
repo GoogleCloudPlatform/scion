@@ -81,7 +81,12 @@ class GeminiModelTest(unittest.TestCase):
     def _ctx(self, harness_config: dict[str, Any]) -> Any:
         return scion_harness.ProvisionContext(
             "gemini-cli",
-            {"harness_bundle_dir": self.bundle, "harness_config": harness_config},
+            {
+                "harness_bundle_dir": self.bundle,
+                "harness_config": harness_config,
+                # Never fall back to the real /workspace (ptone/scion#2993).
+                "agent_workspace": os.path.join(self._tmp.name, "workspace"),
+            },
         )
 
     def _settings(self) -> dict[str, Any]:

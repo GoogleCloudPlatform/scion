@@ -122,15 +122,11 @@ func TestSessionOnlyGate_ReasonIsReported(t *testing.T) {
 	assert.False(t, ok)
 	requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, "scheduled dispatch authoring")
 
-	// Scheduled message authoring is not session-only either: the revision
-	// records the token's ceiling, and each fire re-checks the token under
-	// resolveScheduledAuthority. Whatever the send preview decides, the
-	// token is not refused as session-only.
 	rec = httptest.NewRecorder()
 	payload := `{"agentId":"` + f.agent + `","message":"x"}`
-	m.srv.authorizeScheduledMessageAuthoring(rec, requestWithContext(ctx, http.MethodPost, "/api/v1/projects/"+f.project+"/scheduled-events", nil), f.project, payload, "", "")
-	_, credential = sessionOnlyDetailsOf(rec)
-	assert.NotEqual(t, sessionRequiredCredential, credential, "scheduled message authoring: refused as session-only: %s", rec.Body.String())
+	ok = m.srv.authorizeScheduledMessageAuthoring(rec, requestWithContext(ctx, http.MethodPost, "/api/v1/projects/"+f.project+"/scheduled-events", nil), f.project, payload, "", "")
+	assert.False(t, ok)
+	requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, "scheduled message authoring")
 
 	bindings, err := m.store.ListRoleBindingsForPrincipal(context.Background(), store.RoleBindingPrincipalUser, m.adminID)
 	require.NoError(t, err)

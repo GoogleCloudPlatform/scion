@@ -6,7 +6,7 @@
 # WHY THIS EXISTS AS A SEPARATE MECHANICAL SCAN.
 #
 # The session secret derives BOTH the cookie encryption key and the shared JWT
-# signing key (resolveSessionSecret, cmd/server_foreground.go:1452-1463), so it
+# signing key (resolveSessionSecret, cmd/server_foreground.go), so it
 # is the most sensitive value this chart handles, and the three places it must
 # never appear all LOOK FINE in a rendered manifest:
 #

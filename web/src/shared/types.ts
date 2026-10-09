@@ -219,6 +219,47 @@ export function isWorktreeWorkspace(project: Project): boolean {
 }
 
 /**
+ * Check whether a git project gives each agent its own clone. Matches the
+ * hub's ResolveProjectSharingMode: only a per-agent (or clone-per-agent)
+ * label means clone per agent; an unlabelled or unknown git project is
+ * shared.
+ */
+export function isClonePerAgentWorkspace(project: Project): boolean {
+  const mode = project.labels?.['scion.dev/workspace-mode'];
+  return !!project.gitRemote && (mode === 'per-agent' || mode === 'clone-per-agent');
+}
+
+/**
+ * Icon and accessible label for a project's workspace mode, as shown in the
+ * project list (#2917). Derived from the git remote, the project type and
+ * the hub-owned scion.dev/workspace-mode label; no extra API data needed.
+ */
+export interface ProjectWorkspaceModeIcon {
+  icon: string;
+  label: string;
+}
+
+export function projectWorkspaceModeIcon(project: Project): ProjectWorkspaceModeIcon {
+  if (project.gitRemote) {
+    if (isClonePerAgentWorkspace(project)) {
+      return { icon: 'git', label: 'Git repository, clone per agent' };
+    }
+    if (isWorktreeWorkspace(project)) {
+      return { icon: 'git', label: 'Git repository, worktree per agent' };
+    }
+    // Unlabelled or unknown git modes are shared, as on the hub.
+    return { icon: 'git', label: 'Git repository, shared workspace' };
+  }
+  if (isEmptyPerAgentWorkspace(project)) {
+    return { icon: 'folder-plus', label: 'Empty directory per agent' };
+  }
+  if (project.projectType === 'linked') {
+    return { icon: 'folder-symlink', label: 'Linked project directory' };
+  }
+  return { icon: 'folder-fill', label: 'Shared directory' };
+}
+
+/**
  * Exposed port registered by an agent for port forwarding.
  */
 export interface ExposedPort {
