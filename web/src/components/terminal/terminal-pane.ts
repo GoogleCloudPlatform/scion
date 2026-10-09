@@ -35,7 +35,6 @@ import {
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import type { TerminalAgentMetadata } from '../../client/terminal-metadata.js';
-import type { StatusType } from '../shared/status-badge.js';
 import '../shared/status-badge.js';
 import { showToast } from '../../utils/toast.js';
 import { buildAgentDMKey, chatConversationPath } from '../../client/chat-routes.js';
@@ -2127,7 +2126,7 @@ export class ScionTerminalPane extends LitElement {
             `
           : ''}
         <scion-status-badge
-          status=${this.agentDisplayStatus as StatusType}
+          status=${this.agentDisplayStatus}
           size="small"
         ></scion-status-badge>
         <div class="status-indicator">

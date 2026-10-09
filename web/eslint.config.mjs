@@ -215,6 +215,10 @@ export default defineConfig([
   // method there is correct and unbound-method only reports false
   // positives. Test files have their own settings above. The rule stays
   // on for src/client and every other source directory (ptone/scion#4070).
+  // Trade-off: this turns the rule off for all component code, so a future
+  // arr.map(this.method) or addEventListener(type, this.method) under
+  // src/components will not be reported. That is acceptable because every
+  // current finding here is a Lit template binding.
   {
     files: ['src/components/**/*.ts'],
     ignores: ['src/components/**/*.test.ts'],

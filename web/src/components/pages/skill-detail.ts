@@ -631,7 +631,7 @@ export class ScionPageSkillDetail extends LitElement {
       <scion-detail-header heading=${skill.name}>
         <sl-icon slot="icon" name="lightning-charge"></sl-icon>
         <scion-status-badge
-          status=${skill.status as StatusType}
+          status=${skill.status}
           label=${skill.status}
         ></scion-status-badge>
         <div slot="meta" class="header-meta">

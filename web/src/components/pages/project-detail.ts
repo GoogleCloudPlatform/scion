@@ -2495,7 +2495,6 @@ export class ScionPageProjectDetail extends LitElement {
         method: 'POST',
       });
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const result = await response.json();
 
       if (!response.ok) {
