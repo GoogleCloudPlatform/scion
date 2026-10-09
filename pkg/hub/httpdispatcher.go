@@ -4056,12 +4056,29 @@ func (d *HTTPAgentDispatcher) deferredDelete(ctx context.Context, agent *store.A
 		DeletedAt:      deletedAt,
 		RunID:          agent.RunID,
 		PreviousRunIDs: agent.PreviousRunIDs,
+		// The target lets the executing node send the delete even after
+		// the agent row is gone, as after a project delete
+		// (ptone/scion#3665).
+		Target: &DeleteIntentTarget{
+			BrokerID:  agent.RuntimeBrokerID,
+			ProjectID: agent.ProjectID,
+			Slug:      agent.Slug,
+			Runtime:   agent.Runtime,
+		},
 	}
 	// An engine delete records its claim, not its notAfter: the executing
 	// node checks the claim is still live and computes notAfter when it
-	// actually sends (ptone/scion#2906).
-	if fence, ok := deleteDispatchFenceFrom(ctx); ok {
+	// actually sends (ptone/scion#2906). Any other delete records a
+	// notAfter fixed now (ptone/scion#3674), or keeps the one it is already
+	// executing under when the executing node defers it again.
+	fence, ok := deleteDispatchFenceFrom(ctx)
+	switch {
+	case ok && fence.claim != 0:
 		args.Claim = fence.claim
+	case ok && !fence.notAfter.IsZero():
+		args.NotAfter = fence.notAfter
+	default:
+		args.NotAfter = claimlessDeleteNotAfter(deleteClock())
 	}
 	return deferredDeleteError(d.deferredDataOp(ctx, agent, "delete", args))
 }

@@ -256,8 +256,8 @@ func countServerLoopGoroutines(skip map[int64]goroutineInfo) (int, []string) {
 
 // TestNewFailureStopsBackgroundGoroutines: a New() that fails after it has
 // started its background loops (here, at the fail-closed D4 membership
-// index step, which runs after the link services, the preview engine, the
-// decision audit worker and the OIDC key loops are up) must stop them
+// index step, which runs after the link services, the preview engine and
+// the OIDC key loops are up) must stop them
 // itself, since the caller gets no *Server to shut down
 // (ptone/scion#3641).
 func TestNewFailureStopsBackgroundGoroutines(t *testing.T) {

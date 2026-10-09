@@ -273,18 +273,6 @@ func (f ConversationParticipantFunc) Mutate(ctx context.Context, m ent.Mutation)
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ConversationParticipantMutation", m)
 }
 
-// The DecisionAuditFunc type is an adapter to allow the use of ordinary
-// function as DecisionAudit mutator.
-type DecisionAuditFunc func(context.Context, *ent.DecisionAuditMutation) (ent.Value, error)
-
-// Mutate calls f(ctx, m).
-func (f DecisionAuditFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
-	if mv, ok := m.(*ent.DecisionAuditMutation); ok {
-		return f(ctx, mv)
-	}
-	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.DecisionAuditMutation", m)
-}
-
 // The DelegationAdoptionFunc type is an adapter to allow the use of ordinary
 // function as DelegationAdoption mutator.
 type DelegationAdoptionFunc func(context.Context, *ent.DelegationAdoptionMutation) (ent.Value, error)

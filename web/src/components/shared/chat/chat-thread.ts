@@ -2804,7 +2804,7 @@ export class ScionChatThread extends LitElement {
       // hub keeps only those the sender can read.
       if (artifactRefs && artifactRefs.length > 0) {
         body.metadata = {
-          ...((body.metadata as Record<string, string> | undefined) ?? {}),
+          ...(body.metadata ?? {}),
           [ARTIFACTS_METADATA_KEY]: JSON.stringify(artifactRefs),
         };
       }
@@ -5134,7 +5134,7 @@ export class ScionChatThread extends LitElement {
     if (composer) {
       const slTextarea = (composer as LitElement).shadowRoot?.querySelector('sl-textarea');
       if (slTextarea) {
-        focusElement(slTextarea as HTMLElement);
+        focusElement(slTextarea);
       }
     }
   }
@@ -5614,7 +5614,7 @@ export class ScionChatThread extends LitElement {
             <scion-chat-system-line
               message=${msg.msg}
               timestamp=${msg.createdAt}
-              category=${(msg.metadata?.['system_category'] as string) || ''}
+              category=${msg.metadata?.['system_category'] || ''}
             ></scion-chat-system-line>
           `,
         });

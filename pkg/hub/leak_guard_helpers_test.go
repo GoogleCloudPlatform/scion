@@ -83,7 +83,6 @@ var leakGuardSignatures = []string{
 	// One per open *sql.DB: an unclosed test store.
 	"database/sql.(*DB).connectionOpener",
 	// Background loops started by New() and stopped by Server.Shutdown.
-	"hub.(*StoreDecisionAuditEmitter).next",
 	"hub.(*chatLinkService).cleanupLoop",
 	"hub.(*PreviewService).cleanupNonces",
 	"hub.(*NonceCache).cleanup",
