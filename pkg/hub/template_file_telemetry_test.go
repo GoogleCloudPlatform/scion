@@ -186,6 +186,27 @@ func TestTemplateUpload_LaterUploadKeepsJSONTelemetry(t *testing.T) {
 	}
 }
 
+// Known limit, pinned: a JSON-set value equal to the replaced file's
+// telemetry block cannot be told apart from a file-sourced one, so it
+// follows the file and is cleared when the new file drops the block. Only
+// the file-handler upload paths are covered; finalize is ptone/scion#4125.
+func TestTemplateUpload_JSONTelemetryEqualToFileFollowsFile(t *testing.T) {
+	for name, upload := range templateUploadPaths {
+		t.Run(name, func(t *testing.T) {
+			srv, s, stor := testTemplateFileServer(t)
+			// The stored file's block (enabled: true) equals the JSON value.
+			tmpl := createTestTemplate(t, s, stor, map[string]string{"scion-agent.yaml": yamlTelemetryOn})
+			setJSONTelemetry(t, s, tmpl, true)
+
+			upload(t, srv, tmpl.ID, yamlNoTelemetry)
+
+			if got := storedTelemetry(t, s, tmpl.ID); got != nil {
+				t.Errorf("expected the value equal to the replaced file to be cleared, got %+v", got)
+			}
+		})
+	}
+}
+
 // Content that does not parse leaves the stored telemetry alone.
 func TestApplyAgentConfigUpload_UnparseableKeepsTelemetry(t *testing.T) {
 	enabled := false

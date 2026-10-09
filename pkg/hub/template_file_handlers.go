@@ -188,6 +188,10 @@ func sameTelemetry(a, b *api.TelemetryConfig) bool {
 // value counts as file-sourced when it equals the replaced file's telemetry.
 // File-sourced telemetry follows the file: it is replaced when the new file
 // has a telemetry block and cleared when the new file has none.
+//
+// This covers the file-handler upload paths only. Template finalize (the CLI
+// push path) does not apply it yet, and finalize cannot read the replaced
+// file because it is already overwritten; see ptone/scion#4125.
 func applyAgentConfigUpload(template *store.Template, data []byte, prevTelemetry *api.TelemetryConfig) {
 	cfgInfo := detectHarnessFromContent(data, template.Name)
 	template.Harness = cfgInfo.Harness
