@@ -2050,6 +2050,13 @@ authDone:
 	// request or template env is replaced.
 	agentEnv = withLaunchIDEnv(agentEnv, runID)
 
+	// Write the full task to the agent home, and pass a short pointer to
+	// it instead when the task is too large to pass inline.
+	task, err = deliverTaskFile(agentHome, task)
+	if err != nil {
+		return nil, err
+	}
+
 	runCfg := runtime.RunConfig{
 		Name:                 containerName(projectName, opts.Name),
 		Template:             template,
