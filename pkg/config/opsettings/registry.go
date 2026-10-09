@@ -64,6 +64,17 @@ func kubernetesServiceAccountMappingsSchema() map[string]interface{} {
 	}
 }
 
+// profileCloneDepthSchema returns profileConfig.clone_depth from the
+// settings schema $defs, so the profiles section validates clone_depth
+// with the same rule as settings-v1.schema.json. It returns nil when the
+// definition is missing.
+func profileCloneDepthSchema(defs map[string]interface{}) map[string]interface{} {
+	profile, _ := defs["profileConfig"].(map[string]interface{})
+	props, _ := profile["properties"].(map[string]interface{})
+	cd, _ := props["clone_depth"].(map[string]interface{})
+	return cd
+}
+
 // sharedDirStorageBackendsSchema mirrors shared_dir_storage_backends in
 // settings-v1.schema.json: shared dir name keys (lowercase letters, digits
 // and hyphens, as api.ValidateSharedDirs requires) mapped to local or nfs.
@@ -147,6 +158,16 @@ func init() {
 				"quotas.enforce_broker_quotas",
 			},
 			New: func() any { return &QuotaSettings{} },
+		},
+		{
+			// gcp_iam holds the GCP service-account permission-check
+			// settings (reloadable; see GCPIAMSettings).
+			Name: "gcp_iam",
+			KoanfPaths: []string{
+				"server.hub.gcp_iam_check_mode",
+				"server.hub.gcp_iam_deny_unknown_policy",
+			},
+			New: func() any { return &GCPIAMSettings{} },
 		},
 		{
 			Name: "agent_secrets",
@@ -248,6 +269,15 @@ func init() {
 			Name:       "artifacts",
 			KoanfPaths: nil,
 			New:        func() any { return &ArtifactsSettings{} },
+		},
+		{
+			// profiling is durable via DB but has no settings.yaml
+			// representation; it is written through PUT
+			// /api/v1/admin/profiling. Absent DB row = everything off.
+			// Seeding skips this section (KoanfPaths nil).
+			Name:       "profiling",
+			KoanfPaths: nil,
+			New:        func() any { return &ProfilingSettings{} },
 		},
 	}
 
@@ -363,6 +393,12 @@ func compileSchemas() {
 
 	defs, _ := root["$defs"].(map[string]interface{})
 
+	cloneDepthSchema := profileCloneDepthSchema(defs)
+	if cloneDepthSchema == nil {
+		schemaCompileErr = fmt.Errorf("opsettings: settings schema has no profileConfig.clone_depth")
+		return
+	}
+
 	sectionSchemaMap := map[string]map[string]interface{}{
 		"access": {
 			"type": "object",
@@ -422,6 +458,17 @@ func compileSchemas() {
 		"auto_expose_ports": schemaObject(getSchemaProperty(root, "auto_expose_ports")),
 		"quotas":            schemaObject(getSchemaProperty(root, "quotas")),
 		"agent_secrets":     schemaObject(getSchemaProperty(root, "agent_secrets")),
+		// gcp_iam schema is hand-written -- the keys have no definition in
+		// settings-v1.schema.json. An empty string is not a valid value:
+		// clearing a key is done by resetting the section.
+		"gcp_iam": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"gcp_iam_check_mode":          map[string]interface{}{"type": "string", "enum": GCPIAMCheckModes},
+				"gcp_iam_deny_unknown_policy": map[string]interface{}{"type": "string", "enum": GCPIAMDenyUnknownPolicies},
+			},
+			"additionalProperties": false,
+		},
 		// experiments schema is hand-written -- it is runtime/API-owned
 		// state with no $defs in settings-v1.schema.json (like maintenance
 		// and messaging). overrides is a map of experiment name -> bool;
@@ -450,6 +497,15 @@ func compileSchemas() {
 		// stored document that breaks them is handled by Resolve (an invalid
 		// remote image value turns remote images off; any other invalid
 		// value disables the service).
+		// profiling schema is hand-written -- it is runtime/API-owned state
+		// with no $defs in settings-v1.schema.json (like messaging).
+		"profiling": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"readiness_marks": map[string]interface{}{"type": "boolean"},
+			},
+			"additionalProperties": false,
+		},
 		"artifacts": {
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -460,6 +516,7 @@ func compileSchemas() {
 				"default_retention_days":       map[string]interface{}{"type": "integer", "minimum": 0},
 				"link_default_ttl_hours":       map[string]interface{}{"type": "integer", "minimum": 1},
 				"link_max_ttl_hours":           map[string]interface{}{"type": "integer", "minimum": 1},
+				"gc_grace_hours":               map[string]interface{}{"type": "integer", "minimum": ArtifactsMinGCGraceHours},
 				"remote_images_enabled":        map[string]interface{}{"type": "boolean"},
 				"remote_image_max_count":       map[string]interface{}{"type": "integer", "minimum": 1},
 				"remote_image_max_bytes":       map[string]interface{}{"type": "integer", "minimum": 1},
@@ -563,6 +620,7 @@ func compileSchemas() {
 						},
 					},
 					"secrets":                     map[string]interface{}{"type": "array"},
+					"clone_depth":                 cloneDepthSchema,
 					"shared_dir_storage_class":    map[string]interface{}{"type": "string"},
 					"shared_dir_size":             map[string]interface{}{"type": "string"},
 					"safe_to_evict":               map[string]interface{}{"type": "boolean"},

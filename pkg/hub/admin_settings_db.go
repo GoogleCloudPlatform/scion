@@ -198,6 +198,11 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	// hub_name: the effective value (DB, else bootstrap), so a client that
 	// echoes this body back sends an unchanged hub_name (ptone/scion#2073).
 	resp.Server.Hub.HubName = effectiveHubName(ops)
+	// GCP permission-check settings: the values this hub applies, which
+	// differ from the stored or file value when that value cannot be used.
+	iam := s.currentGCPIAMSettings()
+	resp.Server.Hub.GCPIAMCheckMode = iam.CheckMode
+	resp.Server.Hub.GCPIAMDenyUnknownPolicy = iam.denyUnknownPolicy()
 
 	// Build section metadata from the cache.
 	resp.SectionMeta = s.buildSectionMetadata(ctx, ops)
@@ -684,6 +689,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	if writeTokenRefusedSettingsKeys(w, r.Context(), tokenRefusedServerConfigKeys(rawBody)) {
 		return
 	}
+	// GCP permission-check keys: a sent key must carry a recognised value.
+	if !validateGCPIAMRequest(w, rawBody) {
+		return
+	}
 
 	caller := GetUserIdentityFromContext(r.Context())
 	updatedBy := ""
@@ -898,6 +907,62 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		lifecycleBaseRev = rev
 	}
 
+	// Sections merged on the current row by mergeSectionOnCurrent: only the
+	// keys the body sends change, and the row revision read is the CAS base
+	// (ptone/scion#3718).
+	mergedBaseRevs := map[string]int64{}
+	if doc, ok := sectionDocs["github_app"]; ok {
+		merged, rev, err := mergeSectionOnCurrent(r.Context(), ops, "github_app", doc, githubAppPresence(rawBody))
+		if err != nil {
+			slog.Error("PUT server-config: failed to build github_app document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		sectionDocs["github_app"] = merged
+		mergedBaseRevs["github_app"] = rev
+	}
+
+	// GCP permission-check section: carry an omitted key forward from the
+	// current row, skip the write when the applied values would not
+	// change, and refuse a change the transition rules do not allow.
+	gcpIAMBaseRev := int64(-1)
+	var gcpIAMCur, gcpIAMNext gcpIAMSettings
+	if _, ok := sectionDocs[gcpIAMSection]; ok {
+		doc, rev, err := buildGCPIAMDoc(r.Context(), ops, &req.ServerConfigUpdateRequest, rawBody)
+		if err != nil {
+			slog.Error("PUT server-config: failed to build gcp_iam document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		gcpIAMCur = s.currentGCPIAMSettings()
+		gcpIAMNext = s.gcpIAMEffectiveFor(&doc)
+		if gcpIAMNext == gcpIAMCur {
+			delete(sectionDocs, gcpIAMSection)
+		} else {
+			if !requireGCPIAMHubAdmin(w, r.Context()) {
+				return
+			}
+			pendingAssign := false
+			if adDoc, ok := sectionDocs["agent_defaults"]; ok {
+				var ad opsettings.AgentDefaultsSettings
+				if json.Unmarshal(adDoc, &ad) == nil && ad.DefaultGCPIdentityMode == store.GCPMetadataModeAssign {
+					pendingAssign = true
+				}
+			}
+			if err := s.checkGCPIAMTransition(r.Context(), gcpIAMCur, gcpIAMNext, pendingAssign); err != nil {
+				writeGCPIAMTransitionError(w, err)
+				return
+			}
+			b, err := json.Marshal(doc)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+				return
+			}
+			sectionDocs[gcpIAMSection] = b
+			gcpIAMBaseRev = rev
+		}
+	}
+
 	// Validate federation semantics (beyond JSON schema).
 	if doc, ok := sectionDocs["federation"]; ok {
 		var fedSettings opsettings.FederationSettings
@@ -1098,9 +1163,33 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			expectedRev = endpointsBaseRev
 		} else if secName == "lifecycle" && lifecycleBaseRev >= 0 {
 			expectedRev = lifecycleBaseRev
+		} else if secName == gcpIAMSection && gcpIAMBaseRev >= 0 {
+			expectedRev = gcpIAMBaseRev
+		} else if rev, ok := mergedBaseRevs[secName]; ok {
+			expectedRev = rev
+		}
+
+		// A GCP permission-check change is recorded before it is written;
+		// if the record cannot be written, the change is not made.
+		if secName == gcpIAMSection {
+			if err := s.auditGCPIAMChange(r.Context(), gcpIAMSurfaceSave, gcpIAMCur, gcpIAMNext); err != nil {
+				slog.Error("PUT server-config: failed to record GCP permission-check change", "error", err)
+				fileTxn.abort()
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					fmt.Sprintf("Failed to update section %q", secName), map[string]interface{}{"applied": applied})
+				return
+			}
+			s.approveGCPIAMTransition(gcpIAMTransition{From: gcpIAMCur, To: gcpIAMNext})
 		}
 
 		newRev, err := ops.Update(r.Context(), secName, doc, updatedBy, expectedRev, "managed")
+		if secName == gcpIAMSection {
+			// The approval covers only this write's own self-apply.
+			s.clearGCPIAMApproval()
+			if err != nil {
+				s.auditGCPIAMNotApplied(r.Context(), gcpIAMCur, gcpIAMNext, err)
+			}
+		}
 		if err != nil {
 			if errors.Is(err, store.ErrRevisionConflict) {
 				// Report the conflict with current revision.
@@ -1418,6 +1507,12 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			}
 			if hub.StartClaimLeaseTTL != "" {
 				keys = append(keys, "server.hub.start_claim_lease_ttl")
+			}
+			if hub.GCPIAMCheckMode != "" {
+				keys = append(keys, gcpIAMCheckModeKey)
+			}
+			if hub.GCPIAMDenyUnknownPolicy != "" {
+				keys = append(keys, gcpIAMDenyUnknownKey)
 			}
 			if hub.StartMaxDuration != "" {
 				keys = append(keys, "server.hub.start_max_duration")
@@ -1797,24 +1892,41 @@ func dropEnvOverriddenAccessFields(base *opsettings.AccessSettings, envKeys []st
 }
 
 // buildSingleSectionDoc extracts the fields for a single section from the
-// update request and marshals them into a section document.
+// update request and marshals them into a section document. The document
+// holds the request's values only; how it is written is decided by the
+// DB-backed PUT (handlePutServerConfigDB).
 //
-// N6/N7 presence-aware clearing (DB-backed path only):
+// Target contract for a DB-backed save (ptone/scion#3718), met today only
+// by the sections listed below: a save changes only the keys the request
+// body sends.
+//   - OMITTED key → keeps its stored value.
+//   - Sent key → replaces the stored value, or clears it when the field's
+//     encoding in this doc leaves the sent value out: an explicit null, and
+//     for omitempty fields their zero value. A *bool field such as
+//     github_app webhooks_enabled carries an explicit false as a value, so
+//     false is stored, not cleared. A cleared key is removed from the
+//     stored row; because a section with a stored row owns all of its
+//     keys, the key is then unset (bootstrap values from settings.yaml or
+//     env are not re-applied).
+//   - The write is a CAS against the row revision the merge read, so a
+//     concurrent write to the section yields a 409, not a lost update.
 //
-// The fp (fieldPresence) parameter carries the raw JSON structure so we can
-// distinguish OMITTED fields from EXPLICITLY-SENT empty values:
-//   - OMITTED → field not in raw JSON → do NOT include in section doc.
-//     The write replaces the whole row, so for most sections an omitted
-//     field is dropped from the DB. The access, endpoints and lifecycle
-//     sections are the exception: handlePutServerConfigDB rebuilds them on
-//     the current row (buildAccessDocOnCurrent, buildEndpointsDocOnCurrent,
-//     carryForwardLifecycleSettings), so their omitted fields are kept.
-//   - EXPLICIT empty ("", [], null) → field IS in raw JSON → include the
-//     zero value in the section doc, which CLEARS it in the DB
+// Sections that meet it:
+//   - github_app, through the shared helper mergeSectionOnCurrent, which
+//     also keeps or drops (with a warning) stored keys the request does not
+//     send; see its doc comment. New sections should use it.
+//   - access, endpoints and lifecycle, through their own carry-forward
+//     builders (buildAccessDocOnCurrent, buildEndpointsDocOnCurrent,
+//     carryForwardLifecycleSettings), and gcp_iam through buildGCPIAMDoc.
+//     Their clear rules are field by field; see each builder.
 //
-// This applies to: admin_emails, user_access_mode, default_user_role,
-// notification_channels, public_url. The file-mode handler (hub without
-// OperationalSettings) does not use this.
+// Every other section still replaces the whole row with this doc, so an
+// omitted field is dropped from the DB. For those, fp (the raw JSON
+// presence; N6/N7) only decides whether an explicitly sent empty value is
+// written as the zero value to clear it.
+//
+// The file-mode handler (hub without OperationalSettings) does not use
+// this.
 func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *fieldPresence) (json.RawMessage, error) {
 	var doc interface{}
 
@@ -1830,6 +1942,16 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 		// doc on top of the current row via buildAccessDocOnCurrent.
 		d := &opsettings.AccessSettings{}
 		overlayAccessRequest(d, req, fp)
+		doc = d
+
+	case gcpIAMSection:
+		// handlePutServerConfigDB rebuilds this doc on the current row
+		// (buildGCPIAMDoc).
+		d := &opsettings.GCPIAMSettings{}
+		if req.Server != nil && req.Server.Hub != nil {
+			d.CheckMode = req.Server.Hub.GCPIAMCheckMode
+			d.DenyUnknownPolicy = req.Server.Hub.GCPIAMDenyUnknownPolicy
+		}
 		doc = d
 
 	case "lifecycle":
@@ -1918,9 +2040,13 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 			d.AppID = ga.AppID
 			d.APIBaseURL = ga.APIBaseURL
 			// #391: webhooks_enabled is a plain bool in the request; use
-			// fieldPresence to distinguish explicit false from omitted.
-			githubFP := serverFP.nestedPresence("github_app")
-			if ga.WebhooksEnabled || githubFP.has("webhooks_enabled") {
+			// the raw body to tell an explicit false (stored as false)
+			// from an omitted key or an explicit null (left out, so the
+			// merge keeps or clears it). The member is resolved with the
+			// decode's case-insensitive rule, as mergeSectionOnCurrent
+			// resolves it.
+			v, sent := githubAppPresenceFromTop(fp).sentFold("webhooks_enabled")
+			if ga.WebhooksEnabled || (sent && !isJSONNull(v)) {
 				d.WebhooksEnabled = &ga.WebhooksEnabled
 			}
 			d.InstallationURL = ga.InstallationURL
@@ -2430,11 +2556,13 @@ var serverConfigTokenSections = map[string]settingsTokenClass{
 	"maintenance":       settingsTokenRefused,       // admin mode, a session-only host operation
 	"messaging":         settingsTokenRefused,       // written through PUT /api/v1/admin/messaging
 	"experiments":       settingsTokenRefused,       // written through /api/v1/admin/experiments
+	"profiling":         settingsTokenRefused,       // written through PUT /api/v1/admin/profiling
 	"agent_defaults":    settingsTokenPerKey,        // see serverConfigTokenKeys
 	"endpoints":         settingsTokenPerKey,        // see serverConfigTokenKeys
 	"lifecycle":         settingsTokenConfiguration, // stall, retention and start timing
 	"telemetry":         settingsTokenConfiguration, // telemetry export
 	"quotas":            settingsTokenConfiguration, // broker quota enforcement switch
+	"gcp_iam":           settingsTokenRefused,       // service account permission check
 	"notifications":     settingsTokenConfiguration, // notification channels
 	"project_defaults":  settingsTokenConfiguration, // see projectDefaultsTokenKeys
 	"artifacts":         settingsTokenConfiguration, // artifact limits

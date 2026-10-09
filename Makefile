@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-launch-store-postgres test-webchat-postgres test-artifacts-postgres test-fixture-coverage vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-launch-store-postgres test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -81,12 +81,9 @@ test-fast:
 # relay/router tests, which run against the SQLite-backed conduit
 # registry store, and pkg/artifacts, whose store and service tests run on
 # SQLite.
-# Skips four pkg/hub tests with known pre-existing, tracked failures
-# (ptone/scion#1847) so this target can be used as a CI merge gate.
 test-hub-sqlite:
 	@echo "Running pkg/hub + perf/bench/seed + pkg/conduit + pkg/store/entadapter + pkg/artifacts tests (SQLite-enabled)..."
-	@go test -count=1 -timeout 40m \
-		-skip '^(TestDEF164_AtAgentSlug_DeliversToAgent|TestDEF164_AtAgentSlug_DMConversationCreated|TestDEF152_AgentToAgentDM_DeliversViaOutbound|TestCreateTemplateV2_ScopeIDInjectionBlocked)$$' \
+	@go test -count=1 -timeout 60m \
 		./pkg/hub/... ./perf/bench/seed/... ./pkg/conduit/... ./pkg/store/entadapter/... ./pkg/artifacts/...
 
 ## test-fixture-coverage: Run the hub fixture coverage gate (TestFixtureCoverage) with SQLite
@@ -97,6 +94,19 @@ test-hub-sqlite:
 test-fixture-coverage:
 	@echo "Running fixture coverage gate (SQLite-enabled)..."
 	@go test -count=1 ./internal/fixturegen/...
+
+# MEMBERSHIP_LOSS_POSTGRES_TESTS are the pkg/hub membership loss
+# concurrency tests (ptone/scion#3433) run by test-launch-store-postgres.
+MEMBERSHIP_LOSS_POSTGRES_TESTS := TestMembershipLossProcessor_vs_ProjectDelete_Postgres \
+	TestMembershipLossProcessor_vs_AgentHardDelete_Postgres \
+	TestMembershipLossProcessor_vs_ReAdd_Postgres \
+	TestMembershipLossProcessor_vs_CredentialMint_Postgres \
+	TestMembershipLossProcessor_vs_ChildCreate_Postgres \
+	TestMembershipLossProcessor_TwoInstances_Postgres \
+	TestMembershipLossProcessor_vs_UserDelete_Postgres \
+	TestMembershipReconciler_LocksCoexist_Postgres
+empty :=
+space := $(empty) $(empty)
 
 ## test-launch-store-postgres: Run the T1 async-create launch store/reaper
 # suite against a real Postgres server (design t1-async-create-v11.md §6,
@@ -208,6 +218,12 @@ test-fixture-coverage:
 # "enttest-sqlite-only: <test name> <reason>". A skipped test is allowed only
 # if its own skip message carries that marker, so there is no name list here
 # and any other skip still fails the target.
+#
+# The entadapter run has a 60m go test timeout. On green main runs it took
+# ~774s and ~1259s, but GoogleCloudPlatform/scion#2855 hit the old 40m
+# (2400s) limit on a runner 2-3x slower than usual, with no failing or hung
+# test (ptone/scion#3945). A timeout there also stops the storetest and
+# pkg/hub runs below, so the headroom is kept generous.
 test-launch-store-postgres:
 	@echo "Running launch store tests against Postgres..."
 	@if [ -z "$$SCION_TEST_POSTGRES_URL" ]; then \
@@ -224,7 +240,7 @@ test-launch-store-postgres:
 		echo "ERROR: one or more Postgres-only integration tests were skipped -- see '--- SKIP' lines above." >&2; \
 		exit 1; \
 	fi
-	@go test -tags integration -count=1 -timeout 40m -v \
+	@go test -tags integration -count=1 -timeout 60m -v \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \
@@ -254,7 +270,7 @@ test-launch-store-postgres:
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 20m -v \
-		-run '^(TestProjectDeletionService_LockOrderNoDeadlock|TestScheduledSend_TwoHubReplicasPostgres_OneDelivery)$$' \
+		-run '^(TestProjectDeletionService_LockOrderNoDeadlock|TestScheduledSend_TwoHubReplicasPostgres_OneDelivery|$(subst $(space),|,$(strip $(MEMBERSHIP_LOSS_POSTGRES_TESTS))))$$' \
 		./pkg/hub/ > /tmp/test-launch-store-postgres-hub.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres-hub.log; \
@@ -265,6 +281,16 @@ test-launch-store-postgres:
 	fi; \
 	if ! grep -qE '^[[:space:]]*--- PASS: TestScheduledSend_TwoHubReplicasPostgres_OneDelivery' /tmp/test-launch-store-postgres-hub.log; then \
 		echo "ERROR: the pkg/hub two-replica scheduled send test did not run." >&2; \
+		exit 1; \
+	fi; \
+	for t in $(MEMBERSHIP_LOSS_POSTGRES_TESTS); do \
+		if ! grep -qE "^[[:space:]]*--- PASS: $$t\b" /tmp/test-launch-store-postgres-hub.log; then \
+			echo "ERROR: the pkg/hub membership loss Postgres test $$t did not pass." >&2; \
+			exit 1; \
+		fi; \
+	done; \
+	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres-hub.log; then \
+		echo "ERROR: one or more pkg/hub Postgres tests were skipped -- see '--- SKIP' lines above." >&2; \
 		exit 1; \
 	fi
 
@@ -301,6 +327,40 @@ test-webchat-postgres:
 	fi; \
 	for t in $(WEBCHAT_POSTGRES_TESTS); do \
 		if ! grep -qE "^--- PASS: $$t " /tmp/test-webchat-postgres.log; then \
+			echo "ERROR: $$t did not pass." >&2; \
+			exit 1; \
+		fi; \
+	done
+
+## test-conduit-authz-postgres: Run the conduit user-stream re-check tests (criterion 16b, P tier) against a real Postgres server
+# Requires SCION_TEST_POSTGRES_DSN (a pgx connection string). Two hub nodes
+# share one database through their own stores and LISTEN/NOTIFY event
+# publishers; each test creates and drops its own schema. The tests
+# self-skip without the DSN, so the target fails if the variable is unset,
+# if any selected test skips, or if any listed test reports no PASS line.
+CONDUIT_AUTHZ_POSTGRES_TESTS := TestConduitAuthzPostgres_NotifyAcrossNodes \
+	TestConduitAuthzPostgres_UserSuspendDeleteAndTokenRevoke \
+	TestConduitAuthzPostgres_ListenGapResync \
+	TestConduitAuthzPostgres_BulkRevocation
+
+test-conduit-authz-postgres:
+	@echo "Running conduit stream re-check tests against Postgres..."
+	@if [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \
+		echo "ERROR: SCION_TEST_POSTGRES_DSN is not set -- the Postgres tests would silently skip instead of running." >&2; \
+		exit 1; \
+	fi
+	@go test -count=1 -timeout 10m -v \
+		-run '^($(subst $(eval) ,|,$(strip $(CONDUIT_AUTHZ_POSTGRES_TESTS))))$$' \
+		./pkg/hub/ > /tmp/test-conduit-authz-postgres.log 2>&1; \
+	status=$$?; \
+	cat /tmp/test-conduit-authz-postgres.log; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-conduit-authz-postgres.log; then \
+		echo "ERROR: a conduit re-check Postgres test was skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi; \
+	for t in $(CONDUIT_AUTHZ_POSTGRES_TESTS); do \
+		if ! grep -qE "^--- PASS: $$t " /tmp/test-conduit-authz-postgres.log; then \
 			echo "ERROR: $$t did not pass." >&2; \
 			exit 1; \
 		fi; \
@@ -425,6 +485,10 @@ check-setenv-guard:
 check-conversation-upsert-guard:
 	@./hack/check-conversation-upsert-guard.sh
 
+## check-hub-store-reassign: Flag new direct srv.store reassignments in pkg/hub tests (baseline: hack/hub-store-reassign-baseline.txt)
+check-hub-store-reassign:
+	@./hack/check-hub-store-reassign.sh
+
 ## check-security-marker-gates: Verify security symbols (authenticatedSender, validateDefaultAgent, ActionAttach) remain in handler code
 check-security-marker-gates:
 	@./hack/check-security-marker-gates.sh
@@ -466,7 +530,7 @@ check-method-not-allowed:
 	@./hack/check-method-not-allowed.sh
 
 ## check-custom: Run all custom CI lint checks (see hack/LINT-CONVENTIONS.md)
-check-custom: compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog check-route-authz-manifest cli-time-zones time-literals check-method-not-allowed
+check-custom: compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates check-authorization-catalog check-route-authz-manifest cli-time-zones time-literals check-method-not-allowed
 	@echo "All custom checks passed."
 
 ## golangci-lint: Run golangci-lint on new issues only (install via: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)

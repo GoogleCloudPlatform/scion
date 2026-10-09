@@ -162,6 +162,11 @@ func loadSettingsKoanf(projectPath string, ignoreEnvProjectID bool) (*Settings, 
 	//       SCION_HUB_BROKER_ID -> hub.brokerId
 	//       SCION_HUB_BROKER_TOKEN -> hub.brokerToken
 	_ = k.Load(env.Provider("SCION_", ".", func(s string) string {
+		if os.Getenv(s) == "" {
+			// An exported but empty variable is treated as unset, so it
+			// never blanks a value from the settings files.
+			return ""
+		}
 		if mapped, ok := projectkeys.EnvProjectIDConfigKey(s, true); ok {
 			if ignoreEnvProjectID {
 				return ""
@@ -181,7 +186,7 @@ func loadSettingsKoanf(projectPath string, ignoreEnvProjectID bool) (*Settings, 
 			// below and land on the unrecognised key hub.grove_id.
 			// Returning "" makes the env provider drop the variable
 			// entirely (env.go's Provider skips a "" key), the same idiom
-			// settings_v1.go already uses for SCION_OTEL_INSECURE.
+			// this callback uses above for an empty value.
 			// WarnRemovedLegacyEnv reports it separately.
 			return ""
 		}
@@ -363,7 +368,7 @@ func loadVersionedSettingsFileOnly(dir string) (*VersionedSettings, error) {
 		HarnessConfigs: make(map[string]HarnessConfigEntry),
 		Profiles:       make(map[string]V1ProfileConfig),
 	}
-	if err := k.Unmarshal("", settings); err != nil {
+	if err := unmarshalVersionedSettings(k, settings); err != nil {
 		return nil, err
 	}
 	return settings, nil

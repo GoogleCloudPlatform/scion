@@ -46,6 +46,12 @@ class FakeStateManager extends EventTarget {
     for (const a of agents) this.agentsById.set(a.id, a);
   }
   seedProjects(): void {}
+  /** Seed-epoch surface used through AgentSeedEpoch; epochs record nothing here. */
+  readonly scopeGeneration = 0;
+  beginSeedEpoch(): symbol {
+    return Symbol('seed-epoch');
+  }
+  endSeedEpoch(): void {}
   reset(): void {
     this.agentsById.clear();
     this.deletedIds.clear();
@@ -69,8 +75,8 @@ vi.mock('../../client/state.js', () => ({
 // chat-thread (imported by agent-detail) pulls in the app entry point; stub
 // it as the other agent-detail tests do.
 // Remove once chat-thread stops importing client/main (chat lane, ptone/scion#3118).
-vi.mock('../../client/main.js', () => ({
-  navigateTo: vi.fn(),
+vi.mock('../../client/main.js', async () => ({
+  ...(await import('../../client/__fixtures__/main-stub.js')),
   get stateManager(): FakeStateManager {
     return fakeStateManager;
   },
@@ -103,7 +109,7 @@ function makeAgent(overrides: Partial<Agent> = {}): Agent {
     phase: 'running',
     _capabilities: { actions: ['read', 'lifecycle'] },
     ...overrides,
-  } as Agent;
+  };
 }
 
 function jsonResponse(status: number, body: unknown): Response {

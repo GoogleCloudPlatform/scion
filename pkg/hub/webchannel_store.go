@@ -82,11 +82,23 @@ type WebChatStore interface {
 	// GetTopicConversationID returns the conversation_id for a webchat topic.
 	// Returns ("", store.ErrNotFound) if the topic does not exist or is soft-deleted.
 	// Returns ("", nil) if the topic exists but has no conversation_id yet.
+	//
+	// Not scoped to a project: do not use it to resolve a caller-supplied
+	// thread or key; use GetTopicConversationIDInProject.
 	GetTopicConversationID(ctx context.Context, topicID string) (string, error)
 
 	// GetTopicConversationIDIncludingDeleted returns the conversation_id for a
 	// webchat topic regardless of its deletion state.
+	//
+	// Not scoped to a project: do not use it to resolve a caller-supplied
+	// thread or key; use GetTopicConversationIDIncludingDeletedInProject.
 	GetTopicConversationIDIncludingDeleted(ctx context.Context, topicID string) (string, error)
+
+	// GetTopicConversationIDInProject and
+	// GetTopicConversationIDIncludingDeletedInProject are the same lookups
+	// for a topic of projectID only (messaging.TopicConversationLookup).
+	GetTopicConversationIDInProject(ctx context.Context, projectID, topicID string) (string, error)
+	GetTopicConversationIDIncludingDeletedInProject(ctx context.Context, projectID, topicID string) (string, error)
 
 	// CreateTopic inserts a new topic. Returns an error on name conflict
 	// within the same project.
@@ -196,7 +208,18 @@ type WebChatStore interface {
 	GetAttachmentsByMessages(ctx context.Context, messageIDs []string) (map[string][]AttachmentMeta, error)
 
 	// LinkAttachmentToMessage associates an attachment with a message.
+	//
+	// A linked file downloads for every reader of the message
+	// (canReadAttachment), so a caller may link only a file that either
+	// passed send validation for that message (attachmentUsableIn: the
+	// sender's own direct-message upload, or a file of the topic's project)
+	// or belongs to the sending agent (hub ingest from its own project, or
+	// attachmentOwnedBySender). Do not add a caller without one of these
+	// checks.
 	LinkAttachmentToMessage(ctx context.Context, messageID, attachmentID string) error
+	// ListMessageIDsForAttachment returns up to limit IDs of messages the
+	// attachment is linked to.
+	ListMessageIDsForAttachment(ctx context.Context, attachmentID string, limit int) ([]string, error)
 
 	// --- Phase-3 Message extension methods ---
 
@@ -235,7 +258,8 @@ type WebChatStore interface {
 	// Returns the number of rows affected.
 	UpdateThreadID(ctx context.Context, oldThreadID, newThreadID string) (int, error)
 
-	// DeleteDM removes all webchat_dm rows for the given conversation key.
+	// DeleteDM removes all webchat_dm rows for the given conversation key,
+	// and the scheduled messages of that conversation.
 	DeleteDM(ctx context.Context, conversationKey string) error
 
 	// MigrateReadState re-keys all webchat_read_state rows from oldKey to newKey.
@@ -591,6 +615,9 @@ CREATE TABLE IF NOT EXISTS webchat_message_attachment (
 
 CREATE INDEX IF NOT EXISTS idx_webchat_message_attachment_message
     ON webchat_message_attachment (message_id);
+
+CREATE INDEX IF NOT EXISTS idx_webchat_message_attachment_attachment
+    ON webchat_message_attachment (attachment_id);
 
 -- Phase-3: message extension data (reply-to, edit, delete)
 CREATE TABLE IF NOT EXISTS webchat_message_ext (
@@ -1684,6 +1711,37 @@ func (s *sqliteWebChatStore) GetTopicConversationID(ctx context.Context, topicID
 	return convID, nil
 }
 
+// GetTopicConversationIDInProject is GetTopicConversationID for a topic of
+// projectID only: a topic of another project answers store.ErrNotFound.
+func (s *sqliteWebChatStore) GetTopicConversationIDInProject(ctx context.Context, projectID, topicID string) (string, error) {
+	const query = `SELECT COALESCE(conversation_id, '') FROM webchat_topic WHERE id = ? AND project_id = ? AND deleted_at IS NULL`
+	var convID string
+	err := s.db.QueryRowContext(ctx, query, topicID, projectID).Scan(&convID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("topic not found %s: %w", topicID, store.ErrNotFound)
+		}
+		return "", fmt.Errorf("webchat store: get topic conversation_id in project: %w", err)
+	}
+	return convID, nil
+}
+
+// GetTopicConversationIDIncludingDeletedInProject is
+// GetTopicConversationIDIncludingDeleted for a topic of projectID only: a
+// topic of another project answers store.ErrNotFound.
+func (s *sqliteWebChatStore) GetTopicConversationIDIncludingDeletedInProject(ctx context.Context, projectID, topicID string) (string, error) {
+	const query = `SELECT COALESCE(conversation_id, '') FROM webchat_topic WHERE id = ? AND project_id = ?`
+	var convID string
+	err := s.db.QueryRowContext(ctx, query, topicID, projectID).Scan(&convID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("topic not found %s: %w", topicID, store.ErrNotFound)
+		}
+		return "", fmt.Errorf("webchat store: get topic conversation_id in project (including deleted): %w", err)
+	}
+	return convID, nil
+}
+
 // GetTopicConversationIDIncludingDeleted returns the conversation_id for a
 // webchat topic regardless of its deletion state.
 //
@@ -2121,6 +2179,34 @@ VALUES (?, ?)
 	return nil
 }
 
+// ListMessageIDsForAttachment returns up to limit IDs of messages the
+// attachment is linked to, in ID order.
+func (s *sqliteWebChatStore) ListMessageIDsForAttachment(ctx context.Context, attachmentID string, limit int) ([]string, error) {
+	const query = `
+SELECT message_id FROM webchat_message_attachment
+WHERE attachment_id = ?
+ORDER BY message_id
+LIMIT ?
+`
+	rows, err := s.db.QueryContext(ctx, query, attachmentID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: list messages for attachment: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("webchat store: scan message for attachment: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("webchat store: list messages for attachment: %w", err)
+	}
+	return ids, nil
+}
+
 // GetAttachmentsByMessage returns all attachments linked to a message.
 func (s *sqliteWebChatStore) GetAttachmentsByMessage(ctx context.Context, messageID string) ([]AttachmentMeta, error) {
 	const query = `
@@ -2433,11 +2519,16 @@ func (s *sqliteWebChatStore) UpdateThreadID(ctx context.Context, oldThreadID, ne
 	return int(n), nil
 }
 
-// DeleteDM removes all webchat_dm rows for the given conversation key.
+// DeleteDM removes all webchat_dm rows for the given conversation key,
+// and the scheduled messages of that conversation.
 func (s *sqliteWebChatStore) DeleteDM(ctx context.Context, conversationKey string) error {
 	const query = `DELETE FROM webchat_dm WHERE conversation_key = ?`
 	_, err := s.db.ExecContext(ctx, query, conversationKey)
 	if err != nil {
+		return fmt.Errorf("webchat store: delete DM: %w", err)
+	}
+	// The conversation's scheduled messages go with it.
+	if _, err := s.DeleteScheduledMessagesForConversation(ctx, conversationKey); err != nil {
 		return fmt.Errorf("webchat store: delete DM: %w", err)
 	}
 	return nil

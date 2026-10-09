@@ -420,10 +420,14 @@ func delegatorLive(ctx context.Context, tx store.Store, delegatorType, delegator
 	}
 }
 
-// reincarnateAuthority is the authority a reincarnation by another principal
-// re-records: a new delegation edge from the requester, with the requester's
-// frozen provenance and ceiling. nil for a self-reincarnation, which keeps
-// the existing edge unchanged.
+// reincarnateAuthority is the authority a reincarnation by another
+// principal re-records: a new delegation edge from the requester, with the
+// requester's frozen provenance and ceiling. It is set for a role-changing
+// reincarnation, and for a user's reincarnation that keeps the role of an
+// agent whose own edge is missing or unrecorded, or whose chain has an
+// unrecorded hop (ptone/scion#3948), where Role is the stored role. nil for a
+// self-reincarnation and for any other reincarnation that keeps the role,
+// which keep the existing edge unchanged (ptone/scion#3762).
 type reincarnateAuthority struct {
 	DelegatorType string
 	DelegatorID   string

@@ -259,9 +259,11 @@ func TestAgentCreateDeliverIDs_NonDeliverControl(t *testing.T) {
 
 // expectedReadsBeforeDeliverEligibility is the edge-read order of an agent
 // create up to the parent's delivery-eligibility read: the create
-// authorization walk, then the parent's active edge and its coverage.
+// authorization walk, the creating agent's standing check
+// (ptone/scion#3433), then the parent's active edge and its coverage.
 var expectedReadsBeforeDeliverEligibility = []string{
 	"walkDelegationChainWithCause",
+	"resolveChainRoot",
 	"agentSourceEffectCeiling",
 	"ceilingFilteredAgentScopes",
 }
@@ -275,6 +277,7 @@ func edgeReadCaller() string {
 		"agentSourceEffectCeiling",
 		"walkDelegationChainWithCause",
 		"AuthorizeAgentToken",
+		"resolveChainRoot",
 	}
 	pcs := make([]uintptr, 64)
 	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
@@ -321,7 +324,7 @@ func TestAgentCreateDeliverIDs_MissingParentEdge(t *testing.T) {
 		require.Empty(t, activeEdgesFor(t, f.store, parent.ID))
 
 		rec := f.createAsParent(t, f.agentToken(t, parent.ID), CreateAgentRequest{Name: "chain-missing-c"})
-		assert.Equal(t, agentTokenDenialMessage(DenyCauseCeilingOrphaned), assertCeilingDenial(t, rec))
+		assert.Equal(t, agentTokenDenialMessage(DenyCauseCeilingOrphaned, false), assertCeilingDenial(t, rec))
 		_, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "chain-missing-c")
 		assert.ErrorIs(t, err, store.ErrNotFound, "no agent row")
 

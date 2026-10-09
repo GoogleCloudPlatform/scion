@@ -4,7 +4,13 @@
 
 // @vitest-environment happy-dom
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+
+// The module under test imports from the app entry. Loading the real
+// main.ts registers every Shoelace component and runs the app bootstrap,
+// so happy-dom tries to fetch from 127.0.0.1:3000 and logs ECONNREFUSED on
+// stderr. These tests only need the shared stub.
+vi.mock('../../../client/main.js', () => import('../../../client/__fixtures__/main-stub.js'));
 import { parseContainerPath, buildFileApiUrl, type PathLinkTarget } from './chat-thread.js';
 
 describe('parseContainerPath', () => {

@@ -83,6 +83,16 @@ var expectedSelectorRegistry = map[string][]string{
 	"hub_project_defaults:read":   {"hub.project_defaults.read"},
 	"hub_project_defaults:update": {"hub.project_defaults.update"},
 	"hub_settings:update":         {"hub.settings.update"},
+	"hub_scheduler:read":          {"hub.scheduler.read"},
+	"hub_health:read":             {"hub.health.read"},
+	"hub_validate:execute":        {"hub.validate.execute"},
+	"hub_integrations:read":       {"hub.integrations.read"},
+	"hub_integrations:update":     {"hub.integrations.update"},
+	"hub_teams_manifest:read":     {"hub.teams_manifest.read"},
+	"hub_diagnostics:read":        {"hub.diagnostics.read"},
+	"hub_metrics:read":            {"hub.metrics.read"},
+	"hub_github_app:read":         {"hub.github_app.read"},
+	"hub_github_app:update":       {"hub.github_app.update"},
 	"inbox:read":                  {"inbox.read"},
 	"inbox:write":                 {"inbox.write"},
 	"project:clone":               {"project.clone"},
@@ -109,6 +119,12 @@ var expectedSelectorRegistry = map[string][]string{
 
 	// Project messaging policy (owner rule applies on top of the selector).
 	"project:set_messaging_policy": {"project.set_messaging_policy"},
+
+	// scheduled_event selectors (reads, cancellation and pause).
+	"scheduled_event:delete": {"scheduled_event.delete"},
+	"scheduled_event:list":   {"scheduled_event.list"},
+	"scheduled_event:read":   {"scheduled_event.read"},
+	"scheduled_event:update": {"scheduled_event.update"},
 }
 
 func TestValidateSelectorRegistry_PinnedSnapshot(t *testing.T) {

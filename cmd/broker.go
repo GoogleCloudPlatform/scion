@@ -19,6 +19,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -52,6 +53,7 @@ var (
 	brokerForceRegister bool
 	brokerAutoProvide   bool
 	brokerHubName       string // --name flag for hub connection name
+	brokerRegisterName  string // --broker-name flag: the broker's name on the hub
 
 	// broker deregister flags
 	brokerDeregisterBrokerOnly bool
@@ -130,7 +132,16 @@ agent operations to this broker.
 Prerequisites:
 - The broker server must be running (scion runtime-broker start)
 - The Hub endpoint must be configured
-- You must be authenticated with the Hub
+- You must be authenticated with the Hub: a sign-in (scion hub auth login),
+  or a hub-boundary user access token carrying broker:create (and
+  broker:read) in SCION_HUB_TOKEN. Either way, your user must hold
+  broker.create, which hub members do.
+
+The broker is owned by the signed-in user, or by the token's user.
+Re-registering an existing broker requires its owner, or a super-admin
+with a sign-in (a token re-registers only a broker its user created).
+Registration never associates the broker with a project: the owner runs
+'scion runtime-broker provide' for each project the broker should serve.
 
 This command will:
 1. Verify the local broker server is running
@@ -142,11 +153,20 @@ Examples:
   # Register this host as a broker
   scion runtime-broker register
 
+  # Register a headless host with a hub-boundary token
+  SCION_HUB_ENDPOINT=https://hub.example.com SCION_HUB_TOKEN=scion_pat_... \
+    scion runtime-broker register -y
+
   # Force re-registration even if already registered
   scion runtime-broker register --force
 
-  # Register with auto-provide enabled
+  # Register with auto-provide enabled (requires broker.auto_provide)
   scion runtime-broker register --auto-provide
+
+  # Register under a custom broker name instead of the hostname, for
+  # example when running several brokers on one host. The name is saved
+  # in the global settings and used by later commands and by the broker.
+  scion runtime-broker register --broker-name build-host-2
 
   # Register a broker on a non-default port. Not needed when the broker
   # was started with 'scion runtime-broker start --port 19800': the port
@@ -221,6 +241,10 @@ broker when agents are created in the project.
 If --project is not specified, uses the current local project.
 If --broker is not specified, uses the local broker registration.
 
+Providing a broker requires update permission on the project and the
+broker owner's consent: the caller must be the broker's owner or a
+super-admin. Once provided, members of the project can run agents on it.
+
 Use --make-default to set the broker as the default for the project. If the
 project already has a different default broker, you will be prompted to confirm
 the change.
@@ -238,7 +262,7 @@ Examples:
   # Add local broker as provider for a project linked to a local checkout
   scion runtime-broker provide --project <project-id> --path /path/to/checkout
 
-  # Add a remote broker as provider for a project (admin only)
+  # Add a remote broker as provider for a project (its owner or a super-admin)
   scion runtime-broker provide --broker <broker-id> --project <project-id>
 
   # Add broker as provider and set as default
@@ -389,8 +413,9 @@ func init() {
 
 	// Register flags
 	brokerRegisterCmd.Flags().BoolVar(&brokerForceRegister, "force", false, "Force re-registration even if already registered")
-	brokerRegisterCmd.Flags().BoolVar(&brokerAutoProvide, "auto-provide", false, "Automatically add as provider for new projects")
+	brokerRegisterCmd.Flags().BoolVar(&brokerAutoProvide, "auto-provide", false, "Automatically add as provider for new projects (requires the broker.auto_provide permission, held by super-admins)")
 	brokerRegisterCmd.Flags().StringVar(&brokerHubName, "name", "", "Name for this hub connection (derived from endpoint if not specified)")
+	brokerRegisterCmd.Flags().StringVar(&brokerRegisterName, "broker-name", "", "Name this broker registers under on the hub, saved in the global settings (server.broker.broker_nickname) for later commands and the broker server; when not set, the saved name, else the hostname")
 	brokerRegisterCmd.Flags().StringVar(&brokerTransportMode, "transport-mode", "", "Transport auth mode: 'iap' or 'cloudrun_invoker' (overrides SCION_TRANSPORT_MODE)")
 	brokerRegisterCmd.Flags().StringVar(&brokerTransportAudience, "transport-audience", "", "Transport auth OIDC audience (overrides SCION_TRANSPORT_AUDIENCE)")
 
@@ -423,6 +448,11 @@ func init() {
 }
 
 func runBrokerRegister(cmd *cobra.Command, args []string) error {
+	brokerName, brokerNameSet, err := resolveRegisterBrokerName(cmd)
+	if err != nil {
+		return err
+	}
+
 	// Resolve project path to find project settings (needed for Hub endpoint config)
 	gp := projectPath
 	if gp == "" && globalMode {
@@ -515,12 +545,6 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("registration cancelled")
 	}
 
-	// Get hostname for broker name
-	brokerName, err := os.Hostname()
-	if err != nil {
-		brokerName = "local-host"
-	}
-
 	// ==== TWO-PHASE BROKER REGISTRATION ====
 
 	// Get global directory early (needed for stable broker ID)
@@ -545,10 +569,12 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 
 	// Get or generate a stable broker UUID
 	var stableBrokerID string
+	stableBrokerIDSaved := false
 	if globalDirErr == nil {
 		globalSettings, gsErr := config.LoadSettings(globalDir)
 		if gsErr == nil && globalSettings.Hub != nil && globalSettings.Hub.BrokerID != "" {
 			stableBrokerID = globalSettings.Hub.BrokerID
+			stableBrokerIDSaved = true
 		}
 	}
 	if stableBrokerID == "" {
@@ -566,11 +592,13 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Using existing broker credentials for '%s' (brokerId: %s)\n", hubName, brokerID)
 
 		// Verify the broker still exists on the hub
-		_, err := client.RuntimeBrokers().Get(ctx, brokerID)
+		existing, err := client.RuntimeBrokers().Get(ctx, brokerID)
 		if err != nil {
 			fmt.Printf("Warning: existing broker not found on Hub, will re-register\n")
 			brokerID = ""
 			needsJoin = true
+		} else if existing != nil && existing.Name != "" {
+			brokerName = keepHubBrokerName(os.Stdout, brokerName, existing.Name, brokerNameSet)
 		}
 	} else {
 		needsJoin = true
@@ -578,49 +606,19 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 
 	// Phase 1 & 2: Create broker and complete join if needed
 	if needsJoin || brokerID == "" {
-		fmt.Printf("Registering broker with Hub...\n")
-
-		// Phase 1: Create broker registration
-		createReq := &hubclient.CreateBrokerRequest{
-			BrokerID:     stableBrokerID,
-			Name:         brokerName,
-			Capabilities: brokerRegistrationCapabilities(),
-			AutoProvide:  brokerAutoProvide,
-			Labels: map[string]string{
-				"scion.io/broker-role": "remote",
-			},
-		}
-
-		createResp, err := client.RuntimeBrokers().Create(ctx, createReq)
-		if err != nil {
-			return fmt.Errorf("failed to create broker registration: %w", err)
-		}
-
-		if createResp.Reregistered {
-			fmt.Printf("Found existing broker registration for '%s' (ID: %s), re-registering...\n", brokerName, createResp.BrokerID)
-		} else {
-			fmt.Printf("Broker created (ID: %s), completing join...\n", createResp.BrokerID)
-		}
-
-		joined, err := completeJoinAndPersist(ctx, client, brokerJoinParams{
-			Settings:          settings,
-			Endpoint:          endpoint,
-			HubName:           hubName,
-			BrokerID:          createResp.BrokerID,
-			JoinToken:         createResp.JoinToken,
-			Hostname:          brokerName,
-			TransportMode:     brokerTransportMode,
-			TransportAudience: brokerTransportAudience,
-			CredStore:         multiStore,
+		brokerID, err = registerBrokerWithHub(ctx, client, multiStore, brokerHubRegistration{
+			BrokerID:      stableBrokerID,
+			BrokerIDSaved: stableBrokerIDSaved,
+			Name:          brokerName,
+			NameSet:       brokerNameSet,
+			KeptName:      &brokerName,
+			AutoProvide:   brokerAutoProvide,
+			Settings:      settings,
+			HubName:       hubName,
+			Endpoint:      endpoint,
 		})
 		if err != nil {
 			return err
-		}
-		brokerID = joined.BrokerID
-		if joined.SaveErr != nil {
-			fmt.Printf("Warning: failed to save broker credentials: %v\n", joined.SaveErr)
-		} else {
-			fmt.Printf("Broker credentials saved to %s\n", multiStore.Dir())
 		}
 	}
 
@@ -629,6 +627,9 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Warning: failed to get global directory: %v\n", globalDirErr)
 	} else {
 		persistBrokerHubSettings(os.Stdout, globalDir, endpoint, brokerID, hubName)
+		if brokerNameSet {
+			persistBrokerName(os.Stdout, brokerName)
+		}
 	}
 
 	// If project is linked, offer to add this broker as a provider. The
@@ -667,6 +668,161 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 	fmt.Println("Use 'scion hub status' to check the connection status.")
 
 	return nil
+}
+
+// resolveRegisterBrokerName returns the name 'runtime-broker register'
+// registers this broker under, and whether --broker-name set it: the flag
+// value when given, else the name saved in the global settings, else the
+// hostname (else "local-host").
+func resolveRegisterBrokerName(cmd *cobra.Command) (name string, set bool, err error) {
+	if f := cmd.Flags().Lookup("broker-name"); f != nil && f.Changed {
+		name = strings.TrimSpace(brokerRegisterName)
+		if name == "" {
+			return "", false, fmt.Errorf("--broker-name must not be empty")
+		}
+		return name, true, nil
+	}
+	return config.LocalBrokerName("local-host"), false, nil
+}
+
+// keepHubBrokerName returns the name the hub has for this broker, which
+// register cannot change: the hub keeps an existing broker's name. When
+// --broker-name asked for a different one it says so on w.
+func keepHubBrokerName(w io.Writer, requested, onHub string, requestedByFlag bool) string {
+	if requestedByFlag && requested != onHub {
+		_, _ = fmt.Fprintf(w, "Warning: this broker is already registered on the hub as '%s'; --broker-name '%s' was not applied. Deregister first to register under a new name.\n", onHub, requested)
+	}
+	return onHub
+}
+
+// warnBrokerIdentityTakeover warns when a re-registration matched an
+// existing broker other than the one this host's broker ID names: the hub
+// matched it by name, and this host now uses that broker's identity. It
+// only warns; checking before registering is a separate concern. localSaved
+// is false when localID was generated for this registration because the
+// host had no saved broker ID; the warning then does not print it, as it
+// is recorded nowhere.
+func warnBrokerIdentityTakeover(w io.Writer, name, matchedID, localID string, localSaved bool) {
+	if matchedID == "" || matchedID == localID {
+		return
+	}
+	local := "this host had no saved broker ID"
+	if localSaved {
+		local = fmt.Sprintf("not this host's broker ID (%s)", localID)
+	}
+	_, _ = fmt.Fprintf(w, "Warning: the name '%s' matched an existing broker on the hub (ID: %s); %s. This host now uses that broker's identity. If another broker uses that name, register with a different --broker-name.\n", name, matchedID, local)
+}
+
+// persistBrokerName saves name as this host's broker name in the global
+// settings, where later commands and 'server start' read it, so they do not
+// fall back to the hostname and match another broker on the hub. It reads
+// and writes the global directory resolved by config.GetGlobalDir, the
+// same one config.ConfiguredBrokerName reads.
+func persistBrokerName(w io.Writer, name string) {
+	if config.ConfiguredBrokerName() == name {
+		return
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		_, _ = fmt.Fprintf(w, "Warning: failed to save broker name to global settings: %v\n", err)
+		return
+	}
+	if err := config.UpdateSetting(globalDir, config.BrokerNameSettingKey, name, true); err != nil {
+		_, _ = fmt.Fprintf(w, "Warning: failed to save broker name to global settings: %v\n", err)
+		return
+	}
+	_, _ = fmt.Fprintf(w, "Broker name '%s' saved to global settings. Restart the broker (scion runtime-broker restart, or scion server restart if the server runs the broker) so it uses the new name locally.\n", name)
+}
+
+// brokerHubRegistration is the input of registerBrokerWithHub.
+type brokerHubRegistration struct {
+	// BrokerID is the stable broker ID requested for a first registration.
+	BrokerID string
+	// BrokerIDSaved is true when BrokerID was loaded from the global
+	// settings rather than generated for this registration.
+	BrokerIDSaved bool
+	Name          string
+	// NameSet is true when --broker-name set Name.
+	NameSet bool
+	// KeptName, when non-nil, is set to the name the broker is registered
+	// under: Name, or on a re-registration the name the hub kept.
+	KeptName    *string
+	AutoProvide bool
+	// Settings supply the broker profiles and default profile reported at
+	// join; nil reports none and leaves the hub's default profile as it is.
+	Settings *config.Settings
+	// HubName names the hub connection the credentials are saved under.
+	HubName  string
+	Endpoint string
+}
+
+// registerBrokerWithHub runs the two-phase broker registration against the
+// hub: POST /api/v1/brokers for a join token, then POST /api/v1/brokers/join
+// (completeJoinAndPersist) for the broker's HMAC secret, which it saves to
+// multiStore under reg.HubName. It returns the joined broker's ID. client
+// carries whichever credential getHubClient selected, for example a hub
+// user access token from SCION_HUB_TOKEN.
+func registerBrokerWithHub(ctx context.Context, client hubclient.Client, multiStore *brokercredentials.MultiStore, reg brokerHubRegistration) (string, error) {
+	fmt.Printf("Registering broker with Hub...\n")
+
+	// Phase 1: Create broker registration
+	createReq := &hubclient.CreateBrokerRequest{
+		BrokerID:     reg.BrokerID,
+		Name:         reg.Name,
+		Capabilities: brokerRegistrationCapabilities(),
+		AutoProvide:  reg.AutoProvide,
+		Labels: map[string]string{
+			"scion.io/broker-role": "remote",
+		},
+	}
+
+	createResp, err := client.RuntimeBrokers().Create(ctx, createReq)
+	if err != nil {
+		if reg.AutoProvide && apiclient.IsForbiddenError(err) {
+			return "", fmt.Errorf("failed to create broker registration: %w (--auto-provide requires the broker.auto_provide permission, held by super-admins; retry without --auto-provide)", err)
+		}
+		return "", fmt.Errorf("failed to create broker registration: %w", err)
+	}
+
+	name := reg.Name
+	if createResp.Reregistered {
+		// The hub matches a re-registration by name, then by broker ID,
+		// and keeps the existing name on an ID match. Read back the name
+		// it kept so that is what gets reported (and saved when
+		// --broker-name was given).
+		if b, err := client.RuntimeBrokers().Get(ctx, createResp.BrokerID); err == nil && b != nil && b.Name != "" {
+			name = keepHubBrokerName(os.Stdout, name, b.Name, reg.NameSet)
+		}
+		fmt.Printf("Found existing broker registration for '%s' (ID: %s), re-registering...\n", name, createResp.BrokerID)
+		warnBrokerIdentityTakeover(os.Stdout, name, createResp.BrokerID, reg.BrokerID, reg.BrokerIDSaved)
+	} else {
+		fmt.Printf("Broker created (ID: %s), completing join...\n", createResp.BrokerID)
+	}
+
+	// Phase 2: Complete broker join with join token
+	joined, err := completeJoinAndPersist(ctx, client, brokerJoinParams{
+		Settings:          reg.Settings,
+		Endpoint:          reg.Endpoint,
+		HubName:           reg.HubName,
+		BrokerID:          createResp.BrokerID,
+		JoinToken:         createResp.JoinToken,
+		Hostname:          name,
+		TransportMode:     brokerTransportMode,
+		TransportAudience: brokerTransportAudience,
+		CredStore:         multiStore,
+	})
+	if err != nil {
+		return "", err
+	}
+	if joined.SaveErr != nil {
+		fmt.Printf("Warning: failed to save broker credentials: %v\n", joined.SaveErr)
+	} else {
+		fmt.Printf("Broker credentials saved to %s\n", multiStore.Dir())
+	}
+	if reg.KeptName != nil {
+		*reg.KeptName = name
+	}
+	return joined.BrokerID, nil
 }
 
 func runBrokerDeregister(cmd *cobra.Command, args []string) error {
@@ -877,8 +1033,9 @@ func isServerDaemonManagingBroker(globalDir string) (running bool, pid int) {
 	if !serverRunning {
 		return false, 0
 	}
-	// Confirm broker is actually responding on its health endpoint
-	_, err := checkLocalBrokerServer(DefaultBrokerPort)
+	// Confirm broker is actually responding on its health endpoint, on
+	// the server's broker port (not always the default).
+	_, err := checkLocalBrokerServer(serverBrokerPort(globalDir))
 	if err != nil {
 		return false, 0
 	}
@@ -1139,7 +1296,7 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 		}
 
 		// Get broker name for display
-		brokerName, _ = os.Hostname()
+		brokerName = config.LocalBrokerName("")
 		if brokerName == "" {
 			brokerName = brokerID[:8]
 		}
@@ -1261,7 +1418,7 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 	}
 
 	// Show confirmation prompt
-	confirmed, confirmErr := confirmProvide(os.Stdin, os.Stdout, projectName, brokerName, autoConfirm, util.IsTerminal())
+	confirmed, confirmErr := confirmProvide(os.Stdin, os.Stderr, projectName, brokerName, autoConfirm, util.IsTerminal())
 	if confirmErr != nil {
 		return confirmErr
 	}
@@ -1270,20 +1427,13 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 	}
 
 	// Add broker as provider
-	req := &hubclient.RegisterProjectRequest{
-		ID:       projectID,
-		Name:     projectName,
-		BrokerID: brokerID,
-		Path:     localProjectPath,
-	}
-
-	resp, err := client.Projects().Register(ctx, req)
+	project, err := provideBrokerToProject(ctx, client, projectID, brokerID, localProjectPath)
 	if err != nil {
 		return fmt.Errorf("failed to add broker as provider: %w", err)
 	}
 
 	fmt.Println()
-	fmt.Printf("Broker '%s' added as provider for project '%s'\n", brokerName, resp.Project.Name)
+	fmt.Printf("Broker '%s' added as provider for project '%s'\n", brokerName, project.Name)
 	if localProjectPath != "" {
 		fmt.Println(providePathSummary(localProjectPath, brokerName, isRemoteBroker && brokerID != getLocalBrokerID()))
 	} else {
@@ -1292,22 +1442,22 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 
 	// Handle --make-default flag
 	if brokerMakeDefault {
-		currentDefault := resp.Project.DefaultRuntimeBrokerID
+		currentDefault := project.DefaultRuntimeBrokerID
 
 		switch currentDefault {
 		case brokerID:
 			// Already the default, nothing to do
-			fmt.Printf("Broker '%s' is already the default for project '%s'\n", brokerName, resp.Project.Name)
+			fmt.Printf("Broker '%s' is already the default for project '%s'\n", brokerName, project.Name)
 		case "":
 			// No default set - the server should have auto-set it during provide,
 			// but set it explicitly to be sure
-			_, err := client.Projects().Update(ctx, resp.Project.ID, &hubclient.UpdateProjectRequest{
+			_, err := client.Projects().Update(ctx, project.ID, &hubclient.UpdateProjectRequest{
 				DefaultRuntimeBrokerID: brokerID,
 			})
 			if err != nil {
 				return fmt.Errorf("failed to set default broker: %w", err)
 			}
-			fmt.Printf("Broker '%s' set as default for project '%s'\n", brokerName, resp.Project.Name)
+			fmt.Printf("Broker '%s' set as default for project '%s'\n", brokerName, project.Name)
 		default:
 			// Different default already set - resolve its name and confirm
 			currentDefaultName := currentDefault[:8] // fallback to truncated ID
@@ -1316,21 +1466,38 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 				currentDefaultName = currentBroker.Name
 			}
 
-			if !hubsync.ShowChangeDefaultBrokerPrompt(resp.Project.Name, currentDefaultName, brokerName, autoConfirm) {
+			if !hubsync.ShowChangeDefaultBrokerPrompt(project.Name, currentDefaultName, brokerName, autoConfirm) {
 				fmt.Println("Default broker not changed.")
 			} else {
-				_, err := client.Projects().Update(ctx, resp.Project.ID, &hubclient.UpdateProjectRequest{
+				_, err := client.Projects().Update(ctx, project.ID, &hubclient.UpdateProjectRequest{
 					DefaultRuntimeBrokerID: brokerID,
 				})
 				if err != nil {
 					return fmt.Errorf("failed to update default broker: %w", err)
 				}
-				fmt.Printf("Default broker for project '%s' changed from '%s' to '%s'\n", resp.Project.Name, currentDefaultName, brokerName)
+				fmt.Printf("Default broker for project '%s' changed from '%s' to '%s'\n", project.Name, currentDefaultName, brokerName)
 			}
 		}
 	}
 
 	return nil
+}
+
+// provideBrokerToProject links brokerID to projectID through the project
+// providers API (POST /api/v1/projects/{id}/providers), which requires
+// project update on the project and broker update on the broker (its owner
+// or a super-admin). localPath is sent as given; an empty localPath sends no
+// path, and the hub decides what an existing provider keeps. Returns the
+// project as it is after the link.
+func provideBrokerToProject(ctx context.Context, client hubclient.Client, projectID, brokerID, localPath string) (*hubclient.Project, error) {
+	if _, err := client.Projects().AddProvider(ctx, projectID, &hubclient.AddProviderRequest{
+		BrokerID:  brokerID,
+		LocalPath: localPath,
+	}); err != nil {
+		return nil, err
+	}
+
+	return client.Projects().Get(ctx, projectID)
 }
 
 // resolveProvidePath resolves an explicit provide --path to the project
@@ -1387,7 +1554,7 @@ func runBrokerWithdraw(cmd *cobra.Command, args []string) error {
 		}
 
 		// Get broker name for display
-		brokerName, _ = os.Hostname()
+		brokerName = config.LocalBrokerName("")
 		if brokerName == "" {
 			brokerName = brokerID[:8]
 		}
@@ -1600,8 +1767,10 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 		})
 	}
 
-	// Get broker name
+	// Get the hostname, and the configured broker name until the hub
+	// reports the name it has.
 	status.Hostname, _ = os.Hostname()
+	status.BrokerName = config.ConfiguredBrokerName()
 
 	// If registered, try to get Hub status and project list
 	if status.Registered && status.HubEndpoint != "" {
@@ -2500,6 +2669,30 @@ func resolveBrokerPort(cmd *cobra.Command) int {
 		}
 	}
 	return settingsBrokerPort()
+}
+
+// serverBrokerPort returns the runtime broker port of the combined server
+// ('scion server start'): the --runtime-broker-port in its saved launch
+// args, else the settings port (server.broker.port), else
+// DefaultBrokerPort. A foreground server saves no args, so it is found
+// through the settings port unless started with --runtime-broker-port.
+func serverBrokerPort(globalDir string) int {
+	if globalDir != "" {
+		if saved, err := daemon.LoadArgs(serverDaemonComponent, globalDir); err == nil && argsSetBrokerPort(saved) {
+			return brokerPortFromArgs(saved)
+		}
+	}
+	return settingsBrokerPort()
+}
+
+// argsSetBrokerPort reports whether launch args set --runtime-broker-port.
+func argsSetBrokerPort(args []string) bool {
+	for _, a := range args {
+		if a == "--runtime-broker-port" || strings.HasPrefix(a, "--runtime-broker-port=") {
+			return true
+		}
+	}
+	return false
 }
 
 // brokerPortFromArgs returns the --runtime-broker-port in saved broker

@@ -19,8 +19,6 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 
 import {
   ScionHealthBrokerTable,
@@ -33,7 +31,8 @@ import {
   type HealthSummaryBroker,
   type HealthSummaryBrokerList,
 } from './health-broker-table.js';
-import { elementStyleRules } from './__fixtures__/card-layout.js';
+import { elementStyleRules } from './__fixtures__/css-rules.js';
+import { contrast, over, resolver, themeTokens } from './__fixtures__/theme-contrast.js';
 
 function broker(over: Partial<HealthSummaryBroker> = {}): HealthSummaryBroker {
   return {
@@ -376,73 +375,8 @@ describe('scion-health-broker-table layout', () => {
 // surface. Translucent badge backgrounds are composited onto the surface.
 // ---------------------------------------------------------------------------
 
-type RGBA = [number, number, number, number];
-
-function block(cssText: string, selectorStart: string): string {
-  const at = cssText.indexOf(selectorStart);
-  if (at < 0) throw new Error(`no block ${selectorStart}`);
-  const open = cssText.indexOf('{', at);
-  let depth = 0;
-  for (let i = open; i < cssText.length; i++) {
-    if (cssText[i] === '{') depth++;
-    if (cssText[i] === '}' && --depth === 0) return cssText.slice(open + 1, i);
-  }
-  throw new Error('unbalanced');
-}
-
-function decls(body: string): Map<string, string> {
-  const out = new Map<string, string>();
-  for (const m of body.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)) {
-    out.set(m[1]!, m[2]!.trim());
-  }
-  return out;
-}
-
-function parseColor(v: string): RGBA {
-  const hex = /^#([0-9a-f]{6})$/i.exec(v);
-  if (hex) {
-    const n = parseInt(hex[1]!, 16);
-    return [(n >> 16) & 255, (n >> 8) & 255, n & 255, 1];
-  }
-  const rgba = /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)$/.exec(
-    v
-  );
-  if (rgba) return [+rgba[1]!, +rgba[2]!, +rgba[3]!, rgba[4] === undefined ? 1 : +rgba[4]];
-  throw new Error(`unparsed colour ${v}`);
-}
-
-function resolver(vars: Map<string, string>) {
-  const get = (name: string, depth = 0): RGBA => {
-    const v = vars.get(name);
-    if (v === undefined || depth > 10) throw new Error(`unresolved ${name}`);
-    const ref = /^var\((--[\w-]+)\)$/.exec(v);
-    return ref ? get(ref[1]!, depth + 1) : parseColor(v);
-  };
-  return get;
-}
-
-function over(fg: RGBA, bg: RGBA): RGBA {
-  const a = fg[3];
-  return [0, 1, 2].map((i) => fg[i]! * a + bg[i]! * (1 - a)).concat(1) as RGBA;
-}
-
-function luminance([r, g, b]: RGBA): number {
-  const lin = (c: number) => {
-    const s = c / 255;
-    return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
-  };
-  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
-}
-
-function contrast(a: RGBA, b: RGBA): number {
-  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
-  return (hi! + 0.05) / (lo! + 0.05);
-}
-
 describe('scion-health-broker-table contrast', () => {
-  const themeCss = readFileSync(resolve(__dirname, '../../styles/theme.css'), 'utf8');
-  const light = decls(block(themeCss, '.sl-theme-light {'));
-  const dark = new Map([...light, ...decls(block(themeCss, '.sl-theme-dark,'))]);
+  const { light, dark } = themeTokens();
   const pairs: Array<[string, string | null]> = [
     ['--scion-text', null],
     ['--scion-text-muted', null],

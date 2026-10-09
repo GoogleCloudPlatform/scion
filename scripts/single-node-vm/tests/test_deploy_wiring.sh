@@ -1076,7 +1076,7 @@ test_deploy_create_api_check_all_enabled_no_enable_call() {
   fresh_gcloud_state
   seed_enabled_apis compute.googleapis.com run.googleapis.com iap.googleapis.com \
     cloudbuild.googleapis.com artifactregistry.googleapis.com aiplatform.googleapis.com \
-    iam.googleapis.com
+    iam.googleapis.com iamcredentials.googleapis.com
   run_deploy_create "$(base_config_json "$HUB")"
   assert_eq "0" "$(gcloud_log | grep -c 'services enable' || true)" \
     "nothing missing must mean no enable call at all, not an enable call with zero APIs"
@@ -1101,7 +1101,7 @@ test_deploy_create_api_check_tier_on_adds_container() {
   fresh_gcloud_state
   seed_enabled_apis compute.googleapis.com run.googleapis.com iap.googleapis.com \
     cloudbuild.googleapis.com artifactregistry.googleapis.com aiplatform.googleapis.com \
-    iam.googleapis.com
+    iam.googleapis.com iamcredentials.googleapis.com
   seed_cluster "mycluster" "default"
   run_deploy_create "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
   local enable_line
@@ -1784,10 +1784,10 @@ test_deploy_create_tier_off_reaches_settings_yaml_with_no_hybrid_ssh_calls() {
 # the Phase-5 proxy-mode write) with the hybrid-tier splices cut out of
 # the source text. The three splices (${HYBRID_X:+${HYBRID_X}<newline>})
 # are cut as one exact fragment that must start its own line and be
-# followed directly by the listen_port line, not expanded with empty
+# followed directly by the listen-port comment line, not expanded with empty
 # variables. A splice that would leave a stray line or character behind,
 # or any text between the splices, on their lines, or between them and
-# the listen_port line, therefore stays in the template and fails the
+# the listen-port comment line, therefore stays in the template and fails the
 # comparison with the render. If the fragment is not found, the output
 # is an error line, not the template, which also fails the comparison.
 # The identity-mode splice (${HYBRID_GCP_IDENTITY_YAML:-"<comment and
@@ -1813,12 +1813,12 @@ settings_yaml_template_tier_off() {
   for var in HYBRID_AUTH_TRANSPORT_YAML HYBRID_USER_ACCESS_YAML HYBRID_SHARED_DIR_STORAGE_YAML; do
     group="${group}\${${var}:+\${${var}}"$'\n'"}"
   done
-  group=$'\n'"${group}  listen_port: 8080"$'\n'
+  group=$'\n'"${group}  # Listen port: set by --web-port in scion-hub.service, not here."$'\n'
   if [[ "$body" != *"$group"* ]]; then
-    echo "settings.yaml heredoc ${n} in deploy.sh has no contiguous hybrid-tier splice fragment before listen_port"
+    echo "settings.yaml heredoc ${n} in deploy.sh has no contiguous hybrid-tier splice fragment before the listen-port comment"
     return 1
   fi
-  body="${body/"$group"/$'\n'  listen_port: 8080$'\n'}"
+  body="${body/"$group"/$'\n'  # Listen port: set by --web-port in scion-hub.service, not here.$'\n'}"
   printf '%s' "$body"
 }
 
@@ -1858,16 +1858,16 @@ test_deploy_create_tier_off_settings_yaml_byte_identical() {
   expected="$(IMAGE_REGISTRY="localhost/scion" HUB_NAME="demohub" ADMIN_EMAIL="admin@example.com" \
     RELEASE_CHANNEL="nightly" UPDATE_POLICY="auto" render_settings_yaml_template "$template"; echo x)"
   expected="${expected%x}"
-  assert_contains "$expected" "  listen_port: 8080" "the rendered template must reach the listen_port line"
+  assert_contains "$expected" "  # Listen port: set by --web-port in scion-hub.service, not here." "the rendered template must reach the listen-port comment line"
   assert_eq "$expected" "$actual" \
     "a tier-off settings.yaml must be byte-for-byte identical to a render with no hybrid-tier splice at all"
   # The comparison above takes the fixed template text from deploy.sh
   # itself, so these pin a few rendered values and the auth block's end.
-  assert_contains "$actual" '    name: "demohub"' "the dev-mode write must carry the hub name"
+  assert_contains "$actual" '    hub_name: "demohub"' "the dev-mode write must carry the hub name"
   assert_contains "$actual" '    release_channel: "nightly"' "the dev-mode write must carry the release channel"
   assert_contains "$actual" '    update_policy: "auto"' "the dev-mode write must carry the update policy"
-  assert_contains "$actual" $'  auth:\n    mode: dev\n  listen_port: 8080\n' \
-    "in the dev-mode write, the listen_port line must directly follow the auth block"
+  assert_contains "$actual" $'  auth:\n    mode: dev\n  # Listen port: set by --web-port in scion-hub.service, not here.\n' \
+    "in the dev-mode write, the listen-port comment line must directly follow the auth block"
 }
 
 # The dev-mode write above is what deploy.sh's own Phase 3 uses on every
@@ -1899,11 +1899,11 @@ test_deploy_create_tier_off_proxy_settings_yaml_byte_identical() {
     "a tier-off proxy-mode settings.yaml must be byte-for-byte identical to a render with no hybrid-tier splice at all"
   # As in the dev-mode test, these pin a few rendered values and the auth
   # block's end independently of the template.
-  assert_contains "$actual" '    name: "demohub"' "the proxy-mode write must carry the hub name"
+  assert_contains "$actual" '    hub_name: "demohub"' "the proxy-mode write must carry the hub name"
   assert_contains "$actual" '    release_channel: "nightly"' "the proxy-mode write must carry the release channel"
   assert_contains "$actual" '    update_policy: "auto"' "the proxy-mode write must carry the update policy"
-  assert_contains "$actual" $'        audience: "/projects/123456789012/locations/us-central1/services/scion-hub-demohub-iap-proxy"\n  listen_port: 8080\n' \
-    "in the proxy-mode write, the listen_port line must directly follow the auth block"
+  assert_contains "$actual" $'        audience: "/projects/123456789012/locations/us-central1/services/scion-hub-demohub-iap-proxy"\n  # Listen port: set by --web-port in scion-hub.service, not here.\n' \
+    "in the proxy-mode write, the listen-port comment line must directly follow the auth block"
 }
 
 test_deploy_create_tier_on_proxy_settings_yaml_has_shared_dir_storage_block() {
@@ -2167,8 +2167,8 @@ test_deploy_create_tier_on_settings_writes_parse_as_yaml() {
       "${mode}-mode write: server.shared_dir_storage.backend"
     assert_eq "10.128.0.9" "$(_json_get "$json" server.shared_dir_storage.nfs.shares.0.server)" \
       "${mode}-mode write: the shared_dir_storage share server is the reserved internal IP"
-    assert_eq "8080" "$(_json_get "$json" server.listen_port)" \
-      "${mode}-mode write: server.listen_port stays a server-level key after the splices"
+    assert_eq "<missing>" "$(_json_get "$json" server.listen_port)" \
+      "${mode}-mode write: no server.listen_port key (not in the v1 schema)"
   done
 }
 
@@ -2188,8 +2188,7 @@ image_registry
 schema_version
 server.auth.mode
 server.hub.admin_emails[0]
-server.hub.name
-server.listen_port
+server.hub.hub_name
 server.maintenance.deployment_tier
 server.maintenance.release_channel
 server.maintenance.update_policy
@@ -2215,7 +2214,7 @@ server.storage.local_path"
       "tier-off ${mode}-mode write: no user_access_mode"
     assert_eq "<missing>" "$(_json_get "$json" server.shared_dir_storage)" \
       "tier-off ${mode}-mode write: no shared_dir_storage block"
-    assert_eq "8080" "$(_json_get "$json" server.listen_port)" "tier-off ${mode}-mode write: server.listen_port"
+    assert_eq "<missing>" "$(_json_get "$json" server.listen_port)" "tier-off ${mode}-mode write: no server.listen_port"
     # The fixed keys of the template, pinned by value here rather than
     # read back from deploy.sh, so an edit to the template text outside
     # the hybrid-tier splices fails a test.
@@ -2226,7 +2225,7 @@ server.storage.local_path"
       "tier-off ${mode}-mode write: default_gcp_identity_mode"
     assert_eq "antigravity" "$(_json_get "$json" default_harness_config)" \
       "tier-off ${mode}-mode write: default_harness_config"
-    assert_eq "$HUB" "$(_json_get "$json" server.hub.name)" "tier-off ${mode}-mode write: server.hub.name"
+    assert_eq "$HUB" "$(_json_get "$json" server.hub.hub_name)" "tier-off ${mode}-mode write: server.hub.hub_name"
     assert_eq "admin@example.com" "$(_json_get "$json" server.hub.admin_emails.0)" \
       "tier-off ${mode}-mode write: server.hub.admin_emails"
     assert_eq "binary" "$(_json_get "$json" server.maintenance.deployment_tier)" \
@@ -2506,8 +2505,8 @@ test_deploy_create_tier_off_project_bindings_pass_condition_none() {
   run_deploy_create_to_proxy_settings_yaml \
     "$(base_config_json "$HUB" "" "registry" "us-docker.pkg.dev/demo-project/scion")"
   assert_eq "true" "$DEPLOY_REACHED_SETTINGS_YAML" "a tier-off create must reach the Phase-5 proxy-mode settings.yaml write"
-  # 5 service account roles, the deployer's tunnel role, the IAP fallback.
-  _assert_project_bindings_carry_condition_none 7 "tier off"
+  # 6 service account roles, the deployer's tunnel role, the IAP fallback.
+  _assert_project_bindings_carry_condition_none 8 "tier off"
   assert_eq "1" "$(gcloud_log | grep '^projects add-iam-policy-binding ' | grep -c -- '--role=roles/iap.httpsResourceAccessor' || true)" \
     "the project-level IAP fallback must run once"
   assert_not_contains "$DEPLOY_LOG" "Updated IAM policy for project" \
@@ -2522,9 +2521,9 @@ test_deploy_create_tier_on_project_bindings_pass_condition_none() {
   run_deploy_create_to_proxy_settings_yaml \
     "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
   assert_eq "true" "$DEPLOY_REACHED_SETTINGS_YAML" "a tier-on create must reach the Phase-5 proxy-mode settings.yaml write"
-  # 5 service account roles and the deployer's tunnel role; the
+  # 6 service account roles and the deployer's tunnel role; the
   # service-level IAP binding succeeds, so there is no fallback.
-  _assert_project_bindings_carry_condition_none 6 "tier on"
+  _assert_project_bindings_carry_condition_none 7 "tier on"
   assert_not_contains "$DEPLOY_LOG" "Updated IAM policy for project" \
     "gcloud's stderr must not be printed when a binding succeeds"
 }
@@ -2545,6 +2544,100 @@ test_deploy_create_role_binding_failure_stops_with_gcloud_error() {
     "no later role binding may run after a failure"
   assert_eq "0" "$(gcloud_log | grep -c '^compute instances create' || true)" \
     "no VM may be created after a failed role binding"
+}
+
+# =====================================================================
+# Hub-minted service accounts: the hub VM's SA gets
+# roles/iam.serviceAccountAdmin by default (hub_sa_minting), and
+# iamcredentials.googleapis.com is a required API.
+# =====================================================================
+
+HUB_SA_ADMIN_BINDING_RE="^projects add-iam-policy-binding demo-project .*--member=serviceAccount:scion-hub-${HUB}@demo-project\.iam\.gserviceaccount\.com .*--role=roles/iam\.serviceAccountAdmin( |$)"
+
+test_deploy_create_grants_hub_sa_service_account_admin_by_default() {
+  fresh_gcloud_state
+  run_deploy_create "$(base_config_json "$HUB")"
+  assert_eq "1" "$(gcloud_log | grep -cE "$HUB_SA_ADMIN_BINDING_RE" || true)" \
+    "a default deploy must grant roles/iam.serviceAccountAdmin to the hub VM's SA exactly once"
+  assert_eq "1" "$(gcloud_log | grep -E "$HUB_SA_ADMIN_BINDING_RE" | grep -cE '( |^)--condition=None( |$)' || true)" \
+    "the serviceAccountAdmin grant must pass --condition=None like the other role grants"
+  assert_contains "$DEPLOY_LOG" "aiplatform.user, iam.serviceAccountAdmin" \
+    "the roles-bound summary must list iam.serviceAccountAdmin"
+}
+
+test_deploy_create_hub_sa_minting_true_grants_service_account_admin() {
+  fresh_gcloud_state
+  run_deploy_create "$(base_config_json "$HUB" ', "hub_sa_minting": true')"
+  assert_eq "1" "$(gcloud_log | grep -cE "$HUB_SA_ADMIN_BINDING_RE" || true)" \
+    "hub_sa_minting: true must grant roles/iam.serviceAccountAdmin to the hub VM's SA"
+}
+
+test_deploy_create_hub_sa_minting_false_skips_service_account_admin() {
+  fresh_gcloud_state
+  run_deploy_create "$(base_config_json "$HUB" ', "hub_sa_minting": false')"
+  assert_eq "0" "$(gcloud_log | grep -c -- '--role=roles/iam.serviceAccountAdmin' || true)" \
+    "hub_sa_minting: false must skip the serviceAccountAdmin grant"
+  assert_eq "1" "$(gcloud_log | grep '^projects add-iam-policy-binding ' | grep -c -- '--role=roles/aiplatform.user' || true)" \
+    "hub_sa_minting: false must still grant the other hub SA roles"
+  assert_contains "$DEPLOY_LOG" "Skipped iam.serviceAccountAdmin (hub_sa_minting is false)" \
+    "the deploy must say the grant was skipped"
+  assert_contains "$DEPLOY_LOG" "gcloud projects remove-iam-policy-binding demo-project --member=serviceAccount:scion-hub-${HUB}@demo-project.iam.gserviceaccount.com --role=roles/iam.serviceAccountAdmin --condition=None" \
+    "the deploy must print how to remove a grant left by an earlier deploy"
+}
+
+test_deploy_create_hub_sa_minting_invalid_value_refused() {
+  fresh_gcloud_state
+  _run_deploy_create_expect_refusal "$(base_config_json "$HUB" ', "hub_sa_minting": "yes"')"
+  assert_true "$([[ "$DEPLOY_RC" -ne 0 && "$DEPLOY_RC" -ne 124 ]] && echo true || echo false)" \
+    "an invalid hub_sa_minting value must stop the deploy"
+  assert_contains "$DEPLOY_LOG" "Invalid hub_sa_minting in config: 'yes' (expected: true or false)" \
+    "the error must name the key and the accepted values"
+  assert_eq "0" "$(gcloud_log | grep -c '^projects add-iam-policy-binding ' || true)" \
+    "no role may be granted after an invalid hub_sa_minting value"
+}
+
+test_deploy_create_service_account_admin_binding_failure_stops_deploy() {
+  fresh_gcloud_state
+  set_project_binding_will_fail "roles/iam.serviceAccountAdmin" "$PROJECT_BINDING_ERROR"
+  _run_deploy_create_expect_refusal \
+    "$(base_config_json "$HUB" "" "registry" "us-docker.pkg.dev/demo-project/scion")"
+  assert_true "$([[ "$DEPLOY_RC" -ne 0 && "$DEPLOY_RC" -ne 124 ]] && echo true || echo false)" \
+    "a failed serviceAccountAdmin grant must stop the deploy like the other role grants"
+  assert_contains "$DEPLOY_LOG" "Failed to grant roles/iam.serviceAccountAdmin to scion-hub-${HUB}@demo-project.iam.gserviceaccount.com" \
+    "the error must name the role and the service account"
+  assert_eq "0" "$(gcloud_log | grep -c '^compute instances create' || true)" \
+    "no VM may be created after a failed serviceAccountAdmin grant"
+}
+
+test_deploy_create_api_check_enables_iamcredentials_when_missing() {
+  fresh_gcloud_state
+  seed_enabled_apis compute.googleapis.com run.googleapis.com iap.googleapis.com \
+    cloudbuild.googleapis.com artifactregistry.googleapis.com aiplatform.googleapis.com \
+    iam.googleapis.com
+  run_deploy_create "$(base_config_json "$HUB")"
+  local enable_line
+  enable_line="$(gcloud_log | grep 'services enable' | head -1)"
+  assert_eq "1" "$(gcloud_log | grep -c 'services enable' || true)" "exactly one enable call, for iamcredentials only"
+  assert_contains "$enable_line" "iamcredentials.googleapis.com" \
+    "the hub mints tokens for hub-minted service accounts through iamcredentials.googleapis.com"
+  assert_not_contains "$enable_line" "compute.googleapis.com" "an already-enabled API must not be re-enabled"
+}
+
+# deploy.sh never removes the hub SA's project role bindings one by one:
+# --delete deletes the hub SA itself, so every binding it holds
+# (serviceAccountAdmin included) no longer applies. Asserts that path, against the
+# exact state a default create left behind.
+test_deploy_delete_after_create_deletes_hub_sa_holding_service_account_admin() {
+  fresh_gcloud_state
+  run_deploy_create "$(base_config_json "$HUB")"
+  assert_eq "1" "$(gcloud_log | grep -cE "$HUB_SA_ADMIN_BINDING_RE" || true)" \
+    "precondition: the create must have granted serviceAccountAdmin to the hub SA"
+  run_deploy_delete "$(base_config_json "$HUB")"
+  assert_eq "0" "$DEPLOY_RC" "teardown after a default create must exit 0"
+  assert_eq "1" "$(gcloud_log | grep -c -- "^iam service-accounts delete scion-hub-${HUB}@demo-project.iam.gserviceaccount.com " || true)" \
+    "teardown must delete the hub SA, so its serviceAccountAdmin binding no longer applies"
+  assert_contains "$DEPLOY_LOG" "Deleted: scion-hub-${HUB}@demo-project.iam.gserviceaccount.com" \
+    "teardown must report the hub SA as deleted"
 }
 
 test_deploy_create_tunnel_binding_failure_warns_with_gcloud_error() {

@@ -221,6 +221,11 @@ func (s *Server) listGCPServiceAccountsScoped(w http.ResponseWriter, r *http.Req
 	var scopeCap *Capabilities
 	if identity != nil {
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, req.scope, req.scopeID, "gcp_service_account")
+		scopeProject := ""
+		if req.scope == store.ScopeProject {
+			scopeProject = req.scopeID
+		}
+		s.projectGCPServiceAccountCapabilities(ctx, items, scopeCap, scopeProject)
 	}
 
 	// Include MintQuota when listing at hub scope and minting is configured.
@@ -842,7 +847,7 @@ func (s *Server) mintHubScopedGCPServiceAccount(w http.ResponseWriter, r *http.R
 		slog.Error("GCP SA mint (hub scope): failed to create service account",
 			"hub_gcp_project_id", hubGCPProjectID, "account_id", accountID, "error", err)
 		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
-			"failed to create GCP service account: "+err.Error(), nil)
+			mintCreateErrorMessage(err, hubGCPProjectID), nil)
 		return
 	}
 

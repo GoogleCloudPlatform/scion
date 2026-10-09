@@ -60,17 +60,17 @@ import { apiFetch } from '../../client/api.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-vi.mock('../../client/main.js', () => ({
-  navigateTo: vi.fn(),
-  pushRoute: vi.fn((path: string) => {
-    window.history.pushState({}, '', path);
-    return Promise.resolve();
-  }),
+vi.mock('../../client/main.js', async () => ({
+  ...(await import('../../client/__fixtures__/main-stub.js')),
   stateManager: {
     getAgents: () => [],
     getDeletedAgentIds: () => new Set<string>(),
     seedAgents: () => {},
     removeAgent: () => {},
+    getAgent: () => undefined,
+    scopeGeneration: 0,
+    beginSeedEpoch: () => Symbol('seed-epoch'),
+    endSeedEpoch: () => {},
   },
 }));
 

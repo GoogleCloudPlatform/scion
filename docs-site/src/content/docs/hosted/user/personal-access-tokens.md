@@ -61,6 +61,25 @@ project, and stores that ceiling with the token. Every later request made with t
 limited to that ceiling. A token whose stored ceiling is missing or has an unrecognized version is
 denied. Existing tokens are converted to versioned ceilings automatically on upgrade.
 
+### Hub-boundary tokens for broker registration
+
+Most tokens are bound to one project. A token can instead be bound to the **hub boundary**
+(`"boundary": {"kind": "hub"}` in `POST /api/v1/auth/tokens`), which is used for hub-level
+resources such as Runtime Brokers. The `broker:create` scope is available only with a hub
+boundary:
+
+| Scope | Boundary | Grants |
+|-------|----------|--------|
+| `broker:create` | Hub only | Register a Runtime Broker, or re-register (issue a new join token for) one your user created, including with `scion hub brokers join-token create`. A token does not let a super-admin re-register another user's broker. Requires that you currently hold `broker.create`, which hub members do. |
+| `broker:read` | Hub only | Read Runtime Broker records. `scion runtime-broker register` uses it to check an existing registration. |
+
+`broker:create` covers registration only. It never associates a broker with a project, never
+turns on auto-provide, and never rotates a broker's secret. Associating a broker with a project
+needs a sign-in by the broker's owner; see
+[Sharing a broker with a project](/scion/hosted/ha/runtime-broker/#sharing-a-broker-with-a-project).
+For the full steps, see
+[Headless registration with a hub token](/scion/hosted/ha/runtime-broker/#headless-registration-with-a-hub-token).
+
 ### Scopes are restrictions, not grants
 
 Selecting a scope only **limits** what a token may ever be used for — it never by itself grants
@@ -119,15 +138,16 @@ Generate a new token with the Scion CLI:
 scion hub token create \
   --project my-project \
   --name "github-actions" \
-  --scopes agent:create,agent:read,agent:attach \
+  --scopes project:read,agent:create,agent:read,agent:attach \
   --expires 90d
 ```
 
 - `--project` (required) — the project name or ID the token is scoped to.
 - `--name` (required) — a human-readable label.
 - `--scopes` (required) — a comma-separated list of the scopes above.
-- `--expires` — a duration (`30d`, `90d`, `1y`) or an RFC 3339 date
-  (`2026-12-31T00:00:00Z`). Defaults to 90 days; maximum 1 year.
+- `--expires` — a duration (`90m`, `2h`, `30d`, `1y`) or an RFC 3339 date
+  (`2026-12-31T00:00:00Z`). Defaults to 90 days; maximum 1 year. `m` means minutes; there is
+  no month unit (use `30d` or `1y` for longer).
 - `--purpose` — an optional description of what the token is for (up to 128 bytes).
 - `--label` — an optional `key=value` label; repeat the flag for more (up to 8). Keys are
   lowercase, start with a letter and may contain digits, `_`, `.` and `-` (up to 32 bytes).
@@ -177,9 +197,18 @@ The same per-request checks apply, with these limits:
   the grant's project.
 - **Messages.** A message sent to an agent with a token passes the same boundary, ceiling, and
   live project-access checks before any other rule can allow it.
-- **Runtime Broker registration.** The `broker:create` scope can be selected only on a hub token,
-  but creating a Runtime Broker still does not admit any UAT (see
-  [What scoped tokens cannot do](#what-scoped-tokens-cannot-do)).
+- **Inbox and conversations.** Inbox, conversation and notification operations check the token's
+  inbox selectors and its boundary.
+- **Project configuration.** Setting the project messaging policy, and template and project
+  configuration operations, each require their own permission; project owners hold
+  `project.set_messaging_policy`.
+- **Hub configuration.** Hub configuration operations admit only a hub token carrying the
+  matching selector, for example `hub_lifecycle_hooks:update` to change hub pre-start hooks.
+  Hub pre-start hook scripts are redacted in read responses for every credential other than an
+  interactive sign-in, so a token sees hub hook metadata but not the script.
+- **Runtime Broker registration.** The `broker:create` scope can be selected only on a hub token.
+  A project token cannot create or re-register a Runtime Broker (see
+  [Hub-boundary tokens for broker registration](#hub-boundary-tokens-for-broker-registration)).
 
 ## Using a token
 
@@ -190,8 +219,43 @@ export SCION_HUB_TOKEN="scion_pat_..."
 scion list --project my-project
 ```
 
-When this variable is set, the CLI bypasses the browser-based OAuth flow and uses the token for
-all communication with the Hub.
+When no stored interactive login exists, the CLI uses the token for all communication with the
+Hub.
+
+:::caution[A stored login takes precedence]
+A stored interactive login (from `scion hub auth login`) takes precedence over
+`SCION_HUB_TOKEN`. To run the CLI under a scoped token, use an environment with no stored login:
+a dedicated OS user, an isolated `HOME`, or log out first (`scion hub auth logout`).
+:::
+
+### Scopes for CLI use
+
+Most CLI commands that run in a project look the project up on the Hub first, which needs
+`project:read`. Include `project:read` in every token you use with the CLI. Scopes common CLI
+flows need:
+
+| Flow | Scopes |
+|------|--------|
+| Any command run in a project | `project:read` |
+| `scion list` | `project:read`, `agent:list` |
+| `scion look`, `scion logs` | `project:read`, `agent:read` |
+| `scion start` / `scion create` | `project:read`, `agent:create`, `agent:read` |
+| `scion message` | `project:read`, `agent:message` |
+| `scion attach` | `project:read`, `agent:attach` |
+| `scion stop`, `scion suspend`, `scion resume`, `scion restore` | `project:read`, `agent:lifecycle` |
+| `scion delete` | `project:read`, `agent:delete` |
+
+A token without `project:read` gets `404 Not Found` on the project lookup. The CLI reports this
+as a likely missing `project:read` scope and stops. A user access token cannot register a new
+project, so the CLI does not try to link or register the project under one. Link the project
+once with an interactive login (`scion hub link`), then use the token.
+
+Token scopes limit what the CLI can do on the Hub. Local actions, such as `scion clean` and any
+command run with `--no-hub` (for example `scion delete --no-hub`), act on the local machine with
+the user's file permissions, and token scopes don't limit them.
+
+To use the CLI from a coding agent running on your machine, see
+[Using the scion CLI from a coding agent](/scion/hosted/user/coding-agent-cli/).
 
 ### What scoped tokens cannot do
 
@@ -201,11 +265,16 @@ owner or administrator shortcuts, require an unscoped sign-in (CLI or Web UI log
 - **Scheduled work**: creating, updating, re-targeting or resuming scheduled messages and
   scheduled `dispatch_agent` events or schedules. See
   [Scheduling](/scion/hosted/user/scheduling/#security--authorization).
-- **Runtime Broker registration**: Runtime Broker creation (`POST /api/v1/brokers` and the
-  embedded Runtime Broker path of project registration) does not admit any UAT, whatever its
-  boundary or scopes — even a hub-bound token carrying `broker:create` is denied with `403`. A UAT
-  also does not satisfy the owner or super-admin shortcuts for re-registering a Runtime Broker. See
+- **Runtime Broker registration**: creating a Runtime Broker (`POST /api/v1/brokers` and the
+  embedded Runtime Broker path of project registration) admits a UAT only when it is a
+  hub-boundary token carrying `broker:create` and your user holds `broker.create`; any other UAT
+  is denied with `403`. Re-registering an existing Runtime Broker (issuing a new join token) with
+  such a token works only for a Runtime Broker your user created: a UAT does not satisfy the
+  super-admin shortcut. See
   [Runtime Broker](/scion/hosted/ha/runtime-broker/#broker-registration-permission).
+- **Broker secret rotation and association**: no UAT can rotate a Runtime Broker's HMAC
+  secret or carry the broker owner's consent to associate a broker with a project. See
+  [Runtime Broker](/scion/hosted/ha/runtime-broker/#broker-ownership).
 
 ## Trust level separation
 

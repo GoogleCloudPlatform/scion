@@ -48,6 +48,28 @@ func TestHubConduitConfig_Validate(t *testing.T) {
 		{name: "reconnect window above max", cfg: HubConduitConfig{ReconnectWindow: "6m"}, wantErr: []string{"reconnect_window", "between 0s and 5m0s"}},
 		{name: "reconnect window negative", cfg: HubConduitConfig{ReconnectWindow: "-1s"}, wantErr: []string{"reconnect_window"}},
 		{name: "reconnect window malformed", cfg: HubConduitConfig{ReconnectWindow: "fast"}, wantErr: []string{"reconnect_window"}},
+		{name: "authz recheck interval at min", cfg: HubConduitConfig{AuthzRecheckInterval: "1s"}},
+		{name: "authz recheck interval at max", cfg: HubConduitConfig{AuthzRecheckInterval: "10m"}},
+		{name: "authz recheck interval below min", cfg: HubConduitConfig{AuthzRecheckInterval: "500ms"}, wantErr: []string{"authz_recheck_interval", "between 1s and 10m0s"}},
+		{name: "authz recheck interval above max", cfg: HubConduitConfig{AuthzRecheckInterval: "11m"}, wantErr: []string{"authz_recheck_interval"}},
+		{name: "authz recheck interval malformed", cfg: HubConduitConfig{AuthzRecheckInterval: "often"}, wantErr: []string{"authz_recheck_interval"}},
+		{name: "lifetime cap at min", cfg: HubConduitConfig{LifetimeCap: "90s"}},
+		{name: "lifetime cap at max", cfg: HubConduitConfig{LifetimeCap: "24h"}},
+		{name: "lifetime cap below min", cfg: HubConduitConfig{LifetimeCap: "89s"}, wantErr: []string{"lifetime_cap", "between 1m30s and 24h0m0s"}},
+		{name: "lifetime cap equal to the GoAway lead", cfg: HubConduitConfig{LifetimeCap: "60s"}, wantErr: []string{"lifetime_cap"}},
+		{name: "lifetime cap zero", cfg: HubConduitConfig{LifetimeCap: "0s"}, wantErr: []string{"lifetime_cap"}},
+		{name: "lifetime cap negative", cfg: HubConduitConfig{LifetimeCap: "-1h"}, wantErr: []string{"lifetime_cap"}},
+		{name: "lifetime cap above max", cfg: HubConduitConfig{LifetimeCap: "25h"}, wantErr: []string{"lifetime_cap"}},
+		{name: "lifetime cap malformed", cfg: HubConduitConfig{LifetimeCap: "an hour"}, wantErr: []string{"lifetime_cap"}},
+		{name: "stream authz max at min", cfg: HubConduitConfig{StreamAuthzMax: HubConduitStreamAuthzMax{User: "1m", Broker: "1m", Agent: "1m"}}},
+		{name: "stream authz max at max", cfg: HubConduitConfig{StreamAuthzMax: HubConduitStreamAuthzMax{User: "168h", Broker: "168h", Agent: "168h"}}},
+		{name: "stream authz max user below min", cfg: HubConduitConfig{StreamAuthzMax: HubConduitStreamAuthzMax{User: "59s"}}, wantErr: []string{"stream_authz_max.user", "between 1m0s and 168h0m0s"}},
+		{name: "stream authz max user above max", cfg: HubConduitConfig{StreamAuthzMax: HubConduitStreamAuthzMax{User: "169h"}}, wantErr: []string{"stream_authz_max.user"}},
+		{name: "stream authz max user malformed", cfg: HubConduitConfig{StreamAuthzMax: HubConduitStreamAuthzMax{User: "a while"}}, wantErr: []string{"stream_authz_max.user"}},
+		{name: "stream authz max broker validated", cfg: HubConduitConfig{StreamAuthzMax: HubConduitStreamAuthzMax{Broker: "30s"}}, wantErr: []string{"stream_authz_max.broker"}},
+		{name: "stream authz max agent validated", cfg: HubConduitConfig{StreamAuthzMax: HubConduitStreamAuthzMax{Agent: "8d"}}, wantErr: []string{"stream_authz_max.agent"}},
+		{name: "stream authz max every field reported", cfg: HubConduitConfig{StreamAuthzMax: HubConduitStreamAuthzMax{User: "0s", Broker: "-1h", Agent: "x"}},
+			wantErr: []string{"stream_authz_max.user", "stream_authz_max.broker", "stream_authz_max.agent"}},
 		{name: "port out of range", cfg: HubConduitConfig{TCPAllowedPorts: []int{0, 65536}}, wantErr: []string{"port 0 is outside", "port 65536 is outside"}},
 		{name: "port duplicated", cfg: HubConduitConfig{TCPAllowedPorts: []int{22, 22}}, wantErr: []string{"port 22 is listed twice"}},
 		{name: "listen without port", cfg: HubConduitConfig{InternalListen: "10.0.0.5"}, wantErr: []string{"internal_listen"}},
@@ -108,6 +130,48 @@ func TestHubConduitConfig_Durations(t *testing.T) {
 	}
 }
 
+// TestHubConduitConfig_StreamAuthzMaxDurations: unset values take the Q6
+// defaults (8h for user streams, 24h for broker and agent streams); set
+// values are parsed per field.
+func TestHubConduitConfig_StreamAuthzMaxDurations(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  HubConduitStreamAuthzMax
+		want ConduitStreamAuthzMax
+	}{
+		{name: "defaults", want: ConduitStreamAuthzMax{User: 8 * time.Hour, Broker: 24 * time.Hour, Agent: 24 * time.Hour}},
+		{name: "user only", cfg: HubConduitStreamAuthzMax{User: "2h"}, want: ConduitStreamAuthzMax{User: 2 * time.Hour, Broker: 24 * time.Hour, Agent: 24 * time.Hour}},
+		{name: "all set", cfg: HubConduitStreamAuthzMax{User: "30m", Broker: "12h", Agent: "168h"}, want: ConduitStreamAuthzMax{User: 30 * time.Minute, Broker: 12 * time.Hour, Agent: 168 * time.Hour}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := HubConduitConfig{StreamAuthzMax: tt.cfg}.StreamAuthzMaxDurations()
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+	assert.Equal(t, 8*time.Hour, ConduitDefaultUserStreamAuthzMax)
+	assert.Equal(t, 24*time.Hour, ConduitDefaultServiceStreamAuthzMax)
+	_, err := HubConduitConfig{StreamAuthzMax: HubConduitStreamAuthzMax{User: "soon"}}.StreamAuthzMaxDurations()
+	assert.ErrorContains(t, err, "stream_authz_max.user")
+}
+
+// TestHubConduitConfig_StreamAuthzMaxTypoIsUnused: stream_authz_max is a
+// typed struct, so a misspelt field is reported as an unrecognized key
+// (and the default applies) rather than silently accepted.
+func TestHubConduitConfig_StreamAuthzMaxTypoIsUnused(t *testing.T) {
+	k := koanf.New(".")
+	require.NoError(t, k.Load(confmap.Provider(map[string]interface{}{
+		"hub.conduit.streamAuthzMax.users": "2h",
+		"hub.conduit.streamAuthzMax.agent": "12h",
+	}, "."), nil))
+	var gc GlobalConfig
+	unused, err := decodeCollectingUnused(k, &gc)
+	require.NoError(t, err)
+	assert.Contains(t, strings.ToLower(strings.Join(unused, ",")), "streamauthzmax.users")
+	assert.Equal(t, HubConduitStreamAuthzMax{Agent: "12h"}, gc.Hub.Conduit.StreamAuthzMax)
+}
+
 func TestHubConduitConfig_IsZero(t *testing.T) {
 	for name, c := range map[string]HubConduitConfig{
 		"activation": {GrantKeyActivation: "1m"},
@@ -119,6 +183,9 @@ func TestHubConduitConfig_IsZero(t *testing.T) {
 		"audience":   {PeerAudience: "a"},
 		"window":     {ReconnectWindow: "1s"},
 		"instance":   {InstanceID: "hub-0"},
+		"recheck":    {AuthzRecheckInterval: "30s"},
+		"cap":        {LifetimeCap: "1h"},
+		"authz max":  {StreamAuthzMax: HubConduitStreamAuthzMax{Agent: "1h"}},
 	} {
 		assert.False(t, c.IsZero(), name)
 	}
@@ -131,7 +198,8 @@ func TestConduitConfig_V1RoundTrip(t *testing.T) {
 		GrantKeyActivation: "20m", TCPAllowedPorts: []int{22, 8080}, InternalListen: ":9810",
 		InternalAdvertise: "http://10.0.0.5:9810", PeerAuth: "oidc",
 		PeerServiceAccounts: []string{"hub@p.iam.gserviceaccount.com"}, PeerAudience: "aud", ReconnectWindow: "7s",
-		InstanceID: "hub-0",
+		InstanceID: "hub-0", AuthzRecheckInterval: "45s", LifetimeCap: "1800s",
+		StreamAuthzMax: HubConduitStreamAuthzMax{User: "4h", Broker: "20h", Agent: "22h"},
 	}
 	v1 := ConvertGlobalToV1ServerConfig(gc)
 	require.NotNil(t, v1.Hub)
@@ -170,6 +238,11 @@ server:
       internal_listen: ":9810"
       peer_auth: hmac
       reconnect_window: 3s
+      authz_recheck_interval: 30s
+      lifetime_cap: 1800s
+      stream_authz_max:
+        user: 4h
+        agent: 12h
 `), 0644))
 
 	cfg, err := LoadGlobalConfig(configPath)
@@ -180,6 +253,26 @@ server:
 	assert.Equal(t, ":9810", c.InternalListen)
 	assert.Equal(t, "hmac", c.PeerAuth)
 	assert.Equal(t, "3s", c.ReconnectWindow)
+	assert.Equal(t, "30s", c.AuthzRecheckInterval)
+	d, err := c.AuthzRecheckIntervalDuration()
+	require.NoError(t, err)
+	assert.Equal(t, 30*time.Second, d)
+	assert.Equal(t, HubConduitStreamAuthzMax{User: "4h", Agent: "12h"}, c.StreamAuthzMax)
+	m, err := c.StreamAuthzMaxDurations()
+	require.NoError(t, err)
+	assert.Equal(t, ConduitStreamAuthzMax{User: 4 * time.Hour, Broker: 24 * time.Hour, Agent: 12 * time.Hour}, m)
+
+	assert.Equal(t, "1800s", c.LifetimeCap)
+	capD, err := c.LifetimeCapDuration()
+	require.NoError(t, err)
+	assert.Equal(t, 30*time.Minute, capD)
+
+	t.Run("lifetime cap env", func(t *testing.T) {
+		t.Setenv(conduitSchemaEnvVar(t, "lifetime_cap"), "120s")
+		cfg, err := LoadGlobalConfig(configPath)
+		require.NoError(t, err)
+		assert.Equal(t, "120s", cfg.Hub.Conduit.LifetimeCap)
+	})
 
 	t.Run("env override", func(t *testing.T) {
 		t.Setenv(conduitSchemaEnvVar(t, "reconnect_window"), "9s")
@@ -212,6 +305,31 @@ server:
 		}
 	})
 
+	t.Run("authz recheck interval env", func(t *testing.T) {
+		t.Setenv(conduitSchemaEnvVar(t, "authz_recheck_interval"), "15s")
+		cfg, err := LoadGlobalConfig(configPath)
+		require.NoError(t, err)
+		assert.Equal(t, "15s", cfg.Hub.Conduit.AuthzRecheckInterval)
+	})
+
+	t.Run("stream authz max env", func(t *testing.T) {
+		data, err := schemasFS.ReadFile(settingsSchemaFiles["1"])
+		require.NoError(t, err)
+		var root map[string]interface{}
+		require.NoError(t, json.Unmarshal(data, &root))
+		want := map[string]string{"user": "3h", "broker": "30h", "agent": "40h"}
+		for field, v := range want {
+			prop := findSchemaProperty(t, root, "server", "hub", "conduit", "stream_authz_max", field)
+			envVar, _ := prop["x-env-var"].(string)
+			require.Equal(t, "SCION_SERVER_HUB_CONDUIT_STREAMAUTHZMAX_"+strings.ToUpper(field), envVar)
+			t.Setenv(envVar, v)
+		}
+		cfg, err := LoadGlobalConfig(configPath)
+		require.NoError(t, err)
+		assert.Equal(t, HubConduitStreamAuthzMax{User: "3h", Broker: "30h", Agent: "40h"}, cfg.Hub.Conduit.StreamAuthzMax)
+		assert.NoError(t, cfg.Hub.Conduit.Validate())
+	})
+
 	t.Run("instance id env", func(t *testing.T) {
 		t.Setenv(conduitSchemaEnvVar(t, "instance_id"), "hub-east-1")
 		cfg, err := LoadGlobalConfig(configPath)
@@ -233,4 +351,39 @@ func TestConduitListKeysSplit(t *testing.T) {
 		assert.Equal(t, []string{"a@p.iam.gserviceaccount.com", "b@p.iam.gserviceaccount.com"}, k.Strings("server.hub.conduit.peer_service_accounts"))
 		assert.Equal(t, []int{22, 3000}, k.Ints("server.hub.conduit.tcp_allowed_ports"))
 	}
+}
+
+// TestConduitLifetimeCap_Default: an unset lifetime_cap is the 3500s
+// default and passes validation.
+func TestConduitLifetimeCap_Default(t *testing.T) {
+	d, err := HubConduitConfig{}.LifetimeCapDuration()
+	require.NoError(t, err)
+	assert.Equal(t, 3500*time.Second, d)
+	assert.Equal(t, ConduitDefaultLifetimeCap, d)
+	assert.NoError(t, HubConduitConfig{}.Validate())
+}
+
+// TestConduitLifetimeCap_EnvMapping: SCION_SERVER_HUB_CONDUIT_LIFETIMECAP
+// is the schema's env var for server.hub.conduit.lifetime_cap and maps to
+// that key in both the opsettings keyspace (snake_case) and the hub
+// config (camelCase), so the setting can be given by environment.
+func TestConduitLifetimeCap_EnvMapping(t *testing.T) {
+	const env = "SCION_SERVER_HUB_CONDUIT_LIFETIMECAP"
+	assert.Equal(t, env, conduitSchemaEnvVar(t, "lifetime_cap"))
+	assert.Equal(t, "server.hub.conduit.lifetime_cap", serverEnvToOpsettingsKey("HUB_CONDUIT_LIFETIMECAP"))
+
+	t.Setenv(env, "600s")
+	k := LoadEnvKoanf()
+	assert.Equal(t, "600s", k.String("server.hub.conduit.lifetime_cap"), "keys: %v", k.Keys())
+
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	configPath := filepath.Join(tmpDir, "settings.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte("schema_version: \"1\"\nserver:\n  hub:\n    conduit:\n      lifetime_cap: 1800s\n"), 0644))
+	cfg, err := LoadGlobalConfig(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, "600s", cfg.Hub.Conduit.LifetimeCap, "the env var overrides the file")
+	d, err := cfg.Hub.Conduit.LifetimeCapDuration()
+	require.NoError(t, err)
+	assert.Equal(t, 10*time.Minute, d)
 }

@@ -53,6 +53,7 @@ const (
 // Error classes recorded for a mint error that carries no DenyCause.
 const (
 	mintErrorClassLookup       = "lookup_error"
+	mintErrorClassStanding     = "not_in_standing"
 	mintErrorClassTokenService = "token_service_error"
 )
 
@@ -65,7 +66,14 @@ type agentTokenIssueError struct {
 	Cause DenyCause
 	// Lookup is set for a store or lookup fault (503).
 	Lookup bool
-	Err    error
+	// Standing is set when the agent is held or not in good standing
+	// (ptone/scion#3433): 409 with the suspended message.
+	Standing bool
+	// OwnEdgeMissing is set with Cause when the chain outcome is the
+	// agent's own missing edge (errOwnEdgeMissing), the one structural cause
+	// a user's reincarnate also repairs.
+	OwnEdgeMissing bool
+	Err            error
 }
 
 func (e *agentTokenIssueError) Error() string {
@@ -78,6 +86,8 @@ func (e *agentTokenIssueError) Unwrap() error { return e.Err }
 // the lookup or token-service error class.
 func (e *agentTokenIssueError) errorClass() string {
 	switch {
+	case e.Standing:
+		return mintErrorClassStanding
 	case e.Cause != "":
 		return string(e.Cause)
 	case e.Lookup:
@@ -117,6 +127,14 @@ func (s *Server) AuthorizeAgentToken(ctx context.Context, agent *store.Agent) (A
 		}
 		return AgentTokenGrant{}, fmt.Errorf("%w: %w", errMintLookup, err)
 	}
+	// No grant for an agent that is held or not in good standing
+	// (ptone/scion#3433). A lookup fault grants nothing either.
+	if err := s.agentStanding(ctx, agent.ID); err != nil {
+		if errors.Is(err, errAgentNotInStanding) {
+			return AgentTokenGrant{}, err
+		}
+		return AgentTokenGrant{}, fmt.Errorf("%w: %w", errMintLookup, err)
+	}
 	return AgentTokenGrant{AgentID: agent.ID, ProjectID: agent.ProjectID, Scopes: scopes, Ancestry: agent.Ancestry}, nil
 }
 
@@ -142,8 +160,11 @@ func authorizeAgentTokenAt(ctx context.Context, gen AgentTokenGenerator, st stor
 		return &grant, nil
 	}
 	issueErr := &agentTokenIssueError{Site: site, Err: err}
-	if cause, structural := ceilingDenyCauseForError(err); structural {
+	if errors.Is(err, errAgentNotInStanding) {
+		issueErr.Standing = true
+	} else if cause, structural := ceilingDenyCauseForError(err); structural {
 		issueErr.Cause = cause
+		issueErr.OwnEdgeMissing = errors.Is(err, errOwnEdgeMissing)
 	} else if errors.Is(err, errMintLookup) {
 		issueErr.Lookup = true
 	}
@@ -247,8 +268,16 @@ func writeAgentTokenIssueError(w http.ResponseWriter, err error) bool {
 		return false
 	}
 	switch {
+	case e.Standing && e.Site == mintSiteRefresh:
+		// The agent refreshing its own token gets the generic refusal,
+		// the same answer an agent with no access gets.
+		Forbidden(w)
+		return true
+	case e.Standing:
+		writeError(w, http.StatusConflict, ErrCodeConflict, agentSuspendedConflictMessage, nil)
+		return true
 	case e.Cause != "":
-		writeForbiddenDenial(w, agentTokenDenialMessage(e.Cause), DeniedByDelegationCeiling)
+		writeForbiddenDenial(w, agentTokenDenialMessage(e.Cause, e.OwnEdgeMissing), DeniedByDelegationCeiling)
 		return true
 	case e.Lookup:
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
@@ -260,15 +289,28 @@ func writeAgentTokenIssueError(w http.ResponseWriter, err error) bool {
 }
 
 // agentTokenDenialMessage is the neutral response message for a mint that
-// the agent's delegation chain does not allow.
-func agentTokenDenialMessage(cause DenyCause) string {
-	switch cause {
-	case DenyCauseCeilingSourceNotAllowed:
+// the agent's delegation chain does not allow. ownEdgeMissing is true when
+// the outcome is the agent's own missing edge (errOwnEdgeMissing): a user's
+// reincarnate records a new edge then (reincarnateAuthorityFor,
+// ptone/scion#3948), so that message names it beside a direct recreate. Every
+// other structural cause names a direct recreate by a user only, which
+// writes a new recorded edge and always clears it.
+func agentTokenDenialMessage(cause DenyCause, ownEdgeMissing bool) string {
+	switch {
+	case cause == DenyCauseCeilingSourceNotAllowed:
 		return "The agent's delegation record names a source that is not accepted on this server"
+	case ownEdgeMissing:
+		return agentTokenOwnEdgeMissingMessage
 	default:
-		return "The agent's delegation record is missing or inconsistent; recreate the agent"
+		return "The agent's delegation record is missing or inconsistent; " +
+			"have an authorized user recreate it directly (not from another agent)"
 	}
 }
+
+// agentTokenOwnEdgeMissingMessage is agentTokenDenialMessage's message for
+// an agent with no delegation edge of its own.
+const agentTokenOwnEdgeMissingMessage = "The agent's delegation record is missing; " +
+	"have an authorized user reincarnate this agent, or recreate it directly (not from another agent)"
 
 // presentedAgentTokenRunID returns the run the request's agent token was
 // issued for, or "" when it was issued without one or the request carries

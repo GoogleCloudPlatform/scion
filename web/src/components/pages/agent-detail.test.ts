@@ -66,6 +66,12 @@ class FakeStateManager extends EventTarget {
     }
   }
   seedProjects(): void {}
+  /** Seed-epoch surface used through AgentSeedEpoch; epochs record nothing here. */
+  readonly scopeGeneration = 0;
+  beginSeedEpoch(): symbol {
+    return Symbol('seed-epoch');
+  }
+  endSeedEpoch(): void {}
   /**
    * Mirrors the real `applyDeleteAccepted` (DELETE 202): merge the returned
    * deletion into the known agent and flush, without removing it. The real
@@ -110,8 +116,8 @@ vi.mock('../../client/state.js', () => ({
 // real main.ts — with its SSE/terminal-workspace singleton side effects —
 // never loads in this test.
 // Remove once chat-thread stops importing client/main (chat lane, ptone/scion#3118).
-vi.mock('../../client/main.js', () => ({
-  navigateTo: vi.fn(),
+vi.mock('../../client/main.js', async () => ({
+  ...(await import('../../client/__fixtures__/main-stub.js')),
   get stateManager() {
     return fakeStateManager;
   },
@@ -754,14 +760,14 @@ describe('scion-page-agent-detail backend-driven delete (ptone/scion#2483 phase 
 
   /** Header action labels; the icon-only Delete button reads as "delete". */
   function headerActions(el: ScionPageAgentDetail): string[] {
-    const buttons = el.shadowRoot?.querySelectorAll('.header sl-button') ?? [];
+    const buttons = el.shadowRoot?.querySelectorAll('scion-detail-header sl-button') ?? [];
     return [...buttons].map((b) =>
       b.querySelector('sl-icon[name="trash"]') ? 'delete' : (b.textContent ?? '').trim()
     );
   }
 
   function headerBadge(el: ScionPageAgentDetail): string | null {
-    const badge = el.shadowRoot?.querySelector('.header scion-deletion-badge');
+    const badge = el.shadowRoot?.querySelector('scion-detail-header scion-deletion-badge');
     const inner = badge?.shadowRoot?.querySelector('.badge');
     return inner ? (inner.textContent ?? '').trim() : null;
   }
@@ -775,7 +781,7 @@ describe('scion-page-agent-detail backend-driven delete (ptone/scion#2483 phase 
 
   async function settle(el: ScionPageAgentDetail): Promise<void> {
     await el.updateComplete;
-    const badge = el.shadowRoot?.querySelector('.header scion-deletion-badge') as
+    const badge = el.shadowRoot?.querySelector('scion-detail-header scion-deletion-badge') as
       | (HTMLElement & { updateComplete: Promise<boolean> })
       | null;
     await badge?.updateComplete;
@@ -805,7 +811,7 @@ describe('scion-page-agent-detail backend-driven delete (ptone/scion#2483 phase 
       HTMLElement & { updateComplete: Promise<boolean> }
     >;
     await Promise.all(allBadges.map((b) => b.updateComplete));
-    const header = el.shadowRoot?.querySelector('.header scion-deletion-badge');
+    const header = el.shadowRoot?.querySelector('scion-detail-header scion-deletion-badge');
     const others = allBadges.filter((b) => b !== header);
     expect(others.length).toBeGreaterThan(0);
     expect(header?.shadowRoot?.querySelector('[role="status"] .badge')?.textContent?.trim()).toBe(

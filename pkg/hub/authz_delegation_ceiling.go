@@ -365,6 +365,11 @@ func (a *AuthzService) walkDelegationChainWithCause(
 		switch edge.DelegatorType {
 		case store.DelegationPrincipalUser:
 			allowed, reason, err := a.resolveUserDelegatorAuthority(ctx, edge.DelegatorID, resource, action, permissionID, edge.ScopeType, edge.ScopeID)
+			if errors.Is(err, errCeilingProjectAccessFault) {
+				addStep("delegation_ceiling_error", fmt.Sprintf("delegator user %s: %s", edge.DelegatorID, reason))
+				setCause(DenyCauseResolutionError)
+				return false, "delegation ceiling check failed (fail-closed): " + reason, nil
+			}
 			if err != nil {
 				if errors.Is(err, store.ErrNotFound) {
 					addStep("delegation_ceiling_delegator_not_live",
@@ -812,8 +817,25 @@ func (a *AuthzService) evaluateUserDelegatorAuthority(
 		}
 	}
 
-	return a.userRelationshipAuthority(ctx, user, resource, action, permissionID)
+	allowed, reason, err := a.userRelationshipAuthority(ctx, user, resource, action, permissionID)
+	if err != nil || !allowed || !relationshipExecutionClass(resource, permissionID) {
+		return allowed, reason, err
+	}
+	// An execution-class permission held through a relationship grant also
+	// requires the delegator's admission to the agent's project.
+	return a.delegatorExecutionAdmission(ctx, user, scopeType, scopeID, permissionID, reason)
 }
+
+// errCeilingProjectAccessFault is returned by userRelationshipAuthority when
+// the project-access stage could not evaluate the delegator's admission.
+// The chain walk records it as DenyCauseResolutionError.
+var errCeilingProjectAccessFault = errors.New("delegator project access check failed")
+
+// errCeilingHoldLookup is returned by checkAgentHoldsPermission when the
+// agent hold lookup fails. Like every other ceiling lookup fault it is
+// returned by the chain walk, so the decision denies with
+// DenyCauseCeilingError.
+var errCeilingHoldLookup = errors.New("delegator agent hold lookup failed")
 
 // userRelationshipAuthority evaluates the named relationship grants of a live
 // user delegator on resource through the common relationship stages, with the
@@ -844,9 +866,19 @@ func (a *AuthzService) userRelationshipAuthority(
 		Ancestry:     resource.Ancestry,
 	})
 
-	out := a.evaluateRelationshipCandidates(ctx, principal, resource, action, permissionID, restrictions, true, nil)
+	// Stage 2c (project access) is on for the delegator: a relationship
+	// grant (owner or ancestor) is honoured only while the user is admitted
+	// to the project that governs the target (the stage resolves it from
+	// the resource, never from the edge scope). The memo is fresh and the
+	// request context is not used: the delegator is not the requester.
+	out := a.evaluateRelationshipCandidates(ctx, principal, resource, action, permissionID, restrictions, true,
+		&relationshipProjectAccess{memo: &ProjectAdmissionCache{}})
 	if out.accepted != nil {
 		return true, "relationship grant: " + out.accepted.MatchedGrant, nil
+	}
+	if out.projectAccessFault {
+		// The project-access lookup failed: indeterminate, fail closed.
+		return false, "relationship project access check failed (fail-closed)", errCeilingProjectAccessFault
 	}
 	if out.restrictedBy != "" {
 		return false, "relationship grant restricted by " + out.restrictedBy, nil
@@ -855,9 +887,9 @@ func (a *AuthzService) userRelationshipAuthority(
 }
 
 // checkAgentHoldsPermission reports whether an agent delegator is live and
-// holds permissionID through its stored role scopes. A missing or deleted
-// agent returns store.ErrNotFound so the caller records a non-live link. A
-// stopped agent is live.
+// holds permissionID through its stored role scopes. A missing, deleted or
+// held agent returns store.ErrNotFound so the caller records a non-live
+// link. A stopped agent is live.
 func (a *AuthzService) checkAgentHoldsPermission(
 	ctx context.Context,
 	agentID, permissionID, scopeType, scopeID string,
@@ -868,6 +900,16 @@ func (a *AuthzService) checkAgentHoldsPermission(
 	}
 	if agent == nil || !agent.DeletedAt.IsZero() {
 		return false, fmt.Sprintf("agent %s is deleted", agentID), store.ErrNotFound
+	}
+	// A held agent (ptone/scion#3433) is not live, like a deleted one. A
+	// hold lookup error is returned wrapped in errCeilingHoldLookup, and
+	// Decide denies it with the ceiling-error cause.
+	held, err := a.store.HasActiveAgentHold(ctx, agentID)
+	if err != nil {
+		return false, fmt.Sprintf("agent %s hold lookup failed: %v", agentID, err), fmt.Errorf("%w: %w", errCeilingHoldLookup, err)
+	}
+	if held {
+		return false, fmt.Sprintf("agent %s is not live", agentID), store.ErrNotFound
 	}
 
 	role, additionalScopes := agentRoleAndScopes(agent)

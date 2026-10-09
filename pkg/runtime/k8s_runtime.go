@@ -49,6 +49,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/remotecommand"
@@ -666,10 +667,19 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		// A previous pod started with a run ID mounts its run's per-run
 		// objects (ptone/scion#3101), which the fixed-name cleanup does not
 		// reach. When that pod is not live they are removed too, after it
-		// is (a live pod's are left, for the sweep or a delete of that run).
+		// is. When it is live, they are removed only once a re-read shows
+		// that pod (its UID) gone after cleanupStalePod, which swallows
+		// non-NFS delete failures (for an NFS-home pod it has already
+		// waited for the stop or failed the start); otherwise they are
+		// left, for the sweep or a delete of that run (ptone/scion#3753).
 		prevPodRun := ""
-		if p, gerr := r.Client.Clientset.CoreV1().Pods(namespace).Get(ctx, config.Name, metav1.GetOptions{}); gerr == nil && !k8sPodIsLive(p) {
-			prevPodRun = p.Labels[api.LabelRunID]
+		livePodRun, livePodUID := "", types.UID("")
+		if p, gerr := r.Client.Clientset.CoreV1().Pods(namespace).Get(ctx, config.Name, metav1.GetOptions{}); gerr == nil {
+			if !k8sPodIsLive(p) {
+				prevPodRun = p.Labels[api.LabelRunID]
+			} else {
+				livePodRun, livePodUID = p.Labels[api.LabelRunID], p.UID
+			}
 		}
 		if !nfsHomeStart {
 			r.cleanupAgentSecrets(ctx, namespace, config.Name)
@@ -680,12 +690,17 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		if nfsHomeStart {
 			r.cleanupAgentSecrets(ctx, namespace, config.Name)
 		}
+		if livePodRun != "" && r.previousPodGone(ctx, namespace, config.Name, livePodRun, livePodUID) {
+			prevPodRun = livePodRun
+		}
 		// Remaining case: if a start of that previous pod's run is retrying
-		// at this moment (before its pod exists), this also removes that
-		// start's objects. The no-run start wins, as a no-run delete does
-		// (see the delete-wins note in CleanupAgentResources); the retrying
-		// start then fails (verifyStartObjects, or its pod create) or its
-		// pod cannot mount them.
+		// at this moment, before its pod exists, this also removes that
+		// start's objects. (A pod of that run already holding the name
+		// keeps them: previousPodGone reports it not gone.)
+		// The no-run start wins, as a no-run delete does (see the
+		// delete-wins note in CleanupAgentResources); the retrying start
+		// then fails (verifyStartObjects, or its pod create) or its pod
+		// cannot mount them.
 		r.deletePodRunObjects(ctx, namespace, config.Name, prevPodRun, "Removing a per-run object of the previous pod's run before a start without a run ID")
 	}
 	cleanupArmed = true
@@ -705,6 +720,10 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	// The hub transport credential is delivered through the per-agent Secret
 	// (secretKeyRef) rather than as a plain pod env value.
 	config.Env, config.ResolvedSecrets = divertTransportCredential(config.Env, config.ResolvedSecrets)
+	// So is the project's git token, which the agent container and the
+	// cloning NFS workspace-provision init container then read from the
+	// same Secret key (ptone/scion#2990).
+	config.Env, config.ResolvedSecrets = divertGitCredential(config.Env, config.ResolvedSecrets)
 
 	// Create K8s Secret or SecretProviderClass before the pod
 	if len(config.ResolvedSecrets) > 0 {
@@ -1205,6 +1224,67 @@ func divertTransportCredential(env []string, secrets []api.ResolvedSecret) ([]st
 		Name:   transportCredentialSecretKey,
 		Type:   "environment",
 		Target: transportauth.EnvTransportToken,
+		Value:  value,
+		Source: "hub",
+	})
+	return outEnv, outSecrets
+}
+
+// gitCredentialSecretKey is the data key under which a git token that
+// arrived as a plain env value (a GitHub App token minted at dispatch, or
+// the NoAuth fallback) is stored in the per-agent Secret. Like
+// transportCredentialSecretKey, divertGitCredential drops any resolved
+// secret that uses it.
+const gitCredentialSecretKey = "scion-git-credential"
+
+// divertGitCredential moves a non-empty GITHUB_TOKEN (provision.GitTokenEnv)
+// out of the plain KEY=VALUE env list and into the resolved secrets as an
+// environment-type entry, so that the pod reads it via secretKeyRef from
+// the per-agent Secret, as it does for a git token from the project's or
+// the user's secrets.
+//
+// The last GITHUB_TOKEN entry in env is the one the container would get.
+// When it is empty, or env has none, both inputs are returned unchanged.
+// Otherwise every GITHUB_TOKEN entry is removed from env, and any
+// environment-type resolved secret targeting GITHUB_TOKEN, and any resolved
+// secret named gitCredentialSecretKey, is dropped: the plain value already
+// took precedence over such a secret (buildPod skips a secret whose target
+// is already in the env), so the agent container keeps the same token.
+//
+// It returns new slices and never modifies the backing arrays of its inputs.
+func divertGitCredential(env []string, secrets []api.ResolvedSecret) ([]string, []api.ResolvedSecret) {
+	const prefix = provision.GitTokenEnv + "="
+	value := ""
+	for _, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			value = e[len(prefix):]
+		}
+	}
+	if value == "" {
+		return env, secrets
+	}
+
+	outEnv := make([]string, 0, len(env))
+	for _, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			continue
+		}
+		outEnv = append(outEnv, e)
+	}
+
+	outSecrets := make([]api.ResolvedSecret, 0, len(secrets)+1)
+	for _, s := range secrets {
+		if (s.Type == "environment" && s.Target == provision.GitTokenEnv) || s.Name == gitCredentialSecretKey {
+			runtimeLog.Info("Using the git token from the dispatch env instead of a resolved secret with the same target",
+				"secret", s.Name, "target", s.Target, "source", s.Source)
+			continue
+		}
+		outSecrets = append(outSecrets, s)
+	}
+	outSecrets = append(outSecrets, api.ResolvedSecret{
+		Name:   gitCredentialSecretKey,
+		Type:   "environment",
+		Target: provision.GitTokenEnv,
 		Value:  value,
 		Source: "hub",
 	})
@@ -2144,6 +2224,10 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// names stay fixed.
 	objectNames := k8sAgentObjectNames(config.Name, config.Labels[api.LabelRunID])
 
+	// gitTokenRef is the agent container's secretKeyRef for the project's
+	// git token, when it has one. The cloning workspace-provision init
+	// container below gets the same reference.
+	var gitTokenRef *corev1.SecretKeySelector
 	if len(config.ResolvedSecrets) > 0 {
 		agentSecretName := objectNames.Secret
 
@@ -2195,6 +2279,12 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 						},
 					})
 					envVarNames[s.Target] = struct{}{}
+					if s.Target == provision.GitTokenEnv {
+						gitTokenRef = &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: agentSecretName},
+							Key:                  s.Name,
+						}
+					}
 				}
 			}
 		} else {
@@ -2216,6 +2306,12 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 						},
 					})
 					envVarNames[s.Target] = struct{}{}
+					if s.Target == provision.GitTokenEnv {
+						gitTokenRef = &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: agentSecretName},
+							Key:                  s.Name,
+						}
+					}
 				}
 			}
 
@@ -2303,6 +2399,24 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	if nfsWorktree {
 		envVars = append(envVars, corev1.EnvVar{Name: "SCION_WORKSPACE_PATH", Value: NFSWorktreeContainerPath(config.NFSWorktreeName)})
 	}
+
+	// Resolve the container's resource requests/limits from the resolved
+	// spec and kubernetes.resources. Default requests fill only resources
+	// with neither a request nor a limit (see buildK8sResourceRequirements).
+	// Resolved here, before de-duplication, so the Go runtime env derived
+	// from the limits below goes through the same de-duplication path.
+	var k8sResources *api.K8sResources
+	if config.Kubernetes != nil {
+		k8sResources = config.Kubernetes.Resources
+	}
+	containerResources, err := buildK8sResourceRequirements(config.Resources, k8sResources)
+	if err != nil {
+		return nil, err
+	}
+
+	// GOMAXPROCS/GOMEMLIMIT from the container limits, added last and only
+	// for names no other source has set (see appendGoRuntimeEnvFromLimits).
+	envVars = appendGoRuntimeEnvFromLimits(envVars, containerResources.Limits)
 
 	// Env vars are assembled above from several sources (harness env, config.Env,
 	// resolved auth, resolved secrets) that can legitimately overlap in name
@@ -2606,6 +2720,19 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			Name:  "SCION_PROJECT_ID",
 			Value: config.ProjectID,
 		})
+		// ptone/scion#2990: the container that clones (shared-plain and
+		// worktree-per-agent, not a wait-only one) reads the project's git
+		// token from the same Secret key as the agent container, so it can
+		// clone a private repository. sciontool provision gives it to the
+		// clone command through a credential helper. Without a git token
+		// the env is unchanged.
+		if gitTokenRef != nil && !waitOnly && initGitClone != nil && initGitClone.URL != "" {
+			ref := *gitTokenRef
+			initEnv = append(initEnv, corev1.EnvVar{
+				Name:      provision.GitTokenEnv,
+				ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &ref},
+			})
+		}
 		if len(sharedDirPairs) > 0 {
 			initEnv = append(initEnv, corev1.EnvVar{
 				Name:  "SCION_SHARED_DIR_PATHS",
@@ -2717,17 +2844,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, extraVolumeMounts...)
 	}
 
-	// Apply resource requests/limits from the resolved spec and
-	// kubernetes.resources. Default requests fill only resources with neither a
-	// request nor a limit (see buildK8sResourceRequirements).
-	var k8sResources *api.K8sResources
-	if config.Kubernetes != nil {
-		k8sResources = config.Kubernetes.Resources
-	}
-	containerResources, err := buildK8sResourceRequirements(config.Resources, k8sResources)
-	if err != nil {
-		return nil, err
-	}
+	// Apply the resource requests/limits resolved above.
 	pod.Spec.Containers[0].Resources = containerResources
 
 	// Process shared directories — mount shared-dir volumes.
@@ -3634,6 +3751,34 @@ func k8sDisruptionExitReason(pod *corev1.Pod) string {
 	return ""
 }
 
+// k8sPodWorkspaceRecoverable reports whether a later start of the agent can
+// resume its work after the pod is gone: the pod's "workspace" volume is
+// persistent storage (a PersistentVolumeClaim, as used by the NFS workspace
+// backend, or an NFS volume) rather than an emptyDir. The home backend does
+// not matter: every Kubernetes start creates a new pod, so a pod-local home
+// session is not kept across restarts anyway, and per-agent Secrets are
+// re-created by the start. Read-only on the pod.
+func k8sPodWorkspaceRecoverable(pod *corev1.Pod) bool {
+	for _, v := range pod.Spec.Volumes {
+		if v.Name != "workspace" {
+			continue
+		}
+		return v.PersistentVolumeClaim != nil || v.NFS != nil
+	}
+	return false
+}
+
+// k8sDisruptionPhase returns the agent phase to report for a pod removed by a
+// Kubernetes-initiated disruption (preemption or eviction): stopped when the
+// workspace survives the pod (k8sPodWorkspaceRecoverable), so a later start
+// can resume the work, and error otherwise.
+func k8sDisruptionPhase(pod *corev1.Pod) state.Phase {
+	if k8sPodWorkspaceRecoverable(pod) {
+		return state.PhaseStopped
+	}
+	return state.PhaseError
+}
+
 func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
 	namespace := r.DefaultNamespace
 	// When ListAllNamespaces is enabled, query across all namespaces
@@ -3714,9 +3859,14 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 		// not be reported as preempted/evicted before it actually is —
 		// unless it is already committed to termination (deletionTimestamp),
 		// which the branch below covers.
+		//
+		// A disrupted pod is reported as stopped when its workspace survives
+		// the pod (a later start resumes the work) and as error otherwise
+		// (k8sDisruptionPhase), in place of the generic phase mapping.
 		if agentStatus == string(state.PhaseStopped) || agentStatus == string(state.PhaseError) {
 			if reason := k8sDisruptionExitReason(&p); reason != "" {
 				exitReason = reason
+				agentStatus = string(k8sDisruptionPhase(&p))
 			}
 		} else if p.DeletionTimestamp != nil {
 			// Scheduler preemption and Eviction API deletions remove the pod
@@ -3724,11 +3874,13 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 			// heartbeat observes a terminal phase at all, since List() polls
 			// rather than watches. A pod with a deletionTimestamp and a live
 			// DisruptionTarget condition is already committed to that
-			// termination, so report the reason now, ahead of it actually
-			// stopping. agentStatus (the reported Phase) is deliberately
-			// left alone — this pod has not stopped yet.
+			// termination and cannot return to running, so report the reason
+			// and the resulting phase now, ahead of it actually stopping.
+			// Otherwise no heartbeat may ever report the agent as no longer
+			// running (ptone/scion#2669).
 			if reason := k8sDisruptionExitReason(&p); reason != "" {
 				exitReason = reason
+				agentStatus = string(k8sDisruptionPhase(&p))
 			}
 		}
 

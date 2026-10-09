@@ -105,6 +105,12 @@ type Layer1Snapshot struct {
 	StartUnconfirmedHold       string
 	StartCreateUnconfirmedHold string
 
+	// GCP service-account permission check (gcp_iam section). DB-backed
+	// snapshots only; "" means no stored or file value, and ApplySnapshot
+	// then uses the deploy-time value (resolveGCPIAMSettings).
+	GCPIAMCheckMode         string
+	GCPIAMDenyUnknownPolicy string
+
 	// Maintenance
 	AdminMode          bool
 	MaintenanceMessage string
@@ -949,6 +955,10 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	snap.StartUnconfirmedHold = k.String("server.hub.start_unconfirmed_hold")
 	snap.StartCreateUnconfirmedHold = k.String("server.hub.start_create_unconfirmed_hold")
 
+	// GCP service-account permission check
+	snap.GCPIAMCheckMode = k.String(gcpIAMCheckModeKey)
+	snap.GCPIAMDenyUnknownPolicy = k.String(gcpIAMDenyUnknownKey)
+
 	// Telemetry — extract via the section struct for full fidelity.
 	if k.Exists("telemetry.enabled") {
 		v := k.Bool("telemetry.enabled")
@@ -1188,6 +1198,10 @@ func (s *Server) startupHubNameOrDefault() string {
 func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	applied := []string{}
 
+	// GCP service-account permission check: decided before s.mu is taken
+	// (the decision reads the store), applied below under s.mu.
+	iamT, iamOK := s.decideGCPIAMReload(snap)
+
 	s.mu.Lock()
 
 	// Telemetry
@@ -1286,6 +1300,20 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	}
 	if s.setStartClaimSettings(sc) {
 		applied = append(applied, "start_claim")
+	}
+
+	// GCP service-account permission check: both keys are applied together
+	// under s.mu, only when admitted, and only if the applied pair is still
+	// the one the decision started from.
+	iamChanged := false
+	if iamOK && s.gcpIAMSettingsLocked() == iamT.From {
+		iamChanged = s.applyGCPIAMSettingsLocked(iamT.To)
+	}
+	if s.gcpIAMApproved != nil && *s.gcpIAMApproved == iamT {
+		s.gcpIAMApproved = nil
+	}
+	if iamChanged {
+		applied = append(applied, gcpIAMSection)
 	}
 
 	// User access mode
@@ -1397,6 +1425,10 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	s.config.AgentDefaults = newDefaults
 
 	s.mu.Unlock()
+
+	if iamChanged {
+		s.invalidateCallerPermissionCaches()
+	}
 
 	// Propagate hub_name to the GCP secret backend so new secrets get the
 	// correct label value. Log handlers have a similar limitation (§7.4).
@@ -1675,6 +1707,26 @@ func (o *OperationalSettings) CrossProjectMessagingEnabled() bool {
 		return *ms.CrossProjectMessagingEnabled
 	}
 	return false // field omitted → compiled default → OFF
+}
+
+// ReadinessMarks returns whether the web client writes readiness marks
+// (the "profiling" section's readiness_marks key). It is false when the
+// section is absent, the document is malformed or the key is unset.
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) ReadinessMarks() bool {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache["profiling"]
+	if !ok || state.Malformed {
+		return false
+	}
+	var ps opsettings.ProfilingSettings
+	if err := json.Unmarshal(state.Value, &ps); err != nil {
+		return false
+	}
+	return ps.ReadinessMarks != nil && *ps.ReadinessMarks
 }
 
 // Artifacts returns the resolved artifact service settings (the

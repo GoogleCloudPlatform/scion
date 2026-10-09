@@ -76,11 +76,19 @@ type Service struct {
 	viewKey  []byte
 	limits   func(context.Context) Limits
 	provider func() Backend
+	// reviewNotifier is told about each finalized review version.
+	reviewNotifier func(context.Context, ReviewNotice)
 
 	// htmlNotice remembers, by entry digest, whether an HTML entry
 	// references remote images (see entryHasRemoteImages).
 	noticeMu   sync.Mutex
 	htmlNotice map[string]bool
+
+	// limiter rate-limits the share-link route; clientKeyFn names the
+	// client a shared read is charged to (remoteHost when nil).
+	limiterOnce sync.Once
+	limiter     *rateLimiter
+	clientKeyFn func(*http.Request) string
 
 	fetcherFactory func(RemoteImageLimits) ImageFetcher
 	// fetchFloor overrides the fetch floor in tests; zero means the
@@ -108,6 +116,16 @@ type Limits struct {
 	MaxBundleBytes int64
 	// MaxFiles caps the number of files of one version.
 	MaxFiles int
+	// LinkDefaultTTL is the lifetime of a share link created without one,
+	// and LinkMaxTTL the longest one may be given (design D19). Zero or
+	// negative values take DefaultLinkTTL and DefaultLinkMaxTTL; a default
+	// above the maximum is lowered to it.
+	LinkDefaultTTL time.Duration
+	LinkMaxTTL     time.Duration
+	// DefaultRetention is how long a new artifact is kept: a positive
+	// value sets its expiry at creation; zero or negative keeps it until
+	// it is deleted (design D12).
+	DefaultRetention time.Duration
 	// RemoteImages bound the remote images fetched at publish time. A host
 	// that sets a limits getter must fill them in: incomplete or invalid
 	// values turn remote images off.
@@ -126,6 +144,46 @@ const (
 // through host.
 func NewService(host Host) *Service {
 	return &Service{host: host}
+}
+
+// ReviewNotice describes a review version that was just finalized, for the
+// host to tell the artifact's owner (design §8.2). It carries ids only; the
+// host addresses the owner as itself, never as the reviewer.
+type ReviewNotice struct {
+	ArtifactID   string
+	Seq          int
+	ScopeRef     string
+	OwnerKind    string
+	OwnerRef     string
+	ReviewerKind string
+	ReviewerRef  string
+}
+
+// Ref is the notice's versioned reference.
+func (n ReviewNotice) Ref() string { return FormatRef(n.ArtifactID, n.Seq) }
+
+// SetReviewNotifier sets the function told about each finalized review. It
+// runs after the review is recorded, on a context detached from the request
+// (it must not block the response for long; the hub dispatches in the
+// background). A review the owner wrote itself is not announced.
+func (s *Service) SetReviewNotifier(fn func(context.Context, ReviewNotice)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reviewNotifier = fn
+}
+
+// notifyReview tells the review notifier about review version v of a.
+func (s *Service) notifyReview(ctx context.Context, a *Artifact, v *Version) {
+	s.mu.RLock()
+	fn := s.reviewNotifier
+	s.mu.RUnlock()
+	if fn == nil || (v.CreatedByKind == a.OwnerKind && v.CreatedByRef == a.OwnerRef) {
+		return
+	}
+	fn(context.WithoutCancel(ctx), ReviewNotice{
+		ArtifactID: a.ID, Seq: v.Seq, ScopeRef: a.ScopeRef, OwnerKind: a.OwnerKind, OwnerRef: a.OwnerRef,
+		ReviewerKind: v.CreatedByKind, ReviewerRef: v.CreatedByRef,
+	})
 }
 
 // Host returns the host the service was built with.
@@ -161,6 +219,37 @@ func (s *Service) SetViewKey(key []byte) {
 	s.mu.Lock()
 	s.viewKey = key
 	s.mu.Unlock()
+}
+
+// SetClientKey sets the function that names the client a share-link read
+// is charged to for rate limiting, such as the client address as the
+// host's trusted proxies report it. The default is the host part of the
+// request's RemoteAddr. It must be set before the service serves.
+func (s *Service) SetClientKey(fn func(*http.Request) string) {
+	s.mu.Lock()
+	s.clientKeyFn = fn
+	s.mu.Unlock()
+}
+
+func (s *Service) clientKey(r *http.Request) string {
+	s.mu.RLock()
+	fn := s.clientKeyFn
+	s.mu.RUnlock()
+	if fn == nil {
+		return remoteHost(r)
+	}
+	return fn(r)
+}
+
+// sharedLimiter returns the share-link route's rate limiter.
+func (s *Service) sharedLimiter() *rateLimiter {
+	s.limiterOnce.Do(func() {
+		if s.limiter == nil {
+			s.limiter = newRateLimiter(time.Now, SharedClientPerMinute, SharedClientBurst,
+				SharedGlobalPerMinute, SharedGlobalBurst, sharedMaxClients)
+		}
+	})
+	return s.limiter
 }
 
 // SetLimits sets the function that yields the current limits. It is called
@@ -247,8 +336,16 @@ func (s *Service) RegisterRoutes(mux Mux, guard Guard) {
 //	GET  /api/v1/artifacts/view/{capability}/{path}         a file of the version a capability names
 //	GET  /api/v1/artifacts/{id}/versions/{seq}/files/{path} a file of version seq
 //	PUT  /api/v1/artifacts/{id}/versions/{seq}/files/{path} upload a file of a pending version
+//	PATCH /api/v1/artifacts/{id}                            set the expiry, move to another project
+//	GET  /api/v1/artifacts/{id}/grants                      the principal and scope grants
+//	POST /api/v1/artifacts/{id}/grants                      add or change a grant
+//	DELETE /api/v1/artifacts/{id}/grants/{grantId}          remove a grant
+//	POST /api/v1/artifacts/{id}/links                       create a share link
+//	GET  /api/v1/artifacts/{id}/links                       the unexpired share links
+//	DELETE /api/v1/artifacts/{id}/links/{linkId}            revoke a share link
+//	GET  /api/v1/artifacts/shared/{token}[/files/{path}]    a share-link read (303 to the view route)
 //
-// Everything else, including share links (a later phase), answers 404.
+// Everything else answers 404.
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rest, ok := strings.CutPrefix(r.URL.EscapedPath(), RouteCollection)
 	if !ok || (rest != "" && rest[0] != '/') {
@@ -270,8 +367,16 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	segs, ok := splitEscapedPath(rest)
-	if !ok || segs[0] == "shared" {
+	if !ok {
 		writeNotFound(w)
+		return
+	}
+	if segs[0] == "shared" {
+		if !isRead(r.Method) {
+			writeMethodNotAllowed(w, http.MethodGet, http.MethodHead)
+			return
+		}
+		s.handleShared(w, r, segs[1:])
 		return
 	}
 	if segs[0] == "view" {
@@ -289,17 +394,50 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case len(segs) == 1:
-		if !isRead(r.Method) {
-			writeMethodNotAllowed(w, http.MethodGet, http.MethodHead)
+		switch {
+		case isRead(r.Method):
+			s.handleGetArtifact(w, r, id)
+		case r.Method == http.MethodPatch:
+			s.handlePatchArtifact(w, r, id)
+		default:
+			writeMethodNotAllowed(w, http.MethodGet, http.MethodHead, http.MethodPatch)
+		}
+	case len(segs) == 2 && segs[1] == "grants":
+		switch {
+		case isRead(r.Method):
+			s.handleListGrants(w, r, id)
+		case r.Method == http.MethodPost:
+			s.handlePutGrant(w, r, id)
+		default:
+			writeMethodNotAllowed(w, http.MethodGet, http.MethodHead, http.MethodPost)
+		}
+	case len(segs) == 3 && segs[1] == "grants":
+		if r.Method != http.MethodDelete {
+			writeMethodNotAllowed(w, http.MethodDelete)
 			return
 		}
-		s.handleGetArtifact(w, r, id)
+		s.handleDeleteGrant(w, r, id, segs[2])
 	case len(segs) >= 3 && segs[1] == "files":
 		if !isRead(r.Method) {
 			writeMethodNotAllowed(w, http.MethodGet, http.MethodHead)
 			return
 		}
 		s.handleGetFile(w, r, id, 0, strings.Join(segs[2:], "/"))
+	case len(segs) == 2 && segs[1] == "links":
+		switch {
+		case isRead(r.Method):
+			s.handleListLinks(w, r, id)
+		case r.Method == http.MethodPost:
+			s.handleCreateLink(w, r, id)
+		default:
+			writeMethodNotAllowed(w, http.MethodGet, http.MethodHead, http.MethodPost)
+		}
+	case len(segs) == 3 && segs[1] == "links":
+		if r.Method != http.MethodDelete {
+			writeMethodNotAllowed(w, http.MethodDelete)
+			return
+		}
+		s.handleRevokeLink(w, r, id, segs[2])
 	case len(segs) == 2 && segs[1] == "versions":
 		switch {
 		case isRead(r.Method):

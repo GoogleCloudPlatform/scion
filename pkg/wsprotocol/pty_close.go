@@ -14,7 +14,10 @@
 
 package wsprotocol
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 // PTY WebSocket close-code contract.
 //
@@ -44,14 +47,21 @@ const (
 	// synthesized by the client library. Retry.
 	ClosePTYAbnormal = 1006
 	// ClosePTYInternalError (1011): unexpected server error, or a broker close
-	// code the Hub does not recognise. Retry.
+	// code the Hub does not recognise. Retry once with normal backoff and full
+	// jitter (see PTYReconnectTiming).
 	ClosePTYInternalError = 1011
 	// ClosePTYServiceRestart (1012): reserved for a future graceful drain.
 	// Retry.
 	ClosePTYServiceRestart = 1012
-	// ClosePTYTryAgainLater (1013): overload. Not emitted today. Retry.
+	// ClosePTYTryAgainLater (1013): overload. The Hub emits it, with reason
+	// "slow_consumer", when an attach client reads output too slowly and the
+	// stream's output buffer fills (pkg/hub StreamOutputLimit). Retry.
 	ClosePTYTryAgainLater = 1013
 
+	// ClosePTYProtocolError (4400): protocol error (bad_hello, bad_frame,
+	// unsupported_version, frame_too_large). Retrying with the same software
+	// will not help. Terminal.
+	ClosePTYProtocolError = 4400
 	// ClosePTYAuthRequired (4401): credentials no longer valid. Reserved;
 	// auth failures surface as HTTP 401 on the handshake or preflight today.
 	// Terminal.
@@ -62,21 +72,32 @@ const (
 	// ClosePTYAgentNotFound (4404): the broker cannot find the agent or its
 	// container. The Hub maps the legacy broker code 404 to this. Terminal.
 	ClosePTYAgentNotFound = 4404
+	// ClosePTYSuperseded (4409): session scope only (superseded_incarnation,
+	// legacy_hello_superseded). A PTY client is not expected to see it; if
+	// it does, it is terminal.
+	ClosePTYSuperseded = 4409
 	// ClosePTYSessionGone (4410): the tmux session no longer exists (agent
 	// exited, container stopped or removed). Terminal.
 	ClosePTYSessionGone = 4410
+	// ClosePTYCancelled (4499): the stream open was cancelled or timed out
+	// before it was accepted. Nothing for the client to resume. Terminal.
+	ClosePTYCancelled = 4499
 	// ClosePTYAttachUnsupported (4501): the matched runtime has no
 	// exec/attach/TTY primitive at all. Distinct from ClosePTYUpstreamUnavailable
 	// so a definitive "this runtime will never support attach" is never
 	// confused with a transient readiness failure that is worth retrying.
 	// Terminal.
 	ClosePTYAttachUnsupported = 4501
-	// ClosePTYUpstreamUnavailable (4503): the hop behind this one is
-	// temporarily gone (Hub <-> broker control channel dropped, stream open
-	// failed, tmux session not ready yet). Retry.
+	// ClosePTYUpstreamUnavailable (4503): planned or deliberate close that is
+	// safe to retry now (relay_restart, draining, superseded, not_serving), or
+	// the hop behind this one is temporarily gone (Hub <-> broker control
+	// channel dropped, stream open failed, tmux session not ready yet).
+	// Retry once, promptly, with full jitter (see PTYReconnectTiming).
 	ClosePTYUpstreamUnavailable = 4503
-	// ClosePTYUpstreamTimeout (4504): the broker did not produce first output
-	// within the open deadline. Reserved. Retry.
+	// ClosePTYUpstreamTimeout (4504): transient failure (registry_unavailable,
+	// grant_keys_unavailable, open_timeout, upstream_unreachable), or the
+	// broker did not produce first output within the open deadline. Retry
+	// once with normal backoff and full jitter (see PTYReconnectTiming).
 	ClosePTYUpstreamTimeout = 4504
 )
 
@@ -189,9 +210,10 @@ func ClassifyPTYClose(code int) CloseDisposition {
 	switch {
 	case code == ClosePTYNormal:
 		return DispositionDetached
-	case code == ClosePTYAuthRequired, code == ClosePTYForbidden,
-		code == ClosePTYAgentNotFound, code == ClosePTYSessionGone,
-		code == ClosePTYAttachUnsupported:
+	case code == ClosePTYProtocolError, code == ClosePTYAuthRequired,
+		code == ClosePTYForbidden, code == ClosePTYAgentNotFound,
+		code == ClosePTYSuperseded, code == ClosePTYSessionGone,
+		code == ClosePTYCancelled, code == ClosePTYAttachUnsupported:
 		return DispositionTerminal
 	case code == ClosePTYUpstreamUnavailable, code == ClosePTYUpstreamTimeout:
 		return DispositionRetry
@@ -204,6 +226,48 @@ func ClassifyPTYClose(code int) CloseDisposition {
 	default:
 		// 1001, 1005, 1006, 1011-1015, and anything else.
 		return DispositionRetry
+	}
+}
+
+// ReconnectTiming says whether, and how soon, a PTY client reconnects
+// automatically after a close code.
+type ReconnectTiming int
+
+const (
+	// ReconnectNever means the client does not reconnect by itself. This
+	// covers every detached and terminal code, and the retry codes the
+	// client leaves to the user (1001, 1006, 1013, ...).
+	ReconnectNever ReconnectTiming = iota
+	// ReconnectPrompt means reconnect once after a delay drawn uniformly
+	// from [0, PTYPromptReconnectMaxDelay] (4503).
+	ReconnectPrompt
+	// ReconnectBackoff means reconnect once after the normal exponential
+	// backoff with full jitter (4504, 1011).
+	ReconnectBackoff
+)
+
+// PTYPromptReconnectMaxDelay is the upper bound of the full-jitter window
+// for a ReconnectPrompt reconnect. It matches the relay's default
+// GoAway.reconnect_after_ms, so clients closed together by a drain spread
+// their reconnects over the same window instead of arriving at once.
+const PTYPromptReconnectMaxDelay = 5 * time.Second
+
+// PTYReconnectTiming maps a PTY close code to the client's automatic
+// reconnect behaviour. It builds on ClassifyPTYClose: only a code that
+// classifies as DispositionRetry can reconnect, and of those only 4503, 4504
+// and 1011 do so automatically. A client makes at most one reconnect attempt
+// per such close.
+func PTYReconnectTiming(code int) ReconnectTiming {
+	if ClassifyPTYClose(code) != DispositionRetry {
+		return ReconnectNever
+	}
+	switch code {
+	case ClosePTYUpstreamUnavailable:
+		return ReconnectPrompt
+	case ClosePTYUpstreamTimeout, ClosePTYInternalError:
+		return ReconnectBackoff
+	default:
+		return ReconnectNever
 	}
 }
 

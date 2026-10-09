@@ -66,6 +66,7 @@ type liveInventoryKey struct {
 var positiveCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "hub.maintenance.execute", Method: "POST", Pattern: "/api/v1/admin/maintenance/restart"}:       "handleAdminRestart (admin_maintenance.go) invokes a real systemd restart subprocess; nothing before it short-circuits for a fake or real target, so there is no safe way to dispatch the declared method",
 	{OperationID: "hub.maintenance.execute", Method: "POST", Pattern: "/api/v1/admin/maintenance/check-updates"}: "handleCheckForUpdates (admin_maintenance.go:662-690) calls the GitHub release channel when MaintenanceConfig.DeploymentTier == \"binary\"; excluded so this test cannot depend on, or accidentally call out based on, server config",
+	{OperationID: "agent.hold.lift", Method: "POST", Pattern: "/api/v1/agents/{id}/hold/lift"}:                   "handleAgentHoldLift (agent_hold_lift.go) clears an agent's holds and writes an audit record: a live POST mutates state, so it is not dispatched against a real target here; TestAgentHoldLift drives it against a real held agent",
 }
 
 // controlCheckExclusions lists HTTP catalog entry points for which
@@ -225,6 +226,12 @@ var suffixCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "user.admin.invite", Method: "DELETE", Pattern: "/api/v1/admin/invites/{id}"}:                                  "same as the GET invites/{id} suffix entry above — and because the suffix is silently ignored, a DELETE with a bogus suffix would delete the real fixture, so this exclusion also protects the positive check that runs after it",
 	{OperationID: "hub.lifecyclehooks.update", Method: "PUT", Pattern: "/api/v1/admin/lifecycle-hooks/{id}"}:                     "handleAdminLifecycleHookByID truncates the suffix with extractID the same way as the GET entry above, so the update runs on the real ID; its result (409 for the empty body's version check) is the same as on the bare path",
 	{OperationID: "hub.lifecyclehooks.update", Method: "DELETE", Pattern: "/api/v1/admin/lifecycle-hooks/{id}"}:                  "handleAdminLifecycleHookByID truncates the suffix with extractID the same way as the GET entry above, so a suffixed DELETE would delete the real hook (204) exactly as the bare path does, and leave the positive check nothing to delete",
+	{OperationID: "hub.integrations.read", Method: "GET", Pattern: "/api/v1/admin/integrations/{name}/health"}:                   "handleAdminIntegrationByName (handlers_integrations.go) splits the sub-path into at most three parts and the health branch ignores the third, so a suffix reaches the same health check as the bare path",
+	{OperationID: "hub.integrations.read", Method: "GET", Pattern: "/api/v1/admin/integrations/{name}/update/{id}"}:              "handleAdminIntegrationByName splits the sub-path into at most three parts, so the suffix joins the update ID as one string and the status lookup answers for that ID instead of a routing 404",
+	{OperationID: "hub.integrations.update", Method: "PUT", Pattern: "/api/v1/admin/integrations/{name}/config"}:                 "handleAdminIntegrationByName splits the sub-path into at most three parts and the config branch ignores the third, so a suffix reaches the same config update as the bare path",
+	{OperationID: "hub.integrations.update", Method: "POST", Pattern: "/api/v1/admin/integrations/{name}/restart"}:               "handleAdminIntegrationByName splits the sub-path into at most three parts and the restart branch ignores the third, so a suffix restarts the integration as the bare path does",
+	{OperationID: "hub.integrations.install", Method: "POST", Pattern: "/api/v1/admin/integrations/{name}/install"}:              "handleAdminIntegrationByName splits the sub-path into at most three parts and the install branch ignores the third, so a suffix reaches the same install handling as the bare path",
+	{OperationID: "hub.integrations.install", Method: "POST", Pattern: "/api/v1/admin/integrations/{name}/update"}:               "handleAdminIntegrationByName splits the sub-path into at most three parts and a POST to update with a third part starts the same update as the bare path",
 }
 
 // idFixtures holds the real, store-seeded entity IDs this test substitutes
@@ -660,9 +667,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	// temporary home so the probes never touch the real one. The workspace
 	// download from object storage (cache notify) is replaced by a no-op.
 	t.Setenv("HOME", t.TempDir())
-	origSync := syncFromGCSIntoHubWorkspace
-	t.Cleanup(func() { syncFromGCSIntoHubWorkspace = origSync })
-	syncFromGCSIntoHubWorkspace = func(context.Context, string, string, string) error { return nil }
+	srv.setHubWorkspaceDownloader(func(context.Context, string, string, string) error { return nil })
 	liProject, err := s.GetProject(ctx, f.project)
 	require.NoError(t, err)
 	wsPath, err := srv.hubManagedProjectPath(liProject.Slug)
@@ -902,6 +907,11 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{projectId}/scheduled-events":      {"projectId": f.project},
 		"/api/v1/projects/{projectId}/schedules":             {"projectId": f.project},
 
+		// Schedule sub-actions on the seeded schedule.
+		"/api/v1/projects/{projectId}/schedules/{id}/history": {"projectId": f.project, "id": f.schedule},
+		"/api/v1/projects/{projectId}/schedules/{id}/pause":   {"projectId": f.project, "id": f.schedule},
+		"/api/v1/projects/{projectId}/schedules/{id}/resume":  {"projectId": f.project, "id": f.schedule},
+
 		// --- quota family (read defaults; quota.update/.delete are
 		// re-pointed at the disposable UD instances by opPatternOverrides) ---
 		"/api/v1/admin/limits/{id}":              {"id": f.limit},
@@ -961,7 +971,11 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/chat/conversations/{id}/messages": {"id": f.chatTopic},
 
 		// --- integrations family ---
-		"/api/v1/admin/integrations/{name}": {"name": f.integrationName},
+		"/api/v1/admin/integrations/{name}":         {"name": f.integrationName},
+		"/api/v1/admin/integrations/{name}/health":  {"name": f.integrationName},
+		"/api/v1/admin/integrations/{name}/config":  {"name": f.integrationName},
+		"/api/v1/admin/integrations/{name}/restart": {"name": f.integrationName},
+		"/api/v1/admin/integrations/{name}/update":  {"name": f.integrationName},
 
 		// --- lifecycle hooks family ---
 		"/api/v1/admin/lifecycle-hooks/{id}": {"id": f.lifecycleHook},

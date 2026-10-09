@@ -41,8 +41,8 @@ import {
   retainTerminalPaletteAgents,
   selectTerminalPaletteCandidates,
 } from './terminal-palette-data.js';
-import { ChatPaletteDataController, type RawPaletteAgent } from './chat-palette-data.js';
-import type { PaletteCandidate } from './chat-palette-types.js';
+import { ChatPaletteDataController } from './chat-palette-data.js';
+import type { PaletteCandidate, RawPaletteAgent } from './palette-types.js';
 import type { Agent, AgentActivity } from '../shared/types.js';
 import { createHarness, settle, type Harness } from './__fixtures__/agent-store-harness.js';
 import { AGENT_PROBE_INTERVAL_MS } from './agent-store.js';

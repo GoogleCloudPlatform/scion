@@ -105,7 +105,7 @@ func runHarnessConfigInstall(cmd *cobra.Command, args []string) error {
 	}
 
 	if hubCtx != nil {
-		return installToHub(hubCtx, name, localSourcePath, hcDir.Config.Harness, force)
+		return installToHub(hubCtx, name, localSourcePath, hcDir.Config.Harness, installSourceURL(source), force)
 	}
 
 	return installLocally(name, localSourcePath, gp, force, hcDir.Config.Harness)
@@ -171,7 +171,24 @@ func normalizeHarnessConfigSourceURL(raw string) string {
 	return s
 }
 
-func installToHub(hubCtx *HubContext, name, localPath, harnessType string, force bool) error {
+// installSourceURL returns the source URL that 'harness-config install'
+// records on the Hub as metadata: the normalized URL for a remote source, or
+// "" for a local path or file:// URL.
+func installSourceURL(source string) string {
+	if strings.HasPrefix(strings.TrimSpace(source), "file://") {
+		return ""
+	}
+	normalized := normalizeHarnessConfigSourceURL(source)
+	if !config.IsRemoteURI(normalized) {
+		return ""
+	}
+	return normalized
+}
+
+// installToHub creates or updates the named harness-config on the Hub from
+// localPath, in the scope harnessConfigHubScope picks. sourceURL, when
+// non-empty, is recorded as the config's source URL (metadata).
+func installToHub(hubCtx *HubContext, name, localPath, harnessType, sourceURL string, force bool) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
 	scope, scopeID, err := harnessConfigHubScope(hubCtx)
@@ -194,7 +211,7 @@ func installToHub(hubCtx *HubContext, name, localPath, harnessType string, force
 			name, harnessConfigScopeLabel(scope, scopeID), existing.ID)
 	}
 
-	return syncHarnessConfigToHub(hubCtx, name, localPath, scope, scopeID, harnessType)
+	return syncHarnessConfigToHub(hubCtx, name, localPath, scope, scopeID, harnessType, sourceURL)
 }
 
 func installLocally(name, sourcePath, projectPath string, force bool, harnessType string) error {

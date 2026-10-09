@@ -507,7 +507,7 @@ func TestScheduledSend_SenderLosesProjectRead_FailsNoAccess(t *testing.T) {
 	_, err = f.store.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, f.bob.ID)
 	require.NoError(t, err)
 	rec := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, f.scheduledPath(), nil)
-	require.Equal(t, http.StatusForbidden, rec.Code, "bob has lost read access")
+	require.Equal(t, http.StatusNotFound, rec.Code, "bob has lost read access: answered as a missing thread")
 
 	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, fireAt.Add(time.Second)))
 	row := f.row(t, f.bob, sm.ID)
@@ -655,18 +655,6 @@ func TestScheduledSend_FireAtWithOffsetStoredUTC(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), fireAt.UTC().Format("2006-01-02T15:04:05")+"Z")
 }
 
-func TestScheduledSend_DMRejected(t *testing.T) {
-	f := newScheduledSendFixture(t)
-	dmKey := "dm:agent:" + f.agent.ID + ":user:" + f.bob.ID
-	path := "/api/v1/chat/conversations/" + dmKey + "/scheduled"
-	rec := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, path, map[string]interface{}{
-		"content": "dm later", "fire_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
-	})
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	rec = doRequestAsUser(t, f.srv, f.bob, http.MethodGet, path, nil)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-}
-
 func TestScheduledSend_OutsiderRefused(t *testing.T) {
 	f := newScheduledSendFixture(t)
 	outsider := &store.User{
@@ -677,9 +665,9 @@ func TestScheduledSend_OutsiderRefused(t *testing.T) {
 	rec := doRequestAsUser(t, f.srv, outsider, http.MethodPost, f.scheduledPath(), map[string]interface{}{
 		"content": "x", "fire_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
 	})
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "an outsider gets the missing-thread answer")
 	rec = doRequestAsUser(t, f.srv, outsider, http.MethodGet, f.scheduledPath(), nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "an outsider gets the missing-thread answer")
 }
 
 func TestScheduledSend_ScopedTokenRefused(t *testing.T) {
@@ -804,7 +792,7 @@ func testScheduledStoreTransitions(t *testing.T, sms ScheduledMessageStore) {
 	ok, err = sms.ClaimScheduledMessage(ctx, early.ID, base)
 	require.NoError(t, err)
 	assert.False(t, ok)
-	require.NoError(t, sms.ReleaseScheduledMessage(ctx, early.ID, base))
+	mustApply(t)(sms.ReleaseScheduledMessage(ctx, early.ID, base, base))
 	got, err = sms.GetScheduledMessage(ctx, "user-a", early.ID)
 	require.NoError(t, err)
 	assert.Equal(t, ScheduledMessagePending, got.Status)
@@ -813,7 +801,7 @@ func testScheduledStoreTransitions(t *testing.T, sms ScheduledMessageStore) {
 	ok, err = sms.ClaimScheduledMessage(ctx, early.ID, base)
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.NoError(t, sms.MarkScheduledMessageSent(ctx, early.ID, "msg-1", base))
+	mustApply(t)(sms.MarkScheduledMessageSent(ctx, early.ID, "msg-1", base, base))
 	next, err := sms.NextDueScheduledMessage(ctx, "user-a", base.Add(250*time.Millisecond))
 	require.NoError(t, err)
 	require.NotNil(t, next)
@@ -829,7 +817,7 @@ func testScheduledStoreTransitions(t *testing.T, sms ScheduledMessageStore) {
 	ok, err = sms.ClaimScheduledMessage(ctx, late.ID, base)
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.NoError(t, sms.MarkScheduledMessageFailed(ctx, late.ID, ScheduledFailureNoAccess, base))
+	mustApply(t)(sms.MarkScheduledMessageFailed(ctx, late.ID, ScheduledFailureNoAccess, base, base))
 	got, err = sms.GetScheduledMessage(ctx, "user-a", late.ID)
 	require.NoError(t, err)
 	assert.Equal(t, ScheduledMessageFailed, got.Status)
@@ -897,6 +885,8 @@ func TestScheduledStore_Postgres(t *testing.T) {
 		sms[i] = scheduledMessageStoreFrom(wcs)
 	}
 	testScheduledStoreTransitions(t, sms[0])
+	testScheduledStorePhase2Transitions(t, sms[0])
+	testScheduledDMDeleteRemovesScheduled(t, sms[0])
 	testScheduledStoreDuePerSender(t, sms[0])
 	testCancelClaimRace(t, sms[0], sms[1], "pg-race")
 	testOneSenderTwoReplicas(t, sms[0], sms[1], "pg-one-sender", 30)
@@ -1352,10 +1342,12 @@ func TestScheduledSend_ExperimentTurnedOffMidBatch_RestHeld(t *testing.T) {
 	assert.Equal(t, ScheduledMessagePending, held.Status)
 }
 
-// A 404 from sendChatMessage at fire time is a delivery error: the checks
-// just before it proved the conversation exists.
+// A 404 from sendChatMessage at fire time is a delivery error (the checks
+// just before it proved the conversation exists), unless it is a refusal of
+// the sender's access answered as not found, which is no_access.
 func TestScheduledSend_FailureMapping(t *testing.T) {
 	assert.Equal(t, ScheduledFailureNoAccess, scheduledFailureFromSendError(chatSendForbidden()))
+	assert.Equal(t, ScheduledFailureNoAccess, scheduledFailureFromSendError(chatSendRefusedAsNotFound("Thread")))
 	assert.Equal(t, ScheduledFailureDeliveryError, scheduledFailureFromSendError(chatSendNotFound("Thread")))
 	assert.Equal(t, ScheduledFailureDeliveryError, scheduledFailureFromSendError(
 		newChatSendError(http.StatusInternalServerError, "INTERNAL", "x", nil)))
@@ -1673,12 +1665,123 @@ func testScheduledStoreDuePerSender(t *testing.T, sms ScheduledMessageStore) {
 // A refusal on a delivery that was cut short is a delivery error; the same
 // refusal on a live delivery keeps its meaning.
 func TestScheduledSend_RefusalReason(t *testing.T) {
-	live := context.Background()
-	cut, cancel := context.WithCancel(context.Background())
-	cancel()
+	live, cut := false, true
 	assert.Equal(t, ScheduledFailureNoAccess, scheduledRefusalReason(live, chatSendForbidden()))
 	assert.Equal(t, ScheduledFailureDeliveryError, scheduledRefusalReason(cut, chatSendForbidden()))
 	assert.Equal(t, ScheduledFailureDeliveryError, scheduledRefusalReason(cut, chatSendNotFound("Thread")))
+}
+
+// stallAbortPropagation makes the runtime's abort never reach a delivery
+// context, standing in for the context.AfterFunc goroutine not having run
+// yet. Only a direct read of the abort can then cut the delivery short.
+func stallAbortPropagation(srv *Server) {
+	rt := srv.scheduledRuntime()
+	rt.mu.Lock()
+	rt.afterAbort = func(context.Context, func()) func() bool {
+		return func() bool { return true }
+	}
+	rt.mu.Unlock()
+}
+
+// A delivery started after the runtime was aborted sends nothing and its
+// row goes back to pending (released), even when the abort has not
+// reached its context (ptone/scion#3827).
+func TestScheduledSend_AbortBeforeFire_PropagationStalled_Released(t *testing.T) {
+	f := newScheduledSendFixture(t)
+	fireAt := time.Now().Add(2 * time.Minute)
+	sm := f.schedule(t, f.bob, "aborted, cancel not landed", fireAt)
+	events, unsub := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.scheduled")
+	defer unsub()
+
+	stallAbortPropagation(f.srv)
+	f.srv.scheduledRuntime().abort()
+	ok, err := f.sms.ClaimScheduledMessage(context.Background(), sm.ID, time.Now())
+	require.NoError(t, err)
+	require.True(t, ok)
+	released := f.srv.fireScheduledMessage(context.Background(), f.sms, f.row(t, f.bob, sm.ID))
+
+	assert.True(t, released)
+	assert.Equal(t, ScheduledMessagePending, f.row(t, f.bob, sm.ID).Status)
+	assert.Empty(t, f.topicMessages(t))
+	assert.Equal(t, []string{"released"}, scheduledEventActions(t, collectEvents(events)))
+}
+
+// abortOnProjectCallStore aborts the scheduled-send runtime during the
+// at-th GetProject made by a scheduled delivery while armed, without
+// waiting for the abort to reach the delivery context. Call 1 is the
+// fire-time check; call 2 is the send's own authorization. With foreign
+// set, that call answers a project the sender has no access to.
+type abortOnProjectCallStore struct {
+	store.Store
+	fault   *storeFaultSwitch
+	srv     atomic.Pointer[Server]
+	at      int32
+	foreign bool
+	calls   atomic.Int32
+}
+
+func (w *abortOnProjectCallStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
+	exec, _ := ExecutorContextFromContext(ctx)
+	if !w.fault.Active() || exec.Kind != scheduledSendClientType || w.calls.Add(1) != w.at {
+		return w.Store.GetProject(ctx, id)
+	}
+	w.srv.Load().scheduledRuntime().abort()
+	p, err := w.Store.GetProject(ctx, id)
+	if err != nil || p == nil || !w.foreign {
+		return p, err
+	}
+	other := *p
+	other.ID = tid("foreign-project")
+	other.OwnerID = tid("someone-else")
+	return &other, nil
+}
+
+func newAbortOnProjectCallFixture(t *testing.T, at int32, foreign bool) (*scheduledSendFixture, *abortOnProjectCallStore, *storeFaultSwitch) {
+	t.Helper()
+	srv, s, alice, bob, project, wrapped, fault := setupDemoPolicyTestWithFault(t,
+		func(inner store.Store, fault *storeFaultSwitch) *abortOnProjectCallStore {
+			return &abortOnProjectCallStore{Store: inner, fault: fault, at: at, foreign: foreign}
+		})
+	wrapped.srv.Store(srv)
+	return newScheduledSendFixtureOn(t, srv, s, alice, bob, project), wrapped, fault
+}
+
+// An abort during the fire-time checks releases the row even when it has
+// not reached the delivery context by the time the checks finish: the
+// gate after the checks reads the abort itself (ptone/scion#3827).
+func TestScheduledSend_AbortDuringChecks_PropagationStalled_Released(t *testing.T) {
+	f, wrapped, fault := newAbortOnProjectCallFixture(t, 1, false)
+	fireAt := time.Now().Add(2 * time.Minute)
+	sm := f.schedule(t, f.bob, "aborted in checks", fireAt)
+	events, unsub := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.scheduled")
+	defer unsub()
+
+	stallAbortPropagation(f.srv)
+	fault.Arm()
+	assert.Equal(t, 1, f.srv.sweepScheduledMessages(context.Background(), fireAt.Add(time.Second)))
+	assert.Equal(t, int32(1), wrapped.calls.Load(), "aborted inside the checks' GetProject, no send")
+	got := f.row(t, f.bob, sm.ID)
+	assert.Equal(t, ScheduledMessagePending, got.Status)
+	assert.Empty(t, got.FailureReason)
+	assert.Empty(t, f.topicMessages(t))
+	assert.Equal(t, []string{"sending", "released"}, scheduledEventActions(t, collectEvents(events)))
+}
+
+// A send refused after an abort that has not reached the delivery context
+// is still recorded as a delivery error, not as an access problem.
+func TestScheduledSend_AbortDuringSend_PropagationStalled_DeliveryError(t *testing.T) {
+	f, wrapped, fault := newAbortOnProjectCallFixture(t, 2, true)
+	fireAt := time.Now().Add(2 * time.Minute)
+	sm := f.schedule(t, f.bob, "aborted in send", fireAt)
+
+	stallAbortPropagation(f.srv)
+	fault.Arm()
+	assert.Equal(t, 1, f.srv.sweepScheduledMessages(context.Background(), fireAt.Add(time.Second)))
+	assert.GreaterOrEqual(t, wrapped.calls.Load(), int32(2), "aborted inside the send's GetProject")
+	got := f.row(t, f.bob, sm.ID)
+	assert.Equal(t, ScheduledMessageFailed, got.Status)
+	assert.Equal(t, ScheduledFailureDeliveryError, got.FailureReason)
+	assert.Empty(t, f.topicMessages(t))
 }
 
 // abortOnProjectStore aborts the scheduled-send runtime during the first
