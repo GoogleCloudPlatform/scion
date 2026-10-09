@@ -2050,6 +2050,33 @@ func (r *KubernetesRuntime) ensureProjectRWXClaim(
 	return nil
 }
 
+// KubernetesWorkloadIdentityNodeLabel is the GKE node label set to "true"
+// on nodes in GKE Workload Identity node pools.
+// A GCP identity "block" pod requires it as a node selector: on a node pool
+// without Workload Identity a pod can use the node's own service account.
+const KubernetesWorkloadIdentityNodeLabel = "iam.gke.io/gke-metadata-server-enabled"
+
+// applyKubernetesBlockIdentity applies the GCP identity "block" pod settings
+// (ptone/scion#4034): the Kubernetes API token is not mounted, and the pod
+// may only schedule onto Workload Identity nodes. The node selector is
+// merged into a copy of any existing one, overriding a conflicting value for
+// the Workload Identity label. The ServiceAccount is set by the caller.
+//
+// This does not remove the pod's GCP identity: on a Workload Identity node
+// pool every ServiceAccount receives a federated token. It is zero-privilege
+// only while no IAM grant names the ServiceAccount, its namespace, or the
+// cluster or pool principal sets (see the Kubernetes identity docs).
+func applyKubernetesBlockIdentity(pod *corev1.Pod) {
+	automount := false
+	pod.Spec.AutomountServiceAccountToken = &automount
+	selector := make(map[string]string, len(pod.Spec.NodeSelector)+1)
+	for k, v := range pod.Spec.NodeSelector {
+		selector[k] = v
+	}
+	selector[KubernetesWorkloadIdentityNodeLabel] = "true"
+	pod.Spec.NodeSelector = selector
+}
+
 func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev1.Pod, error) {
 	// Command Resolution — see buildCommonRunArgs for the Docker/Podman
 	// equivalent. No-auth mode builds a raw shell command string to avoid
@@ -2959,6 +2986,10 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 				})
 			}
 		}
+	}
+
+	if config.KubernetesBlockIdentity {
+		applyKubernetesBlockIdentity(pod)
 	}
 
 	// Priority class: an explicit per-template/agent kubernetes.priorityClassName

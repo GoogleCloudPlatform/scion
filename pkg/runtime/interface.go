@@ -206,6 +206,15 @@ type RunConfig struct {
 	// Checkpoint is set. Callers set both hooks together.
 	Checkpoint        func(ctx context.Context, step string) error
 	OnResourceCreated func(api.ResourceHandle)
+
+	// KubernetesBlockIdentity marks a pod whose GCP identity mode is
+	// "block" (ptone/scion#4034). The Kubernetes runtime then sets
+	// automountServiceAccountToken false and adds the Workload Identity node
+	// selector (KubernetesWorkloadIdentityNodeLabel). The ServiceAccount
+	// itself comes from Kubernetes.ServiceAccountName, which the agent
+	// manager has already set to the block ServiceAccount or cleared.
+	// Ignored by other runtimes.
+	KubernetesBlockIdentity bool
 }
 
 // Checkpoint step names a runtime passes to RunConfig.Checkpoint (design
