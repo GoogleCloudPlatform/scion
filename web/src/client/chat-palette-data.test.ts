@@ -50,12 +50,12 @@ import {
   ChatPaletteDataController,
   AGENT_DMS_CACHE_MS,
   type PaletteAgentSource,
-  type RawPaletteAgent,
   type RawPaletteDm,
   type RawPaletteUser,
   type RawPaletteSpace,
   type RawPaletteThread,
 } from './chat-palette-data.js';
+import type { RawPaletteAgent } from './palette-types.js';
 import type { RecentFile } from './chat-recent-files.js';
 import type { AgentListSnapshot } from './agent-store.js';
 import type { Agent } from '../shared/types.js';

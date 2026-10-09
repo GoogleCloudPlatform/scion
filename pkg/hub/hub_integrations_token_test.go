@@ -499,3 +499,65 @@ func TestStreamCredentialRecheck_UsesTheRecordedCredential(t *testing.T) {
 	assert.False(t, srv.streamCredentialStillAuthorized(recorded, hub, ActionRead, "hub.diagnostics.read"),
 		"a recorded revoked token fails the re-check")
 }
+
+// TestDiagnosticsLogStream_CredentialEventOnlyForOpenRequest requires the
+// diagnostics log stream re-check to end the stream on a credential that
+// fails it, writing streamCredentialEndedEvent while the request is open
+// and ending without that event once the request is cancelled, even when a
+// re-check is due at the same moment.
+func TestDiagnosticsLogStream_CredentialEventOnlyForOpenRequest(t *testing.T) {
+	prev := streamCredentialRecheckInterval
+	streamCredentialRecheckInterval = time.Nanosecond
+	t.Cleanup(func() { streamCredentialRecheckInterval = prev })
+
+	srv, s := testServer(t)
+	srv.logQueryService = &blockingLogQuerier{}
+	ctx := context.Background()
+	const path = "/api/v1/admin/diagnostics/logs/stream"
+	userID := tid("hit-diag-cancelled")
+	createTestUserWithRole(t, s, userID, userID+"@test.com", "member", store.SystemRoleSuperAdmin)
+	ensureHubMembership(ctx, s, userID)
+	_, token, err := srv.uatService.CreateTokenWithParams(rs4MintContext(userID), CreateTokenParams{
+		UserID: userID, Name: "hit-" + tid("cancel"), Boundary: hubBoundary(), Scopes: []string{"hub_diagnostics:read"},
+	})
+	require.NoError(t, err)
+	require.NoError(t, srv.uatService.RevokeToken(rs4MintContext(userID), userID, token.ID))
+	user := NewAuthenticatedUser(userID, userID+"@test.com", "Cancelled", "member", "web")
+	recorded := contextWithCredentialContext(contextWithIdentity(ctx, user), CredentialContext{Kind: CredentialKindUAT, ID: token.ID})
+
+	serve := func(t *testing.T, reqCtx context.Context) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, path, nil).WithContext(reqCtx)
+		rec := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() {
+			srv.handleDiagnosticsLogsStream(rec, req)
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("stream did not end")
+		}
+		return rec
+	}
+
+	t.Run("an open request whose credential fails gets the event and ends", func(t *testing.T) {
+		reqCtx, cancel := context.WithCancel(recorded)
+		defer cancel()
+		rec := serve(t, reqCtx)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), streamCredentialEndedEvent)
+	})
+
+	t.Run("a cancelled request ends without the event", func(t *testing.T) {
+		// The handler's select sees the cancelled request and the due
+		// re-check together; repeat so both orders are exercised.
+		for i := 0; i < 200; i++ {
+			reqCtx, cancel := context.WithCancel(recorded)
+			cancel()
+			rec := serve(t, reqCtx)
+			require.NotContains(t, rec.Body.String(), streamCredentialEndedEvent, "iteration %d", i)
+		}
+	})
+}

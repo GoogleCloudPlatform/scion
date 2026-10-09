@@ -32,19 +32,12 @@ import { apiFetch } from './api.js';
 import type { ApiFetchOptions } from './api.js';
 import { agentStore } from './agent-store.js';
 import type { AgentListSnapshot, AgentStore } from './agent-store.js';
-import type {
-  AgentActivity,
-  AgentMessageability,
-  AgentMessageabilityDetail,
-  AgentPhase,
-  Capabilities,
-} from '../shared/types.js';
 import { canMessageAgent } from '../shared/types.js';
-import { activityMsFromTimestamp } from '../utils/chat-palette-match.js';
+import { activityMsFromTimestamp } from '../utils/palette-match.js';
 import { formatFileSize } from '../utils/chat-file-links.js';
 import { formatInstant } from '../utils/time.js';
-import type { PaletteCandidate, PaletteThreadTarget } from './chat-palette-types.js';
-import { dmCandidateId, documentCandidateId, threadCandidateId } from './chat-palette-types.js';
+import type { PaletteCandidate, PaletteThreadTarget, RawPaletteAgent } from './palette-types.js';
+import { dmCandidateId, documentCandidateId, threadCandidateId } from './palette-types.js';
 import { agentRowText, type ProjectSlugLookup } from './agent-palette-candidate.js';
 import type { RecentFile } from './chat-recent-files.js';
 
@@ -81,24 +74,6 @@ export const AGENTS_IDLE_TIMEOUT_MS = 90 * 1000;
  * superseded/cancelled load is swallowed.
  */
 const AGENTS_IDLE_TIMEOUT_REASON = Symbol('agents-group-idle-timeout');
-
-/**
- * The agent fields palette candidate building reads. `phase` and `activity`
- * are for the terminal view's own agents-only candidate source; this
- * module's own candidate building ({@link buildAgentCandidates},
- * {@link isPaletteAgentViable}) reads neither.
- */
-export interface RawPaletteAgent {
-  id: string;
-  name?: string;
-  slug?: string;
-  projectId?: string;
-  project?: string;
-  phase?: AgentPhase;
-  activity?: AgentActivity;
-  _capabilities?: Capabilities;
-  _messageability?: AgentMessageability | AgentMessageabilityDetail;
-}
 
 /** The subset of a DM list entry this module reads. */
 export interface RawPaletteDm {

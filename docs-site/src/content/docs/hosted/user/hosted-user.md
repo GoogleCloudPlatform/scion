@@ -181,6 +181,8 @@ scion list --project acme-backend
 
 **A terminal is required.** Attach needs an interactive terminal on both stdin and stdout. From a script or a coding harness it fails at once with a non-zero exit. Use `scion look <agent>` to see the screen and `scion message <agent>` to send input instead.
 
+**Preflight.** Before connecting, `scion attach` asks the Hub whether it can reach the agent's terminal, through the Runtime Broker or, when the broker's runtime has no attach, through the agent's own session. If the Hub answers `503`, the command exits with the Hub's reason and does not retry. When there is no path at all, the message says the agent's runtime has no attach and the agent has no session that serves a terminal.
+
 **Reconnect.** When the Hub closes the session with `4503` (a planned restart, or the Runtime Broker connection dropped), `4504` (a transient failure) or `1011` (an internal error), `scion attach` reconnects by itself, once per close, and the screen redraws. It stops after 3 reconnects in a row whose sessions each ended within a minute; press Ctrl-C during the wait to stop it. For `4503` it waits a random delay of up to 5 seconds first, so many clients closed at once do not all reconnect at the same moment. If that reconnect fails, or the network drops, the Hub restarts without a close message, or the agent's session ends, `scion attach` exits with a message that names the cause and the next command to run. (The web terminal also reconnects on its own.) The messages follow the [PTY close codes](/scion/reference/api/#pty-close-codes):
 
 | Close code | What the CLI tells you | What to do |
