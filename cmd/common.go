@@ -320,6 +320,7 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 
 	opts := hubsync.EnsureHubReadyOptions{
 		AutoConfirm:      autoConfirm,
+		NonInteractive:   nonInteractive,
 		NoHub:            noHub,
 		EndpointOverride: hubEndpoint,
 		SkipSync:         skipSync,
@@ -1737,8 +1738,10 @@ func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, pr
 			return nil, err
 		}
 
-		// Only prompt if interactive and not auto-confirm
-		if autoConfirm || !util.IsTerminal() {
+		// Only prompt if interactive and not auto-confirm. Without a
+		// terminal, stdin is never read (an idle open stdin would hang);
+		// the error names --broker so the caller can pick one.
+		if autoConfirm || !isInteractiveTerminal() {
 			return nil, &hubError{msg: nonInteractiveBrokerMessage(apiErr.Message, availableBrokers), err: apiErr}
 		}
 
@@ -1755,7 +1758,7 @@ func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, pr
 			if isDefault {
 				defaultLabel = " (default)"
 			}
-			fmt.Printf("\nUse runtime broker %s (%s)%s? [y/N]: ", name, status, defaultLabel)
+			fmt.Fprintf(os.Stderr, "\nUse runtime broker %s (%s)%s? [y/N]: ", name, status, defaultLabel)
 			input, err := reader.ReadString('\n')
 			if err != nil {
 				return nil, fmt.Errorf("failed to read input: %w", err)
@@ -1767,7 +1770,7 @@ func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, pr
 			req.RuntimeBrokerID, _ = brokerMap["id"].(string)
 		} else {
 			// Multiple brokers - selection prompt
-			fmt.Printf("\nMultiple runtime brokers available for project:\n")
+			fmt.Fprintf(os.Stderr, "\nMultiple runtime brokers available for project:\n")
 			for i, h := range availableBrokers {
 				brokerMap, _ := h.(map[string]interface{})
 				name, _ := brokerMap["name"].(string)
@@ -1777,12 +1780,12 @@ func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, pr
 				if isDefault {
 					defaultLabel = " (default)"
 				}
-				fmt.Printf("  [%d] %s (%s)%s\n", i+1, name, status, defaultLabel)
+				fmt.Fprintf(os.Stderr, "  [%d] %s (%s)%s\n", i+1, name, status, defaultLabel)
 			}
-			fmt.Println()
+			fmt.Fprintln(os.Stderr)
 
 			for {
-				fmt.Print("Select a broker (or 'c' to cancel): ")
+				fmt.Fprint(os.Stderr, "Select a broker (or 'c' to cancel): ")
 				input, err := reader.ReadString('\n')
 				if err != nil {
 					return nil, fmt.Errorf("failed to read input: %w", err)
@@ -1795,7 +1798,7 @@ func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, pr
 
 				var choice int
 				if _, err := fmt.Sscanf(input, "%d", &choice); err != nil || choice < 1 || choice > len(availableBrokers) {
-					fmt.Printf("Invalid choice. Please enter 1-%d.\n", len(availableBrokers))
+					fmt.Fprintf(os.Stderr, "Invalid choice. Please enter 1-%d.\n", len(availableBrokers))
 					continue
 				}
 

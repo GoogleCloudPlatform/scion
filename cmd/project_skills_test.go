@@ -705,16 +705,21 @@ func TestRunProjectSkillsFromDirectory_TTY_Abort(t *testing.T) {
 	defer func() { autoConfirm = origAutoConfirm }()
 	autoConfirm = false
 
-	var buf bytes.Buffer
+	var buf, errBuf bytes.Buffer
 	projectSkillsAddCmd.SetOut(&buf)
 	defer projectSkillsAddCmd.SetOut(nil)
+	projectSkillsAddCmd.SetErr(&errBuf)
+	defer projectSkillsAddCmd.SetErr(nil)
 	projectSkillsAddCmd.SetIn(strings.NewReader("n\n"))
 	defer projectSkillsAddCmd.SetIn(nil)
 
 	err := runProjectSkillsFromDirectory(projectSkillsAddCmd, "", "https://github.com/org/repo/tree/main/skills")
 	assert.NoError(t, err)
 	assert.Equal(t, int32(0), addCalls.Load())
-	assert.Contains(t, buf.String(), "Aborted")
+	// The prompt and its answer go to stderr so stdout stays machine-readable.
+	assert.Contains(t, errBuf.String(), "Add all")
+	assert.Contains(t, errBuf.String(), "Aborted")
+	assert.NotContains(t, buf.String(), "Aborted")
 }
 
 func TestRunProjectSkillsFromDirectory_NoSkills(t *testing.T) {
