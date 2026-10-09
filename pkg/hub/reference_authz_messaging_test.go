@@ -122,7 +122,7 @@ func TestAgentOutbound_ClientAttachmentMetadataNotLinked(t *testing.T) {
 
 // The agent-to-agent path of the outbound route drops the key as well, and
 // keeps the rest of the caller's metadata.
-func TestAgentMessage_ClientAttachmentMetadataRemoved(t *testing.T) {
+func TestAgentOutbound_AgentToAgentClientAttachmentMetadataRemoved(t *testing.T) {
 	srv, s, _, sender, target, convID, dispatcher, _ := paritySetup(t)
 	newChatV2WebChatStore(t, srv, s)
 	md, _ := clientAttachmentMetadata(t, srv)
