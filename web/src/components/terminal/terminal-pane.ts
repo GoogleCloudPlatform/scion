@@ -24,7 +24,13 @@
 import { LitElement, html, css, nothing, unsafeCSS } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import type { Agent, AgentPhase, AgentActivity, ExposedPort } from '../../shared/types.js';
+import type {
+  Agent,
+  AgentPhase,
+  AgentActivity,
+  ExposedPort,
+  SharedDir,
+} from '../../shared/types.js';
 import {
   TerminalSessionRegistry,
   type TerminalSession,
@@ -1408,12 +1414,8 @@ export class ScionTerminalPane extends LitElement {
         this.uploadDisabledReason = 'Could not determine shared directories for file upload';
         return;
       }
-      const data = (await resp.json()) as { sharedDirs?: unknown };
-      const dirs = (data.sharedDirs ?? []) as Array<{
-        name: string;
-        read_only?: boolean;
-        in_workspace?: boolean;
-      }>;
+      const data = (await resp.json()) as { sharedDirs?: SharedDir[] };
+      const dirs = data.sharedDirs ?? [];
       // Filter: writable, non-in_workspace
       const candidates = dirs.filter((d) => !d.read_only && !d.in_workspace);
       const target = candidates.find((d) => d.name === 'scratchpad') || candidates[0];

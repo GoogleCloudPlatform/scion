@@ -113,10 +113,13 @@ interface MaintenanceStateResponse {
   break_glass?: boolean;
 }
 
-/** Result of POST /api/v1/admin/agents/reset-auth-all. */
+/**
+ * Result of POST /api/v1/admin/agents/reset-auth-all. The hub sends null
+ * for an empty list.
+ */
 interface ResetAuthAllResult {
-  succeeded: { id: string; name: string }[];
-  failed: { id: string; name: string; error: string }[];
+  succeeded: { id: string; name: string }[] | null;
+  failed: { id: string; name: string; error: string }[] | null;
   total: number;
 }
 
@@ -1216,8 +1219,8 @@ export class ScionPageAdminMaintenance extends LitElement {
                   ${(this.resetAuthAllResult.failed?.length ?? 0) > 0
                     ? html`
                         <div class="result-log result-error">
-                          ${this.resetAuthAllResult.failed
-                            .map((f) => `${f.name || f.id}: ${f.error}`)
+                          ${this.resetAuthAllResult
+                            .failed!.map((f) => `${f.name || f.id}: ${f.error}`)
                             .join('\n')}
                         </div>
                       `

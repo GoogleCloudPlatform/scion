@@ -1563,7 +1563,7 @@ export class ScionPageAgentConfigure extends LitElement {
             style="flex:1"
             @sl-input=${(e: Event) => {
               // sl-range reports its value as a number.
-              this.thinkingLevel = (e.target as unknown as { value: number }).value;
+              this.thinkingLevel = (e.target as HTMLElement & { value: number }).value;
             }}
           ></sl-range>
           <sl-checkbox

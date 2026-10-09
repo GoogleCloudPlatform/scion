@@ -51,13 +51,13 @@ export interface User {
 
 /**
  * The current user as returned by GET /auth/me. The client maps it to
- * {@link User}; older servers send name and avatar instead of displayName
- * and avatarUrl.
+ * {@link User}. name and avatar are legacy fallbacks that the client still
+ * reads when displayName or avatarUrl is empty.
  */
 export interface AuthMeResponse {
   id: string;
   email: string;
-  displayName?: string;
+  displayName: string;
   name?: string;
   avatarUrl?: string;
   avatar?: string;

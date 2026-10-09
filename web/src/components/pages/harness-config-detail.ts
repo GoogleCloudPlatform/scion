@@ -71,7 +71,7 @@ interface HarnessConfigImageStatus {
 /** Result of POST /api/v1/harness-configs/{id}/reimport. */
 interface HarnessConfigReimportResult {
   count?: number;
-  harnessConfigs?: HarnessConfig[];
+  harnessConfigs?: string[];
   failed?: Array<{ name: string; reason: string }>;
 }
 

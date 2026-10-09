@@ -1626,7 +1626,10 @@ export class ScionPageProjectDetail extends LitElement {
         this.metricsSummary = null;
         return;
       }
-      const data = (await res.json()) as (ProjectMetricsSummary & { available?: boolean }) | null;
+      const data = (await res.json()) as
+        | (ProjectMetricsSummary & { available?: undefined })
+        | { available: false }
+        | null;
       // If metrics service is unavailable, the backend returns {available: false}
       if (data && data.available === false) {
         this.metricsSummary = null;
