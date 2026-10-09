@@ -77,6 +77,10 @@ var hubOperations = []OperationSpec{
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestScopeReissue_OperatorRefusals"},
+			{Package: "pkg/hub", Function: "TestScopeReissue_UserDelegatorFailClosed"},
+			{Package: "pkg/hub", Function: "TestScopeReissue_UserDelegatorLookupFault"},
+			{Package: "pkg/hub", Function: "TestScopeReissue_SessionRootedEqualsCreateToday"},
+			{Package: "pkg/hub", Function: "TestScopeReissue_SessionRootedEqualsCreateTodayAfterChange"},
 		},
 		Bearer: SessionOnly(ReasonGovernancePending),
 	},

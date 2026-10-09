@@ -148,6 +148,24 @@ type reissueFaultStore struct {
 	// this ID answers no row and no error.
 	nilAgentAfterCommitID string
 	committed             atomic.Bool
+	// failUserID: GetUser for this ID fails.
+	failUserID string
+	// uatReadErr: GetUserAccessToken fails.
+	uatReadErr bool
+}
+
+func (s *reissueFaultStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if s.fault.Active() && s.failUserID != "" && id == s.failUserID {
+		return nil, errors.New("injected user read fault")
+	}
+	return s.Store.GetUser(ctx, id)
+}
+
+func (s *reissueFaultStore) GetUserAccessToken(ctx context.Context, id string) (*store.UserAccessToken, error) {
+	if s.fault.Active() && s.uatReadErr {
+		return nil, errors.New("injected access token read fault")
+	}
+	return s.Store.GetUserAccessToken(ctx, id)
 }
 
 // arm turns the configured faults on.
