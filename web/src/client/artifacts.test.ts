@@ -21,6 +21,7 @@ import {
   artifactListUrl,
   artifactPagePath,
   baseName,
+  expiryImpact,
   formatArtifactRef,
   formatBytes,
   isInlineType,
@@ -32,7 +33,10 @@ import {
   publishFiles,
   rendererFor,
   sha256Hex,
+  shareLinkUrl,
+  type ArtifactGrant,
   type MessageArtifactRef,
+  type ShareLink,
 } from './artifacts.js';
 
 describe('rendererFor', () => {
@@ -541,5 +545,54 @@ describe('artifactListUrl and artifactPagePath', () => {
     expect(artifactPagePath({ id: A, scopeRef: 'proj 1' })).toBe(
       `/projects/proj%201/artifacts/${A}`
     );
+  });
+});
+
+describe('sharing helpers', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('asks for shared artifacts only when the filter is on', () => {
+    expect(artifactListUrl({ sharedOnly: true })).toBe('/api/v1/artifacts?mine=1&shared=1');
+    expect(artifactListUrl({ sharedOnly: false })).toBe('/api/v1/artifacts?mine=1');
+  });
+
+  it('asks a project list for the artifacts shared with it', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        urls.push(String(input));
+        return Promise.resolve(new Response('{"artifacts":[]}', { status: 200 }));
+      })
+    );
+    await listProjectArtifacts('p-1', { sharedOnly: true });
+    expect(urls).toEqual(['/api/v1/artifacts?mine=1&scope=p-1&shared=1']);
+  });
+
+  it('makes the hub-relative link absolute', () => {
+    expect(shareLinkUrl('/api/v1/artifacts/shared/abc', 'https://hub.example.com')).toBe(
+      'https://hub.example.com/api/v1/artifacts/shared/abc'
+    );
+  });
+
+  it('counts what an expiry cuts like the hub does', () => {
+    const now = new Date('2026-10-08T12:00:00Z');
+    const links: ShareLink[] = [
+      { id: 'a', createdAt: '', expiresAt: '2026-10-15T12:00:00Z' },
+      { id: 'b', createdAt: '', expiresAt: '2026-10-09T00:00:00Z' },
+      { id: 'c', createdAt: '', expiresAt: '2026-10-01T00:00:00Z' },
+    ];
+    const grants = [{ id: 'g1' }, { id: 'g2' }] as ArtifactGrant[];
+    expect(expiryImpact(new Date('2026-10-10T00:00:00Z'), links, grants, now)).toEqual({
+      linksCutShort: 1,
+      grantsRemoved: 2,
+    });
+    expect(expiryImpact(new Date('2026-10-08T18:00:00Z'), links, grants, now)).toEqual({
+      linksCutShort: 2,
+      grantsRemoved: 2,
+    });
+    expect(expiryImpact(null, links, grants, now)).toEqual({ linksCutShort: 0, grantsRemoved: 0 });
   });
 });

@@ -28,18 +28,18 @@
 
 import { describe, it, expect, vi } from 'vitest';
 
-vi.mock('../../../utils/chat-palette-match.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../../utils/chat-palette-match.js')>();
+vi.mock('../../../utils/palette-match.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../utils/palette-match.js')>();
   return { ...actual, rankCandidates: vi.fn(actual.rankCandidates) };
 });
 
-import { rankCandidates } from '../../../utils/chat-palette-match.js';
+import { rankCandidates } from '../../../utils/palette-match.js';
 const rankCandidatesMock = vi.mocked(rankCandidates);
 
 await import('./quick-palette.js');
 type ScionQuickPalette = import('./quick-palette.js').ScionQuickPalette;
-import type { GroupState } from '../../../client/chat-palette-types.js';
-import { dmCandidateId } from '../../../client/chat-palette-types.js';
+import type { GroupState } from '../../../client/palette-types.js';
+import { dmCandidateId } from '../../../client/palette-types.js';
 
 function agentsGroup(
   candidates: Array<{ peerId: string; label: string; activityMs?: number }>

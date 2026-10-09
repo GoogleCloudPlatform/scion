@@ -63,6 +63,8 @@ export interface Artifact {
   key?: string;
   title: string;
   currentSeq: number;
+  /** When the artifact expires and is deleted; absent when kept until deleted. */
+  expiresAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -71,6 +73,8 @@ export interface ArtifactResponse {
   artifact: Artifact;
   version?: ArtifactVersion;
   warnings?: string[];
+  /** On a GET: the caller may share and change the artifact. */
+  canManage?: boolean;
 }
 
 /** GET /api/v1/artifacts/{id}/versions: ready versions, newest first, without files. */
@@ -98,6 +102,7 @@ export interface CreateVersionRequest {
   title?: string;
   key?: string;
   scope?: string;
+  kind?: 'publish' | 'review';
   entry: string;
   note?: string;
   files: ManifestFile[];
@@ -249,10 +254,18 @@ function artifactPath(id: string): string {
 /** One page of the artifacts homed in a project that the caller can read. */
 export async function listProjectArtifacts(
   projectId: string,
-  opts: { q?: string; cursor?: string; limit?: number; signal?: AbortSignal } = {}
+  opts: {
+    q?: string;
+    cursor?: string;
+    limit?: number;
+    signal?: AbortSignal;
+    /** Only artifacts homed elsewhere and shared with the project. */
+    sharedOnly?: boolean;
+  } = {}
 ): Promise<ArtifactListResponse> {
   const params = new URLSearchParams({ mine: '1', scope: projectId });
   if (opts.q) params.set('q', opts.q);
+  if (opts.sharedOnly) params.set('shared', '1');
   if (opts.cursor) params.set('cursor', opts.cursor);
   if (opts.limit) params.set('limit', String(opts.limit));
   return okJSON(
@@ -287,6 +300,14 @@ export interface PublishRequest {
   title?: string | undefined;
   key?: string | undefined;
   note?: string | undefined;
+  /** Version kind; unset publishes. A review needs artifactId and base. */
+  kind?: 'publish' | 'review' | undefined;
+  /**
+   * For a review, the version it was made against. The hub checks the
+   * review against that version only and refuses it (409 stale_review)
+   * unless it is still the current version.
+   */
+  base?: number | undefined;
   entry: string;
   files: PublishFile[];
   /** Called after each upload with the number of files uploaded so far. */
@@ -319,7 +340,9 @@ export interface PendingPublish {
 export class PublishError extends Error {
   constructor(
     message: string,
-    readonly pending: PendingPublish | null
+    readonly pending: PendingPublish | null,
+    /** The hub's error code, when it answered with one. */
+    readonly code = ''
   ) {
     super(message);
     this.name = 'PublishError';
@@ -349,6 +372,7 @@ export async function publishFiles(req: PublishRequest): Promise<ArtifactRespons
   if (req.title) body.title = req.title;
   if (req.key) body.key = req.key;
   if (req.note) body.note = req.note;
+  if (req.kind === 'review') body.kind = 'review';
   if (!req.artifactId && req.scope) body.scope = req.scope;
   const fingerprint = JSON.stringify([req.artifactId ?? '', body]);
 
@@ -390,12 +414,23 @@ export async function publishFiles(req: PublishRequest): Promise<ArtifactRespons
       // Not JSON; the status decides.
     }
     const code = body.error?.code ?? '';
+    // A review the hub refused is discarded: say why in this page's terms.
+    if (code === 'unmarked_changes') {
+      throw new PublishError(reviewRejectedMessage(body), null, code);
+    }
+    if (code === 'stale_review') {
+      throw new PublishError(
+        'Your review was not saved: a newer version was published, or is being published. The review now starts from the current version; your discarded text is kept read-only to copy from.',
+        null,
+        code
+      );
+    }
     const message = prefix + (await extractApiError(res, `HTTP ${res.status}`));
     // The version is gone (404), no longer pending (409 conflict), or not
     // the caller's (403): another attempt must start a new version.
     const gone =
       res.status === 404 || res.status === 403 || (res.status === 409 && code === 'conflict');
-    if (gone) throw new PublishError(message, null);
+    if (gone) throw new PublishError(message, null, code);
     // Finalize found files missing: upload those next time. The hub lists
     // at most a few; when it lists fewer than are missing, upload them all.
     const missing = body.error?.details?.missing;
@@ -406,7 +441,7 @@ export async function publishFiles(req: PublishRequest): Promise<ArtifactRespons
           : pending.all;
       remaining = all.filter((p) => byPath.has(p));
     }
-    throw new PublishError(message, left());
+    throw new PublishError(message, left(), code);
   };
   let done = 0;
   for (const path of required) {
@@ -435,12 +470,51 @@ export async function publishFiles(req: PublishRequest): Promise<ArtifactRespons
   }
   let res: Response;
   try {
-    res = await apiFetch(`${artifactPath(id)}/versions/${seq}/finalize`, { method: 'POST' });
+    res = await apiFetch(
+      `${artifactPath(id)}/versions/${seq}/finalize`,
+      req.kind === 'review'
+        ? {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ base: req.base }),
+          }
+        : { method: 'POST' }
+    );
   } catch (err) {
     throw new PublishError(err instanceof Error ? err.message : 'finalize failed', left());
   }
   if (!res.ok) await fail(res, '');
   return (await res.json()) as ArtifactResponse;
+}
+
+/** A file of a review the hub refused (code unmarked_changes). */
+interface UnmarkedFile {
+  path?: string;
+  change?: string;
+  hunks?: { line?: number }[];
+}
+
+/** Explains an unmarked_changes refusal: where the review changed text. */
+export function reviewRejectedMessage(body: { error?: { details?: unknown } }): string {
+  const details = (body.error?.details ?? {}) as { files?: unknown };
+  const files = Array.isArray(details.files) ? (details.files as UnmarkedFile[]) : [];
+  const where = files
+    .slice(0, 3)
+    .map((f) => {
+      const lines = (f.hunks ?? [])
+        .map((h) => h.line)
+        .filter((n): n is number => typeof n === 'number');
+      if (f.change === 'modified' && lines.length > 0) {
+        return `${f.path ?? ''} (line ${lines.slice(0, 5).join(', ')})`;
+      }
+      return `${f.path ?? ''} (${f.change ?? 'changed'})`;
+    })
+    .join('; ');
+  return (
+    'Your review changes text outside marks' +
+    (where ? `: ${where}` : '') +
+    '. A review may only add marks: mark every change with the toolbar. The review was not saved.'
+  );
 }
 
 /** The message to show for a failed publish. */
@@ -456,7 +530,18 @@ export function publishErrorMessage(err: unknown): string {
 export interface ArtifactListItem extends Artifact {
   /** The current version is a review awaiting the owner. */
   reviewPending: boolean;
+  /** Why the caller sees the artifact. */
+  access?: ArtifactAccess;
+  /** In a list narrowed to a project: homed elsewhere and shared with it. */
+  sharedWithScope?: boolean;
+  /** The artifact's home project was deleted. */
+  scopeDeleted?: boolean;
+  /** Set on rows with scopeDeleted: the caller may move the artifact. */
+  canManage?: boolean;
 }
+
+/** Why the caller sees an artifact in the list. */
+export type ArtifactAccess = 'owned' | 'project' | 'shared';
 
 /** Body of GET /api/v1/artifacts?mine=1. */
 export interface ArtifactListResponse {
@@ -473,6 +558,8 @@ export interface ArtifactListFilters {
   reviewPending?: boolean;
   /** Only artifacts the caller owns. */
   ownedOnly?: boolean;
+  /** Only artifacts a grant shares with the caller. */
+  sharedOnly?: boolean;
 }
 
 /**
@@ -485,6 +572,7 @@ export function artifactListUrl(filters: ArtifactListFilters, cursor?: string): 
   if (q) params.set('q', q);
   if (filters.reviewPending) params.set('review_pending', '1');
   if (filters.ownedOnly) params.set('owner', 'me');
+  if (filters.sharedOnly) params.set('shared', '1');
   if (cursor) params.set('cursor', cursor);
   return `/api/v1/artifacts?${params.toString()}`;
 }
@@ -496,6 +584,175 @@ export function artifactListUrl(filters: ArtifactListFilters, cursor?: string): 
 export function artifactPagePath(a: Pick<Artifact, 'id' | 'scopeRef'>, seq = 0): string {
   const base = `/projects/${encodeURIComponent(a.scopeRef)}/artifacts/${encodeURIComponent(a.id)}`;
   return seq > 0 ? `${base}/v/${seq}` : base;
+}
+
+// ---------------------------------------------------------------------------
+// Sharing: share links, grants, expiry and moving (pkg/artifacts/links.go,
+// pkg/artifacts/grants.go)
+// ---------------------------------------------------------------------------
+
+/** A share link. The hub never returns its token after creation. */
+export interface ShareLink {
+  id: string;
+  createdAt: string;
+  expiresAt: string;
+  /** "user:<id>" of the user who created it. */
+  createdBy?: string;
+}
+
+/** POST /api/v1/artifacts/{id}/links. */
+export interface CreateLinkResponse {
+  link: ShareLink;
+  /** Hub-relative path of the link; shown once, never retrievable later. */
+  url: string;
+  /** The link ends earlier than asked because the artifact expires then. */
+  clampedToArtifactExpiry?: boolean;
+}
+
+/** Grant permissions, weakest first. */
+export type GrantPermission = 'read' | 'write' | 'admin';
+
+/** A grant to a user or agent ("principal") or a project ("scope"). */
+export interface ArtifactGrant {
+  id: string;
+  subjectKind: 'principal' | 'scope';
+  /** "user:<id>" or "agent:<id>" for a principal, a project id for a scope. */
+  subjectRef: string;
+  permission: GrantPermission;
+  /** The home project's grant: listed first, never removed. */
+  home?: boolean;
+  createdAt: string;
+  createdBy?: string;
+}
+
+/** GET /api/v1/artifacts/{id}/grants. */
+export interface GrantListResponse {
+  grants: ArtifactGrant[];
+  /** Grants to other projects, and moves to them, are turned on. */
+  crossProjectSharing: boolean;
+}
+
+/** PATCH /api/v1/artifacts/{id}. */
+export interface PatchArtifactResponse {
+  artifact: Artifact;
+  linksCutShort?: number;
+  grantsRemoved?: number;
+}
+
+/** The lifetimes a share link can be created with. */
+export const LINK_LIFETIMES: ReadonlyArray<{ label: string; hours: number }> = [
+  { label: '1 day', hours: 24 },
+  { label: '7 days', hours: 7 * 24 },
+  { label: '30 days', hours: 30 * 24 },
+];
+
+/** The default share link lifetime, in hours. */
+export const DEFAULT_LINK_HOURS = 7 * 24;
+
+/** Labels of the grant permissions. */
+export const PERMISSION_LABELS: Record<GrantPermission, string> = {
+  read: 'Can view',
+  write: 'Can edit',
+  admin: 'Can manage',
+};
+
+/** Lists an artifact's unexpired share links. */
+export async function listLinks(id: string): Promise<ShareLink[]> {
+  const body = await okJSON<{ links: ShareLink[] }>(await apiFetch(`${artifactPath(id)}/links`));
+  return body.links ?? [];
+}
+
+/** Creates a share link that lasts ttlHours. */
+export async function createLink(id: string, ttlHours: number): Promise<CreateLinkResponse> {
+  return okJSON(
+    await apiFetch(`${artifactPath(id)}/links`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ttlHours }),
+    })
+  );
+}
+
+/** Revokes a share link. */
+export async function revokeLink(id: string, linkId: string): Promise<void> {
+  const res = await apiFetch(`${artifactPath(id)}/links/${encodeURIComponent(linkId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+}
+
+/** Lists an artifact's grants, the home project's first. */
+export async function listGrants(id: string): Promise<GrantListResponse> {
+  const body = await okJSON<GrantListResponse>(await apiFetch(`${artifactPath(id)}/grants`));
+  return { grants: body.grants ?? [], crossProjectSharing: !!body.crossProjectSharing };
+}
+
+/** Adds a grant, or changes the permission of the subject's grant. */
+export async function putGrant(
+  id: string,
+  subjectKind: ArtifactGrant['subjectKind'],
+  subjectRef: string,
+  permission: GrantPermission
+): Promise<ArtifactGrant> {
+  const body = await okJSON<{ grant: ArtifactGrant }>(
+    await apiFetch(`${artifactPath(id)}/grants`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subjectKind, subjectRef, permission }),
+    })
+  );
+  return body.grant;
+}
+
+/** Removes a grant. */
+export async function deleteGrant(id: string, grantId: string): Promise<void> {
+  const res = await apiFetch(`${artifactPath(id)}/grants/${encodeURIComponent(grantId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+}
+
+/**
+ * Changes an artifact: expiresAt sets its expiry (null clears it), scopeRef
+ * moves it to another home project.
+ */
+export async function patchArtifact(
+  id: string,
+  change: { expiresAt?: string | null; scopeRef?: string }
+): Promise<PatchArtifactResponse> {
+  return okJSON(
+    await apiFetch(artifactPath(id), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(change),
+    })
+  );
+}
+
+/** The absolute URL of a share link from the hub-relative path it was created with. */
+export function shareLinkUrl(path: string, origin: string): string {
+  return new URL(path, origin).toString();
+}
+
+/**
+ * What setting the artifact's expiry to expiresAt (null: kept until
+ * deleted) would cut: the unexpired links that would end before their own
+ * expiry, and the grants deleted with the artifact. Mirrors the counts the
+ * hub returns from PATCH.
+ */
+export function expiryImpact(
+  expiresAt: Date | null,
+  links: readonly ShareLink[],
+  grants: readonly ArtifactGrant[],
+  now: Date
+): { linksCutShort: number; grantsRemoved: number } {
+  if (!expiresAt) return { linksCutShort: 0, grantsRemoved: 0 };
+  let linksCutShort = 0;
+  for (const l of links) {
+    const end = new Date(l.expiresAt);
+    if (end > now && expiresAt < end) linksCutShort++;
+  }
+  return { linksCutShort, grantsRemoved: grants.length };
 }
 
 // ---------------------------------------------------------------------------

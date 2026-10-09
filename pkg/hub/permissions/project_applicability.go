@@ -134,6 +134,7 @@ var ProjectTargetApplicability = map[string]bool{
 	"hub.teams_manifest.read": false, "hub.teams_manifest.update": false,
 	"hub.validate.execute": false, "hub.github_app.read": false, "hub.github_app.update": false,
 	"hub.metrics.read": false, "hub.audit.read": false,
+	"hub.env_vars.read": false,
 
 	// quota.* — every live route (handlers_quota.go) authorizes against
 	// Resource{Type:"quota", ID:"hub"}, matching this family's own

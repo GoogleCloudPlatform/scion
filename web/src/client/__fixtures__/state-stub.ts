@@ -16,7 +16,9 @@
 
 /**
  * Shared stub of `client/state.js` for tests that need the module's
- * `stateManager` only as an event bus.
+ * `stateManager` only as an event bus, plus a no-op seed-epoch surface
+ * (`scopeGeneration`, `beginSeedEpoch`, `endSeedEpoch`) for code that
+ * reaches it through `AgentSeedEpoch`.
  *
  *   vi.mock('../../client/state.js', () => import('../../client/__fixtures__/state-stub.js'));
  *
@@ -24,4 +26,10 @@
  * test that stubs both modules sees one instance, as with the real modules.
  */
 
-export const stateManager = new EventTarget();
+export const stateManager = Object.assign(new EventTarget(), {
+  scopeGeneration: 0,
+  beginSeedEpoch: (): symbol => Symbol('seed-epoch'),
+  endSeedEpoch: (): void => {},
+  // No agents are held: lookups by id find nothing.
+  getAgent: (_id: string): undefined => undefined,
+});

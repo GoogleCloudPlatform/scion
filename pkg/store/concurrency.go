@@ -236,6 +236,11 @@ const (
 	// broker join tokens.
 	LockBrokerJoinTokenCleanup AdvisoryLockKey = 0x5C100025
 
+	// LockTelegramSchema serializes the Telegram plugin's Postgres schema
+	// creation so replicas starting together against one database do not
+	// run the CREATE IF NOT EXISTS statements concurrently.
+	LockTelegramSchema AdvisoryLockKey = 0x5C100029
+
 	// LockNotificationOrphanGC guards the periodic removal of acknowledged
 	// notifications whose agent and subscription are both gone.
 	LockNotificationOrphanGC AdvisoryLockKey = 0x5C10002A

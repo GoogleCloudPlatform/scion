@@ -296,7 +296,7 @@ describe('Open terminals bulk actions', () => {
         sessions.set(id, session);
       }
     });
-    refreshSpy = vi.spyOn(registry.metadata, 'refresh').mockResolvedValue(undefined as never);
+    refreshSpy = vi.spyOn(registry.metadata, 'refresh').mockResolvedValue(undefined);
     await flush();
   }
 
