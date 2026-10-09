@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -513,4 +514,27 @@ func (s *Server) publishAgentStatusFresh(ctx context.Context, a *store.Agent) {
 		return
 	}
 	s.events.PublishAgentStatus(ctx, a)
+}
+
+// refuseQueuedStartForDelete is the delete check a queued start or restart
+// runs when the reconcile drain executes it (ptone/scion#2882): the intent
+// was recorded before the delete, so the start gate it passed then no longer
+// holds. It returns an error wrapping store.ErrDeleteInProgress when the row
+// is soft-deleted or deleteBlocksStart holds, so the dispatch row fails with
+// the delete_in_progress sentinel and the requester answers 409
+// delete_in_progress, as the synchronous start gate does. A failed delete
+// check also refuses: without the dispatch table an outstanding delete
+// intent cannot be ruled out.
+func (s *Server) refuseQueuedStartForDelete(ctx context.Context, a *store.Agent, op string) error {
+	if !a.DeletedAt.IsZero() {
+		return fmt.Errorf("queued %s not applied: agent %s is deleted: %w", op, a.ID, store.ErrDeleteInProgress)
+	}
+	blocked, err := s.deleteBlocksStart(ctx, a)
+	if err != nil {
+		return fmt.Errorf("queued %s not applied: could not check for a delete of agent %s: %w", op, a.ID, err)
+	}
+	if blocked {
+		return fmt.Errorf("queued %s not applied: a delete is in progress for agent %s: %w", op, a.ID, store.ErrDeleteInProgress)
+	}
+	return nil
 }
