@@ -277,10 +277,9 @@ func runBrokerJoin(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	hostname, err := os.Hostname()
-	if err != nil {
-		hostname = "local-host"
-	}
+	// The configured broker name (see 'register --broker-name'), else
+	// the hostname.
+	hostname := config.LocalBrokerName("local-host")
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
 	defer cancel()
