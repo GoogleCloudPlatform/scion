@@ -554,7 +554,7 @@ func syncLocalHarnessConfigToHub(hubCtx *HubContext, name, localPath, harnessTyp
 	if err != nil {
 		return err
 	}
-	return syncHarnessConfigToHub(hubCtx, name, localPath, scope, scopeID, harnessType)
+	return syncHarnessConfigToHub(hubCtx, name, localPath, scope, scopeID, harnessType, "")
 }
 
 // harnessConfigHubScope picks the Hub scope for harness-config sync, push and
@@ -608,7 +608,9 @@ func findHubHarnessConfig(ctx context.Context, hubCtx *HubContext, name, scope, 
 }
 
 // syncHarnessConfigToHub creates or updates a harness config in the Hub.
-func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID, harnessType string) error {
+// sourceURL, when non-empty, is recorded as the config's source URL
+// (metadata) at finalize; when empty, the stored source URL is left as is.
+func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID, harnessType, sourceURL string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -698,7 +700,10 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 			}
 			sort.Strings(removed)
 
-			if len(filesToUpload) == 0 && len(removed) == 0 {
+			// A new source URL still needs a finalize to record it, even
+			// when no file changed.
+			sourceChanged := sourceURL != "" && sourceURL != existing.SourceURL
+			if len(filesToUpload) == 0 && len(removed) == 0 && !sourceChanged {
 				fmt.Printf("Harness-config '%s' is already up to date.\n", name)
 				fmt.Printf("  Scope: %s\n", harnessConfigScopeLabel(scope, scopeID))
 				fmt.Printf("  ID: %s\n", hcID)
@@ -768,7 +773,7 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 
 	// Finalize
 	fmt.Println("Finalizing harness-config...")
-	hc, err := hubCtx.Client.HarnessConfigs().Finalize(ctx, hcID, manifest)
+	hc, err := hubCtx.Client.HarnessConfigs().Finalize(ctx, hcID, manifest, sourceURL)
 	if err != nil {
 		if !isHarnessConfigMissingFileError(err) {
 			return fmt.Errorf("failed to finalize: %w", err)
@@ -790,7 +795,7 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 			}
 			fmt.Printf("  Re-uploaded: %s\n", fileInfo.Path)
 		}
-		hc, err = hubCtx.Client.HarnessConfigs().Finalize(ctx, hcID, manifest)
+		hc, err = hubCtx.Client.HarnessConfigs().Finalize(ctx, hcID, manifest, sourceURL)
 		if err != nil {
 			return fmt.Errorf("failed to finalize after retry: %w", err)
 		}

@@ -184,7 +184,7 @@ describe('artifact page', () => {
     expect(preview).not.toBeNull();
     expect(preview!.content).toBe('# Hello');
     expect(urls).toContain(`/api/v1/artifacts/${ID}/versions/1/files/design.md?stream=1`);
-    expect(el.shadowRoot!.querySelector('h1')!.textContent).toBe('Design');
+    expect(el.shadowRoot!.querySelector('scion-detail-header')!.heading).toBe('Design');
   });
 
   it('renders text read-only in the code editor', async () => {
@@ -357,8 +357,8 @@ describe('artifact page', () => {
     const urls = mockFetch(meta, '# Old');
     const el = await mount(true, `/projects/p-1/artifacts/${ID}/v/1`);
     expect(urls[0]).toBe(`/api/v1/artifacts/${ID}/versions/1`);
-    const labels = Array.from(el.shadowRoot!.querySelectorAll('.actions sl-button')).map((b) =>
-      b.textContent!.trim()
+    const labels = Array.from(el.shadowRoot!.querySelectorAll('.header-actions sl-button')).map(
+      (b) => b.textContent!.trim()
     );
     expect(labels.some((l) => l.includes('Version v1'))).toBe(true);
     expect(labels.some((l) => l.includes('Edit'))).toBe(false);
@@ -366,8 +366,8 @@ describe('artifact page', () => {
 
     mockFetch(artifact('design.md', 'text/markdown'), '# Now');
     const cur = await mount(true);
-    const curLabels = Array.from(cur.shadowRoot!.querySelectorAll('.actions sl-button')).map((b) =>
-      b.textContent!.trim()
+    const curLabels = Array.from(cur.shadowRoot!.querySelectorAll('.header-actions sl-button')).map(
+      (b) => b.textContent!.trim()
     );
     expect(curLabels.some((l) => l.includes('Version v1 (current)'))).toBe(true);
     expect(curLabels.some((l) => l.includes('Edit'))).toBe(true);
@@ -432,8 +432,8 @@ describe('artifact page', () => {
       },
     });
     const el = await mount(true);
-    const editBtn = Array.from(el.shadowRoot!.querySelectorAll('.actions sl-button')).find((b) =>
-      b.textContent!.includes('Edit')
+    const editBtn = Array.from(el.shadowRoot!.querySelectorAll('.header-actions sl-button')).find(
+      (b) => b.textContent!.includes('Edit')
     ) as HTMLElement;
     editBtn.click();
     await el.updateComplete;
@@ -454,8 +454,8 @@ describe('artifact page', () => {
       el.shadowRoot!.querySelector('scion-code-editor[readonly]') ??
         el.shadowRoot!.querySelector('scion-artifact-markdown-frame')
     ).not.toBeNull();
-    const labels = Array.from(el.shadowRoot!.querySelectorAll('.actions sl-button')).map((b) =>
-      b.textContent!.trim()
+    const labels = Array.from(el.shadowRoot!.querySelectorAll('.header-actions sl-button')).map(
+      (b) => b.textContent!.trim()
     );
     expect(labels.some((l) => l.includes('Version v2 (current)'))).toBe(true);
   });
@@ -484,7 +484,7 @@ describe('artifact page', () => {
     });
     const el = await mount(true);
     (
-      Array.from(el.shadowRoot!.querySelectorAll('.actions sl-button')).find((b) =>
+      Array.from(el.shadowRoot!.querySelectorAll('.header-actions sl-button')).find((b) =>
         b.textContent!.includes('Edit')
       ) as HTMLElement
     ).click();
@@ -652,7 +652,7 @@ describe('artifact page', () => {
     await newerSecond;
     await settle();
     expect(priv.loading).toBe(false);
-    expect(el.shadowRoot!.querySelector('h1')!.textContent).toBe('Newer');
+    expect(el.shadowRoot!.querySelector('scion-detail-header')!.heading).toBe('Newer');
 
     // The earlier load answers last: the newer result and state stay.
     const olderLast = priv.load();
@@ -662,12 +662,12 @@ describe('artifact page', () => {
     await newerFirst;
     await settle();
     expect(priv.loading).toBe(false);
-    expect(el.shadowRoot!.querySelector('h1')!.textContent).toBe('Newest');
+    expect(el.shadowRoot!.querySelector('scion-detail-header')!.heading).toBe('Newest');
     release[2](meta('Stale'));
     await olderLast;
     await settle();
     expect(priv.loading).toBe(false);
-    expect(el.shadowRoot!.querySelector('h1')!.textContent).toBe('Newest');
+    expect(el.shadowRoot!.querySelector('scion-detail-header')!.heading).toBe('Newest');
   });
 
   it('keeps the newer view when an earlier mint answers last', async () => {
