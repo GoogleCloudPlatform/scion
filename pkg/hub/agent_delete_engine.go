@@ -850,6 +850,10 @@ func (e *deletionEngine) rollback(code, msg string) deletionOutcome {
 		Error:    &msg,
 		Derive: func(cur *store.Agent, f *store.DeletionFields) {
 			if prior.LaunchID != "" && (cur.LaunchState != store.LaunchStateActive || cur.LaunchID != prior.LaunchID) {
+				// C2: the launch has ended, so the phase=stopped this
+				// restores is published as a real transition, and a stopped
+				// lifecycle hook firing on this failed delete is intended
+				// (ptone/scion#2891).
 				stopped := string(state.PhaseStopped)
 				noActivity := ""
 				f.Phase = &stopped
