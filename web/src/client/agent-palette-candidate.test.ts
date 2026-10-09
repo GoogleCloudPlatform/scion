@@ -69,6 +69,21 @@ describe('agentRowText', () => {
     });
   });
 
+  it('shows a project slug or project name that equals the agent name', () => {
+    const coordinatorSlugs = (projectId: string): string | undefined =>
+      projectId === 'p-coordinator' ? 'coordinator' : undefined;
+    expect(
+      agentRowText(
+        { id: 'a0', name: 'coordinator', slug: 'coordinator', projectId: 'p-coordinator' },
+        coordinatorSlugs
+      ).secondaryLabel
+    ).toBe('coordinator');
+    expect(
+      agentRowText({ id: 'a0', name: 'coordinator', projectId: 'p-x', project: 'coordinator' })
+        .secondaryLabel
+    ).toBe('coordinator');
+  });
+
   it('shows the project name without a lookup', () => {
     const row = agentRowText({ id: 'a0', name: 'Coder', projectId: 'p-alpha', project: 'Alpha' });
     expect(row.secondaryLabel).toBe('Alpha');
