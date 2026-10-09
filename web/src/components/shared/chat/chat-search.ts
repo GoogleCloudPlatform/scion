@@ -467,52 +467,42 @@ export class ScionChatSearch extends LitElement {
         ></sl-icon-button>
       </div>
 
-      ${
-        hasConversation
-          ? html`
-              <div class="scope-toggle">
-                <button
-                  class="scope-btn ${!this.scopeAll ? 'active' : ''}"
-                  @click=${() => this.toggleScope(false)}
-                >
-                  In ${this.conversationName || 'this conversation'}
-                </button>
-                <button
-                  class="scope-btn ${this.scopeAll ? 'active' : ''}"
-                  @click=${() => this.toggleScope(true)}
-                >
-                  All conversations
-                </button>
-              </div>
-            `
-          : nothing
-      }
+      ${hasConversation
+        ? html`
+            <div class="scope-toggle">
+              <button
+                class="scope-btn ${!this.scopeAll ? 'active' : ''}"
+                @click=${() => this.toggleScope(false)}
+              >
+                In ${this.conversationName || 'this conversation'}
+              </button>
+              <button
+                class="scope-btn ${this.scopeAll ? 'active' : ''}"
+                @click=${() => this.toggleScope(true)}
+              >
+                All conversations
+              </button>
+            </div>
+          `
+        : nothing}
 
       <div class="results-list">
-        ${
-          this.loading
-            ? html`<div class="status-msg"><sl-spinner></sl-spinner></div>`
-            : this.noResults
-              ? html`<div class="status-msg">No messages found</div>`
-              : this.results.length === 0 && this.query.trim().length < 2
-                ? html`<div class="status-msg">Type at least 2 characters to search</div>`
-                : this.results.map((r) => this.renderResult(r))
-        }
-        ${
-          this.nextCursor && !this.loading
-            ? html`
-                <div class="load-more">
-                  ${
-                    this.loadingMore
-                      ? html`<sl-spinner></sl-spinner>`
-                      : html`<button @click=${() => void this.performSearch(true)}>
-                          Load more
-                        </button>`
-                  }
-                </div>
-              `
-            : nothing
-        }
+        ${this.loading
+          ? html`<div class="status-msg"><sl-spinner></sl-spinner></div>`
+          : this.noResults
+            ? html`<div class="status-msg">No messages found</div>`
+            : this.results.length === 0 && this.query.trim().length < 2
+              ? html`<div class="status-msg">Type at least 2 characters to search</div>`
+              : this.results.map((r) => this.renderResult(r))}
+        ${this.nextCursor && !this.loading
+          ? html`
+              <div class="load-more">
+                ${this.loadingMore
+                  ? html`<sl-spinner></sl-spinner>`
+                  : html`<button @click=${() => void this.performSearch(true)}>Load more</button>`}
+              </div>
+            `
+          : nothing}
       </div>
     `;
   }

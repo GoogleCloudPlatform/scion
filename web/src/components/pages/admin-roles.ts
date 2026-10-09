@@ -1224,7 +1224,8 @@ export class ScionPageAdminRoles extends LitElement {
             slot="icon"
             name=${hasErrors ? 'exclamation-triangle' : 'check-circle'}
           ></sl-icon>
-          Import complete: ${results.created} created, ${results.skipped} skipped${hasErrors
+          Import complete: ${results.created} created, ${results.skipped}
+          skipped${hasErrors
             ? `, ${results.errors.filter((e) => e.status === 'error').length} failed`
             : ''}.
         </sl-alert>

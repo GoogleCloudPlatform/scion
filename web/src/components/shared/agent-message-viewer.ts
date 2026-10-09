@@ -598,8 +598,8 @@ export class ScionAgentMessageViewer extends LitElement {
     const body = (payload['message_content'] as string) || '';
 
     // Cross-project provenance from log labels
-    const senderProjectId = (labels['sender_project_id'] as string) || undefined;
-    const recipientProjectId = (labels['recipient_project_id'] as string) || undefined;
+    const senderProjectId = labels['sender_project_id'] || undefined;
+    const recipientProjectId = labels['recipient_project_id'] || undefined;
     const crossProject =
       !!this.projectId &&
       ((!!senderProjectId && senderProjectId !== this.projectId) ||
@@ -974,7 +974,8 @@ export class ScionAgentMessageViewer extends LitElement {
               <div class="msg-badges">
                 ${msg.crossProject
                   ? html`<span class="msg-badge badge-cross-project"
-                      ><sl-icon name="globe" style="font-size:0.625rem"></sl-icon> cross-project</span
+                      ><sl-icon name="globe" style="font-size:0.625rem"></sl-icon>
+                      cross-project</span
                     >`
                   : nothing}
                 ${msg.msgType
