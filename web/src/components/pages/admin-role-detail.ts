@@ -152,7 +152,7 @@ export class ScionPageAdminRoleDetail extends LitElement {
       color: var(--scion-primary, #3b82f6);
     }
 
-    /* A long description with no spaces breaks instead of widening the
+    /* A long description with no spaces breaks instead of spilling past the
        shared header's title column. */
     .header-description {
       font-size: 0.875rem;
