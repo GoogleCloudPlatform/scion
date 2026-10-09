@@ -163,7 +163,7 @@ func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key s
 	target := &chatSendTarget{Key: key, wcs: wcs}
 	if strings.HasPrefix(key, "dm:") {
 		target.IsDM = true
-		if serr := authorizeDMKeyParticipant(ctx, user, key); serr != nil {
+		if serr := authorizeDMKeyParticipant(ctx, user, key, chatSendPath(key)); serr != nil {
 			return nil, serr
 		}
 		// The other participant must be a principal the caller may message.
@@ -211,15 +211,15 @@ func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key s
 // participants. Callers that need only these steps use it so their
 // responses are the same as authorizeChatSend's. A caller who is not a
 // participant gets the same answer as for a missing thread; the reason is
-// logged.
-func authorizeDMKeyParticipant(ctx context.Context, user UserIdentity, key string) *chatSendError {
+// logged against route, the path of the request being answered.
+func authorizeDMKeyParticipant(ctx context.Context, user UserIdentity, key, route string) *chatSendError {
 	// Validate DM key format before any further processing.
 	if !validDMKey(key) {
 		return chatSendBadRequest("invalid DM key format")
 	}
 	// DM key: verify the caller is one of the two participants.
 	if !isDMParticipant(key, user.ID()) {
-		logReferenceRefused(ctx, chatSendPath(key), "sender is not a participant of this DM", user)
+		logReferenceRefused(ctx, route, "sender is not a participant of this DM", user)
 		return chatSendRefusedAsNotFound("Thread")
 	}
 	return nil

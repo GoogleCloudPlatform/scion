@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -482,4 +483,29 @@ func TestScheduledSend_DM_ListRefusalsMatchLiveSend(t *testing.T) {
 		assert.Equal(t, live.Body.String(), list.Body.String(), key)
 		assert.Contains(t, []int{http.StatusNotFound, http.StatusBadRequest}, list.Code)
 	}
+}
+
+// The scheduled DM list refuses a non-participant with the reason logged
+// against the route that was called.
+func TestScheduledSend_DMListRefusalLogsItsRoute(t *testing.T) {
+	logs := captureSlog(t)
+	f := newScheduledSendFixture(t)
+	key := scheduledDMKey(t, "agent", f.agent.ID, "user", f.bob.ID)
+	path := scheduledConversationPath(key)
+
+	logs.Reset()
+	rec := doRequestAsUser(t, f.srv, f.alice, http.MethodGet, path, nil)
+	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+
+	var line string
+	for _, l := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(l, "reference refused") {
+			line = l
+		}
+	}
+	require.NotEmpty(t, line, "the refusal is logged")
+	assert.Contains(t, line, "not a participant of this DM")
+	assert.Contains(t, line, path, "the log names the route that was called")
+	assert.NotContains(t, line, "/messages")
+	assert.NotContains(t, rec.Body.String(), "participant", "the response carries no reason")
 }

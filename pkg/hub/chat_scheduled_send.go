@@ -408,7 +408,7 @@ func (s *Server) handleScheduledList(w http.ResponseWriter, r *http.Request, key
 		// nothing, since rows exist only under canonical keys (create runs
 		// the full check), and the rows are the caller's own, as for
 		// cancel and dismiss.
-		if serr := authorizeDMKeyParticipant(ctx, user, key); serr != nil {
+		if serr := authorizeDMKeyParticipant(ctx, user, key, logging.RequestPath(r)); serr != nil {
 			serr.write(w)
 			return
 		}
