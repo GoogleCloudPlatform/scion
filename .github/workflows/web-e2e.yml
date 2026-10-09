@@ -17,7 +17,7 @@
 # the nightly run covers everything else, such as browser drift.
 #
 # One matrix job per suite config under web/e2e/*/playwright.config.ts,
-# all in Chromium (the headless shell). Every suite serves the web sources
+# all in full Chromium. Every suite serves the web sources
 # itself (Vite dev server or an esbuild bundle). Only terminal-workspace also
 # needs a production build: some of its tests check the Shoelace icon files
 # in web/dist, so that job runs npm run build first.
@@ -116,24 +116,29 @@ jobs:
         working-directory: ./web
         run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
 
-      # Only the Chromium headless shell is installed, as in the
-      # chat-mobile-e2e job in ci.yml. Browser binaries are keyed on the
-      # Playwright version; the OS packages Chromium needs are not cacheable
-      # and are installed each run.
-      - name: Cache Playwright Chromium headless shell
+      # Full Chromium is installed, not the headless shell used by the
+      # chat-mobile-e2e job in ci.yml: the terminal-entrypoints test that
+      # Ctrl-clicks a terminal link expects the new tab to load the link's
+      # href, and under the headless shell that tab stays on about:blank.
+      # Browser binaries are keyed on the Playwright version; the key names
+      # full Chromium so a headless-shell-only cache is never restored. The
+      # OS packages Chromium needs are not cacheable and are installed each
+      # run.
+      - name: Cache Playwright Chromium
         id: browser-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-chromium-headless-shell-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+          key: playwright-chromium-full-${{ runner.os }}-${{ steps.playwright.outputs.version }}
 
-      # A normal install takes 1-2 minutes; the timeout makes a stalled
-      # download fail fast instead of using up the job timeout.
-      - name: Install Chromium headless shell
+      # A normal install of full Chromium takes about 1-3 minutes; the
+      # timeout makes a stalled download fail fast instead of using up the
+      # job timeout, with headroom for a slow but progressing download.
+      - name: Install Chromium
         if: steps.browser-cache.outputs.cache-hit != 'true'
-        timeout-minutes: 8
+        timeout-minutes: 10
         working-directory: ./web
-        run: npx playwright install --with-deps --only-shell chromium
+        run: npx playwright install --with-deps --no-shell chromium
 
       - name: Install Chromium system dependencies
         if: steps.browser-cache.outputs.cache-hit == 'true'
@@ -141,26 +146,22 @@ jobs:
         run: npx playwright install-deps chromium
 
       # CHROMIUM_EXECUTABLE / TERMINAL_OWNER_CHROMIUM point every suite at
-      # the Playwright headless shell. Four configs otherwise default to
-      # /usr/bin/chromium: agent-store-count, terminal-entrypoints and
-      # terminal-workspace read CHROMIUM_EXECUTABLE, while
-      # terminal-coordinator reads TERMINAL_OWNER_CHROMIUM (as does
-      # terminal-owner, which has no such default), so both variables are
-      # exported. chromium.executablePath() returns the full
-      # Chromium path (not installed here), so the headless shell path is
-      # derived from it: same browsers directory and revision, x64 Linux
-      # layout.
+      # the Playwright full Chromium binary, from chromium.executablePath().
+      # Four configs otherwise default to /usr/bin/chromium:
+      # agent-store-count, terminal-entrypoints and terminal-workspace read
+      # CHROMIUM_EXECUTABLE, while terminal-coordinator reads
+      # TERMINAL_OWNER_CHROMIUM (as does terminal-owner, which has no such
+      # default), so both variables are exported. The step stops with a
+      # clear error if the binary is missing, for example after a partial
+      # install or cache restore.
       - name: Run Playwright suite
         working-directory: ./web
         env:
           SUITE: ${{ matrix.suite }}
         run: |
-          FULL_CHROMIUM="$(node -p "require('playwright-core').chromium.executablePath()")"
-          CHROMIUM_DIR="$(dirname "$(dirname "$FULL_CHROMIUM")")"
-          CHROMIUM_REVISION="${CHROMIUM_DIR##*/chromium-}"
-          CHROMIUM_EXECUTABLE="$(dirname "$CHROMIUM_DIR")/chromium_headless_shell-${CHROMIUM_REVISION}/chrome-headless-shell-linux64/chrome-headless-shell"
+          CHROMIUM_EXECUTABLE="$(node -p "require('playwright-core').chromium.executablePath()")"
           if [ ! -x "$CHROMIUM_EXECUTABLE" ]; then
-            echo "::error::Chromium headless shell not found at $CHROMIUM_EXECUTABLE (derived from $FULL_CHROMIUM)"
+            echo "::error::Playwright Chromium not found at $CHROMIUM_EXECUTABLE (expected from npx playwright install --no-shell chromium)"
             exit 1
           fi
           export CHROMIUM_EXECUTABLE
