@@ -7,7 +7,8 @@
       "fields": [
         "isAdmin:boolean",
         "isSuperAdmin:boolean",
-        "permissions:array"
+        "permissions:array",
+        "permissions[]:string"
       ]
     },
     "/api/v1/chat/dms": {
@@ -46,6 +47,7 @@
       "status": 200,
       "fields": [
         "_capabilities.actions:array",
+        "_capabilities.actions[]:string",
         "_capabilities:object",
         "agentCount:number",
         "created:string",
@@ -65,12 +67,15 @@
       "status": 200,
       "fields": [
         "_capabilities.actions:array",
+        "_capabilities.actions[]:string",
         "_capabilities:object",
         "agents:array",
         "agents[]._capabilities.actions:array",
+        "agents[]._capabilities.actions[]:string",
         "agents[]._capabilities:object",
         "agents[].activity:string",
         "agents[].ancestry:array",
+        "agents[].ancestry[]:string",
         "agents[].appliedConfig.agentRole:string",
         "agents[].appliedConfig.creatorName:string",
         "agents[].appliedConfig.env.SCION_AGENT_SEQ:string",
@@ -121,12 +126,15 @@
       "status": 200,
       "fields": [
         "_capabilities.actions:array",
+        "_capabilities.actions[]:string",
         "_capabilities:object",
         "agents:array",
         "agents[]._capabilities.actions:array",
+        "agents[]._capabilities.actions[]:string",
         "agents[]._capabilities:object",
         "agents[].activity:string",
         "agents[].ancestry:array",
+        "agents[].ancestry[]:string",
         "agents[].appliedConfig.agentRole:string",
         "agents[].appliedConfig.creatorName:string",
         "agents[].appliedConfig.env.SCION_AGENT_SEQ:string",
@@ -175,6 +183,7 @@
         "serverTime:string",
         "sort:string",
         "stats.agents:array",
+        "stats.agents[][]:string",
         "stats.running:number",
         "stats.total:number",
         "stats:object",
@@ -213,9 +222,11 @@
       "status": 200,
       "fields": [
         "_capabilities.actions:array",
+        "_capabilities.actions[]:string",
         "_capabilities:object",
         "projects:array",
         "projects[]._capabilities.actions:array",
+        "projects[]._capabilities.actions[]:string",
         "projects[]._capabilities:object",
         "projects[].agentCount:number",
         "projects[].created:string",
