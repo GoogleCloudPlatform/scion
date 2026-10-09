@@ -359,3 +359,69 @@ describe('scion-page-profile-settings — display timezone', () => {
     expect(await pickerDisplayText(element)).toBe('Auto');
   });
 });
+
+describe('scion-page-profile-settings — view mode shortcuts', () => {
+  let element: AnyEl = null;
+
+  beforeAll(async () => {
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler({})));
+    await import('./profile-settings.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  function shortcutsSwitch(): AnyEl {
+    return element.shadowRoot.querySelector('.view-mode-shortcuts-switch');
+  }
+
+  async function toggleTo(checked: boolean): Promise<void> {
+    const sw = shortcutsSwitch();
+    sw.checked = checked;
+    sw.dispatchEvent(new CustomEvent('sl-change', { bubbles: true, composed: true }));
+    await element.updateComplete;
+  }
+
+  it('shows the toggle on by default', async () => {
+    element = await createComponent(createFetchHandler({}));
+
+    expect(shadowText(element)).toContain('View mode shortcuts');
+    expect(shortcutsSwitch().hasAttribute('checked')).toBe(true);
+  });
+
+  it('stores the preference when turned off and back on', async () => {
+    const { areViewModeShortcutsEnabled } = await import('../../client/view-mode-shortcuts.js');
+    element = await createComponent(createFetchHandler({}));
+
+    await toggleTo(false);
+    expect(areViewModeShortcutsEnabled()).toBe(false);
+    expect(shortcutsSwitch().hasAttribute('checked')).toBe(false);
+
+    await toggleTo(true);
+    expect(areViewModeShortcutsEnabled()).toBe(true);
+  });
+
+  it('reflects a stored off preference on load', async () => {
+    const { setViewModeShortcutsEnabled } = await import('../../client/view-mode-shortcuts.js');
+    setViewModeShortcutsEnabled(false);
+    element = await createComponent(createFetchHandler({}));
+
+    expect(shortcutsSwitch().hasAttribute('checked')).toBe(false);
+  });
+
+  it('makes no request when toggled', async () => {
+    element = await createComponent(createFetchHandler({}));
+    const before = (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    await toggleTo(false);
+    await settle(element);
+
+    expect((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(
+      before
+    );
+  });
+});

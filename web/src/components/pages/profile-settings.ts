@@ -35,6 +35,11 @@ import {
   type PushPermissionState,
 } from '../../client/push-preference.js';
 import { isChimeEnabled, setChimeEnabled } from '../../utils/audio.js';
+import {
+  areViewModeShortcutsEnabled,
+  setViewModeShortcutsEnabled,
+} from '../../client/view-mode-shortcuts.js';
+import { isMacPlatform } from '../../utils/platform.js';
 import { setPreferredTimeZone, browserTimeZone } from '../../utils/time.js';
 import '../shared/subscription-manager.js';
 import '../shared/timezone-picker.js';
@@ -50,6 +55,9 @@ export class ScionPageProfileSettings extends LitElement {
 
   @state()
   private _chimeEnabled = isChimeEnabled();
+
+  @state()
+  private _viewModeShortcutsEnabled = areViewModeShortcutsEnabled();
 
   @state()
   private _gcloudADCAvailable = false;
@@ -357,6 +365,12 @@ export class ScionPageProfileSettings extends LitElement {
     this._chimeEnabled = isChimeEnabled();
   }
 
+  private _handleViewModeShortcutsToggle(e: Event): void {
+    const target = e.target as HTMLInputElement & { checked: boolean };
+    setViewModeShortcutsEnabled(target.checked);
+    this._viewModeShortcutsEnabled = areViewModeShortcutsEnabled();
+  }
+
   private async _handleADCToggle(e: Event): Promise<void> {
     const target = e.target as HTMLInputElement & { checked: boolean };
     const enabled = target.checked;
@@ -511,6 +525,31 @@ export class ScionPageProfileSettings extends LitElement {
               </div>
             `
           : nothing}
+      </div>
+
+      <div class="settings-card">
+        <h2 class="section-title">
+          <sl-icon name="keyboard"></sl-icon>
+          Keyboard shortcuts
+        </h2>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <p class="setting-label">View mode shortcuts</p>
+            <p class="setting-description">
+              Switch between Dashboard, Chat and Terminal with
+              ${isMacPlatform() ? '⌘1, ⌘2 and ⌘3' : 'Ctrl+1, Ctrl+2 and Ctrl+3'}. When off, these
+              keys keep their usual browser behaviour.
+            </p>
+          </div>
+          <div class="setting-control">
+            <sl-switch
+              class="view-mode-shortcuts-switch"
+              ?checked=${this._viewModeShortcutsEnabled}
+              @sl-change=${this._handleViewModeShortcutsToggle}
+            ></sl-switch>
+          </div>
+        </div>
       </div>
 
       ${this._gcloudADCAvailable && this._isWorkstation
