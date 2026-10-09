@@ -187,8 +187,13 @@ func waitForAgentLaunch(ctx context.Context, o launchWaitOptions) (*hubclient.Ag
 		getCancel()
 		if err != nil && last == nil && o.Accepted && isUnreadableStatusError(err) {
 			a, err = retryUnreadableStatus(fetchCtx, o.Get, err)
-			if err != nil && isUnreadableStatusError(err) && fetchCtx.Err() != nil {
-				return false, nil // the wait loop reports the timeout or interrupt
+			// When the retry is cut short, the wait loop reports the
+			// interrupt or timeout, except for a user caller whose wait
+			// budget ran out: its 403 or 404 is a definite answer and is
+			// reported below, not as a launch still in progress.
+			if err != nil && isUnreadableStatusError(err) && fetchCtx.Err() != nil &&
+				(ctx.Err() != nil || config.IsHubManagedAgent()) {
+				return false, nil
 			}
 		}
 		// A not-found after the agent has been read in this wait is
@@ -196,10 +201,14 @@ func waitForAgentLaunch(ctx context.Context, o launchWaitOptions) (*hubclient.Ag
 		// single not-found is not enough for that: it is confirmed by
 		// retrying for launchUnreadableGrace, and any successful read in
 		// that window means the agent is still there and the wait goes on.
+		// If the wait budget runs out first, the not-found that lasted to
+		// the end of the wait is reported below as a deletion, not as a
+		// launch still in progress; only an interrupt is left to the wait
+		// loop.
 		if err != nil && last != nil && apiclient.IsNotFoundError(err) {
 			a, err = retryUnreadableStatus(fetchCtx, o.Get, err)
-			if err != nil && isUnreadableStatusError(err) && fetchCtx.Err() != nil {
-				return false, nil // the wait loop reports the timeout or interrupt
+			if err != nil && isUnreadableStatusError(err) && ctx.Err() != nil {
+				return false, nil // the wait loop reports the interrupt
 			}
 		}
 		// An agent caller gets the same 404 for an agent it may not read as
@@ -408,7 +417,7 @@ func isUnreadableStatusError(err error) bool {
 // backoff, for launchUnreadableGrace; the last
 // delay is shortened to end at the grace. It returns the first success, the
 // first other error, or the last unreadable-status error when the grace
-// runs out or ctx ends.
+// runs out or ctx ends (also when ctx ends during a read).
 func retryUnreadableStatus(ctx context.Context, get func(context.Context) (*hubclient.Agent, error), err error) (*hubclient.Agent, error) {
 	deadline := launchNow().Add(launchUnreadableGrace)
 	delay := launchUnreadableBackoff
@@ -425,6 +434,9 @@ func retryUnreadableStatus(ctx context.Context, get func(context.Context) (*hubc
 		getCtx, getCancel := context.WithTimeout(ctx, launchFetchTimeout)
 		a, getErr := get(getCtx)
 		getCancel()
+		if getErr != nil && ctx.Err() != nil {
+			return nil, err // a read cut short by ctx says nothing new
+		}
 		if getErr == nil || !isUnreadableStatusError(getErr) {
 			return a, getErr
 		}

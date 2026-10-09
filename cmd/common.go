@@ -1549,6 +1549,9 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 	// launchReportable is false when finalAgent's launch is not the start
 	// being reported (the create answer predates a workspace finalize).
 	launchReportable := true
+	// statusRead is false when the wait never read the agent, so only the
+	// create answer is known.
+	statusRead := true
 	if needWait {
 		statusf("Waiting for agent '%s' to start...\n", agentName)
 		var progress io.Writer
@@ -1591,8 +1594,9 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 			notFollowed = note
 			if waited != nil {
 				finalAgent = waited
-			} else if workspaceFinalized {
-				launchReportable = false
+			} else {
+				statusRead = false
+				launchReportable = !workspaceFinalized
 			}
 		default:
 			for _, w := range textWarnings {
@@ -1604,7 +1608,7 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 
 	// A status that was never read leaves only the create answer, whose
 	// phase predates the launch.
-	phaseKnown := notFollowed == "" || finalAgent != resp.Agent
+	phaseKnown := statusRead
 	// After a finalize without waiting, the create answer predates the
 	// dispatched start; report the agent's current state instead.
 	if workspaceFinalized && !needWait {
