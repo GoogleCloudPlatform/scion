@@ -758,3 +758,31 @@ func TestRun_KeysDuringRedial(t *testing.T) {
 		})
 	}
 }
+
+// TestRun_CancelDuringRedialDialError: a dial that fails because of the
+// cancel is reported as the cancel, whichever of the two the client sees
+// first.
+func TestRun_CancelDuringRedialDialError(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		s := newPTYScriptServer(t, nil, func(idx int, s *ptyScriptServer, conn *websocket.Conn) {
+			sendData(conn)
+			sendClose(conn, wsprotocol.ClosePTYUpstreamTimeout, "")
+		})
+		ft := &fakeTiming{}
+		sc := newScriptedClient(t, s, ft)
+		dialing := make(chan struct{})
+		sc.redialFn = func(ctx context.Context) (*websocket.Conn, error) {
+			close(dialing)
+			<-ctx.Done()
+			return nil, fmt.Errorf("dial: %w", ctx.Err())
+		}
+		ch := sc.runAsync()
+		waitSignal(t, dialing, "the redial")
+		sc.cancel()
+		err := waitRun(t, ch)
+		require.ErrorIs(t, err, context.Canceled)
+		var re *PTYReconnectError
+		require.False(t, errors.As(err, &re), "iteration %d: got %v", i, err)
+		sc.assertRestoredOnce(t)
+	}
+}

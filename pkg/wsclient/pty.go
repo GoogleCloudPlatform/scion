@@ -192,6 +192,8 @@ type PTYClient struct {
 	termSize func() (cols, rows int, ok bool)
 	// restoreTerm restores the terminal state, like term.Restore.
 	restoreTerm func(fd int, state *term.State) error
+	// redialFn opens a replacement connection; NewPTYClient sets it to dial.
+	redialFn func(ctx context.Context) (*websocket.Conn, error)
 }
 
 // NewPTYClient creates a new PTY client.
@@ -207,6 +209,7 @@ func NewPTYClient(config PTYClientConfig) *PTYClient {
 		restoreTerm: term.Restore,
 	}
 	c.termSize = c.localTermSize
+	c.redialFn = c.dial
 	return c
 }
 
@@ -601,11 +604,16 @@ func (c *PTYClient) reconnect(delay time.Duration, stdinCh <-chan stdinResult, c
 			}
 			results = make(chan dialResult, 1)
 			go func(results chan<- dialResult) {
-				conn, err := c.dial(c.ctx)
+				conn, err := c.redialFn(c.ctx)
 				results <- dialResult{conn, err}
 			}(results)
 		case r := <-results:
 			if r.err != nil {
+				// A dial cut short by the cancel can report its error
+				// before the select sees ctx.Done: report the cancel.
+				if c.ctx.Err() != nil {
+					return nil, true, c.ctx.Err()
+				}
 				return nil, false, r.err
 			}
 			c.writeMu.Lock()
