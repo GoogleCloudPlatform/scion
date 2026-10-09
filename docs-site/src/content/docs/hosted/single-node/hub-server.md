@@ -29,9 +29,11 @@ SESSION_SECRET=\${SESSION_SECRET} scion --global server start --foreground --pro
 Pass the session secret via the `SESSION_SECRET` environment variable (e.g., through a systemd `EnvironmentFile`), **not** via the `--session-secret` CLI flag. CLI arguments are visible to any local user via `ps(1)` and `/proc/pid/cmdline`.
 :::
 
-This is often best managed through something like systemd
-
+:::note[Debug logging]
 Debug logging is off by default and should stay off in production. To troubleshoot, turn it on temporarily: add `--debug` to the startup command, or set `SCION_LOG_LEVEL=debug` in the Hub's environment, then restart the Hub. When you are done, remove the flag or variable and restart again.
+:::
+
+This is often best managed through something like systemd
 
 ### Hub vs. Broker Processes
 While they can run in the same process—known as **Combo Mode** (the default for `scion server start` with no flags, which runs in workstation mode)—they serve distinct roles:
