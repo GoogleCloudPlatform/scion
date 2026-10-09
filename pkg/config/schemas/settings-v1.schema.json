@@ -83,7 +83,6 @@
         "log_format": {
           "type": "string",
           "enum": ["text", "json"],
-          "default": "text",
           "description": "Deprecated and ignored: accepted so existing settings files still load, but nothing reads it. The log output format is chosen by the logging setup at startup (SCION_LOG_GCP selects Cloud Logging JSON). There is no environment-variable override.",
           "x-since": "1"
         },
