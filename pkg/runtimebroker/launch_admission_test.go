@@ -694,7 +694,7 @@ func TestAsyncCreate_AbortRecordedDuringWaitSuperseded_NoMarkerNoStart(t *testin
 	// (at admission and in the download) and a launch that wrongly reaches
 	// the download calls the fake this test looks at.
 	srv.config.WorktreeBase = t.TempDir()
-	fake := installFakeWorkspaceSync(t, errors.New("fake sync failure"))
+	fake := installFakeWorkspaceSync(t, srv, errors.New("fake sync failure"))
 
 	key := launchKey{Slug: "agent-guard-c"}
 	oldRec := newLaunchRecord("L-old-for-guard-c", "agent-old-for-guard-c", store.LaunchKindCreate, "", time.Now().Add(time.Hour), func() {})
@@ -1246,8 +1246,9 @@ func TestAsyncCreate_ClaimLocallyCancelled_SendsNoTerminal(t *testing.T) {
 	}
 }
 
-// fakeWorkspaceSync replaces syncWorkspaceFromGCS for the test, recording
-// each call's bucket and storage path and returning err.
+// fakeWorkspaceSync replaces srv's workspace download for the test (through
+// SetWorkspaceDownloader, so per Server), recording each call's bucket and
+// storage path and returning err.
 type fakeWorkspaceSync struct {
 	mu    sync.Mutex
 	calls []fakeWorkspaceSyncCall
@@ -1255,17 +1256,15 @@ type fakeWorkspaceSync struct {
 
 type fakeWorkspaceSyncCall struct{ bucket, prefix, dest string }
 
-func installFakeWorkspaceSync(t *testing.T, err error) *fakeWorkspaceSync {
+func installFakeWorkspaceSync(t *testing.T, srv *Server, err error) *fakeWorkspaceSync {
 	t.Helper()
 	f := &fakeWorkspaceSync{}
-	prev := syncWorkspaceFromGCS
-	syncWorkspaceFromGCS = func(_ context.Context, bucket, prefix, dest string) error {
+	srv.SetWorkspaceDownloader(func(_ context.Context, bucket, prefix, dest string) error {
 		f.mu.Lock()
 		f.calls = append(f.calls, fakeWorkspaceSyncCall{bucket, prefix, dest})
 		f.mu.Unlock()
 		return err
-	}
-	t.Cleanup(func() { syncWorkspaceFromGCS = prev })
+	})
 	return f
 }
 
@@ -1305,7 +1304,7 @@ func TestCreateAgent_SyncGCSNoBucket_Returns422(t *testing.T) {
 	// A real WorktreeBase, so the workspace directory passes validation and
 	// the download reaches the bucket check.
 	srv.config.WorktreeBase = t.TempDir()
-	fake := installFakeWorkspaceSync(t, nil)
+	fake := installFakeWorkspaceSync(t, srv, nil)
 
 	w := postCreate(t, srv, map[string]any{
 		"name": "agent-sync-gcs", "workspaceStoragePath": "some/path",
@@ -1331,7 +1330,7 @@ func TestCreateAgent_SyncGCSDownload_UsesRequestBucket(t *testing.T) {
 	mgr := newAsyncManager()
 	srv, _ := newAsyncTestServer(t, mgr)
 	srv.config.WorktreeBase = t.TempDir()
-	fake := installFakeWorkspaceSync(t, nil)
+	fake := installFakeWorkspaceSync(t, srv, nil)
 
 	w := postCreate(t, srv, map[string]any{
 		"name": "agent-sync-gcs-bucket", "workspaceStoragePath": "some/path",
@@ -1360,7 +1359,7 @@ func TestCreateAgent_SyncGCSDownloadFailure_PinsFixedText(t *testing.T) {
 	srv, _ := newAsyncTestServer(t, mgr)
 	srv.config.WorktreeBase = t.TempDir()
 	srv.config.StorageBucket = "broker-bucket"
-	fake := installFakeWorkspaceSync(t, errors.New("fake sync failure"))
+	fake := installFakeWorkspaceSync(t, srv, errors.New("fake sync failure"))
 
 	w := postCreate(t, srv, map[string]any{
 		"name": "agent-sync-gcs-fail", "workspaceStoragePath": "some/path",
@@ -1488,7 +1487,7 @@ func TestAsyncCreate_GCSDownloadRunsOnlyOnceInRunLaunch(t *testing.T) {
 	// A real WorktreeBase, so runLaunch's download passes workspace
 	// directory validation and reaches the (fake, failing) download.
 	srv.config.WorktreeBase = t.TempDir()
-	fake := installFakeWorkspaceSync(t, errors.New("fake sync failure"))
+	fake := installFakeWorkspaceSync(t, srv, errors.New("fake sync failure"))
 
 	var mu sync.Mutex
 	var failedMessage string
@@ -1540,7 +1539,7 @@ func TestAsyncCreate_NoWorkspaceBucket_Returns422BeforeAccept(t *testing.T) {
 	mgr := newAsyncManager()
 	srv, rtb := newAsyncTestServer(t, mgr)
 	srv.config.WorktreeBase = t.TempDir()
-	fake := installFakeWorkspaceSync(t, nil)
+	fake := installFakeWorkspaceSync(t, srv, nil)
 
 	w := postCreate(t, srv, map[string]any{
 		"name": "agent-async-no-bucket", "asyncLaunch": true, "launchId": "L-async-no-bucket",
@@ -1575,7 +1574,7 @@ func TestAsyncCreate_NoRequestBucket_UsesBrokerStorageBucket(t *testing.T) {
 	srv, rtb := newAsyncTestServer(t, mgr)
 	srv.config.WorktreeBase = t.TempDir()
 	srv.config.StorageBucket = "broker-bucket"
-	fake := installFakeWorkspaceSync(t, errors.New("fake sync failure"))
+	fake := installFakeWorkspaceSync(t, srv, errors.New("fake sync failure"))
 
 	var mu sync.Mutex
 	var failedMessage string
@@ -1854,7 +1853,7 @@ func TestAsyncCreate_HubManagedGCSBootstrap_NotAmbiguous(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	mgr := newAsyncManager()
 	srv, rtb := newAsyncTestServer(t, mgr)
-	installFakeWorkspaceSync(t, errors.New("fake sync failure"))
+	installFakeWorkspaceSync(t, srv, errors.New("fake sync failure"))
 
 	var mu sync.Mutex
 	var failedMessage string
