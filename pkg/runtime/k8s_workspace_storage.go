@@ -90,10 +90,9 @@ func isLocalSlashPath(p string) bool {
 // other NFSSubPath that is not <subPathRoot>/<projectID>/workspace is an
 // error (see NFSProvisionStateSubPath), so the pod is not created.
 //
-// Both the provisioning container and the wait-for-sentinel container get
-// it: the waiter must see the sentinel where the provisioner writes it. The
-// agent container never gets it, and the project directory itself is never
-// mounted (it holds every agent's directory).
+// Only the provisioning init container gets it. The agent container never
+// gets it, and the project directory itself is never mounted (it holds every
+// agent's directory).
 func nfsProvisionStateInitMount(config RunConfig, nfsAgentDir bool) (*corev1.VolumeMount, *corev1.EnvVar, error) {
 	// An empty NFSSubPath mounts the claim's root as the workspace: there is
 	// no project directory to put a sibling in, so the sentinel stays in the

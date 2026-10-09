@@ -48,6 +48,7 @@ import { showConfirm } from '../shared/confirm-dialog.js';
 import { START_BLOCKED_BY_DELETE_MESSAGE } from '../../shared/agent-deletion.js';
 import { stateManager, StateManager } from '../../client/state.js';
 import type { Agent } from '../../shared/types.js';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 /** happy-dom has no EventSource; setScope opens one. */
 class FakeEventSource extends EventTarget {
@@ -137,7 +138,7 @@ describe('scion-page-agents live updates (agents-changed -> mergeChanged)', () =
     vi.stubGlobal(
       'fetch',
       vi.fn((input: string | URL | Request) => {
-        requests.push(typeof input === 'string' ? input : input.toString());
+        requests.push(requestUrl(input));
         return Promise.resolve(jsonResponse({ agents: initial, _capabilities: { actions: [] } }));
       })
     );
@@ -295,7 +296,7 @@ describe('scion-page-agents live updates (agents-changed -> mergeChanged)', () =
     vi.stubGlobal(
       'fetch',
       vi.fn((input: string | URL | Request) => {
-        const url = typeof input === 'string' ? input : input.toString();
+        const url = requestUrl(input);
         if (url.includes('scope=mine')) {
           return Promise.resolve(jsonResponse({ agents: initial, _capabilities: { actions: [] } }));
         }
@@ -464,7 +465,7 @@ describe('scion-page-agents live updates (agents-changed -> mergeChanged)', () =
         'fetch',
         vi.fn((input: string | URL | Request, init?: RequestInit) => {
           if (init?.method === 'DELETE') {
-            const url = typeof input === 'string' ? input : input.toString();
+            const url = requestUrl(input);
             deletes.push(url);
             if (!url.includes('force=true')) {
               return Promise.resolve(new Response('{}', { status: 502 }));
@@ -571,7 +572,7 @@ describe('scion-page-agents live updates (agents-changed -> mergeChanged)', () =
       vi.stubGlobal(
         'fetch',
         vi.fn((input: string | URL | Request, init?: RequestInit) => {
-          const url = typeof input === 'string' ? input : input.toString();
+          const url = requestUrl(input);
           if (init?.method && init.method !== 'GET') {
             mutations.push(`${init.method} ${url}`);
             return Promise.resolve(
@@ -851,7 +852,7 @@ describe('scion-page-agents live updates (agents-changed -> mergeChanged)', () =
       vi.stubGlobal(
         'fetch',
         vi.fn((input: string | URL | Request) => {
-          urls.push(typeof input === 'string' ? input : input.toString());
+          urls.push(requestUrl(input));
           return Promise.resolve(
             jsonResponse({
               agents: [actionable('a1', { phase: 'stopping' }), actionable('a2')],
