@@ -765,9 +765,12 @@ jobs:
         # Allow header (reporting only)" job, folded in here to save a runner
         # spin-up (ptone/scion#2845); the logic now lives in
         # hack/check-method-not-allowed.sh and covers pkg/hub and
-        # pkg/runtimebroker. It is a step, not a separate check, so it adds no
-        # check name. !cancelled() runs it even when Run shellcheck above
-        # failed, so both results show on one run.
+        # pkg/runtimebroker (bare helper calls) plus pkg/sciontool,
+        # extras/docs-agent and extras/scion-telegram (direct
+        # StatusMethodNotAllowed writes without Allow, ptone/scion#2858).
+        # It is a step, not a separate check, so it adds no check name.
+        # !cancelled() runs it even when Run shellcheck above failed, so
+        # both results show on one run.
         #
         # Invoked directly rather than via `make check-method-not-allowed`,
         # for the same reason as Check Authorization Guards in Build & Test:
@@ -799,7 +802,7 @@ jobs:
           set -e
           case "$rc" in
             0) ;;
-            1) echo "::error title=405 Allow header::Bare MethodNotAllowed(w) calls found: a 405 must carry an Allow header (RFC 9110 15.5.6). Pass the accepted methods, e.g. MethodNotAllowed(w, http.MethodGet). The file:line list is in the step log above." ;;
+            1) echo "::error title=405 Allow header::405 responses without an Allow header found (RFC 9110 15.5.6): pass the accepted methods to MethodNotAllowed, e.g. MethodNotAllowed(w, http.MethodGet), or set w.Header().Set(\"Allow\", ...) before writing StatusMethodNotAllowed. The file:line list is in the step log above." ;;
             *) echo "::error title=405 Allow header NOT checked::check-method-not-allowed could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure, not a statement about the codebase." ;;
           esac
           exit "$rc"

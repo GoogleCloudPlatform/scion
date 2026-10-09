@@ -522,7 +522,7 @@ check-authorization-catalog:
 check-route-authz-manifest:
 	@./hack/check-route-authz-manifest.sh
 
-## check-method-not-allowed: Flag bare MethodNotAllowed(w) calls (405 without Allow) in pkg/hub and pkg/runtimebroker
+## check-method-not-allowed: Flag 405 responses without Allow (bare MethodNotAllowed(w) in pkg/hub and pkg/runtimebroker; direct StatusMethodNotAllowed writes in pkg/sciontool and extras)
 # NOTE: same caveat as check-authz-guards above -- make collapses the
 # script's exit 1 (violations) and exit 3/4 (nothing was analysed) into one
 # code. CI invokes the script directly to tell those apart.
