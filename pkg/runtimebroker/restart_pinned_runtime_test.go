@@ -15,12 +15,15 @@
 package runtimebroker
 
 import (
+	"context"
 	"net/http"
 	"path/filepath"
 	"slices"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // These tests pin that a restart of an agent with no saved profile starts it
@@ -80,6 +83,92 @@ func TestRestartAgent_NoSavedProfile_StartsOnFoundRuntime(t *testing.T) {
 	}
 	if got := env["SCION_HUB_ENDPOINT"]; got != lifecycleBridgedHubEP {
 		t.Errorf("SCION_HUB_ENDPOINT = %q, want %q (classified for docker)", got, lifecycleBridgedHubEP)
+	}
+}
+
+// TestRestartAgent_NoSavedProfile_UnknownForceRuntimeKeepsPin: a
+// ForceRuntime that names no registered runtime is ignored by runtime
+// resolution, so it does not drop the pin either: the agent still starts on
+// the runtime it was found on, not on the active profile's runtime.
+func TestRestartAgent_NoSavedProfile_UnknownForceRuntimeKeepsPin(t *testing.T) {
+	f := newLifecycleFixture(t)
+	f.srv.config.ForceRuntime = "no-such-runtime"
+	const name = "pinned-forced-agent"
+	projectPath := newActiveK8sProject(t)
+	f.defaultMgr.agents = []api.AgentInfo{lifecycleAgent(name, projectPath, "")}
+
+	w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/restart", map[string]any{
+		"hubEndpoint": lifecycleHubEndpoint,
+	})
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	if f.defaultMgr.stopCalls != 1 {
+		t.Errorf("default runtime stop calls = %d, want 1", f.defaultMgr.stopCalls)
+	}
+	if f.defaultMgr.StartCalls() != 1 {
+		t.Errorf("default runtime Start calls = %d, want 1", f.defaultMgr.StartCalls())
+	}
+	if runs, _ := f.k8sRun(); runs != 0 {
+		t.Errorf("kubernetes runtime runs = %d, want 0", runs)
+	}
+	if got := f.defaultMgr.LastStartOpts().Env["SCION_HUB_ENDPOINT"]; got != lifecycleBridgedHubEP {
+		t.Errorf("SCION_HUB_ENDPOINT = %q, want %q (classified for docker)", got, lifecycleBridgedHubEP)
+	}
+}
+
+// TestRestartAgent_NoSavedProfile_StartsOnFoundAuxRuntime is the reverse
+// direction: an agent found on the auxiliary kubernetes runtime with no
+// saved profile, in a project whose active profile selects docker, is
+// stopped and started on kubernetes and classified for it (hub endpoint
+// not bridged).
+func TestRestartAgent_NoSavedProfile_StartsOnFoundAuxRuntime(t *testing.T) {
+	f := newLifecycleFixture(t)
+	const name = "pinned-aux-agent"
+	listed := lifecycleAgent(name, f.projectPath, "")
+	var k8sStops int
+	f.k8sRuntime.ListFunc = func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+		if n, ok := labelFilter["scion.name"]; ok && n != name {
+			return nil, nil
+		}
+		return []api.AgentInfo{listed}, nil
+	}
+	f.k8sRuntime.StopFunc = func(ctx context.Context, ref runtime.RunRef) error {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		k8sStops++
+		return nil
+	}
+	// A real manager over the kubernetes runtime, so a start on it shows
+	// up as a kubernetes run.
+	f.srv.auxiliaryRuntimesMu.Lock()
+	f.srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: f.k8sRuntime, Manager: agent.NewManager(f.k8sRuntime)}
+	f.srv.auxiliaryRuntimesMu.Unlock()
+
+	w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/restart", map[string]any{
+		"hubEndpoint": lifecycleHubEndpoint,
+	})
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	f.mu.Lock()
+	stops := k8sStops
+	f.mu.Unlock()
+	if stops != 1 {
+		t.Errorf("kubernetes runtime stops = %d, want 1", stops)
+	}
+	if f.defaultMgr.stopCalls != 0 {
+		t.Errorf("default runtime stop calls = %d, want 0", f.defaultMgr.stopCalls)
+	}
+	if f.defaultMgr.StartCalls() != 0 {
+		t.Errorf("default runtime Start calls = %d, want 0", f.defaultMgr.StartCalls())
+	}
+	runs, env := f.k8sRun()
+	if runs != 1 {
+		t.Fatalf("kubernetes runtime runs = %d, want 1", runs)
+	}
+	if !slices.Contains(env, "SCION_HUB_ENDPOINT="+lifecycleHubEndpoint) {
+		t.Errorf("want SCION_HUB_ENDPOINT=%s (classified for kubernetes), got env %v", lifecycleHubEndpoint, env)
 	}
 }
 

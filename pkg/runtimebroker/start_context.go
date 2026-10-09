@@ -51,8 +51,9 @@ type startContext struct {
 	Manager      agent.Manager
 
 	// RuntimeType is the runtime type this dispatch resolved to through
-	// resolveManagerForOpts (dispatchRuntimeType), which can differ from the
-	// broker's default runtime. The create path reports it to the hub.
+	// resolveExistingAgentManager (dispatchRuntimeType; pinned to the
+	// found-on runtime on restart), which can differ from the broker's
+	// default runtime. The create path reports it to the hub.
 	RuntimeType string
 
 	// EnvClassifications is the merged provenance map: what the hub sent,
@@ -407,9 +408,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// the broker's default: a broker can register more than one profile
 	// (e.g. both a "docker" and a "kubernetes" profile), and a dispatch's
 	// profile selects which one it runs on. mgr and dispatchRuntimeType are
-	// resolved exactly once here, via resolveManagerForOptsStrict (handlers.go) —
-	// the same function that ultimately selects the manager this function
-	// returns — and reused below instead of re-resolving, so within this one
+	// resolved exactly once here, via resolveExistingAgentManager
+	// (handlers.go; pinned to the found-on runtime on restart) — the same
+	// function that ultimately selects the manager this function returns — and reused below instead of re-resolving, so within this one
 	// buildStartContext call the GCP check and the manager it returns cannot
 	// disagree, and settings are loaded only once per call. (start/restart
 	// perform their own, later, second resolution after this function

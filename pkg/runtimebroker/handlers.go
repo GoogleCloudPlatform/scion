@@ -5902,10 +5902,14 @@ func pinnedRuntimeOf(mgr agent.Manager, runtimes ...scionrt.Runtime) pinnedRunti
 // provisioned profile (opts.Profile is empty) and its container was found
 // on a runtime (pin), that runtime is used instead of the project's active
 // profile, so the agent starts where it was found. A forced runtime
-// (ServerConfig.ForceRuntime) still takes precedence.
+// (ServerConfig.ForceRuntime) still takes precedence when it resolves to a
+// registered runtime; one that resolves to none is ignored by
+// resolveManagerForOptsStrict, so it does not drop the pin either.
 func (s *Server) resolveExistingAgentManager(opts api.StartOptions, mode profileResolution, fallbackLevel slog.Level, pin pinnedRuntime) (agent.Manager, string, error) {
-	if opts.Profile == "" && pin.mgr != nil && pin.name != "" && s.config.ForceRuntime == "" {
-		return pin.mgr, pin.name, nil
+	if opts.Profile == "" && pin.mgr != nil && pin.name != "" {
+		if _, forced := s.forcedRuntime(); !forced {
+			return pin.mgr, pin.name, nil
+		}
 	}
 	return s.resolveManagerForOptsStrict(opts, mode, fallbackLevel)
 }
