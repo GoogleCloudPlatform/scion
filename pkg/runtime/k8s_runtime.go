@@ -49,6 +49,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/remotecommand"
@@ -666,10 +667,19 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		// A previous pod started with a run ID mounts its run's per-run
 		// objects (ptone/scion#3101), which the fixed-name cleanup does not
 		// reach. When that pod is not live they are removed too, after it
-		// is (a live pod's are left, for the sweep or a delete of that run).
+		// is. When it is live, they are removed only once a re-read shows
+		// that pod (its UID) gone after cleanupStalePod, which swallows
+		// non-NFS delete failures (for an NFS-home pod it has already
+		// waited for the stop or failed the start); otherwise they are
+		// left, for the sweep or a delete of that run (ptone/scion#3753).
 		prevPodRun := ""
-		if p, gerr := r.Client.Clientset.CoreV1().Pods(namespace).Get(ctx, config.Name, metav1.GetOptions{}); gerr == nil && !k8sPodIsLive(p) {
-			prevPodRun = p.Labels[api.LabelRunID]
+		livePodRun, livePodUID := "", types.UID("")
+		if p, gerr := r.Client.Clientset.CoreV1().Pods(namespace).Get(ctx, config.Name, metav1.GetOptions{}); gerr == nil {
+			if !k8sPodIsLive(p) {
+				prevPodRun = p.Labels[api.LabelRunID]
+			} else {
+				livePodRun, livePodUID = p.Labels[api.LabelRunID], p.UID
+			}
 		}
 		if !nfsHomeStart {
 			r.cleanupAgentSecrets(ctx, namespace, config.Name)
@@ -680,12 +690,17 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		if nfsHomeStart {
 			r.cleanupAgentSecrets(ctx, namespace, config.Name)
 		}
+		if livePodRun != "" && r.previousPodGone(ctx, namespace, config.Name, livePodRun, livePodUID) {
+			prevPodRun = livePodRun
+		}
 		// Remaining case: if a start of that previous pod's run is retrying
-		// at this moment (before its pod exists), this also removes that
-		// start's objects. The no-run start wins, as a no-run delete does
-		// (see the delete-wins note in CleanupAgentResources); the retrying
-		// start then fails (verifyStartObjects, or its pod create) or its
-		// pod cannot mount them.
+		// at this moment, before its pod exists, this also removes that
+		// start's objects. (A pod of that run already holding the name
+		// keeps them: previousPodGone reports it not gone.)
+		// The no-run start wins, as a no-run delete does (see the
+		// delete-wins note in CleanupAgentResources); the retrying start
+		// then fails (verifyStartObjects, or its pod create) or its pod
+		// cannot mount them.
 		r.deletePodRunObjects(ctx, namespace, config.Name, prevPodRun, "Removing a per-run object of the previous pod's run before a start without a run ID")
 	}
 	cleanupArmed = true
@@ -3728,6 +3743,34 @@ func k8sDisruptionExitReason(pod *corev1.Pod) string {
 	return ""
 }
 
+// k8sPodWorkspaceRecoverable reports whether a later start of the agent can
+// resume its work after the pod is gone: the pod's "workspace" volume is
+// persistent storage (a PersistentVolumeClaim, as used by the NFS workspace
+// backend, or an NFS volume) rather than an emptyDir. The home backend does
+// not matter: every Kubernetes start creates a new pod, so a pod-local home
+// session is not kept across restarts anyway, and per-agent Secrets are
+// re-created by the start. Read-only on the pod.
+func k8sPodWorkspaceRecoverable(pod *corev1.Pod) bool {
+	for _, v := range pod.Spec.Volumes {
+		if v.Name != "workspace" {
+			continue
+		}
+		return v.PersistentVolumeClaim != nil || v.NFS != nil
+	}
+	return false
+}
+
+// k8sDisruptionPhase returns the agent phase to report for a pod removed by a
+// Kubernetes-initiated disruption (preemption or eviction): stopped when the
+// workspace survives the pod (k8sPodWorkspaceRecoverable), so a later start
+// can resume the work, and error otherwise.
+func k8sDisruptionPhase(pod *corev1.Pod) state.Phase {
+	if k8sPodWorkspaceRecoverable(pod) {
+		return state.PhaseStopped
+	}
+	return state.PhaseError
+}
+
 func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
 	namespace := r.DefaultNamespace
 	// When ListAllNamespaces is enabled, query across all namespaces
@@ -3808,9 +3851,14 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 		// not be reported as preempted/evicted before it actually is —
 		// unless it is already committed to termination (deletionTimestamp),
 		// which the branch below covers.
+		//
+		// A disrupted pod is reported as stopped when its workspace survives
+		// the pod (a later start resumes the work) and as error otherwise
+		// (k8sDisruptionPhase), in place of the generic phase mapping.
 		if agentStatus == string(state.PhaseStopped) || agentStatus == string(state.PhaseError) {
 			if reason := k8sDisruptionExitReason(&p); reason != "" {
 				exitReason = reason
+				agentStatus = string(k8sDisruptionPhase(&p))
 			}
 		} else if p.DeletionTimestamp != nil {
 			// Scheduler preemption and Eviction API deletions remove the pod
@@ -3818,11 +3866,13 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 			// heartbeat observes a terminal phase at all, since List() polls
 			// rather than watches. A pod with a deletionTimestamp and a live
 			// DisruptionTarget condition is already committed to that
-			// termination, so report the reason now, ahead of it actually
-			// stopping. agentStatus (the reported Phase) is deliberately
-			// left alone — this pod has not stopped yet.
+			// termination and cannot return to running, so report the reason
+			// and the resulting phase now, ahead of it actually stopping.
+			// Otherwise no heartbeat may ever report the agent as no longer
+			// running (ptone/scion#2669).
 			if reason := k8sDisruptionExitReason(&p); reason != "" {
 				exitReason = reason
+				agentStatus = string(k8sDisruptionPhase(&p))
 			}
 		}
 
