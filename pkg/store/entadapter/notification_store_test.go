@@ -18,10 +18,12 @@ package entadapter
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -586,4 +588,150 @@ func TestGetUndispatchedAgentNotifications_BrokerFilter(t *testing.T) {
 	all, err := s.GetUndispatchedAgentNotifications(ctx, "")
 	require.NoError(t, err)
 	assert.Len(t, all, 2)
+}
+
+func TestPurgeOrphanedNotifications(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	s := NewNotificationStore(client)
+
+	projectID := uuid.New()
+	_, err := client.Project.Create().SetID(projectID).SetName("GC Project").SetSlug("gc-project").Save(ctx)
+	require.NoError(t, err)
+	liveAgentID := uuid.New()
+	_, err = client.Agent.Create().SetID(liveAgentID).SetSlug("live").SetName("Live").
+		SetProjectID(projectID).Save(ctx)
+	require.NoError(t, err)
+	liveSub := &store.NotificationSubscription{
+		ID: uuid.NewString(), Scope: store.SubscriptionScopeAgent, AgentID: liveAgentID.String(),
+		SubscriberType: "user", SubscriberID: "user-1", ProjectID: projectID.String(),
+		TriggerActivities: []string{"DELETED"}, CreatedBy: "tester",
+	}
+	require.NoError(t, s.CreateNotificationSubscription(ctx, liveSub))
+
+	newNotif := func(agentID, subID string, acked bool) string {
+		t.Helper()
+		id := uuid.NewString()
+		require.NoError(t, s.CreateNotification(ctx, &store.Notification{
+			ID: id, SubscriptionID: subID, AgentID: agentID, ProjectID: projectID.String(),
+			SubscriberType: "user", SubscriberID: "user-1", Status: "DELETED", Message: "deleted",
+		}))
+		if acked {
+			require.NoError(t, s.AcknowledgeNotification(ctx, id))
+		}
+		return id
+	}
+	goneAgent, goneSub := uuid.NewString(), uuid.NewString()
+	orphanAcked := newNotif(goneAgent, goneSub, true)
+	orphanUnacked := newNotif(goneAgent, goneSub, false)
+	agentLive := newNotif(liveAgentID.String(), goneSub, true)
+	subLive := newNotif(goneAgent, liveSub.ID, true)
+
+	purged, err := s.PurgeOrphanedNotifications(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, purged)
+
+	_, err = s.GetNotification(ctx, orphanAcked)
+	assert.ErrorIs(t, err, store.ErrNotFound, "acknowledged orphan is removed")
+	for name, id := range map[string]string{
+		"unacknowledged orphan": orphanUnacked,
+		"agent still present":   agentLive,
+		"subscription present":  subLive,
+	} {
+		_, err := s.GetNotification(ctx, id)
+		assert.NoError(t, err, "%s must be kept", name)
+	}
+
+	purged, err = s.PurgeOrphanedNotifications(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0, purged, "a second run removes nothing")
+}
+
+func TestPurgeOrphanedNotifications_DeletesInBatches(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	s := NewNotificationStore(client)
+
+	prev := orphanPurgeBatchSize
+	orphanPurgeBatchSize = 2
+	t.Cleanup(func() { orphanPurgeBatchSize = prev })
+
+	var deletes int
+	client.Notification.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if m.Op().Is(ent.OpDelete) {
+				deletes++
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+
+	projectID := uuid.New()
+	_, err := client.Project.Create().SetID(projectID).SetName("Batch Project").SetSlug("batch-project").Save(ctx)
+	require.NoError(t, err)
+	const orphans = 5
+	for i := 0; i < orphans; i++ {
+		id := uuid.NewString()
+		require.NoError(t, s.CreateNotification(ctx, &store.Notification{
+			ID: id, SubscriptionID: uuid.NewString(), AgentID: uuid.NewString(),
+			ProjectID: projectID.String(), SubscriberType: "user", SubscriberID: "user-1",
+			Status: "DELETED", Message: "deleted",
+		}))
+		require.NoError(t, s.AcknowledgeNotification(ctx, id))
+	}
+
+	purged, err := s.PurgeOrphanedNotifications(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, orphans, purged, "every orphan is removed across batches")
+	assert.Equal(t, 3, deletes, "5 rows in batches of 2 take 3 delete statements")
+
+	purged, err = s.PurgeOrphanedNotifications(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0, purged)
+}
+
+// A full batch whose delete removes no rows ends the purge instead of
+// selecting the same rows again.
+func TestPurgeOrphanedNotifications_StopsWhenDeleteRemovesNothing(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	s := NewNotificationStore(client)
+
+	prev := orphanPurgeBatchSize
+	orphanPurgeBatchSize = 2
+	t.Cleanup(func() { orphanPurgeBatchSize = prev })
+
+	projectID := uuid.New()
+	_, err := client.Project.Create().SetID(projectID).SetName("Stuck Project").SetSlug("stuck-project").Save(ctx)
+	require.NoError(t, err)
+	for i := 0; i < orphanPurgeBatchSize; i++ {
+		id := uuid.NewString()
+		require.NoError(t, s.CreateNotification(ctx, &store.Notification{
+			ID: id, SubscriptionID: uuid.NewString(), AgentID: uuid.NewString(),
+			ProjectID: projectID.String(), SubscriberType: "user", SubscriberID: "user-1",
+			Status: "DELETED", Message: "deleted",
+		}))
+		require.NoError(t, s.AcknowledgeNotification(ctx, id))
+	}
+
+	// Every delete removes nothing. Past a few attempts, fail the delete
+	// so a looping purge returns an error instead of hanging the test.
+	var deletes int
+	client.Notification.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if !m.Op().Is(ent.OpDelete) {
+				return next.Mutate(ctx, m)
+			}
+			deletes++
+			if deletes > 5 {
+				return nil, errors.New("purge kept deleting the same rows")
+			}
+			return 0, nil
+		})
+	})
+
+	purged, err := s.PurgeOrphanedNotifications(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0, purged)
+	assert.Equal(t, 1, deletes, "the purge stops after one delete that removes nothing")
 }

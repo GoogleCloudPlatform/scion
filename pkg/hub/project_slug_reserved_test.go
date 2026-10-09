@@ -161,7 +161,9 @@ func TestProjectRegister_GlobalProjectStillRegistersAndDispatches(t *testing.T) 
 	provider, err := s.GetProjectProvider(ctx, resp.Project.ID, broker.ID)
 	require.NoError(t, err)
 	assert.Equal(t, brokerGlobalDir, provider.LocalPath)
-	assert.Equal(t, []string{brokerGlobalDir + "/.scion"}, *inits)
+	// The path names a directory on a remote broker's host: the hub stores
+	// it and initializes only the embedded broker's paths.
+	assert.Empty(t, *inits, "the hub does not initialize a remote broker's path")
 
 	again, code, body := registerWithBroker(t, srv, "global", broker.ID, brokerGlobalDir)
 	require.Equal(t, http.StatusOK, code, "body: %s", body)

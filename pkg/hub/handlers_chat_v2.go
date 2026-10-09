@@ -824,6 +824,7 @@ func (s *Server) handleTopicDelete(w http.ResponseWriter, r *http.Request, topic
 	}
 
 	s.events.PublishChatTopicEvent(r.Context(), topic.ProjectID, "deleted", *topic)
+	s.deleteScheduledMessagesOfConversation(r.Context(), topicID)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
@@ -1220,17 +1221,32 @@ var unreachablePhases = map[string]bool{
 	string(state.PhaseError):     true,
 }
 
+// agentGoneReason is the failure reason recorded when the primary agent no
+// longer resolves to a live agent. A soft-deleted agent and an agent whose
+// record is missing get this same reason, so the two cases read alike.
+const agentGoneReason = "Agent unreachable"
+
+// agentUnreachableReason returns the failure reason for an unreachable
+// primary given the suffix from isAgentUnreachable.
+func agentUnreachableReason(suffix string) string {
+	if suffix == "" {
+		return agentGoneReason
+	}
+	return fmt.Sprintf("Agent unreachable (%s)", suffix)
+}
+
 // isAgentUnreachable reports whether agent is unreachable for chat v2 primary
 // dispatch: soft-deleted, or in a phase whose container cannot accept a
 // buffered message (suspended, stopping, stopped, error). The returned string
-// is a short reason suffix for the "Agent unreachable (<reason>)" message
-// (e.g. "deleted" or the phase name); it is empty when reachable.
+// is a short reason suffix for agentUnreachableReason: the phase name, or
+// empty for a soft-deleted agent (reported like a missing one) and when
+// reachable.
 func isAgentUnreachable(agent *store.Agent) (bool, string) {
 	if agent == nil {
 		return false, ""
 	}
 	if !agent.DeletedAt.IsZero() {
-		return true, "deleted"
+		return true, ""
 	}
 	if unreachablePhases[agent.Phase] {
 		return true, agent.Phase
@@ -1293,6 +1309,13 @@ func chatWakeWriteBudget(recipients int) time.Duration {
 	}
 	return chatWakeResumeBudget + time.Duration(recipients)*chatWakeDeliveryBudget + chatWakeWriteSlack
 }
+
+// chatWakeSendBudget is the overall deadline of a wake send once it is
+// detached from the request: the wake, persistence, every dispatch and
+// the store and event calls in between. It matches the write deadline,
+// so the send ends no later than the connection can still answer.
+// A variable so tests can shorten it.
+var chatWakeSendBudget = chatWakeWriteBudget
 
 // extendWriteDeadlineForWake moves the connection's write deadline past
 // the server-wide WriteTimeout to chatWakeWriteBudget(recipients) from
@@ -1562,7 +1585,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		// Not a failure: the message is saved for catch-up, not dropped.
 		storeMsg.DispatchState = store.MessageDispatchDeferred
 	} else if primaryUnreachable {
-		unreachableReason := fmt.Sprintf("Agent unreachable (%s)", primaryUnreachableReason)
+		unreachableReason := agentUnreachableReason(primaryUnreachableReason)
 		storeMsg.DispatchState = store.MessageDispatchFailed
 		storeMsg.DispatchFailureReason = &unreachableReason
 		dispatchFailureCode = dispatchFailureCodeAgentUnreachable
@@ -1634,12 +1657,15 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		// abort a wake in progress, nor the persist and dispatch after it.
 		// The send then runs to its end with its idempotency key in flight
 		// (a retry is told send_in_progress), so the client's retry finds
-		// the finished outcome. Only some steps carry a deadline: the wake
-		// (chatWakeResumeBudget), each dispatch (30s) and markFailed (its
-		// finalization timeout). The store and event calls after the wake
-		// have none, as on the request context, which had no deadline
-		// either.
-		ctx = context.WithoutCancel(ctx)
+		// the finished outcome. The detached context carries one overall
+		// deadline (chatWakeSendBudget), so a stalled store or event call
+		// ends the send instead of keeping the key in flight forever.
+		// Within it the wake (chatWakeResumeBudget) and each dispatch
+		// (30s) have their own bounds; markFailed uses its finalization
+		// timeout and still runs after the deadline.
+		var cancelSend context.CancelFunc
+		ctx, cancelSend = context.WithTimeout(context.WithoutCancel(ctx), chatWakeSendBudget(len(agents)))
+		defer cancelSend()
 		wakeCtx, cancelWake := context.WithTimeout(ctx, chatWakeResumeBudget)
 		// wakeAgentForDM reports managed runtimes, a missing broker, the
 		// start gate and readiness failures as typed errors.
@@ -2099,7 +2125,7 @@ func groupCoAddressees(agents []*store.Agent) []messaging.Addressee {
 type unreachableAgentOverride struct {
 	AgentSlug string // resolved or best-effort slug of the named agent
 	AgentID   string // resolved agent ID, or "" if it never resolved at all
-	Reason    string // e.g. "Agent unreachable (deleted)"
+	Reason    string // e.g. agentGoneReason
 	Code      string // dispatchFailureCode, e.g. dispatchFailureCodeAgentUnreachable
 }
 
@@ -2110,9 +2136,10 @@ type unreachableAgentOverride struct {
 // message type, and response differ, but conversation resolution, SSE
 // publish, watermark updates, and notification firing (including
 // fireHumanMentionNotifications) are shared with the ordinary human-to-human
-// path. unreachable is only ever used for the topic case (isDM is always
-// false alongside it). It returns the response body of the persisted
-// message, or the error the send handler answers with.
+// path. With isDM (an agent DM whose agent record is gone) the DM is
+// registered as usual but no DM notification is sent. It returns the
+// response body of the persisted message, or the error the send handler
+// answers with.
 func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, user UserIdentity,
 	content, senderLabel string, isDM, noRecipient bool, mentionNames []string, attachmentRefs []AttachmentRef, now time.Time, replyToID string,
 	unreachable *unreachableAgentOverride) (*chatMessageResponse, *chatSendError) {
@@ -2298,7 +2325,7 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 	// that topic.
 	if cn := s.getChatNotifier(); cn != nil {
 		// DM received notification: notify the peer when a DM is sent.
-		if isDM && recipientID != "" && recipientID != user.ID() {
+		if isDM && unreachable == nil && recipientID != "" && recipientID != user.ID() {
 			go cn.NotifyDMReceived(context.Background(), recipientID, ChatMessageContext{
 				SenderID:        user.ID(),
 				SenderName:      senderLabel,

@@ -35,7 +35,14 @@ import {
   mapWithConcurrency,
   summarizeBurstScenario,
   BURST_TARGET_ROTATION,
+  READINESS_MARK_PREFIX,
+  READINESS_MARK_NAMES,
+  expectedReadinessMarks,
+  readinessMarksFrom,
+  checkReadinessMarks,
+  summarizeReadinessMarks,
 } from './lib.mjs';
+import { readFileSync } from 'node:fs';
 
 // ---- apiMatcherFor: a regression test against the real page URLs ----------
 // Match against the REAL URLs each page actually fetches, not an assumed
@@ -666,4 +673,95 @@ test('mapWithConcurrency: bounded in-flight calls, results in input order', asyn
     items.map((n) => n * 2)
   );
   assert.deepEqual(await mapWithConcurrency([], 4, async (n) => n), []);
+});
+
+// ---- readiness marks ------------------------------------------------------
+
+test('readiness mark names match the web client', () => {
+  const src = readFileSync(new URL('../src/client/readiness-marks.ts', import.meta.url), 'utf8');
+  const webNames = [...src.matchAll(/'(scion:ready:[a-z-]+)'/g)].map((m) => m[1]);
+  assert.deepEqual(webNames, Object.values(READINESS_MARK_NAMES));
+  assert.ok(src.includes(`READINESS_MARK_PREFIX = '${READINESS_MARK_PREFIX}'`));
+});
+
+test('expectedReadinessMarks pairs the data mark with the view mark', () => {
+  assert.deepEqual(expectedReadinessMarks('project-grid'), [
+    'scion:ready:agents-data',
+    'scion:ready:rows-grid',
+  ]);
+  assert.deepEqual(expectedReadinessMarks('project-list'), [
+    'scion:ready:agents-data',
+    'scion:ready:rows-list',
+  ]);
+  assert.deepEqual(expectedReadinessMarks('project-graph-embedded'), [
+    'scion:ready:agents-data',
+    'scion:ready:graph',
+  ]);
+  assert.deepEqual(expectedReadinessMarks('standalone-graph'), [
+    'scion:ready:agents-data',
+    'scion:ready:graph',
+  ]);
+  assert.deepEqual(expectedReadinessMarks('other'), []);
+});
+
+test('readinessMarksFrom keeps readiness marks only, first of each name', () => {
+  const got = readinessMarksFrom([
+    { name: 'scion:ready:agents-data', startTime: 812.345 },
+    { name: 'something-else', startTime: 1 },
+    { name: 'scion:ready:agents-data', startTime: 999 },
+    { name: 'scion:ready:graph', startTime: 1200.04 },
+  ]);
+  assert.deepEqual(got, { 'scion:ready:agents-data': 812.3, 'scion:ready:graph': 1200 });
+  assert.deepEqual(readinessMarksFrom(undefined), {});
+});
+
+test('checkReadinessMarks: on reports missing marks, off reports any mark', () => {
+  const expected = ['scion:ready:agents-data', 'scion:ready:rows-grid'];
+  assert.deepEqual(checkReadinessMarks({ 'scion:ready:agents-data': 5 }, expected, true), {
+    missing: ['scion:ready:rows-grid'],
+    unexpected: [],
+  });
+  assert.deepEqual(checkReadinessMarks({}, expected, false), { missing: [], unexpected: [] });
+  assert.deepEqual(checkReadinessMarks({ 'scion:ready:agents-data': 5 }, expected, false), {
+    missing: [],
+    unexpected: ['scion:ready:agents-data'],
+  });
+});
+
+test('summarizeReadinessMarks: populated runs only, cold and warm split', () => {
+  const runs = [
+    {
+      outcome: 'populated',
+      cold: true,
+      readinessMarks: { 'scion:ready:graph': 300 },
+      readinessMarksMissing: [],
+      readinessMarksUnexpected: [],
+    },
+    {
+      outcome: 'populated',
+      cold: false,
+      readinessMarks: { 'scion:ready:graph': 100 },
+      readinessMarksMissing: ['scion:ready:agents-data'],
+      readinessMarksUnexpected: [],
+    },
+    {
+      outcome: 'populated',
+      cold: false,
+      readinessMarks: { 'scion:ready:graph': 200 },
+      readinessMarksMissing: [],
+      readinessMarksUnexpected: ['scion:ready:graph'],
+    },
+    { outcome: 'still-loading', cold: false, readinessMarks: { 'scion:ready:graph': 9999 } },
+  ];
+  const s = summarizeReadinessMarks(runs);
+  assert.deepEqual(s.readinessMarks['scion:ready:graph'], {
+    count: 3,
+    medianMs: 200,
+    minMs: 100,
+    maxMs: 300,
+    medianMsCold: 300,
+    medianMsWarm: 150,
+  });
+  assert.equal(s.readinessMarksMissingRunCount, 1);
+  assert.equal(s.readinessMarksUnexpectedRunCount, 1);
 });

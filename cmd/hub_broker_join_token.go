@@ -69,8 +69,10 @@ The token is printed on stdout and the instructions on stderr, so
   TOKEN=$(scion hub brokers join-token create my-broker 2>/dev/null)
 captures only the token.
 
-Requires the broker.create permission (hub member or admin). Minting with a
-user access token is not supported; sign in with 'scion hub auth login'.
+Requires the broker.create permission (hub member or admin), with a sign-in
+('scion hub auth login') or a hub-boundary user access token carrying
+broker:create. A token issues a new token only for a broker its user
+created; a super-admin needs a sign-in to do so for another user's broker.
 
 Examples:
   # Create a token valid for the default lifetime (1h)

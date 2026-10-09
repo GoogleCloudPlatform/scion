@@ -465,6 +465,13 @@ type AgentStore interface {
 	// soft-deleted (a soft-deleted row is never written).
 	SetAgentWorkspacePlacement(ctx context.Context, agentID, placement string) error
 
+	// SetAgentAnnotation sets one annotation on the agent, or removes it
+	// when value is empty, leaving every other annotation as it is. Like
+	// SetAgentWorkspacePlacement it is a narrow write that neither checks
+	// nor bumps state_version. Returns ErrNotFound if the agent doesn't
+	// exist or is soft-deleted.
+	SetAgentAnnotation(ctx context.Context, agentID, key, value string) error
+
 	// UpdateAgentExposedPorts updates only exposed port registrations.
 	UpdateAgentExposedPorts(ctx context.Context, id string, ports []ExposedPort) error
 
@@ -2102,6 +2109,11 @@ type NotificationStore interface {
 	//
 	// Results are ordered by created_at ASC (oldest first), limited to 100.
 	GetUndispatchedAgentNotifications(ctx context.Context, brokerID string) ([]Notification, error)
+
+	// PurgeOrphanedNotifications deletes acknowledged notifications whose
+	// agent and subscription rows are both gone, and returns how many it
+	// deleted. Unacknowledged notifications are kept.
+	PurgeOrphanedNotifications(ctx context.Context) (int, error)
 
 	// CreateSubscriptionTemplate creates a new subscription template.
 	CreateSubscriptionTemplate(ctx context.Context, tmpl *SubscriptionTemplate) error

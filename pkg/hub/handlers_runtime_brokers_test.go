@@ -474,9 +474,12 @@ func TestBrokerHeartbeat_ProjectEntryGroveIdFieldIgnored(t *testing.T) {
 }
 
 // ============================================================================
-// A plain hub member who registers and auto-provides a broker must be able
-// to read the broker record and its provider list back immediately, through
-// the same user-authenticated path `scion runtime-broker status` uses.
+// A plain hub member who registers a broker that has auto-provide turned on
+// must be able to read the broker record and its provider list back
+// immediately, through the same user-authenticated path `scion
+// runtime-broker status` uses. Turning auto-provide on needs
+// broker.auto_provide, which a hub member does not hold, so the setting is
+// written to the store directly after registration.
 // ============================================================================
 func TestBrokerAuthz_AutoProvideRegistration_StatusSeesProviderImmediately(t *testing.T) {
 	srv, s := testServer(t)
@@ -496,19 +499,18 @@ func TestBrokerAuthz_AutoProvideRegistration_StatusSeesProviderImmediately(t *te
 	require.NoError(t, s.CreateUser(ctx, operator))
 	ensureHubMembership(ctx, s, operator.ID)
 
-	// Phase 1: POST /api/v1/brokers — create the broker registration with
-	// auto-provide enabled, exactly as `scion runtime-broker register
-	// --auto-provide` does.
+	// Phase 1: POST /api/v1/brokers — create the broker registration, then
+	// turn auto-provide on in the store.
 	createRec := doRequestAsUser(t, srv, operator, http.MethodPost, "/api/v1/brokers",
 		CreateBrokerRegistrationRequest{
-			Name:        "status-broker",
-			AutoProvide: true,
+			Name: "status-broker",
 		})
 	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
 	var createResp CreateBrokerRegistrationResponse
 	require.NoError(t, json.NewDecoder(createRec.Body).Decode(&createResp))
 	require.NotEmpty(t, createResp.BrokerID)
 	require.NotEmpty(t, createResp.JoinToken)
+	setBrokerAutoProvide(t, s, createResp.BrokerID, true)
 
 	// Phase 2: POST /api/v1/brokers/join — unauthenticated, the join token is
 	// the credential.
@@ -554,19 +556,21 @@ func TestBrokerAuthz_AutoProvideRegistration_StatusSeesProviderImmediately(t *te
 	assert.Equal(t, registerResp.Project.ID, projectsResp.Projects[0].ProjectID)
 }
 
-// autoProvideBrokerWithProject registers an auto-provide broker as owner and
-// links it to a new, owner-created project via the two-phase register flow
-// (mirroring the CLI's `register --auto-provide` + project-link step). It
-// returns the broker ID and the created project (with its real name and git
-// remote, for cross-project-disclosure checks).
+// autoProvideBrokerWithProject registers a broker as owner, turns its
+// auto-provide setting on in the store, and links it to a new,
+// owner-created project via the two-phase register flow (mirroring the
+// CLI's `register` + project-link step). It returns the broker ID and the
+// created project (with its real name and git remote, for the project
+// visibility checks).
 func autoProvideBrokerWithProject(t *testing.T, srv *Server, owner *store.User, brokerName, projectName, gitRemote string) (brokerID string, project *store.Project) {
 	t.Helper()
 
 	createRec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/brokers",
-		CreateBrokerRegistrationRequest{Name: brokerName, AutoProvide: true})
+		CreateBrokerRegistrationRequest{Name: brokerName})
 	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
 	var createResp CreateBrokerRegistrationResponse
 	require.NoError(t, json.NewDecoder(createRec.Body).Decode(&createResp))
+	setBrokerAutoProvide(t, srv.store, createResp.BrokerID, true)
 
 	joinRec := doRequestNoAuth(t, srv, http.MethodPost, "/api/v1/brokers/join",
 		BrokerJoinRequest{
