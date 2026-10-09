@@ -68,9 +68,19 @@ func serviceAccountDisplayNames(ctx context.Context, client hubclient.Client, pr
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, serviceAccountLookupParallelism)
+	// Stop launching lookups once the context is done, instead of waiting
+	// for a slot behind lookups that are still running.
+launch:
 	for _, pid := range unique {
+		if ctx.Err() != nil {
+			break
+		}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			break launch
+		}
 		wg.Add(1)
-		sem <- struct{}{}
 		go func(pid string) {
 			defer wg.Done()
 			defer func() { <-sem }()

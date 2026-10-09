@@ -21,6 +21,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -382,4 +383,22 @@ func TestLookViaHub_SlowHeaderSkipped(t *testing.T) {
 	assert.Less(t, time.Since(start), 2*time.Second)
 	assert.Equal(t, "terminal text\n", stdout)
 	assert.NotContains(t, stderr, "GCP identity")
+}
+
+// With the context already done, no lookups are launched and the names are
+// empty; the caller falls back to the email.
+func TestServiceAccountDisplayNames_ContextDone(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = w.Write([]byte(`{"items": []}`))
+	}))
+	defer server.Close()
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	assert.Empty(t, serviceAccountDisplayNames(ctx, client, []string{"p1", "p2", "p3", "p4", "p5", "p6"}))
+	assert.Equal(t, int32(0), calls.Load())
 }
