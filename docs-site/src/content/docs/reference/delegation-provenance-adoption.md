@@ -149,10 +149,14 @@ adds these keys to the error `details`:
 
 On a service-account assignment, the message asks for an authorized user to
 reincarnate the agent, or to recreate it directly. Either clears the denial
-whether the unrecorded hop is the agent's own edge or an ancestor's: a user's
+whether the unrecorded hop is the agent's own edge or an ancestor's. A user's
 reincarnation that keeps the role re-records the agent's edge with the user as
-delegator when the agent's own edge or an edge above it is unrecorded, as a
-user's create does. A
+delegator, as a user's create does, when the agent's own edge is unrecorded or
+an edge above it is unrecorded and every edge between them is accepted on this
+Hub. The denial is only reported in that case, because the check walks up from
+the agent and stops at the first edge that fails, so the reincarnation clears
+it even when an edge further up (for example one recorded with local
+development credentials on a Hub without dev auth) is not accepted. A
 reincarnation by the agent itself or by another agent keeps the edge and does
 not clear it. The details name the admin alternative: adopting the chain
 through the route above.
