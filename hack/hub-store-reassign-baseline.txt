@@ -50,8 +50,6 @@ pkg/hub/execute_agent_keys_test.go | 6
 pkg/hub/fix_2087_create_cleanup_detached_test.go | 2
 pkg/hub/fix_3471_dm_wake_detached_test.go | 2
 pkg/hub/fix_3557_managed_create_unrecorded_test.go | 12
-# Temporary exception: added after the guard by GoogleCloudPlatform/scion#2981; migrate to installStoreFault and lower (ptone/scion#4068).
-pkg/hub/fix_3730_workspace_storage_path_test.go | 10
 pkg/hub/fix_3746_managed_create_conflict_retry_test.go | 10
 pkg/hub/gcp_iam_settings_test.go | 2
 pkg/hub/gcs_link_test.go | 3

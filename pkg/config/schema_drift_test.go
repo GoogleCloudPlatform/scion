@@ -126,6 +126,9 @@ type schemaDriftWalker struct {
 	root  map[string]any
 	drift []string
 	seen  map[string]bool
+	// reportOpen also reports "go-only" for objects the schema leaves open
+	// (see TestSettingsSchema_OpenObjectsDocumentGoFields).
+	reportOpen bool
 }
 
 // resolve follows local "$ref" pointers ("#/$defs/name").
@@ -232,7 +235,7 @@ func (w *schemaDriftWalker) walk(path string, t reflect.Type, node map[string]an
 	for name, ft := range fields {
 		sub, ok := props[name].(map[string]any)
 		if !ok {
-			if closed {
+			if closed || w.reportOpen {
 				w.drift = append(w.drift, "go-only: "+joinDriftPath(path, name))
 			}
 			continue

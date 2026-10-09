@@ -121,6 +121,22 @@ Whenever an API request is made, the Hub's `Decide` endpoint processes the autho
 
 ---
 
+## Adding Permissions (Developer Conventions)
+
+Permission IDs are defined in one registry, `pkg/hub/permissions/registry.go`. Follow these rules when you add a row or change an agent scope bundle:
+
+* **Every row is enforced or reserved.** A row must either record where code checks it (`Enforcement` for a route or handler check, `NonRouteUse` for any other consumer) or set `Reserved` to the reason nothing checks it yet. It cannot do both. To wire up a reserved permission:
+  1. Audit existing custom role definitions for the permission. The hub rejects reserved permissions when a custom role is created, updated, copied or imported, but roles created before the permission was reserved may still carry it. Once you un-reserve the row, those roles grant it.
+  2. Decide whether agent chains with no recorded delegation ceiling may hold it. While a row is reserved, such chains are denied it. If they must stay denied after you un-reserve it, cover it with a ceiling-optional agent scope or add it to `legacyChainExcludedPermissions` explicitly.
+  3. Add the check, clear `Reserved`, and record the check in `Enforcement`.
+
+  Once `Reserved` is cleared, the permission goes back to super-admin automatically, because super-admin's role is built from every registry row that isn't reserved. Adding it to any other role, agent scope bundle or token scope list is a separate, deliberate change.
+* **Nothing grants a reserved permission.** Don't put a reserved permission in any role, agent scope bundle or token scope list. The hub leaves reserved permissions out of manage aliases and out of the scopes it offers when you create a token. The token scope for a reserved permission is still accepted, so existing tokens that carry it keep working. `TestPermissionRegistryRowsEnforcedOrReserved` fails a row that is neither enforced nor reserved, and fails any role, agent scope bundle, manage alias or token scope picker that carries a reserved permission.
+* **Point `Enforcement` at the real check.** If several permissions go through one shared function (for example, the artifact service's `Authorize`), that function alone doesn't show that a given permission is checked. Also name the call site that passes the permission. For artifact rows, `TestArtifactPermissionsConsumedUnlessReserved` requires each non-reserved row to be used in `pkg/artifacts` or `pkg/hub` (through its `pkg/artifacts` constant or its ID as a string), and each reserved row to be unused.
+* **New agent scopes in an existing bundle are ceiling-optional.** If you add a new agent scope to an existing agent role bundle (`ScopesForRole`), list it in `ceilingOptionalRoleScopes`. The exception is a scope already within the authority of the principal that creates the agent. A ceiling-optional scope never decides whether a role fits a creator's ceiling. A mint drops the scope when the source ceiling lacks its permission. This way, a token that fit a role before the scope was added still fits it.
+
+---
+
 ## Offline Authorization Recovery
 
 If an administrator misconfigures an AccessConstraint (e.g., applying an overly restrictive `all_principals` constraint at `system` scope), all administrators may become locked out of the Hub API.

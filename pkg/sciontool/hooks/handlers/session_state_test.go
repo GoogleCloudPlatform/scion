@@ -67,6 +67,7 @@ func toolEvent(sessionID, tool string) *hooks.Event {
 }
 
 func TestFileSessionState_CarriesCountsAcrossHandlers(t *testing.T) {
+	t.Setenv("SCION_USAGE_SOURCE", "hooks") // model-end events carry the usage
 	store := NewFileSessionState(t.TempDir())
 
 	model := sessionEvent(hooks.EventModelEnd, "s1")

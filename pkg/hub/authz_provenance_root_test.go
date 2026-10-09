@@ -1176,14 +1176,16 @@ func TestAllowUnrecordedLegacySetterMatcher(t *testing.T) {
 
 // filterScopes is the only production function that removes scopes from a
 // candidate list by a ceiling. It is called only from
-// ceilingFilteredAgentScopes and EffectiveAgentAuthority, and both obtain
-// their inputs from loadScopeCeilings.
+// ceilingFilteredAgentScopes, EffectiveAgentAuthority and
+// reissueFilteredScopes (the scope re-issue's projection of the mint), and
+// each obtains its inputs from loadScopeCeilings.
 func TestScopeFilterSingleSource(t *testing.T) {
 	_, files := parseHubProduction(t)
 	callers := callsIn(files, "filterScopes")
 	want := map[string]bool{
 		"AuthzService.ceilingFilteredAgentScopes": true,
 		"AuthzService.EffectiveAgentAuthority":    true,
+		"AuthzService.reissueFilteredScopes":      true,
 	}
 	for fn := range callers {
 		assert.True(t, want[fn], "unexpected filterScopes caller %s", fn)

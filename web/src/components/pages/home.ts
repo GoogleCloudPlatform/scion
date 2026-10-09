@@ -140,10 +140,10 @@ export class ScionPageHome extends LitElement {
     stateManager.setScope({ type: 'dashboard' });
 
     // Subscribe before snapshot so no deltas are missed between read and listen
-    stateManager.addEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
-    stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
+    stateManager.addEventListener('agents-updated', this.boundOnAgentsUpdated);
+    stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged);
     stateManager.addEventListener('agents-resync', this.boundOnAgentsResync);
-    stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated as EventListener);
+    stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated);
 
     // Use data already in the store, avoiding unnecessary fetches when
     // navigating back from a page that already populated the state.
@@ -179,13 +179,10 @@ export class ScionPageHome extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    stateManager.removeEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
-    stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
+    stateManager.removeEventListener('agents-updated', this.boundOnAgentsUpdated);
+    stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged);
     stateManager.removeEventListener('agents-resync', this.boundOnAgentsResync);
-    stateManager.removeEventListener(
-      'projects-updated',
-      this.boundOnProjectsUpdated as EventListener
-    );
+    stateManager.removeEventListener('projects-updated', this.boundOnProjectsUpdated);
   }
 
   private onAgentsUpdated(): void {

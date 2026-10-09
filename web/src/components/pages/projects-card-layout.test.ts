@@ -99,7 +99,7 @@ describe('project card layout', () => {
       container
     );
     expect(container.querySelector('.name-cell > sl-tooltip')?.getAttribute('content')).toBe(
-      'Git repository, shared workspace'
+      'Git repository, clone per agent'
     );
   });
 
