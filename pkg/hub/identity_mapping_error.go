@@ -102,9 +102,17 @@ func identityMappingDispatchError(err error) (identityMappingError, bool) {
 		if mapped != "" {
 			details[api.BrokerErrDetailMappedKSA] = mapped
 		}
-		msg = fmt.Sprintf("The requested Kubernetes service account %q does not match %q, the one mapped to %s on %s. "+
+		requestedText := "The requested Kubernetes service account"
+		if requested != "" {
+			requestedText = fmt.Sprintf("The requested Kubernetes service account %q", requested)
+		}
+		mappedText := "the one mapped"
+		if mapped != "" {
+			mappedText = fmt.Sprintf("%q, the one mapped", mapped)
+		}
+		msg = fmt.Sprintf("%s does not match %s to %s on %s. "+
 			"Remove the explicit Kubernetes service account from the request, or ask a broker operator to change kubernetes_service_account_mappings in that broker's settings; see %s",
-			requested, mapped, accountText, scope, kubernetesIdentityMappingDocsURL)
+			requestedText, mappedText, accountText, scope, kubernetesIdentityMappingDocsURL)
 	}
 	return identityMappingError{Code: code, Message: msg, Details: details}, true
 }

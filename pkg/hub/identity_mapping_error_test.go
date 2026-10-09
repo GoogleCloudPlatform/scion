@@ -145,6 +145,7 @@ func TestDispatchCreateErrorResponse_IdentityCodeOnlyAt400(t *testing.T) {
 		{name: "500 runtime_error", err: brokerIdentityMappingErr(http.StatusInternalServerError, "runtime_error", nil)},
 		{name: "text only", err: &brokerStatusError{StatusCode: http.StatusInternalServerError,
 			Body: `{"error":{"code":"runtime_error","message":"has no Kubernetes ServiceAccount mapped for \"x\""}}`}},
+		{name: "400 validation_error", err: brokerIdentityMappingErr(http.StatusBadRequest, "validation_error", nil)},
 		{name: "transport error", err: errors.New("dial tcp: connection refused")},
 	}
 	for _, tc := range tests {
@@ -162,6 +163,41 @@ func TestRelayIdentityMappingError_OtherCodeNotRelayed(t *testing.T) {
 	err := brokerIdentityMappingErr(http.StatusBadRequest, "validation_error", nil)
 	assert.False(t, relayIdentityMappingError(w, err))
 	assert.Equal(t, 0, w.Body.Len())
+}
+
+// A mismatch whose details lack the Kubernetes ServiceAccount names reads
+// without empty quotes.
+func TestIdentityMappingDispatchError_MismatchWithoutKSANames(t *testing.T) {
+	ime, ok := identityMappingDispatchError(brokerIdentityMappingErr(http.StatusBadRequest, ErrCodeIdentityKSAMismatch, nil))
+	require.True(t, ok)
+	assert.NotContains(t, ime.Message, `""`)
+	assert.True(t, strings.HasPrefix(ime.Message,
+		`The requested Kubernetes service account does not match the one mapped to GCP service account "`+testMappingAccount+`" on profile "gke" of broker "broker-a".`), ime.Message)
+}
+
+// A provision-only create that fails for a mapping refusal stays a 201 and
+// carries the hub's coded message in its warning, not the broker's text.
+func TestCreateAgent_ProvisionOnlyWarningUsesIdentityMappingMessage(t *testing.T) {
+	disp := &skillFailDispatcher{provisionErr: brokerNotMappedErr()}
+	srv, _, project := setupCreateAgentServer(t, disp)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:          "provision-only-idmap",
+		ProjectID:     project.ID,
+		ProvisionOnly: true,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	var warning string
+	for _, w := range resp.Warnings {
+		if strings.HasPrefix(w, api.ProvisionFailedWarningPrefix) {
+			warning = w
+		}
+	}
+	require.NotEmpty(t, warning, "warnings: %v", resp.Warnings)
+	assert.Contains(t, warning, ErrCodeIdentityNotMapped+": ")
+	assert.Contains(t, warning, `on profile "gke" of broker "broker-a"`)
+	assert.NotContains(t, warning, "broker operator text")
 }
 
 // Without a profile the message names the runtime entry, and without a

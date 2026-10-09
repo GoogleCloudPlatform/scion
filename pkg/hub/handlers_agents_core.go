@@ -2806,7 +2806,10 @@ func (s *Server) createAgentInProject(
 					writeCreateFailure(w, corrID, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
 					return
 				}
-				warnings = append(warnings, api.ProvisionFailedWarningPrefix+err.Error())
+				// A Kubernetes identity mapping refusal reads as the
+				// hub's coded message, not the raw broker body
+				// (ptone/scion#4024).
+				warnings = append(warnings, api.ProvisionFailedWarningPrefix+dispatchFailureText(err))
 			} else {
 				agent.Phase = string(state.PhaseCreated)
 				if err := s.updateAgentAfterDispatch(ctx, agent); err != nil {
