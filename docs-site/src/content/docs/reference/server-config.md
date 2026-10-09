@@ -192,7 +192,17 @@ Persistence settings for the Hub.
 | `url` | string | `"hub.db"` | Connection string or file path. |
 
 :::caution[Permanent decision-audit data removal]
-`AutoMigrate` permanently drops `decision_audits` and its data. Export first if preservation is required. During Hub schema migration on PostgreSQL, the drop takes an `ACCESS EXCLUSIVE` table lock while the existing advisory schema lock is held. Maintenance commands also call `CompositeStore.Migrate` directly and can trigger this drop: `server recover-authz` (SQLite/PostgreSQL), `hub secret migrate-names` (SQLite/PostgreSQL except `--dry-run`), and `hub secret migrate` (SQLite, including `--dry-run`); the PostgreSQL direct calls may run outside the Hub's advisory schema lock. Mixed old replicas may report degraded legacy health as well as write failures after the drop. Rolling back to an old binary can recreate an empty table but cannot restore the deleted data.
+Any schema-migration entry point may permanently drop `decision_audits` and its data through `entc.AutoMigrate`, directly or through `CompositeStore.Migrate`. Export first if preservation is required. During Hub schema migration on PostgreSQL, the drop takes an `ACCESS EXCLUSIVE` table lock while the existing advisory schema lock is held.
+
+Direct maintenance callers include:
+
+- `server recover-authz`: SQLite/PostgreSQL through `CompositeStore.Migrate`.
+- `hub secret migrate-names`: SQLite/PostgreSQL through `CompositeStore.Migrate`, except with `--dry-run`.
+- `hub secret migrate`: SQLite through `CompositeStore.Migrate`, including with `--dry-run`.
+- `server backfill` and `server migrate-dm-keys`: SQLite/PostgreSQL through `entc.AutoMigrate`, including their default dry-run mode.
+- `server migrate`: `entc.AutoMigrate` on the PostgreSQL destination only; the SQLite source is read-only and unaffected. Source decision-audit rows are not copied, as in the existing migration behavior.
+
+These direct calls run outside the Hub's advisory schema lock. Mixed old replicas may report degraded legacy health as well as write failures after the drop. Rolling back to an old binary can recreate an empty table but cannot restore the deleted data.
 :::
 
 :::caution[Postgres: `broker_dispatch` index on upgrade]

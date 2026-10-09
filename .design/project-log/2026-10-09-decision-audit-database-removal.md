@@ -48,7 +48,8 @@ Fresh focused migration tests passed for `pkg/ent/entc` and
 reopening and mutation/history conservation. Hub, command and real PostgreSQL
 checks remain unexecuted for this revision.
 
-Final emitter and failed-start cleanup comments now match retained behavior; static diff and stale-text checks passed.
+Final emitter and failed-start cleanup comments now match retained behavior;
+static diff and stale-text checks passed.
 
 The third code review aligns the experiment description and its test pin with
 non-persistence on admission, freshness or logging-health failure. Database
@@ -59,4 +60,12 @@ coverage now requires zero commits and rollbacks. Focused Entc migration tests
 passed; Hub, command, experiment-package, documentation-build and PostgreSQL
 validation remain unexecuted for this revision.
 
-The fourth code review clarifies maintenance-command migration and dry-run behavior, removes an orphaned test banner and reflows the migration comment; static source-call-site, exact-path, stale-text and diff checks passed.
+The fourth code review documented direct `CompositeStore.Migrate` maintenance
+callers, removed an orphaned test banner and reflowed the migration comment;
+static source-call-site, exact-path, stale-text and diff checks passed. The fifth
+review extends the caution to direct `entc.AutoMigrate` callers, including default
+dry-run backfill and DM-key migration, and distinguishes destination migration
+from the read-only source in `server migrate`. Source decision-audit rows were
+already excluded from data copying in the baseline. Direct maintenance migrations
+run outside the Hub advisory schema lock. This documentation correction changes
+no command or dry-run behavior; no Go commands or new validation were run.
