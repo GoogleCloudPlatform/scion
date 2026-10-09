@@ -203,10 +203,15 @@ func TestPublishUserMessage_DMSubjectsScoped(t *testing.T) {
 			require.NotEmpty(t, subjects)
 
 			participants := dmUserParticipants(msg.ThreadID)
+			// user.<id>.* subjects are scoped to the session user with that
+			// id. The chat.dm fan-out names both DM key slots, so the agent
+			// slot of an agent DM also gets one; no web session has that id.
+			keyParts := strings.Split(msg.ThreadID, ":")
+			keyIDs := []string{keyParts[2], keyParts[4]}
 			for i, subject := range subjects {
 				tokens := strings.Split(subject, ".")
 				if tokens[0] == "user" && len(tokens) >= 3 {
-					assert.Contains(t, participants, tokens[1],
+					assert.Contains(t, keyIDs, tokens[1],
 						"DM message published to a non-participant user subject %q", subject)
 					continue
 				}
