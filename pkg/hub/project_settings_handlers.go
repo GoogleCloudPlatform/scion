@@ -15,7 +15,6 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -666,6 +665,8 @@ func mergeProjectSettingsPut(stored *hubclient.ProjectSettings, body []byte) (*h
 		if !ok {
 			continue
 		}
+		// encoding/json stores map values without surrounding whitespace,
+		// so the shared isJSONNull literal check is exact here.
 		if isJSONNull(msg) {
 			if !projectSettingsNullClearsFields[name] {
 				continue
@@ -693,11 +694,6 @@ func jsonFieldName(f reflect.StructField) string {
 		return name
 	}
 	return f.Name
-}
-
-// isJSONNull reports whether msg is the JSON literal null.
-func isJSONNull(msg json.RawMessage) bool {
-	return string(bytes.TrimSpace(msg)) == "null"
 }
 
 // projectSettingsFromAnnotations reads project settings from the project's annotations map.
