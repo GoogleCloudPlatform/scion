@@ -23,7 +23,7 @@ The Hub now suspends a removed member's agents and their descendants, and sharin
 * **Message IDs** (#2912): Delivered agent envelopes carry `message_id`, and `scion message` prints the created ID.
 * **Reloadable GCP permission-check settings** (#2840): Hub admins can change them at runtime from Server Config, with validation and audit.
 * **CLI** (#2843, #2916, #2907): `hub token create --expires` accepts `2h` and `90m` and parses all units strictly. `hub projects info`/`delete` accept project IDs. Local `scion list` marks provisioned-but-not-started agents and hints at `scion start`.
-* **Web** (#2905, #2908, #2896, #2851): Browser Back steps through chat panels on phones. The project list icon shows the workspace mode. Detail pages share a header that wraps long names. "Remove all inactive" covers every unconnected terminal, and status dots explain their colours.
+* **Web** (#2905, #2908, #2896, #2851): Browser Back steps through chat panels on phones. The project list icon shows the workspace mode. Detail pages share a header that wraps long names. "Remove all inactive" covers every unconnected terminal, and status dots explain their colors.
 * **Image and deploy** (#2902, #2881, #2839, #2885): Agent base images include pinned Helm v3.17.3. Cloud Run and single-node VM deploys grant the Hub service account admin, so it can mint service accounts. Starter-hub sets the telemetry project for the metrics dashboard.
 * **Web performance** (#2861, #2821, #2897): Vite-fingerprinted assets are cached for a day, unused list prefetches are dropped, and readiness marks are available behind a profiling setting.
 
