@@ -269,7 +269,7 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 100,
-      "description": "Default thinking/reasoning level for new agents (1-100). 0 is reserved as the clear sentinel.",
+      "description": "Default thinking/reasoning level for new agents (1-100). Through the admin server-config API, null clears it; 0 is rejected.",
       "x-scope": "any",
       "x-since": "1"
     },
