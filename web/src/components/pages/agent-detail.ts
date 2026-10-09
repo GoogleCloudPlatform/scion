@@ -2597,7 +2597,7 @@ export class ScionPageAgentDetail extends LitElement {
                     : html`<span class="info-value mono gcp-sa-email">${email}</span>`}
                 </div>
               `
-            : ''}
+            : nothing}
           ${hasAccount
             ? html`
                 <div class="info-item">
@@ -2611,7 +2611,7 @@ export class ScionPageAgentDetail extends LitElement {
                   </span>
                 </div>
               `
-            : ''}
+            : nothing}
           ${gcpIdentity.projectId
             ? html`
                 <div class="info-item">
@@ -2619,7 +2619,7 @@ export class ScionPageAgentDetail extends LitElement {
                   <span class="info-value mono">${gcpIdentity.projectId}</span>
                 </div>
               `
-            : ''}
+            : nothing}
         </div>
       </div>
     `;
