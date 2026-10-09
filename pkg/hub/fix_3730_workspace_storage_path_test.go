@@ -427,6 +427,37 @@ func TestWorkspaceRecord_Managed_ConflictRetryKeepsStoragePath(t *testing.T) {
 	assert.Equal(t, string(state.PhaseRunning), row.Phase)
 }
 
+// Managed create: a concurrent stop lands before the record write, so the
+// write conflicts and the retry lands on the live, stopped row. The
+// create's copy keeps its older state_version, so its post-create write
+// conflicts too, and mergeManagedCreate keeps the stopped phase: the create
+// answers 201 from the stored row, the storage path is kept, and the
+// create stops its interaction once.
+func TestWorkspaceRecord_Managed_ConcurrentStopBeforeRecord_KeepsStopped(t *testing.T) {
+	srv, s, project := setupCreateAgentServer(t, &createRaceDispatcher{})
+	useHubWorkspaceUpload(t, srv, project)
+	backend := newInteractionLedgerBackend()
+	useManagedBackend(t, backend)
+	fs := &workspaceRecordStore{Store: s, beforeFirst: func(id string) {
+		bumpPhase(t, s, id, string(state.PhaseStopped), "")
+	}}
+	srv.store = fs
+
+	rec := managedCreate(t, srv, project.ID, "ws-record-managed-stopped")
+	row := requireManagedCreated(t, rec, s)
+
+	_, _, retried := fs.snapshot()
+	assert.True(t, retried, "the conflicting record write was retried")
+	assert.Equal(t, string(state.PhaseStopped), row.Phase, "the concurrent stop is kept")
+	assertWorkspaceRecorded(t, row)
+	assert.Equal(t, "interaction-1", row.Annotations[annotationInteractionID])
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, string(state.PhaseStopped), resp.Agent.Phase, "the 201 answers the stored row")
+	assert.Equal(t, []string{"interaction-1"}, backend.cancels(), "the create stops the interaction, once")
+	assert.Empty(t, backend.inProgress())
+}
+
 // mergeManagedCreate carries the hub-managed workspace swap onto the
 // re-read row, including when a concurrent writer's terminal phase is kept,
 // and leaves the row's workspace alone when the create made no swap.
