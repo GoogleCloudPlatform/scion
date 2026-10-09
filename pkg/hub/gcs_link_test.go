@@ -422,11 +422,25 @@ func gcsTestAgent(t *testing.T, s store.Store, project *store.Project, seed stri
 	return a
 }
 
+// gcsTestSA creates a verified service account scoped to project: the
+// state an agent's assignment must be in for the hub to mint its token, and
+// so for a gs:// link to open.
 func gcsTestSA(t *testing.T, s store.Store, project *store.Project, seed, email string) *store.GCPServiceAccount {
+	t.Helper()
+	return gcsTestSAWith(t, s, project, seed, email, nil)
+}
+
+// gcsTestSAWith is gcsTestSA with a hook that adjusts the account before it
+// is stored (for example to leave it unverified or make it hub-scoped).
+func gcsTestSAWith(t *testing.T, s store.Store, project *store.Project, seed, email string, adjust func(*store.GCPServiceAccount)) *store.GCPServiceAccount {
 	t.Helper()
 	sa := &store.GCPServiceAccount{
 		ID: tid(seed), Scope: store.ScopeProject, ScopeID: project.ID, Email: email,
 		ProjectID: project.ID, CreatedAt: time.Now(),
+		Verified: true, VerificationStatus: store.GCPVerificationVerified,
+	}
+	if adjust != nil {
+		adjust(sa)
 	}
 	require.NoError(t, s.CreateGCPServiceAccount(context.Background(), sa))
 	return sa
