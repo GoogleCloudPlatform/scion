@@ -545,7 +545,7 @@ describe('document visibilitychange feeds frontmost', () => {
 });
 
 describe('overlay strings', () => {
-  it('shows RECONNECTING... with a spinner while an attempt is in flight', async () => {
+  it('shows RECONNECTING... with a spinner from the 4503 close, before the redial', async () => {
     await mountConnected();
     FakeSocket.instances[0].readyState = 3;
     FakeSocket.instances[0].onclose?.({ code: 4503 });
@@ -577,6 +577,24 @@ describe('overlay strings', () => {
     await page.updateComplete;
     expect(page.shadowRoot?.textContent).toContain('RECONNECTING...');
     expect(page.shadowRoot?.querySelector('.disconnected-overlay sl-spinner')).toBeTruthy();
+  });
+
+  it('a 4503 close then a no-path answer ends on ATTACH NOT SUPPORTED, with no spinner', async () => {
+    await mountConnected();
+    const noPath = {
+      error: { code: 'runtime_attach_unsupported', message: 'No path to the terminal' },
+    };
+    fetcher
+      .mockResolvedValueOnce(json({ id: agentId, name: 'test', phase: 'running' }))
+      .mockResolvedValueOnce(json(noPath, 503));
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 4503 });
+    await vi.waitFor(() => expect(page.shadowRoot?.textContent).toContain('ATTACH NOT SUPPORTED'));
+    await page.updateComplete;
+    expect(page.shadowRoot?.textContent).not.toContain('RECONNECTING...');
+    expect(page.shadowRoot?.querySelector('.disconnected-overlay sl-spinner')).toBeNull();
+    expect(page.shadowRoot?.textContent).toContain('No path to the terminal');
+    expect(FakeSocket.instances).toHaveLength(1);
   });
 
   it('shows the exact copy, pinned rather than matched as a substring, once an automatic attempt fails', async () => {

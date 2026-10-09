@@ -1092,6 +1092,7 @@ describe('the reconnect after a 4503 close waits a full-jitter delay of 0-5s', (
     socket0.onclose?.({ code: 4503 }); // background pane: armed, delay running
 
     session.setFrontmost(true);
+    expect(session.reconnecting).toBe(true); // still the wait, not a new attempt
     expect(FakeSocket.instances).toHaveLength(1);
     expect(f.fetcher).toHaveBeenCalledTimes(2); // no attempt yet
     vi.advanceTimersByTime(2_999);

@@ -491,7 +491,8 @@ class Session implements TerminalSession {
       reconnectFailedManual: false,
     });
     void attempt.finally(() => {
-      if (this.pending === attempt) this.pending = null;
+      const wasPending = this.pending === attempt;
+      if (wasPending) this.pending = null;
       // Attempts that settle synchronously (agent fetch/preflight failure, thrown
       // error, agent-unavailable) never reach a socket, so onclose never fires.
       // Attempts that reach a socket are judged later, by onopen/onclose.
@@ -518,6 +519,10 @@ class Session implements TerminalSession {
       ) {
         this.markReconnectFailed();
       }
+      // `reconnecting` reads `pending`, which only just cleared: tell
+      // subscribers, or an attempt that settled without a socket (refused,
+      // unavailable, or an error) would leave them on "reconnecting".
+      if (wasPending && this.state.connection !== 'closed') this.update({});
     });
     return attempt;
   }
