@@ -122,6 +122,21 @@ const stopAllPath = "/api/v1/agents/stop-all"
 
 func membersPath(projectID string) string { return "/api/v1/projects/" + projectID + "/members" }
 
+// assertSessionCredential requires the credential leaf of a session-token
+// record: kind "interactive" (credentialContextForIdentity for a session
+// user), only canonical keys, never name or labels. A missing leaf fails:
+// C1.4 forbids emitting an event without its credential attribution.
+func assertSessionCredential(t *testing.T, line map[string]any) {
+	t.Helper()
+	cred := auditGroup(t, line, "credential")
+	assert.Equal(t, "interactive", cred["kind"], "credential: %v", cred)
+	for key := range cred {
+		assert.Contains(t, []string{"kind", "id", "boundary_kind", "boundary_project_id"}, key, "credential: %v", cred)
+	}
+	assert.NotContains(t, cred, "name")
+	assert.NotContains(t, cred, "labels")
+}
+
 func auditGroup(t *testing.T, line map[string]any, key string) map[string]any {
 	t.Helper()
 	g, ok := line[key].(map[string]any)
@@ -137,7 +152,7 @@ func auditGroup(t *testing.T, line map[string]any, key string) map[string]any {
 // GET /api/v1/projects/{id}/members are excluded_permission (asserted
 // below). The measured in-domain route is POST /api/v1/agents/stop-all:
 // a hub admin is allowed and a member is denied.
-func TestDecisionLog_P1_3_ProductionConstructorProjectRoute(t *testing.T) {
+func TestDecisionLog_P1_3_ProductionConstructorStopAll(t *testing.T) {
 	capture := &decisionLogCapture{}
 	srv, s := newDecisionLogServer(t, capture)
 	member, _, projectID := seedDecisionLogProject(t, s)
@@ -185,10 +200,7 @@ func TestDecisionLog_P1_3_ProductionConstructorProjectRoute(t *testing.T) {
 	assert.Equal(t, "agent.stop_all", payload["permission_id"])
 	assert.Equal(t, "false", payload["sampled"])
 	assert.NotEmpty(t, payload["reason"])
-	if cred, ok := line["credential"].(map[string]any); ok {
-		assert.NotContains(t, cred, "name")
-		assert.NotContains(t, cred, "labels")
-	}
+	assertSessionCredential(t, line)
 	for _, absent := range []string{"policy", "policy_id", "matched_policy", "matched_grant", "actor", "purpose"} {
 		assert.NotContains(t, line, absent)
 		assert.NotContains(t, payload, absent)
@@ -200,6 +212,7 @@ func TestDecisionLog_P1_3_ProductionConstructorProjectRoute(t *testing.T) {
 	assert.Equal(t, "warning", deny[0]["severity"])
 	assert.Equal(t, "WARN", deny[0]["level"])
 	assert.Equal(t, map[string]any{"kind": "user", "id": member.ID}, auditGroup(t, deny[0], "principal"))
+	assertSessionCredential(t, deny[0])
 
 	snap := srv.auditWriter.Snapshot()
 	assert.Equal(t, uint64(2), snap.Enqueued, "%+v", snap)
@@ -287,10 +300,14 @@ func TestDecisionLog_P1_5_ExcludedResourceThroughServer(t *testing.T) {
 // HTTP results are unchanged while the audit writer is blocked
 // (noncooperative inner handler) and full. Probes drive every adapter
 // branch a real Decide can reach (in-domain user and agent principals, the
-// delegated-agent AlwaysAudit allow, UAT bearer allow and gate deny with
-// credential decoration, a dependency-unavailable deny, and the
-// excluded_scope/principal/correlation/credential dispositions); each must
-// match the flag-off baseline and move its expected disposition counter.
+// delegated-agent allow, a dependency-unavailable deny, the real UAT bearer
+// gate deny over HTTP, and the excluded_resource/scope/principal/
+// permission/correlation/credential dispositions) plus two synthetic probes
+// (request AlwaysAudit allow; UAT allow from the production decoration
+// context); each must match the flag-off baseline, including its expected
+// allow/deny, and move its expected disposition counter. invalid is not
+// probed: a real Decide always yields a valid envelope for in-domain
+// records (validation failures are covered by the unit table).
 // It also pins panic isolation (sink and mapping faults through test seams)
 // and that emission mutates nothing reachable from the Decision or the
 // request. The test finishes while the inner handler is still blocked; it
@@ -366,32 +383,41 @@ func TestDecisionLog_P1_6_OutcomesUnchangedWithWriterBlockedAndFull(t *testing.T
 		ctx         func(reqID string) context.Context
 		req         func(context.Context) AuthzRequest
 		want        decisionAuditDisposition
+		wantAllowed bool
 		alwaysAudit bool
 	}
 	probes := []probe{
 		// In-domain user decisions carry an explicit registered Permission
 		// (the only source of Decision.PermissionID).
-		{name: "member read allow", ctx: asUser(member), req: withPermission(projectReq(projectID, ActionRead), "project.read"), want: decisionAuditNotEnqueued},
-		{name: "outsider read deny", ctx: asUser(outsider), req: withPermission(projectReq(projectID, ActionRead), "project.read"), want: decisionAuditNotEnqueued},
-		{name: "member delete deny", ctx: asUser(member), req: withPermission(projectReq(projectID, ActionDelete), "project.delete"), want: decisionAuditNotEnqueued},
-		{name: "outsider manage deny", ctx: asUser(outsider), req: withPermission(projectReq(projectID, ActionManage), "project.manage"), want: decisionAuditNotEnqueued},
+		{name: "member read allow", ctx: asUser(member), req: withPermission(projectReq(projectID, ActionRead), "project.read"), want: decisionAuditNotEnqueued, wantAllowed: true},
+		{name: "outsider read deny", ctx: asUser(outsider), req: withPermission(projectReq(projectID, ActionRead), "project.read"), want: decisionAuditNotEnqueued, wantAllowed: false},
+		{name: "member delete deny", ctx: asUser(member), req: withPermission(projectReq(projectID, ActionDelete), "project.delete"), want: decisionAuditNotEnqueued, wantAllowed: false},
+		{name: "outsider manage deny", ctx: asUser(outsider), req: withPermission(projectReq(projectID, ActionManage), "project.manage"), want: decisionAuditNotEnqueued, wantAllowed: false},
 		// The authorize/CheckAccess shape (no Permission) is excluded_permission.
-		{name: "excluded_permission: authorize-shaped member read", ctx: asUser(member), req: projectReq(projectID, ActionRead), want: decisionAuditExcludedPermission},
+		{name: "excluded_permission: authorize-shaped member read", ctx: asUser(member), req: projectReq(projectID, ActionRead), want: decisionAuditExcludedPermission, wantAllowed: true},
 		{name: "delegated agent allow", ctx: asIdentity(dcAgentIdentity(liveAgent, dcProject, AgentRoleFull)),
-			req: withPermission(projectReq(dcProject, ActionRead), "project.read"), want: decisionAuditNotEnqueued},
+			req: withPermission(projectReq(dcProject, ActionRead), "project.read"), want: decisionAuditNotEnqueued, wantAllowed: true},
 		{name: "dependency-unavailable deny", authz: faultyAuthz, ctx: asIdentity(dcAgentIdentity(errAgent, dcProject, AgentRoleFull)),
-			req: withPermission(projectReq(dcProject, ActionRead), "project.read"), want: decisionAuditNotEnqueued},
+			req: withPermission(projectReq(dcProject, ActionRead), "project.read"), want: decisionAuditNotEnqueued, wantAllowed: false},
 		{name: "excluded_scope: project-contained agent resource", ctx: asUser(member),
 			req: func(c context.Context) AuthzRequest {
 				return AuthzRequestFromContext(c, Resource{Type: "agent", ID: liveAgent, ParentType: "project", ParentID: dcProject}, ActionRead)
-			}, want: decisionAuditExcludedScope},
+			}, want: decisionAuditExcludedScope, wantAllowed: false},
+		// R2 review #3: a real Decide on a non-project/agent resource with a
+		// registered permission (member is not a hub admin).
+		{name: "excluded_resource: hub config update", ctx: asUser(member),
+			req: func(c context.Context) AuthzRequest {
+				r := AuthzRequestFromContext(c, Resource{Type: "hub", ID: "hub"}, Action("update"))
+				r.Permission = "hub.config.update"
+				return r
+			}, want: decisionAuditExcludedResource, wantAllowed: false},
 		{name: "excluded_principal: dev principal", ctx: asIdentity(NewDevUser(DevUserConfig{Username: "dev", DisplayName: "Dev", Email: "dev@localhost"})),
-			req: projectReq(projectID, ActionRead), want: decisionAuditExcludedPrincipal},
+			req: projectReq(projectID, ActionRead), want: decisionAuditExcludedPrincipal, wantAllowed: true},
 		{name: "excluded_correlation: no request ID", ctx: func(string) context.Context {
 			return contextWithIdentity(ctx, NewAuthenticatedUser(member.ID, member.Email, member.DisplayName, member.Role, "web"))
-		}, req: withPermission(projectReq(projectID, ActionRead), "project.read"), want: decisionAuditExcludedCorrelation},
+		}, req: withPermission(projectReq(projectID, ActionRead), "project.read"), want: decisionAuditExcludedCorrelation, wantAllowed: true},
 		{name: "excluded_credential: hub_delivery credential", ctx: asIdentity(hubDelivery),
-			req: withPermission(projectReq(dcProject, ActionRead), "project.read"), want: decisionAuditExcludedCredential},
+			req: withPermission(projectReq(dcProject, ActionRead), "project.read"), want: decisionAuditExcludedCredential, wantAllowed: false},
 		// Synthetic (R3 #5): no production branch sets AlwaysAudit; this
 		// covers that mapping path under a blocked, full writer.
 		{name: "synthetic: request AlwaysAudit allow", ctx: asUser(member),
@@ -399,13 +425,13 @@ func TestDecisionLog_P1_6_OutcomesUnchangedWithWriterBlockedAndFull(t *testing.T
 				r := withPermission(projectReq(projectID, ActionRead), "project.read")(c)
 				r.AlwaysAudit = true
 				return r
-			}, want: decisionAuditNotEnqueued, alwaysAudit: true},
+			}, want: decisionAuditNotEnqueued, wantAllowed: true, alwaysAudit: true},
 		// Synthetic (R3 #4): a UAT allow in the recorded domain has no real
 		// route, so drive Decide from the production decoration context
 		// (token validated by the UAT service, credential context built as
 		// the bearer middleware does) with an explicit project.read.
 		{name: "synthetic: UAT bearer allow with production decoration", ctx: uatCtx,
-			req: withPermission(projectReq(uatProject, ActionRead), "project.read"), want: decisionAuditNotEnqueued},
+			req: withPermission(projectReq(uatProject, ActionRead), "project.read"), want: decisionAuditNotEnqueued, wantAllowed: true},
 	}
 	run := func(p probe, reqID string) Decision {
 		authz := p.authz
@@ -416,17 +442,21 @@ func TestDecisionLog_P1_6_OutcomesUnchangedWithWriterBlockedAndFull(t *testing.T
 		return authz.Decide(c, p.req(c))
 	}
 	moved := func(d decisionAuditDisposition) uint64 { return l.counts.get(d, true) + l.counts.get(d, false) }
-	// HTTP probes: two authorize-path project requests (excluded_permission)
-	// and three in-domain stop-all requests: hub-admin allow, member deny,
-	// and a real UAT bearer gate deny with decoration (NewRef path).
-	httpStatuses := func() []int {
+	// HTTP probes: two authorize-path project requests (excluded_permission),
+	// two in-domain session stop-all requests (hub-admin allow, member deny),
+	// and separately a real UAT bearer gate deny on stop-all with the
+	// decoration present (NewRef path).
+	membersStatuses := func() []int {
 		a, _ := userRequest(t, srv, member, http.MethodGet, membersPath(projectID), nil, nil)
 		b, _ := userRequest(t, srv, outsider, http.MethodGet, membersPath(projectID), nil, nil)
+		return []int{a.Code, b.Code}
+	}
+	stopAllStatuses := func() []int {
 		c, _ := userRequest(t, srv, admin, http.MethodPost, stopAllPath, nil, nil)
 		d, _ := userRequest(t, srv, member, http.MethodPost, stopAllPath, nil, nil)
-		e := doRequestWithUAT(t, srv, uatKey, http.MethodPost, stopAllPath, nil)
-		return []int{a.Code, b.Code, c.Code, d.Code, e.Code}
+		return []int{c.Code, d.Code}
 	}
+	uatStatus := func() int { return doRequestWithUAT(t, srv, uatKey, http.MethodPost, stopAllPath, nil).Code }
 	assertParity := func(label string, want, got Decision) {
 		t.Helper()
 		assert.Equal(t, want.Allowed, got.Allowed, label)
@@ -437,21 +467,29 @@ func TestDecisionLog_P1_6_OutcomesUnchangedWithWriterBlockedAndFull(t *testing.T
 		assert.Equal(t, want.AlwaysAudit, got.AlwaysAudit, label)
 	}
 
+	// Normalize the fixture first (review N7): the admin stop-all stops the
+	// running fixture agents, so run it once now and the baseline and the
+	// measured phase see the same store state.
+	require.Equal(t, http.StatusOK, stopAllStatuses()[0], "normalizing stop-all")
+
 	// Baseline: flag off (status quo).
 	baseline := make([]Decision, len(probes))
 	for i, p := range probes {
 		before := moved(decisionAuditDisabled)
 		baseline[i] = run(p, fmt.Sprintf("dl6-base-%d", i))
 		require.Greater(t, moved(decisionAuditDisabled), before, "%s: baseline counted disabled", p.name)
-		if p.alwaysAudit {
-			require.True(t, baseline[i].Allowed, "%s: probe must be an allow: %+v", p.name, baseline[i])
-		}
+		require.Equal(t, p.wantAllowed, baseline[i].Allowed, "%s: expected outcome: %+v", p.name, baseline[i])
 	}
 	require.False(t, baseline[0].Allowed == baseline[1].Allowed, "probes must cover both allow and deny")
 	require.Equal(t, DenyCauseCeilingError, baseline[6].DenyCause, "dependency-unavailable probe: %q", baseline[6].Reason)
-	baseHTTP := httpStatuses()
-	require.Equal(t, []int{http.StatusOK, http.StatusForbidden, http.StatusOK, http.StatusForbidden}, baseHTTP[:4], "baseline HTTP results")
-	require.NotEqual(t, http.StatusOK, baseHTTP[4], "UAT gate deny on stop-all")
+	for i, p := range probes {
+		if p.want == decisionAuditExcludedCredential {
+			require.Equal(t, "project.read", baseline[i].PermissionID, "%s: the credential rule must be reached", p.name)
+		}
+	}
+	require.Equal(t, []int{http.StatusOK, http.StatusForbidden}, membersStatuses(), "baseline members results")
+	require.Equal(t, []int{http.StatusOK, http.StatusForbidden}, stopAllStatuses(), "baseline stop-all results")
+	require.Equal(t, http.StatusForbidden, uatStatus(), "baseline UAT gate deny on stop-all")
 
 	// Flag on; block the worker in the inner handler, then fill the queue.
 	setDecisionLogFlag(t, srv, true)
@@ -468,25 +506,24 @@ func TestDecisionLog_P1_6_OutcomesUnchangedWithWriterBlockedAndFull(t *testing.T
 
 	// 1. Every mapping branch: parity plus the expected disposition.
 	for i, p := range probes {
-		want := p.want
-		if want == decisionAuditExcludedCredential && !isKnownPermission(baseline[i].PermissionID) {
-			// Mapping checks permission before credential; record which
-			// disposition this real decision reaches instead.
-			t.Logf("%s: decision has no registered permission (%q); excluded_credential not reachable through Decide, expecting excluded_permission",
-				p.name, baseline[i].PermissionID)
-			want = decisionAuditExcludedPermission
-		}
-		before := moved(want)
+		before := moved(p.want)
 		got := run(p, fmt.Sprintf("dl6-full-%d", i))
+		assert.Equal(t, p.wantAllowed, got.Allowed, "%s: expected outcome", p.name)
 		assertParity(p.name, baseline[i], got)
-		assert.Greater(t, moved(want), before, "%s: disposition %s did not move", p.name, want)
+		assert.Equal(t, before+1, moved(p.want), "%s: disposition %s did not move exactly once", p.name, p.want)
 	}
-	beforeHTTP := moved(decisionAuditNotEnqueued)
 	beforePerm := moved(decisionAuditExcludedPermission)
-	beforeCred := moved(decisionAuditExcludedCredential)
-	assert.Equal(t, baseHTTP, httpStatuses(), "HTTP results unchanged (members ×2, stop-all admin/member, UAT gate deny)")
-	assert.GreaterOrEqual(t, moved(decisionAuditNotEnqueued), beforeHTTP+3, "each stop-all probe reached the full writer")
+	assert.Equal(t, []int{http.StatusOK, http.StatusForbidden}, membersStatuses(), "members results unchanged")
 	assert.GreaterOrEqual(t, moved(decisionAuditExcludedPermission), beforePerm+2, "authorize-path probes are excluded_permission")
+
+	beforeSession := moved(decisionAuditNotEnqueued)
+	assert.Equal(t, []int{http.StatusOK, http.StatusForbidden}, stopAllStatuses(), "stop-all results unchanged")
+	assert.Equal(t, beforeSession+2, moved(decisionAuditNotEnqueued), "each session stop-all decision reached the full writer exactly once")
+
+	beforeUAT := moved(decisionAuditNotEnqueued)
+	beforeCred := moved(decisionAuditExcludedCredential)
+	assert.Equal(t, http.StatusForbidden, uatStatus(), "UAT gate deny unchanged")
+	assert.Equal(t, beforeUAT+1, moved(decisionAuditNotEnqueued), "the UAT request reached Decide and the full writer exactly once")
 	assert.Equal(t, beforeCred, moved(decisionAuditExcludedCredential),
 		"UAT decoration maps to a credential reference (NewRef path), never excluded_credential")
 
