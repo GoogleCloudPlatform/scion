@@ -347,7 +347,10 @@ func gcpSAProfileMappings(email string, profiles []kubernetesProfileMappings, no
 			m.ReportedAt = p.reportedAt
 			m.Incomplete = p.incompleteReason != ""
 			m.IncompleteReason = p.incompleteReason
-			m.Ambiguous = p.ambiguous[key]
+			// A mapped account is not refused as ambiguous: an explicit
+			// mapping wins over discovery, so a stored ambiguous flag for
+			// it predates the mapping.
+			m.Ambiguous = state != GCPSAMappingMapped && p.ambiguous[key]
 		}
 		out = append(out, m)
 	}
@@ -406,8 +409,8 @@ func (s *Server) gcpSADefaultsFor(project *store.Project, saID string) []GCPServ
 // Then mapping: a profile whose project default is this account but which
 // does not map it, or else, when Kubernetes profiles reported and none maps
 // it, the first of them. A profile that did not report, or whose state is
-// unknown (its report is not authoritative), is not a known missing link. The Workload Identity binding is not checked, so it never
-// produces a step.
+// unknown (its report is not authoritative), is not a known missing link.
+// The Workload Identity binding is not checked, so it never produces a step.
 func gcpSANextStep(verified bool, mappings []GCPServiceAccountProfileMapping, defaults []GCPServiceAccountDefault) GCPServiceAccountNextStep {
 	if !verified {
 		return GCPServiceAccountNextStep{

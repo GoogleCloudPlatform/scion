@@ -200,19 +200,14 @@ export function saStatusUrl(scionProjectId: string, ref: string): string {
  * capabilities, so buttons there could only be rendered from existence.
  * Verify and delete for project-scoped accounts stay in the project's settings
  * list, whose list route does compute capabilities.
- *
- * `projectId` adds the project-relative sections for a parentless account
- * viewed from a project. It is ignored for a project-scoped account, whose
- * owning project is the only one that can see it.
  */
 export function saDetailPath(
-  account: Pick<GCPServiceAccount, 'id' | 'scope' | 'scopeId'>,
-  projectId = ''
+  account: Pick<GCPServiceAccount, 'id' | 'scope' | 'scopeId'>
 ): string | null {
   const base = `/settings/service-accounts/${encodeURIComponent(account.id)}`;
   if (account.scope === 'project') {
     if (!account.scopeId) return null;
     return `${base}?project=${encodeURIComponent(account.scopeId)}`;
   }
-  return projectId ? `${base}?project=${encodeURIComponent(projectId)}` : base;
+  return base;
 }

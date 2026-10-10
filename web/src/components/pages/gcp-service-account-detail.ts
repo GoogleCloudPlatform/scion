@@ -153,10 +153,17 @@ export class ScionPageGCPServiceAccountDetail extends LitElement {
 
     try {
       // The status view first when a project is named: its account scope says
-      // which address the row lives at. A failure here is shown in place of
-      // the sections and does not hide the row.
+      // which address the row lives at. When it fails, the page shows why and
+      // reads no row: the flat GET would answer 404 for a project-scoped
+      // account (a misleading "not found"), and the nested GET runs no read
+      // check of its own, so it must not route around a failed status read.
       if (this.projectId) {
         await this.loadStatus();
+        if (this.statusError) {
+          throw new Error(
+            `Could not load this account in project ${this.projectId}: ${this.statusError}`
+          );
+        }
       }
       this.account = await this.fetchAccount();
       dispatchPageTitle(
@@ -265,11 +272,14 @@ export class ScionPageGCPServiceAccountDetail extends LitElement {
   }
 
   /**
-   * The back link: a project-scoped account returns to its project's
-   * service-accounts tab, everything else to the hub settings tab.
+   * The back link: with ?project= the page returns to that project's
+   * service-accounts tab (also when the status view failed), unless the
+   * status view says the account is parentless; otherwise to the hub
+   * settings tab.
    */
   private backLink(): { href: string; label: string } {
-    if (this.projectId && this.accountStatus?.account.scope === 'project') {
+    const scope = this.accountStatus?.account.scope;
+    if (this.projectId && (scope === undefined || scope === 'project')) {
       return {
         href: `/projects/${encodeURIComponent(this.projectId)}/settings?tab=gcp-sa`,
         label: 'Project Settings',
@@ -283,11 +293,6 @@ export class ScionPageGCPServiceAccountDetail extends LitElement {
       return html`<div class="status-note" data-note="project-relative">
         Mapping, defaults and agents are relative to a project. Open this account from a project's
         settings to see them.
-      </div>`;
-    }
-    if (this.statusError) {
-      return html`<div class="action-error" data-note="status-error">
-        Could not load the status in this project: ${this.statusError}
       </div>`;
     }
     return html`<scion-gcp-service-account-status

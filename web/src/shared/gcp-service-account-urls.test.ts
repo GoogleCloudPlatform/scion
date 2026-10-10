@@ -178,16 +178,7 @@ describe('saDetailPath', () => {
     expect(saDetailPath(projectScoped)).toBe(
       '/settings/service-accounts/sa-1?project=scion-project-abc'
     );
-    expect(saDetailPath(projectScoped, 'some-other-project')).toBe(
-      '/settings/service-accounts/sa-1?project=scion-project-abc'
-    );
     expect(saDetailPath({ ...projectScoped, scopeId: '' })).toBeNull();
-  });
-
-  it('adds a viewing project to a parentless account when given', () => {
-    expect(saDetailPath(hubScoped, 'scion-project-abc')).toBe(
-      '/settings/service-accounts/sa-2?project=scion-project-abc'
-    );
   });
 });
 

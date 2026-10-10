@@ -174,9 +174,14 @@ func (s *Server) projectKubernetesProfileMappings(ctx context.Context, projectID
 								row.gsas[key] = true
 								// The live settings name only the GSA. The
 								// KSA, namespace and source come from the
-								// stored report when it maps the same GSA.
-								if e, ok := stored[key]; ok {
+								// stored report only when it maps the same
+								// GSA explicitly too: a stored discovered
+								// entry predates the explicit mapping and
+								// would show a KSA the broker no longer uses.
+								if e, ok := stored[key]; ok && e.Source == api.BrokerKSASourceMapped {
 									row.entries[key] = e
+								} else {
+									delete(row.entries, key)
 								}
 							}
 							row.reported = true

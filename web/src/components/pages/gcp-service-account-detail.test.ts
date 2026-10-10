@@ -304,18 +304,35 @@ describe('GCP service account detail: status sections', () => {
     await statusRoot(el);
   });
 
-  it('keeps the row when the status view fails, and says why', async () => {
-    routes({
-      '/api/v1/projects/proj-1/gcp-service-accounts/sa-1/status': () =>
-        json({ error: 'forbidden' }, 403),
-      '/api/v1/gcp-service-accounts/sa-1': () => json(row()),
-    });
-    const el = await mount('/settings/service-accounts/sa-1?project=proj-1');
+  for (const [name, status] of [
+    ['forbidden', 403],
+    ['a server error', 500],
+    ['an older hub without the endpoint', 404],
+  ] as const) {
+    it(`shows the status error, not "not found", when the status view answers ${name}`, async () => {
+      // A project-scoped id from the project settings list. The flat GET would
+      // answer 404 for it; the nested GET must not be used to route around a
+      // failed status read.
+      routes({
+        '/api/v1/projects/proj-1/gcp-service-accounts/sa-p/status': () =>
+          json({ error: name }, status),
+        '/api/v1/projects/proj-1/gcp-service-accounts/sa-p': () =>
+          json(row({ id: 'sa-p', scope: 'project', scopeId: 'proj-1' })),
+      });
+      const el = await mount('/settings/service-accounts/sa-p?project=proj-1');
 
-    expect(el.shadowRoot.querySelector('scion-detail-header')?.getAttribute('heading')).toBe(EMAIL);
-    expect(el.shadowRoot.querySelector('[data-note="status-error"]')?.textContent).toContain(
-      'HTTP 403'
-    );
-    expect(el.shadowRoot.querySelector('scion-gcp-service-account-status')).toBeNull();
-  });
+      const text = (el.shadowRoot.querySelector('.error-state')?.textContent ?? '').replace(
+        /\s+/g,
+        ' '
+      );
+      expect(text).toContain(`Could not load this account in project proj-1: HTTP ${status}`);
+      expect(el.shadowRoot.querySelector('scion-detail-header')).toBeNull();
+      expect(buttonLabels(el)).toEqual([]);
+      expect(el.shadowRoot.querySelector('scion-back-link')?.getAttribute('href')).toBe(
+        '/projects/proj-1/settings?tab=gcp-sa'
+      );
+      const urls = apiFetch.mock.calls.map((c) => c[0] as string);
+      expect(urls).toEqual(['/api/v1/projects/proj-1/gcp-service-accounts/sa-p/status']);
+    });
+  }
 });

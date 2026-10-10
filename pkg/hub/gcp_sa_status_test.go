@@ -510,7 +510,10 @@ func TestGCPSAStatus_EmbeddedBrokerDetailsFromRecord(t *testing.T) {
 			{GSA: mappedGSA, KSA: "worker-ksa", Namespace: "agents", Source: "mapped"},
 			{GSA: unmappedGSA, KSA: "stale-ksa", Namespace: "agents", Source: "mapped"},
 			{GSA: "found@p.iam.gserviceaccount.com", KSA: "found-ksa", Namespace: "agents", Source: "discovered"},
+			// Mapped explicitly in the live settings since this report.
+			{GSA: "now-explicit@p.iam.gserviceaccount.com", KSA: "old-ksa", Namespace: "agents", Source: "discovered"},
 		},
+		AmbiguousGSAs: []string{"now-explicit-amb@p.iam.gserviceaccount.com"},
 	})
 	srv.SetEmbeddedBrokerID(b.ID)
 	prev := loadEmbeddedBrokerMappingSettings
@@ -519,7 +522,11 @@ func TestGCPSAStatus_EmbeddedBrokerDetailsFromRecord(t *testing.T) {
 		return &config.VersionedSettings{
 			Profiles: map[string]config.V1ProfileConfig{"gke": {Runtime: "kubernetes"}},
 			Runtimes: map[string]config.V1RuntimeConfig{
-				"kubernetes": {KubernetesServiceAccountMappings: map[string]string{mappedGSA: "worker-ksa"}},
+				"kubernetes": {KubernetesServiceAccountMappings: map[string]string{
+					mappedGSA:                                    "worker-ksa",
+					"now-explicit@p.iam.gserviceaccount.com":     "new-ksa",
+					"now-explicit-amb@p.iam.gserviceaccount.com": "amb-ksa",
+				}},
 			},
 		}, nil
 	}
@@ -545,4 +552,19 @@ func TestGCPSAStatus_EmbeddedBrokerDetailsFromRecord(t *testing.T) {
 	assert.Equal(t, GCPSAMappingMapped, st.Mappings[0].State)
 	assert.Equal(t, "found-ksa", st.Mappings[0].KubernetesServiceAccount)
 	assert.Equal(t, "discovered", st.Mappings[0].Source)
+
+	// Mapped explicitly in the live settings, discovered in the older stored
+	// report: mapped, without the stale discovered KSA.
+	st = getSAStatus(t, srv, projectID, mappingTestSA(t, s, projectID, "now-explicit@p.iam.gserviceaccount.com").ID)
+	require.Len(t, st.Mappings, 1)
+	assert.Equal(t, GCPSAMappingMapped, st.Mappings[0].State)
+	assert.Empty(t, st.Mappings[0].KubernetesServiceAccount)
+	assert.Empty(t, st.Mappings[0].Source)
+
+	// Mapped explicitly in the live settings, ambiguous in the older stored
+	// report: mapped and not flagged ambiguous (an explicit mapping wins).
+	st = getSAStatus(t, srv, projectID, mappingTestSA(t, s, projectID, "now-explicit-amb@p.iam.gserviceaccount.com").ID)
+	require.Len(t, st.Mappings, 1)
+	assert.Equal(t, GCPSAMappingMapped, st.Mappings[0].State)
+	assert.False(t, st.Mappings[0].Ambiguous)
 }
