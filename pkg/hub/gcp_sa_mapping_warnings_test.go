@@ -240,6 +240,32 @@ func TestHubSAMappingWarnings_ChecksEveryBroker(t *testing.T) {
 	assert.Contains(t, warnings[0], "b2/k8s")
 }
 
+// The hub-wide view is reused for hubSAMappingCacheTTL, so repeated
+// hub-scope requests do not each walk every broker; after the window a new
+// mapping is seen.
+func TestHubSAMappingWarnings_ViewCachedForTTL(t *testing.T) {
+	srv, s, projectID := newMappingProject(t)
+	addProviderBroker(t, s, projectID, "b1", k8sProfile("k8s", true))
+	hubSA := &store.GCPServiceAccount{
+		ID: tid("hub-sa"), Scope: store.ScopeHub, ScopeID: "hub", Email: unmappedGSA, ProjectID: "p", Verified: true,
+	}
+
+	now := time.Now()
+	orig := hubSAMappingNow
+	hubSAMappingNow = func() time.Time { return now }
+	t.Cleanup(func() { hubSAMappingNow = orig })
+
+	require.Len(t, srv.hubSAMappingWarnings(context.Background(), hubSA), 1)
+
+	// A second broker maps the account. Within the window the cached view
+	// still answers; past it the walk runs again and sees the mapping.
+	addProviderBroker(t, s, projectID, "b2", k8sProfile("k8s", true, unmappedGSA))
+	now = now.Add(hubSAMappingCacheTTL - time.Second)
+	assert.Len(t, srv.hubSAMappingWarnings(context.Background(), hubSA), 1, "cached view reused within the TTL")
+	now = now.Add(2 * time.Second)
+	assert.Empty(t, srv.hubSAMappingWarnings(context.Background(), hubSA), "view reloaded after the TTL")
+}
+
 // No Kubernetes profile anywhere on the hub: nothing to warn about.
 func TestHubSAMappingWarnings_NoKubernetesBrokers(t *testing.T) {
 	srv, s, projectID := newMappingProject(t)

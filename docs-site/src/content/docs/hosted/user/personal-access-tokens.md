@@ -250,6 +250,7 @@ flows need:
 | `scion attach` | `project:read`, `agent:attach` |
 | `scion stop`, `scion suspend`, `scion resume`, `scion restore` | `project:read`, `agent:lifecycle` |
 | `scion delete` | `project:read`, `agent:delete` |
+| `scion project service-accounts list`, `scion service-accounts list` | `project:read` (a project's accounts) |
 
 A token without `project:read` gets `404 Not Found` on the project lookup. The CLI reports this
 as a likely missing `project:read` scope and stops. A user access token cannot register a new

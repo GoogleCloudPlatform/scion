@@ -315,8 +315,11 @@ func (d *saAssignDenial) Error() string {
 }
 
 // write renders the denial. Every 403 carries the stable code
-// identity_assign_denied (ptone/scion#4019); the details the structured kind
-// adds are unchanged.
+// identity_assign_denied (ptone/scion#4019) and the structured
+// resource_type/denied_action details. The unstructured kinds (check mode,
+// actAs) gained those details with the code: a client that labels a 403 by
+// denied_action and falls back to the code (the web access-denied toast)
+// would otherwise show the raw code.
 func (d *saAssignDenial) write(w http.ResponseWriter) {
 	switch d.kind {
 	case saAssignDenyUnauthorized:
@@ -328,7 +331,7 @@ func (d *saAssignDenial) write(w http.ResponseWriter) {
 		if msg == "" {
 			msg = saAssignGenericForbiddenMsg
 		}
-		writeError(w, http.StatusForbidden, ErrCodeIdentityAssignDenied, msg, nil)
+		writeForbiddenStructuredDenialCauseCode(w, ErrCodeIdentityAssignDenied, msg, "gcp_service_account", ActionAssign, "", "")
 	}
 }
 

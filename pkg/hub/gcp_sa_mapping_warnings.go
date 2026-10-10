@@ -20,6 +20,8 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -104,20 +106,62 @@ func (s *Server) projectSAMappings(ctx context.Context, projectID string) projec
 // hubSAMappings.
 const hubSAMappingBrokerPageSize = 200
 
-// hubSAMappings collects the Kubernetes profile mappings of every broker on
+// hubSAMappingCacheTTL is how long a hub-wide mapping view is reused. The
+// view feeds advisory warnings only, and brokers report mapping changes on
+// a heartbeat measured in minutes, so a few seconds of reuse loses nothing
+// a caller could act on while sparing repeated list, register and verify
+// calls a walk over every broker each.
+const hubSAMappingCacheTTL = 30 * time.Second
+
+// hubSAMappingViewCache is the Server's single cached hub-wide view.
+type hubSAMappingViewCache struct {
+	mu      sync.Mutex
+	view    projectSAMappingView
+	expires time.Time
+}
+
+// hubSAMappingNow is the clock for the cache; a variable so tests can move it.
+var hubSAMappingNow = time.Now
+
+// hubSAMappings returns the Kubernetes profile mappings of every broker on
 // the hub. A hub-scoped account is assignable from every project, so the
 // question for it is whether any broker maps it, not one project's
-// providers. Listing errors are logged and end the walk: the result feeds
-// warnings only.
+// providers; the hub-scope routes have no project to narrow the brokers to.
+//
+// The view is cached on the Server for hubSAMappingCacheTTL, so at most one
+// walk over the brokers happens per window however many hub-scope requests
+// arrive, and a request computes it at most once (hubSAMappingWarnings
+// reads it once for all its accounts). Only the hub-scope routes (list,
+// register, mint, verify-by-id) read it, and only when the response holds a
+// hub-scoped account. A failed listing is not cached.
 func (s *Server) hubSAMappings(ctx context.Context) projectSAMappingView {
+	c := &s.hubSAMappingCache
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := hubSAMappingNow()
+	if now.Before(c.expires) {
+		return c.view
+	}
+	view, ok := s.loadHubSAMappings(ctx)
+	if ok {
+		c.view, c.expires = view, now.Add(hubSAMappingCacheTTL)
+	}
+	return view
+}
+
+// loadHubSAMappings walks every broker on the hub. ok is false when a
+// listing page failed; the partial view is still returned for this call.
+func (s *Server) loadHubSAMappings(ctx context.Context) (projectSAMappingView, bool) {
 	view := projectSAMappingView{where: "this hub", mapped: map[string]bool{}}
 	var brokers []*store.RuntimeBroker
+	ok := true
 	cursor := ""
 	for {
 		page, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{},
 			store.ListOptions{Limit: hubSAMappingBrokerPageSize, Cursor: cursor, SkipTotalCount: true})
 		if err != nil {
 			slog.Debug("SA mapping warning: listing hub brokers failed", "error", err)
+			ok = false
 			break
 		}
 		for i := range page.Items {
@@ -129,7 +173,7 @@ func (s *Server) hubSAMappings(ctx context.Context) projectSAMappingView {
 		cursor = page.NextCursor
 	}
 	s.addBrokerSAMappings(&view, brokers)
-	return view
+	return view, ok
 }
 
 // addBrokerSAMappings adds the Kubernetes profile mappings of brokers to

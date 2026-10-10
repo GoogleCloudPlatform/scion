@@ -524,7 +524,7 @@ There is no fallback: a failed mapping never runs the pod with the emulator or w
 - listing the project's service accounts (`warnings` in the list response, printed by `scion project service-accounts list`); with `includeHubScoped=true` the hub-scoped accounts in the list are checked against the project's profiles too,
 - the `gcp-sa-mappings` check of `scion doctor`.
 
-Hub-scoped service accounts are also checked on the hub-scope routes, which have no project: registering or minting one, verifying it through `POST /api/v1/gcp-service-accounts/<id>/verify`, and listing with `scope=hub`. There the warning says the GSA is not mapped on any Kubernetes broker profile of the hub, checking every broker on the hub.
+Hub-scoped service accounts are also checked on the hub-scope routes, which have no project: registering or minting one, verifying it through `POST /api/v1/gcp-service-accounts/<id>/verify`, and listing with `scope=hub`. There the warning says the GSA is not mapped on any Kubernetes broker profile of the hub, checking every broker on the hub. The Hub reuses that hub-wide check for up to 30 seconds, so a mapping change can take that long to show on these routes.
 
 It is only a warning: it never fails a request, and an unmapped GSA is fine if it is never assigned on a Kubernetes profile. It is not shown when the brokers checked have no Kubernetes profile, or when no Kubernetes profile has reported its mappings. For the other identity error codes (`identity_not_verified`, `identity_default_invalid`, `identity_assign_denied`, `identity_mode_unsupported`) see [Identity Error Codes](/scion/hosted/ha/permissions/#identity-error-codes).
 

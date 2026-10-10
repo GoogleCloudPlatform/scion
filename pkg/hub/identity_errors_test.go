@@ -149,7 +149,12 @@ func TestIdentityAssignDenied_WriteCarriesCode(t *testing.T) {
 	rec = httptest.NewRecorder()
 	(&saAssignDenial{kind: saAssignDenyForbidden, msg: "m"}).write(rec)
 	require.Equal(t, http.StatusForbidden, rec.Code)
-	assert.Equal(t, ErrCodeIdentityAssignDenied, decodeTargetAPIError(t, rec).Code)
+	apiErr = decodeTargetAPIError(t, rec)
+	assert.Equal(t, ErrCodeIdentityAssignDenied, apiErr.Code)
+	// Structured details too, so a client labelling by denied_action does not
+	// fall back to showing the code.
+	assert.Equal(t, "gcp_service_account", apiErr.Details["resource_type"])
+	assert.Equal(t, string(ActionAssign), apiErr.Details["denied_action"])
 
 	rec = httptest.NewRecorder()
 	(&saAssignDenial{kind: saAssignDenyUnauthorized}).write(rec)
@@ -203,20 +208,24 @@ func TestIdentityAssignDenied_HubScopedWithCheckModeOff(t *testing.T) {
 // --- start refusal ---
 
 func TestGCPIdentityStartRefusalText(t *testing.T) {
-	code, msg := gcpIdentityStartRefusalText("start", errGCPSANotVerified)
+	status, code, msg := gcpIdentityStartRefusalText("start", errGCPSANotVerified)
+	assert.Equal(t, http.StatusBadRequest, status)
 	assert.Equal(t, ErrCodeIdentityNotVerified, code)
 	assert.Contains(t, msg, "Cannot start agent")
 	assert.Contains(t, msg, "not verified")
 	assert.Contains(t, msg, "roles/iam.serviceAccountTokenCreator")
 
-	code, msg = gcpIdentityStartRefusalText("restart", errGCPSAHubModeOff)
+	// identity_assign_denied is a 403 on every path, start included.
+	status, code, msg = gcpIdentityStartRefusalText("restart", errGCPSAHubModeOff)
+	assert.Equal(t, http.StatusForbidden, status)
 	assert.Equal(t, ErrCodeIdentityAssignDenied, code)
 	assert.Contains(t, msg, "gcpIamCheckMode=enforce")
 	assert.Contains(t, msg, saAssignHubModeRemedy)
 
-	// A vanished account reads as before: no identity code, no remedy that
-	// would reveal more than the not-available text.
-	code, msg = gcpIdentityStartRefusalText("start", errGCPSANotAvailable)
+	// A vanished account reads as before: 400, no identity code, no remedy
+	// that would reveal more than the not-available text.
+	status, code, msg = gcpIdentityStartRefusalText("start", errGCPSANotAvailable)
+	assert.Equal(t, http.StatusBadRequest, status)
 	assert.Equal(t, ErrCodeValidationError, code)
 	assert.Contains(t, msg, errGCPSANotAvailable.Error())
 }

@@ -1325,7 +1325,8 @@ func (s *Server) resolveAgentGCPMintFacts(ctx context.Context, gcpID *store.GCPI
 // Agents without an applied assign-mode GCP identity are unaffected.
 //
 // It writes the response and returns true when the start must not proceed:
-// 400 for an inadmissible assignment, 500 when the check could not be made.
+// 400 for an inadmissible assignment (403 for a hub-scoped account the check
+// mode no longer allows), 500 when the check could not be made.
 func (s *Server) gcpIdentityStartRefusal(ctx context.Context, w http.ResponseWriter, agent *store.Agent, action string) bool {
 	gcpID, ok := s.resolveAgentGCPAssignment(agent)
 	if !ok {
@@ -1343,30 +1344,31 @@ func (s *Server) gcpIdentityStartRefusal(ctx context.Context, w http.ResponseWri
 	}
 	slog.Info("agent start refused: GCP identity assignment is not admissible",
 		"agent_id", agent.ID, "action", action, "sa_id", gcpID.ServiceAccountID, "reason", err)
-	code, msg := gcpIdentityStartRefusalText(action, err)
-	writeError(w, http.StatusBadRequest, code, msg, nil)
+	status, code, msg := gcpIdentityStartRefusalText(action, err)
+	writeError(w, status, code, msg, nil)
 	return true
 }
 
-// gcpIdentityStartRefusalText is the code and message for an inadmissible
-// assignment at start. A not-verified account and a hub-scoped account the
-// check mode no longer allows get their identity codes and a remedy naming
-// who acts. The other reasons keep the validation code: a vanished or
-// unreachable account must read the same as before, and the changed-email
-// case is fixed the same way.
-func gcpIdentityStartRefusalText(action string, err error) (string, string) {
+// gcpIdentityStartRefusalText is the status, code and message for an
+// inadmissible assignment at start. A not-verified account and a hub-scoped
+// account the check mode no longer allows get their identity codes and a
+// remedy naming who acts. identity_assign_denied is a 403 on every path,
+// here included. The other reasons keep 400 and the validation code: a
+// vanished or unreachable account must read the same as before, and the
+// changed-email case is fixed the same way.
+func gcpIdentityStartRefusalText(action string, err error) (int, string, string) {
 	switch {
 	case errors.Is(err, errGCPSANotVerified):
-		return ErrCodeIdentityNotVerified, fmt.Sprintf(
+		return http.StatusBadRequest, ErrCodeIdentityNotVerified, fmt.Sprintf(
 			"Cannot %s agent: %s: the hub cannot obtain tokens for it. %s "+
 				"Or assign the agent a different GCP identity, then retry.",
 			action, err.Error(), identityVerifyRemedy(""))
 	case errors.Is(err, errGCPSAHubModeOff):
-		return ErrCodeIdentityAssignDenied, fmt.Sprintf(
+		return http.StatusForbidden, ErrCodeIdentityAssignDenied, fmt.Sprintf(
 			"Cannot %s agent: %s. %s Or assign the agent a project-scoped GCP identity, then retry.",
 			action, err.Error(), saAssignHubModeRemedy)
 	default:
-		return ErrCodeValidationError, fmt.Sprintf(
+		return http.StatusBadRequest, ErrCodeValidationError, fmt.Sprintf(
 			"Cannot %s agent: %s. Verify the service account, or assign the agent a different GCP identity, then retry.",
 			action, err.Error())
 	}

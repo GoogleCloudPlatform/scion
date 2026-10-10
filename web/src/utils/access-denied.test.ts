@@ -113,6 +113,27 @@ describe('formatAccessDenied', () => {
     expect(result.secondary).toBeUndefined();
   });
 
+  it('shows the server message, not the code, for an unstructured identity_assign_denied 403', () => {
+    const detail: AccessDeniedDetail = {
+      action: 'identity_assign_denied',
+      reason: 'Hub-scoped service account assignment requires gcpIamCheckMode=enforce.',
+    };
+    const result = formatAccessDenied(detail);
+    expect(result.primary).toBe('Hub-scoped service account assignment requires gcpIamCheckMode=enforce.');
+    expect(result.secondary).toBeUndefined();
+  });
+
+  it('falls back to a friendly sentence for identity_assign_denied with a generic message', () => {
+    const result = formatAccessDenied({ action: 'identity_assign_denied', reason: 'Insufficient permissions' });
+    expect(result.primary).toBe("You're not permitted to assign this service account.");
+    expect(result.secondary).toBeUndefined();
+  });
+
+  it('labels a structured assign denial', () => {
+    const result = formatAccessDenied({ action: 'assign', resource: 'gcp_service_account' });
+    expect(result.secondary).toBe('Permission needed: assign on gcp_service_account');
+  });
+
   it('shows secondary when action is "forbidden" but resource is present', () => {
     const detail: AccessDeniedDetail = { action: 'forbidden', resource: 'agent' };
     const result = formatAccessDenied(detail);
