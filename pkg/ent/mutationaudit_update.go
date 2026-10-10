@@ -357,6 +357,166 @@ func (_u *MutationAuditUpdate) ClearExecutorID() *MutationAuditUpdate {
 	return _u
 }
 
+// SetActorAgentID sets the "actor_agent_id" field.
+func (_u *MutationAuditUpdate) SetActorAgentID(v string) *MutationAuditUpdate {
+	_u.mutation.SetActorAgentID(v)
+	return _u
+}
+
+// SetNillableActorAgentID sets the "actor_agent_id" field if the given value is not nil.
+func (_u *MutationAuditUpdate) SetNillableActorAgentID(v *string) *MutationAuditUpdate {
+	if v != nil {
+		_u.SetActorAgentID(*v)
+	}
+	return _u
+}
+
+// ClearActorAgentID clears the value of the "actor_agent_id" field.
+func (_u *MutationAuditUpdate) ClearActorAgentID() *MutationAuditUpdate {
+	_u.mutation.ClearActorAgentID()
+	return _u
+}
+
+// SetAuthorizingUserID sets the "authorizing_user_id" field.
+func (_u *MutationAuditUpdate) SetAuthorizingUserID(v string) *MutationAuditUpdate {
+	_u.mutation.SetAuthorizingUserID(v)
+	return _u
+}
+
+// SetNillableAuthorizingUserID sets the "authorizing_user_id" field if the given value is not nil.
+func (_u *MutationAuditUpdate) SetNillableAuthorizingUserID(v *string) *MutationAuditUpdate {
+	if v != nil {
+		_u.SetAuthorizingUserID(*v)
+	}
+	return _u
+}
+
+// ClearAuthorizingUserID clears the value of the "authorizing_user_id" field.
+func (_u *MutationAuditUpdate) ClearAuthorizingUserID() *MutationAuditUpdate {
+	_u.mutation.ClearAuthorizingUserID()
+	return _u
+}
+
+// SetSourceGrantID sets the "source_grant_id" field.
+func (_u *MutationAuditUpdate) SetSourceGrantID(v string) *MutationAuditUpdate {
+	_u.mutation.SetSourceGrantID(v)
+	return _u
+}
+
+// SetNillableSourceGrantID sets the "source_grant_id" field if the given value is not nil.
+func (_u *MutationAuditUpdate) SetNillableSourceGrantID(v *string) *MutationAuditUpdate {
+	if v != nil {
+		_u.SetSourceGrantID(*v)
+	}
+	return _u
+}
+
+// ClearSourceGrantID clears the value of the "source_grant_id" field.
+func (_u *MutationAuditUpdate) ClearSourceGrantID() *MutationAuditUpdate {
+	_u.mutation.ClearSourceGrantID()
+	return _u
+}
+
+// SetParentGrantID sets the "parent_grant_id" field.
+func (_u *MutationAuditUpdate) SetParentGrantID(v string) *MutationAuditUpdate {
+	_u.mutation.SetParentGrantID(v)
+	return _u
+}
+
+// SetNillableParentGrantID sets the "parent_grant_id" field if the given value is not nil.
+func (_u *MutationAuditUpdate) SetNillableParentGrantID(v *string) *MutationAuditUpdate {
+	if v != nil {
+		_u.SetParentGrantID(*v)
+	}
+	return _u
+}
+
+// ClearParentGrantID clears the value of the "parent_grant_id" field.
+func (_u *MutationAuditUpdate) ClearParentGrantID() *MutationAuditUpdate {
+	_u.mutation.ClearParentGrantID()
+	return _u
+}
+
+// SetDelegationEdgeID sets the "delegation_edge_id" field.
+func (_u *MutationAuditUpdate) SetDelegationEdgeID(v string) *MutationAuditUpdate {
+	_u.mutation.SetDelegationEdgeID(v)
+	return _u
+}
+
+// SetNillableDelegationEdgeID sets the "delegation_edge_id" field if the given value is not nil.
+func (_u *MutationAuditUpdate) SetNillableDelegationEdgeID(v *string) *MutationAuditUpdate {
+	if v != nil {
+		_u.SetDelegationEdgeID(*v)
+	}
+	return _u
+}
+
+// ClearDelegationEdgeID clears the value of the "delegation_edge_id" field.
+func (_u *MutationAuditUpdate) ClearDelegationEdgeID() *MutationAuditUpdate {
+	_u.mutation.ClearDelegationEdgeID()
+	return _u
+}
+
+// SetExchangeAgentCredentialID sets the "exchange_agent_credential_id" field.
+func (_u *MutationAuditUpdate) SetExchangeAgentCredentialID(v string) *MutationAuditUpdate {
+	_u.mutation.SetExchangeAgentCredentialID(v)
+	return _u
+}
+
+// SetNillableExchangeAgentCredentialID sets the "exchange_agent_credential_id" field if the given value is not nil.
+func (_u *MutationAuditUpdate) SetNillableExchangeAgentCredentialID(v *string) *MutationAuditUpdate {
+	if v != nil {
+		_u.SetExchangeAgentCredentialID(*v)
+	}
+	return _u
+}
+
+// ClearExchangeAgentCredentialID clears the value of the "exchange_agent_credential_id" field.
+func (_u *MutationAuditUpdate) ClearExchangeAgentCredentialID() *MutationAuditUpdate {
+	_u.mutation.ClearExchangeAgentCredentialID()
+	return _u
+}
+
+// SetActorKind sets the "actor_kind" field.
+func (_u *MutationAuditUpdate) SetActorKind(v string) *MutationAuditUpdate {
+	_u.mutation.SetActorKind(v)
+	return _u
+}
+
+// SetNillableActorKind sets the "actor_kind" field if the given value is not nil.
+func (_u *MutationAuditUpdate) SetNillableActorKind(v *string) *MutationAuditUpdate {
+	if v != nil {
+		_u.SetActorKind(*v)
+	}
+	return _u
+}
+
+// ClearActorKind clears the value of the "actor_kind" field.
+func (_u *MutationAuditUpdate) ClearActorKind() *MutationAuditUpdate {
+	_u.mutation.ClearActorKind()
+	return _u
+}
+
+// SetAgentDelegationCode sets the "agent_delegation_code" field.
+func (_u *MutationAuditUpdate) SetAgentDelegationCode(v string) *MutationAuditUpdate {
+	_u.mutation.SetAgentDelegationCode(v)
+	return _u
+}
+
+// SetNillableAgentDelegationCode sets the "agent_delegation_code" field if the given value is not nil.
+func (_u *MutationAuditUpdate) SetNillableAgentDelegationCode(v *string) *MutationAuditUpdate {
+	if v != nil {
+		_u.SetAgentDelegationCode(*v)
+	}
+	return _u
+}
+
+// ClearAgentDelegationCode clears the value of the "agent_delegation_code" field.
+func (_u *MutationAuditUpdate) ClearAgentDelegationCode() *MutationAuditUpdate {
+	_u.mutation.ClearAgentDelegationCode()
+	return _u
+}
+
 // Mutation returns the MutationAuditMutation object of the builder.
 func (_u *MutationAuditUpdate) Mutation() *MutationAuditMutation {
 	return _u.mutation
@@ -523,6 +683,54 @@ func (_u *MutationAuditUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	}
 	if _u.mutation.ExecutorIDCleared() {
 		_spec.ClearField(mutationaudit.FieldExecutorID, field.TypeString)
+	}
+	if value, ok := _u.mutation.ActorAgentID(); ok {
+		_spec.SetField(mutationaudit.FieldActorAgentID, field.TypeString, value)
+	}
+	if _u.mutation.ActorAgentIDCleared() {
+		_spec.ClearField(mutationaudit.FieldActorAgentID, field.TypeString)
+	}
+	if value, ok := _u.mutation.AuthorizingUserID(); ok {
+		_spec.SetField(mutationaudit.FieldAuthorizingUserID, field.TypeString, value)
+	}
+	if _u.mutation.AuthorizingUserIDCleared() {
+		_spec.ClearField(mutationaudit.FieldAuthorizingUserID, field.TypeString)
+	}
+	if value, ok := _u.mutation.SourceGrantID(); ok {
+		_spec.SetField(mutationaudit.FieldSourceGrantID, field.TypeString, value)
+	}
+	if _u.mutation.SourceGrantIDCleared() {
+		_spec.ClearField(mutationaudit.FieldSourceGrantID, field.TypeString)
+	}
+	if value, ok := _u.mutation.ParentGrantID(); ok {
+		_spec.SetField(mutationaudit.FieldParentGrantID, field.TypeString, value)
+	}
+	if _u.mutation.ParentGrantIDCleared() {
+		_spec.ClearField(mutationaudit.FieldParentGrantID, field.TypeString)
+	}
+	if value, ok := _u.mutation.DelegationEdgeID(); ok {
+		_spec.SetField(mutationaudit.FieldDelegationEdgeID, field.TypeString, value)
+	}
+	if _u.mutation.DelegationEdgeIDCleared() {
+		_spec.ClearField(mutationaudit.FieldDelegationEdgeID, field.TypeString)
+	}
+	if value, ok := _u.mutation.ExchangeAgentCredentialID(); ok {
+		_spec.SetField(mutationaudit.FieldExchangeAgentCredentialID, field.TypeString, value)
+	}
+	if _u.mutation.ExchangeAgentCredentialIDCleared() {
+		_spec.ClearField(mutationaudit.FieldExchangeAgentCredentialID, field.TypeString)
+	}
+	if value, ok := _u.mutation.ActorKind(); ok {
+		_spec.SetField(mutationaudit.FieldActorKind, field.TypeString, value)
+	}
+	if _u.mutation.ActorKindCleared() {
+		_spec.ClearField(mutationaudit.FieldActorKind, field.TypeString)
+	}
+	if value, ok := _u.mutation.AgentDelegationCode(); ok {
+		_spec.SetField(mutationaudit.FieldAgentDelegationCode, field.TypeString, value)
+	}
+	if _u.mutation.AgentDelegationCodeCleared() {
+		_spec.ClearField(mutationaudit.FieldAgentDelegationCode, field.TypeString)
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -874,6 +1082,166 @@ func (_u *MutationAuditUpdateOne) ClearExecutorID() *MutationAuditUpdateOne {
 	return _u
 }
 
+// SetActorAgentID sets the "actor_agent_id" field.
+func (_u *MutationAuditUpdateOne) SetActorAgentID(v string) *MutationAuditUpdateOne {
+	_u.mutation.SetActorAgentID(v)
+	return _u
+}
+
+// SetNillableActorAgentID sets the "actor_agent_id" field if the given value is not nil.
+func (_u *MutationAuditUpdateOne) SetNillableActorAgentID(v *string) *MutationAuditUpdateOne {
+	if v != nil {
+		_u.SetActorAgentID(*v)
+	}
+	return _u
+}
+
+// ClearActorAgentID clears the value of the "actor_agent_id" field.
+func (_u *MutationAuditUpdateOne) ClearActorAgentID() *MutationAuditUpdateOne {
+	_u.mutation.ClearActorAgentID()
+	return _u
+}
+
+// SetAuthorizingUserID sets the "authorizing_user_id" field.
+func (_u *MutationAuditUpdateOne) SetAuthorizingUserID(v string) *MutationAuditUpdateOne {
+	_u.mutation.SetAuthorizingUserID(v)
+	return _u
+}
+
+// SetNillableAuthorizingUserID sets the "authorizing_user_id" field if the given value is not nil.
+func (_u *MutationAuditUpdateOne) SetNillableAuthorizingUserID(v *string) *MutationAuditUpdateOne {
+	if v != nil {
+		_u.SetAuthorizingUserID(*v)
+	}
+	return _u
+}
+
+// ClearAuthorizingUserID clears the value of the "authorizing_user_id" field.
+func (_u *MutationAuditUpdateOne) ClearAuthorizingUserID() *MutationAuditUpdateOne {
+	_u.mutation.ClearAuthorizingUserID()
+	return _u
+}
+
+// SetSourceGrantID sets the "source_grant_id" field.
+func (_u *MutationAuditUpdateOne) SetSourceGrantID(v string) *MutationAuditUpdateOne {
+	_u.mutation.SetSourceGrantID(v)
+	return _u
+}
+
+// SetNillableSourceGrantID sets the "source_grant_id" field if the given value is not nil.
+func (_u *MutationAuditUpdateOne) SetNillableSourceGrantID(v *string) *MutationAuditUpdateOne {
+	if v != nil {
+		_u.SetSourceGrantID(*v)
+	}
+	return _u
+}
+
+// ClearSourceGrantID clears the value of the "source_grant_id" field.
+func (_u *MutationAuditUpdateOne) ClearSourceGrantID() *MutationAuditUpdateOne {
+	_u.mutation.ClearSourceGrantID()
+	return _u
+}
+
+// SetParentGrantID sets the "parent_grant_id" field.
+func (_u *MutationAuditUpdateOne) SetParentGrantID(v string) *MutationAuditUpdateOne {
+	_u.mutation.SetParentGrantID(v)
+	return _u
+}
+
+// SetNillableParentGrantID sets the "parent_grant_id" field if the given value is not nil.
+func (_u *MutationAuditUpdateOne) SetNillableParentGrantID(v *string) *MutationAuditUpdateOne {
+	if v != nil {
+		_u.SetParentGrantID(*v)
+	}
+	return _u
+}
+
+// ClearParentGrantID clears the value of the "parent_grant_id" field.
+func (_u *MutationAuditUpdateOne) ClearParentGrantID() *MutationAuditUpdateOne {
+	_u.mutation.ClearParentGrantID()
+	return _u
+}
+
+// SetDelegationEdgeID sets the "delegation_edge_id" field.
+func (_u *MutationAuditUpdateOne) SetDelegationEdgeID(v string) *MutationAuditUpdateOne {
+	_u.mutation.SetDelegationEdgeID(v)
+	return _u
+}
+
+// SetNillableDelegationEdgeID sets the "delegation_edge_id" field if the given value is not nil.
+func (_u *MutationAuditUpdateOne) SetNillableDelegationEdgeID(v *string) *MutationAuditUpdateOne {
+	if v != nil {
+		_u.SetDelegationEdgeID(*v)
+	}
+	return _u
+}
+
+// ClearDelegationEdgeID clears the value of the "delegation_edge_id" field.
+func (_u *MutationAuditUpdateOne) ClearDelegationEdgeID() *MutationAuditUpdateOne {
+	_u.mutation.ClearDelegationEdgeID()
+	return _u
+}
+
+// SetExchangeAgentCredentialID sets the "exchange_agent_credential_id" field.
+func (_u *MutationAuditUpdateOne) SetExchangeAgentCredentialID(v string) *MutationAuditUpdateOne {
+	_u.mutation.SetExchangeAgentCredentialID(v)
+	return _u
+}
+
+// SetNillableExchangeAgentCredentialID sets the "exchange_agent_credential_id" field if the given value is not nil.
+func (_u *MutationAuditUpdateOne) SetNillableExchangeAgentCredentialID(v *string) *MutationAuditUpdateOne {
+	if v != nil {
+		_u.SetExchangeAgentCredentialID(*v)
+	}
+	return _u
+}
+
+// ClearExchangeAgentCredentialID clears the value of the "exchange_agent_credential_id" field.
+func (_u *MutationAuditUpdateOne) ClearExchangeAgentCredentialID() *MutationAuditUpdateOne {
+	_u.mutation.ClearExchangeAgentCredentialID()
+	return _u
+}
+
+// SetActorKind sets the "actor_kind" field.
+func (_u *MutationAuditUpdateOne) SetActorKind(v string) *MutationAuditUpdateOne {
+	_u.mutation.SetActorKind(v)
+	return _u
+}
+
+// SetNillableActorKind sets the "actor_kind" field if the given value is not nil.
+func (_u *MutationAuditUpdateOne) SetNillableActorKind(v *string) *MutationAuditUpdateOne {
+	if v != nil {
+		_u.SetActorKind(*v)
+	}
+	return _u
+}
+
+// ClearActorKind clears the value of the "actor_kind" field.
+func (_u *MutationAuditUpdateOne) ClearActorKind() *MutationAuditUpdateOne {
+	_u.mutation.ClearActorKind()
+	return _u
+}
+
+// SetAgentDelegationCode sets the "agent_delegation_code" field.
+func (_u *MutationAuditUpdateOne) SetAgentDelegationCode(v string) *MutationAuditUpdateOne {
+	_u.mutation.SetAgentDelegationCode(v)
+	return _u
+}
+
+// SetNillableAgentDelegationCode sets the "agent_delegation_code" field if the given value is not nil.
+func (_u *MutationAuditUpdateOne) SetNillableAgentDelegationCode(v *string) *MutationAuditUpdateOne {
+	if v != nil {
+		_u.SetAgentDelegationCode(*v)
+	}
+	return _u
+}
+
+// ClearAgentDelegationCode clears the value of the "agent_delegation_code" field.
+func (_u *MutationAuditUpdateOne) ClearAgentDelegationCode() *MutationAuditUpdateOne {
+	_u.mutation.ClearAgentDelegationCode()
+	return _u
+}
+
 // Mutation returns the MutationAuditMutation object of the builder.
 func (_u *MutationAuditUpdateOne) Mutation() *MutationAuditMutation {
 	return _u.mutation
@@ -1070,6 +1438,54 @@ func (_u *MutationAuditUpdateOne) sqlSave(ctx context.Context) (_node *MutationA
 	}
 	if _u.mutation.ExecutorIDCleared() {
 		_spec.ClearField(mutationaudit.FieldExecutorID, field.TypeString)
+	}
+	if value, ok := _u.mutation.ActorAgentID(); ok {
+		_spec.SetField(mutationaudit.FieldActorAgentID, field.TypeString, value)
+	}
+	if _u.mutation.ActorAgentIDCleared() {
+		_spec.ClearField(mutationaudit.FieldActorAgentID, field.TypeString)
+	}
+	if value, ok := _u.mutation.AuthorizingUserID(); ok {
+		_spec.SetField(mutationaudit.FieldAuthorizingUserID, field.TypeString, value)
+	}
+	if _u.mutation.AuthorizingUserIDCleared() {
+		_spec.ClearField(mutationaudit.FieldAuthorizingUserID, field.TypeString)
+	}
+	if value, ok := _u.mutation.SourceGrantID(); ok {
+		_spec.SetField(mutationaudit.FieldSourceGrantID, field.TypeString, value)
+	}
+	if _u.mutation.SourceGrantIDCleared() {
+		_spec.ClearField(mutationaudit.FieldSourceGrantID, field.TypeString)
+	}
+	if value, ok := _u.mutation.ParentGrantID(); ok {
+		_spec.SetField(mutationaudit.FieldParentGrantID, field.TypeString, value)
+	}
+	if _u.mutation.ParentGrantIDCleared() {
+		_spec.ClearField(mutationaudit.FieldParentGrantID, field.TypeString)
+	}
+	if value, ok := _u.mutation.DelegationEdgeID(); ok {
+		_spec.SetField(mutationaudit.FieldDelegationEdgeID, field.TypeString, value)
+	}
+	if _u.mutation.DelegationEdgeIDCleared() {
+		_spec.ClearField(mutationaudit.FieldDelegationEdgeID, field.TypeString)
+	}
+	if value, ok := _u.mutation.ExchangeAgentCredentialID(); ok {
+		_spec.SetField(mutationaudit.FieldExchangeAgentCredentialID, field.TypeString, value)
+	}
+	if _u.mutation.ExchangeAgentCredentialIDCleared() {
+		_spec.ClearField(mutationaudit.FieldExchangeAgentCredentialID, field.TypeString)
+	}
+	if value, ok := _u.mutation.ActorKind(); ok {
+		_spec.SetField(mutationaudit.FieldActorKind, field.TypeString, value)
+	}
+	if _u.mutation.ActorKindCleared() {
+		_spec.ClearField(mutationaudit.FieldActorKind, field.TypeString)
+	}
+	if value, ok := _u.mutation.AgentDelegationCode(); ok {
+		_spec.SetField(mutationaudit.FieldAgentDelegationCode, field.TypeString, value)
+	}
+	if _u.mutation.AgentDelegationCodeCleared() {
+		_spec.ClearField(mutationaudit.FieldAgentDelegationCode, field.TypeString)
 	}
 	_node = &MutationAudit{config: _u.config}
 	_spec.Assign = _node.assignValues

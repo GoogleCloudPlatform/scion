@@ -11,6 +11,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accesspolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentcredential"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdelegatedcredential"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdelegationgrant"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentrecovery"
@@ -344,6 +346,102 @@ func init() {
 	agentcredentialDescID := agentcredentialFields[0].Descriptor()
 	// agentcredential.DefaultID holds the default value on creation for the id field.
 	agentcredential.DefaultID = agentcredentialDescID.Default.(func() uuid.UUID)
+	agentdelegatedcredentialFields := schema.AgentDelegatedCredential{}.Fields()
+	_ = agentdelegatedcredentialFields
+	// agentdelegatedcredentialDescGrantID is the schema descriptor for grant_id field.
+	agentdelegatedcredentialDescGrantID := agentdelegatedcredentialFields[1].Descriptor()
+	// agentdelegatedcredential.GrantIDValidator is a validator for the "grant_id" field. It is called by the builders before save.
+	agentdelegatedcredential.GrantIDValidator = agentdelegatedcredentialDescGrantID.Validators[0].(func(string) error)
+	// agentdelegatedcredentialDescAgentID is the schema descriptor for agent_id field.
+	agentdelegatedcredentialDescAgentID := agentdelegatedcredentialFields[2].Descriptor()
+	// agentdelegatedcredential.AgentIDValidator is a validator for the "agent_id" field. It is called by the builders before save.
+	agentdelegatedcredential.AgentIDValidator = agentdelegatedcredentialDescAgentID.Validators[0].(func(string) error)
+	// agentdelegatedcredentialDescKeyHash is the schema descriptor for key_hash field.
+	agentdelegatedcredentialDescKeyHash := agentdelegatedcredentialFields[3].Descriptor()
+	// agentdelegatedcredential.KeyHashValidator is a validator for the "key_hash" field. It is called by the builders before save.
+	agentdelegatedcredential.KeyHashValidator = agentdelegatedcredentialDescKeyHash.Validators[0].(func(string) error)
+	// agentdelegatedcredentialDescPrefix is the schema descriptor for prefix field.
+	agentdelegatedcredentialDescPrefix := agentdelegatedcredentialFields[4].Descriptor()
+	// agentdelegatedcredential.PrefixValidator is a validator for the "prefix" field. It is called by the builders before save.
+	agentdelegatedcredential.PrefixValidator = agentdelegatedcredentialDescPrefix.Validators[0].(func(string) error)
+	// agentdelegatedcredentialDescAudience is the schema descriptor for audience field.
+	agentdelegatedcredentialDescAudience := agentdelegatedcredentialFields[5].Descriptor()
+	// agentdelegatedcredential.AudienceValidator is a validator for the "audience" field. It is called by the builders before save.
+	agentdelegatedcredential.AudienceValidator = agentdelegatedcredentialDescAudience.Validators[0].(func(string) error)
+	// agentdelegatedcredentialDescCeilingPermissionIds is the schema descriptor for ceiling_permission_ids field.
+	agentdelegatedcredentialDescCeilingPermissionIds := agentdelegatedcredentialFields[6].Descriptor()
+	// agentdelegatedcredential.CeilingPermissionIdsValidator is a validator for the "ceiling_permission_ids" field. It is called by the builders before save.
+	agentdelegatedcredential.CeilingPermissionIdsValidator = agentdelegatedcredentialDescCeilingPermissionIds.Validators[0].(func(string) error)
+	// agentdelegatedcredentialDescExchangeAgentCredentialID is the schema descriptor for exchange_agent_credential_id field.
+	agentdelegatedcredentialDescExchangeAgentCredentialID := agentdelegatedcredentialFields[7].Descriptor()
+	// agentdelegatedcredential.ExchangeAgentCredentialIDValidator is a validator for the "exchange_agent_credential_id" field. It is called by the builders before save.
+	agentdelegatedcredential.ExchangeAgentCredentialIDValidator = agentdelegatedcredentialDescExchangeAgentCredentialID.Validators[0].(func(string) error)
+	// agentdelegatedcredentialDescIssuedAt is the schema descriptor for issued_at field.
+	agentdelegatedcredentialDescIssuedAt := agentdelegatedcredentialFields[8].Descriptor()
+	// agentdelegatedcredential.DefaultIssuedAt holds the default value on creation for the issued_at field.
+	agentdelegatedcredential.DefaultIssuedAt = agentdelegatedcredentialDescIssuedAt.Default.(func() time.Time)
+	// agentdelegatedcredentialDescID is the schema descriptor for id field.
+	agentdelegatedcredentialDescID := agentdelegatedcredentialFields[0].Descriptor()
+	// agentdelegatedcredential.DefaultID holds the default value on creation for the id field.
+	agentdelegatedcredential.DefaultID = agentdelegatedcredentialDescID.Default.(func() uuid.UUID)
+	agentdelegationgrantFields := schema.AgentDelegationGrant{}.Fields()
+	_ = agentdelegationgrantFields
+	// agentdelegationgrantDescAgentID is the schema descriptor for agent_id field.
+	agentdelegationgrantDescAgentID := agentdelegationgrantFields[1].Descriptor()
+	// agentdelegationgrant.AgentIDValidator is a validator for the "agent_id" field. It is called by the builders before save.
+	agentdelegationgrant.AgentIDValidator = agentdelegationgrantDescAgentID.Validators[0].(func(string) error)
+	// agentdelegationgrantDescAgentProjectID is the schema descriptor for agent_project_id field.
+	agentdelegationgrantDescAgentProjectID := agentdelegationgrantFields[2].Descriptor()
+	// agentdelegationgrant.AgentProjectIDValidator is a validator for the "agent_project_id" field. It is called by the builders before save.
+	agentdelegationgrant.AgentProjectIDValidator = agentdelegationgrantDescAgentProjectID.Validators[0].(func(string) error)
+	// agentdelegationgrantDescAgentGeneration is the schema descriptor for agent_generation field.
+	agentdelegationgrantDescAgentGeneration := agentdelegationgrantFields[3].Descriptor()
+	// agentdelegationgrant.DefaultAgentGeneration holds the default value on creation for the agent_generation field.
+	agentdelegationgrant.DefaultAgentGeneration = agentdelegationgrantDescAgentGeneration.Default.(int)
+	// agentdelegationgrantDescAgentStateVersion is the schema descriptor for agent_state_version field.
+	agentdelegationgrantDescAgentStateVersion := agentdelegationgrantFields[4].Descriptor()
+	// agentdelegationgrant.DefaultAgentStateVersion holds the default value on creation for the agent_state_version field.
+	agentdelegationgrant.DefaultAgentStateVersion = agentdelegationgrantDescAgentStateVersion.Default.(int64)
+	// agentdelegationgrantDescIssuerUserID is the schema descriptor for issuer_user_id field.
+	agentdelegationgrantDescIssuerUserID := agentdelegationgrantFields[5].Descriptor()
+	// agentdelegationgrant.IssuerUserIDValidator is a validator for the "issuer_user_id" field. It is called by the builders before save.
+	agentdelegationgrant.IssuerUserIDValidator = agentdelegationgrantDescIssuerUserID.Validators[0].(func(string) error)
+	// agentdelegationgrantDescBoundaryKind is the schema descriptor for boundary_kind field.
+	agentdelegationgrantDescBoundaryKind := agentdelegationgrantFields[6].Descriptor()
+	// agentdelegationgrant.BoundaryKindValidator is a validator for the "boundary_kind" field. It is called by the builders before save.
+	agentdelegationgrant.BoundaryKindValidator = agentdelegationgrantDescBoundaryKind.Validators[0].(func(string) error)
+	// agentdelegationgrantDescCeilingPermissionIds is the schema descriptor for ceiling_permission_ids field.
+	agentdelegationgrantDescCeilingPermissionIds := agentdelegationgrantFields[9].Descriptor()
+	// agentdelegationgrant.CeilingPermissionIdsValidator is a validator for the "ceiling_permission_ids" field. It is called by the builders before save.
+	agentdelegationgrant.CeilingPermissionIdsValidator = agentdelegationgrantDescCeilingPermissionIds.Validators[0].(func(string) error)
+	// agentdelegationgrantDescName is the schema descriptor for name field.
+	agentdelegationgrantDescName := agentdelegationgrantFields[10].Descriptor()
+	// agentdelegationgrant.NameValidator is a validator for the "name" field. It is called by the builders before save.
+	agentdelegationgrant.NameValidator = agentdelegationgrantDescName.Validators[0].(func(string) error)
+	// agentdelegationgrantDescAllowSubdelegation is the schema descriptor for allow_subdelegation field.
+	agentdelegationgrantDescAllowSubdelegation := agentdelegationgrantFields[13].Descriptor()
+	// agentdelegationgrant.DefaultAllowSubdelegation holds the default value on creation for the allow_subdelegation field.
+	agentdelegationgrant.DefaultAllowSubdelegation = agentdelegationgrantDescAllowSubdelegation.Default.(bool)
+	// agentdelegationgrantDescDepth is the schema descriptor for depth field.
+	agentdelegationgrantDescDepth := agentdelegationgrantFields[15].Descriptor()
+	// agentdelegationgrant.DefaultDepth holds the default value on creation for the depth field.
+	agentdelegationgrant.DefaultDepth = agentdelegationgrantDescDepth.Default.(int)
+	// agentdelegationgrantDescMaxCredentialTTLSeconds is the schema descriptor for max_credential_ttl_seconds field.
+	agentdelegationgrantDescMaxCredentialTTLSeconds := agentdelegationgrantFields[16].Descriptor()
+	// agentdelegationgrant.MaxCredentialTTLSecondsValidator is a validator for the "max_credential_ttl_seconds" field. It is called by the builders before save.
+	agentdelegationgrant.MaxCredentialTTLSecondsValidator = agentdelegationgrantDescMaxCredentialTTLSeconds.Validators[0].(func(int) error)
+	// agentdelegationgrantDescCreated is the schema descriptor for created field.
+	agentdelegationgrantDescCreated := agentdelegationgrantFields[18].Descriptor()
+	// agentdelegationgrant.DefaultCreated holds the default value on creation for the created field.
+	agentdelegationgrant.DefaultCreated = agentdelegationgrantDescCreated.Default.(func() time.Time)
+	// agentdelegationgrantDescIssuanceAuditID is the schema descriptor for issuance_audit_id field.
+	agentdelegationgrantDescIssuanceAuditID := agentdelegationgrantFields[23].Descriptor()
+	// agentdelegationgrant.IssuanceAuditIDValidator is a validator for the "issuance_audit_id" field. It is called by the builders before save.
+	agentdelegationgrant.IssuanceAuditIDValidator = agentdelegationgrantDescIssuanceAuditID.Validators[0].(func(string) error)
+	// agentdelegationgrantDescID is the schema descriptor for id field.
+	agentdelegationgrantDescID := agentdelegationgrantFields[0].Descriptor()
+	// agentdelegationgrant.DefaultID holds the default value on creation for the id field.
+	agentdelegationgrant.DefaultID = agentdelegationgrantDescID.Default.(func() uuid.UUID)
 	agentholdFields := schema.AgentHold{}.Fields()
 	_ = agentholdFields
 	// agentholdDescRootPrincipalType is the schema descriptor for root_principal_type field.
