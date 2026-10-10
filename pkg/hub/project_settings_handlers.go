@@ -515,22 +515,17 @@ func setProfileDefaultSAIDsAnnotation(annotations map[string]string, m map[strin
 // same string set, checked against the resolved runtime's Name() rather than
 // a stored profile field, so the two cannot drift on which spellings count.
 //
-// A profile's Type is the settings *runtime key* the profile's `runtime:`
-// field references (cmd/server_broker.go, pkg/runtimebroker/handlers.go build
-// it directly from that map), not a resolved type — but it IS exactly that
-// runtime key, regardless of what the profile itself is named: a profile
-// named "my-cluster" with `runtime: kubernetes` reports Type "kubernetes",
-// correctly, because "kubernetes" is the runtime key, not the profile name
-// (the profile name is never inspected). The gap is a custom-named *runtime
-// entry*: `runtimes.gke-prod: {type: kubernetes}`
-// referenced by `runtime: gke-prod` reports Type "gke-prod" and is missed
-// here (pkg/config/settings_v1.go ResolveRuntime resolves it through
-// V1RuntimeConfig.Type, which this function never sees). The same gap runs in
-// reverse: a runtime key spelled "kubernetes"/"k8s"/"remote" with an explicit
-// `type: docker` (or any other non-Kubernetes type) is misclassified as
-// Kubernetes here, though it dispatches as that other type. Both gaps need
-// the broker to report its resolved type instead of the profile's runtime
-// key; out of scope for this check.
+// A profile's Type is the profile's resolved runtime type: the explicit
+// `type:` of the runtime entry the profile's `runtime:` field references,
+// else that entry's key (cmd/broker.go buildBrokerProfiles and
+// cmd/server_broker.go buildStoreBrokerProfiles, the same rule as the
+// broker's /info in pkg/runtimebroker/handlers.go). So `runtimes.gke-prod:
+// {type: kubernetes}` referenced by `runtime: gke-prod` reports Type
+// "kubernetes", and a key spelled "docker" with `type: kubernetes` reports
+// "kubernetes" too. Profile names are never inspected. A record registered
+// by an older broker, or by a broker that could not load its settings,
+// still carries the runtime key as Type and is classified by that key, as
+// before, until the broker registers again.
 func isKubernetesRuntimeType(t string) bool {
 	switch t {
 	case "kubernetes", "k8s", "remote":
@@ -665,7 +660,7 @@ func mergeProjectSettingsPut(stored *hubclient.ProjectSettings, body []byte) (*h
 	t := mv.Type()
 	names := make([]string, t.NumField())
 	for i := range names {
-		names[i] = jsonFieldName(t.Field(i))
+		names[i] = serializedJSONFieldName(t.Field(i))
 	}
 
 	// Map each body key to the field encoding/json decodes it into. Keys
@@ -721,9 +716,9 @@ func projectSettingsFieldIndex(names []string, key string) int {
 	return -1
 }
 
-// jsonFieldName returns the JSON name of an exported struct field, or ""
+// serializedJSONFieldName returns the JSON name of an exported struct field, or ""
 // when the field is not serialized.
-func jsonFieldName(f reflect.StructField) string {
+func serializedJSONFieldName(f reflect.StructField) string {
 	if !f.IsExported() {
 		return ""
 	}

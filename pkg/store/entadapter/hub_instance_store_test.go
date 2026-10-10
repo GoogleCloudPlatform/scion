@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -126,19 +127,21 @@ func TestHubInstanceStore_UpsertKeepsStartedAtAndReplacesFields(t *testing.T) {
 	assert.JSONEq(t, `{"db":{"max_open":4}}`, string(got.Stats))
 }
 
-func TestHubInstanceStore_TouchUpdatesLastSeenOnly(t *testing.T) {
+func TestHubInstanceStore_TouchUpdatesLastSeenAndPoolGaugesOnly(t *testing.T) {
 	s, client := newHubInstanceTestStore(t)
 	ctx := context.Background()
 
 	require.NoError(t, s.UpsertHubInstance(ctx, store.HubInstance{
 		ID: "hub-a-1", Label: "hub-a", Version: "v1", Status: "healthy",
 		Checks: map[string]string{"database": "healthy"},
+		Stats: json.RawMessage(`{"db":{"in_use":1,"idle":2,"max_open":10,"wait_count":3},` +
+			`"integrations":[{"name":"chat","health":"healthy","connected":true,"version":"1.0"}]}`),
 	}))
 	first := getHubInstance(t, s, "hub-a-1")
 	past := first.LastSeen.Add(-time.Minute)
 	setHubInstanceTimes(t, client, "hub-a-1", past, nil)
 
-	found, err := s.TouchHubInstance(ctx, "hub-a-1")
+	found, err := s.TouchHubInstance(ctx, "hub-a-1", &api.HubInstanceDBStats{InUse: 7, Idle: 1, MaxOpen: 10, WaitCount: 9})
 	require.NoError(t, err)
 	assert.True(t, found)
 
@@ -149,12 +152,40 @@ func TestHubInstanceStore_TouchUpdatesLastSeenOnly(t *testing.T) {
 	assert.Equal(t, first.Version, got.Version)
 	assert.Equal(t, first.Status, got.Status)
 	assert.Equal(t, first.Checks, got.Checks)
+	assert.JSONEq(t, `{"db":{"in_use":7,"idle":1,"max_open":10,"wait_count":9},`+
+		`"integrations":[{"name":"chat","health":"healthy","connected":true,"version":"1.0"}]}`,
+		string(got.Stats), "touch replaces stats.db and keeps every other stats key")
+}
+
+func TestHubInstanceStore_TouchOnEmptyStatsWritesDB(t *testing.T) {
+	s, _ := newHubInstanceTestStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.UpsertHubInstance(ctx, store.HubInstance{ID: "hub-a-1", Status: "healthy"}))
+	found, err := s.TouchHubInstance(ctx, "hub-a-1", &api.HubInstanceDBStats{InUse: 2, MaxOpen: 5})
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.JSONEq(t, `{"db":{"in_use":2,"idle":0,"max_open":5,"wait_count":0}}`, string(getHubInstance(t, s, "hub-a-1").Stats))
+}
+
+func TestHubInstanceStore_TouchWithNilDBRemovesDBOnly(t *testing.T) {
+	s, _ := newHubInstanceTestStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.UpsertHubInstance(ctx, store.HubInstance{
+		ID: "hub-a-1", Status: "healthy",
+		Stats: json.RawMessage(`{"db":{"in_use":1,"idle":0,"max_open":4,"wait_count":0},"integrations_truncated":true}`),
+	}))
+	found, err := s.TouchHubInstance(ctx, "hub-a-1", nil)
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.JSONEq(t, `{"integrations_truncated":true}`, string(getHubInstance(t, s, "hub-a-1").Stats))
 }
 
 func TestHubInstanceStore_TouchMissingRowReturnsNotFound(t *testing.T) {
 	s, _ := newHubInstanceTestStore(t)
 
-	found, err := s.TouchHubInstance(context.Background(), "hub-missing")
+	found, err := s.TouchHubInstance(context.Background(), "hub-missing", &api.HubInstanceDBStats{InUse: 1})
 	require.NoError(t, err)
 	assert.False(t, found, "touch on a missing row reports found=false so the caller upserts")
 }
@@ -198,7 +229,7 @@ func TestHubInstanceStore_RejectsInvalidID(t *testing.T) {
 	for _, id := range []string{"", "has space", "tab\tid", strings.Repeat("a", hubInstanceMaxIDBytes+1)} {
 		err := s.UpsertHubInstance(ctx, store.HubInstance{ID: id})
 		assert.True(t, errors.Is(err, store.ErrInvalidInput), "upsert id %q: %v", id, err)
-		_, err = s.TouchHubInstance(ctx, id)
+		_, err = s.TouchHubInstance(ctx, id, nil)
 		assert.True(t, errors.Is(err, store.ErrInvalidInput), "touch id %q: %v", id, err)
 	}
 	assert.NoError(t, s.UpsertHubInstance(ctx, store.HubInstance{ID: strings.Repeat("a", hubInstanceMaxIDBytes)}))
@@ -328,7 +359,7 @@ func TestHubInstanceStore_PrunedLiveRowIsRecreated(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, n)
 
-	found, err := s.TouchHubInstance(ctx, "hub-a-1")
+	found, err := s.TouchHubInstance(ctx, "hub-a-1", nil)
 	require.NoError(t, err)
 	assert.False(t, found)
 	require.NoError(t, s.UpsertHubInstance(ctx, store.HubInstance{ID: "hub-a-1", Label: "hub-a", Status: "healthy"}))

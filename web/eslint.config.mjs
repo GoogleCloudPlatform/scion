@@ -92,9 +92,8 @@ export default defineConfig([
   globalIgnores(['**/dist/', '**/node_modules/', '**/public/', '**/*.cjs']),
 
   {
-    // ESLint 9+ reports unused eslint-disable comments by default.
-    // Keep the ESLint 8 behaviour.
-    linterOptions: { reportUnusedDisableDirectives: 'off' },
+    // Fail on stale eslint-disable comments so they do not build up.
+    linterOptions: { reportUnusedDisableDirectives: 'error' },
   },
 
   {
@@ -114,39 +113,46 @@ export default defineConfig([
     rules: sharedRules,
   },
 
-  project(['e2e/terminal-workspace/*.ts'], './e2e/terminal-workspace/tsconfig.json'),
-  project(['e2e/terminal-entrypoints/*.ts'], './e2e/terminal-entrypoints/tsconfig.json'),
-  project(['e2e/terminal-hidden/*.ts'], './e2e/terminal-hidden/tsconfig.json'),
-  project(['e2e/chat-mobile/*.ts'], './e2e/chat-mobile/tsconfig.json'),
-  project(['e2e/agent-store-count/*.ts'], './e2e/agent-store-count/tsconfig.json'),
-  project(['e2e/chat-file-preview/*.ts'], './e2e/chat-file-preview/tsconfig.json'),
-  project(['e2e/project-files-tabs/*.ts'], './e2e/project-files-tabs/tsconfig.json'),
   // Checks the Playwright configs, so it needs their TS project.
   project(['src/utils/playwright-forbid-only.test.ts'], './tsconfig.e2e-configs.json'),
+  // Playwright suites. The suites that load src share one lint-only TS
+  // project (e2e/tsconfig.eslint.json) so ESLint builds one program for
+  // them, not one per suite. Each suite's tsconfig.json still owns its
+  // typecheck. terminal-lifecycle and terminal-owner do not load src and
+  // keep their own project.
   project(
     [
-      'e2e/chat-palette/accessibility.pw.ts',
-      'e2e/chat-palette/agent-selection.pw.ts',
-      'e2e/chat-palette/agents-livelock.pw.ts',
-      'e2e/chat-palette/agents-progressive.pw.ts',
-      'e2e/chat-palette/document-preview.pw.ts',
-      'e2e/chat-palette/fixture.ts',
-      'e2e/chat-palette/focus-and-guards.pw.ts',
-      'e2e/chat-palette/group-navigation.pw.ts',
-      'e2e/chat-palette/palette-button.pw.ts',
-      'e2e/chat-palette/playwright.config.ts',
-      'e2e/chat-palette/reopen-race.pw.ts',
-      'e2e/chat-palette/shortcut-then-enter.pw.ts',
-      'e2e/chat-palette/terminal-and-modal.pw.ts',
-      'e2e/chat-palette/terminal-guard-under-shell.pw.ts',
-      'e2e/chat-palette/thread-navigation.pw.ts',
-      'e2e/chat-palette/touch-keyboard.pw.ts',
-      'e2e/chat-palette/typography.pw.ts',
-      'e2e/palette-typography.ts',
+      'e2e/agent-store-count/*.ts',
+      'e2e/chat/*.ts',
+      'e2e/chat-file-preview/*.ts',
+      'e2e/chat-mobile/*.ts',
+      'e2e/chat-palette/*.ts',
+      'e2e/project-files-tabs/*.ts',
+      'e2e/terminal-entrypoints/*.ts',
+      'e2e/terminal-hidden/*.ts',
+      'e2e/terminal-pane/*.ts',
+      'e2e/terminal-workspace/*.ts',
+      'e2e/client-main-stub.ts',
       'e2e/palette-focus.ts',
+      'e2e/palette-typography.ts',
     ],
-    './e2e/chat-palette/tsconfig.json'
+    './e2e/tsconfig.eslint.json'
   ),
+  project(['e2e/terminal-lifecycle/*.ts'], './e2e/terminal-lifecycle/tsconfig.json'),
+  project(['e2e/terminal-owner/*.ts'], './e2e/terminal-owner/tsconfig.json'),
+
+  // TEMPORARY: the hub-backed suites run from the root playwright.config.ts
+  // and have no TS project yet, so they are not linted here. Linted in
+  // ptone/scion#4201.
+  {
+    ignores: [
+      'e2e/*.spec.ts',
+      'e2e/groups/**',
+      'e2e/harness/**',
+      'e2e/roles/**',
+      'e2e/terminal-coordinator/**',
+    ],
+  },
 
   // Test files: a looser type-aware rule set than sources. Tests reach
   // into private members and use `as any` fakes, so the no-unsafe-* rules

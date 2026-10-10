@@ -32,7 +32,6 @@ await import('../pages/skills.js');
 await import('../pages/skill-detail.js');
 await import('../pages/health-dashboard.js');
 await import('./notification-tray.js');
-await import('./inbox-tray.js');
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyEl = any;
@@ -45,7 +44,6 @@ const HELPERS: Array<[tag: string, method: string, invalid: string]> = [
   ['scion-page-skills', 'formatRelativeTime', '—'],
   ['scion-page-skill-detail', 'formatRelativeTime', '—'],
   ['scion-notification-tray', 'relativeTime', '—'],
-  ['scion-inbox-tray', 'relativeTime', '—'],
 ];
 
 describe('compact relative times (tz-refactor task 19)', () => {

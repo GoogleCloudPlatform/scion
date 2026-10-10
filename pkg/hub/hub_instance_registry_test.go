@@ -19,7 +19,9 @@ package hub
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -29,6 +31,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -45,6 +48,8 @@ type countingHubInstanceStore struct {
 	// ops records completed stop writes (and, for
 	// blockingUpsertHubInstanceStore, upserts) in order.
 	ops []string
+	// touchedDB is the pool argument of the last successful Touch.
+	touchedDB *api.HubInstanceDBStats
 }
 
 func newCountingHubInstanceStore() *countingHubInstanceStore {
@@ -63,7 +68,7 @@ func (c *countingHubInstanceStore) UpsertHubInstance(_ context.Context, in store
 	return nil
 }
 
-func (c *countingHubInstanceStore) TouchHubInstance(_ context.Context, id string) (bool, error) {
+func (c *countingHubInstanceStore) TouchHubInstance(_ context.Context, id string, db *api.HubInstanceDBStats) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.touches++
@@ -77,6 +82,9 @@ func (c *countingHubInstanceStore) TouchHubInstance(_ context.Context, id string
 		return false, nil
 	}
 	_, ok := c.rows[id]
+	if ok {
+		c.touchedDB = db
+	}
 	return ok, nil
 }
 
@@ -256,6 +264,11 @@ func TestHubInstanceRegistry_TickRunsNoCountQueries(t *testing.T) {
 	assert.NotEmpty(t, rows[0].Version)
 	assert.Equal(t, "healthy", rows[0].Checks["database"])
 	assert.Equal(t, deriveHealthStatus(srv.healthChecks(ctx)), rows[0].Status)
+
+	// The counting wrapper exposes no *sql.DB, so no pool is written; see
+	// TestHandleHealthSummary_NoPoolStatsRead for a row with stats.db.
+	assert.Nil(t, srv.hubInstanceDBStats())
+	assert.Empty(t, rows[0].Stats, "no stats.db without a *sql.DB")
 }
 
 // The stored status comes from the raw checks; the stored checks are
@@ -268,7 +281,7 @@ func TestHubInstanceSnapshot_StatusFromRawChecksAndNormalisedChecks(t *testing.T
 		"workspace_storage_mount_verification": "unavailable: could not compare filesystem device IDs",
 		strings.Repeat("x", 65):                "unhealthy: detail",
 	}
-	snap := hubInstanceSnapshotFromChecks("hub-a", "v1", raw)
+	snap := hubInstanceSnapshotFromChecks("hub-a", "v1", raw, api.HubInstanceStats{})
 	// The 65-character key is dropped from the stored checks, but it is a
 	// non-critical non-healthy check, so the status is degraded.
 	assert.Equal(t, HealthStatusDegraded, snap.Status)
@@ -974,4 +987,130 @@ func TestHubInstanceRegistry_PanickingTickMarksWriteUncertain(t *testing.T) {
 	reg.snapshot = healthy
 	reg.tick(ctx)
 	assert.False(t, reg.writeUncertain.Load())
+}
+
+func poolSnapshot(inUse, maxOpen int) *hubInstanceSnapshot {
+	snap := quietSnapshot()
+	snap.Stats = api.HubInstanceStats{DB: &api.HubInstanceDBStats{InUse: inUse, Idle: 1, MaxOpen: maxOpen, WaitCount: int64(inUse)}}
+	return snap
+}
+
+// The pool gauges change on every tick without forcing an upsert: Touch
+// carries them, so the row's gauges are at most one tick old.
+func TestHubInstanceRegistry_PoolGaugesTravelWithTouch(t *testing.T) {
+	st := newCountingHubInstanceStore()
+	snap := poolSnapshot(1, 10)
+	reg := newTestHubInstanceRegistry(st, snap)
+	ctx := context.Background()
+
+	reg.tick(ctx) // first tick: upsert
+	for i := 2; i <= 20; i++ {
+		*snap = *poolSnapshot(i, 10)
+		reg.tick(ctx)
+	}
+	upserts, touches := st.counts()
+	assert.Equal(t, 1, upserts, "gauge changes alone never force an upsert")
+	assert.Equal(t, 19, touches)
+	assert.Equal(t, &api.HubInstanceDBStats{InUse: 20, Idle: 1, MaxOpen: 10, WaitCount: 20}, st.touchedDB)
+
+	var stored api.HubInstanceStats
+	require.NoError(t, json.Unmarshal(st.rows["hub-test-1"].Stats, &stored))
+	assert.Equal(t, &api.HubInstanceDBStats{InUse: 1, Idle: 1, MaxOpen: 10, WaitCount: 1}, stored.DB, "the upsert wrote stats.db")
+}
+
+// max_open is configuration: a change to it is material and upserts.
+func TestHubInstanceRegistry_MaxOpenChangeUpserts(t *testing.T) {
+	st := newCountingHubInstanceStore()
+	snap := poolSnapshot(1, 10)
+	reg := newTestHubInstanceRegistry(st, snap)
+	ctx := context.Background()
+
+	reg.tick(ctx) // upsert
+	reg.tick(ctx) // touch
+	*snap = *poolSnapshot(1, 20)
+	reg.tick(ctx) // upsert: max_open changed
+
+	upserts, touches := st.counts()
+	assert.Equal(t, 2, upserts)
+	assert.Equal(t, 1, touches)
+	var stored api.HubInstanceStats
+	require.NoError(t, json.Unmarshal(st.rows["hub-test-1"].Stats, &stored))
+	assert.Equal(t, 20, stored.DB.MaxOpen)
+}
+
+// A check value outside the vocabulary is stored as unknown, and a check
+// name outside the pattern is not stored.
+func TestHubInstanceRegistry_StoresNormalisedChecks(t *testing.T) {
+	st := newCountingHubInstanceStore()
+	snap := hubInstanceSnapshotFromChecks("hub-a", "v1", map[string]string{
+		"database":      "healthy",
+		"colocated":     "flaky: see log",
+		"Bad-Name":      "healthy",
+		"also bad name": "unhealthy",
+	}, api.HubInstanceStats{})
+	reg := newTestHubInstanceRegistry(st, &snap)
+
+	reg.tick(context.Background())
+	assert.Equal(t, map[string]string{"database": "healthy", "colocated": "unknown"}, st.rows["hub-test-1"].Checks)
+}
+
+// hubInstancePayloadBytes is the serialised size of the payload an upsert
+// of snap writes: label, version, status, checks and stats (not the
+// instance ID or timestamps).
+func hubInstancePayloadBytes(t *testing.T, snap hubInstanceSnapshot) int {
+	t.Helper()
+	b, err := json.Marshal(snap)
+	require.NoError(t, err)
+	return len(b)
+}
+
+// With 16 checks and 32 integrations, every name and value at its length
+// cap, the payload (label, version, status, checks and stats; not the
+// instance ID or timestamps) serialises to at most 4 KiB: the integrations
+// are cut and marked truncated.
+func TestHubInstanceSnapshot_PayloadWithMaxChecksAndIntegrationsWithin4KiB(t *testing.T) {
+	checks := map[string]string{}
+	for i := 0; i < api.BrokerHealthMaxChecks; i++ {
+		checks[fmt.Sprintf("%02d", i)+strings.Repeat("c", api.HubInstanceMaxCheckNameChars-2)] = "unavailable: detail"
+	}
+	var integrations []api.HubInstanceIntegration
+	for i := 0; i < api.HubInstanceMaxIntegrations; i++ {
+		integrations = append(integrations, api.HubInstanceIntegration{
+			Name:    fmt.Sprintf("%02d", i) + strings.Repeat("n", api.HubInstanceMaxIntegrationNameChars-2),
+			Health:  "unhealthy",
+			Version: strings.Repeat("v", api.HubInstanceMaxIntegrationVersionBytes),
+		})
+	}
+	snap := hubInstanceSnapshotFromChecks(strings.Repeat("l", hubInstanceMaxLabelBytes), strings.Repeat("v", 100), checks,
+		api.HubInstanceStats{
+			DB:           &api.HubInstanceDBStats{InUse: 1 << 30, Idle: 1 << 30, MaxOpen: 1 << 30, WaitCount: 1 << 62},
+			Integrations: integrations,
+		})
+
+	require.Len(t, snap.Checks, api.BrokerHealthMaxChecks)
+	assert.LessOrEqual(t, hubInstancePayloadBytes(t, snap), api.HubInstanceRowMaxBytes)
+	assert.LessOrEqual(t, len(snap.statsJSON()), api.HubInstanceRowMaxBytes)
+	assert.True(t, snap.Stats.IntegrationsTruncated)
+	assert.NotNil(t, snap.Stats.DB, "the pool block is never cut")
+}
+
+// With 16 checks and 32 integrations of ordinary length, nothing is cut.
+func TestHubInstanceSnapshot_TypicalPayloadKeepsAllIntegrations(t *testing.T) {
+	checks := map[string]string{}
+	for i := 0; i < api.BrokerHealthMaxChecks; i++ {
+		checks[fmt.Sprintf("check_%02d", i)] = "healthy"
+	}
+	var integrations []api.HubInstanceIntegration
+	for i := 0; i < api.HubInstanceMaxIntegrations; i++ {
+		integrations = append(integrations, api.HubInstanceIntegration{
+			Name: fmt.Sprintf("plugin-%02d", i), Health: "healthy", Connected: true, Version: "1.2.3",
+		})
+	}
+	snap := hubInstanceSnapshotFromChecks("scion-hub-7d9f", "v1.2.3", checks, api.HubInstanceStats{
+		DB:           &api.HubInstanceDBStats{InUse: 3, Idle: 2, MaxOpen: 25, WaitCount: 7},
+		Integrations: integrations,
+	})
+	assert.LessOrEqual(t, hubInstancePayloadBytes(t, snap), api.HubInstanceRowMaxBytes)
+	assert.Len(t, snap.Stats.Integrations, api.HubInstanceMaxIntegrations)
+	assert.False(t, snap.Stats.IntegrationsTruncated)
 }
