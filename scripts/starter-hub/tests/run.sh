@@ -873,6 +873,73 @@ test_tls_fix_without_runuser_rechecks_after_fix() {
     assert_eq 0 "$RC" "run succeeds"
 }
 
+test_tls_fix_systemctl_without_value_flag() {
+    # systemd older than 230 has no "systemctl show --value" and prints
+    # "User=NAME"; the script and the hook must still find the Caddy user.
+    EXTRA_ENV=(STUB_SYSTEMCTL_NO_VALUE=1)
+    tls_fake_root 60 false
+    run_fix --check
+    assert_contains "$OUT" "found:   Caddy runs as user ${TLS_CADDY_USER} (group ${TLS_CADDY_GROUP})" "script: user without the User= prefix"
+    assert_not_contains "$OUT" "User=" "script: no User= prefix anywhere"
+    run_fix
+    assert_eq 0 "$RC" "script: the fix succeeds"
+    : > "${STUB_LOG}"
+    OUT="$(env STUB_SYSTEMCTL_NO_VALUE=1 PATH="${TESTS_DIR}/lib-tls:${PATH}" \
+        STUB_CADDY_USER="${TLS_CADDY_USER}" STUB_CADDY_GROUP="${TLS_CADDY_GROUP}" \
+        STUB_TLS_LIVE="${TLS_LE}/live/${TLS_DOMAIN}/fullchain.pem" \
+        RENEWED_LINEAGE="${TLS_LE}/live/${TLS_DOMAIN}" "${TLS_HOOKS}/scion-reload-caddy.sh" 2>&1)"
+    RC=$?
+    assert_eq 0 "$RC" "hook: exits 0"
+    assert_not_contains "$OUT" "User=" "hook: no User= prefix"
+    assert_not_contains "$OUT" "no user" "hook: finds the Caddy user"
+    assert_not_contains "$OUT" "WARNING" "hook: permission steps succeed"
+    assert_contains "$OUT" "reloaded Caddy" "hook: reloads Caddy"
+    EXTRA_ENV=()
+}
+
+test_tls_fix_finds_the_certificate_name() {
+    # Only real directories under live/ count: a README file and a symlink
+    # to a directory are ignored. Several real ones: sorted, and an error.
+    # No Caddyfile, so the name comes from live/.
+    EXTRA_ENV=()
+    tls_fake_root 60 false
+    rm -f "${TLS_ROOT}/etc/caddy/Caddyfile"
+    chmod 0755 "${TLS_LE}/live"
+    : > "${TLS_LE}/live/README"
+    ln -s "${TLS_DOMAIN}" "${TLS_LE}/live/alias.example"
+    run_fix --check
+    assert_contains "$OUT" "found:   certificate name ${TLS_DOMAIN}," "one real directory: its name"
+    mkdir "${TLS_LE}/live/b.example" "${TLS_LE}/live/.a.example"
+    run_fix --check
+    assert_eq 1 "$RC" "several certificates: exits 1"
+    assert_contains "$OUT" "several certificates under /etc/letsencrypt/live (.a.example b.example ${TLS_DOMAIN}); pass --domain." "lists them sorted, hidden included, symlink excluded"
+}
+
+test_tls_fix_stat_failure_is_reported() {
+    # stat fails on a blocked path: reported as a problem, left alone, and
+    # the script does not crash on the empty mode.
+    tls_fake_root 60 false
+    local bin="${STATE_DIR}/statbin" blockpath="${TLS_LE}/live"
+    mkdir -p "${bin}"
+    # shellcheck disable=SC2016 # the stub's own code, expanded when it runs
+    printf '%s\n' '#!/usr/bin/env bash' \
+        'for a in "$@"; do [ "$a" != "${STUB_STAT_FAIL}" ] || { echo "stat: cannot statx" >&2; exit 1; }; done' \
+        "exec $(command -v stat) \"\$@\"" > "${bin}/stat"
+    chmod +x "${bin}/stat"
+    EXTRA_ENV=(PATH="${bin}:${TESTS_DIR}/lib-tls:${PATH}" STUB_STAT_FAIL="${blockpath}")
+    local mode
+    for mode in --check --dry-run ""; do
+        run_fix ${mode:+"$mode"}
+        assert_not_contains "$OUT" "syntax error" "${mode:-fix}: no arithmetic crash"
+        assert_contains "$OUT" "PROBLEM: cannot stat /etc/letsencrypt/live, so cannot tell whether user ${TLS_CADDY_USER} can reach it; left alone" "${mode:-fix}: stat failure reported"
+        assert_contains "$OUT" "cannot traverse /etc/letsencrypt/archive" "${mode:-fix}: other blocked paths still found"
+        assert_contains "$OUT" "Result:" "${mode:-fix}: runs to the end"
+        assert_ne 0 "$RC" "${mode:-fix}: exits non-zero"
+    done
+    assert_eq "700" "$(stat -c %a "${blockpath}")" "the path stat failed on is left alone"
+    EXTRA_ENV=()
+}
+
 test_tls_certs_cleans_up_when_scp_fails() {
     fresh_state
     EXTRA_ENV=(CERT_EMAIL=admin@example.com STUB_SCP_FAIL=1)

@@ -25,8 +25,9 @@ printf 'runuser %s\n' "$*" >> "${STUB_LOG:?}"
 root="${FIX_TLS_ROOT:?}"
 g="${STUB_CADDY_GROUP:?}"
 allowed() { # PATH BIT(1=x,4=r)
-  grp="$(stat -c '%G' "$1")"
-  m=$((8#$(stat -c '%a' "$1")))
+  grp="$(stat -c '%G' "$1" 2>/dev/null)" || return 1
+  m="$(stat -c '%a' "$1" 2>/dev/null)" || return 1
+  m=$((8#$m))
   if [ "$grp" = "$g" ]; then [ $(( (m >> 3) & $2 )) -ne 0 ]; else [ $(( m & $2 )) -ne 0 ]; fi
 }
 dirs_ok() { # check every directory from $root down to dirname PATH

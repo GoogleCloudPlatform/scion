@@ -236,7 +236,9 @@ if [ -z "$lineage" ] || [ ! -d "$lineage" ]; then
 fi
 le_dir="$(dirname "$(dirname "$lineage")")"
 
-caddy_user="$(systemctl show -p User --value caddy 2>/dev/null || true)"
+# No --value (systemd 230 or later): strip the "User=" prefix instead.
+caddy_user="$(systemctl show -p User caddy 2>/dev/null || true)"
+caddy_user="${caddy_user#User=}"
 caddy_user="${caddy_user:-caddy}"
 if group="$(id -gn "$caddy_user" 2>/dev/null)"; then
     perm() { # MODE PATH: chgrp to Caddy's group and add MODE; warn on failure
@@ -299,11 +301,13 @@ timer_unit() {
 
 # own_ok KIND PATH -- true if PATH's own owner, group and mode let
 # CADDY_USER traverse it (KIND dir) or read it (KIND file). Ancestors are
-# checked separately, so each blocking path is found on its own.
+# checked separately, so each blocking path is found on its own. False if
+# stat fails, so the path is reported (as a stat failure) rather than passed.
 own_ok() {
-    local need=4 owner group mode
+    local need=4 owner="" group="" mode=""
     [[ "$1" == "dir" ]] && need=1
-    read -r owner group mode < <(stat -c '%U %G %a' "$2")
+    read -r owner group mode < <(stat -c '%U %G %a' "$2" 2>/dev/null) || true
+    [[ "$mode" =~ ^[0-7]+$ ]] || return 1
     mode=$((8#$mode))
     if [[ "$owner" == "$CADDY_USER" ]]; then
         (( (mode >> 6) & need ))
@@ -410,7 +414,9 @@ else
 fi
 CADDY_USER=""
 if $caddy_unit; then
-    CADDY_USER="$(systemctl show -p User --value caddy 2>/dev/null || true)"
+    # No --value (systemd 230 or later): strip the "User=" prefix instead.
+    CADDY_USER="$(systemctl show -p User caddy 2>/dev/null || true)"
+    CADDY_USER="${CADDY_USER#User=}"
     if systemctl show -p ExecReload caddy 2>/dev/null | grep -q -- '--force'; then
         ok "caddy.service reloads with --force"
     else
@@ -426,7 +432,14 @@ if [[ -d "${LE_DIR}/live" && ! -x "${LE_DIR}/live" ]]; then
     exit 1
 fi
 if [[ -z "$DOMAIN" && -d "${LE_DIR}/live" ]]; then
-    mapfile -t lives < <(find "${LE_DIR}/live" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+    # Real directories (not symlinks), hidden ones included, in glob
+    # (collation) order: what find -type d | sort gave, without GNU find.
+    lives=()
+    shopt -s nullglob dotglob
+    for d in "${LE_DIR}/live"/*; do
+        if [[ -d "$d" && ! -L "$d" ]]; then lives+=("${d##*/}"); fi
+    done
+    shopt -u nullglob dotglob
     if [[ ${#lives[@]} -eq 1 ]]; then
         DOMAIN="${lives[0]}"
     elif [[ ${#lives[@]} -gt 1 ]]; then
@@ -607,12 +620,19 @@ else
         ok "user ${CADDY_USER} can read the certificate and key (${how})"
     else
         blocked=0
+        statfail=0
         for t in "${targets[@]}"; do
             kind="${t%% *}"
             p="${t#* }"
             own_ok "$kind" "$p" && continue
+            og="" om=""
+            read -r og om < <(stat -c '%G %a' "$p" 2>/dev/null) || true
+            if [[ ! "$om" =~ ^[0-7]+$ ]]; then
+                statfail=$((statfail + 1))
+                problem "cannot stat $(show "$p"), so cannot tell whether user ${CADDY_USER} can reach it; left alone"
+                continue
+            fi
             blocked=$((blocked + 1))
-            read -r og om < <(stat -c '%G %a' "$p")
             if [[ "$kind" == "dir" ]]; then verb="traverse"; nm=$(( 8#$om | 8#010 )); else verb="read"; nm=$(( 8#$om | 8#040 )); fi
             nm="$(printf '%o' "$nm")"
             found "user ${CADDY_USER} cannot ${verb} $(show "$p") (group ${og}, mode ${om})"
@@ -620,7 +640,9 @@ else
                 act "set $(show "$p"): group ${og} -> ${CADDY_GROUP}, mode ${om} -> ${nm}" fix_one "$kind" "$p"
             fi
         done
-        if [[ $blocked -eq 0 ]]; then
+        if [[ $blocked -eq 0 && $statfail -gt 0 ]]; then
+            problem "user ${CADDY_USER} cannot read ${unreadable% } (see the stat failure above)"
+        elif [[ $blocked -eq 0 ]]; then
             problem "user ${CADDY_USER} cannot read ${unreadable% } (not explained by owner, group or mode; check ACLs or security modules)"
         elif [[ "$MODE" == "check" ]]; then
             problem "user ${CADDY_USER} cannot read ${unreadable% } (blocked by the paths above)"

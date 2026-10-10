@@ -20,7 +20,10 @@
 #   is-enabled UNIT         -> "enabled" if enabled-UNIT exists, else "disabled"
 #   is-active [--quiet] U   -> "active" if active-U exists, else "inactive"
 #   enable --now UNIT       -> creates enabled-UNIT and active-UNIT
-#   show -p User --value caddy -> $STUB_CADDY_USER
+#   show -p User --value caddy -> $STUB_CADDY_USER, or "User=$STUB_CADDY_USER"
+#                                 if $STUB_SYSTEMCTL_NO_VALUE is set (systemd
+#                                 older than 230, which lacks --value)
+#   show -p User caddy         -> "User=$STUB_CADDY_USER"
 #   show -p ExecReload caddy   -> a Caddy ExecReload line, with --force
 #                                 unless $STUB_TLS_STATE/execreload-no-force
 #   reload caddy            -> "serves" $STUB_TLS_LIVE (copies it to served.pem);
@@ -42,7 +45,12 @@ case "${1:-}" in
     : > "$st/enabled-$2"; : > "$st/active-$2" ;;
   show)
     case "$*" in
-      *"-p User"*) echo "${STUB_CADDY_USER:-}" ;;
+      *"-p User"*)
+        if [[ "$*" == *--value* && -z "${STUB_SYSTEMCTL_NO_VALUE:-}" ]]; then
+          echo "${STUB_CADDY_USER:-}"
+        else
+          echo "User=${STUB_CADDY_USER:-}"
+        fi ;;
       *"-p ExecReload"*)
         if [ -f "$st/execreload-no-force" ]; then
           echo "ExecReload={ path=/usr/bin/caddy ; argv[]=/usr/bin/caddy reload --config /etc/caddy/Caddyfile ; }"
