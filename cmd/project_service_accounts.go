@@ -353,28 +353,31 @@ var saMappingStateText = map[string]string{
 
 // printSAStatus writes the status view's sections.
 func printSAStatus(w io.Writer, st *hubclient.GCPServiceAccountStatus) {
+	// Output errors are ignored, as for the other printers in this package.
+	p := func(format string, a ...interface{}) { _, _ = fmt.Fprintf(w, format, a...) }
+
 	name := st.Account.DisplayName
 	if name == "" {
 		name = st.Account.Email
 	}
-	fmt.Fprintf(w, "Service account: %s\n", name)
-	fmt.Fprintf(w, "  ID:     %s\n", st.Account.ID)
-	fmt.Fprintf(w, "  Email:  %s\n", st.Account.Email)
-	fmt.Fprintf(w, "  Scope:  %s\n", st.Account.Scope)
+	p("Service account: %s\n", name)
+	p("  ID:     %s\n", st.Account.ID)
+	p("  Email:  %s\n", st.Account.Email)
+	p("  Scope:  %s\n", st.Account.Scope)
 
-	fmt.Fprintln(w, "\nVerification:")
+	p("\nVerification:\n")
 	status := st.Verification.Status
 	if st.Verification.VerifiedAt != nil && !st.Verification.VerifiedAt.IsZero() {
 		status += fmt.Sprintf(" (checked %s)", clitime.Ago(*st.Verification.VerifiedAt))
 	}
-	fmt.Fprintf(w, "  Status: %s\n", status)
+	p("  Status: %s\n", status)
 	if st.Verification.Error != "" {
-		fmt.Fprintf(w, "  Error:  %s\n", st.Verification.Error)
+		p("  Error:  %s\n", st.Verification.Error)
 	}
 
-	fmt.Fprintln(w, "\nMapping (Kubernetes broker profiles, broker-owned):")
+	p("\nMapping (Kubernetes broker profiles, broker-owned):\n")
 	if len(st.Mappings) == 0 {
-		fmt.Fprintln(w, "  no Kubernetes broker profiles in this project")
+		p("  no Kubernetes broker profiles in this project\n")
 	}
 	for _, m := range st.Mappings {
 		state := saMappingStateText[m.State]
@@ -384,42 +387,42 @@ func printSAStatus(w io.Writer, st *hubclient.GCPServiceAccountStatus) {
 		if m.KubernetesServiceAccount != "" {
 			state += fmt.Sprintf(" (%s, %s)", m.KubernetesServiceAccount, m.Namespace)
 		}
-		fmt.Fprintf(w, "  %-30s  %s\n", m.BrokerName+"/"+m.Profile, state)
+		p("  %-30s  %s\n", m.BrokerName+"/"+m.Profile, state)
 	}
 
-	fmt.Fprintln(w, "\nWorkload Identity binding:")
+	p("\nWorkload Identity binding:\n")
 	binding := strings.ReplaceAll(st.WorkloadIdentityBinding.State, "_", " ")
 	if st.WorkloadIdentityBinding.Reason != "" {
 		binding += fmt.Sprintf(" (%s)", st.WorkloadIdentityBinding.Reason)
 	}
-	fmt.Fprintf(w, "  %s\n", binding)
+	p("  %s\n", binding)
 
-	fmt.Fprintln(w, "\nDefault for:")
+	p("\nDefault for:\n")
 	if len(st.DefaultFor) == 0 {
-		fmt.Fprintln(w, "  none")
+		p("  none\n")
 	}
 	for _, d := range st.DefaultFor {
 		switch d.Kind {
 		case "profile":
-			fmt.Fprintf(w, "  profile %s\n", d.Profile)
+			p("  profile %s\n", d.Profile)
 		default:
-			fmt.Fprintf(w, "  %s default\n", d.Kind)
+			p("  %s default\n", d.Kind)
 		}
 	}
 
-	fmt.Fprintf(w, "\nAgents using it (%d):\n", st.Agents.Count)
+	p("\nAgents using it (%d):\n", st.Agents.Count)
 	if st.Agents.Count == 0 {
-		fmt.Fprintln(w, "  none")
+		p("  none\n")
 	}
 	for _, n := range st.Agents.Names {
-		fmt.Fprintf(w, "  %s\n", n)
+		p("  %s\n", n)
 	}
 	if more := st.Agents.Count - len(st.Agents.Names); more > 0 {
-		fmt.Fprintf(w, "  ... and %d more\n", more)
+		p("  ... and %d more\n", more)
 	}
 
-	fmt.Fprintln(w, "\nNext step:")
-	fmt.Fprintf(w, "  %s\n", st.NextStep.Message)
+	p("\nNext step:\n")
+	p("  %s\n", st.NextStep.Message)
 }
 
 func runSARemove(cmd *cobra.Command, args []string) error {
