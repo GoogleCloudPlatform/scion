@@ -3341,9 +3341,9 @@ func agentTemplateDisplayName(slug string, cfg *api.ScionConfig) string {
 // start (opts.HostCredentialFiles, set only by a co-located workstation
 // broker). Only files that harness.InjectableHostCredentialFiles accepts are
 // considered: entries declared by harness configs shipped with scion, which
-// resolve to regular files inside home. It does nothing outside broker mode, where local mode reads host
-// credentials through GatherAuthWithEnv instead. It returns the names of the
-// secrets it added.
+// resolve to regular files inside home. It does nothing outside broker mode,
+// where local mode reads host credentials through GatherAuthWithEnv instead.
+// It returns the names of the secrets it added.
 func injectHostCredentialFiles(opts *api.StartOptions, authMeta *config.HarnessAuthMetadata, home string) []string {
 	if !opts.BrokerMode || !opts.HostCredentialFiles {
 		return nil
@@ -3361,8 +3361,8 @@ func injectHostCredentialFiles(opts *api.StartOptions, authMeta *config.HarnessA
 // is skipped when it has no declared name, when it is the gcloud ADC file
 // (left to the broker's auto_inject_gcloud_adc opt-in), when read fails, or
 // when secrets already holds a secret with the same name or a file secret
-// with the same target, so a hub-resolved secret always wins. It returns the updated slice
-// and the names of the secrets it added (never their contents).
+// with the same target, so a hub-resolved secret always wins. It returns the
+// updated slice and the names of the secrets it added (never their contents).
 func appendHostCredentialFileSecrets(secrets []api.ResolvedSecret, files []harness.HostCredentialFile, read func(harness.HostCredentialFile) ([]byte, error)) ([]api.ResolvedSecret, []string) {
 	var injected []string
 	for _, f := range files {
