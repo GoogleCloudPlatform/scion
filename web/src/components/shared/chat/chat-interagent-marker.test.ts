@@ -2,8 +2,6 @@
  * Tests for <scion-chat-interagent-marker> cross-project display.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { setPreferredTimeZone } from '../../../utils/time.js';
 

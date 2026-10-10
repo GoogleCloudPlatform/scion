@@ -19,8 +19,6 @@
  * review round 2 R2-3).
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, afterEach } from 'vitest';
 import { render } from 'lit';
 import { formatChatDate, renderDateDivider } from './chat-date-divider.js';

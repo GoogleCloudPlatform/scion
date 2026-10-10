@@ -21,8 +21,6 @@
  * sidebar (ptone/scion#2982). Uses the real stateManager.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
 vi.mock('../../client/main.js', async () => {

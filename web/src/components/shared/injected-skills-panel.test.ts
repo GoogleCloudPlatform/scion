@@ -36,8 +36,6 @@
  * dispatch the sl-* events the component listens for.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
