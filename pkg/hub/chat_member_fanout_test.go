@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -55,6 +56,11 @@ type memberFanoutFixture struct {
 func newMemberFanoutFixture(t *testing.T) *memberFanoutFixture {
 	t.Helper()
 	srv, s, alice, bob, proj := setupDemoPolicyTest(t)
+	return newMemberFanoutFixtureOn(t, srv, s, alice, bob, proj)
+}
+
+func newMemberFanoutFixtureOn(t *testing.T, srv *Server, s store.Store, alice, bob *store.User, proj *store.Project) *memberFanoutFixture {
+	t.Helper()
 	ctx := context.Background()
 
 	ep := NewChannelEventPublisher()
@@ -311,13 +317,94 @@ func TestThreadMessageFanOut_RecipientBound(t *testing.T) {
 	assert.Len(t, memberMessageRecipients(collectEvents(events)), 1, "bound of 1")
 }
 
-// An expired deadline stops the fan-out before any member is accepted.
-func TestThreadMessageFanOut_ExpiredContextPublishesNothing(t *testing.T) {
-	f := newMemberFanoutFixture(t)
+// cancelOnUserLookupStore cancels a context the first time, while armed,
+// that GetUser is asked for one of the watched users, and records which
+// watched users were looked up.
+type cancelOnUserLookupStore struct {
+	store.Store
+	fault *storeFaultSwitch
+
+	mu     sync.Mutex
+	watch  map[string]bool
+	looked map[string]bool
+	cancel context.CancelFunc
+}
+
+func (w *cancelOnUserLookupStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if w.fault.Active() {
+		w.mu.Lock()
+		if w.watch[id] {
+			w.looked[id] = true
+			if w.cancel != nil {
+				w.cancel()
+			}
+		}
+		w.mu.Unlock()
+	}
+	return w.Store.GetUser(ctx, id)
+}
+
+// A deadline that passes mid-loop stops the fan-out at the next member
+// rather than looking up every remaining member with a dead context.
+func TestThreadMessageFanOut_DeadlineStopsMidLoop(t *testing.T) {
+	srv, s, alice, bob, proj, wrapped, fault := setupDemoPolicyTestWithFault(t,
+		func(inner store.Store, f *storeFaultSwitch) *cancelOnUserLookupStore {
+			return &cancelOnUserLookupStore{Store: inner, fault: f, looked: map[string]bool{}}
+		})
+	f := newMemberFanoutFixtureOn(t, srv, s, alice, bob, proj)
 	events, unsub := f.ep.Subscribe("user.*.chat.message")
 	defer unsub()
+
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	defer cancel()
+	wrapped.mu.Lock()
+	// The fixture's active participants: carol, bob and sam.
+	wrapped.watch = map[string]bool{f.carol.ID: true, f.bob.ID: true, f.sam.ID: true}
+	wrapped.cancel = cancel
+	wrapped.mu.Unlock()
+	fault.Arm()
+
 	f.srv.fanOutThreadMessageToMembers(ctx, f.threadMessage("late"), nil)
+
+	wrapped.mu.Lock()
+	looked := len(wrapped.looked)
+	wrapped.mu.Unlock()
+	assert.Equal(t, 1, looked, "the loop must stop at the first member after the deadline passed")
 	assert.Empty(t, memberMessageRecipients(collectEvents(events)))
+}
+
+// The same through the agent-routed send path: in a topic with a default
+// agent, a human @mentioned by the sender receives the message on their
+// user subject.
+func TestThreadMessageFanOut_MentionedNonParticipantReceives_AgentRouted(t *testing.T) {
+	f := newMemberFanoutFixture(t)
+	ctx := context.Background()
+	f.srv.SetDispatcher(&brokerMockDispatcher{})
+	agent := &store.Agent{ID: api.NewUUID(), ProjectID: f.proj.ID, Name: "Helper", Slug: "fanout-helper",
+		Phase: "running", OwnerID: f.alice.ID, CreatedBy: f.alice.ID}
+	require.NoError(t, f.s.CreateAgent(ctx, agent))
+	topicID := api.NewUUID()
+	require.NoError(t, f.wcs.CreateTopic(ctx, WebChatTopic{
+		ID: topicID, ProjectID: f.proj.ID, Name: "with agent", DefaultAgent: agent.Slug,
+		CreatedBy: f.alice.ID, CreatedAt: time.Now().UTC(),
+	}))
+	convID := topicConversationID(t, f.wcs, topicID)
+
+	nia := addProjectHuman(t, f.s, f.proj, "nia@test.com", "Nia")
+	events, unsub := f.ep.Subscribe("user." + nia.ID + ".chat.message")
+	defer unsub()
+
+	rec := doRequestAsUser(t, f.srv, f.alice, http.MethodPost,
+		"/api/v1/chat/conversations/"+topicID+"/messages", map[string]string{"content": "please look, @nia"})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	select {
+	case evt := <-events:
+		var payload UserMessageEvent
+		require.NoError(t, json.Unmarshal(evt.Data, &payload))
+		assert.Equal(t, topicID, payload.ThreadID)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the mentioned user did not receive the agent-routed message")
+	}
+	assert.True(t, isUserParticipant(t, f.s, convID, nia.ID))
 }

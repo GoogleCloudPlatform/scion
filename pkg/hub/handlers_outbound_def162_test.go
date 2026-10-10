@@ -30,6 +30,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -459,41 +462,118 @@ func TestDEF162_AgentMention_NonBroker_FannedOutToMentioned(t *testing.T) {
 	expectMemberMessage(t, sub, human.ID, topicID)
 }
 
+// syncTestBus is an event bus that runs matching handlers inline, inside
+// Publish. With it, the broker path's deliverToUser (and its member
+// fan-out hook) runs before the publisher's Publish call returns, so a
+// test can observe what the publisher had written before publishing.
+type syncTestBus struct {
+	mu   sync.Mutex
+	subs map[int]syncTestSub
+	next int
+}
+
+type syncTestSub struct {
+	pattern string
+	handler eventbus.EventHandler
+}
+
+func newSyncTestBus() *syncTestBus { return &syncTestBus{subs: map[int]syncTestSub{}} }
+
+// syncTestMatch matches NATS-style patterns: '*' is one token, '>' the rest.
+func syncTestMatch(pattern, topic string) bool {
+	pt, tt := strings.Split(pattern, "."), strings.Split(topic, ".")
+	for i, p := range pt {
+		if p == ">" {
+			return len(tt) > i
+		}
+		if i >= len(tt) || (p != "*" && p != tt[i]) {
+			return false
+		}
+	}
+	return len(pt) == len(tt)
+}
+
+func (b *syncTestBus) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
+	b.mu.Lock()
+	var handlers []eventbus.EventHandler
+	for _, sub := range b.subs {
+		if sub.handler != nil && syncTestMatch(sub.pattern, topic) {
+			handlers = append(handlers, sub.handler)
+		}
+	}
+	b.mu.Unlock()
+	for _, h := range handlers {
+		h(ctx, topic, msg)
+	}
+	return nil
+}
+
+func (b *syncTestBus) Subscribe(pattern string, handler eventbus.EventHandler) (eventbus.Subscription, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	id := b.next
+	b.next++
+	b.subs[id] = syncTestSub{pattern: pattern, handler: handler}
+	return syncTestUnsub(func() {
+		b.mu.Lock()
+		delete(b.subs, id)
+		b.mu.Unlock()
+	}), nil
+}
+
+func (b *syncTestBus) Close() error { return nil }
+
+type syncTestUnsub func()
+
+func (u syncTestUnsub) Unsubscribe() error { u(); return nil }
+
 // The same on the broker path, where deliverToUser stores the message and
-// runs the member fan-out wired as StartMessageBroker wires it.
+// runs the member fan-out hook wired as StartMessageBroker wires it. The
+// synchronous bus runs deliverToUser inside the publish, and the hook
+// records whether the mentioned human was already a member when it ran:
+// membership written after the publish (or in the background) fails here.
 func TestDEF162_AgentMention_Broker_FannedOutToMentioned(t *testing.T) {
 	srv, s, project, agent, human, topicID := def162Setup(t)
 	events := NewChannelEventPublisher()
 	t.Cleanup(events.Close)
 	srv.SetEventPublisher(events)
-	bus := eventbus.NewInProcessEventBus(slog.Default())
-	t.Cleanup(func() { _ = bus.Close() })
+	bus := newSyncTestBus()
+
+	convID := def162GroupConv(t, s, project.ID, topicID)
 
 	proxy := NewMessageBrokerProxy(bus, s, events,
 		func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
 	srv.mu.RLock()
 	proxy.webChatStore = srv.webChatStore
 	srv.mu.RUnlock()
-	proxy.memberFanout = srv.fanOutThreadMessageToMembersAsync
+	var hookCalls, memberAtHook atomic.Int32
+	proxy.memberFanout = func(ctx context.Context, msg *store.Message, attachments []AttachmentRef) {
+		if isWebThreadMessage(msg) {
+			hookCalls.Add(1)
+			parts, err := s.ListParticipants(ctx, convID)
+			if err == nil {
+				for _, p := range parts {
+					if p.PrincipalKind == "user" && p.PrincipalID == human.ID && p.LeftAt == nil {
+						memberAtHook.Add(1)
+						break
+					}
+				}
+			}
+		}
+		srv.fanOutThreadMessageToMembersAsync(ctx, msg, attachments)
+	}
 	proxy.Start()
 	t.Cleanup(proxy.Stop)
 	srv.SetMessageBrokerProxy(proxy)
 
-	busSub, err := bus.Subscribe(
-		eventbus.TopicAllUserMessages(project.ID),
-		func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
-			proxy.deliverToUser(ctx, project.ID, topic, msg)
-		},
-	)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = busSub.Unsubscribe() })
-
 	sub, unsub := events.Subscribe("user." + human.ID + ".chat.message")
 	defer unsub()
 
-	convID := def162GroupConv(t, s, project.ID, topicID)
 	rr := postOutboundConvRef(t, srv, project.ID, agent.ID,
 		"Hey @UniqueHuman162 broker fan-out", "conv:"+convID)
 	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	require.GreaterOrEqual(t, hookCalls.Load(), int32(1), "deliverToUser must run the member fan-out hook")
+	require.Equal(t, hookCalls.Load(), memberAtHook.Load(),
+		"the mentioned human must already be a member when the broker fans the message out")
 	expectMemberMessage(t, sub, human.ID, topicID)
 }
