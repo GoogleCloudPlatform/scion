@@ -98,7 +98,7 @@ func init() {
 	provisionCmd.Flags().IntVar(&provisionGID, "gid", 1000,
 		"GID for chown of provisioned files (0 means 1000)")
 	provisionCmd.Flags().IntVar(&provisionTimeout, "timeout", 300,
-		"Minimum time in seconds to wait for the provisioning lock (worktree-per-agent and clone-per-agent modes)")
+		"Minimum time in seconds to wait for the provisioning lock (all modes except shared-plain)")
 }
 
 func runProvision(ctx context.Context) error {

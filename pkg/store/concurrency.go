@@ -190,13 +190,14 @@ const (
 	// own hand-built *sql.Tx.
 	LockAgentLaunchDeadline AdvisoryLockKey = 0x5C10001A
 
-	// LockWorkspaceProvision is the CLASS ID for per-project workspace
-	// provisioning locks. It is used with the two-int advisory lock form
-	// pg_try_advisory_lock(classid, objid), where classid is this constant
-	// and objid is a stable hash of the project ID. This guards the NFS
-	// first-access provisioning flow (design §7, risk RN1): only one
-	// broker across all nodes may clone/provision a project's workspace at
-	// a time, while different projects lock independently.
+	// LockWorkspaceProvision is retired: it has no production user. It was
+	// the CLASS ID for per-project workspace provisioning locks, used with
+	// the two-int advisory lock form pg_try_advisory_lock(classid, objid)
+	// (objid a stable hash of the project ID) for the NFS first-access
+	// provisioning flow (design §7, risk RN1). Workspace provisioning now
+	// serializes with a file lock on the shared filesystem instead (see
+	// pkg/provision). The key stays reserved: do not reuse this value for
+	// another lock.
 	//
 	// The value is intentionally in a different range (0x5C10_1001) from
 	// the singleton keys above (0x5C10_0001..0005) to avoid collisions

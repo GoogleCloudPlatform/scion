@@ -15,11 +15,13 @@
 package runtime
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -361,20 +363,35 @@ func TestNFSProvision_LockPerProject_Independent(t *testing.T) {
 	b, _, _ := nfsTestBackend(t)
 
 	// Two different projects get independent locks: each project's file
-	// lock lives in its own project directory.
+	// lock lives in its own project directory (the sentinel directory, the
+	// workspace's parent).
 	res1, _ := b.Resolve(ResolveInput{ProjectID: "proj-A", Mode: store.SharingModeSharedPlain})
 	res2, _ := b.Resolve(ResolveInput{ProjectID: "proj-B", Mode: store.SharingModeSharedPlain})
 
-	// Provision both — they should not block each other.
-	if err := ProvisionShared(ProvisionInput{
-		Resolved: res1, ProjectID: "proj-A", Mode: store.SharingModeSharedPlain,
-	}); err != nil {
-		t.Fatalf("Provision proj-A: %v", err)
+	// Another holder has proj-A's lock (a fresh lock directory).
+	lockA := filepath.Join(filepath.Dir(res1.HostPath), ".scion-provision.lock")
+	if err := os.MkdirAll(lockA, 0o755); err != nil {
+		t.Fatal(err)
 	}
+
+	// proj-B does not wait for it.
+	start := time.Now()
 	if err := ProvisionShared(ProvisionInput{
 		Resolved: res2, ProjectID: "proj-B", Mode: store.SharingModeSharedPlain,
 	}); err != nil {
 		t.Fatalf("Provision proj-B: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("proj-B waited %s on proj-A's lock", elapsed)
+	}
+
+	// proj-A does wait for it: the planted lock is really held.
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if err := ProvisionShared(ProvisionInput{
+		Ctx: ctx, Resolved: res1, ProjectID: "proj-A", Mode: store.SharingModeSharedPlain,
+	}); err == nil {
+		t.Fatal("Provision proj-A succeeded while its lock was held")
 	}
 }
 

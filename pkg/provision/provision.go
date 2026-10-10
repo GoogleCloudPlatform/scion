@@ -330,8 +330,9 @@ type ProvisionInput struct {
 }
 
 // heldLock represents a successfully acquired provisioning file lock (or
-// an ordered set of them; see acquireOrderedFileLocks) plus the hooks ProvisionShared needs to detect and react to losing it mid-provision:
-// a holder must not simply assume it holds the lock forever once acquired.
+// an ordered set of them; see acquireOrderedFileLocks) plus the hooks
+// ProvisionShared needs to detect and react to losing it mid-provision: a
+// holder must not simply assume it holds the lock forever once acquired.
 type heldLock struct {
 	// release releases the lock. ProvisionShared calls it exactly once, via
 	// a single deferred call.
@@ -505,7 +506,7 @@ func ProvisionShared(in ProvisionInput) error {
 	}
 	defer func() {
 		if releaseErr := held.release(); releaseErr != nil {
-			slog.Warn("ProvisionShared: failed to release advisory lock",
+			slog.Warn("ProvisionShared: failed to release provisioning lock",
 				"project_id", in.ProjectID, "error", releaseErr)
 		}
 	}()
@@ -566,7 +567,7 @@ func ProvisionShared(in ProvisionInput) error {
 	}
 
 	// Chown to stable NFS UID/GID (design §9.1). This is a ONE-TIME operation
-	// under the advisory lock — per-start chown is skipped for NFS (see N1-5).
+	// under the provisioning lock — per-start chown is skipped for NFS (see N1-5).
 	// chown -R on an existing, differently-owned directory (e.g. one kubelet
 	// auto-created as root:root before this mechanism ran) re-owns it and
 	// everything already inside it — self-healing on the next start needs no
@@ -2422,7 +2423,7 @@ func nonIgnorableWorkspaceEntries(in ProvisionInput, dir string) ([]string, erro
 //     long clone runs.
 //
 // stillOwned reports whether the caller still holds the provisioning lock;
-// nil means not applicable.
+// nil skips the check.
 func gitCloneWorkspace(ctx context.Context, in ProvisionInput, stillOwned func() bool) error {
 	dest := in.Resolved.HostPath
 
@@ -3220,8 +3221,8 @@ type worktreeOutcome struct {
 //   - Otherwise, a new worktree is created and the agent registers as its
 //     first sharer.
 //
-// The worktree add is done under the already-held advisory lock (design §9.2:
-// worktree add/remove touches shared .git metadata).
+// The worktree add is done under the already-held provisioning lock
+// (design §9.2: worktree add/remove touches shared .git metadata).
 //
 // It reports what it did in a worktreeOutcome.
 func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, error) {
@@ -4023,7 +4024,7 @@ func chownTarget(hostPath string) string {
 }
 
 // chownProjectTree sets ownership of the project root and its contents to the
-// given UID/GID. This is a ONE-TIME operation done under the advisory lock
+// given UID/GID. This is a ONE-TIME operation done under the provisioning lock
 // during first provisioning (design §9.1). Per-start chown is NOT done for
 // NFS (slow, and unsafe to run concurrently with other starts, over the network).
 //
