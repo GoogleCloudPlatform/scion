@@ -15,6 +15,8 @@ vi.mock('../../utils/toast.js', () => ({ showToast }));
 
 const terminal = vi.hoisted(() => ({
   instances: [] as Array<Record<'dispose' | 'reset' | 'focus' | 'blur', ReturnType<typeof vi.fn>>>,
+  /** When set, fit() resizes the latest terminal to this measured size. */
+  fitSize: null as { cols: number; rows: number } | null,
 }));
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
@@ -39,7 +41,10 @@ vi.mock('@xterm/xterm', () => ({
 }));
 vi.mock('@xterm/addon-fit', () => ({
   FitAddon: class {
-    fit = vi.fn();
+    fit = vi.fn(() => {
+      const latest = terminal.instances.at(-1);
+      if (terminal.fitSize && latest) Object.assign(latest, terminal.fitSize);
+    });
   },
 }));
 vi.mock('@xterm/addon-web-links', () => ({ WebLinksAddon: class {} }));
@@ -54,7 +59,7 @@ class FakeSocket {
   onmessage: ((event: { data: unknown }) => void) | null = null;
   send = vi.fn();
   close = vi.fn();
-  constructor() {
+  constructor(readonly url = '') {
     FakeSocket.instances.push(this);
   }
   open() {
@@ -90,6 +95,7 @@ beforeAll(async () => {
 });
 beforeEach(() => {
   terminal.instances.length = 0;
+  terminal.fitSize = null;
   FakeSocket.instances = [];
   FakeEventSource.instances = [];
   frames = [];
@@ -286,6 +292,84 @@ it('two panes share registry SSE and preserve metadata across transport notifica
     other.dispose();
     other.remove();
   }
+});
+
+describe('initially hidden pane waits for reveal before attaching', () => {
+  /** Runs queued animation frames (and any they queue) and settles promises. */
+  async function flushFrames(): Promise<void> {
+    for (let i = 0; i < 10; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await page.updateComplete;
+      const pending = frames.splice(0);
+      if (pending.length === 0) return;
+      for (const callback of pending) callback(0);
+    }
+  }
+  async function mountHidden(): Promise<void> {
+    terminal.fitSize = { cols: 132, rows: 41 };
+    page.setVisible(false);
+    document.body.append(page);
+    await vi.waitFor(() => expect(terminal.instances).toHaveLength(1));
+    await flushFrames();
+  }
+
+  it('a hidden mount does not attach until it is revealed', async () => {
+    await mountHidden();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await flushFrames();
+    expect(FakeSocket.instances).toHaveLength(0);
+  });
+
+  it('reveal attaches exactly once, at the measured size', async () => {
+    await mountHidden();
+    expect(FakeSocket.instances).toHaveLength(0);
+    page.setVisible(true);
+    await flushFrames();
+    await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
+    // A second reveal must not attach again.
+    page.setVisible(false);
+    page.setVisible(true);
+    await flushFrames();
+    expect(FakeSocket.instances).toHaveLength(1);
+    const url = new URL(FakeSocket.instances[0].url);
+    expect(url.searchParams.get('cols')).toBe('132');
+    expect(url.searchParams.get('rows')).toBe('41');
+  });
+
+  it('close before reveal never attaches, even if reveal or layout readiness follows', async () => {
+    const observers: Array<{
+      observe: ReturnType<typeof vi.fn>;
+      disconnect: ReturnType<typeof vi.fn>;
+    }> = [];
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe = vi.fn();
+        unobserve = vi.fn();
+        disconnect = vi.fn();
+        constructor() {
+          observers.push(this);
+        }
+      }
+    );
+    await mountHidden();
+    expect(observers).toHaveLength(1);
+    expect(observers[0].observe).toHaveBeenCalledTimes(1);
+    expect(observers[0].disconnect).not.toHaveBeenCalled();
+    page.dispose();
+    await flushFrames();
+    expect(page.session?.state.connection).toBe('closed');
+    expect(terminal.instances[0].dispose).toHaveBeenCalledTimes(1);
+    // The wait's ResizeObserver is released, so a late resize cannot resume it.
+    expect(observers[0].disconnect).toHaveBeenCalledTimes(1);
+    // The wait's layout callback was cleared, so nothing can resume it.
+    expect((page as unknown as { layoutReady: unknown }).layoutReady).toBeNull();
+    page.setVisible(true);
+    await flushFrames();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await flushFrames();
+    expect(FakeSocket.instances).toHaveLength(0);
+  });
 });
 
 describe('hidden pane interaction isolation (P1.8)', () => {

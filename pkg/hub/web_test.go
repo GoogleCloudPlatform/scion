@@ -15,9 +15,11 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -30,6 +32,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1937,10 +1940,10 @@ func TestOAuthCallback_NoOAuthService(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 }
 
-func TestAuthDebug_DebugMode(t *testing.T) {
+func TestAuthDebugRoute_ServedWithExplicitFlag(t *testing.T) {
 	ws := newTestWebServer(t, WebServerConfig{
-		Debug:   true,
-		BaseURL: "http://localhost:8080",
+		EnableDebugEndpoints: true,
+		BaseURL:              "http://localhost:8080",
 	})
 
 	req := httptest.NewRequest("GET", "/auth/debug", nil)
@@ -1964,18 +1967,56 @@ func TestAuthDebug_DebugMode(t *testing.T) {
 	assert.Equal(t, false, config["devAuthEnabled"])
 }
 
-func TestAuthDebug_NotAvailableInProduction(t *testing.T) {
-	ws := newTestWebServer(t, WebServerConfig{
-		Debug: false,
-	})
+// TestAuthDebugRoute_RequiresExplicitFlag checks that the diagnostic route is
+// not served by default, even when the default log level is debug.
+func TestAuthDebugRoute_RequiresExplicitFlag(t *testing.T) {
+	t.Cleanup(func() { loglevel.Reset(false) })
+	loglevel.Apply(loglevel.Spec{Default: slog.LevelDebug}, loglevel.SourceFlag)
+
+	ws := newTestWebServer(t, WebServerConfig{})
 
 	req := httptest.NewRequest("GET", "/auth/debug", nil)
 	rec := httptest.NewRecorder()
 
 	ws.Handler().ServeHTTP(rec, req)
 
-	resp := rec.Result()
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, http.StatusNotFound, rec.Result().StatusCode)
+}
+
+// TestWebRequestLogging_FollowsComponentLevel checks that successful requests
+// are logged only when the web component is at debug level, while error
+// responses are always logged.
+func TestWebRequestLogging_FollowsComponentLevel(t *testing.T) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	notFound := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) })
+
+	for _, tc := range []struct {
+		name    string
+		spec    loglevel.Spec
+		handler http.Handler
+		wantLog bool
+	}{
+		{"info default, success", loglevel.Spec{Default: slog.LevelInfo}, ok, false},
+		{"info default, error", loglevel.Spec{Default: slog.LevelInfo}, notFound, true},
+		{"web component debug, success", loglevel.Spec{Default: slog.LevelInfo, Components: map[string]slog.Level{webLogSubsystem: slog.LevelDebug}}, ok, true},
+		{"hub component debug, success", loglevel.Spec{Default: slog.LevelInfo, Components: map[string]slog.Level{"hub": slog.LevelDebug}}, ok, true},
+		{"debug default, web component info, success", loglevel.Spec{Default: slog.LevelDebug, Components: map[string]slog.Level{webLogSubsystem: slog.LevelInfo}}, ok, false},
+		{"debug default, success", loglevel.Spec{Default: slog.LevelDebug}, ok, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Cleanup(func() { loglevel.Reset(false) })
+			loglevel.Apply(tc.spec, loglevel.SourceFlag)
+
+			var buf bytes.Buffer
+			ws := newTestWebServer(t, WebServerConfig{})
+			ws.log = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+			rec := httptest.NewRecorder()
+			ws.loggingMiddleware(tc.handler).ServeHTTP(rec, httptest.NewRequest("GET", "/some/path", nil))
+
+			assert.Equal(t, tc.wantLog, strings.Contains(buf.String(), "Web request"), "log output: %q", buf.String())
+		})
+	}
 }
 
 func TestIsPublicRoute(t *testing.T) {

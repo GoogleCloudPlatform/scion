@@ -1795,8 +1795,9 @@ Exactly one list is.
    above, and the answer is still not argv. For storage-dir it is nowhere yet. None of
    the five is rendered as an argument ($setByChart), none selects
    which configuration is loaded ($neverPassed), none is a flag that no longer
-   exists ($removedFlags), none is inert or misnamed ($aliasOrIgnored), and
-   none weakens authentication ($unsafeToPass).
+   exists ($removedFlags), none is inert or misnamed ($aliasOrIgnored), none
+   weakens authentication ($unsafeToPass), and none is refused by the server in
+   hosted mode ($refusedWhenHosted).
 
    The harm is present for four of the five and scheduled for the fifth.
    Passing -base-url, -storage-bucket, -db or -admin-emails today makes argv the
@@ -1918,6 +1919,16 @@ Exactly one list is.
 {{- $unsafeToPass := list "session-secret" "dev-auth" "enable-test-login" "web-assets-dir" }}
 
 {{- /*
+REFUSED BY THE SERVER IN HOSTED MODE ($refusedWhenHosted).
+
+   --enable-debug-endpoints (cmd/server.go, init) is for local development only.
+   loadAndReconcileConfig (cmd/server_foreground.go) refuses it in hosted mode,
+   and this chart always renders --hosted, so passing it would only fail the pod
+   at startup. Refusing it here reports the same problem at render time instead.
+*/}}
+{{- $refusedWhenHosted := list "enable-debug-endpoints" }}
+
+{{- /*
 ADJUDICATED AND DELIBERATELY NOT RESERVED. The six lists above say what is
 refused; a reader auditing them for COMPLETENESS needs to know which flags were
 considered and let through, or they re-derive the same six every time. Round 4
@@ -2037,7 +2048,7 @@ would be a third thing to keep in step with the command.
 {{- end }}
 {{- range $listed := $setByChart }}
 {{- if not (has $listed $renderedFlags) }}
-{{- fail (printf "chart defect, not a values error: $setByChart lists %q but scion-hub.hubArgs does not render it, and that list's stated reason for reserving a flag is that the chart sets it. Do NOT fix this by deleting the entry - a reserved flag the chart does not render may still be dangerous to accept, and deleting it would silently reopen whatever it was guarding. Move it to the list whose reason actually applies ($neverPassed, $removedFlags, $aliasOrIgnored, $ownedByConfig or $unsafeToPass), or render it. If a later phase renders it conditionally, append to $setByChart inside the same conditional." $listed) }}
+{{- fail (printf "chart defect, not a values error: $setByChart lists %q but scion-hub.hubArgs does not render it, and that list's stated reason for reserving a flag is that the chart sets it. Do NOT fix this by deleting the entry - a reserved flag the chart does not render may still be dangerous to accept, and deleting it would silently reopen whatever it was guarding. Move it to the list whose reason actually applies ($neverPassed, $removedFlags, $aliasOrIgnored, $ownedByConfig, $unsafeToPass or $refusedWhenHosted), or render it. If a later phase renders it conditionally, append to $setByChart inside the same conditional." $listed) }}
 {{- end }}
 {{- end }}
 {{- range $raw := .Values.hub.args }}
@@ -2079,6 +2090,9 @@ overlay on the other, and no single verb covers both.
 {{- end }}
 {{- if has $flag $unsafeToPass }}
 {{- fail (printf "hub.args may not contain -%s: it weakens authentication or places credential material where anyone with pod read access can read it." $flag) }}
+{{- end }}
+{{- if has $flag $refusedWhenHosted }}
+{{- fail (printf "hub.args may not contain -%s: the server refuses it in hosted mode, which this chart always renders." $flag) }}
 {{- end }}
 {{- /*
    THE CLUSTER WALK. See the $neverPassedShorthand comment for the pflag
