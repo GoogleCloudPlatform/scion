@@ -241,6 +241,30 @@ func TestBuildHealthSummaryHubInstances_DatabaseNullWithoutPool(t *testing.T) {
 	b, err := json.Marshal(byID["hub-a"])
 	require.NoError(t, err)
 	assert.Contains(t, string(b), `"database":null`)
+	assert.Contains(t, string(b), `"integration_counts":{"total":0,`)
+	assert.NotContains(t, string(b), `"integrations"`)
+	assert.True(t, byID["hub-b"].IntegrationsTruncated)
+}
+
+// Each instance's integrations come from its own row: counts by health,
+// the list sorted and normalised again on read.
+func TestBuildHealthSummaryHubInstances_Integrations(t *testing.T) {
+	now := hubInstanceT0
+	got := buildHealthSummaryHubInstances([]store.HubInstance{
+		{ID: "hub-a", LastSeen: now, Stats: json.RawMessage(`{"integrations":[` +
+			`{"name":"slack","health":"unhealthy","connected":false,"version":"2"},` +
+			`{"name":"chat","health":"healthy","connected":true,"version":"1"},` +
+			`{"name":"BAD NAME","health":"healthy"},` +
+			`{"name":"mail","health":"weird"}]}`)},
+	}, now, "hub-a")
+	require.Len(t, got.Items, 1)
+	it := got.Items[0]
+	assert.Equal(t, HealthSummaryIntegrationCounts{Total: 3, Healthy: 1, Unhealthy: 1, Unknown: 1}, it.IntegrationCounts)
+	assert.Equal(t, []HealthHubInstanceIntegration{
+		{Name: "chat", Health: "healthy", Connected: true, Version: "1"},
+		{Name: "mail", Health: "unknown"},
+		{Name: "slack", Health: "unhealthy", Version: "2"},
+	}, it.Integrations)
 }
 
 // poolCountingStore wraps a real store and counts DB() calls: the only way

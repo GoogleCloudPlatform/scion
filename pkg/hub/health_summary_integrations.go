@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -29,35 +30,50 @@ import (
 // values a plugin reports itself (healthy, degraded, unhealthy).
 const healthIntegrationUnknown = "unknown"
 
-// healthIntegrationNotManagedReason is the fixed reason given for a plugin
-// that has a hub record but is not run by the serving hub instance.
-const healthIntegrationNotManagedReason = "not managed by this hub instance"
+// healthIntegrationNotRunReason is the fixed reason given for a plugin that
+// has a hub record but that no live hub instance reports running.
+const healthIntegrationNotRunReason = "not run by any running hub instance"
+
+// healthIntegrationRegistryUnavailableReason is the fixed reason given for a
+// plugin record when the hub-instance registry could not be read, so it is
+// not known which hub instances run the plugin.
+const healthIntegrationRegistryUnavailableReason = "hub instance data not available"
 
 // HealthSummaryIntegration is one chat or messaging plugin in the health
-// summary. Its fields are an explicit allow-list: the plugin's own health
-// message and details are never copied, because hub.health.read is a
-// narrower permission than the integrations admin surface.
+// summary, merged across the live hub instances that run it (see
+// mergeHealthSummaryIntegrations). Its fields are an explicit allow-list:
+// the plugin's own health message and details are never copied, because
+// hub.health.read is a narrower permission than the integrations admin
+// surface.
 type HealthSummaryIntegration struct {
 	Name     string `json:"name"`
 	Platform string `json:"platform"`
-	// Health is the plugin's reported health (healthy, degraded,
-	// unhealthy) or "unknown" when it could not be queried.
-	Health    string `json:"health"`
-	Connected bool   `json:"connected"`
-	Version   string `json:"version"`
+	// Health is the worst health (healthy, degraded, unhealthy) reported
+	// by the live hub instances that run the plugin, or "unknown" when
+	// none of them reported a known value.
+	Health string `json:"health"`
+	// Connected is true only when every instance that reported a known
+	// health reports the plugin connected; a report with health unknown
+	// (for example a timed-out query) does not count. When no report has a
+	// known health, it is true only when every report says connected.
+	Connected bool `json:"connected"`
+	// Version is the version in the most recent report.
+	Version string `json:"version"`
 	// Reason is a fixed, server-composed explanation, set only when the
 	// health could not be read for a known cause.
 	Reason string `json:"reason,omitempty"`
+	// ManagedBy lists the IDs of the live hub instances that report the
+	// plugin, ordered by instance label, then ID. Empty when none does.
+	ManagedBy []string `json:"managed_by,omitempty"`
+	// ReportedAt is the oldest last write (store clock) among the reports
+	// used, so the merged health is at least this fresh. Null when no
+	// live instance reports the plugin.
+	ReportedAt *time.Time `json:"reported_at,omitempty"`
 }
 
-// healthIntegrationQueryTimeout bounds how long one health summary waits
-// for all managed plugins' health, in total. A variable so tests can lower
-// it.
+// healthIntegrationQueryTimeout bounds how long one registry tick waits for
+// all managed plugins' health, in total. A variable so tests can lower it.
 var healthIntegrationQueryTimeout = 2 * time.Second
-
-// healthIntegrationTimedOutReason is the fixed reason given for a managed
-// plugin whose health did not arrive within healthIntegrationQueryTimeout.
-const healthIntegrationTimedOutReason = "health not reported in time"
 
 // HealthSummaryIntegrationCounts is the non-identifying aggregate of the
 // integrations section. It is returned to every caller of the summary,
@@ -71,58 +87,40 @@ type HealthSummaryIntegrationCounts struct {
 	Unknown int `json:"unknown"`
 }
 
-// healthSummaryIntegrations builds the integrations section of the health
-// summary. Plugins run by this hub instance's plugin manager are queried
-// with getIntegrationStatus, the same live check the Integrations admin
-// page uses, all at once, waiting at most healthIntegrationQueryTimeout in
-// total: a plugin that does not answer in time is listed with health
-// "unknown" (not reported) and a fixed reason; concurrent summaries share
-// one query per plugin. pluginRecordNames are the plugin names of the plugin
-// records in the runtime broker table (from the handler's broker pass);
-// those this instance does not run are listed with health "unknown" and a
-// fixed reason. The list is sorted by name and is never nil.
-func (s *Server) healthSummaryIntegrations(ctx context.Context, pluginRecordNames []string) []HealthSummaryIntegration {
+// hubInstanceIntegrations returns the health of the plugins this hub
+// instance's plugin manager runs, for its registry row. It is called from
+// the registry tick only; the health summary makes no plugin calls. The
+// plugins are queried with getIntegrationStatus, the same check the
+// Integrations admin page uses, all at once, waiting at most
+// healthIntegrationQueryTimeout in total: a plugin that does not answer in
+// time is reported with health "unknown". Only the allow-listed fields are
+// kept; the registry writer normalises and caps the list.
+func (s *Server) hubInstanceIntegrations(ctx context.Context) []api.HubInstanceIntegration {
 	s.mu.RLock()
 	mgr := s.pluginManager
 	s.mu.RUnlock()
-
-	out := []HealthSummaryIntegration{}
-	managed := map[string]bool{}
-	if mgr != nil {
-		var names []string
-		for _, key := range mgr.ListPlugins() {
-			name := pluginNameFromKey(key)
-			if name == "" || managed[name] {
-				continue
-			}
-			managed[name] = true
-			names = append(names, name)
-		}
-		out = append(out, s.queryHealthSummaryIntegrations(ctx, mgr, names)...)
+	if mgr == nil {
+		return nil
 	}
-
-	for _, name := range pluginRecordNames {
-		if managed[name] {
+	seen := map[string]bool{}
+	var names []string
+	for _, key := range mgr.ListPlugins() {
+		name := pluginNameFromKey(key)
+		if name == "" || seen[name] {
 			continue
 		}
-		managed[name] = true
-		out = append(out, HealthSummaryIntegration{
-			Name:     name,
-			Platform: resolvePlatform(name),
-			Health:   healthIntegrationUnknown,
-			Reason:   healthIntegrationNotManagedReason,
-		})
+		seen[name] = true
+		names = append(names, name)
 	}
-
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out
+	sort.Strings(names)
+	return s.queryIntegrationHealth(ctx, mgr, names)
 }
 
 // integrationHealthFlight is one running health query for a plugin. row
 // is set before done is closed.
 type integrationHealthFlight struct {
 	done chan struct{}
-	row  HealthSummaryIntegration
+	row  api.HubInstanceIntegration
 }
 
 // integrationHealthQuery returns the running health query for the named
@@ -147,8 +145,8 @@ func (s *Server) integrationHealthQuery(mgr IntegrationManager, name string) *in
 			// A panicking plugin call must not take the hub down or
 			// leave the flight open: report the plugin as unknown.
 			if r := recover(); r != nil {
-				slog.Error("health summary: integration health query panicked", "integration", name, "panic", r)
-				f.row = healthSummaryIntegrationFromStatus(name, nil)
+				slog.Error("hub instance registry: integration health query panicked", "integration", name, "panic", r)
+				f.row = hubInstanceIntegrationFromStatus(name, nil)
 			}
 			s.healthIntegrationMu.Lock()
 			// Remove only this flight: never another query for the
@@ -159,30 +157,25 @@ func (s *Server) integrationHealthQuery(mgr IntegrationManager, name string) *in
 			s.healthIntegrationMu.Unlock()
 			close(f.done)
 		}()
-		f.row = healthSummaryIntegrationFromStatus(name, getIntegrationStatus(mgr, name))
+		f.row = hubInstanceIntegrationFromStatus(name, getIntegrationStatus(mgr, name))
 	}()
 	return f
 }
 
-// queryHealthSummaryIntegrations reads the health of the named plugins,
-// waiting at most healthIntegrationQueryTimeout (or until ctx ends) in
-// total. Queries are shared per plugin (integrationHealthQuery): a caller
-// that arrives while a query for the same plugin is running waits for that
-// query's result, with its own deadline, instead of starting another. The
-// plugin manager calls take no context, so a hung plugin keeps its one
-// query running; every caller meanwhile reports it as not reported when
-// its own deadline passes. The caller starts no goroutine of its own. The
-// result has one row per name, in name order.
-func (s *Server) queryHealthSummaryIntegrations(ctx context.Context, mgr IntegrationManager, names []string) []HealthSummaryIntegration {
-	rows := make([]HealthSummaryIntegration, len(names))
+// queryIntegrationHealth reads the health of the named plugins, waiting at
+// most healthIntegrationQueryTimeout (or until ctx ends) in total. Queries
+// are shared per plugin (integrationHealthQuery): a caller that arrives
+// while a query for the same plugin is running waits for that query's
+// result, with its own deadline, instead of starting another. The plugin
+// manager calls take no context, so a hung plugin keeps its one query
+// running; every caller meanwhile reports it as unknown when its own
+// deadline passes. The caller starts no goroutine of its own. The result
+// has one entry per name, in the order of names.
+func (s *Server) queryIntegrationHealth(ctx context.Context, mgr IntegrationManager, names []string) []api.HubInstanceIntegration {
+	rows := make([]api.HubInstanceIntegration, len(names))
 	flights := make([]*integrationHealthFlight, len(names))
 	for i, name := range names {
-		rows[i] = HealthSummaryIntegration{
-			Name:     name,
-			Platform: resolvePlatform(name),
-			Health:   healthIntegrationUnknown,
-			Reason:   healthIntegrationTimedOutReason,
-		}
+		rows[i] = hubInstanceIntegrationFromStatus(name, nil)
 		flights[i] = s.integrationHealthQuery(mgr, name)
 	}
 	if len(names) == 0 {
@@ -208,20 +201,17 @@ func (s *Server) queryHealthSummaryIntegrations(ctx context.Context, mgr Integra
 		case <-f.done:
 			rows[i] = f.row
 		default:
-			slog.Warn("health summary: integration health not reported in time", "integration", names[i])
+			slog.Warn("hub instance registry: integration health not reported in time", "integration", names[i])
 		}
 	}
 	return rows
 }
 
-// healthSummaryIntegrationFromStatus copies the allow-listed fields of a
+// hubInstanceIntegrationFromStatus copies the allow-listed fields of a
 // live integration status. Message and Details are deliberately dropped.
-func healthSummaryIntegrationFromStatus(name string, st *IntegrationStatus) HealthSummaryIntegration {
-	row := HealthSummaryIntegration{
-		Name:     name,
-		Platform: resolvePlatform(name),
-		Health:   healthIntegrationUnknown,
-	}
+// A nil status (not reported) gives health "unknown", not connected.
+func hubInstanceIntegrationFromStatus(name string, st *IntegrationStatus) api.HubInstanceIntegration {
+	row := api.HubInstanceIntegration{Name: name, Health: healthIntegrationUnknown}
 	if st == nil {
 		return row
 	}
@@ -231,6 +221,143 @@ func healthSummaryIntegrationFromStatus(name string, st *IntegrationStatus) Heal
 	row.Connected = st.Connected
 	row.Version = st.Version
 	return row
+}
+
+// healthIntegrationHealthRank orders known integration health for the
+// worst-of merge. unknown is absent (rank 0): it never hides a known value.
+var healthIntegrationHealthRank = map[string]int{
+	HealthStatusHealthy:   1,
+	HealthStatusDegraded:  2,
+	HealthStatusUnhealthy: 3,
+}
+
+// healthIntegrationReport is one live hub instance's report of one plugin.
+type healthIntegrationReport struct {
+	instanceID string
+	label      string
+	lastSeen   time.Time
+	in         api.HubInstanceIntegration
+}
+
+// mergeHealthSummaryIntegrations builds the integrations section from the
+// hub-instance registry rows and the plugin record names (F3 design §5.7).
+// It makes no plugin call: every hub instance, the serving one included,
+// reports its plugins through its own registry row. Only rows that are live
+// at the store clock now count; a stale or stopped instance's report is
+// never used. For each plugin name reported by a live row or present as a
+// plugin record:
+//
+//   - Health is the worst known value across the live reports; unknown is
+//     neutral and is used only when no report has a known value.
+//   - Connected is true only when every report with a known health says
+//     connected; an unknown report (no real data, for example a timed-out
+//     query) is neutral, as it is for health. When no report has a known
+//     health, Connected is true only when every report says connected.
+//   - Version is that of the report with the latest last_seen (ties go to
+//     the lower instance ID).
+//   - ManagedBy lists the reporting instances by label, then ID;
+//     ReportedAt is the oldest last_seen among them.
+//   - A plugin record with no live report is unknown, with the reason
+//     healthIntegrationNotRunReason, or, when the registry could not be
+//     read (registryRead false), healthIntegrationRegistryUnavailableReason.
+//
+// The list is sorted by name and is never nil. A pure function of its
+// inputs.
+func mergeHealthSummaryIntegrations(rows []store.HubInstance, now time.Time, registryRead bool, pluginRecordNames []string) []HealthSummaryIntegration {
+	reports := map[string][]healthIntegrationReport{}
+	for _, r := range rows {
+		if hubInstanceState(r, now) != HubInstanceStateLive {
+			continue
+		}
+		stats, ok := decodeHubInstanceStats(r.Stats)
+		if !ok {
+			continue
+		}
+		for _, in := range stats.Integrations {
+			reports[in.Name] = append(reports[in.Name], healthIntegrationReport{
+				instanceID: r.ID, label: r.Label, lastSeen: r.LastSeen, in: in,
+			})
+		}
+	}
+
+	out := make([]HealthSummaryIntegration, 0, len(reports)+len(pluginRecordNames))
+	for name, rs := range reports {
+		out = append(out, mergeHealthIntegrationReports(name, rs))
+	}
+	reason := healthIntegrationNotRunReason
+	if !registryRead {
+		reason = healthIntegrationRegistryUnavailableReason
+	}
+	listed := map[string]bool{}
+	for name := range reports {
+		listed[name] = true
+	}
+	for _, name := range pluginRecordNames {
+		if listed[name] {
+			continue
+		}
+		listed[name] = true
+		out = append(out, HealthSummaryIntegration{
+			Name:     name,
+			Platform: resolvePlatform(name),
+			Health:   healthIntegrationUnknown,
+			Reason:   reason,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// mergeHealthIntegrationReports merges the live reports of one plugin; see
+// mergeHealthSummaryIntegrations. rs is never empty.
+func mergeHealthIntegrationReports(name string, rs []healthIntegrationReport) HealthSummaryIntegration {
+	sort.Slice(rs, func(i, j int) bool {
+		if rs[i].label != rs[j].label {
+			return rs[i].label < rs[j].label
+		}
+		return rs[i].instanceID < rs[j].instanceID
+	})
+	it := HealthSummaryIntegration{
+		Name:      name,
+		Platform:  resolvePlatform(name),
+		Health:    healthIntegrationUnknown,
+		ManagedBy: make([]string, 0, len(rs)),
+	}
+	worst := 0
+	knownConnected, anyKnown, allConnected := true, false, true
+	freshest := rs[0]
+	oldest := rs[0].lastSeen
+	for _, r := range rs {
+		it.ManagedBy = append(it.ManagedBy, r.instanceID)
+		if rank := healthIntegrationHealthRank[r.in.Health]; rank > worst {
+			worst = rank
+			it.Health = r.in.Health
+		}
+		if !r.in.Connected {
+			allConnected = false
+		}
+		if healthIntegrationHealthRank[r.in.Health] > 0 {
+			anyKnown = true
+			if !r.in.Connected {
+				knownConnected = false
+			}
+		}
+		if r.lastSeen.After(freshest.lastSeen) || (r.lastSeen.Equal(freshest.lastSeen) && r.instanceID < freshest.instanceID) {
+			freshest = r
+		}
+		if r.lastSeen.Before(oldest) {
+			oldest = r.lastSeen
+		}
+	}
+	if anyKnown {
+		it.Connected = knownConnected
+	} else {
+		it.Connected = allConnected
+	}
+	it.Version = freshest.in.Version
+	reportedAt := oldest.UTC()
+	it.ReportedAt = &reportedAt
+	return it
 }
 
 // pluginRecordName returns the plugin name of a plugin record in the
@@ -245,9 +372,21 @@ func pluginRecordName(b *store.RuntimeBroker) string {
 
 // healthSummaryIntegrationCounts aggregates the integrations by health.
 func healthSummaryIntegrationCounts(list []HealthSummaryIntegration) HealthSummaryIntegrationCounts {
+	return integrationHealthCounts(list, func(it HealthSummaryIntegration) string { return it.Health })
+}
+
+// hubInstanceIntegrationCounts aggregates one hub instance's reported
+// integrations by health.
+func hubInstanceIntegrationCounts(list []api.HubInstanceIntegration) HealthSummaryIntegrationCounts {
+	return integrationHealthCounts(list, func(it api.HubInstanceIntegration) string { return it.Health })
+}
+
+// integrationHealthCounts counts list by the health health returns; any
+// value but healthy, degraded or unhealthy counts as unknown.
+func integrationHealthCounts[T any](list []T, health func(T) string) HealthSummaryIntegrationCounts {
 	c := HealthSummaryIntegrationCounts{Total: len(list)}
 	for _, it := range list {
-		switch it.Health {
+		switch health(it) {
 		case HealthStatusHealthy:
 			c.Healthy++
 		case HealthStatusDegraded:
@@ -263,7 +402,9 @@ func healthSummaryIntegrationCounts(list []HealthSummaryIntegration) HealthSumma
 
 // omitHealthSummaryIntegrationDetail removes all integration identity from
 // a summary, for a caller without hub.integrations.read. The integrations
-// list becomes empty and the integration attention items are replaced, at
+// list (with its managed_by and reported_at) becomes empty, each hub
+// instance's integrations list is removed (its integration_counts stay),
+// and the integration attention items are replaced, at
 // the position of the first one, by aggregate items built only from
 // IntegrationCounts ("N integrations unhealthy"). What is left matches the
 // response on a hub with no integrations, except for the counts and the
@@ -271,6 +412,11 @@ func healthSummaryIntegrationCounts(list []HealthSummaryIntegration) HealthSumma
 func omitHealthSummaryIntegrationDetail(resp *HealthSummaryResponse) {
 	resp.Integrations = []HealthSummaryIntegration{}
 	resp.IntegrationsDetail = false
+	if resp.HubInstances != nil {
+		for i := range resp.HubInstances.Items {
+			resp.HubInstances.Items[i].Integrations = nil
+		}
+	}
 
 	var aggregate []HealthAttentionItem
 	subject := HealthAttentionSubject{Type: HealthSubjectIntegration}
