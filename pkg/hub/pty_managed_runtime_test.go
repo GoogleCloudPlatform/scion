@@ -110,11 +110,11 @@ func TestPTYPath_ManagedRuntime(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newPTYConduitFixture(t)
-			f.setAgentRuntime(t, tc.runtime)
 			reads := &atomic.Int32{}
-			prev := f.srv.store
-			f.srv.store = brokerReadCountingStore{Store: prev, reads: reads}
-			t.Cleanup(func() { f.srv.store = prev })
+			installStoreFault(t, f.srv, func(inner store.Store, _ *storeFaultSwitch) brokerReadCountingStore {
+				return brokerReadCountingStore{Store: inner, reads: reads}
+			})
+			f.setAgentRuntime(t, tc.runtime)
 			var b *fakeBroker
 			if tc.brokerConnected {
 				b = connectFakeBroker(t, f.srv, f.launched.RuntimeBrokerID)
