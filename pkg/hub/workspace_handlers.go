@@ -277,6 +277,13 @@ func (s *Server) handleWorkspaceSyncFrom(w http.ResponseWriter, r *http.Request,
 		RuntimeError(w, "Failed to sync workspace: "+err.Error())
 		return
 	}
+	// A broker reply with a 2xx status but no manifest is a broker fault:
+	// answer 502, as for other broker failures, rather than dereference
+	// the missing manifest (ptone/scion#4245).
+	if uploadResp.Manifest == nil {
+		RuntimeError(w, "Failed to sync workspace: runtime broker returned no workspace manifest")
+		return
+	}
 
 	// Generate signed download URLs for each file
 	expires := time.Now().Add(SignedURLExpiry)
