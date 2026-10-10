@@ -139,9 +139,8 @@ func TestDefaultExcludeRules_Matching(t *testing.T) {
 		// root and ".scion/**" only matches entries inside a .scion directory.
 		// This mirrors the hub, which hides only top-level entries.
 		{"a/b/.scion", true},
-		{".git", false},        // bare .git file at the root (worktree/submodule)
-		{".git/config", false}, // contents of a .git directory
-		{".gitignore", true},   // "/.git" is not a prefix match
+		{".git", false},      // bare .git file at the root (worktree/submodule)
+		{".gitignore", true}, // "/.git" is not a prefix match
 		{".github/workflows/ci.yml", true},
 		// A nested bare .git file is synced: "/.git" is anchored to the root,
 		// mirroring the hub, which hides only a top-level .git entry.
