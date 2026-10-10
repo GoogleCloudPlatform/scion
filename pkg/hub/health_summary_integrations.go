@@ -52,8 +52,10 @@ type HealthSummaryIntegration struct {
 	// by the live hub instances that run the plugin, or "unknown" when
 	// none of them reported a known value.
 	Health string `json:"health"`
-	// Connected is true only when every reporting instance reports the
-	// plugin connected.
+	// Connected is true only when every instance that reported a known
+	// health reports the plugin connected; a report with health unknown
+	// (for example a timed-out query) does not count. When no report has a
+	// known health, it is true only when every report says connected.
 	Connected bool `json:"connected"`
 	// Version is the version in the most recent report.
 	Version string `json:"version"`
@@ -247,7 +249,10 @@ type healthIntegrationReport struct {
 //
 //   - Health is the worst known value across the live reports; unknown is
 //     neutral and is used only when no report has a known value.
-//   - Connected is true only when every report says connected.
+//   - Connected is true only when every report with a known health says
+//     connected; an unknown report (no real data, for example a timed-out
+//     query) is neutral, as it is for health. When no report has a known
+//     health, Connected is true only when every report says connected.
 //   - Version is that of the report with the latest last_seen (ties go to
 //     the lower instance ID).
 //   - ManagedBy lists the reporting instances by label, then ID;
@@ -316,10 +321,10 @@ func mergeHealthIntegrationReports(name string, rs []healthIntegrationReport) He
 		Name:      name,
 		Platform:  resolvePlatform(name),
 		Health:    healthIntegrationUnknown,
-		Connected: true,
 		ManagedBy: make([]string, 0, len(rs)),
 	}
 	worst := 0
+	knownConnected, anyKnown, allConnected := true, false, true
 	freshest := rs[0]
 	oldest := rs[0].lastSeen
 	for _, r := range rs {
@@ -329,7 +334,13 @@ func mergeHealthIntegrationReports(name string, rs []healthIntegrationReport) He
 			it.Health = r.in.Health
 		}
 		if !r.in.Connected {
-			it.Connected = false
+			allConnected = false
+		}
+		if healthIntegrationHealthRank[r.in.Health] > 0 {
+			anyKnown = true
+			if !r.in.Connected {
+				knownConnected = false
+			}
 		}
 		if r.lastSeen.After(freshest.lastSeen) || (r.lastSeen.Equal(freshest.lastSeen) && r.instanceID < freshest.instanceID) {
 			freshest = r
@@ -337,6 +348,11 @@ func mergeHealthIntegrationReports(name string, rs []healthIntegrationReport) He
 		if r.lastSeen.Before(oldest) {
 			oldest = r.lastSeen
 		}
+	}
+	if anyKnown {
+		it.Connected = knownConnected
+	} else {
+		it.Connected = allConnected
 	}
 	it.Version = freshest.in.Version
 	reportedAt := oldest.UTC()

@@ -162,11 +162,11 @@ Centralized views for managing the Scion infrastructure and access control (avai
   The summary merges the reports of the **live** instances for each plugin:
 
   - **Health** is the worst value any live instance reports. `unknown` never hides a known value, and is shown only when no live instance reports a known one.
-  - **Connected** is `yes` only when every reporting instance says connected.
+  - **Connected** is `yes` only when every instance that reported a known health says connected. An instance whose report is `unknown` (for example, its plugin did not answer in time) does not count, as for health. When no instance reports a known health, **Connected** is `yes` only when every reporting instance says connected.
   - **Version** comes from the most recent report.
   - **Managed by** lists the reporting instances. The `reported_at` field in the API response is the oldest report used.
 
-  A stale or stopped instance's report is never used. A plugin that has a Hub record but that no live instance reports shows as `unknown` with the reason "not run by any running hub instance". A change in a plugin's health appears on the page after the next write of the instance that runs it (within 15 seconds) plus the next page refresh.
+  A stale or stopped instance's report is never used. A plugin that has a Hub record but that no live instance reports shows as `unknown` with the reason "not run by any running hub instance". If the serving instance cannot read the Hub instance table, plugins with a Hub record show `unknown` with the reason "hub instance data not available". A change in a plugin's health appears on the page after the next write of the instance that runs it (within 15 seconds) plus the next page refresh.
 
   On Cloud Run, keep CPU always allocated (`--no-cpu-throttling`, which the shipped deploy script sets) so each instance keeps writing its row between requests. With CPU throttling, an idle instance stops writing and shows as stale.
 - **Metrics Dashboard**: View infrastructure health and agent telemetry metrics. Access requires the `hub.metrics.read` permission scope. For details on the metrics collected, see [Metrics & OpenTelemetry](/scion/hosted/single-node/metrics/). Daily charts group days by calendar day in your display zone, and their headings name that zone (see [Metrics dashboard day buckets](/scion/reference/times-and-timezones/#metrics-dashboard-day-buckets)).

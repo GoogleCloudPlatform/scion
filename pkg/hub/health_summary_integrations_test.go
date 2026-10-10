@@ -1071,11 +1071,11 @@ func TestMergeHealthSummaryIntegrations(t *testing.T) {
 	ts := func(age time.Duration) *time.Time { t := now.Add(-age).UTC(); return &t }
 	assert.Equal(t, []HealthSummaryIntegration{
 		{
-			// Worst known value wins over healthy; unknown is neutral.
-			// One replica not connected makes it not connected. The
-			// version is the freshest report's. managed_by by label;
-			// reported_at is the oldest report used.
-			Name: "chat", Platform: "chat", Health: "degraded", Connected: false, Version: "new",
+			// Worst known value wins over healthy; unknown is neutral,
+			// for connected too (hub-x's unknown, not connected report
+			// does not count). The version is the freshest report's.
+			// managed_by by label; reported_at is the oldest report used.
+			Name: "chat", Platform: "chat", Health: "degraded", Connected: true, Version: "new",
 			ManagedBy: []string{"hub-z", "hub-y", "hub-x"}, ReportedAt: ts(10 * time.Second),
 		},
 		{
@@ -1099,4 +1099,102 @@ func TestMergeHealthSummaryIntegrations(t *testing.T) {
 
 	// Never nil.
 	assert.Equal(t, []HealthSummaryIntegration{}, mergeHealthSummaryIntegrations(nil, now, true, nil))
+}
+
+// TestMergeHealthSummaryIntegrations_Connected: connected is the AND of
+// the reports with a known health; unknown reports are neutral. With no
+// known report, it is the AND of all reports.
+func TestMergeHealthSummaryIntegrations_Connected(t *testing.T) {
+	now := hubInstanceT0
+	row := func(id string, integrations string) store.HubInstance {
+		return store.HubInstance{
+			ID: id, Label: id, StartedAt: now.Add(-time.Hour), LastSeen: now.Add(-time.Second),
+			Stats: json.RawMessage(`{"integrations":` + integrations + `}`),
+		}
+	}
+	cases := []struct {
+		name    string
+		reports []string
+		want    bool
+	}{
+		{"known reports all connected", []string{`{"name":"c","health":"healthy","connected":true}`, `{"name":"c","health":"degraded","connected":true}`}, true},
+		{"one known report not connected", []string{`{"name":"c","health":"healthy","connected":true}`, `{"name":"c","health":"unhealthy","connected":false}`}, false},
+		{"timed-out replica is neutral", []string{`{"name":"c","health":"healthy","connected":true}`, `{"name":"c","health":"unknown","connected":false}`}, true},
+		{"only unknown reports, all connected", []string{`{"name":"c","health":"unknown","connected":true}`, `{"name":"c","health":"unknown","connected":true}`}, true},
+		{"only unknown reports, one not connected", []string{`{"name":"c","health":"unknown","connected":true}`, `{"name":"c","health":"unknown","connected":false}`}, false},
+		{"single timed-out report", []string{`{"name":"c","health":"unknown","connected":false}`}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var rows []store.HubInstance
+			for i, r := range tc.reports {
+				rows = append(rows, row(fmt.Sprintf("hub-%d", i), `[`+r+`]`))
+			}
+			got := mergeHealthSummaryIntegrations(rows, now, true, nil)
+			require.Len(t, got, 1)
+			assert.Equal(t, tc.want, got[0].Connected)
+		})
+	}
+}
+
+// TestMergeHealthSummaryIntegrations_VersionTieBreak: the version is the
+// report with the latest last_seen; with equal last_seen, the report of
+// the lower instance ID wins, whatever the row order.
+func TestMergeHealthSummaryIntegrations_VersionTieBreak(t *testing.T) {
+	now := hubInstanceT0
+	row := func(id, label, version string, age time.Duration) store.HubInstance {
+		return store.HubInstance{
+			ID: id, Label: label, StartedAt: now.Add(-time.Hour), LastSeen: now.Add(-age),
+			Stats: json.RawMessage(`{"integrations":[{"name":"chat","health":"healthy","connected":true,"version":"` + version + `"}]}`),
+		}
+	}
+	// Equal last_seen: hub-a (lower ID) wins, though its label sorts last.
+	a := row("hub-a", "zz", "v-a", 3*time.Second)
+	b := row("hub-b", "aa", "v-b", 3*time.Second)
+	for _, rows := range [][]store.HubInstance{{a, b}, {b, a}} {
+		got := mergeHealthSummaryIntegrations(rows, now, true, nil)
+		require.Len(t, got, 1)
+		assert.Equal(t, "v-a", got[0].Version)
+		assert.Equal(t, []string{"hub-b", "hub-a"}, got[0].ManagedBy, "managed_by is by label")
+	}
+	// A fresher report wins over a lower ID.
+	fresher := row("hub-c", "cc", "v-c", time.Second)
+	for _, rows := range [][]store.HubInstance{{a, b, fresher}, {fresher, b, a}} {
+		got := mergeHealthSummaryIntegrations(rows, now, true, nil)
+		require.Len(t, got, 1)
+		assert.Equal(t, "v-c", got[0].Version)
+	}
+}
+
+// TestHandleHealthSummary_TimedOutReplicaIsNeutral: two replicas run the
+// same plugin. On replica A its health query times out (stored as
+// unknown, not connected); B reports it healthy and connected. Either
+// replica's summary shows it healthy and connected, managed by both.
+func TestHandleHealthSummary_TimedOutReplicaIsNeutral(t *testing.T) {
+	orig := healthIntegrationQueryTimeout
+	healthIntegrationQueryTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { healthIntegrationQueryTimeout = orig })
+
+	a, s := testServer(t)
+	b := newHubReplica(t, s)
+	mgrA := &slowHealthSummaryPluginDouble{
+		healthSummaryPluginDouble: newHealthSummaryPluginDouble("telegram"),
+		slow:                      "telegram",
+		release:                   make(chan struct{}),
+	}
+	t.Cleanup(func() { close(mgrA.release) })
+	a.SetPluginManager(mgrA)
+	b.SetPluginManager(newHealthSummaryPluginDouble("telegram"))
+	createHealthSummaryPluginRecord(t, s, "telegram")
+
+	tickHubInstance(t, a)
+	tickHubInstance(t, b)
+
+	for _, serving := range []*Server{a, b} {
+		list, _ := getHealthSummaryIntegrations(t, serving)
+		got := findHealthSummaryIntegration(t, list, "telegram")
+		assert.Equal(t, "healthy", got.Health)
+		assert.True(t, got.Connected, "a timed-out replica does not make the plugin not connected")
+		assert.ElementsMatch(t, []string{a.InstanceID(), b.InstanceID()}, got.ManagedBy)
+	}
 }
