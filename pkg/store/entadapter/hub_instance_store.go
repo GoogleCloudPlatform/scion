@@ -23,6 +23,7 @@ import (
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubinstance"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -135,8 +136,12 @@ func (s *HubInstanceStore) UpsertHubInstance(ctx context.Context, in store.HubIn
 	return nil
 }
 
-// TouchHubInstance implements store.HubInstanceStore.
-func (s *HubInstanceStore) TouchHubInstance(ctx context.Context, id string) (bool, error) {
+// TouchHubInstance implements store.HubInstanceStore. It reads the row's
+// stats, replaces only its "db" key and writes it back with last_seen. The
+// read and the write need no transaction: each hub instance writes only its
+// own row, from one goroutine. A row deleted in between (pruned) updates
+// nothing and reports found=false, so the caller upserts.
+func (s *HubInstanceStore) TouchHubInstance(ctx context.Context, id string, db *api.HubInstanceDBStats) (bool, error) {
 	if !validHubInstanceID(id) {
 		return false, fmt.Errorf("%w: hub instance id must be 1-%d bytes of printable ASCII", store.ErrInvalidInput, hubInstanceMaxIDBytes)
 	}
@@ -144,14 +149,58 @@ func (s *HubInstanceStore) TouchHubInstance(ctx context.Context, id string) (boo
 	if err != nil {
 		return false, err
 	}
+	row, err := s.client.HubInstance.Query().
+		Where(hubinstance.IDEQ(id)).
+		Select(hubinstance.FieldStats).
+		Only(ctx)
+	if ent.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("touch hub instance: read stats: %w", err)
+	}
+	stats, err := replaceHubInstanceStatsDB(row.Stats, db)
+	if err != nil {
+		return false, fmt.Errorf("touch hub instance: %w", err)
+	}
 	n, err := s.client.HubInstance.Update().
 		Where(hubinstance.IDEQ(id)).
 		SetLastSeen(now).
+		SetStats(stats).
 		Save(ctx)
 	if err != nil {
 		return false, fmt.Errorf("touch hub instance: %w", err)
 	}
 	return n > 0, nil
+}
+
+// replaceHubInstanceStatsDB returns stored with its "db" key set to db, or
+// removed when db is nil. Every other key is kept byte for byte, so Touch
+// never rewrites fields it does not own. Empty or null stats count as {}.
+func replaceHubInstanceStatsDB(stored json.RawMessage, db *api.HubInstanceDBStats) (json.RawMessage, error) {
+	fields := map[string]json.RawMessage{}
+	if len(stored) > 0 && string(stored) != "null" {
+		if err := json.Unmarshal(stored, &fields); err != nil {
+			return nil, fmt.Errorf("decode stats: %w", err)
+		}
+		if fields == nil {
+			fields = map[string]json.RawMessage{}
+		}
+	}
+	if db == nil {
+		delete(fields, "db")
+	} else {
+		b, err := json.Marshal(db)
+		if err != nil {
+			return nil, fmt.Errorf("encode stats.db: %w", err)
+		}
+		fields["db"] = b
+	}
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return nil, fmt.Errorf("encode stats: %w", err)
+	}
+	return out, nil
 }
 
 // ListHubInstances implements store.HubInstanceStore. The cut is
