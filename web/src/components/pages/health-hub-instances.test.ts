@@ -15,21 +15,26 @@
  */
 
 /**
- * Health dashboard hub instances table (ptone/scion#4136).
+ * Health dashboard hub instances table (ptone/scion#4136, ptone/scion#4138).
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
 
 import {
   ScionHealthHubInstances,
+  failingChecks,
   formatDuration,
   instanceLastSeen,
   instanceStateTone,
   instanceUptime,
+  stoppedAtLabel,
+  poolDetail,
+  poolUsage,
   type HealthHubInstance,
   type HealthSummaryHubInstances,
 } from './health-hub-instances.js';
 import { elementStyleRules } from './__fixtures__/css-rules.js';
+import { formatInstantWithZone, setPreferredTimeZone } from '../../utils/time.js';
 
 const GENERATED_AT = '2026-10-09T12:00:00Z';
 
@@ -45,6 +50,7 @@ function instance(over: Partial<HealthHubInstance> = {}): HealthHubInstance {
     stopped_at: null,
     status: 'healthy',
     checks: { database: 'healthy' },
+    database: { pool_active: 3, pool_idle: 2, pool_max: 25, pool_wait_count_total: 4 },
     ...over,
   };
 }
@@ -84,6 +90,7 @@ function cell(row: Element, cls: string): string {
 
 afterEach(() => {
   while (mounted.length) mounted.pop()?.remove();
+  setPreferredTimeZone('');
 });
 
 describe('formatDuration', () => {
@@ -114,6 +121,36 @@ describe('hub instance cells', () => {
     );
   });
 
+  it('formats the stop time in the display zone, falling back to the raw value', () => {
+    expect(stoppedAtLabel('2026-10-09T11:50:00Z')).toBe(
+      formatInstantWithZone('2026-10-09T11:50:00Z')
+    );
+    expect(stoppedAtLabel('not-a-time')).toBe('not-a-time');
+  });
+
+  it('lists failing checks as name: value, sorted; healthy and available pass', () => {
+    expect(
+      failingChecks({
+        workspace_storage: 'unhealthy',
+        database: 'healthy',
+        docker: 'available',
+        colocated_broker: 'unknown',
+        mount: 'unavailable',
+      })
+    ).toEqual(['colocated_broker: unknown', 'mount: unavailable', 'workspace_storage: unhealthy']);
+    expect(failingChecks(undefined)).toEqual([]);
+  });
+
+  it('formats the pool as in use / limit, or in use alone without a limit', () => {
+    const db = { pool_active: 3, pool_idle: 2, pool_max: 25, pool_wait_count_total: 4 };
+    expect(poolUsage(db)).toBe('3/25');
+    expect(poolUsage({ ...db, pool_max: 0 })).toBe('3');
+    expect(poolDetail(db)).toBe('3 in use, 2 idle, limit 25, 4 waits');
+    expect(poolDetail({ ...db, pool_max: 0, pool_wait_count_total: 1 })).toBe(
+      '3 in use, 2 idle, no limit, 1 wait'
+    );
+  });
+
   it('maps states to tones', () => {
     expect(instanceStateTone('live')).toBe('ok');
     expect(instanceStateTone('stale')).toBe('warn');
@@ -122,7 +159,7 @@ describe('hub instance cells', () => {
 });
 
 describe('scion-health-hub-instances', () => {
-  it('renders one row per instance with the six columns', async () => {
+  it('renders one row per instance with the seven columns', async () => {
     const root = await mount(
       list([
         instance({ id: 'hub-a-0123', label: 'hub-a', serving: true }),
@@ -133,11 +170,20 @@ describe('scion-health-hub-instances', () => {
           state: 'stale',
           status: 'degraded',
           last_seen: '2026-10-09T11:59:00Z',
+          database: { pool_active: 9, pool_idle: 0, pool_max: 10, pool_wait_count_total: 17 },
         }),
       ])
     );
     const headers = [...root.querySelectorAll('th')].map((th) => th.textContent?.trim());
-    expect(headers).toEqual(['Label', 'State', 'Version', 'Uptime', 'Status', 'Last seen']);
+    expect(headers).toEqual([
+      'Label',
+      'State',
+      'Version',
+      'Uptime',
+      'Status',
+      'DB pool',
+      'Last seen',
+    ]);
 
     const [a, b] = rows(root);
     expect(a.dataset.instanceId).toBe('hub-a-0123');
@@ -148,6 +194,10 @@ describe('scion-health-hub-instances', () => {
     expect(cell(a, 'version')).toBe('v1.2.3');
     expect(cell(a, 'uptime')).toBe('2h 30m');
     expect(cell(a, 'status')).toBe('healthy');
+    expect(cell(a, 'pool')).toBe('3/25');
+    expect(a.querySelector('td.pool')?.getAttribute('title')).toBe(
+      '3 in use, 2 idle, limit 25, 4 waits'
+    );
     expect(cell(a, 'last-seen')).toBe('12s ago');
 
     expect(cell(b, 'label')).toBe('hub-b');
@@ -158,7 +208,87 @@ describe('scion-health-hub-instances', () => {
     // A stale instance's status is out of date: shown greyed, not as a pill.
     expect(cell(b, 'status')).toBe('last reported: degraded');
     expect(b.querySelector('td.status .pill')).toBeNull();
+    // Each instance shows its own pool.
+    expect(cell(b, 'pool')).toBe('9/10');
     expect(cell(b, 'last-seen')).toBe('1m 0s ago');
+  });
+
+  it('greys a stopped instance and shows its last reported status', async () => {
+    const root = await mount(
+      list([
+        instance({ id: 'hub-a-0123', serving: true }),
+        instance({
+          id: 'hub-old-89ab',
+          label: 'hub-old',
+          state: 'stopped',
+          status: 'healthy',
+          last_seen: '2026-10-09T11:50:00Z',
+          stopped_at: '2026-10-09T11:50:00Z',
+        }),
+      ])
+    );
+    const [live, stopped] = rows(root);
+    expect(live.classList.contains('stopped')).toBe(false);
+    expect(stopped.classList.contains('stopped')).toBe(true);
+    expect(stopped.dataset.state).toBe('stopped');
+    expect(cell(stopped, 'state')).toBe('stopped');
+    expect(stopped.querySelector('td.state .pill')?.classList.contains('tone-neutral')).toBe(true);
+    // The stop time is shown in the display zone, like other absolute times.
+    expect(stopped.querySelector('td.state')?.getAttribute('title')).toBe(
+      `stopped ${formatInstantWithZone('2026-10-09T11:50:00Z')}`
+    );
+    expect(formatInstantWithZone('2026-10-09T11:50:00Z')).not.toBe('');
+    expect(live.querySelector('td.state')?.hasAttribute('title')).toBe(false);
+    expect(cell(stopped, 'uptime')).toBe('—');
+    expect(cell(stopped, 'status')).toBe('last reported: healthy');
+    expect(stopped.querySelector('td.status .pill')).toBeNull();
+    expect(cell(stopped, 'last-seen')).toBe('10m 0s ago');
+
+    expect(elementStyleRules('scion-health-hub-instances').get('tr.stopped td')).toContain(
+      'var(--scion-text-muted)'
+    );
+  });
+
+  it('re-renders the stop-time tooltip when the display zone changes', async () => {
+    const stoppedAt = '2026-10-09T11:50:00Z';
+    setPreferredTimeZone('UTC');
+    const root = await mount(
+      list([instance({ state: 'stopped', last_seen: stoppedAt, stopped_at: stoppedAt })])
+    );
+    const title = () => rows(root)[0].querySelector('td.state')?.getAttribute('title');
+    expect(title()).toContain('(UTC)');
+
+    setPreferredTimeZone('Asia/Kathmandu');
+    const el = root.host as ScionHealthHubInstances;
+    await el.updateComplete;
+    expect(title()).toBe(`stopped ${formatInstantWithZone(stoppedAt)}`);
+    expect(title()).toContain('(Asia/Kathmandu)');
+  });
+
+  it('shows the failing checks under the status', async () => {
+    const root = await mount(
+      list([
+        instance({
+          status: 'degraded',
+          checks: { database: 'healthy', colocated_broker: 'unhealthy', mount: 'unknown' },
+        }),
+        instance({ id: 'hub-b-4567' }),
+      ])
+    );
+    const [a, b] = rows(root);
+    const failing = [...a.querySelectorAll('[data-role="failing-checks"] li')].map((li) =>
+      li.textContent?.trim()
+    );
+    expect(failing).toEqual(['colocated_broker: unhealthy', 'mount: unknown']);
+    expect(a.querySelector('td.status .pill')?.textContent?.trim()).toBe('degraded');
+    expect(b.querySelector('[data-role="failing-checks"]')).toBeNull();
+  });
+
+  it('shows a dash when an instance reported no pool', async () => {
+    const root = await mount(list([instance({ database: null }), instance({ id: 'x' })]));
+    const [a] = rows(root);
+    expect(cell(a, 'pool')).toBe('—');
+    expect(a.querySelector('td.pool')?.getAttribute('title')).toBe('');
   });
 
   it('computes uptime and last seen from as_of (the database clock), not generated_at', async () => {

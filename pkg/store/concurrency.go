@@ -244,6 +244,11 @@ const (
 	// LockNotificationOrphanGC guards the periodic removal of acknowledged
 	// notifications whose agent and subscription are both gone.
 	LockNotificationOrphanGC AdvisoryLockKey = 0x5C10002A
+
+	// LockHubInstancePrune guards the hourly hub-instance registry prune
+	// (health dashboard F3 design §5.11), so one replica per tick deletes
+	// hub_instances rows past the 24 h retention.
+	LockHubInstancePrune AdvisoryLockKey = 0x5C10002B
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide

@@ -20,8 +20,6 @@
  * payload, and the picker's list, search, filters and limit.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import '@shoelace-style/shoelace/dist/components/textarea/textarea.js';
 

@@ -200,7 +200,7 @@
         },
         "mode": {
           "type": "string",
-          "description": "CLI mode (human, assistant or agent); SCION_CLI_MODE takes precedence. Kept when a legacy settings file is migrated.",
+          "description": "CLI mode (human or agent); SCION_CLI_MODE takes precedence. The removed value assistant is ignored with a warning. Kept when a legacy settings file is migrated.",
           "x-since": "1"
         }
       },
@@ -1319,6 +1319,13 @@
           "default": false,
           "description": "Turns on per-request performance tracing, off by default. Each Hub API request and SSE connection then logs one perf_trace line with phase timings, authorization store-call and decision-audit counts and DB pool waits; an unscoped local platform admin who sends X-Scion-Perf-Trace: 1 also gets them in X-Scion-Perf-* response headers; no other caller does. Observe only: decisions, audit records and response bodies are unchanged. For diagnosis; not for routine production use. Restart required to change.",
           "x-env-var": "SCION_SERVER_HUB_PERFTRACE",
+          "x-since": "1"
+        },
+        "membership_sweep_report_only": {
+          "type": "boolean",
+          "default": false,
+          "description": "Puts the membership-standing sweep in report-only mode, off by default. The sweep runs on the scheduler's first tick after start and then hourly; when on, it logs and audits (mutation type agent_hold_would_set) each agent whose root user is not admitted to the agent's project, and places no hold, revokes no credential and stops no agent. Holds from event-driven membership changes (member removal, role change, binding expiry) still apply. Meant for the first boot after an upgrade; turn it off to enforce. On a replicated Hub, set it on every replica: the sweep runs on whichever replica takes its lock, and a replica left enforcing holds the listed agents at its next sweep. Restart required to change.",
+          "x-env-var": "SCION_SERVER_HUB_MEMBERSHIPSWEEPREPORTONLY",
           "x-since": "1"
         },
         "launch_timeout": {

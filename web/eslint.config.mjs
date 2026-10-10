@@ -135,24 +135,17 @@ export default defineConfig([
       'e2e/client-main-stub.ts',
       'e2e/palette-focus.ts',
       'e2e/palette-typography.ts',
+      'e2e/*.spec.ts',
+      'e2e/groups/*.ts',
+      'e2e/harness/*.ts',
+      'e2e/roles/*.ts',
+      'e2e/terminal-coordinator/*.ts',
     ],
     './e2e/tsconfig.eslint.json'
   ),
   project(['e2e/terminal-lifecycle/*.ts'], './e2e/terminal-lifecycle/tsconfig.json'),
   project(['e2e/terminal-owner/*.ts'], './e2e/terminal-owner/tsconfig.json'),
-
-  // TEMPORARY: the hub-backed suites run from the root playwright.config.ts
-  // and have no TS project yet, so they are not linted here. Linted in
-  // ptone/scion#4201.
-  {
-    ignores: [
-      'e2e/*.spec.ts',
-      'e2e/groups/**',
-      'e2e/harness/**',
-      'e2e/roles/**',
-      'e2e/terminal-coordinator/**',
-    ],
-  },
+  project(['e2e-perf/budgets/*.ts'], './e2e-perf/budgets/tsconfig.json'),
 
   // Test files: a looser type-aware rule set than sources. Tests reach
   // into private members and use `as any` fakes, so the no-unsafe-* rules

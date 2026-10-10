@@ -24,9 +24,8 @@ import (
 // the web autocomplete inserts, e.g. "John Smith" -> "john-smith"), their
 // email, or the email's local part, case-insensitively.
 //
-// It is a pure function. The human mention notification path
-// (fireHumanMentionNotifications) mirrors these rules in its own copy; the
-// two should be unified later.
+// It is a pure function. Human mention resolution (mentionedHumanIDs)
+// mirrors these rules in its own copy; the two should be unified later.
 func mentionMatchesMember(name string, m chatMemberEntry) bool {
 	n := strings.ToLower(name)
 	if m.DisplayName != "" {

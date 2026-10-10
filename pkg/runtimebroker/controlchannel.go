@@ -553,11 +553,16 @@ func (c *ControlChannelClient) waitForConnected() error {
 func (c *ControlChannelClient) runMessageLoop() {
 	conn := c.conn
 
+	// If Close has started, it would not wait for a new ping loop, so close
+	// the connection and return instead of starting one.
+	if !c.addTracked() {
+		_ = conn.Close()
+		return
+	}
 	// Start the ping loop for this connection only. loopDone tells it to
 	// exit once this read loop is over; pingDone reports that it has.
 	loopDone := make(chan struct{})
 	pingDone := make(chan struct{})
-	c.wg.Add(1)
 	go func() {
 		defer close(pingDone)
 		c.pingLoop(conn, loopDone)
@@ -682,13 +687,17 @@ func (c *ControlChannelClient) handleRequest(data []byte) error {
 	}
 
 	conn := c.conn
+	// If Close has started, it would not wait for this request: drop it
+	// without registering a cancel or starting a goroutine.
+	if !c.addTracked() {
+		return nil
+	}
 	// Register the request's cancel synchronously, on the read loop, before
 	// the dispatch goroutine starts. The read loop handles frames in order,
 	// so a "cancel" frame the Hub sends for this RequestID always finds it,
 	// including while the request is still queued for a dispatch slot
 	// (ptone/scion#2877).
 	ctx, done := c.trackRequest(req.RequestID)
-	c.wg.Add(1)
 	go c.runRequest(ctx, done, conn, req)
 	return nil
 }
@@ -1059,17 +1068,26 @@ func (c *ControlChannelClient) closeStreamAsync(handler *StreamHandler, reason s
 // not allow. Checking c.ctx and adding under c.mu, which Close holds while
 // cancelling, orders every Add either before Close's Wait or not at all.
 func (c *ControlChannelClient) goTracked(f func()) bool {
-	c.mu.Lock()
-	if c.ctx != nil && c.ctx.Err() != nil {
-		c.mu.Unlock()
+	if !c.addTracked() {
 		return false
 	}
-	c.wg.Add(1)
-	c.mu.Unlock()
 	go func() {
 		defer c.wg.Done()
 		f()
 	}()
+	return true
+}
+
+// addTracked adds one to c.wg unless Close has started, and reports whether
+// it did; the caller must then call c.wg.Done exactly once. See goTracked for
+// why the check and the Add happen together under c.mu.
+func (c *ControlChannelClient) addTracked() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ctx != nil && c.ctx.Err() != nil {
+		return false
+	}
+	c.wg.Add(1)
 	return true
 }
 

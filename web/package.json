@@ -18,14 +18,15 @@
     "lint:fix": "eslint src --fix",
     "lint:e2e": "eslint e2e",
     "lint:e2e-perf": "eslint e2e-perf",
-    "test:e2e-perf": "node --test e2e-perf/lib.test.mjs",
+    "test:e2e-perf": "node --test e2e-perf/lib.test.mjs e2e-perf/budgets/fixture.test.mjs",
     "format": "prettier --write \"src/**/*.{ts,tsx,css,json}\"",
     "format:check": "prettier --check \"src/**/*.{ts,tsx,css,json}\"",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.e2e-configs.json && tsc --noEmit -p src/client/tsconfig.client-tests.json && tsc --noEmit -p src/client/tsconfig.terminal-tests.json && tsc --noEmit -p src/components/tsconfig.component-tests.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "test:e2e:chat-mobile": "playwright test -c e2e/chat-mobile/playwright.config.ts"
+    "test:e2e:chat-mobile": "playwright test -c e2e/chat-mobile/playwright.config.ts",
+    "test:e2e:perf-budgets": "playwright test -c e2e-perf/budgets/playwright.config.ts"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.18.0",

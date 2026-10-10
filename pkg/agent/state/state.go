@@ -149,6 +149,11 @@ const (
 	// than PreemptionByScheduler (for example TerminationByKubelet,
 	// EvictionByEvictionAPI, or another disruption-controller reason).
 	ExitReasonEvicted ExitReason = "evicted"
+	// ExitReasonOOMKilled is set when the agent container was terminated
+	// for exceeding its memory limit (Kubernetes container termination
+	// reason OOMKilled). It is a crash, not a disruption: the workload
+	// exceeded its own limit, so a relaunch without a change hits it again.
+	ExitReasonOOMKilled ExitReason = "oom_killed"
 )
 
 // IsValid reports whether r is a recognised ExitReason value.
@@ -164,6 +169,8 @@ func (r ExitReason) IsValid() bool {
 	case ExitReasonCrashed, ExitReasonLimitsExceeded:
 		return true
 	case ExitReasonPreempted, ExitReasonEvicted:
+		return true
+	case ExitReasonOOMKilled:
 		return true
 	}
 	return false

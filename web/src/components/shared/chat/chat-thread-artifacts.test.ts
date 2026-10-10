@@ -21,8 +21,6 @@
  * live message naming an artifact fetches the viewer's views.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { requestBodyText } from '../../../client/__fixtures__/request-url.js';
 

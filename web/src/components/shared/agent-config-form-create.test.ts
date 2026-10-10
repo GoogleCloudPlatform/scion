@@ -21,8 +21,6 @@
  * is a touch, and inherited values are source-labelled placeholders.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 
 import type { AgentConfigPlaceholder } from '../../shared/agent-config-inherited.js';

@@ -27,8 +27,6 @@
  * in Tokyo, so the expected strings also prove midnight renders as `00:00`.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { render } from 'lit';
 import { setPreferredTimeZone } from '../../utils/time.js';

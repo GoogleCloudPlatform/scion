@@ -71,6 +71,15 @@ type DeletionInfo struct {
 	// lapsed lease itself cannot tell that the row never expires from view
 	// and blocks start until a retry or force (design note D4, phase 2).
 	Stage string `json:"stage,omitempty"`
+	// BlocksStart is whether a start of the agent is refused right now
+	// because of this delete (the hub's deleteBlocksStart: a live or
+	// finalizing delete, or an outstanding broker delete intent). It is set
+	// only on the single-agent GET (ptone/scion#3098). List views, the
+	// compact view, other agent responses and SSE status events omit it, as
+	// does a GET whose check could not be read. Absent means "not computed",
+	// never "false": a client that sees no blocksStart infers the block from
+	// state and stage as before.
+	BlocksStart *bool `json:"blocksStart,omitempty"`
 }
 
 // DeletionStageFinalizing is the DeletionInfo.Stage value for a row whose

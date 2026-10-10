@@ -68,6 +68,7 @@ var metricGroups = []MetricGroup{
 	{EnvVar: "SCION_METRICS_HUB_AUTH", NamePattern: "scion.hub.brokers.*"},
 	{EnvVar: "SCION_METRICS_HUB_AUTH", NamePattern: "scion.hub.dispatch.*"},
 	{EnvVar: "SCION_METRICS_HUB_GCP", NamePattern: "scion.hub.gcp.*"},
+	{EnvVar: "SCION_METRICS_LOGGING", NamePattern: "scion.logging.*"},
 }
 
 // Option configures the MeterProvider.

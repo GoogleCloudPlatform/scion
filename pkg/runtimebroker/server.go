@@ -53,6 +53,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"k8s.io/client-go/kubernetes"
 )
 
 // ServerConfig holds configuration for the Runtime Broker API server.
@@ -246,6 +247,10 @@ type Server struct {
 	mu         sync.RWMutex
 	startTime  time.Time
 
+	// nfsCleanupWG tracks background NFS project tree removals started by
+	// project delete (startNFSProjectTreeCleanup), so tests can wait for them.
+	nfsCleanupWG sync.WaitGroup
+
 	// workspaceDownload replaces gcp.SyncFromGCS for the GCS workspace
 	// bootstrap (create-time and handleWorkspaceApply) when set (see
 	// SetWorkspaceDownloader).
@@ -339,6 +344,13 @@ type Server struct {
 	// real loader; tests set it per fixture to exercise each settings
 	// outcome.
 	loadSettings func(projectDir string) (*config.VersionedSettings, []string, error)
+
+	// assignKSAClientset, when non-nil, replaces assignDiscoveryClientset in
+	// resolveKubernetesAssignIdentity: it returns the Kubernetes client used
+	// to discover an annotated ServiceAccount for a GCP identity "assign"
+	// dispatch on the dispatch's resolved manager. Tests set it to a fake
+	// clientset.
+	assignKSAClientset func(mgr agent.Manager) (kubernetes.Interface, error)
 
 	// agentOwnRuntimes memoises the runtime an existing agent's saved
 	// profile resolves to (see ensureAgentOwnRuntime), keyed by project dir
@@ -2526,8 +2538,10 @@ func (s *Server) logHubConnections() {
 			attrs = append(attrs, slog.Bool("colocated", true))
 		}
 
+		conn.mu.RLock()
 		hasHeartbeat := conn.Heartbeat != nil
 		hasControlChannel := conn.ControlChannel != nil
+		conn.mu.RUnlock()
 		attrs = append(attrs,
 			slog.Bool("heartbeat", hasHeartbeat),
 			slog.Bool("control_channel", hasControlChannel),
