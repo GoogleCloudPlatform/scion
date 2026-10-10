@@ -1328,8 +1328,12 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 	}
 
 	kind := s.harnessConfigImportKind()
+	slug := reimportTargetSlug(hc)
 	run := func(progress importProgressFunc) ([]string, error) {
-		return s.importFromRemote(ctx, hc.ScopeID, sourceURL, hc.Scope, kind, progress, nil)
+		return s.importFromRemoteSelected(ctx, hc.ScopeID, sourceURL, hc.Scope, kind, progress,
+			func(dirs []resourceDir, skipped []skippedDir) ([]resourceDir, []skippedDir) {
+				return applySlugFilter(dirs, skipped, slug)
+			}, fmt.Sprintf("no harness-config in the source matches slug %q", slug))
 	}
 
 	if importAcceptsNDJSON(r) {
@@ -1362,6 +1366,19 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 		Count:          len(imported),
 		Failed:         failures,
 	})
+}
+
+// reimportTargetSlug returns the slug that selects hc's entry when
+// reimporting it, so a source holding several harness-configs validates and
+// imports only the target (ptone/scion#4213). Discovered entries are persisted
+// under Slugify(name), so selection compares that against the record's slug;
+// matching the record's Name instead could pick another config, since Name and
+// Slug can be changed independently. There is no fallback for an empty slug:
+// every API write path sets a non-empty slug, and an empty slug would match
+// only entries whose names slugify to empty, so the reimport does not guess a
+// different record.
+func reimportTargetSlug(hc *store.HarnessConfig) string {
+	return hc.Slug
 }
 
 // handleHarnessConfigImageStatus returns per-broker aggregated image status.
