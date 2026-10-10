@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 var (
@@ -72,6 +73,20 @@ Commands:
   scion artifact get <ref> [--out <path>] [--clean|--accept] [--kind publish]
   scion artifact versions <ref>                List an artifact's versions
   scion artifact share <ref> [--ttl 7d]        Create a share link (users only)`,
+	// Args/Run make this command Runnable so cobra validates subcommand
+	// names, as for "scion hub": an unrecognized subcommand, including one
+	// the CLI mode removed (such as share in agent mode), returns an
+	// "unknown command" error with a non-zero exit instead of falling
+	// through to this command's help with exit status 0. A bare
+	// "artifact", and "artifact help ...", print help through pflag.ErrHelp.
+	Args: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 || args[0] == "help" {
+			return pflag.ErrHelp
+		}
+		return cobra.NoArgs(cmd, args)
+	},
+	// Must be Runnable for the Args validator above to be evaluated.
+	Run: func(cmd *cobra.Command, args []string) {},
 }
 
 var artifactPublishCmd = &cobra.Command{
