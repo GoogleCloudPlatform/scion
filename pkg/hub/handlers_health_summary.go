@@ -16,7 +16,6 @@ package hub
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -50,7 +49,6 @@ type HealthSummaryResponse struct {
 	// deriveHealthSummaryStatus.
 	Attention []HealthAttentionItem `json:"attention"`
 	Hub       HealthSummaryHub      `json:"hub"`
-	Database  HealthSummaryDB       `json:"database"`
 	Brokers   HealthSummaryBrokers  `json:"runtime_brokers"`
 	Agents    *HealthSummaryAgents  `json:"agents"` // nil when the agent aggregate is unavailable
 	// Dispatch is nil when a dispatch store count failed.
@@ -108,21 +106,6 @@ type HealthSummaryHub struct {
 	// UnhealthyChecks lists the non-healthy checks as "key: value", sorted,
 	// so a dashboard can show the cause without interpreting the map.
 	UnhealthyChecks []string `json:"unhealthy_checks,omitempty"`
-}
-
-// HealthSummaryDB contains database health information.
-// Fields are sourced from Go's sql.DBStats (runtime pool counters) rather than
-// the OTel-based metrics described in the design doc. sql.DBStats provides
-// accurate, zero-latency pool stats without depending on the metrics pipeline,
-// which may itself be the thing that is unhealthy.
-type HealthSummaryDB struct {
-	Status     string `json:"status"`
-	PoolActive int64  `json:"pool_active"`
-	PoolMax    int64  `json:"pool_max"`
-	PoolIdle   int64  `json:"pool_idle"`
-	// PoolWaitCountTotal is the cumulative number of times a caller had to wait
-	// for a DB connection (monotonically increasing counter from sql.DBStats.WaitCount).
-	PoolWaitCountTotal int64 `json:"pool_wait_count_total"`
 }
 
 // HealthSummaryBrokers is the runtime broker section of the health
@@ -296,26 +279,10 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 		hubSummary.Projects = healthInfo.Stats.Projects
 	}
 
-	// Build database section
-	dbSummary := HealthSummaryDB{
-		Status: "healthy",
-	}
-	if healthInfo.Checks != nil {
-		if dbStatus, ok := healthInfo.Checks["database"]; ok {
-			dbSummary.Status = dbStatus
-		}
-	}
-	// Get pool stats from sql.DB if available
-	if dbp, ok := s.store.(interface{ DB() *sql.DB }); ok {
-		db := dbp.DB()
-		if db != nil {
-			stats := db.Stats()
-			dbSummary.PoolActive = int64(stats.InUse)
-			dbSummary.PoolIdle = int64(stats.Idle)
-			dbSummary.PoolWaitCountTotal = stats.WaitCount
-			dbSummary.PoolMax = int64(stats.MaxOpenConnections)
-		}
-	}
+	// The database connection pool is per instance: each hub instance
+	// writes its own pool counters to its registry row, and they reach
+	// this response under hub_instances[].database. The handler reads no
+	// pool counters itself.
 
 	// Use aggregate queries instead of fetching full agent records.
 	// This avoids deserialising up to 10 000 structs on every 30 s poll.
@@ -356,7 +323,6 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 	resp := HealthSummaryResponse{
 		GeneratedAt:        now,
 		Hub:                hubSummary,
-		Database:           dbSummary,
 		Brokers:            brokerList,
 		Agents:             agentsSummary,
 		Dispatch:           dispatchSummary,

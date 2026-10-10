@@ -279,6 +279,13 @@ func (rs *ResourceStore) BootstrapSource(ctx context.Context, src ResourceSource
 		return result, err
 	}
 
+	// One pre-upload content check per resource; it covers the create, update
+	// and storage-repair branches below, so a refusal writes nothing.
+	if err := rs.checkDir(ctx, dir, files); err != nil {
+		result.Failed++
+		return result, err
+	}
+
 	if existing == nil {
 		return rs.bootstrapSourceCreate(ctx, meta, slug, dir, files, &result)
 	}

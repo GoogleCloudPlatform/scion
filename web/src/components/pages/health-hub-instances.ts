@@ -26,6 +26,10 @@
  * they use one clock, neither the browser's nor the serving hub's. A
  * section without as_of falls back to the summary's generated_at.
  *
+ * Each row shows the instance's own failing checks under its status, and
+ * its own database connection pool (in use / limit) as last written to its
+ * registry row; the hub that serves the summary reads no pool itself.
+ *
  * The section is absent when an older hub replica served the summary
  * (during a rollout): the dashboard then hides this table. A null section
  * means the registry could not be read.
@@ -56,6 +60,18 @@ export interface HealthHubInstance {
   status: string;
   /** Last reported checks; fixed words only. */
   checks?: Record<string, string>;
+  /** Last reported database connection pool; null when none was reported. */
+  database?: HealthHubInstanceDB | null;
+}
+
+/** One hub instance's database connection pool. */
+export interface HealthHubInstanceDB {
+  pool_active: number;
+  pool_idle: number;
+  /** 0 when the pool has no limit. */
+  pool_max: number;
+  /** Cumulative waits for a connection since the instance started. */
+  pool_wait_count_total: number;
 }
 
 /** The summary's hub_instances block. */
@@ -109,6 +125,32 @@ export function instanceUptime(i: HealthHubInstance, referenceTime: string): str
 export function instanceLastSeen(i: HealthHubInstance, referenceTime: string): string {
   const d = formatDuration(Math.max(0, diffMs(referenceTime, i.last_seen)));
   return d ? `${d} ago` : '';
+}
+
+/** Check values that count as passing. */
+const PASSING_CHECK_VALUES = new Set(['healthy', 'available']);
+
+/**
+ * The instance's non-passing checks as "name: value", sorted by name. A
+ * check passes when its value is healthy or available.
+ */
+export function failingChecks(checks: Record<string, string> | undefined): string[] {
+  return Object.entries(checks ?? {})
+    .filter(([, v]) => !PASSING_CHECK_VALUES.has(v))
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([k, v]) => `${k}: ${v}`);
+}
+
+/** "3/25" (in use / limit); without a limit, "3". */
+export function poolUsage(db: HealthHubInstanceDB): string {
+  return db.pool_max > 0 ? `${db.pool_active}/${db.pool_max}` : `${db.pool_active}`;
+}
+
+/** The pool cell's tooltip: "3 in use, 2 idle, limit 25, 4 waits". */
+export function poolDetail(db: HealthHubInstanceDB): string {
+  const limit = db.pool_max > 0 ? `limit ${db.pool_max}` : 'no limit';
+  const waits = db.pool_wait_count_total === 1 ? 'wait' : 'waits';
+  return `${db.pool_active} in use, ${db.pool_idle} idle, ${limit}, ${db.pool_wait_count_total} ${waits}`;
 }
 
 /** The tone of an instance state: live ok, stale warn, stopped neutral. */
@@ -218,6 +260,19 @@ export class ScionHealthHubInstances extends LitElement {
       td.num {
         font-variant-numeric: tabular-nums;
       }
+
+      td.status {
+        white-space: normal;
+      }
+
+      ul.failing {
+        margin: 0.25rem 0 0 0;
+        padding: 0;
+        list-style: none;
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted);
+        overflow-wrap: anywhere;
+      }
     `,
   ];
 
@@ -252,6 +307,7 @@ export class ScionHealthHubInstances extends LitElement {
                 <th scope="col">Version</th>
                 <th scope="col">Uptime</th>
                 <th scope="col">Status</th>
+                <th scope="col">DB pool</th>
                 <th scope="col">Last seen</th>
               </tr>
             </thead>
@@ -277,6 +333,8 @@ export class ScionHealthHubInstances extends LitElement {
     const uptime = instanceUptime(i, ref);
     const lastSeen = instanceLastSeen(i, ref);
     const live = i.state === 'live';
+    const failing = failingChecks(i.checks);
+    const db = i.database;
     return html`
       <tr data-instance-id=${i.id} data-state=${i.state}>
         <td class="label" title=${i.id}>
@@ -293,6 +351,14 @@ export class ScionHealthHubInstances extends LitElement {
           ${live
             ? html`<span class="pill tone-${healthTone(i.status)}">${i.status || 'unknown'}</span>`
             : html`<span class="muted">last reported: ${i.status || 'unknown'}</span>`}
+          ${failing.length > 0
+            ? html`<ul class="failing" data-role="failing-checks">
+                ${failing.map((c) => html`<li>${c}</li>`)}
+              </ul>`
+            : nothing}
+        </td>
+        <td class="pool num" data-role="pool" title=${db ? poolDetail(db) : ''}>
+          ${db ? poolUsage(db) : html`<span class="muted">—</span>`}
         </td>
         <td class="last-seen num" title=${i.last_seen}>
           ${lastSeen || html`<span class="muted">—</span>`}

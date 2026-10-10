@@ -1445,6 +1445,10 @@ type Server struct {
 	// zero value uses the defaults (handlers_chat_v2.go).
 	chatSpacesBatch chatSpacesBatchSizes
 
+	// chatMemberFanout bounds the thread member fan-out; the zero value
+	// uses the defaults (chat_member_fanout.go).
+	chatMemberFanout chatMemberFanoutLimits
+
 	// Conduit stream grant key ring cache (conduit_grants.go); created on
 	// first use behind the hub.conduit experiment.
 	conduitGrantsOnce sync.Once
@@ -1562,9 +1566,6 @@ type Server struct {
 	// artifactBlobSweeper keeps the blob sweep's position between passes
 	// of the artifact maintenance loop (its only user).
 	artifactBlobSweeper artifacts.BlobSweeper
-
-	// Chat notifier for human mention + DM received notifications (W6). Nil-safe.
-	chatNotifier *ChatNotifier
 
 	// Attachment file store for chat attachments (W7). Nil = attachments disabled.
 	// HA limitation: LocalDiskAttachmentStore is single-node only; see attachments.go.
@@ -3352,18 +3353,11 @@ func (s *Server) GetMessageBrokerProxy() *MessageBrokerProxy {
 }
 
 // SetWebChatStore sets the webchat store for thread prefs and chat threads API.
-// It also initializes the ChatNotifier for human-mention and DM notifications (W6).
 func (s *Server) SetWebChatStore(wcs WebChatStore) {
 	s.mu.Lock()
 	s.webChatStore = wcs
-	// Initialize ChatNotifier with the store. Presence is resolved lazily
-	// through the server (see serverPresenceChecker): the presence manager is
-	// created by InitPresenceManager, which runs after this on the current
-	// startup path, and a snapshot taken here would pin a nil checker.
-	s.chatNotifier = NewChatNotifier(s.store, s.events, wcs, serverPresenceChecker{s}, s.messageLog)
 	// Wire into existing broker proxy if already started (startup order varies).
 	if s.messageBrokerProxy != nil {
-		s.messageBrokerProxy.chatNotifier = s.chatNotifier
 		s.messageBrokerProxy.webChatStore = wcs
 	}
 	s.mu.Unlock()
@@ -3374,35 +3368,6 @@ func (s *Server) SetAttachmentStore(as AttachmentStore) {
 	s.mu.Lock()
 	s.attachmentStore = as
 	s.mu.Unlock()
-}
-
-// getChatNotifier returns the chat notifier, or nil if not initialized.
-func (s *Server) getChatNotifier() *ChatNotifier {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.chatNotifier
-}
-
-// serverPresenceChecker adapts the server's presence manager to the
-// PresenceChecker interface, resolving it at call time rather than at
-// construction time. Startup wires the webchat store (and with it the
-// ChatNotifier) before InitPresenceManager runs, so a checker captured up
-// front would be permanently absent-reporting — the defect this replaces.
-type serverPresenceChecker struct {
-	srv *Server
-}
-
-// IsUserActive reports whether the user is currently present, or false while
-// no presence manager exists (before InitPresenceManager, or in deployments
-// that never start one).
-func (c serverPresenceChecker) IsUserActive(userID string) bool {
-	if c.srv == nil {
-		return false
-	}
-	c.srv.mu.RLock()
-	pm := c.srv.presenceManager
-	c.srv.mu.RUnlock()
-	return pm.IsUserActive(userID)
 }
 
 // InitPresenceManager creates and starts the presence manager for real-time
@@ -4006,8 +3971,8 @@ func (s *Server) StartMessageBroker(b eventbus.EventBus) {
 
 	proxy := NewMessageBrokerProxy(b, s.store, s.events, s.GetDispatcher, logging.Subsystem("hub.broker"))
 	proxy.messageLog = s.dedicatedMessageLog
-	proxy.chatNotifier = s.chatNotifier // W6: wire DM notification trigger
 	proxy.webChatStore = s.webChatStore // DM watermark stamping after persist
+	proxy.memberFanout = s.fanOutThreadMessageToMembersAsync
 	proxy.writeDenyEnabled = func() bool {
 		ops := s.GetOperationalSettings()
 		return ops != nil && ops.ConversationEnvelopeSwitch()
@@ -6252,6 +6217,7 @@ func (s *Server) registerRoutes() {
 		s.mux.HandleFunc("/api/v1/chat/conversations/", s.guarded("/api/v1/chat/conversations/", s.handleChatConversationRoutes))
 		s.mux.HandleFunc("/api/v1/chat/topics/", s.guarded("/api/v1/chat/topics/", s.handleChatTopicRoutes))
 		s.mux.HandleFunc("/api/v1/chat/dms", s.guarded("/api/v1/chat/dms", s.handleChatDMs))
+		s.mux.HandleFunc("/api/v1/chat/unread-count", s.guarded("/api/v1/chat/unread-count", s.handleChatUnreadCount))
 		s.mux.HandleFunc("/api/v1/chat/user-prefs", s.guarded("/api/v1/chat/user-prefs", s.handleChatUserPrefs))
 		s.mux.HandleFunc("/api/v1/chat/presence", s.guarded("/api/v1/chat/presence", s.handleChatPresence))
 		s.mux.HandleFunc("/api/v1/chat/search", s.guarded("/api/v1/chat/search", s.handleChatSearch))
