@@ -79,7 +79,7 @@ func TestArtifactShareModes(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			t.Setenv("SCION_CLI_MODE", mode)
 			root := build()
-			applyModeRestrictions(root)
+			applyModeRestrictions(root, resolveMode())
 			names := collectCommandNames(root)
 			assert.Equal(t, wantShare, slices.Contains(names, "artifact.share"), "artifact.share in %s mode", mode)
 			assert.Contains(t, names, "artifact.get")
