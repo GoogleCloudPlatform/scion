@@ -21,6 +21,8 @@
  * follow it onto the next line, the icon keeps its size and the actions
  * drop below the title on a narrow screen. These tests check each page
  * hands its parts to the right slots and keeps no copy of the header CSS.
+ * Pages with a back link hand it to the header's back slot as a shared
+ * scion-back-link (ptone/scion#4177) and keep no back-link CSS of their own.
  * The agent page is covered in agent-detail-layout.test.ts.
  */
 
@@ -51,6 +53,8 @@ interface PageCase {
   badges: string[];
   /** Classes of the meta slot's elements, in order. */
   meta: string[];
+  /** Back links in the back slot, as [href, label], in order. */
+  back: Array<[string, string]>;
   /** State overrides under which no header action renders. */
   noActions?: Record<string, unknown>;
 }
@@ -101,6 +105,7 @@ const cases: Array<[string, PageCase]> = [
       },
       method: 'render',
       icon: 'sl-icon.[hdd-rack]',
+      back: [['/brokers', 'Back to Brokers']],
       badges: ['span', 'scion-status-badge'],
       meta: ['header-subtitle'],
       noActions: { pageData: { path: '/brokers/b-1', user: { id: 'u', role: 'member' } } },
@@ -117,6 +122,7 @@ const cases: Array<[string, PageCase]> = [
       },
       method: 'renderHeader',
       icon: 'sl-icon.[lightning-charge]',
+      back: [['/skills', 'Back to Skills']],
       badges: ['scion-status-badge'],
       meta: ['header-meta'],
       noActions: {
@@ -149,6 +155,7 @@ const cases: Array<[string, PageCase]> = [
       },
       method: 'render',
       icon: 'div.group-icon explicit[]',
+      back: [['/admin/groups', 'Back to Groups']],
       badges: ['span'],
       meta: ['header-slug'],
       noActions: {
@@ -175,6 +182,7 @@ const cases: Array<[string, PageCase]> = [
       },
       method: 'render',
       icon: 'sl-icon.[folder-fill]',
+      back: [['/projects', 'Back to Projects']],
       badges: ['sl-tooltip'],
       meta: ['header-path'],
     },
@@ -198,6 +206,7 @@ const cases: Array<[string, PageCase]> = [
       },
       method: 'renderHeader',
       icon: 'sl-icon.[file-earmark-code]',
+      back: [['/settings?tab=templates', 'Hub Resources']],
       badges: ['span'],
       meta: ['template-description', 'template-meta-row'],
       // Refresh from Source shows only for a GitHub source.
@@ -231,6 +240,7 @@ const cases: Array<[string, PageCase]> = [
       },
       method: 'renderHeader',
       icon: 'sl-icon.[sliders]',
+      back: [['/settings?tab=harness-configs', 'Hub Resources']],
       badges: ['span'],
       // The description sits in the title column, beside the actions.
       meta: ['resource-description', 'resource-meta-row'],
@@ -256,6 +266,7 @@ const cases: Array<[string, PageCase]> = [
       },
       method: 'renderHeader',
       icon: 'sl-icon.[cloud-arrow-down]',
+      back: [['/admin/skill-registries', 'Back to Registries']],
       badges: [],
       meta: [],
     },
@@ -294,6 +305,7 @@ const cases: Array<[string, PageCase]> = [
       },
       method: 'renderHeader',
       icon: 'sl-icon.[file-earmark-richtext]',
+      back: [['/projects/p-1', 'Project']],
       badges: [],
       meta: ['meta'],
       // The actions hide while the artifact is being edited.
@@ -317,6 +329,7 @@ const cases: Array<[string, PageCase]> = [
       },
       method: 'render',
       icon: null,
+      back: [],
       badges: [],
       meta: ['display-name'],
       noActions: {
@@ -336,7 +349,8 @@ const cases: Array<[string, PageCase]> = [
       tag: 'scion-page-admin-role-detail',
       state: { loading: false, roleData: ROLE },
       method: 'renderDetail',
-      icon: null,
+      icon: 'sl-icon.[shield-lock]',
+      back: [['/admin/roles', 'Roles']],
       badges: ['span', 'span'],
       meta: ['header-description', 'metadata-row'],
     },
@@ -349,7 +363,8 @@ const cases: Array<[string, PageCase]> = [
       state: { phase: 'ready', boundary: BOUNDARY },
       method: 'renderPageHeader',
       args: [BOUNDARY],
-      icon: null,
+      icon: 'sl-icon.[shield-check]',
+      back: [['/admin/access-boundaries', 'Access Constraints']],
       badges: ['scion-access-boundary-status'],
       meta: ['header-meta'],
       noActions: { boundary: { ...BOUNDARY, _capabilities: { actions: ['read'] } } },
@@ -383,6 +398,9 @@ const LAYOUT_SELECTORS = [
   '.header-badges',
   '.boundary-name',
 ];
+
+/** Back-link selectors the pages used to define for themselves. */
+const BACK_LINK_SELECTORS = ['.back-link', '.back-link:hover', '.back-links', '.header-top'];
 
 const loaded = new Map<string, Map<string, string>>();
 const rulesOf = (c: { tag: string }): Map<string, string> => loaded.get(c.tag)!;
@@ -433,8 +451,24 @@ describe.each(cases)('%s detail header', (_label, c) => {
     expect(actions.map((n) => n.className)).toEqual(['header-actions']);
     expect(actions[0].querySelector('sl-button')).not.toBeNull();
     expect(
-      children.every((n) => ['icon', 'meta', 'actions', null].includes(n.getAttribute('slot')))
+      children.every((n) =>
+        ['back', 'icon', 'meta', 'actions', null].includes(n.getAttribute('slot'))
+      )
     ).toBe(true);
+  });
+
+  it('hands its back links to the back slot as shared back links', () => {
+    const header = renderHeader(c);
+    const back = Array.from(header.children).filter((n) => n.getAttribute('slot') === 'back');
+    expect(back.map((n) => n.tagName.toLowerCase())).toEqual(c.back.map(() => 'scion-back-link'));
+    expect(back.map((n) => [n.getAttribute('href'), n.textContent?.trim()])).toEqual(c.back);
+    // The page renders no back anchor of its own.
+    expect(header.querySelector('a.back-link, a > sl-icon[name="arrow-left"]')).toBeNull();
+  });
+
+  it('keeps no copy of the back-link CSS', () => {
+    const rules = rulesOf(c);
+    for (const sel of BACK_LINK_SELECTORS) expect(rules.has(sel), sel).toBe(false);
   });
 
   it('keeps no copy of the header layout CSS', () => {
@@ -483,5 +517,73 @@ describe('project detail linked badge', () => {
       state: { ...c.state, project: { id: 'p-2', name: LONG_NAME, slug: 'p', ...CAPS } },
     });
     expect(header.querySelector('sl-tooltip')).toBeNull();
+  });
+});
+
+describe('project-scoped template and harness config back links', () => {
+  it.each([
+    [
+      'template',
+      [
+        ['/projects/p-1/settings?tab=templates', 'Templates'],
+        ['/projects/p-1/settings', 'Project Settings'],
+      ],
+    ],
+    [
+      'harness config',
+      [
+        ['/projects/p-1/settings?tab=harness-configs', 'Harness Configs'],
+        ['/projects/p-1/settings', 'Project Settings'],
+      ],
+    ],
+  ])('%s hands both links to the back slot in order', (label, expected) => {
+    const c = cases.find(([l]) => l === label)![1];
+    const header = renderHeader({ ...c, state: { ...c.state, projectId: 'p-1' } });
+    const back = Array.from(header.querySelectorAll(':scope > [slot="back"]'));
+    expect(back.map((n) => n.tagName.toLowerCase())).toEqual([
+      'scion-back-link',
+      'scion-back-link',
+    ]);
+    expect(back.map((n) => [n.getAttribute('href'), n.textContent?.trim()])).toEqual(expected);
+  });
+});
+
+/**
+ * Error states have no header, so the back link stands alone there; it is
+ * the same shared scion-back-link.
+ */
+describe.each([
+  ['broker', './broker-detail.js', 'scion-page-broker-detail', '/brokers', 'Back to Brokers'],
+  ['skill', './skill-detail.js', 'scion-page-skill-detail', '/skills', 'Back to Skills'],
+  [
+    'group',
+    './admin-group-detail.js',
+    'scion-page-admin-group-detail',
+    '/admin/groups',
+    'Back to Groups',
+  ],
+  ['project', './project-detail.js', 'scion-page-project-detail', '/projects', 'Back to Projects'],
+  [
+    'skill registry',
+    './admin-skill-registry-detail.js',
+    'scion-page-admin-skill-registry-detail',
+    '/admin/skill-registries',
+    'Back to Registries',
+  ],
+  ['role', './admin-role-detail.js', 'scion-page-admin-role-detail', '/admin/roles', 'Roles'],
+])('%s error state', (_label, module, tag, href, text) => {
+  it('renders the shared back link on its own', async () => {
+    await import(/* @vite-ignore */ module);
+    const el = document.createElement(tag);
+    Object.assign(el, { loading: false, error: 'boom' });
+    const host = document.createElement('div');
+    render((el as unknown as { render: () => TemplateResult }).render(), host);
+    expect(host.querySelector('scion-detail-header')).toBeNull();
+    const links = host.querySelectorAll('scion-back-link');
+    expect(links).toHaveLength(1);
+    expect(links[0].getAttribute('href')).toBe(href);
+    expect(links[0].hasAttribute('slot')).toBe(false);
+    expect(links[0].textContent?.trim()).toBe(text);
+    expect(host.querySelector('a.back-link')).toBeNull();
   });
 });
