@@ -414,6 +414,17 @@ func (c *cancelAfterDeleteStore) WithTx(ctx context.Context, fn func(tx store.St
 	return nil
 }
 
+// FinalizeAgentDeletion cancels the request once a finalize that removed
+// targetID has committed: the env-gather recreate removes the row this way.
+func (c *cancelAfterDeleteStore) FinalizeAgentDeletion(ctx context.Context, id string, pred store.DeletionPredicate, mode store.DeletionFinalizeMode, set store.DeletionFields, hook store.DeletionFinalizeHook) (int, error) {
+	n, err := c.Store.FinalizeAgentDeletion(ctx, id, pred, mode, set, hook)
+	if err == nil && n > 0 && id == c.targetID {
+		c.deleted = true
+		c.cancelRequest()
+	}
+	return n, err
+}
+
 // deleteRecordingTx records whether DeleteAgent of targetID succeeded.
 type deleteRecordingTx struct {
 	store.Store
