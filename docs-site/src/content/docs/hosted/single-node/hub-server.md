@@ -291,6 +291,8 @@ The Hub is designed to be stateless and is highly compatible with Google Cloud R
 - Use **Cloud Storage** for template persistence.
 - Connect the Hub to Cloud SQL using the Cloud SQL Auth Proxy or a VPC connector.
 
+See [Cloud Run](/scion/hosted/single-node/hub-setup-cloudrun/) and [Helm](/scion/hosted/ha/helm/).
+
 ## Discord Integration
 
 The Hub supports native Discord webhooks to broadcast persistent agent messages, notifications, and `ask_user` requests to a Discord channel.

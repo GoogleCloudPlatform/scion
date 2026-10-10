@@ -72,7 +72,7 @@ The Hub uses the Google Cloud OpenTelemetry metric exporter. If you build your o
 
 ## Link from the Health page
 
-When [`server.hub.monitoring_dashboard_url`](/scion/reference/server-config/) is set to an `http` or `https` URL, the Health page header shows an **Open monitoring dashboard** link to it.
+When [`server.hub.monitoring_dashboard_url`](/scion/reference/server-config/#hub-settings-serverhub) is set to an `http` or `https` URL, the Health page header shows an **Open monitoring dashboard** link to it.
 
 ## Related guides
 
