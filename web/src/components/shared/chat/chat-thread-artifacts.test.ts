@@ -364,7 +364,7 @@ describe('scion-chat-thread artifact references', () => {
     expect(el.shadowRoot?.querySelectorAll('.artifact-refs-notice')).toHaveLength(1);
   });
 
-  it('does not cache a failed live refresh as no artifacts; the next load fills the chips and clears the notice', async () => {
+  it('does not cache a failed live refresh as no artifacts; a later event for another message fills the chips and clears the notice', async () => {
     apiFetch.mockResolvedValue(history({ items: [] }));
     const el = await mount();
     apiFetch.mockClear();
@@ -380,13 +380,80 @@ describe('scion-chat-thread artifact references', () => {
     expect(internals.v2ArtifactMap.has('m2')).toBe(false);
     expect(messageEl(el, 'm2')?.artifactRefs).toEqual([]);
 
-    // The next event for it refreshes again; this time the refs load.
+    // The next live event is for a different message; its page also
+    // carries m2, whose refs now load.
+    apiFetch.mockClear();
     apiFetch.mockResolvedValue(
-      history({ messages: [message('m2', 'here it is')], messageArtifacts: { m2: [VIEW] } })
+      history({
+        messages: [message('m3', 'another'), message('m2', 'here it is')],
+        messageArtifacts: { m2: [VIEW], m3: [{ ...VIEW, title: 'Other' }] },
+      })
+    );
+    live('m3', 'another', [`scion://artifact/${A}`]);
+    await vi.waitFor(() => expect(messageEl(el, 'm2')?.artifactRefs).toEqual([VIEW]));
+    expect(messageEl(el, 'm3')?.artifactRefs).toEqual([{ ...VIEW, title: 'Other' }]);
+    await vi.waitFor(() => expect(refsNotice(el)).toBeNull());
+    // Still one request for the burst; m2 is never asked for on its own.
+    await new Promise((r) => setTimeout(r, 250));
+    expect(historyCalls()).toEqual([`/api/v1/chat/conversations/${KEY}/messages?limit=1`]);
+  });
+
+  it('a marked message missing from a later live page stays marked and is not asked for again', async () => {
+    apiFetch.mockResolvedValue(history({ items: [] }));
+    const el = await mount();
+    apiFetch.mockResolvedValue(
+      history({ messages: [message('m2', 'here it is')], messageArtifactsUnavailable: ['m2'] })
     );
     live('m2', 'here it is', [`scion://artifact/${A}`]);
-    await vi.waitFor(() => expect(messageEl(el, 'm2')?.artifactRefs).toEqual([VIEW]));
-    await vi.waitFor(() => expect(refsNotice(el)).toBeNull());
+    await vi.waitFor(() => expect(refsNotice(el)).not.toBeNull());
+    apiFetch.mockClear();
+    apiFetch.mockResolvedValue(
+      history({ messages: [message('m3', 'another')], messageArtifacts: { m3: [VIEW] } })
+    );
+    live('m3', 'another', [`scion://artifact/${A}`]);
+    await vi.waitFor(() => expect(messageEl(el, 'm3')?.artifactRefs).toEqual([VIEW]));
+    await new Promise((r) => setTimeout(r, 250));
+    expect(refsNotice(el)).not.toBeNull();
+    expect(historyCalls()).toEqual([`/api/v1/chat/conversations/${KEY}/messages?limit=1`]);
+  });
+
+  it('clears the notice when the only marked message is evicted by the buffer cap or deleted', async () => {
+    apiFetch.mockResolvedValue(
+      history({
+        items: [message('m-old', 'old'), message('m-del', 'to delete')],
+        messageArtifactsUnavailable: ['m-old'],
+      })
+    );
+    const el = await mount();
+    await vi.waitFor(() => expect(refsNotice(el)).not.toBeNull());
+    const internals = el as unknown as {
+      mergeMessages(msgs: unknown[]): void;
+      applyArtifactRefsAvailability(ids: string[], unavailable: string[] | undefined): void;
+    };
+    // 500 newer messages push m-old (and m-del) out of the buffer.
+    const newer = Array.from({ length: 500 }, (_, i) => ({
+      ...message(`n${String(i).padStart(3, '0')}`, 'newer'),
+      createdAt: '2026-10-08T10:00:00Z',
+    }));
+    internals.mergeMessages(newer);
+    await el.updateComplete;
+    expect(messageEl(el, 'm-old')).toBeNull();
+    expect(refsNotice(el)).toBeNull();
+
+    // A live soft-delete of the only marked message clears it too.
+    internals.applyArtifactRefsAvailability(['n499'], ['n499']);
+    await el.updateComplete;
+    expect(refsNotice(el)).not.toBeNull();
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-message-deleted', {
+        detail: {
+          state: {},
+          data: { conversationKey: KEY, messageId: 'n499', deletedAt: '2026-10-08T11:00:00Z' },
+        },
+      })
+    );
+    await el.updateComplete;
+    expect(refsNotice(el)).toBeNull();
   });
 
   it('drops chips a message already had when a later page could not load its refs', async () => {

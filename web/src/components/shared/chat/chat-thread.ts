@@ -1839,6 +1839,8 @@ export class ScionChatThread extends LitElement {
         this.messageMap.delete(msg.id);
         // Prune mention results for evicted messages (R1 fix).
         this.mentionResultsByMessageId.delete(msg.id);
+        // An evicted message no longer keeps the artifact refs notice up.
+        this._artifactRefsUnavailable.delete(msg.id);
       }
     }
 
@@ -2348,11 +2350,22 @@ export class ScionChatThread extends LitElement {
         if (refs) views[id] = refs;
         else if (!onPage.has(id)) missing.push(id);
       }
+      // Messages an earlier load could not load refs for are retried by
+      // any page that carries them; they are never asked for on their own
+      // (not in `missing`), so a burst still costs one request.
+      const queued = new Set(ids);
+      const retried = [...this._artifactRefsUnavailable].filter(
+        (id) => onPage.has(id) && !queued.has(id)
+      );
+      for (const id of retried) {
+        const refs = data?.messageArtifacts?.[id];
+        if (refs) views[id] = refs;
+      }
       this.mergeMessageArtifacts(views);
-      // A queried message whose refs could not be loaded is marked, not
-      // taken for one with none; the next history load retries it.
+      // A message whose refs could not be loaded is marked, not taken for
+      // one with none; a later page that loads them unmarks it.
       this.applyArtifactRefsAvailability(
-        ids.filter((id) => onPage.has(id)),
+        [...ids.filter((id) => onPage.has(id)), ...retried],
         data?.messageArtifactsUnavailable
       );
       return missing;
@@ -3453,6 +3466,9 @@ export class ScionChatThread extends LitElement {
     const ext = this.v2MessageExtMap.get(messageId) || {};
     if (deletedAt) ext.deletedAt = deletedAt;
     this.v2MessageExtMap.set(messageId, ext);
+    // A deleted message shows no artifact refs, so it no longer keeps the
+    // could-not-load notice up.
+    this._artifactRefsUnavailable.delete(messageId);
     // Force re-render.
     this.messages = [...this.messages];
   }
