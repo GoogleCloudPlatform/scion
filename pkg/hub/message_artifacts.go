@@ -170,20 +170,25 @@ func (s *Server) admitMessageArtifacts(ctx context.Context, md map[string]string
 }
 
 // recordMessageArtifacts persists admitted references for a stored
-// message, so the web chat can show them later. A failure is logged, not
-// returned: the message itself is already stored and its body still names
-// the artifacts.
-func (s *Server) recordMessageArtifacts(ctx context.Context, messageID string, refs []artifacts.MessageRef) {
+// message, so the web chat can show them later, and returns the references
+// it stored: refs, or nil when there is nothing to record, no artifact
+// store, or the write failed. Callers publish the live chat event with the
+// returned value, so the event never names a reference history would not
+// return. A failure is logged, not returned: the message itself is already
+// stored and its body still names the artifacts.
+func (s *Server) recordMessageArtifacts(ctx context.Context, messageID string, refs []artifacts.MessageRef) []artifacts.MessageRef {
 	if messageID == "" || len(refs) == 0 {
-		return
+		return nil
 	}
 	st := s.ArtifactStore()
 	if st == nil {
-		return
+		return nil
 	}
 	if err := st.AddMessageRefs(ctx, messageID, refs); err != nil {
 		slog.ErrorContext(ctx, "failed to record message artifact references", "message_id", messageID, "error", err)
+		return nil
 	}
+	return refs
 }
 
 // chatArtifactRef is one artifact reference on a chat message, as the

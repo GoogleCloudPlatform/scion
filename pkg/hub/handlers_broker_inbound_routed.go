@@ -602,7 +602,7 @@ func (s *Server) dispatchRoutedRecipient(
 		result.PersistenceWarning = "message dispatched but persistence failed: " + err.Error()
 	} else {
 		persisted = true
-		s.events.PublishUserMessage(ctx, storeMsg, nil)
+		s.events.PublishUserMessage(ctx, storeMsg, nil, nil)
 	}
 
 	// --- Reply affinity ---
