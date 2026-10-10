@@ -103,7 +103,7 @@ describe('sidebar Admin section permission gating', () => {
     adminStatusBody = {
       isAdmin: true,
       isSuperAdmin: false,
-      permissions: ['user.list', 'group.list', 'role.read', 'hub.health.read'],
+      permissions: ['user.read', 'group.list', 'role.read', 'hub.health.read'],
     };
     const el = await mount({ id: 'u-hub-admin', role: 'member' });
     await vi.waitFor(() =>
