@@ -64,8 +64,8 @@ func TestResolveMode(t *testing.T) {
 // for the removed assistant mode.
 func resetRemovedModeWarning(t *testing.T) {
 	t.Helper()
-	removedModeWarnOnce = sync.Once{}
-	t.Cleanup(func() { removedModeWarnOnce = sync.Once{} })
+	removedModeWarnOnce = &sync.Once{}
+	t.Cleanup(func() { removedModeWarnOnce = &sync.Once{} })
 }
 
 // The assistant CLI mode was removed. An old SCION_CLI_MODE=assistant must

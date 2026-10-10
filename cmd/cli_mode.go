@@ -25,7 +25,7 @@ const removedModeAssistant = "assistant"
 
 // removedModeWarnOnce makes sure the removed-mode warning is printed at
 // most once per process, even though resolveMode is called many times.
-var removedModeWarnOnce sync.Once
+var removedModeWarnOnce = &sync.Once{}
 
 func warnRemovedMode(source string) {
 	removedModeWarnOnce.Do(func() {
