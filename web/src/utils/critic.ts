@@ -608,21 +608,19 @@ export function criticToolBlocked(
       : at.from < seg.end && at.to > seg.start;
     if (touches) return INSIDE_MARK_HINT;
   }
-  // A mark token at the start of a fence's opening line stops the line
-  // being a fence, and one before a closing fence's line terminator stops
-  // that line closing the block. A fenced block can still be marked whole
-  // from the end of the line before it through its closing line's
-  // terminator.
-  const fenceEdge = (p: number): boolean =>
-    code.some(
-      (r) =>
-        (p === r.start && isFenceStart(doc, r.start)) ||
-        (r.start < p && p < r.end && /^[\r\n]+$/.test(doc.slice(p, r.end)))
-    );
-  if (fenceEdge(at.from) || fenceEdge(at.to)) return FENCE_EDGE_HINT;
-  // Any other boundary strictly inside a code range would put mark tokens
-  // into code, where they are literal text. Whole code spans may be
-  // selected.
+  // Fenced code blocks: a mark token on a fence line, or inside the block,
+  // would change where the block starts or ends, or put the token into
+  // code. The toolbar refuses any boundary that touches the block, from
+  // the start of its opening line to the end of its closing line (to the
+  // end of the text for a block with no closing fence). The line before
+  // and the line after are fine.
+  for (const r of code) {
+    if (!isFenceStart(doc, r.start)) continue;
+    const last = fenceLast(doc, r);
+    if (at.from <= last && at.to >= r.start) return FENCE_HINT;
+  }
+  // A boundary strictly inside a code span would put mark tokens into
+  // code, where they are literal text. Whole code spans may be selected.
   const cuts = (p: number): boolean => code.some((r) => r.start < p && p < r.end);
   if (cuts(at.from) || cuts(at.to)) return INSIDE_CODE_HINT;
   // The new mark must read as intended in the whole document. Apply the
@@ -696,6 +694,27 @@ function isFenceStart(doc: string, start: number): boolean {
 }
 
 /**
+ * The last offset at which a toolbar boundary would touch the fenced
+ * block r: the end of its closing line, before the line terminator; or
+ * the end of the text when the block has no closing fence, since text
+ * added there would join the block.
+ */
+function fenceLast(doc: string, r: CriticRange): number {
+  const text = doc.slice(r.start, r.end);
+  const term = /(\r\n|\r|\n)$/.exec(text)?.[0] ?? '';
+  const lines = text.slice(0, text.length - term.length).split(/\r\n|\r|\n/);
+  const open = fenceRun(lines[0]);
+  const close = lines.length > 1 ? fenceRun(lines[lines.length - 1]) : null;
+  const closed =
+    open !== null &&
+    close !== null &&
+    close.c === open.c &&
+    close.len >= open.len &&
+    isBlank(close.rest);
+  return closed ? r.end - term.length : r.end;
+}
+
+/**
  * Reports whether result (doc with edit applied) holds exactly `inserted`
  * marks overlapping the inserted text, tiling it from its first to its
  * last character.
@@ -717,8 +736,8 @@ function marksAsIntended(result: string, edit: CriticEdit, inserted: number): bo
 const INSIDE_MARK_HINT = 'The selection is inside or across a mark. Select text outside marks.';
 const INSIDE_CODE_HINT =
   'The selection is inside or across code. Text in code is literal, so a mark there would change it. Select a whole code span, or mark beside the code.';
-const FENCE_EDGE_HINT =
-  'A mark here would change where a fenced code block starts or ends. To mark the whole block, select from the end of the line before it through the end of its closing line, line break included.';
+const FENCE_HINT =
+  'The selection touches a fenced code block. The toolbar does not mark fenced blocks: type the marks in the editor, or comment on the text beside the block.';
 const CODE_STRUCTURE_HINT = 'This mark would change which text is code. Place it elsewhere.';
 const UNCLOSED_MARK_HINT =
   'An unclosed CriticMarkup opener earlier in the text would swallow this mark. Remove or close it first.';

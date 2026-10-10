@@ -348,7 +348,7 @@ describe('criticToolBlocked and code', () => {
         );
       }
       expect(criticToolBlocked(tool, sel(doc, 'go test'), doc), tool).toMatch(
-        /inside or across code/
+        /touches a fenced code block/
       );
     }
     const p = doc.indexOf('test');
@@ -361,24 +361,6 @@ describe('criticToolBlocked and code', () => {
     const after = doc.indexOf(' now');
     expect(criticToolBlocked('insert', { from: after, to: after, text: '' }, doc)).toBeNull();
     expect(criticToolBlocked('delete', sel(doc, '`make test`'), doc)).toBeNull();
-  });
-
-  it('refuses a mark at the start of a fence line, with the fence hint', () => {
-    const doc = 'Intro\n```\ncode\n```\nEnd';
-    const at = doc.indexOf('```');
-    const s = { from: at, to: at, text: '' };
-    // The clean text is unchanged, so only a code check sees it.
-    expect(onlyMarksChanged(apply(doc, 'comment', s), doc)).toBe(true);
-    for (const tool of ['comment', 'suggest', 'insert'] as const) {
-      expect(criticToolBlocked(tool, s, doc), tool).toMatch(/fenced code block starts or ends/);
-    }
-    // A selection ending at the fence would put its closing token there.
-    expect(criticToolBlocked('delete', sel(doc, 'Intro\n'), doc)).toMatch(
-      /fenced code block starts or ends/
-    );
-    // At the end of the paragraph before the fence it is fine.
-    const end = doc.indexOf('\n');
-    expect(criticToolBlocked('comment', { from: end, to: end, text: '' }, doc)).toBeNull();
   });
 
   it('refuses a mark that changes which text is code elsewhere', () => {
@@ -394,37 +376,111 @@ describe('criticToolBlocked and code', () => {
     expect(criticToolBlocked('delete', s, doc)).toMatch(/which text is code/);
   });
 
-  describe('a whole fenced block', () => {
-    const doc = 'Intro\n\n```sh\ngo test\n```\n\nEnd';
-    const [range] = criticCodeRanges(doc);
-    const pick = (from: number, to: number) => ({ from, to, text: doc.slice(from, to) });
-    it('is the one code range', () => {
-      expect(doc.slice(range.start, range.end)).toBe('```sh\ngo test\n```\n');
-    });
-    for (const tool of ['comment', 'suggest', 'delete'] as const) {
-      it(`${tool}: refused from the fence line start, with or without the final line break`, () => {
-        expect(criticToolBlocked(tool, pick(range.start, range.end), doc)).toMatch(
-          /fenced code block starts or ends/
-        );
-        expect(criticToolBlocked(tool, pick(range.start, range.end - 1), doc)).toMatch(
-          /fenced code block starts or ends/
-        );
-      });
-      it(`${tool}: refused from the end of the line before without the final line break`, () => {
-        expect(criticToolBlocked(tool, pick(range.start - 1, range.end - 1), doc)).toMatch(
-          /fenced code block starts or ends/
-        );
-      });
-      it(`${tool}: allowed from the end of the line before through the closing line break`, () => {
-        const s = pick(range.start - 1, range.end);
-        expect(criticToolBlocked(tool, s, doc)).toBeNull();
-        const result = apply(doc, tool, s);
-        expect(onlyMarksChanged(result, doc)).toBe(true);
-        // The block is still a fenced block in the review.
-        expect(criticCodeRanges(result).map((r) => result.slice(r.start, r.end))).toContain(
-          '```sh\ngo test\n```\n'
-        );
-      });
+  describe('fenced blocks: every boundary touching one is refused with one hint', () => {
+    const FENCE = /touches a fenced code block/;
+    const DELETE = /Select the text to delete/;
+    // Each document has one fenced block; `closed` is whether it has a
+    // closing fence followed by a line break, so the line after it exists.
+    const positions: { name: string; doc: string; closed: boolean }[] = [
+      { name: 'document start', doc: '```sh\ngo test\n```\n\nEnd', closed: true },
+      { name: 'middle', doc: 'Intro\n\n```sh\ngo test\n```\n\nEnd', closed: true },
+      { name: 'end with LF', doc: 'Intro\n\n```sh\ngo test\n```\n', closed: true },
+      { name: 'end with CRLF', doc: 'Intro\r\n\r\n~~~sh\r\ngo test\r\n~~~\r\n', closed: true },
+      { name: 'end without a line break', doc: 'Intro\n\n```sh\ngo test\n```', closed: false },
+      { name: 'unterminated, final newline', doc: 'Intro\n\n```sh\ngo test\n', closed: false },
+      { name: 'unterminated, no final newline', doc: 'Intro\n\n```sh\ngo test', closed: false },
+    ];
+    type Expect = 'fence' | 'allowed';
+    // A shape gives the selection [from, to) for a block at [start, end)
+    // whose final line break is `term` long, and the outcome for each
+    // tool: refused with the fence hint, or allowed. Delete with an empty
+    // selection always asks for a selection. Insert adds at `to`.
+    interface Shape {
+      name: string;
+      at: (start: number, end: number, term: number, doc: string) => [number, number] | null;
+      expect: (closed: boolean, tool: CriticTool) => Expect;
     }
+    const shapes: Shape[] = [
+      {
+        name: 'exact range',
+        at: (s, e) => [s, e],
+        // Insert adds after the block: the line after it, if there is one.
+        expect: (closed, tool) => (tool === 'insert' && closed ? 'allowed' : 'fence'),
+      },
+      {
+        name: 'range without its final line break',
+        at: (s, e, t) => [s, e - t],
+        expect: () => 'fence',
+      },
+      {
+        name: 'from the end of the line before through the line break',
+        at: (s, e, _t, doc) => (s === 0 ? null : [s - (doc[s - 2] === '\r' ? 2 : 1), e]),
+        expect: (closed, tool) => (tool === 'insert' && closed ? 'allowed' : 'fence'),
+      },
+      {
+        name: 'selection ending at the opening fence line',
+        at: (s) => (s === 0 ? null : [0, s]),
+        expect: () => 'fence',
+      },
+      { name: 'insertion at the block start', at: (s) => [s, s], expect: () => 'fence' },
+      {
+        name: 'insertion at the block end',
+        at: (_s, e) => [e, e],
+        expect: (closed) => (closed ? 'allowed' : 'fence'),
+      },
+      {
+        name: 'insertion at the end of the text before',
+        // The end of 'Intro', two lines up.
+        at: (s) => (s === 0 ? null : [5, 5]),
+        expect: () => 'allowed',
+      },
+      {
+        name: 'the word beside the block',
+        at: (s, _e, _t, doc) => {
+          const w = s === 0 ? 'End' : 'Intro';
+          const i = doc.indexOf(w);
+          return [i, i + w.length];
+        },
+        expect: () => 'allowed',
+      },
+    ];
+    const tools = ['comment', 'suggest', 'delete', 'insert'] as const;
+    let count = 0;
+    for (const p of positions) {
+      const [r] = criticCodeRanges(p.doc);
+      const term = /(\r\n|\r|\n)$/.exec(p.doc.slice(r.start, r.end))?.[0].length ?? 0;
+      for (const shape of shapes) {
+        const range = shape.at(r.start, r.end, term, p.doc);
+        if (!range) continue;
+        for (const tool of tools) {
+          count++;
+          const [from, to] = range;
+          it(`${p.name} / ${shape.name} / ${tool}`, () => {
+            expect(criticCodeRanges(p.doc)).toHaveLength(1);
+            const s = { from, to, text: p.doc.slice(from, to) };
+            const hint = criticToolBlocked(tool, s, p.doc);
+            if (tool === 'delete' && from === to) {
+              expect(hint).toMatch(DELETE);
+              return;
+            }
+            if (shape.expect(p.closed, tool) === 'fence') {
+              expect(hint).toMatch(FENCE);
+              return;
+            }
+            expect(hint).toBeNull();
+            // Allowed marks keep the clean text and the block as it was.
+            const e = criticToolEdit(tool, s)!;
+            const result = p.doc.slice(0, e.from) + e.insert + p.doc.slice(e.to);
+            expect(onlyMarksChanged(result, p.doc)).toBe(true);
+            expect(criticCodeRanges(result).map((x) => result.slice(x.start, x.end))).toEqual([
+              p.doc.slice(r.start, r.end),
+            ]);
+          });
+        }
+      }
+    }
+    it('enumerates the table', () => {
+      expect(count).toBe(212);
+    });
   });
 });
