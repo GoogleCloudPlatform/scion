@@ -1091,17 +1091,14 @@ type workspaceReadResult struct {
 	err     error
 }
 
-// workspaceProbeCall is one in-flight directory read shared by every
-// probeWorkspaceContent call for the same directory.
-type workspaceProbeCall = inFlightCall[workspaceReadResult]
-
 // workspaceProbesInFlight maps a directory to its in-flight
-// *workspaceProbeCall. On a hung mount a read never returns and its
-// goroutine holds an OS thread in the syscall. Without deduplication every
-// request would add one more stuck thread (and Go aborts the process at its
-// thread limit). With it, there is at most one stuck read per directory:
-// later probes wait on the existing read, with their own timeout, instead of
-// starting a new one.
+// *inFlightCall[workspaceReadResult], one directory read shared by every
+// probeWorkspaceContent call for that directory. On a hung mount a read
+// never returns and its goroutine holds an OS thread in the syscall.
+// Without deduplication every request would add one more stuck thread (and
+// Go aborts the process at its thread limit). With it, there is at most one
+// stuck read per directory: later probes wait on the existing read, with
+// their own timeout, instead of starting a new one.
 var workspaceProbesInFlight sync.Map
 
 // probeWorkspaceContent reports whether dir exists and contains meaningful
