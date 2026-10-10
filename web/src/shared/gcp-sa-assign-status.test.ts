@@ -98,9 +98,9 @@ describe('assignStatusLabel', () => {
     expect(assignStatusLabel({ state: 'unknown', reason: 'report_stale', message: 'm' })).toBe(
       'mapping unknown: report stale'
     );
-    expect(
-      assignStatusLabel({ state: 'unknown', reason: 'report_incomplete', message: 'm' })
-    ).toBe('mapping unknown: report incomplete');
+    expect(assignStatusLabel({ state: 'unknown', reason: 'report_incomplete', message: 'm' })).toBe(
+      'mapping unknown: report incomplete'
+    );
     expect(
       assignStatusLabel({ state: 'unknown', reason: 'report_old_version', message: 'm' })
     ).toBe('mapping unknown: older broker');
