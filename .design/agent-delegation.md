@@ -932,8 +932,9 @@ writes.
 
 G does not rely on decision records for attribution. The mutation records (§14.3), which are
 written unconditionally, are the attribution source. Adding G actor fields to the typed
-`auditevent` decision schema is a separate follow-up, subject to the audit owner's approval
-([ptone/scion#2379](https://github.com/ptone/scion/issues/2379)), and outside G.2-a. This design
+`auditevent` decision schema is a separate follow-up, coordinated with the audit workstream
+([ptone/scion#2379](https://github.com/ptone/scion/issues/2379)) and approved by the maintainers,
+and outside G.2-a. This design
 does not change that schema.
 
 ### 14.5 Messages
@@ -1388,8 +1389,8 @@ list operations.
 6. **G.3-L.** The delegated list slice (§11.8), starting with `agent.list` on the hub agent list as
    one slice, then the project agent list, skills and templates.
 
-Later work, outside these phases: G actor fields in the typed decision-audit schema: follow-up,
-subject to the audit owner's approval (§14.4).
+Later work, outside these phases: G actor fields in the typed decision-audit schema, a separate
+follow-up, coordinated with the audit workstream and approved by the maintainers (§14.4).
 
 ## 20. Acceptance criteria
 
