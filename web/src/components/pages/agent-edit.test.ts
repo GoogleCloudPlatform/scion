@@ -380,27 +380,27 @@ describe('dispositionSummary', () => {
         applied: ['config.max_duration'],
         held: [],
         heldForReincarnate: ['config.max_turns', 'config.system_prompt'],
-      }),
+      })
     ).toBe(
-      'Saved max_duration. Saved max_turns, system_prompt; takes effect at the next reincarnation.',
+      'Saved max_duration. Saved max_turns, system_prompt; takes effect at the next reincarnation.'
     );
   });
 
   it('reports a save of only reincarnation-held keys as saved', () => {
     expect(
-      dispositionSummary({ applied: [], held: [], heldForReincarnate: ['config.model'] }),
+      dispositionSummary({ applied: [], held: [], heldForReincarnate: ['config.model'] })
     ).toBe('Saved model; takes effect at the next reincarnation.');
   });
 
   it('names held keys', () => {
-    expect(dispositionSummary({ applied: [], held: ['config.model'], heldForReincarnate: [] })).toBe(
-      'Saved model for the next start.',
-    );
+    expect(
+      dispositionSummary({ applied: [], held: ['config.model'], heldForReincarnate: [] })
+    ).toBe('Saved model for the next start.');
   });
 
   it('says nothing was saved when every list is empty or missing', () => {
     expect(dispositionSummary({ applied: [], held: [], heldForReincarnate: [] })).toBe(
-      'Nothing to save.',
+      'Nothing to save.'
     );
     expect(dispositionSummary(undefined)).toBe('Nothing to save.');
   });
