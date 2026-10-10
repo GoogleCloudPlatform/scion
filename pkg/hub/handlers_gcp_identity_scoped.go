@@ -262,7 +262,14 @@ func (s *Server) listGCPServiceAccountsScoped(w http.ResponseWriter, r *http.Req
 		for i := range sas {
 			saPtrs[i] = &sas[i]
 		}
-		warnings = s.projectSAMappingWarnings(ctx, req.scopeID, saPtrs...)
+		// Brokers are read only when there is an account to describe.
+		var profiles []kubernetesProfileMappings
+		if len(items) > 0 {
+			profiles = s.projectKubernetesProfileMappings(ctx, req.scopeID)
+		}
+		annotateGCPSAMappings(items, profiles)
+		warnings = projectSAMappingWarningsFrom(req.scopeID,
+			func() projectSAMappingView { return projectSAMappingViewFrom(profiles) }, saPtrs...)
 	}
 
 	writeJSON(w, http.StatusOK, ListGCPServiceAccountsResponse{

@@ -170,7 +170,8 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | `grove list` | Y | - |
 | `grove prune` | Y | - |
 | `grove reconnect` | Y | - |
-| `grove service-accounts` (all) | Y | - |
+| `grove service-accounts` (all except `show`) | Y | - |
+| `project service-accounts show` | Y | Y |
 | `harness-config` (all) | Y | - |
 | `hub status` | Y | - |
 | `hub groves` (all) | Y | - |
