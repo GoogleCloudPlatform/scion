@@ -77,7 +77,7 @@ var relationshipCharacterizedAllowlist = map[relationshipAllowKey][]string{
 		"agent.create", "agent.read", "agent.list", "agent.update", "agent.delete",
 		"agent.attach", "agent.lifecycle", "agent.port_access", "agent.stop_all",
 		"agent.message", "agent.set_message_mode", "agent.grant_hub_mode",
-		"agent.status_update", "agent.log_append", "agent.notify",
+		"agent.status_update", "agent.notify",
 		"agent.token_refresh", "agent.port_forward", "agent.identity_token",
 	},
 	// No {"owner", "user", "project"} cell: Project.OwnerID grants nothing
@@ -111,15 +111,15 @@ var relationshipCharacterizedAllowlist = map[relationshipAllowKey][]string{
 		"agent.create", "agent.read", "agent.list", "agent.update", "agent.delete",
 		"agent.attach", "agent.lifecycle", "agent.port_access", "agent.stop_all",
 		"agent.message", "agent.set_message_mode", "agent.grant_hub_mode",
-		"agent.status_update", "agent.log_append", "agent.notify",
+		"agent.status_update", "agent.notify",
 		"agent.token_refresh", "agent.port_forward", "agent.identity_token",
 	},
 	// Agent ancestors are further limited by their JWT scopes; this cell is
 	// the set reachable when the agent holds every registered agent scope.
 	{"ancestor", "agent", "agent"}: {
 		"agent.create", "agent.delete", "agent.attach", "agent.lifecycle",
-		"agent.set_message_mode", "agent.status_update", "agent.log_append",
-		"agent.notify", "agent.token_refresh", "agent.port_forward", "agent.identity_token",
+		"agent.set_message_mode", "agent.status_update", "agent.notify",
+		"agent.token_refresh", "agent.port_forward", "agent.identity_token",
 	},
 
 	// An agent reads the status of an agent it directly launched, in the

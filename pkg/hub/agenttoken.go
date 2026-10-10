@@ -46,7 +46,9 @@ const (
 const (
 	// ScopeAgentStatusUpdate allows the agent to update its own status.
 	ScopeAgentStatusUpdate AgentTokenScope = "agent:status:update"
-	// ScopeAgentLogAppend allows the agent to append logs.
+	// ScopeAgentLogAppend names agent log append. Its permission,
+	// agent.log_append, is Reserved: no handler checks it, so the scope
+	// grants nothing and is not in DefaultFederationScopes.
 	ScopeAgentLogAppend AgentTokenScope = "agent:log:append"
 	// ScopeProjectSecretRead allows the agent to read project secrets.
 	ScopeProjectSecretRead AgentTokenScope = "project:secret:read"

@@ -727,13 +727,6 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
-    value: 'user:list',
-    label: 'user:list',
-    description: 'List users',
-    resource: 'user',
-    isAlias: false,
-  },
-  {
     value: 'user:read',
     label: 'user:read',
     description: 'Read users',

@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -27,7 +26,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
-	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 )
 
 // TestControlChannelBrokerClient_ExecuteKeys_Dispatched proves the
@@ -36,9 +34,13 @@ import (
 // separate control-channel RPC method name" rule) and that a 200 dispatch
 // round-trips.
 func TestControlChannelBrokerClient_ExecuteKeys_Dispatched(t *testing.T) {
+	runOverHubTunnels(t, testControlChannelBrokerClient_ExecuteKeys_Dispatched)
+}
+
+func testControlChannelBrokerClient_ExecuteKeys_Dispatched(t *testing.T, tr hubTunnelTransport) {
 	tunnel := &mockControlChannelTunnel{connected: true}
 	signer := &mockBrokerSigner{}
-	client := &ControlChannelBrokerClient{manager: tunnel, signer: signer}
+	client := &ControlChannelBrokerClient{manager: tr.wrap(t, tunnel), signer: signer}
 
 	// A non-UTC zone makes the UTC-normalization assertion below
 	// non-vacuous: time.Now() alone would often already be UTC in CI, so a
@@ -122,8 +124,12 @@ func TestControlChannelBrokerClient_ExecuteKeys_Dispatched(t *testing.T) {
 // attempting a tunnel round-trip (proven via the call counter) — this is a
 // provable, before-any-send failure, unlike a mid-flight disconnect.
 func TestControlChannelBrokerClient_ExecuteKeys_NotConnected(t *testing.T) {
+	runOverHubTunnels(t, testControlChannelBrokerClient_ExecuteKeys_NotConnected)
+}
+
+func testControlChannelBrokerClient_ExecuteKeys_NotConnected(t *testing.T, tr hubTunnelTransport) {
 	tunnel := &mockControlChannelTunnel{connected: false}
-	client := &ControlChannelBrokerClient{manager: tunnel}
+	client := &ControlChannelBrokerClient{manager: tr.wrap(t, tunnel)}
 
 	_, err := client.ExecuteKeys(context.Background(), "broker-1", "unused", "test-agent", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
 	if !errors.Is(err, agentkeys.ErrNotDispatched) {
@@ -141,9 +147,16 @@ func TestControlChannelBrokerClient_ExecuteKeys_NotConnected(t *testing.T) {
 // pre-send body-size check also fails closed to ErrNotDispatched without
 // attempting a tunnel round-trip: unlike MessageAgent, keys has no HTTP
 // fallback to retry through when a payload cannot be tunneled.
+// The client's own body check rejects the payload before either tunnel is
+// reached, so the conduit leg does not exercise conduitBrokerTunnel's size
+// check (TestConduitBrokerTunnel_PayloadTooLarge does).
 func TestControlChannelBrokerClient_ExecuteKeys_TooLargeForTunnel(t *testing.T) {
+	runOverHubTunnels(t, testControlChannelBrokerClient_ExecuteKeys_TooLargeForTunnel)
+}
+
+func testControlChannelBrokerClient_ExecuteKeys_TooLargeForTunnel(t *testing.T, tr hubTunnelTransport) {
 	tunnel := &mockControlChannelTunnel{connected: true}
-	client := &ControlChannelBrokerClient{manager: tunnel}
+	client := &ControlChannelBrokerClient{manager: tr.wrap(t, tunnel)}
 
 	huge := strings.Repeat("a", maxControlChannelBodySize+1)
 	_, err := client.ExecuteKeys(context.Background(), "broker-1", "unused", "test-agent", agentkeys.BrokerRequest{Keys: huge, ExecuteBefore: time.Now().Add(time.Minute)})
@@ -161,8 +174,12 @@ func TestControlChannelBrokerClient_ExecuteKeys_TooLargeForTunnel(t *testing.T) 
 // This must NOT be reported as ErrNotDispatched — the request may have
 // reached the broker — and must be single-attempt (exactly one call).
 func TestControlChannelBrokerClient_ExecuteKeys_MidFlightFailure(t *testing.T) {
+	runOverHubTunnels(t, testControlChannelBrokerClient_ExecuteKeys_MidFlightFailure)
+}
+
+func testControlChannelBrokerClient_ExecuteKeys_MidFlightFailure(t *testing.T, tr hubTunnelTransport) {
 	tunnel := &mockControlChannelTunnel{connected: true, err: fmt.Errorf("tunnel closed: broker reconnecting")}
-	client := &ControlChannelBrokerClient{manager: tunnel}
+	client := &ControlChannelBrokerClient{manager: tr.wrap(t, tunnel)}
 
 	_, err := client.ExecuteKeys(context.Background(), "broker-1", "unused", "test-agent", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
 	if err == nil {
@@ -183,12 +200,16 @@ func TestControlChannelBrokerClient_ExecuteKeys_MidFlightFailure(t *testing.T) {
 // same 404-without-outcome classification the HTTP transport uses, now over
 // the control-channel path.
 func TestControlChannelBrokerClient_ExecuteKeys_OldBrokerUnsupported(t *testing.T) {
+	runOverHubTunnels(t, testControlChannelBrokerClient_ExecuteKeys_OldBrokerUnsupported)
+}
+
+func testControlChannelBrokerClient_ExecuteKeys_OldBrokerUnsupported(t *testing.T, tr hubTunnelTransport) {
 	tunnel := &mockControlChannelTunnel{
 		connected: true,
 		status:    http.StatusNotFound,
 		body:      []byte(`{"error":{"code":"not_found","message":"Action not found"}}`),
 	}
-	client := &ControlChannelBrokerClient{manager: tunnel}
+	client := &ControlChannelBrokerClient{manager: tr.wrap(t, tunnel)}
 
 	_, err := client.ExecuteKeys(context.Background(), "broker-1", "unused", "test-agent", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
 	var boe *agentkeys.BrokerOutcomeError
@@ -210,6 +231,10 @@ func TestControlChannelBrokerClient_ExecuteKeys_OldBrokerUnsupported(t *testing.
 // AC3, the same proof TestHTTPRuntimeBrokerClient_ExecuteKeys_UnknownOutcomes
 // gives for the HTTP transport.
 func TestControlChannelBrokerClient_ExecuteKeys_ServerError(t *testing.T) {
+	runOverHubTunnels(t, testControlChannelBrokerClient_ExecuteKeys_ServerError)
+}
+
+func testControlChannelBrokerClient_ExecuteKeys_ServerError(t *testing.T, tr hubTunnelTransport) {
 	cases := []struct {
 		name   string
 		status int
@@ -224,7 +249,7 @@ func TestControlChannelBrokerClient_ExecuteKeys_ServerError(t *testing.T) {
 				status:    tc.status,
 				body:      []byte(`{"error":{"code":"internal","message":"boom"}}`),
 			}
-			client := &ControlChannelBrokerClient{manager: tunnel}
+			client := &ControlChannelBrokerClient{manager: tr.wrap(t, tunnel)}
 
 			_, err := client.ExecuteKeys(context.Background(), "broker-1", "unused", "test-agent", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
 			if err == nil {
@@ -253,8 +278,12 @@ func (failingControlChannelSigner) Sign(context.Context, *http.Request, string) 
 // proves a signing failure is reported as agentkeys.ErrNotDispatched, and
 // that the tunnel is never used when signing fails.
 func TestControlChannelBrokerClient_ExecuteKeys_SignerFailureIsNotDispatched(t *testing.T) {
+	runOverHubTunnels(t, testControlChannelBrokerClient_ExecuteKeys_SignerFailureIsNotDispatched)
+}
+
+func testControlChannelBrokerClient_ExecuteKeys_SignerFailureIsNotDispatched(t *testing.T, tr hubTunnelTransport) {
 	tunnel := &mockControlChannelTunnel{connected: true}
-	client := &ControlChannelBrokerClient{manager: tunnel, signer: failingControlChannelSigner{}}
+	client := &ControlChannelBrokerClient{manager: tr.wrap(t, tunnel), signer: failingControlChannelSigner{}}
 
 	_, err := client.ExecuteKeys(context.Background(), "broker-1", "unused", "test-agent", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
 	if !errors.Is(err, agentkeys.ErrNotDispatched) {
@@ -278,33 +307,17 @@ func TestControlChannelBrokerClient_ExecuteKeys_SignerFailureIsNotDispatched(t *
 // tunnel-reconnect resend" — a stale response or a second attempt would
 // break single-attempt dispatch).
 func TestControlChannelBrokerClient_ExecuteKeys_CtxCancelledMidTunnel_UnknownAndSingleSend(t *testing.T) {
-	hubSide, brokerSide, cleanup := newHubWSPair(t)
-	defer cleanup()
+	runOverSilentBrokers(t, testControlChannelBrokerClient_ExecuteKeys_CtxCancelledMidTunnel_UnknownAndSingleSend)
+}
 
-	mgr := NewControlChannelManager(ControlChannelConfig{RequestTimeout: 30 * time.Second}, slog.Default())
-	hc := &BrokerConnection{
-		brokerID:        "broker-1",
-		conn:            hubSide,
-		config:          mgr.config,
-		log:             slog.Default(),
-		pendingRequests: make(map[string]chan *wsprotocol.ResponseEnvelope),
-		ctx:             context.Background(),
-	}
-	mgr.connections["broker-1"] = hc
-
-	signer := &mockBrokerSigner{}
-	client := &ControlChannelBrokerClient{manager: mgr, signer: signer}
-
+func testControlChannelBrokerClient_ExecuteKeys_CtxCancelledMidTunnel_UnknownAndSingleSend(t *testing.T, tr silentBrokerTransport) {
 	// Simulate a broker that received the request but never answers (e.g.
 	// busy with a slow create, or the connection is about to drop) — the
 	// same shape as TestTunnelRequest_CallerCtxCancelledSendsCancelToBroker.
-	readDone := make(chan wsprotocol.RequestEnvelope, 1)
-	go func() {
-		var got wsprotocol.RequestEnvelope
-		if err := brokerSide.ReadJSON(&got); err == nil {
-			readDone <- got
-		}
-	}()
+	b := tr.new(t, 30*time.Second)
+
+	signer := &mockBrokerSigner{}
+	client := &ControlChannelBrokerClient{manager: b.tunnel(), signer: signer}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	resultCh := make(chan error, 1)
@@ -319,12 +332,7 @@ func TestControlChannelBrokerClient_ExecuteKeys_CtxCancelledMidTunnel_UnknownAnd
 		resultCh <- err
 	}()
 
-	var sentReq wsprotocol.RequestEnvelope
-	select {
-	case sentReq = <-readDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("broker side never received the tunneled keys request")
-	}
+	sentReq := b.received(t)
 	if sentReq.Path != "/api/v1/agents/test-agent/keys" {
 		t.Fatalf("unexpected tunneled path: %s", sentReq.Path)
 	}
@@ -353,37 +361,12 @@ func TestControlChannelBrokerClient_ExecuteKeys_CtxCancelledMidTunnel_UnknownAnd
 		t.Fatalf("HTTPStatus(OutcomeKeysOutcomeUnknown) = (%d, %v), want (502, true)", status, ok)
 	}
 
-	// Exactly one cancel frame must follow, for the same RequestID.
-	var cancelMsg wsprotocol.CancelMessage
-	envDone := make(chan error, 1)
-	go func() { envDone <- brokerSide.ReadJSON(&cancelMsg) }()
-	select {
-	case err := <-envDone:
-		if err != nil {
-			t.Fatalf("broker side failed to read cancel message: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("broker side never received a cancel message after ctx cancellation")
-	}
-	if cancelMsg.Type != wsprotocol.TypeCancel {
-		t.Errorf("expected cancel message type %q, got %q", wsprotocol.TypeCancel, cancelMsg.Type)
-	}
-	if cancelMsg.RequestID != sentReq.RequestID {
-		t.Errorf("cancel RequestID = %q, want %q (the same request that was sent)", cancelMsg.RequestID, sentReq.RequestID)
+	// Exactly one cancel must follow, for the same RequestID.
+	if got := b.cancelled(t); got != sentReq.RequestID {
+		t.Errorf("cancel RequestID = %q, want %q (the same request that was sent)", got, sentReq.RequestID)
 	}
 
-	// No resend: the pending-request entry must be cleaned up, and nothing
-	// further arrives on the wire for this request within a short window.
-	hc.pendingMu.Lock()
-	_, stillPending := hc.pendingRequests[sentReq.RequestID]
-	hc.pendingMu.Unlock()
-	if stillPending {
-		t.Error("expected the pending-request entry to be removed once ExecuteKeys returned")
-	}
-
-	_ = brokerSide.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
-	var extra wsprotocol.RequestEnvelope
-	if err := brokerSide.ReadJSON(&extra); err == nil {
-		t.Fatalf("unexpected second message on the wire after the cancel: %+v", extra)
-	}
+	// No resend: the hub no longer tracks the request, and nothing further
+	// reaches the broker for it.
+	b.noFurther(t, sentReq.RequestID)
 }

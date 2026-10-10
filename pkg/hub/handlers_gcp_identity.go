@@ -476,6 +476,10 @@ type GCPServiceAccountWithCapabilities struct {
 	// Mapping summarizes the listed project's Kubernetes broker profiles
 	// that map this account. Set on project-scope lists only.
 	Mapping *GCPServiceAccountMappingSummary `json:"mapping,omitempty"`
+	// AssignStatus is the account's mapping state on the broker profile
+	// the caller chose (assignStatus, profile and broker query parameters).
+	// Set on project-scope lists only, and only when asked for.
+	AssignStatus *GCPServiceAccountAssignStatus `json:"assignStatus,omitempty"`
 }
 
 // GCPMintQuotaInfo provides quota information for minted service accounts.
@@ -514,6 +518,12 @@ func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, 
 	// against here -- the route is project-scoped by construction -- so the
 	// flag is accepted unconditionally.
 	includeHubScoped := r.URL.Query().Get("includeHubScoped") == "true"
+
+	// The assign status is opt-in and gated like the status view.
+	assignReq := parseAssignStatusRequest(r)
+	if assignReq != nil && !s.authorizeAssignStatus(w, r, projectID) {
+		return
+	}
 
 	sas, err := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
 		Scope:            store.ScopeProject,
@@ -588,6 +598,7 @@ func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, 
 		profiles = s.projectKubernetesProfileMappings(ctx, projectID)
 	}
 	annotateGCPSAMappings(items, profiles)
+	s.annotateGCPSAAssignStatus(ctx, items, projectID, assignReq)
 
 	writeJSON(w, http.StatusOK, ListGCPServiceAccountsResponse{
 		Items:        items,

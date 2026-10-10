@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 185
+**Operations:** 187
 
 ## Table of Contents
 
@@ -137,7 +137,9 @@
 - [hub.experiments.update](#hubexperimentsupdate) — Read and update hub-wide experiment overrides
 - [hub.conduitgrantkeys.rotate](#hubconduitgrantkeysrotate) — Rotate the conduit grant signing key (kids and timestamps only in the response)
 - [hub.maintenance.execute](#hubmaintenanceexecute) — Execute maintenance operations including migrations and restarts
+- [hub.adminmode.read](#hubadminmoderead) — Read admin/maintenance mode state
 - [hub.adminmode.update](#hubadminmodeupdate) — Toggle admin/maintenance mode
+- [hub.allowlist.read](#huballowlistread) — Read the platform email allow list and its domains
 - [hub.allowlist.update](#huballowlistupdate) — Manage the platform email allow list
 - [hub.health.read](#hubhealthread) — Read platform health summary and GCP quota status
 - [hub.diagnostics.read](#hubdiagnosticsread) — Read diagnostic logs, the diagnostic log stream and messaging divergence data. The log stream re-checks a token credential on every heartbeat and ends once the token stops validating or loses hub.diagnostics.read
@@ -5116,6 +5118,36 @@
 
 ---
 
+## hub.adminmode.read
+
+**Domain:** hub
+
+**Description:** Read admin/maintenance mode state
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/maintenance` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `hub.admin_mode.read`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestHubAdminReadUpdateRoutePermissions`
+
+---
+
 ## hub.adminmode.update
 
 **Domain:** hub
@@ -5146,6 +5178,37 @@
 
 ---
 
+## hub.allowlist.read
+
+**Domain:** hub
+
+**Description:** Read the platform email allow list and its domains
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/allow-list` |
+| http_route | GET | `/api/v1/admin/allow-list/domains` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `hub.allow_list.read`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestHubAdminReadUpdateRoutePermissions`
+
+---
+
 ## hub.allowlist.update
 
 **Domain:** hub
@@ -5156,8 +5219,8 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | GET | `/api/v1/admin/allow-list` |
 | http_route | POST | `/api/v1/admin/allow-list` |
+| http_route | POST | `/api/v1/admin/allow-list/import` |
 | http_route | DELETE | `/api/v1/admin/allow-list/{email}` |
 
 **Principals:** `user`
