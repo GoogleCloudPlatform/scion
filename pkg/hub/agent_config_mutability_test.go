@@ -650,17 +650,22 @@ func TestRemovedEntriesWarnings(t *testing.T) {
 	}
 	all := map[string]bool{"env": true, "mcp_servers": true, "volumes": true}
 
-	got := removedEntriesWarnings(old, req, all, true)
+	warnings := func(old, req *api.ScionConfig, present map[string]bool, canViewEnv bool) []string {
+		return removedEntriesWarnings(removedConfigEntries(old, req, present, canViewEnv))
+	}
+	assert.Equal(t, map[string][]string{"env": {"GONE"}, "mcp_servers": {"b"}, "volumes": {"/x"}},
+		removedConfigEntries(old, req, all, true))
+	got := warnings(old, req, all, true)
 	require.Len(t, got, 3)
 	assert.Contains(t, got[0], "config.env: removed GONE now")
 	assert.Contains(t, got[1], "config.mcp_servers: removed b now")
 	assert.Contains(t, got[2], "config.volumes: removed /x now")
 
-	assert.Len(t, removedEntriesWarnings(old, req, all, false), 2, "env key names are hidden from a caller who cannot see the env")
-	assert.Empty(t, removedEntriesWarnings(old, req, map[string]bool{}, true), "keys the request does not name are not removals")
+	assert.Len(t, warnings(old, req, all, false), 2, "env key names are hidden from a caller who cannot see the env")
+	assert.Empty(t, warnings(old, req, map[string]bool{}, true), "keys the request does not name are not removals")
 	emptied := &api.ScionConfig{Env: map[string]string{}, MCPServers: map[string]api.MCPServerConfig{}, Volumes: []api.VolumeMount{}}
-	assert.Empty(t, removedEntriesWarnings(old, emptied, all, true), "an emptied key is the cleared warning's case")
-	assert.Empty(t, removedEntriesWarnings(nil, req, all, true))
+	assert.Empty(t, warnings(old, emptied, all, true), "an emptied key is the cleared warning's case")
+	assert.Empty(t, warnings(nil, req, all, true))
 }
 
 // TestStartMergeKeepsBase_ValuesThatApply: a value the start merge applies is
