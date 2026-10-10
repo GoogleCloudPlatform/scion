@@ -81,7 +81,7 @@ export function initialPageDataFor(
 
 /** The current document's timing, failing closed (unknown type) where the API is missing. */
 export function currentDocumentTiming(): DocumentTiming {
-  let navigationType: string | null = null;
+  let navigationType: string | null;
   try {
     const entry = performance.getEntriesByType('navigation')[0] as
       | PerformanceNavigationTiming

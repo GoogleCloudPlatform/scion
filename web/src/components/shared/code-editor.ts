@@ -233,6 +233,7 @@ export class ScionCodeEditor extends LitElement {
     }
   `;
 
+  // eslint-disable-next-line @typescript-eslint/no-misused-promises -- async override of the void connectedCallback lifecycle method, kept as is; per-site decision tracked in ptone/scion#4126.
   override async connectedCallback(): Promise<void> {
     super.connectedCallback();
     await this.updateComplete;

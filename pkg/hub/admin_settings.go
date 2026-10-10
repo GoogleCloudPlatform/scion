@@ -517,6 +517,12 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		req.Server.Hub.AgentEndpoint = normalized
 	}
 
+	// The monitoring dashboard link must be an absolute http(s) URL; the
+	// same check as the DB path.
+	if !validateMonitoringDashboardURLRequest(w, &req) {
+		return
+	}
+
 	// server.auth.default_user_role must be one of the schema enum values
 	// (design D6). The DB path validates section docs against the schema;
 	// file mode has no schema pass, so validate this key against the same
