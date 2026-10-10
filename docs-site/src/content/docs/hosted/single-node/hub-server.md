@@ -266,7 +266,7 @@ scion server migrate \
   --to "postgres://scion:secret@db.example.com:5432/scion?sslmode=require"
 ```
 
-The copy reads the SQLite file without changing it, skips rows already in the destination (so a failed run can be restarted), and compares row counts after each table. The SQLite file is kept unless you pass `--drop-source`.
+The copy reads the SQLite file without changing it, skips rows already in the destination (so a failed run can be restarted), and compares row counts after each table. A restart expects the destination to hold only rows from an earlier run; rows changed or deleted in the source since then are not reconciled, and a row-count mismatch stops the run. The SQLite file is kept unless you pass `--drop-source`.
 
 ## Storage Backends
 
