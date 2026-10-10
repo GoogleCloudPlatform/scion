@@ -51,6 +51,14 @@ func newRealStoreTestLogin(t *testing.T) (*WebServer, *UserTokenService, store.S
 	return ws, tokenSvc, s
 }
 
+func decodeTestLoginResponse(t *testing.T, rec *httptest.ResponseRecorder) TestLoginResponse {
+	t.Helper()
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp TestLoginResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	return resp
+}
+
 func testLoginAudits(t *testing.T, s store.Store) []*store.MutationAuditRecord {
 	t.Helper()
 	recs, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{MutationType: testLoginMutationType})

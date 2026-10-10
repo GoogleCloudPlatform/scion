@@ -58,14 +58,6 @@ func doTestLogin(t *testing.T, ws *WebServer, svc *UserTokenService, body, remot
 	return rec
 }
 
-func decodeTestLoginResponse(t *testing.T, rec *httptest.ResponseRecorder) TestLoginResponse {
-	t.Helper()
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	var resp TestLoginResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	return resp
-}
-
 // The created field is also reported by the in-memory store path that the
 // existing tests use, and is present in the JSON body.
 func TestHandleTestLogin_CreatedField_JSON(t *testing.T) {
