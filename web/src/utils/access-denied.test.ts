@@ -119,12 +119,17 @@ describe('formatAccessDenied', () => {
       reason: 'Hub-scoped service account assignment requires gcpIamCheckMode=enforce.',
     };
     const result = formatAccessDenied(detail);
-    expect(result.primary).toBe('Hub-scoped service account assignment requires gcpIamCheckMode=enforce.');
+    expect(result.primary).toBe(
+      'Hub-scoped service account assignment requires gcpIamCheckMode=enforce.'
+    );
     expect(result.secondary).toBeUndefined();
   });
 
   it('falls back to a friendly sentence for identity_assign_denied with a generic message', () => {
-    const result = formatAccessDenied({ action: 'identity_assign_denied', reason: 'Insufficient permissions' });
+    const result = formatAccessDenied({
+      action: 'identity_assign_denied',
+      reason: 'Insufficient permissions',
+    });
     expect(result.primary).toBe("You're not permitted to assign this service account.");
     expect(result.secondary).toBeUndefined();
   });
