@@ -28,7 +28,6 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -124,7 +123,7 @@ func (s *Server) handleHarnessConfigFileRead(w http.ResponseWriter, r *http.Requ
 		}
 
 		objectPath := hc.StoragePath + "/" + filePath
-		reader, _, err := stor.Download(ctx, objectPath)
+		reader, obj, err := stor.Download(ctx, objectPath)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
 				NotFound(w, "Harness config file")
@@ -140,7 +139,7 @@ func (s *Server) handleHarnessConfigFileRead(w http.ResponseWriter, r *http.Requ
 
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Disposition", contentDisposition)
-		w.Header().Set("Content-Length", strconv.FormatInt(found.Size, 10))
+		setDownloadContentLength(w, obj)
 		w.WriteHeader(http.StatusOK)
 		if _, err := io.Copy(w, reader); err != nil {
 			slog.Error("Error streaming file to client", "path", objectPath, "error", err)

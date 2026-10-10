@@ -340,7 +340,7 @@ func (s *Server) handleTemplateFileRead(w http.ResponseWriter, r *http.Request, 
 	// Raw binary download for local storage proxy flow
 	if r.URL.Query().Get("raw") != "" || strings.Contains(r.Header.Get("Accept"), "application/octet-stream") {
 		objectPath := template.StoragePath + "/" + filePath
-		reader, _, err := stor.Download(ctx, objectPath)
+		reader, obj, err := stor.Download(ctx, objectPath)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
 				NotFound(w, "Template file")
@@ -356,7 +356,7 @@ func (s *Server) handleTemplateFileRead(w http.ResponseWriter, r *http.Request, 
 
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Disposition", contentDisposition)
-		w.Header().Set("Content-Length", strconv.FormatInt(found.Size, 10))
+		setDownloadContentLength(w, obj)
 		w.WriteHeader(http.StatusOK)
 		if _, err := io.Copy(w, reader); err != nil {
 			slog.Error("Error streaming file to client", "path", objectPath, "error", err)
@@ -746,4 +746,21 @@ func (s *Server) handleTemplateFileDelete(w http.ResponseWriter, r *http.Request
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// setDownloadContentLength sets Content-Length for a raw file download from
+// the size of the storage object being streamed, so the declared length
+// always matches the bytes sent. The database record's size is deliberately
+// not used: it can be out of date relative to the stored object.
+//
+// When the object size is unknown (nil object, or a non-positive size) the
+// header is left unset and net/http either computes it for small bodies or
+// uses chunked transfer encoding. Both storage backends report the real
+// object size, so this only guards against a backend or wrapper that does
+// not; a genuinely empty object still gets "Content-Length: 0" from net/http.
+func setDownloadContentLength(w http.ResponseWriter, obj *storage.Object) {
+	if obj == nil || obj.Size <= 0 {
+		return
+	}
+	w.Header().Set("Content-Length", strconv.FormatInt(obj.Size, 10))
 }
