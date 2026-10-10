@@ -24,7 +24,7 @@ import '@shoelace-style/shoelace/dist/components/menu-item/menu-item.js';
 import '@shoelace-style/shoelace/dist/themes/light.css';
 import { CONVERSATION_KEY, SELF_USER_ID } from './data.js';
 
-const thread = document.createElement('scion-chat-thread') as ScionChatThread;
+const thread = document.createElement('scion-chat-thread');
 thread.conversationKey = CONVERSATION_KEY;
 thread.isDM = true;
 thread.currentUserId = SELF_USER_ID;
