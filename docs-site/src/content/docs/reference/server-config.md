@@ -72,6 +72,7 @@ Controls the central Hub API server.
 | `start_unconfirmed_hold` | duration | `"13m"` | Longest time a start whose outcome is unknown (for example a dispatch timeout) keeps other starts of the agent waiting, until the runtime shows whether it created anything. Minimum `12m40s` (the broker's whole start budget plus a minute). Hot-reloaded. Env: `SCION_SERVER_HUB_STARTUNCONFIRMEDHOLD`. |
 | `start_create_unconfirmed_hold` | duration | `"5m"` | `start_unconfirmed_hold` for a new agent's create-and-start. Allowed `3m` up to `start_unconfirmed_hold`. Hot-reloaded. Env: `SCION_SERVER_HUB_STARTCREATEUNCONFIRMEDHOLD`. |
 | `perf_trace` | bool | `false` | Turns on per-request performance tracing for diagnosis. Observe only. See [Request performance tracing](#request-performance-tracing) and the [developer guide](/scion/contributing/perf-tracing/). Startup-only: restart required to change. Env: `SCION_SERVER_HUB_PERFTRACE`. |
+| `membership_sweep_report_only` | bool | `false` | Puts the membership-standing sweep in report-only mode: it logs and audits (`agent_hold_would_set`) each agent it would hold and stop, and holds and stops none. Off by default (the sweep enforces). Holds from membership changes made while it is on still apply. Set it on every replica: the sweep runs on whichever replica takes its lock, and a replica left enforcing holds the listed agents at its next sweep. For the first boot after an upgrade; see [Upgrading: report-only first boot](/scion/reference/agent-suspension/#upgrading-report-only-first-boot). Startup-only: restart required to change. Env: `SCION_SERVER_HUB_MEMBERSHIPSWEEPREPORTONLY`. |
 | `cors` | object | | CORS configuration (see below). |
 | `conduit` | object | | Conduit relay settings (see [Conduit](#conduit-serverhubconduit)). |
 
@@ -1075,6 +1076,7 @@ Settings required before the database connection exists, or that are restart-bou
 | Messaging/plugins | `message_broker.*`, `plugins.*` |
 | Async agent create | `hub.async_agent_launch`, `hub.launch_timeout`, `hub.launch_keepalive_seconds` |
 | Diagnostics | `hub.perf_trace` |
+| Membership standing | `hub.membership_sweep_report_only` |
 | Heartbeat reconcile | `hub.missing_agent_grace` |
 | Conduit relay | `hub.conduit.*` |
 
@@ -1117,7 +1119,7 @@ A `SCION_SERVER_*` variable on a Layer-1 key therefore does not override a row a
 
 - **Every start**: the replica that takes the seed advisory lock syncs `hub_settings` (Layer-1 sections only) from its bootstrap merge: `SCION_SEED_*`, `settings.yaml`, then `SCION_SERVER_*`. A missing section is created, a section no admin has edited (seeded) is re-synced when its content differs, and an edited (managed) section is not touched. A replica that finds the lock held skips the sync.
 - **DB wins**: once a section is seeded/written to DB, the DB row fully owns that section. Omitted fields within the section fall to compiled defaults, not to the file.
-- **Rollback safety**: older builds ignore the `hub_settings` table entirely and read files — rolling back reverts to pre-change behavior.
+- **Rollback safety**: older builds ignore the `hub_settings` table entirely and read files — rolling back reverts to pre-change behavior. This covers operational settings only: other stored data is rewritten one way, so a binary rollback after a newer build has started is unsupported. See [Hub Upgrade and Binary Rollback](/scion/reference/hub-upgrade-rollback/).
 
 ### Environment Override Warnings
 

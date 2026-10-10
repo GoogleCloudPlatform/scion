@@ -60,7 +60,7 @@ func TestDecisionAuditRemoval_NoPersistence(t *testing.T) {
 			requireNoDecisionPersistenceTable(t, cs)
 			require.NoError(t, srv.Shutdown(ctx))
 			srv.authzService.Decide(ctx, AuthzRequest{})
-			require.NoError(t, cs.Migrate(ctx))
+			require.NoError(t, migrateTestStore(ctx, cs))
 			requireNoDecisionPersistenceTable(t, cs)
 		})
 	}

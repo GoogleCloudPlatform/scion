@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/cmd/internal/cliutil"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -205,6 +206,11 @@ return an error instead of blocking.`,
 
 		// Check for dev auth usage and warn if Hub is enabled
 		printDevAuthWarningIfNeeded(projectPath)
+
+		// Hand the normalized root flag values to the command (see
+		// rootOptions). This must stay last so the snapshot reflects every
+		// adjustment above.
+		cmd.SetContext(cliutil.WithRootOptions(cmd.Context(), snapshotRootOptions()))
 
 		return nil
 	},

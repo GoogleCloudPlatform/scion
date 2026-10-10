@@ -35,6 +35,8 @@ func doDeleteProject(t *testing.T, srv *Server, slug, projectID string) *httptes
 	}
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, target, nil))
+	// Wait for any background NFS tree removal the delete started.
+	srv.nfsCleanupWG.Wait()
 	return rec
 }
 
@@ -124,9 +126,9 @@ func TestDeleteProject_GitSplitStorage_RemovesSharedDirStorage(t *testing.T) {
 }
 
 // A project directory recording a different project than the one the hub
-// asked to delete keeps its shared-dir storage; the hub-managed directory
-// itself is still removed, as before.
-func TestDeleteProject_ProjectIDMismatch_KeepsSharedDirStorage(t *testing.T) {
+// asked to delete keeps its shared-dir storage and the directory itself: the
+// slug may already belong to a re-created project (ptone/scion#2569).
+func TestDeleteProject_ProjectIDMismatch_KeepsSharedDirStorageAndDir(t *testing.T) {
 	mgr := &filteringMockManager{}
 	srv, home := newScopeTestServer(t, mgr)
 	extA, _ := makeHubMarkerProject(t, home, "proj-a", scopeProjA, "dev")
@@ -137,7 +139,7 @@ func TestDeleteProject_ProjectIDMismatch_KeepsSharedDirStorage(t *testing.T) {
 		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
 	assertPresent(t, filepath.Join(baseA, "scratch", "file"))
-	assertGone(t, filepath.Join(home, ".scion", "projects", "proj-a"))
+	assertPresent(t, filepath.Join(home, ".scion", "projects", "proj-a"))
 }
 
 func TestHubManagedProjectSharedDirsBase(t *testing.T) {

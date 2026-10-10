@@ -317,14 +317,19 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 		slog.Error("health summary: failed to count dispatch health", "error", err)
 	}
 
-	integrations := s.healthSummaryIntegrations(ctx, pluginRecordNames)
-
 	// Hub instances, from the registry table only. A failed read leaves
-	// the section nil ("not reported").
-	hubInstances, err := s.healthSummaryHubInstances(ctx)
+	// the section nil ("not reported"). The same rows give the
+	// integrations section: every hub instance, this one included,
+	// reports its plugins' health through its own row, so the summary
+	// makes no plugin call.
+	var hubInstances *HealthSummaryHubInstances
+	instanceRows, storeNow, err := s.store.ListHubInstances(ctx, hubInstanceDisplayWindow)
 	if err != nil {
 		slog.Error("health summary: failed to list hub instances", "error", err)
+	} else {
+		hubInstances = buildHealthSummaryHubInstances(instanceRows, storeNow, s.InstanceID())
 	}
+	integrations := mergeHealthSummaryIntegrations(instanceRows, storeNow, err == nil, pluginRecordNames)
 
 	resp := HealthSummaryResponse{
 		GeneratedAt:        now,

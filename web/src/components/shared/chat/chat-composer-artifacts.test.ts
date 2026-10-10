@@ -20,8 +20,6 @@
  * payload, and the picker's list, search, filters and limit.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import '@shoelace-style/shoelace/dist/components/textarea/textarea.js';
 
@@ -36,6 +34,7 @@ vi.mock('../../../utils/toast.js', () => ({ showToast: vi.fn() }));
 
 await import('./chat-composer.js');
 await import('./artifact-picker.js');
+const { resetPrincipalNames } = await import('../../../client/principal-names.js');
 
 const A = '5f1c2d3e-0000-4000-8000-0000000000aa';
 const B = '5f1c2d3e-0000-4000-8000-0000000000bb';
@@ -124,6 +123,29 @@ describe('composer — attach artifact', () => {
     expect(picker.remaining).toBe(10);
   });
 
+  it('opens the picker without New artifact in a DM with no project', async () => {
+    const el = document.createElement('scion-chat-composer') as any;
+    el.conversationMode = 'dm';
+    el.projectId = '';
+    el.currentUserId = 'u-self';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    el.handleAttachMenuSelect(
+      new CustomEvent('sl-select', { detail: { item: { value: 'artifact' } } })
+    );
+    await settle(el);
+    const picker = el.shadowRoot.querySelector('scion-artifact-picker');
+    await settle(picker);
+    expect(picker.open).toBe(true);
+    expect(picker.projectId).toBe('');
+    expect(picker.currentUserId).toBe('u-self');
+    expect(picker.shadowRoot.querySelector('.placeholder.empty')?.textContent).toContain(
+      'No artifacts yet'
+    );
+    expect(picker.shadowRoot.querySelector('.new-artifact')).toBeNull();
+    expect(picker.shadowRoot.querySelector('scion-artifact-publish-dialog')).toBeNull();
+  });
+
   it('shows picked artifacts as removable chips and sends their refs', async () => {
     const el = await mount();
     el.handleArtifactsPicked(
@@ -184,6 +206,7 @@ describe('scion-artifact-picker', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
     apiFetch.mockReset();
+    resetPrincipalNames();
   });
   afterEach(() => {
     vi.useRealTimers();
@@ -247,9 +270,11 @@ describe('scion-artifact-picker', () => {
     await settle(el);
     expect(lastListCall()).toBe('/api/v1/artifacts?mine=1&q=brand&owner=me');
 
+    // "This project" is the list endpoint's own scope filter, not a
+    // filter over the pages loaded so far.
     el.setFilter('project');
     await settle(el);
-    expect(titles(el)).toEqual(['Design notes']);
+    expect(lastListCall()).toBe('/api/v1/artifacts?mine=1&q=brand&scope=proj-1');
   });
 
   it('stops at the remaining limit and keeps already attached ones fixed', async () => {
@@ -267,27 +292,26 @@ describe('scion-artifact-picker', () => {
     expect(boxes[1].hasAttribute('disabled')).toBe(true);
   });
 
-  it('keeps Load more reachable when This project matches nothing on the loaded page', async () => {
+  it('pages the hub-filtered This project list with its cursor', async () => {
     apiFetch.mockImplementation((url: string) =>
       Promise.resolve(
-        url.includes('cursor=c1')
-          ? listResponse([item(A, 'Here', 'proj-1')])
-          : listResponse([item(B, 'Elsewhere', 'other')], 'c1')
+        !url.includes('scope=proj-1')
+          ? listResponse([item(B, 'Elsewhere', 'other')])
+          : url.includes('cursor=c1')
+            ? listResponse([item(B, 'Shared here', 'other')])
+            : listResponse([item(A, 'Here', 'proj-1')], 'c1')
       )
     );
     const el = await openPicker();
     el.setFilter('project');
     await settle(el);
-    expect(titles(el)).toEqual([]);
-    expect(el.shadowRoot.querySelector('.placeholder')?.textContent).toContain(
-      'No matches in the loaded artifacts'
-    );
+    // Rows come as the hub returns them, including one shared with the project.
+    expect(titles(el)).toEqual(['Here']);
     const more = el.shadowRoot.querySelector('.more sl-button') as HTMLElement;
-    expect(more).toBeTruthy();
     more.click();
     await settle(el);
-    expect(lastListCall()).toBe('/api/v1/artifacts?mine=1&cursor=c1');
-    expect(titles(el)).toEqual(['Here']);
+    expect(lastListCall()).toBe('/api/v1/artifacts?mine=1&scope=proj-1&cursor=c1');
+    expect(titles(el)).toEqual(['Here', 'Shared here']);
   });
 
   it('keeps every owner and project name when lookups finish out of order', async () => {
@@ -317,11 +341,101 @@ describe('scion-artifact-picker', () => {
     );
   });
 
+  it("names user owners and home projects through the viewer's own lookups", async () => {
+    const SELF = '11111111-0000-4000-8000-000000000001';
+    const PEER = '22222222-0000-4000-8000-000000000002';
+    const HIDDEN = '33333333-0000-4000-8000-000000000003';
+    const C = A.replace('aa', 'cc');
+    const rows = [
+      { ...item(A, 'Mine', 'proj-1'), ownerRef: SELF },
+      { ...item(B, 'Peer', 'proj-2'), ownerRef: PEER },
+      { ...item(C, 'Hidden', 'proj-hidden'), ownerRef: HIDDEN },
+    ];
+    apiFetch.mockImplementation((url: string) => {
+      if (url.startsWith('/api/v1/artifacts')) return Promise.resolve(listResponse(rows));
+      if (url === `/api/v1/users/${PEER}`) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ displayName: 'Sam Rivera' }), { status: 200 })
+        );
+      }
+      if (url === '/api/v1/projects/proj-2') {
+        return Promise.resolve(
+          new Response(JSON.stringify({ name: 'web-frontend' }), { status: 200 })
+        );
+      }
+      // A user or project the viewer may not read.
+      return Promise.resolve(new Response('{}', { status: 403 }));
+    });
+    const el = await openPicker({ currentUserId: SELF });
+    await settle(el);
+    const cells = [...el.shadowRoot.querySelectorAll('tbody tr')].map((tr: Element) =>
+      [...tr.querySelectorAll('td')].slice(2, 4).map((td) => td.textContent?.trim())
+    );
+    expect(cells).toEqual([
+      ['You', 'This project'],
+      ['Sam Rivera', 'web-frontend'],
+      // Unreadable: a short id, never the literal "User", and no project name.
+      ['33333333…', ''],
+    ]);
+    const urls = apiFetch.mock.calls.map((c) => c[0]);
+    // The signed-in user is not looked up.
+    expect(urls).not.toContain(`/api/v1/users/${SELF}`);
+    expect(urls).toContain(`/api/v1/users/${HIDDEN}`);
+  });
+
   it('shows an empty state with no command to run', async () => {
     apiFetch.mockImplementation(() => Promise.resolve(listResponse([])));
     const el = await openPicker();
     const empty = el.shadowRoot.querySelector('.placeholder.empty');
     expect(empty.textContent).toContain('No artifacts yet');
     expect(empty.textContent).not.toContain('scion ');
+  });
+
+  it('offers New artifact in the empty state, opening the publish dialog for the project', async () => {
+    apiFetch.mockImplementation(() => Promise.resolve(listResponse([])));
+    const el = await openPicker();
+    const dialog = el.shadowRoot.querySelector('scion-artifact-publish-dialog') as any;
+    expect(dialog.projectId).toBe('proj-1');
+    expect(dialog.open).toBe(false);
+    const button = el.shadowRoot.querySelector('.placeholder.empty sl-button.new-artifact');
+    expect(button.textContent.trim()).toBe('New artifact');
+    expect(button.querySelector('sl-icon').getAttribute('name')).toBe('plus-lg');
+    button.click();
+    await settle(el);
+    expect(dialog.open).toBe(true);
+
+    // Publishing lists the new artifact and picks it.
+    apiFetch.mockImplementation(() =>
+      Promise.resolve(listResponse([item(A, 'Fresh', 'proj-1', 1)]))
+    );
+    dialog.dispatchEvent(
+      new CustomEvent('artifact-published', {
+        detail: { artifact: item(A, 'Fresh', 'proj-1', 1), version: { seq: 1 } },
+      })
+    );
+    await settle(el);
+    expect(dialog.open).toBe(false);
+    expect(titles(el)).toEqual(['Fresh']);
+    expect([...el.selected.keys()]).toEqual([A]);
+  });
+
+  it('has no New artifact when the list is not empty, filtered, or has no project', async () => {
+    apiFetch.mockImplementation(() => Promise.resolve(listResponse([item(A, 'One')])));
+    const listed = await openPicker();
+    expect(listed.shadowRoot.querySelector('.new-artifact')).toBeNull();
+
+    apiFetch.mockImplementation(() => Promise.resolve(listResponse([])));
+    const filtered = await openPicker();
+    filtered.setFilter('owned');
+    await settle(filtered);
+    expect(filtered.shadowRoot.querySelector('.placeholder')?.textContent).toContain(
+      'No artifacts match'
+    );
+    expect(filtered.shadowRoot.querySelector('.new-artifact')).toBeNull();
+
+    const noProject = await openPicker({ projectId: '' });
+    expect(noProject.shadowRoot.querySelector('.placeholder.empty')).toBeTruthy();
+    expect(noProject.shadowRoot.querySelector('.new-artifact')).toBeNull();
+    expect(noProject.shadowRoot.querySelector('scion-artifact-publish-dialog')).toBeNull();
   });
 });

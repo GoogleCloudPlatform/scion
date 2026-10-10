@@ -18,8 +18,6 @@
  * Tests for the split alert preferences: chat messages and agent events.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import {

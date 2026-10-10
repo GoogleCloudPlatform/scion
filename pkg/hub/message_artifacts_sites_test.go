@@ -188,10 +188,11 @@ func TestMessageArtifactsSite_DeliverToUserRequiresAdmittedFlag(t *testing.T) {
 	proxy := NewMessageBrokerProxy(nil, f.s, events, func() AgentDispatcher { return f.dispatcher }, slog.Default())
 	var mu sync.Mutex
 	var recordedFor []string
-	proxy.recordArtifactRefs = func(_ context.Context, messageID string, refs []artifacts.MessageRef) {
+	proxy.recordArtifactRefs = func(_ context.Context, messageID string, refs []artifacts.MessageRef) []artifacts.MessageRef {
 		mu.Lock()
 		defer mu.Unlock()
 		recordedFor = append(recordedFor, messageID)
+		return refs
 	}
 
 	value := refsValue(artifacts.MessageRef{ArtifactID: f.unreadable})

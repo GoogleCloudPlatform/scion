@@ -25,8 +25,6 @@
  * attachment endpoint; everything else stays a download chip.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { vi } from 'vitest';
 import { setPreferredTimeZone } from '../../../utils/time.js';

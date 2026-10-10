@@ -28,8 +28,6 @@
  * never returns what was written for another.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { StateManager } from './state.js';
 import type { Capabilities } from '../shared/types.js';

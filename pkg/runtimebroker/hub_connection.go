@@ -88,6 +88,15 @@ type HubConnection struct {
 	// clearing ControlChannel. Without this, Reinitialize can race with the
 	// previous Connect goroutine and leak goroutines across reconnects.
 	ccWg sync.WaitGroup
+
+	// conduitCancel stops the conduit dialer started in Start, and
+	// conduitWg tracks its goroutine. The conduit session runs alongside
+	// the control channel with its own lifecycle (conduit_dial.go).
+	conduitCancel context.CancelFunc
+	conduitWg     sync.WaitGroup
+	// conduitExitHook, when set, runs on the dialer goroutine after the
+	// dialer returned, before the goroutine ends (tests only).
+	conduitExitHook func()
 }
 
 // GetStatus returns the current connection status.
@@ -179,6 +188,7 @@ func (hc *HubConnection) Start(ctx context.Context, server *Server) error {
 				}
 			}()
 			slog.Info("Connecting to Hub control channel", "name", hc.Name, "endpoint", hc.HubEndpoint)
+			hc.startConduit(ctx, server)
 		}
 	}
 
@@ -205,6 +215,7 @@ func (hc *HubConnection) Stop() {
 	// Wait for the Connect goroutine launched in Start to observe the close
 	// and exit. Safe to call even when no goroutine is outstanding.
 	hc.ccWg.Wait()
+	hc.stopConduit()
 
 	if hb != nil {
 		slog.Info("Stopping heartbeat for connection", "name", hc.Name)
@@ -221,8 +232,11 @@ func (hc *HubConnection) Reinitialize(ctx context.Context, server *Server, creds
 	// Update credentials
 	hc.Credentials = creds
 	hc.BrokerID = creds.BrokerID
+	// logHubConnections reads these under hc.mu from another goroutine.
+	hc.mu.Lock()
 	hc.HubEndpoint = creds.HubEndpoint
 	hc.AuthMode = creds.AuthMode
+	hc.mu.Unlock()
 
 	// Decode secret key
 	secretKey, err := base64.StdEncoding.DecodeString(creds.SecretKey)

@@ -24,6 +24,9 @@ import {
   ScionHealthHubInstances,
   failingChecks,
   formatDuration,
+  hubInstanceLabels,
+  integrationCountsDetail,
+  integrationCountsText,
   instanceLastSeen,
   instanceStateTone,
   instanceUptime,
@@ -158,8 +161,66 @@ describe('hub instance cells', () => {
   });
 });
 
+describe('hub instance integration counts', () => {
+  const counts = (over = {}) => ({
+    total: 0,
+    healthy: 0,
+    degraded: 0,
+    unhealthy: 0,
+    unknown: 0,
+    ...over,
+  });
+
+  it('shows the total and the non-healthy counts', () => {
+    expect(integrationCountsText(counts({ total: 2, healthy: 2 }))).toBe('2');
+    expect(
+      integrationCountsText(counts({ total: 4, healthy: 1, unhealthy: 1, degraded: 1, unknown: 1 }))
+    ).toBe('4 (1 unhealthy, 1 degraded, 1 unknown)');
+    expect(integrationCountsText(counts({ total: 3, healthy: 3 }), true)).toBe('3+');
+  });
+
+  it('is empty when the instance runs no integration or sent no counts', () => {
+    expect(integrationCountsText(counts())).toBe('');
+    expect(integrationCountsText(undefined)).toBe('');
+    expect(integrationCountsDetail(counts())).toBe('');
+  });
+
+  it('lists every count in the tooltip', () => {
+    expect(integrationCountsDetail(counts({ total: 3, healthy: 1, degraded: 1, unknown: 1 }))).toBe(
+      '1 healthy, 1 degraded, 0 unhealthy, 1 unknown'
+    );
+  });
+
+  it('maps instance IDs to labels, falling back to the ID', () => {
+    expect(
+      hubInstanceLabels(
+        list([instance({ id: 'a1', label: 'hub-a' }), instance({ id: 'b2', label: '' })])
+      )
+    ).toEqual({ a1: 'hub-a', b2: 'b2' });
+    expect(hubInstanceLabels(null)).toEqual({});
+  });
+});
+
 describe('scion-health-hub-instances', () => {
-  it('renders one row per instance with the seven columns', async () => {
+  it("shows each instance's integration counts, with a dash for none", async () => {
+    const root = await mount(
+      list([
+        instance({
+          id: 'a1',
+          integration_counts: { total: 2, healthy: 1, degraded: 0, unhealthy: 1, unknown: 0 },
+        }),
+        instance({ id: 'b2' }),
+      ])
+    );
+    const [a, b] = rows(root);
+    expect(cell(a, 'integrations')).toBe('2 (1 unhealthy)');
+    expect(a.querySelector('td.integrations')?.getAttribute('title')).toBe(
+      '1 healthy, 0 degraded, 1 unhealthy, 0 unknown'
+    );
+    expect(cell(b, 'integrations')).toBe('—');
+  });
+
+  it('renders one row per instance with the eight columns', async () => {
     const root = await mount(
       list([
         instance({ id: 'hub-a-0123', label: 'hub-a', serving: true }),
@@ -182,6 +243,7 @@ describe('scion-health-hub-instances', () => {
       'Uptime',
       'Status',
       'DB pool',
+      'Integrations',
       'Last seen',
     ]);
 

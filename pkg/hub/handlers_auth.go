@@ -1847,6 +1847,10 @@ func (s *Server) handleInviteRedeem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required", nil)
 		return
 	}
+	// Redeeming an invite joins the hub, which a federated caller does not.
+	if !requireProfileWriter(w, r) {
+		return
+	}
 
 	var req struct {
 		Code string `json:"code"`

@@ -587,7 +587,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 				s.autoAdvanceSenderReadState(r.Context(), senderUserID, storeMsg.ThreadID, storeMsg.ID)
 			}
 		}
-		s.events.PublishUserMessage(r.Context(), storeMsg, nil)
+		s.events.PublishUserMessage(r.Context(), storeMsg, nil, nil)
 
 		// Group conversations: list the dispatched agent and the posting
 		// user as participants, mirroring the native group path (listing

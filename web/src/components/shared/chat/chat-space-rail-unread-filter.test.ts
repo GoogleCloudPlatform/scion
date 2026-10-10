@@ -24,8 +24,6 @@
  * they're reading it — including when auto-advance marks it read.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { apiFetch } from '../../../client/api.js';
 import type { ChatSpace, ChatSpaceThread } from './chat-space-rail.js';

@@ -19,8 +19,6 @@
  * in the tab title.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import {

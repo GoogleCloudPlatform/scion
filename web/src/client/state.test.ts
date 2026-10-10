@@ -23,8 +23,6 @@
  * the thread refetch history and never show a typing indicator.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi } from 'vitest';
 import { StateManager } from './state.js';
 

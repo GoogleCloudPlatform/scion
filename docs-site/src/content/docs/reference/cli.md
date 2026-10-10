@@ -664,6 +664,15 @@ flag is local and offline, so it works without a Hub connection and from inside 
 The new generation's preamble names who requested the migration. While a migration is in progress,
 the agent's status message reads "migrating to generation N".
 
+An interrupted migration is not resumed. For example, if the Hub restarts in the middle of a
+migration, the Hub marks it failed and puts the agent in the `error` phase with the reason in its
+status message. Run `scion reincarnate` again with the same flags: the Hub does not keep a failed
+migration's patch flags. A migration that had not started yet fails within about 10 minutes with
+"reincarnation failed: did not start, so no changes were applied; run reincarnate again". None of
+its patch flags are applied. A migration that had started fails after 30 minutes without progress.
+The Hub restores the previous configuration unless the new generation had already been provisioned.
+Until the migration fails, a new request for the agent is refused with `409`.
+
 Reincarnation works for agents in clone-per-agent, shared-workspace (shared-plain), and
 Hub-managed workspaces. For a shared-workspace agent, the agent record, identity, and shared
 checkout are preserved, and sibling agents sharing the checkout are not restarted. Agents in
@@ -785,7 +794,8 @@ Manages the Scion workspace (Project).
     - `add <email>`: Register an existing GCP service account.
         - Flags: `--gcp-project <id>` (required, the GCP project ID), `--name <string>` (display name).
     - `mint`: Create a new service account in the Hub's GCP project (the account ID is prefixed with `scion-`). Flags: `--account-id`, `--name`.
-    - `list` (alias `ls`): List registered service accounts. Flags: `--json`.
+    - `list` (alias `ls`): List registered service accounts. The `MAPPED` column shows how many of the project's Kubernetes broker profiles map the account, out of those whose broker reported its mappings (for example `1/2`), or `-` when no profile reported. Flags: `--json`.
+    - `show <id|email|name>` (aliases `get`, `describe`, `status`): Show the account as seen from this project, in sections: identity, verification (with its age), mapping per Kubernetes broker profile (`mapped`, `not mapped` or `not reported`; mappings are owned by the broker and shown read-only), Workload Identity binding (always `unknown (not checked)`: the Hub does not read IAM policy here), the defaults that point at it (project, per-profile, Hub), the agents using it that you may see, and the next step (not verified, not mapped on a named profile, or nothing missing). The account is resolved as for `scion create --service-account`; use the id or the email for a name that contains `/`. Available in agent mode (the other `project service-accounts` subcommands are not). Flags: `--json`.
     - `verify <id>`: Verify that the Hub can impersonate the service account.
     - `remove <id>` (aliases `rm`, `delete`): Remove a service account registration.
     - `add`, `mint`, `verify` and `list` print the Hub's warnings to stderr, for example a service account that no Kubernetes broker profile of the project maps (see [early warning for unmapped service accounts](/scion/hosted/ha/kubernetes/#gcp-identity-mode-assign-workload-identity-mapping)). Warnings never change the exit status. With `--json`, `add`, `mint` and `verify` also include the warnings in the JSON document as `warnings`; `list --json` prints only the account list.
