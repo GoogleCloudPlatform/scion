@@ -1,0 +1,24 @@
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 1. Findings: 7. Errors: 0.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== WARN: func name seen through its value changes (runtime.FuncForPC, stack traces) ==
+  hub/move.go:31: example.com/fx/hub.Values is now example.com/fx/hub/sub.Values for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+
+== WARN: package-level var initialiser calls other packages ==
+  hub/move.go:16: upper = ... calls strings.Map: it now runs before every var initialiser and init() of hub, so state they set (environment, defaults, registries) is no longer visible to it, and its own effects happen earlier
+  hub/move.go:19: label = ... calls fmt.Sprint: it now runs before every var initialiser and init() of hub, so state they set (environment, defaults, registries) is no longer visible to it, and its own effects happen earlier
+  hub/move.go:25: kind = ... calls reflect.Value.Kind, reflect.ValueOf: it now runs before every var initialiser and init() of hub, so state they set (environment, defaults, registries) is no longer visible to it, and its own effects happen earlier
+
+== WARN: package-level var initialiser reads other packages' vars ==
+  hub/move.go:28: out = ... reads os.Stderr: it now runs before every initialiser of hub, so changes they make to those vars are no longer visible to it
+
+== WARN: reflect-visible type name changes (all users, not only moved files) ==
+  hub/move.go:11: hub.level becomes sub.level for %T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)
+
+== INFO: package-level var initialiser calls pure constructors only ==
+  hub/move.go:22: plain = ... calls fmt.Sprintf (allow-listed, with arguments that cannot run package code)

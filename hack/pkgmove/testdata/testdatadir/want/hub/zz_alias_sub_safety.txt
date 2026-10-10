@@ -1,0 +1,18 @@
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 2. Findings: 7. Errors: 0.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== WARN: func name seen through its value changes (runtime.FuncForPC, stack traces) ==
+  hub/move.go:3: example.com/fx/hub.Parse is now example.com/fx/hub/sub.Parse for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+
+== WARN: moved test reads package-relative files ==
+  hub/move_test.go:9: "testdata/golden.txt" is resolved against the package directory, which changes to hub/sub; move it as an asset (list testdata in the file set) or adjust the path
+  hub/move_test.go:19: os.Getwd() resolves paths from the test's working directory, which becomes hub/sub; check the paths derived from it
+  hub/move_test.go:22: "../go.mod" is resolved against the package directory, which moves one level deeper to hub/sub; adjust the path
+  hub/move_test.go:29: ".." is resolved against the package directory, which moves one level deeper to hub/sub; adjust the path
+  hub/move_test.go:37: findRepoDir() resolves paths from the test's working directory, which becomes hub/sub; check the paths derived from it
+  hub/testdata: tests move but the testdata directory stays; if the moved tests read it, list testdata (or its relevant files) in the file set
