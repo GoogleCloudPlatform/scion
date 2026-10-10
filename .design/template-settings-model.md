@@ -44,16 +44,16 @@ built-in defaults
                 < policy (only for the keys it controls; currently the only policy key: project telemetry on/off)
 ```
 
-This ladder governs agent config values (model, harness config, image, telemetry, limits). Environment-variable scopes keep their own order; see [`settings-precedence.md`](../docs-site/src/content/docs/reference/settings-precedence.md). A template's own `env:` block is part of its files and enters at the template tier; the hub does not copy it into the environment-variable scopes.
+This ladder governs agent config values (model, harness config, image, telemetry, limits). A template's own `env:` block is part of its files, but its rank among environment sources is set by the environment-variable order, not by this ladder. The hub does not copy it into the hub environment-variable scopes.
 
 - Defaults fill only what the template leaves unset. Policy overrides for its keys only.
 - Hub-supplied values travel as separate tiers (hub defaults, policy) and are never merged into the requester's inline config.
 - Known exceptions, unchanged by this model:
-  - Resources: their own interleaving with broker profile and harness overrides; see [`settings-precedence.md`](../docs-site/src/content/docs/reference/settings-precedence.md).
-  - Environment-variable scopes (hub, user, project secrets and env): their own order; see [`settings-precedence.md`](../docs-site/src/content/docs/reference/settings-precedence.md).
-  - Skills: merged by scope (hub < user < project < template) rather than replaced along this ladder.
+  - Resources: their own interleaving with broker profile and harness overrides.
+  - Environment variables and secrets (runtime_broker, hub, project and user scopes, and template and harness-config env): their own orders.
+  - Skills: merged by scope rather than replaced along this ladder, using the existing hub and broker merge rules. Hub-injected skills keep travelling in the requester's inline config, labelled by scope. This is an explicit exception to I4 and is not changed by this epic.
 
-  The release that applies the model updates that page (ptone/scion#4225).
+  See [`settings-precedence.md`](../docs-site/src/content/docs/reference/settings-precedence.md) for these orders; the release that applies this model updates that page (ptone/scion#4225).
 
 For example, a project telemetry policy beats a requester's explicit `--enable-telemetry` / `--disable-telemetry` flag.
 
