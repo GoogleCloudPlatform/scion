@@ -1111,7 +1111,7 @@ A `SCION_SERVER_*` variable on a Layer-1 key therefore does not override a row a
 
 - **Every start**: the replica that takes the seed advisory lock syncs `hub_settings` (Layer-1 sections only) from its bootstrap merge: `SCION_SEED_*`, `settings.yaml`, then `SCION_SERVER_*`. A missing section is created, a section no admin has edited (seeded) is re-synced when its content differs, and an edited (managed) section is not touched. A replica that finds the lock held skips the sync.
 - **DB wins**: once a section is seeded/written to DB, the DB row fully owns that section. Omitted fields within the section fall to compiled defaults, not to the file.
-- **Rollback safety**: older builds ignore the `hub_settings` table entirely and read files — rolling back reverts to pre-change behavior.
+- **Rollback safety**: older builds ignore the `hub_settings` table entirely and read files — rolling back reverts to pre-change behavior. This covers operational settings only: other stored data is rewritten one way, so a binary rollback after a newer build has started is unsupported. See [Hub Upgrade and Binary Rollback](/scion/reference/hub-upgrade-rollback/).
 
 ### Environment Override Warnings
 
