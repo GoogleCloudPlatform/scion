@@ -132,10 +132,10 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 	// message to the bus; persistence happens later in its deliverToUser
 	// callback, not at the caller. Every PublishUserMessage call that is
 	// not the event publish (see classifyPublishUserMessageCall) must be
-	// one of these, keyed by file:enclosing function.
+	// one of these, keyed by file, enclosing function and receiver
+	// expression, with the exact number of such calls expected (see
+	// checkProxyCalls).
 	// -------------------------------------------------------------------
-	// Each entry is file, enclosing function and receiver expression, with
-	// the exact number of such calls expected (see checkProxyCalls).
 	proxyExcluded := map[proxyCallKey]int{
 		// bp.PublishUserMessage: broker path to a user.
 		{"handlers_agent_messaging.go", "handleAgentOutboundMessage", "bp"}: 1,
