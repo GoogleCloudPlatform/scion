@@ -34,6 +34,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -85,7 +87,9 @@ func storageSnapshot(stor *mockStorage) map[string][]byte {
 	return out
 }
 
-func assertUnusableProvisionerAnswer(t *testing.T, rec *httptest.ResponseRecorder, wantReason string) {
+// assertUnusableProvisionerAnswer checks the finalize 422 answer and returns
+// its message.
+func assertUnusableProvisionerAnswer(t *testing.T, rec *httptest.ResponseRecorder, wantReason string) string {
 	t.Helper()
 	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
 	var resp struct {
@@ -97,6 +101,7 @@ func assertUnusableProvisionerAnswer(t *testing.T, rec *httptest.ResponseRecorde
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
 	assert.Equal(t, harnessConfigUnusableErrorCode, resp.Error.Code)
 	assert.Contains(t, resp.Error.Message, wantReason)
+	return resp.Error.Message
 }
 
 // Import refuses a harness-config whose provisioner block cannot provision an
@@ -108,16 +113,22 @@ func TestHarnessConfigImport_RejectsUnusableProvisioner(t *testing.T) {
 			stor := srv.GetStorage().(*mockStorage)
 			before := storageSnapshot(stor)
 
+			cfgYAML := "name: badcfg\nharness: claude\n" + tc.block
 			src := tarGzFilesServer(t, map[string]string{
-				"config.yaml": "name: badcfg\nharness: claude\n" + tc.block,
+				"config.yaml": cfgYAML,
 				"README.md":   "hello",
 			})
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/resources/import", ImportResourcesRequest{
 				Kind: "harness-config", Scope: "global", SourceURL: src.URL + "/configs/badcfg.tar.gz",
 			})
-			assertUnusableProvisionerAnswer(t, rec, tc.wantReason)
+			msg := assertUnusableProvisionerAnswer(t, rec, tc.wantReason)
+			entry, err := config.ParseHarnessConfigYAML([]byte(cfgYAML))
+			require.NoError(t, err)
+			want := harness.CheckProvisionerUsable("badcfg", nil, entry)
+			require.NotNil(t, want)
+			assert.Equal(t, want.PublicMessage(), msg, "import must answer byte-for-byte as finalize does")
 
-			_, err := s.GetHarnessConfigBySlug(context.Background(), "badcfg", store.HarnessConfigScopeGlobal, "")
+			_, err = s.GetHarnessConfigBySlug(context.Background(), "badcfg", store.HarnessConfigScopeGlobal, "")
 			assert.ErrorIs(t, err, store.ErrNotFound, "a refused import must not create a record")
 			assert.True(t, maps.EqualFunc(before, storageSnapshot(stor), bytes.Equal),
 				"a refused import must not write to storage")
@@ -171,11 +182,13 @@ func TestHarnessConfigReimport_RejectsUnusableProvisioner(t *testing.T) {
 
 // multiConfigSource is a source holding one usable harness-config and two
 // unusable ones. An import of it must refuse all three, name both unusable
-// configs in name order, and persist nothing.
+// configs in name order, and persist nothing. zzz-bad lives in directory
+// "000", which sorts before the others, so directory order differs from name
+// order and the name ordering of the refusals is checked on its own.
 var multiConfigSource = map[string]string{
+	"000/config.yaml":      "name: zzz-bad\nharness: claude\n" + unusableProvisionerCases[1].block,
 	"aaa-good/config.yaml": "name: aaa-good\nharness: claude\n",
 	"mmm-bad/config.yaml":  "name: mmm-bad\nharness: claude\n" + unusableProvisionerCases[0].block,
-	"zzz-bad/config.yaml":  "name: zzz-bad\nharness: claude\n" + unusableProvisionerCases[1].block,
 }
 
 // assertNamesBothUnusable checks that msg names both unusable configs, in name
