@@ -135,6 +135,11 @@ export default defineConfig([
       'e2e/client-main-stub.ts',
       'e2e/palette-focus.ts',
       'e2e/palette-typography.ts',
+      'e2e/*.spec.ts',
+      'e2e/groups/*.ts',
+      'e2e/harness/*.ts',
+      'e2e/roles/*.ts',
+      'e2e/terminal-coordinator/*.ts',
     ],
     './e2e/tsconfig.eslint.json'
   ),
