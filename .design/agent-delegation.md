@@ -283,15 +283,17 @@ Rules, applied in order. Each one fails closed. §8.4 collects every error code.
    and `details.reason` = `boundary_invalid` or `boundary_required`, exactly as UAT mint does
    (`writeTokenBoundaryError`, `handlers_auth.go:1036`). A well-formed project boundary naming a
    project that does not exist, or that the issuer cannot access, fails mint eligibility and
-   answers 403 `permission_not_eligible` with `details.reason = project_access_required`, so
-   project existence is not disclosed.
+   answers the uniform 403 `forbidden` with no reason, as UAT mint does for
+   `ErrUATProjectForbidden` (`handlers_auth.go:905-906`), so the response does not confirm whether
+   the project exists.
 5. **Ceiling.** Resolve and freeze the selectors.
    1. Every selector resolves through `ResolveSelector` (`permissions/registry.go:659`), its
       allowed boundaries include the boundary kind, and `CanMintSelector` returns `OK`. A non-OK
-      result answers 403 `permission_not_eligible`, with the `MintDenialReason` in
-      `details.reason`; a selector whose allowed boundaries exclude the boundary kind gives
-      `boundary_not_allowed`, and an unknown selector gives `unknown_selector`. This is the same eligibility function as UAT mint,
-      so an owner can delegate `agent.attach` on their own agents through relationship
+      result answers 403 `scope_violation` with `details.selector` and `details.reason` (the
+      `MintDenialReason`: `unknown_selector`, `boundary_not_allowed`, `flat_role_insufficient` or
+      `no_relationship_candidacy`), exactly as UAT mint does (`handlers_auth.go:895-904`). A
+      `project_access_required` refusal never appears in a response; it collapses to the uniform
+      403 `forbidden` of rule 4. This is the same eligibility function as UAT mint, so an owner can delegate `agent.attach` on their own agents through relationship
       eligibility.
    2. Every resulting permission ID is in the hub agent-delegation policy for that boundary kind,
       and is not narrowed away by the hub setting (§13). Otherwise 403
@@ -471,7 +473,8 @@ external code, goes to the decision record (§14.2).
 | 403 | `issuer_not_controller` | issuer is not the agent's owner or recorded ancestor, or lacks `agent.delegation.create` |
 | 403 | `issuer_project_access` | issuer not admitted to the agent's project (issuance, exchange) |
 | 403 | `issuer_invalid` | exchange: issuer suspended, deleted, federated or a reserved platform identity |
-| 403 | `permission_not_eligible` | issuance: `CanMintSelector` refused a selector, including an unknown selector, a boundary kind the selector does not allow, and a project boundary naming a project that does not exist or that the issuer cannot access; `details.reason` carries the `MintDenialReason` (`unknown_selector`, `boundary_not_allowed`, `project_access_required`, `flat_role_insufficient`, `no_relationship_candidacy`) |
+| 403 | `scope_violation` | issuance: `CanMintSelector` refused a selector; `details.selector` names it and `details.reason` carries the `MintDenialReason` (`unknown_selector`, `boundary_not_allowed`, `flat_role_insufficient`, `no_relationship_candidacy`) |
+| 403 | `forbidden` (no reason) | issuance: a project boundary naming a project that does not exist or that the issuer cannot access (the uniform response UAT mint gives, so existence is not confirmed) |
 | 403 | `permission_not_delegable` | a permission outside the hub agent-delegation policy, or an empty intersection after narrowing |
 | 403 | `outside_ceiling` | exchange: requested permissions exceed the grant ceiling |
 | 403 | `grant_inactive` | exchange: grant revoked, expired, or with an unsupported ceiling version |
