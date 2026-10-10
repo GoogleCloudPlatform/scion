@@ -6440,6 +6440,13 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 		return
 	}
 
+	// Remove the project's tree on the NFS workspace export
+	// (ptone/scion#2569) before the local-directory check below: the tree
+	// exists whether or not this broker has a local project directory, as
+	// for git projects whose agents run on Kubernetes. Best-effort: a
+	// failure is logged and never fails the delete.
+	s.cleanupNFSProjectTree(slug, r.URL.Query().Get("project_id"))
+
 	if _, err := os.Stat(projectPath); os.IsNotExist(err) {
 		// Already gone — idempotent success
 		w.WriteHeader(http.StatusNoContent)
@@ -6479,6 +6486,30 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 
 	s.agentLifecycleLog.Info("Removed hub-managed project directory", "slug", slug, "path", projectPath)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// cleanupNFSProjectTree removes the deleted project's directory on the NFS
+// workspace export, <MountRoot>/<shareID>/<SubPathRoot>/<projectID>, with its
+// workspace, shared-dirs, provisioning state, worktrees and agent
+// directories (scionrt.CleanupNFSProject, which guards the path). It does
+// nothing when this broker has no NFS workspace storage or the request
+// carries no project ID. A missing tree is success; any other failure is
+// logged and left for an operator, never returned.
+func (s *Server) cleanupNFSProjectTree(slug, projectID string) {
+	nfs := s.config.NFSConfig
+	if nfs == nil || len(nfs.Shares) == 0 {
+		return
+	}
+	if projectID == "" {
+		s.agentLifecycleLog.Warn("project delete without project_id: NFS workspace tree not removed", "slug", slug)
+		return
+	}
+	if err := scionrt.CleanupNFSProject(nfs, projectID); err != nil {
+		s.agentLifecycleLog.Error("failed to remove project's NFS workspace tree on delete",
+			"slug", slug, "project_id", projectID, "error", err)
+		return
+	}
+	s.agentLifecycleLog.Info("Removed project's NFS workspace tree (if present)", "slug", slug, "project_id", projectID)
 }
 
 // hubManagedProjectSharedDirsBase returns the shared-dir storage directory
