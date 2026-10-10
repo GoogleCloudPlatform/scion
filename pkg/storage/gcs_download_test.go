@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -141,20 +142,29 @@ func TestGCSDownloadSizeUnknownWhenDecompressed(t *testing.T) {
 // TestGCSDownloadNotFound: a missing object, or a pinned generation that no
 // longer exists by the time it is read, maps to ErrNotFound.
 func TestGCSDownloadNotFound(t *testing.T) {
-	for name, f := range map[string]*fakeGCSDownload{
-		"metadata missing":   {attrsStatus: http.StatusNotFound},
-		"generation removed": {attrsSize: "5", readStatus: http.StatusNotFound},
+	for _, tc := range []struct {
+		name string
+		f    *fakeGCSDownload
+		// wantGens is the generation each read asked for: none when the
+		// metadata is missing, one pinned read otherwise.
+		wantGens []string
+	}{
+		{name: "metadata missing", f: &fakeGCSDownload{attrsStatus: http.StatusNotFound}},
+		{name: "generation removed", f: &fakeGCSDownload{attrsSize: "5", readStatus: http.StatusNotFound}, wantGens: []string{"7"}},
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
-			s := newFakeGCS(t, f.serve(t))
+			s := newFakeGCS(t, tc.f.serve(t))
 			rc, _, err := s.Download(ctx, "obj")
 			if rc != nil {
 				_ = rc.Close()
 			}
 			if !errors.Is(err, ErrNotFound) {
 				t.Errorf("err = %v, want ErrNotFound", err)
+			}
+			if g := tc.f.gens(); !slices.Equal(g, tc.wantGens) {
+				t.Errorf("read generations = %q, want %q", g, tc.wantGens)
 			}
 		})
 	}

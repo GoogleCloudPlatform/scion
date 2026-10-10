@@ -232,7 +232,12 @@ func downloadSize(ra storage.ReaderObjectAttrs) int64 {
 	return ra.Size
 }
 
-// Download downloads data from the specified path.
+// Download downloads data from the specified path. The read is pinned to
+// the generation the object attributes describe, and the returned Object's
+// Size is the number of bytes the reader yields (-1 when unknown). On a
+// bucket without versioning, an overwrite between reading the attributes and
+// starting the read returns ErrNotFound rather than mixing one generation's
+// size with another's bytes.
 func (s *GCSStorage) Download(ctx context.Context, objectPath string) (io.ReadCloser, *Object, error) {
 	if objectPath == "" {
 		return nil, nil, ErrInvalidPath
