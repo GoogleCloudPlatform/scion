@@ -551,8 +551,9 @@ func TestAgentTCPLoopbackOnly(t *testing.T) {
 	}
 }
 
-// TestAgentTCPDialsOnlyLoopback: the only address the target dials is
-// 127.0.0.1:<granted port>.
+// TestAgentTCPDialsOnlyLoopback: the target dials 127.0.0.1:<granted
+// port>; an error other than connection refused is not retried on ::1
+// (see TestAgentTCPFallbackRule).
 func TestAgentTCPDialsOnlyLoopback(t *testing.T) {
 	key := newTestKey(t, "k1")
 	h := newFakeHub(t, key.public)

@@ -100,7 +100,7 @@ func TestSSEHandler_AgentMessagesFollowHistoryRule(t *testing.T) {
 
 					for _, msg := range messages {
 						msg.CreatedAt = time.Unix(0, 0)
-						pub.PublishUserMessage(ctx, msg, nil)
+						pub.PublishUserMessage(ctx, msg, nil, nil)
 					}
 					synctest.Wait()
 					cancel()

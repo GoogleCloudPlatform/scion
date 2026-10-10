@@ -125,7 +125,7 @@ func TestChannelEventPublisher_UserMessageCreatedAtIsInstantCorrect(t *testing.T
 				CreatedAt:   createdAt,
 			}
 
-			pub.PublishUserMessage(context.Background(), msg, nil)
+			pub.PublishUserMessage(context.Background(), msg, nil, nil)
 
 			var evtData UserMessageEvent
 			select {
