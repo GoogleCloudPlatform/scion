@@ -1467,6 +1467,7 @@ type Server struct {
 	// no relay runs); conduitAuthzMetrics is its counter.
 	conduitAuthz        atomic.Pointer[conduitStreamAuthz]
 	conduitAuthzMetrics atomic.Pointer[conduitStreamAuthzMetrics]
+	conduitBrokerRevoke atomic.Pointer[conduitBrokerRevoker] // broker session re-check (conduit_broker_revoke.go)
 	// conduitAuthzBindMu guards conduitAuthzUnbind, which releases the
 	// re-check's binding to the current event publisher.
 	conduitAuthzBindMu     sync.Mutex
@@ -3884,6 +3885,7 @@ func (s *Server) SetEventPublisher(ep EventPublisher) {
 	s.mu.Unlock()
 	// A running conduit stream re-check follows the new publisher.
 	s.bindConduitAuthzEvents()
+	s.bindConduitBrokerRevokeEvents()
 }
 
 // SetCommandBus sets the inter-node dispatch signal bus. Nil is safe (treated

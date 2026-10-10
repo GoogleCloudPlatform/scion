@@ -584,6 +584,7 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 
 	// Log successful join
 	LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), true, "")
+	s.conduitBrokerCredentialChanged(req.BrokerID)
 
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -682,6 +683,7 @@ func (s *Server) handleBrokerRotateSecret(w http.ResponseWriter, r *http.Request
 			"failed to rotate secret: "+err.Error(), nil)
 		return
 	}
+	s.conduitBrokerCredentialChanged(brokerID)
 
 	// Log audit event
 	actorID := ""

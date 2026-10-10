@@ -227,6 +227,7 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 	if err != nil {
 		return err
 	}
+	stopAuthz = s.startConduitBrokerRevoke(ctx, opts.Clock, interval, stopAuthz)
 	// Published before Start: the internal listener is already serving and
 	// the self-check probe must reach this relay's internal handler.
 	if !s.conduit.CompareAndSwap(nil, rt) {
