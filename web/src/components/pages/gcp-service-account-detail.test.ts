@@ -82,7 +82,7 @@ function statusView(overrides: Partial<GCPServiceAccountStatus> = {}): GCPServic
         brokerName: 'b',
         profile: 'gke-2',
         state: 'unknown',
-        unknownReason: 'incomplete',
+        unknownReason: 'report_incomplete',
         incomplete: true,
         incompleteReason: 'list_failed',
         reportedAt: '2026-10-10T11:58:00Z',
@@ -92,7 +92,7 @@ function statusView(overrides: Partial<GCPServiceAccountStatus> = {}): GCPServic
         brokerName: 'b',
         profile: 'gke-stale',
         state: 'unknown',
-        unknownReason: 'stale',
+        unknownReason: 'report_stale',
         reportedAt: '2026-10-10T11:00:00Z',
       },
       {
@@ -100,7 +100,7 @@ function statusView(overrides: Partial<GCPServiceAccountStatus> = {}): GCPServic
         brokerName: 'b',
         profile: 'gke-pre4',
         state: 'unknown',
-        unknownReason: 'report_unsupported',
+        unknownReason: 'report_old_version',
       },
       { brokerId: 'b1', brokerName: 'b', profile: 'gke-3', state: 'not_mapped', ambiguous: true },
       { brokerId: 'b1', brokerName: 'b', profile: 'gke-old', state: 'mapped' },
@@ -211,7 +211,7 @@ describe('GCP service account detail: status sections', () => {
     ).toContain('stale (reported 1 hour ago)');
     expect(
       root.querySelector('tr[data-profile="gke-pre4"] [data-note="unknown"]')!.textContent
-    ).toContain('does not report enough');
+    ).toContain('too old a version to tell');
 
     const ambiguous = root.querySelector('tr[data-profile="gke-3"]')!;
     expect(ambiguous.querySelector('[data-note="ambiguous"]')).not.toBeNull();

@@ -1521,7 +1521,10 @@ export interface GCPServiceAccountProfileMapping {
   incomplete?: boolean;
   incompleteReason?: string;
   ambiguous?: boolean;
-  /** Why the state is 'unknown': 'stale', 'incomplete' or 'report_unsupported'. */
+  /**
+   * Why the state is 'unknown': 'report_missing', 'report_incomplete',
+   * 'report_old_version' or 'report_stale'.
+   */
   unknownReason?: string;
 }
 

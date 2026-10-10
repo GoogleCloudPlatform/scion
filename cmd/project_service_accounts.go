@@ -375,12 +375,14 @@ func saMappingText(m hubclient.GCPServiceAccountProfileMapping, state string) st
 	var notes []string
 	switch m.UnknownReason {
 	case "":
-	case "stale":
+	case "report_stale":
 		notes = append(notes, "report stale")
-	case "incomplete":
+	case "report_incomplete":
 		// Covered by the incomplete note below.
-	case "report_unsupported":
-		notes = append(notes, "the broker does not report enough to tell")
+	case "report_old_version":
+		notes = append(notes, "the broker's report is too old a version to tell")
+	case "report_missing":
+		notes = append(notes, "no stored report from the broker")
 	default:
 		notes = append(notes, strings.ReplaceAll(m.UnknownReason, "_", " "))
 	}

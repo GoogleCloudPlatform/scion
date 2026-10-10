@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -67,6 +68,7 @@ func createSAStatusAgent(t *testing.T, s store.Store, projectID, name, saID stri
 func authoritativeProfile(name string, gsas ...string) store.BrokerProfile {
 	p := k8sProfile(name, true, gsas...)
 	p.MappingsComplete = true
+	p.MappingsReportVersion = api.BrokerSAReportVersion
 	at := time.Now().Add(-time.Minute)
 	p.MappingsReportedAt = &at
 	return p
@@ -155,6 +157,7 @@ func TestGCPSAStatus_MappingDetails(t *testing.T) {
 	explicit := store.BrokerProfile{
 		Name: "k8s-explicit", Type: "kubernetes", Available: true,
 		MappingsReported: true, MappingsComplete: true, MappingsReportedAt: &reportedAt,
+		MappingsReportVersion: api.BrokerSAReportVersion,
 		ServiceAccountMappings: []store.BrokerProfileSAMapping{
 			{GSA: mappedGSA, KSA: "worker-ksa", Namespace: "agents", Source: "mapped"},
 		},
@@ -162,6 +165,7 @@ func TestGCPSAStatus_MappingDetails(t *testing.T) {
 	discovered := store.BrokerProfile{
 		Name: "k8s-discovered", Type: "kubernetes", Available: true,
 		MappingsReported: true, MappingsComplete: true, MappingsReportedAt: &reportedAt,
+		MappingsReportVersion: api.BrokerSAReportVersion,
 		ServiceAccountMappings: []store.BrokerProfileSAMapping{
 			// Stored as reported; matched case-insensitively.
 			{GSA: "MAPPED@p.iam.gserviceaccount.com", KSA: "found-ksa", Namespace: "team", Source: "discovered"},
@@ -171,10 +175,11 @@ func TestGCPSAStatus_MappingDetails(t *testing.T) {
 		Name: "k8s-incomplete", Type: "kubernetes", Available: true,
 		MappingsReported: true, MappingsIncompleteReason: "list_failed", MappingsReportedAt: &reportedAt,
 	}
-	staleAt := time.Now().Add(-gcpSAReportFreshFor - time.Minute)
+	staleAt := time.Now().Add(-profileSAReportFreshFor - time.Minute)
 	stale := store.BrokerProfile{
 		Name: "k8s-stale", Type: "kubernetes", Available: true,
 		MappingsReported: true, MappingsComplete: true, MappingsReportedAt: &staleAt,
+		MappingsReportVersion: api.BrokerSAReportVersion,
 	}
 	// A broker that predates completeness reporting: reported, never complete,
 	// no reason.
@@ -186,7 +191,8 @@ func TestGCPSAStatus_MappingDetails(t *testing.T) {
 	ambiguous := store.BrokerProfile{
 		Name: "k8s-ambiguous", Type: "kubernetes", Available: true,
 		MappingsReported: true, MappingsComplete: true, MappingsReportedAt: &reportedAt,
-		AmbiguousGSAs: []string{mappedGSA},
+		MappingsReportVersion: api.BrokerSAReportVersion,
+		AmbiguousGSAs:         []string{mappedGSA},
 	}
 	addProviderBroker(t, s, projectID, "b", explicit, discovered, incomplete, ambiguous, stale, older, authoritative,
 		k8sProfile("k8s-silent", false))
@@ -222,19 +228,19 @@ func TestGCPSAStatus_MappingDetails(t *testing.T) {
 
 	got = byProfile["k8s-incomplete"]
 	assert.Equal(t, GCPSAMappingUnknown, got.State, "an incomplete report cannot show absence")
-	assert.Equal(t, GCPSAUnknownIncomplete, got.UnknownReason)
+	assert.Equal(t, GCPSAUnknownReportIncomplete, got.UnknownReason)
 	assert.True(t, got.Incomplete)
 	assert.Equal(t, "list_failed", got.IncompleteReason)
 	assert.Empty(t, got.KubernetesServiceAccount)
 
 	got = byProfile["k8s-stale"]
 	assert.Equal(t, GCPSAMappingUnknown, got.State)
-	assert.Equal(t, GCPSAUnknownStale, got.UnknownReason)
+	assert.Equal(t, GCPSAUnknownReportStale, got.UnknownReason)
 	require.NotNil(t, got.ReportedAt, "the age is shown with a stale report")
 
 	got = byProfile["k8s-older"]
 	assert.Equal(t, GCPSAMappingUnknown, got.State)
-	assert.Equal(t, GCPSAUnknownReportUnsupported, got.UnknownReason)
+	assert.Equal(t, GCPSAUnknownReportOldVersion, got.UnknownReason)
 	assert.False(t, got.Incomplete, "an older broker's report has no incomplete reason to show")
 
 	got = byProfile["k8s-ambiguous"]
@@ -251,6 +257,46 @@ func TestGCPSAStatus_MappingDetails(t *testing.T) {
 	require.NoError(t, err)
 	for _, key := range []string{"source", "reportedAt", "incomplete", "incompleteReason", "ambiguous", "unknownReason", "kubernetesServiceAccount", "namespace"} {
 		assert.NotContains(t, string(raw), `"`+key+`"`)
+	}
+}
+
+// The authority conditions are the dispatch precheck's: a stored report that
+// is complete, at api.BrokerSAReportVersion or later, and fresh.
+func TestGCPSAReportUnknownReason(t *testing.T) {
+	now := time.Now()
+	fresh := now.Add(-time.Minute)
+	stale := now.Add(-profileSAReportFreshFor - time.Second)
+	authoritative := kubernetesProfileMappings{
+		reported: true, storedReport: true, complete: true, version: api.BrokerSAReportVersion, reportedAt: &fresh,
+	}
+	with := func(f func(*kubernetesProfileMappings)) kubernetesProfileMappings {
+		p := authoritative
+		f(&p)
+		return p
+	}
+	cases := []struct {
+		name string
+		p    kubernetesProfileMappings
+		want string
+	}{
+		{"authoritative", authoritative, ""},
+		{"live settings without a stored report", kubernetesProfileMappings{reported: true}, GCPSAUnknownReportMissing},
+		{"incomplete with a reason", with(func(p *kubernetesProfileMappings) {
+			p.complete, p.incompleteReason = false, "list_failed"
+		}), GCPSAUnknownReportIncomplete},
+		{"older broker: never complete, no reason", with(func(p *kubernetesProfileMappings) {
+			p.complete, p.version = false, 0
+		}), GCPSAUnknownReportOldVersion},
+		{"complete but before the report version", with(func(p *kubernetesProfileMappings) {
+			p.version = api.BrokerSAReportVersion - 1
+		}), GCPSAUnknownReportOldVersion},
+		{"stale", with(func(p *kubernetesProfileMappings) { p.reportedAt = &stale }), GCPSAUnknownReportStale},
+		{"no report time", with(func(p *kubernetesProfileMappings) { p.reportedAt = nil }), GCPSAUnknownReportStale},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, gcpSAReportUnknownReason(tc.p, now))
+		})
 	}
 }
 
@@ -506,6 +552,8 @@ func TestGCPSAStatus_EmbeddedBrokerDetailsFromRecord(t *testing.T) {
 	reportedAt := time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
 	b := addProviderBroker(t, s, projectID, "embedded", store.BrokerProfile{
 		Name: "gke", Type: "kubernetes", MappingsReported: true, MappingsComplete: true, MappingsReportedAt: &reportedAt,
+		MappingsReportVersion: api.BrokerSAReportVersion,
+		MappingsReportVersion: api.BrokerSAReportVersion,
 		ServiceAccountMappings: []store.BrokerProfileSAMapping{
 			{GSA: mappedGSA, KSA: "worker-ksa", Namespace: "agents", Source: "mapped"},
 			{GSA: unmappedGSA, KSA: "stale-ksa", Namespace: "agents", Source: "mapped"},

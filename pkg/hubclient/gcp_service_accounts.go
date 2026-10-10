@@ -228,8 +228,9 @@ type GCPServiceAccountProfileMapping struct {
 	// Ambiguous is true when more than one Kubernetes ServiceAccount is
 	// annotated with the account; the broker refuses it.
 	Ambiguous bool `json:"ambiguous,omitempty"`
-	// UnknownReason says why State is "unknown" ("stale", "incomplete" or
-	// "report_unsupported"): the report cannot show the account is absent.
+	// UnknownReason says why State is "unknown" ("report_missing",
+	// "report_incomplete", "report_old_version" or "report_stale"): the
+	// report cannot show the account is absent.
 	UnknownReason string `json:"unknownReason,omitempty"`
 }
 

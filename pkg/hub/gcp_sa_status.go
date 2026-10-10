@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -52,25 +53,23 @@ const (
 )
 
 // Reasons a mapping state is "unknown": the profile's report cannot show
-// that an account is absent.
+// that an account is absent. The shared vocabulary of the dispatch precheck
+// (ptone/scion#3329).
 const (
-	// GCPSAUnknownStale: the report is older than gcpSAReportFreshFor.
-	GCPSAUnknownStale = "stale"
-	// GCPSAUnknownIncomplete: the broker said the report may not list every
-	// account (IncompleteReason says why).
-	GCPSAUnknownIncomplete = "incomplete"
-	// GCPSAUnknownReportUnsupported: the broker does not report enough to
-	// tell (it predates completeness reporting).
-	GCPSAUnknownReportUnsupported = "report_unsupported"
+	// GCPSAUnknownReportMissing: there is no stored report to judge (the
+	// embedded broker's live settings alone).
+	GCPSAUnknownReportMissing = "report_missing"
+	// GCPSAUnknownReportIncomplete: the broker said the report may not list
+	// every account (IncompleteReason says why).
+	GCPSAUnknownReportIncomplete = "report_incomplete"
+	// GCPSAUnknownReportOldVersion: the report is older than
+	// api.BrokerSAReportVersion, from a broker whose report may not match
+	// what dispatch would use.
+	GCPSAUnknownReportOldVersion = "report_old_version"
+	// GCPSAUnknownReportStale: the report is older than
+	// profileSAReportFreshFor.
+	GCPSAUnknownReportStale = "report_stale"
 )
-
-// gcpSAReportFreshFor is how long a profile's mapping report is authoritative
-// after the hub last stored or confirmed it.
-//
-// TODO(ptone/scion#3329 phase 4b): replace with profileSAReportFreshFor from
-// pkg/hub/gcp_identity_dispatch_precheck.go once it lands, through one shared
-// "complete, fresh and versioned" helper the dispatch precheck also calls.
-const gcpSAReportFreshFor = 15 * time.Minute
 
 // Workload Identity binding states. Only "unknown" is produced today: the hub
 // does not read IAM policy for this view, and the binding is never reported
@@ -158,8 +157,9 @@ type GCPServiceAccountProfileMapping struct {
 	// is annotated with the account and none is mapped explicitly; the
 	// broker refuses it at dispatch, so State is not "mapped".
 	Ambiguous bool `json:"ambiguous,omitempty"`
-	// UnknownReason says why State is "unknown": GCPSAUnknownStale,
-	// GCPSAUnknownIncomplete or GCPSAUnknownReportUnsupported.
+	// UnknownReason says why State is "unknown": GCPSAUnknownReportMissing,
+	// GCPSAUnknownReportIncomplete, GCPSAUnknownReportOldVersion or
+	// GCPSAUnknownReportStale.
 	UnknownReason string `json:"unknownReason,omitempty"`
 }
 
@@ -299,20 +299,27 @@ func gcpSAVerificationOf(sa *store.GCPServiceAccount) GCPServiceAccountVerificat
 }
 
 // gcpSAReportUnknownReason returns why a reported profile's report is not
-// authoritative for an account it does not map at now, or "" when it is:
-// the report is complete and fresh. Only then is "not mapped" shown.
+// authoritative for an account it does not map at now, or "" when it is.
+// The conditions are the dispatch precheck's (kubernetesIdentityNotMapped):
+// a stored report that is complete, at api.BrokerSAReportVersion or later,
+// and at most profileSAReportFreshFor old. Only then is "not mapped" shown.
 //
-// TODO(ptone/scion#3329 phase 4b): also require MappingsReportVersion >=
-// api.BrokerSAReportVersion once 4b adds them; a report without the
-// version is then GCPSAUnknownReportUnsupported.
+// The shared decision helper of ptone/scion#3329 phase 4c replaces this
+// (ptone/scion#4360).
 func gcpSAReportUnknownReason(p kubernetesProfileMappings, now time.Time) string {
 	switch {
-	case !p.complete && p.incompleteReason == "":
-		return GCPSAUnknownReportUnsupported
+	case !p.storedReport:
+		return GCPSAUnknownReportMissing
+	case !p.complete && p.incompleteReason != "":
+		return GCPSAUnknownReportIncomplete
+	case p.version < api.BrokerSAReportVersion:
+		// Includes a broker that predates completeness reporting: never
+		// complete and no reason.
+		return GCPSAUnknownReportOldVersion
 	case !p.complete:
-		return GCPSAUnknownIncomplete
-	case p.reportedAt == nil || now.Sub(*p.reportedAt) > gcpSAReportFreshFor:
-		return GCPSAUnknownStale
+		return GCPSAUnknownReportIncomplete
+	case p.reportedAt == nil || now.Sub(*p.reportedAt) > profileSAReportFreshFor:
+		return GCPSAUnknownReportStale
 	}
 	return ""
 }

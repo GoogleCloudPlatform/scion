@@ -89,9 +89,16 @@ type kubernetesProfileMappings struct {
 	// Kubernetes ServiceAccount, namespace and source when the broker sent
 	// them (ptone/scion#3329 phase 4). A GSA in gsas may have no entry.
 	entries map[string]store.BrokerProfileSAMapping
+	// storedReport is true when the broker's stored report backs the row's
+	// completeness, version and report time. False for the embedded
+	// broker's live settings without a stored report.
+	storedReport bool
 	// complete is the stored report's MappingsComplete: it lists every GSA
 	// the profile can serve.
 	complete bool
+	// version is the stored report's MappingsReportVersion; zero from a
+	// broker that predates api.BrokerSAReportVersion.
+	version int
 	// incompleteReason is the broker's code for why the report may not list
 	// every usable GSA. Empty when complete, and for a report from a broker
 	// that predates completeness reporting (which reads as before).
@@ -216,7 +223,9 @@ func (p *kubernetesProfileMappings) setStoredReport(bp store.BrokerProfile) {
 	if !bp.MappingsReported {
 		return
 	}
+	p.storedReport = true
 	p.complete = bp.MappingsComplete
+	p.version = bp.MappingsReportVersion
 	if !bp.MappingsComplete {
 		p.incompleteReason = bp.MappingsIncompleteReason
 	}

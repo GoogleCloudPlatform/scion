@@ -69,14 +69,16 @@ export function incompleteReasonText(reason: string | undefined): string {
  */
 export function unknownReasonText(m: GCPServiceAccountProfileMapping): string {
   switch (m.unknownReason) {
-    case 'stale': {
+    case 'report_stale': {
       const age = ago(m.reportedAt);
       return age ? `the broker's report is stale (reported ${age})` : "the broker's report is stale";
     }
-    case 'incomplete':
+    case 'report_incomplete':
       return `the broker's report is incomplete: ${incompleteReasonText(m.incompleteReason)}`;
-    case 'report_unsupported':
-      return 'the broker does not report enough to tell';
+    case 'report_old_version':
+      return "the broker's report is too old a version to tell";
+    case 'report_missing':
+      return 'there is no stored report from the broker';
     default:
       return m.unknownReason ? m.unknownReason.replace(/_/g, ' ') : 'the report is not conclusive';
   }
