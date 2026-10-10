@@ -1511,7 +1511,7 @@ export interface GCPServiceAccountProfileMapping {
   brokerId: string;
   brokerName: string;
   profile: string;
-  state: GCPSAMappingState | string;
+  state: GCPSAMappingState;
   kubernetesServiceAccount?: string;
   namespace?: string;
   /** 'mapped' (explicit mapping) or 'discovered' (annotation discovery). */
@@ -1535,7 +1535,7 @@ export interface GCPServiceAccountProfileMapping {
 export interface GCPServiceAccountStatus {
   account: { id: string; displayName?: string; scope: string; email: string };
   verification: {
-    status: GCPVerificationStatus | string;
+    status: GCPVerificationStatus;
     verified: boolean;
     verifiedAt?: string;
     error?: string;

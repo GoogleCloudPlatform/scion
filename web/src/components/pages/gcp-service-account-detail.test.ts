@@ -265,13 +265,15 @@ describe('GCP service account detail: status sections', () => {
     });
     const root = await statusRoot(await mount('/settings/service-accounts/sa-1?project=proj-1'));
     expect(sectionText(root, 'verification')).toContain('Unverified');
-    expect(sectionText(root, 'mappings')).toContain('No Kubernetes broker profiles in this project.');
+    expect(sectionText(root, 'mappings')).toContain(
+      'No Kubernetes broker profiles in this project.'
+    );
     expect(sectionText(root, 'defaults')).toContain('None');
     expect(sectionText(root, 'agents')).toContain('Agents using it (0) None');
     expect(sectionText(root, 'next-step')).toContain('Not verified.');
   });
 
-  it('says the sections are project-relative and requests no status without ?project=', async () => {
+  it('without ?project=, notes the sections are project-relative and asks no status', async () => {
     routes({ '/api/v1/gcp-service-accounts/sa-1': () => json(row()) });
     const el = await mount('/settings/service-accounts/sa-1');
 
@@ -285,7 +287,9 @@ describe('GCP service account detail: status sections', () => {
     routes({
       '/api/v1/projects/proj-1/gcp-service-accounts/sa-p/status': () =>
         json(
-          statusView({ account: { id: 'sa-p', displayName: 'Worker', scope: 'project', email: EMAIL } })
+          statusView({
+            account: { id: 'sa-p', displayName: 'Worker', scope: 'project', email: EMAIL },
+          })
         ),
       // A capability here must still not produce a button: the nested GET is
       // not where capabilities come from.
@@ -309,7 +313,7 @@ describe('GCP service account detail: status sections', () => {
     ['a server error', 500],
     ['an older hub without the endpoint', 404],
   ] as const) {
-    it(`shows the status error, not "not found", when the status view answers ${name}`, async () => {
+    it(`shows the status error, not "not found", on a status answer of ${name}`, async () => {
       // A project-scoped id from the project settings list. The flat GET would
       // answer 404 for it; the nested GET must not be used to route around a
       // failed status read.

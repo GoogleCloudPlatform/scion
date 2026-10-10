@@ -71,7 +71,9 @@ export function unknownReasonText(m: GCPServiceAccountProfileMapping): string {
   switch (m.unknownReason) {
     case 'report_stale': {
       const age = ago(m.reportedAt);
-      return age ? `the broker's report is stale (reported ${age})` : "the broker's report is stale";
+      return age
+        ? `the broker's report is stale (reported ${age})`
+        : "the broker's report is stale";
     }
     case 'report_incomplete':
       return `the broker's report is incomplete: ${incompleteReasonText(m.incompleteReason)}`;
@@ -230,8 +232,8 @@ export class ScionGCPServiceAccountStatus extends LitElement {
           ${m.ambiguous
             ? html`<div class="note" data-note="ambiguous">
                 <sl-icon name="exclamation-triangle"></sl-icon>
-                Ambiguous: more than one Kubernetes service account is annotated with this account, so
-                the broker refuses it.
+                Ambiguous: more than one Kubernetes service account is annotated with this account,
+                so the broker refuses it.
               </div>`
             : nothing}
           ${unknown
