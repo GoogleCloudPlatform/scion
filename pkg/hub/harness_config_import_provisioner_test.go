@@ -370,3 +370,62 @@ func TestHarnessConfigReimport_RejectsUnusableTargetWithSiblings(t *testing.T) {
 		assert.ErrorIs(t, err, store.ErrNotFound, "reimport must not import %s", slug)
 	}
 }
+
+// doStreamRequest issues an authenticated request that opts into the NDJSON
+// import stream.
+func doStreamRequest(t *testing.T, srv *Server, method, path string, body interface{}) *httptest.ResponseRecorder {
+	t.Helper()
+	bodyBytes, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest(method, path, bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/x-ndjson")
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// A refused config in the import stream yields an error event carrying the
+// harness_config_unusable code and the same public message as the
+// non-streaming 422 answer (ptone/scion#4214).
+func TestHarnessConfigImportStream_RefusalCarriesCode(t *testing.T) {
+	srv, s := testInstallSourceServer(t)
+	src := tarGzFilesServer(t, multiConfigSource)
+	importReq := ImportResourcesRequest{
+		Kind: "harness-config", Scope: "global", SourceURL: src.URL + "/configs/multi.tar.gz",
+	}
+
+	plain := doRequest(t, srv, http.MethodPost, "/api/v1/resources/import", importReq)
+	wantMsg := assertUnusableProvisionerAnswer(t, plain, `harness-config "zzz-bad"`)
+
+	hc := installClaudeViaHub(t, srv, s, installPinnedClaudeURL)
+	badClaude := tarGzFilesServer(t, map[string]string{
+		"config.yaml": "name: claude\nharness: claude\n" + unusableProvisionerCases[0].block,
+	})
+
+	for _, tc := range []struct {
+		name, path string
+		body       interface{}
+		wantMsg    string
+	}{
+		{"import", "/api/v1/resources/import", importReq, wantMsg},
+		{"reimport", "/api/v1/harness-configs/" + hc.ID + "/reimport",
+			map[string]interface{}{"sourceUrl": badClaude.URL + "/configs/claude.tar.gz"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doStreamRequest(t, srv, http.MethodPost, tc.path, tc.body)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			events := parseImportEvents(t, rec.Body.String())
+			require.NotEmpty(t, events)
+			last := events[len(events)-1]
+			require.Equal(t, ImportEventError, last.Type, rec.Body.String())
+			assert.Equal(t, harnessConfigUnusableErrorCode, last.Code)
+			if tc.wantMsg != "" {
+				assert.Equal(t, tc.wantMsg, last.Reason, "the stream must carry the non-streaming public message")
+			} else {
+				assert.Contains(t, last.Reason, unusableProvisionerCases[0].wantReason)
+			}
+		})
+	}
+}

@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -417,8 +418,19 @@ func (s *Server) streamImport(w http.ResponseWriter, run func(progress importPro
 		// The import failed before reaching the per-resource phase (e.g. fetch
 		// failure or nothing found); report it in-band since the status line is
 		// already committed.
-		progress(ResourceImportEvent{Type: ImportEventError, Reason: err.Error()})
+		progress(importErrorEvent(err))
 	}
+}
+
+// importErrorEvent builds the in-band error event for a failed streaming
+// import. A refused harness-config carries the same error code and public
+// message as the non-streaming 422 answer (ptone/scion#4214).
+func importErrorEvent(err error) ResourceImportEvent {
+	var ierr *unusableProvisionerImportError
+	if errors.As(err, &ierr) {
+		return ResourceImportEvent{Type: ImportEventError, Code: harnessConfigUnusableErrorCode, Reason: ierr.publicMessage()}
+	}
+	return ResourceImportEvent{Type: ImportEventError, Reason: err.Error()}
 }
 
 // authorizeProjectImport checks that the caller may import resources into the

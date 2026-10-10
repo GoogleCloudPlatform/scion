@@ -92,6 +92,10 @@ type ResourceImportEvent struct {
 	Name string `json:"name,omitempty"`
 	// Reason carries the failure/skip explanation on failed/skipped/error.
 	Reason string `json:"reason,omitempty"`
+	// Code is the machine-readable error code on an error event, when the
+	// failure has one: harness_config_unusable for a refused harness-config,
+	// matching the non-streaming import answer.
+	Code string `json:"code,omitempty"`
 	// Completed is the monotonic count of finished resources (any terminal
 	// status) at the time of the event; set on completed/failed.
 	Completed int `json:"completed,omitempty"`
