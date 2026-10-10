@@ -1907,9 +1907,7 @@ export class ScionChatMessage extends LitElement {
       pre.setAttribute('data-highlighted', 'true');
 
       // Create a readonly code editor and replace the <pre> in-place.
-      const editor = document.createElement(
-        'scion-code-editor'
-      ) as import('../code-editor.js').ScionCodeEditor;
+      const editor = document.createElement('scion-code-editor');
       editor.content = content;
       editor.language = language;
       editor.readonly = true;

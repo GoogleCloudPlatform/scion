@@ -160,6 +160,7 @@ const USED_ICONS = [
   'moon',
   'paperclip',
   'pencil',
+  'pencil-square',
   'people',
   'person',
   'person-check',

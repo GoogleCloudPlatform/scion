@@ -15,6 +15,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -109,10 +110,12 @@ return an error instead of blocking.`,
 			autoConfirm = true
 		}
 
-		// Enable debug mode if --debug flag is set
-		if debugMode {
-			util.EnableDebug()
-		}
+		// Enable debug mode if --debug flag is set, and in agent mode
+		// ignore an inherited SCION_DEBUG (see configureDebugOutput).
+		// The CLI mode depends only on the environment and global
+		// settings, so it is resolved once here and reused below.
+		mode := resolveMode()
+		configureDebugOutput(mode, debugMode)
 
 		// Detect agent container context without a reachable Hub endpoint.
 		// SCION_HOST_UID is set by the runtime when launching agent containers.
@@ -120,6 +123,14 @@ return an error instead of blocking.`,
 		// cannot do anything useful — warn the agent and abort.
 		if err := checkAgentContainerContext(cmd); err != nil {
 			return err
+		}
+
+		// A config subcommand's own --global flag (config set --global,
+		// config migrate --global) shadows the root --global, so cobra never
+		// sets globalMode for it. Treat it as the root flag too, so the
+		// command runs outside a project (ptone/scion#3317).
+		if subcommandGlobalFlagSet(cmd) {
+			globalMode = true
 		}
 
 		if globalMode && projectPath == "" {
@@ -134,59 +145,7 @@ return an error instead of blocking.`,
 			}
 		}
 
-		// Determine if this command requires explicit project context
-		// Commands that don't require project context:
-		// - help, version, completion (built-in or explicit)
-		// - init, project init (creates project)
-		// - server (runs hub server, doesn't need local project)
-		cmdName := cmd.Name()
-		parentName := ""
-		if cmd.Parent() != nil {
-			parentName = cmd.Parent().Name()
-		}
-
-		requiresProject := true
-		switch cmdName {
-		case "help", "version", "completion", "doctor", "whoami", "global-flags":
-			requiresProject = false
-		case "init":
-			// Both top-level init and project init don't require existing project
-			requiresProject = false
-		case "shadow", "unshadow":
-			// hub shadow/unshadow create/remove the project marker — they must
-			// run in a directory with no existing project.
-			if parentName == "hub" {
-				requiresProject = false
-			}
-		case "migrate-names", "migrate":
-			// hub secret migrate-names (GCP SM name migration) and hub secret
-			// migrate (DB -> GCP SM value migration) operate directly against
-			// the Hub DB and GCP Secret Manager; neither reads or resolves
-			// the current directory's scion project (ptone/scion#2396).
-			if parentName == "secret" && commandInSubtree(cmd, "hub") {
-				requiresProject = false
-			}
-		case "scion":
-			// Root command itself doesn't require project
-			requiresProject = false
-		}
-		// Server subcommands run the hub server and don't need a local project
-		if commandInSubtree(cmd, "server") {
-			requiresProject = false
-		}
-		// Admin subcommands connect directly to the database and don't need a local project
-		if commandInSubtree(cmd, "admin") {
-			requiresProject = false
-		}
-		// Project subcommands operate on all projects, not just the current one
-		if parentName == "project" {
-			requiresProject = false
-		}
-		// design Amendment A26.2 O1: same reasoning as checkAgentContainerContext
-		// above — --handoff-template never touches the project or the Hub.
-		if isReincarnateHandoffTemplateInvocation(cmd) {
-			requiresProject = false
-		}
+		requiresProject := commandRequiresProject(cmd)
 
 		// For commands that require project context, use RequireProjectPath
 		// to error if no project found and --global not specified
@@ -212,7 +171,7 @@ return an error instead of blocking.`,
 
 		// Agent mode implies non-interactive: prompts that require stdin
 		// will hang indefinitely inside an unattended agent container.
-		if !nonInteractive && resolveMode() == ModeAgent {
+		if !nonInteractive && mode == ModeAgent {
 			nonInteractive = true
 			autoConfirm = true
 			util.Debugf("agent mode detected, non-interactive mode auto-enabled")
@@ -220,8 +179,8 @@ return an error instead of blocking.`,
 
 		// Check image_registry is configured for commands that need it.
 		// Skip for config commands (users need those to set the registry).
-		// Skip in hub context (inside a container, the agent is already
-		// running — image_registry is not needed).
+		// Skip for hub-dispatched work: the broker that runs the agent
+		// resolves images, so the local registry setting is not needed.
 		requiresRegistry := requiresProject
 		if commandInSubtree(cmd, "config") {
 			requiresRegistry = false
@@ -229,7 +188,7 @@ return an error instead of blocking.`,
 		if commandInSubtree(cmd, "hub") || commandInSubtree(cmd, "server") {
 			requiresRegistry = false
 		}
-		if requiresRegistry && config.IsHubContext() {
+		if requiresRegistry && isHubDispatchInvocation(projectPath) {
 			requiresRegistry = false
 		}
 		// Shadow projects never launch containers locally — skip registry check.
@@ -268,6 +227,16 @@ func Execute() {
 	target, _, _ := rootCmd.Find(cliArgs)
 	maybeWarnRemovedLegacyEnv(target)
 
+	// Decide early whether an inherited SCION_DEBUG applies. This call is
+	// load-bearing: the settings loads below and anything else that runs
+	// before PersistentPreRunE can emit debug lines, and without it they
+	// (and the SCION_DEBUG deprecation warning) would still follow the
+	// inherited SCION_DEBUG inside an agent.
+	// Resolving the mode loads settings, so it runs after the legacy-env
+	// warning above.
+	mode := resolveMode()
+	configureDebugOutput(mode, false)
+
 	// Early settings load to determine autoHelp behavior
 	// This handles cases where ExecuteC fails during flag parsing or unknown commands
 	tempProjectPath := ""
@@ -289,12 +258,11 @@ func Execute() {
 		autoHelp = *settings.CLI.AutoHelp
 	}
 
-	applyModeRestrictions(rootCmd)
+	applyModeRestrictions(rootCmd, mode)
 
-	// Suppress ASCII banner in agent mode. This runs after early flag
-	// parsing so resolveMode() can safely load settings and the project
-	// path is available — unlike init(), where flags haven't been parsed.
-	if resolveMode() == ModeAgent {
+	// Suppress ASCII banner in agent mode. This runs in Execute rather
+	// than init(), where the mode cannot yet be resolved safely.
+	if mode == ModeAgent {
 		rootCmd.Long = ""
 	}
 
@@ -318,6 +286,19 @@ func Execute() {
 // itself, so piped stderr stays plain.
 func formatCLIError(f *os.File, err error) string {
 	return util.ColorFor(f, fmt.Sprintf("\n%s%s%sError: %v%s\n\n", util.BgRed, util.White, util.Bold, err, util.Reset))
+}
+
+// configureDebugOutput sets up CLI debug output for one invocation. An
+// explicit --debug always enables it. In agent mode the CLI also ignores
+// the deprecated SCION_DEBUG alias: inside an agent it is usually inherited
+// from an older broker that set it in every agent, not chosen for the
+// command, and honouring it would print debug lines and the deprecation
+// warning on every command. SCION_LOG_LEVEL still applies in every mode.
+func configureDebugOutput(mode CLIMode, explicitDebug bool) {
+	loglevel.SetIgnoreDebugAlias(mode == ModeAgent)
+	if explicitDebug {
+		util.EnableDebug()
+	}
 }
 
 // exitCodeFor returns the process exit status for a failed command: the

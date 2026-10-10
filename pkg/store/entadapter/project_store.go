@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -803,6 +804,13 @@ func entBrokerToStore(b *ent.RuntimeBroker) *store.RuntimeBroker {
 	if sb.Annotations == nil {
 		sb.Annotations = make(map[string]string)
 	}
+	if b.RuntimeTargetID != nil && *b.RuntimeTargetID != "" {
+		sb.RuntimeTarget = &api.RuntimeTargetDescriptor{
+			ID:          *b.RuntimeTargetID,
+			Type:        b.RuntimeTargetType,
+			DisplayName: b.RuntimeTargetDisplayName,
+		}
+	}
 	return sb
 }
 
@@ -813,6 +821,11 @@ func (s *ProjectStore) CreateRuntimeBroker(ctx context.Context, b *store.Runtime
 		return err
 	}
 
+	profiles, defaultProfile := b.Profiles, b.DefaultProfile
+	if b.IsFlat() {
+		// Profiles never persist on a flat Runtime Broker row.
+		profiles, defaultProfile = nil, ""
+	}
 	create := s.client.RuntimeBroker.Create().
 		SetID(uid).
 		SetName(b.Name).
@@ -820,12 +833,17 @@ func (s *ProjectStore) CreateRuntimeBroker(ctx context.Context, b *store.Runtime
 		SetEndpoint(b.Endpoint).
 		SetAutoProvide(b.AutoProvide).
 		SetCapabilities(marshalRawJSON(b.Capabilities)).
-		SetRuntimes(marshalRawJSON(b.Profiles)).
-		SetDefaultProfile(b.DefaultProfile).
+		SetRuntimes(marshalRawJSON(profiles)).
+		SetDefaultProfile(defaultProfile).
 		SetWorkspaceStorage(marshalRawJSON(b.WorkspaceStorage)).
 		SetHealth(marshalRawJSON(b.Health)).
 		SetLabels(b.Labels).
 		SetAnnotations(b.Annotations)
+	if b.IsFlat() {
+		create.SetRuntimeTargetID(b.RuntimeTarget.ID).
+			SetRuntimeTargetType(b.RuntimeTarget.Type).
+			SetRuntimeTargetDisplayName(b.RuntimeTarget.DisplayName)
+	}
 
 	if b.Version != "" {
 		create.SetVersion(b.Version)
@@ -914,6 +932,19 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 			return mapError(err)
 		}
 
+		// On a flat row (stored runtime target), profiles never persist:
+		// strip rather than reject, so a leftover written by an older binary
+		// cannot make later read-modify-writes fail. The runtime_target_*
+		// columns are never written here.
+		profiles, defaultProfile := b.Profiles, b.DefaultProfile
+		if cur.RuntimeTargetID != nil && *cur.RuntimeTargetID != "" {
+			if len(profiles) > 0 || defaultProfile != "" {
+				slog.Warn(store.FlatRuntimeBrokerProfilesDroppedMessage,
+					"broker_id", b.ID, "profiles", len(profiles), "default_profile", defaultProfile)
+			}
+			profiles, defaultProfile = nil, ""
+		}
+
 		update := s.client.RuntimeBroker.Update().
 			Where(runtimebroker.IDEQ(uid), runtimebroker.LockVersionEQ(cur.LockVersion)).
 			SetName(b.Name).
@@ -923,8 +954,8 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 			SetConnectionState(b.ConnectionState).
 			SetLastHeartbeat(b.LastHeartbeat).
 			SetCapabilities(marshalRawJSON(b.Capabilities)).
-			SetRuntimes(marshalRawJSON(b.Profiles)).
-			SetDefaultProfile(b.DefaultProfile).
+			SetRuntimes(marshalRawJSON(profiles)).
+			SetDefaultProfile(defaultProfile).
 			SetWorkspaceStorage(marshalRawJSON(b.WorkspaceStorage)).
 			SetHealth(marshalRawJSON(b.Health)).
 			SetLabels(b.Labels).
@@ -1146,10 +1177,12 @@ func runtimeBrokerBeforeCursor(cursorCreated time.Time, cursorID uuid.UUID) pred
 // FindEmbeddedBroker returns the single embedded broker if exactly one exists,
 // or nil if zero or multiple embedded brokers are found. "Embedded" means the
 // broker's labels JSON contains {"scion.io/broker-role": "embedded"}.
-// Used to recover the broker ID from the DB when settings are lost.
+// Used to recover the legacy broker ID from the DB when settings are lost, so
+// only legacy rows (no stored runtime target) are candidates: a flat Runtime
+// Broker row is never recovered as the legacy identity.
 func (s *ProjectStore) FindEmbeddedBroker(ctx context.Context) (*store.RuntimeBroker, error) {
 	brokers, err := s.client.RuntimeBroker.Query().
-		Where(brokerLabelContains("scion.io/broker-role", "embedded")).
+		Where(brokerLabelContains("scion.io/broker-role", "embedded"), runtimebroker.RuntimeTargetIDIsNil()).
 		Limit(2). // Only need to know if there's exactly one
 		All(ctx)
 	if err != nil {

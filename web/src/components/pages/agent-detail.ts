@@ -37,6 +37,7 @@ import type {
   Notification,
   Subscription,
   AgentMetricsSummary,
+  RuntimeBroker,
 } from '../../shared/types.js';
 import type { AgentLifecycleAction } from '../../shared/types.js';
 import {
@@ -55,6 +56,7 @@ interface AgentNotificationsResponse {
 }
 import { agentStatusBadge, stateLabel } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { agentPlacementView } from './agent-placement.js';
 import {
   gcpModeLabel,
   gcpModeVariant,
@@ -84,7 +86,7 @@ import '../shared/agent-message-viewer.js';
 import type { ScionAgentMessageViewer } from '../shared/agent-message-viewer.js';
 import '../shared/chat/chat-thread.js';
 import type { ScionChatThread } from '../shared/chat/chat-thread.js';
-import { isFeatureEnabled } from '../../utils/feature-flags.js';
+import { isFeatureEnabled, AGENT_EDIT_FLAG } from '../../utils/feature-flags.js';
 import '../shared/hash-display.js';
 import '../shared/quick-message-dialog.js';
 import '../shared/cascade-mode-dialog.js';
@@ -177,6 +179,14 @@ export class ScionPageAgentDetail extends LitElement {
 
   @state()
   private project: Project | null = null;
+
+  /**
+   * The Runtime Broker row of a pinned (flat) agent's Runtime Broker, for the
+   * placement card's target display name and connection status. Null for an
+   * unpinned agent, before it loads, or when it cannot be read.
+   */
+  @state()
+  private placementBroker: RuntimeBroker | null = null;
 
   @state()
   private error: string | null = null;
@@ -974,6 +984,21 @@ export class ScionPageAgentDetail extends LitElement {
       // Fetch project and notifications in parallel — they are independent.
       const parallel: Promise<void>[] = [];
 
+      // A pinned (flat) agent's placement card reads its Runtime Broker row.
+      const pinnedBrokerId = this.agent.pinnedRuntimeTarget?.runtimeBrokerId;
+      if (pinnedBrokerId) {
+        parallel.push(
+          apiFetch(`/api/v1/runtime-brokers/${encodeURIComponent(pinnedBrokerId)}`)
+            .then(async (res) => {
+              this.placementBroker = res.ok ? ((await res.json()) as RuntimeBroker) : null;
+            })
+            .catch(() => {
+              // The placement card falls back to the stored pin alone.
+              this.placementBroker = null;
+            })
+        );
+      }
+
       if (this.agent.projectId) {
         const projectId = this.agent.projectId;
         parallel.push(
@@ -1048,6 +1073,7 @@ export class ScionPageAgentDetail extends LitElement {
       await Promise.all(parallel);
 
       // Load metrics summary (non-blocking).
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises -- fire-and-forget by design; per-site decision tracked in ptone/scion#4126.
       this.loadMetricsSummary();
 
       this.seedAgent(this.agent, agentId, epoch, epochGeneration);
@@ -1257,6 +1283,7 @@ export class ScionPageAgentDetail extends LitElement {
     this.chatViewActive = mode === 'chat';
     // Trigger load for the newly active view
     if (this.chatViewActive) {
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises -- fire-and-forget by design; per-site decision tracked in ptone/scion#4126.
       this.updateComplete.then(() => {
         const chatThread = this.shadowRoot?.querySelector(
           'scion-chat-thread'
@@ -1264,6 +1291,7 @@ export class ScionPageAgentDetail extends LitElement {
         chatThread?.loadHistory();
       });
     } else {
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises -- fire-and-forget by design; per-site decision tracked in ptone/scion#4126.
       this.updateComplete.then(() => {
         const viewer = this.shadowRoot?.querySelector(
           'scion-agent-message-viewer'
@@ -1636,6 +1664,20 @@ export class ScionPageAgentDetail extends LitElement {
                 </a>
               `
             : nothing}
+          ${isFeatureEnabled(AGENT_EDIT_FLAG) && can(agent._capabilities, 'update')
+            ? html`
+                <a
+                  href="/agents/${this.agentId}/edit"
+                  style="text-decoration: none;"
+                  data-testid="edit-agent"
+                >
+                  <sl-button variant="default" size="small">
+                    <sl-icon slot="prefix" name="pencil-square"></sl-icon>
+                    Edit
+                  </sl-button>
+                </a>
+              `
+            : nothing}
           ${can(agent._capabilities, 'delete') && !deleting
             ? html`
                 <sl-button
@@ -1662,8 +1704,9 @@ export class ScionPageAgentDetail extends LitElement {
     const agent = this.agent!;
     return html`
       ${this.renderCurrentStateCard(agent)} ${this.renderCurrentTaskCard(agent)}
-      ${this.renderLimitsUsageCard(agent)} ${this.renderConnectivityCard(agent)}
-      ${this.renderExposedPortsCard(agent)} ${this.renderNotificationsCard()}
+      ${this.renderLimitsUsageCard(agent)} ${this.renderPlacementCard(agent)}
+      ${this.renderConnectivityCard(agent)} ${this.renderExposedPortsCard(agent)}
+      ${this.renderNotificationsCard()}
     `;
   }
 
@@ -1824,6 +1867,82 @@ export class ScionPageAgentDetail extends LitElement {
         <span class="limit-value">${formatDurationHMS(remainingSec)}</span>
         <div class="progress-bar-track">
           <div class="progress-bar-fill ${colorClass}" style="width: ${pct}%"></div>
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * Placement of a pinned (flat Runtime Broker) agent, from stored data: the
+   * Runtime Broker and runtime target it is pinned to, with the Runtime
+   * Broker's connection status and the agent's failed runtime operations as
+   * two separate indicators. Unpinned agents render nothing here.
+   */
+  private renderPlacementCard(agent: Agent): TemplateResult | typeof nothing {
+    const view = agentPlacementView(agent, this.placementBroker);
+    if (!view) return nothing;
+    return html`
+      <div class="card placement-card">
+        <h3 class="card-title">Placement</h3>
+        <div class="info-grid">
+          <div class="info-item">
+            <span class="info-label">Runtime Broker</span>
+            <span class="info-value">
+              <a href="/brokers/${view.runtimeBrokerId}" class="broker-link"
+                >${view.runtimeBrokerName}</a
+              >
+            </span>
+          </div>
+          <div class="info-item">
+            <span class="info-label">Runtime Target</span>
+            <span class="info-value placement-target"
+              >${view.targetLabel}${view.targetLabel !== view.targetType
+                ? ` (${view.targetType})`
+                : ''}</span
+            >
+          </div>
+          <div class="info-item">
+            <span class="info-label">Target ID</span>
+            <span class="info-value mono placement-target-id">${view.targetId}</span>
+          </div>
+          <div class="info-item">
+            <span class="info-label">Runtime Broker Connection</span>
+            <span class="info-value placement-connection">
+              <scion-status-badge
+                status=${view.connection.status}
+                label=${view.connection.detail
+                  ? `${view.connection.label} (${view.connection.detail})`
+                  : view.connection.label}
+                size="small"
+              ></scion-status-badge>
+            </span>
+          </div>
+          <div class="info-item">
+            <span class="info-label">Last Runtime Operation</span>
+            <span class="info-value placement-runtime-op">
+              <scion-status-badge
+                status=${view.lastRuntimeOperation.status}
+                label=${view.lastRuntimeOperation.label}
+                size="small"
+              ></scion-status-badge>
+              ${view.lastRuntimeOperation.detail
+                ? html`<span class="placement-runtime-op-detail"
+                    >${view.lastRuntimeOperation.detail}</span
+                  >`
+                : nothing}
+            </span>
+          </div>
+          ${view.stale
+            ? html`
+                <div class="info-item placement-stale">
+                  <span class="info-label">Placement</span>
+                  <span class="info-value">
+                    Pinned to a different Runtime Broker than the agent's current one; starts are
+                    refused until the placement is repaired.
+                  </span>
+                </div>
+              `
+            : nothing}
         </div>
       </div>
     `;
@@ -2485,7 +2604,9 @@ export class ScionPageAgentDetail extends LitElement {
   private renderRuntimeCard(agent: Agent, inline: AgentInlineConfig | undefined) {
     const image = agent.image || inline?.image || agent.appliedConfig?.image;
     const branch = inline?.branch;
-    const profile = agent.appliedConfig?.profile;
+    // A pinned (flat) agent has no Runtime Broker Profile; its placement
+    // card shows the runtime target instead.
+    const profile = agent.pinnedRuntimeTarget ? undefined : agent.appliedConfig?.profile;
 
     return html`
       <div class="card">

@@ -216,6 +216,8 @@ const (
 	GCSLinkReasonURINotInBody       GCSLinkFetchReason = "uri_not_in_body"
 	GCSLinkReasonSenderNotAgent     GCSLinkFetchReason = "sender_not_agent"
 	GCSLinkReasonNoSA               GCSLinkFetchReason = "no_sa"
+	GCSLinkReasonSANotAdmissible    GCSLinkFetchReason = "sa_not_admissible"
+	GCSLinkReasonSALookupFailed     GCSLinkFetchReason = "sa_lookup_failed"
 	GCSLinkReasonMintFailed         GCSLinkFetchReason = "mint_failed"
 	GCSLinkReasonGCSNotFound        GCSLinkFetchReason = "gcs_not_found"
 	GCSLinkReasonGCSDenied          GCSLinkFetchReason = "gcs_denied"

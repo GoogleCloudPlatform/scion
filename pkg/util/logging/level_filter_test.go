@@ -175,7 +175,7 @@ func assertLines(t *testing.T, out string, all, want []string) {
 }
 
 // TestRequestLogKeepsInfoWhenLevelRaised mirrors the server wiring: the
-// request logger takes its floor from ResolveLogLevel and is not gated by
+// request logger takes its floor from ResolveLogLeveler and is not gated by
 // the shared level filter, so SCION_LOG_LEVEL=error must not drop the Info
 // entries of successful requests from the request log.
 func TestRequestLogKeepsInfoWhenLevelRaised(t *testing.T) {
@@ -185,7 +185,7 @@ func TestRequestLogKeepsInfoWhenLevelRaised(t *testing.T) {
 	logger, cleanup, err := NewRequestLogger(RequestLoggerConfig{
 		FilePath:  path,
 		Component: "test",
-		Level:     ResolveLogLevel(false),
+		Level:     ResolveLogLeveler(false),
 	})
 	if err != nil {
 		t.Fatal(err)

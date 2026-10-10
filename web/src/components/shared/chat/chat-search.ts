@@ -446,6 +446,7 @@ export class ScionChatSearch extends LitElement {
 
     const hasConversation = !!this.conversationKey;
 
+    // prettier-ignore
     return html`
       <div class="search-header">
         <div class="search-input-wrap">

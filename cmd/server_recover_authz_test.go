@@ -89,7 +89,7 @@ func TestRecoverAuthz_ModeRestrictions_AgentNotAllowed(t *testing.T) {
 func TestRecoverAuthz_ModeRestrictions_RemovedInAssistantMode(t *testing.T) {
 	t.Setenv("SCION_CLI_MODE", "assistant")
 	root := buildRecoverAuthzTestTree()
-	applyModeRestrictions(root)
+	applyModeRestrictions(root, resolveMode())
 	remaining := collectCommandNames(root)
 	assert.NotContains(t, remaining, "server.recover-authz",
 		"recover-authz should be removed in assistant mode")
@@ -98,7 +98,7 @@ func TestRecoverAuthz_ModeRestrictions_RemovedInAssistantMode(t *testing.T) {
 func TestRecoverAuthz_ModeRestrictions_RemovedInAgentMode(t *testing.T) {
 	t.Setenv("SCION_CLI_MODE", "agent")
 	root := buildRecoverAuthzTestTree()
-	applyModeRestrictions(root)
+	applyModeRestrictions(root, resolveMode())
 	remaining := collectCommandNames(root)
 	assert.NotContains(t, remaining, "server.recover-authz",
 		"recover-authz should be removed in agent mode")
@@ -107,7 +107,7 @@ func TestRecoverAuthz_ModeRestrictions_RemovedInAgentMode(t *testing.T) {
 func TestRecoverAuthz_ModeRestrictions_AvailableInHumanMode(t *testing.T) {
 	t.Setenv("SCION_CLI_MODE", "human")
 	root := buildRecoverAuthzTestTree()
-	applyModeRestrictions(root)
+	applyModeRestrictions(root, resolveMode())
 	remaining := collectCommandNames(root)
 	assert.Contains(t, remaining, "server.recover-authz",
 		"recover-authz should be available in human mode")

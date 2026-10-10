@@ -41,6 +41,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/GoogleCloudPlatform/scion/web"
 	"github.com/google/uuid"
@@ -81,6 +82,10 @@ type CompositeHealthResponse struct {
 
 // webSessionName is the cookie name for web sessions.
 const webSessionName = "scion_sess"
+
+// webLogSubsystem is the log component name for the web server. Its level
+// (see pkg/util/logging/loglevel) controls per-request logging.
+const webLogSubsystem = "hub.web"
 
 // Session key constants for storing values in the gorilla session map.
 const (
@@ -162,16 +167,17 @@ type WebServerConfig struct {
 	// AssetsDir overrides embedded assets with a filesystem directory.
 	// When set, static files are served from this path instead of the embedded FS.
 	AssetsDir string
-	// Debug enables verbose debug logging.
-	Debug bool
 	// SessionSecret is the HMAC key for signing session cookies.
 	SessionSecret string
 	// BaseURL is the public URL for OAuth redirects (e.g., "https://scion.example.com").
 	BaseURL string
 	// DevAuthToken is the dev token for auto-login (empty = disabled).
 	DevAuthToken string
-	// AuthMode is the exclusive human auth mode: "oauth" (default), "proxy", "dev".
-	// In proxy mode, OAuth providers are not shown and logout behavior changes.
+	// AuthMode is the configured human auth mode (server.auth.mode). "proxy"
+	// is the only value the code checks: in proxy mode, OAuth providers are
+	// not shown and logout behavior changes. Any other value, including ""
+	// (the default), "oauth" and "dev", leaves the hub handling
+	// authentication itself. Dev auth is enabled separately (DevAuthToken).
 	AuthMode string
 	// AdminMode restricts access to admin users only (maintenance mode).
 	AdminMode bool
@@ -181,6 +187,10 @@ type WebServerConfig struct {
 	// for integration testing. Disabled by default; must never be enabled
 	// in production.
 	EnableTestLogin bool
+	// EnableDebugEndpoints serves the GET /auth/debug diagnostic endpoint.
+	// Disabled by default and independent of the log level. Intended for
+	// local development only; the server command refuses it in hosted mode.
+	EnableDebugEndpoints bool
 	// ProxyAuthenticator verifies proxy-supplied assertions (e.g., IAP JWT).
 	// Required when AuthMode == "proxy".
 	ProxyAuthenticator ProxyAuthenticator
@@ -571,7 +581,7 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 		config:    cfg,
 		mux:       http.NewServeMux(),
 		startTime: time.Now(),
-		log:       logging.Subsystem("hub.web"),
+		log:       logging.Subsystem(webLogSubsystem),
 	}
 
 	// Initialize session store
@@ -3214,10 +3224,11 @@ func (ws *WebServer) handleAuthProviders(w http.ResponseWriter, r *http.Request)
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// handleAuthDebug returns session debug info (debug mode only).
+// handleAuthDebug serves the diagnostic endpoint. It is served only when
+// EnableDebugEndpoints is set; otherwise it answers 404.
 // Route: GET /auth/debug
 func (ws *WebServer) handleAuthDebug(w http.ResponseWriter, r *http.Request) {
-	if !ws.config.Debug {
+	if !ws.config.EnableDebugEndpoints {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -3300,7 +3311,9 @@ func (ws *WebServer) loggingMiddleware(next http.Handler) http.Handler {
 
 		aborted := logging.ServeCatchingAbort(next, wrapped, r)
 
-		if ws.config.Debug || wrapped.statusCode >= 400 || aborted {
+		// Every request is logged when the web component is at debug
+		// level; errors and aborted responses are always logged.
+		if wrapped.statusCode >= 400 || aborted || loglevel.DebugEnabled(webLogSubsystem) {
 			attrs := []slog.Attr{
 				slog.String("method", r.Method),
 				slog.String("path", logging.RequestPath(r)),

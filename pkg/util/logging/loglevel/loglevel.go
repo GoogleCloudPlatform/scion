@@ -284,6 +284,10 @@ var (
 	initMu   sync.Mutex
 	initDone atomic.Bool
 
+	// ignoreDebugAlias makes the process-wide state skip the deprecated
+	// SCION_DEBUG alias; see SetIgnoreDebugAlias.
+	ignoreDebugAlias atomic.Bool
+
 	warnMu  sync.Mutex
 	warnOut io.Writer = os.Stderr
 	warned            = map[string]bool{}
@@ -310,11 +314,58 @@ func ensureInit() {
 	if initDone.Load() {
 		return
 	}
-	spec, ok, warnings := SpecFromEnv(nil)
+	spec, ok, warnings := SpecFromEnv(processGetenv())
 	if ok {
 		storeLocked(&state{spec: spec, source: SourceEnv})
 	}
 	initDone.Store(true)
+	for _, w := range warnings {
+		warnOnce(w)
+	}
+}
+
+// processGetenv returns the lookup used for the process-wide state:
+// os.Getenv, with SCION_DEBUG hidden while SetIgnoreDebugAlias is on.
+func processGetenv() func(string) string {
+	if !ignoreDebugAlias.Load() {
+		return os.Getenv
+	}
+	return func(key string) string {
+		if key == EnvDebug {
+			return ""
+		}
+		return os.Getenv(key)
+	}
+}
+
+// SetIgnoreDebugAlias controls whether the process-wide state honours the
+// deprecated SCION_DEBUG alias. The scion CLI turns this on inside agent
+// containers: there SCION_DEBUG is usually inherited from an older broker
+// that set it in every agent it started, not chosen for the command being
+// run. SCION_LOG_LEVEL and explicit flags are not affected, and nothing is
+// printed for an ignored SCION_DEBUG.
+//
+// If the environment has already been applied, the level is re-resolved so
+// the change takes effect; a level set by a flag is left alone.
+func SetIgnoreDebugAlias(ignore bool) {
+	initMu.Lock()
+	defer initMu.Unlock()
+	ignoreDebugAlias.Store(ignore)
+	if !initDone.Load() {
+		return // the lazy environment read will apply it
+	}
+	s := cur.Load()
+	if s.source > SourceEnv {
+		return
+	}
+	spec, ok, warnings := SpecFromEnv(processGetenv())
+	switch {
+	case ok:
+		storeLocked(&state{spec: spec, source: SourceEnv})
+	case s.source == SourceEnv:
+		// The environment no longer sets a level.
+		storeLocked(&state{spec: DefaultSpec(), source: SourceDefault})
+	}
 	for _, w := range warnings {
 		warnOnce(w)
 	}
@@ -444,13 +495,15 @@ func MinLevel() slog.Leveler {
 }
 
 // Reset restores the built-in default and makes the next read re-resolve
-// the environment. One-time warnings already printed stay suppressed unless
-// resetWarnings is true. It exists for tests and for processes that change
-// their environment deliberately before configuring logging.
+// the environment; it also turns SetIgnoreDebugAlias off. One-time warnings
+// already printed stay suppressed unless resetWarnings is true. It exists
+// for tests and for processes that change their environment deliberately
+// before configuring logging.
 func Reset(resetWarnings bool) {
 	initMu.Lock()
 	storeLocked(&state{spec: DefaultSpec(), source: SourceDefault})
 	initDone.Store(false)
+	ignoreDebugAlias.Store(false)
 	initMu.Unlock()
 	if resetWarnings {
 		warnMu.Lock()

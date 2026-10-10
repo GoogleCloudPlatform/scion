@@ -106,13 +106,13 @@ func TestAppendDaemonBoolFlagForwardsExplicitDisable(t *testing.T) {
 func TestBuildDaemonStartArgsForwardsExplicitFlags(t *testing.T) {
 	resetServerFlags()
 	// Globals resetServerFlags doesn't cover:
-	noAutoMigrate, enableTestLogin, simulateRemoteBroker = false, false, false
+	noAutoMigrate, enableTestLogin, simulateRemoteBroker, enableDebugEndpoints = false, false, false, false
 	templateCacheDir, webAssetsDir, webBaseURL = "", "", ""
 	adminEmails = nil
 	templateCacheMax, globalMode = 0, false
 	defer func() {
 		resetServerFlags()
-		noAutoMigrate, enableTestLogin, simulateRemoteBroker = false, false, false
+		noAutoMigrate, enableTestLogin, simulateRemoteBroker, enableDebugEndpoints = false, false, false, false
 		templateCacheDir, webAssetsDir, webBaseURL = "", "", ""
 		adminEmails = nil
 		templateCacheMax, globalMode = 0, false
@@ -126,6 +126,7 @@ func TestBuildDaemonStartArgsForwardsExplicitFlags(t *testing.T) {
 	f.BoolVar(&enableDevAuth, "dev-auth", false, "")
 	f.BoolVar(&noAutoMigrate, "no-auto-migrate", false, "")
 	f.BoolVar(&enableTestLogin, "enable-test-login", false, "")
+	f.BoolVar(&enableDebugEndpoints, "enable-debug-endpoints", false, "")
 	f.BoolVar(&simulateRemoteBroker, "simulate-remote-broker", false, "")
 	f.StringVar(&templateCacheDir, "template-cache-dir", "", "")
 	f.Int64Var(&templateCacheMax, "template-cache-max", 100*1024*1024, "")
@@ -139,6 +140,7 @@ func TestBuildDaemonStartArgsForwardsExplicitFlags(t *testing.T) {
 		"--enable-web=false", // explicit workstation-default disable (the core fix)
 		"--no-auto-migrate",
 		"--simulate-remote-broker=true",
+		"--enable-debug-endpoints",
 		"--session-secret=topsecret", // set, but must NOT be forwarded (signing secret)
 		"--base-url=https://scion.example.com",
 		"--admin-emails=a@x.com,b@y.com",
@@ -156,6 +158,7 @@ func TestBuildDaemonStartArgsForwardsExplicitFlags(t *testing.T) {
 		"--enable-web=false",
 		"--no-auto-migrate=true", // helper normalizes bare --no-auto-migrate to =true
 		"--simulate-remote-broker=true",
+		"--enable-debug-endpoints=true",
 		"--base-url=https://scion.example.com",
 		"--admin-emails=a@x.com,b@y.com",
 		"--template-cache-max=42",
