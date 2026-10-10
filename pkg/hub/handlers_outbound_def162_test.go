@@ -140,14 +140,14 @@ func def162GroupConv(t *testing.T, s store.Store, projectID, topicKey string) st
 // with the given message body. Returns the response recorder.
 func postOutboundConvRef(t *testing.T, srv *Server, projectID, agentID, msg, convRef string) *httptest.ResponseRecorder {
 	t.Helper()
-	return postOutboundRequest(t, srv, projectID, agentID, OutboundMessageRequest{
+	return postAgentOutboundRequest(t, srv, projectID, agentID, OutboundMessageRequest{
 		Msg:             msg,
 		ConversationRef: convRef,
 	})
 }
 
-// postOutboundRequest sends an agent outbound message request as agentID.
-func postOutboundRequest(t *testing.T, srv *Server, projectID, agentID string, outbound OutboundMessageRequest) *httptest.ResponseRecorder {
+// postAgentOutboundRequest sends an agent outbound message request as agentID.
+func postAgentOutboundRequest(t *testing.T, srv *Server, projectID, agentID string, outbound OutboundMessageRequest) *httptest.ResponseRecorder {
 	t.Helper()
 	body, _ := json.Marshal(outbound)
 	req := httptest.NewRequest(http.MethodPost,
@@ -603,7 +603,7 @@ func TestDEF162_ReservedChannel_MentionMakesNoMember(t *testing.T) {
 	t.Cleanup(proxy.Stop)
 
 	convID := def162GroupConv(t, s, project.ID, topicID)
-	rr := postOutboundRequest(t, srv, project.ID, agent.ID, OutboundMessageRequest{
+	rr := postAgentOutboundRequest(t, srv, project.ID, agent.ID, OutboundMessageRequest{
 		Msg:             "Hey @UniqueHuman162 on a reserved channel",
 		ConversationRef: "conv:" + convID,
 		Channel:         eventbus.InProcessBusName,
