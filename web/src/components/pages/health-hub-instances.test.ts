@@ -38,7 +38,7 @@ import {
   type HealthHubInstance,
   type HealthSummaryHubInstances,
 } from './health-hub-instances.js';
-import { hubInstanceAnchor } from './health-hub-card.js';
+import { HUB_INSTANCE_TARGET_EVENT, hubInstanceAnchor } from './health-hub-card.js';
 import { elementStyleRules } from './__fixtures__/css-rules.js';
 import { formatInstantWithZone, setPreferredTimeZone } from '../../utils/time.js';
 
@@ -456,6 +456,30 @@ describe('scion-health-hub-instances', () => {
     await el.updateComplete;
     expect(byId('hub-a-1').classList.contains('target')).toBe(true);
     expect(byId('hub-b-1').classList.contains('target')).toBe(false);
+  });
+
+  it('follows in-page links and Back through the target event and popstate', async () => {
+    history.replaceState(null, '', '/health');
+    const root = await mount(
+      list([
+        instance({ id: 'hub-a-1', label: 'hub-a' }),
+        instance({ id: 'hub-b-1', label: 'hub-b' }),
+      ])
+    );
+    const el = root.host as ScionHealthHubInstances;
+    const target = () => rows(root).find((r) => r.classList.contains('target'))?.dataset.instanceId;
+    expect(target()).toBeUndefined();
+
+    history.pushState({}, '', '#' + hubInstanceAnchor('hub-a-1'));
+    window.dispatchEvent(new CustomEvent(HUB_INSTANCE_TARGET_EVENT, { detail: 'hub-a-1' }));
+    await el.updateComplete;
+    expect(target()).toBe('hub-a-1');
+
+    // Back to the entry without a fragment.
+    history.replaceState({}, '', '/health');
+    window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
+    await el.updateComplete;
+    expect(target()).toBeUndefined();
   });
 
   it('shows not available when the section is null', async () => {

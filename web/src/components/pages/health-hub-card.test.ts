@@ -20,9 +20,21 @@
  * to its instance row. Per-instance figures are in the Hub instances table.
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 
-import { fleetHealthyText, hubInstanceAnchor, type HealthSummaryHub } from './health-hub-card.js';
+import {
+  fleetHealthyText,
+  hubFailingChecks,
+  hubInstanceAnchor,
+  HUB_INSTANCE_TARGET_EVENT,
+  type HealthSummaryHub,
+} from './health-hub-card.js';
+import {
+  hasInPageState,
+  isInPagePop,
+  IN_PAGE_STATE_KEY,
+  type RouteShell,
+} from '../../client/route-history.js';
 import './health-hub-card.js';
 import { elementStyleRules } from './__fixtures__/css-rules.js';
 
@@ -51,6 +63,88 @@ async function mount(h: HealthSummaryHub | null): Promise<ShadowRoot> {
 describe('scion-health-hub-card', () => {
   afterEach(() => {
     document.body.innerHTML = '';
+    vi.restoreAllMocks();
+    history.replaceState(null, '', '/');
+  });
+
+  function failingHub(): HealthSummaryHub {
+    return hub({
+      status: 'degraded',
+      instances: { live: 2, healthy: 1, degraded: 1, unhealthy: 0 },
+      unhealthy_checks: [
+        {
+          instance_id: 'hub-b-1',
+          instance_label: 'hub-b',
+          name: 'audit_log_writer',
+          value: 'degraded',
+        },
+      ],
+    });
+  }
+
+  it('moves to the instance row within the page on a link click, as in-page history', async () => {
+    history.replaceState({ from: 'router' }, '', '/health');
+    const replace = vi.spyOn(history, 'replaceState');
+    const targets: string[] = [];
+    const onTarget = (e: Event) => targets.push((e as CustomEvent<string>).detail);
+    window.addEventListener(HUB_INSTANCE_TARGET_EVENT, onTarget);
+    try {
+      const root = await mount(failingHub());
+      const link = root.querySelector('[data-role="failing-checks"] a')!;
+      const click = new MouseEvent('click', {
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+        button: 0,
+      });
+      link.dispatchEvent(click);
+
+      // No fragment navigation: the router would render the route again.
+      expect(click.defaultPrevented).toBe(true);
+      expect(window.location.pathname).toBe('/health');
+      expect(window.location.hash).toBe('#' + hubInstanceAnchor('hub-b-1'));
+      // The new entry and the one it came from are in-page entries, so the
+      // router leaves Back and Forward to the page.
+      expect(history.state).toEqual({ [IN_PAGE_STATE_KEY]: { hubInstance: 'hub-b-1' } });
+      const shell = { currentPath: '/health' } as RouteShell;
+      expect(isInPagePop(history.state, '/health', shell, false)).toBe(true);
+      expect(replace).toHaveBeenCalledTimes(1);
+      const marked = replace.mock.calls[0]![0];
+      expect(hasInPageState(marked)).toBe(true);
+      expect(marked).toMatchObject({ from: 'router' });
+      expect(targets).toEqual(['hub-b-1']);
+    } finally {
+      window.removeEventListener(HUB_INSTANCE_TARGET_EVENT, onTarget);
+    }
+  });
+
+  it('leaves a modified click to the browser', async () => {
+    history.replaceState(null, '', '/health');
+    const push = vi.spyOn(history, 'pushState');
+    const root = await mount(failingHub());
+    const link = root.querySelector('[data-role="failing-checks"] a')!;
+    const click = new MouseEvent('click', {
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+      button: 0,
+      ctrlKey: true,
+    });
+    link.addEventListener('click', (e) => e.preventDefault(), { once: true });
+    link.dispatchEvent(click);
+    expect(push).not.toHaveBeenCalled();
+  });
+
+  it('shows no fleet line or failing checks for an older replica during a rolling upgrade', async () => {
+    const older = {
+      ...hub(),
+      instances: undefined,
+      unhealthy_checks: ['colocated_broker: unhealthy: registration failed'],
+    } as unknown as HealthSummaryHub;
+    const root = await mount(older);
+    expect(root.querySelector('[data-role="fleet"]')).toBeNull();
+    expect(root.querySelector('[data-role="failing-checks"]')).toBeNull();
+    expect(root.textContent).not.toContain('undefined');
   });
 
   it('shows the fleet status and N of M instances healthy', async () => {
@@ -187,6 +281,15 @@ describe('fleetHealthyText', () => {
   it('is empty when the counts were not reported', () => {
     expect(fleetHealthyText(null)).toBe('');
     expect(fleetHealthyText(undefined)).toBe('');
+  });
+});
+
+describe('hubFailingChecks', () => {
+  it('keeps only object entries', () => {
+    const check = { instance_id: 'a', instance_label: 'a', name: 'database', value: 'unhealthy' };
+    const mixed = { ...hub(), unhealthy_checks: ['database: unhealthy', null, check] };
+    expect(hubFailingChecks(mixed as unknown as HealthSummaryHub)).toEqual([check]);
+    expect(hubFailingChecks(hub({ unhealthy_checks: undefined }))).toEqual([]);
   });
 });
 

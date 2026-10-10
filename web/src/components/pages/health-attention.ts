@@ -32,7 +32,7 @@ import { LitElement, html, css, type TemplateResult } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
 import { INTEGRATIONS_PAGE } from './health-integrations.js';
-import { hubInstanceAnchor } from './health-hub-card.js';
+import { followHubInstanceLink, hubInstanceAnchor } from './health-hub-card.js';
 
 /** One entry of the summary's ranked "Needs attention" list (server-composed). */
 export interface HealthAttentionItem {
@@ -205,8 +205,19 @@ export class ScionHealthAttention extends LitElement {
       data-kind=${it.kind}
     >
       <sl-icon name=${icon.name} label=${icon.label}></sl-icon>
-      <span class="message">${href ? html`<a href=${href}>${it.message}</a>` : it.message}</span>
+      <span class="message">${href ? this.renderLink(it, href) : it.message}</span>
     </li>`;
+  }
+
+  /** A hub instance link moves within the page (followHubInstanceLink). */
+  private renderLink(it: HealthAttentionItem, href: string): TemplateResult {
+    const id = it.subject.id;
+    if (it.subject.type === 'hub' && id) {
+      return html`<a href=${href} @click=${(e: MouseEvent) => followHubInstanceLink(e, id)}
+        >${it.message}</a
+      >`;
+    }
+    return html`<a href=${href}>${it.message}</a>`;
   }
 }
 

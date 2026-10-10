@@ -35,6 +35,7 @@ import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
 import { healthPillStyles, healthTone } from './health-status.js';
+import { hasInPageState, IN_PAGE_STATE_KEY } from '../../client/route-history.js';
 
 /** Live hub instances counted by their last reported status. */
 export interface HealthSummaryHubFleet {
@@ -86,6 +87,53 @@ export interface HealthSummaryServiceAccountCheck {
  */
 export function hubInstanceAnchor(instanceId: string): string {
   return `hub-instance-${encodeURIComponent(instanceId)}`;
+}
+
+/**
+ * Window event fired after a link to a hub instance row moved the page to
+ * that row's fragment. The Hub instances table listens for it.
+ */
+export const HUB_INSTANCE_TARGET_EVENT = 'scion-hub-instance-target';
+
+/**
+ * Click handler for a link to a hub instance row on this page. The router
+ * leaves "#" links to the browser, and a plain fragment navigation fires a
+ * popstate without in-page state, which renders the route again (a new
+ * page element, a new fetch, page state lost). So the link moves within
+ * the page instead: it marks the current entry and pushes the fragment as
+ * in-page history entries (IN_PAGE_STATE_KEY), which the router leaves to
+ * the page on Back and Forward, then tells the table. Modified clicks
+ * (new tab, etc.) keep the browser's behaviour.
+ */
+export function followHubInstanceLink(e: MouseEvent, instanceId: string): void {
+  if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
+    return;
+  }
+  e.preventDefault();
+  const h = window.history;
+  if (!hasInPageState(h.state)) {
+    const current = typeof h.state === 'object' && h.state !== null ? h.state : {};
+    h.replaceState({ ...current, [IN_PAGE_STATE_KEY]: { hubInstance: null } }, '');
+  }
+  h.pushState(
+    { [IN_PAGE_STATE_KEY]: { hubInstance: instanceId } },
+    '',
+    `#${hubInstanceAnchor(instanceId)}`
+  );
+  window.dispatchEvent(new CustomEvent(HUB_INSTANCE_TARGET_EVENT, { detail: instanceId }));
+}
+
+/**
+ * The failing checks of a summary's hub block, keeping only object entries.
+ * An older hub replica sends unhealthy_checks as "key: value" strings
+ * during a rolling upgrade; those are not shown.
+ */
+export function hubFailingChecks(hub: HealthSummaryHub): HealthSummaryHubCheck[] {
+  const list: unknown[] = Array.isArray(hub.unhealthy_checks) ? hub.unhealthy_checks : [];
+  return list.filter(
+    (c): c is HealthSummaryHubCheck =>
+      typeof c === 'object' && c !== null && typeof (c as HealthSummaryHubCheck).name === 'string'
+  );
 }
 
 /**
@@ -257,8 +305,10 @@ export class ScionHealthHubCard extends LitElement {
         <div class="empty">Hub data not available</div>
       </div>`;
     }
-    const checks = hub.unhealthy_checks ?? [];
+    const checks = hubFailingChecks(hub);
     const fleet = fleetHealthyText(hub.instances);
+    // instances is absent when an older hub replica served the summary
+    // (rolling upgrade): no fleet line then. Null means not reported.
     return html`
       <section class="card" aria-labelledby="hub-title">
         <div class="card-head">
@@ -267,7 +317,11 @@ export class ScionHealthHubCard extends LitElement {
             >${hub.status || 'unknown'}</span
           >
         </div>
-        <div class="fleet" data-role="fleet">${fleet || 'Hub instance data not available'}</div>
+        ${hub.instances === undefined
+          ? nothing
+          : html`<div class="fleet" data-role="fleet">
+              ${fleet || 'Hub instance data not available'}
+            </div>`}
         ${checks.length > 0
           ? html`<ul class="checks" data-role="failing-checks">
               ${checks.map((c) => this.renderCheck(c))}
@@ -317,7 +371,12 @@ export class ScionHealthHubCard extends LitElement {
       <div class="check">
         <span class="name"
           >${c.name} on
-          <a href="#${hubInstanceAnchor(c.instance_id)}" title=${c.instance_id}>${label}</a></span
+          <a
+            href="#${hubInstanceAnchor(c.instance_id)}"
+            title=${c.instance_id}
+            @click=${(e: MouseEvent) => followHubInstanceLink(e, c.instance_id)}
+            >${label}</a
+          ></span
         >
         <span class="pill tone-${healthTone(c.value)}">${c.value || 'unknown'}</span>
       </div>

@@ -23,6 +23,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 
 import { attentionHref, type HealthAttentionItem } from './health-attention.js';
 import './health-attention.js';
+import { hasInPageState } from '../../client/route-history.js';
 import { elementStyleRules } from './__fixtures__/css-rules.js';
 
 async function mount(
@@ -127,6 +128,41 @@ describe('scion-health-attention', () => {
       '/agents/ag1',
       null,
     ]);
+  });
+
+  it('moves to a hub instance row within the page on click', async () => {
+    history.replaceState(null, '', '/health');
+    const root = await mount(items);
+    const link = root.querySelector('a[href^="#hub-instance-"]')!;
+    const click = new MouseEvent('click', {
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+      button: 0,
+    });
+    link.dispatchEvent(click);
+    expect(click.defaultPrevented).toBe(true);
+    expect(window.location.hash).toBe('#hub-instance-hub-a%201');
+    expect(hasInPageState(history.state)).toBe(true);
+    history.replaceState(null, '', '/');
+  });
+
+  it('leaves other links to the router', async () => {
+    const root = await mount(items);
+    const link = root.querySelector('a[href="/brokers/b%201"]')!;
+    const click = new MouseEvent('click', {
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+      button: 0,
+    });
+    let prevented: boolean | null = null;
+    link.addEventListener('click', (e) => {
+      prevented = e.defaultPrevented;
+      e.preventDefault();
+    });
+    link.dispatchEvent(click);
+    expect(prevented).toBe(false);
   });
 
   it('links no integration item when the summary has no integration identity', async () => {

@@ -41,7 +41,10 @@
  * hubInstanceAnchor(id), so the Hub card and the attention list can link
  * to it. Because the row is inside this element's shadow root, the browser
  * cannot scroll to it on its own. The element follows location.hash
- * instead: it scrolls the row into view and highlights it.
+ * instead: it scrolls the row into view and highlights it. It reads the
+ * hash on connect, on HUB_INSTANCE_TARGET_EVENT (an in-page link moved to
+ * a row, see followHubInstanceLink), and on popstate and hashchange (Back,
+ * Forward, or an edited URL).
  *
  * The section is absent when an older hub replica served the summary
  * (during a rollout): the dashboard then hides this table. A null section
@@ -54,7 +57,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { formatInstantWithZone } from '../../utils/time.js';
 import { healthPillStyles, healthTone, type HealthTone } from './health-status.js';
-import { hubInstanceAnchor } from './health-hub-card.js';
+import { HUB_INSTANCE_TARGET_EVENT, hubInstanceAnchor } from './health-hub-card.js';
 import type { HealthSummaryIntegrationCounts } from './health-integrations.js';
 
 /** One hub instance of GET /api/v1/admin/health/summary. */
@@ -284,11 +287,15 @@ export class ScionHealthHubInstances extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     window.addEventListener('hashchange', this.onHashChange);
+    window.addEventListener('popstate', this.onHashChange);
+    window.addEventListener(HUB_INSTANCE_TARGET_EVENT, this.onHashChange);
     this.onHashChange();
   }
 
   override disconnectedCallback(): void {
     window.removeEventListener('hashchange', this.onHashChange);
+    window.removeEventListener('popstate', this.onHashChange);
+    window.removeEventListener(HUB_INSTANCE_TARGET_EVENT, this.onHashChange);
     super.disconnectedCallback();
   }
 
