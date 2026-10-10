@@ -1358,6 +1358,15 @@ type StartOptions struct {
 	// Like ResolvedKubernetesServiceAccountName it is never persisted, so it
 	// is recomputed on every dispatch.
 	KubernetesBlockIdentity *KubernetesBlockIdentity
+
+	// HostCredentialFiles is set by a co-located workstation broker whose
+	// host-credential policy allows it (hub on loopback, dev auth,
+	// use_host_credentials on). In broker mode the agent manager then reads
+	// the harness-declared credential files from the broker user's home and
+	// adds them as file secrets, unless a resolved secret with the same name
+	// or target already exists. Like KubernetesBlockIdentity it is never
+	// persisted, so it is recomputed on every dispatch.
+	HostCredentialFiles bool
 }
 
 // KubernetesBlockIdentity describes how a GCP identity "block" pod runs on

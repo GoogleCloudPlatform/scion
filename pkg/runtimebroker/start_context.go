@@ -1175,6 +1175,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// Host credential files (workstation parity with local mode): decided
+	// here, per start, and gathered by the agent manager once the harness
+	// auth metadata is known (pkg/agent/run.go). Never persisted.
+	opts.HostCredentialFiles = s.colocatedHostCredentials(ctx, in.HTTPRequest, hubConn)
+
 	// --- Manager resolution ---
 	// mgr and dispatchRuntimeType were already resolved once, above, for the
 	// GCP identity check — reused here rather than calling
@@ -2183,4 +2188,60 @@ func ambiguousNonGitWorkspace(in startContextInputs, worktreeProvisioned bool) s
 	}
 	return "ambiguous workspace for hub-managed project " + in.ProjectSlug +
 		": the request has no workspace mode, workspace path or git clone; refusing to fall back to the shared project directory"
+}
+
+// colocatedHostCredentials reports whether this start may receive the host's
+// harness-declared credential files. All of these must hold:
+//   - the server is eligible (ServerConfig.HostCredentials: workstation mode
+//     with dev auth);
+//   - the request is bound to the hub co-located in this process, and that
+//     binding is not just a guess: when HMAC auth identified the sending hub
+//     it must be the co-located one, and with more than one hub connection
+//     the X-Scion-Hub-Connection header must name it (so the unauthenticated
+//     fallback in resolveHubConnection never picks it for a remote hub);
+//   - as defence in depth, the co-located hub endpoint is on a loopback host;
+//   - use_host_credentials, re-read from the global settings on every start
+//     so turning it off applies to the next start, is on (fails closed).
+func (s *Server) colocatedHostCredentials(ctx context.Context, r *http.Request, hubConn *HubConnection) bool {
+	if !s.config.HostCredentials || hubConn == nil || !hubConn.IsColocated {
+		return false
+	}
+	authName := authenticatingHubConnFromContext(ctx)
+	if authName == "" && r != nil {
+		authName = authenticatingHubConnFromContext(r.Context())
+	}
+	if authName != "" && authName != hubConn.Name {
+		return false
+	}
+	headerName := ""
+	if r != nil {
+		headerName = r.Header.Get("X-Scion-Hub-Connection")
+	}
+	if headerName != hubConn.Name {
+		s.hubMu.RLock()
+		conns := len(s.hubConnections)
+		s.hubMu.RUnlock()
+		if conns != 1 {
+			return false
+		}
+	}
+	if !isLoopbackEndpointURL(hubConn.HubEndpoint) {
+		return false
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return false
+	}
+	return config.UseHostCredentials(globalDir)
+}
+
+// isLoopbackEndpointURL reports whether endpoint is a URL whose host is
+// localhost or a loopback IP. An empty or unparsable endpoint, or one with
+// no host, is not loopback.
+func isLoopbackEndpointURL(endpoint string) bool {
+	u, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	return isLoopbackHost(u.Hostname())
 }

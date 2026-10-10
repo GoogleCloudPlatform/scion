@@ -465,6 +465,12 @@
       "description": "Automatically inject the host's gcloud Application Default Credentials file into agent containers in co-located (workstation) mode.",
       "x-scope": "any",
       "x-since": "1"
+    },
+    "use_host_credentials": {
+      "type": "boolean",
+      "description": "Inject the host's harness credential files (for example OAuth login files) into agent containers when the broker is co-located with a workstation hub on loopback using dev auth. Defaults to true in workstation mode; ignored in hosted mode. Hub secrets take precedence.",
+      "x-scope": "global",
+      "x-since": "1"
     }
   },
   "additionalProperties": false,
