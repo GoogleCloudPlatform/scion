@@ -22,6 +22,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -187,13 +190,208 @@ func TestProjectSAMappingWarnings_Matrix(t *testing.T) {
 	}
 }
 
-func TestProjectSAMappingWarnings_HubScopedAccountNeverWarned(t *testing.T) {
+// A hub-scoped account is assignable from the project, so it is checked
+// against the project's Kubernetes profiles like a project-scoped one
+// (ptone/scion#4019). Another project's account is still skipped.
+func TestProjectSAMappingWarnings_HubScopedAccountWarned(t *testing.T) {
 	srv, s, projectID := newMappingProject(t)
-	addProviderBroker(t, s, projectID, "b", k8sProfile("k8s", true))
+	addProviderBroker(t, s, projectID, "b", k8sProfile("k8s", true, mappedGSA))
 	hubSA := &store.GCPServiceAccount{
 		ID: tid("hub-sa"), Scope: store.ScopeHub, ScopeID: "hub", Email: unmappedGSA, ProjectID: "p", Verified: true,
 	}
-	assert.Empty(t, srv.projectSAMappingWarnings(context.Background(), projectID, hubSA))
+	hubMapped := &store.GCPServiceAccount{
+		ID: tid("hub-sa-mapped"), Scope: store.ScopeHub, ScopeID: "hub", Email: mappedGSA, ProjectID: "p", Verified: true,
+	}
+	otherProject := &store.GCPServiceAccount{
+		ID: tid("other-sa"), Scope: store.ScopeProject, ScopeID: "some-other-project",
+		Email: "other@p.iam.gserviceaccount.com", ProjectID: "p", Verified: true,
+	}
+	warnings := srv.projectSAMappingWarnings(context.Background(), projectID, hubSA, hubMapped, otherProject)
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0], unmappedGSA)
+	assert.Contains(t, warnings[0], "of this project")
+}
+
+// The hub-scope check reads every broker on the hub, not one project's
+// providers: an account mapped on any broker's Kubernetes profile gets no
+// warning, and project-scoped accounts are skipped.
+func TestHubSAMappingWarnings_ChecksEveryBroker(t *testing.T) {
+	srv, s, projectID := newMappingProject(t)
+	otherProject := tid("map-other-project")
+	require.NoError(t, s.CreateProject(context.Background(), &store.Project{
+		ID: otherProject, Name: "Other Mapping Project", Slug: "map-other-project",
+	}))
+	addProviderBroker(t, s, projectID, "b1", k8sProfile("k8s", true))
+	addProviderBroker(t, s, otherProject, "b2", k8sProfile("k8s", true, mappedGSA))
+
+	hubUnmapped := &store.GCPServiceAccount{
+		ID: tid("hub-unmapped"), Scope: store.ScopeHub, ScopeID: "hub", Email: unmappedGSA, ProjectID: "p", Verified: true,
+	}
+	hubMapped := &store.GCPServiceAccount{
+		ID: tid("hub-mapped"), Scope: store.ScopeHub, ScopeID: "hub", Email: mappedGSA, ProjectID: "p", Verified: true,
+	}
+	projectScoped := &store.GCPServiceAccount{
+		ID: tid("proj-unmapped"), Scope: store.ScopeProject, ScopeID: projectID,
+		Email: "proj@p.iam.gserviceaccount.com", ProjectID: "p", Verified: true,
+	}
+
+	warnings := srv.hubSAMappingWarnings(context.Background(), hubUnmapped, hubMapped, projectScoped)
+	require.Len(t, warnings, 1, "only the hub-scoped account no broker maps is warned about")
+	assert.Contains(t, warnings[0], unmappedGSA)
+	assert.Contains(t, warnings[0], "of this hub")
+	assert.Contains(t, warnings[0], "b1/k8s")
+	assert.Contains(t, warnings[0], "b2/k8s")
+}
+
+// The hub-wide view is reused for hubSAMappingCacheTTL, so repeated
+// hub-scope requests do not each walk every broker; after the window a new
+// mapping is seen.
+func TestHubSAMappingWarnings_ViewCachedForTTL(t *testing.T) {
+	srv, s, projectID := newMappingProject(t)
+	addProviderBroker(t, s, projectID, "b1", k8sProfile("k8s", true))
+	hubSA := &store.GCPServiceAccount{
+		ID: tid("hub-sa"), Scope: store.ScopeHub, ScopeID: "hub", Email: unmappedGSA, ProjectID: "p", Verified: true,
+	}
+
+	now := time.Now()
+	orig := hubSAMappingNow
+	hubSAMappingNow = func() time.Time { return now }
+	t.Cleanup(func() { hubSAMappingNow = orig })
+
+	require.Len(t, srv.hubSAMappingWarnings(context.Background(), hubSA), 1)
+
+	// A second broker maps the account. Within the window the cached view
+	// still answers; past it the walk runs again and sees the mapping.
+	addProviderBroker(t, s, projectID, "b2", k8sProfile("k8s", true, unmappedGSA))
+	now = now.Add(hubSAMappingCacheTTL - time.Second)
+	assert.Len(t, srv.hubSAMappingWarnings(context.Background(), hubSA), 1, "cached view reused within the TTL")
+	now = now.Add(2 * time.Second)
+	assert.Empty(t, srv.hubSAMappingWarnings(context.Background(), hubSA), "view reloaded after the TTL")
+}
+
+// hubBrokerListStore lets a test hold or fail the broker listing behind
+// hubSAMappings. It is installed through installStoreFault before any
+// audited setup and delegates untouched until its switch is armed, so tests
+// never reassign srv.store after setup (ptone/scion#3435).
+type hubBrokerListStore struct {
+	store.Store
+	fault   *storeFaultSwitch
+	fail    atomic.Bool
+	started chan struct{} // closed-once signal that a listing began, if set
+	release chan struct{} // a listing waits on it, if set
+	once    sync.Once
+}
+
+func (h *hubBrokerListStore) ListRuntimeBrokers(ctx context.Context, f store.RuntimeBrokerFilter, o store.ListOptions) (*store.ListResult[store.RuntimeBroker], error) {
+	if !h.fault.Active() {
+		return h.Store.ListRuntimeBrokers(ctx, f, o)
+	}
+	if h.started != nil {
+		h.once.Do(func() { close(h.started) })
+	}
+	if h.release != nil {
+		<-h.release
+	}
+	if h.fail.Load() {
+		return nil, errors.New("listing failed")
+	}
+	return h.Store.ListRuntimeBrokers(ctx, f, o)
+}
+
+// newMappingProjectWithBrokerListFault is newMappingProject with a disarmed
+// hubBrokerListStore installed right after the server is built. configure
+// runs on the wrapper before it is installed (e.g. to set the hold channels).
+func newMappingProjectWithBrokerListFault(t *testing.T, configure func(*hubBrokerListStore)) (*Server, store.Store, string, *hubBrokerListStore, *storeFaultSwitch) {
+	t.Helper()
+	srv, s, wrapper, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *hubBrokerListStore {
+		w := &hubBrokerListStore{Store: inner, fault: f}
+		if configure != nil {
+			configure(w)
+		}
+		return w
+	})
+	projectID := createTestProjectForSA(t, srv, s)
+	return srv, s, projectID, wrapper, fault
+}
+
+// The cache lock is not held across the broker walk: while one request's
+// walk is stuck, another request can still read the cache.
+func TestHubSAMappings_LockNotHeldDuringLoad(t *testing.T) {
+	srv, s, projectID, hold, fault := newMappingProjectWithBrokerListFault(t, func(w *hubBrokerListStore) {
+		w.started = make(chan struct{})
+		w.release = make(chan struct{})
+	})
+	addProviderBroker(t, s, projectID, "b1", k8sProfile("k8s", true))
+	fault.Arm()
+
+	done := make(chan projectSAMappingView, 1)
+	go func() { done <- srv.hubSAMappings(context.Background()) }()
+	<-hold.started
+
+	locked := make(chan struct{})
+	go func() {
+		srv.hubSAMappingCache.mu.Lock()
+		srv.hubSAMappingCache.mu.Unlock() //nolint:staticcheck // probing that the lock is free
+		close(locked)
+	}()
+	select {
+	case <-locked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cache lock held while the broker walk is in progress")
+	}
+
+	close(hold.release)
+	view := <-done
+	assert.Equal(t, []string{"b1/k8s"}, view.reported)
+}
+
+// A failed walk is not cached and does not replace the last good view: the
+// previous view answers until a walk succeeds again.
+func TestHubSAMappings_FailureReturnsLastGoodView(t *testing.T) {
+	srv, s, projectID, flaky, fault := newMappingProjectWithBrokerListFault(t, nil)
+	addProviderBroker(t, s, projectID, "b1", k8sProfile("k8s", true))
+	fault.Arm()
+	hubSA := &store.GCPServiceAccount{
+		ID: tid("hub-sa"), Scope: store.ScopeHub, ScopeID: "hub", Email: unmappedGSA, ProjectID: "p", Verified: true,
+	}
+
+	now := time.Now()
+	orig := hubSAMappingNow
+	hubSAMappingNow = func() time.Time { return now }
+	t.Cleanup(func() { hubSAMappingNow = orig })
+
+	require.Len(t, srv.hubSAMappingWarnings(context.Background(), hubSA), 1)
+
+	// Past the TTL the walk fails: the last good view still answers.
+	flaky.fail.Store(true)
+	now = now.Add(hubSAMappingCacheTTL + time.Second)
+	assert.Len(t, srv.hubSAMappingWarnings(context.Background(), hubSA), 1, "last good view used on failure")
+	assert.Equal(t, []string{"b1/k8s"}, srv.hubSAMappings(context.Background()).reported)
+
+	// The failure was not cached: the next walk succeeds and sees a new mapping.
+	flaky.fail.Store(false)
+	addProviderBroker(t, s, projectID, "b2", k8sProfile("k8s", true, unmappedGSA))
+	assert.Empty(t, srv.hubSAMappingWarnings(context.Background(), hubSA), "view reloaded once the walk succeeds")
+}
+
+// With no good view yet, a failed walk answers with its partial view.
+func TestHubSAMappings_FailureWithoutPriorViewReturnsPartial(t *testing.T) {
+	srv, s, projectID, flaky, fault := newMappingProjectWithBrokerListFault(t, nil)
+	addProviderBroker(t, s, projectID, "b1", k8sProfile("k8s", true))
+	flaky.fail.Store(true)
+	fault.Arm()
+	assert.Empty(t, srv.hubSAMappings(context.Background()).reported)
+	assert.False(t, srv.hubSAMappingCache.loaded, "failed walk not cached")
+}
+
+// No Kubernetes profile anywhere on the hub: nothing to warn about.
+func TestHubSAMappingWarnings_NoKubernetesBrokers(t *testing.T) {
+	srv, s, projectID := newMappingProject(t)
+	addProviderBroker(t, s, projectID, "b", store.BrokerProfile{Name: "local", Type: "docker"})
+	hubSA := &store.GCPServiceAccount{
+		ID: tid("hub-sa"), Scope: store.ScopeHub, ScopeID: "hub", Email: unmappedGSA, ProjectID: "p", Verified: true,
+	}
+	assert.Empty(t, srv.hubSAMappingWarnings(context.Background(), hubSA))
 }
 
 // The embedded broker runs in the hub process, so its mappings are read live
@@ -663,15 +861,28 @@ func TestCreateGCPServiceAccount_NoWarningWithoutKubernetesProviders(t *testing.
 	assert.NotContains(t, rec.Body.String(), `"warnings"`)
 }
 
-func TestHubScopedCreate_NoWarnings(t *testing.T) {
+// Registering a hub-scoped account warns when no Kubernetes broker profile
+// on the hub maps it (ptone/scion#4019), and not when one does.
+func TestHubScopedCreate_WarnsWhenUnmapped(t *testing.T) {
 	srv, s, projectID := newMappingProject(t)
-	addProviderBroker(t, s, projectID, "b", k8sProfile("k8s", true))
+	addProviderBroker(t, s, projectID, "b", k8sProfile("k8s", true, mappedGSA))
 	ensureHubMembership(context.Background(), s, DevUserID)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/gcp-service-accounts?scope=hub",
 		map[string]string{"email": unmappedGSA})
+	require.Less(t, rec.Code, 300, "warnings must never fail the request: %s", rec.Body.String())
+	var resp struct {
+		Warnings []string `json:"warnings"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Warnings, 1)
+	assert.Contains(t, resp.Warnings[0], unmappedGSA)
+	assert.Contains(t, resp.Warnings[0], "of this hub")
+
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/gcp-service-accounts?scope=hub",
+		map[string]string{"email": mappedGSA})
 	require.Less(t, rec.Code, 300, rec.Body.String())
-	assert.NotContains(t, rec.Body.String(), `"warnings"`)
+	assert.NotContains(t, rec.Body.String(), `"warnings"`, "a mapped account gets no warnings field")
 }
 
 func TestListGCPServiceAccounts_Warnings(t *testing.T) {
@@ -695,14 +906,21 @@ func TestListGCPServiceAccounts_Warnings(t *testing.T) {
 			var resp ListGCPServiceAccountsResponse
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 			assert.Len(t, resp.Items, 3)
-			require.Len(t, resp.Warnings, 1, "only the unmapped project-scoped account is warned about")
-			assert.Contains(t, resp.Warnings[0], unmappedGSA)
+			require.Len(t, resp.Warnings, 2, "the unmapped project-scoped and hub-scoped accounts are warned about")
+			joined := strings.Join(resp.Warnings, "\n")
+			assert.Contains(t, joined, unmappedGSA)
+			assert.Contains(t, joined, hubSA.Email)
+			assert.NotContains(t, joined, "account "+mappedGSA)
 		})
 	}
 
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/gcp-service-accounts?scope=hub", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.NotContains(t, rec.Body.String(), `"warnings"`, "the hub-scope list never carries warnings")
+	var resp ListGCPServiceAccountsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Warnings, 1, "the hub-scope list warns about its unmapped hub-scoped account")
+	assert.Contains(t, resp.Warnings[0], hubSA.Email)
+	assert.Contains(t, resp.Warnings[0], "of this hub")
 }
 
 func TestMintGCPServiceAccount_WarnsWhenUnmapped(t *testing.T) {
@@ -735,7 +953,9 @@ func TestVerifyGCPServiceAccount_Warnings(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), `"warnings"`)
 	assert.Contains(t, rec.Body.String(), unmappedGSA)
 
-	// A hub-scoped account verified through the project route gets none.
+	// A hub-scoped account verified through the project route is checked
+	// against the project's profiles, and through the parentless route
+	// against every profile on the hub.
 	hubSA := &store.GCPServiceAccount{
 		ID: tid("hub-sa-verify"), Scope: store.ScopeHub, ScopeID: "hub",
 		Email: "hubverify@p.iam.gserviceaccount.com", ProjectID: "p",
@@ -744,5 +964,12 @@ func TestVerifyGCPServiceAccount_Warnings(t *testing.T) {
 	rec = doRequest(t, srv, http.MethodPost,
 		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/%s/verify", projectID, hubSA.ID), nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.NotContains(t, rec.Body.String(), `"warnings"`)
+	assert.Contains(t, rec.Body.String(), "hubverify@p.iam.gserviceaccount.com is not mapped")
+	assert.Contains(t, rec.Body.String(), "of this project")
+
+	rec = doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/gcp-service-accounts/%s/verify", hubSA.ID), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "hubverify@p.iam.gserviceaccount.com is not mapped")
+	assert.Contains(t, rec.Body.String(), "of this hub")
 }

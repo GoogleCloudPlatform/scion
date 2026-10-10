@@ -65,6 +65,29 @@ func (t defaultTier) setting() string {
 	return "the " + t.name + "'s default GCP identity setting"
 }
 
+// fixer and fix name who changes the default and where (ptone/scion#4019):
+// the settings field to update and the API route or page that carries it.
+func (t defaultTier) fixer() string {
+	if t == defaultTierHub {
+		return "a hub admin"
+	}
+	return "a project admin"
+}
+
+func (t defaultTier) fix() string {
+	switch {
+	case t.profile != "":
+		return fmt.Sprintf("the %q entry of defaultGCPIdentityServiceAccountIDByProfile in the project settings "+
+			"(PUT /api/v1/projects/<project>/settings, or the project's settings page)", t.profile)
+	case t == defaultTierHub:
+		return "agent_defaults.default_gcp_identity_service_account_id in the hub's server config " +
+			"(PUT /api/v1/admin/server-config, or the admin server-config page)"
+	default:
+		return "defaultGCPIdentityServiceAccountID in the project settings " +
+			"(PUT /api/v1/projects/<project>/settings, or the project's settings page)"
+	}
+}
+
 // projectProfileDefaultSA returns the per-profile default GCP service
 // account ID (ProjectSettings.DefaultGCPIdentityServiceAccountIDByProfile)
 // for the profile the agent runs under, and that profile's name. Both are
@@ -177,15 +200,19 @@ func (s *Server) resolveDefaultSAAssignmentCore(ctx context.Context, r *http.Req
 			"sa_id", saID,
 			"err", err)
 		return nil, &defaultSAUnusableError{msg: fmt.Sprintf("%s GCP service account is not available in this project; "+
-			"update %s", tier.subject(), tier.setting())}
+			"update %s: %s must change or clear %s.", tier.subject(), tier.setting(), tier.fixer(), tier.fix())}
 	}
 	if !gcpServiceAccountVerified(sa) {
 		slog.Warn(tier.name+"-default SA assignment failed: service account not verified",
 			"surface", surface,
 			"project_id", projectID,
 			"sa_id", sa.ID, "sa_email", sa.Email)
-		return nil, &defaultSAUnusableError{msg: fmt.Sprintf("%s GCP service account is not verified; "+
-			"verify it before it can be assigned to agents", tier.subject())}
+		// Naming the account follows the spec §9 Q1 rule: the caller is
+		// creating an agent in this project, and the account is reachable
+		// from it.
+		return nil, &defaultSAUnusableError{msg: fmt.Sprintf("%s GCP service account is not verified: "+
+			"the hub cannot obtain tokens for %s. %s Or %s can point %s at a verified account.",
+			tier.subject(), sa.Email, identityVerifyRemedy(sa.Scope), tier.fixer(), tier.fix())}
 	}
 
 	// P10: Authorization gate for default SA assignment.
@@ -254,7 +281,7 @@ func (s *Server) resolveDefaultSAAssignment(ctx context.Context, w http.Response
 	}
 	var unusable *defaultSAUnusableError
 	if errors.As(err, &unusable) {
-		writeError(w, http.StatusBadRequest, ErrCodeValidationError, unusable.Error(), nil)
+		writeError(w, http.StatusBadRequest, ErrCodeIdentityDefaultInvalid, unusable.Error(), nil)
 		return nil, false
 	}
 	// An internal failure. Always a plain 500, never mapped through

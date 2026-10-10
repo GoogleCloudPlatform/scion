@@ -322,7 +322,9 @@ func TestAgentLifecycle_StartRefusedForHubScopedSAWithoutEnforce(t *testing.T) {
 	require.NotEqual(t, SAAssignCheckEnforce, mode, "test assumes the default mode is not enforce")
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
-	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	// identity_assign_denied is a 403 on every path (ptone/scion#4019).
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"code":"`+ErrCodeIdentityAssignDenied+`"`)
 	assert.True(t, strings.Contains(rec.Body.String(), "gcpIamCheckMode=enforce"), rec.Body.String())
 	assert.Zero(t, disp.starts)
 }
