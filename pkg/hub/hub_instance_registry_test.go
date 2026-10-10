@@ -649,19 +649,21 @@ func TestHubInstanceRegistry_StoresNormalisedChecks(t *testing.T) {
 	assert.Equal(t, map[string]string{"database": "healthy", "colocated": "unknown"}, st.rows["hub-test-1"].Checks)
 }
 
-// hubInstanceRowBytes is the serialised size of the material part of the
-// row that an upsert of snap writes.
-func hubInstanceRowBytes(t *testing.T, snap hubInstanceSnapshot) int {
+// hubInstancePayloadBytes is the serialised size of the payload an upsert
+// of snap writes: label, version, status, checks and stats (not the
+// instance ID or timestamps).
+func hubInstancePayloadBytes(t *testing.T, snap hubInstanceSnapshot) int {
 	t.Helper()
 	b, err := json.Marshal(snap)
 	require.NoError(t, err)
 	return len(b)
 }
 
-// A row with 16 checks and 32 integrations, every name and value at its
-// length cap, serialises to at most 4 KiB: the integrations are cut and
-// marked truncated.
-func TestHubInstanceSnapshot_RowWithMaxChecksAndIntegrationsWithin4KiB(t *testing.T) {
+// With 16 checks and 32 integrations, every name and value at its length
+// cap, the payload (label, version, status, checks and stats; not the
+// instance ID or timestamps) serialises to at most 4 KiB: the integrations
+// are cut and marked truncated.
+func TestHubInstanceSnapshot_PayloadWithMaxChecksAndIntegrationsWithin4KiB(t *testing.T) {
 	checks := map[string]string{}
 	for i := 0; i < api.BrokerHealthMaxChecks; i++ {
 		checks[fmt.Sprintf("%02d", i)+strings.Repeat("c", api.HubInstanceMaxCheckNameChars-2)] = "unavailable: detail"
@@ -681,14 +683,14 @@ func TestHubInstanceSnapshot_RowWithMaxChecksAndIntegrationsWithin4KiB(t *testin
 		})
 
 	require.Len(t, snap.Checks, api.BrokerHealthMaxChecks)
-	assert.LessOrEqual(t, hubInstanceRowBytes(t, snap), api.HubInstanceRowMaxBytes)
+	assert.LessOrEqual(t, hubInstancePayloadBytes(t, snap), api.HubInstanceRowMaxBytes)
 	assert.LessOrEqual(t, len(snap.statsJSON()), api.HubInstanceRowMaxBytes)
 	assert.True(t, snap.Stats.IntegrationsTruncated)
 	assert.NotNil(t, snap.Stats.DB, "the pool block is never cut")
 }
 
 // With 16 checks and 32 integrations of ordinary length, nothing is cut.
-func TestHubInstanceSnapshot_TypicalRowKeepsAllIntegrations(t *testing.T) {
+func TestHubInstanceSnapshot_TypicalPayloadKeepsAllIntegrations(t *testing.T) {
 	checks := map[string]string{}
 	for i := 0; i < api.BrokerHealthMaxChecks; i++ {
 		checks[fmt.Sprintf("check_%02d", i)] = "healthy"
@@ -703,7 +705,7 @@ func TestHubInstanceSnapshot_TypicalRowKeepsAllIntegrations(t *testing.T) {
 		DB:           &api.HubInstanceDBStats{InUse: 3, Idle: 2, MaxOpen: 25, WaitCount: 7},
 		Integrations: integrations,
 	})
-	assert.LessOrEqual(t, hubInstanceRowBytes(t, snap), api.HubInstanceRowMaxBytes)
+	assert.LessOrEqual(t, hubInstancePayloadBytes(t, snap), api.HubInstanceRowMaxBytes)
 	assert.Len(t, snap.Stats.Integrations, api.HubInstanceMaxIntegrations)
 	assert.False(t, snap.Stats.IntegrationsTruncated)
 }

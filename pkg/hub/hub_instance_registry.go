@@ -63,7 +63,8 @@ const (
 )
 
 // hubInstanceSnapshot is one tick's view of this process's registry row.
-// Stats is normalised and capped so the serialised row stays within
+// Stats is normalised and capped so the serialised payload (label,
+// version, status, checks and stats) stays within
 // api.HubInstanceRowMaxBytes (see hubInstanceSnapshotFromChecks). A tick
 // compares the snapshot's material JSON (see material) with that of the
 // last successfully written snapshot, and writes the full row only when
@@ -193,8 +194,9 @@ func (s *Server) hubInstanceDBStats() *api.HubInstanceDBStats {
 
 // hubInstanceSnapshotFromChecks builds a snapshot from a raw check map and
 // raw stats: status from the raw checks, stored checks normalised, version
-// bounded, and stats normalised and cut so the serialised row (label,
-// version, status, checks and stats) is at most api.HubInstanceRowMaxBytes.
+// bounded, and stats normalised and cut so the serialised payload (label,
+// version, status, checks and stats; not the instance ID or timestamps) is
+// at most api.HubInstanceRowMaxBytes.
 func hubInstanceSnapshotFromChecks(label, ver string, raw map[string]string, stats api.HubInstanceStats) hubInstanceSnapshot {
 	snap := hubInstanceSnapshot{
 		Label:   label,

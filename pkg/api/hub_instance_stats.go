@@ -22,7 +22,8 @@ import (
 // HubInstanceStats is the stats column of a hub-instance registry row
 // (health dashboard F3 design §5.1, §5.5): bounded per-instance figures, no
 // free text. New fields must be bounded too, and must keep the serialised
-// row within HubInstanceRowMaxBytes (see CapHubInstanceStats).
+// payload (label, version, status, checks and stats) within
+// HubInstanceRowMaxBytes (see CapHubInstanceStats).
 type HubInstanceStats struct {
 	// DB is the instance's database connection pool, from
 	// sql.DB.Stats(). Nil when the store exposes no *sql.DB.
@@ -31,7 +32,7 @@ type HubInstanceStats struct {
 	// at most HubInstanceMaxIntegrations.
 	Integrations []HubInstanceIntegration `json:"integrations,omitempty"`
 	// IntegrationsTruncated is true when CapHubInstanceStats cut
-	// Integrations to keep the row within its size cap.
+	// Integrations to keep the payload within its size cap.
 	IntegrationsTruncated bool `json:"integrations_truncated,omitempty"`
 }
 
@@ -66,9 +67,10 @@ type HubInstanceIntegration struct {
 }
 
 const (
-	// HubInstanceRowMaxBytes caps the serialised material part of a
-	// registry row (label, version, status, checks and stats). It keeps
-	// the row below the Postgres TOAST threshold.
+	// HubInstanceRowMaxBytes caps the serialised payload of a registry
+	// row: the JSON of its label, version, status, checks and stats. It
+	// keeps the row small. The instance ID and the timestamps are not
+	// counted.
 	HubInstanceRowMaxBytes = 4096
 	// HubInstanceMaxIntegrations caps the integrations kept in stats.
 	HubInstanceMaxIntegrations = 32
@@ -138,7 +140,7 @@ func NormalizeHubInstanceStats(s HubInstanceStats) HubInstanceStats {
 // integrations are dropped from the end of the (sorted) list, one at a
 // time, and IntegrationsTruncated is set. The DB block is fixed-size and
 // never cut. The registry writer passes the room left in
-// HubInstanceRowMaxBytes after the row's other material fields.
+// HubInstanceRowMaxBytes after the payload's other fields.
 func CapHubInstanceStats(s HubInstanceStats, maxBytes int) (HubInstanceStats, json.RawMessage) {
 	s = NormalizeHubInstanceStats(s)
 	// A struct of bounded strings, ints and bools always marshals.
