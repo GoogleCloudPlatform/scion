@@ -370,7 +370,9 @@ func TestThreadMessageFanOut_DeadlineStopsMidLoop(t *testing.T) {
 	looked := len(wrapped.looked)
 	wrapped.mu.Unlock()
 	assert.Equal(t, 1, looked, "the loop must stop at the first member after the deadline passed")
-	assert.Empty(t, memberMessageRecipients(collectEvents(events)))
+	// The first member's lookups run on the cancelled context, so whether
+	// they succeed depends on the store; only the loop stopping is pinned.
+	assert.LessOrEqual(t, len(memberMessageRecipients(collectEvents(events))), 1)
 }
 
 // The same through the agent-routed send path: in a topic with a default

@@ -140,10 +140,16 @@ func def162GroupConv(t *testing.T, s store.Store, projectID, topicKey string) st
 // with the given message body. Returns the response recorder.
 func postOutboundConvRef(t *testing.T, srv *Server, projectID, agentID, msg, convRef string) *httptest.ResponseRecorder {
 	t.Helper()
-	body, _ := json.Marshal(OutboundMessageRequest{
+	return postOutboundRequest(t, srv, projectID, agentID, OutboundMessageRequest{
 		Msg:             msg,
 		ConversationRef: convRef,
 	})
+}
+
+// postOutboundRequest sends an agent outbound message request as agentID.
+func postOutboundRequest(t *testing.T, srv *Server, projectID, agentID string, outbound OutboundMessageRequest) *httptest.ResponseRecorder {
+	t.Helper()
+	body, _ := json.Marshal(outbound)
 	req := httptest.NewRequest(http.MethodPost,
 		"/api/v1/agents/"+agentID+"/outbound-message", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -576,4 +582,37 @@ func TestDEF162_AgentMention_Broker_FannedOutToMentioned(t *testing.T) {
 	require.Equal(t, hookCalls.Load(), memberAtHook.Load(),
 		"the mentioned human must already be a member when the broker fans the message out")
 	expectMemberMessage(t, sub, human.ID, topicID)
+}
+
+// A message naming the reserved inprocess channel is refused by the broker
+// before anything is published, so its mentions make no one a member.
+// (TestHandleAgentOutboundMessage_ReservedChannelIsBadRequest covers the
+// refusal for a DM; this covers the thread-membership skip.)
+func TestDEF162_ReservedChannel_MentionMakesNoMember(t *testing.T) {
+	srv, s, project, agent, human, topicID := def162Setup(t)
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: eventbus.InProcessBusName, Bus: eventbus.NewInProcessEventBus(slog.Default())},
+		{Name: "chatplugin", ChannelID: eventbus.InProcessBusName, Bus: nullSpokeEventBus{}},
+	}, slog.Default())
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	proxy := NewMessageBrokerProxy(fanout, s, events,
+		func() AgentDispatcher { return noopDispatcher{} }, slog.Default())
+	srv.SetMessageBrokerProxy(proxy)
+	proxy.Start()
+	t.Cleanup(proxy.Stop)
+
+	convID := def162GroupConv(t, s, project.ID, topicID)
+	rr := postOutboundRequest(t, srv, project.ID, agent.ID, OutboundMessageRequest{
+		Msg:             "Hey @UniqueHuman162 on a reserved channel",
+		ConversationRef: "conv:" + convID,
+		Channel:         eventbus.InProcessBusName,
+	})
+	require.Equal(t, http.StatusBadRequest, rr.Code, "body: %s", rr.Body.String())
+	require.Contains(t, rr.Body.String(), "reserved for internal use")
+
+	time.Sleep(def162Settle)
+	assert.False(t, isUserParticipant(t, s, convID, human.ID),
+		"a refused reserved-channel message must not make the mentioned human a member")
+	requireNoNotifications(t, s, human.ID)
 }
