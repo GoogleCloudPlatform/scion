@@ -3979,6 +3979,7 @@ func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, a
 
 	// Enrich agent with project and broker names
 	s.enrichAgent(ctx, agent, nil, nil)
+	s.setDeletionBlocksStart(ctx, agent)
 	resolvedHarness, harnessCaps := s.resolveAgentHarnessCapabilities(ctx, agent)
 
 	// Compute capabilities for this agent
@@ -4004,6 +4005,25 @@ func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, a
 	resp.AppliedConfig = redactAppliedConfigEnvForResponse(resp.AppliedConfig, s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// setDeletionBlocksStart sets agent.Deletion.BlocksStart to the current
+// start-gate answer for the single-agent GET (ptone/scion#3098), so a client
+// can word the delete banner and gate Start from the hub's answer instead of
+// inferring it from the stage. It does nothing when there is no deletion
+// view. If the check cannot be read, the field stays absent and the GET
+// still succeeds.
+func (s *Server) setDeletionBlocksStart(ctx context.Context, agent *store.Agent) {
+	if agent == nil || agent.Deletion == nil {
+		return
+	}
+	blocked, err := s.deleteBlocksStart(ctx, agent)
+	if err != nil {
+		slog.WarnContext(ctx, "agent get: could not compute deletion blocksStart; omitting it",
+			"agent_id", agent.ID, "error", err)
+		return
+	}
+	agent.Deletion.BlocksStart = &blocked
 }
 
 // agentEditAccessFor computes what the caller may edit on agent, for the
