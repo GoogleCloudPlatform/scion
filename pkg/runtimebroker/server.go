@@ -340,7 +340,11 @@ type Server struct {
 	// (sa_mappings_report.go), created on first use by saDiscovery. Tests
 	// may set it before first use. saDiscoveryClients keeps the Kubernetes
 	// client resolved for a profile that has no live runtime.
-	saDiscoveryCache     *saDiscoveryCache
+	saDiscoveryCache *saDiscoveryCache
+	// loadMappingSettings, when set before the server starts, replaces the
+	// settings loader of the heartbeat's service account report
+	// (loadHeartbeatMappingSettings). Tests use it.
+	loadMappingSettings  func() (*config.VersionedSettings, error)
 	saDiscoveryOnce      sync.Once
 	saDiscoveryClients   map[string]kubernetes.Interface
 	saDiscoveryClientsMu sync.Mutex
@@ -1556,11 +1560,18 @@ func canonicalRuntimeTypeName(runtimeType string) string {
 // means the cheap check could not prove a match, so the caller should fall
 // back to fully resolving the profile for a conclusive answer.
 func (s *Server) defaultRuntimeMatchesProfile(runtimeType string, rtConfig config.V1RuntimeConfig) bool {
-	if canonicalRuntimeTypeName(runtimeType) != s.runtime.Name() {
+	return runtimeMatchesProfile(s.runtime, runtimeType, rtConfig)
+}
+
+// runtimeMatchesProfile is defaultRuntimeMatchesProfile for a given
+// runtime, so a caller that read the default runtime under s.mu can check
+// its own snapshot.
+func runtimeMatchesProfile(def scionrt.Runtime, runtimeType string, rtConfig config.V1RuntimeConfig) bool {
+	if canonicalRuntimeTypeName(runtimeType) != def.Name() {
 		return false
 	}
 
-	defaultK8s, isDefaultK8s := s.runtime.(*scionrt.KubernetesRuntime)
+	defaultK8s, isDefaultK8s := def.(*scionrt.KubernetesRuntime)
 	if !isDefaultK8s {
 		// Every non-Kubernetes type uses the bare type-name identity
 		// (see auxiliaryRuntimeIdentity): a type match is an identity match,

@@ -390,9 +390,15 @@ func (s *Server) heartbeatProfileAttach() []hubclient.ProfileAttachState {
 
 // loadHeartbeatMappingSettings loads the broker's global settings plus the
 // DB-backed overlay, the source of kubernetes_service_account_mappings at
-// dispatch (resolveKubernetesAssignIdentity). A variable so tests can
-// substitute settings.
-var loadHeartbeatMappingSettings = func() (*config.VersionedSettings, error) {
+// dispatch (resolveKubernetesAssignIdentity), for the heartbeat's service
+// account report. s.loadMappingSettings replaces the loader when set
+// (tests). It is a per-server field, not a package variable, so a test
+// that substitutes settings never races with the heartbeat loop of
+// another server in the same test binary (ptone/scion#4313).
+func (s *Server) loadHeartbeatMappingSettings() (*config.VersionedSettings, error) {
+	if s.loadMappingSettings != nil {
+		return s.loadMappingSettings()
+	}
 	vs, _, err := config.LoadGlobalSettingsWithOverlay()
 	return vs, err
 }

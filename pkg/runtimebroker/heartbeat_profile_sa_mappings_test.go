@@ -157,9 +157,10 @@ func saTestKSA(namespace, name, gsa string) *corev1.ServiceAccount {
 
 func TestServer_HeartbeatProfileSAMappings(t *testing.T) {
 	t.Setenv("SCION_K8S_NAMESPACE", "default-ns")
-	prev := loadHeartbeatMappingSettings
-	t.Cleanup(func() { loadHeartbeatMappingSettings = prev })
-	loadHeartbeatMappingSettings = func() (*config.VersionedSettings, error) {
+	// The settings loader is a per-server field: the test never writes
+	// state another server's heartbeat loop reads (ptone/scion#4313).
+	srv := &Server{}
+	srv.loadMappingSettings = func() (*config.VersionedSettings, error) {
 		return &config.VersionedSettings{
 			Profiles: map[string]config.V1ProfileConfig{
 				"local": {Runtime: "docker"},
@@ -180,7 +181,6 @@ func TestServer_HeartbeatProfileSAMappings(t *testing.T) {
 		saTestKSA("team-a", "amb-2", "amb@example.com"),
 		saTestKSA("default-ns", "k-ksa", "k@example.com"),
 	)
-	srv := &Server{}
 	srv.saDiscoveryCache = newSADiscoveryCache(func(string) (kubernetes.Interface, error) { return client, nil }, discardLogger())
 
 	pending := srv.heartbeatProfileSAMappings()
@@ -205,7 +205,10 @@ func TestServer_HeartbeatProfileSAMappings(t *testing.T) {
 		}, Complete: true},
 	}, got, "explicit wins, discovered added, ambiguous listed, namespace per entry (runtime entry, else the runtime default)")
 
-	loadHeartbeatMappingSettings = func() (*config.VersionedSettings, error) { return nil, errors.New("bad") }
+	// No refresh is running (all finished, and the next is not due), so
+	// replacing the loader races with nothing.
+	srv.saDiscoveryCache.wait()
+	srv.loadMappingSettings = func() (*config.VersionedSettings, error) { return nil, errors.New("bad") }
 	assert.Nil(t, srv.heartbeatProfileSAMappings(), "unreadable settings report nothing")
 }
 

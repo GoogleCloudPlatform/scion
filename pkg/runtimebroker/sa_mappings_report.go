@@ -59,7 +59,7 @@ const (
 // settings cannot be read, so the hub keeps what it has; an empty result
 // when there are no Kubernetes profiles.
 func (s *Server) heartbeatProfileSAMappings() []hubclient.ProfileSAMappingsState {
-	vs, err := loadHeartbeatMappingSettings()
+	vs, err := s.loadHeartbeatMappingSettings()
 	if err != nil || vs == nil {
 		return nil
 	}
@@ -245,7 +245,7 @@ func (s *Server) saDiscovery() *saDiscoveryCache {
 // resolver dispatch uses, and its client is kept for later lookups. It
 // runs only in the background refresh.
 func (s *Server) saDiscoveryClientset(profile string) (kubernetes.Interface, error) {
-	vs, err := loadHeartbeatMappingSettings()
+	vs, err := s.loadHeartbeatMappingSettings()
 	if err != nil {
 		return nil, err
 	}
@@ -259,7 +259,7 @@ func (s *Server) saDiscoveryClientset(profile string) (kubernetes.Interface, err
 	s.mu.RLock()
 	def := s.runtime
 	s.mu.RUnlock()
-	if def != nil && s.defaultRuntimeMatchesProfile(rtType, rtConfig) {
+	if def != nil && runtimeMatchesProfile(def, rtType, rtConfig) {
 		if c := kubernetesClientset(def); c != nil {
 			return c, nil
 		}
