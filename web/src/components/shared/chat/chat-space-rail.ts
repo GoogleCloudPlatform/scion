@@ -48,6 +48,7 @@ import { formatInstantWithZone } from '../../../utils/time.js';
 import { touchMenuItemStyles } from '../touch-styles.js';
 import { TouchPrimaryController } from '../../../utils/input-modality.js';
 import { LongPressController, type LongPressPoint } from './long-press.js';
+import { PullToRefreshController, type PullState } from './pull-to-refresh.js';
 import {
   placeMenuInViewport,
   renderMenuRows,
@@ -312,6 +313,9 @@ const MOBILE_BREAKPOINT_PX = 768;
  */
 const BACKGROUND_THREAD_LOADS = 2;
 
+/** How long the pull indicator's "Updated" stays in its live region. */
+const PULL_ANNOUNCE_MS = 3_000;
+
 /** Automatic retries of a failed thread load, per space and reload. */
 const THREAD_LOAD_AUTO_RETRIES = 1;
 
@@ -322,6 +326,17 @@ export interface ThreadSelectDetail {
   projectSlug: string;
   threadName: string;
   defaultAgent: string;
+}
+
+/**
+ * Detail of the rail's `rail-refresh` event, sent when the rail starts a full
+ * refresh (see {@link ScionChatSpaceRail.refresh}). A listener that refreshes
+ * data of its own passes the promise to `waitUntil`, so the indicator stays up
+ * until that finishes too. A promise that rejects or resolves to `false`
+ * counts as a failed refresh.
+ */
+export interface RailRefreshDetail {
+  waitUntil(promise: Promise<unknown>): void;
 }
 
 @customElement('scion-chat-space-rail')
@@ -374,6 +389,18 @@ export class ScionChatSpaceRail extends LitElement {
   private readonly longPress = new LongPressController(this);
   /** Rows are draggable only for a mouse or trackpad: on touch, a long-press opens the menu. */
   private readonly touchPrimary = new TouchPrimaryController(this);
+  /** The pull-to-refresh indicator, driven by {@link pullToRefresh}. */
+  @state() private pull: PullState = { distance: 0, armed: false, refreshing: false };
+  /** What the pull indicator's live region says once a pull finishes. */
+  @state() private pullAnnouncement = '';
+  /** Touch pull-to-refresh on the rail body, in both the All and Unread views. */
+  private readonly pullToRefresh = new PullToRefreshController({
+    scroller: () => this.shadowRoot?.querySelector<HTMLElement>('.rail-body'),
+    onRefresh: () => this.runRefresh(),
+    onChange: (state) => {
+      this.pull = state;
+    },
+  });
   @state() private renamingThread: string | null = null;
   @state() private renameValue = '';
   /** Space filter: 'all' shows everything, 'unread' shows only spaces with unread. */
@@ -801,6 +828,37 @@ export class ScionChatSpaceRail extends LitElement {
       font-size: var(--chat-fs-lg);
     }
 
+    /* Pull-to-refresh indicator, above the rail body. */
+    .pull-indicator {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      overflow: hidden;
+      color: var(--scion-text-muted, #64748b);
+      font-size: var(--chat-fs-lg);
+      transition: height 0.2s ease;
+    }
+
+    .pull-indicator.dragging {
+      transition: none;
+    }
+
+    .pull-indicator sl-icon {
+      transition: transform 0.15s ease;
+    }
+
+    .pull-indicator.armed sl-icon {
+      transform: rotate(180deg);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .pull-indicator,
+      .pull-indicator sl-icon {
+        transition: none;
+      }
+    }
+
     /* Loading / empty */
     .loading-state {
       display: flex;
@@ -1022,6 +1080,9 @@ export class ScionChatSpaceRail extends LitElement {
     // Collapsed thread-groups are restored in willUpdate, not here — see its
     // doc comment (round-4 review, N7).
     void this.loadData();
+    // Touches inside the shadow root reach the host, so listen there: the
+    // rail body is re-rendered across the first load.
+    this.pullToRefresh.attach(this);
     // Close context menu on outside click
     this._outsideClickHandler = this.handleOutsideClick.bind(this);
     document.addEventListener('click', this._outsideClickHandler);
@@ -1184,6 +1245,12 @@ export class ScionChatSpaceRail extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.pullToRefresh.detach();
+    if (this._pullAnnounceTimer) {
+      clearTimeout(this._pullAnnounceTimer);
+      this._pullAnnounceTimer = null;
+    }
+    this.pullAnnouncement = '';
     if (this._outsideClickHandler) {
       document.removeEventListener('click', this._outsideClickHandler);
     }
@@ -1225,6 +1292,89 @@ export class ScionChatSpaceRail extends LitElement {
   }
 
   /**
+   * Refresh everything the rail shows, as a user pull-to-refresh does: the
+   * spaces with their unread rollups and the thread lists, and (through the
+   * `rail-refresh` event) whatever the page loads alongside the rail, such
+   * as DM state. Unlike {@link reload}, it never reuses an earlier response.
+   *
+   * Single-flight: a call while a refresh is running joins it. `quiet`
+   * (for refreshes code starts, such as a catch-up) refreshes without the
+   * pull indicator; a user pull shows it, also when it joins a quiet one.
+   */
+  refresh(options: { quiet?: boolean } = {}): Promise<void> {
+    return this.pullToRefresh.refresh(options);
+  }
+
+  /**
+   * The body of {@link refresh}. A rail load already running is joined
+   * (loadData queues one trailing pass, so the answer is never older than
+   * this call), then the thread lists on screen, which refetch after it;
+   * the page adds its own loads through the event's `waitUntil`.
+   *
+   * A shown refresh reports how it went: a toast if the spaces or a page
+   * load failed, otherwise a short "Updated" for assistive technology. A
+   * quiet one reports nothing.
+   */
+  private async runRefresh(): Promise<void> {
+    const extra: Promise<unknown>[] = [];
+    this.dispatchEvent(
+      new CustomEvent<RailRefreshDetail>('rail-refresh', {
+        detail: { waitUntil: (p) => extra.push(p) },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    const rail = (async (): Promise<boolean> => {
+      const ok = await this.loadData();
+      await this.visibleThreadLoads();
+      return ok;
+    })();
+    const results = await Promise.allSettled([rail, ...extra]);
+    if (!this.pullToRefresh.showingRefresh) return;
+    const ok = results.every((r) => r.status === 'fulfilled' && r.value !== false);
+    if (ok) {
+      this.announcePull('Updated');
+    } else {
+      showToast('Couldn’t refresh. Check your connection and try again.', 'warning');
+    }
+  }
+
+  /** Say `message` in the pull indicator's live region, then clear it. */
+  private announcePull(message: string): void {
+    if (this._pullAnnounceTimer) clearTimeout(this._pullAnnounceTimer);
+    this.pullAnnouncement = message;
+    this._pullAnnounceTimer = setTimeout(() => {
+      this._pullAnnounceTimer = null;
+      this.pullAnnouncement = '';
+    }, PULL_ANNOUNCE_MS);
+  }
+
+  private _pullAnnounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Wait for the thread lists on screen to be current: the reload that just
+   * finished made them stale, and the next render starts their refetch. A
+   * space whose list was already loading when the reload landed fetches
+   * once more after that load. A failed load is waited out, not retried
+   * forever.
+   */
+  private async visibleThreadLoads(): Promise<void> {
+    const waitFor = async (id: string): Promise<void> => {
+      // A few rounds cover: an older load in flight, its refetch, and one
+      // automatic retry of a failure.
+      for (let round = 0; round < 4 && this.isConnected; round++) {
+        await this.updateComplete;
+        const load = this.loadingThreads.has(id) ? this._threadLoads.get(id) : undefined;
+        if (!load) return;
+        await load;
+      }
+    };
+    await this.updateComplete;
+    const ids = [...this.visibleThreadSpaceIds()].filter((id) => this._knownSpaceIds.has(id));
+    await Promise.allSettled(ids.map(waitFor));
+  }
+
+  /**
    * A space's thread list, loading it first if the rail has not. Lets the
    * page pick a space's #general on a deep link without a second request
    * for the list the rail is about to show.
@@ -1244,39 +1394,46 @@ export class ScionChatSpaceRail extends LitElement {
    * made while a load is running does not start a second, concurrent one —
    * it queues exactly one trailing load (the running one may have read the
    * server before whatever prompted the call) and shares its promise.
+   *
+   * Resolves to whether the last pass loaded the spaces: that pass answers
+   * every call, the ones it absorbed included.
    */
-  private loadData(startedAfter: number = chatLoadClock()): Promise<void> {
+  private loadData(startedAfter: number = chatLoadClock()): Promise<boolean> {
     if (this._loadInFlight) {
       this._reloadQueued = true;
       // The trailing pass must answer every call it absorbs.
       this._queuedStartedAfter = Math.max(this._queuedStartedAfter, startedAfter);
       return this._loadInFlight;
     }
-    const run = async (): Promise<void> => {
+    const run = async (): Promise<boolean> => {
       let after = startedAfter;
+      let ok = false;
       try {
         do {
           this._reloadQueued = false;
           this._queuedStartedAfter = -Infinity;
-          await this.loadDataOnce(after);
+          ok = await this.loadDataOnce(after);
           after = this._queuedStartedAfter;
         } while (this._reloadQueued && this.isConnected);
       } finally {
         this._loadInFlight = null;
       }
+      return ok;
     };
     this._loadInFlight = run();
     return this._loadInFlight;
   }
 
   /** The running {@link loadData} pass, if any. */
-  private _loadInFlight: Promise<void> | null = null;
+  private _loadInFlight: Promise<boolean> | null = null;
   /** A {@link loadData} call arrived during the running pass; run once more after it. */
   private _reloadQueued = false;
   /** The newest `startedAfter` among the calls the trailing pass answers. */
   private _queuedStartedAfter = -Infinity;
 
-  private async loadDataOnce(startedAfter: number): Promise<void> {
+  /** One spaces/prefs pass; resolves to whether the spaces loaded. */
+  private async loadDataOnce(startedAfter: number): Promise<boolean> {
+    let spacesLoaded = false;
     // Only show the full-page spinner on the very first load. Subsequent
     // reloads (e.g. SSE-triggered) update data in-place without a flash.
     const initial = !this._initialLoadDone;
@@ -1288,6 +1445,7 @@ export class ScionChatSpaceRail extends LitElement {
         this.loadSpaces(initial, startedAfter),
         this.loadPrefs(),
       ]);
+      spacesLoaded = spacesOk;
       // Pruning reads both this.spaces and this.prefs.threadGroups to decide
       // what's stale, so it must not run unless both loaded cleanly in this
       // pass — see pruneCollapsedGroups' doc comment for what goes wrong
@@ -1323,6 +1481,7 @@ export class ScionChatSpaceRail extends LitElement {
         })
       );
     }
+    return spacesLoaded;
   }
 
   /** Track whether spaces have been loaded at least once. */
@@ -3156,7 +3315,7 @@ export class ScionChatSpaceRail extends LitElement {
         this.loading
           ? html`<div class="loading-state"><sl-spinner></sl-spinner></div>`
           : html`
-              ${this.renderToolbar()}
+              ${this.renderToolbar()} ${this.renderPullIndicator()}
               <div class="rail-body" @click=${this.handleRailBodyClick}>${this.renderSpaces()}</div>
             `
       }
@@ -3164,6 +3323,27 @@ export class ScionChatSpaceRail extends LitElement {
       ${this.groupContextMenuTarget && !this.menuAsSheet ? this.renderGroupContextMenu() : nothing}
       ${this.renderMenuSheet()} ${this.emojiPickerSpaceId ? this.renderEmojiPicker() : nothing}
     `;
+  }
+
+  /** The pull-to-refresh indicator: an arrow while pulling, a spinner while refreshing. */
+  private renderPullIndicator() {
+    const { distance, armed, refreshing } = this.pull;
+    const dragging = distance > 0 && !refreshing;
+    return html`<div
+      class="pull-indicator ${armed ? 'armed' : ''} ${dragging ? 'dragging' : ''}"
+      style="height: ${distance}px"
+      role="status"
+      aria-live="polite"
+    >
+      ${refreshing
+        ? html`<sl-spinner></sl-spinner><span class="sr-only">Refreshing</span>`
+        : distance > 0
+          ? html`<sl-icon name="arrow-down" aria-hidden="true"></sl-icon>`
+          : nothing}
+      ${!refreshing && this.pullAnnouncement
+        ? html`<span class="sr-only">${this.pullAnnouncement}</span>`
+        : nothing}
+    </div>`;
   }
 
   /** Render the filter + sort toolbar below the rail header. */

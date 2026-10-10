@@ -56,6 +56,8 @@ import { chatNotifications } from '../../client/chat-notifications.js';
 import { chatUnread } from '../../client/chat-unread.js';
 import { CHAT_STARTUP_REUSE_MS, chatDMsLoad, chatLoadClock } from '../../client/chat-list-cache.js';
 import type { SharedLoadOptions } from '../../client/chat-list-cache.js';
+import { ResumeRefresh } from '../../client/resume-refresh.js';
+import type { RailRefreshDetail } from '../shared/chat/chat-space-rail.js';
 import { TouchPrimaryController } from '../../utils/input-modality.js';
 import { isMacTextFieldCtrlKey } from '../shared/text-field-keys.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
@@ -465,6 +467,15 @@ export class ScionPageChat extends LitElement {
   private _onOwnReadStateSSE = this._handleOwnReadStateSSE.bind(this);
   /** Bound listener for the rail's own-tab "Mark unread" notification. */
   private _onConversationMarkedUnread = this._handleConversationMarkedUnread.bind(this);
+  /** Bound listener for the rail's `rail-refresh` (pull-to-refresh and resume). */
+  private _onRailRefresh = this._handleRailRefresh.bind(this);
+  /** Bound listener for an SSE reconnect after a drop. */
+  private _onSseResync = this._handleSseResync.bind(this);
+  /**
+   * Refreshes the rail when the page returns after a while in the
+   * background; see {@link ResumeRefresh} for why the rail is stale then.
+   */
+  private _resumeRefresh: ResumeRefresh | null = null;
   private _unreadDMRequestId = 0;
   /**
    * Bumped whenever the user navigates within the page (opens a thread or a
@@ -1672,6 +1683,10 @@ export class ScionPageChat extends LitElement {
     this.removeEventListener('rail-loaded', this._onRailLoaded);
     this.removeEventListener('read-state-updated', this._onReadStateUpdated);
     this.removeEventListener('conversation-marked-unread', this._onConversationMarkedUnread);
+    this.removeEventListener('rail-refresh', this._onRailRefresh);
+    stateManager.removeEventListener('agents-resync', this._onSseResync);
+    this._resumeRefresh?.stop();
+    this._resumeRefresh = null;
     this.stopPresenceHeartbeat();
     // Clean up the fallback poll
     if (this._fallbackPollInterval) {
@@ -1867,6 +1882,18 @@ export class ScionPageChat extends LitElement {
     // peerId needed for the dot.
     this.addEventListener('conversation-marked-unread', this._onConversationMarkedUnread);
 
+    // A full rail refresh (a pull, or one of the catch-ups below) also
+    // reloads what the page shows alongside the rail.
+    this.addEventListener('rail-refresh', this._onRailRefresh);
+    // The hub keeps no SSE backlog, so events published while the feed was
+    // down are lost. Catch the rail up when the feed comes back after a drop,
+    // and when the page returns from the background (a mobile PWA is
+    // suspended there, and its feed may never have been seen to drop).
+    stateManager.addEventListener('agents-resync', this._onSseResync);
+    this._resumeRefresh?.stop();
+    this._resumeRefresh = new ResumeRefresh(() => this.refreshRail());
+    this._resumeRefresh.start();
+
     // Agent membership and status badges are SSE-driven: the chat scope
     // subscribes to `project.{spaceId}.agent.>`, which carries both lifecycle
     // (created/deleted) and status (phase/activity) events. See
@@ -1902,6 +1929,35 @@ export class ScionPageChat extends LitElement {
         void this.refreshHubMemberPresence(this._presenceProjectIds[0] ?? '');
       }
     }, FALLBACK_POLL_INTERVAL_MS);
+  }
+
+  /**
+   * Quietly refresh the rail and what loads with it (see the rail's
+   * `refresh`): a catch-up, so no pull indicator. A refresh already running
+   * is joined.
+   */
+  private refreshRail(): void {
+    const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
+      | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
+      | null;
+    void rail?.refresh({ quiet: true });
+  }
+
+  /** The SSE feed reconnected after a drop: events sent meanwhile were lost. */
+  private _handleSseResync(): void {
+    this.refreshRail();
+  }
+
+  /**
+   * The rail started a full refresh. Reload the DM state the members
+   * sidebar shows (fresh, not shared with an earlier request; a failure
+   * fails the refresh), and the nav badge's count, which has the same
+   * staleness.
+   */
+  private _handleRailRefresh(e: Event): void {
+    const detail = (e as CustomEvent<RailRefreshDetail>).detail;
+    detail?.waitUntil(this.loadUnreadDMPeers());
+    chatUnread.scheduleRefresh();
   }
 
   /** Called when the space rail finishes loading its data. Sets up the SSE scope. */
@@ -3455,13 +3511,14 @@ export class ScionPageChat extends LitElement {
 
   /**
    * Fetch DM conversations and extract peer IDs with unread messages
-   * for the blue unread dot on member avatars.
+   * for the blue unread dot on member avatars. Resolves to whether the
+   * list loaded (a pull-to-refresh reports a failure).
    */
-  private async loadUnreadDMPeers(options: SharedLoadOptions = {}): Promise<void> {
+  private async loadUnreadDMPeers(options: SharedLoadOptions = {}): Promise<boolean> {
     const requestId = ++this._unreadDMRequestId;
     try {
       const body = await chatDMsLoad.load(options);
-      if (!body) return;
+      if (!body) return false;
       const data = body as {
         dms?: Array<{
           conversationKey: string;
@@ -3473,7 +3530,8 @@ export class ScionPageChat extends LitElement {
       };
       // A muted DM raises no dot: muting is the user saying "stop telling me
       // about this", and the avatar dot is the telling (#1029).
-      if (requestId !== this._unreadDMRequestId) return;
+      // A newer call owns the dots; this one still loaded.
+      if (requestId !== this._unreadDMRequestId) return true;
       const unreadIds = (data?.dms || [])
         .filter((dm) => dm.hasUnread && !dm.muted)
         .map((dm) => dm.peerId);
@@ -3499,8 +3557,10 @@ export class ScionPageChat extends LitElement {
             { key: dm.conversationKey, muted: dm.muted === true, hasUnread: dm.hasUnread === true },
           ])
       );
+      return true;
     } catch {
       // Non-critical — unread dots just won't show
+      return false;
     }
   }
 
