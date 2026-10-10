@@ -64,6 +64,7 @@
 
 import { expect, test, type Browser, type Page } from '@playwright/test';
 
+import { median } from '../lib.mjs';
 import { loadFixture, setupBudgetMocks } from './mock-api.js';
 
 const BASELINE_COMMIT = 'main 48a6715';
@@ -121,12 +122,6 @@ function limits(b: ViewBudget['baseline']): ViewBudget['baseline'] {
     domElements: b.domElements + DOM_MARGIN,
     longTasks: b.longTasks + Math.max(3, Math.ceil(b.longTasks / 2)),
   };
-}
-
-function median(xs: number[]): number {
-  const s = [...xs].sort((a, b) => a - b);
-  const m = Math.floor(s.length / 2);
-  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
 
 async function countDeep(page: Page, selector: string): Promise<number> {
