@@ -28,30 +28,32 @@ This document records the model that removes both problems.
 
 ## 4. Defaults vs Policy
 
-Hub and project settings are **defaults**: they sit below the template. **Policy** (enforced values, for example project telemetry on/off) sits above everything for the keys it controls. Nothing the hub supplies is written into the requester's inline config.
+Hub and project settings are **defaults**: they sit below the template. **Policy** (enforced values, for example project telemetry on/off) sits above everything for the keys it controls. Nothing the hub supplies is written into the requester's inline config (skills excepted; see section 4).
 
 Precedence, lowest to highest:
 
 ```
 built-in defaults
-  < broker settings (settings.yaml on the broker)
-    < hub defaults
-      < project defaults
-        < harness-config (its config.yaml base layer)
+  < harness-config (its config.yaml base layer)
+    < broker settings (settings.yaml on the broker)
+      < hub defaults
+        < project defaults
           < template chain (default template < named template, its files)
             < requester inline config
               < requester explicit CLI flags (--model, --image, --harness-config, --enable/--disable-telemetry, ...)
-                < policy (only for the keys it controls; currently the only policy key: project telemetry on/off)
+                < policy (only for the keys it controls; currently the only policy key is project telemetry on/off)
 ```
 
 This ladder governs agent config values (model, harness config, image, telemetry, limits). A template's own `env:` block is part of its files, but its rank among environment sources is set by the environment-variable order, not by this ladder. The hub does not copy it into the hub environment-variable scopes.
 
 - Defaults fill only what the template leaves unset. Policy overrides for its keys only.
-- Hub-supplied values travel as separate tiers (hub defaults, policy) and are never merged into the requester's inline config.
+- Hub-supplied values travel as separate tiers (hub defaults, policy) and are never merged into the requester's inline config (except skills, below).
 - Known exceptions, unchanged by this model:
   - Resources: their own interleaving with broker profile and harness overrides.
   - Environment variables and secrets (runtime_broker, hub, project and user scopes, and template and harness-config env): their own orders.
   - Skills: merged by scope rather than replaced along this ladder, using the existing hub and broker merge rules. Hub-injected skills keep travelling in the requester's inline config, labelled by scope. This is an explicit exception to I4 and is not changed by this epic.
+  - Image and image pull policy: their own chain.
+  - Project default annotations for harness config, thinking level and limits keep their current rank above the template. Their target rank is an open question tracked on the epic (ptone/scion#4215). Only the model outcome (template beats project and hub default models) is decided.
 
   See [`settings-precedence.md`](../docs-site/src/content/docs/reference/settings-precedence.md) for these orders; the release that applies this model updates that page (ptone/scion#4225).
 

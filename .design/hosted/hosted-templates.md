@@ -657,7 +657,7 @@ When creating an agent, the Runtime Broker hydrates the template:
 
 ### 7.4. Template Resolution in CreateAgent
 
-> **Superseded:** the `template.config` object in the payload below is superseded by [`../template-settings-model.md`](../template-settings-model.md). In the target model, agent config comes from the template's files, and nothing the hub supplies is written into the requester's inline config. The original text is kept for history.
+> **Superseded:** the `template.config` object in the payload below is superseded by [`../template-settings-model.md`](../template-settings-model.md). In the target model, agent config comes from the template's files, and nothing the hub supplies is written into the requester's inline config (skills excepted; see section 4 of template-settings-model.md). The original text is kept for history.
 
 The Hub resolves templates before dispatching to Runtime Brokers:
 
