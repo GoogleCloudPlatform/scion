@@ -51,7 +51,7 @@ const (
 	agentDelegationCodeGrantBoundaryInvalid      = "grant_boundary_invalid"
 	agentDelegationCodeTargetUnknown             = "target_unknown"
 	agentDelegationCodeOutsideBoundary           = "outside_boundary"
-	agentDelegationCodeOutsideBoundaryEligiblity = "outside_boundary_eligibility"
+	agentDelegationCodeOutsideBoundaryEligibility = "outside_boundary_eligibility"
 	agentDelegationCodeIssuerAuthority           = "issuer_authority"
 	agentDelegationCodeEvaluationError           = "evaluation_error"
 	agentDelegationCodeLookupError               = "lookup_error"
@@ -226,7 +226,7 @@ func bearerStageAgentDelegationCode(stage string) string {
 	case BearerStageCeiling:
 		return agentDelegationCodeOutsideCeiling
 	case BearerStageBoundaryEligibility:
-		return agentDelegationCodeOutsideBoundaryEligiblity
+		return agentDelegationCodeOutsideBoundaryEligibility
 	case BearerStageProjectAccess:
 		return agentDelegationCodeIssuerProjectAccess
 	case BearerStageAuthority:

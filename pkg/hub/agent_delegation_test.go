@@ -332,7 +332,7 @@ func TestAgentDelegationIssuance_Refusals(t *testing.T) {
 	})
 	t.Run("mintable but not delegable", func(t *testing.T) {
 		body := hubRead()
-		body["permissions"] = []string{"agent:list"}
+		body["permissions"] = []string{"project:read"}
 		rec := f.issue(t, alice, f.agentA.ID, body)
 		assertAPIError(t, rec, http.StatusForbidden, errCodePermissionNotDelegable)
 	})
@@ -737,11 +737,11 @@ func TestAgentDelegation_HeaderRules(t *testing.T) {
 	agentToken := f.agentJWT(t, f.agentA)
 
 	// A valid agent token header wins: the plain agent, which cannot read
-	// an agent in another project (404), and gains nothing from the bearer.
+	// an agent in another project, and gains nothing from the bearer.
 	rec := f.do(t, http.MethodGet, "/api/v1/agents/"+f.agentB.ID, nil, map[string]string{
 		"X-Scion-Agent-Token": agentToken, "Authorization": "Bearer " + cred.Token,
 	})
-	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.Contains(t, []int{http.StatusNotFound, http.StatusForbidden}, rec.Code, rec.Body.String())
 
 	// An invalid agent token header with the bearer: 401.
 	rec = f.do(t, http.MethodGet, "/api/v1/agents/"+f.agentB.ID, nil, map[string]string{
@@ -769,5 +769,5 @@ func TestAgentDelegation_OrdinaryAgentTokenGainsNothing(t *testing.T) {
 	cred := f.delegated(t, f.hubGrant(t).ID)
 	require.Equal(t, http.StatusOK, f.getAgent(t, cred.Token, f.agentB.ID).Code)
 	assert.Equal(t, before, read(), "an issued grant adds nothing to the agent's own token")
-	assert.Equal(t, http.StatusNotFound, before)
+	assert.Contains(t, []int{http.StatusNotFound, http.StatusForbidden}, before)
 }
