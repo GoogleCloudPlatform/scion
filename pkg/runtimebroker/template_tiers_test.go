@@ -32,6 +32,16 @@ import (
 
 func tiersBoolPtr(b bool) *bool { return &b }
 
+func tiersFmt(b *bool) string {
+	if b == nil {
+		return "<nil>"
+	}
+	if *b {
+		return "true"
+	}
+	return "false"
+}
+
 // TestResolveTelemetryOverride_PolicyBeatsEnv pins decision E6: the
 // project's telemetry policy beats the requester's SCION_TELEMETRY_ENABLED
 // (acceptance 4). With no policy, the env var still overrides as today.
@@ -58,7 +68,7 @@ func TestResolveTelemetryOverride_PolicyBeatsEnv(t *testing.T) {
 			case tc.want == nil && got != nil:
 				t.Fatalf("override = %v, want nil", *got)
 			case tc.want != nil && (got == nil || *got != *tc.want):
-				t.Fatalf("override = %v, want %v", got, *tc.want)
+				t.Fatalf("override = %s, want %v", tiersFmt(got), *tc.want)
 			}
 			v, ok := tc.env["SCION_TELEMETRY_ENABLED"]
 			if tc.wantEnvV == "" && ok {
@@ -126,7 +136,7 @@ func TestBuildStartContext_TelemetryPolicyBeatsEnv(t *testing.T) {
 				t.Fatal(err)
 			}
 			if sc.Opts.TelemetryOverride == nil || *sc.Opts.TelemetryOverride != tc.want {
-				t.Fatalf("TelemetryOverride = %v, want %v", sc.Opts.TelemetryOverride, tc.want)
+				t.Fatalf("TelemetryOverride = %s, want %v", tiersFmt(sc.Opts.TelemetryOverride), tc.want)
 			}
 		})
 	}
@@ -151,7 +161,7 @@ func TestStartAndRestart_DecodeTelemetryPolicy(t *testing.T) {
 			}
 			opts := mgr.LastStartOpts()
 			if opts.TelemetryOverride == nil || *opts.TelemetryOverride {
-				t.Fatalf("TelemetryOverride = %v, want false (policy beats env)", opts.TelemetryOverride)
+				t.Fatalf("TelemetryOverride = %s, want false (policy beats env)", tiersFmt(opts.TelemetryOverride))
 			}
 		})
 	}
@@ -174,7 +184,7 @@ func TestCreateAgent_DecodesTelemetryPolicy(t *testing.T) {
 	}
 	opts := mgr.LastStartOpts()
 	if opts.TelemetryOverride == nil || *opts.TelemetryOverride {
-		t.Fatalf("TelemetryOverride = %v, want false (policy beats env)", opts.TelemetryOverride)
+		t.Fatalf("TelemetryOverride = %s, want false (policy beats env)", tiersFmt(opts.TelemetryOverride))
 	}
 }
 
