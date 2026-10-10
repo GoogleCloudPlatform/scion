@@ -260,11 +260,12 @@ func (p *poolCountingStore) DB() *sql.DB {
 // call): every pool figure comes from the registry rows. The registry tick,
 // by contrast, does read this process's pool.
 func TestHandleHealthSummary_NoPoolStatsRead(t *testing.T) {
-	srv, s := testServer(t)
+	srv, s, counting, _ := testServerWithStoreFault(t, func(inner store.Store, _ *storeFaultSwitch) *poolCountingStore {
+		return &poolCountingStore{Store: inner}
+	})
 	dbp, ok := s.(interface{ DB() *sql.DB })
 	require.True(t, ok, "the test store exposes its *sql.DB")
-	counting := &poolCountingStore{Store: s, db: dbp.DB()}
-	srv.store = counting
+	counting.db = dbp.DB()
 
 	srv.newHubInstanceRegistry().tick(context.Background())
 	require.Positive(t, counting.calls.Load(), "the registry tick reads this process's pool")
