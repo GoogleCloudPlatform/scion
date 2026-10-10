@@ -519,6 +519,12 @@ func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, 
 	// flag is accepted unconditionally.
 	includeHubScoped := r.URL.Query().Get("includeHubScoped") == "true"
 
+	// The assign status is opt-in and gated like the status view.
+	assignReq := parseAssignStatusRequest(r)
+	if assignReq != nil && !s.authorizeAssignStatus(w, r, projectID) {
+		return
+	}
+
 	sas, err := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
 		Scope:            store.ScopeProject,
 		ScopeID:          projectID,
@@ -592,7 +598,7 @@ func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, 
 		profiles = s.projectKubernetesProfileMappings(ctx, projectID)
 	}
 	annotateGCPSAMappings(items, profiles)
-	s.annotateGCPSAAssignStatus(ctx, items, projectID, parseAssignStatusRequest(r))
+	s.annotateGCPSAAssignStatus(ctx, items, projectID, assignReq)
 
 	writeJSON(w, http.StatusOK, ListGCPServiceAccountsResponse{
 		Items:        items,

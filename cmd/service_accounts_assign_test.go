@@ -144,3 +144,22 @@ func TestSAAssignColumn(t *testing.T) {
 		assert.Equal(t, tc.want, saAssignColumn(tc.st))
 	}
 }
+
+// --broker without --profile is a usage error on both lists, before any
+// request.
+func TestSALists_BrokerWithoutProfileRefused(t *testing.T) {
+	orig := saveSACLIState()
+	defer orig.restore()
+	withSAAssignFlags(t, "", "broker-a")
+
+	seen := saCLIHub(t, saAssignBody)
+	globalMode = false
+	saGlobalListAssignable = true
+	err := runSAScopedList(nil, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--profile")
+	err = runSAList(nil, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--profile")
+	assert.Empty(t, *seen, "no request was sent")
+}

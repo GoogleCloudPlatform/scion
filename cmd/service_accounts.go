@@ -154,10 +154,12 @@ Examples:
   scion service-accounts list --assignable --profile gke --broker my-broker
   scion service-accounts list --global --json
 
---profile and --broker add an ASSIGN column: whether each account is
-mapped to a Kubernetes service account on that broker profile, from the
-broker's latest report. Without --broker the broker is the one agent
-creation would pick. "mapped" does not mean ready: the Workload Identity
+--profile (with an optional --broker) adds an ASSIGN column: whether each
+account is mapped to a Kubernetes service account on that broker profile,
+from the broker's latest report. Without --broker the broker is the one
+agent creation would pick (the project's default broker, else the hub's
+default broker if it serves the project, else the only provider), not
+counting whether it is online. "mapped" does not mean ready: the Workload Identity
 IAM binding is not checked. Accounts whose state is unknown are listed
 with the reason, never hidden.`,
 	Args: cobra.NoArgs,
@@ -290,6 +292,9 @@ func runSAScopedList(cmd *cobra.Command, args []string) error {
 			"assigned; it has no meaning with --global, which already lists every hub-scoped account")
 	}
 
+	if err := checkSAAssignStatusFlags(); err != nil {
+		return err
+	}
 	if saAssignStatusRequested() && saScopeFromGlobalFlag() == store.ScopeHub {
 		return newUsageError("--profile and --broker describe where an agent in a PROJECT would run; " +
 			"they have no meaning with --global")

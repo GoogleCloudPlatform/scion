@@ -36,11 +36,20 @@ func addSAAssignStatusFlags(c *cobra.Command) {
 	c.Flags().StringVar(&saListProfile, "profile", "",
 		"Show whether each account is mapped on this broker profile (adds an ASSIGN column)")
 	c.Flags().StringVar(&saListBroker, "broker", "",
-		"Broker for the ASSIGN column (default: the broker agent creation would pick)")
+		"Broker for the ASSIGN column; needs --profile (default: the broker agent creation would pick, not counting whether it is online)")
 }
 
 func saAssignStatusRequested() bool {
 	return saListProfile != "" || saListBroker != ""
+}
+
+// checkSAAssignStatusFlags refuses --broker without --profile: every row
+// would read unknown (no_profile).
+func checkSAAssignStatusFlags() error {
+	if saListBroker != "" && saListProfile == "" {
+		return newUsageError("--broker needs --profile: the ASSIGN column describes one broker profile")
+	}
+	return nil
 }
 
 func setSAAssignStatusOptions(opts *hubclient.ListGCPServiceAccountsOptions) {

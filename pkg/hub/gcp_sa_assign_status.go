@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -72,6 +73,34 @@ func parseAssignStatusRequest(r *http.Request) *assignStatusRequest {
 	return req
 }
 
+// authorizeAssignStatus applies the per-account status view's read gate
+// (getGCPServiceAccountStatus) to a list that asked for the assign status,
+// because the status exposes provider broker and profile names and the
+// report's namespace. An agent may ask only from its own project; a user
+// must be able to read the project. On denial it writes 403 and returns
+// false. Called only when the caller asked for the assign status, so a list
+// without the parameters is unchanged.
+func (s *Server) authorizeAssignStatus(w http.ResponseWriter, r *http.Request, projectID string) bool {
+	ctx := r.Context()
+	if agent := GetAgentIdentityFromContext(ctx); agent != nil {
+		if agent.ProjectID() != projectID {
+			Forbidden(w)
+			return false
+		}
+		return true
+	}
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			NotFound(w, "Project")
+			return false
+		}
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+	return s.authorize(w, r, projectResource(project), ActionRead)
+}
+
 // assignStatusBroker is the broker the picker's status is decided against.
 // broker is nil when none is known; missingMessage then says why.
 type assignStatusBroker struct {
@@ -79,11 +108,21 @@ type assignStatusBroker struct {
 	missingMessage string
 }
 
-// resolveAssignStatusBroker picks the broker the way agent creation does
-// (resolveRuntimeBroker): the requested broker when it names a provider of
-// the project by id, name or slug; otherwise the project's default broker
-// when it is a provider; otherwise the only provider. It never fails the
-// request: an unknown broker gives unknown/no_broker.
+// resolveAssignStatusBroker picks the broker the status is decided against,
+// following agent creation's selection order (resolveRuntimeBroker) without
+// its availability and permission checks, which are about dispatch rather
+// than mapping:
+//
+//  1. the requested broker, when it names a provider of the project by id,
+//     name or slug;
+//  2. the project's default broker, when it is a provider (a default that is
+//     not a provider gives no broker, as creation refuses it);
+//  3. the hub's default broker, when it is a provider;
+//  4. the project's only provider.
+//
+// It never fails the request: no broker gives unknown/no_broker. Only
+// providers are considered, so a broker that does not serve the project is
+// never described.
 func (s *Server) resolveAssignStatusBroker(ctx context.Context, projectID, requested string) assignStatusBroker {
 	providers, err := s.store.GetProjectProviders(ctx, projectID)
 	if err != nil {
@@ -98,17 +137,25 @@ func (s *Server) resolveAssignStatusBroker(ctx context.Context, projectID, reque
 		}
 		return assignStatusBroker{broker: b}
 	}
-	if requested != "" {
+	// findProvider matches ref against the providers by id or name, then by
+	// the broker's slug.
+	findProvider := func(ref string) (assignStatusBroker, bool) {
 		for _, p := range providers {
-			if p.BrokerID == requested || strings.EqualFold(p.BrokerName, requested) {
-				return load(p.BrokerID)
+			if p.BrokerID == ref || strings.EqualFold(p.BrokerName, ref) {
+				return load(p.BrokerID), true
 			}
 		}
 		for _, p := range providers {
 			b, err := s.store.GetRuntimeBroker(ctx, p.BrokerID)
-			if err == nil && b != nil && b.Slug != "" && strings.EqualFold(b.Slug, requested) {
-				return assignStatusBroker{broker: b}
+			if err == nil && b != nil && b.Slug != "" && strings.EqualFold(b.Slug, ref) {
+				return assignStatusBroker{broker: b}, true
 			}
+		}
+		return assignStatusBroker{}, false
+	}
+	if requested != "" {
+		if b, ok := findProvider(requested); ok {
+			return b
 		}
 		return assignStatusBroker{missingMessage: "The requested broker is not a provider for this project."}
 	}
@@ -118,6 +165,12 @@ func (s *Server) resolveAssignStatusBroker(ctx context.Context, projectID, reque
 			if p.BrokerID == project.DefaultRuntimeBrokerID {
 				return load(p.BrokerID)
 			}
+		}
+		return assignStatusBroker{missingMessage: "The project's default broker is not one of its providers."}
+	}
+	if hubDefault := s.hubAgentDefaults().DefaultRuntimeBroker; hubDefault != "" {
+		if b, ok := findProvider(hubDefault); ok {
+			return b
 		}
 	}
 	if len(providers) == 1 {

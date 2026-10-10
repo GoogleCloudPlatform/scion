@@ -243,6 +243,9 @@ func runSAAdd(cmd *cobra.Command, args []string) error {
 }
 
 func runSAList(cmd *cobra.Command, args []string) error {
+	if err := checkSAAssignStatusFlags(); err != nil {
+		return err
+	}
 	client, projectID, err := resolveProjectForSA()
 	if err != nil {
 		return err
