@@ -29,6 +29,7 @@ import (
 	gcplog "cloud.google.com/go/logging"
 	logpb "cloud.google.com/go/logging/apiv2/loggingpb"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
@@ -421,12 +422,23 @@ func ResolveProjectID() string {
 	return resolveProjectID()
 }
 
-// ResolveLogLevel returns the slog.Level based on the debug flag and env var.
+// ResolveLogLevel returns the level floor for a handler that is constructed
+// with a fixed level: the main CloudHandler, the request logger and the
+// message logger. It is debug when the debug flag is set; otherwise it is the
+// most verbose level in the shared level spec (SCION_LOG_LEVEL, including
+// per-component levels), clamped so it is never above info.
+//
+// The clamp matters because the request and message logs are an access and
+// audit trail that the shared level filter does not gate: SCION_LOG_LEVEL may
+// lower their floor (debug) but must not raise it, or warn/error would
+// silently drop every successful request entry. The main CloudHandler is
+// still raised to the configured level by the filter that Setup and
+// SetupWithOTel install around it.
 func ResolveLogLevel(debug bool) slog.Level {
-	if debug || os.Getenv("SCION_LOG_LEVEL") == "debug" {
+	if debug {
 		return slog.LevelDebug
 	}
-	return slog.LevelInfo
+	return min(loglevel.MinLevel().Level(), slog.LevelInfo)
 }
 
 // FormatLogID returns the configured log ID (for display purposes).

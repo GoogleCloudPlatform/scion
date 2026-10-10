@@ -31,6 +31,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -195,7 +196,18 @@ try { r.popup = window.open('about:blank') ? 'opened' : 'blocked'; } catch (e) {
 try { if (parent !== self) { top.location.href = top.location.href + '#navigated'; } r.topNav = 'attempted'; } catch (e) { r.topNav = 'blocked'; }
 try { document.getElementById('form').submit(); } catch (e) {}
 fetch('../../../ARTIFACT_PATH').then(() => { r.fetch = 'allowed'; }, () => { r.fetch = 'blocked'; });
-setTimeout(() => {
+// Report once every expected violation has been seen, the fetch has
+// settled and every image has finished, or at the deadline, whichever
+// comes first. A loaded runner can deliver a report seconds late, so a
+// fixed wait would cut it off; a report that never comes still fails.
+const wantViolations = WANT_VIOLATIONS;
+const deadline = Date.now() + REPORT_DEADLINE_MS;
+const settled = () =>
+  wantViolations.every((d) => r.violations.includes(d)) &&
+  r.outsideViolation !== undefined && r.fetch !== undefined &&
+  Array.from(document.images).every((i) => i.complete);
+const report = () => {
+  if (!settled() && Date.now() < deadline) { setTimeout(report, 100); return; }
   r.local = document.getElementById('local').naturalWidth > 0 ? 'loaded' : 'failed';
   r.remote = document.getElementById('remote').naturalWidth > 0 ? 'loaded' : 'blocked';
   r.outsideView = document.getElementById('hubimg').naturalWidth > 0 ? 'loaded' : 'blocked';
@@ -204,8 +216,27 @@ setTimeout(() => {
   const s = JSON.stringify(r);
   document.documentElement.setAttribute('data-probe', s);
   if (parent !== self) parent.postMessage(s, '*');
-}, 500);
+};
+setTimeout(report, 100);
 </script></body></html>`
+
+// wantViolations are the CSP directives the probe page must report.
+var wantViolations = []string{"connect-src", "frame-src", "img-src", "object-src", "script-src-elem"}
+
+// probeReportDeadline bounds how long the probe page waits for the
+// expected reports before it reports what it has.
+const probeReportDeadline = 30 * time.Second
+
+// probePageFor returns probePage with its placeholders filled in.
+func probePageFor(artifactID string) []byte {
+	want, _ := json.Marshal(wantViolations)
+	page := strings.NewReplacer(
+		"ARTIFACT_PATH", artifactID,
+		"WANT_VIOLATIONS", string(want),
+		"REPORT_DEADLINE_MS", strconv.FormatInt(probeReportDeadline.Milliseconds(), 10),
+	).Replace(probePage)
+	return []byte(page)
+}
 
 // probeHost is the page that frames the view the way the web UI does.
 const probeHost = `<!doctype html><html><head><title>host-secret</title></head><body>
@@ -248,7 +279,7 @@ func TestViewSandboxBrowserProbe(t *testing.T) {
 	f.svc.SetViewKey(testViewKey)
 	pngBytes := onePixelPNG(t)
 	site := bundle{
-		"index.html":    []byte(probePage),
+		"index.html":    probePageFor("ARTIFACT_PATH"),
 		"img/a.png":     pngBytes,
 		"css/s.css":     []byte("body { background-color: rgb(1, 2, 3); }"),
 		"js/app.js":     []byte("r.bundleScript = 'ran';"),
@@ -256,7 +287,7 @@ func TestViewSandboxBrowserProbe(t *testing.T) {
 	}
 	pub := f.publishBundle(agentA, "/api/v1/artifacts", site.manifest("index.html"), site)
 	// The probe fetches the artifact's metadata route relative to the view.
-	site["index.html"] = []byte(strings.Replace(probePage, "ARTIFACT_PATH", pub.Artifact.ID, 1))
+	site["index.html"] = probePageFor(pub.Artifact.ID)
 	pub = f.publishBundle(agentA, "/api/v1/artifacts", site.manifest("index.html"), site)
 	view, code := f.mintView(&agentA, pub.Artifact.ID, 1)
 	if code != http.StatusOK {
@@ -327,7 +358,7 @@ func TestViewSandboxBrowserProbe(t *testing.T) {
 			}
 		}
 		got := strings.Join(r.Violations, ",")
-		for _, d := range []string{"connect-src", "frame-src", "img-src", "object-src", "script-src-elem"} {
+		for _, d := range wantViolations {
 			if !strings.Contains(got, d) {
 				t.Errorf("no %s violation reported (got %q)", d, got)
 			}

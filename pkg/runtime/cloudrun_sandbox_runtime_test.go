@@ -934,7 +934,6 @@ func TestP3a_EnvForBehaviourIdentity(t *testing.T) {
 		"SCION_METADATA_PROJECT_ID=proj-001",
 		"SCION_BROKER_ID=broker-001",
 		"SCION_CREATOR=user@example.com",
-		"SCION_DEBUG=1",
 		// Broker-side secret-injected (B-auth, B-clone)
 		"SCION_AUTH_TOKEN=FAKE-AUTH-SENTINEL-not-a-real-credential",
 		"SCION_GIT_CLONE_URL=https://FAKE-KEY-SENTINEL-not-a-real-credential@github.com/org/repo.git",
