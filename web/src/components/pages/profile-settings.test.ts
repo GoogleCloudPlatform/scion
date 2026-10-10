@@ -359,6 +359,98 @@ describe('scion-page-profile-settings — display timezone', () => {
   });
 });
 
+describe('scion-page-profile-settings — alert toggles', () => {
+  let element: AnyEl = null;
+
+  class FakeNotification {
+    static permission: NotificationPermission = 'granted';
+    static requestPermission = vi.fn(() => Promise.resolve(FakeNotification.permission));
+  }
+
+  beforeAll(async () => {
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler({})));
+    await import('./profile-settings.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  function toggle(el: AnyEl, category: 'chat' | 'agent'): AnyEl {
+    return el.shadowRoot?.querySelector(`sl-switch[data-push-category="${category}"]`);
+  }
+
+  it('shows separate chat message and agent event toggles', async () => {
+    (window as unknown as { Notification: unknown }).Notification = FakeNotification;
+    element = await createComponent(createFetchHandler({}));
+    expect(toggle(element, 'chat')?.getAttribute('aria-label')).toBe('Chat message alerts');
+    expect(toggle(element, 'agent')?.getAttribute('aria-label')).toBe('Agent event alerts');
+    expect(shadowText(element)).toContain('Chat message alerts');
+    expect(shadowText(element)).toContain('Agent event alerts');
+    expect(shadowText(element)).not.toContain('Enable Push Notifications');
+  });
+
+  it('carries an old single opt-in over to both toggles', async () => {
+    (window as unknown as { Notification: unknown }).Notification = FakeNotification;
+    localStorage.setItem('scion-push-notifications', 'true');
+    element = await createComponent(createFetchHandler({}));
+    expect(toggle(element, 'chat')?.hasAttribute('checked')).toBe(true);
+    expect(toggle(element, 'agent')?.hasAttribute('checked')).toBe(true);
+  });
+
+  it('turns one category off without touching the other', async () => {
+    (window as unknown as { Notification: unknown }).Notification = FakeNotification;
+    localStorage.setItem('scion-push-chat-messages', 'true');
+    localStorage.setItem('scion-push-agent-events', 'true');
+    element = await createComponent(createFetchHandler({}));
+
+    const chat = toggle(element, 'chat');
+    chat.checked = false;
+    chat.dispatchEvent(new CustomEvent('sl-change'));
+    await settle(element);
+
+    expect(localStorage.getItem('scion-push-chat-messages')).toBe('false');
+    expect(localStorage.getItem('scion-push-agent-events')).toBe('true');
+    expect(toggle(element, 'chat')?.hasAttribute('checked')).toBe(false);
+    expect(toggle(element, 'agent')?.hasAttribute('checked')).toBe(true);
+  });
+
+  it('turns agent alerts off without touching chat alerts', async () => {
+    (window as unknown as { Notification: unknown }).Notification = FakeNotification;
+    localStorage.setItem('scion-push-chat-messages', 'true');
+    localStorage.setItem('scion-push-agent-events', 'true');
+    element = await createComponent(createFetchHandler({}));
+
+    const agent = toggle(element, 'agent');
+    agent.checked = false;
+    agent.dispatchEvent(new CustomEvent('sl-change'));
+    await settle(element);
+
+    expect(localStorage.getItem('scion-push-agent-events')).toBe('false');
+    expect(localStorage.getItem('scion-push-chat-messages')).toBe('true');
+    expect(toggle(element, 'agent')?.hasAttribute('checked')).toBe(false);
+    expect(toggle(element, 'chat')?.hasAttribute('checked')).toBe(true);
+  });
+
+  it('turns agent alerts on without touching chat alerts', async () => {
+    (window as unknown as { Notification: unknown }).Notification = FakeNotification;
+    localStorage.setItem('scion-push-chat-messages', 'false');
+    localStorage.setItem('scion-push-agent-events', 'false');
+    element = await createComponent(createFetchHandler({}));
+
+    const agent = toggle(element, 'agent');
+    agent.checked = true;
+    agent.dispatchEvent(new CustomEvent('sl-change'));
+    await settle(element);
+
+    expect(localStorage.getItem('scion-push-agent-events')).toBe('true');
+    expect(localStorage.getItem('scion-push-chat-messages')).toBe('false');
+  });
+});
+
 describe('scion-page-profile-settings — view mode shortcuts', () => {
   let element: AnyEl = null;
 

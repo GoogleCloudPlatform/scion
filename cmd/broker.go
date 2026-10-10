@@ -2333,15 +2333,19 @@ func buildBrokerProfiles(settings *config.Settings) []hubclient.BrokerProfile {
 	// are reported without them (MappingsReported=false: unknown).
 	mappingVS, mappingErr := loadBrokerMappingSettings()
 	if mappingErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not read global settings for kubernetes_service_account_mappings; the Hub will treat this broker's mappings as unknown: %v\n", mappingErr)
+		fmt.Fprintf(os.Stderr, "Warning: could not read global settings for kubernetes_service_account_mappings and runtime types; the Hub will treat this broker's mappings as unknown and see each profile's runtime key as its type: %v\n", mappingErr)
 	}
 
 	var profiles []hubclient.BrokerProfile
 	for name, profileCfg := range settings.Profiles {
-		// Determine runtime type from the profile's runtime reference
+		// Determine runtime type from the profile's runtime reference:
+		// the resolved type of the runtime entry it names (the same rule
+		// as the broker's /info), else the key itself.
 		runtimeType := profileCfg.Runtime
 		if runtimeType == "" {
 			runtimeType = "docker" // default
+		} else if mappingErr == nil {
+			runtimeType = resolveProfileRuntimeType(mappingVS, name, profileCfg.Runtime)
 		}
 		mappings, reported := brokerProfileSAMappings(mappingVS, mappingErr, name)
 
@@ -2368,9 +2372,28 @@ func buildBrokerProfiles(settings *config.Settings) []hubclient.BrokerProfile {
 	return profiles
 }
 
+// resolveProfileRuntimeType returns the resolved runtime type
+// (VersionedSettings.ProfileRuntimeType: the runtime entry's explicit type,
+// else its key) of the profile name whose runtime key is runtimeKey. It
+// returns runtimeKey unchanged, which is what brokers registered before the
+// type was resolved, when vs is nil, does not have the profile, or has it
+// referencing a different runtime entry than the settings the caller built
+// the profile from. Callers pass the global settings (plus the DB settings
+// overlay, when installed), the scope the broker's /info resolves from, so
+// the type comes from global settings even when the join profiles were
+// built from project-scoped settings.
+func resolveProfileRuntimeType(vs *config.VersionedSettings, name, runtimeKey string) string {
+	key, rtType, ok := vs.ProfileRuntimeType(name)
+	if !ok || key != runtimeKey {
+		return runtimeKey
+	}
+	return rtType
+}
+
 // loadBrokerMappingSettings loads the broker's global settings (plus the
 // DB-backed overlay, when one is installed) for reporting
-// kubernetes_service_account_mappings at join. A variable so tests can
+// kubernetes_service_account_mappings and resolving each profile's runtime
+// type at join. A variable so tests can
 // substitute settings.
 var loadBrokerMappingSettings = func() (*config.VersionedSettings, error) {
 	vs, _, err := config.LoadGlobalSettingsWithOverlay()

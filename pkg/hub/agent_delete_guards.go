@@ -316,7 +316,14 @@ func writeDeleteWon(w http.ResponseWriter, agentID, message string, warnings []s
 // holds the row (store.ErrDeleteInProgress), so the start fails closed
 // before reaching the broker, rather than starting a run the delete's
 // snapshot does not name (ptone/scion#2550 P1 round 3).
+//
+// A queued start or restart refused because the agent is soft-deleted
+// (errQueuedStartAgentDeleted) answers agentDeletedRefusal instead, as the
+// synchronous start gate does (ptone/scion#4182).
 func deleteClaimedDuringDispatch(err error, agentID string) *startRefusal {
+	if errors.Is(err, errQueuedStartAgentDeleted) {
+		return agentDeletedRefusal(agentID)
+	}
 	if !errors.Is(err, store.ErrDeleteInProgress) {
 		return nil
 	}
@@ -516,29 +523,53 @@ func (s *Server) publishAgentStatusFresh(ctx context.Context, a *store.Agent) {
 	s.events.PublishAgentStatus(ctx, a)
 }
 
+// errQueuedStartAgentDeleted marks a queued start or restart refused
+// because its agent is soft-deleted (ptone/scion#4182). It travels on a
+// failed dispatch row's envelope (dispatchFailureEnvelope.AgentDeleted), and
+// deleteClaimedDuringDispatch answers it with agentDeletedRefusal, the start
+// gate's step 1b answer.
+var errQueuedStartAgentDeleted error = queuedStartAgentDeletedError{}
+
+// queuedStartAgentDeletedError is errQueuedStartAgentDeleted's type. Its
+// text is internal (the user-facing text comes only from
+// agentDeletedRefusal). It unwraps to store.ErrDeleteInProgress so the
+// callers that branch on that sentinel treat the refusal as they treat a
+// delete: startOutcomeOf classifies it as not acted on (the start claim is
+// released), the restart leg leaves the row's phase to the delete, and a
+// requesting node that predates the envelope's agentDeleted field still
+// answers 409 delete_in_progress.
+type queuedStartAgentDeletedError struct{}
+
+func (queuedStartAgentDeletedError) Error() string { return "agent is soft-deleted" }
+func (queuedStartAgentDeletedError) Unwrap() error { return store.ErrDeleteInProgress }
+
 // refuseQueuedStartForDelete is the delete check a queued start or restart
 // runs when the reconcile drain executes it (ptone/scion#2882): the intent
 // was recorded before the delete, so the start gate it passed then no longer
-// holds. It returns an error wrapping store.ErrDeleteInProgress when the row
-// is soft-deleted or deleteBlocksStart holds, so the dispatch row fails with
-// the delete_in_progress sentinel and the requester answers 409
-// delete_in_progress. For a row a delete holds, that is what the synchronous
-// start gate answers. For a soft-deleted row it is not: the synchronous gate
-// answers 409 conflict "agent is deleted; restore it first"
-// (agentDeletedRefusal), but the dispatch failure envelope has no
-// agent-deleted sentinel, so the queued path reports delete_in_progress. The
-// status code is the same. A failed delete check also refuses: without the
-// dispatch table an outstanding delete intent cannot be ruled out.
+// holds. It applies the start gate's steps 1 and 1b in the same order, and
+// the requester answers what the synchronous gate answers:
+//   - deleteBlocksStart holds: the error wraps store.ErrDeleteInProgress, so
+//     the dispatch row fails with the delete_in_progress sentinel and the
+//     requester answers 409 delete_in_progress;
+//   - else the row is soft-deleted: the error wraps
+//     errQueuedStartAgentDeleted, carried on the row's envelope, so the
+//     requester answers 409 conflict "agent is deleted; restore it first"
+//     (agentDeletedRefusal; ptone/scion#4182). The sentinel unwraps to
+//     store.ErrDeleteInProgress, so callers that branch on a delete (for
+//     example to leave the row's phase alone) still do.
+//
+// A failed delete check also refuses: without the dispatch table an
+// outstanding delete intent cannot be ruled out.
 func (s *Server) refuseQueuedStartForDelete(ctx context.Context, a *store.Agent, op string) error {
-	if !a.DeletedAt.IsZero() {
-		return fmt.Errorf("queued %s not applied: agent %s is deleted: %w", op, a.ID, store.ErrDeleteInProgress)
-	}
 	blocked, err := s.deleteBlocksStart(ctx, a)
 	if err != nil {
 		return fmt.Errorf("queued %s not applied: could not check for a delete of agent %s: %w", op, a.ID, err)
 	}
 	if blocked {
 		return fmt.Errorf("queued %s not applied: a delete is in progress for agent %s: %w", op, a.ID, store.ErrDeleteInProgress)
+	}
+	if !a.DeletedAt.IsZero() {
+		return fmt.Errorf("queued %s not applied: agent %s: %w", op, a.ID, errQueuedStartAgentDeleted)
 	}
 	return nil
 }

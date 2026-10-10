@@ -1545,7 +1545,7 @@ export class TerminalWorkspaceRoot {
     const wrap = document.createElement('span');
     wrap.className = 'terminal-bulk-action-wrap';
     const reason = document.createElement('span');
-    reason.className = 'terminal-bulk-reason terminal-aria-live';
+    reason.className = 'terminal-bulk-reason terminal-visually-hidden';
     reason.id = `${reasonId}-${this.instanceId}`;
     reason.hidden = true;
     button.setAttribute('aria-describedby', reason.id);
@@ -2471,6 +2471,14 @@ export class TerminalWorkspaceRoot {
         outline-offset: -2px;
       }
       .terminal-aria-live {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+      }
+      .terminal-visually-hidden {
         position: absolute;
         width: 1px;
         height: 1px;

@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -195,6 +196,62 @@ func TestUpdateTemplate(t *testing.T) {
 	assert.Equal(t, store.TemplateStatusArchived, got.Status)
 	require.NotNil(t, got.Config)
 	assert.Equal(t, "opus", got.Config.Model)
+}
+
+// TestTemplateAgentConfigRoundTrip covers the derived agent_config column
+// (ptone/scion#4217): a snapshot survives create, get, update and list, and a
+// nil snapshot reads back as nil (not an empty config) and clears the column.
+func TestTemplateAgentConfigRoundTrip(t *testing.T) {
+	ts := newTestTemplateStore(t)
+	ctx := context.Background()
+
+	detached := false
+	snap := &api.ScionConfig{
+		Harness:              "claude",
+		DefaultHarnessConfig: "claude-web",
+		Model:                "opus",
+		Detached:             &detached,
+		Env:                  map[string]string{"FOO": "bar"},
+		Skills:               []api.SkillReference{{URI: "hub:review"}},
+	}
+	tmpl := &store.Template{
+		ID: uuid.New().String(), Name: "snap", Slug: "snap", Harness: "claude",
+		DefaultHarnessConfig: "claude-web", Scope: store.TemplateScopeGlobal,
+		Status: store.TemplateStatusActive, AgentConfig: snap,
+	}
+	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
+
+	got, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, snap, got.AgentConfig, "create/get round trip")
+
+	got.AgentConfig.Model = "sonnet"
+	got.AgentConfig.HarnessConfig = "claude-alt"
+	require.NoError(t, ts.UpdateTemplate(ctx, got))
+	again, err := ts.GetTemplateBySlug(ctx, "snap", store.TemplateScopeGlobal, "")
+	require.NoError(t, err)
+	require.NotNil(t, again.AgentConfig)
+	assert.Equal(t, "sonnet", again.AgentConfig.Model)
+	assert.Equal(t, "claude-alt", again.AgentConfig.HarnessConfig)
+
+	list, err := ts.ListTemplates(ctx, store.TemplateFilter{Scope: store.TemplateScopeGlobal}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 1)
+	require.NotNil(t, list.Items[0].AgentConfig)
+	assert.Equal(t, "sonnet", list.Items[0].AgentConfig.Model)
+
+	again.AgentConfig = nil
+	require.NoError(t, ts.UpdateTemplate(ctx, again))
+	cleared, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Nil(t, cleared.AgentConfig, "nil snapshot clears the column")
+
+	// A row created without a snapshot reads back nil.
+	plain := &store.Template{ID: uuid.New().String(), Name: "plain", Slug: "plain", Harness: "claude", Scope: store.TemplateScopeGlobal}
+	require.NoError(t, ts.CreateTemplate(ctx, plain))
+	gotPlain, err := ts.GetTemplate(ctx, plain.ID)
+	require.NoError(t, err)
+	assert.Nil(t, gotPlain.AgentConfig)
 }
 
 func TestUpdateTemplateNotFound(t *testing.T) {
