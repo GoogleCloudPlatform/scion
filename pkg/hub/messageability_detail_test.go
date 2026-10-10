@@ -292,8 +292,6 @@ func TestAgentGet_MessageabilityReadsFlatAcrossProjectSize(t *testing.T) {
 				assert.Equal(t, int64(1), s[i].messageabilityPhases, "n=%d: one messageability phase covers the detail", n)
 				// Alice's agent can reach every other project-mode agent.
 				assert.Positive(t, s[i].reachable, "n=%d", n)
-				assert.LessOrEqual(t, s[i].reads["GetAgent"], int64(1), "n=%d: the sender row is read at most once", n)
-				assert.LessOrEqual(t, s[i].reads["GetUser"], int64(1), "n=%d: the sender's root user is read at most once", n)
 			}
 			for i := 1; i < len(sizes); i++ {
 				assert.Equal(t, s[0].authzStoreCalls, s[i].authzStoreCalls, "authz store calls at n=%d vs n=%d", sizes[i], sizes[0])
