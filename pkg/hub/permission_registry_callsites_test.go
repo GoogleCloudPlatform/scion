@@ -100,7 +100,7 @@ var pendingNonRouteRows = map[string]string{
 	"hub.teams_manifest.update":   "held by built-in roles; no route checks it yet (ptone/scion#4171)",
 	"user.list":                   "held by built-in roles; no route checks it yet (ptone/scion#4171)",
 	"agent.log_append":            "agent:log:append is a default federation scope; no handler checks it yet (ptone/scion#4171)",
-	"user_skill_injection.update": "no caller passes it to authorizeSelfScoped yet (ptone/scion#4171)",
+	"user_skill_injection.update": "NonRouteUse names authorizeSelfScoped; no caller passes it yet (ptone/scion#4171)",
 	"secret.deliver":              "decision rules exist; no production path requests it yet (ptone/scion#4171)",
 	"env_var.deliver":             "decision rules exist; no production path requests it yet (ptone/scion#4171)",
 	"skill_injection.deliver":     "decision rules exist; no production path requests it yet (ptone/scion#4171)",
@@ -157,7 +157,7 @@ func loadReferenceConstants(t *testing.T) referenceConstants {
 		{"permissions", "permissions."},
 		{filepath.Join("..", "store"), "store."},
 	} {
-		files, err := parseGoDir(dir.path)
+		files, err := parseNonTestGoFiles(dir.path)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -184,8 +184,8 @@ func loadReferenceConstants(t *testing.T) referenceConstants {
 	return out
 }
 
-// parseGoDir parses the non-test Go files in dir.
-func parseGoDir(dir string) ([]*ast.File, error) {
+// parseNonTestGoFiles parses the non-test Go files in dir.
+func parseNonTestGoFiles(dir string) ([]*ast.File, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", dir, err)
@@ -273,7 +273,7 @@ func verifyCallSites(dir string, registry []permissions.Permission, sites map[st
 				continue
 			}
 			if !bodyReferences(fd.Body, want, consts) {
-				problems = append(problems, fmt.Sprintf("%s: call site %s:%s does not reference the permission (want one of %s)", id, site.File, site.Func, strings.Join(sortedKeys(want), ", ")))
+				problems = append(problems, fmt.Sprintf("%s: call site %s:%s does not reference the permission (want one of %s)", id, site.File, site.Func, strings.Join(sortedWantKeys(want), ", ")))
 				ok = false
 			}
 		}
@@ -284,7 +284,7 @@ func verifyCallSites(dir string, registry []permissions.Permission, sites map[st
 	return verified, problems
 }
 
-func sortedKeys(m map[string]bool) []string {
+func sortedWantKeys(m map[string]bool) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
