@@ -114,6 +114,53 @@ func (c *CompositeStore) deduplicateDelegationEdges(ctx context.Context) error {
 	return nil
 }
 
+// deduplicateAgentSessionMetrics removes duplicate agent_session_metrics
+// rows before the Ent auto-migration adds the UNIQUE index on (agent_id,
+// session_id, started_at). Before that index, every session-metrics report
+// was stored, so a retried or resent report of the same session segment
+// added a second row. Rows of different segments of one session (a session
+// resumed after a restart with the same ID starts a new segment, with its
+// own started_at) are not duplicates and are all kept. For each set of
+// duplicates the earliest stored row (by created_at, then id) is kept,
+// matching how the store treats a repeated report from now on: the first
+// one stored wins.
+//
+// The function is idempotent: when no duplicates exist (or the table does not
+// exist yet on a fresh database) it is a no-op.
+func (c *CompositeStore) deduplicateAgentSessionMetrics(ctx context.Context) error {
+	db := c.DB()
+	if db == nil {
+		return nil
+	}
+
+	exists, err := c.tableExists(ctx, db, "agent_session_metrics")
+	if err != nil || !exists {
+		return err
+	}
+
+	// ROW_NUMBER() OVER … is supported by both SQLite (≥3.25) and Postgres.
+	result, err := db.ExecContext(ctx, `
+		DELETE FROM agent_session_metrics
+		WHERE id IN (
+			SELECT id FROM (
+				SELECT id, ROW_NUMBER() OVER (
+					PARTITION BY agent_id, session_id, started_at
+					ORDER BY created_at ASC, id ASC
+				) AS rn
+				FROM agent_session_metrics
+			) sub WHERE rn > 1
+		)
+	`)
+	if err != nil {
+		return err
+	}
+
+	if n, _ := result.RowsAffected(); n > 0 {
+		slog.Info("deduplicated agent_session_metrics before migration", "rows_deleted", n)
+	}
+	return nil
+}
+
 // tableExists checks whether a table exists in the database.
 // SQLite and Postgres use different system catalogs.
 func (c *CompositeStore) tableExists(ctx context.Context, db *sql.DB, tableName string) (bool, error) {

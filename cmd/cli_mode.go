@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/spf13/cobra"
 
@@ -13,27 +14,28 @@ import (
 type CLIMode string
 
 const (
-	ModeHuman     CLIMode = "human"
-	ModeAssistant CLIMode = "assistant"
-	ModeAgent     CLIMode = "agent"
+	ModeHuman CLIMode = "human"
+	ModeAgent CLIMode = "agent"
 )
 
-// assistantDenied lists commands removed in assistant mode (relative to human).
-// Uses dot-separated command paths: "hub.auth", "config.migrate", etc.
-var assistantDenied = map[string]bool{
-	"hub.auth":                 true,
-	"hub.token":                true,
-	"hub.secret.migrate-names": true,
-	"project.reconnect":        true,
-	"config.migrate":           true,
-	"config.cd-config":         true,
-	"config.cd-project":        true,
-	"cdw":                      true,
-	"clean":                    true,
-	"server.recover-authz":     true,
+// removedModeAssistant is the value of a CLI mode that has been removed.
+// A SCION_CLI_MODE or cli.mode value that still names it is ignored with
+// a single warning, and the CLI runs in human mode.
+const removedModeAssistant = "assistant"
+
+// removedModeWarnOnce makes sure the removed-mode warning is printed at
+// most once per process, even though resolveMode is called many times.
+var removedModeWarnOnce = &sync.Once{}
+
+func warnRemovedMode(source string) {
+	removedModeWarnOnce.Do(func() {
+		fmt.Fprintf(os.Stderr, "Warning: %s=%q: the %q CLI mode has been removed and is ignored; running in %q mode\n",
+			source, removedModeAssistant, removedModeAssistant, ModeHuman)
+	})
 }
 
 // agentAllowed lists commands available in agent mode.
+// Uses dot-separated command paths: "notifications.ack", "schedule.list", etc.
 // Every entry — including parent commands — must be listed explicitly;
 // parents are NOT implicitly allowed when a child is listed.
 var agentAllowed = map[string]bool{
@@ -141,8 +143,11 @@ var agentAllowed = map[string]bool{
 func resolveMode() CLIMode {
 	if envMode := os.Getenv("SCION_CLI_MODE"); envMode != "" {
 		switch CLIMode(envMode) {
-		case ModeHuman, ModeAssistant, ModeAgent:
+		case ModeHuman, ModeAgent:
 			return CLIMode(envMode)
+		case removedModeAssistant:
+			warnRemovedMode("SCION_CLI_MODE")
+			return ModeHuman
 		default:
 			fmt.Fprintf(os.Stderr, "Warning: unrecognized SCION_CLI_MODE=%q, defaulting to %q\n", envMode, ModeHuman)
 			return ModeHuman
@@ -152,8 +157,11 @@ func resolveMode() CLIMode {
 	settings, err := config.LoadSettings("")
 	if err == nil && settings != nil && settings.CLI != nil && settings.CLI.Mode != "" {
 		switch CLIMode(settings.CLI.Mode) {
-		case ModeHuman, ModeAssistant, ModeAgent:
+		case ModeHuman, ModeAgent:
 			return CLIMode(settings.CLI.Mode)
+		case removedModeAssistant:
+			warnRemovedMode("cli.mode")
+			return ModeHuman
 		default:
 			fmt.Fprintf(os.Stderr, "Warning: unrecognized cli.mode=%q in settings, defaulting to %q\n", settings.CLI.Mode, ModeHuman)
 			return ModeHuman
@@ -166,22 +174,9 @@ func resolveMode() CLIMode {
 // applyModeRestrictions removes commands from the Cobra tree that are not
 // permitted in mode (normally the result of resolveMode).
 func applyModeRestrictions(root *cobra.Command, mode CLIMode) {
-	if mode == ModeHuman {
-		return
-	}
-
-	switch mode {
-	case ModeAssistant:
-		applyAssistantMode(root)
-	case ModeAgent:
+	if mode == ModeAgent {
 		applyAgentMode(root)
 	}
-}
-
-func applyAssistantMode(root *cobra.Command) {
-	removeCommands(root, "", func(path string) bool {
-		return assistantDenied[path]
-	})
 }
 
 func applyAgentMode(root *cobra.Command) {

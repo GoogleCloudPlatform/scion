@@ -1261,7 +1261,7 @@ export class ScionTerminalPane extends LitElement {
       await new Promise<void>((resolve, reject) => {
         const abort = (): void => {
           this.layoutReady = null;
-          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the AbortSignal reason unchanged; per-site decision tracked in ptone/scion#4126.
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the AbortSignal reason unchanged, as signal.throwIfAborted() does, so callers can still match it.
           reject(signal.reason);
         };
         this.layoutReady = () => {

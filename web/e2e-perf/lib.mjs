@@ -606,3 +606,134 @@ export function summarizeReadinessMarks(results) {
     ).length,
   };
 }
+
+// ---- wall-clock median-ratio budgets ---------------------------------------
+//
+// Used by median-ratio.mjs; see perf/bench/README.md "Wall-clock budgets".
+
+/** Defaults for the median-ratio check, documented in perf/bench/README.md. */
+export const MEDIAN_RATIO_DEFAULTS = Object.freeze({
+  // Fail when a metric's median exceeds its baseline median by more than this.
+  ratio: 1.25,
+  // Fewer timed (post-warm-up) samples than this is an error, not a pass.
+  minTrials: 10,
+});
+
+/**
+ * wallClockSamples extracts the timed samples per metric from an apibench
+ * report and/or a large-project-bench report.
+ *
+ * - apibench: `api:<scenario name>` -> totalMs of each successful attempt.
+ *   apibench's own --warmup requests are discarded before the report.
+ * - large-project-bench: `browser:<scenario key>` -> navToPopulatedMs of
+ *   each warm, populated run. The first (cold, fresh-context) run of each
+ *   scenario is the warm-up and is not counted.
+ *
+ * Failed or unpopulated attempts are not samples; they reduce the count,
+ * which the minTrials check catches.
+ */
+export function wallClockSamples({ api = null, browser = null } = {}) {
+  const out = {};
+  for (const sc of api?.scenarios || []) {
+    out[`api:${sc.name}`] = (sc.attempts || []).filter((a) => a.success).map((a) => a.totalMs);
+  }
+  for (const [key, sc] of Object.entries(browser?.scenarios || {})) {
+    out[`browser:${key}`] = (sc.runs || [])
+      .filter((r) => !r.cold && r.outcome === 'populated' && r.navToPopulatedMs != null)
+      .map((r) => r.navToPopulatedMs);
+  }
+  return out;
+}
+
+/**
+ * checkMedianRatioOptions throws on an unusable ratio or trial minimum, so
+ * a typo (for example "1,25", which is NaN) cannot turn the check into a
+ * pass. Undefined values are allowed (the defaults apply).
+ */
+export function checkMedianRatioOptions({ ratio, minTrials } = {}) {
+  if (ratio !== undefined && !(Number.isFinite(ratio) && ratio > 0)) {
+    throw new Error(`ratio must be a finite number above 0, got ${ratio}`);
+  }
+  if (minTrials !== undefined && !(Number.isInteger(minTrials) && minTrials >= 1)) {
+    throw new Error(`minimum trials must be an integer of at least 1, got ${minTrials}`);
+  }
+}
+
+/**
+ * compareMedianRatio compares each baseline metric's current median with
+ * its stored baseline median. A metric fails when its ratio is above
+ * `ratio`, or when it has fewer than `minTrials` samples or none at all.
+ * Metrics present only in the current samples are reported as `new` and do
+ * not fail. Returns { ok, rows }.
+ *
+ * Throws (a setup error, not a result) when the ratio or trial minimum is
+ * unusable, when the baseline has no metrics (it would pass vacuously), or
+ * when the baseline came from a smoke run and opts.smoke is not set.
+ */
+export function compareMedianRatio(samples, baseline, opts = {}) {
+  const ratio = opts.ratio ?? baseline.ratio ?? MEDIAN_RATIO_DEFAULTS.ratio;
+  const minTrials = opts.minTrials ?? baseline.minTrials ?? MEDIAN_RATIO_DEFAULTS.minTrials;
+  checkMedianRatioOptions({ ratio, minTrials });
+  if (!baseline.metrics || Object.keys(baseline.metrics).length === 0) {
+    throw new Error('the baseline has no metrics');
+  }
+  if (baseline.smoke && !opts.smoke) {
+    throw new Error('the baseline is from a smoke run; a check needs a full baseline');
+  }
+  const rows = [];
+  for (const [metric, b] of Object.entries(baseline.metrics)) {
+    const xs = samples[metric] || [];
+    const current = median(xs);
+    const row = { metric, trials: xs.length, baselineMedianMs: b.medianMs, medianMs: current };
+    if (xs.length < minTrials) {
+      row.status = 'insufficient';
+    } else {
+      row.ratio = current / b.medianMs;
+      row.status = row.ratio > ratio ? 'over' : 'ok';
+    }
+    rows.push(row);
+  }
+  for (const metric of Object.keys(samples)) {
+    if (!(metric in baseline.metrics)) {
+      rows.push({
+        metric,
+        trials: samples[metric].length,
+        medianMs: median(samples[metric]),
+        status: 'new',
+      });
+    }
+  }
+  return { ok: rows.every((r) => r.status === 'ok' || r.status === 'new'), ratio, minTrials, rows };
+}
+
+/**
+ * buildWallClockBaseline turns samples into a baseline file body. Every
+ * metric must have at least minTrials samples. `meta` is copied in as is
+ * (commit, runner description, date); no host names belong in it.
+ *
+ * A trial minimum below the default is refused unless opts.smoke is set;
+ * a smoke baseline is marked `smoke: true`, and compareMedianRatio refuses
+ * it for a real check, so smoke settings cannot become the stored policy.
+ */
+export function buildWallClockBaseline(samples, meta = {}, opts = {}) {
+  const ratio = opts.ratio ?? MEDIAN_RATIO_DEFAULTS.ratio;
+  const minTrials = opts.minTrials ?? MEDIAN_RATIO_DEFAULTS.minTrials;
+  checkMedianRatioOptions({ ratio, minTrials });
+  if (minTrials < MEDIAN_RATIO_DEFAULTS.minTrials && !opts.smoke) {
+    throw new Error(
+      `minimum trials ${minTrials} is below the default ${MEDIAN_RATIO_DEFAULTS.minTrials}; ` +
+        'only a smoke run (--smoke) may write such a baseline'
+    );
+  }
+  if (Object.keys(samples).length === 0) {
+    throw new Error('no samples: the reports had no scenarios');
+  }
+  const metrics = {};
+  for (const [metric, xs] of Object.entries(samples)) {
+    if (xs.length < minTrials) {
+      throw new Error(`${metric}: ${xs.length} timed samples, need at least ${minTrials}`);
+    }
+    metrics[metric] = { medianMs: median(xs), trials: xs.length };
+  }
+  return { ...meta, ...(opts.smoke ? { smoke: true } : {}), ratio, minTrials, metrics };
+}
