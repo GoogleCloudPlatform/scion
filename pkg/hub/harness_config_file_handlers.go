@@ -25,6 +25,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"path"
 	"path/filepath"
 	"slices"
@@ -441,21 +442,73 @@ func (s *Server) handleHarnessConfigFileUpload(w http.ResponseWriter, r *http.Re
 	})
 }
 
+// unusableProvisionerInYAML returns the refusal for configYAML when it
+// parses and declares a provisioner block that could never provision an agent
+// (builtin type, or no command), and nil otherwise. Content that does not
+// parse is left to the existing handling. It is the single content check
+// shared by the file write, multipart upload and import/reimport paths
+// (ptone/scion#3133, ptone/scion#4181).
+func unusableProvisionerInYAML(name string, configYAML []byte) *harness.UnusableProvisionerError {
+	entry, err := config.ParseHarnessConfigYAML(configYAML)
+	if err != nil {
+		return nil
+	}
+	return harness.CheckProvisionerUsable(name, nil, entry)
+}
+
+// writeUnusableProvisioner writes the 422 harness_config_unusable answer that
+// harness-config finalize returns for an unusable provisioner block.
+func writeUnusableProvisioner(w http.ResponseWriter, perr *harness.UnusableProvisionerError) {
+	writeError(w, http.StatusUnprocessableEntity, harnessConfigUnusableErrorCode, perr.PublicMessage(), nil)
+}
+
 // refuseUnusableProvisionerYAML writes 422 harness_config_unusable and returns
 // true when configYAML parses and declares a provisioner block that could
 // never provision an agent (builtin type, or no command). This is the same
 // check and response as harness-config finalize (ptone/scion#3133). Content
 // that does not parse is left to the existing handling.
 func refuseUnusableProvisionerYAML(w http.ResponseWriter, name string, configYAML []byte) bool {
-	entry, err := config.ParseHarnessConfigYAML(configYAML)
-	if err != nil {
-		return false
-	}
-	if perr := harness.CheckProvisionerUsable(name, nil, entry); perr != nil {
-		writeError(w, http.StatusUnprocessableEntity, harnessConfigUnusableErrorCode, perr.PublicMessage(), nil)
+	if perr := unusableProvisionerInYAML(name, configYAML); perr != nil {
+		writeUnusableProvisioner(w, perr)
 		return true
 	}
 	return false
+}
+
+// unusableProvisionerImportError is returned by the import driver when a
+// discovered harness-config declares an unusable provisioner block. The
+// import is refused before anything is persisted.
+type unusableProvisionerImportError struct {
+	perr *harness.UnusableProvisionerError
+}
+
+// Error returns the public message, which carries no filesystem paths, since
+// the streaming import endpoints send it to the client as-is.
+func (e *unusableProvisionerImportError) Error() string { return e.perr.PublicMessage() }
+
+// writeUnusableProvisionerImportError writes the finalize-equivalent 422 and
+// returns true when err is an unusableProvisionerImportError.
+func writeUnusableProvisionerImportError(w http.ResponseWriter, err error) bool {
+	var ierr *unusableProvisionerImportError
+	if errors.As(err, &ierr) {
+		writeUnusableProvisioner(w, ierr.perr)
+		return true
+	}
+	return false
+}
+
+// checkHarnessConfigDirProvisioner applies unusableProvisionerInYAML to the
+// config.yaml of a discovered harness-config directory. A config.yaml that
+// cannot be read is left to the existing import handling.
+func checkHarnessConfigDirProvisioner(name, dir string) error {
+	data, err := os.ReadFile(filepath.Join(dir, "config.yaml"))
+	if err != nil {
+		return nil
+	}
+	if perr := unusableProvisionerInYAML(name, data); perr != nil {
+		return &unusableProvisionerImportError{perr: perr}
+	}
+	return nil
 }
 
 // isHarnessConfigYAMLPath reports whether a harness-config file path names
