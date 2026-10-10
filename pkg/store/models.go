@@ -3807,6 +3807,18 @@ type DecisionAuditRecord struct {
 	// on allow and on a deny not attributed to a named stage. The aggregated
 	// list-filter record (G) leaves it empty by agreement.
 	DeniedBy string
+
+	// Resource scope evidence, copied verbatim from the evaluated
+	// AuthzRequest.Resource by BuildDecisionAuditRecord (remaining-audit P1,
+	// design C1.4). In-memory only: decision records have no table. The
+	// decision-log adapter maps a record to the system-scoped
+	// authorization/decide event only when all of these are empty/zero;
+	// any containment or scope classification excludes it.
+	ResourceParentType     string
+	ResourceParentID       string
+	ResourceAncestryLen    int
+	ResourceScopeKind      string
+	ResourceScopeUserIDSet bool
 }
 
 // =============================================================================
