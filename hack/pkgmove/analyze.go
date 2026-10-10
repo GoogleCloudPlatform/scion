@@ -58,6 +58,13 @@ type analysis struct {
 	// xtestSels lists, per moved external test file, the selectors on the
 	// source import that must be re-qualified with the target import.
 	xtestSels map[*srcFile][]*ast.SelectorExpr
+	// excludedCallFuns marks call-position identifiers of the excluded file
+	// being scanned.
+	excludedCallFuns map[*ast.Ident]bool
+	// callFuns marks identifiers in call position in the checked files.
+	// Staying uses of moved funcs outside call position are func values; they
+	// are rewritten to the target (like vars) so func identity is preserved.
+	callFuns map[*ast.Ident]bool
 	// hazards caches wrapperHazard results.
 	hazards map[*types.Func]string
 	// assets are non-Go files or directories (base names) moved verbatim.
@@ -291,6 +298,7 @@ func analyze(cfg *Config) (*analysis, error) {
 	if err := a.renderAliases(); err != nil {
 		return nil, err
 	}
+	a.checkEmbeddedExports()
 	a.checkPkgCollisions()
 	a.safetyFindings()
 	if cfg.Strict {
@@ -360,7 +368,36 @@ func (a *analysis) selectFiles() error {
 	return nil
 }
 
+// collectCallFuns records every identifier used as the function of a call
+// (including explicit instantiations f[T](...)) in the checked files.
+func (a *analysis) collectCallFuns() {
+	a.callFuns = map[*ast.Ident]bool{}
+	for _, f := range a.checked {
+		ast.Inspect(f.AST, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			fun := ast.Unparen(call.Fun)
+			switch ix := fun.(type) {
+			case *ast.IndexExpr:
+				fun = ix.X
+			case *ast.IndexListExpr:
+				fun = ix.X
+			}
+			switch fn := fun.(type) {
+			case *ast.Ident:
+				a.callFuns[fn] = true
+			case *ast.SelectorExpr:
+				a.callFuns[fn.Sel] = true
+			}
+			return true
+		})
+	}
+}
+
 func (a *analysis) collectUses() {
+	a.collectCallFuns()
 	for id, obj := range a.info.Defs {
 		if obj != nil {
 			a.uses = append(a.uses, identUse{id: id, obj: origin(obj), file: a.fileOf(id.Pos()), def: true})
@@ -455,10 +492,14 @@ func (a *analysis) scanExcluded() {
 		}
 	}
 	members := map[string]bool{}
+	methods := map[string]bool{} // unexported methods of moved types and interfaces
 	for _, u := range a.uses {
 		if u.def && isMember(u.obj) {
 			if h := a.home(u.obj); h != nil && h.Moved {
 				members[u.obj.Name()] = true
+				if _, isFunc := u.obj.(*types.Func); isFunc && !u.obj.Exported() {
+					methods[u.obj.Name()] = true
+				}
 			}
 		}
 	}
@@ -466,6 +507,33 @@ func (a *analysis) scanExcluded() {
 		if f.Included || f.XTest || f.Moved {
 			continue
 		}
+		// Methods declared under other build tags may satisfy a moved
+		// interface (or match a moved type's method) dynamically; that cannot
+		// be checked without type information for those tags.
+		for _, d := range f.AST.Decls {
+			if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv != nil && methods[fd.Name.Name] {
+				a.plan.add(levelWarn, "file excluded by build constraints (not type-checked)", a.posOf(fd.Name.Pos()),
+					"method %s matches an unexported method of a moved type or interface; interface satisfaction under these tags cannot be checked (an unexported method cannot satisfy an interface across packages) - verify with -tags", fd.Name.Name)
+			}
+		}
+		// Identifiers used as the function of a call (all others that name a
+		// moved func are func values, whose identity a wrapper alias changes).
+		a.excludedCallFuns = map[*ast.Ident]bool{}
+		ast.Inspect(f.AST, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				fun := ast.Unparen(call.Fun)
+				if ix, ok := fun.(*ast.IndexExpr); ok {
+					fun = ix.X
+				}
+				if ix, ok := fun.(*ast.IndexListExpr); ok {
+					fun = ix.X
+				}
+				if id, ok := fun.(*ast.Ident); ok {
+					a.excludedCallFuns[id] = true
+				}
+			}
+			return true
+		})
 		var hits []string
 		ast.Inspect(f.AST, func(n ast.Node) bool {
 			switch n := n.(type) {
@@ -481,8 +549,8 @@ func (a *analysis) scanExcluded() {
 			}
 		})
 		if len(hits) > 0 {
-			a.plan.add(levelInfo, "file excluded by build constraints (not type-checked)", a.rel(f.Path),
-				"references moved names by name (aliased conservatively): %s", strings.Join(dedupStrings(sortedCopy(hits)), ", "))
+			a.plan.add(levelWarn, "file excluded by build constraints (not type-checked)", a.rel(f.Path),
+				"references moved names by name (aliased conservatively, not type-checked): %s - verify with -tags", strings.Join(dedupStrings(sortedCopy(hits)), ", "))
 		} else {
 			a.plan.add(levelInfo, "file excluded by build constraints (not type-checked)", a.rel(f.Path), "no references to moved names")
 		}
@@ -510,9 +578,48 @@ func (a *analysis) excludedIdent(f *srcFile, n ast.Node, moved map[string]types.
 	case kindOf(obj) == "var":
 		a.plan.errorf("%s: excluded file (not type-checked) uses moved var %s; vars cannot be aliased and the reference cannot be rewritten safely - re-run with -tags covering this file", a.posOf(id.Pos()), id.Name)
 	default:
+		if _, isFunc := obj.(*types.Func); isFunc && !a.excludedCallFuns[id] {
+			a.plan.add(levelWarn, "moved func used as a value through a wrapper alias", a.posOf(id.Pos()),
+				"%s is used as a func value in a file excluded by build constraints; through the wrapper alias its identity (reflect Pointer, runtime.FuncForPC name) differs from %s.%s - verify with -tags",
+				id.Name, a.cfg.PkgName, exportedForm(obj))
+		}
 		a.forward[obj] = append(a.forward[obj], f)
 	}
 	return true
+}
+
+// exportedForm is the name obj will have in the target if it gets exported.
+func exportedForm(obj types.Object) string {
+	if n := exportName(obj.Name()); n != "" {
+		return n
+	}
+	return obj.Name()
+}
+
+// checkEmbeddedExports treats every embedded field whose name changes with
+// its renamed type as a field export: the field becomes exported, which
+// changes encoding/json, gob, cmp, text/template, %+v and reflect behaviour.
+func (a *analysis) checkEmbeddedExports() {
+	var fields []types.Object
+	for v := range a.embedFollow {
+		fields = append(fields, v)
+	}
+	sort.Slice(fields, func(i, j int) bool { return fields[i].Pos() < fields[j].Pos() })
+	for _, v := range fields {
+		owner := a.fieldOwner(v)
+		newName := a.embedFollow[v]
+		if v.Exported() {
+			continue
+		}
+		a.plan.Renames = append(a.plan.Renames, renameEntry{Kind: "field", Owner: owner, Old: v.Name(), New: newName, Pos: a.posOf(v.Pos())})
+		if !a.cfg.AllowFieldExport {
+			a.plan.errorf("%s: embedded field %s.%s becomes the exported field %s because its type is exported; exporting a field changes reflection, encoding (encoding/json, gob, cmp), text/template and %%+v behaviour - restructure first, or pass -allow-field-export and review the HIGH finding",
+				a.posOf(v.Pos()), owner, v.Name(), newName)
+			continue
+		}
+		a.plan.add(levelHigh, "exported struct field (reflection/encoding visibility changes)", a.posOf(v.Pos()),
+			"embedded %s.%s -> %s (follows the exported type): reflection, encoding, templates and %%+v now see this field (types in other packages that embed %s are not checked for shadowing)", owner, v.Name(), newName, owner)
+	}
 }
 
 func sortedCopy(in []string) []string {

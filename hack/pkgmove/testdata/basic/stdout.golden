@@ -32,7 +32,7 @@ Alias files (2):
   hub/zz_alias_sub.go (48 lines)
   hub/zz_alias_sub_test.go (16 lines)
 
-Var reference rewrites in remaining files (3):
+Reference rewrites in remaining files (vars and func values) (3):
   hub/core.go:24: registry -> sub.Registry
   hub/core.go:25: registry -> sub.Registry
   hub/core.go:36: registry -> sub.Registry
@@ -72,8 +72,8 @@ ERROR/HIGH/WARN item below before merging.
 == WARN: runtime type/function names change package qualifier ==
   hub/maint.go: uses runtime.Caller: names of moved types and functions now print as sub.X instead of hub.X; functions that inspect their caller are aliased as vars, not wrappers
 
-== INFO: staying var initialiser reads moved symbols ==
-  hub/core.go:36: startCount reads maxItems, registry, now initialised in package sub (before all of hub)
+== WARN: staying var initialiser reads moved vars ==
+  hub/core.go:36: startCount = ... reads registry, now initialised in package sub before all of hub (values set by hub initialisers or init() are no longer visible)
 
 safety report written to hub/zz_alias_sub_safety.txt
 

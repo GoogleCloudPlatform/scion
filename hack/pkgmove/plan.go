@@ -225,7 +225,7 @@ func writePlan(out io.Writer, p *Plan) {
 	for _, f := range p.AliasFiles {
 		fmt.Fprintf(&w, "  %s (%d lines)\n", f.Path, strings.Count(string(f.Content), "\n"))
 	}
-	fmt.Fprintf(&w, "\nVar reference rewrites in remaining files (%d):\n", len(p.VarRewrites))
+	fmt.Fprintf(&w, "\nReference rewrites in remaining files (vars and func values) (%d):\n", len(p.VarRewrites))
 	for _, v := range p.VarRewrites {
 		fmt.Fprintf(&w, "  %s: %s -> %s\n", v.Pos, v.Old, v.New)
 	}

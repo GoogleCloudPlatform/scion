@@ -9,7 +9,8 @@ import (
 )
 
 type (
-	Token = sub.Token
+	Token  = sub.Token
+	secret = sub.Secret
 )
 
 func NewSecret() any {

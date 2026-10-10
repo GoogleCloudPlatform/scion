@@ -45,13 +45,17 @@ var goldenCases = []goldenCase{
 	{fixture: "basic", files: []string{"maint.go", "maint_test.go"}, git: true},
 	{fixture: "tags", files: []string{"move_sqlite.go", "move_plain.go"}},
 	{fixture: "xtest", files: []string{"move.go", "move_test.go", "onlymoved_test.go", "data.txt"}},
-	{fixture: "embed", files: []string{"move.go"}},
+	{fixture: "embedallow", files: []string{"move.go"}, allowField: true},
 	{fixture: "iface", files: []string{"move.go"}},
 	{fixture: "fields", files: []string{"move.go"}, allowField: true},
 	{fixture: "generic", files: []string{"move.go"}},
 	{fixture: "initorder", files: []string{"move.go"}},
 	{fixture: "samename", files: []string{"move.go"}},
 	{fixture: "typenames", files: []string{"move.go"}},
+	{fixture: "registry", files: []string{"move.go"}},
+	{fixture: "purity", files: []string{"move.go"}},
+	{fixture: "funcvalue", files: []string{"move.go"}},
+	{fixture: "excludedmethod", files: []string{"move.go"}},
 	// Rejections.
 	{fixture: "methods", files: []string{"move.go"}, wantErr: true},
 	{fixture: "backref", files: []string{"move.go"}, wantErr: true},
@@ -59,6 +63,7 @@ var goldenCases = []goldenCase{
 	{fixture: "collide", files: []string{"move.go"}, wantErr: true},
 	{fixture: "dynamic", files: []string{"move.go"}, wantErr: true},
 	{fixture: "cgo", files: []string{"move.go"}, wantErr: true},
+	{fixture: "embed", files: []string{"move.go"}, wantErr: true}, // embedded-field export needs -allow-field-export
 }
 
 func requireGo(t *testing.T) {
@@ -245,7 +250,7 @@ func TestDeterministic(t *testing.T) {
 	requireGo(t)
 	const runs = 6
 	for _, c := range goldenCases {
-		if c.wantErr || !strings.Contains("basic tags iface samename generic initorder typenames", c.fixture) {
+		if c.wantErr {
 			continue
 		}
 		t.Run(c.fixture, func(t *testing.T) {
@@ -418,6 +423,67 @@ func TestRollback(t *testing.T) {
 				if err != nil || len(b) != 0 {
 					t.Fatalf("git status not clean after rollback: %v\n%s", err, b)
 				}
+			}
+		})
+	}
+}
+
+// goTest runs `go test ./...` in a fixture tree.
+func goTest(t *testing.T, dir string, tags string) (string, error) {
+	t.Helper()
+	args := []string{"test", "-count=1"}
+	if tags != "" {
+		args = append(args, "-tags="+tags)
+	}
+	cmd := exec.Command("go", append(args, "./...")...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GOFLAGS=", "GOWORK=off")
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// TestBehaviour runs each fixture's own tests before and after the move.
+// Where a move changes behaviour, the tests must fail afterwards AND the
+// report must carry the finding (WARN or higher) that explains why; where
+// the tool preserves behaviour, the tests must still pass.
+func TestBehaviour(t *testing.T) {
+	requireGo(t)
+	for _, tc := range []struct {
+		c           goldenCase
+		tags        string
+		afterPasses bool
+		finding     string
+	}{
+		{goldenCase{fixture: "embedallow", files: []string{"move.go"}, allowField: true}, "", false,
+			"== HIGH: exported struct field"},
+		{goldenCase{fixture: "registry", files: []string{"move.go"}}, "", false,
+			"== HIGH: staying var initialiser calls moved code"},
+		{goldenCase{fixture: "excludedmethod", files: []string{"move.go"}}, "integration", false,
+			"method run matches an unexported method of a moved type or interface"},
+		{goldenCase{fixture: "funcvalue", files: []string{"move.go"}}, "", true,
+			"defaultHook -> sub.DefaultHook"},
+		{goldenCase{fixture: "generic", files: []string{"move.go"}}, "", true,
+			"method interface.run -> Run"},
+	} {
+		t.Run(tc.c.fixture, func(t *testing.T) {
+			before := t.TempDir()
+			copyTree(t, filepath.Join("testdata", tc.c.fixture, "in"), before)
+			if out, err := goTest(t, before, tc.tags); err != nil {
+				t.Fatalf("fixture tests fail before the move: %v\n%s", err, out)
+			}
+			after, report, err := runFixture(t, tc.c, false)
+			if err != nil {
+				t.Fatalf("run: %v\n%s", err, report)
+			}
+			if !strings.Contains(report, tc.finding) {
+				t.Errorf("report lacks %q:\n%s", tc.finding, report)
+			}
+			out, err := goTest(t, after, tc.tags)
+			if tc.afterPasses && err != nil {
+				t.Errorf("behaviour changed after the move: %v\n%s", err, out)
+			}
+			if !tc.afterPasses && err == nil {
+				t.Errorf("expected the fixture's tests to detect the behaviour change after the move")
 			}
 		})
 	}

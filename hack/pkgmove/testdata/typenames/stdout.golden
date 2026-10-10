@@ -3,21 +3,23 @@ pkgmove plan: example.com/fx/hub -> example.com/fx/hub/sub (package sub)
 Files (1):
   git mv hub/move.go hub/sub/move.go
 
-Renames (0):
+Renames (1):
+  type   secret -> Secret  (hub/move.go:6)
 
-Alias entries (2):
+Alias entries (3):
   func  NewSecret = sub.NewSecret
   type  Token = sub.Token
+  type  secret = sub.Secret
 
 Alias files (1):
-  hub/zz_alias_sub.go (17 lines)
+  hub/zz_alias_sub.go (18 lines)
 
-Var reference rewrites in remaining files (0):
+Reference rewrites in remaining files (vars and func values) (0):
 
 Remaining source files edited (0):
 
 pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
-Files moved: 1. Findings: 4. Errors: 0.
+Files moved: 1. Findings: 6. Errors: 0.
 
 Why this matters: a moved package is initialised before the package that
 imports it, so init() functions and package-level var initialisers in the moved
@@ -25,11 +27,15 @@ files now run before every initialiser of the source package. Review each
 ERROR/HIGH/WARN item below before merging.
 
 == HIGH: gob registration of a moved type ==
-  hub/stay.go:9: gob.Register registers Token, whose gob name changes with the package path; encoded data and peers on the old name break
+  hub/stay.go:9: gob.Register registers Token, whose gob name embeds the package path; encoded data and peers on the old name break
+  hub/stay.go:10: gob.Register registers Token, whose gob name embeds the package path; encoded data and peers on the old name break
+
+== WARN: gob registration of a moved type ==
+  hub/stay.go:11: gob.RegisterName registers secret under a fixed wire name (unchanged), but type identity checks and %T output now use package sub
 
 == WARN: reflect-visible type name changes (all users, not only moved files) ==
   hub/move.go:4: hub.Token becomes sub.Token for %T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)
-  hub/move.go:6: hub.secret becomes sub.secret for %T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)
+  hub/move.go:6: hub.secret becomes sub.Secret for %T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)
 
 == WARN: runtime type/function names change package qualifier ==
   hub/move.go: uses %T: names of moved types and functions now print as sub.X instead of hub.X

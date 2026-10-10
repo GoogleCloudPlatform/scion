@@ -1,0 +1,41 @@
+pkgmove plan: example.com/fx/hub -> example.com/fx/hub/sub (package sub)
+
+Files (1):
+  git mv hub/move.go hub/sub/move.go
+
+Renames (0):
+
+Alias entries (1):
+  func  Start = sub.Start
+
+Alias files (1):
+  hub/zz_alias_sub.go (13 lines)
+
+Reference rewrites in remaining files (vars and func values) (0):
+
+Remaining source files edited (0):
+
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 1. Findings: 4. Errors: 0.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== WARN: file excluded by build constraints (not type-checked) ==
+  hub/fake_integration.go: references moved names by name (aliased conservatively, not type-checked): Start - verify with -tags
+  hub/fake_integration.go:7: method run matches an unexported method of a moved type or interface; interface satisfaction under these tags cannot be checked (an unexported method cannot satisfy an interface across packages) - verify with -tags
+
+== WARN: reflect-visible type name changes (all users, not only moved files) ==
+  hub/move.go:3: hub.runner becomes sub.runner for %T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)
+
+== INFO: file excluded by build constraints (not type-checked) ==
+  hub/fake_integration_test.go: no references to moved names
+
+safety report written to hub/zz_alias_sub_safety.txt
+
+sanity: go list example.com/fx/hub example.com/fx/hub/sub
+sanity: go list OK
+sanity: type-checking both packages (with in-package tests)
+sanity: type-check OK

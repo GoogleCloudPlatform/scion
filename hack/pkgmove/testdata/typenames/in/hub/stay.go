@@ -7,6 +7,8 @@ import (
 
 func init() {
 	gob.Register(Token{})
+	gob.Register([]Token{})
+	gob.RegisterName("fx.secret", secret{})
 }
 
 // Describe prints the dynamic type name.

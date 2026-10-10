@@ -13,7 +13,7 @@ Alias entries (1):
 Alias files (1):
   hub/zz_alias_sub.go (13 lines)
 
-Var reference rewrites in remaining files (0):
+Reference rewrites in remaining files (vars and func values) (0):
 
 Remaining source files edited (1):
   hub/stay.go

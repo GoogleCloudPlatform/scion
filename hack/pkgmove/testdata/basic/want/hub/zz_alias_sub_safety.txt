@@ -30,5 +30,5 @@ ERROR/HIGH/WARN item below before merging.
 == WARN: runtime type/function names change package qualifier ==
   hub/maint.go: uses runtime.Caller: names of moved types and functions now print as sub.X instead of hub.X; functions that inspect their caller are aliased as vars, not wrappers
 
-== INFO: staying var initialiser reads moved symbols ==
-  hub/core.go:36: startCount reads maxItems, registry, now initialised in package sub (before all of hub)
+== WARN: staying var initialiser reads moved vars ==
+  hub/core.go:36: startCount = ... reads registry, now initialised in package sub before all of hub (values set by hub initialisers or init() are no longer visible)

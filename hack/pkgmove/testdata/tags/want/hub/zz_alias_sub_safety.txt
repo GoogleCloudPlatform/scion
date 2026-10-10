@@ -6,11 +6,11 @@ imports it, so init() functions and package-level var initialisers in the moved
 files now run before every initialiser of the source package. Review each
 ERROR/HIGH/WARN item below before merging.
 
+== WARN: file excluded by build constraints (not type-checked) ==
+  hub/stay_nosqlite.go: references moved names by name (aliased conservatively, not type-checked): otherLimit - verify with -tags
+
 == WARN: go:generate directive ==
   hub/move_plain.go:3: //go:generate echo hi (runs in the new directory)
-
-== INFO: file excluded by build constraints (not type-checked) ==
-  hub/stay_nosqlite.go: references moved names by name (aliased conservatively): otherLimit
 
 == INFO: moved file has a build constraint ==
   hub/move_sqlite.go: constraint "!no_sqlite" (its alias entries carry the same constraint)

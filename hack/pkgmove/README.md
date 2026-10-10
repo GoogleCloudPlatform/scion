@@ -118,6 +118,13 @@ the report, and the tree is untouched), `2` usage, `3` tool or post-check failur
    wrapper does not affect it. A generic function in either group cannot be
    aliased as a var, so it is an error.
 
+   **Funcs used as values are not routed through the wrapper.** When staying
+   code uses a moved func as a value rather than calling it (`hook =
+   defaultHook`, `reflect.ValueOf(f).Pointer()`), the reference is rewritten
+   to `target.Foo`, like a var. A wrapper has a different identity. Value uses
+   in tag-excluded files and in external tests cannot be rewritten, so they
+   are reported as WARN.
+
    **Package-level vars are never aliased.** `var foo = target.Foo` would be a
    copy, which changes behaviour for assignments, hook overrides in tests and
    error identity. Instead, references to them in staying files are rewritten
@@ -158,22 +165,29 @@ severity:
 | HIGH | a moved package-level var initialiser that calls code of the source package, or an immediately invoked func literal |
 | HIGH | `//go:linkname` and `//go:embed` directives |
 | HIGH | `gob.Register`/`RegisterName` of a moved type anywhere in the source package: the gob name embeds the package path, so encoded data and peers that use the old name break |
-| HIGH | exported struct fields (only with `-allow-field-export`) |
-| WARN | a moved var initialiser that calls another package's functions (for example `os.Getenv` or `slog.Default`). It now runs before all of the source package's initialisers, so state they set is no longer visible to it, and its own effects happen earlier |
+| HIGH | exported struct fields (only with `-allow-field-export`). **This includes embedded fields:** exporting a moved type `inner` as `Inner` renames every field that embeds it (`Outer.inner` becomes `Outer.Inner`), which changes `%+v`, encoding/json, gob, cmp, templates and reflection |
+| HIGH | a staying var initialiser that calls a moved func or a method of a moved type. Moved package state is now initialised before every source initialiser; for example, a registry filled by a staying initialiser looks empty to a moved initialiser |
+| WARN | a moved var initialiser that calls another package's functions (for example `os.Getenv` or `slog.Default`), unless the call is provably pure (see below). It now runs before all of the source package's initialisers, so state they set is no longer visible to it, and its own effects happen earlier |
+| WARN | a moved var initialiser that reads another package's vars (`os.Stderr`, `http.DefaultClient`) |
+| WARN | a staying var initialiser that reads moved vars |
+| WARN | staying var initialisers with side-effecting calls, listed when a moved file has `init()` or a side-effecting initialiser |
+| WARN | a method declared in a tag-excluded file whose name matches an unexported method of a moved type or interface: satisfaction under those tags cannot be checked |
+| WARN | files excluded by build tags that reference moved names. They are aliased conservatively, by name, without type-checking |
+| WARN | `gob.RegisterName` of a moved type: the wire name is fixed, but identity checks and `%T` change |
 | WARN | a moved var initialiser that reads vars or funcs of other files |
 | WARN | every moved named type: `%T`, reflect `Type.String`/`PkgPath`, gob names and messages that print type names change from `src.X` to `target.X` for **all** users, including staying files and importers |
 | WARN | methods exported to new names: they may newly satisfy interfaces. Types in **other packages** that embed the moved type are not checked for shadowing or newly promoted members; the WARN says so |
-| WARN | a renamed method's old or new name in a template string (`{{.Name}}`), in a `MethodByName`/`FieldByName` call, or in a non-Go file of the source directory. Exported methods become visible to text/template, html/template, reflect and RPC-style dispatch |
+| WARN | a renamed method's old or new name in a template string (`{{.Name}}`), in a `MethodByName`/`FieldByName` call, or in a non-Go file of the source directory or any of its subdirectories (for example `templates/*.tmpl`). Exported methods become visible to text/template, html/template, reflect and RPC-style dispatch |
 | WARN | `debug.Stack` or `runtime.Stack` in moved files: captured stacks and panic traces show the new package path |
 | WARN | `%T`, `reflect.TypeOf`, `gob.Register`, `runtime.Caller` or `FuncForPC` in moved files: type and function names now print as `target.X` |
 | WARN | the package doc comment moving |
 | WARN | `//go:generate` directives |
 | WARN | function aliases declared as vars (recover, stack inspection, or a signature that cannot be spelled) |
 | INFO | staying var initialisers that read moved symbols |
-| INFO | moved var initialisers that call only allow-listed pure constructors (`errors`, `regexp`, `reflect`, `strings`, `strconv`, `fmt.Errorf`/`Sprintf`, ...) |
-| INFO | staying var initialisers that call other packages, listed when a moved file has `init()` or a side-effecting initialiser. The moved initialisers now run before them |
+| INFO | moved var initialisers whose calls are all provably pure (see below) |
+| INFO | staying var initialisers that use only moved consts or types (compile-time) |
 | INFO | moved external tests, and moved files with build constraints |
-| INFO | files excluded by the build tags (scanned by name only) |
+| INFO | files excluded by the build tags that do not reference moved names |
 | INFO | test companions left behind |
 
 **Errors** (the tool refuses the move):
@@ -199,6 +213,31 @@ severity:
 - A moved file is excluded by the build tags, or uses cgo.
 - A `go:embed` pattern matches files that are not in the move set.
 - The target directory already has Go files, or an alias file already exists.
+
+### What counts as a pure initialiser call
+
+The tool is **default-deny**: anything it cannot prove safe statically is
+reported at WARN or higher, never INFO.
+
+A call in a var initialiser is pure only when both of these hold.
+
+1. **The callee is allow-listed** as a package-level function:
+   - `errors`, `regexp`, `strings`, `strconv`, `unicode`, `unicode/utf8`,
+     `math`, `bytes`;
+   - `fmt.Errorf`, `Sprintf`, `Sprint` and `Sprintln`;
+   - `reflect.TypeOf` and `TypeFor`;
+   - `time.Date`, `Unix`, `UnixMilli` and `UnixMicro`;
+   - `path.Join`, `filepath.Join`, `slices.Clone` and `maps.Clone`.
+
+   Methods never count.
+2. **No argument can run package code:**
+   - no func-typed argument (this excludes `strings.Map`, `FieldsFunc` and
+     the like);
+   - no non-empty interface argument;
+   - no argument whose method set includes methods from non-standard
+     packages;
+   - for `fmt`, only unnamed basic-typed arguments, because fmt calls
+     `String`, `Error` and `Format`.
 
 ## Build tags
 
@@ -270,7 +309,7 @@ discard it.
 ## Tests
 
 ```sh
-go test ./hack/pkgmove/...           # golden, determinism (6 runs per fixture), dry-run, rollback and unit tests
+go test ./hack/pkgmove/...           # golden, determinism (6 runs per fixture), behaviour, dry-run, rollback and unit tests
 go test ./hack/pkgmove/ -update      # rewrite the goldens after an intended change
 ```
 
@@ -278,12 +317,18 @@ Each fixture under `testdata/<case>/in` is a small module. A test copies it to
 a temp dir, moves files from `hub/` to `hub/sub/`, and compares the result with
 `want/` and `stdout.golden`. Failing cases must leave the tree untouched.
 
+`TestBehaviour` runs a fixture's own tests before and after the move:
+- **Where the move changes behaviour:** the tests must fail afterwards, and
+  the report must contain the finding that explains why.
+- **Where the tool preserves behaviour:** the tests must still pass.
+
 | Fixture | What it covers |
 |---|---|
 | `basic` | export renames, aliases, generics, var rewrite, test-only alias, init detection, recover and stack-inspection var aliases, template and `MethodByName` warnings |
 | `tags` | build constraints |
 | `xtest` | external tests, embed and linkname |
-| `embed` | embedded-field rename |
+| `embed` | embedded-field rename refused without `-allow-field-export` |
+| `embedallow` | the same move allowed: HIGH, and the fixture's `%+v` test fails after the move |
 | `iface` | interface-group rename |
 | `fields` | field export with `-allow-field-export` |
 | `methods` | methods on a type that stays, rejected |
@@ -295,4 +340,8 @@ a temp dir, moves files from `hub/` to `hub/sub/`, and compares the result with
 | `generic` | generic type that satisfies an interface dynamically through an unexported method |
 | `initorder` | WARN for a moved initialiser that calls another package, INFO for pure constructors, staying side-effecting initialisers |
 | `samename` | several types renaming the same method name (deterministic report) |
-| `typenames` | type-name WARN, and HIGH for `gob.Register` of a moved type |
+| `typenames` | type-name WARN, HIGH for `gob.Register` (including `[]T`), WARN for `gob.RegisterName` |
+| `registry` | a staying initialiser that fills a moved registry is HIGH; the fixture's test fails after the move |
+| `purity` | which initialiser calls count as pure |
+| `funcvalue` | func values rewritten to the target, so func identity is kept; the fixture's test passes after the move |
+| `excludedmethod` | a method in an integration-tagged file that matches a moved interface: WARN; the tagged test fails after the move |

@@ -3,35 +3,35 @@ pkgmove plan: example.com/fx/hub -> example.com/fx/hub/sub (package sub)
 Files (1):
   git mv hub/move.go hub/sub/move.go
 
-Renames (1):
+Renames (2):
   type   inner -> Inner  (hub/move.go:3)
+  field  Outer.inner -> Inner  (hub/move.go:9)
 
-Alias entries (1):
+Alias entries (2):
   type  Outer = sub.Outer
+  type  inner = sub.Inner [test]
 
-Alias files (1):
+Alias files (2):
   hub/zz_alias_sub.go (13 lines)
+  hub/zz_alias_sub_test.go (13 lines)
 
-Var reference rewrites in remaining files (0):
+Reference rewrites in remaining files (vars and func values) (0):
 
-Remaining source files edited (1):
-  hub/stay.go
+Remaining source files edited (0):
+
+ERRORS (1) - the move cannot be generated; see the safety report below.
 
 pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
-Files moved: 1. Findings: 2. Errors: 0.
+Files moved: 1. Findings: 2. Errors: 1.
 
 Why this matters: a moved package is initialised before the package that
 imports it, so init() functions and package-level var initialisers in the moved
 files now run before every initialiser of the source package. Review each
 ERROR/HIGH/WARN item below before merging.
 
+== ERRORS (the move was not generated) ==
+  - hub/move.go:9: embedded field Outer.inner becomes the exported field Inner because its type is exported; exporting a field changes reflection, encoding (encoding/json, gob, cmp), text/template and %+v behaviour - restructure first, or pass -allow-field-export and review the HIGH finding
+
 == WARN: reflect-visible type name changes (all users, not only moved files) ==
   hub/move.go:3: hub.inner becomes sub.Inner for %T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)
   hub/move.go:8: hub.Outer becomes sub.Outer for %T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)
-
-safety report written to hub/zz_alias_sub_safety.txt
-
-sanity: go list example.com/fx/hub example.com/fx/hub/sub
-sanity: go list OK
-sanity: type-checking both packages (with in-package tests)
-sanity: type-check OK

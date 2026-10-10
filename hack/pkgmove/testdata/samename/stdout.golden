@@ -18,13 +18,13 @@ Alias entries (4):
 Alias files (1):
   hub/zz_alias_sub.go (16 lines)
 
-Var reference rewrites in remaining files (0):
+Reference rewrites in remaining files (vars and func values) (0):
 
 Remaining source files edited (1):
   hub/stay.go
 
 pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
-Files moved: 1. Findings: 9. Errors: 0.
+Files moved: 1. Findings: 10. Errors: 0.
 
 Why this matters: a moved package is initialised before the package that
 imports it, so init() functions and package-level var initialisers in the moved
@@ -45,6 +45,7 @@ ERROR/HIGH/WARN item below before merging.
 
 == WARN: renamed method name appears in a template or reflection string ==
   hub/stay.go:4: "{{.Count}} things" mentions Count (Alpha.count -> Count, Beta.count -> Count, Delta.count -> Count, Gamma.count -> Count); templates call exported methods only
+  hub/templates/summary.tmpl: mentions .Count (Alpha.count -> Count, Beta.count -> Count, Delta.count -> Count, Gamma.count -> Count); check templates that call methods by name
 
 safety report written to hub/zz_alias_sub_safety.txt
 

@@ -1,5 +1,5 @@
 pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
-Files moved: 1. Findings: 9. Errors: 0.
+Files moved: 1. Findings: 10. Errors: 0.
 
 Why this matters: a moved package is initialised before the package that
 imports it, so init() functions and package-level var initialisers in the moved
@@ -20,3 +20,4 @@ ERROR/HIGH/WARN item below before merging.
 
 == WARN: renamed method name appears in a template or reflection string ==
   hub/stay.go:4: "{{.Count}} things" mentions Count (Alpha.count -> Count, Beta.count -> Count, Delta.count -> Count, Gamma.count -> Count); templates call exported methods only
+  hub/templates/summary.tmpl: mentions .Count (Alpha.count -> Count, Beta.count -> Count, Delta.count -> Count, Gamma.count -> Count); check templates that call methods by name
