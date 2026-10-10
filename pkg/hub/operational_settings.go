@@ -1904,25 +1904,21 @@ func (o *OperationalSettings) ReadAuthoritativeExperiments(ctx context.Context) 
 	return ExperimentsReadResult{Overrides: overrides, Revision: setting.Revision}
 }
 
-// applySnapshotLogLevel applies the log-level portion of the snapshot.
+// applySnapshotLogLevel applies server.log_level to the shared level state
+// at setting precedence (logging.SetLogLevelSetting), so the installed level
+// filter and the handlers built with logging.ResolveLogLeveler follow it.
+// SCION_LOG_LEVEL and the --debug flag still win. An empty level reverts the
+// setting to the built-in default (info).
+//
+// It deliberately does not call slog.SetLogLoggerLevel: that changes only the
+// level of the standard-library log bridge, and also re-levels log.Printf
+// lines so that they bypass the level filter.
+//
 // This is separated from applySnapshot because log level is a Layer-0 setting
-// (per design §3.1) and is only changed in file mode via reloadSettings.
+// (per design §3.1) and is only changed in file mode via reloadSettings or a
+// workstation server-config save.
 func applySnapshotLogLevel(level string) {
-	if level == "" {
-		return
-	}
-	var lvl slog.Level
-	switch level {
-	case "debug":
-		lvl = slog.LevelDebug
-	case "info":
-		lvl = slog.LevelInfo
-	case "warn":
-		lvl = slog.LevelWarn
-	case "error":
-		lvl = slog.LevelError
-	}
-	slog.SetLogLoggerLevel(lvl)
+	logging.ApplyLogLevelSetting("server.log_level", level)
 }
 
 // Lifecycle authority belongs to this captured router/source attachment, never

@@ -236,8 +236,8 @@ func TestSeedImageRegistry_ReachesBootstrap(t *testing.T) {
 }
 
 // TestFindUnmatchedSettingsEnv_LogLevelNote checks the LOG_LEVEL warning
-// does not overstate SCION_LOG_LEVEL: the hint names the reload-only
-// setting spelling and the note gives the boot-time controls.
+// names the setting spelling and says that SCION_LOG_LEVEL and --debug take
+// precedence over it.
 func TestFindUnmatchedSettingsEnv_LogLevelNote(t *testing.T) {
 	u, ok := unmatchedByName([]string{"SCION_SERVER_LOG_LEVEL=debug"})["SCION_SERVER_LOG_LEVEL"]
 	if !ok {
@@ -246,7 +246,7 @@ func TestFindUnmatchedSettingsEnv_LogLevelNote(t *testing.T) {
 	if u.Suggestion != "SCION_SERVER_LOGLEVEL" {
 		t.Errorf("suggestion = %q, want SCION_SERVER_LOGLEVEL", u.Suggestion)
 	}
-	for _, want := range []string{"no boot-time override", "file-mode reload", "--debug", "SCION_LOG_LEVEL=debug"} {
+	for _, want := range []string{"server.log_level", "startup", "file-mode reload", "SCION_LOG_LEVEL", "--debug"} {
 		if !strings.Contains(u.Note, want) {
 			t.Errorf("note %q lacks %q", u.Note, want)
 		}

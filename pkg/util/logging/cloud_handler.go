@@ -77,7 +77,7 @@ type CloudLoggingConfig struct {
 type CloudHandler struct {
 	logger    *gcplog.Logger
 	client    *gcplog.Client
-	level     slog.Level
+	level     slog.Leveler // nil means info
 	component string
 	hubName   string
 	hubID     string
@@ -93,8 +93,11 @@ type CloudHandler struct {
 }
 
 // NewCloudHandler creates a new CloudHandler that sends logs to Cloud Logging.
+// level is consulted on every record, so a slog.Leveler that tracks the
+// shared level state (see ResolveLogLeveler) follows later level changes; a
+// plain slog.Level gives a fixed floor.
 // Returns the handler, a cleanup function to flush and close the client, and any error.
-func NewCloudHandler(ctx context.Context, config CloudLoggingConfig, level slog.Level) (*CloudHandler, func(), error) {
+func NewCloudHandler(ctx context.Context, config CloudLoggingConfig, level slog.Leveler) (*CloudHandler, func(), error) {
 	projectID := config.ProjectID
 	if projectID == "" {
 		projectID = resolveProjectID()
@@ -158,7 +161,11 @@ func NewCloudHandler(ctx context.Context, config CloudLoggingConfig, level slog.
 
 // Enabled implements slog.Handler.
 func (h *CloudHandler) Enabled(_ context.Context, level slog.Level) bool {
-	return level >= h.level
+	floor := slog.LevelInfo
+	if h.level != nil {
+		floor = h.level.Level()
+	}
+	return level >= floor
 }
 
 // Handle implements slog.Handler.
@@ -318,7 +325,7 @@ func (h *CloudHandler) Client() *gcplog.Client {
 // NewCloudHandlerFromClient creates a CloudHandler from an existing client.
 // This avoids opening a second connection for the request log stream.
 // hubID is optional — when non-empty, it is emitted as the "hub_id" label.
-func NewCloudHandlerFromClient(client *gcplog.Client, logID, component, hubName, hubID string, level slog.Level) *CloudHandler {
+func NewCloudHandlerFromClient(client *gcplog.Client, logID, component, hubName, hubID string, level slog.Leveler) *CloudHandler {
 	logger := client.Logger(logID)
 	hostname, _ := os.Hostname()
 	return &CloudHandler{
@@ -422,24 +429,39 @@ func ResolveProjectID() string {
 	return resolveProjectID()
 }
 
-// ResolveLogLevel returns the level floor for a handler that is constructed
-// with a fixed level: the main CloudHandler, the request logger and the
-// message logger. It is debug when the debug flag is set; otherwise it is the
-// most verbose level in the shared level spec (SCION_LOG_LEVEL, including
-// per-component levels), clamped so it is never above info.
+// ResolveLogLevel returns the current level floor for the main CloudHandler,
+// the request logger and the message logger. It is debug when the debug flag
+// is set; otherwise it is the most verbose level in the shared level spec
+// (SCION_LOG_LEVEL, server.log_level, including per-component levels),
+// clamped so it is never above info.
 //
 // The clamp matters because the request and message logs are an access and
-// audit trail that the shared level filter does not gate: SCION_LOG_LEVEL may
+// audit trail that the shared level filter does not gate: the level spec may
 // lower their floor (debug) but must not raise it, or warn/error would
 // silently drop every successful request entry. The main CloudHandler is
 // still raised to the configured level by the filter that Setup and
 // SetupWithOTel install around it.
+//
+// ResolveLogLevel is a snapshot; use ResolveLogLeveler for a handler that
+// must follow later changes such as a settings reload.
 func ResolveLogLevel(debug bool) slog.Level {
 	if debug {
 		return slog.LevelDebug
 	}
 	return min(loglevel.MinLevel().Level(), slog.LevelInfo)
 }
+
+// ResolveLogLeveler returns a slog.Leveler that evaluates ResolveLogLevel on
+// every call, so a handler built with it follows changes to the shared level
+// state (for example server.log_level applied on a settings reload) instead
+// of keeping the floor it was constructed with.
+func ResolveLogLeveler(debug bool) slog.Leveler {
+	return resolvedLeveler{debug: debug}
+}
+
+type resolvedLeveler struct{ debug bool }
+
+func (l resolvedLeveler) Level() slog.Level { return ResolveLogLevel(l.debug) }
 
 // FormatLogID returns the configured log ID (for display purposes).
 func FormatLogID() string {
