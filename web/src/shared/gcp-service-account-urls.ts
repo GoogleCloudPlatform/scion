@@ -173,17 +173,46 @@ export function saVerifyUrl(account: Pick<GCPServiceAccount, 'id' | 'scope' | 's
 }
 
 /**
+ * saStatusUrl is the per-account status view of the account named by `ref`
+ * (an id, an email or a display name) as seen from one Scion project.
+ *
+ * The view is project-relative for every account, hub-scoped ones included:
+ * mapping, defaults and agents all belong to a project, so there is no flat
+ * twin. `scionProjectId` is the Scion project, never the GCP project.
+ */
+export function saStatusUrl(scionProjectId: string, ref: string): string {
+  if (!scionProjectId) {
+    throw new Error('gcp-service-accounts: the status view requires a Scion project id');
+  }
+  if (!ref) {
+    throw new Error('gcp-service-accounts: the status view requires an account');
+  }
+  return `${nested(scionProjectId)}/${encodeURIComponent(ref)}/status`;
+}
+
+/**
  * saDetailPath is the UI route for one account.
  *
- * Only parentless accounts get a detail page today; see the page component for
- * why (the nested GET returns no capabilities, so a project-scoped detail page
- * could only render its buttons from existence, which is the thing this feature
- * is under instruction not to do). Project-scoped accounts are managed from
- * their project's settings tab, which is where their capabilities come from.
+ * Parentless accounts get the plain route; the page shows their row and the
+ * actions their `_capabilities` allow. A project-scoped account gets the same
+ * route with `?project=` naming its owning project, where the page shows the
+ * project-relative status sections and NO actions: the nested GET returns no
+ * capabilities, so buttons there could only be rendered from existence.
+ * Verify and delete for project-scoped accounts stay in the project's settings
+ * list, whose list route does compute capabilities.
+ *
+ * `projectId` adds the project-relative sections for a parentless account
+ * viewed from a project. It is ignored for a project-scoped account, whose
+ * owning project is the only one that can see it.
  */
 export function saDetailPath(
-  account: Pick<GCPServiceAccount, 'id' | 'scope' | 'scopeId'>
+  account: Pick<GCPServiceAccount, 'id' | 'scope' | 'scopeId'>,
+  projectId = ''
 ): string | null {
-  if (account.scope === 'project') return null;
-  return `/settings/service-accounts/${account.id}`;
+  const base = `/settings/service-accounts/${encodeURIComponent(account.id)}`;
+  if (account.scope === 'project') {
+    if (!account.scopeId) return null;
+    return `${base}?project=${encodeURIComponent(account.scopeId)}`;
+  }
+  return projectId ? `${base}?project=${encodeURIComponent(projectId)}` : base;
 }
