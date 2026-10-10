@@ -270,9 +270,12 @@ func TestHubSAMappingWarnings_ViewCachedForTTL(t *testing.T) {
 }
 
 // hubBrokerListStore lets a test hold or fail the broker listing behind
-// hubSAMappings.
+// hubSAMappings. It is installed through installStoreFault before any
+// audited setup and delegates untouched until its switch is armed, so tests
+// never reassign srv.store after setup (ptone/scion#3435).
 type hubBrokerListStore struct {
 	store.Store
+	fault   *storeFaultSwitch
 	fail    atomic.Bool
 	started chan struct{} // closed-once signal that a listing began, if set
 	release chan struct{} // a listing waits on it, if set
@@ -280,6 +283,9 @@ type hubBrokerListStore struct {
 }
 
 func (h *hubBrokerListStore) ListRuntimeBrokers(ctx context.Context, f store.RuntimeBrokerFilter, o store.ListOptions) (*store.ListResult[store.RuntimeBroker], error) {
+	if !h.fault.Active() {
+		return h.Store.ListRuntimeBrokers(ctx, f, o)
+	}
 	if h.started != nil {
 		h.once.Do(func() { close(h.started) })
 	}
@@ -292,13 +298,31 @@ func (h *hubBrokerListStore) ListRuntimeBrokers(ctx context.Context, f store.Run
 	return h.Store.ListRuntimeBrokers(ctx, f, o)
 }
 
+// newMappingProjectWithBrokerListFault is newMappingProject with a disarmed
+// hubBrokerListStore installed right after the server is built. configure
+// runs on the wrapper before it is installed (e.g. to set the hold channels).
+func newMappingProjectWithBrokerListFault(t *testing.T, configure func(*hubBrokerListStore)) (*Server, store.Store, string, *hubBrokerListStore, *storeFaultSwitch) {
+	t.Helper()
+	srv, s, wrapper, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *hubBrokerListStore {
+		w := &hubBrokerListStore{Store: inner, fault: f}
+		if configure != nil {
+			configure(w)
+		}
+		return w
+	})
+	projectID := createTestProjectForSA(t, srv, s)
+	return srv, s, projectID, wrapper, fault
+}
+
 // The cache lock is not held across the broker walk: while one request's
 // walk is stuck, another request can still read the cache.
 func TestHubSAMappings_LockNotHeldDuringLoad(t *testing.T) {
-	srv, s, projectID := newMappingProject(t)
+	srv, s, projectID, hold, fault := newMappingProjectWithBrokerListFault(t, func(w *hubBrokerListStore) {
+		w.started = make(chan struct{})
+		w.release = make(chan struct{})
+	})
 	addProviderBroker(t, s, projectID, "b1", k8sProfile("k8s", true))
-	hold := &hubBrokerListStore{Store: s, started: make(chan struct{}), release: make(chan struct{})}
-	srv.store = hold
+	fault.Arm()
 
 	done := make(chan projectSAMappingView, 1)
 	go func() { done <- srv.hubSAMappings(context.Background()) }()
@@ -324,10 +348,9 @@ func TestHubSAMappings_LockNotHeldDuringLoad(t *testing.T) {
 // A failed walk is not cached and does not replace the last good view: the
 // previous view answers until a walk succeeds again.
 func TestHubSAMappings_FailureReturnsLastGoodView(t *testing.T) {
-	srv, s, projectID := newMappingProject(t)
+	srv, s, projectID, flaky, fault := newMappingProjectWithBrokerListFault(t, nil)
 	addProviderBroker(t, s, projectID, "b1", k8sProfile("k8s", true))
-	flaky := &hubBrokerListStore{Store: s}
-	srv.store = flaky
+	fault.Arm()
 	hubSA := &store.GCPServiceAccount{
 		ID: tid("hub-sa"), Scope: store.ScopeHub, ScopeID: "hub", Email: unmappedGSA, ProjectID: "p", Verified: true,
 	}
@@ -353,11 +376,10 @@ func TestHubSAMappings_FailureReturnsLastGoodView(t *testing.T) {
 
 // With no good view yet, a failed walk answers with its partial view.
 func TestHubSAMappings_FailureWithoutPriorViewReturnsPartial(t *testing.T) {
-	srv, s, projectID := newMappingProject(t)
+	srv, s, projectID, flaky, fault := newMappingProjectWithBrokerListFault(t, nil)
 	addProviderBroker(t, s, projectID, "b1", k8sProfile("k8s", true))
-	flaky := &hubBrokerListStore{Store: s}
 	flaky.fail.Store(true)
-	srv.store = flaky
+	fault.Arm()
 	assert.Empty(t, srv.hubSAMappings(context.Background()).reported)
 	assert.False(t, srv.hubSAMappingCache.loaded, "failed walk not cached")
 }
