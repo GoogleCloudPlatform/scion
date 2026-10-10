@@ -11,6 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 //go:build !no_sqlite
 
 package hub
@@ -41,7 +42,7 @@ func TestAdminResetAuthAll_TokenRefused(t *testing.T) {
 		require.Equal(t, http.StatusForbidden, rec.Code, "body %v: %s", body, rec.Body.String())
 		code, details := errorCodeAndDetails(t, rec)
 		require.Equal(t, ErrCodeForbidden, code, rec.Body.String())
-		require.Equal(t, string(authzop.ReasonCredentialManagement), details["reason"], rec.Body.String())
+		require.Equal(t, string(authzop.ReasonSessionRecovery), details["reason"], rec.Body.String())
 		require.Equal(t, sessionRequiredCredential, details["credential"], rec.Body.String())
 	}
 }
@@ -56,6 +57,17 @@ func TestAdminResetAuthAll_SessionPassesGuard(t *testing.T) {
 	// A body the handler rejects proves the request got past the guard
 	// without dispatching any reset.
 	rec := doRequestAsUser(t, srv, admin, http.MethodPost, adminResetAuthAllPath, map[string]any{"dry_run": true})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "dry_run applies only with reissue_scopes")
+}
+
+// TestAdminResetAuthAll_DevCredentialPassesGuard: the local development
+// credential, which the session-only guard admits alongside a session,
+// passes the guard and reaches the handler.
+func TestAdminResetAuthAll_DevCredentialPassesGuard(t *testing.T) {
+	srv, _ := testServerWithOps(t, nil)
+
+	rec := doRequest(t, srv, http.MethodPost, adminResetAuthAllPath, map[string]any{"dry_run": true})
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	require.Contains(t, rec.Body.String(), "dry_run applies only with reissue_scopes")
 }

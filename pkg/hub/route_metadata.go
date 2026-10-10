@@ -776,13 +776,13 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "hub.conduit_grant_keys.execute", Resource: "hub", Action: "execute",
 		SessionOnly: authzop.ReasonCredentialManagement,
 	},
-	// Bulk agent auth reset. Session only, like the other
-	// credential-management routes.
+	// Bulk agent auth reset. Session only: a session-recovery route, like
+	// revoke-sessions.
 	"/api/v1/admin/agents/reset-auth-all": {
 		Pattern: "/api/v1/admin/agents/reset-auth-all", RouteID: "admin.agents.resetAuthAll",
 		Classification: RouteHubAdmin,
 		Permission:     "hub.auth_reset.execute", Resource: "hub", Action: "execute",
-		SessionOnly: authzop.ReasonCredentialManagement,
+		SessionOnly: authzop.ReasonSessionRecovery,
 	},
 	// Delegation-provenance adoption recovery: hub system admin on a session
 	// or local development credential only (checked again in the handler).

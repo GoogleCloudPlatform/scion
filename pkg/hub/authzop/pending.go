@@ -310,7 +310,6 @@ var PendingBearerOperations = []OperationID{
 	"harnessconfig.delete",
 	"hub.adminmode.update",
 	"hub.allowlist.update",
-	"hub.authreset",
 	"hub.maintenance.execute",
 	"project.lifecycle.create",
 	"project.list",

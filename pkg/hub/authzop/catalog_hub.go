@@ -45,6 +45,7 @@ var hubOperations = []OperationSpec{
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		Bearer:      SessionOnly(ReasonSessionRecovery),
 	},
 
 	{
