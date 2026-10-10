@@ -214,10 +214,20 @@ func TestStopAll_OneAgentTimesOut_OthersStop(t *testing.T) {
 type slowStopIntentStore struct {
 	store.Store
 	delay time.Duration
+
+	mu sync.Mutex
+	// firstEntry is when the first stop intent write began.
+	firstEntry time.Time
 }
 
 func (s *slowStopIntentStore) SwapRunIntent(ctx context.Context, agentID string, intent store.RunIntent) (store.RunIntent, time.Time, error) {
 	if intent == store.RunIntentStopped {
+		now := time.Now()
+		s.mu.Lock()
+		if s.firstEntry.IsZero() || now.Before(s.firstEntry) {
+			s.firstEntry = now
+		}
+		s.mu.Unlock()
 		time.Sleep(s.delay)
 	}
 	return s.Store.SwapRunIntent(ctx, agentID, intent)
@@ -248,20 +258,21 @@ func TestStopAll_SharedOpDeadline_SlowPreDispatchWrite(t *testing.T) {
 	setStopAllAgentOpTimeout(t, 2*time.Second)
 	createSiteAgent(t, s, project, "shared-deadline-a", state.PhaseRunning, store.RunIntentRunning)
 	createSiteAgent(t, s, project, "shared-deadline-b", state.PhaseRunning, store.RunIntentRunning)
-	srv.store = &slowStopIntentStore{Store: srv.store, delay: writeDelay}
+	slow := &slowStopIntentStore{Store: srv.store, delay: writeDelay}
+	srv.store = slow
 
-	start := time.Now()
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents/stop-all", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	require.Len(t, disp.deadlines, 2)
-	// The handler takes the shared deadline a little after start (the list
-	// and authz reads): allow for that, but far less than writeDelay, which
-	// a per-agent timeout taken after the slow write would add.
-	limit := start.Add(stopAllAgentOpTimeout + writeDelay/3)
+	require.False(t, slow.firstEntry.IsZero(), "fixture check: the stop intent write ran")
+	// The shared deadline is taken before any agent's stop intent write
+	// begins, so it is at most stopAllAgentOpTimeout after the first one;
+	// a per-agent timeout taken after the slow write would be later.
+	limit := slow.firstEntry.Add(stopAllAgentOpTimeout)
 	for i, d := range disp.deadlines {
 		require.False(t, d.IsZero(), "stop %d must run under the op deadline", i)
 		assert.False(t, d.After(limit),
-			"stop %d deadline %v is past the shared op deadline: the pre-dispatch write took slack time", i, d.Sub(start))
+			"stop %d deadline is %v past the first stop intent write plus the op timeout: the pre-dispatch write took slack time", i, d.Sub(limit))
 	}
 	assert.True(t, disp.deadlines[0].Equal(disp.deadlines[1]), "every agent shares one op deadline")
 }
