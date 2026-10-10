@@ -76,7 +76,9 @@ type Credentials struct {
 type Object struct {
 	// Name is the object name/path.
 	Name string `json:"name"`
-	// Size is the object size in bytes.
+	// Size is the object size in bytes. On objects returned by Download it
+	// is the number of bytes the reader yields, or -1 when that is unknown
+	// (for example, GCS decompressing a gzip-encoded object on read).
 	Size int64 `json:"size"`
 	// ContentType is the MIME content type.
 	ContentType string `json:"contentType,omitempty"`

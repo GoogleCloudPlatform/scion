@@ -487,10 +487,28 @@ describe('admin-role-detail', () => {
     const handler = createFetchHandler({ role: CUSTOM_ROLE });
     el = await createElement(handler);
 
-    const backLink = el.shadowRoot?.querySelector('.back-link');
-    expect(backLink).not.toBeNull();
-    expect(backLink?.getAttribute('href')).toBe('/admin/roles');
-    expect(backLink?.textContent?.trim()).toContain('Roles');
+    // The shared scion-back-link, in the shared header's back slot.
+    const backLinks = el.shadowRoot?.querySelectorAll('scion-back-link');
+    expect(backLinks).toHaveLength(1);
+    const backLink = backLinks![0];
+    expect(backLink.parentElement?.tagName.toLowerCase()).toBe('scion-detail-header');
+    expect(backLink.getAttribute('slot')).toBe('back');
+    expect(backLink.getAttribute('href')).toBe('/admin/roles');
+    expect(backLink.textContent?.trim()).toBe('Roles');
+    expect(el.shadowRoot?.querySelector('a.back-link')).toBeNull();
+  });
+
+  it('shows the Roles nav icon in the header icon slot', async () => {
+    const handler = createFetchHandler({ role: CUSTOM_ROLE });
+    el = await createElement(handler);
+
+    const header = el.shadowRoot?.querySelector('scion-detail-header');
+    const icons = Array.from(header?.children ?? []).filter(
+      (n) => n.getAttribute('slot') === 'icon'
+    );
+    expect(icons.map((n) => `${n.tagName.toLowerCase()}[${n.getAttribute('name')}]`)).toEqual([
+      'sl-icon[shield-lock]',
+    ]);
   });
 
   // -- Tabs --

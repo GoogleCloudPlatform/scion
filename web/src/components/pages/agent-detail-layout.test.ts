@@ -176,6 +176,38 @@ describe('agent detail layout', () => {
     }
   );
 
+  // The back link is the shared scion-back-link in the header's back slot
+  // (ptone/scion#4177); its target and label follow the agent's project.
+  it.each([
+    ['without a project', null, '/agents', 'Back to Agents'],
+    ['with a project', { id: 'p-1', name: 'Payments' }, '/projects/p-1', 'To Payments'],
+  ])('hands the back link to the back slot (%s)', (_label, project, href, text) => {
+    const el = document.createElement('scion-page-agent-detail');
+    Object.assign(el, { agentId: 'a-1', agent: makeAgent({}), project });
+    const host = document.createElement('div');
+    render((el as unknown as { renderHeader: () => TemplateResult }).renderHeader(), host);
+    const back = host.querySelectorAll('scion-detail-header > [slot="back"]');
+    expect(Array.from(back).map((n) => n.tagName.toLowerCase())).toEqual(['scion-back-link']);
+    expect(back[0].getAttribute('href')).toBe(href);
+    expect(back[0].textContent?.trim()).toBe(text);
+  });
+
+  it('renders the shared back link on its own in the error state', () => {
+    const el = document.createElement('scion-page-agent-detail');
+    Object.assign(el, { agentId: 'a-1', loading: false, error: 'boom' });
+    const host = document.createElement('div');
+    render((el as unknown as { render: () => TemplateResult }).render(), host);
+    const links = host.querySelectorAll('scion-back-link');
+    expect(links).toHaveLength(1);
+    expect(links[0].getAttribute('href')).toBe('/agents');
+    expect(links[0].textContent?.trim()).toBe('Back to Agents');
+    expect(host.querySelector('a.back-link')).toBeNull();
+  });
+
+  it('keeps no copy of the back-link CSS', () => {
+    for (const sel of ['.back-link', '.back-link:hover']) expect(rules.has(sel), sel).toBe(false);
+  });
+
   it('keeps the provisioned-not-started label in the wrapping row', () => {
     const { badges } = headerParts(makeAgent({ phase: 'created', provisionedOnly: true }));
     expect(badges[0].getAttribute('label')).toBe(PROVISIONED_ONLY_LABEL);

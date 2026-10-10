@@ -16,6 +16,7 @@
     "copy:shoelace-icons": "node scripts/copy-shoelace-icons.mjs",
     "lint": "eslint src",
     "lint:fix": "eslint src --fix",
+    "lint:e2e": "eslint e2e",
     "lint:e2e-perf": "eslint e2e-perf",
     "test:e2e-perf": "node --test e2e-perf/lib.test.mjs e2e-perf/budgets/fixture.test.mjs",
     "format": "prettier --write \"src/**/*.{ts,tsx,css,json}\"",

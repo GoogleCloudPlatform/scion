@@ -256,6 +256,10 @@ type Relay struct {
 	// testHookPendingWait runs in Local and GoAway when they start
 	// waiting for a pending session (r2-F1 seam).
 	testHookPendingWait func()
+	// testHookAfterReady runs in Serve right after the session became
+	// visible as ready (registered, readyCh closed), before Serve acts
+	// on the relay state (the lifetime-arming seam).
+	testHookAfterReady func()
 }
 
 // ActiveBridges returns the number of owner-side stream bridges running.
@@ -500,6 +504,13 @@ func (r *Relay) armLifetime(e *entry) {
 	e.lifetime = r.clk.AfterFunc(d, func() { r.lifetimeGoAway(e) })
 }
 
+// stopLifetime stops e's lifetime GoAway timer, if armed.
+func (r *Relay) stopLifetime(e *entry) {
+	if e.lifetime != nil {
+		e.lifetime.Stop()
+	}
+}
+
 // lifetimeGoAway hands e off before its lifetime cap: the row is marked
 // draining (routing stops choosing it), then GoAway{4503 relay_restart}
 // is sent with the reconnect window and a drain deadline that ends by
@@ -601,6 +612,10 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 		h()
 	}
 	e.rec, e.source, e.sess = rec, source, ls
+	// Arm the lifetime GoAway before the session becomes visible (Local,
+	// readyCh): a caller that sees the session and advances the clock
+	// past the GoAway point must find the timer already armed.
+	r.armLifetime(e)
 	e.ready.Store(true)
 
 	r.mu.Lock()
@@ -611,25 +626,28 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 	state, killed := r.state, r.killed
 	r.mu.Unlock()
 	e.readyOnce.Do(func() { close(e.readyCh) })
+	if h := r.testHookAfterReady; h != nil {
+		h()
+	}
 	switch {
 	case killed:
+		r.stopLifetime(e)
 		_ = ls.Close()
 	case e.closeForbidden.Load():
 		// A user StreamOpen arrived before sess was set (pipelined
 		// after the Hello); refuseDialerStream could not close it.
+		r.stopLifetime(e)
 		_ = ls.CloseWithCode(conduit.CloseForbidden, userStreamRefused)
 	case state != stateServing:
 		// Drain or supersede began while this session was admitted.
+		r.stopLifetime(e)
 		r.goAway(e, r.drainOptions(e))
 	default:
-		r.armLifetime(e)
 		r.revalidate(ctx, e)
 	}
 
 	<-ls.Done()
-	if e.lifetime != nil {
-		e.lifetime.Stop()
-	}
+	r.stopLifetime(e)
 
 	r.mu.Lock()
 	if r.sessions[rec.SessionID] == e {

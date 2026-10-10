@@ -219,18 +219,6 @@ export class ScionPageArtifactDetail extends LitElement {
       max-width: 1200px;
       margin: 0 auto;
     }
-    .back-link {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
-      color: var(--sl-color-neutral-600);
-      text-decoration: none;
-      font-size: 0.875rem;
-      margin-bottom: 1rem;
-    }
-    .back-link:hover {
-      color: var(--sl-color-primary-600);
-    }
     .meta {
       display: flex;
       flex-wrap: wrap;
@@ -951,10 +939,6 @@ export class ScionPageArtifactDetail extends LitElement {
     }
     if (!this.data) return nothing;
     return html`
-      <a href=${`/projects/${encodeURIComponent(this.homeProject)}`} class="back-link">
-        <sl-icon name="arrow-left"></sl-icon>
-        Project
-      </a>
       ${this.renderHeader()}
       ${this.editing
         ? this.renderEditor()
@@ -1025,6 +1009,9 @@ export class ScionPageArtifactDetail extends LitElement {
       !this.editing && !this.reviewing && (!!v || this.canEdit || !!this.data?.canManage);
     return html`
       <scion-detail-header heading=${a.title}>
+        <scion-back-link slot="back" href=${`/projects/${encodeURIComponent(this.homeProject)}`}
+          >Project</scion-back-link
+        >
         <sl-icon slot="icon" name="file-earmark-richtext"></sl-icon>
         ${this.currentIsReview
           ? html`<sl-badge variant="warning" pill>
