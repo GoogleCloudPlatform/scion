@@ -212,18 +212,18 @@ func precheckDispatcher(t *testing.T, gsa string, persist bool, mutate ...func(a
 	return dispatcher, mockClient, agent, memStore
 }
 
-// countingTokenGenerator counts token authorizations and signatures and
+// precheckTokenCounter counts token authorizations and signatures and
 // refuses them, so a test can show no token was minted.
-type countingTokenGenerator struct {
+type precheckTokenCounter struct {
 	authorize, sign int
 }
 
-func (g *countingTokenGenerator) AuthorizeAgentToken(context.Context, *store.Agent) (AgentTokenGrant, error) {
+func (g *precheckTokenCounter) AuthorizeAgentToken(context.Context, *store.Agent) (AgentTokenGrant, error) {
 	g.authorize++
 	return AgentTokenGrant{}, fmt.Errorf("unexpected token authorization")
 }
 
-func (g *countingTokenGenerator) SignAgentToken(AgentTokenGrant, string) (string, *store.AgentCredential, error) {
+func (g *precheckTokenCounter) SignAgentToken(AgentTokenGrant, string) (string, *store.AgentCredential, error) {
 	g.sign++
 	return "", nil, fmt.Errorf("unexpected token signature")
 }
@@ -262,7 +262,7 @@ func TestDispatch_KubernetesIdentityPrecheck(t *testing.T) {
 	for _, op := range precheckOps(ctx) {
 		t.Run(op.name+" rejects before dispatch", func(t *testing.T) {
 			d, m, a, s := precheckDispatcher(t, precheckGSA, true)
-			tokens := &countingTokenGenerator{}
+			tokens := &precheckTokenCounter{}
 			d.SetTokenGenerator(tokens)
 			before, err := s.GetAgent(ctx, a.ID)
 			require.NoError(t, err)
@@ -351,9 +351,19 @@ func TestStartClaimWiring_IdentityNotMappedReleasesClaim(t *testing.T) {
 	require.NoError(t, err)
 	broker.Profiles = []store.BrokerProfile{precheckProfile(time.Now())}
 	require.NoError(t, f.s.UpdateRuntimeBroker(ctx, broker))
+	// A registered, verified project service account, so the start gate
+	// (checkGCPAssignmentAdmissible) admits the assignment.
+	now := time.Now()
+	require.NoError(t, f.s.CreateGCPServiceAccount(ctx, &store.GCPServiceAccount{
+		ID: tid("precheck-sa"), Scope: store.ScopeProject, ScopeID: f.projectID, Email: precheckGSA,
+		ProjectID: "example-project", Verified: true, VerifiedAt: now,
+		VerificationStatus: store.GCPVerificationVerified, CreatedBy: "test", CreatedAt: now,
+	}))
 	cur := getAgent(t, f.s, a.ID)
 	cur.AppliedConfig.Profile = "gke"
 	cur.AppliedConfig.GCPIdentity = precheckAssign(precheckGSA)
+	cur.AppliedConfig.GCPIdentity.ServiceAccountID = tid("precheck-sa")
+	cur.AppliedConfig.GCPIdentity.ProjectID = "example-project"
 	require.NoError(t, f.s.UpdateAgent(ctx, cur))
 
 	precheck := NewHTTPAgentDispatcherWithClient(f.s, &mockRuntimeBrokerClient{}, false, slog.Default())
