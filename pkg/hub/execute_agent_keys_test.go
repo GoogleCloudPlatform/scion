@@ -238,9 +238,6 @@ func (e *agentKeysEventSpy) PublishBrokerStatus(_ context.Context, _, _ string) 
 func (e *agentKeysEventSpy) PublishNotification(_ context.Context, _ *store.Notification) {
 	e.record("PublishNotification")
 }
-func (e *agentKeysEventSpy) PublishChatNotification(_ context.Context, _ *store.Notification, _ ChatMessageContext) {
-	e.record("PublishChatNotification")
-}
 func (e *agentKeysEventSpy) PublishUserNotification(_ context.Context, _ *store.Notification) {
 	e.record("PublishUserNotification")
 }
@@ -267,6 +264,12 @@ func (e *agentKeysEventSpy) PublishChatReadStateEvent(_ context.Context, _, _, _
 }
 func (e *agentKeysEventSpy) PublishChatOwnReadStateEvent(_ context.Context, _, _, _ string) {
 	e.record("PublishChatOwnReadStateEvent")
+}
+func (e *agentKeysEventSpy) PublishChatOwnStateChanged(_ context.Context, _, _, _ string, _ *bool) {
+	e.record("PublishChatOwnStateChanged")
+}
+func (e *agentKeysEventSpy) PublishChatMemberMessage(_ context.Context, _ *store.Message, _ []AttachmentRef, _ []string) {
+	e.record("PublishChatMemberMessage")
 }
 func (e *agentKeysEventSpy) PublishChatMessageEdited(_ context.Context, _, _ string, _ ChatMessageEditedEvent) {
 	e.record("PublishChatMessageEdited")

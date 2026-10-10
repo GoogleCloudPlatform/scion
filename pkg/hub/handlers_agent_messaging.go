@@ -1210,6 +1210,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			ProjectID:      agent.ProjectID,
 			GroupID:        result.GroupID,
 			Wake:           req.Wake,
+			BeforeWake:     func() { s.extendWriteDeadlineForDMWake(ctx, w) },
 		})
 		if dmErr != nil {
 			WriteAgentDMError(w, dmErr)
@@ -1319,8 +1320,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		extRef := result.ConvResult.ExternalRef
 		storeMsg.ThreadID = extRef
 		structuredMsg.ThreadID = extRef
-		// Backfill req.ThreadID so the W6 DM notification guard fires
-		// on the non-broker path.
+		// Backfill req.ThreadID so later thread-key guards see the DM key.
 		req.ThreadID = extRef
 
 		// Default Channel to "web" only when no channel was determined
@@ -1359,7 +1359,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		structuredMsg.Metadata[attachmentsMetadataKey] = encoded
 	}
 
-	// W6-mention: human members @mentioned in an agent → group (thread)
+	// Human members @mentioned in an agent → group (thread)
 	// message, matched against the member list resolved above.
 	var mentionedHumans []string
 	if req.ThreadID != "" && !strings.HasPrefix(req.ThreadID, "dm:") && !strings.HasPrefix(req.ThreadID, "agent:") {
@@ -1387,7 +1387,34 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		linkAttachmentRefs(storeCtx, wcs, storeMsg.ID, attachmentRefs, s.messageLog)
 		s.recordMessageArtifacts(storeCtx, storeMsg.ID, outboundArtifactRefs)
 		s.events.PublishUserMessage(storeCtx, storeMsg, attachmentRefs)
+		s.fanOutThreadMessageToMembersAsync(storeCtx, storeMsg, attachmentRefs)
 		return nil
+	}
+
+	// Thread membership: human project members an agent @mentions in a
+	// thread become members of it. Written before the message is stored
+	// and published on either path (the broker path stores and fans out in
+	// deliverToUser, after this), so the member fan-out includes them.
+	// Best effort, bounded, and not cut short by the request ending.
+	//
+	// A message naming the reserved inprocess channel is refused by the
+	// broker before anything is published, so it writes no members. A
+	// later store or broker failure (the 500, 502 and 503 answers below)
+	// can still leave the members written without the message; that window
+	// is accepted, since the agent could make the same members with a
+	// message that succeeds.
+	if len(mentionedHumans) > 0 && structuredMsg.Channel != eventbus.InProcessBusName {
+		m := threadMembership{
+			ProjectID:        agent.ProjectID,
+			ThreadKey:        req.ThreadID,
+			MentionedUserIDs: mentionedHumans,
+		}
+		if result.ConvResult != nil && result.ConvResult.Kind == "group" {
+			m.ConversationID = result.ConversationID
+		}
+		memberCtx, cancelMembers := context.WithTimeout(context.WithoutCancel(ctx), threadMembershipTimeout)
+		s.recordThreadMembers(memberCtx, m)
+		cancelMembers()
 	}
 
 	// Dispatch based on delivery path.
@@ -1504,34 +1531,6 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		Channel:            result.Channel,
 		HumanMembers:       humanMembers,
 	})
-
-	// Fire notifications (both broker and non-broker paths).
-	// W6-mention: mention notifications for agent → group messages.
-	if len(mentionedHumans) > 0 && s.getChatNotifier() != nil {
-		senderName := agent.Name
-		if senderName == "" {
-			senderName = agent.Slug
-		}
-		go s.notifyHumanMentions(context.Background(), mentionedHumans, agent.ProjectID,
-			req.ThreadID, "", senderName, req.Msg)
-	}
-
-	// W6: DM notification for agent → human replies (non-broker path only).
-	if bp := s.GetMessageBrokerProxy(); bp == nil {
-		if cn := s.getChatNotifier(); cn != nil && req.ThreadID != "" && strings.HasPrefix(req.ThreadID, "dm:") && result.RecipientID != "" {
-			senderName := agent.Name
-			if senderName == "" {
-				senderName = agent.Slug
-			}
-			go cn.NotifyDMReceived(context.Background(), result.RecipientID, ChatMessageContext{
-				SenderID:        agent.ID,
-				SenderName:      senderName,
-				ConversationKey: req.ThreadID,
-				Preview:         req.Msg,
-				ProjectID:       agent.ProjectID,
-			})
-		}
-	}
 
 	outboundLogAttrs := []any{
 		"agent_id", agent.ID,
@@ -2141,6 +2140,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	deferDelivery := reincarnationInFlight(agent)
 
 	if req.Wake && !senderIsAgent && !deferDelivery {
+		// The response waits on the resume and the readiness wait: extend
+		// this request's write deadline to cover them (ptone/scion#4178).
+		s.extendWriteDeadlineForDMWake(ctx, w)
 		wakeResult, wakeErr := s.wakeAgentForDM(ctx, agent)
 		if wakeErr != nil {
 			WriteAgentDMError(w, wakeErr)
@@ -2590,6 +2592,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				ProjectID:      agent.ProjectID,
 				GroupID:        groupID,
 				Wake:           req.Wake,
+				BeforeWake:     func() { s.extendWriteDeadlineForDMWake(ctx, w) },
 			})
 			if dmErr != nil {
 				WriteAgentDMError(w, dmErr)

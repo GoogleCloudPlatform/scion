@@ -143,7 +143,7 @@ test('navigation away during URL restoration aborts later agent opens', async ({
 
   // The terminal workspace should not be visible (we navigated away)
   const terminalWorkspaceVisible = await page.evaluate(() => {
-    const tw = document.querySelector('#terminal-workspace') as HTMLElement | null;
+    const tw = document.querySelector<HTMLElement>('#terminal-workspace');
     return tw ? !tw.hidden : false;
   });
   expect(terminalWorkspaceVisible).toBe(false);
@@ -189,7 +189,7 @@ test('navigate away after URL restoration preserves already-opened sessions', as
 
   // The terminal workspace should not be visible
   const terminalWorkspaceVisible = await page.evaluate(() => {
-    const tw = document.querySelector('#terminal-workspace') as HTMLElement | null;
+    const tw = document.querySelector<HTMLElement>('#terminal-workspace');
     return tw ? !tw.hidden : false;
   });
   expect(terminalWorkspaceVisible).toBe(false);
