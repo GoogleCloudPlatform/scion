@@ -180,7 +180,8 @@ hooks, then audit.
 - Routine decision records are no longer persisted in the database. GoogleCloudPlatform/scion#2986 removed the
   `decision_audits` table. The production emitter is inert (`server.go:2317`), and decision records
   reach the typed `pkg/hub/auditevent` sink only when the default-off experiment
-  `hub.authorization_decision_audit_v2` is admitted.
+  `hub.authorization_decision_audit_v2` is admitted, and then only for decisions inside the sink's
+  recorded domain.
 - Mutation audit (`store.MutationAuditRecord`) is persisted and can be written in the same
   transaction as the change it records.
 - E.1 reserves the verified-actor label keys `actor_agent_id`, `authorizing_user_id`,
@@ -894,6 +895,7 @@ renders `verified=true`, because the binding was checked at exchange, not per re
 - `decideAgentDelegation` runs inside `decide` and emits nothing itself. The single-exit `Decide`
   wrapper emits exactly one record per evaluated check, primary or secondary, allow or deny.
 - Every delegated decision sets `Decision.AlwaysAudit`, so a delegated allow is never sampled away.
+  Whether a record is retained still depends on the sink (§14.4).
 - Every delegated deny sets `Decision.DeniedBy = "agent_delegation"` (a new `DeniedBy` constant next
   to `DeniedByDelegationCeiling`, `authz.go:418`). The fine-grained G code goes in the G block as
   `agent_delegation_code` and in `Reason` for the record.
@@ -921,11 +923,18 @@ attributable credential lifetime.
 ### 14.4 Where decision records go
 
 Per-decision records for delegated requests, including delegated reads, follow the platform
-decision-audit setting (`hub.authorization_decision_audit_v2`), exactly as for every other caller.
-When that sink is not admitted, decision records are not retained. G does not add its own
-per-request database writes. G.2-a adds the G actor fields to the typed `auditevent` decision schema
-in coordination with the audit-update owner ([ptone/scion#2379](https://github.com/ptone/scion/issues/2379));
-this design does not change that schema.
+decision-audit sink exactly as for every other caller: its experiment flag
+(`hub.authorization_decision_audit_v2`) and its domain and validation exclusions. `AlwaysAudit`
+only exempts a decision from allow sampling; it does not bring a decision into the sink's recorded
+domain. Many delegated decisions, for example `agent.read` on an agent inside a project, therefore
+produce no decision record even when the sink is on. G does not add its own per-request database
+writes.
+
+G does not rely on decision records for attribution. The mutation records (§14.3), which are
+written unconditionally, are the attribution source. Adding G actor fields to the typed
+`auditevent` decision schema is a separate follow-up, subject to the audit owner's approval
+([ptone/scion#2379](https://github.com/ptone/scion/issues/2379)), and outside G.2-a. This design
+does not change that schema.
 
 ### 14.5 Messages
 
@@ -1040,7 +1049,8 @@ credentials, or re-run `decideAgentDelegation` when the ticket is redeemed.
    with its JWT, gets a 15-minute credential, and lists agents in P2. Allowed: Alice is admitted to
    P2 and holds `agent.list` and `agent.read` there. The mutation record of the exchange names
    agent A, Alice and the grant. When `hub.authorization_decision_audit_v2` is admitted (or under
-   the test sink), the decision record also shows actor `agent:A`, authorizing user Alice and the
+   the test sink) and the decision is inside the sink's recorded domain, the decision record also
+   shows actor `agent:A`, authorizing user Alice and the
    grant.
 2. **Read an agent in another project (G.2-a).** With a hub grant for `agent:read`, A reads agent B
    in P2. Allowed while Alice can read B. The environment in the response is redacted.
@@ -1134,9 +1144,11 @@ credentials, or re-run `decideAgentDelegation` when the ticket is redeemed.
     the agent credential's. Use after the agent credential's expiry denies.
 35. **Reserved platform identity as issuer** → issuance, exchange and use deny. A hit at exchange or
     use also revokes; a failed revocation write still denies.
-36. **One decision record per delegated check**, with `AlwaysAudit` set and the G block filled, and
-    with E's credential and principal fields unchanged. Under the decision-audit sink's test harness,
-    a delegated allow is recorded even with the allow-sampling rate at 0.
+36. **One decision record per delegated check**, asserted against the test sink only: with
+    `AlwaysAudit` set and the G block filled, and with E's credential and principal fields
+    unchanged, a delegated allow is emitted even with the allow-sampling rate at 0. In production,
+    retention also requires the sink to be admitted and the decision to be inside its recorded
+    domain (§14.4).
 37. **Dev session** → may revoke, list and read grants only as hub-admin control authority.
 38. **Maintenance mode on** → 503 on every admitted route.
 39. **Experiment off** → `scion_adt_` credentials refused, and issuance and exchange answer 404,
@@ -1219,8 +1231,9 @@ agent_delegated_credentials
   record, never overwriting E's fields.
 - **Decision record struct.** `store.DecisionAuditRecord` (`models.go:3759`) gets the same Go
   fields, and `BuildDecisionAuditRecord` (`audit_authz.go:78`) fills them from the decision. The
-  struct is in memory only while the decision-audit sink is inert; the typed `auditevent` schema
-  gains the matching fields in the G.2-a coordination task (§14.4).
+  struct is in memory only while the decision-audit sink is inert, and a record reaches the sink
+  only when the decision is inside the sink's recorded domain. The typed `auditevent` schema is
+  unchanged; G fields there are a separate follow-up (§14.4).
 - `e2a_no_g_column_test.go` is updated in the same change: the reserved Go names become real fields,
   and its E-writer tests keep asserting that E's paths leave them empty.
 - Migration: purely additive tables and nullable columns through `AutoMigrate`. No backfill. The
@@ -1362,9 +1375,8 @@ list operations.
 1. **G.2-a: vertical slice (one PR).** Schema and store (both dialects), issuance, exchange, the
    middleware arm, the classification and permissive-helper arms (§12), and a decision procedure
    that admits **one** route, the agent `GET` (`agent.read`), behind the experiment. It includes the
-   admission table with one entry, env redaction at every site and primary-only capabilities. It
-   also includes the coordination task with the audit-update owner to add G's actor fields to the
-   `auditevent` decision schema. **Stop for review.** Fan-out depends on this slice passing.
+   admission table with one entry, env redaction at every site and primary-only capabilities.
+   **Stop for review.** Fan-out depends on this slice passing.
 2. **G.2-b.** Revoke, list and read operations (§7), the caps, the credential purge job, and catalog,
    scanner and applicability completeness.
 3. **G.3-a.** The full decision procedure and admission for `project.read`, `agent.message` (once
@@ -1375,6 +1387,9 @@ list operations.
 5. **G.3-c.** SDK, CLI, revoke-all, operator docs, end-to-end scenarios.
 6. **G.3-L.** The delegated list slice (§11.8), starting with `agent.list` on the hub agent list as
    one slice, then the project agent list, skills and templates.
+
+Later work, outside these phases: G actor fields in the typed decision-audit schema: follow-up,
+subject to the audit owner's approval (§14.4).
 
 ## 20. Acceptance criteria
 
@@ -1390,8 +1405,8 @@ list operations.
 5. A store or audit failure rolls back issuance, exchange and revoke on both stores.
 6. Every issuance, exchange, revocation and delegated mutation has a mutation record carrying the
    actor agent, the authorizing user, the grant and the credential (unconditional). When
-   `hub.authorization_decision_audit_v2` is admitted, or under the test sink, decision records
-   agree with those mutation records on actor, authorizing user, grant, credential, boundary and
+   `hub.authorization_decision_audit_v2` is admitted, or under the test sink, and the decision is
+   inside the sink's recorded domain, decision records agree with those mutation records on actor, authorizing user, grant, credential, boundary and
    correlation ID.
 7. A delegated identity is never classified as an interactive, UAT or agent JWT credential, never
    counts as hub-attested ancestry, and is refused or ignored by every helper in §12.3.
@@ -1434,8 +1449,8 @@ list operations.
 
 ### 21.3 Adapted to merged code (2026-10-10)
 
-- Decision records follow the platform decision-audit path (§14.4). Mutation audit is the durable
-  record. A later option, not in v1, would let delegation be enabled only while the decision-audit
+- Decision records follow the platform decision-audit path, including its flag and its domain and
+  validation exclusions (§14.4). Mutation audit is the attribution source. A later option, not in v1, would let delegation be enabled only while the decision-audit
   sink is admitted and healthy.
 - The feature gate is a registered experiment, not a hub setting (§10).
 - The credential kind is `delegated_agent`, as `user-access-tokens.md` already names it, and joins
