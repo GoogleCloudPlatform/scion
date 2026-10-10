@@ -186,9 +186,9 @@ func TestIsFederatedCaller(t *testing.T) {
 		{name: "no identity", want: false},
 		{name: "session user", identity: member, want: false},
 		{name: "dev user", identity: NewDevUser(DevUserConfig{Username: "dev", Email: "dev@localhost"}), want: false},
-		{name: "user access token", identity: NewScopedUserIdentity(member, "", []string{"hub_config:read"}), want: false},
+		{name: "user access credential", identity: NewScopedUserIdentity(member, "", []string{"hub_config:read"}), want: false},
 		{name: "federated user", identity: fed, want: true},
-		{name: "user access token wrapping a federated user", identity: NewScopedUserIdentity(fed, "", nil), want: true},
+		{name: "user access credential wrapping a federated user", identity: NewScopedUserIdentity(fed, "", nil), want: true},
 		{name: "federation credential", identity: member, credential: CredentialKindFederation, want: true},
 	}
 	for _, tc := range cases {
@@ -259,7 +259,7 @@ func TestUserTemplateWrites_SessionAndTokenUnchanged(t *testing.T) {
 	want = []int{http.StatusCreated, http.StatusOK, http.StatusForbidden, http.StatusForbidden, http.StatusNoContent}
 	for i, pr := range writes {
 		rec := f.asBearer(pr, f.token)
-		assert.Equal(t, want[i], rec.Code, "token %s %s: %s", pr.method, pr.path, rec.Body.String())
+		assert.Equal(t, want[i], rec.Code, "user access credential %s %s: %s", pr.method, pr.path, rec.Body.String())
 	}
 }
 
@@ -318,11 +318,11 @@ func TestUserEnvSecretWrites_FederatedUserRefused(t *testing.T) {
 // secret writes.
 func TestUserEnvSecretWrites_SessionAndTokenUnchanged(t *testing.T) {
 	want := []int{http.StatusOK, http.StatusOK, http.StatusOK, http.StatusOK, http.StatusNoContent, http.StatusNoContent}
-	for _, caller := range []string{"session", "token"} {
+	for _, caller := range []string{"session", "user access credential"} {
 		t.Run(caller, func(t *testing.T) {
 			f := newProfileWriteFixture(t)
 			key := f.session
-			if caller == "token" {
+			if caller == "user access credential" {
 				key = f.token
 			}
 			seedUserEnvAndSecret(t, f, f.alice.ID, "PW_ENV", "PW_SECRET")
@@ -376,7 +376,7 @@ func TestChatProfileWrites_FederatedUserRefused(t *testing.T) {
 func TestChatProfileWrites_SessionAndTokenUnchanged(t *testing.T) {
 	f := newProfileWriteFixture(t)
 	want := []int{http.StatusOK, http.StatusOK, http.StatusCreated}
-	for _, caller := range []struct{ name, key string }{{"session", f.session}, {"token", f.token}} {
+	for _, caller := range []struct{ name, key string }{{"session", f.session}, {"user access credential", f.token}} {
 		for i, pr := range chatProfileWrites(t) {
 			rec := f.asBearer(pr, caller.key)
 			assert.Equal(t, want[i], rec.Code, "%s %s %s: %s", caller.name, pr.method, pr.path, rec.Body.String())
@@ -488,7 +488,7 @@ func TestGenericUserTemplateWrites_SessionAndTokenUnchanged(t *testing.T) {
 		want []int
 	}{
 		{"session", f.session, []int{http.StatusCreated, http.StatusOK, http.StatusNoContent}},
-		{"token", f.token, []int{http.StatusForbidden, http.StatusForbidden, http.StatusNoContent}},
+		{"user access credential", f.token, []int{http.StatusForbidden, http.StatusForbidden, http.StatusNoContent}},
 	}
 	for _, tc := range cases {
 		tmpl := createUserTemplate(t, f.store, f.alice.ID, tc.name+"-generic")
@@ -567,11 +567,19 @@ func TestUserHarnessConfigWrites_FederatedUserRefused(t *testing.T) {
 	// The create reaches requireProfileWriter. The writes on the config
 	// are already refused to a federated caller by the route gate
 	// (authorizeHarnessConfigRoute) in front of it: 403, or the read
-	// gate's 404 for DELETE and reimport.
+	// gate's 404 for DELETE.
 	requireProfileWriteRefused(t, f.asIdentity(writes[0], f.fed), writes[0].method+" "+writes[0].path)
 	for _, pr := range writes[1:] {
 		rec := f.asIdentity(pr, f.fed)
-		assert.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, rec.Code, "%s %s: %s", pr.method, pr.path, rec.Body.String())
+		what := pr.method + " " + pr.path
+		if pr.method == http.MethodDelete {
+			assert.Equal(t, http.StatusNotFound, rec.Code, "%s: %s", what, rec.Body.String())
+			continue
+		}
+		require.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", what, rec.Body.String())
+		var resp ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+		assert.Equal(t, "harness_config", resp.Error.Details["resource_type"], what)
 	}
 
 	got, err := f.store.GetHarnessConfig(ctx, owned.ID)
@@ -671,4 +679,65 @@ func TestIsFederatedCaller_FederatedAgentAndService(t *testing.T) {
 		ctx := contextWithCredentialContext(contextWithIdentity(context.Background(), identity), credentialContextForIdentity(identity))
 		assert.True(t, isFederatedCaller(ctx), identity.Type())
 	}
+}
+
+// TestCloneIntoUserScope_FederatedCallerRefused pins that a federated
+// caller that may read a clone source (a project-scope template or harness
+// config in a project where it holds a member grant) gets the uniform 403
+// when it clones the source into user scope, and that no row is created.
+// A source it may not read still answers the read gate's 404 first.
+func TestCloneIntoUserScope_FederatedCallerRefused(t *testing.T) {
+	f := newFedFixture(t, "pwclone")
+	ctx := context.Background()
+	f.srv.SetStorage(newMockStorage("test-bucket"))
+	fed := fedIdentity("pw-clone")
+	member, err := f.store.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	f.fed.addBinding(&store.RoleBinding{
+		RoleDefinitionID: member.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: fed.ID(),
+		ScopeType: store.RoleScopeProject, ScopeID: f.projectID, CreatedBy: "test",
+	})
+
+	otherProject := tid("pw-clone-other-project")
+	createRS1Project(t, f.store, otherProject, f.ownerID)
+
+	readable := &store.Template{ID: tid("pw-clone-tmpl"), Name: "clone-source", Slug: "clone-source", Harness: "claude", Scope: store.TemplateScopeProject, ScopeID: f.projectID, OwnerID: f.ownerID, CreatedBy: f.ownerID, Status: store.TemplateStatusActive}
+	require.NoError(t, f.store.CreateTemplate(ctx, readable))
+	unreadable := &store.Template{ID: tid("pw-clone-tmpl-other"), Name: "clone-source-other", Slug: "clone-source-other", Harness: "claude", Scope: store.TemplateScopeProject, ScopeID: otherProject, OwnerID: f.ownerID, CreatedBy: f.ownerID, Status: store.TemplateStatusActive}
+	require.NoError(t, f.store.CreateTemplate(ctx, unreadable))
+	readableHC := &store.HarnessConfig{ID: tid("pw-clone-hc"), Name: "clone-hc", Slug: "clone-hc", Harness: "claude", Scope: store.HarnessConfigScopeProject, ScopeID: f.projectID, OwnerID: f.ownerID, CreatedBy: f.ownerID, Status: store.HarnessConfigStatusActive}
+	require.NoError(t, f.store.CreateHarnessConfig(ctx, readableHC))
+	unreadableHC := &store.HarnessConfig{ID: tid("pw-clone-hc-other"), Name: "clone-hc-other", Slug: "clone-hc-other", Harness: "claude", Scope: store.HarnessConfigScopeProject, ScopeID: otherProject, OwnerID: f.ownerID, CreatedBy: f.ownerID, Status: store.HarnessConfigStatusActive}
+	require.NoError(t, f.store.CreateHarnessConfig(ctx, unreadableHC))
+
+	serve := func(pr profileRequest) *httptest.ResponseRecorder {
+		req := pr.build()
+		rctx := contextWithIdentity(req.Context(), fed)
+		rctx = contextWithCredentialContext(rctx, credentialContextForIdentity(fed))
+		rec := httptest.NewRecorder()
+		f.srv.mux.ServeHTTP(rec, req.WithContext(rctx))
+		return rec
+	}
+
+	// The federated caller may read both readable sources.
+	rec := serve(jsonProfileRequest(t, http.MethodGet, "/api/v1/templates/"+readable.ID, nil))
+	require.Equal(t, http.StatusOK, rec.Code, "template read: %s", rec.Body.String())
+	rec = serve(jsonProfileRequest(t, http.MethodGet, "/api/v1/harness-configs/"+readableHC.ID, nil))
+	require.Equal(t, http.StatusOK, rec.Code, "harness config read: %s", rec.Body.String())
+
+	toUser := CloneTemplateRequest{Name: "fed-clone", Scope: "user"}
+	requireProfileWriteRefused(t, serve(jsonProfileRequest(t, http.MethodPost, "/api/v1/templates/"+readable.ID+"/clone", toUser)), "template clone into user scope")
+	requireProfileWriteRefused(t, serve(jsonProfileRequest(t, http.MethodPost, "/api/v1/harness-configs/"+readableHC.ID+"/clone", toUser)), "harness config clone into user scope")
+
+	rec = serve(jsonProfileRequest(t, http.MethodPost, "/api/v1/templates/"+unreadable.ID+"/clone", toUser))
+	assert.Equal(t, http.StatusNotFound, rec.Code, "unreadable template source: %s", rec.Body.String())
+	rec = serve(jsonProfileRequest(t, http.MethodPost, "/api/v1/harness-configs/"+unreadableHC.ID+"/clone", toUser))
+	assert.Equal(t, http.StatusNotFound, rec.Code, "unreadable harness config source: %s", rec.Body.String())
+
+	templates, err := f.store.ListTemplates(ctx, store.TemplateFilter{Scope: store.TemplateScopeUser, ScopeID: fed.ID()}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, templates.Items, "a refused clone creates no template")
+	configs, err := f.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{Scope: store.HarnessConfigScopeUser, ScopeID: fed.ID()}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, configs.Items, "a refused clone creates no harness config")
 }

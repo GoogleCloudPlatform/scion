@@ -162,7 +162,7 @@ var materialOperations = []OperationSpec{
 	{
 		ID:          "secret.write",
 		Domain:      "secret",
-		Description: "Create, update or delete secrets. At user scope, the default, the secrets are the caller's own and a federated user is refused (requireProfileWriter)",
+		Description: "Create, update or delete secrets. At user scope, the default, the secrets are the caller's own and a federated caller is refused (requireProfileWriter)",
 		EntryPoints: []EntryPoint{
 			// handleSecrets (handlers_env_secrets.go) is GET-only (list);
 			// create-or-update and delete are both on the by-key route.

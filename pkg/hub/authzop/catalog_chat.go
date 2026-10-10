@@ -41,7 +41,7 @@ var chatOperations = []OperationSpec{
 			// handleChatAttachments (upload) is POST-only; only the
 			// by-ID download route (handleChatAttachmentByID) is GET. An
 			// upload without a project is a profile write, refused to a
-			// federated user (requireProfileWriter).
+			// federated caller (requireProfileWriter).
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments/{id}", Method: "GET"},
 		},
