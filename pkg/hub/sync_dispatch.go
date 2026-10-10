@@ -157,7 +157,8 @@ func stopWriteBudget() time.Duration {
 }
 
 // stopAllAgentOpTimeout bounds each agent's broker work in a stop-all: the
-// workspace sync-back and the stop dispatch together. All agents share one
+// workspace sync-back, the ephemeral workspace check and the stop dispatch
+// together. All agents share one
 // deadline, this long after the stops begin. A variable so tests can
 // shorten it.
 var stopAllAgentOpTimeout = 60 * time.Second

@@ -4282,7 +4282,11 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 		stopRunID := agent.RunID
 		if agent.RuntimeBrokerID != "" {
 			s.syncWorkspaceOnStop(ctx, agent)
-			if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
+			// As for stop and suspend, the dispatch is bounded by
+			// syncDispatch (ptone/scion#4247).
+			if err := syncDispatch(ctx, func(dctx context.Context) error {
+				return dispatcher.DispatchAgentStop(dctx, agent)
+			}); err != nil {
 				s.logStopRunMismatch(agent, "auto-suspend", err)
 				slog.Error("Scheduler: auto-suspend dispatch failed",
 					"agent_id", agent.ID, "agent_name", agent.Name, "error", err)

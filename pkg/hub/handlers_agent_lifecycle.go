@@ -1290,6 +1290,10 @@ type stopAllResult struct {
 	Name   string `json:"name"`
 	Status string `json:"status"`
 	Error  string `json:"error,omitempty"`
+	// Warnings are the warnings a single stop of this agent would answer
+	// with, such as work an ephemeral workspace discards. Omitted when
+	// empty.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // recordRestartStopped records a restart whose stop leg succeeded but whose
@@ -1589,13 +1593,27 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 
 			// Dispatch stop to broker
 			var dispatchErr error
+			var warnings []string
 			stopRunID := agent.RunID
 			if dispatcher != nil && agent.RuntimeBrokerID != "" {
 				opCtx, cancel := context.WithDeadline(ctx, opDeadline)
 				defer cancel()
+				// Each agent collects its own warnings, reported on its
+				// result as a single stop reports them on its response.
+				opCtx, agentWarns := withDispatchWarnings(opCtx)
 				s.syncWorkspaceOnStop(opCtx, agent)
+				// As for a single stop: warn about, and record, work in an
+				// ephemeral workspace that the stop discards
+				// (ptone/scion#3819, ptone/scion#4246). The check runs
+				// within this agent's broker-work deadline.
+				s.checkEphemeralWorkspaceBeforeStop(opCtx, dispatcher, agent, true)
 				dispatchErr = dispatcher.DispatchAgentStop(opCtx, agent)
-				if dispatchErr == nil {
+				if dispatchErr != nil {
+					// The agent may still be running: what the check
+					// found is not the state of a stopped workspace.
+					s.clearWorkspaceAtStop(ctx, agent)
+				} else {
+					warnings = agentWarns.Warnings()
 					// Released last, after this agent's stopped status
 					// write and quota release (see suspendAgent).
 					defer s.releaseSupersededClaim(ctx, agent.ID, supersedes, intentAt)
@@ -1624,6 +1642,7 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 					res.Status = stopAllStatusRunChanged
 				} else {
 					res.Status = "stopped"
+					res.Warnings = warnings
 					// Clear a failed delete marker, as a single stop does,
 					// and publish the row as stored.
 					// A failed re-read is logged inside; the stop's result stands.
