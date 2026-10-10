@@ -90,6 +90,9 @@ const (
 	ErrCodeDeliveryFailed  = "delivery_failed"
 	ErrCodeAgentNotRunning = "agent_not_running"
 	ErrCodeBrokerTimeout   = "broker_timeout"
+	// ErrCodeAgentSessionUnavailable is returned (503) when the agent is
+	// running but the conduit session a stream needs is not connected.
+	ErrCodeAgentSessionUnavailable = "agent_session_unavailable"
 	// ErrCodeSendInProgress is returned (409) for a chat send whose
 	// idempotency key belongs to a send that is still running.
 	ErrCodeSendInProgress = "send_in_progress"
