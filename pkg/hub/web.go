@@ -41,6 +41,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/GoogleCloudPlatform/scion/web"
 	"github.com/google/uuid"
@@ -81,6 +82,10 @@ type CompositeHealthResponse struct {
 
 // webSessionName is the cookie name for web sessions.
 const webSessionName = "scion_sess"
+
+// webLogSubsystem is the log component name for the web server. Its level
+// (see pkg/util/logging/loglevel) controls per-request logging.
+const webLogSubsystem = "hub.web"
 
 // Session key constants for storing values in the gorilla session map.
 const (
@@ -162,16 +167,17 @@ type WebServerConfig struct {
 	// AssetsDir overrides embedded assets with a filesystem directory.
 	// When set, static files are served from this path instead of the embedded FS.
 	AssetsDir string
-	// Debug enables verbose debug logging.
-	Debug bool
 	// SessionSecret is the HMAC key for signing session cookies.
 	SessionSecret string
 	// BaseURL is the public URL for OAuth redirects (e.g., "https://scion.example.com").
 	BaseURL string
 	// DevAuthToken is the dev token for auto-login (empty = disabled).
 	DevAuthToken string
-	// AuthMode is the exclusive human auth mode: "oauth" (default), "proxy", "dev".
-	// In proxy mode, OAuth providers are not shown and logout behavior changes.
+	// AuthMode is the configured human auth mode (server.auth.mode). "proxy"
+	// is the only value the code checks: in proxy mode, OAuth providers are
+	// not shown and logout behavior changes. Any other value, including ""
+	// (the default), "oauth" and "dev", leaves the hub handling
+	// authentication itself. Dev auth is enabled separately (DevAuthToken).
 	AuthMode string
 	// AdminMode restricts access to admin users only (maintenance mode).
 	AdminMode bool
@@ -181,6 +187,10 @@ type WebServerConfig struct {
 	// for integration testing. Disabled by default; must never be enabled
 	// in production.
 	EnableTestLogin bool
+	// EnableDebugEndpoints serves the GET /auth/debug diagnostic endpoint.
+	// Disabled by default and independent of the log level. Intended for
+	// local development only; the server command refuses it in hosted mode.
+	EnableDebugEndpoints bool
 	// ProxyAuthenticator verifies proxy-supplied assertions (e.g., IAP JWT).
 	// Required when AuthMode == "proxy".
 	ProxyAuthenticator ProxyAuthenticator
@@ -571,7 +581,7 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 		config:    cfg,
 		mux:       http.NewServeMux(),
 		startTime: time.Now(),
-		log:       logging.Subsystem("hub.web"),
+		log:       logging.Subsystem(webLogSubsystem),
 	}
 
 	// Initialize session store
@@ -1556,13 +1566,13 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		logPerfTraceLine(perfTraceLogger(), r, trace.Snapshot, slog.String("sse_stage", "connect"))
 	}
 
-	// DM messages are also published on agent and project subjects that
-	// any reader of the agent or project may subscribe to. Deliver them only
-	// to DM participants, matching the REST DM reads (see sseEventVisible).
-	sessionUserID := ""
-	if su := getWebSessionUser(r.Context()); su != nil {
-		sessionUserID = su.UserID
-	}
+	// User messages are also published on agent and project subjects that
+	// any reader of the agent or project may subscribe to. DM messages go
+	// only to DM participants, matching the REST DM reads; other agent
+	// messages follow the agent message history rule: callers with attach
+	// on the agent see all of them, other readers only the ones they sent
+	// or received (see sseMessageViewer).
+	viewer := ws.newSSEMessageViewer(r)
 
 	eventID := 0
 	heartbeat := time.NewTicker(30 * time.Second)
@@ -1584,7 +1594,7 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 				// Publisher closed
 				return
 			}
-			if !sseEventVisible(evt, sessionUserID) {
+			if !viewer.visible(evt) {
 				continue
 			}
 			eventID++
@@ -1628,38 +1638,155 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 // or project can subscribe to those subjects, so DM messages on them (a
 // "dm:" thread id) are delivered only to users named in the DM key — the
 // same rule the REST DM reads apply (isDMParticipant). Participants also
-// receive every DM message on user.<id>.chat.dm. All other events, including
-// non-DM agent messages, pass through unchanged.
+// receive every DM message on user.<id>.chat.dm. All other events pass
+// through here. It is a test helper wrapping sseDMRuleAllows; the events
+// stream applies that rule through sseMessageViewer.visible, which then
+// also applies the agent message history rule.
 func sseEventVisible(evt Event, userID string) bool {
 	if !sseSubjectMayCarryDM(evt.Subject) {
 		return true
 	}
-	var payload struct {
-		ThreadID string `json:"threadId"`
-	}
-	if err := json.Unmarshal(evt.Data, &payload); err != nil {
-		// Fail closed: a message payload that cannot be read cannot be
-		// shown not to be a DM.
-		return false
-	}
-	if !strings.HasPrefix(payload.ThreadID, "dm:") {
-		return true
-	}
-	return userID != "" && isDMParticipant(payload.ThreadID, userID)
+	msg, ok := decodeSSEUserMessage(evt.Data)
+	return ok && sseDMRuleAllows(msg, userID)
 }
 
 // sseSubjectMayCarryDM matches the subjects onto which PublishUserMessage
 // publishes DM messages that are not already scoped to a participant:
-// agent.<id>.message and project.<id>.user.message.
+// agent.<id>.message and project.<id>.user.message. It is a test helper
+// wrapping sseUserMessageSubject, which sseMessageViewer.visible uses.
 func sseSubjectMayCarryDM(subject string) bool {
+	_, _, ok := sseUserMessageSubject(subject)
+	return ok
+}
+
+// sseUserMessageSubject matches agent.<id>.message and
+// project.<id>.user.message, the subjects on which PublishUserMessage
+// publishes user messages to every reader of the agent or project.
+// agentSubject reports the agent form, and subjectAgentID is its id token
+// (which may be empty); for the project form both are zero.
+func sseUserMessageSubject(subject string) (subjectAgentID string, agentSubject, ok bool) {
 	tokens := strings.Split(subject, ".")
 	switch {
 	case len(tokens) == 3 && tokens[0] == "agent" && tokens[2] == "message":
-		return true
+		return tokens[1], true, true
 	case len(tokens) == 4 && tokens[0] == "project" && tokens[2] == "user" && tokens[3] == "message":
+		return "", false, true
+	}
+	return "", false, false
+}
+
+// sseUserMessage holds the UserMessageEvent fields the visibility rules
+// read.
+type sseUserMessage struct {
+	ThreadID    string `json:"threadId"`
+	AgentID     string `json:"agentId"`
+	SenderID    string `json:"senderId"`
+	RecipientID string `json:"recipientId"`
+}
+
+// decodeSSEUserMessage decodes a user message payload. ok is false when it
+// cannot be read; callers fail closed, since such a message cannot be
+// shown not to be a DM.
+func decodeSSEUserMessage(data []byte) (msg sseUserMessage, ok bool) {
+	return msg, json.Unmarshal(data, &msg) == nil
+}
+
+// sseDMRuleAllows applies the DM rule: a "dm:" thread goes only to users
+// named in the DM key; any other thread passes.
+func sseDMRuleAllows(msg sseUserMessage, userID string) bool {
+	if !strings.HasPrefix(msg.ThreadID, "dm:") {
 		return true
 	}
-	return false
+	return userID != "" && isDMParticipant(msg.ThreadID, userID)
+}
+
+// sseMessageViewer applies the agent message history rule
+// (handleAgentMessages, handleAgentMessagesStream) to the user message
+// events PublishUserMessage writes to agent.<id>.message and
+// project.<id>.user.message: a caller with attach on the agent sees every
+// message of that agent; any other caller sees only messages it sent or
+// received. A row with no agent (human to human) is shown to its
+// participants only. The rule keys on sender and recipient, not on the
+// thread id, so legacy agent:<slug> threads and DMs relayed from other
+// channels are covered the same way. DM threads ("dm:") are first scoped
+// to participants by the DM rule (sseDMRuleAllows, see sseEventVisible).
+//
+// Attach is decided at most once per agent per connection, when the first
+// message event for that agent arrives, and then cached. Like the subject
+// authorization at connect time, a later change to the caller's attach
+// access applies from the next connection.
+type sseMessageViewer struct {
+	userID string
+	// decideAttach reports whether the caller holds attach on the agent and
+	// whether that answer may be cached. Nil means no caller identity: no
+	// attach anywhere.
+	decideAttach func(agentID string) (allowed, cacheable bool)
+	attach       map[string]bool
+}
+
+func (ws *WebServer) newSSEMessageViewer(r *http.Request) *sseMessageViewer {
+	v := &sseMessageViewer{attach: map[string]bool{}}
+	su := getWebSessionUser(r.Context())
+	if su == nil {
+		return v
+	}
+	v.userID = su.UserID
+	if ws.authzService == nil || ws.store == nil {
+		return v
+	}
+	ctx := r.Context()
+	identity := NewAuthenticatedUser(su.UserID, su.Email, su.Name, su.Role, "web")
+	v.decideAttach = func(agentID string) (bool, bool) {
+		agent, err := ws.store.GetAgent(ctx, agentID)
+		if err != nil || agent == nil || agent.ID != agentID {
+			// Fail closed. A missing agent stays missing; anything else
+			// may be transient, so it is asked again next time.
+			return false, errors.Is(err, store.ErrNotFound)
+		}
+		return agentFullHistoryDecide(ctx, ws.authzService, identity, agent).Allowed, true
+	}
+	return v
+}
+
+// visible reports whether evt may be written to the caller's stream. On
+// the user message subjects it matches the subject and decodes the payload
+// once, then applies the DM rule and the attach-or-participant rule, in
+// that order. Other events pass through.
+func (v *sseMessageViewer) visible(evt Event) bool {
+	subjectAgentID, agentSubject, ok := sseUserMessageSubject(evt.Subject)
+	if !ok {
+		return true
+	}
+	msg, ok := decodeSSEUserMessage(evt.Data)
+	if !ok || !sseDMRuleAllows(msg, v.userID) {
+		return false
+	}
+	if v.userID != "" && (msg.SenderID == v.userID || msg.RecipientID == v.userID) {
+		return true
+	}
+	// The subject names the agent the caller was authorized for; on the
+	// project subject only the payload names it. An agent subject with an
+	// empty id token is not resolved from the payload and gets no attach
+	// access; a sender or recipient still sees it through the check above.
+	agentID := msg.AgentID
+	if agentSubject {
+		agentID = subjectAgentID
+	}
+	return agentID != "" && v.hasAttach(agentID)
+}
+
+func (v *sseMessageViewer) hasAttach(agentID string) bool {
+	if allowed, ok := v.attach[agentID]; ok {
+		return allowed
+	}
+	if v.decideAttach == nil {
+		return false
+	}
+	allowed, cacheable := v.decideAttach(agentID)
+	if cacheable {
+		v.attach[agentID] = allowed
+	}
+	return allowed
 }
 
 // validateSSESubjects validates the subject patterns for SSE subscriptions.
@@ -3097,10 +3224,11 @@ func (ws *WebServer) handleAuthProviders(w http.ResponseWriter, r *http.Request)
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// handleAuthDebug returns session debug info (debug mode only).
+// handleAuthDebug serves the diagnostic endpoint. It is served only when
+// EnableDebugEndpoints is set; otherwise it answers 404.
 // Route: GET /auth/debug
 func (ws *WebServer) handleAuthDebug(w http.ResponseWriter, r *http.Request) {
-	if !ws.config.Debug {
+	if !ws.config.EnableDebugEndpoints {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -3183,7 +3311,9 @@ func (ws *WebServer) loggingMiddleware(next http.Handler) http.Handler {
 
 		aborted := logging.ServeCatchingAbort(next, wrapped, r)
 
-		if ws.config.Debug || wrapped.statusCode >= 400 || aborted {
+		// Every request is logged when the web component is at debug
+		// level; errors and aborted responses are always logged.
+		if wrapped.statusCode >= 400 || aborted || loglevel.DebugEnabled(webLogSubsystem) {
 			attrs := []slog.Attr{
 				slog.String("method", r.Method),
 				slog.String("path", logging.RequestPath(r)),

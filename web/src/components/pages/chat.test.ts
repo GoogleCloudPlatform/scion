@@ -3262,3 +3262,45 @@ describe('chat page — late conversation switches while composing', () => {
     expect(window.location.pathname).toBe('/chat/alpha/topic-2');
   });
 });
+
+describe('chat page — thread default agent resolution', () => {
+  const AGENT_ID = '3f2a9c1e-7b4d-4e8a-9c2f-1a2b3c4d5e6f';
+
+  function pageWithAgents(): any {
+    const el = createPage();
+    el.v2AgentMembers = [
+      { id: AGENT_ID, kind: 'agent', displayName: 'Code Writer', slug: 'coder' },
+      { id: 'agent-2', kind: 'agent', displayName: 'Review Bot', slug: 'reviewer' },
+      { id: 'agent-3', kind: 'agent', displayName: 'coder-ish' },
+    ];
+    return el;
+  }
+
+  it('names the default agent for the header tooltip by ID, slug, or name', () => {
+    const el = pageWithAgents();
+    expect(el.resolveDefaultAgentName(AGENT_ID)).toBe('Code Writer');
+    expect(el.resolveDefaultAgentName('reviewer')).toBe('Review Bot');
+    expect(el.resolveDefaultAgentName('coder-ish')).toBe('coder-ish');
+    expect(el.resolveDefaultAgentName('gone')).toBe('gone');
+    expect(el.resolveDefaultAgentName('')).toBe('');
+  });
+
+  it('resolves the members-panel pin slug by ID, slug, or name', () => {
+    const el = pageWithAgents();
+    expect(el.resolveDefaultAgentSlug(AGENT_ID)).toBe('coder');
+    expect(el.resolveDefaultAgentSlug('reviewer')).toBe('reviewer');
+    expect(el.resolveDefaultAgentSlug('Review Bot')).toBe('reviewer');
+    expect(el.resolveDefaultAgentSlug('gone')).toBe('gone');
+    expect(el.resolveDefaultAgentSlug('')).toBe('');
+  });
+
+  it('prefers a slug match over another agent whose name equals the slug', () => {
+    const el = createPage();
+    el.v2AgentMembers = [
+      { id: 'agent-a', kind: 'agent', displayName: 'helper', slug: 'a-slug' },
+      { id: 'agent-b', kind: 'agent', displayName: 'Helper Prime', slug: 'helper' },
+    ];
+    expect(el.resolveDefaultAgentId('helper')).toBe('agent-b');
+    expect(el.resolveDefaultAgentName('helper')).toBe('Helper Prime');
+  });
+});

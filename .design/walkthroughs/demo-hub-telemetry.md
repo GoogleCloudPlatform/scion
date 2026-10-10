@@ -421,7 +421,7 @@ gcloud compute ssh scion-demo --zone us-central1-a --command '
 | `telemetry.cloud.provider` | `gcp` | Use GCP-native SDKs (no endpoint needed) |
 | `telemetry.cloud.batch.max_size` | `256` | Max spans per batch |
 | `telemetry.cloud.batch.timeout` | `5s` | Batch flush interval |
-| `telemetry.local.enabled` | `true` | Enable local debug telemetry |
+| `telemetry.local.enabled` | `true` | Enable local debug telemetry (accepted but ignored, ptone/scion#4103) |
 | `telemetry.filter.events.exclude` | `[agent.user.prompt]` | Suppress user prompt spans |
 | `telemetry.filter.attributes.redact` | `[prompt, user.email, ...]` | Redact sensitive attributes |
 | `telemetry.filter.attributes.hash` | `[session_id]` | Hash for correlation without exposure |

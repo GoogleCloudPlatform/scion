@@ -112,3 +112,19 @@ type ScopeExplainer interface {
 	// a non-empty answer never grants anything.
 	MissingScope(ctx context.Context, permission string) string
 }
+
+// ReviewGrantAuthority is an optional extension of Host (design D24,
+// ptone/scion#4014). For an artifact owned by an agent, the agent cannot
+// administer it (sharing is user-only), so without this extension no one
+// but an admin grantee can give a human review access. With it, the
+// service lets two more users give a user a write grant, and nothing else:
+// the owning agent's delegating user and an admin of the artifact's home
+// project. A host without it allows neither (fail closed).
+type ReviewGrantAuthority interface {
+	// MayGrantReview reports whether the caller of ctx, a user, may give a
+	// user a write grant on an artifact owned by agent ownerAgentID and
+	// homed in project homeScope: the caller is the user at the root of the
+	// agent's live, recorded delegation chain, or holds project
+	// administration in homeScope. Any lookup failure answers false.
+	MayGrantReview(ctx context.Context, ownerAgentID, homeScope string) bool
+}

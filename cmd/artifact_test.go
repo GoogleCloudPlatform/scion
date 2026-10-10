@@ -191,7 +191,7 @@ func TestAgentModeArtifactVerbs(t *testing.T) {
 	real := resolveCommandPath(rootCmd, "artifact")
 	require.NotNil(t, real)
 	root.AddCommand(cloneCommandShape(real))
-	applyModeRestrictions(root)
+	applyModeRestrictions(root, resolveMode())
 	names := collectCommandNames(root)
 	assert.Equal(t, []string{"artifact", "artifact.get", "artifact.publish", "artifact.versions"}, names)
 	assert.False(t, strings.Contains(strings.Join(names, ","), "share"))

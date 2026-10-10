@@ -144,6 +144,59 @@ describe('scion-page-health-dashboard cards', () => {
     ).toBeNull();
   });
 
+  it('hides the Hub instances table when hub_instances is absent (older hub replica)', async () => {
+    await rendered();
+    expect(el.shadowRoot?.querySelector('scion-health-hub-instances')).toBeNull();
+  });
+
+  it('renders the Hub instances table when hub_instances is present', async () => {
+    el.remove();
+    extra = {
+      generated_at: '2026-10-09T12:00:00Z',
+      hub_instances: {
+        items: [
+          {
+            id: 'hub-a-1',
+            label: 'hub-a',
+            version: 'v1',
+            state: 'live',
+            serving: true,
+            started_at: '2026-10-09T10:00:00Z',
+            last_seen: '2026-10-09T11:59:50Z',
+            stopped_at: null,
+            status: 'healthy',
+            checks: { database: 'healthy' },
+          },
+        ],
+        live: 1,
+        total: 1,
+        truncated: false,
+      },
+    };
+    el = new ScionPageHealthDashboard();
+    document.body.appendChild(el);
+    await rendered();
+    const table = el.shadowRoot!.querySelector('scion-health-hub-instances')!;
+    expect(table).not.toBeNull();
+    await (table as LitLike).updateComplete;
+    const text = (table.shadowRoot?.textContent ?? '').replace(/\s+/g, ' ');
+    expect(text).toContain('hub-a');
+    expect(text).toContain('(this instance)');
+    expect(text).toContain('2h 0m');
+  });
+
+  it('shows Hub instance data not available when hub_instances is null', async () => {
+    el.remove();
+    extra = { hub_instances: null };
+    el = new ScionPageHealthDashboard();
+    document.body.appendChild(el);
+    await rendered();
+    const table = el.shadowRoot!.querySelector('scion-health-hub-instances')!;
+    expect(table).not.toBeNull();
+    await (table as LitLike).updateComplete;
+    expect(table.shadowRoot?.textContent).toContain('Hub instance data not available');
+  });
+
   it('never reads or writes the server config', async () => {
     await rendered();
     // One manual refresh cycle, as the Refresh button and the poll timer run it.
@@ -676,3 +729,49 @@ describe('scion-page-health-dashboard layout (ptone/scion#3595)', () => {
 });
 
 type LitLike = Element & { updateComplete: Promise<unknown> };
+
+describe('scion-page-health-dashboard monitoring dashboard link (ptone/scion#3597)', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  function link(page: ScionPageHealthDashboard): HTMLAnchorElement | null {
+    return page.shadowRoot!.querySelector('[data-role="monitoring-dashboard"]');
+  }
+
+  it('shows no link when links is absent', async () => {
+    const page = await mountPage(summaryBody());
+    expect(link(page)).toBeNull();
+    expect(page.shadowRoot!.textContent).not.toContain('Open monitoring dashboard');
+  });
+
+  it('shows no link when links has no monitoring_dashboard', async () => {
+    const page = await mountPage(summaryBody({ links: {} }));
+    expect(link(page)).toBeNull();
+  });
+
+  it('opens a configured URL in a new tab with rel noopener noreferrer', async () => {
+    const url = 'https://console.cloud.google.com/monitoring/dashboards/builder/hub?project=p';
+    const page = await mountPage(summaryBody({ links: { monitoring_dashboard: url } }));
+    const a = link(page);
+    expect(a).not.toBeNull();
+    expect(a!.getAttribute('href')).toBe(url);
+    expect(a!.getAttribute('target')).toBe('_blank');
+    expect(a!.getAttribute('rel')?.split(/\s+/)).toEqual(
+      expect.arrayContaining(['noopener', 'noreferrer'])
+    );
+    expect(a!.textContent?.trim()).toBe('Open monitoring dashboard');
+    expect(a!.querySelector('sl-icon')?.getAttribute('name')).toBe('box-arrow-up-right');
+    expect(a!.closest('.header')).not.toBeNull();
+  });
+
+  it.each(['javascript:alert(1)', 'data:text/html,hi', '/relative', 'ftp://example.com/x'])(
+    'does not render a non-http(s) value %j',
+    async (value) => {
+      const page = await mountPage(summaryBody({ links: { monitoring_dashboard: value } }));
+      expect(link(page)).toBeNull();
+      expect(page.shadowRoot!.querySelector('a[href^="javascript"]')).toBeNull();
+    }
+  );
+});

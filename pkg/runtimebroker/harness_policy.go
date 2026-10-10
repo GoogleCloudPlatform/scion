@@ -245,7 +245,7 @@ func (s *Server) lookupHarnessConfigDirForPolicy(req CreateAgentRequest, hydrate
 	var settings *config.VersionedSettings
 	if projectDir != "" {
 		if vs, _, err := config.LoadEffectiveSettings(projectDir); err == nil {
-			settings = vs
+			settings = s.settingsView(vs)
 		}
 	}
 

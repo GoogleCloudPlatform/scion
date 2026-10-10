@@ -114,6 +114,7 @@ import {
 import { ComposerRoomController, type RoomComposer } from './composer-room.js';
 import { PinOnResizeController } from './pin-on-resize.js';
 import { focusElement } from '../focus-moved.js';
+import { findDefaultAgent } from './default-agent.js';
 
 /** Result from server-side mention fan-out. */
 interface MentionResult {
@@ -2718,8 +2719,10 @@ export class ScionChatThread extends LitElement {
       projectId: '',
       sender: '',
       senderId: this.selfUserId(),
-      recipient: this.defaultAgent ? 'agent:' + this.defaultAgent : '',
-      recipientId: this.defaultAgent || '',
+      // Name the agent by slug, as the server copy does, even when the
+      // default is stored by ID (a promoted DM stores the UUID).
+      recipient: this.defaultAgent ? 'agent:' + this.defaultAgentSlug() : '',
+      recipientId: this.defaultAgentMember()?.id || this.defaultAgent || '',
       msg: text,
       type: replyToId ? 'reply' : 'chat',
       agentId: '',
@@ -3049,6 +3052,7 @@ export class ScionChatThread extends LitElement {
         mayHaveReachedHub = true;
       }
       if (Date.now() + this.wakeRetryDelayMs > giveUpAt) {
+        // eslint-disable-next-line @typescript-eslint/only-throw-error -- rethrows the last caught value unchanged; per-site decision tracked in ptone/scion#4126.
         throw lastError ?? new WakeOutcomeUnknownError();
       }
       await new Promise((resolve) => setTimeout(resolve, this.wakeRetryDelayMs));
@@ -4272,6 +4276,31 @@ export class ScionChatThread extends LitElement {
   // Phase-5: Context menu
   // ---------------------------------------------------------------------------
 
+  /**
+   * The agent member the thread default names. The stored value may be an
+   * agent ID, a slug, or a display name (see default-agent.ts).
+   */
+  private defaultAgentMember(): ChatAgentMember | undefined {
+    return findDefaultAgent(this.defaultAgent, this.agentMembers, (m) => m.displayName);
+  }
+
+  /**
+   * The thread default as a slug, for places that name the agent the way
+   * the server does. Falls back to the stored value when the agent isn't a
+   * known member or has no slug.
+   */
+  private defaultAgentSlug(): string {
+    return this.defaultAgentMember()?.slug || this.defaultAgent;
+  }
+
+  /** Whether `msg` was sent by the thread's default agent. */
+  private isDefaultAgentSender(msg: Message): boolean {
+    if (!this.defaultAgent) return false;
+    const member = this.defaultAgentMember();
+    if (member && msg.senderId === member.id) return true;
+    return msg.sender.startsWith('agent:') && msg.sender.slice(6) === this.defaultAgentSlug();
+  }
+
   /** The actions of a message's menu, shared by the popup and the sheet. */
   private messageMenuActions(msg: Message): MenuAction[] {
     const isOwnMessage = msg.senderId === (this._currentUserId || this.currentUserId);
@@ -4305,11 +4334,7 @@ export class ScionChatThread extends LitElement {
         run: () => this.handleContextMenuCopyLink(),
       }
     );
-    if (
-      this.isSenderAgent(msg) &&
-      !this.isDM &&
-      !(msg.sender.startsWith('agent:') && msg.sender.slice(6) === this.defaultAgent)
-    ) {
+    if (this.isSenderAgent(msg) && !this.isDM && !this.isDefaultAgentSender(msg)) {
       actions.push({
         id: 'set-default-agent',
         label: 'Make this agent thread default',

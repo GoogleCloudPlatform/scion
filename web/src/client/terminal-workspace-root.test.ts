@@ -14,7 +14,7 @@ import {
   type MockInstance,
 } from 'vitest';
 import type { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
-import { TerminalSessionRegistry } from './terminal-sessions.js';
+import { TerminalSessionRegistry, type TerminalSession } from './terminal-sessions.js';
 import type { Agent } from '../shared/types.js';
 import { _appFrameRefCountForTests } from '../components/shared/app-frame.js';
 import {
@@ -454,6 +454,88 @@ describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
     const overlays = visibleOverlays();
     expect(overlays.map((el) => el.className)).toEqual(['terminal-empty', 'terminal-status']);
     expect(overlays[1].textContent).toBe('Terminal selected in its owning tab.');
+  });
+
+  describe('status action button (ptone/scion#3328)', () => {
+    function actionButton(): HTMLButtonElement {
+      return getPaneHost(root).querySelector<HTMLButtonElement>('.terminal-status-action')!;
+    }
+
+    it('shows the action with the status message and runs it on click', async () => {
+      const onClick = vi.fn();
+      root.setStatus('Terminal selected in its owning tab.');
+      root.setStatusAction({ label: 'Move terminals to this window', onClick });
+      await flush();
+      const button = actionButton();
+      expect(button.hidden).toBe(false);
+      expect(button.textContent).toBe('Move terminals to this window');
+      expect(button.disabled).toBe(false);
+      button.click();
+      expect(onClick).toHaveBeenCalledOnce();
+      // The status text itself is unchanged by the button.
+      expect(visibleOverlays()[1].textContent).toBe('Terminal selected in its owning tab.');
+    });
+
+    it('disables the button while a move runs and hides it when removed', async () => {
+      root.setStatus('Terminal selected in its owning tab.');
+      root.setStatusAction({ label: 'Moving terminals…', disabled: true, onClick: () => {} });
+      await flush();
+      expect(actionButton().disabled).toBe(true);
+      expect(actionButton().textContent).toBe('Moving terminals…');
+      root.setStatusAction(null);
+      await flush();
+      expect(actionButton().hidden).toBe(true);
+    });
+
+    it.each(['two-columns', 'four'] as const)(
+      'shows the status and its action over %s placeholders',
+      async (preset) => {
+        root.layoutManager.setLayout(preset);
+        root.setStatus('Terminals moved to another window.');
+        root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
+        await flush();
+        const overlays = visibleOverlays();
+        expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
+        expect(overlays[0].textContent).toBe('Terminals moved to another window.');
+        expect(actionButton().hidden).toBe(false);
+        // Without an action, the placeholders show as before.
+        root.setStatusAction(null);
+        await flush();
+        expect(visibleOverlays()).toEqual([]);
+        expect(actionButton().hidden).toBe(true);
+      }
+    );
+
+    it('clearStatus returns to the normal empty viewer without an action', async () => {
+      root.setStatus('Terminals moved to another window.');
+      root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
+      await flush();
+      root.clearStatus();
+      await flush();
+      const overlays = visibleOverlays();
+      expect(overlays.map((el) => el.className)).toEqual(['terminal-empty']);
+      expect(actionButton().hidden).toBe(true);
+    });
+
+    it('is hidden by default and cleared once a terminal is selected', async () => {
+      await flush();
+      expect(actionButton().hidden).toBe(true);
+      const registry = new TerminalSessionRegistry({
+        hubUrl: window.location.origin,
+        accountId: 'test',
+      });
+      root.setStatus('Terminal selected in its owning tab.');
+      root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
+      await flush();
+      expect(actionButton().hidden).toBe(false);
+      root.select(root.create(registry, AGENT_ID));
+      await flush();
+      expect(actionButton().hidden).toBe(true);
+      // Closing the selected terminal brings back the default status, without the action.
+      root.withAutoSelectSuspended(() => registry.list()[0].close());
+      await flush();
+      expect(actionButton().hidden).toBe(true);
+    });
   });
 
   it.each(presets)(
@@ -926,6 +1008,10 @@ describe('the SSE bridge re-arms auto-reconnect regardless of which agent-state 
     vi.stubGlobal('fetch', fetcher);
     vi.stubGlobal('WebSocket', FakeSocket);
     vi.stubGlobal('EventSource', FakeEventSource);
+    // A pane attaches only once it is shown and measurable, so give the
+    // container a size (happy-dom does no layout).
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(500);
     root = new WorkspaceRoot();
     document.body.append(root.element);
   });
@@ -949,16 +1035,44 @@ describe('the SSE bridge re-arms auto-reconnect regardless of which agent-state 
     return found[found.length - 1];
   }
 
-  it('an agent-phase reason (the WS drop reached the client before SSE reported it) still re-arms once SSE confirms running', async () => {
-    const registry = new TerminalSessionRegistry({
-      hubUrl: window.location.origin,
-      accountId: 'r2',
-    });
+  /**
+   * The session's own agent SSE stream. Showing the workspace also opens the
+   * palette's project-wide stream, so array position is not reliable.
+   */
+  function mySource(): FakeEventSource {
+    const found = FakeEventSource.instances.filter((s) => s.url.includes(agentId));
+    return found[found.length - 1];
+  }
+
+  /**
+   * Opens the session in a shown workspace so its pane attaches, confirms
+   * the stream live, then hides the workspace before the test's drop. A
+   * hidden pane is never frontmost on its own, so each test drives
+   * frontmost explicitly and exercises the SSE bridge rather than the
+   * visible pane's own reconnect.
+   */
+  async function attachVisibleThenHide(
+    registry: TerminalSessionRegistry
+  ): Promise<{ session: TerminalSession; socket: FakeSocket }> {
+    root.show(true);
     const session = root.create(registry, agentId);
     await vi.waitFor(() => expect(mySocket()).toBeDefined());
     const socket = mySocket();
     socket.open();
     socket.data();
+    expect(session.state.connection).toBe('connected');
+    root.show(false);
+    const pane = root.element.querySelector('scion-terminal-pane') as HTMLElement;
+    await vi.waitFor(() => expect(pane.hidden).toBe(true));
+    return { session, socket };
+  }
+
+  it('an agent-phase reason (the WS drop reached the client before SSE reported it) still re-arms once SSE confirms running', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'r2',
+    });
+    const { session, socket } = await attachVisibleThenHide(registry);
     session.setFrontmost(true);
 
     // The common ordering: the WebSocket drop reaches the client, and the
@@ -971,8 +1085,8 @@ describe('the SSE bridge re-arms auto-reconnect regardless of which agent-state 
     expect(session.state.connection).toBe('unavailable');
     expect(session.state.disconnectReason).toBe('agent-phase');
 
-    await vi.waitFor(() => expect(FakeEventSource.instances.length).toBeGreaterThanOrEqual(1));
-    const source = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+    await vi.waitFor(() => expect(mySource()).toBeDefined());
+    const source = mySource();
     source.onopen?.();
 
     // The workspace root's own async layout/visibility refresh (queued via
@@ -1010,11 +1124,7 @@ describe('the SSE bridge re-arms auto-reconnect regardless of which agent-state 
       hubUrl: window.location.origin,
       accountId: 'r2-offline',
     });
-    const session = root.create(registry, agentId);
-    await vi.waitFor(() => expect(mySocket()).toBeDefined());
-    const socket = mySocket();
-    socket.open();
-    socket.data();
+    const { session, socket } = await attachVisibleThenHide(registry);
     session.setFrontmost(true);
 
     agentPhase = 'stopped';
@@ -1024,8 +1134,8 @@ describe('the SSE bridge re-arms auto-reconnect regardless of which agent-state 
     expect(session.state.connection).toBe('unavailable');
     expect(session.state.disconnectReason).toBe('agent-phase');
 
-    await vi.waitFor(() => expect(FakeEventSource.instances.length).toBeGreaterThanOrEqual(1));
-    const source = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+    await vi.waitFor(() => expect(mySource()).toBeDefined());
+    const source = mySource();
     source.onopen?.();
     session.setFrontmost(true);
 
@@ -1050,15 +1160,11 @@ describe('the SSE bridge re-arms auto-reconnect regardless of which agent-state 
       hubUrl: window.location.origin,
       accountId: 'r2-error-phase',
     });
-    const session = root.create(registry, agentId);
-    await vi.waitFor(() => expect(mySocket()).toBeDefined());
-    const socket = mySocket();
-    socket.open();
-    socket.data();
+    const { session } = await attachVisibleThenHide(registry);
     expect(session.state.connection).toBe('connected');
 
-    await vi.waitFor(() => expect(FakeEventSource.instances.length).toBeGreaterThanOrEqual(1));
-    const source = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+    await vi.waitFor(() => expect(mySource()).toBeDefined());
+    const source = mySource();
     source.onopen?.();
 
     // The container crashes: SSE reports phase 'error', not 'stopped'. The
@@ -1090,11 +1196,7 @@ describe('the SSE bridge re-arms auto-reconnect regardless of which agent-state 
       hubUrl: window.location.origin,
       accountId: 'r2-stale-running-race',
     });
-    const session = root.create(registry, agentId);
-    await vi.waitFor(() => expect(mySocket()).toBeDefined());
-    const socket = mySocket();
-    socket.open();
-    socket.data();
+    const { session, socket } = await attachVisibleThenHide(registry);
     session.setFrontmost(true);
 
     // The broker's own open-time check already knows the container is down
@@ -1106,8 +1208,8 @@ describe('the SSE bridge re-arms auto-reconnect regardless of which agent-state 
     expect(session.state.connection).toBe('unavailable');
     expect(session.state.disconnectReason).toBe('agent-stopped');
 
-    await vi.waitFor(() => expect(FakeEventSource.instances.length).toBeGreaterThanOrEqual(1));
-    const source = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+    await vi.waitFor(() => expect(mySource()).toBeDefined());
+    const source = mySource();
     source.onopen?.();
     session.setFrontmost(true);
 
@@ -1145,6 +1247,215 @@ describe('the SSE bridge re-arms auto-reconnect regardless of which agent-state 
       })
     );
     expect(session.reconnecting).toBe(true);
+  });
+});
+
+describe('a pane that has never been shown (ptone/scion#4170)', () => {
+  class FakeSocket {
+    static instances: FakeSocket[] = [];
+    readyState = 0;
+    onopen: (() => void) | null = null;
+    onclose: ((event: { code: number; reason?: string }) => void) | null = null;
+    onmessage: ((event: { data: unknown }) => void) | null = null;
+    send = vi.fn();
+    close = vi.fn();
+    constructor(readonly url: string) {
+      FakeSocket.instances.push(this);
+    }
+    open(): void {
+      this.readyState = 1;
+      this.onopen?.();
+    }
+    data(payload = ''): void {
+      this.onmessage?.({ data: JSON.stringify({ type: 'data', data: btoa(payload) }) });
+    }
+  }
+  class SilentEventSource extends EventTarget {
+    onopen: (() => void) | null = null;
+    close = vi.fn();
+    constructor(readonly url: string) {
+      super();
+    }
+  }
+
+  const agentId = '77777777-7777-4777-8777-777777777777';
+  let root: TerminalWorkspaceRoot;
+  let mod: typeof import('./terminal-workspace-root.js');
+
+  beforeEach(async () => {
+    mod = await import('./terminal-workspace-root.js');
+    FakeSocket.instances = [];
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ id: agentId, name: 'test', phase: 'running' }), {
+            status: 200,
+          })
+        )
+      )
+    );
+    vi.stubGlobal('WebSocket', FakeSocket);
+    vi.stubGlobal('EventSource', SilentEventSource);
+    // happy-dom does no layout: give a shown pane a measurable container.
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(500);
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function mySocket(): FakeSocket | undefined {
+    return FakeSocket.instances.filter((s) => s.url.includes(agentId)).at(-1);
+  }
+
+  function railItem(): HTMLElement {
+    return root.element.querySelector('.terminal-rail-item') as HTMLElement;
+  }
+
+  function railStatus(): string {
+    return railItem().querySelector<HTMLButtonElement>('.terminal-rail-select')!.title;
+  }
+
+  it('shows a neutral "Not opened yet" dot, not Connecting, and does not attach', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'never-shown',
+    });
+    const session = root.create(registry, agentId);
+    await vi.waitFor(() => expect(railItem()).not.toBeNull());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(session.state.connection).toBe('loading');
+    expect(mySocket()).toBeUndefined();
+    expect(railItem().dataset.dot).toBe('neutral');
+    expect(railStatus()).toContain('Hollow dot: Not opened yet');
+    expect(railStatus()).not.toContain('Connecting');
+    expect(railStatus()).not.toContain('Pending');
+  });
+
+  it('on reveal goes through Connecting, then connected', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'never-shown-reveal',
+    });
+    const session = root.create(registry, agentId);
+    await vi.waitFor(() => expect(railItem()?.dataset.dot).toBe('neutral'));
+
+    root.show(true);
+    await vi.waitFor(() => expect(mySocket()).toBeDefined());
+    await vi.waitFor(() => expect(session.state.connection).toBe('connecting'));
+    await vi.waitFor(() => expect(railItem().dataset.dot).toBe('amber'));
+    expect(railStatus()).toContain('Amber dot: Connecting');
+
+    const socket = mySocket()!;
+    socket.open();
+    socket.data();
+    await vi.waitFor(() => expect(railItem().dataset.dot).toBe('green'));
+    expect(railStatus()).toContain('Green dot: Connected');
+
+    // Hiding it again later does not bring the never-shown state back.
+    root.show(false);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(railItem().dataset.dot).toBe('green');
+  });
+
+  it('a pane shown but not yet measurable leaves Not opened yet for Connecting', async () => {
+    // Shown, but the container has no size yet: the pane keeps waiting, so
+    // the session stays loading and only the shown state moves the dot.
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(0);
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'never-shown-unmeasured',
+    });
+    const session = root.create(registry, agentId);
+    await vi.waitFor(() => expect(railItem()?.dataset.dot).toBe('neutral'));
+
+    root.show(true);
+    // The first show queues its own rail refresh: one microtask later the
+    // row already reads Connecting, before any other update re-renders it.
+    await Promise.resolve();
+    expect(railItem().dataset.dot).toBe('amber');
+    expect(railStatus()).toContain('Amber dot: Connecting');
+    expect(railStatus()).not.toContain('Not opened yet');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(session.state.connection).toBe('loading');
+    expect(mySocket()).toBeUndefined();
+  });
+
+  it('a session re-created for the same agent after close is never-shown again', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'never-shown-recreate',
+    });
+    const first = root.create(registry, agentId);
+    root.show(true);
+    await vi.waitFor(() => expect(mySocket()).toBeDefined());
+    const socket = mySocket()!;
+    socket.open();
+    socket.data();
+    await vi.waitFor(() => expect(railItem()?.dataset.dot).toBe('green'));
+    const key = first.state.key;
+
+    first.close();
+    await vi.waitFor(() => expect(railItem()).toBeNull());
+    root.show(false);
+
+    const second = root.create(registry, agentId);
+    expect(second).not.toBe(first);
+    expect(second.state.key).toBe(key);
+    await vi.waitFor(() => expect(railItem()?.dataset.dot).toBe('neutral'));
+    expect(railStatus()).toContain('Hollow dot: Not opened yet');
+    expect(second.state.connection).toBe('loading');
+  });
+
+  it('a revealed pane still loading reads Connecting, not Not opened yet', () => {
+    const loading = {
+      state: { connection: 'loading', disconnectReason: null },
+      metadata: { availability: 'loading', agent: null, error: null },
+    } as unknown as Parameters<typeof mod.connectionDot>[0];
+    expect(mod.connectionDot(loading, true)).toEqual({
+      colour: 'neutral',
+      meaning: 'Not opened yet',
+    });
+    expect(mod.connectionDot(loading, false)).toEqual({ colour: 'amber', meaning: 'Connecting' });
+    expect(mod.connectionDot(loading)).toEqual({ colour: 'amber', meaning: 'Connecting' });
+    // Only a pending session can be never-shown: other states keep their dot.
+    for (const connection of ['connecting', 'connected', 'idle', 'disconnected'] as const) {
+      const entry = { ...loading, state: { connection, disconnectReason: null } } as typeof loading;
+      expect(mod.connectionDot(entry, true)).toEqual(mod.connectionDot(entry, false));
+    }
+  });
+
+  it('isInactiveEntry counts a never-shown pane like a connected one, so filter and sort are unchanged', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'never-shown-inactive',
+    });
+    const session = root.create(registry, agentId);
+    await vi.waitFor(() => expect(railItem()?.dataset.dot).toBe('neutral'));
+    const entry = {
+      state: session.state,
+      metadata: registry.metadata.get(agentId) ?? {
+        agent: null,
+        availability: 'loading' as const,
+        error: null,
+      },
+    };
+    expect(entry.state.connection).toBe('loading');
+    expect(mod.isInactiveEntry(entry)).toBe(false);
+    expect(
+      mod.isInactiveEntry({ ...entry, state: { ...entry.state, connection: 'connected' } })
+    ).toBe(false);
   });
 });
 

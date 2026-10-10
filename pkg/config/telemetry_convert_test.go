@@ -269,27 +269,22 @@ func TestTelemetryConfigToEnv_Full(t *testing.T) {
 	}
 
 	expected := map[string]string{
-		"SCION_TELEMETRY_ENABLED":                   "true",
-		"SCION_TELEMETRY_CLOUD_ENABLED":             "true",
-		"SCION_OTEL_ENDPOINT":                       "otel.example.com:4317",
-		"SCION_OTEL_PROTOCOL":                       "grpc",
-		"SCION_OTEL_SKIP_TLS_VERIFY":                "false",
-		"SCION_OTEL_CA_FILE":                        "/etc/ssl/certs/custom-root.pem",
-		"SCION_TELEMETRY_CLOUD_BATCH_MAX_SIZE":      "256",
-		"SCION_TELEMETRY_CLOUD_BATCH_TIMEOUT":       "10s",
-		"SCION_TELEMETRY_CLOUD_PROVIDER":            "gcp",
-		"SCION_TELEMETRY_HUB_ENABLED":               "true",
-		"SCION_TELEMETRY_HUB_REPORT_INTERVAL":       "60s",
-		"SCION_TELEMETRY_LOCAL_ENABLED":             "true",
-		"SCION_TELEMETRY_DEBUG":                     "true",
-		"SCION_TELEMETRY_LOCAL_FILE":                "/var/log/telemetry.jsonl",
-		"SCION_TELEMETRY_LOCAL_CONSOLE":             "true",
-		"SCION_TELEMETRY_FILTER_ENABLED":            "true",
-		"SCION_TELEMETRY_FILTER_RESPECT_DEBUG_MODE": "false",
-		"SCION_TELEMETRY_FILTER_INCLUDE":            "agent.tool.call,agent.turn",
-		"SCION_TELEMETRY_FILTER_EXCLUDE":            "agent.user.prompt",
-		"SCION_TELEMETRY_REDACT":                    "prompt,user.email",
-		"SCION_TELEMETRY_HASH":                      "session_id",
+		"SCION_TELEMETRY_ENABLED":              "true",
+		"SCION_TELEMETRY_CLOUD_ENABLED":        "true",
+		"SCION_OTEL_ENDPOINT":                  "otel.example.com:4317",
+		"SCION_OTEL_PROTOCOL":                  "grpc",
+		"SCION_OTEL_SKIP_TLS_VERIFY":           "false",
+		"SCION_OTEL_CA_FILE":                   "/etc/ssl/certs/custom-root.pem",
+		"SCION_TELEMETRY_CLOUD_BATCH_MAX_SIZE": "256",
+		"SCION_TELEMETRY_CLOUD_BATCH_TIMEOUT":  "10s",
+		"SCION_TELEMETRY_CLOUD_PROVIDER":       "gcp",
+		"SCION_TELEMETRY_HUB_ENABLED":          "true",
+		"SCION_TELEMETRY_HUB_REPORT_INTERVAL":  "60s",
+		"SCION_TELEMETRY_FILTER_ENABLED":       "true",
+		"SCION_TELEMETRY_FILTER_INCLUDE":       "agent.tool.call,agent.turn",
+		"SCION_TELEMETRY_FILTER_EXCLUDE":       "agent.user.prompt",
+		"SCION_TELEMETRY_REDACT":               "prompt,user.email",
+		"SCION_TELEMETRY_HASH":                 "session_id",
 	}
 
 	// Check headers JSON separately since map ordering is non-deterministic
@@ -447,5 +442,26 @@ func TestTelemetryConfigToEnv_HeadersJSON(t *testing.T) {
 	}
 	if parsed["X-Custom"] != "value" {
 		t.Errorf("X-Custom = %q", parsed["X-Custom"])
+	}
+}
+
+// TestTelemetryConfigToEnv_OmitsUnreadVars guards against re-emitting env
+// vars that no consumer reads (ptone/scion#4103).
+func TestTelemetryConfigToEnv_OmitsUnreadVars(t *testing.T) {
+	on := true
+	env := TelemetryConfigToEnv(&api.TelemetryConfig{
+		Local:  &api.TelemetryLocalConfig{Enabled: &on, File: "/tmp/t.jsonl", Console: &on},
+		Filter: &api.TelemetryFilterConfig{RespectDebugMode: &on},
+	})
+	for _, k := range []string{
+		"SCION_TELEMETRY_DEBUG",
+		"SCION_TELEMETRY_FILTER_RESPECT_DEBUG_MODE",
+		"SCION_TELEMETRY_LOCAL_ENABLED",
+		"SCION_TELEMETRY_LOCAL_FILE",
+		"SCION_TELEMETRY_LOCAL_CONSOLE",
+	} {
+		if v, ok := env[k]; ok {
+			t.Errorf("%s should not be emitted, got %q", k, v)
+		}
 	}
 }

@@ -19,6 +19,7 @@ package hub
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -135,7 +136,9 @@ func TestDispatchCreateErrorResponse_TranslatesIdentityMappingRefusal(t *testing
 
 // TestDispatchCreateErrorResponse_IdentityCodeOnlyAt400 keeps the
 // translation narrow: the codes are honoured only on a 400, the broker's
-// text alone is never matched, and other broker errors keep the 502.
+// text alone is never matched, and other broker errors keep the 502. A 400
+// validation_error is not here: the hub relays it as itself (see
+// TestDispatchCreateErrorResponse_ValidationErrorNotTranslated).
 func TestDispatchCreateErrorResponse_IdentityCodeOnlyAt400(t *testing.T) {
 	tests := []struct {
 		name string
@@ -145,7 +148,6 @@ func TestDispatchCreateErrorResponse_IdentityCodeOnlyAt400(t *testing.T) {
 		{name: "500 runtime_error", err: brokerIdentityMappingErr(http.StatusInternalServerError, "runtime_error", nil)},
 		{name: "text only", err: &brokerStatusError{StatusCode: http.StatusInternalServerError,
 			Body: `{"error":{"code":"runtime_error","message":"has no Kubernetes ServiceAccount mapped for \"x\""}}`}},
-		{name: "400 validation_error", err: brokerIdentityMappingErr(http.StatusBadRequest, "validation_error", nil)},
 		{name: "transport error", err: errors.New("dial tcp: connection refused")},
 	}
 	for _, tc := range tests {
@@ -155,6 +157,46 @@ func TestDispatchCreateErrorResponse_IdentityCodeOnlyAt400(t *testing.T) {
 			require.Equal(t, http.StatusBadGateway, w.Code, w.Body.String())
 		})
 	}
+}
+
+// A broker 400 validation_error is relayed as a 400 validation_error with
+// the broker's own text: it is not translated into an identity code, and it
+// carries none of the identity details.
+func TestDispatchCreateErrorResponse_ValidationErrorNotTranslated(t *testing.T) {
+	w := httptest.NewRecorder()
+	dispatchCreateErrorResponse(w, brokerIdentityMappingErr(http.StatusBadRequest, "validation_error", nil), "")
+	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	var resp struct {
+		Error struct {
+			Code    string         `json:"code"`
+			Message string         `json:"message"`
+			Details map[string]any `json:"details"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp), w.Body.String())
+	assert.Equal(t, "validation_error", resp.Error.Code)
+	assert.Equal(t, "broker operator text", resp.Error.Message)
+	assert.Nil(t, resp.Error.Details)
+}
+
+// A typed nil *brokerStatusError, direct or wrapped in a non-nil error, is
+// not an identity refusal and does not panic.
+func TestIdentityMappingDispatchError_TypedNil(t *testing.T) {
+	var se *brokerStatusError
+	err := fmt.Errorf("dispatch: %w", se)
+	_, ok := identityMappingDispatchError(err)
+	assert.False(t, ok)
+	w := httptest.NewRecorder()
+	assert.False(t, relayIdentityMappingError(w, err))
+	assert.Equal(t, 0, w.Body.Len())
+
+	// dispatchFailureText must not call Error on the nil pointer, whether
+	// the typed nil is the error itself or wrapped.
+	var direct error = se
+	assert.NotPanics(t, func() {
+		assert.Equal(t, "", dispatchFailureText(direct))
+		assert.Equal(t, "", dispatchFailureText(err))
+	})
 }
 
 // A 400 with another code is not an identity refusal.
@@ -318,4 +360,5 @@ func TestDispatchFailureText_IdentityMappingRefusal(t *testing.T) {
 	}
 	other := errors.New("dial tcp: connection refused")
 	assert.Equal(t, other.Error(), dispatchFailureText(other))
+	assert.Equal(t, "", dispatchFailureText(nil))
 }
