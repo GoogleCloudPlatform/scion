@@ -104,6 +104,7 @@ func TestDefaultExcludePatterns(t *testing.T) {
 	// Verify the default exclude patterns match what the hub WebDAV endpoint excludes
 	expected := []string{
 		".git/**",
+		"/.git",
 		".scion/**",
 		"/.scion",
 		"node_modules/**",
@@ -138,6 +139,12 @@ func TestDefaultExcludeRules_Matching(t *testing.T) {
 		// root and ".scion/**" only matches entries inside a .scion directory.
 		// This mirrors the hub, which hides only top-level entries.
 		{"a/b/.scion", true},
+		{".git", false},      // bare .git file at the root (worktree/submodule)
+		{".gitignore", true}, // "/.git" is not a prefix match
+		{".github/workflows/ci.yml", true},
+		// A nested bare .git file is synced: "/.git" is anchored to the root,
+		// mirroring the hub, which hides only a top-level .git entry.
+		{"a/.git", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.remote, func(t *testing.T) {
@@ -145,13 +152,15 @@ func TestDefaultExcludeRules_Matching(t *testing.T) {
 		})
 	}
 
-	// rclone must not descend into a .scion directory at all.
+	// rclone must not descend into a .scion or .git directory at all.
 	includeDir := fi.IncludeDirectory(context.Background(), nil)
 	dirTests := []struct {
 		dir      string
 		included bool
 	}{
 		{".scion", false},
+		{".git", false},
+		{".github", true},
 		{"sub", true},
 	}
 	for _, tt := range dirTests {
