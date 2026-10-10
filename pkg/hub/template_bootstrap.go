@@ -145,8 +145,9 @@ func (s *Server) BootstrapTemplatesFromDir(ctx context.Context, templatesDir str
 // stored.
 //
 // This now delegates to the shared ResourceStore (§7.3); the template-specific
-// behavior (harness detection, DefaultHarnessConfig backfill, bundled
-// harness-config import) lives in templatePersistence.
+// behavior (the commit through commitTemplateFiles, re-derivation of an
+// unchanged template, bundled harness-config import) lives in
+// templatePersistence.
 func (s *Server) syncExistingTemplate(ctx context.Context, existing *store.Template, templatePath string, force bool) (bool, error) {
 	return s.templateStore().Bootstrap(ctx, existing.Name, templatePath, existing.Scope, existing.ScopeID, "", force)
 }
@@ -157,41 +158,6 @@ func (s *Server) syncExistingTemplate(ctx context.Context, existing *store.Templ
 func (s *Server) bootstrapSingleTemplate(ctx context.Context, name, templatePath, scope, projectID string) error {
 	_, err := s.templateStore().Bootstrap(ctx, name, templatePath, scope, projectID, "", false)
 	return err
-}
-
-// templateConfigInfo holds the harness type and default harness config name
-// extracted from a template's scion-agent.yaml.
-type templateConfigInfo struct {
-	Harness              string // inferred harness type (claude, gemini, etc.)
-	DefaultHarnessConfig string // actual harness-config name from config (e.g. "claude-web", "adk")
-}
-
-// detectHarnessFromConfig reads a template's config and returns the harness type
-// and the default harness config name. The harness type is inferred from the
-// config name or explicit harness field. The default harness config name preserves
-// the original value from scion-agent.yaml so it can be used for hub resolution.
-func detectHarnessFromConfig(templatePath, templateName string) templateConfigInfo {
-	t := &config.Template{Name: templateName, Path: templatePath}
-	cfg, err := t.LoadConfig()
-	if err == nil && cfg != nil {
-		if cfg.HarnessConfig != "" {
-			return templateConfigInfo{
-				Harness:              inferHarnessFromName(cfg.HarnessConfig),
-				DefaultHarnessConfig: cfg.HarnessConfig,
-			}
-		}
-		if cfg.DefaultHarnessConfig != "" {
-			return templateConfigInfo{
-				Harness:              inferHarnessFromName(cfg.DefaultHarnessConfig),
-				DefaultHarnessConfig: cfg.DefaultHarnessConfig,
-			}
-		}
-		if cfg.Harness != "" {
-			return templateConfigInfo{Harness: cfg.Harness}
-		}
-	}
-
-	return templateConfigInfo{Harness: inferHarnessFromName(templateName)}
 }
 
 // inferHarnessFromName guesses the harness type from a name string.

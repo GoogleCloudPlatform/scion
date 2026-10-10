@@ -1167,6 +1167,13 @@ type Template struct {
 	Image                string          `json:"image"`                          // Default container image
 	Config               *TemplateConfig `json:"config,omitempty"`
 
+	// AgentConfig is a derived, read-only snapshot of the template's own
+	// scion-agent.{yaml,yml,json}, with per-agent fields cleared. Only the
+	// hub's template commit path sets it (ptone/scion#4217); create and PUT
+	// bodies cannot write it. Nil when the template has no agent config file
+	// or the file does not parse.
+	AgentConfig *api.ScionConfig `json:"agentConfig,omitempty"`
+
 	// Content tracking
 	ContentHash string `json:"contentHash,omitempty"` // SHA-256 hash of template contents
 

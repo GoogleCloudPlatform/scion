@@ -581,13 +581,10 @@ func (s *Server) cloneProjectTemplates(ctx context.Context, srcProjectID string,
 			Slug:         srcTmpl.Slug, // SAME slug — critical for annotation references
 			DisplayName:  srcTmpl.DisplayName,
 			Description:  srcTmpl.Description,
-			Harness:      srcTmpl.Harness,
 			Config:       srcTmpl.Config,
 			Scope:        store.TemplateScopeProject,
 			ScopeID:      clone.ID,
 			Status:       srcTmpl.Status,
-			Files:        srcTmpl.Files,
-			ContentHash:  srcTmpl.ContentHash,
 			BaseTemplate: srcTmpl.BaseTemplate,
 		}
 
@@ -599,7 +596,11 @@ func (s *Server) cloneProjectTemplates(ctx context.Context, srcProjectID string,
 			newTmpl.StorageURI = storage.TemplateStorageURI(s.HubID(), stor.Bucket(), newTmpl.Scope, newTmpl.ScopeID, newTmpl.Slug)
 		}
 
-		// Copy storage files
+		// Copy storage files, then create the template through the commit
+		// path, which re-derives Harness, DefaultHarnessConfig and
+		// AgentConfig from the copied files instead of copying the source's
+		// derived fields (ptone/scion#4217).
+		var createErr error
 		if stor != nil && len(srcTmpl.Files) > 0 && srcTmpl.StoragePath != "" {
 			for _, file := range srcTmpl.Files {
 				srcPath := srcTmpl.StoragePath + "/" + file.Path
@@ -609,9 +610,17 @@ func (s *Server) cloneProjectTemplates(ctx context.Context, srcProjectID string,
 					return err
 				}
 			}
+			createErr = s.commitTemplateFiles(ctx, newTmpl, srcTmpl.Files, commitOpts{create: true})
+		} else {
+			// No stored content to derive from: keep the manifest as the
+			// source had it and take the harness from the name.
+			newTmpl.Files = srcTmpl.Files
+			newTmpl.ContentHash = srcTmpl.ContentHash
+			newTmpl.Harness = deriveTemplateIndex(nil, "", newTmpl.Name).Harness
+			createErr = s.store.CreateTemplate(ctx, newTmpl)
 		}
 
-		if err := s.store.CreateTemplate(ctx, newTmpl); err != nil {
+		if err := createErr; err != nil {
 			if stor != nil {
 				_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
 			}
