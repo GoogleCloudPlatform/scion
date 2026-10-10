@@ -435,3 +435,38 @@ func TestLiveChatArtifacts_UnrecordedRefsAreNotPublished(t *testing.T) {
 	assert.NotContains(t, string(evt.Data), `"metadata"`)
 	assert.NotContains(t, string(evt.Data), f.userOwned)
 }
+
+// TestLiveChatArtifacts_UserToAgentMessage: a user's message to an agent
+// through handleAgentMessage (the non-agent-sender branch) carries its
+// admitted references on user.<id>.chat.dm.
+func TestLiveChatArtifacts_UserToAgentMessage(t *testing.T) {
+	f := newArtifactSiteFixture(t)
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	f.srv.SetEventPublisher(pub)
+
+	key, err := messages.DMConversationKey("agent", f.target.ID, "user", f.owner.ID)
+	require.NoError(t, err)
+	dmCh, unsub := pub.Subscribe("user." + f.owner.ID + ".chat.dm")
+	t.Cleanup(unsub)
+
+	sm := &messages.StructuredMessage{
+		Version: messages.Version, Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Type: messages.TypeInstruction, Sender: "user:" + f.owner.Email, SenderID: f.owner.ID,
+		Recipient: "agent:" + f.target.Slug, RecipientID: f.target.ID, Msg: "have a look",
+		Channel: "web", ThreadID: key,
+		Metadata: map[string]string{artifacts.MessageMetadataKey: refsValue(
+			artifacts.MessageRef{ArtifactID: f.userOwned}, artifacts.MessageRef{ArtifactID: f.unreadable})},
+	}
+	body, err := json.Marshal(MessageRequest{StructuredMessage: sm})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+f.project.ID+"/agents/"+f.target.ID+"/message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(requestAuthCtx(req.Context(), f.ownerIdentity()))
+	rr := httptest.NewRecorder()
+	f.srv.handleAgentMessage(rr, req, f.target.ID)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	evt := receiveEvent(t, dmCh, "chat.dm")
+	assert.Equal(t, refsValue(artifacts.MessageRef{ArtifactID: f.userOwned}), eventArtifacts(t, evt.Data))
+}
