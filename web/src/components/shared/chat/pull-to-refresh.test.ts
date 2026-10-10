@@ -274,6 +274,37 @@ describe('PullToRefreshController', () => {
     }
   });
 
+  it('a second finger mid-pull hands the touch to the browser for good', () => {
+    touch(scroller, 'touchstart', [{ y: 0 }]);
+    touch(scroller, 'touchmove', [{ y: PAST / 2 }]);
+    touch(scroller, 'touchmove', [{ y: PAST }]);
+    expect(ctl.state.armed).toBe(true);
+    // The second finger lands: a pinch.
+    touch(scroller, 'touchstart', [{ y: PAST }, { y: PAST, id: 1 }]);
+    expect(ctl.state.distance).toBe(0);
+    const pinch = touch(scroller, 'touchmove', [{ y: PAST + 20 }, { y: PAST - 20, id: 1 }]);
+    // The second finger lifts; the first moves on and lifts past the threshold.
+    touch(scroller, 'touchend', [{ y: PAST + 20 }]);
+    const after = touch(scroller, 'touchmove', [{ y: PAST + 40 }]);
+    touch(scroller, 'touchend', []);
+    expect(pinch.defaultPrevented).toBe(false);
+    expect(after.defaultPrevented).toBe(false);
+    expect(onRefresh).not.toHaveBeenCalled();
+    expect(ctl.state).toEqual({ distance: 0, armed: false, refreshing: false });
+  });
+
+  it('a pull that comes back up above its start resets and does not fire', () => {
+    touch(scroller, 'touchstart', [{ y: 100 }]);
+    touch(scroller, 'touchmove', [{ y: 100 + PAST }]);
+    expect(ctl.state.armed).toBe(true);
+    touch(scroller, 'touchmove', [{ y: 80 }]);
+    expect(ctl.state.distance).toBe(0);
+    expect(ctl.state.armed).toBe(false);
+    touch(scroller, 'touchend', []);
+    expect(onRefresh).not.toHaveBeenCalled();
+    expect(ctl.state.distance).toBe(0);
+  });
+
   it('stops listening once detached', () => {
     ctl.detach();
     pull(scroller, PAST);

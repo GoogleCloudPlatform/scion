@@ -167,8 +167,11 @@ export class PullToRefreshController {
 
   private readonly onTouchStart = (e: Event): void => {
     const touch = (e as TouchEvent).touches;
-    // A second finger (pinch) is not a pull.
+    // A second finger (pinch) is not a pull: give up the touch, so the
+    // pinch is the browser's and no later move is cancelled or re-arms it.
     if (touch.length !== 1) {
+      this.start = null;
+      this.mode = 'ignore';
       this.cancelPull();
       return;
     }
