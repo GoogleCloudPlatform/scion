@@ -40,6 +40,14 @@ var preMigrateWantRows = map[string]int{
 	"agent_session_metrics": 2, // one kept of the duplicate pair, plus a later segment
 }
 
+// preMigrateSeededRows is the row count each table has right after
+// SeedPreMigrateDuplicates, duplicates included.
+var preMigrateSeededRows = map[string]int{
+	"access_policies":       3,
+	"delegation_edges":      4,
+	"agent_session_metrics": 3,
+}
+
 // PreMigrateTables lists the tables SeedPreMigrateDuplicates can seed.
 var PreMigrateTables = []string{"access_policies", "delegation_edges", "agent_session_metrics"}
 
@@ -56,6 +64,8 @@ var preMigrateSeedRows = map[string]string{
 		('00000000-0000-0000-0000-00000000d002', 'user', 'u1', 'agent', 'a1', 'project', 'p1', 'member', 1, '2026-02-01 00:00:00', '2026-02-01 00:00:00'),
 		('00000000-0000-0000-0000-00000000d003', 'user', 'u1', 'agent', 'a1', 'project', 'p1', 'member', 0, '2026-03-01 00:00:00', '2026-03-01 00:00:00'),
 		('00000000-0000-0000-0000-00000000d004', 'user', 'u1', 'agent', 'a2', 'project', 'p1', 'member', 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00')`,
+	// grove_id is the physical column name for the project ID (see the
+	// StorageKey in pkg/ent/schema/agentsessionmetrics.go); keep it as is.
 	"agent_session_metrics": `INSERT INTO agent_session_metrics (id, agent_id, grove_id, session_id, started_at, created_at) VALUES
 		('00000000-0000-0000-0000-00000000e001', 'agent-a', 'p1', 's1', '2026-01-01 10:00:00', '2026-01-01 11:00:00'),
 		('00000000-0000-0000-0000-00000000e002', 'agent-a', 'p1', 's1', '2026-01-01 10:00:00', '2026-01-01 12:00:00'),
@@ -116,6 +126,27 @@ func AssertPreMigrateDeduplicated(t testing.TB, dbPath string, tables ...string)
 			}
 			if want := preMigrateWantRows[table]; n != want {
 				t.Errorf("%s has %d rows after migration, want %d", table, n, want)
+			}
+		}
+	}, false)
+}
+
+// AssertPreMigrateDuplicatesKept checks that the database file at dbPath,
+// seeded by SeedPreMigrateDuplicates with the same tables, still holds every
+// seeded row, duplicates included: nothing removed them.
+func AssertPreMigrateDuplicatesKept(t testing.TB, dbPath string, tables ...string) {
+	t.Helper()
+	withSQLiteDB(t, dbPath, func(db *sql.DB) {
+		if len(tables) == 0 {
+			tables = PreMigrateTables
+		}
+		for _, table := range tables {
+			var n int
+			if err := db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&n); err != nil {
+				t.Fatalf("count %s: %v", table, err)
+			}
+			if want := preMigrateSeededRows[table]; n != want {
+				t.Errorf("%s has %d rows, want the %d seeded rows", table, n, want)
 			}
 		}
 	}, false)

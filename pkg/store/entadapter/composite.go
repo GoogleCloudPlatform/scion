@@ -613,7 +613,7 @@ func (c *CompositeStore) Ping(ctx context.Context) error {
 func (c *CompositeStore) Migrate(ctx context.Context) error {
 	// The data fixes that must precede the schema migration are shared with
 	// every other migrate entry point; see PreMigrate.
-	if err := c.preMigrate(ctx); err != nil {
+	if err := PreMigrate(ctx, c.client); err != nil {
 		return err
 	}
 
@@ -1523,10 +1523,7 @@ func (c *CompositeStore) MigrateGitHubTokenInjectionMode(ctx context.Context) er
 // database/sql driver. It is an escape hatch for diagnostics and tests that
 // need raw SQL access; production code should use the typed store methods.
 func (c *CompositeStore) DB() *sql.DB {
-	if drv, ok := c.client.Driver().(*entsql.Driver); ok {
-		return drv.DB()
-	}
-	return nil
+	return clientDB(c.client)
 }
 
 // Dialect returns the ent dialect of the underlying driver (for example

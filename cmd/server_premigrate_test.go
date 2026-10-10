@@ -21,54 +21,88 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/stretchr/testify/require"
 )
 
-// scion server backfill opens its store with the same pre-migration step as
-// server start, so a hub database holding duplicate access_policies,
-// delegation_edges and agent_session_metrics rows migrates instead of
-// failing on the unique indexes.
-func TestOpenBackfillStore_RunsPreMigrate(t *testing.T) {
-	origDB := backfillDB
-	origConfigPath := serverConfigPath
-	defer func() {
-		backfillDB = origDB
-		serverConfigPath = origConfigPath
-	}()
-
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "hub.db")
-	enttest.SeedPreMigrateDuplicates(t, dbPath)
-
-	backfillDB = dbPath
-	serverConfigPath = filepath.Join(tmpDir, "nonexistent.yaml")
-	s, err := openBackfillStore(context.Background())
-	require.NoError(t, err)
-	require.NoError(t, s.Close())
-
-	enttest.AssertPreMigrateDeduplicated(t, dbPath)
+// maintenanceOpener describes one maintenance command whose store opener
+// runs the schema migration: its --db and --execute flag variables and the
+// opener itself.
+type maintenanceOpener struct {
+	name    string
+	db      *string
+	execute *bool
+	open    func(context.Context) (*entadapter.CompositeStore, error)
 }
 
-// scion server migrate-dm-keys opens its store with the same pre-migration
-// step as server start; see TestOpenBackfillStore_RunsPreMigrate.
-func TestOpenDMMigrationStore_RunsPreMigrate(t *testing.T) {
-	origDB := dmMigrationDB
-	origConfigPath := serverConfigPath
-	defer func() {
-		dmMigrationDB = origDB
-		serverConfigPath = origConfigPath
-	}()
+func maintenanceOpeners() []maintenanceOpener {
+	return []maintenanceOpener{
+		{
+			name:    "server backfill",
+			db:      &backfillDB,
+			execute: &backfillExecute,
+			open: func(ctx context.Context) (*entadapter.CompositeStore, error) {
+				return openBackfillStore(ctx)
+			},
+		},
+		{
+			name:    "server migrate-dm-keys",
+			db:      &dmMigrationDB,
+			execute: &dmMigrationExecute,
+			open:    openDMMigrationStore,
+		},
+	}
+}
+
+// openMaintenanceStore points the command at a fresh SQLite file seeded with
+// duplicate rows and opens its store with the given --execute value. It
+// returns the database path and the opener's error.
+func openMaintenanceStore(t *testing.T, o maintenanceOpener, execute bool) (string, error) {
+	t.Helper()
+	origDB, origExecute, origConfigPath := *o.db, *o.execute, serverConfigPath
+	t.Cleanup(func() {
+		*o.db, *o.execute, serverConfigPath = origDB, origExecute, origConfigPath
+	})
 
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "hub.db")
 	enttest.SeedPreMigrateDuplicates(t, dbPath)
 
-	dmMigrationDB = dbPath
+	*o.db = dbPath
+	*o.execute = execute
 	serverConfigPath = filepath.Join(tmpDir, "nonexistent.yaml")
-	s, err := openDMMigrationStore(context.Background())
-	require.NoError(t, err)
-	require.NoError(t, s.Close())
+	s, err := o.open(context.Background())
+	if s != nil {
+		require.NoError(t, s.Close())
+	}
+	return dbPath, err
+}
 
-	enttest.AssertPreMigrateDeduplicated(t, dbPath)
+// With --execute, server backfill and server migrate-dm-keys run the same
+// pre-migration step as server start, so a hub database holding duplicate
+// access_policies, delegation_edges and agent_session_metrics rows migrates
+// instead of failing on the unique indexes.
+func TestMaintenanceStoreExecute_RunsPreMigrate(t *testing.T) {
+	for _, o := range maintenanceOpeners() {
+		t.Run(o.name, func(t *testing.T) {
+			dbPath, err := openMaintenanceStore(t, o, true)
+			require.NoError(t, err)
+			enttest.AssertPreMigrateDeduplicated(t, dbPath)
+		})
+	}
+}
+
+// A dry run (the default) must not modify the database, so it skips the
+// pre-migration step: the duplicate rows stay, the schema migration fails on
+// the unique indexes, and the error points at --execute.
+func TestMaintenanceStoreDryRun_KeepsDuplicateRows(t *testing.T) {
+	for _, o := range maintenanceOpeners() {
+		t.Run(o.name, func(t *testing.T) {
+			dbPath, err := openMaintenanceStore(t, o, false)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "--execute")
+			enttest.AssertPreMigrateDuplicatesKept(t, dbPath)
+		})
+	}
 }

@@ -147,13 +147,9 @@ func openDMMigrationStore(ctx context.Context) (*entadapter.CompositeStore, erro
 		if err != nil {
 			return nil, fmt.Errorf("opening sqlite: %w", err)
 		}
-		if err := entadapter.PreMigrate(ctx, client); err != nil {
+		if err := migrateMaintenanceDB(ctx, client, dmMigrationExecute); err != nil {
 			_ = client.Close()
-			return nil, fmt.Errorf("running pre-migration steps: %w", err)
-		}
-		if err := entc.AutoMigrate(ctx, client); err != nil {
-			_ = client.Close()
-			return nil, fmt.Errorf("running migrations: %w", err)
+			return nil, err
 		}
 		s = entadapter.NewCompositeStore(client)
 
@@ -162,13 +158,9 @@ func openDMMigrationStore(ctx context.Context) (*entadapter.CompositeStore, erro
 		if err != nil {
 			return nil, fmt.Errorf("opening postgres (verify DSN and network connectivity): %w", err)
 		}
-		if err := entadapter.PreMigrate(ctx, client); err != nil {
+		if err := migrateMaintenanceDB(ctx, client, dmMigrationExecute); err != nil {
 			_ = client.Close()
-			return nil, fmt.Errorf("running pre-migration steps: %w", err)
-		}
-		if err := entc.AutoMigrate(ctx, client); err != nil {
-			_ = client.Close()
-			return nil, fmt.Errorf("running migrations: %w", err)
+			return nil, err
 		}
 		s = entadapter.NewCompositeStore(client)
 

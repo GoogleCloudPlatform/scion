@@ -39,22 +39,16 @@ import (
 // entc.AutoMigrate against a hub database must call PreMigrate first;
 // CompositeStore.Migrate does so. Each step is idempotent and a no-op on a
 // fresh database where the tables do not exist yet.
+//
+// Keep the order: see the comment on the scope_id backfill.
 func PreMigrate(ctx context.Context, client *ent.Client) error {
-	// The steps only use the client, so a store wrapping just the client
-	// is enough; the per-entity stores are not needed.
-	return (&CompositeStore{client: client}).preMigrate(ctx)
-}
-
-// preMigrate implements PreMigrate. Keep the order: see the comment on the
-// scope_id backfill.
-func (c *CompositeStore) preMigrate(ctx context.Context) error {
 	// Backfill null scope_id to empty string before dedup and schema migration.
 	// Must run BEFORE dedup: in SQL NULL != NULL, so dedup won't detect
 	// duplicate rows where scope_id IS NULL. Converting to '' first lets
 	// dedup catch all real duplicates. Also prevents SQLSTATE 23502 when
 	// the schema migration applies the NOT NULL constraint.
-	if db := c.DB(); db != nil {
-		exists, err := c.accessPoliciesTableExists(ctx, db)
+	if db := clientDB(client); db != nil {
+		exists, err := accessPoliciesTableExists(ctx, client, db)
 		if err != nil {
 			return fmt.Errorf("pre-migration null scope_id check: %w", err)
 		}
@@ -74,21 +68,21 @@ func (c *CompositeStore) preMigrate(ctx context.Context) error {
 	// Existing databases may have duplicate (name, scope_type, scope_id) rows
 	// (including former NULL scope_id rows now normalized to '') which would
 	// cause the UNIQUE constraint migration to fail.
-	if err := c.deduplicateAccessPolicies(ctx); err != nil {
+	if err := deduplicateAccessPolicies(ctx, client); err != nil {
 		return fmt.Errorf("pre-migration dedup: %w", err)
 	}
 
 	// Deduplicate delegation_edges before migration adds a partial unique index.
 	// Existing databases that ran the initial backfill and were interrupted may
 	// have duplicate active edges that would violate the new constraint.
-	if err := c.deduplicateDelegationEdges(ctx); err != nil {
+	if err := deduplicateDelegationEdges(ctx, client); err != nil {
 		return fmt.Errorf("pre-migration delegation edge dedup: %w", err)
 	}
 
 	// Deduplicate agent_session_metrics before migration adds the unique
 	// (agent_id, session_id, started_at) index. Before it, a repeated
 	// report of a session segment was stored again.
-	if err := c.deduplicateAgentSessionMetrics(ctx); err != nil {
+	if err := deduplicateAgentSessionMetrics(ctx, client); err != nil {
 		return fmt.Errorf("pre-migration agent session metrics dedup: %w", err)
 	}
 

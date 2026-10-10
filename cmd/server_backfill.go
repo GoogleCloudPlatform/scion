@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -202,13 +203,9 @@ func openBackfillStore(ctx context.Context, readOnly ...bool) (*entadapter.Compo
 			return nil, fmt.Errorf("opening sqlite: %w", err)
 		}
 		if !skipMigrations {
-			if err := entadapter.PreMigrate(ctx, client); err != nil {
+			if err := migrateMaintenanceDB(ctx, client, backfillExecute); err != nil {
 				_ = client.Close()
-				return nil, fmt.Errorf("running pre-migration steps: %w", err)
-			}
-			if err := entc.AutoMigrate(ctx, client); err != nil {
-				_ = client.Close()
-				return nil, fmt.Errorf("running migrations: %w", err)
+				return nil, err
 			}
 		}
 		s = entadapter.NewCompositeStore(client)
@@ -219,13 +216,9 @@ func openBackfillStore(ctx context.Context, readOnly ...bool) (*entadapter.Compo
 			return nil, fmt.Errorf("opening postgres (verify DSN and network connectivity): %w", err)
 		}
 		if !skipMigrations {
-			if err := entadapter.PreMigrate(ctx, client); err != nil {
+			if err := migrateMaintenanceDB(ctx, client, backfillExecute); err != nil {
 				_ = client.Close()
-				return nil, fmt.Errorf("running pre-migration steps: %w", err)
-			}
-			if err := entc.AutoMigrate(ctx, client); err != nil {
-				_ = client.Close()
-				return nil, fmt.Errorf("running migrations: %w", err)
+				return nil, err
 			}
 		}
 		s = entadapter.NewCompositeStore(client)
@@ -235,6 +228,28 @@ func openBackfillStore(ctx context.Context, readOnly ...bool) (*entadapter.Compo
 	}
 
 	return s, nil
+}
+
+// migrateMaintenanceDB runs the schema migration for the maintenance
+// commands that open the hub database directly (server backfill and server
+// migrate-dm-keys). The pre-migration steps delete duplicate rows, so they run
+// only when execute is set: a dry run must not modify the database. A dry run
+// on a database holding such rows therefore fails at the unique index
+// creation, and the error says how to proceed.
+func migrateMaintenanceDB(ctx context.Context, client *ent.Client, execute bool) error {
+	if execute {
+		if err := entadapter.PreMigrate(ctx, client); err != nil {
+			return fmt.Errorf("running pre-migration steps: %w", err)
+		}
+	}
+	if err := entc.AutoMigrate(ctx, client); err != nil {
+		if !execute {
+			return fmt.Errorf("running migrations (a dry run skips the pre-migration steps that remove duplicate rows; "+
+				"on a unique-constraint error, rerun with --execute or start the Hub once on this version): %w", err)
+		}
+		return fmt.Errorf("running migrations: %w", err)
+	}
+	return nil
 }
 
 // mergeBackfillResult adds the counts from src into dst.
