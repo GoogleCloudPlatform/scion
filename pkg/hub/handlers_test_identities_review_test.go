@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -113,11 +114,13 @@ func TestTestIdentity_TransientConflictIs429(t *testing.T) {
 	}
 	assert.False(t, isTransientIssuanceConflict(errors.New("constraint failed")))
 	assert.False(t, isTransientIssuanceConflict(nil))
+	// The store's typed sentinel is the primary signal.
+	assert.True(t, isTransientIssuanceConflict(fmt.Errorf("commit transaction: %w", store.ErrTransient)))
 
 	srv, s := newTestIdentityServer(t, true)
 	_, issuerTok := tiIssuer(t, srv, s, "ti-busy-issuer")
 	srv.testIdentities.hooks.writeAudit = func(context.Context, store.Store, *store.MutationAuditRecord) error {
-		return errors.New("database is locked")
+		return fmt.Errorf("%w: write audit", store.ErrTransient)
 	}
 	rec := tiPost(t, srv, issuerTok, "/api/v1/test-identities", nil)
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())

@@ -109,9 +109,16 @@ const (
 // connection, so issuance transactions queue rather than collide, and on
 // Postgres the issuance advisory lock serializes them; this is the
 // fallback for any other configuration.
+//
+// The store marks these errors with store.ErrTransient from the typed
+// driver error (entadapter.markTransient). The message match below is only
+// a fallback for a store that does not.
 func isTransientIssuanceConflict(err error) bool {
 	if err == nil {
 		return false
+	}
+	if errors.Is(err, store.ErrTransient) {
+		return true
 	}
 	msg := strings.ToLower(err.Error())
 	for _, marker := range []string{"database is locked", "database table is locked", "sqlite_busy", "sqlite_locked", "(sqlstate 40001)", "(sqlstate 40p01)", "could not serialize access", "deadlock detected"} {

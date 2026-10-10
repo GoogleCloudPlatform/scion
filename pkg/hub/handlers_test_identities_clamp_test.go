@@ -18,8 +18,10 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -252,4 +254,97 @@ func TestTestIdentity_ClampFailsClosedOnKindLookupError(t *testing.T) {
 
 	// The same lookup through the working store: not a fixture, grants kept.
 	assert.True(t, srv.authzService.IsHubAdmin(ctx, human.ID))
+}
+
+// countingKindStore counts user and role-definition lookups.
+type countingKindStore struct {
+	store.Store
+	mu        sync.Mutex
+	getUser   int
+	roleByNm  int
+	failRoles bool
+}
+
+func (c *countingKindStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	c.mu.Lock()
+	c.getUser++
+	c.mu.Unlock()
+	return c.Store.GetUser(ctx, id)
+}
+
+func (c *countingKindStore) GetRoleDefinitionByName(ctx context.Context, name, scope string) (*store.RoleDefinition, error) {
+	c.mu.Lock()
+	c.roleByNm++
+	fail := c.failRoles
+	c.mu.Unlock()
+	if fail {
+		return nil, errors.New("store unavailable")
+	}
+	return c.Store.GetRoleDefinitionByName(ctx, name, scope)
+}
+
+// R2-2: the kind cache is shared with transaction-bound authorization
+// services, and a partial allowed-role set is cached for a short time.
+func TestTestIdentity_ClampCachesShared(t *testing.T) {
+	srv, s := newTestIdentityServer(t, true)
+	ctx := context.Background()
+	group := tiGroupWithSystemRole(t, s, "ti-cache-hubadmin", store.SystemRoleHubAdmin, DevUserID)
+	human := &store.User{ID: tid("ti-cache-human"), Email: "ti-cache@test.com", DisplayName: "h", Role: store.UserRoleMember, Status: store.UserStatusActive}
+	require.NoError(t, s.CreateUser(ctx, human))
+	tiAddToGroup(t, s, group.ID, human.ID, store.GroupMemberRoleMember)
+
+	counting := &countingKindStore{Store: s}
+	main := NewAuthzService(counting, srv.authzService.logger)
+	require.True(t, main.IsHubAdmin(ctx, human.ID))
+	require.Equal(t, 1, counting.getUser, "first privileged read loads the kind")
+
+	// A transaction-bound service (as Server.authzFor builds) shares the cache.
+	tx := NewAuthzService(counting, srv.authzService.logger)
+	shareTestFixtureClampCache(tx.store, main.store)
+	require.True(t, tx.IsHubAdmin(ctx, human.ID))
+	assert.Equal(t, 1, counting.getUser, "the shared cache avoids a second kind read")
+	srvTx := srv.authzFor(&countingKindStore{Store: s})
+	assert.Same(t, srv.authzService.store.(*testFixtureGrantClamp).cache, srvTx.store.(*testFixtureGrantClamp).cache)
+
+	// A partial allowed-role set is kept for a while instead of re-queried.
+	failing := &countingKindStore{Store: s, failRoles: true}
+	partial := NewAuthzService(failing, srv.authzService.logger)
+	_ = partial.IsHubAdmin(ctx, human.ID)
+	_ = partial.IsHubAdmin(ctx, human.ID)
+	assert.Equal(t, 2, failing.roleByNm, "two lookups on the first read, then the partial set is cached")
+	c := partial.store.(*testFixtureGrantClamp)
+	assert.False(t, c.cache.allowedComplete)
+	c.cache.mu.Lock()
+	c.cache.allowedAt = time.Now().Add(-2 * testFixtureClampAllowedRetry)
+	c.cache.mu.Unlock()
+	failing.mu.Lock()
+	failing.failRoles = false
+	failing.mu.Unlock()
+	_ = partial.IsHubAdmin(ctx, human.ID)
+	assert.True(t, c.cache.allowedComplete, "retried after the partial set expires")
+}
+
+// R2-6: the admin effective-access view shows a test identity only the
+// system grants authorization honours.
+func TestTestIdentity_EffectiveAccessViewClamped(t *testing.T) {
+	srv, s := newTestIdentityServer(t, true)
+	ctx := context.Background()
+	_, issuerTok := tiIssuer(t, srv, s, "ti-ea-issuer")
+	fx := tiIssue(t, srv, issuerTok, nil)
+	human := &store.User{ID: tid("ti-ea-human"), Email: "ti-ea@test.com", DisplayName: "h", Role: store.UserRoleMember, Status: store.UserStatusActive}
+	require.NoError(t, s.CreateUser(ctx, human))
+	ensureHubMembership(ctx, s, human.ID)
+	group := tiGroupWithSystemRole(t, s, "ti-ea-hubadmin", store.SystemRoleHubAdmin, DevUserID)
+	tiAddToGroup(t, s, group.ID, fx.Identity.ID, store.GroupMemberRoleMember)
+	tiAddToGroup(t, s, group.ID, human.ID, store.GroupMemberRoleMember)
+
+	count := func(userID string) int {
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/effective-access?principalType=user&principalId="+userID, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp adminEffectiveAccessResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		return resp.ActiveBindingCount
+	}
+	fixtureCount, humanCount := count(fx.Identity.ID), count(human.ID)
+	assert.Equal(t, humanCount-1, fixtureCount, "the fixture's inherited hub-admin binding is not shown")
 }

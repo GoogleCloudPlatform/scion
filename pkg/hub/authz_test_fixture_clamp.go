@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -35,17 +36,84 @@ import (
 // projects like any member. Lists that contain no test-fixture user
 // principal pass through unchanged, so no other principal's grants change.
 //
+// Invariant: the clamp recognizes a test identity only by a USER principal
+// present in the same list. A caller that evaluates a group's bindings in a
+// list without the member user, and then merges the result into a user's
+// authority outside the clamp, bypasses it. Callers must resolve a user's
+// authority with the user principal and its groups in one list (as the
+// authorization service does), never by merging group-only results.
+//
 // The clamp is keyed only on the stored kind. It costs nothing for a list
-// whose system-scoped bindings are all hub-member or hub-viewer (the common
-// case); otherwise it reads each user principal's row once.
+// with no system-scoped binding or whose system-scoped bindings are all
+// hub-member or hub-viewer (the common case); otherwise it reads each user
+// principal's kind once per process (testFixtureClampCache).
 type testFixtureGrantClamp struct {
 	store.Store
+	cache *testFixtureClampCache
+}
 
-	mu      sync.Mutex
-	allowed map[string]bool // role definition IDs of hub-member and hub-viewer
+// testFixtureClampCache holds the clamp's lookups. One cache is shared by
+// the server's authorization service and every transaction-bound one
+// (Server.authzFor), so each user's kind is read once.
+type testFixtureClampCache struct {
+	mu sync.Mutex
+	// allowed is the set of role definition IDs of hub-member and
+	// hub-viewer. allowedComplete is false when a lookup failed; such a
+	// partial set is retried after testFixtureClampAllowedRetry.
+	allowed         map[string]bool
+	allowedComplete bool
+	allowedAt       time.Time
 	// fixture caches whether a user ID is a test fixture. A user's kind is
 	// immutable (pkg/ent/schema/user.go), so an entry never goes stale.
 	fixture map[string]bool
+}
+
+// testFixtureClampCacheMax bounds the kind cache; it is reset when full.
+const testFixtureClampCacheMax = 10000
+
+// testFixtureClampAllowedRetry is how long a partial allowed-role set is
+// kept before the lookups are retried. A partial set only drops more.
+const testFixtureClampAllowedRetry = 30 * time.Second
+
+// wrapAuthzStoreWithTestFixtureClamp wraps s with the clamp and a new cache.
+// A nil store is returned unchanged.
+func wrapAuthzStoreWithTestFixtureClamp(s store.Store) store.Store {
+	if s == nil {
+		return nil
+	}
+	return &testFixtureGrantClamp{Store: s, cache: &testFixtureClampCache{}}
+}
+
+// shareTestFixtureClampCache makes dst's clamp use src's cache. Both must
+// be clamped stores; otherwise it does nothing.
+func shareTestFixtureClampCache(dst, src store.Store) {
+	d, ok1 := dst.(*testFixtureGrantClamp)
+	s, ok2 := src.(*testFixtureGrantClamp)
+	if ok1 && ok2 && s.cache != nil {
+		d.cache = s.cache
+	}
+}
+
+// isFixture reports whether userID is a test-fixture user, reading the row
+// once per user. A missing user is not a fixture and is not cached.
+func (c *testFixtureGrantClamp) isFixture(ctx context.Context, userID string) (bool, error) {
+	c.cache.mu.Lock()
+	v, ok := c.cache.fixture[userID]
+	c.cache.mu.Unlock()
+	if ok {
+		return v, nil
+	}
+	v, err := lookupUserIsTestFixture(ctx, c.Store, userID)
+	if err != nil {
+		return false, err
+	}
+	c.cache.mu.Lock()
+	if c.cache.fixture == nil || len(c.cache.fixture) >= testFixtureClampCacheMax {
+		c.cache.fixture = make(map[string]bool)
+	}
+	c.cache.fixture[userID] = v
+	c.cache.mu.Unlock()
+	return v, nil
 }
 
 // lookupUserIsTestFixture is the one place authorization reads whether a
@@ -64,58 +132,27 @@ func lookupUserIsTestFixture(ctx context.Context, users store.UserStore, userID 
 	return u.IsTestFixture(), nil
 }
 
-// testFixtureClampCacheMax bounds the kind cache; it is reset when full.
-const testFixtureClampCacheMax = 10000
-
-// isFixture reports whether userID is a test-fixture user, reading the row
-// once per user. A missing user is not a fixture and is not cached.
-func (c *testFixtureGrantClamp) isFixture(ctx context.Context, userID string) (bool, error) {
-	c.mu.Lock()
-	v, ok := c.fixture[userID]
-	c.mu.Unlock()
-	if ok {
-		return v, nil
-	}
-	v, err := lookupUserIsTestFixture(ctx, c.Store, userID)
-	if err != nil {
-		return false, err
-	}
-	c.mu.Lock()
-	if c.fixture == nil || len(c.fixture) >= testFixtureClampCacheMax {
-		c.fixture = make(map[string]bool)
-	}
-	c.fixture[userID] = v
-	c.mu.Unlock()
-	return v, nil
-}
-
-// wrapAuthzStoreWithTestFixtureClamp wraps s with the clamp. A nil store is
-// returned unchanged.
-func wrapAuthzStoreWithTestFixtureClamp(s store.Store) store.Store {
-	if s == nil {
-		return nil
-	}
-	return &testFixtureGrantClamp{Store: s}
-}
-
 // allowedRoleIDs returns the role definition IDs a test identity may hold at
-// system scope. The result is cached once both lookups succeed; until then
-// an empty set is returned, which only makes the clamp check rows more often.
+// system scope. A complete set is cached for the process; a partial one
+// (a lookup failed) is kept for testFixtureClampAllowedRetry and then
+// retried. A partial set only makes the clamp drop more.
 func (c *testFixtureGrantClamp) allowedRoleIDs(ctx context.Context) map[string]bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.allowed != nil {
-		return c.allowed
+	c.cache.mu.Lock()
+	defer c.cache.mu.Unlock()
+	if c.cache.allowed != nil && (c.cache.allowedComplete || time.Since(c.cache.allowedAt) < testFixtureClampAllowedRetry) {
+		return c.cache.allowed
 	}
 	ids := map[string]bool{}
+	complete := true
 	for _, name := range []string{store.SystemRoleHubMember, store.SystemRoleHubViewer} {
 		rd, err := c.Store.GetRoleDefinitionByName(ctx, name, store.RoleScopeSystem)
 		if err != nil || rd == nil {
-			return ids
+			complete = false
+			continue
 		}
 		ids[rd.ID] = true
 	}
-	c.allowed = ids
+	c.cache.allowed, c.cache.allowedComplete, c.cache.allowedAt = ids, complete, time.Now()
 	return ids
 }
 
@@ -152,6 +189,8 @@ func (c *testFixtureGrantClamp) clamp(ctx context.Context, principals []store.Pr
 		}
 		isFx, err := c.isFixture(ctx, p.ID)
 		if err != nil {
+			// Fail closed by design: an unreadable kind denies this
+			// request, even for a non-fixture admin on a cold cache.
 			return nil, err
 		}
 		if isFx {

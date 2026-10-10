@@ -33,6 +33,12 @@ var (
 	ErrInvalidInput     = errors.New("invalid input")
 	ErrRevisionConflict = errors.New("revision conflict")
 	ErrQuotaExceeded    = errors.New("quota exceeded")
+
+	// ErrTransient marks a database conflict that a retry resolves: a
+	// Postgres serialization failure or deadlock, or a busy or locked
+	// SQLite database. The entadapter WithTx wraps such errors with it.
+	ErrTransient = errors.New("transient database conflict")
+
 	// ErrConversationProjectMismatch is returned when a write names a project
 	// other than the one an existing conversation was created with, or names
 	// a project for a group conversation created without one. A conversation

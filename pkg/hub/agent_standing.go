@@ -306,7 +306,10 @@ func (s *Server) authzFor(st store.Store) *AuthzService {
 	if st == s.store || s.authzService == nil {
 		return s.authzService
 	}
-	return NewAuthzService(st, s.authzService.logger)
+	svc := NewAuthzService(st, s.authzService.logger)
+	// Share the test-identity clamp's caches (user kind is immutable).
+	shareTestFixtureClampCache(svc.store, s.authzService.store)
+	return svc
 }
 
 // userAdmittedToProjectOn reports whether user has live admission to
