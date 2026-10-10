@@ -4709,8 +4709,9 @@ func agentPatchSnapshotOf(agent *store.Agent) agentPatchSnapshot {
 // pin are applied; the config keys are split by configEditDisposition.
 // held is reserved for config edits held while a container is live and is
 // always empty, because such edits are refused; a timezone pin edited on a
-// live agent is applied (with a warning). before is the agent as it stood before the writes, after the
-// agent as written.
+// live agent is applied, with a warning only when the zone its next start
+// gets changes. before is the agent as it stood before the writes, after
+// the agent as written.
 func agentUpdateDisposition(before agentPatchSnapshot, after *store.Agent, configApplied, configHeldForReincarnate []string, timezoneChanged bool) AgentUpdateDisposition {
 	applied := append([]string{}, configApplied...)
 	if after.Name != before.name {

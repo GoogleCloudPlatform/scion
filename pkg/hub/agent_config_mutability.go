@@ -557,7 +557,8 @@ type AgentUpdateDisposition struct {
 	// live and applied at the next container creation after the current
 	// run. It is always empty until such edits are held rather than
 	// refused (ptone/scion#3976). A timezone pin edited while a container
-	// is live is listed under Applied, with a warning.
+	// is live is listed under Applied; the response warns only when the
+	// zone the next start gets changes.
 	Held []string `json:"held"`
 	// HeldForReincarnate lists the keys whose edit takes effect only at the
 	// next reincarnation.

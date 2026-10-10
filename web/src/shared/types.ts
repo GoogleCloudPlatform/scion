@@ -771,7 +771,11 @@ export interface AgentEditability {
 export interface AgentUpdateDisposition {
   /** Keys that take effect at the next container creation (or at once, for metadata). */
   applied: string[];
-  /** Keys that take effect at the next container creation after the current run. */
+  /**
+   * Reserved for config edits held while a container is live and applied at
+   * the next container creation after the current run. Always empty until
+   * ptone/scion#3976.
+   */
   held: string[];
   /** Keys stored now that take effect only at the next reincarnation. */
   heldForReincarnate: string[];
