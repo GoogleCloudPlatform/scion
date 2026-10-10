@@ -33,7 +33,7 @@ function agent(overrides: Partial<Agent>): Agent {
     runtimeBrokerName: 'flat-docker',
     pinnedRuntimeTarget: { id: 't-1', type: 'docker', runtimeBrokerId: 'b-flat' },
     ...overrides,
-  } as Agent;
+  };
 }
 
 function broker(overrides: Partial<RuntimeBroker>): RuntimeBroker {
@@ -48,7 +48,7 @@ function broker(overrides: Partial<RuntimeBroker>): RuntimeBroker {
     autoProvide: false,
     runtimeTarget: { id: 't-1', type: 'docker', displayName: 'Local Docker' },
     ...overrides,
-  } as RuntimeBroker;
+  };
 }
 
 describe('agentPlacementView', () => {
