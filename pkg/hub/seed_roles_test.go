@@ -451,10 +451,10 @@ func TestReconcileBuiltInRole_LegacyIntegerMarkerTriggersReconciliation(t *testi
 	reconcileBuiltInRoles(ctx, s)
 
 	// After reconciliation, marker should now have the hash and the
-	// current revision (hub-member is at revision 4 after adding the
-	// self-scoped permissions).
+	// current revision (hub-member is at revision 5 after dropping the
+	// Reserved user.list).
 	updatedMarker := getAppliedBuiltInRoleMarker(ctx, s, roleName)
-	assert.Equal(t, 4, updatedMarker.Revision)
+	assert.Equal(t, 5, updatedMarker.Revision)
 	assert.NotEmpty(t, updatedMarker.PermHash, "marker should have PermHash after reconciliation")
 	assert.Equal(t, permListHash(hubMemberPermissionIDs()), updatedMarker.PermHash)
 }
