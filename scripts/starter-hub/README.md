@@ -121,14 +121,18 @@ certificate only when it starts or reloads. `gce-certs.sh` therefore runs
 `fix-tls-rotation.sh` on the VM, which installs a certbot deploy hook that
 reloads Caddy after each renewal. To repair a hub set up before this change,
 copy the script to the VM and run it with `sudo`. Use `--check` (read-only)
-and `--dry-run` first, then run it without a flag. See *Certificate renewal* in
+and `--dry-run` first, then run it without a flag. If another hook already
+reloads Caddy, the script reports it and installs nothing; `--replace-hook`
+installs its own hook anyway, and you then move the old hook aside yourself.
+A non-zero exit from the script stops `gce-certs.sh`. See *Certificate renewal* in
 `docs-site/src/content/docs/hosted/single-node/hub-setup-gce.md`.
 
 ## Tests
 
 `tests/run.sh` runs the script tests against stub `gcloud`, `curl`, and
 `sleep` commands, and runs `fix-tls-rotation.sh` against a fake root with stub
-`systemctl`, `certbot`, `caddy`, and `openssl s_client` (`tests/lib-tls`). It
+`systemctl`, `certbot`, `caddy`, `runuser`, `id`, and `openssl s_client`
+(`tests/lib-tls`). It
 never contacts GCP and needs only bash and openssl:
 
 ```bash

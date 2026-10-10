@@ -83,31 +83,40 @@ The final health check requests `https://<HUB_DOMAIN>/healthz` and verifies the 
 
 Caddy serves the certbot files in `/etc/letsencrypt/live/<CERT_DOMAIN>/` (the `tls` line of the Caddyfile that `gce-start-hub.sh --full` writes). It reads them only when it starts or reloads. certbot renews the files on disk twice a day through `certbot.timer`, from 30 days before expiry. Unless Caddy reloads afterwards, it keeps serving the old certificate until that certificate expires.
 
-`gce-certs.sh` therefore runs `scripts/starter-hub/fix-tls-rotation.sh` on the VM. That installs the certbot deploy hook `/etc/letsencrypt/renewal-hooks/deploy/scion-reload-caddy.sh`. certbot runs it only after a successful renewal. The hook gives group `caddy` read access to the new files and reloads Caddy. The Hub is not restarted. The script also enables `certbot.timer`.
+`gce-certs.sh` therefore runs `scripts/starter-hub/fix-tls-rotation.sh` on the VM. That installs the certbot deploy hook `/etc/letsencrypt/renewal-hooks/deploy/scion-reload-caddy.sh`. certbot runs it only after a successful renewal. The hook gives Caddy's group read access to the new files and reloads Caddy. The Hub is not restarted. The script also enables `certbot.timer`. If the script finds a problem it cannot fix, it exits non-zero, and `gce-certs.sh` stops at that step. Run the script with `--check` on the VM to see the problem, fix it, then re-run `gce-certs.sh`.
 
 #### Repairing an existing Hub
 
-Hubs set up before this change may have no working hook. They then keep serving an expired certificate after a renewal. Copy the script to the VM, and look at what it would change before it changes anything. Replace `<INSTANCE_NAME>` and `<ZONE>` with your values from `hub-config.sh`:
+Hubs set up before this change may have no working hook. They then keep serving an expired certificate after a renewal. Copy the script to your home directory on the VM, and look at what it would change before it changes anything. Replace `<INSTANCE_NAME>` and `<ZONE>` with your values from `hub-config.sh`:
 
 ```bash
-gcloud compute scp scripts/starter-hub/fix-tls-rotation.sh <INSTANCE_NAME>:/tmp/ --zone=<ZONE>
-gcloud compute ssh <INSTANCE_NAME> --zone=<ZONE> --command='sudo bash /tmp/fix-tls-rotation.sh --check'
-gcloud compute ssh <INSTANCE_NAME> --zone=<ZONE> --command='sudo bash /tmp/fix-tls-rotation.sh --dry-run'
-gcloud compute ssh <INSTANCE_NAME> --zone=<ZONE> --command='sudo bash /tmp/fix-tls-rotation.sh'
+gcloud compute scp scripts/starter-hub/fix-tls-rotation.sh <INSTANCE_NAME>:fix-tls-rotation.sh --zone=<ZONE>
+gcloud compute ssh <INSTANCE_NAME> --zone=<ZONE> --command='sudo bash ~/fix-tls-rotation.sh --check'
+gcloud compute ssh <INSTANCE_NAME> --zone=<ZONE> --command='sudo bash ~/fix-tls-rotation.sh --dry-run'
+gcloud compute ssh <INSTANCE_NAME> --zone=<ZONE> --command='sudo bash ~/fix-tls-rotation.sh'
 ```
 
-- `--check` changes nothing. It reports the serial and expiry date (`notAfter`) of the certificate on disk and of the certificate Caddy serves, and whether the hook and the timer are in place. It exits 1 if something needs fixing.
+- `--check` changes nothing. It reports the following, and exits 1 if something needs fixing:
+  - The serial and expiry date (`notAfter`) of the certificate on disk and of the certificate Caddy serves.
+  - The reload hooks it finds and whether the timer is enabled.
+  - Whether the user Caddy runs as can read the certificate and key, or which path blocks it.
 - `--dry-run` prints each change it would make and changes nothing.
 - Without a flag, the script does the following:
-  - Installs or updates the deploy hook.
-  - Removes the inline `renew_hook` that older `gce-certs.sh` versions stored in `/etc/letsencrypt/renewal/<CERT_DOMAIN>.conf`. That hook always failed before it reached the reload. The original file is kept as a `.bak-fix-tls-rotation` backup.
+  - Installs or updates the deploy hook, unless another hook already reloads Caddy (see below).
+  - Removes the inline `renew_hook` that older `gce-certs.sh` versions stored in `/etc/letsencrypt/renewal/<CERT_DOMAIN>.conf`. That hook always failed before it reached the reload. The original file is kept as a `.bak-fix-tls-rotation` backup. The script never prints the content of an inline hook, because it can contain credentials.
   - Enables the timer.
-  - Fixes file permissions.
-  - Runs `certbot renew` only if the certificate on disk expires within 30 days (`--renew-days` changes that).
-  - Reloads Caddy only if Caddy serves a different certificate from the one on disk.
+  - Tests, as the user Caddy runs as (`User=` of `caddy.service`, default `caddy`), whether it can read the certificate and key. It changes the group or mode only of the paths that block it, and prints each path with its old and new group and mode.
+  - Runs `certbot renew` only if the certificate on disk expires within 30 days. `--renew-days` lowers that threshold. It cannot raise it, because certbot only renews within its own `renew_before_expiry` window (30 days by default). If certbot reports that the certificate is not yet due, the script says so and exits 1.
+  - Reloads Caddy only if Caddy serves a different certificate from the one on disk. It uses `systemctl reload caddy` when `caddy.service` reloads with `--force`, and otherwise `caddy reload --force`. Without `--force`, Caddy skips a reload when the Caddyfile is unchanged.
   - Ends with the same report as `--check`.
 
-  A second run changes nothing. Re-running `gce-certs.sh` has the same effect.
+A second run changes nothing. Re-running `gce-certs.sh` has the same effect.
+
+**An existing reload hook.** Some hubs already have a deploy hook added by hand, for example `/etc/letsencrypt/renewal-hooks/deploy/reload-caddy.sh`, or an inline `renew_hook` that reloads Caddy. The script reports it as `existing reload hook: <name>` and installs nothing, because that hook already covers the reload. If the existing hook does not change the group of the files, the script notes it. That is usually fine, because certbot gives a renewed private key the previous key's group and mode, and the permission check confirms that Caddy can read the files. To use this script's hook instead, run it with `--replace-hook`. It does not delete the existing hook. Move the old hook out of `renewal-hooks/deploy/` yourself, keeping a copy (certbot runs every executable in that directory, so renaming it in place is not enough):
+
+```bash
+sudo mv /etc/letsencrypt/renewal-hooks/deploy/reload-caddy.sh /root/reload-caddy.sh.bak
+```
 
 #### Checking the served certificate from outside
 
