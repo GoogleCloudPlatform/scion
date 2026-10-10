@@ -102,6 +102,47 @@ func TestPrintSAStatus_AllSections(t *testing.T) {
 	}
 }
 
+func TestPrintSAStatus_MappingDetails(t *testing.T) {
+	restore := clitime.SetNow(func() time.Time { return time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC) })
+	defer restore()
+
+	const body = `{
+  "account":{"id":"sa-1","scope":"project","email":"worker@example.com"},
+  "verification":{"status":"verified","verified":true},
+  "mappings":[
+    {"brokerId":"b1","brokerName":"b","profile":"gke","state":"mapped","kubernetesServiceAccount":"worker-ksa","namespace":"agents","source":"mapped","reportedAt":"2026-10-10T11:55:00Z"},
+    {"brokerId":"b1","brokerName":"b","profile":"gke-2","state":"mapped","kubernetesServiceAccount":"found-ksa","namespace":"team","source":"discovered"},
+    {"brokerId":"b1","brokerName":"b","profile":"gke-3","state":"unknown","unknownReason":"incomplete","incomplete":true,"incompleteReason":"list_failed","reportedAt":"2026-10-10T11:58:00Z"},
+    {"brokerId":"b1","brokerName":"b","profile":"gke-6","state":"unknown","unknownReason":"stale","reportedAt":"2026-10-10T11:00:00Z"},
+    {"brokerId":"b1","brokerName":"b","profile":"gke-7","state":"unknown","unknownReason":"report_unsupported"},
+    {"brokerId":"b1","brokerName":"b","profile":"gke-4","state":"not_mapped","ambiguous":true},
+    {"brokerId":"b1","brokerName":"b","profile":"gke-5","state":"mapped"}
+  ],
+  "workloadIdentityBinding":{"state":"unknown"},
+  "defaultFor":[],
+  "agents":{"count":0,"names":[]},
+  "nextStep":{"code":"none","message":"Nothing missing."}
+}`
+	var st hubclient.GCPServiceAccountStatus
+	require.NoError(t, json.Unmarshal([]byte(body), &st))
+	var buf bytes.Buffer
+	printSAStatus(&buf, &st)
+	out := buf.String()
+
+	for _, want := range []string{
+		"b/gke                           mapped (KSA worker-ksa, namespace agents, mapped); reported 5m ago\n",
+		"b/gke-2                         mapped (KSA found-ksa, namespace team, discovered)\n",
+		"b/gke-3                         unknown; report incomplete: list failed; reported 2m ago\n",
+		"b/gke-6                         unknown; report stale; reported 1h ago\n",
+		"b/gke-7                         unknown; the broker does not report enough to tell\n",
+		"b/gke-4                         not mapped; ambiguous: more than one Kubernetes service account is annotated with it\n",
+		// An older broker's entry names only the state.
+		"b/gke-5                         mapped\n",
+	} {
+		assert.Contains(t, out, want)
+	}
+}
+
 func TestPrintSAStatus_EmptySections(t *testing.T) {
 	st := &hubclient.GCPServiceAccountStatus{}
 	st.Account.Email = "worker@example.com"
