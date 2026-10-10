@@ -116,6 +116,9 @@ func (c *CompositeStore) deduplicateDelegationEdges(ctx context.Context) error {
 
 // tableExists checks whether a table exists in the database.
 // SQLite and Postgres use different system catalogs.
+//
+// tableName is interpolated into the SQL (see tableExistsQuery), so it must be
+// a compile-time constant, never user or config input.
 func (c *CompositeStore) tableExists(ctx context.Context, db *sql.DB, tableName string) (bool, error) {
 	drv, ok := c.client.Driver().(*entsql.Driver)
 	if !ok {
@@ -145,6 +148,9 @@ func (c *CompositeStore) tableExists(ctx context.Context, db *sql.DB, tableName 
 // schema on the connection's search_path, which is where unqualified table
 // names (and so the Ent migration) resolve. A literal 'public' would miss the
 // tables whenever the hub runs with a non-default search_path.
+//
+// tableName is interpolated into the returned SQL without escaping, so it must
+// be a compile-time constant, never user or config input.
 func tableExistsQuery(d, tableName string) string {
 	switch d {
 	case dialect.Postgres:
