@@ -536,7 +536,7 @@ func TestAgentDelegationExchange_Refusals(t *testing.T) {
 		require.NoError(t, f.store.RevokeAgentCredential(context.Background(), ac.ID, "test", "test"))
 		rec := f.exchange(t, token, f.agentA.ID, grant.ID, map[string]interface{}{"audience": aud})
 		// The middleware already refuses a revoked agent credential.
-		assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+		adtAssertAPIError(t, rec, http.StatusUnauthorized, ErrCodeUnauthorized)
 	})
 	t.Run("revoked grant", func(t *testing.T) {
 		other := f.hubGrant(t)
@@ -552,8 +552,7 @@ func TestAgentDelegationExchange_Refusals(t *testing.T) {
 		rec := f.exchange(t, tokenA, f.agentA.ID, other.ID, map[string]interface{}{"audience": aud})
 		// The agent's root user is the issuer, so the actor-state check
 		// (standing) refuses before the issuer-state check.
-		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-		assert.Contains(t, []string{errCodeGrantAgentChanged, errCodeIssuerInvalid}, decodeTargetAPIError(t, rec).Code)
+		adtAssertAPIError(t, rec, http.StatusForbidden, errCodeGrantAgentChanged)
 	})
 	t.Run("experiment off", func(t *testing.T) {
 		adtSetExperiment(t, f.srv, false)

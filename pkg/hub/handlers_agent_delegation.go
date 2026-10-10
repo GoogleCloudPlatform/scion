@@ -455,10 +455,14 @@ var (
 func (s *Server) handleExchangeAgentDelegation(w http.ResponseWriter, r *http.Request, pathAgentID, grantID string) {
 	ctx := r.Context()
 	agentRes := Resource{Type: "agent", ID: pathAgentID}
-	refuse := func(status int, code, msg string) {
-		s.recordAgentDelegationDeny(ctx, agentDelegationExchangePermission, agentRes, code)
+	// refuseWithReason answers with the external code and records the
+	// precise reason in the decision record (§8.2: the record says which
+	// check applied where the external code is coarser).
+	refuseWithReason := func(status int, code, reason, msg string) {
+		s.recordAgentDelegationDeny(ctx, agentDelegationExchangePermission, agentRes, reason)
 		writeError(w, status, code, msg, nil)
 	}
+	refuse := func(status int, code, msg string) { refuseWithReason(status, code, code, msg) }
 
 	// 1. A local agent JWT, nothing else.
 	identity := GetIdentityFromContext(ctx)
@@ -495,8 +499,12 @@ func (s *Server) handleExchangeAgentDelegation(w http.ResponseWriter, r *http.Re
 		InternalError(w)
 		return
 	}
-	if grant == nil || grant.AgentID != agentIdent.ID() {
+	if grant == nil {
 		refuse(http.StatusNotFound, errCodeGrantNotFound, "grant not found")
+		return
+	}
+	if grant.AgentID != agentIdent.ID() {
+		refuseWithReason(http.StatusNotFound, errCodeGrantNotFound, agentDelegationReasonGrantOtherAgent, "grant not found")
 		return
 	}
 
@@ -536,7 +544,7 @@ func (s *Server) handleExchangeAgentDelegation(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if issuerRow == nil {
-		refuse(http.StatusForbidden, errCodeIssuerInvalid, "the grant issuer is not valid")
+		refuseWithReason(http.StatusForbidden, errCodeIssuerInvalid, agentDelegationReasonIssuerMissing, "the grant issuer is not valid")
 		return
 	}
 	issuerPC := issuerPrincipal(issuerRow)
@@ -553,12 +561,12 @@ func (s *Server) handleExchangeAgentDelegation(w http.ResponseWriter, r *http.Re
 	}
 	// 9. Issuer state. A reserved platform identity denies and revokes.
 	if issuerRow.Status != store.UserStatusActive {
-		refuse(http.StatusForbidden, errCodeIssuerInvalid, "the grant issuer is not valid")
+		refuseWithReason(http.StatusForbidden, errCodeIssuerInvalid, agentDelegationCodeIssuerSuspended, "the grant issuer is not valid")
 		return
 	}
 	if isReservedPlatformIdentity(issuerRow.Email, s.platformAuthSA) {
 		s.revokeAgentDelegationGrantBySystem(ctx, grant, revokeReasonReservedIdentity)
-		refuse(http.StatusForbidden, errCodeIssuerInvalid, "the grant issuer is not valid")
+		refuseWithReason(http.StatusForbidden, errCodeIssuerInvalid, agentDelegationCodeReservedIdentity, "the grant issuer is not valid")
 		return
 	}
 	// 10. The policy, which may have narrowed since issuance.

@@ -112,10 +112,10 @@ func (f *adtFixture) mutateAgent(t *testing.T, agentID string, change func(a *st
 // stays its root user) and makes Dave, a member of P1 and P2, its owner.
 // Dave is then a controller who is not the root user, so his account state
 // is checked by the issuer checks rather than by the agent's standing.
-func (f *adtFixture) transferredAgent(t *testing.T, name string) (*store.Agent, *store.User) {
+func (f *adtFixture) transferredAgent(t *testing.T, name string) (*store.Agent, *store.User, string) {
 	t.Helper()
 	dave := hubMemberUser(t, f.store, name+"-dave")
-	adtGrantRole(t, f.store, dave.ID, f.proj.ID, store.ProjectRoleMember)
+	daveP1 := adtGrantRole(t, f.store, dave.ID, f.proj.ID, store.ProjectRoleMember)
 	adtGrantRole(t, f.store, dave.ID, f.other.ID, store.ProjectRoleMember)
 	d, _ := f.createdAgent(t, f.create(t, authUser(f.alice), CreateAgentRequest{Name: name + "-d"}), name+"-d")
 	f.mutateAgent(t, d.ID, func(a *store.Agent) { a.OwnerID = dave.ID })
@@ -123,7 +123,7 @@ func (f *adtFixture) transferredAgent(t *testing.T, name string) (*store.Agent, 
 	require.NoError(t, err)
 	require.Equal(t, dave.ID, stored.OwnerID)
 	require.Equal(t, f.alice.ID, stored.Ancestry[0])
-	return stored, dave
+	return stored, dave, daveP1
 }
 
 // grantFor issues a hub agent:read grant for agentID with session.
@@ -192,7 +192,7 @@ func (f *adtFixture) storeGrant(t *testing.T, a *store.Agent, expires time.Time)
 func TestAgentDelegation_IssuerWhoIsNotTheRootUser(t *testing.T) {
 	f := newADTFixture(t, "adt-issuer")
 	decisions := f.captureDecisions(t)
-	d, dave := f.transferredAgent(t, "adt-issuer")
+	d, dave, _ := f.transferredAgent(t, "adt-issuer")
 	daveSession := f.session(t, dave)
 
 	t.Run("suspended issuer denies at use with the issuer check", func(t *testing.T) {
@@ -211,6 +211,16 @@ func TestAgentDelegation_IssuerWhoIsNotTheRootUser(t *testing.T) {
 		// Project admission (§8.2 step 7) refuses an inactive account
 		// before the issuer-state step (step 9) is reached.
 		adtAssertAPIError(t, f.exchangeFor(t, d, grant.ID), http.StatusForbidden, errCodeIssuerProjectAccess)
+	})
+	t.Run("reserved issuer: exchange record names the precise reason", func(t *testing.T) {
+		// Reserved issuer at exchange step 9: the record says
+		// reserved_identity, the response says issuer_invalid.
+		grant := f.grantFor(t, daveSession, d.ID)
+		f.srv.platformAuthSA = dave.Email
+		defer func() { f.srv.platformAuthSA = "" }()
+		decisions.reset()
+		adtAssertAPIError(t, f.exchangeFor(t, d, grant.ID), http.StatusForbidden, errCodeIssuerInvalid)
+		decisions.assertDelegatedDeny(t, agentDelegationCodeReservedIdentity)
 	})
 	t.Run("issuer no longer the controller", func(t *testing.T) {
 		grant := f.grantFor(t, daveSession, d.ID)
@@ -401,6 +411,7 @@ func TestAgentDelegation_OneRecordPerCheckAndNoReasonInResponses(t *testing.T) {
 			allows = append(allows, r)
 		}
 	}
+	require.Len(t, agentDelegationAdmittedRoutes, 1, "a new admitted route needs its own record and no-reason checks here")
 	require.Len(t, allows, 1, "one record for the delegated agent.read check")
 	assert.Equal(t, "agent_delegation:"+grant.ID, allows[0].MatchedGrant)
 	assert.Equal(t, f.agentA.ID, allows[0].PrincipalID)
@@ -553,4 +564,190 @@ func TestAgentDelegation_ReincarnateRouteRefused(t *testing.T) {
 	cred := f.delegated(t, f.hubGrant(t).ID)
 	rec := f.do(t, http.MethodPost, "/api/v1/agents/"+f.agentA.ID+"/reincarnate", map[string]interface{}{}, adtBearer(cred.Token))
 	adtAssertAPIError(t, rec, http.StatusForbidden, errCodeCredentialNotAdmitted)
+}
+
+// TestAgentDelegation_IssuerLeavesTheAgentsProject: an issuer who stays the
+// agent's owner but leaves its project cannot exchange or use a hub grant,
+// even on a target in another project they can still reach (§17.2 #7).
+// Issuance is refused too; the owner relationship that rule 2 evaluates
+// itself requires project access, so it refuses first.
+func TestAgentDelegation_IssuerLeavesTheAgentsProject(t *testing.T) {
+	f := newADTFixture(t, "adt-leave")
+	decisions := f.captureDecisions(t)
+	d, dave, daveP1 := f.transferredAgent(t, "adt-leave")
+	daveSession := f.session(t, dave)
+	grant := f.grantFor(t, daveSession, d.ID)
+	cred := f.credentialFor(t, d, grant.ID)
+	require.Equal(t, http.StatusOK, f.getAgent(t, cred.Token, f.agentB.ID).Code)
+
+	require.NoError(t, f.store.DeleteRoleBinding(context.Background(), daveP1))
+
+	decisions.reset()
+	adtAssertAPIError(t, f.getAgent(t, cred.Token, f.agentB.ID), http.StatusForbidden, ErrCodeForbidden)
+	decisions.assertDelegatedDeny(t, agentDelegationCodeIssuerProjectAccess)
+	adtAssertAPIError(t, f.exchangeFor(t, d, grant.ID), http.StatusForbidden, errCodeIssuerProjectAccess)
+	rec := f.issue(t, daveSession, d.ID, map[string]interface{}{
+		"boundary": map[string]string{"kind": "hub"}, "permissions": []string{"agent:read"}, "name": "g",
+	})
+	adtAssertAPIError(t, rec, http.StatusForbidden, errCodeIssuerNotController)
+}
+
+// TestAgentDelegationExchange_AgentCredentialRowChecks: the exchange handler
+// refuses an agent token with no credential row or an expired row, which
+// the middleware still admits, with 401 agent_credential_invalid (§8.2
+// step 2). A revoked row is refused by the middleware with 401
+// unauthorized. None of them issues a credential.
+func TestAgentDelegationExchange_AgentCredentialRowChecks(t *testing.T) {
+	f := newADTFixture(t, "adt-acrow")
+	ctx := context.Background()
+	grant := f.hubGrant(t)
+	aud := map[string]interface{}{"audience": f.srv.agentDelegationAudience()}
+	stored, err := f.store.GetAgent(ctx, f.agentA.ID)
+	require.NoError(t, err)
+	tokenGrant, err := f.srv.AuthorizeAgentToken(ctx, stored)
+	require.NoError(t, err)
+
+	t.Run("no credential row", func(t *testing.T) {
+		token, _, err := f.srv.SignAgentToken(tokenGrant, stored.RunID)
+		require.NoError(t, err)
+		rec := f.exchange(t, token, stored.ID, grant.ID, aud)
+		adtAssertAPIError(t, rec, http.StatusUnauthorized, errCodeAgentCredentialInvalid)
+	})
+	t.Run("expired credential row", func(t *testing.T) {
+		token, ac, err := f.srv.SignAgentToken(tokenGrant, stored.RunID)
+		require.NoError(t, err)
+		ac.ExpiresAt = time.Now().Add(-time.Minute)
+		require.NoError(t, f.store.CreateAgentCredential(ctx, ac))
+		rec := f.exchange(t, token, stored.ID, grant.ID, aud)
+		adtAssertAPIError(t, rec, http.StatusUnauthorized, errCodeAgentCredentialInvalid)
+	})
+	t.Run("revoked credential row", func(t *testing.T) {
+		token, ac, err := f.srv.SignAgentToken(tokenGrant, stored.RunID)
+		require.NoError(t, err)
+		require.NoError(t, f.store.CreateAgentCredential(ctx, ac))
+		require.NoError(t, f.store.RevokeAgentCredential(ctx, ac.ID, "test", "test"))
+		rec := f.exchange(t, token, stored.ID, grant.ID, aud)
+		adtAssertAPIError(t, rec, http.StatusUnauthorized, ErrCodeUnauthorized)
+	})
+	assert.Empty(t, adtAudits(t, f.store, mutationAgentDelegationCredentialIssue), "no credential was issued")
+}
+
+// TestAgentDelegation_AgentAndIssuerStateAtExchangeAndUse covers the bound
+// agent suspended, held or deleted, and the issuer deleted, at exchange and
+// at use (§17.2 #4, #5), and the grant-lookup reasons (§17.2 #1).
+func TestAgentDelegation_AgentAndIssuerStateAtExchangeAndUse(t *testing.T) {
+	f := newADTFixture(t, "adt-state")
+	ctx := context.Background()
+	decisions := f.captureDecisions(t)
+	aud := map[string]interface{}{"audience": f.srv.agentDelegationAudience()}
+
+	t.Run("another agent's grant and a missing grant record different reasons", func(t *testing.T) {
+		grant := f.hubGrant(t)
+		other, _ := f.createdAgent(t, f.create(t, authUser(f.alice), CreateAgentRequest{Name: "adt-state-x"}), "adt-state-x")
+		decisions.reset()
+		adtAssertAPIError(t, f.exchangeFor(t, other, grant.ID), http.StatusNotFound, errCodeGrantNotFound)
+		decisions.assertDelegatedDeny(t, agentDelegationReasonGrantOtherAgent)
+		decisions.reset()
+		adtAssertAPIError(t, f.exchangeFor(t, other, tid("adt-state-nogrant")), http.StatusNotFound, errCodeGrantNotFound)
+		decisions.assertDelegatedDeny(t, errCodeGrantNotFound)
+	})
+	t.Run("agent suspended", func(t *testing.T) {
+		grant := f.hubGrant(t)
+		token := f.agentJWT(t, f.agentA)
+		restore := f.mutateAgent(t, f.agentA.ID, func(a *store.Agent) { a.Phase = "suspended" })
+		defer restore()
+		adtAssertAPIError(t, f.exchange(t, token, f.agentA.ID, grant.ID, aud), http.StatusForbidden, errCodeGrantAgentChanged)
+	})
+	t.Run("agent held", func(t *testing.T) {
+		d, _, _ := f.transferredAgent(t, "adt-state-held")
+		grant := f.grantFor(t, f.session(t, f.alice), d.ID)
+		cred := f.credentialFor(t, d, grant.ID)
+		token := f.agentJWT(t, d)
+		_, err := f.store.CreateAgentHolds(ctx, []*store.AgentHold{{
+			AgentID: d.ID, ProjectID: d.ProjectID, Cause: store.AgentHoldCauseOwnerAccessEnded,
+			RootPrincipalType: store.AgentHoldRootUser, RootPrincipalID: f.alice.ID,
+			Trigger: store.MembershipLossTriggerMemberRemove, ActorKind: "system", ActorID: "hub", CorrelationID: "test",
+		}})
+		require.NoError(t, err)
+		// The agent middleware refuses a held agent's token before exchange.
+		adtAssertAPIError(t, f.exchange(t, token, d.ID, grant.ID, aud), http.StatusUnauthorized, ErrCodeUnauthorized)
+		decisions.reset()
+		adtAssertAPIError(t, f.getAgent(t, cred.Token, f.agentB.ID), http.StatusForbidden, ErrCodeForbidden)
+		decisions.assertDelegatedDeny(t, agentDelegationCodeGrantAgentChanged)
+	})
+	t.Run("agent deleted", func(t *testing.T) {
+		grant := f.hubGrant(t)
+		cred := f.delegated(t, grant.ID)
+		token := f.agentJWT(t, f.agentA)
+		restore := f.mutateAgentDeleted(t, f.agentA.ID)
+		defer restore()
+		adtAssertAPIError(t, f.exchange(t, token, f.agentA.ID, grant.ID, aud), http.StatusForbidden, errCodeGrantAgentChanged)
+		decisions.reset()
+		adtAssertAPIError(t, f.getAgent(t, cred.Token, f.agentB.ID), http.StatusForbidden, ErrCodeForbidden)
+		decisions.assertDelegatedDeny(t, agentDelegationCodeGrantAgentChanged)
+	})
+	t.Run("issuer deleted", func(t *testing.T) {
+		d, dave, _ := f.transferredAgent(t, "adt-state-gone")
+		grant := f.grantFor(t, f.session(t, dave), d.ID)
+		cred := f.credentialFor(t, d, grant.ID)
+		_, err := f.store.DeleteGroupMembershipsForUser(ctx, dave.ID)
+		require.NoError(t, err)
+		require.NoError(t, f.store.DeleteUser(ctx, dave.ID))
+		decisions.reset()
+		adtAssertAPIError(t, f.exchangeFor(t, d, grant.ID), http.StatusForbidden, errCodeIssuerInvalid)
+		decisions.assertDelegatedDeny(t, agentDelegationReasonIssuerMissing)
+		decisions.reset()
+		adtAssertAPIError(t, f.getAgent(t, cred.Token, f.agentB.ID), http.StatusForbidden, ErrCodeForbidden)
+		decisions.assertDelegatedDeny(t, agentDelegationCodeIssuerInvalid)
+	})
+}
+
+// mutateAgentDeleted soft-deletes the agent row and returns a restore.
+func (f *adtFixture) mutateAgentDeleted(t *testing.T, agentID string) func() {
+	t.Helper()
+	ctx := context.Background()
+	a, err := f.store.GetAgent(ctx, agentID)
+	require.NoError(t, err)
+	a.DeletedAt = time.Now()
+	require.NoError(t, f.store.UpdateAgent(ctx, a))
+	return func() {
+		again, err := f.store.GetAgent(ctx, agentID)
+		require.NoError(t, err)
+		again.DeletedAt = time.Time{}
+		require.NoError(t, f.store.UpdateAgent(ctx, again))
+	}
+}
+
+// TestAgentDelegation_PermissionUnresolvedDenies: a request with no
+// explicit permission whose resource and action do not resolve to exactly
+// one permission is denied (§17.2 #26).
+func TestAgentDelegation_PermissionUnresolvedDenies(t *testing.T) {
+	f := newADTFixture(t, "adt-unresolved")
+	ctx := context.Background()
+	cred := f.delegated(t, f.hubGrant(t).ID)
+	row, err := f.store.GetAgentDelegatedCredentialByKeyHash(ctx, hashDelegatedCredential(cred.Token))
+	require.NoError(t, err)
+	grant, err := f.store.GetAgentDelegationGrant(ctx, row.GrantID)
+	require.NoError(t, err)
+	issuer, err := f.store.GetUser(ctx, grant.IssuerUserID)
+	require.NoError(t, err)
+	agent, err := f.store.GetAgent(ctx, grant.AgentID)
+	require.NoError(t, err)
+	ac, err := f.store.GetAgentCredentialByID(ctx, row.ExchangeAgentCredentialID)
+	require.NoError(t, err)
+	st := &delegatedRequestState{
+		identity: newDelegatedAgentIdentity(row, grant), credential: row, grant: grant,
+		issuer: issuer, agent: agent, exchangeCred: ac, issuerPC: issuerPrincipal(issuer), memo: &ProjectAdmissionCache{},
+	}
+	dctx := withStandingMemo(contextWithDelegatedAdmission(contextWithDelegatedState(ctx, st), agentDelegationAdmittedRoutes[0]))
+	target := agentResource(f.agentB)
+
+	d := f.srv.authzService.Decide(dctx, AuthzRequest{Principal: PrincipalContext{Identity: st.identity}, Resource: target, Action: Action("no_such_action")})
+	assert.False(t, d.Allowed)
+	require.NotNil(t, d.AgentDelegation)
+	assert.Equal(t, agentDelegationCodePermissionUnresolved, d.AgentDelegation.AgentDelegationCode)
+
+	// Control: the same state and target with the read action is allowed.
+	d = f.srv.authzService.Decide(dctx, AuthzRequest{Principal: PrincipalContext{Identity: st.identity}, Resource: target, Action: ActionRead})
+	assert.True(t, d.Allowed, d.Reason)
 }

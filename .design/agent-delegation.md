@@ -430,7 +430,10 @@ codes. The precise reason goes only to the decision record.
 9. **Issuer state:** the user row exists, is active, is a local (non-federated) user, and
    `isReservedPlatformIdentity` is false for the issuer's email. A lookup error denies. External
    code: 403 `issuer_invalid`; the decision record carries `issuer_suspended`, `issuer_federated`
-   or `reserved_identity`. A reserved-identity hit **denies and revokes** the grant and its
+   or `reserved_identity`. A suspended local issuer does not reach this step: project admission
+   (step 7) refuses an account that is not active, with 403 `issuer_project_access`. So at
+   exchange, `issuer_invalid` covers a missing issuer row, a federated issuer and a reserved
+   platform identity. A reserved-identity hit **denies and revokes** the grant and its
    credentials (`revoke_reason = "reserved_identity"`, mutation audit). A failed revocation write
    still denies.
 10. **Policy:** every ceiling permission is still in the hub agent-delegation policy and the hub
@@ -479,8 +482,8 @@ external code, goes to the decision record (§14.2).
 | 403 | `forbidden` (no reason) | a non-user identity (an agent JWT other than the bound agent's own management paths) on a session-only G route |
 | 403 | `reserved_identity` | issuance by a reserved platform identity |
 | 403 | `issuer_not_controller` | issuer is not the agent's owner or recorded ancestor, or lacks `agent.delegation.create` |
-| 403 | `issuer_project_access` | issuer not admitted to the agent's project (issuance, exchange) |
-| 403 | `issuer_invalid` | exchange: issuer suspended, deleted, federated or a reserved platform identity |
+| 403 | `issuer_project_access` | issuer not admitted to the agent's project (issuance, exchange), including a suspended local issuer at exchange (step 7 refuses an account that is not active) |
+| 403 | `issuer_invalid` | exchange: issuer deleted, federated or a reserved platform identity |
 | 403 | `scope_violation` | issuance: `CanMintSelector` refused a selector; `details.selector` names it and `details.reason` carries the `MintDenialReason` (`unknown_selector`, `boundary_not_allowed`, `flat_role_insufficient`, `no_relationship_candidacy`) |
 | 403 | `forbidden` (no reason) | issuance: a project boundary naming a project that does not exist or that the issuer cannot access (the uniform response UAT mint gives, so existence is not confirmed) |
 | 403 | `permission_not_delegable` | a permission outside the hub agent-delegation policy, or an empty intersection after narrowing |

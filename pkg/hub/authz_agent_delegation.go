@@ -55,6 +55,11 @@ const (
 	agentDelegationCodeIssuerAuthority            = "issuer_authority"
 	agentDelegationCodeEvaluationError            = "evaluation_error"
 	agentDelegationCodeLookupError                = "lookup_error"
+
+	// Decision-record reasons finer than the external code (§8.2 steps 4
+	// and 9).
+	agentDelegationReasonGrantOtherAgent = "grant_bound_to_another_agent"
+	agentDelegationReasonIssuerMissing   = "issuer_missing"
 )
 
 // actorKindAgentDelegated is the actor kind recorded for an agent
