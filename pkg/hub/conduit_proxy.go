@@ -183,11 +183,15 @@ func (s *Server) portProxyResponseHeaderTimeout() time.Duration {
 }
 
 // isResponseHeaderTimeout reports whether err is the proxy transport's
-// response header timeout. A conduit stream has no deadlines, so the
-// transport's header bound is the only timeout on this path.
+// response header timeout. net/http returns that error unwrapped, so only
+// err itself is checked: a timeout wrapped inside a conduit stream or
+// session error (for example a session that failed on a write deadline
+// or a link read timeout) is a lost upstream, answered with 502 as before.
+// A context deadline (which also reports Timeout) is not it either.
 func isResponseHeaderTimeout(err error) bool {
-	var ne net.Error
-	return errors.As(err, &ne) && ne.Timeout()
+	ne, ok := err.(net.Error)
+	return ok && ne.Timeout() &&
+		!errors.Is(err, conduit.ErrSessionClosed) && !errors.Is(err, context.DeadlineExceeded)
 }
 
 // serveConduitProxy proxies r to the agent port over conn (a conduit
@@ -241,7 +245,7 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 				// with it.
 				status = http.StatusGatewayTimeout
 				slog.Info("Conduit proxy: the agent port did not answer in time",
-					"agent_id", agent.ID, "port", port, "path", reqPath,
+					"agent_id", agent.ID, "port", port,
 					"response_header_timeout", headerTimeout)
 				s.recordPortProxyUpstreamTimeout()
 				writePortProxyTimeout(w, r)

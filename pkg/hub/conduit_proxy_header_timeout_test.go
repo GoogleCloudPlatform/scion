@@ -17,18 +17,25 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -45,12 +52,19 @@ const headerTimeoutTestBound = time.Second
 func (f *conduitProxyFixture) withHeaderTimeout(t *testing.T, d time.Duration) (upstreamTimeouts func() int64) {
 	t.Helper()
 	f.srv.config.PortProxyResponseHeaderTimeout = d
+	return portProxyCounter(t, f.srv)
+}
+
+// portProxyCounter wires a port proxy counter on s and returns a reader
+// of its value.
+func portProxyCounter(t *testing.T, s *Server) func() int64 {
+	t.Helper()
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
 	rec, err := NewOTelPortProxyMetrics(mp)
 	require.NoError(t, err)
-	f.srv.SetPortProxyMetrics(rec)
+	s.SetPortProxyMetrics(rec)
 	return func() int64 {
 		var rm metricdata.ResourceMetrics
 		require.NoError(t, reader.Collect(context.Background(), &rm))
@@ -120,7 +134,22 @@ func TestConduitProxyTransportBounds(t *testing.T) {
 	assert.False(t, isResponseHeaderTimeout(errors.New("conduit: stream reset")))
 	assert.False(t, isResponseHeaderTimeout(io.ErrUnexpectedEOF))
 	assert.False(t, isResponseHeaderTimeout(nil))
+	assert.True(t, isResponseHeaderTimeout(timeoutNetError{}), "a bare net.Error timeout")
+	assert.False(t, isResponseHeaderTimeout(fmt.Errorf("%w: %w", conduit.ErrSessionClosed, timeoutNetError{})),
+		"a session closed on a deadline is a lost upstream")
+	assert.False(t, isResponseHeaderTimeout(fmt.Errorf("conduit stream: %w", timeoutNetError{})),
+		"a wrapped timeout is not the transport's header timeout")
+	assert.False(t, isResponseHeaderTimeout(fmt.Errorf("read: %w", context.DeadlineExceeded)))
+	assert.False(t, isResponseHeaderTimeout(context.DeadlineExceeded))
 }
+
+// timeoutNetError is a bare net.Error timeout, like the transport's
+// response header timeout.
+type timeoutNetError struct{}
+
+func (timeoutNetError) Error() string   { return "timeout awaiting response headers" }
+func (timeoutNetError) Timeout() bool   { return true }
+func (timeoutNetError) Temporary() bool { return true }
 
 // TestConduitProxyHeaderTimeout: a service that accepts and never answers
 // gets a 504 runtime_error within the bound plus 2s; the hub-side stream
@@ -239,6 +268,7 @@ func TestConduitProxyWebSocketHeaderTimeout(t *testing.T) {
 	auth := http.Header{"Authorization": {"Bearer " + f.userToken}}
 
 	t.Run("handshake not answered", func(t *testing.T) {
+		before := timeouts()
 		d := websocket.Dialer{HandshakeTimeout: headerTimeoutTestBound + 2*time.Second}
 		start := time.Now()
 		c, resp, err := d.Dial(wsBase+"/silent", auth)
@@ -253,7 +283,7 @@ func TestConduitProxyWebSocketHeaderTimeout(t *testing.T) {
 		body, err := io.ReadAll(resp.Body)
 		require.NoError(t, err)
 		assert.Equal(t, ErrCodeRuntimeError, proxyErrorCode(t, body))
-		assert.Equal(t, int64(1), timeouts())
+		assert.Equal(t, before+1, timeouts())
 		select {
 		case <-closed:
 		case <-time.After(5 * time.Second):
@@ -263,6 +293,7 @@ func TestConduitProxyWebSocketHeaderTimeout(t *testing.T) {
 	})
 
 	t.Run("upgraded connection outlives the bound", func(t *testing.T) {
+		before := timeouts()
 		c, resp, err := websocket.DefaultDialer.Dial(wsBase+"/ws", auth)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = c.Close() })
@@ -279,6 +310,123 @@ func TestConduitProxyWebSocketHeaderTimeout(t *testing.T) {
 		idle := time.NewTimer(2 * headerTimeoutTestBound)
 		<-idle.C
 		exchange("two")
-		assert.Equal(t, int64(1), timeouts(), "no timeout counted for the upgraded connection")
+		assert.Equal(t, before, timeouts(), "no timeout counted for the upgraded connection")
 	})
+}
+
+// erringStreamConn is a conduit stream stand-in for serveConduitProxy:
+// writes succeed, and reads fail with err (or, when err is nil, block
+// until the conn is closed).
+type erringStreamConn struct {
+	err    error
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newErringStreamConn(err error) *erringStreamConn {
+	return &erringStreamConn{err: err, closed: make(chan struct{})}
+}
+
+func (c *erringStreamConn) Read([]byte) (int, error) {
+	if c.err != nil {
+		return 0, c.err
+	}
+	<-c.closed
+	return 0, net.ErrClosed
+}
+func (c *erringStreamConn) Write(p []byte) (int, error)      { return len(p), nil }
+func (c *erringStreamConn) Close() error                     { c.once.Do(func() { close(c.closed) }); return nil }
+func (c *erringStreamConn) LocalAddr() net.Addr              { return conduitAddr("hub") }
+func (c *erringStreamConn) RemoteAddr() net.Addr             { return conduitAddr("agent") }
+func (c *erringStreamConn) SetDeadline(time.Time) error      { return nil }
+func (c *erringStreamConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *erringStreamConn) SetWriteDeadline(time.Time) error { return nil }
+
+// syncBuffer is a goroutine-safe log sink.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
+
+// TestConduitProxyTimeoutClassification pins, end to end through
+// serveConduitProxy, which upstream failures are a header timeout: only
+// the transport's own (unwrapped) response header timeout gives 504, the
+// INFO line and the counter. A stream whose session failed on a write
+// deadline, or a stream read failing with a wrapped deadline error, is a
+// lost upstream: 502 as before, nothing counted, no timeout line.
+func TestConduitProxyTimeoutClassification(t *testing.T) {
+	const timeoutLine = "the agent port did not answer in time"
+	logs := &syncBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	for _, tc := range []struct {
+		name       string
+		readErr    error
+		wantStatus int
+		wantCount  int64
+	}{
+		{name: "session closed on a write deadline",
+			readErr:    fmt.Errorf("%w: %w", conduit.ErrSessionClosed, timeoutNetError{}),
+			wantStatus: http.StatusBadGateway},
+		{name: "wrapped deadline error",
+			readErr:    fmt.Errorf("conduit stream: %w", context.DeadlineExceeded),
+			wantStatus: http.StatusBadGateway},
+		{name: "wrapped net timeout (link read)",
+			readErr:    fmt.Errorf("conduit link: %w", timeoutNetError{}),
+			wantStatus: http.StatusBadGateway},
+		{name: "transport response header timeout",
+			wantStatus: http.StatusGatewayTimeout, wantCount: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Server{}
+			s.config.PortProxyResponseHeaderTimeout = 100 * time.Millisecond
+			count := portProxyCounter(t, s)
+			mark := len(logs.String())
+			conn := newErringStreamConn(tc.readErr)
+			agent := &store.Agent{ID: "agent-classify"}
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/agent-classify/ports/3000/proxy/x", nil)
+			rec := httptest.NewRecorder()
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				s.serveConduitProxy(rec, req, agent, 3000, "/x", conn)
+			}()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("serveConduitProxy did not return")
+			}
+
+			require.Equal(t, tc.wantStatus, rec.Code, rec.Body.String())
+			assert.Equal(t, ErrCodeRuntimeError, proxyErrorCode(t, rec.Body.Bytes()))
+			assert.Equal(t, tc.wantCount, count())
+			newLogs := logs.String()[mark:]
+			if tc.wantCount > 0 {
+				assert.Contains(t, newLogs, timeoutLine)
+				assert.Contains(t, newLogs, "level=INFO")
+			} else {
+				assert.NotContains(t, newLogs, timeoutLine)
+			}
+			select {
+			case <-conn.closed:
+			default:
+				t.Error("the stream was not closed")
+			}
+		})
+	}
 }
