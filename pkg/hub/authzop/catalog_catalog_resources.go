@@ -157,7 +157,7 @@ var catalogResourceOperations = []OperationSpec{
 	{
 		ID:          "template.create",
 		Domain:      "template",
-		Description: "Create a new template or import resources",
+		Description: "Create a new template or import resources. A user-scope create through /api/v1/templates refuses a federated user (requireProfileWriter)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/resources/import", Method: "POST"},
@@ -170,12 +170,15 @@ var catalogResourceOperations = []OperationSpec{
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestGenericUserTemplateWrites_FederatedUserRefused"},
+		},
 	},
 	{
 		ID:          "template.update",
 		Domain:      "template",
-		Description: "Update an existing template definition",
+		Description: "Update an existing template definition. A user-scope template refuses a federated user (requireProfileWriter)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}", Method: "PUT"},
 		},
@@ -187,13 +190,16 @@ var catalogResourceOperations = []OperationSpec{
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
-		Bearer:           AdmitOn(BearerTargetCatalogRecord, BearerBoundaryProject, BearerBoundaryHub),
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestGenericUserTemplateWrites_FederatedUserRefused"},
+		},
+		Bearer: AdmitOn(BearerTargetCatalogRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "template.delete",
 		Domain:      "template",
-		Description: "Delete a template definition",
+		Description: "Delete a template definition. A user-scope template refuses a federated user (requireProfileWriter)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}", Method: "DELETE"},
 		},
@@ -211,7 +217,10 @@ var catalogResourceOperations = []OperationSpec{
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
-		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestGenericUserTemplateWrites_FederatedUserRefused"},
+		},
 	},
 
 	// =====================================================================

@@ -167,9 +167,9 @@
 - [skill.delete](#skilldelete) — Delete a skill definition
 - [skill.register](#skillregister) — Register skills in a skill registry
 - [template.read](#templateread) — Read template definitions or discover available templates
-- [template.create](#templatecreate) — Create a new template or import resources
-- [template.update](#templateupdate) — Update an existing template definition
-- [template.delete](#templatedelete) — Delete a template definition
+- [template.create](#templatecreate) — Create a new template or import resources. A user-scope create through /api/v1/templates refuses a federated user (requireProfileWriter)
+- [template.update](#templateupdate) — Update an existing template definition. A user-scope template refuses a federated user (requireProfileWriter)
+- [template.delete](#templatedelete) — Delete a template definition. A user-scope template refuses a federated user (requireProfileWriter)
 - [harnessconfig.read](#harnessconfigread) — Read harness configurations or list available configs
 - [harnessconfig.create](#harnessconfigcreate) — Create a new harness configuration
 - [harnessconfig.update](#harnessconfigupdate) — Update a harness configuration
@@ -6122,7 +6122,7 @@
 
 **Domain:** template
 
-**Description:** Create a new template or import resources
+**Description:** Create a new template or import resources. A user-scope create through /api/v1/templates refuses a federated user (requireProfileWriter)
 
 ### Entry Points
 
@@ -6146,6 +6146,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestGenericUserTemplateWrites_FederatedUserRefused`
 
 ---
 
@@ -6153,7 +6154,7 @@
 
 **Domain:** template
 
-**Description:** Update an existing template definition
+**Description:** Update an existing template definition. A user-scope template refuses a federated user (requireProfileWriter)
 
 ### Entry Points
 
@@ -6178,6 +6179,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestGenericUserTemplateWrites_FederatedUserRefused`
 
 ---
 
@@ -6185,7 +6187,7 @@
 
 **Domain:** template
 
-**Description:** Delete a template definition
+**Description:** Delete a template definition. A user-scope template refuses a federated user (requireProfileWriter)
 
 ### Entry Points
 
@@ -6215,6 +6217,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestGenericUserTemplateWrites_FederatedUserRefused`
 
 ---
 
