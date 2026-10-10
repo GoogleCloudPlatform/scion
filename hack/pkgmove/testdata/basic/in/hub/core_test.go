@@ -7,3 +7,9 @@ func TestCore(t *testing.T) {
 		t.Fatal("core")
 	}
 }
+
+func TestSafe(t *testing.T) {
+	if err := Safe(func() { panic("boom") }); err == nil {
+		t.Fatal("panic not recovered")
+	}
+}

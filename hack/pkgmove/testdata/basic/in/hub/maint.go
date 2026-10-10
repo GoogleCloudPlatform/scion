@@ -55,3 +55,10 @@ func onlyForTests() string { return "t" }
 func init() {
 	registry["init"] = 1
 }
+
+// guard recovers a panic; staying code defers it.
+func guard(err *error) {
+	if r := recover(); r != nil {
+		*err = fmt.Errorf("recovered: %v", r)
+	}
+}

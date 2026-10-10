@@ -4,7 +4,8 @@ Files (2):
   git mv hub/maint.go hub/sub/maint.go
   git mv hub/maint_test.go hub/sub/maint_test.go
 
-Renames (7):
+Renames (8):
+  func   guard -> Guard  (hub/maint.go:60)
   func   helper -> Helper  (hub/maint.go:29)
   const  maxItems -> MaxItems  (hub/maint.go:11)
   func   newWidget -> NewWidget  (hub/maint.go:22)
@@ -13,10 +14,11 @@ Renames (7):
   type   widget -> Widget  (hub/maint.go:17)
   method widget.count -> Count  (hub/maint.go:24)
 
-Alias entries (8):
+Alias entries (9):
   func  Exported = sub.Exported
   func  Map = sub.Map
   type  Pair = sub.Pair
+  var   guard = sub.Guard
   func  helper = sub.Helper
   const maxItems = sub.MaxItems
   func  newWidget = sub.NewWidget
@@ -24,7 +26,7 @@ Alias entries (8):
   func  onlyForTests = sub.OnlyForTests [test]
 
 Alias files (2):
-  hub/zz_alias_sub.go (37 lines)
+  hub/zz_alias_sub.go (41 lines)
   hub/zz_alias_sub_test.go (16 lines)
 
 Var reference rewrites in remaining files (3):
@@ -36,7 +38,7 @@ Remaining source files edited (1):
   hub/core.go
 
 pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
-Files moved: 2. Findings: 4. Errors: 0.
+Files moved: 2. Findings: 5. Errors: 0.
 
 Why this matters: a moved package is initialised before the package that
 imports it, so init() functions and package-level var initialisers in the moved
@@ -51,6 +53,9 @@ ERROR/HIGH/WARN item below before merging.
 
 == WARN: exported method (may newly satisfy interfaces) ==
   hub/maint.go:24: widget.count -> Count: check dynamic interface assertions that could now match
+
+== WARN: function alias declared as a var (calls recover) ==
+  hub/maint.go:60: guard calls recover() directly, so it is aliased as a var (a wrapper would make recover return nil under defer); the var is assignable and initialised at package init
 
 == INFO: staying var initialiser reads moved symbols ==
   hub/core.go:33: startCount reads maxItems, registry, now initialised in package sub (before all of hub)

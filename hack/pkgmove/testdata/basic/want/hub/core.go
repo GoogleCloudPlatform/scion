@@ -35,3 +35,10 @@ func Describe() string {
 }
 
 var startCount = maxItems + len(sub.Registry)
+
+// Safe runs f and converts a panic into an error through a moved helper.
+func Safe(f func()) (err error) {
+	defer guard(&err)
+	f()
+	return nil
+}

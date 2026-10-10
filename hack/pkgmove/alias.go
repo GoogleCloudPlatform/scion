@@ -17,6 +17,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"go/ast"
 	"go/format"
 	"go/types"
 	"path/filepath"
@@ -68,6 +69,15 @@ func (a *analysis) renderAliases() error {
 		var ok bool
 		switch obj := c.obj.(type) {
 		case *types.Func:
+			if a.callsRecover(obj) {
+				// A wrapper would break `defer foo()`: recover only works when
+				// called directly by the deferred function.
+				c.asVar = true
+				a.plan.add(levelWarn, "function alias declared as a var (calls recover)", a.posOf(obj.Pos()),
+					"%s calls recover() directly, so it is aliased as a var (a wrapper would make recover return nil under defer); the var is assignable and initialised at package init", obj.Name())
+				ok = true
+				break
+			}
 			ok = a.spellable(obj.Signature(), need)
 			if !ok && obj.Signature().TypeParams().Len() == 0 {
 				c.asVar = true
@@ -200,6 +210,37 @@ func (a *analysis) renderAliases() error {
 		a.plan.AliasFiles = append(a.plan.AliasFiles, generatedFile{Path: a.rel(path), Content: content})
 	}
 	return nil
+}
+
+// callsRecover reports whether the declaration of f calls the recover builtin
+// directly (outside nested function literals).
+func (a *analysis) callsRecover(f *types.Func) bool {
+	h := a.home(f)
+	if h == nil {
+		return false
+	}
+	for _, d := range h.AST.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || fd.Recv != nil || fd.Body == nil || a.info.Defs[fd.Name] != types.Object(f) {
+			continue
+		}
+		found := false
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.FuncLit:
+				return false
+			case *ast.CallExpr:
+				if id, ok := ast.Unparen(n.Fun).(*ast.Ident); ok {
+					if b, ok := a.info.Uses[id].(*types.Builtin); ok && b.Name() == "recover" {
+						found = true
+					}
+				}
+			}
+			return !found
+		})
+		return found
+	}
+	return false
 }
 
 func typeParamsOf(tn *types.TypeName) *types.TypeParamList {

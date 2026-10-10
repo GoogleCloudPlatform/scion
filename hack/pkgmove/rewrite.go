@@ -226,8 +226,12 @@ func (a *analysis) safetyFindings() {
 		}
 		for _, n := range []string{"%T", "reflect.TypeOf", "gob.Register", "runtime.FuncForPC", "runtime.Caller"} {
 			if strings.Contains(string(f.Src), n) {
+				extra := ""
+				if strings.HasPrefix(n, "runtime.Caller") {
+					extra = "; wrapper aliases also add one stack frame for callers in " + a.srcName
+				}
 				a.plan.add(levelWarn, "runtime type/function names change package qualifier", a.rel(f.Path),
-					"uses %s: names of moved types and functions now print as %s.X instead of %s.X", n, a.cfg.PkgName, a.srcName)
+					"uses %s: names of moved types and functions now print as %s.X instead of %s.X%s", n, a.cfg.PkgName, a.srcName, extra)
 			}
 		}
 		if f.Included && !f.XTest {

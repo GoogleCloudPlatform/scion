@@ -1,5 +1,5 @@
 pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
-Files moved: 2. Findings: 4. Errors: 0.
+Files moved: 2. Findings: 5. Errors: 0.
 
 Why this matters: a moved package is initialised before the package that
 imports it, so init() functions and package-level var initialisers in the moved
@@ -14,6 +14,9 @@ ERROR/HIGH/WARN item below before merging.
 
 == WARN: exported method (may newly satisfy interfaces) ==
   hub/maint.go:24: widget.count -> Count: check dynamic interface assertions that could now match
+
+== WARN: function alias declared as a var (calls recover) ==
+  hub/maint.go:60: guard calls recover() directly, so it is aliased as a var (a wrapper would make recover return nil under defer); the var is assignable and initialised at package init
 
 == INFO: staying var initialiser reads moved symbols ==
   hub/core.go:33: startCount reads maxItems, registry, now initialised in package sub (before all of hub)

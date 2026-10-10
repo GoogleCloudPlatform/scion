@@ -20,6 +20,10 @@ const (
 	maxItems = sub.MaxItems
 )
 
+var (
+	guard = sub.Guard
+)
+
 func Exported() *sub.Widget {
 	return sub.Exported()
 }
