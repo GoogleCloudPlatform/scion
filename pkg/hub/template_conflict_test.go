@@ -46,25 +46,40 @@ func setTemplateContentForTest(ctx context.Context, s store.Store, tmpl *store.T
 // lose to a concurrent commit: before delegating, it commits a new content
 // hash to the same row through the inner store, as another hub replica
 // would.
+//
+// With revertAfter set, a second concurrent commit restores the original
+// content hash right after the caller's write has lost, so the caller's
+// re-read sees its original content hash again (another writer reverted).
 type conflictInjectingStore struct {
 	store.Store
-	armed    atomic.Int32
-	injected atomic.Int32
+	armed       atomic.Int32
+	injected    atomic.Int32
+	revertAfter bool
 }
 
 func (c *conflictInjectingStore) UpdateTemplateContent(ctx context.Context, t *store.Template, expected store.TemplateContentPrecondition) error {
-	if c.armed.Add(-1) >= 0 {
-		cur, err := c.Store.GetTemplate(ctx, t.ID)
-		if err != nil {
-			return err
-		}
-		n := c.injected.Add(1)
-		cur.ContentHash = fmt.Sprintf("sha256:concurrent-%d", n)
-		if err := c.Store.UpdateTemplateContent(ctx, cur, store.TemplateContentPrecondition{ContentHash: expected.ContentHash}); err != nil {
-			return fmt.Errorf("inject concurrent commit: %w", err)
+	if c.armed.Add(-1) < 0 {
+		return c.Store.UpdateTemplateContent(ctx, t, expected)
+	}
+	cur, err := c.Store.GetTemplate(ctx, t.ID)
+	if err != nil {
+		return err
+	}
+	original := cur.ContentHash
+	n := c.injected.Add(1)
+	cur.ContentHash = fmt.Sprintf("sha256:concurrent-%d", n)
+	if err := c.Store.UpdateTemplateContent(ctx, cur, store.TemplateContentPrecondition{ContentHash: expected.ContentHash}); err != nil {
+		return fmt.Errorf("inject concurrent commit: %w", err)
+	}
+	err = c.Store.UpdateTemplateContent(ctx, t, expected)
+	if c.revertAfter {
+		concurrent := cur.ContentHash
+		cur.ContentHash = original
+		if rerr := c.Store.UpdateTemplateContent(ctx, cur, store.TemplateContentPrecondition{ContentHash: concurrent}); rerr != nil {
+			return fmt.Errorf("revert concurrent commit: %w", rerr)
 		}
 	}
-	return c.Store.UpdateTemplateContent(ctx, t, expected)
+	return err
 }
 
 // injectConflicts swaps the server's store for a conflictInjectingStore.
@@ -97,31 +112,6 @@ func templateErrorCode(t *testing.T, rec *httptest.ResponseRecorder) string {
 		t.Fatalf("decode error body %q: %v", rec.Body.String(), err)
 	}
 	return body.Error.Code
-}
-
-// casDisabledStore is the in-test mutant for the compare-and-swap: it
-// ignores the caller's precondition and writes against whatever the row
-// holds, which is what a plain whole-row update did before ptone/scion#4221.
-// The mutant subtests run the acceptance scenarios against it and assert
-// that the acceptance check fails, so each test is shown to depend on the
-// CAS within the same compile.
-type casDisabledStore struct {
-	store.Store
-}
-
-func (c casDisabledStore) UpdateTemplateContent(ctx context.Context, t *store.Template, _ store.TemplateContentPrecondition) error {
-	// Last writer wins: write against the row's current hash, re-reading if
-	// another writer slipped in between the read and the write.
-	for {
-		cur, err := c.Store.GetTemplate(ctx, t.ID)
-		if err != nil {
-			return err
-		}
-		err = c.Store.UpdateTemplateContent(ctx, t, store.TemplateContentPrecondition{ContentHash: cur.ContentHash})
-		if !errors.Is(err, store.ErrTemplateConflict) {
-			return err
-		}
-	}
 }
 
 // concurrentFinalizeOutcome is the result of two finalizes racing against
@@ -194,8 +184,8 @@ func TestTemplateFinalize_ConcurrentFinalizesExactlyOneWins(t *testing.T) {
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("losing finalize: status %d, want 409: %s", rec.Code, rec.Body.String())
 		}
-		if code := templateErrorCode(t, rec); code != templateConflictErrorCode {
-			t.Errorf("409 code = %q, want %q", code, templateConflictErrorCode)
+		if code := templateErrorCode(t, rec); code != ErrCodeTemplateConflict {
+			t.Errorf("409 code = %q, want %q", code, ErrCodeTemplateConflict)
 		}
 	}
 
@@ -217,19 +207,6 @@ func TestTemplateFinalize_ConcurrentFinalizesExactlyOneWins(t *testing.T) {
 	}
 }
 
-// Mutant (a): with the CAS disabled, both racing finalizes succeed, so the
-// exactly-one-winner check above fails.
-func TestTemplateFinalize_ConcurrentFinalizesMutantCASDisabled(t *testing.T) {
-	stor := newCommitTestStorage(t)
-	srv, s := newCommitTestServer(t, stor)
-	srv.store = casDisabledStore{Store: s}
-
-	out := raceTwoFinalizes(t, srv)
-	if len(out.winners) == 1 {
-		t.Fatalf("with the CAS disabled exactly one finalize still won; the acceptance test would not catch a missing CAS (codes %d, %d)", out.recs[0].Code, out.recs[1].Code)
-	}
-}
-
 // A finalize whose expectedContentHash is stale is refused with 409 and
 // leaves the row unchanged; a finalize without one (an older CLI) still
 // commits.
@@ -247,8 +224,8 @@ func TestTemplateFinalize_ExpectedContentHash(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("stale expectedContentHash: status %d, want 409: %s", rec.Code, rec.Body.String())
 	}
-	if code := templateErrorCode(t, rec); code != templateConflictErrorCode {
-		t.Errorf("409 code = %q, want %q", code, templateConflictErrorCode)
+	if code := templateErrorCode(t, rec); code != ErrCodeTemplateConflict {
+		t.Errorf("409 code = %q, want %q", code, ErrCodeTemplateConflict)
 	}
 	got, err := s.GetTemplate(ctx, tmpl.ID)
 	if err != nil {
@@ -319,34 +296,8 @@ func TestCommitTemplateFiles_StaleReadConflicts(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	writeTemplateCommitError(rec, conflictErr)
-	if rec.Code != http.StatusConflict || templateErrorCode(t, rec) != templateConflictErrorCode {
-		t.Errorf("writeTemplateCommitError: %d %s, want 409 %s", rec.Code, rec.Body.String(), templateConflictErrorCode)
-	}
-}
-
-// Mutant (a) for the stale-read case: without the CAS the stale commit
-// overwrites the newer one.
-func TestCommitTemplateFiles_StaleReadMutantCASDisabled(t *testing.T) {
-	stor := newCommitTestStorage(t)
-	srv, s := newCommitTestServer(t, stor)
-	ctx := context.Background()
-
-	tmpl := seedCommittedTemplate(t, srv, "stale", "global", "", map[string]string{"scion-agent.yaml": commitCfgOld})
-	srv.store = casDisabledStore{Store: s}
-	first, err := s.GetTemplate(ctx, tmpl.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := s.GetTemplate(ctx, tmpl.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	putObjects(t, stor, tmpl.StoragePath, map[string]string{"one.md": "1", "two.md": "2"})
-	if err := srv.commitTemplateFiles(ctx, first, upsertTemplateFile(first.Files, commitManifest(map[string]string{"one.md": "1"})[0]), commitOpts{}); err != nil {
-		t.Fatalf("first commit: %v", err)
-	}
-	if err := srv.commitTemplateFiles(ctx, second, upsertTemplateFile(second.Files, commitManifest(map[string]string{"two.md": "2"})[0]), commitOpts{}); errors.Is(err, store.ErrTemplateConflict) {
-		t.Fatal("with the CAS disabled the stale commit still conflicted; the acceptance test would not catch a missing CAS")
+	if rec.Code != http.StatusConflict || templateErrorCode(t, rec) != ErrCodeTemplateConflict {
+		t.Errorf("writeTemplateCommitError: %d %s, want 409 %s", rec.Code, rec.Body.String(), ErrCodeTemplateConflict)
 	}
 }
 
@@ -438,4 +389,95 @@ func TestTemplateRepair_RetriesConflictOnce(t *testing.T) {
 			}
 		})
 	}
+}
+
+// plantStaleDerivedFields gives the template a wrong Harness and no
+// DefaultHarnessConfig or AgentConfig while leaving Files and ContentHash
+// unchanged, so the next bootstrap of the same directory takes the
+// hash-match re-derive path (OnHashMatch).
+func plantStaleDerivedFields(t *testing.T, s store.Store, slug string) *store.Template {
+	t.Helper()
+	ctx := context.Background()
+	got, err := s.GetTemplateBySlug(ctx, slug, store.TemplateScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got.Harness = "stale"
+	got.DefaultHarnessConfig = ""
+	got.AgentConfig = nil
+	if err := setTemplateContentForTest(ctx, s, got); err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+// The hash-match re-derive (OnHashMatch) retries a conflict once while the
+// re-read row still has the directory's content hash, and skips without
+// writing when another commit has replaced the content.
+func TestTemplateBootstrap_OnHashMatchConflict(t *testing.T) {
+	files := map[string]string{"scion-agent.yaml": commitCfgBoth}
+
+	t.Run("content replaced: skip", func(t *testing.T) {
+		stor := newCommitTestStorage(t)
+		srv, s := newCommitTestServer(t, stor)
+		ctx := context.Background()
+		dir := writeTemplateDir(t, t.TempDir(), "rederive", files)
+		if _, err := srv.templateStore().Bootstrap(ctx, "rederive", dir, store.TemplateScopeGlobal, "", "", false); err != nil {
+			t.Fatal(err)
+		}
+		stale := plantStaleDerivedFields(t, s, "rederive")
+
+		inj := injectConflicts(srv, s)
+		inj.armed.Store(1)
+		changed, err := srv.templateStore().Bootstrap(ctx, "rederive", dir, store.TemplateScopeGlobal, "", "", false)
+		if err != nil || changed {
+			t.Fatalf("Bootstrap = (%v, %v), want (false, nil)", changed, err)
+		}
+		if inj.injected.Load() != 1 {
+			t.Fatalf("injected %d conflicts, want 1", inj.injected.Load())
+		}
+		got, err := s.GetTemplateBySlug(ctx, "rederive", store.TemplateScopeGlobal, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.ContentHash != "sha256:concurrent-1" {
+			t.Errorf("ContentHash = %q, want the concurrent commit's sha256:concurrent-1", got.ContentHash)
+		}
+		if got.Harness != "stale" {
+			t.Errorf("Harness = %q, want the concurrent commit's row untouched (stale)", got.Harness)
+		}
+		if got.StoragePath != stale.StoragePath {
+			t.Errorf("StoragePath = %q, want unchanged %q", got.StoragePath, stale.StoragePath)
+		}
+	})
+
+	t.Run("content unchanged: retry re-derives", func(t *testing.T) {
+		stor := newCommitTestStorage(t)
+		srv, s := newCommitTestServer(t, stor)
+		ctx := context.Background()
+		dir := writeTemplateDir(t, t.TempDir(), "rederive", files)
+		if _, err := srv.templateStore().Bootstrap(ctx, "rederive", dir, store.TemplateScopeGlobal, "", "", false); err != nil {
+			t.Fatal(err)
+		}
+		stale := plantStaleDerivedFields(t, s, "rederive")
+
+		inj := injectConflicts(srv, s)
+		inj.revertAfter = true
+		inj.armed.Store(1)
+		changed, err := srv.templateStore().Bootstrap(ctx, "rederive", dir, store.TemplateScopeGlobal, "", "", false)
+		if err != nil || changed {
+			t.Fatalf("Bootstrap = (%v, %v), want (false, nil)", changed, err)
+		}
+		if inj.injected.Load() != 1 {
+			t.Fatalf("injected %d conflicts, want 1", inj.injected.Load())
+		}
+		got, err := s.GetTemplateBySlug(ctx, "rederive", store.TemplateScopeGlobal, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.ContentHash != stale.ContentHash {
+			t.Errorf("ContentHash = %q, want the directory's %q", got.ContentHash, stale.ContentHash)
+		}
+		assertBothIndex(t, got)
+	})
 }

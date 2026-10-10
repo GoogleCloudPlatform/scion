@@ -43,6 +43,10 @@ type conflictHub struct {
 	uploadRequested  [][]string
 	finalized        *hubclient.TemplateManifest
 	conflicted       bool
+	// notFoundFirst makes the first finalize answer the Hub's "file not
+	// found" validation error, which sends sync down its re-upload-all
+	// retry.
+	notFoundFirst bool
 }
 
 func (h *conflictHub) server(t *testing.T, initialFiles map[string]string) *httptest.Server {
@@ -90,6 +94,14 @@ func (h *conflictHub) server(t *testing.T, initialFiles map[string]string) *http
 				return
 			}
 			h.finalizeExpected = append(h.finalizeExpected, req.ExpectedContentHash)
+			if h.notFoundFirst {
+				h.notFoundFirst = false
+				w.WriteHeader(http.StatusBadRequest)
+				assert.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]interface{}{"code": "validation_error", "message": "file not found: mine.md"},
+				}))
+				return
+			}
 			if h.conflicts > 0 {
 				h.conflicts--
 				h.conflicted = true
@@ -184,4 +196,26 @@ func TestUpdateHubTemplate_RetriesOnceOnConflict(t *testing.T) {
 	})
 	require.Equal(t, []string{"sha256:old", "sha256:winner"}, h.finalizeExpected)
 	require.NotNil(t, h.finalized)
+}
+
+// A conflict on the re-upload-all retry (after a "file not found" finalize)
+// fails with the same clear message as the conflict retry.
+func TestSyncTemplateToHub_ConflictAfterMissingFilesRetry(t *testing.T) {
+	localPath := t.TempDir()
+	writeTemplateFile(t, localPath, "scion-agent.yaml", "harness: claude\n")
+	writeTemplateFile(t, localPath, "mine.md", "mine\n")
+
+	h := &conflictHub{notFoundFirst: true, conflicts: 1, winnerFiles: map[string]string{}}
+	server := h.server(t, map[string]string{"scion-agent.yaml": transfer.HashBytes([]byte("harness: claude\n"))})
+	defer server.Close()
+
+	var err error
+	out := captureStdout(t, func() {
+		err = syncTemplateToHub(newTemplateSyncHubCtx(t, server), "base", localPath, "global", "claude")
+	})
+	require.Contains(t, out, "re-uploading all files")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "changed on the Hub by another push while re-uploading")
+	require.Len(t, h.finalizeExpected, 2)
+	require.Nil(t, h.finalized)
 }

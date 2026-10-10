@@ -371,16 +371,17 @@ func (s *Server) commitTemplateFiles(ctx context.Context, tmpl *store.Template, 
 
 // templateCommitPrecondition returns the stored state a commit of tmpl
 // requires: the content hash the caller read, unless opts names one.
+//
+// The precondition is built from the row as read, and opts overrides only
+// the fields it names, so a field added to TemplateContentPrecondition is
+// checked for every commit, including a finalize that names its content hash.
 func templateCommitPrecondition(tmpl *store.Template, opts commitOpts) store.TemplateContentPrecondition {
+	p := store.TemplateContentPrecondition{ContentHash: tmpl.ContentHash}
 	if opts.expectedContentHash != "" {
-		return store.TemplateContentPrecondition{ContentHash: opts.expectedContentHash}
+		p.ContentHash = opts.expectedContentHash
 	}
-	return store.TemplateContentPrecondition{ContentHash: tmpl.ContentHash}
+	return p
 }
-
-// templateConflictErrorCode is the API error code of a template commit that
-// lost a compare-and-swap to a concurrent commit (HTTP 409).
-const templateConflictErrorCode = "template_conflict"
 
 // deleteRemovedTemplateFiles deletes the storage objects of files listed in
 // previous but no longer in tmpl.Files. Only those exact paths are deleted,
@@ -432,7 +433,7 @@ func writeTemplateCommitError(w http.ResponseWriter, err error) {
 		return
 	}
 	if errors.Is(err, store.ErrTemplateConflict) {
-		writeError(w, http.StatusConflict, templateConflictErrorCode,
+		writeError(w, http.StatusConflict, ErrCodeTemplateConflict,
 			"template was changed by another commit; re-read it and retry", nil)
 		return
 	}
