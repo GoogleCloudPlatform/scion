@@ -258,7 +258,9 @@ function withLiveAgentStatus(
     ...member,
     phase: agent.phase || '',
     activity: agent.activity || '',
-    detailMessage: agentDetailMessage(agent) || member.detailMessage || '',
+    // The store row is the seeded member plus any status events, so a
+    // row without a message means the message was cleared.
+    detailMessage: agentDetailMessage(agent),
     lastActivityEvent: realTimestamp(agent.lastActivityEvent) || member.lastActivityEvent || '',
   };
 }
@@ -2470,7 +2472,9 @@ export class ScionPageChat extends LitElement {
         activity: agent.activity || '',
         lastSeen: agent.lastSeen || existing?.lastSeen || '',
         projectId: agent.projectId || existing?.projectId || scopeProjectId,
-        detailMessage: agentDetailMessage(agent) || existing?.detailMessage || '',
+        // A full store row: no message means the server cleared it, as
+        // the hub view treats it (hubAgentMember).
+        detailMessage: agentDetailMessage(agent),
         lastActivityEvent:
           realTimestamp(agent.lastActivityEvent) ||
           realTimestamp(agent.updated) ||
