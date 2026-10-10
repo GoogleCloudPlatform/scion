@@ -159,9 +159,9 @@ account is mapped to a Kubernetes service account on that broker profile,
 from the broker's latest report. Without --broker the broker is the one
 agent creation would pick (the project's default broker, else the hub's
 default broker if it serves the project, else the only provider), not
-counting whether it is online. "mapped" does not mean ready: the Workload Identity
-IAM binding is not checked. Accounts whose state is unknown are listed
-with the reason, never hidden.`,
+counting whether it is online. "mapped" does not mean ready: the
+Workload Identity IAM binding is not checked. Accounts whose state is
+unknown are listed with the reason, never hidden.`,
 	Args: cobra.NoArgs,
 	RunE: runSAScopedList,
 }
