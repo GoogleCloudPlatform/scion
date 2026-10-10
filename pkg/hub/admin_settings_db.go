@@ -561,8 +561,9 @@ func accessNoRowBase(ops *OperationalSettings) map[string]json.RawMessage {
 }
 
 // endpointsNoRowBase is the endpoints base when no endpoints row exists:
-// the effective public_url, image_registry and monitoring_dashboard_url. hub_name is left out: the
-// bootstrap value applies without being written (bootstrapAppliesWhenAbsent).
+// the effective public_url, image_registry and monitoring_dashboard_url.
+// hub_name is left out: the bootstrap value applies without being written
+// (bootstrapAppliesWhenAbsent).
 func endpointsNoRowBase(ops *OperationalSettings) map[string]json.RawMessage {
 	snap := ops.Snapshot()
 	return structToRawMap(opsettings.EndpointsSettings{
@@ -921,9 +922,26 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		if len(maskedTelemetryHeaderNames(req.Telemetry)) > 0 {
-			merged, err = restoreMaskedTelemetryHeadersInDoc(merged, cur)
+			var restored int
+			merged, restored, err = restoreMaskedTelemetryHeadersInDoc(merged, cur)
 			if err != nil {
 				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+				return
+			}
+			// A restored value is approved against the row this merge
+			// read, so the write must be a CAS on that row's revision. A
+			// client revision that differs (-1 included) cannot carry it.
+			if pinned, ok := req.ExpectedRevisions["telemetry"]; ok && restored > 0 && pinned != rev {
+				writeJSON(w, http.StatusConflict, map[string]interface{}{
+					"error":   "revision_conflict",
+					"message": "telemetry.cloud.headers holds masked values, which are kept only on the current revision of the telemetry section; reload and save again.",
+					"applied": map[string]int64{},
+					"conflicted": []map[string]interface{}{{
+						"section":           "telemetry",
+						"expected_revision": pinned,
+						"current_revision":  rev,
+					}},
+				})
 				return
 			}
 		}

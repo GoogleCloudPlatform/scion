@@ -130,9 +130,10 @@ type sectionMergeOptions struct {
 	// the bootstrap hub_name, which applies without being written).
 	seededBase func(base map[string]json.RawMessage)
 	// baseOut, when set, receives the base document from the same row
-	// read the merge uses, after the base rules above and before the
-	// request is applied (telemetry compares it with the merged result;
-	// see restoreMaskedTelemetryHeadersInDoc).
+	// read the merge uses, after the base rules above and the schema
+	// drops the write applies to carried keys, before the request is
+	// applied (telemetry compares it with the merged result; see
+	// restoreMaskedTelemetryHeadersInDoc).
 	baseOut *json.RawMessage
 }
 
@@ -177,8 +178,23 @@ func mergeSectionOnCurrentWith(ctx context.Context, ops *OperationalSettings, se
 		return nil, 0, fmt.Errorf("reading current %s row: %w", section, err)
 	}
 
+	schema, _ := opsettings.SchemaInfo()[section].Schema.(map[string]interface{})
+	validate := func(doc json.RawMessage) bool { return len(opsettings.Validate(section, doc)) == 0 }
+
 	if opts.baseOut != nil {
-		b, err := json.Marshal(base)
+		// The base goes through the same schema drops the write applies to
+		// the keys it carries, so it equals what the row would hold after
+		// a save that sends nothing.
+		cp := make(map[string]json.RawMessage, len(base))
+		for k, v := range base {
+			cp[k] = v
+		}
+		dropKeysForbiddenBySchema(section, schema, cp)
+		if deepMergeSections[section] {
+			dropInvalidCarriedNestedKeys(section, cp, sentTree{}, validate)
+		}
+		dropInvalidCarriedKeys(section, schema, cp, nil, validate)
+		b, err := json.Marshal(cp)
 		if err != nil {
 			return nil, 0, fmt.Errorf("marshalling %s base: %w", section, err)
 		}
@@ -187,12 +203,10 @@ func mergeSectionOnCurrentWith(ctx context.Context, ops *OperationalSettings, se
 
 	tree := patchSection(section, base, next, fp)
 
-	schema, _ := opsettings.SchemaInfo()[section].Schema.(map[string]interface{})
 	if dropped := dropKeysForbiddenBySchema(section, schema, base); len(dropped) > 0 {
 		slog.Warn("admin settings save: removing stored keys the section schema does not allow (takes effect only if the save is written)",
 			"section", section, "keys", dropped)
 	}
-	validate := func(doc json.RawMessage) bool { return len(opsettings.Validate(section, doc)) == 0 }
 	var dropped []string
 	if deepMergeSections[section] {
 		dropped = dropInvalidCarriedNestedKeys(section, base, tree, validate)

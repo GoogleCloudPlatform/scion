@@ -852,6 +852,57 @@ func TestPutServerConfigDB_TelemetryMaskedHeaderSeededEnvPinnedRow(t *testing.T)
 	assert.Equal(t, map[string]any{"x-api-key": "real-key"}, headers)
 }
 
+// A stored cloud member the schema rejects is dropped from the write and
+// from the base the check compares with alike, so a masked echo that
+// changes nothing keeps the stored header instead of failing.
+func TestPutServerConfigDB_TelemetryMaskedHeaderInvalidCarriedMember(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv, fake, ops := newTestDBServer(t)
+	fake.seedWithOrigin("telemetry", json.RawMessage(`{"cloud":{"endpoint":"otel.example.com:4317","protocol":"bogus","headers":{"x-api-key":"real-key"}}}`), "managed")
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+
+	rr := putServerConfigDB(t, srv, ops, `{"telemetry":{"cloud":{"endpoint":"otel.example.com:4317","headers":{"x-api-key":"********"}}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	cloud, _ := valueAtPath(decodeJSONValue(t, storedRow(fake, "telemetry").Value), []string{"cloud"})
+	assert.Equal(t, map[string]any{"endpoint": "otel.example.com:4317", "headers": map[string]any{"x-api-key": "real-key"}}, cloud)
+}
+
+// A masked header restored from the row needs the write to be a CAS on
+// that row's revision: a request that pins another telemetry revision
+// (-1 included) gets 409 and nothing is written; pinning the revision GET
+// reported keeps the header.
+func TestPutServerConfigDB_TelemetryMaskedHeaderPinnedRevision(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		pinned   string
+		wantCode int
+	}{
+		{"last writer wins", `-1`, http.StatusConflict},
+		{"stale revision", `7`, http.StatusConflict},
+		{"read revision", `1`, http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			srv, fake, ops := newTestDBServer(t)
+			fake.seedWithOrigin("telemetry", json.RawMessage(storedTelemetryWithHeaders), "managed")
+			_, err := ops.Refresh(context.Background())
+			require.NoError(t, err)
+
+			rr := putServerConfigDB(t, srv, ops, `{"telemetry":{"cloud":{"headers":{"x-api-key":"********","x-tenant":"t2"}}},"expected_revisions":{"telemetry":`+tc.pinned+`}}`)
+			require.Equal(t, tc.wantCode, rr.Code, rr.Body.String())
+			row := storedRow(fake, "telemetry")
+			headers, _ := valueAtPath(decodeJSONValue(t, row.Value), []string{"cloud", "headers"})
+			if tc.wantCode != http.StatusOK {
+				assert.Equal(t, int64(1), row.Revision, "nothing is written")
+				assert.Equal(t, map[string]any{"x-api-key": "real-key", "x-tenant": "t1"}, headers)
+				return
+			}
+			assert.Equal(t, map[string]any{"x-api-key": "real-key", "x-tenant": "t2"}, headers)
+		})
+	}
+}
+
 // With no telemetry row there is no stored header to restore, so a masked
 // header is rejected even when GET showed one from bootstrap settings.
 func TestPutServerConfigDB_TelemetryMaskedHeaderNoRowRejected(t *testing.T) {
@@ -1076,4 +1127,22 @@ func TestSystemRegistry_UnchangedManagedRowNotRewritten(t *testing.T) {
 	assert.Equal(t, int64(2), row.Revision)
 	got, _ := valueAtPath(decodeJSONValue(t, row.Value), []string{"image_registry"})
 	assert.Equal(t, "other.example.com", got)
+}
+
+// A seeded endpoints row whose monitoring_dashboard_url is pinned by a
+// node-local env var: an unrelated endpoints save does not carry the
+// env value into the written row.
+func TestPutServerConfigDB_EndpointsSeededRowEnvPinnedMonitoringURLNotCarried(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv, fake, ops := newTestDBServer(t)
+	ops.envOverrides = map[string]bool{config.MonitoringDashboardURLKey: true}
+	fake.seedWithOrigin("endpoints", json.RawMessage(`{"public_url":"https://old.example.com","monitoring_dashboard_url":"https://env.example.com/d"}`), "seeded")
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+
+	rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"public_url":"https://hub.example.com"}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	row := storedRow(fake, "endpoints")
+	assert.Equal(t, "managed", row.Origin)
+	assert.Equal(t, map[string]any{"public_url": "https://hub.example.com"}, decodeJSONValue(t, row.Value))
 }

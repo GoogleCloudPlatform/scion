@@ -454,11 +454,12 @@ func pruneNoValue(m map[string]any) {
 // The values restored come from the row, never from the snapshot GET was
 // built from: on a replica whose snapshot is stale, the row wins. With no
 // row, cur is empty, so a masked header (which GET can show from bootstrap
-// settings) has no stored value and the save is rejected.
-func restoreMaskedTelemetryHeadersInDoc(next, cur json.RawMessage) (json.RawMessage, error) {
+// settings) has no stored value and the save is rejected. It returns the
+// number of values restored.
+func restoreMaskedTelemetryHeadersInDoc(next, cur json.RawMessage) (json.RawMessage, int, error) {
 	var doc map[string]any
 	if err := json.Unmarshal(next, &doc); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	cloud, _ := doc["cloud"].(map[string]any)
 	headers, _ := cloud["headers"].(map[string]any)
@@ -469,16 +470,16 @@ func restoreMaskedTelemetryHeadersInDoc(next, cur json.RawMessage) (json.RawMess
 		}
 	}
 	if len(names) == 0 {
-		return next, nil
+		return next, 0, nil
 	}
 	sort.Strings(names)
 	if !telemetryCloudUnchanged(next, cur) {
-		return nil, fmt.Errorf("telemetry.cloud.headers.%s is the masked placeholder %q but other fields of telemetry.cloud changed; send the real value", names[0], maskedValue)
+		return nil, 0, fmt.Errorf("telemetry.cloud.headers.%s is the masked placeholder %q but other fields of telemetry.cloud changed; send the real value", names[0], maskedValue)
 	}
 	var curDoc map[string]any
 	if len(cur) > 0 {
 		if err := json.Unmarshal(cur, &curDoc); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 	}
 	curCloud, _ := curDoc["cloud"].(map[string]any)
@@ -489,11 +490,15 @@ func restoreMaskedTelemetryHeadersInDoc(next, cur json.RawMessage) (json.RawMess
 			sp = &sv
 		}
 		if err := checkStoredSecret("telemetry.cloud.headers."+k, sp); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		headers[k] = *sp
 	}
-	return json.Marshal(doc)
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return nil, 0, err
+	}
+	return out, len(names), nil
 }
 
 // telemetryCloudUnchangedFile reports, for a file-mode save, whether the
