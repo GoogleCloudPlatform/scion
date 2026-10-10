@@ -141,7 +141,9 @@ const defaultMaxConcurrentDispatches = 20
 
 // ControlChannelClient manages the WebSocket connection to the Hub.
 type ControlChannelClient struct {
-	config         ControlChannelConfig
+	config ControlChannelConfig
+	// conn is written only by doConnect on the connect goroutine, under mu;
+	// readers on other goroutines must copy it under mu.
 	conn           *wsprotocol.Connection
 	handlers       http.Handler // Reuse existing HTTP handlers
 	agentLookup    AgentLookup  // For looking up agent container IDs

@@ -2524,7 +2524,8 @@ func (s *Server) logHubConnections() {
 	}
 
 	for _, conn := range s.hubConnections {
-		// Reinitialize writes these fields under conn.mu.
+		// Reinitialize writes these fields under conn.mu; other readers are
+		// tracked in ptone/scion#4344.
 		conn.mu.RLock()
 		endpoint := conn.HubEndpoint
 		authMode := conn.AuthMode
