@@ -23,6 +23,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 )
 
+// Compile-time check that PostgresConfigProvider satisfies the interface;
+// runs without a Postgres backend.
+var _ config.IntegrationConfigProvider = (*pgprovider.PostgresConfigProvider)(nil)
+
 func TestPostgresConfigProvider_LoadEmpty(t *testing.T) {
 	if !enttest.Active() {
 		t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")

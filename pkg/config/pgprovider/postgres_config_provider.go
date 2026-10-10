@@ -25,7 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationconfig"
 )
 
-// PostgresConfigProvider implements IntegrationConfigProvider backed by the
+// PostgresConfigProvider implements config.IntegrationConfigProvider backed by the
 // integration_configs Ent table. Used for Mode 3 (HA) integrations where
 // config is stored in Postgres rather than local YAML files.
 type PostgresConfigProvider struct {
