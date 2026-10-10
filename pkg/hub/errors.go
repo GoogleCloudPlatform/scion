@@ -328,13 +328,40 @@ func writeError(w http.ResponseWriter, statusCode int, code, message string, det
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+// httpStatusError is implemented by hub errors that writeErrorFromErr maps to
+// a fixed response. Each implementation sits next to its error's definition,
+// so this file needs no reference to the error itself. httpStatus returns the
+// response status, the error code and the client-facing message; the response
+// carries no extra headers or details.
+type httpStatusError interface {
+	error
+	httpStatus() (status int, code, message string)
+}
+
+// deleteInProgressMessage is the client-facing message of a 409
+// delete_in_progress answer, shared by writeErrorFromErr (store
+// ErrDeleteInProgress) and deleteInProgressRefusal.
+const deleteInProgressMessage = "a delete is in progress for this agent; wait for it to finish, or force the delete"
+
+// storeMembersGroupPrincipalMessage is the client-facing message for a store
+// refusal (store.ErrProjectMembersGroupPrincipal), shared by writeErrorFromErr
+// and storeMembersGroupPrincipalDecision so both routes return the same text.
+const storeMembersGroupPrincipalMessage = "Project members groups cannot be role-binding principals or child groups"
+
 // writeErrorFromErr writes an error response based on a Go error.
 // For 5xx errors, it logs the underlying error for debugging.
+//
+// The cases are checked in order and the first match wins, which decides the
+// response when err matches more than one (a wrap chain or errors.Join):
+// secret.PermissionError, then the store sentinels in the order listed, then
+// secret.ErrNoSecretBackend, then any hub error implementing httpStatusError,
+// and otherwise a 500.
 func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 	var statusCode int
 	var code, message string
 
 	var permErr *secret.PermissionError
+	var statusErr httpStatusError
 
 	switch {
 	case errors.As(err, &permErr):
@@ -354,7 +381,7 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		// delete holds the row (ptone/scion#2550).
 		statusCode = http.StatusConflict
 		code = ErrCodeDeleteInProgress
-		message = deleteInProgressRefusal("").Message
+		message = deleteInProgressMessage
 	case errors.Is(err, store.ErrVersionConflict):
 		statusCode = http.StatusConflict
 		code = ErrCodeVersionConflict
@@ -388,10 +415,8 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		statusCode = http.StatusNotImplemented
 		code = ErrCodeUnavailable
 		message = err.Error()
-	case errors.Is(err, errInvalidCursor):
-		statusCode = http.StatusBadRequest
-		code = ErrCodeInvalidCursor
-		message = "invalid cursor: restart pagination from the first page"
+	case errors.As(err, &statusErr):
+		statusCode, code, message = statusErr.httpStatus()
 	default:
 		statusCode = http.StatusInternalServerError
 		code = ErrCodeInternalError
