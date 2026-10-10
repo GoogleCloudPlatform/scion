@@ -62,6 +62,7 @@ import type {
 import type { AgentConfigPlaceholder } from '../../shared/agent-config-inherited.js';
 import type { GcpIdentityState, GcpMetadataMode } from '../../shared/gcp-identity-state.js';
 import { MESSAGE_MODE_DISPLAY } from '../../shared/message-mode.js';
+import { assignStatusLabel } from '../../shared/gcp-sa-assign-status.js';
 import type { EnvEntry } from './env-editor.js';
 import './env-editor.js';
 
@@ -1405,16 +1406,27 @@ export class ScionAgentConfigForm extends LitElement {
                         this.emitChange();
                       }}
                     >
-                      ${g.verifiedGCPServiceAccounts.map(
-                        (sa) =>
-                          html`<sl-option value=${sa.id}>
-                            ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}${sa.scope ===
-                            'hub'
-                              ? ' (Hub)'
-                              : ''}
-                          </sl-option>`
-                      )}
+                      ${g.pickerServiceAccounts.map((sa) => {
+                        const status = assignStatusLabel(sa.assignStatus);
+                        return html`<sl-option
+                          value=${sa.id}
+                          data-assign-state=${sa.assignStatus?.state ?? nothing}
+                          title=${sa.assignStatus?.message || nothing}
+                        >
+                          ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}${sa.scope ===
+                          'hub'
+                            ? ' (Hub)'
+                            : ''}${status
+                            ? html` <span class="assign-status">— ${status}</span>`
+                            : nothing}
+                        </sl-option>`;
+                      })}
                     </sl-select>
+                    ${g.selectedAssignStatus?.message
+                      ? html`<div class="hint" data-testid="gcp-sa-assign-status">
+                          ${g.selectedAssignStatus.message}
+                        </div>`
+                      : nothing}
                   `
                 : html`
                     <div class="hint">
@@ -1596,6 +1608,9 @@ export class ScionAgentConfigForm extends LitElement {
     .other-help {
       margin-top: 0.25rem;
       font-size: var(--sl-font-size-small);
+      color: var(--sl-color-neutral-600);
+    }
+    .assign-status {
       color: var(--sl-color-neutral-600);
     }
     .status {
