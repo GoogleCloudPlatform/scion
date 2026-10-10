@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -103,12 +104,13 @@ func userRequest(t *testing.T, srv *Server, user *store.User, method, path strin
 	return rec, token
 }
 
-// seedDecisionLogAdmin creates a hub-admin user (holds agent.stop_all on
-// the hub).
+// seedDecisionLogAdmin creates a super-admin user. Global stop-all needs
+// agent.stop_all on the hub, which the super-admin role holds (it is not in
+// the curated hub-admin set; project owner/admin hold it per project).
 func seedDecisionLogAdmin(t *testing.T, s store.Store) *store.User {
 	t.Helper()
 	id := tid("dl-admin")
-	createTestUserWithRole(t, s, id, "dl-admin@example.com", "admin", store.SystemRoleHubAdmin)
+	createTestUserWithRole(t, s, id, "dl-admin@example.com", "admin", store.SystemRoleSuperAdmin)
 	ensureHubMembership(context.Background(), s, id)
 	u, err := s.GetUser(context.Background(), id)
 	require.NoError(t, err)
@@ -146,7 +148,7 @@ func auditGroup(t *testing.T, line map[string]any, key string) map[string]any {
 // s.authorize/CheckAccess sets no Permission, so project routes such as
 // GET /api/v1/projects/{id}/members are excluded_permission (asserted
 // below). The measured in-domain route is POST /api/v1/agents/stop-all:
-// a hub admin is allowed and a member is denied.
+// a super-admin is allowed and a member is denied.
 func TestDecisionLog_P1_3_ProductionConstructorStopAll(t *testing.T) {
 	capture := &decisionLogCapture{}
 	srv, s := newDecisionLogServer(t, capture)
@@ -438,7 +440,7 @@ func TestDecisionLog_P1_6_OutcomesUnchangedWithWriterBlockedAndFull(t *testing.T
 	}
 	moved := func(d decisionAuditDisposition) uint64 { return l.counts.get(d, true) + l.counts.get(d, false) }
 	// HTTP probes: two authorize-path project requests (excluded_permission),
-	// two in-domain session stop-all requests (hub-admin allow, member deny),
+	// two in-domain session stop-all requests (super-admin allow, member deny),
 	// and separately a real UAT bearer gate deny on stop-all with the
 	// decoration present (NewRef path).
 	membersStatuses := func() []int {
@@ -646,7 +648,8 @@ func TestDecisionLog_P1_9_ShutdownClosesWriterAfterDrain(t *testing.T) {
 		srv.decisionAuditLogger.EmitDecisionAudit(decisionCtx(), rec)
 		w.WriteHeader(http.StatusNoContent)
 	})}
-	hs.RegisterOnShutdown(func() { close(drainStarted) })
+	var drainOnce sync.Once // the test cleanup calls Shutdown again
+	hs.RegisterOnShutdown(func() { drainOnce.Do(func() { close(drainStarted) }) })
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	go func() { _ = hs.Serve(ln) }()
