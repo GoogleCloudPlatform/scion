@@ -129,17 +129,30 @@ func restartWriteBudget() time.Duration {
 	return workspaceCheckTimeout + 2*syncDispatchTimeout + syncDispatchWriteSlack
 }
 
+// stopSyncBackTimeout bounds the stop-time workspace sync-back
+// (syncWorkspaceOnStop) as a whole: the upload request tunneled to the
+// broker and the download of the upload into the hub workspace together
+// (ptone/scion#4210). It equals syncDispatchTimeout, the hub-to-broker
+// request limit that already capped the upload alone, so the sync-back's
+// share of stopWriteBudget is unchanged and now also covers the download.
+func stopSyncBackTimeout() time.Duration {
+	return syncDispatchTimeout
+}
+
+// stopSyncBackTimedOutWarning is the stop (or suspend) response's warning
+// when the workspace sync-back ran out of time and the stop went on.
+const stopSyncBackTimedOutWarning = "The workspace sync-back to the hub did not finish in time; the stop went ahead. The hub's copy of the workspace may not have the agent's latest changes, or may have only part of them."
+
 // stopWriteBudget is the write deadline, from the start of the broker
-// work, of a lifecycle stop or suspend: the workspace sync-back request to
-// the broker (syncWorkspaceOnStop, bounded like a dispatch by the
-// hub-to-broker request limit, syncDispatchTimeout), the ephemeral workspace
-// check, then the stop dispatch (under syncDispatch), plus
+// work, of a lifecycle stop or suspend: the workspace sync-back
+// (syncWorkspaceOnStop, bounded by stopSyncBackTimeout), the ephemeral
+// workspace check, then the stop dispatch (under syncDispatch), plus
 // syncDispatchWriteSlack. It is also the bound of the whole stop once it is
 // detached from the client (detachStopFromClient): the slack is then what
 // is left for the stopped status write and the other store writes after
 // the broker steps.
 func stopWriteBudget() time.Duration {
-	return syncDispatchTimeout + workspaceCheckTimeout + syncDispatchTimeout + syncDispatchWriteSlack
+	return stopSyncBackTimeout() + workspaceCheckTimeout + syncDispatchTimeout + syncDispatchWriteSlack
 }
 
 // dmWakeWriteBudget is the write deadline, from the start of the wake, of a
