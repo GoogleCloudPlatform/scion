@@ -95,6 +95,16 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The reserved hub test-identity domain is created only by the
+	// issuance endpoint. Checked on the requested email before any lookup
+	// or write, so it refuses creating such a user as well as signing in
+	// as an existing one. Other domains, including the one test-login
+	// callers use for their own synthetic users, are unaffected.
+	if isReservedTestIdentityEmail(req.Email) {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "test-login cannot sign in as this user", nil)
+		return
+	}
+
 	switch req.Role {
 	case "admin", "member", "viewer":
 	case "":
@@ -117,6 +127,10 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		slog.Error("test-login: failed to look up user", "email", req.Email, "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to look up user", nil)
+		return
+	}
+	if err == nil && testLoginRefusesUser(user) {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "test-login cannot sign in as this user", nil)
 		return
 	}
 	if err != nil {
@@ -198,4 +212,12 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 		RefreshToken: refreshToken,
 		ExpiresIn:    expiresIn,
 	})
+}
+
+// testLoginRefusesUser reports whether test-login must refuse to sign in as
+// an existing user row. It is called before any write. A hub test identity
+// is refused: it authenticates only with its own hub-issued token, and
+// test-login would otherwise overwrite its role.
+func testLoginRefusesUser(u *store.User) bool {
+	return u.IsTestFixture()
 }
