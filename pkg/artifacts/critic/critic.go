@@ -42,16 +42,22 @@
 //     closing token. Scanning resumes one byte after the literal "{".
 //   - In a substitution, the first "~>" after the opening token separates
 //     old from new. Either side may be empty.
-//   - Marks may span newlines. Code spans and fences are not special: marks
-//     inside them are marks, matching the MultiMarkdown preprocessor.
+//   - Marks may span newlines.
+//   - Markdown code is literal text: a token inside an inline code span or
+//     a fenced code block (see codeSpans for the rules) is neither an
+//     opening nor a closing token, nor a substitution separator. A mark may
+//     contain code; code never contains a mark.
 //   - Tokens are ASCII, so a mark boundary never splits a UTF-8 sequence.
 //     Projections are byte-exact outside marks; CRLF is preserved.
 //
-// Cost: Parse makes one forward pass over the input. The search for each
-// closing token type (and for "~>") keeps its own cursor that only moves
-// forward, and a search that finds nothing is remembered, so the total work
-// is linear in the input length regardless of how many unterminated or
-// malformed marks it contains. TestParseLinearWork enforces this.
+// Cost: Parse makes one forward pass to find the code and one to find the
+// marks. The search for each closing token type (and for "~>") keeps its
+// own cursor that only moves forward, and a search that finds nothing is
+// remembered; each cursor, and the scan for openers, steps over the code
+// with its own forward-only index into the code ranges. The total work is
+// therefore linear in the input length regardless of how many unterminated
+// or malformed marks, or how much code, it contains. TestParseLinearWork
+// enforces this.
 package critic
 
 import (
@@ -107,7 +113,27 @@ var marks = [...]mark{
 // subSep separates the old and new sides of a substitution.
 const subSep = "~>"
 
-// cursor finds the next occurrence of a fixed token at or after a position.
+// codeIndex answers whether positions, asked in non-decreasing order, lie
+// in code. Its index only moves forward.
+type codeIndex struct {
+	code []span
+	i    int
+}
+
+// at returns the code range containing p, if any.
+func (c *codeIndex) at(p int, steps *int) (span, bool) {
+	for c.i < len(c.code) && c.code[c.i].end <= p {
+		c.i++
+		*steps++
+	}
+	if c.i < len(c.code) && c.code[c.i].start <= p {
+		return c.code[c.i], true
+	}
+	return span{}, false
+}
+
+// cursor finds the next occurrence of a fixed token outside code at or
+// after a position.
 // Callers ask with non-decreasing positions. The last occurrence found is
 // reused while it is still at or after the position asked for, so a new
 // search always starts past the previous match; a failed search marks the
@@ -115,32 +141,43 @@ const subSep = "~>"
 // through one cursor together therefore examine O(len(src)) bytes.
 type cursor struct {
 	tok       []byte
+	code      codeIndex
 	found     int // offset of the last occurrence found, or -1 if none yet
 	exhausted bool
 }
 
-func newCursor(tok string) cursor {
-	return cursor{tok: []byte(tok), found: -1}
+func newCursor(tok string, code []span) cursor {
+	return cursor{tok: []byte(tok), code: codeIndex{code: code}, found: -1}
 }
 
-// next returns the offset of the first occurrence of the token at or after
-// from, or -1. steps counts bytes examined.
+// next returns the offset of the first occurrence of the token outside
+// code at or after from, or -1. steps counts bytes examined. A code range
+// starts at a backtick or a line start and ends after a backtick or a line
+// terminator (or at the end of the text), and no token holds a backtick or
+// a line terminator, so an occurrence that starts outside code lies wholly
+// outside it.
 func (c *cursor) next(src []byte, from int, steps *int) int {
 	if c.found >= from {
 		return c.found
 	}
-	if c.exhausted || from >= len(src) {
-		return -1
+	for {
+		if c.exhausted || from >= len(src) {
+			return -1
+		}
+		i := bytes.Index(src[from:], c.tok)
+		if i < 0 {
+			*steps += len(src) - from
+			c.exhausted = true
+			return -1
+		}
+		*steps += i + len(c.tok)
+		if r, in := c.code.at(from+i, steps); in {
+			from = r.end
+			continue
+		}
+		c.found = from + i
+		return c.found
 	}
-	i := bytes.Index(src[from:], c.tok)
-	if i < 0 {
-		*steps += len(src) - from
-		c.exhausted = true
-		return -1
-	}
-	*steps += i + len(c.tok)
-	c.found = from + i
-	return c.found
 }
 
 // Parse splits src into segments. Concatenating the source bytes of all
@@ -153,12 +190,14 @@ func Parse(src []byte) []Segment {
 // parse is Parse that also reports the number of bytes examined, for the
 // linear-work test.
 func parse(src []byte) ([]Segment, int) {
+	steps := 0
+	code := codeSpans(src, &steps)
 	var cur [len(marks)]cursor
 	for i, m := range marks {
-		cur[i] = newCursor(m.close)
+		cur[i] = newCursor(m.close, code)
 	}
-	sep := newCursor(subSep)
-	steps := 0
+	sep := newCursor(subSep, code)
+	open := codeIndex{code: code}
 
 	var segs []Segment
 	textStart := 0
@@ -175,6 +214,10 @@ func parse(src []byte) ([]Segment, int) {
 		}
 		steps += j + 1
 		i += j
+		if r, in := open.at(i, &steps); in {
+			i = r.end
+			continue
+		}
 		slot := -1
 		if i+2 < len(src) && src[i+1] == src[i+2] {
 			for k, m := range marks {
