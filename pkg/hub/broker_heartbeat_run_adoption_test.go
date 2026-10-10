@@ -438,13 +438,13 @@ func TestRunAdoption_TwoReplicas(t *testing.T) {
 	assert.Equal(t, r, f.get(a.ID).RunID, "R on another target of B stops adoption")
 
 	// Within Q of the last off-broker report of R: still no adoption.
-	f.offset = start + runAdoptionQuietPeriod() - time.Second
+	f.offset = start + runAdoptionQuietPeriod() - 30*time.Second
 	f.beatVia(srv2, f.brokerID, a.Slug, l)
 	assert.Equal(t, r, f.get(a.ID).RunID, "R reported elsewhere within Q stops adoption")
 	assert.Empty(t, f.logs.records(logRunAdopted))
 
 	// Both gone for Q: B's next heartbeat, on either replica, adopts L.
-	f.offset = start + runAdoptionQuietPeriod() + time.Second
+	f.offset = start + runAdoptionQuietPeriod() + 30*time.Second
 	f.beatVia(srv2, f.brokerID, a.Slug, l)
 	assert.Equal(t, l, f.get(a.ID).RunID)
 	assert.Len(t, f.logs.records(logRunAdopted), 1)

@@ -160,9 +160,8 @@ var wantEntRunIDSetterCallers = []string{
 // TestAgentRunIDStoreWritersAreAClosedSet: below the store interface, the
 // agent's run_id column is written only by the functions behind
 // SetAgentRunID, CompareAndSwapAgentRunID, RevertAgentRunID and
-// AdoptAgentRunID, so a new
-// store method (or direct ent use anywhere in the module) that writes it
-// fails here.
+// AdoptAgentRunID, so a new store method (or direct ent use anywhere in the
+// module) that writes it fails here.
 func TestAgentRunIDStoreWritersAreAClosedSet(t *testing.T) {
 	assert.Equal(t, wantEntRunIDSetterCallers, moduleReferences(t, entRunIDSetters, filepath.Join("pkg", "ent")))
 
@@ -230,8 +229,9 @@ func agentUpsertCalls(t *testing.T) []string {
 
 // TestAgentRunIDWritersAreAClosedSet: the functions that change an agent's
 // recorded run are exactly the dispatcher, the broker launch report, the
-// revert worker and the heartbeat adoption; the launch report is reached only from the broker
-// launch handler, and no agent-token request reaches any of them.
+// revert worker and the heartbeat adoption; the launch report is reached
+// only from the broker launch handler, and no agent-token request reaches
+// any of them.
 func TestAgentRunIDWritersAreAClosedSet(t *testing.T) {
 	t.Run("writers", func(t *testing.T) {
 		want := make([]string, 0, len(wantAgentRunIDWriters))
