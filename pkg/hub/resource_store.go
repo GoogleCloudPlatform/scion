@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -324,12 +325,30 @@ func (p *templatePersistence) Create(ctx context.Context, rec *ResourceRecord, d
 func (p *templatePersistence) Update(ctx context.Context, rec *ResourceRecord, dir string) error {
 	t := p.model
 	prevStatus, prevSourceURL, prevStoragePath := t.Status, t.SourceURL, t.StoragePath
-	t.Status = rec.Status
-	if rec.SourceURL != "" {
-		t.SourceURL = rec.SourceURL
+	apply := func(t *store.Template) {
+		t.Status = rec.Status
+		if rec.SourceURL != "" {
+			t.SourceURL = rec.SourceURL
+		}
+		p.ensureStoragePath(t)
 	}
-	p.ensureStoragePath(t)
-	if err := p.s.commitTemplateFiles(ctx, t, rec.Files, commitOpts{dir: dir}); err != nil {
+	apply(t)
+	err := p.s.commitTemplateFiles(ctx, t, rec.Files, commitOpts{dir: dir})
+	if errors.Is(err, store.ErrTemplateConflict) {
+		// Another commit changed the row since it was read: re-read it and
+		// commit the directory's files once more against the fresh row
+		// (ptone/scion#4221).
+		var fresh *store.Template
+		fresh, err = p.rereadAfterConflict(ctx, t)
+		if err == nil {
+			apply(fresh)
+			if err = p.s.commitTemplateFiles(ctx, fresh, rec.Files, commitOpts{dir: dir}); err == nil {
+				p.model = fresh
+				t = fresh
+			}
+		}
+	}
+	if err != nil {
 		t.Status, t.SourceURL, t.StoragePath = prevStatus, prevSourceURL, prevStoragePath
 		return fmt.Errorf("%s: template %q not updated: %w", p.Label(), t.Name, err)
 	}
@@ -337,10 +356,22 @@ func (p *templatePersistence) Update(ctx context.Context, rec *ResourceRecord, d
 	return nil
 }
 
+// rereadAfterConflict reloads t after a commit lost its compare-and-swap,
+// logging the retry. The second conflict, if any, is returned to the caller,
+// which logs it and skips the resource.
+func (p *templatePersistence) rereadAfterConflict(ctx context.Context, t *store.Template) (*store.Template, error) {
+	p.s.templateLog.Warn(p.Label()+": template changed during commit; re-reading and retrying once",
+		"template", t.Name, "id", t.ID)
+	return p.s.store.GetTemplate(ctx, t.ID)
+}
+
 // OnHashMatch re-derives the template's index from dir when the content is
 // unchanged but the stored derived fields differ from what the files give
 // (a row written before a derived field existed, or before the derivation
-// changed). The re-derivation goes through commitTemplateFiles.
+// changed). The re-derivation goes through commitTemplateFiles. A commit conflict is retried once against the re-read row
+// while that row still has the directory's content hash; when it no longer
+// does, another writer has replaced the content and there is nothing left to
+// re-derive here, so the resource is skipped.
 func (p *templatePersistence) OnHashMatch(ctx context.Context, rec *ResourceRecord, dir string) (bool, error) {
 	t := p.model
 	idx := deriveTemplateIndexFromDir(dir, t.Name)
@@ -349,7 +380,25 @@ func (p *templatePersistence) OnHashMatch(ctx context.Context, rec *ResourceReco
 	}
 	prevStoragePath := t.StoragePath
 	p.ensureStoragePath(t)
-	if err := p.s.commitTemplateFiles(ctx, t, t.Files, commitOpts{dir: dir}); err != nil {
+	err := p.s.commitTemplateFiles(ctx, t, t.Files, commitOpts{dir: dir})
+	if errors.Is(err, store.ErrTemplateConflict) {
+		var fresh *store.Template
+		fresh, err = p.rereadAfterConflict(ctx, t)
+		if err == nil {
+			if fresh.ContentHash != rec.ContentHash {
+				p.s.templateLog.Warn(p.Label()+": template content replaced by another commit; skipping re-derive",
+					"template", t.Name, "id", t.ID)
+				t.StoragePath = prevStoragePath
+				return false, nil
+			}
+			p.ensureStoragePath(fresh)
+			if err = p.s.commitTemplateFiles(ctx, fresh, fresh.Files, commitOpts{dir: dir}); err == nil {
+				p.model = fresh
+				t = fresh
+			}
+		}
+	}
+	if err != nil {
 		t.StoragePath = prevStoragePath
 		return false, fmt.Errorf("%s: failed to re-derive template %q: %w", p.Label(), t.Name, err)
 	}

@@ -1030,6 +1030,89 @@ func isTemplateNoFilesError(err error) bool {
 	return apiErr.Code == apiclient.ErrCodeValidationError && strings.Contains(apiErr.Message, "has no files")
 }
 
+// resyncTemplateAfterConflict handles a 409 template_conflict from finalize:
+// another push changed the template on the Hub after this one diffed against
+// it, and nothing was committed. It re-reads the template, re-diffs the
+// local files against the Hub's current manifest, uploads what differs and
+// finalizes once more against the new content hash. A second conflict fails
+// with a clear message rather than looping.
+//
+// Sync mirrors the local directory, so a successful retry replaces the
+// other push's version with this one (ptone/scion#4221).
+func resyncTemplateAfterConflict(ctx context.Context, hubCtx *HubContext, name, templateID string, files []hubclient.FileInfo, manifest *hubclient.TemplateManifest) (*hubclient.Template, error) {
+	fmt.Printf("Template '%s' was changed on the Hub by another push during this sync; re-checking and retrying once...\n", name)
+
+	current, err := hubCtx.Client.Templates().Get(ctx, templateID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to re-read template after conflict: %w", err)
+	}
+
+	remoteHashes := make(map[string]string)
+	downloadResp, err := hubCtx.Client.Templates().RequestDownloadURLs(ctx, templateID)
+	switch {
+	case err == nil:
+		for _, f := range downloadResp.Files {
+			remoteHashes[f.Path] = f.Hash
+		}
+	case isTemplateNoFilesError(err):
+		// No files on the Hub: everything is uploaded.
+	default:
+		return nil, fmt.Errorf("failed to re-read template manifest after conflict: %w", err)
+	}
+
+	var toUpload []hubclient.FileUploadRequest
+	for _, f := range files {
+		if remoteHashes[f.Path] != f.Hash {
+			toUpload = append(toUpload, hubclient.FileUploadRequest{Path: f.Path, Size: f.Size})
+		}
+	}
+	if err := uploadTemplateFiles(ctx, hubCtx, templateID, toUpload, files); err != nil {
+		return nil, err
+	}
+
+	template, err := hubCtx.Client.Templates().Finalize(ctx, templateID, manifest, current.ContentHash)
+	if hubclient.IsTemplateConflictError(err) {
+		return nil, fmt.Errorf("template '%s' was changed on the Hub again while retrying; nothing from this sync was committed. Re-run the sync to push the local version", name)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to finalize template after conflict retry: %w", err)
+	}
+	return template, nil
+}
+
+// uploadTemplateFiles requests upload URLs for reqs and uploads the matching
+// local files.
+func uploadTemplateFiles(ctx context.Context, hubCtx *HubContext, templateID string, reqs []hubclient.FileUploadRequest, files []hubclient.FileInfo) error {
+	if len(reqs) == 0 {
+		return nil
+	}
+	byPath := make(map[string]*hubclient.FileInfo, len(files))
+	for i := range files {
+		byPath[files[i].Path] = &files[i]
+	}
+	uploadResp, err := hubCtx.Client.Templates().RequestUploadURLs(ctx, templateID, reqs)
+	if err != nil {
+		return fmt.Errorf("failed to get upload URLs: %w", err)
+	}
+	for _, urlInfo := range uploadResp.UploadURLs {
+		fileInfo := byPath[urlInfo.Path]
+		if fileInfo == nil {
+			continue
+		}
+		f, err := os.Open(fileInfo.FullPath)
+		if err != nil {
+			return fmt.Errorf("failed to open %s: %w", fileInfo.Path, err)
+		}
+		err = hubCtx.Client.Templates().UploadFile(ctx, urlInfo.URL, urlInfo.Method, urlInfo.Headers, f)
+		_ = f.Close()
+		if err != nil {
+			return fmt.Errorf("failed to upload %s: %w", fileInfo.Path, err)
+		}
+		fmt.Printf("  Uploaded: %s\n", fileInfo.Path)
+	}
+	return nil
+}
+
 // syncTemplateToHub creates or updates a template in the Hub.
 // If a template with the same name already exists, only changed files are uploaded.
 func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType string) error {
@@ -1101,9 +1184,14 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 
 	// Track which files need to be uploaded
 	var filesToUpload []hubclient.FileUploadRequest
+	// expectedHash is the Hub content hash this sync diffs against. Finalize
+	// sends it so the Hub refuses the commit (409) if another push lands
+	// first (ptone/scion#4221).
+	var expectedHash string
 
 	if existingTemplate != nil {
 		templateID = existingTemplate.ID
+		expectedHash = existingTemplate.ContentHash
 
 		// Fetch existing file manifest to compare hashes
 		fmt.Printf("Checking for changes in template '%s'...\n", name)
@@ -1188,6 +1276,7 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 		}
 
 		templateID = resp.Template.ID
+		expectedHash = resp.Template.ContentHash
 		fmt.Printf("Template created with ID: %s\n", templateID)
 
 		// All files need to be uploaded for new templates
@@ -1245,8 +1334,13 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 
 	// Finalize template
 	fmt.Println("Finalizing template...")
-	template, err := hubCtx.Client.Templates().Finalize(ctx, templateID, manifest)
-	if err != nil {
+	template, err := hubCtx.Client.Templates().Finalize(ctx, templateID, manifest, expectedHash)
+	if hubclient.IsTemplateConflictError(err) {
+		template, err = resyncTemplateAfterConflict(ctx, hubCtx, name, templateID, files, manifest)
+		if err != nil {
+			return err
+		}
+	} else if err != nil {
 		// If finalize failed because files are missing from storage (e.g., stale
 		// manifest from a previous incomplete sync or storage data loss), retry
 		// by re-uploading all files.
@@ -1275,7 +1369,7 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 			}
 			fmt.Printf("  Re-uploaded: %s\n", fileInfo.Path)
 		}
-		template, err = hubCtx.Client.Templates().Finalize(ctx, templateID, manifest)
+		template, err = hubCtx.Client.Templates().Finalize(ctx, templateID, manifest, expectedHash)
 		if err != nil {
 			return fmt.Errorf("failed to finalize template after retry: %w", err)
 		}

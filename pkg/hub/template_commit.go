@@ -277,8 +277,14 @@ type commitOpts struct {
 	// harness-config check read from it instead of storage.
 	dir string
 	// create persists the template with CreateTemplate instead of
-	// UpdateTemplate (template and project clone).
+	// UpdateTemplateContent (template and project clone).
 	create bool
+	// expectedContentHash, when set, is the content hash the commit
+	// requires the stored row to have. It overrides the default, which is
+	// tmpl.ContentHash as the caller read it. Finalize sets it from the
+	// client's expectedContentHash, so the compare-and-swap covers the
+	// client's whole diff, upload and finalize window (ptone/scion#4221).
+	expectedContentHash string
 }
 
 // errTemplateStorageNotConfigured is returned when a commit has no storage.
@@ -290,7 +296,11 @@ var errTemplateStorageNotConfigured = errors.New("storage not configured")
 //  2. computes ContentHash;
 //  3. derives Harness, DefaultHarnessConfig and AgentConfig (deriveTemplateIndex);
 //  4. validates bundled harness-configs/*/config.yaml (harness.CheckProvisionerUsable);
-//  5. writes the row once (UpdateTemplate, or CreateTemplate with opts.create);
+//  5. writes the row once: CreateTemplate with opts.create, otherwise
+//     UpdateTemplateContent, a compare-and-swap against the content hash the
+//     caller read (or opts.expectedContentHash). A row changed by another
+//     commit since then fails with store.ErrTemplateConflict, which the HTTP
+//     handlers map to 409 template_conflict (ptone/scion#4221);
 //  6. deletes the storage objects of paths in the old manifest but not in next
 //     (diff-based, never a prefix sweep).
 //
@@ -304,6 +314,7 @@ func (s *Server) commitTemplateFiles(ctx context.Context, tmpl *store.Template, 
 		return errTemplateStorageNotConfigured
 	}
 	next = append([]store.TemplateFile(nil), next...)
+	expected := templateCommitPrecondition(tmpl, opts)
 
 	// 1. Verify the objects exist (and the paths are canonical).
 	if _, err := verifyAndFinalizeFiles(ctx, stor, tmpl.StoragePath, next); err != nil {
@@ -346,7 +357,7 @@ func (s *Server) commitTemplateFiles(ctx context.Context, tmpl *store.Template, 
 	if opts.create {
 		err = s.store.CreateTemplate(ctx, tmpl)
 	} else {
-		err = s.store.UpdateTemplate(ctx, tmpl)
+		err = s.store.UpdateTemplateContent(ctx, tmpl, expected)
 	}
 	if err != nil {
 		*tmpl = prevState
@@ -357,6 +368,19 @@ func (s *Server) commitTemplateFiles(ctx context.Context, tmpl *store.Template, 
 	s.deleteRemovedTemplateFiles(ctx, stor, tmpl, previous)
 	return nil
 }
+
+// templateCommitPrecondition returns the stored state a commit of tmpl
+// requires: the content hash the caller read, unless opts names one.
+func templateCommitPrecondition(tmpl *store.Template, opts commitOpts) store.TemplateContentPrecondition {
+	if opts.expectedContentHash != "" {
+		return store.TemplateContentPrecondition{ContentHash: opts.expectedContentHash}
+	}
+	return store.TemplateContentPrecondition{ContentHash: tmpl.ContentHash}
+}
+
+// templateConflictErrorCode is the API error code of a template commit that
+// lost a compare-and-swap to a concurrent commit (HTTP 409).
+const templateConflictErrorCode = "template_conflict"
 
 // deleteRemovedTemplateFiles deletes the storage objects of files listed in
 // previous but no longer in tmpl.Files. Only those exact paths are deleted,
@@ -405,6 +429,11 @@ func writeTemplateCommitError(w http.ResponseWriter, err error) {
 	}
 	if errors.Is(err, errTemplateStorageNotConfigured) {
 		RuntimeError(w, "Storage not configured")
+		return
+	}
+	if errors.Is(err, store.ErrTemplateConflict) {
+		writeError(w, http.StatusConflict, templateConflictErrorCode,
+			"template was changed by another commit; re-read it and retry", nil)
 		return
 	}
 	writeErrorFromErr(w, err, "")
