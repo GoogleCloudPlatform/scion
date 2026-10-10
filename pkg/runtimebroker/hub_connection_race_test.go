@@ -32,6 +32,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 )
 
+// maxRaceReads bounds each reader loop in the race tests below. The reader
+// stops earlier once the writer is done.
+const maxRaceReads = 2000
+
 // TestHubConnection_ReinitializeConcurrentReaders overlaps
 // HubConnection.Reinitialize (the writer) with each goroutine that reads the
 // fields it rewrites. Run under -race: before the fix Reinitialize wrote
@@ -128,19 +132,27 @@ func TestHubConnection_ReinitializeConcurrentReaders(t *testing.T) {
 			defer cancel()
 
 			done := make(chan struct{})
+			started := make(chan struct{})
 			var wg sync.WaitGroup
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				for {
+				// Bounded so log-emitting readers cannot flood output.
+				for n := 0; n < maxRaceReads; n++ {
 					select {
 					case <-done:
 						return
 					default:
 					}
 					rd.read(srv, conn)
+					if n == 0 {
+						close(started)
+					}
 				}
 			}()
+			// Ensure the reader is running before the writes start, so the
+			// test cannot pass without real overlap.
+			<-started
 
 			for i := 0; i < 20; i++ {
 				if err := conn.Reinitialize(ctx, srv, creds); err != nil {
@@ -176,19 +188,25 @@ func TestControlChannelClient_WaitForConnectedConcurrentSessionID(t *testing.T) 
 	client.conn = brokerConn
 
 	done := make(chan struct{})
+	started := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for {
+		for n := 0; n < maxRaceReads; n++ {
 			select {
 			case <-done:
 				return
 			default:
 			}
 			_ = client.SessionID()
+			if n == 0 {
+				close(started)
+			}
 		}
 	}()
+	// Ensure the reader is running before the handshake write.
+	<-started
 
 	if err := hubConn.WriteJSON(wsprotocol.ConnectedMessage{
 		Type:      wsprotocol.TypeConnected,
@@ -201,9 +219,6 @@ func TestControlChannelClient_WaitForConnectedConcurrentSessionID(t *testing.T) 
 	}
 
 	err := client.waitForConnected()
-	// Keep reading for a moment after the write so the race detector sees
-	// reads on both sides of it.
-	time.Sleep(10 * time.Millisecond)
 	close(done)
 	wg.Wait()
 	if err != nil {
