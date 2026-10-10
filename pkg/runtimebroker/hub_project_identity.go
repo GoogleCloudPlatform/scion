@@ -209,6 +209,56 @@ func (s *Server) otherProjectAgentsInUse(ctx context.Context, projectID, agentID
 	return false, nil
 }
 
+// projectAgentIDs returns the IDs of the agents of projectID known to this
+// broker, in any phase. Without a manager it returns an empty set.
+func (s *Server) projectAgentIDs(ctx context.Context, projectID string) (map[string]bool, error) {
+	ids := map[string]bool{}
+	if s.manager == nil {
+		return ids, nil
+	}
+	agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true", "scion.project_id": projectID})
+	if err != nil {
+		return ids, err
+	}
+	for _, a := range agents {
+		if label, ok := a.Labels["scion.project_id"]; ok && label != projectID {
+			continue
+		}
+		ids[a.ID] = true
+	}
+	return ids, nil
+}
+
+// newProjectAgentsInUse reports whether an agent of projectID whose ID is not
+// in known is known to this broker in any phase other than stopped or error.
+// It is otherProjectAgentsInUse with a set of excluded agents. A listing
+// failure counts as in use. Without a manager no agents are known, so it
+// reports false.
+func (s *Server) newProjectAgentsInUse(ctx context.Context, projectID string, known map[string]bool) (bool, error) {
+	if s.manager == nil {
+		// A broker without a manager runs no agents, so none can be in use.
+		return false, nil
+	}
+	agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true", "scion.project_id": projectID})
+	if err != nil {
+		return true, err
+	}
+	for _, a := range agents {
+		if label, ok := a.Labels["scion.project_id"]; ok && label != projectID {
+			continue
+		}
+		if known[a.ID] {
+			continue
+		}
+		switch state.Phase(a.Phase) {
+		case state.PhaseStopped, state.PhaseError:
+		default:
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // alignHubManagedProjectIdentity applies recordHubProjectIdentity for an
 // agent start or create and logs the outcome by project ID.
 func (s *Server) alignHubManagedProjectIdentity(ctx context.Context, agentID, projectPath, slug, projectID string) {

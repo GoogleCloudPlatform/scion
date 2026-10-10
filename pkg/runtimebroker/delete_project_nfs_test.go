@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -298,9 +299,9 @@ func makeWorkspaceUnremovable(t *testing.T, tree string) func() {
 	return restore
 }
 
-func liveAgent(projectID string) api.AgentInfo {
+func liveAgent(id, projectID string) api.AgentInfo {
 	return api.AgentInfo{
-		ID:     "agent-new",
+		ID:     id,
 		Name:   "dev",
 		Phase:  string(state.PhaseRunning),
 		Labels: map[string]string{"scion.agent": "true", "scion.project_id": projectID},
@@ -330,17 +331,19 @@ func TestDeleteProject_NFS_RetriesFailedRemoval(t *testing.T) {
 }
 
 // ptone/scion#2569 review: a project ID can come back (re-linked checkout).
-// An agent of that project running on this broker when the retry is due
-// keeps the tree.
+// A new agent of that project (an ID the broker did not know when the delete
+// arrived) running on this broker when the retry is due keeps the tree. The
+// deleted project's own agent, still listed, does not count.
 func TestDeleteProject_NFS_LiveAgentBeforeRetryKeepsTree(t *testing.T) {
 	srv, _, subRoot := newNFSDeleteTestServer(t)
 	mgr := srv.manager.(*filteringMockManager)
+	mgr.agents = []api.AgentInfo{liveAgent("agent-deleted", scopeProjA)}
 	treeA := seedNFSProjectTree(t, subRoot, scopeProjA)
 	restore := makeWorkspaceUnremovable(t, treeA)
 	seen := setBrokerAttemptHook(t, func(attempt int) {
 		if attempt == 2 {
 			restore()
-			mgr.agents = []api.AgentInfo{liveAgent(scopeProjA)}
+			mgr.agents = append(mgr.agents, liveAgent("agent-new", scopeProjA))
 		}
 	})
 
@@ -354,18 +357,77 @@ func TestDeleteProject_NFS_LiveAgentBeforeRetryKeepsTree(t *testing.T) {
 	assertPresent(t, filepath.Join(treeA, "workspace", "README.md"))
 }
 
-// The check runs before the first attempt too.
-func TestDeleteProject_NFS_LiveAgentKeepsTree(t *testing.T) {
+// The deleted project's own agents, still listed as running while their
+// pods terminate, do not block the removal: the tree is removed on the
+// first attempt.
+func TestDeleteProject_NFS_DeletedProjectsLiveAgentDoesNotBlock(t *testing.T) {
 	srv, _, subRoot := newNFSDeleteTestServer(t)
 	mgr := srv.manager.(*filteringMockManager)
-	mgr.agents = []api.AgentInfo{liveAgent(scopeProjA)}
+	mgr.agents = []api.AgentInfo{liveAgent("agent-deleted", scopeProjA)}
 	treeA := seedNFSProjectTree(t, subRoot, scopeProjA)
+	seen := setBrokerAttemptHook(t, nil)
 
 	rec := doDeleteProject(t, srv, "proj-a", scopeProjA)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
-	assertPresent(t, filepath.Join(treeA, "workspace", "README.md"))
+	if len(*seen) != 1 {
+		t.Fatalf("attempts = %v, want [1]", *seen)
+	}
+	assertGone(t, treeA)
+}
+
+// While the deleted project's pod is still writing, the first removal fails;
+// the retry removes the tree once it is removable, the agent still listed.
+func TestDeleteProject_NFS_DeletedProjectsLiveAgentRetryRemovesTree(t *testing.T) {
+	srv, _, subRoot := newNFSDeleteTestServer(t)
+	mgr := srv.manager.(*filteringMockManager)
+	mgr.agents = []api.AgentInfo{liveAgent("agent-deleted", scopeProjA)}
+	treeA := seedNFSProjectTree(t, subRoot, scopeProjA)
+	restore := makeWorkspaceUnremovable(t, treeA)
+	seen := setBrokerAttemptHook(t, func(attempt int) {
+		if attempt == 2 {
+			restore()
+		}
+	})
+
+	rec := doDeleteProject(t, srv, "proj-a", scopeProjA)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(*seen) != 2 || (*seen)[1] != 2 {
+		t.Fatalf("attempts = %v, want [1 2]", *seen)
+	}
+	assertGone(t, treeA)
+}
+
+func TestNewProjectAgentsInUse(t *testing.T) {
+	srv, _, _ := newNFSDeleteTestServer(t)
+	mgr := srv.manager.(*filteringMockManager)
+	ctx := context.Background()
+	stopped := liveAgent("agent-stopped", scopeProjA)
+	stopped.Phase = string(state.PhaseStopped)
+	mgr.agents = []api.AgentInfo{liveAgent("agent-known", scopeProjA), stopped, liveAgent("agent-other", scopeProjB)}
+
+	known, err := srv.projectAgentIDs(ctx, scopeProjA)
+	if err != nil || len(known) != 2 || !known["agent-known"] || !known["agent-stopped"] {
+		t.Fatalf("projectAgentIDs = %v, %v; want agent-known and agent-stopped", known, err)
+	}
+	if inUse, err := srv.newProjectAgentsInUse(ctx, scopeProjA, known); inUse || err != nil {
+		t.Fatalf("known agents only: inUse=%v err=%v, want false", inUse, err)
+	}
+	mgr.agents = append(mgr.agents, liveAgent("agent-new", scopeProjA))
+	if inUse, _ := srv.newProjectAgentsInUse(ctx, scopeProjA, known); !inUse {
+		t.Fatal("a new running agent of the project must count as in use")
+	}
+	mgr.listErr = errors.New("list failed")
+	if inUse, err := srv.newProjectAgentsInUse(ctx, scopeProjA, known); !inUse || err == nil {
+		t.Fatalf("listing error: inUse=%v err=%v, want true with error", inUse, err)
+	}
+	srv.manager = nil
+	if inUse, err := srv.newProjectAgentsInUse(ctx, scopeProjA, nil); inUse || err != nil {
+		t.Fatalf("nil manager: inUse=%v err=%v, want false", inUse, err)
+	}
 }
 
 // Stopped agents of the project and live agents of other projects do not
@@ -373,9 +435,9 @@ func TestDeleteProject_NFS_LiveAgentKeepsTree(t *testing.T) {
 func TestDeleteProject_NFS_StoppedOrOtherProjectAgentsDoNotBlock(t *testing.T) {
 	srv, _, subRoot := newNFSDeleteTestServer(t)
 	mgr := srv.manager.(*filteringMockManager)
-	stopped := liveAgent(scopeProjA)
+	stopped := liveAgent("agent-stopped", scopeProjA)
 	stopped.Phase = string(state.PhaseStopped)
-	mgr.agents = []api.AgentInfo{stopped, liveAgent(scopeProjB)}
+	mgr.agents = []api.AgentInfo{stopped, liveAgent("agent-other", scopeProjB)}
 	treeA := seedNFSProjectTree(t, subRoot, scopeProjA)
 
 	rec := doDeleteProject(t, srv, "proj-a", scopeProjA)
