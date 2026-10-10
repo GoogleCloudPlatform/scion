@@ -62,6 +62,8 @@ let projectProfileDefaults: Record<string, string> = {};
 let hubTelemetry = false;
 /** Extra project settings fields (limits, model) for the placeholder tests. */
 let projectExtraSettings: Record<string, unknown> = {};
+/** Extra hub public settings fields for the placeholder tests. */
+let hubExtraSettings: Record<string, unknown> = {};
 let bodies: Array<Record<string, unknown>> = [];
 
 /** A verified account, so a project default of assign applies on load. */
@@ -100,7 +102,7 @@ function stubFetch(): void {
       }
       let body: unknown = { projects: [], brokers: [], templates: [], harnessConfigs: [] };
       if (url.includes('/settings/public')) {
-        body = { telemetryEnabled: hubTelemetry };
+        body = { telemetryEnabled: hubTelemetry, ...hubExtraSettings };
       } else if (url.includes('/api/v1/projects?')) {
         body = { projects: [{ id: 'p1', name: 'P1' }] };
       } else if (url.includes('/api/v1/projects/p1/settings')) {
@@ -138,6 +140,7 @@ afterEach(() => {
   serviceAccounts = [verifiedServiceAccount];
   hubTelemetry = false;
   projectExtraSettings = {};
+  hubExtraSettings = {};
 });
 
 async function settle(c: CreatePrivate): Promise<void> {
@@ -655,5 +658,29 @@ describe('Create Agent: an untouched form posts no config keys', () => {
     const body = await submit(c);
     expect(body.config).toEqual({ max_turns: 12 });
     expect(body.gcp_identity).toEqual({ metadata_mode: 'passthrough' });
+  });
+});
+
+describe('Create Agent: hub defaults show as placeholders', () => {
+  it('shows the hub default model and auto-expose setting, with the hub as the source', async () => {
+    hubExtraSettings = { defaultModel: 'hub-model', autoExposePortsEnabled: true };
+    const c = await mount();
+    expect(formField(c, 'Model')?.querySelector('sl-input')?.getAttribute('placeholder')).toBe(
+      'hub-model (inherited from hub defaults)'
+    );
+    expect(
+      formField(c, 'Auto-expose ports')?.querySelector('sl-select')?.getAttribute('placeholder')
+    ).toBe('Enabled (inherited from hub defaults, unless the harness config sets it)');
+    const body = await submit(c);
+    expect(body).not.toHaveProperty('config');
+  });
+
+  it('prefers the project default model over the hub default', async () => {
+    hubExtraSettings = { defaultModel: 'hub-model' };
+    projectExtraSettings = { defaultModel: 'project-model' };
+    const c = await mount();
+    expect(formField(c, 'Model')?.querySelector('sl-input')?.getAttribute('placeholder')).toBe(
+      'project-model (inherited from project settings)'
+    );
   });
 });

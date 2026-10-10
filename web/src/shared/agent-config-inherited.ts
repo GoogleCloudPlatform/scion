@@ -64,6 +64,7 @@ export interface ProjectCreateDefaults {
   telemetryEnabled?: boolean | null;
   autoExposePortsEnabled?: boolean | null;
   defaultAgentRole?: string;
+  maxAgentRole?: string;
   defaultGCPIdentityMode?: string;
   defaultGCPIdentityServiceAccountID?: string;
   defaultGCPIdentityServiceAccountIDByProfile?: Record<string, string>;
@@ -111,8 +112,10 @@ const RESOURCE_KEYS: ReadonlyArray<{
  * (pkg/hub/handlers_agent_create_helpers.go, project_settings_handlers.go,
  * hub_agent_defaults.go):
  * - model: project, then hub, then template (the hub's SCION_MODEL).
- * - thinking level, harness auth, limits, resources, agent role: project.
- *   The template's and the hub's values for these are not readable here.
+ * - thinking level, harness auth, limits, resources: project. The
+ *   template's and the hub's values for these are not readable here.
+ * - agent role: the project default, capped by the project maximum, as the
+ *   hub caps it (see inheritedAgentRole).
  * - image, message mode: template (the image is resolved by the broker, with
  *   the template ahead of the harness config).
  * - telemetry: the project setting is an override, applied even over a value
@@ -158,7 +161,8 @@ export function resolveInheritedPlaceholders(
       if (v) out[r.key] = { value: v, source: FROM_PROJECT };
     }
   }
-  if (ps.defaultAgentRole) out.agentRole = { value: ps.defaultAgentRole, source: FROM_PROJECT };
+  const role = inheritedAgentRole(ps.defaultAgentRole, ps.maxAgentRole);
+  if (role) out.agentRole = { value: role, source: FROM_PROJECT };
 
   const image = tc?.image || sources.template?.image;
   if (image) out['config.image'] = { value: image, source: FROM_TEMPLATE };
@@ -187,4 +191,26 @@ export function resolveInheritedPlaceholders(
   }
 
   return out;
+}
+
+/** Agent roles from least to most privileged, as the hub orders them. */
+const AGENT_ROLE_ORDER = ['none', 'readonly', 'baseline', 'full'];
+
+/**
+ * The role a user-created agent inherits: the hub takes the project default
+ * (else the hub default, not readable here, else full) and caps it at the
+ * project maximum (pkg/hub/handlers_agents_core.go). Known only when the
+ * project sets a default, or when its maximum is none, which caps
+ * everything.
+ */
+export function inheritedAgentRole(
+  projectDefault: string | undefined,
+  projectMax: string | undefined
+): string | undefined {
+  const rank = (r: string | undefined): number => (r ? AGENT_ROLE_ORDER.indexOf(r) : -1);
+  const max = rank(projectMax) >= 0 ? projectMax : undefined;
+  if (max === 'none') return 'none';
+  if (rank(projectDefault) < 0) return undefined;
+  if (max && rank(max) < rank(projectDefault)) return max;
+  return projectDefault;
 }

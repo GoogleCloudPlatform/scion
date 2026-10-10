@@ -550,6 +550,9 @@ export class ScionAgentConfigForm extends LitElement {
     const out: AgentConfigPatch = {};
     const create = this.mode === 'create';
     const env: Record<string, string> = {};
+    // The auto-expose control's keys, merged after the custom env entries so
+    // the control wins over a custom entry of the same name.
+    const autoExposeEnv: Record<string, string> = {};
     let envTouched = false;
     for (const f of this.fields) {
       if (!this.fieldTouched(f) || !editableNow(this.fieldState(f))) continue;
@@ -589,11 +592,11 @@ export class ScionAgentConfigForm extends LitElement {
           const a = this.autoExpose!;
           if (a.enabled === '') break;
           envTouched = true;
-          env.SCION_AUTO_EXPOSE_PORTS = a.enabled;
+          autoExposeEnv.SCION_AUTO_EXPOSE_PORTS = a.enabled;
           if (a.enabled === 'true') {
-            env.SCION_AUTO_EXPOSE_MODE = a.mode;
-            env.SCION_AUTO_EXPOSE_PORTS_LIST = a.list;
-            env.SCION_AUTO_EXPOSE_INTERVAL = a.interval.trim() || '3s';
+            autoExposeEnv.SCION_AUTO_EXPOSE_MODE = a.mode;
+            autoExposeEnv.SCION_AUTO_EXPOSE_PORTS_LIST = a.list;
+            autoExposeEnv.SCION_AUTO_EXPOSE_INTERVAL = a.interval.trim() || '3s';
           }
           break;
         }
@@ -609,7 +612,7 @@ export class ScionAgentConfigForm extends LitElement {
           break;
       }
     }
-    if (envTouched) out.env = env;
+    if (envTouched) out.env = { ...env, ...autoExposeEnv };
     return out;
   }
 
@@ -1123,27 +1126,33 @@ export class ScionAgentConfigForm extends LitElement {
   ) {
     const stored = this.storedText(f);
     const set = d ? !d.cleared && d.typed : stored !== '';
-    const value = Number.parseInt((d?.typed ? d.text : stored) || '50', 10);
+    const inheritedValue = this.placeholders?.[f.key]?.value;
+    // While inherited, the slider shows the inherited value when it is
+    // known, and is hidden otherwise: it never shows a made-up position.
+    const shown = set ? (d?.typed ? d.text : stored) : inheritedValue;
+    const value = shown === undefined ? undefined : Number.parseInt(shown, 10);
     const inherited = d?.cleared ? `Cleared — ${this.placeholderFor(f)}` : this.placeholderFor(f);
     return html`<div class="row">
-        <sl-range
-          id=${id}
-          min="0"
-          max="100"
-          step="1"
-          .value=${value}
-          ?disabled=${off || !set}
-          @sl-input=${(e: Event) =>
-            this.editField(
-              f.key,
-              {
-                typed: true,
-                cleared: false,
-                text: String((e.target as HTMLElement & { value: number }).value),
-              },
-              f
-            )}
-        ></sl-range>
+        ${value === undefined
+          ? nothing
+          : html`<sl-range
+              id=${id}
+              min="0"
+              max="100"
+              step="1"
+              .value=${value}
+              ?disabled=${off || !set}
+              @sl-input=${(e: Event) =>
+                this.editField(
+                  f.key,
+                  {
+                    typed: true,
+                    cleared: false,
+                    text: String((e.target as HTMLElement & { value: number }).value),
+                  },
+                  f
+                )}
+            ></sl-range>`}
         <span class="range-value">${set ? value : ''}</span>
         <sl-checkbox
           size="small"
@@ -1152,7 +1161,8 @@ export class ScionAgentConfigForm extends LitElement {
           ?disabled=${off}
           @sl-change=${(e: Event) => {
             if ((e.target as HTMLInputElement).checked) {
-              const start = this.placeholders?.[f.key]?.value ?? '50';
+              // Start from the inherited value when known, else the middle.
+              const start = inheritedValue ?? '50';
               this.editField(f.key, { typed: true, cleared: false, text: start }, f);
             } else {
               this.clearField(f);

@@ -161,23 +161,33 @@ describe('create mode: untouched form sends nothing', () => {
  * way a user does, then check what lands in the create request.
  */
 const ROUND_TRIPS: Array<{
+  /** The field the case covers. */
+  key: string;
   name: string;
   act: (el: ScionAgentConfigForm) => Promise<void>;
   config?: Record<string, unknown>;
   top?: Record<string, unknown>;
 }> = [
-  { name: 'branch', act: (el) => type(el, 'branch', ' feat/x '), top: { branch: 'feat/x' } },
   {
+    key: 'branch',
+    name: 'branch',
+    act: (el) => type(el, 'branch', ' feat/x '),
+    top: { branch: 'feat/x' },
+  },
+  {
+    key: 'config.model',
     name: 'model (typed)',
     act: (el) => type(el, 'config.model', 'claude-opus-4-8'),
     config: { model: 'claude-opus-4-8' },
   },
   {
+    key: 'config.model',
     name: 'model (alias)',
     act: (el) => pick(el, 'config.model', 'large', 'sl-select.alias'),
     config: { model: 'large' },
   },
   {
+    key: 'config.thinking_level',
     name: 'thinking level',
     act: async (el) => {
       await check(el, 'config.thinking_level', true, 'sl-checkbox.set');
@@ -186,17 +196,25 @@ const ROUND_TRIPS: Array<{
     config: { thinking_level: 80 },
   },
   {
+    key: 'config.image',
     name: 'container image',
     act: (el) => type(el, 'config.image', 'img:1'),
     config: { image: 'img:1' },
   },
-  { name: 'container user', act: (el) => type(el, 'config.user', 'dev'), config: { user: 'dev' } },
   {
+    key: 'config.user',
+    name: 'container user',
+    act: (el) => type(el, 'config.user', 'dev'),
+    config: { user: 'dev' },
+  },
+  {
+    key: 'config.telemetry',
     name: 'telemetry',
     act: (el) => pick(el, 'config.telemetry', 'false'),
     config: { telemetry: { enabled: false } },
   },
   {
+    key: 'autoExpose',
     name: 'auto-expose ports',
     act: async (el) => {
       await pick(el, 'autoExpose', 'true');
@@ -214,47 +232,61 @@ const ROUND_TRIPS: Array<{
     },
   },
   {
+    key: 'agentRole',
     name: 'agent role',
     act: (el) => pick(el, 'agentRole', 'readonly'),
     top: { agentRole: 'readonly' },
   },
   {
+    key: 'messageMode',
     name: 'message mode',
     act: (el) => pick(el, 'messageMode', 'none'),
     top: { messageMode: 'none' },
   },
   {
+    key: 'config.auth_selectedType',
     name: 'harness authentication',
     act: (el) => pick(el, 'config.auth_selectedType', 'vertex-ai'),
     config: { auth_selectedType: 'vertex-ai' },
   },
   {
+    key: 'gcp_identity',
     name: 'GCP identity',
     act: (el) => pick(el, 'gcp_identity', 'passthrough'),
     top: { gcp_identity: { metadata_mode: 'passthrough' } },
   },
   {
+    key: 'config.system_prompt',
     name: 'system prompt',
     act: (el) => type(el, 'config.system_prompt', 'Be terse.\n', 'sl-textarea'),
     config: { system_prompt: 'Be terse.\n' },
   },
   {
+    key: 'config.agent_instructions',
     name: 'agent instructions',
     act: (el) => type(el, 'config.agent_instructions', 'file:///a.md', 'sl-textarea'),
     config: { agent_instructions: 'file:///a.md' },
   },
-  { name: 'max turns', act: (el) => type(el, 'config.max_turns', '25'), config: { max_turns: 25 } },
   {
+    key: 'config.max_turns',
+    name: 'max turns',
+    act: (el) => type(el, 'config.max_turns', '25'),
+    config: { max_turns: 25 },
+  },
+  {
+    key: 'config.max_model_calls',
     name: 'max model calls',
     act: (el) => type(el, 'config.max_model_calls', '300'),
     config: { max_model_calls: 300 },
   },
   {
+    key: 'config.max_duration',
     name: 'max duration',
     act: (el) => type(el, 'config.max_duration', '2h'),
     config: { max_duration: '2h' },
   },
   {
+    key: 'config.resources',
     name: 'resources',
     act: async (el) => {
       const subs = field(el, 'config.resources').querySelectorAll('.sub sl-input');
@@ -275,6 +307,7 @@ const ROUND_TRIPS: Array<{
     },
   },
   {
+    key: 'config.env',
     name: 'environment variables',
     act: async (el) => {
       const editor = field(el, 'config.env').querySelector('scion-env-editor')!;
@@ -286,6 +319,7 @@ const ROUND_TRIPS: Array<{
     config: { env: { FOO: 'bar' } },
   },
   {
+    key: 'labels',
     name: 'labels',
     act: async (el) => {
       (field(el, 'labels').querySelector('sl-button.add-label') as HTMLElement).click();
@@ -307,30 +341,11 @@ describe('create mode: every former Additional Options field round-trips', () =>
     });
   }
 
-  it('covers every field in the table', () => {
-    const covered = new Set([
-      'branch',
-      'config.model',
-      'config.thinking_level',
-      'config.image',
-      'config.user',
-      'config.telemetry',
-      'autoExpose',
-      'agentRole',
-      'messageMode',
-      'config.auth_selectedType',
-      'gcp_identity',
-      'config.system_prompt',
-      'config.agent_instructions',
-      'config.max_turns',
-      'config.max_model_calls',
-      'config.max_duration',
-      'config.resources',
-      'config.env',
-      'labels',
-    ]);
-    expect([...covered].sort()).toEqual([...ALL_CREATE_KEYS].sort());
-    expect(ROUND_TRIPS.length).toBeGreaterThanOrEqual(ALL_CREATE_KEYS.length);
+  it('has a round-trip case for exactly the fields the form renders', async () => {
+    const el = await mount();
+    const rendered = el.fields.map((f) => f.key);
+    expect(new Set(ROUND_TRIPS.map((r) => r.key))).toEqual(new Set(rendered));
+    expect(new Set(rendered)).toEqual(new Set(ALL_CREATE_KEYS));
   });
 
   it('merges custom env and auto-expose keys into one env object', async () => {
@@ -425,8 +440,8 @@ describe('create mode: Unlimited is a separate limits control', () => {
 describe('create mode: touched-tracking does not depend on same-value change events', () => {
   // Shoelace fires no sl-change when the user re-picks the value already
   // shown. Choices therefore start blank, so a pick of the inherited value
-  // changes the select and is a touch; a later no-event re-pick of the same
-  // value keeps it touched.
+  // changes the select and is a touch. Touches come only from user events:
+  // a value that reaches the control without an event is not counted.
   const choiceKeys: Array<[string, string]> = [
     ['config.telemetry', 'false'],
     ['autoExpose', 'true'],
@@ -441,15 +456,18 @@ describe('create mode: touched-tracking does not depend on same-value change eve
       const el = await mount({
         placeholders: { [key]: { value: inherited, source: 'inherited from project settings' } },
       });
-      const select = control(el, key, 'sl-select');
-      expect(select.value).toBe('');
+      expect(control(el, key, 'sl-select').value).toBe('');
       await pick(el, key, inherited);
-      expect(el.touchedKeys).toContain(key);
+      expect(el.touchedKeys).toEqual([key]);
+    });
 
-      // No-event re-pick of the same value, as real Shoelace does it.
+    it(`${key} does not count a value set without a user event`, async () => {
+      const el = await mount();
       control(el, key, 'sl-select').value = inherited;
       await el.updateComplete;
-      expect(el.touchedKeys).toContain(key);
+      expect(el.touchedKeys).toEqual([]);
+      expect(el.collectConfigPatch()).toEqual({});
+      expect(el.collectTopLevel()).toEqual({});
     });
   }
 
@@ -593,5 +611,60 @@ describe('create mode: resources', () => {
     disk.dispatchEvent(new Event('sl-input'));
     await el.updateComplete;
     expect(el.collectConfigPatch()).toEqual({ resources: { disk: '30Gi' } });
+  });
+});
+
+describe('create mode: thinking level never shows a made-up value', () => {
+  it('hides the slider while inherited with no known value', async () => {
+    const el = await mount();
+    expect(field(el, 'config.thinking_level').querySelector('sl-range')).toBeNull();
+    expect(field(el, 'config.thinking_level').textContent).toContain('Inherited');
+    await check(el, 'config.thinking_level', true, 'sl-checkbox.set');
+    expect(field(el, 'config.thinking_level').querySelector('sl-range')).not.toBeNull();
+  });
+
+  it('positions the disabled slider at a known inherited value', async () => {
+    const el = await mount({
+      placeholders: {
+        'config.thinking_level': { value: '7', source: 'inherited from project settings' },
+      },
+    });
+    const range = control(el, 'config.thinking_level', 'sl-range');
+    expect(range.hasAttribute('disabled')).toBe(true);
+    expect(Number(range.value)).toBe(7);
+  });
+});
+
+describe('create mode: the auto-expose control wins over a custom env entry', () => {
+  it('sends the control value when a custom entry names the same key', async () => {
+    const el = await mount();
+    const editor = field(el, 'config.env').querySelector('scion-env-editor')!;
+    editor.dispatchEvent(
+      new CustomEvent('env-change', {
+        detail: {
+          entries: [
+            { key: 'SCION_AUTO_EXPOSE_PORTS', value: 'true' },
+            { key: 'OTHER', value: 'x' },
+          ],
+        },
+      })
+    );
+    await el.updateComplete;
+    await pick(el, 'autoExpose', 'false');
+    expect(el.collectConfigPatch()).toEqual({
+      env: { SCION_AUTO_EXPOSE_PORTS: 'false', OTHER: 'x' },
+    });
+  });
+
+  it('sends a custom entry as is while the control is untouched', async () => {
+    const el = await mount();
+    const editor = field(el, 'config.env').querySelector('scion-env-editor')!;
+    editor.dispatchEvent(
+      new CustomEvent('env-change', {
+        detail: { entries: [{ key: 'SCION_AUTO_EXPOSE_PORTS', value: 'true' }] },
+      })
+    );
+    await el.updateComplete;
+    expect(el.collectConfigPatch()).toEqual({ env: { SCION_AUTO_EXPOSE_PORTS: 'true' } });
   });
 });

@@ -1,5 +1,5 @@
 {
-  "description": "Inherited create-time values, one case per tier. sources holds what the web reads from existing APIs, in their response shapes: template (a template list item), projectSettings (GET /api/v1/projects/{id}/settings) and hubSettings (GET /api/v1/settings/public). dispatched holds what the hub dispatches for an agent created with no config keys, by the web form's field key. TestCreateAgent_InheritedValuesGolden checks dispatched against the hub; the web's inherited-placeholder test checks its placeholders against dispatched.",
+  "description": "Inherited create-time values, one case per tier. sources is the input, written by hand: what the web reads from existing APIs, in their response shapes (template: a template list item; projectSettings: GET /api/v1/projects/{id}/settings; hubSettings: GET /api/v1/settings/public). dispatched is generated from the hub's actual dispatch by go test ./pkg/hub -run TestCreateAgent_InheritedValuesGolden -update, by the web form's field key, for an agent created with no config keys. The web's inherited-placeholder test checks its placeholders against dispatched.",
   "cases": [
     {
       "tier": "template",
@@ -8,17 +8,21 @@
           "config": {
             "model": "template-model",
             "messageMode": "lineage",
-            "telemetry": { "enabled": true },
-            "env": { "SCION_AUTO_EXPOSE_PORTS": "true" }
+            "telemetry": {
+              "enabled": true
+            },
+            "env": {
+              "SCION_AUTO_EXPOSE_PORTS": "true"
+            }
           }
         },
         "projectSettings": {},
         "hubSettings": {}
       },
       "dispatched": {
+        "autoExpose": "true",
         "config.model": "template-model",
         "config.telemetry": "true",
-        "autoExpose": "true",
         "messageMode": "lineage"
       }
     },
@@ -28,8 +32,12 @@
         "template": {
           "config": {
             "model": "template-model",
-            "telemetry": { "enabled": true },
-            "env": { "SCION_AUTO_EXPOSE_PORTS": "true" }
+            "telemetry": {
+              "enabled": true
+            },
+            "env": {
+              "SCION_AUTO_EXPOSE_PORTS": "true"
+            }
           }
         },
         "projectSettings": {
@@ -38,34 +46,62 @@
           "defaultMaxTurns": 40,
           "defaultMaxModelCalls": 300,
           "defaultMaxDuration": "2h",
-          "defaultResources": { "requests": { "cpu": "2" }, "disk": "20Gi" },
+          "defaultResources": {
+            "requests": {
+              "cpu": "2",
+              "memory": "4Gi"
+            },
+            "limits": {
+              "cpu": "4",
+              "memory": "8Gi"
+            },
+            "disk": "20Gi"
+          },
           "telemetryEnabled": false,
-          "autoExposePortsEnabled": false
+          "autoExposePortsEnabled": false,
+          "defaultHarnessAuth": "api-key",
+          "defaultAgentRole": "full",
+          "maxAgentRole": "baseline"
         },
-        "hubSettings": { "defaultModel": "hub-model", "autoExposePortsEnabled": true }
+        "hubSettings": {
+          "defaultModel": "hub-model",
+          "autoExposePortsEnabled": true
+        }
       },
       "dispatched": {
-        "config.model": "project-model",
-        "config.thinking_level": "7",
-        "config.max_turns": "40",
-        "config.max_model_calls": "300",
+        "agentRole": "baseline",
+        "autoExpose": "false",
+        "config.auth_selectedType": "api-key",
         "config.max_duration": "2h",
-        "config.resources.requests.cpu": "2",
+        "config.max_model_calls": "300",
+        "config.max_turns": "40",
+        "config.model": "project-model",
         "config.resources.disk": "20Gi",
+        "config.resources.limits.cpu": "4",
+        "config.resources.limits.memory": "8Gi",
+        "config.resources.requests.cpu": "2",
+        "config.resources.requests.memory": "4Gi",
         "config.telemetry": "false",
-        "autoExpose": "false"
+        "config.thinking_level": "7"
       }
     },
     {
       "tier": "hub",
       "sources": {
-        "template": { "config": { "model": "template-model" } },
+        "template": {
+          "config": {
+            "model": "template-model"
+          }
+        },
         "projectSettings": {},
-        "hubSettings": { "defaultModel": "hub-model", "autoExposePortsEnabled": true }
+        "hubSettings": {
+          "defaultModel": "hub-model",
+          "autoExposePortsEnabled": true
+        }
       },
       "dispatched": {
-        "config.model": "hub-model",
-        "autoExpose": "true"
+        "autoExpose": "true",
+        "config.model": "hub-model"
       }
     }
   ]

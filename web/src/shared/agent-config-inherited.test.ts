@@ -35,6 +35,7 @@ import {
   FROM_PROJECT,
   FROM_TEMPLATE,
   PROJECT_OVERRIDE,
+  inheritedAgentRole,
   resolveInheritedPlaceholders,
   type InheritedSources,
 } from './agent-config-inherited.js';
@@ -143,5 +144,26 @@ describe('resolveInheritedPlaceholders labels and gaps', () => {
     });
     expect(p['config.resources.limits.memory']).toEqual({ value: '8Gi', source: FROM_PROJECT });
     expect(p['config.resources.requests.cpu']).toBeUndefined();
+  });
+});
+
+describe('inheritedAgentRole caps the project default at the project maximum', () => {
+  it.each([
+    ['full', 'baseline', 'baseline'],
+    ['readonly', 'baseline', 'readonly'],
+    ['baseline', undefined, 'baseline'],
+    ['full', 'full', 'full'],
+    [undefined, 'baseline', undefined],
+    [undefined, 'none', 'none'],
+    ['bogus', undefined, undefined],
+  ])('default %s, max %s -> %s', (def, max, want) => {
+    expect(inheritedAgentRole(def, max)).toBe(want);
+  });
+
+  it('shows the capped role as the placeholder', () => {
+    const p = resolveInheritedPlaceholders({
+      projectSettings: { defaultAgentRole: 'full', maxAgentRole: 'readonly' },
+    });
+    expect(p.agentRole).toEqual({ value: 'readonly', source: FROM_PROJECT });
   });
 });

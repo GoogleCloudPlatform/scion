@@ -415,8 +415,9 @@ describe('scion-agent-config-form does not echo an untouched auth type (ptone/sc
     expect(select!.value).toBe('none');
     expect(el.collectConfigPatch()).toEqual({});
 
-    // Re-picking the shown value fires no change event in Shoelace.
-    select!.value = 'none';
+    // Touches come only from user events: a value that reaches the
+    // control without one is not sent.
+    select!.value = 'api-key';
     await el.updateComplete;
     expect(el.collectConfigPatch()).toEqual({});
   });
