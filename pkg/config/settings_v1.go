@@ -1574,6 +1574,19 @@ type V1ServerHubConfig struct {
 	// Conduit holds the conduit relay and grant settings (hub.conduit
 	// experiment). Read at startup; changes need a restart.
 	Conduit *V1ServerHubConduitConfig `json:"conduit,omitempty" yaml:"conduit,omitempty" koanf:"conduit"`
+	// PortProxy holds the agent port proxy settings. Read at startup;
+	// changes need a restart.
+	PortProxy *V1ServerHubPortProxyConfig `json:"port_proxy,omitempty" yaml:"port_proxy,omitempty" koanf:"port_proxy"`
+}
+
+// V1ServerHubPortProxyConfig holds the agent port proxy settings of the
+// hub server (server.hub.port_proxy). Validated at startup
+// (HubPortProxyConfig.Validate); an invalid value is a startup error.
+type V1ServerHubPortProxyConfig struct {
+	// ResponseHeaderTimeout bounds the wait for an agent port's response
+	// headers, the WebSocket handshake included (e.g. "60s"; default
+	// "60s", between "5s" and "10m"). The body is not time-limited.
+	ResponseHeaderTimeout string `json:"response_header_timeout,omitempty" yaml:"response_header_timeout,omitempty" koanf:"response_header_timeout"`
 }
 
 // V1ServerHubConduitConfig holds the conduit settings of the hub server
@@ -3086,6 +3099,7 @@ var conduitV1EnvListKeys = []string{
 // IMPORTANT: Sorted longest-first so that "dev_token_file" matches before "dev_token".
 var knownCompoundFields = []string{
 	"start_create_unconfirmed_hold",
+	"response_header_timeout",
 	"require_trusted_proxy_ip",
 	"soft_delete_retain_files",
 	"start_unconfirmed_hold",
@@ -3105,6 +3119,7 @@ var knownCompoundFields = []string{
 	"peer_audience",
 	"lifetime_cap",
 	"instance_id",
+	"port_proxy",
 	"peer_auth",
 	"authorized_domains",
 	"platform_auth_sa",
@@ -3460,6 +3475,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				gc.Hub.Conduit.StreamAuthzMax = HubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
 			}
 		}
+		if p := v1.Hub.PortProxy; p != nil {
+			gc.Hub.PortProxy = HubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout}
+		}
 	}
 
 	// Broker config
@@ -3802,6 +3820,9 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		if m := c.StreamAuthzMax; !m.IsZero() {
 			v1Hub.Conduit.StreamAuthzMax = &V1ServerHubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
 		}
+	}
+	if p := gc.Hub.PortProxy; !p.IsZero() {
+		v1Hub.PortProxy = &V1ServerHubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout}
 	}
 	if gc.Hub.StartClaimLeaseTTL > 0 {
 		v1Hub.StartClaimLeaseTTL = gc.Hub.StartClaimLeaseTTL.String()

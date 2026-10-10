@@ -1304,10 +1304,25 @@ func validateServerPreflight(cfg *config.GlobalConfig) error {
 	if err := cfg.Hub.Conduit.Validate(); err != nil {
 		return err
 	}
+	if err := cfg.Hub.PortProxy.Validate(); err != nil {
+		return err
+	}
 	if _, err := hub.ParseAgentRunScope(cfg.Auth.AgentRunScope, cfg.Auth.AgentRunScopeLegacyUntil); err != nil {
 		return err
 	}
 	return nil
+}
+
+// portProxyResponseHeaderTimeoutSetting returns the configured bound on
+// the wait for an agent port's response headers (default 60s).
+// validateServerPreflight has already rejected a malformed or
+// out-of-range value.
+func portProxyResponseHeaderTimeoutSetting(cfg *config.GlobalConfig) time.Duration {
+	d, err := cfg.Hub.PortProxy.ResponseHeaderTimeoutDuration()
+	if err != nil {
+		return config.PortProxyDefaultResponseHeaderTimeout
+	}
+	return d
 }
 
 // agentRunScopeSetting returns the parsed agent run-scope setting.
@@ -2085,6 +2100,8 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		WorkspaceStorageConfig:  cfg.WorkspaceStorage,
 		// nil (no server.native_chat section) means enabled — chat is default-on.
 		NativeChatEnabled: cfg.NativeChat.EnabledSetting(),
+		// server.hub.port_proxy.response_header_timeout (validated at startup).
+		PortProxyResponseHeaderTimeout: portProxyResponseHeaderTimeoutSetting(cfg),
 	}
 }
 
@@ -2140,6 +2157,12 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		log.Printf("WARNING: hub conduit stream authz metrics disabled: %v", err)
 	} else {
 		hubSrv.SetConduitStreamAuthzMetrics(authzRec)
+	}
+
+	if portProxyRec, err := hub.NewOTelPortProxyMetrics(mp); err != nil {
+		log.Printf("WARNING: hub port proxy metrics disabled: %v", err)
+	} else {
+		hubSrv.SetPortProxyMetrics(portProxyRec)
 	}
 
 	runScopeRec, runScopeErr := hub.NewOTelAgentRunScopeMetrics(mp)

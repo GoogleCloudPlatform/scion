@@ -142,6 +142,12 @@ type ServerConfig struct {
 	// it, the hub re-checks the user and renews or closes the stream.
 	// Only used behind the hub.conduit experiment.
 	ConduitUserStreamAuthzMax time.Duration
+	// PortProxyResponseHeaderTimeout bounds the wait for an agent port's
+	// response headers on the conduit port proxy, the WebSocket handshake
+	// included (server.hub.port_proxy.response_header_timeout; 0 = 60s).
+	// The range (5s to 10m) is enforced at startup by config validation.
+	// On timeout the proxy answers 504.
+	PortProxyResponseHeaderTimeout time.Duration
 	// AuthMode is the configured human auth mode (server.auth.mode). "proxy"
 	// is the only value the code checks: the auth handlers then list no
 	// OAuth providers and treat logout as a no-op. Any other value,
@@ -1467,6 +1473,9 @@ type Server struct {
 	// no relay runs); conduitAuthzMetrics is its counter.
 	conduitAuthz        atomic.Pointer[conduitStreamAuthz]
 	conduitAuthzMetrics atomic.Pointer[conduitStreamAuthzMetrics]
+	// portProxyMetrics counts agent port proxy upstream header timeouts
+	// (port_proxy_metrics.go); nil until SetPortProxyMetrics.
+	portProxyMetrics atomic.Pointer[portProxyMetrics]
 	// conduitAuthzBindMu guards conduitAuthzUnbind, which releases the
 	// re-check's binding to the current event publisher.
 	conduitAuthzBindMu     sync.Mutex

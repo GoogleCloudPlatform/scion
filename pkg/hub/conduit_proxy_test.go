@@ -51,7 +51,7 @@ import (
 func TestConduitProxyTransportNeverDials(t *testing.T) {
 	stream, peer := net.Pipe()
 	t.Cleanup(func() { _ = stream.Close(); _ = peer.Close() })
-	tr := conduitProxyTransport(stream)
+	tr := conduitProxyTransport(stream, 0)
 
 	assert.Nil(t, tr.Proxy, "no HTTP proxy")
 	assert.True(t, tr.DisableKeepAlives, "the stream is not reused")
