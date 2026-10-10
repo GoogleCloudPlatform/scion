@@ -92,4 +92,8 @@ const (
 	// BrokerKSADiscoveryUnavailable: the lookup could not run, for example
 	// because the selected runtime has no Kubernetes client.
 	BrokerKSADiscoveryUnavailable = "unavailable"
+	// BrokerKSADiscoveryPending: no discovery result exists yet (the first
+	// lookup for the namespace has not finished). Used only as a heartbeat
+	// report's incomplete reason (hubclient.ProfileSAMappingsState).
+	BrokerKSADiscoveryPending = "pending"
 )
