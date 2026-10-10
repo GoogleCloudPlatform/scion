@@ -3995,7 +3995,7 @@ export class ScionPageChat extends LitElement {
    * `popstate` to the page; on any other URL the router replaces the page.
    */
   private routeShowsCurrentUrl(): boolean {
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion -- tsc needs the cast to read currentPath on the parent element.
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion -- tsc needs the cast to read currentPath on the parent element; per-site decision tracked in ptone/scion#4126.
     const shell = this.parentElement as (HTMLElement & { currentPath?: unknown }) | null;
     if (typeof shell?.currentPath !== 'string') return false;
     const appPath = stripBasePath(window.location.pathname) + window.location.search;
@@ -4343,7 +4343,7 @@ export class ScionPageChat extends LitElement {
         // Fall through to the manual walk below (e.g. not implemented in this environment).
       }
     }
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion -- cast through unknown keeps no-this-alias from reporting the loop variable.
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion -- cast through unknown keeps no-this-alias from reporting the loop variable; per-site decision tracked in ptone/scion#4126.
     let node: Node | null = this as unknown as Node;
     while (node) {
       const el = node as HTMLElement;
