@@ -112,6 +112,20 @@ func (_c *TemplateCreate) SetNillableConfig(v *string) *TemplateCreate {
 	return _c
 }
 
+// SetAgentConfig sets the "agent_config" field.
+func (_c *TemplateCreate) SetAgentConfig(v string) *TemplateCreate {
+	_c.mutation.SetAgentConfig(v)
+	return _c
+}
+
+// SetNillableAgentConfig sets the "agent_config" field if the given value is not nil.
+func (_c *TemplateCreate) SetNillableAgentConfig(v *string) *TemplateCreate {
+	if v != nil {
+		_c.SetAgentConfig(*v)
+	}
+	return _c
+}
+
 // SetContentHash sets the "content_hash" field.
 func (_c *TemplateCreate) SetContentHash(v string) *TemplateCreate {
 	_c.mutation.SetContentHash(v)
@@ -513,6 +527,10 @@ func (_c *TemplateCreate) createSpec() (*Template, *sqlgraph.CreateSpec) {
 		_spec.SetField(template.FieldConfig, field.TypeString, value)
 		_node.Config = value
 	}
+	if value, ok := _c.mutation.AgentConfig(); ok {
+		_spec.SetField(template.FieldAgentConfig, field.TypeString, value)
+		_node.AgentConfig = value
+	}
 	if value, ok := _c.mutation.ContentHash(); ok {
 		_spec.SetField(template.FieldContentHash, field.TypeString, value)
 		_node.ContentHash = value
@@ -752,6 +770,24 @@ func (u *TemplateUpsert) UpdateConfig() *TemplateUpsert {
 // ClearConfig clears the value of the "config" field.
 func (u *TemplateUpsert) ClearConfig() *TemplateUpsert {
 	u.SetNull(template.FieldConfig)
+	return u
+}
+
+// SetAgentConfig sets the "agent_config" field.
+func (u *TemplateUpsert) SetAgentConfig(v string) *TemplateUpsert {
+	u.Set(template.FieldAgentConfig, v)
+	return u
+}
+
+// UpdateAgentConfig sets the "agent_config" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateAgentConfig() *TemplateUpsert {
+	u.SetExcluded(template.FieldAgentConfig)
+	return u
+}
+
+// ClearAgentConfig clears the value of the "agent_config" field.
+func (u *TemplateUpsert) ClearAgentConfig() *TemplateUpsert {
+	u.SetNull(template.FieldAgentConfig)
 	return u
 }
 
@@ -1202,6 +1238,27 @@ func (u *TemplateUpsertOne) UpdateConfig() *TemplateUpsertOne {
 func (u *TemplateUpsertOne) ClearConfig() *TemplateUpsertOne {
 	return u.Update(func(s *TemplateUpsert) {
 		s.ClearConfig()
+	})
+}
+
+// SetAgentConfig sets the "agent_config" field.
+func (u *TemplateUpsertOne) SetAgentConfig(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetAgentConfig(v)
+	})
+}
+
+// UpdateAgentConfig sets the "agent_config" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateAgentConfig() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateAgentConfig()
+	})
+}
+
+// ClearAgentConfig clears the value of the "agent_config" field.
+func (u *TemplateUpsertOne) ClearAgentConfig() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearAgentConfig()
 	})
 }
 
@@ -1861,6 +1918,27 @@ func (u *TemplateUpsertBulk) UpdateConfig() *TemplateUpsertBulk {
 func (u *TemplateUpsertBulk) ClearConfig() *TemplateUpsertBulk {
 	return u.Update(func(s *TemplateUpsert) {
 		s.ClearConfig()
+	})
+}
+
+// SetAgentConfig sets the "agent_config" field.
+func (u *TemplateUpsertBulk) SetAgentConfig(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetAgentConfig(v)
+	})
+}
+
+// UpdateAgentConfig sets the "agent_config" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateAgentConfig() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateAgentConfig()
+	})
+}
+
+// ClearAgentConfig clears the value of the "agent_config" field.
+func (u *TemplateUpsertBulk) ClearAgentConfig() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearAgentConfig()
 	})
 }
 
