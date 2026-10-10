@@ -796,9 +796,16 @@ export class ScionPageAgentCreate extends LitElement {
     if (!projectId) return;
     const target = this.gcpAssignTarget;
     this.gcpAssignTargetKey = assignStatusTargetKey(target);
-    // Non-critical: a failed fetch leaves the picker without accounts.
-    let accounts = (await this.fetchGCPServiceAccounts(projectId, target)) ?? [];
+    let fetched = await this.fetchGCPServiceAccounts(projectId, target);
     if (isStale()) return;
+    // Asking for the mapping state adds a project-read check on the hub; if
+    // that request fails, list the accounts without it as before.
+    if (fetched === null && target) {
+      fetched = await this.fetchGCPServiceAccounts(projectId, null);
+      if (isStale()) return;
+    }
+    // Non-critical: a failed fetch leaves the picker without accounts.
+    let accounts = fetched ?? [];
     // The target changed while this load was in flight: this load's labels
     // are for the old target, so drop them and ask again for the current one.
     const targetChanged = assignSeq !== this.gcpAssignSeq;

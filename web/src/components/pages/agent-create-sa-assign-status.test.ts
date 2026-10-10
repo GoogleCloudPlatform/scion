@@ -88,15 +88,27 @@ const STATUS_BY_PROFILE: Record<string, Record<string, GCPServiceAccountAssignSt
   },
 };
 
+/** A held service-account list response, released by the test. */
+interface HeldList {
+  /** The profile the request asked about, or '' for none. */
+  profile: string;
+  release: () => void;
+}
+
 /**
  * Routes the page's fetches. The service-account list answers with the
  * mapping state for the requested profile, unless olderHub, which ignores
- * the parameters as a hub that predates them does. Records every list URL.
+ * the parameters as a hub that predates them does. With denyAssignStatus a
+ * list that asks for the mapping state is refused (403), as the hub's extra
+ * read check can. While hold.on, list responses wait in held until the test
+ * releases them, so they can complete in any order. Records every list URL.
  */
-function stubFetch(opts: { broker?: typeof BROKER; olderHub?: boolean } = {}): {
-  listUrls: URL[];
-} {
+function stubFetch(
+  opts: { broker?: typeof BROKER; olderHub?: boolean; denyAssignStatus?: boolean } = {}
+): { listUrls: URL[]; hold: { on: boolean }; held: HeldList[] } {
   const listUrls: URL[] = [];
+  const hold = { on: false };
+  const held: HeldList[] = [];
   const broker = opts.broker ?? BROKER;
   vi.stubGlobal(
     'fetch',
@@ -115,15 +127,44 @@ function stubFetch(opts: { broker?: typeof BROKER; olderHub?: boolean } = {}): {
       if (raw.includes('/gcp-service-accounts')) {
         const url = new URL(raw, 'http://hub.example.com');
         listUrls.push(url);
+        if (opts.denyAssignStatus && url.searchParams.has('assignStatus')) {
+          return Promise.resolve({
+            ok: false,
+            status: 403,
+            json: () => Promise.resolve({ error: { message: 'forbidden' } }),
+          } as Response);
+        }
+        const profile = url.searchParams.get('profile') ?? '';
         const statuses: Record<string, GCPServiceAccountAssignStatus> = opts.olderHub
           ? {}
-          : (STATUS_BY_PROFILE[url.searchParams.get('profile') ?? ''] ?? {});
-        return ok({ items: ['sa-a', 'sa-b', 'sa-c'].map((id) => account(id, statuses[id])) });
+          : (STATUS_BY_PROFILE[profile] ?? {});
+        const response = ok({
+          items: ['sa-a', 'sa-b', 'sa-c'].map((id) => account(id, statuses[id])),
+        });
+        if (!hold.on) return response;
+        return new Promise<Response>((resolve) => {
+          held.push({ profile, release: () => resolve(response) });
+        });
       }
       return ok({});
     })
   );
-  return { listUrls };
+  return { listUrls, hold, held };
+}
+
+/** Releases the oldest held list response for profile, then lets the page settle. */
+async function release(el: MountedEl, held: HeldList[], profile: string): Promise<void> {
+  const i = held.findIndex((h) => h.profile === profile);
+  if (i < 0) throw new Error(`no held list response for profile "${profile}"`);
+  const [h] = held.splice(i, 1);
+  h.release();
+  await settle(el);
+}
+
+/** Lets the page settle until cond holds (or gives up after a while). */
+async function waitUntil(el: MountedEl, cond: () => boolean): Promise<void> {
+  for (let i = 0; i < 50 && !cond(); i++) await settle(el);
+  if (!cond()) throw new Error('condition not reached');
 }
 
 async function settle(el: MountedEl): Promise<void> {
@@ -263,5 +304,92 @@ describe('Create Agent: service-account mapping state for the Kubernetes target'
       ['sa-c', 'sa-c@example.com'],
     ]);
     expect(statusHint(el)).toBe('');
+  });
+
+  it('keeps the newest target when an older response arrives last', async () => {
+    const { hold, held } = stubFetch();
+    const el = await mountAgentCreate();
+    hold.on = true;
+
+    await setProfile(el, 'k8s-a');
+    await setProfile(el, 'k8s-b');
+    expect(held.map((h) => h.profile)).toEqual(['k8s-a', 'k8s-b']);
+
+    await release(el, held, 'k8s-b');
+    await release(el, held, 'k8s-a');
+
+    const opts = options(el);
+    expect(opts.map(([id]) => id)).toEqual(['sa-a', 'sa-c', 'sa-b']);
+    expect(opts[0][1]).toContain('— mapped');
+    expect(opts[2][1]).toContain('— not mapped on this profile');
+    expect(statusHint(el)).toBe('Mapped: test message A2.');
+  });
+
+  it('ends on the current target when it changes during the first load', async () => {
+    // k8s-a is the only available profile, so the first load asks about it;
+    // the test then switches to k8s-b while that load is still in flight.
+    const broker = {
+      ...BROKER,
+      profiles: [
+        { name: 'k8s-a', type: 'kubernetes', available: true },
+        { name: 'k8s-b', type: 'kubernetes', available: false },
+      ],
+    };
+    const { hold, held } = stubFetch({ broker });
+    hold.on = true;
+    const el = await mountAgentCreate();
+    await waitUntil(el, () => held.length === 1);
+    expect(held[0].profile).toBe('k8s-a');
+
+    await setProfile(el, 'k8s-b');
+    expect(held.map((h) => h.profile)).toEqual(['k8s-a', 'k8s-b']);
+
+    // The newer request completes first, then the first load's older one.
+    await release(el, held, 'k8s-b');
+    await release(el, held, 'k8s-a');
+    // Whatever is still asked about must be the current target only.
+    expect(held.every((h) => h.profile === 'k8s-b')).toBe(true);
+    while (held.length > 0) await release(el, held, 'k8s-b');
+    await waitUntil(el, () => statusHint(el) !== '');
+
+    const opts = options(el);
+    expect(opts.map(([id]) => id)).toEqual(['sa-a', 'sa-c', 'sa-b']);
+    expect(opts[0][1]).toContain('— mapped');
+    expect(opts[1][1]).toContain('— no mapping needed');
+    expect(opts[2][1]).toContain('— not mapped on this profile');
+    expect(statusHint(el)).toBe('Mapped: test message A2.');
+  });
+
+  it('lists the accounts without labels when the first load cannot get the mapping state', async () => {
+    const { listUrls } = stubFetch({ broker: SINGLE_PROFILE_BROKER, denyAssignStatus: true });
+    const el = await mountAgentCreate();
+
+    expect(listUrls[0].searchParams.get('assignStatus')).toBe('true');
+    expect(listUrls[1].searchParams.has('assignStatus')).toBe(false);
+    expect(options(el)).toEqual([
+      ['sa-a', 'sa-a@example.com'],
+      ['sa-b', 'sa-b@example.com'],
+      ['sa-c', 'sa-c@example.com'],
+    ]);
+    expect(statusHint(el)).toBe('');
+  });
+
+  it('puts the message in the select help text and marks a not-mapped selection', async () => {
+    stubFetch();
+    const el = await mountAgentCreate();
+    await setProfile(el, 'k8s-a');
+
+    const hint = formField(el, 'Service Account')!.querySelector(
+      'sl-select > [slot="help-text"][data-testid="gcp-sa-assign-status"]'
+    );
+    expect(hint).not.toBeNull();
+    expect(hint!.classList.contains('warning')).toBe(true);
+    expect(hint!.getAttribute('data-assign-state')).toBe('not_mapped');
+
+    await setProfile(el, 'k8s-b');
+    const mapped = formField(el, 'Service Account')!.querySelector(
+      '[data-testid="gcp-sa-assign-status"]'
+    );
+    expect(mapped!.classList.contains('warning')).toBe(false);
   });
 }, 30000);

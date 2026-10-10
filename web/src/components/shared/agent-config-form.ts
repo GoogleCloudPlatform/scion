@@ -1421,12 +1421,19 @@ export class ScionAgentConfigForm extends LitElement {
                             : nothing}
                         </sl-option>`;
                       })}
+                      ${g.selectedAssignStatus?.message
+                        ? html`<div
+                            slot="help-text"
+                            class=${g.selectedAssignStatus.state === 'not_mapped'
+                              ? 'assign-status-message warning'
+                              : 'assign-status-message'}
+                            data-testid="gcp-sa-assign-status"
+                            data-assign-state=${g.selectedAssignStatus.state}
+                          >
+                            ${g.selectedAssignStatus.message}
+                          </div>`
+                        : nothing}
                     </sl-select>
-                    ${g.selectedAssignStatus?.message
-                      ? html`<div class="hint" data-testid="gcp-sa-assign-status">
-                          ${g.selectedAssignStatus.message}
-                        </div>`
-                      : nothing}
                   `
                 : html`
                     <div class="hint">
@@ -1613,6 +1620,13 @@ export class ScionAgentConfigForm extends LitElement {
     .assign-status {
       color: var(--sl-color-neutral-600);
     }
+    .assign-status-message {
+      font-size: var(--sl-font-size-small);
+      color: var(--sl-color-neutral-600);
+    }
+    .assign-status-message.warning {
+      color: var(--sl-color-warning-700, #b45309);
+    }
     .status {
       display: flex;
       flex-direction: column;
@@ -1625,7 +1639,7 @@ export class ScionAgentConfigForm extends LitElement {
     }
     .clear-note,
     .override-note {
-      color: var(--sl-color-warning-700);
+      color: var(--sl-color-warning-700, #b45309);
     }
     .other {
       border-top: 1px solid var(--sl-color-neutral-200);
