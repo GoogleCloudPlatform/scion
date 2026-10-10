@@ -163,9 +163,9 @@ describe('hub instance integration counts', () => {
 
   it('shows the total and the non-healthy counts', () => {
     expect(integrationCountsText(counts({ total: 2, healthy: 2 }))).toBe('2');
-    expect(integrationCountsText(counts({ total: 4, healthy: 1, unhealthy: 1, degraded: 1, unknown: 1 }))).toBe(
-      '4 (1 unhealthy, 1 degraded, 1 unknown)'
-    );
+    expect(
+      integrationCountsText(counts({ total: 4, healthy: 1, unhealthy: 1, degraded: 1, unknown: 1 }))
+    ).toBe('4 (1 unhealthy, 1 degraded, 1 unknown)');
     expect(integrationCountsText(counts({ total: 3, healthy: 3 }), true)).toBe('3+');
   });
 
@@ -183,14 +183,16 @@ describe('hub instance integration counts', () => {
 
   it('maps instance IDs to labels, falling back to the ID', () => {
     expect(
-      hubInstanceLabels(list([instance({ id: 'a1', label: 'hub-a' }), instance({ id: 'b2', label: '' })]))
+      hubInstanceLabels(
+        list([instance({ id: 'a1', label: 'hub-a' }), instance({ id: 'b2', label: '' })])
+      )
     ).toEqual({ a1: 'hub-a', b2: 'b2' });
     expect(hubInstanceLabels(null)).toEqual({});
   });
 });
 
 describe('scion-health-hub-instances', () => {
-  it('shows each instance\'s integration counts, with a dash for none', async () => {
+  it("shows each instance's integration counts, with a dash for none", async () => {
     const root = await mount(
       list([
         instance({

@@ -179,7 +179,9 @@ export function integrationCountsText(
 }
 
 /** The Integrations cell's tooltip: every count, healthy first. */
-export function integrationCountsDetail(c: HealthSummaryIntegrationCounts | null | undefined): string {
+export function integrationCountsDetail(
+  c: HealthSummaryIntegrationCounts | null | undefined
+): string {
   if (!c || (c.total ?? 0) <= 0) return '';
   return `${c.healthy} healthy, ${c.degraded} degraded, ${c.unhealthy} unhealthy, ${c.unknown} unknown`;
 }
