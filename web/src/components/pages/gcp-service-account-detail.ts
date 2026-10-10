@@ -67,20 +67,6 @@ export class ScionPageGCPServiceAccountDetail extends LitElement {
       display: block;
     }
 
-    .breadcrumb {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      font-size: 0.875rem;
-      color: var(--scion-text-muted, #64748b);
-      margin-bottom: 1rem;
-    }
-
-    .breadcrumb a {
-      color: var(--scion-primary, #3b82f6);
-      text-decoration: none;
-    }
-
     .panel {
       background: var(--scion-surface, #ffffff);
       border: 1px solid var(--scion-border, #e2e8f0);
@@ -225,9 +211,7 @@ export class ScionPageGCPServiceAccountDetail extends LitElement {
 
     if (this.error || !this.account) {
       return html`
-        <div class="breadcrumb">
-          <a href="/settings?tab=service-accounts">Hub Resources</a>
-        </div>
+        <scion-back-link href="/settings?tab=service-accounts">Hub Resources</scion-back-link>
         <div class="error-state">
           <sl-icon name="exclamation-triangle"></sl-icon>
           <p>${this.error ?? 'Service account not found'}</p>
@@ -241,13 +225,10 @@ export class ScionPageGCPServiceAccountDetail extends LitElement {
     const canDelete = can(account._capabilities, 'delete');
 
     return html`
-      <div class="breadcrumb">
-        <a href="/settings?tab=service-accounts">Hub Resources</a>
-        <span>/</span>
-        <span>Service Accounts</span>
-      </div>
-
       <scion-detail-header heading=${account.email}>
+        <scion-back-link slot="back" href="/settings?tab=service-accounts"
+          >Hub Resources</scion-back-link
+        >
         ${account.displayName
           ? html`<div slot="meta" class="display-name">${account.displayName}</div>`
           : nothing}

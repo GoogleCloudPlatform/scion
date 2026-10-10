@@ -1003,20 +1003,6 @@ export class ScionPageProjectDetail extends LitElement {
       margin-top: 0.75rem;
     }
 
-    .back-link {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      color: var(--scion-text-muted, #64748b);
-      text-decoration: none;
-      font-size: 0.875rem;
-      margin-bottom: 1rem;
-    }
-
-    .back-link:hover {
-      color: var(--scion-primary, #3b82f6);
-    }
-
     .header-path a {
       color: inherit;
       text-decoration: none;
@@ -2710,12 +2696,8 @@ export class ScionPageProjectDetail extends LitElement {
     }
 
     return html`
-      <a href="/projects" class="back-link">
-        <sl-icon name="arrow-left"></sl-icon>
-        Back to Projects
-      </a>
-
       <scion-detail-header heading=${this.project.name}>
+        <scion-back-link slot="back" href="/projects">Back to Projects</scion-back-link>
         ${this.renderProjectIcon()} ${this.renderLinkedBadge()}
         <div slot="meta" class="header-path">
           <scion-git-remote-display .project=${this.project}></scion-git-remote-display>
@@ -3217,10 +3199,7 @@ export class ScionPageProjectDetail extends LitElement {
 
   private renderError() {
     return html`
-      <a href="/projects" class="back-link">
-        <sl-icon name="arrow-left"></sl-icon>
-        Back to Projects
-      </a>
+      <scion-back-link href="/projects">Back to Projects</scion-back-link>
 
       <div class="error-state">
         <sl-icon name="exclamation-triangle"></sl-icon>
