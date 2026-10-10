@@ -1,0 +1,108 @@
+{
+  "description": "Inherited create-time values, one case per tier. sources is the input, written by hand: what the web reads from existing APIs, in their response shapes (template: a template list item; projectSettings: GET /api/v1/projects/{id}/settings; hubSettings: GET /api/v1/settings/public). dispatched is generated from the hub's actual dispatch by go test ./pkg/hub -run TestCreateAgent_InheritedValuesGolden -update, by the web form's field key, for an agent created with no config keys. The web's inherited-placeholder test checks its placeholders against dispatched.",
+  "cases": [
+    {
+      "tier": "template",
+      "sources": {
+        "template": {
+          "config": {
+            "model": "template-model",
+            "messageMode": "lineage",
+            "telemetry": {
+              "enabled": true
+            },
+            "env": {
+              "SCION_AUTO_EXPOSE_PORTS": "true"
+            }
+          }
+        },
+        "projectSettings": {},
+        "hubSettings": {}
+      },
+      "dispatched": {
+        "autoExpose": "true",
+        "config.model": "template-model",
+        "config.telemetry": "true",
+        "messageMode": "lineage"
+      }
+    },
+    {
+      "tier": "project",
+      "sources": {
+        "template": {
+          "config": {
+            "model": "template-model",
+            "telemetry": {
+              "enabled": true
+            },
+            "env": {
+              "SCION_AUTO_EXPOSE_PORTS": "true"
+            }
+          }
+        },
+        "projectSettings": {
+          "defaultModel": "project-model",
+          "defaultThinkingLevel": 7,
+          "defaultMaxTurns": 40,
+          "defaultMaxModelCalls": 300,
+          "defaultMaxDuration": "2h",
+          "defaultResources": {
+            "requests": {
+              "cpu": "2",
+              "memory": "4Gi"
+            },
+            "limits": {
+              "cpu": "4",
+              "memory": "8Gi"
+            },
+            "disk": "20Gi"
+          },
+          "telemetryEnabled": false,
+          "autoExposePortsEnabled": false,
+          "defaultHarnessAuth": "api-key",
+          "defaultAgentRole": "full",
+          "maxAgentRole": "baseline"
+        },
+        "hubSettings": {
+          "defaultModel": "hub-model",
+          "autoExposePortsEnabled": true
+        }
+      },
+      "dispatched": {
+        "agentRole": "baseline",
+        "autoExpose": "false",
+        "config.auth_selectedType": "api-key",
+        "config.max_duration": "2h",
+        "config.max_model_calls": "300",
+        "config.max_turns": "40",
+        "config.model": "project-model",
+        "config.resources.disk": "20Gi",
+        "config.resources.limits.cpu": "4",
+        "config.resources.limits.memory": "8Gi",
+        "config.resources.requests.cpu": "2",
+        "config.resources.requests.memory": "4Gi",
+        "config.telemetry": "false",
+        "config.thinking_level": "7"
+      }
+    },
+    {
+      "tier": "hub",
+      "sources": {
+        "template": {
+          "config": {
+            "model": "template-model"
+          }
+        },
+        "projectSettings": {},
+        "hubSettings": {
+          "defaultModel": "hub-model",
+          "autoExposePortsEnabled": true
+        }
+      },
+      "dispatched": {
+        "autoExpose": "true",
+        "config.model": "hub-model"
+      }
+    }
+  ]
+}

@@ -28,7 +28,7 @@ interface AgentCreateInternals extends HTMLElement {
   updateComplete: Promise<unknown>;
   projectId: string;
   templateId: string;
-  maxTurns: number;
+  placeholders: Record<string, { value?: string }>;
   harnessConfigs: Array<{ name: string }>;
 }
 
@@ -115,7 +115,7 @@ describe('Create Agent project switch', () => {
     const el = await mount();
     expect(el.projectId).toBe('proj-a');
     expect(el.templateId).toBe('t-a');
-    expect(el.maxTurns).toBe(11);
+    expect(el.placeholders['config.max_turns']?.value).toBe('11');
 
     // Switch to B, whose responses are held, then back to A before they land.
     selectProject(el, 'proj-b');
@@ -132,7 +132,7 @@ describe('Create Agent project switch', () => {
 
     expect(el.projectId).toBe('proj-a');
     expect(el.templateId).toBe('t-a');
-    expect(el.maxTurns).toBe(11);
+    expect(el.placeholders['config.max_turns']?.value).toBe('11');
     expect(el.harnessConfigs.map((h) => h.name)).toEqual(['harness-a']);
   });
 });
