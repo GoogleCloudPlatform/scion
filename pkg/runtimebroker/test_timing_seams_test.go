@@ -23,7 +23,7 @@ import (
 // test that has to sit through it (a PTY teardown, a retry backoff) runs in
 // milliseconds instead of seconds, while still driving the same code path.
 // Production defaults are pinned separately (TestLaunchSender_DefaultTimings,
-// TestPTYShutdownDefaults).
+// TestPTYShutdownDefaults, TestCommandWaitDelayDefault).
 
 // fastPTYExitGracePeriod replaces processExitGracePeriod (3s) in tests whose
 // PTY bridge teardown would otherwise wait it out: the tmux attach client a
@@ -131,8 +131,5 @@ func TestPTYShutdownDefaults(t *testing.T) {
 	}
 	if processTermTimeout != 2*time.Second {
 		t.Errorf("processTermTimeout = %v, want 2s", processTermTimeout)
-	}
-	if commandWaitDelay != 3*time.Second {
-		t.Errorf("commandWaitDelay = %v, want 3s", commandWaitDelay)
 	}
 }

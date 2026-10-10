@@ -566,8 +566,9 @@ func TestLaunchSender_TerminalNotEndedByAbortRecordedDuringIt(t *testing.T) {
 	// non-abortable retry path is the same.
 	s.timings = *fastLaunchTimings(0)
 
-	// The production reportMaxBackoff (10s) plus slack for the second attempt.
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	// A generous safety bound: with the shortened backoff both attempts
+	// finish in milliseconds.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	result, err := s.SendTerminal(ctx, false, "launching", "runtime_error", "boom", nil)
 	if err != nil {
