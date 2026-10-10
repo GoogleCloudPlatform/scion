@@ -28,7 +28,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
-	"github.com/google/uuid"
 )
 
 // AuthConfig holds authentication configuration.
@@ -271,88 +270,13 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 			if token := extractAgentToken(r); token != "" {
 				if cfg.AgentTokenSvc != nil {
 					if claims, err := cfg.AgentTokenSvc.ValidateAgentToken(token); err == nil {
-						// Step 1a: Agent-token authentication requires a successful
-						// credential-status evaluation (Phase 1H). See
-						// evaluateAgentCredentialStatus for the possible outcomes.
-						var credState agentTokenCredentialState
-						if cfg.CredentialStore != nil && claims.ID != "" {
-							cred, isLegacy, credErr := evaluateAgentCredentialStatus(ctx, cfg.CredentialStore, claims.ID)
-							credState.evaluated = true
-							switch {
-							case errors.Is(credErr, errAgentCredentialRevoked):
-								writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
-									"token has been revoked", nil)
-								return
-							case credErr != nil:
-								// Any store error other than "not found" must not fall
-								// back to authenticating the request: it means the
-								// credential's status could not actually be determined,
-								// so treat it as a retryable failure.
-								log.Error("Agent credential status lookup failed",
-									"agent_id", claims.Subject, "error", credErr)
-								writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
-									"unable to verify credential status", nil)
-								return
-							case isLegacy:
-								// Legacy compatibility path: tokens issued before the
-								// credential table existed have no credential record.
-								// Retained pending a product decision; do not close or
-								// widen this branch.
-								log.Warn("Agent token not found in credential store (legacy/pre-table token)",
-									"agent_id", claims.Subject, "jti_hash", hashJTI(claims.ID)[:8])
-								ctx = context.WithValue(ctx, legacyTokenContextKey{}, true)
-							default:
-								// Credential found and active.
-								credState.cred = cred
-								ctx = context.WithValue(ctx, agentCredentialIDContextKey{}, cred.ID)
-								// Update last_seen_at (fire-and-forget)
-								go func() {
-									_ = cfg.CredentialStore.UpdateAgentCredentialLastSeen(
-										context.Background(), cred.ID, time.Now())
-								}()
-							}
-						}
-
-						// Step 1b: a held agent's token is refused on every
-						// request, including tokens on the legacy path above
-						// (ptone/scion#3433). Same response as a revoked
-						// credential; a lookup fault is the same 503.
-						if cfg.HoldStore != nil {
-							// A subject that is not an agent UUID names no agent:
-							// an authentication failure, refused before the hold
-							// lookup.
-							if _, perr := uuid.Parse(claims.Subject); perr != nil {
-								writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
-									"invalid agent token", nil)
-								return
-							}
-							held, holdErr := cfg.HoldStore.HasActiveAgentHold(ctx, claims.Subject)
-							if holdErr != nil {
-								log.Error("Agent hold lookup failed",
-									"agent_id", claims.Subject, "error", holdErr)
-								writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
-									"unable to verify credential status", nil)
-								return
-							}
-							if held {
-								writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
-									"token has been revoked", nil)
-								return
-							}
-						}
-
-						// Step 1c: the token's run, only when
-						// server.auth.agent_run_scope is not off.
-						if rs := cfg.AgentRunScope; rs != nil {
-							switch rs.check(ctx, claims, credState, runScopeRequestFrom(r), runScopeSourceHTTP) {
-							case runScopeDeny:
-								writeAgentTokenRefused(w)
-								return
-							case runScopeUnavailable:
-								writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
-									"unable to verify credential status", nil)
-								return
-							}
+						// Steps 1a-1c: credential status, hold and token run
+						// (verifyAgentTokenCredential).
+						var refusal agentTokenRefusal
+						ctx, refusal = verifyAgentTokenCredential(ctx, cfg, log, claims, runScopeRequestFrom(r), runScopeSourceHTTP)
+						if refusal != agentTokenAccepted {
+							writeAgentTokenRefusal(w, refusal)
+							return
 						}
 
 						ctx = context.WithValue(ctx, agentContextKey{}, claims)
