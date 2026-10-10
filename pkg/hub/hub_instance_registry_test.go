@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -523,8 +524,26 @@ func TestHubInstanceRegistry_PersistentPanicLogIsRateLimited(t *testing.T) {
 	assert.Contains(t, stack, "safeTick", "the first line carries the stack trace")
 	assert.LessOrEqual(t, len(stack), hubInstancePanicStackBytes)
 
-	// 20 ticks per 5-minute window: one logged, 19 suppressed.
-	assert.Equal(t, int64(19), lines[1]["suppressed_since_last_log"].Int64())
+	// 20 ticks per 5-minute window: one logged, 19 suppressed. Every line
+	// after the first reports exactly 19, so the counter is reset at each
+	// logged line rather than accumulating.
+	for i, line := range lines[1:] {
+		assert.Equal(t, int64(19), line["suppressed_since_last_log"].Int64(), "line %d", i+1)
+		assert.NotEmpty(t, line["stack"].String(), "line %d carries the stack", i+1)
+	}
+}
+
+// The logged stack trace is cut to hubInstancePanicStackBytes.
+func TestHubInstanceRegistry_PanicStackIsCappedAtLimit(t *testing.T) {
+	h := &recordingHandler{}
+	now := hubInstanceT0
+	reg := newPanickingRegistry(h, &now)
+
+	reg.panicked(context.Background(), "x", bytes.Repeat([]byte("a"), 3*hubInstancePanicStackBytes))
+
+	lines := h.panicLines()
+	require.Len(t, lines, 1)
+	assert.Len(t, lines[0]["stack"].String(), hubInstancePanicStackBytes)
 }
 
 // Many panicking ticks inside one window log a single line.

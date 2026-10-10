@@ -203,11 +203,12 @@ func (r *hubInstanceRegistry) safeTick(ctx context.Context) {
 // recovered panic.
 const hubInstancePanicStackBytes = 4096
 
-// panicked records a recovered tick panic. The next tick upserts. The
-// first panic is logged at error with its value and a bounded stack trace;
-// after that, at most one line per hubInstanceWarnEvery, carrying the
-// number of panics not logged since the previous line. Nothing is logged
-// once ctx is done (shutdown has started).
+// panicked records a recovered tick panic. The next tick upserts. At most
+// one line is logged per hubInstanceWarnEvery window, at error, starting
+// with the first panic; every logged line carries the panic value, a stack
+// trace cut to hubInstancePanicStackBytes, and the number of panics not
+// logged since the previous line. Nothing is logged once ctx is done
+// (shutdown has started).
 func (r *hubInstanceRegistry) panicked(ctx context.Context, p any, stack []byte) {
 	r.mu.Lock()
 	r.lastWritten = nil
