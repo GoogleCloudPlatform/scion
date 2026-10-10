@@ -513,7 +513,9 @@ test('a second tab selects through the owner without attaching locally', async (
   await owner.goto(`/terminals/${agent}`);
   await expect.poll(() => ownerSocket.attaches).toBe(1);
   await other.goto(`/terminals/${agent}`);
-  await expect(other.locator('#terminal-workspace')).toContainText('owning tab');
+  await expect(other.locator('#terminal-workspace')).toContainText(
+    'Terminals open in another window'
+  );
   expect(otherSocket.attaches).toBe(0);
   expect(await other.locator('#terminal-workspace scion-terminal-pane').count()).toBe(0);
   await expect
@@ -2190,7 +2192,9 @@ test('non-owner logout broadcasts teardown, owner disposes', async ({ context })
 
   // Other tab navigates to terminals (becomes non-owner)
   await other.goto(`/terminals/${agent}`);
-  await expect(other.locator('#terminal-workspace')).toContainText('owning tab');
+  await expect(other.locator('#terminal-workspace')).toContainText(
+    'Terminals open in another window'
+  );
 
   // Non-owner fires teardown
   await other.evaluate(() => {
