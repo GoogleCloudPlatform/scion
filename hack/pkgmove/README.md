@@ -481,7 +481,11 @@ generated (a second `TestMain` would not compile). Instead:
 - the source has no `TestMain` but the target does: WARN.
 
 If the target has none, the rules above apply (stub, or generated with
-`-testmain-support`; an existing `zz_testmain_test.go` is an ERROR).
+`-testmain-support`; an existing `zz_testmain_test.go` is an ERROR). A
+generated `TestMain` wraps the whole test binary, so the target's **existing**
+tests, which ran without a `TestMain`, now run under it too; the WARN says so,
+and the reviewer checks that those tests still behave the same under the
+harness (HOME isolation, env clearing, leak and memory guards).
 
 **Expected helper:** a small test-support package (for pkg/hub, created by the
 first real move, for example under `pkg/hub/internal/`) exporting:

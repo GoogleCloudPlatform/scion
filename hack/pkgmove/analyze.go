@@ -1270,8 +1270,12 @@ func (a *analysis) checkTestMain() {
 	}
 	where := strings.Join(staying, ", ")
 	if a.cfg.TestMainSupport != "" {
+		existing := ""
+		if a.intoExisting {
+			existing = fmt.Sprintf("; the existing tests of %s, which ran without a TestMain, now also run under the generated one - check them too", a.cfg.PkgName)
+		}
 		a.plan.add(levelWarn, "TestMain separation (generated a delegating TestMain)", where,
-			"moved tests leave the TestMain of %s; the target gets a TestMain that calls %s.RunTestMain - check that it does everything the source TestMain does", a.srcName, a.cfg.TestMainSupport)
+			"moved tests leave the TestMain of %s; the target gets a TestMain that calls %s.RunTestMain - check that it does everything the source TestMain does%s", a.srcName, a.cfg.TestMainSupport, existing)
 		support := a.cfg.TestMainSupport
 		name := support[strings.LastIndex(support, "/")+1:]
 		content := fmt.Sprintf(`%spackage %s

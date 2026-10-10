@@ -692,3 +692,30 @@ func TestHelperReuseIsSemantic(t *testing.T) {
 		t.Fatalf("want a helper-separation error, got %v\n%s", err, buf.String())
 	}
 }
+
+// TestIntoExistingGeneratedTestMain checks that a TestMain generated into an
+// existing target without one warns that the target's existing tests run
+// under it too.
+func TestIntoExistingGeneratedTestMain(t *testing.T) {
+	requireGo(t)
+	dir := t.TempDir()
+	copyTree(t, filepath.Join("testdata", "intoexisting", "in"), dir)
+	if err := os.Remove(filepath.Join(dir, "hub", "sub", "main_test.go")); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	err := run(&Config{SrcDir: filepath.Join(dir, "hub"), DstDir: filepath.Join(dir, "hub", "sub"),
+		Files: []string{"policy_a_test.go", "policy_x_test.go"}, TestMainSupport: "example.com/fx/hubtest",
+		NoGit: true, DryRun: true, Stdout: &buf})
+	if err != nil {
+		t.Fatalf("dry run: %v\n%s", err, buf.String())
+	}
+	for _, want := range []string{
+		"hub/sub/zz_testmain_test.go (generated",
+		"the existing tests of sub, which ran without a TestMain, now also run under the generated one - check them too",
+	} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("missing %q:\n%s", want, buf.String())
+		}
+	}
+}
