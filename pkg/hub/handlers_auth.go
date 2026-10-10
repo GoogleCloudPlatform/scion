@@ -687,10 +687,11 @@ type AdminStatusResponse struct {
 }
 
 // handleAuthAdminStatus handles GET /api/v1/auth/admin-status.
-// Returns whether the current user has hub-admin or super-admin capabilities,
-// along with their effective system-scoped permission IDs.
-// This is used by the frontend to decide whether to show admin navigation,
-// which admin sections are visible, and to allow access to admin routes.
+// Returns whether the current user is a hub admin or super admin, along with
+// their effective system-scoped permission IDs. isAdmin is true only for hub
+// admins and super admins; a member holding system-scoped permissions through
+// another role gets isAdmin=false with those permissions listed. The frontend
+// decides which admin sections and routes to show from the permissions list.
 func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
@@ -704,6 +705,7 @@ func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	isSuperAdmin := IsUnscopedLocalPlatformAdmin(user)
+	isAdmin := isSuperAdmin
 
 	var perms []string
 	if isSuperAdmin {
@@ -726,6 +728,8 @@ func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		perms = effective
+		isAdmin = s.authzService.IsSystemAdmin(r.Context(), user.ID()) ||
+			s.authzService.IsHubAdmin(r.Context(), user.ID())
 	}
 
 	// Ensure JSON serializes as [] rather than null when there are no permissions.
@@ -736,7 +740,7 @@ func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, AdminStatusResponse{
-		IsAdmin:      isSuperAdmin || len(perms) > 0,
+		IsAdmin:      isAdmin,
 		IsSuperAdmin: isSuperAdmin,
 		Permissions:  perms,
 	})

@@ -31,6 +31,11 @@
  * Phase 1 added the `permissions` array to the response.
  */
 export interface AdminStatus {
+  /**
+   * True only for hub admins and super admins. A member can hold
+   * system-scoped permissions without being an admin, so UI gating reads
+   * `permissions` (via hasAnyPermission), not this flag.
+   */
   isAdmin: boolean;
   isSuperAdmin: boolean;
   permissions: string[];
