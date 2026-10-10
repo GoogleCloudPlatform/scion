@@ -17,6 +17,7 @@ package harness
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -291,8 +292,8 @@ func TestReadInjectableHostCredentialFile_FIFODoesNotBlock(t *testing.T) {
 	}()
 	select {
 	case err := <-done:
-		if err == nil {
-			t.Fatal("expected a FIFO to be rejected")
+		if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+			t.Fatalf("expected the FIFO to be rejected as not a regular file, got %v", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("reading a FIFO blocked")

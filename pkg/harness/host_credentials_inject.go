@@ -138,11 +138,11 @@ const maxHostCredentialFileSize = 1 << 20
 
 // ReadInjectableHostCredentialFile reads a file returned by
 // InjectableHostCredentialFiles while closing the gap between that check and
-// the read: it opens the file without blocking, then re-resolves the declared path under home
-// and requires that the resolved path is still strictly inside the resolved
-// home and names the very file that was opened (same device and inode), and
-// that it is a regular file no larger than 1 MiB. The content is read from
-// the already-open descriptor.
+// the read: it opens the file without blocking, then re-resolves the
+// declared path under home and requires that the resolved path is still
+// strictly inside the resolved home and names the very file that was opened
+// (same device and inode), and that it is a regular file no larger than
+// 1 MiB. The content is read from the already-open descriptor.
 func ReadInjectableHostCredentialFile(f HostCredentialFile, home string) ([]byte, error) {
 	rel, ok := homeRelativeSuffix(f.TargetSuffix)
 	if !ok {
