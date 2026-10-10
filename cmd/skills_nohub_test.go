@@ -17,7 +17,6 @@ package cmd
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -26,19 +25,12 @@ import (
 )
 
 // isolateNoHubForTest gives the test a temp HOME and a project with no hub
-// configured, clears every SCION_* variable the environment may leak into
-// settings resolution, and points projectPath at that project. Package
-// state it changes is restored when the test ends.
-func isolateNoHubForTest(t *testing.T) {
+// configured, and points projectPath at that project. With noHubFlag set it
+// also sets the --no-hub flag variable. Ambient SCION_* variables are already
+// cleared for the whole test binary by TestMain (clearAmbientScionEnv).
+// Package state it changes is restored when the test ends.
+func isolateNoHubForTest(t *testing.T, noHubFlag bool) {
 	t.Helper()
-
-	for _, kv := range os.Environ() {
-		key, _, _ := strings.Cut(kv, "=")
-		if strings.HasPrefix(key, "SCION_") {
-			t.Setenv(key, "") // registers restore of the original value
-			require.NoError(t, os.Unsetenv(key))
-		}
-	}
 
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -56,8 +48,18 @@ func isolateNoHubForTest(t *testing.T) {
 	outputFormat = ""
 	autoConfirm = true
 	nonInteractive = true
-	noHub = false
+	noHub = noHubFlag
 	hubEndpoint = ""
+}
+
+// noHubModes are the two ways no hub is in use: no hub in settings, and the
+// --no-hub flag.
+var noHubModes = []struct {
+	name      string
+	noHubFlag bool
+}{
+	{name: "hub-not-enabled", noHubFlag: false},
+	{name: "no-hub-flag", noHubFlag: true},
 }
 
 // setCmdFlagForTest sets a flag on cmd for the duration of the test.
@@ -74,8 +76,9 @@ func setCmdFlagForTest(t *testing.T, cmd *cobra.Command, name, value string) {
 }
 
 // TestSkillsCommands_NoHubConfigured runs every hub-backed skills command
-// with no hub configured. Each must return errHubNotConfigured instead of
-// dereferencing a nil hub context.
+// with no hub configured, both with hub settings absent and with --no-hub.
+// Each must return errHubNotConfigured instead of dereferencing a nil hub
+// context.
 func TestSkillsCommands_NoHubConfigured(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -97,18 +100,20 @@ func TestSkillsCommands_NoHubConfigured(t *testing.T) {
 		{name: "resolve", cmd: skillsResolveCmd, args: []string{"scion://skills/my-skill"}},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			isolateNoHubForTest(t)
-			args := tt.args
-			if tt.setup != nil {
-				args = tt.setup(t)
-			}
+		for _, mode := range noHubModes {
+			t.Run(tt.name+"/"+mode.name, func(t *testing.T) {
+				isolateNoHubForTest(t, mode.noHubFlag)
+				args := tt.args
+				if tt.setup != nil {
+					args = tt.setup(t)
+				}
 
-			var err error
-			assert.NotPanics(t, func() { err = tt.cmd.RunE(tt.cmd, args) })
-			require.Error(t, err)
-			assert.ErrorIs(t, err, errHubNotConfigured)
-			assert.Contains(t, err.Error(), "this command needs a hub")
-		})
+				var err error
+				assert.NotPanics(t, func() { err = tt.cmd.RunE(tt.cmd, args) })
+				require.Error(t, err)
+				assert.ErrorIs(t, err, errHubNotConfigured)
+				assert.Contains(t, err.Error(), "this command needs a hub")
+			})
+		}
 	}
 }

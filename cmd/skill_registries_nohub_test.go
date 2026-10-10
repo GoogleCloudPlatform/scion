@@ -23,8 +23,9 @@ import (
 )
 
 // TestRegistriesCommands_NoHubConfigured runs every skills registries
-// command with no hub configured. Each must return errHubNotConfigured
-// instead of dereferencing a nil hub context.
+// command with no hub configured, both with hub settings absent and with
+// --no-hub. Each must return errHubNotConfigured instead of dereferencing a
+// nil hub context.
 func TestRegistriesCommands_NoHubConfigured(t *testing.T) {
 	tests := []struct {
 		name string
@@ -39,14 +40,16 @@ func TestRegistriesCommands_NoHubConfigured(t *testing.T) {
 		{name: "pin", cmd: registriesPinCmd, args: []string{"my-registry", "scion://skills/my-skill"}},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			isolateNoHubForTest(t)
+		for _, mode := range noHubModes {
+			t.Run(tt.name+"/"+mode.name, func(t *testing.T) {
+				isolateNoHubForTest(t, mode.noHubFlag)
 
-			var err error
-			assert.NotPanics(t, func() { err = tt.cmd.RunE(tt.cmd, tt.args) })
-			require.Error(t, err)
-			assert.ErrorIs(t, err, errHubNotConfigured)
-			assert.Contains(t, err.Error(), "this command needs a hub")
-		})
+				var err error
+				assert.NotPanics(t, func() { err = tt.cmd.RunE(tt.cmd, tt.args) })
+				require.Error(t, err)
+				assert.ErrorIs(t, err, errHubNotConfigured)
+				assert.Contains(t, err.Error(), "this command needs a hub")
+			})
+		}
 	}
 }
