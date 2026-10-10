@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -43,6 +44,22 @@ func (s *sqlStore) lockLiveArtifact(ctx context.Context, tx *sql.Tx, artifactID 
 
 // PutGrant implements Store.
 func (s *sqlStore) PutGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool) (bool, error) {
+	return s.putGrant(ctx, g, maxGrants, crossScope, "")
+}
+
+// PutReviewGrant implements Store.
+func (s *sqlStore) PutReviewGrant(ctx context.Context, g *Grant, maxGrants int, home string) (bool, error) {
+	if g == nil || g.SubjectKind != SubjectPrincipal || !strings.HasPrefix(g.SubjectRef, PrincipalKindUser+":") ||
+		g.Permission != GrantWrite || home == "" {
+		return false, errors.New("artifacts: PutReviewGrant needs a user principal grant with write permission and a home scope")
+	}
+	return s.putGrant(ctx, g, maxGrants, false, home)
+}
+
+// putGrant is PutGrant and, with reviewHome set, PutReviewGrant: then the
+// artifact must still be owned by an agent and homed in reviewHome, and an
+// existing admin grant for the subject is never lowered.
+func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool, reviewHome string) (bool, error) {
 	if g == nil || (g.SubjectKind != SubjectPrincipal && g.SubjectKind != SubjectScope) || g.SubjectRef == "" ||
 		(g.Permission != GrantRead && g.Permission != GrantWrite && g.Permission != GrantAdmin) {
 		return false, errors.New("artifacts: PutGrant needs a principal or scope grant with a permission")
@@ -54,6 +71,15 @@ func (s *sqlStore) PutGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 	defer func() { _ = tx.Rollback() }()
 	if err := s.lockLiveArtifact(ctx, tx, g.ArtifactID); err != nil {
 		return false, err
+	}
+	if reviewHome != "" {
+		var home, ownerKind string
+		if err := tx.QueryRowContext(ctx, s.rebind(`SELECT scope_ref, owner_kind FROM artifact WHERE id = ?`), g.ArtifactID).Scan(&home, &ownerKind); err != nil {
+			return false, fmt.Errorf("artifacts: read home: %w", err)
+		}
+		if home != reviewHome || ownerKind != PrincipalKindAgent {
+			return false, ErrReviewGrantRefused
+		}
 	}
 	if g.SubjectKind == SubjectScope {
 		var home string
@@ -69,12 +95,16 @@ func (s *sqlStore) PutGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 	}
 	var (
 		id      string
+		perm    string
 		created dbTime
 	)
-	err = tx.QueryRowContext(ctx, s.rebind(`SELECT id, created_at FROM artifact_grant
-		WHERE artifact_id = ? AND subject_kind = ? AND subject_ref = ?`), g.ArtifactID, g.SubjectKind, g.SubjectRef).Scan(&id, &created)
+	err = tx.QueryRowContext(ctx, s.rebind(`SELECT id, permission, created_at FROM artifact_grant
+		WHERE artifact_id = ? AND subject_kind = ? AND subject_ref = ?`), g.ArtifactID, g.SubjectKind, g.SubjectRef).Scan(&id, &perm, &created)
 	switch {
 	case err == nil:
+		if reviewHome != "" && perm != GrantRead && perm != GrantWrite {
+			return false, ErrReviewGrantRefused
+		}
 		if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_grant SET permission = ? WHERE id = ?`), g.Permission, id); err != nil {
 			return false, fmt.Errorf("artifacts: update grant: %w", err)
 		}
