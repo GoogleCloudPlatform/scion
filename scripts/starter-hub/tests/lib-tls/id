@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Stub id for the fix-tls-rotation.sh tests. Models a Caddy user
+# $STUB_CADDY_USER that does not exist on the test machine: its only group is
+# $STUB_CADDY_GROUP. Any other call runs the real id.
+set -u
+u="${STUB_CADDY_USER:-}"
+case "$*" in
+  "-u $u") [ -n "$u" ] && echo 999 && exit 0 ;;
+  "-gn $u"|"-Gn $u") [ -n "$u" ] && echo "${STUB_CADDY_GROUP:?}" && exit 0 ;;
+esac
+exec /usr/bin/id "$@"
