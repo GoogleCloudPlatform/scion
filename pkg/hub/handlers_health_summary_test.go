@@ -78,8 +78,12 @@ func TestHandleHealthSummary_ResponseShape(t *testing.T) {
 	assert.NotEmpty(t, resp.Hub.Version)
 	assert.NotEmpty(t, resp.Hub.Uptime)
 
-	// Verify database section populated
-	assert.NotEmpty(t, resp.Database.Status)
+	// The database pool is per instance (hub_instances[].database); the
+	// database check stays in the hub checks.
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &raw))
+	assert.NotContains(t, raw, "database", "no top-level database block")
+	assert.NotEmpty(t, resp.Hub.Checks["database"])
 
 	// Verify brokers is an array (even if empty)
 	assert.NotNil(t, resp.Brokers.Items)
@@ -544,6 +548,7 @@ func TestHandleHealthSummary_BrokerMixedStatus(t *testing.T) {
 
 func TestHandleHealthSummary_DatabaseHealthy(t *testing.T) {
 	srv, _ := testServer(t)
+	srv.newHubInstanceRegistry().tick(context.Background())
 
 	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
 	require.Equal(t, http.StatusOK, rr.Code)
@@ -552,10 +557,15 @@ func TestHandleHealthSummary_DatabaseHealthy(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 
 	// SQLite test DB should be healthy
-	assert.Equal(t, "healthy", resp.Database.Status)
-	// Pool stats should be populated (at least max > 0 from sqlite config)
-	// Note: SQLite test stores use MaxOpenConns=1
-	assert.GreaterOrEqual(t, resp.Database.PoolMax, int64(0))
+	assert.Equal(t, "healthy", resp.Hub.Checks["database"])
+	// The serving instance's pool is in its hub_instances row, written by
+	// its registry tick.
+	require.NotNil(t, resp.HubInstances)
+	require.Len(t, resp.HubInstances.Items, 1)
+	db := resp.HubInstances.Items[0].Database
+	require.NotNil(t, db)
+	assert.GreaterOrEqual(t, db.PoolMax, 0)
+	assert.Equal(t, "healthy", resp.HubInstances.Items[0].Checks["database"])
 }
 
 func TestHandleHealthSummary_ViaRouter(t *testing.T) {
@@ -586,7 +596,7 @@ func TestHandleHealthSummary_SurfacesNonHealthyChecks(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	assert.Equal(t, "degraded", resp.Status)
 	assert.Equal(t, "degraded", resp.Hub.Status)
-	assert.Equal(t, "healthy", resp.Database.Status, "database itself is fine; the cause is elsewhere")
+	assert.Equal(t, "healthy", resp.Hub.Checks["database"], "database itself is fine; the cause is elsewhere")
 	assert.Equal(t, "unhealthy: registration failed", resp.Hub.Checks["colocated_broker"])
 	assert.Equal(t, []string{"colocated_broker: unhealthy: registration failed"}, resp.Hub.UnhealthyChecks)
 }
@@ -626,7 +636,7 @@ func TestHandleHealthSummary_UnhealthyNotDowngraded(t *testing.T) {
 	var resp HealthSummaryResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	assert.Equal(t, "unhealthy", resp.Status)
-	assert.Equal(t, "unhealthy", resp.Database.Status)
+	assert.Equal(t, "unhealthy", resp.Hub.Checks["database"])
 	assert.Contains(t, resp.Hub.UnhealthyChecks, "database: unhealthy")
 }
 
@@ -645,7 +655,7 @@ func TestHealthSummary_DecisionAuditWarningDegradesWithoutUnavailability(t *test
 	assert.Equal(t, HealthStatusDegraded, summary.Status)
 	assert.Equal(t, decisionAuditFaultWarning, summary.Hub.Checks[decisionAuditNewHealthKey])
 	assert.Contains(t, summary.Hub.UnhealthyChecks, decisionAuditNewHealthKey+": "+decisionAuditFaultWarning)
-	assert.Equal(t, "healthy", summary.Database.Status)
+	assert.Equal(t, "healthy", summary.Hub.Checks["database"])
 	// Serving health stays HTTP 200; database-critical unavailability still wins.
 	health := httptest.NewRecorder()
 	srv.handleHealthz(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))

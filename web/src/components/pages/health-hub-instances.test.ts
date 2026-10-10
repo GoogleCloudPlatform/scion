@@ -15,17 +15,20 @@
  */
 
 /**
- * Health dashboard hub instances table (ptone/scion#4136).
+ * Health dashboard hub instances table (ptone/scion#4136, ptone/scion#4138).
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
 
 import {
   ScionHealthHubInstances,
+  failingChecks,
   formatDuration,
   instanceLastSeen,
   instanceStateTone,
   instanceUptime,
+  poolDetail,
+  poolUsage,
   type HealthHubInstance,
   type HealthSummaryHubInstances,
 } from './health-hub-instances.js';
@@ -45,6 +48,7 @@ function instance(over: Partial<HealthHubInstance> = {}): HealthHubInstance {
     stopped_at: null,
     status: 'healthy',
     checks: { database: 'healthy' },
+    database: { pool_active: 3, pool_idle: 2, pool_max: 25, pool_wait_count_total: 4 },
     ...over,
   };
 }
@@ -114,6 +118,29 @@ describe('hub instance cells', () => {
     );
   });
 
+  it('lists failing checks as name: value, sorted; healthy and available pass', () => {
+    expect(
+      failingChecks({
+        workspace_storage: 'unhealthy',
+        database: 'healthy',
+        docker: 'available',
+        colocated_broker: 'unknown',
+        mount: 'unavailable',
+      })
+    ).toEqual(['colocated_broker: unknown', 'mount: unavailable', 'workspace_storage: unhealthy']);
+    expect(failingChecks(undefined)).toEqual([]);
+  });
+
+  it('formats the pool as in use / limit, or in use alone without a limit', () => {
+    const db = { pool_active: 3, pool_idle: 2, pool_max: 25, pool_wait_count_total: 4 };
+    expect(poolUsage(db)).toBe('3/25');
+    expect(poolUsage({ ...db, pool_max: 0 })).toBe('3');
+    expect(poolDetail(db)).toBe('3 in use, 2 idle, limit 25, 4 waits');
+    expect(poolDetail({ ...db, pool_max: 0, pool_wait_count_total: 1 })).toBe(
+      '3 in use, 2 idle, no limit, 1 wait'
+    );
+  });
+
   it('maps states to tones', () => {
     expect(instanceStateTone('live')).toBe('ok');
     expect(instanceStateTone('stale')).toBe('warn');
@@ -122,7 +149,7 @@ describe('hub instance cells', () => {
 });
 
 describe('scion-health-hub-instances', () => {
-  it('renders one row per instance with the six columns', async () => {
+  it('renders one row per instance with the seven columns', async () => {
     const root = await mount(
       list([
         instance({ id: 'hub-a-0123', label: 'hub-a', serving: true }),
@@ -133,11 +160,20 @@ describe('scion-health-hub-instances', () => {
           state: 'stale',
           status: 'degraded',
           last_seen: '2026-10-09T11:59:00Z',
+          database: { pool_active: 9, pool_idle: 0, pool_max: 10, pool_wait_count_total: 17 },
         }),
       ])
     );
     const headers = [...root.querySelectorAll('th')].map((th) => th.textContent?.trim());
-    expect(headers).toEqual(['Label', 'State', 'Version', 'Uptime', 'Status', 'Last seen']);
+    expect(headers).toEqual([
+      'Label',
+      'State',
+      'Version',
+      'Uptime',
+      'Status',
+      'DB pool',
+      'Last seen',
+    ]);
 
     const [a, b] = rows(root);
     expect(a.dataset.instanceId).toBe('hub-a-0123');
@@ -148,6 +184,10 @@ describe('scion-health-hub-instances', () => {
     expect(cell(a, 'version')).toBe('v1.2.3');
     expect(cell(a, 'uptime')).toBe('2h 30m');
     expect(cell(a, 'status')).toBe('healthy');
+    expect(cell(a, 'pool')).toBe('3/25');
+    expect(a.querySelector('td.pool')?.getAttribute('title')).toBe(
+      '3 in use, 2 idle, limit 25, 4 waits'
+    );
     expect(cell(a, 'last-seen')).toBe('12s ago');
 
     expect(cell(b, 'label')).toBe('hub-b');
@@ -158,7 +198,35 @@ describe('scion-health-hub-instances', () => {
     // A stale instance's status is out of date: shown greyed, not as a pill.
     expect(cell(b, 'status')).toBe('last reported: degraded');
     expect(b.querySelector('td.status .pill')).toBeNull();
+    // Each instance shows its own pool.
+    expect(cell(b, 'pool')).toBe('9/10');
     expect(cell(b, 'last-seen')).toBe('1m 0s ago');
+  });
+
+  it('shows the failing checks under the status', async () => {
+    const root = await mount(
+      list([
+        instance({
+          status: 'degraded',
+          checks: { database: 'healthy', colocated_broker: 'unhealthy', mount: 'unknown' },
+        }),
+        instance({ id: 'hub-b-4567' }),
+      ])
+    );
+    const [a, b] = rows(root);
+    const failing = [...a.querySelectorAll('[data-role="failing-checks"] li')].map((li) =>
+      li.textContent?.trim()
+    );
+    expect(failing).toEqual(['colocated_broker: unhealthy', 'mount: unknown']);
+    expect(a.querySelector('td.status .pill')?.textContent?.trim()).toBe('degraded');
+    expect(b.querySelector('[data-role="failing-checks"]')).toBeNull();
+  });
+
+  it('shows a dash when an instance reported no pool', async () => {
+    const root = await mount(list([instance({ database: null }), instance({ id: 'x' })]));
+    const [a] = rows(root);
+    expect(cell(a, 'pool')).toBe('—');
+    expect(a.querySelector('td.pool')?.getAttribute('title')).toBe('');
   });
 
   it('computes uptime and last seen from as_of (the database clock), not generated_at', async () => {
