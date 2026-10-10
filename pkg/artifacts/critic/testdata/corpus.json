@@ -1,5 +1,5 @@
 {
- "comment": "Shared CriticMarkup corpus: pkg/artifacts/critic (Go) and web/src/utils/critic.ts must both produce clean and accept for every case.",
+ "comment": "Shared CriticMarkup corpus: pkg/artifacts/critic (Go) and web/src/utils/critic.ts must both produce clean and accept for every case. An optional \"code\" lists the text of each Markdown code range (inline code span or fenced code block) the parser finds, in order.",
  "cases": [
   {
    "name": "plain",
@@ -194,18 +194,6 @@
    "accept": "a\r\nb\r\nc\r\n"
   },
   {
-   "name": "code span not special",
-   "in": "`{++x++}`",
-   "clean": "``",
-   "accept": "`x`"
-  },
-  {
-   "name": "fence not special",
-   "in": "```\n{--x--}\n```",
-   "clean": "```\nx\n```",
-   "accept": "```\n\n```"
-  },
-  {
    "name": "unicode around marks",
    "in": "café {~~naïve~>naive~~} 日本",
    "clean": "café naïve 日本",
@@ -252,6 +240,433 @@
    "in": "Lorem {++ipsum ++}dolor{-- sit--} amet {~~is~>are~~} {==here==}{>>yes<<}.",
    "clean": "Lorem dolor sit amet is here.",
    "accept": "Lorem ipsum dolor amet are here."
+  },
+  {
+   "name": "code span is literal",
+   "in": "`{++x++}`",
+   "clean": "`{++x++}`",
+   "accept": "`{++x++}`",
+   "code": [
+    "`{++x++}`"
+   ]
+  },
+  {
+   "name": "code span between marks",
+   "in": "{--a--} `{--b--}` {++c++}",
+   "clean": "a `{--b--}` ",
+   "accept": " `{--b--}` c",
+   "code": [
+    "`{--b--}`"
+   ]
+  },
+  {
+   "name": "double backtick span holds single backtick",
+   "in": "``a ` {++b++}``",
+   "clean": "``a ` {++b++}``",
+   "accept": "``a ` {++b++}``",
+   "code": [
+    "``a ` {++b++}``"
+   ]
+  },
+  {
+   "name": "unmatched backtick run is literal",
+   "in": "a ` {++b++}",
+   "clean": "a ` ",
+   "accept": "a ` b",
+   "code": []
+  },
+  {
+   "name": "run length must match exactly",
+   "in": "``a` {++b++}",
+   "clean": "``a` ",
+   "accept": "``a` b",
+   "code": []
+  },
+  {
+   "name": "longer run does not close shorter",
+   "in": "`a`` {++b++}",
+   "clean": "`a`` ",
+   "accept": "`a`` b",
+   "code": []
+  },
+  {
+   "name": "shorter run skipped until exact match",
+   "in": "`a`` {++b++}`",
+   "clean": "`a`` {++b++}`",
+   "accept": "`a`` {++b++}`",
+   "code": [
+    "`a`` {++b++}`"
+   ]
+  },
+  {
+   "name": "escaped backtick does not open",
+   "in": "\\`{++a++}`",
+   "clean": "\\``",
+   "accept": "\\`a`",
+   "code": []
+  },
+  {
+   "name": "escaped first backtick shortens the run",
+   "in": "\\``{++a++}`",
+   "clean": "\\``{++a++}`",
+   "accept": "\\``{++a++}`",
+   "code": [
+    "`{++a++}`"
+   ]
+  },
+  {
+   "name": "backslash does not escape a closer",
+   "in": "`a\\`{++b++}",
+   "clean": "`a\\`",
+   "accept": "`a\\`b",
+   "code": [
+    "`a\\`"
+   ]
+  },
+  {
+   "name": "double backslash does not escape",
+   "in": "\\\\`{++a++}`",
+   "clean": "\\\\`{++a++}`",
+   "accept": "\\\\`{++a++}`",
+   "code": [
+    "`{++a++}`"
+   ]
+  },
+  {
+   "name": "code span crosses a line end",
+   "in": "`a\n{++b++}`",
+   "clean": "`a\n{++b++}`",
+   "accept": "`a\n{++b++}`",
+   "code": [
+    "`a\n{++b++}`"
+   ]
+  },
+  {
+   "name": "code span stops at a blank line",
+   "in": "`a\n\n{++b++}`",
+   "clean": "`a\n\n`",
+   "accept": "`a\n\nb`",
+   "code": []
+  },
+  {
+   "name": "code span stops at a line of spaces",
+   "in": "`a\n \t\n{++b++}`",
+   "clean": "`a\n \t\n`",
+   "accept": "`a\n \t\nb`",
+   "code": []
+  },
+  {
+   "name": "backtick fence is literal",
+   "in": "```\n{--x--}\n```",
+   "clean": "```\n{--x--}\n```",
+   "accept": "```\n{--x--}\n```",
+   "code": [
+    "```\n{--x--}\n```"
+   ]
+  },
+  {
+   "name": "tilde fence is literal",
+   "in": "~~~\n{~~a~>b~~}\n~~~\n",
+   "clean": "~~~\n{~~a~>b~~}\n~~~\n",
+   "accept": "~~~\n{~~a~>b~~}\n~~~\n",
+   "code": [
+    "~~~\n{~~a~>b~~}\n~~~\n"
+   ]
+  },
+  {
+   "name": "fence then marks",
+   "in": "```go\n{++x++}\n```\n{++y++}",
+   "clean": "```go\n{++x++}\n```\n",
+   "accept": "```go\n{++x++}\n```\ny",
+   "code": [
+    "```go\n{++x++}\n```\n"
+   ]
+  },
+  {
+   "name": "info string is code",
+   "in": "```{++x++}\ny\n```",
+   "clean": "```{++x++}\ny\n```",
+   "accept": "```{++x++}\ny\n```",
+   "code": [
+    "```{++x++}\ny\n```"
+   ]
+  },
+  {
+   "name": "backtick in backtick fence info string is not a fence",
+   "in": "``` a`b\n{++x++}\n",
+   "clean": "``` a`b\n\n",
+   "accept": "``` a`b\nx\n",
+   "code": []
+  },
+  {
+   "name": "backtick in tilde fence info string",
+   "in": "~~~ a`b\n{++x++}\n~~~",
+   "clean": "~~~ a`b\n{++x++}\n~~~",
+   "accept": "~~~ a`b\n{++x++}\n~~~",
+   "code": [
+    "~~~ a`b\n{++x++}\n~~~"
+   ]
+  },
+  {
+   "name": "longer closing fence closes",
+   "in": "```\n{++x++}\n`````\n",
+   "clean": "```\n{++x++}\n`````\n",
+   "accept": "```\n{++x++}\n`````\n",
+   "code": [
+    "```\n{++x++}\n`````\n"
+   ]
+  },
+  {
+   "name": "shorter closing fence does not close",
+   "in": "````\n```\n{++x++}\n````\n{++y++}",
+   "clean": "````\n```\n{++x++}\n````\n",
+   "accept": "````\n```\n{++x++}\n````\ny",
+   "code": [
+    "````\n```\n{++x++}\n````\n"
+   ]
+  },
+  {
+   "name": "other fence character does not close",
+   "in": "```\n~~~\n{++x++}\n```\n{++y++}",
+   "clean": "```\n~~~\n{++x++}\n```\n",
+   "accept": "```\n~~~\n{++x++}\n```\ny",
+   "code": [
+    "```\n~~~\n{++x++}\n```\n"
+   ]
+  },
+  {
+   "name": "closing fence with trailing text does not close",
+   "in": "```\n``` x\n{++a++}\n```\n{++b++}",
+   "clean": "```\n``` x\n{++a++}\n```\n",
+   "accept": "```\n``` x\n{++a++}\n```\nb",
+   "code": [
+    "```\n``` x\n{++a++}\n```\n"
+   ]
+  },
+  {
+   "name": "closing fence may have trailing spaces and three spaces indent",
+   "in": "```\n{++a++}\n   ```  \t\n",
+   "clean": "```\n{++a++}\n   ```  \t\n",
+   "accept": "```\n{++a++}\n   ```  \t\n",
+   "code": [
+    "```\n{++a++}\n   ```  \t\n"
+   ]
+  },
+  {
+   "name": "fence indented three spaces",
+   "in": "   ```\n{++x++}\n```",
+   "clean": "   ```\n{++x++}\n```",
+   "accept": "   ```\n{++x++}\n```",
+   "code": [
+    "   ```\n{++x++}\n```"
+   ]
+  },
+  {
+   "name": "fence indented four spaces stays marks (indented code is not recognised)",
+   "in": "    ~~~\n{++x++}\n",
+   "clean": "    ~~~\n\n",
+   "accept": "    ~~~\nx\n",
+   "code": []
+  },
+  {
+   "name": "tab before fence stays marks",
+   "in": "\t~~~\n{++x++}\n",
+   "clean": "\t~~~\n\n",
+   "accept": "\t~~~\nx\n",
+   "code": []
+  },
+  {
+   "name": "two backticks are a code span, not a fence",
+   "in": "``\n{++x++}\n``",
+   "clean": "``\n{++x++}\n``",
+   "accept": "``\n{++x++}\n``",
+   "code": [
+    "``\n{++x++}\n``"
+   ]
+  },
+  {
+   "name": "two tildes are not a fence",
+   "in": "~~\n{++x++}\n~~",
+   "clean": "~~\n\n~~",
+   "accept": "~~\nx\n~~",
+   "code": []
+  },
+  {
+   "name": "unterminated fence runs to the end",
+   "in": "a\n```\n{++x++}\n{--y--}",
+   "clean": "a\n```\n{++x++}\n{--y--}",
+   "accept": "a\n```\n{++x++}\n{--y--}",
+   "code": [
+    "```\n{++x++}\n{--y--}"
+   ]
+  },
+  {
+   "name": "fence interrupts a paragraph",
+   "in": "a `b\n```\nc`\n{++d++}\n```",
+   "clean": "a `b\n```\nc`\n{++d++}\n```",
+   "accept": "a `b\n```\nc`\n{++d++}\n```",
+   "code": [
+    "```\nc`\n{++d++}\n```"
+   ]
+  },
+  {
+   "name": "crlf fence",
+   "in": "```\r\n{++x++}\r\n```\r\n",
+   "clean": "```\r\n{++x++}\r\n```\r\n",
+   "accept": "```\r\n{++x++}\r\n```\r\n",
+   "code": [
+    "```\r\n{++x++}\r\n```\r\n"
+   ]
+  },
+  {
+   "name": "lone cr fence",
+   "in": "```\r{++x++}\r```\r{++y++}",
+   "clean": "```\r{++x++}\r```\r",
+   "accept": "```\r{++x++}\r```\ry",
+   "code": [
+    "```\r{++x++}\r```\r"
+   ]
+  },
+  {
+   "name": "mark contains code",
+   "in": "{++use `x` here++}",
+   "clean": "",
+   "accept": "use `x` here",
+   "code": [
+    "`x`"
+   ]
+  },
+  {
+   "name": "closer right after code",
+   "in": "{++`x`++}{--`y`--}",
+   "clean": "`y`",
+   "accept": "`x`",
+   "code": [
+    "`x`",
+    "`y`"
+   ]
+  },
+  {
+   "name": "closer inside code does not close",
+   "in": "{>>see `<<}` here<<} end",
+   "clean": " end",
+   "accept": " end",
+   "code": [
+    "`<<}`"
+   ]
+  },
+  {
+   "name": "separator inside code does not separate",
+   "in": "{~~`a~>b`~>c~~}",
+   "clean": "`a~>b`",
+   "accept": "c",
+   "code": [
+    "`a~>b`"
+   ]
+  },
+  {
+   "name": "code on both substitution sides",
+   "in": "{~~`old`~>`new`~~}",
+   "clean": "`old`",
+   "accept": "`new`",
+   "code": [
+    "`old`",
+    "`new`"
+   ]
+  },
+  {
+   "name": "suggesting a code change around the code",
+   "in": "{--`old`--}{++`new`++}",
+   "clean": "`old`",
+   "accept": "`new`",
+   "code": [
+    "`old`",
+    "`new`"
+   ]
+  },
+  {
+   "name": "opener whose closer is only in code is literal",
+   "in": "{++a `++}`",
+   "clean": "{++a `++}`",
+   "accept": "{++a `++}`",
+   "code": [
+    "`++}`"
+   ]
+  },
+  {
+   "name": "code swallows the opener of a mark",
+   "in": "`{++`a++}",
+   "clean": "`{++`a++}",
+   "accept": "`{++`a++}",
+   "code": [
+    "`{++`"
+   ]
+  },
+  {
+   "name": "fence inside a mark",
+   "in": "{++\n```\n{--x--}\n```\n++}",
+   "clean": "",
+   "accept": "\n```\n{--x--}\n```\n",
+   "code": [
+    "```\n{--x--}\n```\n"
+   ]
+  },
+  {
+   "name": "tilde fence in a block quote stays marks (container blocks are not recognised)",
+   "in": "> ~~~\n> {++x++}\n> ~~~",
+   "clean": "> ~~~\n> \n> ~~~",
+   "accept": "> ~~~\n> x\n> ~~~",
+   "code": []
+  },
+  {
+   "name": "backtick fence in a block quote is read as a code span",
+   "in": "> ```\n> {++x++}\n> ```",
+   "clean": "> ```\n> {++x++}\n> ```",
+   "accept": "> ```\n> {++x++}\n> ```",
+   "code": [
+    "```\n> {++x++}\n> ```"
+   ]
+  },
+  {
+   "name": "tilde fence nested in a list item four spaces deep stays marks",
+   "in": "- a\n    - b\n\n      ~~~\n      {++x++}\n      ~~~",
+   "clean": "- a\n    - b\n\n      ~~~\n      \n      ~~~",
+   "accept": "- a\n    - b\n\n      ~~~\n      x\n      ~~~",
+   "code": []
+  },
+  {
+   "name": "indented code block stays marks",
+   "in": "para\n\n    {++x++}\n",
+   "clean": "para\n\n    \n",
+   "accept": "para\n\n    x\n",
+   "code": []
+  },
+  {
+   "name": "html precedence over code spans is not recognised",
+   "in": "<a title=\"`\">{++x++}`</a>",
+   "clean": "<a title=\"`\">{++x++}`</a>",
+   "accept": "<a title=\"`\">{++x++}`</a>",
+   "code": [
+    "`\">{++x++}`"
+   ]
+  },
+  {
+   "name": "autolink precedence is not recognised",
+   "in": "<http://a/`>{++x++}`",
+   "clean": "<http://a/`>{++x++}`",
+   "accept": "<http://a/`>{++x++}`",
+   "code": [
+    "`>{++x++}`"
+   ]
+  },
+  {
+   "name": "unicode in code",
+   "in": "é `{++ü++}` {++日++}",
+   "clean": "é `{++ü++}` ",
+   "accept": "é `{++ü++}` 日",
+   "code": [
+    "`{++ü++}`"
+   ]
   }
  ]
 }
