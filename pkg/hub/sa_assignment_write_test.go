@@ -33,28 +33,33 @@ import (
 )
 
 // saWriteFaultStore fails the service-account assignment write, inside
-// transactions too.
+// transactions too, once its switch is armed.
 type saWriteFaultStore struct {
 	store.Store
+	fault *storeFaultSwitch
 }
 
 func (f *saWriteFaultStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
 	return f.Store.WithTx(ctx, func(tx store.Store) error {
-		return fn(&saWriteFaultStore{Store: tx})
+		return fn(&saWriteFaultStore{Store: tx, fault: f.fault})
 	})
 }
 
-func (f *saWriteFaultStore) ReplaceAgentServiceAccountAssignment(context.Context, *store.AgentServiceAccountAssignment) error {
-	return errSPCInjected
+func (f *saWriteFaultStore) ReplaceAgentServiceAccountAssignment(ctx context.Context, a *store.AgentServiceAccountAssignment) error {
+	if f.fault.Active() {
+		return errSPCInjected
+	}
+	return f.Store.ReplaceAgentServiceAccountAssignment(ctx, a)
 }
 
-// installSAWriteFault makes srv's store fail assignment writes until the
-// test ends.
-func installSAWriteFault(t *testing.T, srv *Server) {
+// installSAWriteFault installs, on srv right after its setup, a store that
+// fails assignment writes once the returned switch is armed.
+func installSAWriteFault(t *testing.T, srv *Server) *storeFaultSwitch {
 	t.Helper()
-	real := srv.store
-	srv.store = &saWriteFaultStore{Store: real}
-	t.Cleanup(func() { srv.store = real })
+	_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *saWriteFaultStore {
+		return &saWriteFaultStore{Store: inner, fault: f}
+	})
+	return fault
 }
 
 func activeAssignments(t *testing.T, s store.Store, agentID string) []store.AgentServiceAccountAssignment {
@@ -84,6 +89,7 @@ func ownerSession(f *bypassAgentsFixture) store.AuthorityProvenance {
 
 func TestSAParentCeiling_CreateAssignmentInSameTx(t *testing.T) {
 	f := bypassAgentsSetup(t)
+	fault := installSAWriteFault(t, f.srv)
 	sa := bypassAgentsCreateSA(t, f, f.proj.ID, true)
 	req := func(name string) CreateAgentRequest {
 		return CreateAgentRequest{Name: name, GCPIdentity: &GCPIdentityAssignment{
@@ -107,7 +113,7 @@ func TestSAParentCeiling_CreateAssignmentInSameTx(t *testing.T) {
 	assert.Equal(t, edges[0].EffectCeiling, row.EffectCeiling)
 
 	// A failing assignment write rolls back the whole create.
-	installSAWriteFault(t, f.srv)
+	fault.Arm()
 	rec = createAgentAsOwner(t, f, req("sa-rec-create-fail"))
 	assert.GreaterOrEqual(t, rec.Code, http.StatusInternalServerError, rec.Body.String())
 	_, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "sa-rec-create-fail")
@@ -217,9 +223,10 @@ func TestSAParentCeiling_ScheduledDefaultUsesRevisionPrincipal(t *testing.T) {
 
 func TestSAParentCeiling_ScheduledCreateAssignmentInSameTx(t *testing.T) {
 	f := bypassAgentsSetup(t)
+	fault := installSAWriteFault(t, f.srv)
 	sa := bypassAgentsCreateSA(t, f, f.proj.ID, true)
 	setProjectDefaultSAAnnotations(t, f, sa.ID)
-	installSAWriteFault(t, f.srv)
+	fault.Arm()
 	require.Error(t, fireScheduledDispatchAsOwner(t, f, "sa-rec-sched-fail"))
 	_, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "sa-rec-sched-fail")
 	assert.ErrorIs(t, err, store.ErrNotFound)
@@ -332,6 +339,7 @@ func patchGCPIdentityAsOwner(t *testing.T, f *bypassAgentsFixture, agentID strin
 
 func TestSAParentCeiling_PatchAssignmentInSameTx(t *testing.T) {
 	f := bypassAgentsSetup(t)
+	fault := installSAWriteFault(t, f.srv)
 	sa := bypassAgentsCreateSA(t, f, f.proj.ID, true)
 	agent := pendingAgentForPatch(t, f, "sa-rec-patch")
 	assignBody := map[string]interface{}{"metadata_mode": store.GCPMetadataModeAssign, "service_account_id": sa.ID}
@@ -346,7 +354,7 @@ func TestSAParentCeiling_PatchAssignmentInSameTx(t *testing.T) {
 
 	// A failing assignment write leaves the identity unchanged.
 	other := pendingAgentForPatch(t, f, "sa-rec-patch-fail")
-	installSAWriteFault(t, f.srv)
+	fault.Arm()
 	rec = patchGCPIdentityAsOwner(t, f, other.ID, assignBody)
 	assert.GreaterOrEqual(t, rec.Code, http.StatusInternalServerError, rec.Body.String())
 	got := mustGetAgent(t, f.store, other.ID)
@@ -507,6 +515,7 @@ func TestSAParentCeiling_HostPassthroughAssignmentInSameTx(t *testing.T) {
 	hostSAEmail := "broker-host@sa-rec-tx.iam.gserviceaccount.com"
 	owner := ptUser(tid("user-sa-rec-pt-tx"), "sa-rec-pt-tx@test.com", store.UserRoleMember)
 	srv, s, project, broker := setupPassthroughSandboxServer(t, owner, hostSAEmail, "sa-rec-tx")
+	fault := installSAWriteFault(t, srv)
 	enforceSAAssign(srv, store.NewFakeCallerPermissionChecker().AllowTarget(hostSAEmail))
 	agent := &store.Agent{
 		ID: tid("agent-sa-rec-pt-tx"), Slug: "sa-rec-pt-tx", Name: "sa-rec-pt-tx", ProjectID: project.ID,
@@ -515,7 +524,7 @@ func TestSAParentCeiling_HostPassthroughAssignmentInSameTx(t *testing.T) {
 		Created:       time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateAgent(context.Background(), agent))
-	installSAWriteFault(t, srv)
+	fault.Arm()
 	rec := doRequestAsUser(t, srv, owner, http.MethodPatch, "/api/v1/agents/"+agent.ID,
 		map[string]interface{}{"gcp_identity": map[string]string{"metadata_mode": "passthrough"}})
 	assert.GreaterOrEqual(t, rec.Code, http.StatusInternalServerError, rec.Body.String())
