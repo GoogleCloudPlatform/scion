@@ -61,6 +61,11 @@ var nonRouteCallSites = map[string][]permissionCallSite{
 		{"authorize_message.go", "Server.authorizeUserToAgent"},
 	},
 	"hub.auth_reset.execute": {{"agent_scope_reissue.go", "Server.authorizeScopeReissue"}},
+	"hub.admin_mode.update":  {{"admin_mode.go", "Server.handleAdminMaintenance"}},
+	"hub.allow_list.update": {
+		{"admin_allow_list.go", "Server.handleAdminAllowList"},
+		{"admin_allow_list.go", "Server.handleAdminAllowListByEmail"},
+	},
 	"hub.audit.read": {
 		{"audit_authz.go", "Server.handleAuthzExplain"},
 		{"handlers_admin_effective_access.go", "Server.handleAdminEffectiveAccess"},
@@ -91,19 +96,12 @@ var nonRouteCallSites = map[string][]permissionCallSite{
 // it is added here, and an entry fails once its row gains Enforcement, a
 // verified call site or a Reserved mark, so the entry must be removed.
 var pendingNonRouteRows = map[string]string{
-	"hub.settings.read":         "held by built-in roles; settings routes use the admin check (ptone/scion#4171)",
-	"hub.admin_mode.read":       "held by built-in roles; the admin mode route checks hub.admin_mode.update (ptone/scion#4171)",
-	"hub.allow_list.read":       "held by built-in roles; allow-list routes check hub.allow_list.update (ptone/scion#4171)",
-	"hub.scheduler.update":      "held by built-in roles; the scheduler route checks hub.scheduler.read (ptone/scion#4171)",
-	"hub.federation.read":       "held by built-in roles; no route checks it yet (ptone/scion#4171)",
-	"hub.federation.update":     "held by built-in roles; no route checks it yet (ptone/scion#4171)",
-	"hub.teams_manifest.update": "held by built-in roles; no route checks it yet (ptone/scion#4171)",
-	"user.list":                 "held by built-in roles; no route checks it yet (ptone/scion#4171)",
-	"agent.log_append":          "agent:log:append is a default federation scope; no handler checks it yet (ptone/scion#4171)",
-	"secret.deliver":            "decision rules exist; no production path requests it yet (ptone/scion#4171)",
-	"env_var.deliver":           "decision rules exist; no production path requests it yet (ptone/scion#4171)",
-	"skill_injection.deliver":   "decision rules exist; no production path requests it yet (ptone/scion#4171)",
-	"gcp_service_account.use":   "decision rules exist; token mint checks the per-account token scope (ptone/scion#4171)",
+	"hub.settings.read":       "held by built-in roles; the only hub settings read route, GET /api/v1/hub/settings/injected-skills, is open to any authenticated user by design (ptone/scion#4171)",
+	"hub.scheduler.update":    "held by built-in roles; no route checks it: /api/v1/admin/scheduler is GET-only (ptone/scion#4171)",
+	"secret.deliver":          "decision rules exist; no production path requests it yet (ptone/scion#4171)",
+	"env_var.deliver":         "decision rules exist; no production path requests it yet (ptone/scion#4171)",
+	"skill_injection.deliver": "decision rules exist; no production path requests it yet (ptone/scion#4171)",
+	"gcp_service_account.use": "decision rules exist; token mint checks the per-account token scope (ptone/scion#4171)",
 }
 
 // nonRouteEvidence is the verified evidence and pending list

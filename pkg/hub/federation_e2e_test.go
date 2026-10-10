@@ -220,7 +220,7 @@ func TestFederationE2E_FullSuccessPath(t *testing.T) {
 func TestFederationE2E_ScopeDenied(t *testing.T) {
 	t.Parallel()
 	// Server requires ScopeProjectSecretRead, but default scopes only include
-	// ScopeAgentStatusUpdate and ScopeAgentLogAppend.
+	// ScopeAgentStatusUpdate.
 	server, hubAKey, hubAIssuer, hubBAudience, kid := setupE2EServer(t, ScopeProjectSecretRead)
 
 	claims := validFederationClaims(hubAIssuer, hubBAudience)
