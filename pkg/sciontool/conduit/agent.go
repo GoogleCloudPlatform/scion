@@ -189,8 +189,12 @@ type Agent struct {
 	refusedSince time.Time
 	// live is the most recently admitted session (nil before the first).
 	live core.LocalSession
-	// authToken is a refreshed token not yet sent as AuthRefresh.
+	// authToken is a refreshed token not yet sent as AuthRefresh, and
+	// authExp its expiry; sentExp is the expiry of the last token sent.
+	// A token not newer than both is stale and never sent.
 	authToken string
+	authExp   time.Time
+	sentExp   time.Time
 
 	// authSendMu serializes AuthRefresh sends, so the newest token is
 	// always the last one sent.
@@ -450,21 +454,31 @@ func (a *Agent) refused(end core.End, cause string) (time.Duration, error) {
 // the next session is admitted with the current token anyway.
 var ErrNoLiveSession = errors.New("conduit: no live session")
 
-// RefreshAuth sends token to the hub as AuthRefresh on the live session,
-// so the hub re-validates the session's credential in band (design §3.3)
-// without disturbing its streams. Call it after each successful token
-// refresh. Concurrent calls send the newest token last; a call whose
-// token a concurrent call already sent returns nil.
-func (a *Agent) RefreshAuth(token string) error {
+// RefreshAuth sends token, which expires at expiresAt, to the hub as
+// AuthRefresh on the live session, so the hub re-validates the session's
+// credential in band (design §3.3) without disturbing its streams. Call
+// it after each successful token refresh. Tokens are ordered by expiry,
+// whatever order the calls arrive in: a token that does not expire after
+// the newest one already sent or queued is stale (the hub may already
+// have replaced it) and is dropped, and a call whose token a concurrent
+// call already sent returns nil.
+func (a *Agent) RefreshAuth(token string, expiresAt time.Time) error {
 	a.mu.Lock()
-	a.authToken = token
+	if !expiresAt.After(a.sentExp) || !expiresAt.After(a.authExp) {
+		a.mu.Unlock()
+		return nil
+	}
+	a.authToken, a.authExp = token, expiresAt
 	a.mu.Unlock()
 
 	a.authSendMu.Lock()
 	defer a.authSendMu.Unlock()
 	a.mu.Lock()
-	s, tok := a.live, a.authToken
+	s, tok, exp := a.live, a.authToken, a.authExp
 	a.authToken = ""
+	if tok != "" {
+		a.sentExp = exp
+	}
 	a.mu.Unlock()
 	if tok == "" {
 		return nil

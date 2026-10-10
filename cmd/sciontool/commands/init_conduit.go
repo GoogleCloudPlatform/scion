@@ -95,7 +95,10 @@ func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUs
 				// After a 4401 the reconnect waits for the refresh loop's
 				// next result instead of refreshing itself, so refreshes
 				// stay single-flight; the redial then presents the token
-				// the loop produced.
+				// the loop produced. The loop serves no kick while it backs
+				// off after failed refreshes (up to 5 minutes), so a 4401
+				// in that window gives up after the bound and the redial
+				// uses the current token.
 				RefreshCredential: func(ctx context.Context) error {
 					return c.KickTokenRefreshWait(ctx, conduitCredentialRefreshBound)
 				},
@@ -132,9 +135,10 @@ func (r authRefreshingAgent) Run(ctx context.Context) error {
 			return
 		}
 		// Off the refresh loop's goroutine: the send may wait for room
-		// on the session. RefreshAuth sends the newest token last.
+		// on the session. These goroutines can run in any order;
+		// RefreshAuth orders tokens by expiry and drops stale ones.
 		go func() {
-			if err := r.agent.RefreshAuth(res.Token); err != nil && !errors.Is(err, conduit.ErrNoLiveSession) {
+			if err := r.agent.RefreshAuth(res.Token, res.ExpiresAt); err != nil && !errors.Is(err, conduit.ErrNoLiveSession) {
 				log.Debug("Conduit: sending the refreshed credential failed: %v", err)
 			}
 		}()

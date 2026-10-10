@@ -41,7 +41,7 @@ func TestAgentRefreshAuthBeforeSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.RefreshAuth("token-2"); !errors.Is(err, ErrNoLiveSession) {
+	if err := a.RefreshAuth("token-2", time.Now().Add(time.Hour)); !errors.Is(err, ErrNoLiveSession) {
 		t.Fatalf("RefreshAuth = %v, want ErrNoLiveSession", err)
 	}
 }
@@ -61,8 +61,9 @@ func TestAgentRefreshAuthSendsOnLiveSession(t *testing.T) {
 		t.Fatal("session not reported")
 	}
 
-	for _, tok := range []string{"token-2", "token-3"} {
-		if err := a.RefreshAuth(tok); err != nil {
+	exp := time.Date(2026, 10, 10, 22, 0, 0, 0, time.UTC)
+	for i, tok := range []string{"token-2", "token-3"} {
+		if err := a.RefreshAuth(tok, exp.Add(time.Duration(i)*time.Hour)); err != nil {
 			t.Fatalf("RefreshAuth(%s): %v", tok, err)
 		}
 		ar := nextAuthRefresh(t, h)
@@ -77,5 +78,43 @@ func TestAgentRefreshAuthSendsOnLiveSession(t *testing.T) {
 	}
 	if n := h.conduitHits.Load(); n != 1 {
 		t.Fatalf("conduit dialed %d times, want 1", n)
+	}
+}
+
+// TestAgentRefreshAuthDropsStaleTokens: results that arrive out of
+// refresh order never send an older token after a newer one.
+func TestAgentRefreshAuthDropsStaleTokens(t *testing.T) {
+	h := newFakeHub(t)
+	ready := make(chan struct{}, 4)
+	a, _ := startAgent(t, h, func(o *Options) {
+		o.OnSession = func(*conduitv1.Welcome) { ready <- struct{}{} }
+	})
+	h.nextSession(t)
+	select {
+	case <-ready:
+	case <-time.After(waitTimeout):
+		t.Fatal("session not reported")
+	}
+
+	exp := time.Date(2026, 10, 10, 22, 0, 0, 0, time.UTC)
+	// The newer refresh's result is delivered first.
+	if err := a.RefreshAuth("newer", exp.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if ar := nextAuthRefresh(t, h); string(ar.GetCredential()) != "newer" {
+		t.Fatalf("AuthRefresh = %q, want newer", ar.GetCredential())
+	}
+	for _, e := range []time.Time{exp, exp.Add(time.Hour)} {
+		if err := a.RefreshAuth("older", e); err != nil {
+			t.Fatalf("RefreshAuth(stale) = %v, want nil", err)
+		}
+	}
+	// A later, newer token still goes out, and is the next one the hub
+	// sees: nothing stale was sent in between.
+	if err := a.RefreshAuth("newest", exp.Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if ar := nextAuthRefresh(t, h); string(ar.GetCredential()) != "newest" {
+		t.Fatalf("AuthRefresh = %q, want newest (a stale token was sent)", ar.GetCredential())
 	}
 }
