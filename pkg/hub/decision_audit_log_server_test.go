@@ -123,18 +123,13 @@ const stopAllPath = "/api/v1/agents/stop-all"
 func membersPath(projectID string) string { return "/api/v1/projects/" + projectID + "/members" }
 
 // assertSessionCredential requires the credential leaf of a session-token
-// record: kind "interactive" (credentialContextForIdentity for a session
-// user), only canonical keys, never name or labels. A missing leaf fails:
-// C1.4 forbids emitting an event without its credential attribution.
+// record to be exactly {kind: interactive}: credentialContextForIdentity
+// gives a session *AuthenticatedUser Kind interactive with no ID, boundary,
+// name or labels. A missing leaf fails: C1.4 forbids emitting an event
+// without its credential attribution.
 func assertSessionCredential(t *testing.T, line map[string]any) {
 	t.Helper()
-	cred := auditGroup(t, line, "credential")
-	assert.Equal(t, "interactive", cred["kind"], "credential: %v", cred)
-	for key := range cred {
-		assert.Contains(t, []string{"kind", "id", "boundary_kind", "boundary_project_id"}, key, "credential: %v", cred)
-	}
-	assert.NotContains(t, cred, "name")
-	assert.NotContains(t, cred, "labels")
+	assert.Equal(t, map[string]any{"kind": "interactive"}, auditGroup(t, line, "credential"))
 }
 
 func auditGroup(t *testing.T, line map[string]any, key string) map[string]any {
@@ -477,7 +472,7 @@ func TestDecisionLog_P1_6_OutcomesUnchangedWithWriterBlockedAndFull(t *testing.T
 	for i, p := range probes {
 		before := moved(decisionAuditDisabled)
 		baseline[i] = run(p, fmt.Sprintf("dl6-base-%d", i))
-		require.Greater(t, moved(decisionAuditDisabled), before, "%s: baseline counted disabled", p.name)
+		require.Equal(t, before+1, moved(decisionAuditDisabled), "%s: baseline counted disabled exactly once", p.name)
 		require.Equal(t, p.wantAllowed, baseline[i].Allowed, "%s: expected outcome: %+v", p.name, baseline[i])
 	}
 	require.False(t, baseline[0].Allowed == baseline[1].Allowed, "probes must cover both allow and deny")
@@ -514,7 +509,7 @@ func TestDecisionLog_P1_6_OutcomesUnchangedWithWriterBlockedAndFull(t *testing.T
 	}
 	beforePerm := moved(decisionAuditExcludedPermission)
 	assert.Equal(t, []int{http.StatusOK, http.StatusForbidden}, membersStatuses(), "members results unchanged")
-	assert.GreaterOrEqual(t, moved(decisionAuditExcludedPermission), beforePerm+2, "authorize-path probes are excluded_permission")
+	assert.Equal(t, beforePerm+2, moved(decisionAuditExcludedPermission), "each authorize-path probe is excluded_permission exactly once")
 
 	beforeSession := moved(decisionAuditNotEnqueued)
 	assert.Equal(t, []int{http.StatusOK, http.StatusForbidden}, stopAllStatuses(), "stop-all results unchanged")
