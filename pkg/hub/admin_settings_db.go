@@ -832,9 +832,17 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	}
 	// telemetry.cloud.headers values are masked in GET too: a masked echo
 	// keeps the stored header (the snapshot value GET showed).
-	if err := restoreMaskedTelemetryHeaders(req.Telemetry, ops.Snapshot().TelemetryConfig, rawTelemetryObject(rawBody)); err != nil {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
-		return
+	if len(maskedTelemetryHeaderNames(req.Telemetry)) > 0 {
+		unchanged, err := telemetryCloudUnchangedDB(r.Context(), ops, req.Telemetry, rawBody)
+		if err != nil {
+			slog.Error("PUT server-config: failed to build telemetry document for masked headers", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+			return
+		}
+		if err := restoreMaskedTelemetryHeaders(req.Telemetry, ops.Snapshot().TelemetryConfig, unchanged); err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			return
+		}
 	}
 
 	// Top-level presence of the body; nil (omitted semantics) on a parse

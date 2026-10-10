@@ -760,6 +760,11 @@ func TestPutServerConfigDB_TelemetryMaskedHeaderNoOpMembers(t *testing.T) {
 		{"null nested object over a stored one", `{"telemetry":{"cloud":{"tls":null,"headers":{"x-api-key":"********"}}}}`, http.StatusBadRequest},
 		{"empty string over a shown endpoint", `{"telemetry":{"cloud":{"endpoint":"","headers":{"x-api-key":"********"}}}}`, http.StatusBadRequest},
 		{"false for a member GET omitted", `{"telemetry":{"cloud":{"cloud_logging":false,"headers":{"x-api-key":"********"}}}}`, http.StatusBadRequest},
+		{"case-variant nested clear", `{"telemetry":{"cloud":{"tls":{"CA_FILE":""},"headers":{"x-api-key":"********"}}}}`, http.StatusBadRequest},
+		{"case-variant nested null", `{"telemetry":{"cloud":{"tls":{"Enabled":null},"headers":{"x-api-key":"********"}}}}`, http.StatusBadRequest},
+		{"case-variant nested no-op", `{"telemetry":{"cloud":{"TLS":{"Ca_File":"/etc/ca.pem"},"headers":{"x-api-key":"********"}}}}`, http.StatusOK},
+		{"changed endpoint", `{"telemetry":{"cloud":{"endpoint":"other.example.com:4317","headers":{"x-api-key":"********"}}}}`, http.StatusBadRequest},
+		{"empty string for a nested object", `{"telemetry":{"cloud":{"tls":"","headers":{"x-api-key":"********"}}}}`, http.StatusBadRequest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
@@ -778,32 +783,75 @@ func TestPutServerConfigDB_TelemetryMaskedHeaderNoOpMembers(t *testing.T) {
 	}
 }
 
-func TestSentValueUnchanged(t *testing.T) {
-	obj := func(s string) any { var v any; _ = json.Unmarshal([]byte(s), &v); return v }
+// File mode replaces the telemetry object whole, so a masked header is
+// kept only when the cloud object written, apart from headers, equals the
+// stored one: an exact echo keeps; a partial or empty tls, a case-variant
+// clear and a changed or cleared endpoint are rejected; "" for a member
+// GET omitted keeps.
+func TestPutServerConfig_FileMode_TelemetryMaskedHeaderCloudRule(t *testing.T) {
+	const stored = `schema_version: "1"
+telemetry:
+  cloud:
+    endpoint: otel.example.com:4317
+    tls:
+      enabled: true
+      ca_file: /etc/ca.pem
+    headers:
+      x-api-key: real-key
+`
 	for _, tc := range []struct {
-		name         string
-		sent, shownV any
-		shown, want  bool
+		name, cloud string
+		wantCode    int
 	}{
-		{"null for absent", nil, nil, false, true},
-		{"empty string for absent", "", nil, false, true},
-		{"empty object for absent", obj(`{}`), nil, false, true},
-		{"object of empties for absent", obj(`{"a":"","b":null,"c":{}}`), nil, false, true},
-		{"value for absent", "x", nil, false, false},
-		{"false for absent", false, nil, false, false},
-		{"zero for absent", float64(0), nil, false, false},
-		{"equal scalar", "x", "x", true, true},
-		{"changed scalar", "y", "x", true, false},
-		{"empty string for shown", "", "x", true, false},
-		{"null for shown", nil, "x", true, false},
-		{"partial object", obj(`{"a":1}`), obj(`{"a":1,"b":2}`), true, true},
-		{"partial object changed", obj(`{"a":2}`), obj(`{"a":1,"b":2}`), true, false},
-		{"partial object clears", obj(`{"b":""}`), obj(`{"a":1,"b":2}`), true, false},
-		{"array equal", obj(`["a"]`), obj(`["a"]`), true, true},
-		{"array changed", obj(`["b"]`), obj(`["a"]`), true, false},
+		{"exact echo", `"endpoint":"otel.example.com:4317","tls":{"enabled":true,"ca_file":"/etc/ca.pem"}`, http.StatusOK},
+		{"empty string for a member GET omitted", `"endpoint":"otel.example.com:4317","protocol":"","tls":{"enabled":true,"ca_file":"/etc/ca.pem"}`, http.StatusOK},
+		{"case-variant nested clear", `"endpoint":"otel.example.com:4317","tls":{"enabled":true,"CA_FILE":""}`, http.StatusBadRequest},
+		{"partial tls", `"endpoint":"otel.example.com:4317","tls":{"enabled":true}`, http.StatusBadRequest},
+		{"empty tls", `"endpoint":"otel.example.com:4317","tls":{}`, http.StatusBadRequest},
+		{"omitted tls", `"endpoint":"otel.example.com:4317"`, http.StatusBadRequest},
+		{"changed endpoint", `"endpoint":"other.example.com:4317","tls":{"enabled":true,"ca_file":"/etc/ca.pem"}`, http.StatusBadRequest},
+		{"cleared endpoint", `"endpoint":"","tls":{"enabled":true,"ca_file":"/etc/ca.pem"}`, http.StatusBadRequest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, sentValueUnchanged(tc.sent, tc.shownV, tc.shown))
+			settingsPath := setTempScionHome(t)
+			require.NoError(t, os.WriteFile(settingsPath, []byte(stored), 0600))
+			srv := &Server{}
+			rr := httptest.NewRecorder()
+			srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+				`{"telemetry":{"cloud":{`+tc.cloud+`,"headers":{"x-api-key":"********"}}}}`))
+			require.Equal(t, tc.wantCode, rr.Code, rr.Body.String())
+			data, err := os.ReadFile(settingsPath)
+			require.NoError(t, err)
+			if tc.wantCode != http.StatusOK {
+				assert.Equal(t, stored, string(data), "nothing is written")
+				return
+			}
+			var vs config.VersionedSettings
+			require.NoError(t, yamlv3.Unmarshal(data, &vs))
+			require.NotNil(t, vs.Telemetry)
+			require.NotNil(t, vs.Telemetry.Cloud)
+			assert.Equal(t, map[string]string{"x-api-key": "real-key"}, vs.Telemetry.Cloud.Headers)
+			assert.Equal(t, "/etc/ca.pem", vs.Telemetry.Cloud.TLS.CAFile)
+		})
+	}
+}
+
+func TestTelemetryCloudUnchanged(t *testing.T) {
+	for _, tc := range []struct {
+		name, next, cur string
+		want            bool
+	}{
+		{"equal apart from headers", `{"cloud":{"endpoint":"e","headers":{"a":"1"}}}`, `{"cloud":{"endpoint":"e","headers":{"a":"2"}}}`, true},
+		{"no cloud on either side", `{}`, `{"enabled":true}`, true},
+		{"empty values pruned", `{"cloud":{"endpoint":"e","protocol":"","tls":{"ca_file":""},"batch":{}}}`, `{"cloud":{"endpoint":"e"}}`, true},
+		{"changed member", `{"cloud":{"endpoint":"x"}}`, `{"cloud":{"endpoint":"e"}}`, false},
+		{"dropped nested member", `{"cloud":{"tls":{"enabled":true}}}`, `{"cloud":{"tls":{"enabled":true,"ca_file":"/c"}}}`, false},
+		{"false is a value", `{"cloud":{"cloud_logging":false}}`, `{"cloud":{}}`, false},
+		{"scalar over object", `{"cloud":{"tls":"x"}}`, `{"cloud":{"tls":{"enabled":true}}}`, false},
+		{"undecodable", `{`, `{}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, telemetryCloudUnchanged(json.RawMessage(tc.next), json.RawMessage(tc.cur)))
 		})
 	}
 }

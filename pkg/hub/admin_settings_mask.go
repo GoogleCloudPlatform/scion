@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -319,6 +320,22 @@ func maskedTelemetry(t *config.V1TelemetryConfig) *config.V1TelemetryConfig {
 	return &out
 }
 
+// maskedTelemetryHeaderNames returns the names of the telemetry.cloud
+// headers in t that hold maskedValue, sorted.
+func maskedTelemetryHeaderNames(t *config.V1TelemetryConfig) []string {
+	if t == nil || t.Cloud == nil {
+		return nil
+	}
+	var names []string
+	for k, v := range t.Cloud.Headers {
+		if v == maskedValue {
+			names = append(names, k)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
 // restoreMaskedTelemetryHeaders is the inverse of maskedTelemetry for the
 // PUT path, the counterpart of restoreMaskedServerSecrets: a
 // telemetry.cloud.headers value in incoming that still holds maskedValue
@@ -326,40 +343,29 @@ func maskedTelemetry(t *config.V1TelemetryConfig) *config.V1TelemetryConfig {
 // so a form round trip keeps the stored headers. A real value is left
 // alone and replaces the stored one as usual.
 //
-// A masked value is restored only when every other telemetry.cloud member
-// the request sends is unchanged from what GET showed for it (stored,
-// masked; see sentValueUnchanged). The sent members are read from
-// rawTelemetry, the telemetry object of the request body, so a member
-// sent as "", null or {} counts as sent. Members the request does not
-// send are not compared. A masked header with no stored value, or with a
-// stored value that is itself the placeholder, is an error too. The
-// caller answers 400 to an error.
-func restoreMaskedTelemetryHeaders(incoming, stored *config.V1TelemetryConfig, rawTelemetry json.RawMessage) error {
-	if incoming == nil || incoming.Cloud == nil {
-		return nil
-	}
-	var names []string
-	for k, v := range incoming.Cloud.Headers {
-		if v == maskedValue {
-			names = append(names, k)
-		}
-	}
+// A masked value is restored only when cloudUnchanged is true: the caller
+// reports whether the telemetry.cloud object this save would store, apart
+// from headers, equals the one stored now (telemetryCloudUnchanged), each
+// computed with the write's own semantics (the DB-mode merge, or the
+// file-mode replace). A masked header with no stored value, or with a
+// stored value that is itself the placeholder, is an error too. The caller
+// answers 400 to an error.
+func restoreMaskedTelemetryHeaders(incoming, stored *config.V1TelemetryConfig, cloudUnchanged bool) error {
+	names := maskedTelemetryHeaderNames(incoming)
 	if len(names) == 0 {
 		return nil
 	}
-	sort.Strings(names)
-	var storedCloud config.V1TelemetryCloudConfig
-	if stored != nil && stored.Cloud != nil {
-		storedCloud = *stored.Cloud
-	}
-	shown := maskedTelemetry(&config.V1TelemetryConfig{Cloud: &storedCloud}).Cloud
-	if !sentCloudMembersEqual(rawTelemetry, shown) {
+	if !cloudUnchanged {
 		return fmt.Errorf("telemetry.cloud.headers.%s is the masked placeholder %q but other fields of telemetry.cloud changed; send the real value", names[0], maskedValue)
+	}
+	var storedHeaders map[string]string
+	if stored != nil && stored.Cloud != nil {
+		storedHeaders = stored.Cloud.Headers
 	}
 	headers := make(map[string]string, len(incoming.Cloud.Headers))
 	for k, v := range incoming.Cloud.Headers {
 		if v == maskedValue {
-			sv, ok := storedCloud.Headers[k]
+			sv, ok := storedHeaders[k]
 			var sp *string
 			if ok {
 				sp = &sv
@@ -375,97 +381,88 @@ func restoreMaskedTelemetryHeaders(incoming, stored *config.V1TelemetryConfig, r
 	return nil
 }
 
-// sentCloudMembersEqual reports whether every member the telemetry object
-// rawTelemetry sends in its cloud object, other than headers, leaves the
-// same member of shown unchanged (sentValueUnchanged). Members are matched
-// to fields with sentStructFields, the rule the typed request decode
-// follows. A body that sends no cloud object sends no members.
-func sentCloudMembersEqual(rawTelemetry json.RawMessage, shown *config.V1TelemetryCloudConfig) bool {
-	rawCloud, ok := sentAtPath(reflect.TypeOf(config.V1TelemetryConfig{}), rawTelemetry, []string{"cloud"})
-	if !ok {
-		return true
+// telemetryCloudUnchanged reports whether the telemetry documents next
+// (what a save would store) and cur (what is stored now) hold the same
+// telemetry.cloud object apart from headers. Both are compared as decoded
+// JSON with members that carry no value (null, "" and objects left empty
+// by that rule) removed, so key order, key spelling in the request and an
+// empty value for an absent member do not matter. A document that cannot
+// be decoded is never equal.
+func telemetryCloudUnchanged(next, cur json.RawMessage) bool {
+	a, ok1 := cloudWithoutHeaders(next)
+	b, ok2 := cloudWithoutHeaders(cur)
+	return ok1 && ok2 && reflect.DeepEqual(a, b)
+}
+
+// cloudWithoutHeaders returns the cloud member of a telemetry document
+// without headers and without members that carry no value.
+func cloudWithoutHeaders(doc json.RawMessage) (map[string]any, bool) {
+	var t map[string]any
+	if len(doc) > 0 {
+		if err := json.Unmarshal(doc, &t); err != nil {
+			return nil, false
+		}
 	}
-	fields, ok := sentStructFields(reflect.TypeOf(config.V1TelemetryCloudConfig{}), rawCloud)
-	if !ok {
-		return false
+	cloud, _ := t["cloud"].(map[string]any)
+	out := make(map[string]any, len(cloud))
+	for k, v := range cloud {
+		if k != "headers" {
+			out[k] = v
+		}
 	}
-	sv, err := toJSONValue(shown)
+	pruneNoValue(out)
+	return out, true
+}
+
+// pruneNoValue removes from m, at every depth, the members that hold null
+// or "", and then the objects left empty.
+func pruneNoValue(m map[string]any) {
+	for k, v := range m {
+		switch t := v.(type) {
+		case nil:
+			delete(m, k)
+		case string:
+			if t == "" {
+				delete(m, k)
+			}
+		case map[string]any:
+			pruneNoValue(t)
+			if len(t) == 0 {
+				delete(m, k)
+			}
+		}
+	}
+}
+
+// telemetryCloudUnchangedDB reports, for a DB-backed save, whether the
+// telemetry.cloud object the save would store after the merge on the
+// current row (mergeSectionOnCurrent, with the presence of the request's
+// telemetry object) equals, apart from headers, the one the current row
+// holds after the same base rules.
+func telemetryCloudUnchangedDB(ctx context.Context, ops *OperationalSettings, req *config.V1TelemetryConfig, rawBody []byte) (bool, error) {
+	reqDoc, err := json.Marshal(req)
 	if err != nil {
-		return false
+		return false, err
 	}
-	shownMembers, _ := sv.(map[string]any)
-	for _, sf := range fields {
-		name := jsonFieldName(sf.field)
-		if name == "headers" {
-			continue
-		}
-		var sent any
-		if err := json.Unmarshal(sf.val, &sent); err != nil {
-			return false
-		}
-		shownVal, shown := shownMembers[name]
-		if !sentValueUnchanged(sent, shownVal, shown) {
-			return false
-		}
+	next, _, err := mergeSectionOnCurrent(ctx, ops, "telemetry", reqDoc, telemetryPresence(rawBody))
+	if err != nil {
+		return false, err
 	}
-	return true
+	cur, _, err := mergeSectionOnCurrent(ctx, ops, "telemetry", nil, nil)
+	if err != nil {
+		return false, err
+	}
+	return telemetryCloudUnchanged(next, cur), nil
 }
 
-// sentValueUnchanged reports whether a sent JSON value leaves a member as
-// GET showed it. shown is false when GET showed no value for the member.
-//   - GET showed no value: the sent value is unchanged only when it holds
-//     no value either: null, "", or an object whose members all hold no
-//     value ({} included). Any other value (false and 0 included) is a
-//     change.
-//   - GET showed an object and an object is sent: each sent member is
-//     checked by the same rules against the shown member, and members the
-//     object does not send are not compared (the telemetry section is
-//     merged key by key).
-//   - Otherwise the sent value must equal the shown value exactly, so ""
-//     or null for a member GET showed is a change.
-func sentValueUnchanged(sent, shownVal any, shown bool) bool {
-	if !shown || shownVal == nil {
-		return holdsNoValue(sent)
-	}
-	sentObj, sentIsObj := sent.(map[string]any)
-	shownObj, shownIsObj := shownVal.(map[string]any)
-	if sentIsObj && shownIsObj {
-		for k, v := range sentObj {
-			sv, ok := shownObj[k]
-			if !sentValueUnchanged(v, sv, ok) {
-				return false
-			}
-		}
-		return true
-	}
-	return reflect.DeepEqual(sent, shownVal)
-}
-
-// holdsNoValue reports whether a decoded JSON value carries no value:
-// null, "", or an object whose members all carry no value.
-func holdsNoValue(v any) bool {
-	switch t := v.(type) {
-	case nil:
-		return true
-	case string:
-		return t == ""
-	case map[string]any:
-		for _, m := range t {
-			if !holdsNoValue(m) {
-				return false
-			}
-		}
-		return true
-	}
-	return false
-}
-
-// rawTelemetryObject returns the telemetry member of a server-config PUT
-// body, resolved with the rule the typed request decode follows, or nil
-// when the body has none.
-func rawTelemetryObject(rawBody []byte) json.RawMessage {
-	v, _ := sentAtPath(reflect.TypeOf(ServerConfigUpdateRequest{}), rawBody, []string{"telemetry"})
-	return v
+// telemetryCloudUnchangedFile reports, for a file-mode save, whether the
+// telemetry.cloud object the save would write (the request's telemetry
+// replaces the stored one whole) equals, apart from headers, the stored
+// one.
+func telemetryCloudUnchangedFile(req, stored *config.V1TelemetryConfig) bool {
+	next, err1 := json.Marshal(req)
+	cur, err2 := json.Marshal(stored)
+	return err1 == nil && err2 == nil && telemetryCloudUnchanged(next, cur)
 }
 
 // maskedCopy returns a deep copy of s with GET's masking applied.

@@ -638,7 +638,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to parse existing settings", nil)
 			return
 		}
-		if err := restoreMaskedTelemetryHeaders(req.Telemetry, stored, rawTelemetryObject(rawBody)); err != nil {
+		if err := restoreMaskedTelemetryHeaders(req.Telemetry, stored, telemetryCloudUnchangedFile(req.Telemetry, stored)); err != nil {
 			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
 			return
 		}
