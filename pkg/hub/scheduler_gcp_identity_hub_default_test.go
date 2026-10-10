@@ -39,8 +39,8 @@ import (
 // hub-wide passthrough default reaches an agent dispatched by a schedule on a
 // project with no project-level override, on the embedded broker.
 func TestScheduledDispatch_HubDefaultPassthroughAppliedWhenNoProjectDefault(t *testing.T) {
-	// Not parallel: its store Migrate mutates ent's package-level schema
-	// tables (concurrent map writes in Atlas.setupTables).
+	// Not parallel: concurrent ent migrate (store Migrate) writes the
+	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
 	f := bypassAgentsSetup(t)
 	markBrokerEmbedded(t, f)
 	markBrokerRuntimeProfile(t, f, "docker")
@@ -66,8 +66,8 @@ func TestScheduledDispatch_HubDefaultPassthroughAppliedWhenNoProjectDefault(t *t
 // default and get passthrough, with that profile pinned onto
 // AppliedConfig.Profile.
 func TestScheduledDispatch_HubDefaultPassthroughAppliedOnStockEmbeddedBroker(t *testing.T) {
-	// Not parallel: its store Migrate mutates ent's package-level schema
-	// tables (concurrent map writes in Atlas.setupTables).
+	// Not parallel: concurrent ent migrate (store Migrate) writes the
+	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
 	f := bypassAgentsSetup(t)
 	markBrokerEmbedded(t, f)
 	markBrokerStockProfiles(t, f, "local")
@@ -98,8 +98,8 @@ func TestScheduledDispatch_HubDefaultPassthroughAppliedOnStockEmbeddedBroker(t *
 // an explicit "block", so the broker's own runtime-aware default
 // (passthrough, for Kubernetes) applies instead.
 func TestScheduledDispatch_HubDefaultPassthroughDeniedOnKubernetesRuntimeLeavesIdentityUnset(t *testing.T) {
-	// Not parallel: its store Migrate mutates ent's package-level schema
-	// tables (concurrent map writes in Atlas.setupTables).
+	// Not parallel: concurrent ent migrate (store Migrate) writes the
+	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
 	f := bypassAgentsSetup(t)
 	markBrokerEmbedded(t, f)
 	markBrokerRuntimeProfile(t, f, "kubernetes")
@@ -128,8 +128,8 @@ func TestScheduledDispatch_HubDefaultPassthroughDeniedOnKubernetesRuntimeLeavesI
 // (unchanged "block" on every runtime except Kubernetes) instead of exposing
 // that broker's host identity via an unchecked passthrough.
 func TestScheduledDispatch_HubDefaultPassthroughNotAppliedOnNonEmbeddedBroker(t *testing.T) {
-	// Not parallel: its store Migrate mutates ent's package-level schema
-	// tables (concurrent map writes in Atlas.setupTables).
+	// Not parallel: concurrent ent migrate (store Migrate) writes the
+	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
 	f := bypassAgentsSetup(t)
 	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
 		DefaultGCPIdentityMode: store.GCPMetadataModePassthrough,
@@ -168,8 +168,8 @@ func setProjectDefaultGCPMode(t *testing.T, f *bypassAgentsFixture, mode string)
 // would have produced (here, an unusable SA ID that would fail dispatch if it
 // were ever looked up).
 func TestScheduledDispatch_ProjectDefaultWinsOverHubDefault(t *testing.T) {
-	// Not parallel: its store Migrate mutates ent's package-level schema
-	// tables (concurrent map writes in Atlas.setupTables).
+	// Not parallel: concurrent ent migrate (store Migrate) writes the
+	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
 	f := bypassAgentsSetup(t)
 	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
 		DefaultGCPIdentityMode:             store.GCPMetadataModeAssign,
@@ -207,8 +207,8 @@ func TestScheduledDispatch_ProjectDefaultWinsOverHubDefault(t *testing.T) {
 // (pkg/runtimebroker/start_context_test.go), not silently become
 // "passthrough" because it looked the same as "nothing configured".
 func TestScheduledDispatch_ProjectBlockNotOverriddenByHubDefault(t *testing.T) {
-	// Not parallel: its store Migrate mutates ent's package-level schema
-	// tables (concurrent map writes in Atlas.setupTables).
+	// Not parallel: concurrent ent migrate (store Migrate) writes the
+	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
 	f := bypassAgentsSetup(t)
 	markBrokerEmbedded(t, f)
 	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
@@ -236,8 +236,8 @@ func TestScheduledDispatch_ProjectBlockNotOverriddenByHubDefault(t *testing.T) {
 // regressed into consulting the hub default, this dispatch would fail
 // (the SA does not exist) instead of succeeding with no GCP identity.
 func TestScheduledDispatch_ProjectBlockStopsBeforeHubDefaultAssignLookup(t *testing.T) {
-	// Not parallel: its store Migrate mutates ent's package-level schema
-	// tables (concurrent map writes in Atlas.setupTables).
+	// Not parallel: concurrent ent migrate (store Migrate) writes the
+	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
 	f := bypassAgentsSetup(t)
 	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
 		DefaultGCPIdentityMode:             store.GCPMetadataModeAssign,
@@ -263,8 +263,8 @@ func TestScheduledDispatch_ProjectBlockStopsBeforeHubDefaultAssignLookup(t *test
 // explicit block, not be skipped or treated as unset, exactly as the
 // equivalent project-default and HTTP hub-default arms already do.
 func TestScheduledDispatch_HubDefaultAssignEmptySAIDFallsBackToBlock(t *testing.T) {
-	// Not parallel: its store Migrate mutates ent's package-level schema
-	// tables (concurrent map writes in Atlas.setupTables).
+	// Not parallel: concurrent ent migrate (store Migrate) writes the
+	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
 	f := bypassAgentsSetup(t)
 	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
 		DefaultGCPIdentityMode:             store.GCPMetadataModeAssign,
@@ -293,8 +293,8 @@ func TestScheduledDispatch_HubDefaultAssignEmptySAIDFallsBackToBlock(t *testing.
 // which pins the same gate function against a broker that merely claims to
 // be embedded via its label).
 func TestScheduledDispatch_HubDefaultPassthroughNotAppliedWhenProjectUsesADifferentBroker(t *testing.T) {
-	// Not parallel: its store Migrate mutates ent's package-level schema
-	// tables (concurrent map writes in Atlas.setupTables).
+	// Not parallel: concurrent ent migrate (store Migrate) writes the
+	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
 	f := bypassAgentsSetup(t)
 	// The hub does have an embedded broker — just not the one this project
 	// dispatches to (f.broker, wired by bypassAgentsSetup's AddProjectProvider).
@@ -323,8 +323,8 @@ func TestScheduledDispatch_HubDefaultPassthroughNotAppliedWhenProjectUsesADiffer
 // instead of writing an explicit "block" record, so the two paths agree: nil
 // means "let the broker apply its own runtime-aware default".
 func TestScheduledDispatch_NoHubDefaultLeavesGCPIdentityUnchanged(t *testing.T) {
-	// Not parallel: its store Migrate mutates ent's package-level schema
-	// tables (concurrent map writes in Atlas.setupTables).
+	// Not parallel: concurrent ent migrate (store Migrate) writes the
+	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
 	f := bypassAgentsSetup(t)
 
 	require.NoError(t, fireScheduledDispatchAsOwner(t, f, "sched-no-hub-default"))
@@ -344,8 +344,8 @@ func TestScheduledDispatch_NoHubDefaultLeavesGCPIdentityUnchanged(t *testing.T) 
 // stay an explicit record rather than being silently reinterpreted as "apply
 // the broker's runtime-aware default" on a Kubernetes-bound dispatch.
 func TestScheduledDispatch_HubDefaultExplicitlyBlockIsExplicit(t *testing.T) {
-	// Not parallel: its store Migrate mutates ent's package-level schema
-	// tables (concurrent map writes in Atlas.setupTables).
+	// Not parallel: concurrent ent migrate (store Migrate) writes the
+	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
 	f := bypassAgentsSetup(t)
 	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
 		DefaultGCPIdentityMode: store.GCPMetadataModeBlock,
@@ -378,8 +378,8 @@ func TestScheduledDispatch_HubDefaultExplicitlyBlockIsExplicit(t *testing.T) {
 // immediate creator) as the project-default rung already uses on this path,
 // and is recorded under the hub-default audit surface.
 func TestScheduledDispatch_HubDefaultAssignSameAuthorizationAsProjectDefault(t *testing.T) {
-	// Not parallel: its store Migrate mutates ent's package-level schema
-	// tables (concurrent map writes in Atlas.setupTables).
+	// Not parallel: concurrent ent migrate (store Migrate) writes the
+	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
 	f := bypassAgentsSetup(t)
 	audit := &mockAuditLogger{}
 	f.srv.SetAuditLogger(audit)
@@ -412,8 +412,8 @@ func TestScheduledDispatch_HubDefaultAssignSameAuthorizationAsProjectDefault(t *
 // cannot act as must fail the dispatch rather than silently falling back
 // to block.
 func TestScheduledDispatch_HubDefaultAssignDeniedFailsDispatch(t *testing.T) {
-	// Not parallel: its store Migrate mutates ent's package-level schema
-	// tables (concurrent map writes in Atlas.setupTables).
+	// Not parallel: concurrent ent migrate (store Migrate) writes the
+	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
 	f := bypassAgentsSetup(t)
 	sa := bypassAgentsCreateSA(t, f, f.proj.ID, true)
 	setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{
@@ -438,8 +438,8 @@ func TestScheduledDispatch_HubDefaultAssignDeniedFailsDispatch(t *testing.T) {
 // Per ptone/scion#2328, the denial leaves GCPIdentity unset rather than
 // writing an explicit "block".
 func TestScheduledDispatch_HubDefaultPassthroughDeniedByProjectActiveProfileLeavesIdentityUnset(t *testing.T) {
-	// Not parallel: its store Migrate mutates ent's package-level schema
-	// tables (concurrent map writes in Atlas.setupTables).
+	// Not parallel: concurrent ent migrate (store Migrate) writes the
+	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
 	f := bypassAgentsSetup(t)
 	markBrokerEmbedded(t, f)
 	markBrokerStockProfiles(t, f, "local") // broker default points at docker
@@ -471,8 +471,8 @@ func TestScheduledDispatch_HubDefaultPassthroughDeniedByProjectActiveProfileLeav
 // the pin lands on CreateInputs.Profile on this path too, and survives a
 // project active-profile change made after the grant.
 func TestScheduledDispatch_PinnedProfileSurvivesReincarnateAfterProjectActiveProfileChanges(t *testing.T) {
-	// Not parallel: its store Migrate mutates ent's package-level schema
-	// tables (concurrent map writes in Atlas.setupTables).
+	// Not parallel: concurrent ent migrate (store Migrate) writes the
+	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
 	f := bypassAgentsSetup(t)
 	markBrokerEmbedded(t, f)
 	markBrokerStockProfiles(t, f, "local")

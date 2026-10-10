@@ -33,8 +33,8 @@ import (
 // successful dispatch also writes an identity-key row for the new agent's
 // Slug.
 func TestScheduledDispatch_WritesSlugIdentityKey(t *testing.T) {
-	// Not parallel: its store Migrate mutates ent's package-level schema
-	// tables (concurrent map writes in Atlas.setupTables).
+	// Not parallel: concurrent ent migrate (store Migrate) writes the
+	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
 	f := bypassAgentsSetup(t)
 	ctx := context.Background()
 
@@ -55,8 +55,8 @@ func TestScheduledDispatch_WritesSlugIdentityKey(t *testing.T) {
 // failure must specifically be the display-name validation, not some other
 // error the dispatch path happens to also produce.
 func TestScheduledDispatch_RejectsReservedSlug(t *testing.T) {
-	// Not parallel: its store Migrate mutates ent's package-level schema
-	// tables (concurrent map writes in Atlas.setupTables).
+	// Not parallel: concurrent ent migrate (store Migrate) writes the
+	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
 	f := bypassAgentsSetup(t)
 	ctx := context.Background()
 
@@ -77,8 +77,8 @@ func TestScheduledDispatch_RejectsReservedSlug(t *testing.T) {
 // failure must specifically be the identity-key conflict, not some other
 // error the dispatch path happens to also produce.
 func TestScheduledDispatch_OrderingCollisionIsRejected(t *testing.T) {
-	// Not parallel: its store Migrate mutates ent's package-level schema
-	// tables (concurrent map writes in Atlas.setupTables).
+	// Not parallel: concurrent ent migrate (store Migrate) writes the
+	// package-level migrate.Tables (concurrent map writes in Atlas.setupTables).
 	f := bypassAgentsSetup(t)
 	ctx := context.Background()
 
