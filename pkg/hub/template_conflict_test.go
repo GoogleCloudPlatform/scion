@@ -28,6 +28,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -45,25 +46,35 @@ func setTemplateContentForTest(ctx context.Context, s store.Store, tmpl *store.T
 }
 
 // conflictInjectingStore makes the next `armed` UpdateTemplateContent calls
-// lose to a concurrent commit: before delegating, it commits a new content
-// hash to the same row through the inner store, as another hub replica
-// would.
+// lose to a concurrent commit once its fault switch is armed: before
+// delegating, it commits a new content hash to the same row through the
+// inner store, as another hub replica would. Until then it is transparent.
+// It is installed with installStoreFault right after the server is built
+// (newConflictTestServer), never swapped in mid-test (ptone/scion#3435).
 //
 // With revertAfter set, a second concurrent commit restores the original
 // content hash right after the caller's write has lost, so the caller's
 // re-read sees its original content hash again (another writer reverted).
 type conflictInjectingStore struct {
 	store.Store
+	fault       *storeFaultSwitch
 	armed       atomic.Int32
 	injected    atomic.Int32
 	revertAfter bool
 }
 
+// arm makes the next n template commits lose to an injected concurrent
+// commit.
+func (c *conflictInjectingStore) arm(n int32) {
+	c.armed.Store(n)
+	c.fault.Arm()
+}
+
 func (c *conflictInjectingStore) UpdateTemplateContent(ctx context.Context, t *store.Template, expected store.TemplateContentPrecondition) error {
-	if c.armed.Add(-1) < 0 {
+	if !c.fault.Active() || c.armed.Add(-1) < 0 {
 		return c.Store.UpdateTemplateContent(ctx, t, expected)
 	}
-	cur, err := c.Store.GetTemplate(ctx, t.ID)
+	cur, err := c.GetTemplate(ctx, t.ID)
 	if err != nil {
 		return err
 	}
@@ -84,11 +95,17 @@ func (c *conflictInjectingStore) UpdateTemplateContent(ctx context.Context, t *s
 	return err
 }
 
-// injectConflicts swaps the server's store for a conflictInjectingStore.
-func injectConflicts(srv *Server, s store.Store) *conflictInjectingStore {
-	c := &conflictInjectingStore{Store: s}
-	srv.store = c
-	return c
+// newConflictTestServer is newCommitTestServer with a conflictInjectingStore
+// installed (disarmed) before any setup. It returns the raw store, which
+// bypasses the wrapper, and the wrapper.
+func newConflictTestServer(t *testing.T, stor storage.Storage) (*Server, store.Store, *conflictInjectingStore) {
+	t.Helper()
+	srv, s := newCommitTestServer(t, stor)
+	waitUserScopedDataSweep(t, srv)
+	inj, _ := installStoreFault(t, srv, func(inner store.Store, fault *storeFaultSwitch) *conflictInjectingStore {
+		return &conflictInjectingStore{Store: inner, fault: fault}
+	})
+	return srv, s, inj
 }
 
 func finalizeBody(t *testing.T, files []store.TemplateFile, expected string) []byte {
@@ -308,18 +325,17 @@ func TestCommitTemplateFiles_StaleReadConflicts(t *testing.T) {
 // caller to log and skip.
 func TestTemplateBootstrap_RetriesConflictOnce(t *testing.T) {
 	stor := newCommitTestStorage(t)
-	srv, s := newCommitTestServer(t, stor)
+	srv, s, inj := newConflictTestServer(t, stor)
 	ctx := context.Background()
 
 	dir := writeTemplateDir(t, t.TempDir(), "boot", map[string]string{"scion-agent.yaml": commitCfgOld})
 	if _, err := srv.templateStore().Bootstrap(ctx, "boot", dir, store.TemplateScopeGlobal, "", "", false); err != nil {
 		t.Fatal(err)
 	}
-	inj := injectConflicts(srv, s)
 
 	next := map[string]string{"scion-agent.yaml": commitCfgBoth, "extra.md": "x"}
 	dir2 := writeTemplateDir(t, t.TempDir(), "boot", next)
-	inj.armed.Store(1)
+	inj.arm(1)
 	if _, err := srv.templateStore().Bootstrap(ctx, "boot", dir2, store.TemplateScopeGlobal, "", "", false); err != nil {
 		t.Fatalf("bootstrap with one conflict: %v", err)
 	}
@@ -336,7 +352,7 @@ func TestTemplateBootstrap_RetriesConflictOnce(t *testing.T) {
 	assertBothIndex(t, got)
 
 	dir3 := writeTemplateDir(t, t.TempDir(), "boot", map[string]string{"scion-agent.yaml": commitCfgOld, "third.md": "3"})
-	inj.armed.Store(2)
+	inj.arm(2)
 	_, err = srv.templateStore().Bootstrap(ctx, "boot", dir3, store.TemplateScopeGlobal, "", "", false)
 	if !errors.Is(err, store.ErrTemplateConflict) {
 		t.Fatalf("bootstrap with two conflicts: err = %v, want store.ErrTemplateConflict", err)
@@ -363,15 +379,14 @@ func TestTemplateRepair_RetriesConflictOnce(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stor := newCommitTestStorage(t)
-			srv, s := newCommitTestServer(t, stor)
+			srv, s, inj := newConflictTestServer(t, stor)
 			ctx := context.Background()
 
 			tmpl := seedCommittedTemplate(t, srv, "repair", "global", "", map[string]string{"scion-agent.yaml": commitCfgOld, "gone.md": "g"})
 			if err := stor.Delete(ctx, tmpl.StoragePath+"/gone.md"); err != nil {
 				t.Fatal(err)
 			}
-			inj := injectConflicts(srv, s)
-			inj.armed.Store(tc.armed)
+			inj.arm(tc.armed)
 
 			if err := srv.syncTemplateFromStorageRetrying(ctx, tmpl.ID); err != nil {
 				t.Fatalf("repair: %v", err)
@@ -421,7 +436,7 @@ func TestTemplateBootstrap_OnHashMatchConflict(t *testing.T) {
 
 	t.Run("content replaced: skip", func(t *testing.T) {
 		stor := newCommitTestStorage(t)
-		srv, s := newCommitTestServer(t, stor)
+		srv, s, inj := newConflictTestServer(t, stor)
 		ctx := context.Background()
 		dir := writeTemplateDir(t, t.TempDir(), "rederive", files)
 		if _, err := srv.templateStore().Bootstrap(ctx, "rederive", dir, store.TemplateScopeGlobal, "", "", false); err != nil {
@@ -429,8 +444,7 @@ func TestTemplateBootstrap_OnHashMatchConflict(t *testing.T) {
 		}
 		stale := plantStaleDerivedFields(t, s, "rederive")
 
-		inj := injectConflicts(srv, s)
-		inj.armed.Store(1)
+		inj.arm(1)
 		changed, err := srv.templateStore().Bootstrap(ctx, "rederive", dir, store.TemplateScopeGlobal, "", "", false)
 		if err != nil || changed {
 			t.Fatalf("Bootstrap = (%v, %v), want (false, nil)", changed, err)
@@ -455,7 +469,7 @@ func TestTemplateBootstrap_OnHashMatchConflict(t *testing.T) {
 
 	t.Run("content unchanged: retry re-derives", func(t *testing.T) {
 		stor := newCommitTestStorage(t)
-		srv, s := newCommitTestServer(t, stor)
+		srv, s, inj := newConflictTestServer(t, stor)
 		ctx := context.Background()
 		dir := writeTemplateDir(t, t.TempDir(), "rederive", files)
 		if _, err := srv.templateStore().Bootstrap(ctx, "rederive", dir, store.TemplateScopeGlobal, "", "", false); err != nil {
@@ -463,9 +477,8 @@ func TestTemplateBootstrap_OnHashMatchConflict(t *testing.T) {
 		}
 		stale := plantStaleDerivedFields(t, s, "rederive")
 
-		inj := injectConflicts(srv, s)
 		inj.revertAfter = true
-		inj.armed.Store(1)
+		inj.arm(1)
 		changed, err := srv.templateStore().Bootstrap(ctx, "rederive", dir, store.TemplateScopeGlobal, "", "", false)
 		if err != nil || changed {
 			t.Fatalf("Bootstrap = (%v, %v), want (false, nil)", changed, err)
