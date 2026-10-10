@@ -116,13 +116,13 @@ type CompositeStore struct {
 	*MembershipLossCheckStore
 	*AgentCredentialStore
 	*AgentIdentityKeyStore
-	*DecisionAuditStore
 	*MutationAuditStore
 	*QuotaStore
 	*AccessConstraintStore
 	*ExternalIdentityStore
 	*AgentReincarnationStore
 	*UserTerminalWorkspaceStore
+	*HubInstanceStore
 
 	client *ent.Client
 	inTx   bool // true when this CompositeStore wraps a transaction
@@ -243,13 +243,13 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		MembershipLossCheckStore:   NewMembershipLossCheckStore(client),
 		AgentCredentialStore:       NewAgentCredentialStore(client),
 		AgentIdentityKeyStore:      NewAgentIdentityKeyStore(client),
-		DecisionAuditStore:         NewDecisionAuditStore(client),
 		MutationAuditStore:         NewMutationAuditStore(client),
 		QuotaStore:                 NewQuotaStore(client),
 		AccessConstraintStore:      NewAccessConstraintStore(client),
 		ExternalIdentityStore:      NewExternalIdentityStore(client),
 		AgentReincarnationStore:    NewAgentReincarnationStore(client),
 		UserTerminalWorkspaceStore: NewUserTerminalWorkspaceStore(client),
+		HubInstanceStore:           NewHubInstanceStore(client),
 		client:                     client,
 	}
 }

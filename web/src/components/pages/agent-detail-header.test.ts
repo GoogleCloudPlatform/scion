@@ -20,7 +20,7 @@
  * destructive Stop and Delete buttons. The other actions keep their order.
  */
 
-import { describe, it, expect, beforeAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { render, type TemplateResult } from 'lit';
 
 import type { Agent } from '../../shared/types.js';
@@ -202,6 +202,36 @@ describe('agent detail header actions order', () => {
       makeAgent({ phase: 'running', _capabilities: { actions: ['read', 'update'] } })
     );
     expect(actions.querySelector('a[href="/agents/a-1/configure"]')).not.toBeNull();
+  });
+
+  // The Edit page (experiment web.agent_edit) sits next to Configure for a
+  // caller who may update the agent.
+  describe('Edit button', () => {
+    afterEach(() => {
+      window.__SCION_FEATURES__ = {};
+    });
+
+    it('shows Edit next to Configure while the experiment is on', () => {
+      window.__SCION_FEATURES__ = { 'web.agent_edit': true };
+      const agent = makeAgent({ phase: 'stopped', _capabilities: { actions: ['read', 'update'] } });
+      const labels = headerActionLabels(agent);
+      expect(labels.indexOf('Edit')).toBe(labels.indexOf('Configure') + 1);
+      expect(renderHeaderActions(agent).querySelector('a[href="/agents/a-1/edit"]')).not.toBeNull();
+    });
+
+    it('hides Edit while the experiment is off', () => {
+      window.__SCION_FEATURES__ = { 'web.agent_edit': false };
+      const labels = headerActionLabels(
+        makeAgent({ phase: 'stopped', _capabilities: { actions: ['read', 'update'] } })
+      );
+      expect(labels).toContain('Configure');
+      expect(labels).not.toContain('Edit');
+    });
+
+    it('hides Edit without update capability', () => {
+      window.__SCION_FEATURES__ = { 'web.agent_edit': true };
+      expect(headerActionLabels(makeAgent({ phase: 'stopped' }))).not.toContain('Edit');
+    });
   });
 
   it('puts the graph link first even with no other actions permitted', () => {

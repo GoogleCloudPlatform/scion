@@ -195,6 +195,20 @@ func ValidateServices(services []ServiceSpec) error {
 	return nil
 }
 
+// AgentGCPIdentity is the GCP identity applied to an agent, as shown by
+// scion list --format json.
+type AgentGCPIdentity struct {
+	// Mode is the metadata mode: "block", "passthrough" or "assign".
+	Mode string `json:"mode"`
+	// ServiceAccountID is the registered service account, set for "assign".
+	ServiceAccountID string `json:"serviceAccountId,omitempty"`
+	// ServiceAccountEmail is the service account email, set for "assign".
+	ServiceAccountEmail string `json:"serviceAccountEmail,omitempty"`
+	// DisplayName is the registered service account's display name, when
+	// the caller can read the registration. Empty otherwise.
+	DisplayName string `json:"displayName,omitempty"`
+}
+
 type AgentK8sMetadata struct {
 	Cluster   string `json:"cluster"`
 	Namespace string `json:"namespace"`
@@ -423,7 +437,9 @@ type TelemetryHubConfig struct {
 	ReportInterval string `json:"report_interval,omitempty" yaml:"report_interval,omitempty"`
 }
 
-// TelemetryLocalConfig holds local debug telemetry output settings.
+// TelemetryLocalConfig holds local debug telemetry output settings. The keys
+// are accepted so existing configs still load, but no component reads them
+// (ptone/scion#4103).
 type TelemetryLocalConfig struct {
 	Enabled *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty"`
 	File    string `json:"file,omitempty" yaml:"file,omitempty"`
@@ -431,6 +447,7 @@ type TelemetryLocalConfig struct {
 }
 
 // TelemetryFilterConfig holds event filtering and sampling settings.
+// RespectDebugMode is accepted but not read (ptone/scion#4103).
 type TelemetryFilterConfig struct {
 	Enabled          *bool                      `json:"enabled,omitempty" yaml:"enabled,omitempty"`
 	RespectDebugMode *bool                      `json:"respect_debug_mode,omitempty" yaml:"respect_debug_mode,omitempty"`
@@ -482,6 +499,12 @@ type ScionConfig struct {
 	MaxDuration   string                     `json:"max_duration,omitempty" yaml:"max_duration,omitempty"`
 	Hub           *AgentHubConfig            `json:"hub,omitempty" yaml:"hub,omitempty"`
 	Telemetry     *TelemetryConfig           `json:"telemetry,omitempty" yaml:"telemetry,omitempty"`
+
+	// CloneDepth sets the git clone depth for a clone-per-agent
+	// workspace: "full" or a positive integer. It overrides a profile's
+	// clone_depth. Empty keeps the profile value, else the default
+	// shallow clone of depth 1.
+	CloneDepth CloneDepth `json:"clone_depth,omitempty" yaml:"clone_depth,omitempty"`
 
 	Secrets []RequiredSecret `json:"secrets,omitempty" yaml:"secrets,omitempty"`
 
@@ -614,8 +637,16 @@ type AgentInfo struct {
 	HarnessAuth         string `json:"harnessAuth,omitempty"` // Resolved harness auth method (api-key, oauth-token, auth-file, vertex-ai)
 
 	// Project association
-	Project     string `json:"project"`               // Project name (standard field)
-	ProjectID   string `json:"projectId,omitempty"`   // Hosted format: <uuid>__<name>
+	Project string `json:"project"` // Project name (standard field)
+	// ProjectID depends on where the AgentInfo came from. In agent-info.json
+	// (written at provision time) it is the local project-id marker read
+	// from the project directory. The Docker, Podman, Apple and Kubernetes
+	// List fill it from the container's scion.project_id label, which
+	// carries the Hub project ID; Cloud Run Sandbox List fills it from its
+	// state entry, which records the same value. Cloud Run List leaves it
+	// empty. The two sources can differ; callers that need the Hub project
+	// ID should read the scion.project_id label (ptone/scion#3020).
+	ProjectID   string `json:"projectId,omitempty"`
 	ProjectPath string `json:"projectPath,omitempty"` // Filesystem path (solo mode)
 
 	// Metadata
@@ -636,6 +667,9 @@ type AgentInfo struct {
 	Runtime    string            `json:"runtime,omitempty"`
 	Profile    string            `json:"profile,omitempty"`
 	Kubernetes *AgentK8sMetadata `json:"kubernetes,omitempty"`
+	// GCPIdentity is the GCP identity the Hub applied to the agent. Set
+	// only for agents listed through a Hub; nil when none is recorded.
+	GCPIdentity *AgentGCPIdentity `json:"gcpIdentity,omitempty"`
 	// WorkspacePlacement is where the start that produced this info placed
 	// the agent's workspace: WorkspacePlacementExport or
 	// WorkspacePlacementLocal. Empty when this info did not come from a
@@ -783,7 +817,7 @@ type EnvKind string
 
 const (
 	// EnvKindPlain is a non-sensitive operational value delivered via
-	// --env KEY=VALUE. Examples: SCION_MODEL, SCION_HUB_NAME, SCION_DEBUG.
+	// --env KEY=VALUE. Examples: SCION_MODEL, SCION_HUB_NAME, SCION_LOG_LEVEL.
 	EnvKindPlain EnvKind = "plain"
 
 	// EnvKindSecretFetchable is a value stored in the hub's secret store,
@@ -1309,6 +1343,24 @@ type StartOptions struct {
 	// otherwise comes only from the template chain and the persisted config,
 	// not from InlineConfig.
 	ResolvedKubernetesServiceAccountName string
+
+	// KubernetesBlockIdentity is set by the broker when the dispatch's GCP
+	// identity mode resolved to "block" on the Kubernetes runtime
+	// (ptone/scion#4034). The pod then runs as its ServiceAccountName, or as
+	// the namespace's default ServiceAccount when that is empty, replacing
+	// any template or persisted serviceAccountName, with the Kubernetes API
+	// token not mounted and a node selector for Workload Identity nodes.
+	// Like ResolvedKubernetesServiceAccountName it is never persisted, so it
+	// is recomputed on every dispatch.
+	KubernetesBlockIdentity *KubernetesBlockIdentity
+}
+
+// KubernetesBlockIdentity describes how a GCP identity "block" pod runs on
+// the Kubernetes runtime. See StartOptions.KubernetesBlockIdentity.
+type KubernetesBlockIdentity struct {
+	// ServiceAccountName is the operator-configured block ServiceAccount,
+	// or empty for the namespace's default ServiceAccount.
+	ServiceAccountName string
 }
 
 // ResourceHandle identifies one runtime resource created during a launch

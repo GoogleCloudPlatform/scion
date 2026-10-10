@@ -43,7 +43,10 @@ import (
 //	DELETE /api/v1/artifacts/{id}/grants/{grantId}   remove a grant
 //	PATCH  /api/v1/artifacts/{id}                    set or clear the expiry; move to another home project
 //
-// All of them need canAdminister. The home project's read grant (the
+// All of them need canAdminister, with one exception (design D24): on an
+// artifact owned by an agent, the agent's delegating user and an admin of
+// the home project may also POST a write grant to a user, the access a
+// human reviewer needs (putReviewGrant). The home project's read grant (the
 // scope grant naming the current home scope) is listed with home set; its
 // permission may be read or write, and it cannot be removed. A scope grant
 // to any other project needs the host to allow sharing across projects
@@ -102,6 +105,9 @@ type GrantResponse struct {
 // GrantListResponse answers GET /{id}/grants.
 type GrantListResponse struct {
 	Grants []GrantInfo `json:"grants"`
+	// CrossProjectSharing is true when grants to other projects (and
+	// moves to them) are turned on for the hub.
+	CrossProjectSharing bool `json:"crossProjectSharing"`
 }
 
 // PatchArtifactRequest is the body of PATCH /{id}. Each field present is
@@ -218,7 +224,7 @@ func (s *Service) handleListGrants(w http.ResponseWriter, r *http.Request, id st
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the artifact's grants")
 		return
 	}
-	out := GrantListResponse{Grants: []GrantInfo{}}
+	out := GrantListResponse{Grants: []GrantInfo{}, CrossProjectSharing: s.crossScopeAllowed(r.Context())}
 	for i := range grants {
 		g := &grants[i]
 		if g.SubjectKind != SubjectPrincipal && g.SubjectKind != SubjectScope {
@@ -237,10 +243,22 @@ func (s *Service) handleListGrants(w http.ResponseWriter, r *http.Request, id st
 
 // handlePutGrant implements POST /{id}/grants. It answers 201 when it
 // created the grant and 200 when it changed an existing grant's
-// permission.
+// permission. A caller that can read the artifact but not administer it
+// may still give review access to an agent-owned artifact
+// (putReviewGrant); every other request from it answers the same 403.
 func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id string) {
-	b, a, ok := s.adminArtifact(w, r, id)
+	b, a, ok := s.readableArtifact(w, r, id)
 	if !ok {
+		return
+	}
+	allowed, err := s.canAdminister(r.Context(), b, a)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "artifacts: list grants failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not read the artifact's grants")
+		return
+	}
+	if !allowed {
+		s.putReviewGrant(w, r, b, a)
 		return
 	}
 	var req GrantRequest
@@ -300,6 +318,98 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 		status = http.StatusCreated
 	}
 	writeJSON(w, status, GrantResponse{Grant: grantInfo(a, g)})
+}
+
+// putReviewGrant implements POST /{id}/grants for a caller that may read
+// artifact a but not administer it (design D24, ptone/scion#4014). For an
+// artifact owned by an agent, the agent's delegating user and an admin of
+// the home project may give a user a write grant, the access a reviewer
+// needs, and nothing else: no read or admin grant, no grant to an agent
+// or a scope. The owning agent itself, like every agent, is refused
+// (sharing is user-only). The caller's credential must permit
+// artifact.manage in the home scope, as for an administrator. Every
+// refusal, a malformed body included, is the 403 a non-administrator gets
+// today, so the request says nothing about why. The store re-checks the
+// home and owner under the artifact's lock and never lowers an existing
+// admin grant.
+func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backend, a *Artifact) {
+	ctx := r.Context()
+	subject, ok := s.reviewGrantSubject(r, a)
+	if !ok {
+		writeAdminForbidden(w)
+		return
+	}
+	kind, ref, _, _ := s.host.Principal(ctx)
+	g := &Grant{
+		ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal, SubjectRef: subject,
+		Permission: GrantWrite, CreatedByRef: PrincipalRef(kind, ref), CreatedAt: time.Now().UTC(),
+	}
+	created, err := b.store.PutReviewGrant(ctx, g, MaxGrantsPerArtifact, a.ScopeRef)
+	switch {
+	case errors.Is(err, ErrReviewGrantRefused):
+		writeAdminForbidden(w)
+		return
+	case errors.Is(err, ErrTooManyGrants):
+		writeError(w, http.StatusConflict, "too_many_grants",
+			"the artifact already has "+strconv.Itoa(MaxGrantsPerArtifact)+" grants; remove one first")
+		return
+	case errors.Is(err, ErrNotFound):
+		writeNotFound(w)
+		return
+	case err != nil:
+		slog.ErrorContext(ctx, "artifacts: put review grant failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not record the grant")
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, GrantResponse{Grant: grantInfo(a, g)})
+}
+
+// reviewGrantSubject decides putReviewGrant's request: it returns the user
+// principal ref to give a write grant when every condition holds, cheapest
+// first and the host's authority last, and ok=false otherwise:
+//   - a is owned by an agent;
+//   - the caller is a user whose credential permits artifact.manage in
+//     a's home scope;
+//   - the body is exactly a principal write grant to a user;
+//   - the host implements ReviewGrantAuthority and answers yes.
+func (s *Service) reviewGrantSubject(r *http.Request, a *Artifact) (string, bool) {
+	ctx := r.Context()
+	if a.OwnerKind != PrincipalKindAgent {
+		return "", false
+	}
+	kind, _, _, ok := s.host.Principal(ctx)
+	if !ok || kind != PrincipalKindUser {
+		return "", false
+	}
+	if !s.host.Permits(ctx, a.ScopeRef, PermissionManage) {
+		return "", false
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxGrantRequestBytes+1))
+	if err != nil || len(body) > maxGrantRequestBytes {
+		return "", false
+	}
+	var req GrantRequest
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil || dec.More() {
+		return "", false
+	}
+	if req.SubjectKind != SubjectPrincipal || req.Permission != GrantWrite {
+		return "", false
+	}
+	pk, id, found := strings.Cut(req.SubjectRef, ":")
+	if !found || pk != PrincipalKindUser || !validSubjectID(id) {
+		return "", false
+	}
+	authority, ok := s.host.(ReviewGrantAuthority)
+	if !ok || !authority.MayGrantReview(ctx, a.OwnerRef, a.ScopeRef) {
+		return "", false
+	}
+	return req.SubjectRef, true
 }
 
 // handleDeleteGrant implements DELETE /{id}/grants/{grantId}.

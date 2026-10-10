@@ -407,11 +407,11 @@ export class ScionPageSkillDetail extends LitElement {
   private versionStatusType(status: string): StatusType {
     switch (status) {
       case 'published':
-        return 'success' as StatusType;
+        return 'success';
       case 'deprecated':
-        return 'warning' as StatusType;
+        return 'warning';
       case 'archived':
-        return 'danger' as StatusType;
+        return 'danger';
       default:
         return 'default' as StatusType;
     }
@@ -627,11 +627,12 @@ export class ScionPageSkillDetail extends LitElement {
     const skill = this.skill!;
     const canUpdate = can(skill._capabilities, 'update');
     const canDelete = can(skill._capabilities, 'delete');
+    // prettier-ignore
     return html`
       <scion-detail-header heading=${skill.name}>
         <sl-icon slot="icon" name="lightning-charge"></sl-icon>
         <scion-status-badge
-          status=${skill.status as StatusType}
+          status=${skill.status}
           label=${skill.status}
         ></scion-status-badge>
         <div slot="meta" class="header-meta">
@@ -758,7 +759,7 @@ export class ScionPageSkillDetail extends LitElement {
             <span class="info-label">Status</span>
             <span class="info-value">
               <scion-status-badge
-                status=${skill.status as StatusType}
+                status=${skill.status}
                 label=${skill.status}
                 size="small"
               ></scion-status-badge>

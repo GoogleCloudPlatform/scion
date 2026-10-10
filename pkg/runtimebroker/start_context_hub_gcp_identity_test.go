@@ -49,8 +49,10 @@ type hubGCPIdentityDispatchCase struct {
 //     Kubernetes profile: Kubernetes gets "passthrough" (no metadata
 //     redirect); docker keeps "block".
 //   - an explicit "block" (agent, project default or hub default), and a
-//     stored project default of "assign" with no service account: refused
-//     on Kubernetes with the existing message; "block" on docker.
+//     stored project default of "assign" with no service account (which the
+//     hub sends as "block"): "block" on both runtimes. On Kubernetes it
+//     carries the Kubernetes block identity (ptone/scion#4034), here the
+//     namespace's default ServiceAccount since none is configured.
 func TestBuildStartContext_HubGCPIdentityDispatchFixture(t *testing.T) {
 	path, err := filepath.Abs(filepath.Join("testdata", "hub_gcp_identity_dispatch.json"))
 	if err != nil {
@@ -69,11 +71,11 @@ func TestBuildStartContext_HubGCPIdentityDispatchFixture(t *testing.T) {
 	// case added on the hub side cannot go unchecked on this side.
 	wantK8s := map[string]string{
 		"no_identity":           store.GCPMetadataModePassthrough,
-		"agent_block":           "",
-		"project_default_block": "",
-		"hub_default_block":     "",
+		"agent_block":           store.GCPMetadataModeBlock,
+		"project_default_block": store.GCPMetadataModeBlock,
+		"hub_default_block":     store.GCPMetadataModeBlock,
 		"hub_default_passthrough_denied_kubernetes": store.GCPMetadataModePassthrough,
-		"project_default_assign_without_sa":         "",
+		"project_default_assign_without_sa":         store.GCPMetadataModeBlock,
 	}
 	names := make([]string, 0, len(fixture))
 	for n := range fixture {
@@ -122,18 +124,14 @@ func TestBuildStartContext_HubGCPIdentityDispatchFixture(t *testing.T) {
 					if runtimeName == "kubernetes" {
 						want = wantK8s[name]
 					}
-					if want == "" {
-						if err == nil {
-							t.Fatalf("expected an explicit block to be refused on Kubernetes, got env %v", sc.Opts.Env)
-						}
-						if !strings.Contains(err.Error(), "not supported on the Kubernetes runtime") ||
-							!strings.Contains(err.Error(), "project or hub default") {
-							t.Errorf("expected the existing Kubernetes block message, got %q", err.Error())
-						}
-						return
-					}
 					if err != nil {
 						t.Fatalf("buildStartContext: %v", err)
+					}
+					wantBlockIdentity := runtimeName == "kubernetes" && want == store.GCPMetadataModeBlock
+					if got := sc.Opts.KubernetesBlockIdentity; (got != nil) != wantBlockIdentity {
+						t.Errorf("KubernetesBlockIdentity = %+v, want set = %v", got, wantBlockIdentity)
+					} else if got != nil && got.ServiceAccountName != "" {
+						t.Errorf("block ServiceAccountName = %q, want the namespace default (empty)", got.ServiceAccountName)
 					}
 					if got := sc.Opts.Env["SCION_METADATA_MODE"]; got != want {
 						t.Errorf("SCION_METADATA_MODE = %q, want %q", got, want)

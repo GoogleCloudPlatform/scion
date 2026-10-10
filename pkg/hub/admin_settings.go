@@ -483,10 +483,22 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	if writeTokenRefusedSettingsKeys(w, r.Context(), tokenRefusedServerConfigKeys(rawBody)) {
 		return
 	}
+	// server.broker.instances: presence comes from the raw body (the typed
+	// decode cannot tell an absent key from []); an explicit value is
+	// validated before anything is written.
+	instancesPresent, instances, err := brokerInstancesInBody(rawBody)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+		return
+	}
 	// Any other key the typed decode drops (unknown, misspelt, or a flat
 	// dotted "server.hub.x" key) is rejected with 422 before anything is
-	// written, unless it echoes the GET view (ptone/scion#3463).
+	// written, unless it echoes the GET view (ptone/scion#3463). A key
+	// inside server.broker.instances was already decoded strictly above.
 	if rejectUnknownFileConfigKeys(w, rawBody) {
+		return
+	}
+	if rejectInvalidThinkingLevel(w, req.DefaultThinkingLevel) {
 		return
 	}
 
@@ -503,6 +515,12 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.Server.Hub.AgentEndpoint = normalized
+	}
+
+	// The monitoring dashboard link must be an absolute http(s) URL; the
+	// same check as the DB path.
+	if !validateMonitoringDashboardURLRequest(w, &req) {
+		return
 	}
 
 	// server.auth.default_user_role must be one of the schema enum values
@@ -630,8 +648,18 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Apply updates by marshaling the request fields and merging. The raw
 	// server object tells the merge which server fields were sent.
+	// server.broker.instances is kept unless the body set it explicitly.
+	storedInstances := storedBrokerInstances(raw)
 	rawServer := rawServerObject(rawBody)
 	applySettingsUpdatesFromBody(raw, &req, rawServer)
+	carryOverBrokerInstances(raw, storedInstances, instancesPresent, instances)
+	// default_thinking_level is cleared by an explicit null, which the typed
+	// decode leaves as a nil pointer (indistinguishable from an omitted key).
+	if top, err := parseFieldPresence(rawBody); err == nil {
+		if v, sent := top.sentFold("default_thinking_level"); sent && isJSONNull(v) {
+			delete(raw, "default_thinking_level")
+		}
+	}
 
 	// The server section is deep-merged, so a section the request changes
 	// only in part is validated again as merged with the stored fields.
@@ -743,7 +771,7 @@ func (s *Server) reloadSettings() map[string]interface{} {
 		"requires_restart": []string{},
 	}
 
-	gc, err := config.LoadGlobalConfig("")
+	gc, err := config.LoadGlobalConfig(s.config.ConfigPath)
 	if err != nil {
 		slog.Error("Failed to reload global config", "error", err)
 		results["error"] = err.Error()
@@ -753,10 +781,12 @@ func (s *Server) reloadSettings() map[string]interface{} {
 	snap := BuildLayer1SnapshotFromFile(gc)
 	results = ApplySnapshot(s, snap)
 
-	// Log level is a Layer-0 setting (per design §3.1) — only applied in
-	// file mode via reloadSettings, not through OperationalSettings.
+	// Log level is a Layer-0 setting (per design §3.1): the server applies
+	// it at startup, and live changes come only in file mode via
+	// reloadSettings, not through OperationalSettings. It is applied even
+	// when empty so that clearing it reverts to the default.
+	applySnapshotLogLevel(gc.LogLevel)
 	if gc.LogLevel != "" {
-		applySnapshotLogLevel(gc.LogLevel)
 		applied := results["applied"].([]string)
 		applied = append(applied, "log_level")
 		results["applied"] = applied
@@ -870,12 +900,11 @@ func applySettingsUpdatesFromBody(raw map[string]interface{}, req *ServerConfigU
 			delete(raw, "default_model")
 		}
 	}
+	// An explicit null clears default_thinking_level (handlePutServerConfig
+	// sees it in the body); 0 is rejected before this runs
+	// (rejectInvalidThinkingLevel), so it is never a silent clear.
 	if req.DefaultThinkingLevel != nil {
-		if *req.DefaultThinkingLevel > 0 {
-			raw["default_thinking_level"] = *req.DefaultThinkingLevel
-		} else {
-			delete(raw, "default_thinking_level")
-		}
+		raw["default_thinking_level"] = *req.DefaultThinkingLevel
 	}
 	setOrDeleteString(raw, "default_max_agent_role", req.DefaultMaxAgentRole)
 	setOrDeleteString(raw, "default_agent_role", req.DefaultAgentRole)
@@ -966,4 +995,19 @@ func user(u UserIdentity) string {
 		return "unknown"
 	}
 	return u.Email()
+}
+
+// rejectInvalidThinkingLevel writes a 422 and returns true when a PUT sends
+// a default_thinking_level outside 1-100 (the settings schema range). An
+// explicit null, not 0, clears the level; 0 is rejected rather than treated
+// as a clear, so a client that sends 0 for "unset" learns of it instead of
+// clearing the value by accident (ptone/scion#3898). Shared by the DB-backed
+// and file-mode server-config PUT handlers.
+func rejectInvalidThinkingLevel(w http.ResponseWriter, level *int) bool {
+	if level == nil || (*level >= 1 && *level <= 100) {
+		return false
+	}
+	writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+		fmt.Sprintf("invalid default_thinking_level %d: must be between 1 and 100; send null to clear it", *level), nil)
+	return true
 }

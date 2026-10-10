@@ -55,6 +55,14 @@ The agent is provisioned but not started, even when a task is given. Run
 			return asUsageError(err)
 		}
 
+		if err := validateTaskFileStdin(); err != nil {
+			return err
+		}
+		task, err := applyTaskFile(task, taskFilePath, os.Stdin)
+		if err != nil {
+			return asUsageError(err)
+		}
+
 		// Validate --template-scope with the other flag checks, before any
 		// hub work (ResolveTemplateForHub keeps its own check as a guard).
 		if err := validateTemplateScope(templateScope); err != nil {
@@ -387,6 +395,7 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 		HarnessConfig:   harnessConfigFlag,
 		HarnessAuth:     harnessAuthFlag,
 		RuntimeBrokerID: runtimeBrokerID,
+		Profile:         profile,
 		Task:            task,
 		Branch:          branch,
 		Labels:          parsedLabels,
@@ -462,6 +471,7 @@ func init() {
 
 	// Inline config flag
 	createCmd.Flags().StringVar(&inlineConfigPath, "config", "", "Path to inline agent config file (YAML/JSON), or '-' for stdin")
+	createCmd.Flags().StringVar(&taskFilePath, "task-file", "", taskFileFlagUsage)
 
 	// Label flags
 	createCmd.Flags().StringArrayVar(&labelFlags, "label", nil, "Label in key=value format (repeatable)")
@@ -475,7 +485,7 @@ func init() {
 		"Agent message mode: none, lineage, branch, project")
 
 	// GCP service account assignment flag
-	createCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account ID to assign to this agent (requires Hub mode)")
+	createCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account to assign to this agent: its id, email or display name (requires Hub mode)")
 }
 
 // skillResolverHubOptions returns the EnsureHubReady options for the hub
@@ -485,6 +495,7 @@ func skillResolverHubOptions(projectPath string) hubsync.EnsureHubReadyOptions {
 	return hubsync.EnsureHubReadyOptions{
 		NoHub:           noHub,
 		AutoConfirm:     true,
+		NonInteractive:  nonInteractive,
 		SkipSync:        true,
 		ExplicitProject: explicitProjectTargetFor(projectPath),
 	}

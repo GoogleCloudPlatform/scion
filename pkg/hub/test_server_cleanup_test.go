@@ -30,10 +30,27 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // modulePath marks goroutines running this module's code.
 const modulePath = "github.com/GoogleCloudPlatform/scion/"
+
+// eventuallyFrame marks the goroutines testify's EventuallyWithT runs its
+// condition on.
+const eventuallyFrame = "github.com/stretchr/testify/assert.EventuallyWithT"
+
+// awaitServerGoroutines re-runs a vacuity guard's check until it passes.
+// A goroutine started with `go x.method()` shows only its creator's gowrap
+// frame until it first runs, so a single runtime.Stack sample taken right
+// after the server is built can miss loops the scheduler has not run yet
+// (ptone/scion#4165). check runs on goroutines whose stacks contain
+// eventuallyFrame; callers must not count those as the server's.
+func awaitServerGoroutines(t *testing.T, check func(c *assert.CollectT)) {
+	t.Helper()
+	require.EventuallyWithT(t, check, 5*time.Second, 10*time.Millisecond)
+}
 
 var (
 	goroutineHeaderRE = regexp.MustCompile(`^goroutine (\d+) \[`)
@@ -162,35 +179,56 @@ func TestTestServerCleanupStopsBackgroundGoroutines(t *testing.T) {
 			t.Run("server", func(t *testing.T) {
 				builderID := currentGoroutineID(t)
 				newServer(t)
-				live := liveGoroutines()
-				for changed := true; changed; {
-					changed = false
-					for id, g := range live {
-						if _, seen := attributed[id]; seen || id == builderID {
-							continue
-						}
-						if _, old := before[id]; old {
-							continue
-						}
-						_, parentAttributed := attributed[g.parent]
-						if g.parent == builderID || parentAttributed || strings.Contains(g.stack, modulePath) {
-							attributed[id] = g
-							changed = true
+				// Re-sample until every expected loop has been seen at
+				// least once (see awaitServerGoroutines). seen[fn] holds
+				// the IDs of attributed goroutines whose stack has
+				// contained fn in any sample.
+				seen := map[string]map[int64]bool{}
+				for fn := range want {
+					seen[fn] = map[int64]bool{}
+				}
+				awaitServerGoroutines(t, func(c *assert.CollectT) {
+					live := liveGoroutines()
+					for changed := true; changed; {
+						changed = false
+						for id, g := range live {
+							if _, ok := attributed[id]; ok || id == builderID {
+								continue
+							}
+							if _, old := before[id]; old {
+								continue
+							}
+							// Skip the goroutines this check runs on: they
+							// descend from the builder and run module code,
+							// but are not the server's.
+							if strings.Contains(g.stack, eventuallyFrame) {
+								continue
+							}
+							_, parentAttributed := attributed[g.parent]
+							if g.parent == builderID || parentAttributed || strings.Contains(g.stack, modulePath) {
+								attributed[id] = g
+								changed = true
+							}
 						}
 					}
-				}
+					for id := range attributed {
+						g, ok := live[id]
+						if !ok {
+							continue
+						}
+						for fn := range want {
+							if strings.Contains(g.stack, fn) {
+								seen[fn][id] = true
+							}
+						}
+					}
+					for fn, n := range want {
+						assert.GreaterOrEqual(c, len(seen[fn]), n,
+							"vacuity guard: saw %d goroutines in %s, want >= %d; the leak check is not observing the server's goroutines",
+							len(seen[fn]), fn, n)
+					}
+				})
 				t.Logf("attributed %d goroutines to the server", len(attributed))
-				for fn, want := range want {
-					got := 0
-					for _, g := range attributed {
-						if strings.Contains(g.stack, fn) {
-							got++
-						}
-					}
-					if got < want {
-						t.Errorf("vacuity guard: saw %d goroutines in %s, want >= %d; the leak check is not observing the server's goroutines", got, fn, want)
-					}
-				}
 			})
 			if t.Failed() {
 				return
@@ -243,6 +281,10 @@ func countServerLoopGoroutines(skip map[int64]goroutineInfo) (int, []string) {
 		if _, old := skip[id]; old {
 			continue
 		}
+		// Not a server loop: a goroutine running a vacuity guard's check.
+		if strings.Contains(g.stack, eventuallyFrame) {
+			continue
+		}
 		for _, sig := range leakedServerGoroutineSigs {
 			if strings.Contains(g.stack, sig) {
 				stacks = append(stacks, g.stack)
@@ -256,8 +298,8 @@ func countServerLoopGoroutines(skip map[int64]goroutineInfo) (int, []string) {
 
 // TestNewFailureStopsBackgroundGoroutines: a New() that fails after it has
 // started its background loops (here, at the fail-closed D4 membership
-// index step, which runs after the link services, the preview engine, the
-// decision audit worker and the OIDC key loops are up) must stop them
+// index step, which runs after the link services, the preview engine and
+// the OIDC key loops are up) must stop them
 // itself, since the caller gets no *Server to shut down
 // (ptone/scion#3641).
 func TestNewFailureStopsBackgroundGoroutines(t *testing.T) {
@@ -278,9 +320,24 @@ func TestNewFailureStopsBackgroundGoroutines(t *testing.T) {
 	// Shut down even if the vacuity check below fails (Shutdown is
 	// idempotent, so the explicit call after it is still fine).
 	t.Cleanup(func() { _ = ok.Shutdown(context.Background()) })
-	if n, _ := countServerLoopGoroutines(before); n < len(expectedServerGoroutines)+2 {
-		t.Fatalf("vacuity guard: a working New started only %d background loops", n)
-	}
+	// Re-sample until the loops have run (see awaitServerGoroutines).
+	wantLoops := len(expectedServerGoroutines) + 2
+	awaitServerGoroutines(t, func(c *assert.CollectT) {
+		n, stacks := countServerLoopGoroutines(before)
+		perSig := make([]string, 0, len(leakedServerGoroutineSigs))
+		for _, sig := range leakedServerGoroutineSigs {
+			got := 0
+			for _, st := range stacks {
+				if strings.Contains(st, sig) {
+					got++
+				}
+			}
+			perSig = append(perSig, sig+"="+strconv.Itoa(got))
+		}
+		assert.GreaterOrEqual(c, n, wantLoops,
+			"vacuity guard: a working New started only %d background loops, want >= %d (%s)",
+			n, wantLoops, strings.Join(perSig, ", "))
+	})
 	_ = ok.Shutdown(context.Background())
 
 	before = liveGoroutines()

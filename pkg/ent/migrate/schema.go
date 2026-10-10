@@ -177,6 +177,9 @@ var (
 		{Name: "runtime", Type: field.TypeString, Nullable: true},
 		{Name: "runtime_broker_id", Type: field.TypeString, Nullable: true},
 		{Name: "workspace_placement", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "pinned_runtime_broker_id", Type: field.TypeString, Nullable: true},
+		{Name: "pinned_runtime_target_id", Type: field.TypeString, Nullable: true},
+		{Name: "pinned_runtime_target_type", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "web_pty_enabled", Type: field.TypeBool, Default: false},
 		{Name: "exposed_ports", Type: field.TypeJSON, Nullable: true},
 		{Name: "task_summary", Type: field.TypeString, Nullable: true},
@@ -240,7 +243,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[80]},
+				Columns:    []*schema.Column{AgentsColumns[83]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -249,22 +252,22 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[80]},
+				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[83]},
 			},
 			{
 				Name:    "agent_project_id_owner_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[80], AgentsColumns[6]},
+				Columns: []*schema.Column{AgentsColumns[83], AgentsColumns[6]},
 			},
 			{
 				Name:    "agent_project_id_created_by",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[80], AgentsColumns[5]},
+				Columns: []*schema.Column{AgentsColumns[83], AgentsColumns[5]},
 			},
 			{
 				Name:    "agent_launch_deadline",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[51]},
+				Columns: []*schema.Column{AgentsColumns[54]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "launch_state = 'active'",
 				},
@@ -272,17 +275,17 @@ var (
 			{
 				Name:    "agent_launch_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[45]},
+				Columns: []*schema.Column{AgentsColumns[48]},
 			},
 			{
 				Name:    "agent_runtime_broker_id_run_intent",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[25], AgentsColumns[66]},
+				Columns: []*schema.Column{AgentsColumns[25], AgentsColumns[69]},
 			},
 			{
 				Name:    "agent_start_claim_state_start_claim_lease_until",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[71], AgentsColumns[75]},
+				Columns: []*schema.Column{AgentsColumns[74], AgentsColumns[78]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "start_claim_id IS NOT NULL",
 				},
@@ -869,82 +872,6 @@ var (
 			},
 		},
 	}
-	// DecisionAuditsColumns holds the columns for the "decision_audits" table.
-	DecisionAuditsColumns = []*schema.Column{
-		{Name: "id", Type: field.TypeUUID},
-		{Name: "timestamp", Type: field.TypeTime},
-		{Name: "principal_kind", Type: field.TypeString},
-		{Name: "principal_id", Type: field.TypeString},
-		{Name: "credential_id", Type: field.TypeString, Nullable: true},
-		{Name: "credential_type", Type: field.TypeString, Nullable: true},
-		{Name: "route", Type: field.TypeString, Nullable: true},
-		{Name: "resource_type", Type: field.TypeString},
-		{Name: "resource_id", Type: field.TypeString, Nullable: true},
-		{Name: "permission", Type: field.TypeString},
-		{Name: "result", Type: field.TypeString},
-		{Name: "reason", Type: field.TypeString},
-		{Name: "matched_policy", Type: field.TypeString, Nullable: true},
-		{Name: "matched_grant", Type: field.TypeString, Nullable: true},
-		{Name: "policy_id", Type: field.TypeString, Nullable: true},
-		{Name: "correlation_id", Type: field.TypeString, Nullable: true},
-		{Name: "sampled", Type: field.TypeBool, Default: false},
-		{Name: "permission_id", Type: field.TypeString, Nullable: true},
-		{Name: "credential_name", Type: field.TypeString, Nullable: true},
-		{Name: "credential_boundary_kind", Type: field.TypeString, Nullable: true},
-		{Name: "credential_boundary_project_id", Type: field.TypeString, Nullable: true},
-		{Name: "credential_labels", Type: field.TypeString, Nullable: true},
-		{Name: "executor_kind", Type: field.TypeString, Nullable: true},
-		{Name: "executor_id", Type: field.TypeString, Nullable: true},
-		{Name: "denied_by", Type: field.TypeString, Nullable: true},
-	}
-	// DecisionAuditsTable holds the schema information for the "decision_audits" table.
-	DecisionAuditsTable = &schema.Table{
-		Name:       "decision_audits",
-		Columns:    DecisionAuditsColumns,
-		PrimaryKey: []*schema.Column{DecisionAuditsColumns[0]},
-		Indexes: []*schema.Index{
-			{
-				Name:    "decisionaudit_timestamp",
-				Unique:  false,
-				Columns: []*schema.Column{DecisionAuditsColumns[1]},
-			},
-			{
-				Name:    "decisionaudit_principal_kind_principal_id",
-				Unique:  false,
-				Columns: []*schema.Column{DecisionAuditsColumns[2], DecisionAuditsColumns[3]},
-			},
-			{
-				Name:    "decisionaudit_credential_id",
-				Unique:  false,
-				Columns: []*schema.Column{DecisionAuditsColumns[4]},
-			},
-			{
-				Name:    "decisionaudit_route",
-				Unique:  false,
-				Columns: []*schema.Column{DecisionAuditsColumns[6]},
-			},
-			{
-				Name:    "decisionaudit_resource_type_resource_id",
-				Unique:  false,
-				Columns: []*schema.Column{DecisionAuditsColumns[7], DecisionAuditsColumns[8]},
-			},
-			{
-				Name:    "decisionaudit_result",
-				Unique:  false,
-				Columns: []*schema.Column{DecisionAuditsColumns[10]},
-			},
-			{
-				Name:    "decisionaudit_correlation_id",
-				Unique:  false,
-				Columns: []*schema.Column{DecisionAuditsColumns[15]},
-			},
-			{
-				Name:    "decisionaudit_denied_by",
-				Unique:  false,
-				Columns: []*schema.Column{DecisionAuditsColumns[24]},
-			},
-		},
-	}
 	// DelegationAdoptionsColumns holds the columns for the "delegation_adoptions" table.
 	DelegationAdoptionsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -1388,6 +1315,24 @@ var (
 				Columns: []*schema.Column{HarnessConfigsColumns[7]},
 			},
 		},
+	}
+	// HubInstancesColumns holds the columns for the "hub_instances" table.
+	HubInstancesColumns = []*schema.Column{
+		{Name: "instance_id", Type: field.TypeString},
+		{Name: "label", Type: field.TypeString, Default: ""},
+		{Name: "version", Type: field.TypeString, Default: ""},
+		{Name: "started_at", Type: field.TypeTime},
+		{Name: "last_seen", Type: field.TypeTime},
+		{Name: "stopped_at", Type: field.TypeTime, Nullable: true},
+		{Name: "status", Type: field.TypeString, Default: ""},
+		{Name: "checks", Type: field.TypeJSON, Nullable: true},
+		{Name: "stats", Type: field.TypeJSON, Nullable: true},
+	}
+	// HubInstancesTable holds the schema information for the "hub_instances" table.
+	HubInstancesTable = &schema.Table{
+		Name:       "hub_instances",
+		Columns:    HubInstancesColumns,
+		PrimaryKey: []*schema.Column{HubInstancesColumns[0]},
 	}
 	// HubSettingsColumns holds the columns for the "hub_settings" table.
 	HubSettingsColumns = []*schema.Column{
@@ -2185,6 +2130,9 @@ var (
 		{Name: "connected_hub_id", Type: field.TypeString, Nullable: true},
 		{Name: "connected_session_id", Type: field.TypeString, Nullable: true},
 		{Name: "connected_at", Type: field.TypeTime, Nullable: true},
+		{Name: "runtime_target_id", Type: field.TypeString, Nullable: true},
+		{Name: "runtime_target_type", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "runtime_target_display_name", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "updated", Type: field.TypeTime},
 	}
@@ -2203,6 +2151,11 @@ var (
 				Name:    "runtimebroker_status",
 				Unique:  false,
 				Columns: []*schema.Column{RuntimeBrokersColumns[6]},
+			},
+			{
+				Name:    "runtimebroker_runtime_target_id",
+				Unique:  true,
+				Columns: []*schema.Column{RuntimeBrokersColumns[26]},
 			},
 		},
 	}
@@ -2743,7 +2696,6 @@ var (
 		ConduitSessionsTable,
 		ConversationsTable,
 		ConversationParticipantsTable,
-		DecisionAuditsTable,
 		DelegationAdoptionsTable,
 		DelegationEdgesTable,
 		EntitlementBindingsTable,
@@ -2755,6 +2707,7 @@ var (
 		GroupsTable,
 		GroupMembershipsTable,
 		HarnessConfigsTable,
+		HubInstancesTable,
 		HubSettingsTable,
 		IntegrationConfigsTable,
 		IntegrationUpdatesTable,
@@ -2868,6 +2821,9 @@ func init() {
 	GroupMembershipsTable.ForeignKeys[2].RefTable = AgentsTable
 	HarnessConfigsTable.Annotation = &entsql.Annotation{
 		Table: "harness_configs",
+	}
+	HubInstancesTable.Annotation = &entsql.Annotation{
+		Table: "hub_instances",
 	}
 	HubSettingsTable.Annotation = &entsql.Annotation{
 		Table: "hub_settings",

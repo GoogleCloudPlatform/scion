@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 178
+**Operations:** 181
 
 ## Table of Contents
 
@@ -78,15 +78,15 @@
 - [inbox.message.write](#inboxmessagewrite) — Mark the caller's own inbox messages read. Mark-all by a project token touches only messages of its boundary project
 - [inbox.channels.list](#inboxchannelslist) — List the registered message channels: static capability metadata with no records
 - [inbox.capabilities.read](#inboxcapabilitiesread) — Read the hub messaging capabilities: static capability metadata with no records
-- [inbox.conversation.list](#inboxconversationlist) — List the caller's conversations. A token lists only conversations inside its boundary, and a direct conversation with an agent only with agent:read on that agent; the project group union also needs project:read
+- [inbox.conversation.list](#inboxconversationlist) — List the caller's conversations. A group conversation is listed only while the caller can read it (project:read on its project, or the participant rule for a group with no project; a token is checked as its user); a participant row alone does not list it. A token lists only conversations inside its boundary, and a direct conversation with an agent only with agent:read on that agent; the project group union also needs project:read
 - [inbox.conversation.create](#inboxconversationcreate) — Create a group conversation in a project. Needs project:read on the project; a token also needs inbox:write for it
 - [project.conversation.read](#projectconversationread) — Read a group conversation, its messages and one message. Needs project:read on the conversation's project; a group with no project needs participation, and a token needs inbox:read on a hub boundary for it
 - [inbox.conversation.direct.read](#inboxconversationdirectread) — Read a direct conversation, its messages and one message. A token needs inbox:read for the peer agent's project and agent:read on the peer agent; a direct conversation between users needs a hub boundary
 - [inbox.conversation.defaultagent.set](#inboxconversationdefaultagentset) — Set the default agent of a group conversation. Needs project:read on the conversation's project; a token also needs inbox:write for it
-- [inbox.conversation.participant.add](#inboxconversationparticipantadd) — Add a participant to a group conversation. Every caller needs project:read on the conversation's project; an added agent must be in that project and an added user must be a member of it; a token also needs inbox:write for it
+- [inbox.conversation.participant.add](#inboxconversationparticipantadd) — Add a participant to a group conversation. Every caller needs project:read on the conversation's project; an added agent must be in that project and an added user must be a member of it; a token also needs inbox:write for it. A caller who is not a participant or cannot read the group gets the unknown-conversation answer, and an agent of another project the unknown-agent answer
 - [inbox.conversation.leave](#inboxconversationleave) — Leave a conversation the caller takes part in. A token needs inbox:write for the conversation
 - [inbox.conversation.resolve](#inboxconversationresolve) — Resolve a conversation reference. A group reference needs project:read on its project and an agent reference needs agent:read on the agent, for every user caller; a token also needs inbox:read for the result
-- [agent.message.target.resolve](#agentmessagetargetresolve) — Resolve a cross-project messaging target through the agent message authorization
+- [agent.message.target.resolve](#agentmessagetargetresolve) — Resolve a messaging target in another project through the agent message authorization. Only a target the caller may message is answered; any other target gets the unknown-target answer
 - [inbox.notification.read](#inboxnotificationread) — List the caller's notifications. A token lists only rows inside its boundary; with agentId, rows addressed to the agent subscriber need agent:read on that agent, for every user caller
 - [inbox.notification.ack](#inboxnotificationack) — Acknowledge the caller's notifications. Ack-all by a project token touches only rows of its boundary project
 - [inbox.notification.subscription.create](#inboxnotificationsubscriptioncreate) — Create notification subscriptions. A user caller needs project:read on the project and agent:read on a watched agent; a token also needs inbox:write for the project
@@ -127,6 +127,8 @@
 - [user.session.revoke](#usersessionrevoke) — Revoke every cookie session of a user (platform admin only)
 - [user.terminalworkspace](#userterminalworkspace) — Read or replace the caller's own terminal workspace
 - [hub.authreset](#hubauthreset) — Reset all agent authentication credentials (emergency action)
+- [hub.authreset.reissue](#hubauthresetreissue) — Re-issue an agent's role scopes from its delegator's current authority (dispatched from POST .../agents/{id}/reset-auth when reissue_scopes is set; hub super-admin only)
+- [hub.authreset.reissueall](#hubauthresetreissueall) — Re-issue every agent's role scopes from its delegator's current authority (dispatched from POST /api/v1/admin/agents/reset-auth-all when reissue_scopes is set; dry run by default; hub super-admin only)
 - [hub.config.read](#hubconfigread) — Read server configuration and schema
 - [hub.config.update](#hubconfigupdate) — Update server configuration sections. The route guard checks hub.config.read, so a token needs hub_config:read and hub_config:update, and writes configuration keys only
 - [hub.messaging.update](#hubmessagingupdate) — Read and update messaging configuration switches
@@ -184,6 +186,7 @@
 - [gcp.identity.read](#gcpidentityread) — Read GCP service account details or list accounts
 - [gcp.identity.verify](#gcpidentityverify) — Verify a GCP service account's IAM configuration
 - [env.read](#envread) — Read project environment variables
+- [env.hub.list](#envhublist) — List hub-level environment variables (scope=hub), without secret entries
 
 ---
 
@@ -2896,7 +2899,7 @@
 
 **Domain:** inbox
 
-**Description:** List the caller's conversations. A token lists only conversations inside its boundary, and a direct conversation with an agent only with agent:read on that agent; the project group union also needs project:read
+**Description:** List the caller's conversations. A group conversation is listed only while the caller can read it (project:read on its project, or the participant rule for a group with no project; a token is checked as its user); a participant row alone does not list it. A token lists only conversations inside its boundary, and a direct conversation with an agent only with agent:read on that agent; the project group union also needs project:read
 
 ### Entry Points
 
@@ -2921,6 +2924,8 @@
 ### Tests
 
 - `pkg/hub:TestConversationListToken_FilteredToBoundary`
+- `pkg/hub:TestConversationList_OmitsGroupsOfUnreadableProject`
+- `pkg/hub:TestConversationList_GroupReadLookupErrorOmitsRow`
 
 ---
 
@@ -3061,7 +3066,7 @@
 
 **Domain:** inbox
 
-**Description:** Add a participant to a group conversation. Every caller needs project:read on the conversation's project; an added agent must be in that project and an added user must be a member of it; a token also needs inbox:write for it
+**Description:** Add a participant to a group conversation. Every caller needs project:read on the conversation's project; an added agent must be in that project and an added user must be a member of it; a token also needs inbox:write for it. A caller who is not a participant or cannot read the group gets the unknown-conversation answer, and an agent of another project the unknown-agent answer
 
 ### Entry Points
 
@@ -3081,11 +3086,13 @@
 
 **Effects:** `update-resource`
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `not_found`
 
 ### Tests
 
 - `pkg/hub:TestConversationAddParticipant_RequiresProjectReadAndMemberPrincipals`
+- `pkg/hub:TestConversationAddParticipant_UnreadableGroupMatchesUnknownConversation`
+- `pkg/hub:TestConversationAddParticipant_AgentOfOtherProjectMatchesUnknownAgent`
 
 ---
 
@@ -3158,7 +3165,7 @@
 
 **Domain:** agent.message
 
-**Description:** Resolve a cross-project messaging target through the agent message authorization
+**Description:** Resolve a messaging target in another project through the agent message authorization. Only a target the caller may message is answered; any other target gets the unknown-target answer
 
 ### Entry Points
 
@@ -3178,11 +3185,12 @@
 
 **Effects:** `read-one`
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `not_found`
 
 ### Tests
 
 - `pkg/hub:TestMessagingTargetsResolve_TokenNeedsAgentMessage`
+- `pkg/hub:TestMessagingTargetsResolve_ReplyOnlyTargetMatchesMissing`
 
 ---
 
@@ -3488,11 +3496,11 @@
 
 **Base Permission:** `project.read`
 
-**Resource Resolver:** project-from-url
+**Resource Resolver:** project-from-row
 
 **Effects:** `read-one`, `list-scoped`
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `not_found`
 
 ### Tests
 
@@ -4702,6 +4710,117 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## hub.authreset.reissue
+
+**Domain:** hub
+
+**Description:** Re-issue an agent's role scopes from its delegator's current authority (dispatched from POST .../agents/{id}/reset-auth when reissue_scopes is set; hub super-admin only)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| internal_dispatch | — | `handleAgentResetAuth:reissue-scopes` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `hub.auth_reset.execute`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `change-authority`, `revoke-authority`, `mint-credential`
+
+### Delegation
+
+- **Kind:** `conditional_on_increase`
+- The re-issued role and scopes are checked with CanDelegate against the delegator's live grant (never the operator's), and the role is never raised
+
+**Authority Evaluation:** `before_and_after`
+
+### Governance
+
+- **Kind:** peer_superior
+- Re-recording an agent's delegated authority and revoking its credentials is a hub super-admin action
+
+### Audit
+
+- **Event Type:** `agent_scopes_reissued`
+- **Context Fields:** actor_id
+- **Before Fields:** role_before, edge_replaced
+- **After Fields:** role_after, edge_new, scopes_added, scopes_removed, credentials_revoked
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestScopeReissue_OperatorRefusals`
+- `pkg/hub:TestScopeReissue_UserDelegatorFailClosed`
+- `pkg/hub:TestScopeReissue_UserDelegatorLookupFault`
+- `pkg/hub:TestScopeReissue_SessionRootedEqualsCreateToday`
+- `pkg/hub:TestScopeReissue_SessionRootedEqualsCreateTodayAfterChange`
+
+---
+
+## hub.authreset.reissueall
+
+**Domain:** hub
+
+**Description:** Re-issue every agent's role scopes from its delegator's current authority (dispatched from POST /api/v1/admin/agents/reset-auth-all when reissue_scopes is set; dry run by default; hub super-admin only)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| internal_dispatch | — | `handleAdminResetAuthAll:reissue-scopes` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `hub.auth_reset.execute`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `change-authority`, `revoke-authority`, `mint-credential`
+
+### Delegation
+
+- **Kind:** `conditional_on_increase`
+- Each agent's re-issued role and scopes are checked with CanDelegate against its own delegator's live grant (never the operator's), and no role is raised
+
+**Authority Evaluation:** `before_and_after`
+
+### Governance
+
+- **Kind:** peer_superior
+- A hub-wide re-issue of delegated authority is a hub super-admin action; each agent is re-issued and audited on its own
+
+### Audit
+
+- **Event Type:** `agent_scopes_reissue_batch`
+- **Context Fields:** actor_id
+- **Before Fields:** total
+- **After Fields:** dry_run, succeeded, noop, refused, push_failed
+- **Atomic:** No
+- **Non-Atomic Justification:** Each agent's re-issue commits with its own agent_scopes_reissued row in one transaction; the batch row is a summary written after the run with a fresh context, and the response reports batch_audit_recorded=false if it could not be written
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestScopeReissueBulk_OperatorRefusals`
 
 ---
 
@@ -6656,6 +6775,36 @@
 **Resource Resolver:** project-from-url
 
 **Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## env.hub.list
+
+**Domain:** env
+
+**Description:** List hub-level environment variables (scope=hub), without secret entries
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/env` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Base Permission:** `hub.env_vars.read`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `list-scoped`
 
 **Denial Codes:** `forbidden`
 

@@ -122,6 +122,7 @@ runtimes:
 | `home_storage_backend` | string | (Kubernetes) `local` or `nfs`. Overrides [`server.home_storage.backend`](/scion/reference/server-config/#agent-home-storage-serverhome_storage) for agents whose profile uses this runtime. A profile's value wins over this. Ignored, with a validation warning, on other runtime types. Read from global settings only. |
 | `home_storage_leaf` | string | (Kubernetes) `pod` or `broker`. Overrides `server.home_storage.leaf` for agents whose profile uses this runtime. A profile's value wins over this. |
 | `kubernetes_service_account_mappings` | map | (Kubernetes) Map of lowercase GCP service account email to Kubernetes ServiceAccount name, used by GCP identity mode `assign`: the agent pod runs as the mapped ServiceAccount through GKE Workload Identity. The ServiceAccount must already exist in this entry's namespace and be bound to the service account; Scion does not create or bind it. A profile's entry for the same email wins over this. Read from global settings only; a project's `settings.yaml` value is ignored. See [GCP identity mode "assign"](/scion/hosted/ha/kubernetes/#gcp-identity-mode-assign-workload-identity-mapping). |
+| `kubernetes_block_service_account` | string | (Kubernetes) Kubernetes ServiceAccount the agent pod runs as when its GCP identity mode is `block`. Use a dedicated ServiceAccount with no Workload Identity annotation and no IAM grants; Scion does not create or check it. Unset or empty: the pod runs as the namespace's default ServiceAccount. A profile's value wins over this. Read from global settings only. See [block](/scion/hosted/ha/kubernetes/#block). |
 | `env` | map | Environment variables to set for the runtime. |
 
 :::note
@@ -233,24 +234,35 @@ profiles:
 | :--- | :--- | :--- |
 | `runtime` | string | **Required**. Name of a runtime defined in `runtimes`. |
 | `default_template` | string | Default template for agents created under this profile. |
-| `default_harness_config` | string | Default harness config to use. |
-| `default_harness_auth` | string | Default authentication type for new agents under this profile. |
+| `default_harness_config` | string | Default harness config name for agents created under this profile. |
 | `image_registry` | string | Profile-level registry override. Takes precedence over the top-level `image_registry`. |
+| `volumes` | list | Volume mounts for agents created under this profile, appended after the harness config's `volumes`. Each entry has `target` (required), `source`, `read_only`, `type`, `bucket` (GCS bucket name), `prefix` (GCS object prefix), `mode` (mount options), `server` (NFS server host or IP) and `volume_name` (Cloud Run or GKE volume name). `type` is `local` (default; host bind mount, requires `source`), `gcs` (GCS FUSE mount, requires `bucket`), `nfs` (NFS mount, requires `server` and `source`), `cloudrun-volume` (Cloud Run managed volume, requires `volume_name`) or `gke-shared-volume` (GKE-provided shared volume such as a Filestore CSI PVC, requires `volume_name`). |
 | `harness_overrides` | map | Per-harness-config overrides. Keys match `harness_configs` names. |
 | `secrets` | list | Required secrets for agents created under this profile. |
 | `resources` | object | Resource requests and limits for agents created under this profile. See [Resource Specification](#resource-specification-resources). |
 | `shared_dir_storage_class` | string | (Kubernetes) StorageClass for shared-dir PVCs created under this profile. Wins over the runtime entry's value; a template or agent `kubernetes.shared_dir_storage_class` wins over this. |
 | `shared_dir_size` | string | (Kubernetes) Size for each shared-dir PVC created under this profile. Same precedence as `shared_dir_storage_class`. |
 | `safe_to_evict` | bool | (Kubernetes) Safe-to-evict setting for agent pods created under this profile. Wins over the runtime entry's value; a template or agent `kubernetes.safeToEvict` wins over this. |
+| `clone_depth` | string or int | Git clone depth for clone-per-agent workspaces of agents under this profile: `full` for a full (non-shallow) clone, or an integer N from 1 to 999999999 for a clone of depth N. A template or agent `clone_depth` wins over this. Unset (absent, null or empty) keeps the default shallow (depth 1) clone. Applies only when the workspace is cloned (a new agent, or a recreated workspace). |
 | `shared_dir_storage_backend` | string | `local` or `nfs`. Overrides [`server.shared_dir_storage.backend`](/scion/reference/server-config/#per-profile-backend) for agents using this profile. Wins over the runtime entry's value. Read from global settings only. |
 | `shared_dir_storage_backends` | map | Shared directory name to `local` or `nfs`, for agents using this profile. A directory it does not name uses `shared_dir_storage_backend`. Wins over the runtime entry's values. See [per-directory backend](/scion/reference/server-config/#per-directory-backend). Read from global settings only. |
 | `home_storage_backend` | string | (Kubernetes) `local` or `nfs`. Overrides [`server.home_storage.backend`](/scion/reference/server-config/#agent-home-storage-serverhome_storage) for agents using this profile. Wins over the runtime entry's value. Read from global settings only. |
 | `home_storage_leaf` | string | (Kubernetes) `pod` or `broker`. Overrides `server.home_storage.leaf` for agents using this profile. Wins over the runtime entry's value. |
 | `kubernetes_service_account_mappings` | map | (Kubernetes) Per-profile override of the runtime entry's `kubernetes_service_account_mappings`: for each service account email listed here, this ServiceAccount name wins over the runtime entry's. Other emails fall through to the runtime entry. Read from global settings only. |
+| `kubernetes_block_service_account` | string | (Kubernetes) Per-profile override of the runtime entry's `kubernetes_block_service_account`. Read from global settings only. |
 
 **Shared-dir PVC class and size (Kubernetes).** Each key is resolved separately, and the first source that sets it wins: the agent's or template's `kubernetes:` block, then the profile, then the profile's runtime entry, then the built-in default (the cluster's default class and `10Gi`). On GKE Autopilot, set an RWX class such as `standard-rwx`. See [Shared Directory PVCs](/scion/hosted/ha/kubernetes/#shared-directory-pvcs).
 
 **Safe-to-evict (Kubernetes).** The first source that sets `safe_to_evict` wins: the agent's or template's `kubernetes.safeToEvict`, then the agent's profile (`--profile`, or the profile the agent was created with, falling back to the active profile), then that profile's runtime entry. An explicit `true` at a higher level turns the annotation off even when a lower level sets `false`. On GKE Autopilot the annotation makes the pod an extended run time pod, which has its own limits and cost. See [Safe-to-Evict](/scion/hosted/ha/kubernetes/#safe-to-evict).
+
+**Clone depth.** The first source that sets `clone_depth` wins: the agent's or template's `clone_depth`, then the agent's profile (`--profile`, or the profile the agent was created with, falling back to the active profile). When neither sets it, a clone-per-agent workspace is a shallow clone of depth 1. `full` clones the whole history, so `git rev-parse --is-shallow-repository` prints `false` and rebase, merge-base, `git log` and blame work without `git fetch --unshallow`. `0`, values above 999999999 and other values are rejected; use `full` for a full clone. The setting applies only when the broker clones the repository per agent (clone-per-agent); on the Kubernetes runtime it reaches both the NFS provisioning init container and the in-container clone. It takes effect only when the workspace is cloned: a new agent, or an agent whose workspace is recreated. Restarting an agent whose workspace is already a shallow clone keeps it shallow; to deepen it in place, run `git fetch --unshallow` in the workspace. For example:
+
+```yaml
+profiles:
+  gke:
+    runtime: gke-autopilot
+    clone_depth: full
+```
 
 **Agent timezone.** Profiles do not set the `TZ` of a Hub-dispatched agent: a `TZ` in a profile's `harness_overrides` env is not used (profiles have no `env` key). The Hub-level default is `agent_defaults.default_timezone` (in `settings.yaml`, the top-level `default_timezone` key). For the full order, pins and local mode, see [Times and Timezones](/scion/reference/times-and-timezones/#agent-tz-hub-dispatched-agents).
 
@@ -305,13 +317,13 @@ Settings for reporting telemetry summaries to the Scion Hub.
 
 ### Local Debug Output (`telemetry.local`)
 
-Settings for local debug telemetry output.
+Settings for local debug telemetry output. These keys are accepted so existing settings files still load, but no component reads them today, so they have no effect.
 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `enabled` | bool | `false` | Enable local debug output. |
-| `file` | string | — | Path for JSONL telemetry file output. |
-| `console` | bool | `false` | Write debug telemetry to stderr. |
+| `enabled` | bool | `false` | Accepted but ignored. |
+| `file` | string | — | Accepted but ignored. |
+| `console` | bool | `false` | Accepted but ignored. |
 
 ### Filtering (`telemetry.filter`)
 
@@ -320,7 +332,7 @@ Controls event filtering, attribute redaction, and sampling.
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `enabled` | bool | `true` | Enable event filtering. |
-| `respect_debug_mode` | bool | `true` | Bypass filters when debug mode is active. |
+| `respect_debug_mode` | bool | `true` | Accepted but ignored: no component reads this key today. |
 | `events.include` | list | `[]` | Event types to include (empty = all). |
 | `events.exclude` | list | `["agent.user.prompt"]` | Event types to exclude. |
 | `attributes.redact` | list | See below | Attribute names to replace with `[REDACTED]`. |
@@ -364,6 +376,5 @@ Settings can be overridden using environment variables with the `SCION_` prefix.
 | `telemetry.cloud.protocol` | `SCION_OTEL_PROTOCOL` |
 | `telemetry.cloud.tls.insecure_skip_verify` | `SCION_OTEL_INSECURE` |
 | `telemetry.hub.enabled` | `SCION_TELEMETRY_HUB_ENABLED` |
-| `telemetry.local.enabled` | `SCION_TELEMETRY_DEBUG` |
 
 See [Local Governance](/scion/local/local-governance/) for more on variable substitution.

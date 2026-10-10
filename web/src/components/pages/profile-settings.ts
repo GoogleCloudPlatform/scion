@@ -35,6 +35,13 @@ import {
   type PushPermissionState,
 } from '../../client/push-preference.js';
 import { isChimeEnabled, setChimeEnabled } from '../../utils/audio.js';
+import {
+  areViewModeShortcutsEnabled,
+  isViewModeShortcutsStorageEvent,
+  setViewModeShortcutsEnabled,
+  VIEW_MODE_SHORTCUTS_CHANGED_EVENT,
+} from '../../client/view-mode-shortcuts.js';
+import { isMacPlatform } from '../../utils/platform.js';
 import { setPreferredTimeZone, browserTimeZone } from '../../utils/time.js';
 import '../shared/subscription-manager.js';
 import '../shared/timezone-picker.js';
@@ -50,6 +57,9 @@ export class ScionPageProfileSettings extends LitElement {
 
   @state()
   private _chimeEnabled = isChimeEnabled();
+
+  @state()
+  private _viewModeShortcutsEnabled = areViewModeShortcutsEnabled();
 
   @state()
   private _gcloudADCAvailable = false;
@@ -223,12 +233,28 @@ export class ScionPageProfileSettings extends LitElement {
 
   private readonly _onPushPreferenceChanged = (): void => this._initNotificationState();
 
+  /** Re-reads the view-mode shortcuts preference after a change in this tab. */
+  private readonly _onViewModeShortcutsChanged = (): void => {
+    this._viewModeShortcutsEnabled = areViewModeShortcutsEnabled();
+  };
+
+  /** Re-reads the view-mode shortcuts preference after another tab changes it. */
+  private readonly _onViewModeShortcutsStorage = (e: StorageEvent): void => {
+    if (!isViewModeShortcutsStorageEvent(e)) return;
+    this._viewModeShortcutsEnabled = areViewModeShortcutsEnabled();
+  };
+
   override connectedCallback(): void {
     super.connectedCallback();
     this._initNotificationState();
     // The tray carries the same toggle; whichever one the user flips, both
     // must show the same answer.
     window.addEventListener(PUSH_PREFERENCE_EVENT, this._onPushPreferenceChanged);
+    // The header reads the same view-mode shortcuts preference; keep this
+    // toggle in step when it changes in this tab or another one.
+    this._viewModeShortcutsEnabled = areViewModeShortcutsEnabled();
+    window.addEventListener(VIEW_MODE_SHORTCUTS_CHANGED_EVENT, this._onViewModeShortcutsChanged);
+    window.addEventListener('storage', this._onViewModeShortcutsStorage);
     void this._loadSystemStatus();
     void this._loadDisplayTimezone();
   }
@@ -236,6 +262,8 @@ export class ScionPageProfileSettings extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     window.removeEventListener(PUSH_PREFERENCE_EVENT, this._onPushPreferenceChanged);
+    window.removeEventListener(VIEW_MODE_SHORTCUTS_CHANGED_EVENT, this._onViewModeShortcutsChanged);
+    window.removeEventListener('storage', this._onViewModeShortcutsStorage);
   }
 
   private async _loadSystemStatus(): Promise<void> {
@@ -357,6 +385,12 @@ export class ScionPageProfileSettings extends LitElement {
     this._chimeEnabled = isChimeEnabled();
   }
 
+  private _handleViewModeShortcutsToggle(e: Event): void {
+    const target = e.target as HTMLInputElement & { checked: boolean };
+    setViewModeShortcutsEnabled(target.checked);
+    this._viewModeShortcutsEnabled = areViewModeShortcutsEnabled();
+  }
+
   private async _handleADCToggle(e: Event): Promise<void> {
     const target = e.target as HTMLInputElement & { checked: boolean };
     const enabled = target.checked;
@@ -416,6 +450,7 @@ export class ScionPageProfileSettings extends LitElement {
     const isDisabled =
       this._permissionState === 'unsupported' || this._permissionState === 'denied';
 
+    // prettier-ignore
     return html`
       <div class="page-header">
         <div class="page-header-info">
@@ -511,6 +546,31 @@ export class ScionPageProfileSettings extends LitElement {
               </div>
             `
           : nothing}
+      </div>
+
+      <div class="settings-card">
+        <h2 class="section-title">
+          <sl-icon name="keyboard"></sl-icon>
+          Keyboard shortcuts
+        </h2>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <p class="setting-label">View mode shortcuts</p>
+            <p class="setting-description">
+              Switch between Dashboard, Chat and Terminal with
+              ${isMacPlatform() ? '⌘1, ⌘2 and ⌘3' : 'Ctrl+1, Ctrl+2 and Ctrl+3'}. When off, these
+              keys keep their usual browser behaviour.
+            </p>
+          </div>
+          <div class="setting-control">
+            <sl-switch
+              class="view-mode-shortcuts-switch"
+              ?checked=${this._viewModeShortcutsEnabled}
+              @sl-change=${this._handleViewModeShortcutsToggle}
+            ></sl-switch>
+          </div>
+        </div>
       </div>
 
       ${this._gcloudADCAvailable && this._isWorkstation

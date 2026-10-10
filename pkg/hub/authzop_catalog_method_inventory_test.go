@@ -64,9 +64,10 @@ type liveInventoryKey struct {
 // TestLiveInventoryExclusionsNotStale asserts every key here still names a
 // real, currently-declared catalog HTTP entry point.
 var positiveCheckExclusions = map[liveInventoryKey]string{
-	{OperationID: "hub.maintenance.execute", Method: "POST", Pattern: "/api/v1/admin/maintenance/restart"}:       "handleAdminRestart (admin_maintenance.go) invokes a real systemd restart subprocess; nothing before it short-circuits for a fake or real target, so there is no safe way to dispatch the declared method",
-	{OperationID: "hub.maintenance.execute", Method: "POST", Pattern: "/api/v1/admin/maintenance/check-updates"}: "handleCheckForUpdates (admin_maintenance.go:662-690) calls the GitHub release channel when MaintenanceConfig.DeploymentTier == \"binary\"; excluded so this test cannot depend on, or accidentally call out based on, server config",
-	{OperationID: "agent.hold.lift", Method: "POST", Pattern: "/api/v1/agents/{id}/hold/lift"}:                   "handleAgentHoldLift (agent_hold_lift.go) clears an agent's holds and writes an audit record: a live POST mutates state, so it is not dispatched against a real target here; TestAgentHoldLift drives it against a real held agent",
+	{OperationID: "inbox.conversation.participant.add", Method: "POST", Pattern: "/api/v1/conversations/{id}/participants"}: "handleAddParticipant answers a caller who is not a participant exactly as an unknown conversation (404); this test calls with the dev token, whose principal kind is \"dev\", and conversation participants are users or agents only, so no fixture can make the caller a participant; TestConversationAddParticipant_RequiresProjectReadAndMemberPrincipals and the TestConversationAddParticipant_* tests drive the route with real participants",
+	{OperationID: "hub.maintenance.execute", Method: "POST", Pattern: "/api/v1/admin/maintenance/restart"}:                  "handleAdminRestart (admin_maintenance.go) invokes a real systemd restart subprocess; nothing before it short-circuits for a fake or real target, so there is no safe way to dispatch the declared method",
+	{OperationID: "hub.maintenance.execute", Method: "POST", Pattern: "/api/v1/admin/maintenance/check-updates"}:            "handleCheckForUpdates (admin_maintenance.go:662-690) calls the GitHub release channel when MaintenanceConfig.DeploymentTier == \"binary\"; excluded so this test cannot depend on, or accidentally call out based on, server config",
+	{OperationID: "agent.hold.lift", Method: "POST", Pattern: "/api/v1/agents/{id}/hold/lift"}:                              "handleAgentHoldLift (agent_hold_lift.go) clears an agent's holds and writes an audit record: a live POST mutates state, so it is not dispatched against a real target here; TestAgentHoldLift drives it against a real held agent",
 }
 
 // controlCheckExclusions lists HTTP catalog entry points for which
@@ -667,9 +668,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	// temporary home so the probes never touch the real one. The workspace
 	// download from object storage (cache notify) is replaced by a no-op.
 	t.Setenv("HOME", t.TempDir())
-	origSync := syncFromGCSIntoHubWorkspace
-	t.Cleanup(func() { syncFromGCSIntoHubWorkspace = origSync })
-	syncFromGCSIntoHubWorkspace = func(context.Context, string, string, string) error { return nil }
+	srv.setHubWorkspaceDownloader(func(context.Context, string, string, string) error { return nil })
 	liProject, err := s.GetProject(ctx, f.project)
 	require.NoError(t, err)
 	wsPath, err := srv.hubManagedProjectPath(liProject.Slug)

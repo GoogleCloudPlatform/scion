@@ -56,8 +56,6 @@ type Tx struct {
 	Conversation *ConversationClient
 	// ConversationParticipant is the client for interacting with the ConversationParticipant builders.
 	ConversationParticipant *ConversationParticipantClient
-	// DecisionAudit is the client for interacting with the DecisionAudit builders.
-	DecisionAudit *DecisionAuditClient
 	// DelegationAdoption is the client for interacting with the DelegationAdoption builders.
 	DelegationAdoption *DelegationAdoptionClient
 	// DelegationEdge is the client for interacting with the DelegationEdge builders.
@@ -80,6 +78,8 @@ type Tx struct {
 	GroupMembership *GroupMembershipClient
 	// HarnessConfig is the client for interacting with the HarnessConfig builders.
 	HarnessConfig *HarnessConfigClient
+	// HubInstance is the client for interacting with the HubInstance builders.
+	HubInstance *HubInstanceClient
 	// HubSetting is the client for interacting with the HubSetting builders.
 	HubSetting *HubSettingClient
 	// IntegrationConfig is the client for interacting with the IntegrationConfig builders.
@@ -311,7 +311,6 @@ func (tx *Tx) init() {
 	tx.ConduitSession = NewConduitSessionClient(tx.config)
 	tx.Conversation = NewConversationClient(tx.config)
 	tx.ConversationParticipant = NewConversationParticipantClient(tx.config)
-	tx.DecisionAudit = NewDecisionAuditClient(tx.config)
 	tx.DelegationAdoption = NewDelegationAdoptionClient(tx.config)
 	tx.DelegationEdge = NewDelegationEdgeClient(tx.config)
 	tx.EntitlementBinding = NewEntitlementBindingClient(tx.config)
@@ -323,6 +322,7 @@ func (tx *Tx) init() {
 	tx.Group = NewGroupClient(tx.config)
 	tx.GroupMembership = NewGroupMembershipClient(tx.config)
 	tx.HarnessConfig = NewHarnessConfigClient(tx.config)
+	tx.HubInstance = NewHubInstanceClient(tx.config)
 	tx.HubSetting = NewHubSettingClient(tx.config)
 	tx.IntegrationConfig = NewIntegrationConfigClient(tx.config)
 	tx.IntegrationUpdate = NewIntegrationUpdateClient(tx.config)

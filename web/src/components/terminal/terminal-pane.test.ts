@@ -2,12 +2,21 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ScionTerminalPane } from './terminal-pane.js';
 import { TerminalSessionRegistry } from '../../client/terminal-sessions.js';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
+
+/**
+ * The automatic reconnect after a 4503 close waits a full-jitter delay;
+ * these pane tests expect it at once, so the registries draw a zero delay.
+ */
+const zeroJitter = { random: () => 0 };
 
 const showToast = vi.fn();
 vi.mock('../../utils/toast.js', () => ({ showToast }));
 
 const terminal = vi.hoisted(() => ({
   instances: [] as Array<Record<'dispose' | 'reset' | 'focus' | 'blur', ReturnType<typeof vi.fn>>>,
+  /** When set, fit() resizes the latest terminal to this measured size. */
+  fitSize: null as { cols: number; rows: number } | null,
 }));
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
@@ -32,7 +41,10 @@ vi.mock('@xterm/xterm', () => ({
 }));
 vi.mock('@xterm/addon-fit', () => ({
   FitAddon: class {
-    fit = vi.fn();
+    fit = vi.fn(() => {
+      const latest = terminal.instances.at(-1);
+      if (terminal.fitSize && latest) Object.assign(latest, terminal.fitSize);
+    });
   },
 }));
 vi.mock('@xterm/addon-web-links', () => ({ WebLinksAddon: class {} }));
@@ -47,7 +59,7 @@ class FakeSocket {
   onmessage: ((event: { data: unknown }) => void) | null = null;
   send = vi.fn();
   close = vi.fn();
-  constructor() {
+  constructor(readonly url = '') {
     FakeSocket.instances.push(this);
   }
   open() {
@@ -83,6 +95,7 @@ beforeAll(async () => {
 });
 beforeEach(() => {
   terminal.instances.length = 0;
+  terminal.fitSize = null;
   FakeSocket.instances = [];
   FakeEventSource.instances = [];
   frames = [];
@@ -105,10 +118,13 @@ beforeEach(() => {
   );
   vi.stubGlobal('fetch', fetcher);
   page = document.createElement('scion-terminal-pane');
-  registry = new TerminalSessionRegistry({
-    hubUrl: window.location.origin,
-    accountId: 'account-1',
-  });
+  registry = new TerminalSessionRegistry(
+    {
+      hubUrl: window.location.origin,
+      accountId: 'account-1',
+    },
+    zeroJitter
+  );
   page.open(registry, agentId);
   vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800);
   vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(500);
@@ -199,10 +215,13 @@ describe('retained terminal pane', () => {
   });
 
   it('requires explicit identity and prevents rebinding a session to another pane', () => {
-    const registry = new TerminalSessionRegistry({
-      hubUrl: window.location.origin,
-      accountId: 'test',
-    });
+    const registry = new TerminalSessionRegistry(
+      {
+        hubUrl: window.location.origin,
+        accountId: 'test',
+      },
+      zeroJitter
+    );
     const first = document.createElement('scion-terminal-pane');
     const second = document.createElement('scion-terminal-pane');
     const session = first.open(registry, agentId);
@@ -226,7 +245,7 @@ it('two panes share registry SSE and preserve metadata across transport notifica
   fetcher.mockImplementation((url) =>
     Promise.resolve(
       json({
-        id: String(url).includes(otherId) ? otherId : agentId,
+        id: requestUrl(url).includes(otherId) ? otherId : agentId,
         name: 'test',
         phase: 'running',
       })
@@ -275,6 +294,84 @@ it('two panes share registry SSE and preserve metadata across transport notifica
   }
 });
 
+describe('initially hidden pane waits for reveal before attaching', () => {
+  /** Runs queued animation frames (and any they queue) and settles promises. */
+  async function flushFrames(): Promise<void> {
+    for (let i = 0; i < 10; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await page.updateComplete;
+      const pending = frames.splice(0);
+      if (pending.length === 0) return;
+      for (const callback of pending) callback(0);
+    }
+  }
+  async function mountHidden(): Promise<void> {
+    terminal.fitSize = { cols: 132, rows: 41 };
+    page.setVisible(false);
+    document.body.append(page);
+    await vi.waitFor(() => expect(terminal.instances).toHaveLength(1));
+    await flushFrames();
+  }
+
+  it('a hidden mount does not attach until it is revealed', async () => {
+    await mountHidden();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await flushFrames();
+    expect(FakeSocket.instances).toHaveLength(0);
+  });
+
+  it('reveal attaches exactly once, at the measured size', async () => {
+    await mountHidden();
+    expect(FakeSocket.instances).toHaveLength(0);
+    page.setVisible(true);
+    await flushFrames();
+    await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
+    // A second reveal must not attach again.
+    page.setVisible(false);
+    page.setVisible(true);
+    await flushFrames();
+    expect(FakeSocket.instances).toHaveLength(1);
+    const url = new URL(FakeSocket.instances[0].url);
+    expect(url.searchParams.get('cols')).toBe('132');
+    expect(url.searchParams.get('rows')).toBe('41');
+  });
+
+  it('close before reveal never attaches, even if reveal or layout readiness follows', async () => {
+    const observers: Array<{
+      observe: ReturnType<typeof vi.fn>;
+      disconnect: ReturnType<typeof vi.fn>;
+    }> = [];
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe = vi.fn();
+        unobserve = vi.fn();
+        disconnect = vi.fn();
+        constructor() {
+          observers.push(this);
+        }
+      }
+    );
+    await mountHidden();
+    expect(observers).toHaveLength(1);
+    expect(observers[0].observe).toHaveBeenCalledTimes(1);
+    expect(observers[0].disconnect).not.toHaveBeenCalled();
+    page.dispose();
+    await flushFrames();
+    expect(page.session?.state.connection).toBe('closed');
+    expect(terminal.instances[0].dispose).toHaveBeenCalledTimes(1);
+    // The wait's ResizeObserver is released, so a late resize cannot resume it.
+    expect(observers[0].disconnect).toHaveBeenCalledTimes(1);
+    // The wait's layout callback was cleared, so nothing can resume it.
+    expect((page as unknown as { layoutReady: unknown }).layoutReady).toBeNull();
+    page.setVisible(true);
+    await flushFrames();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await flushFrames();
+    expect(FakeSocket.instances).toHaveLength(0);
+  });
+});
+
 describe('hidden pane interaction isolation (P1.8)', () => {
   it('setVisible(false) blurs terminal, cancels pending resize and removes window drag prevention', async () => {
     await mountConnected();
@@ -311,10 +408,13 @@ describe('hidden pane interaction isolation (P1.8)', () => {
 
   it('window drag prevention is not installed when pane starts hidden', () => {
     const pane2 = document.createElement('scion-terminal-pane');
-    const reg2 = new TerminalSessionRegistry({
-      hubUrl: window.location.origin,
-      accountId: 'test-hidden',
-    });
+    const reg2 = new TerminalSessionRegistry(
+      {
+        hubUrl: window.location.origin,
+        accountId: 'test-hidden',
+      },
+      zeroJitter
+    );
     pane2.setVisible(false);
     const addSpy = vi.spyOn(window, 'addEventListener');
     document.body.append(pane2);
@@ -437,10 +537,13 @@ it('a failed metadata snapshot does not remove the independently authorized term
   page.dispose();
   FakeEventSource.instances = [];
   page = document.createElement('scion-terminal-pane');
-  registry = new TerminalSessionRegistry({
-    hubUrl: window.location.origin,
-    accountId: 'account-1',
-  });
+  registry = new TerminalSessionRegistry(
+    {
+      hubUrl: window.location.origin,
+      accountId: 'account-1',
+    },
+    zeroJitter
+  );
   let resolve!: (response: Response) => void;
   const gate = new Promise<Response>((r) => {
     resolve = r;
@@ -460,12 +563,63 @@ it('a failed metadata snapshot does not remove the independently authorized term
   expect(page.shadowRoot?.textContent).toContain('metadata unavailable');
 });
 
+describe('initial-load preflight refusal', () => {
+  it.each([
+    [
+      'denied (403)',
+      403,
+      { error: { code: 'forbidden', message: 'denied' } },
+      'You do not have permission to attach to this agent.',
+    ],
+    [
+      'no path (503 runtime_attach_unsupported)',
+      503,
+      { error: { code: 'runtime_attach_unsupported', message: 'No path to the terminal' } },
+      'No path to the terminal',
+    ],
+  ] as const)(
+    '%s shows the error state with an enabled Retry button',
+    async (_name, status, body, text) => {
+      page.dispose();
+      page = document.createElement('scion-terminal-pane');
+      registry = new TerminalSessionRegistry(
+        {
+          hubUrl: window.location.origin,
+          accountId: 'account-refusal',
+        },
+        zeroJitter
+      );
+      // Answer by URL, so the order of the agent, metadata and preflight
+      // requests does not matter.
+      fetcher.mockImplementation((input) => {
+        if (requestUrl(input).endsWith('/pty')) return Promise.resolve(json(body, status));
+        return Promise.resolve(json({ id: agentId, name: 'test', phase: 'running' }));
+      });
+      page.open(registry, agentId);
+      document.body.append(page);
+
+      await vi.waitFor(() => expect(page.shadowRoot?.querySelector('.error-state')).not.toBeNull());
+      await page.updateComplete;
+      const errorState = page.shadowRoot!.querySelector('.error-state')!;
+      expect(errorState.textContent).toContain(text);
+      const retry = errorState.querySelector('button')!;
+      expect(retry.disabled).toBe(false);
+      expect(retry.textContent?.trim()).toBe('Retry');
+      expect(page.session?.reconnecting).toBe(false);
+      expect(FakeSocket.instances).toHaveLength(0);
+    }
+  );
+});
+
 describe('bind-after-mount still arms frontmost', () => {
   it('a pane mounted before open() (the legacy page order) still auto-reconnects on a retriable close', async () => {
-    const registry2 = new TerminalSessionRegistry({
-      hubUrl: window.location.origin,
-      accountId: 'account-r3',
-    });
+    const registry2 = new TerminalSessionRegistry(
+      {
+        hubUrl: window.location.origin,
+        accountId: 'account-r3',
+      },
+      zeroJitter
+    );
     const page2 = document.createElement('scion-terminal-pane');
     // connectedCallback runs with no session bound yet — the exact order that
     // pages/terminal.ts uses (mount the shell, then open()).
@@ -524,11 +678,14 @@ describe('document visibilitychange feeds frontmost', () => {
 });
 
 describe('overlay strings', () => {
-  it('shows RECONNECTING... with a spinner while an attempt is in flight', async () => {
+  it('shows RECONNECTING... with a spinner from the 4503 close, before the redial', async () => {
     await mountConnected();
     FakeSocket.instances[0].readyState = 3;
     FakeSocket.instances[0].onclose?.({ code: 4503 });
     await page.updateComplete;
+    // Shown immediately after the close, before the jitter timer (a
+    // macrotask, even at zero delay) has fired: nothing is redialed yet.
+    expect(FakeSocket.instances).toHaveLength(1);
     expect(page.shadowRoot?.textContent).toContain('RECONNECTING...');
     expect(page.shadowRoot?.querySelector('.disconnected-overlay sl-spinner')).toBeTruthy();
   });
@@ -553,6 +710,24 @@ describe('overlay strings', () => {
     await page.updateComplete;
     expect(page.shadowRoot?.textContent).toContain('RECONNECTING...');
     expect(page.shadowRoot?.querySelector('.disconnected-overlay sl-spinner')).toBeTruthy();
+  });
+
+  it('a 4503 close then a no-path answer ends on ATTACH NOT SUPPORTED, with no spinner', async () => {
+    await mountConnected();
+    const noPath = {
+      error: { code: 'runtime_attach_unsupported', message: 'No path to the terminal' },
+    };
+    fetcher
+      .mockResolvedValueOnce(json({ id: agentId, name: 'test', phase: 'running' }))
+      .mockResolvedValueOnce(json(noPath, 503));
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 4503 });
+    await vi.waitFor(() => expect(page.shadowRoot?.textContent).toContain('ATTACH NOT SUPPORTED'));
+    await page.updateComplete;
+    expect(page.shadowRoot?.textContent).not.toContain('RECONNECTING...');
+    expect(page.shadowRoot?.querySelector('.disconnected-overlay sl-spinner')).toBeNull();
+    expect(page.shadowRoot?.textContent).toContain('No path to the terminal');
+    expect(FakeSocket.instances).toHaveLength(1);
   });
 
   it('shows the exact copy, pinned rather than matched as a substring, once an automatic attempt fails', async () => {

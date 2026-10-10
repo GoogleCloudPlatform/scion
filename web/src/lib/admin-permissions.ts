@@ -31,6 +31,11 @@
  * Phase 1 added the `permissions` array to the response.
  */
 export interface AdminStatus {
+  /**
+   * True only for hub admins and super admins. A member can hold
+   * system-scoped permissions without being an admin, so UI gating reads
+   * `permissions` (via hasAnyPermission), not this flag.
+   */
   isAdmin: boolean;
   isSuperAdmin: boolean;
   permissions: string[];
@@ -67,7 +72,7 @@ export function hasAnyPermission(
  * The `/settings` nav item is visible when the user holds ANY of these.
  */
 const SETTINGS_PERMISSIONS: string[] = [
-  'hub.settings.read',
+  'hub.env_vars.read',
   'template.list',
   'template.read',
   'harness_config.list',
@@ -147,8 +152,14 @@ export const ROUTE_PERMISSION_MAP: Record<string, string[]> = {
  * permissions (OR logic). Super-admin users see all tabs.
  */
 export const TAB_PERMISSION_MAP: Record<string, string[]> = {
-  'env-vars': ['hub.settings.read'],
-  secrets: ['hub.settings.read'],
+  // The hub-level environment variable list needs its own read permission;
+  // hub.settings.read alone does not grant it.
+  'env-vars': ['hub.env_vars.read'],
+  // The hub settings tab lists hub-scoped entries, and that list call
+  // returns 403 for anyone but a legacy admin (user role 'admin'), so
+  // hub.settings.read is not enough: every hub role holds it. No gate
+  // permission means the tab is shown to super-admins only.
+  secrets: [],
   templates: ['template.list', 'template.read'],
   'harness-configs': ['harness_config.list', 'harness_config.read'],
   'pre-start-hooks': ['hub.lifecycle_hooks.read'],
@@ -156,6 +167,23 @@ export const TAB_PERMISSION_MAP: Record<string, string[]> = {
   skills: ['skill.list', 'skill.read'],
   'project-templates': ['hub.project_defaults.read'],
 };
+
+/**
+ * Whether a settings tab is visible to the user. A tab with no entry in
+ * TAB_PERMISSION_MAP is visible only to super-admins.
+ */
+export function isSettingsTabVisible(adminStatus: AdminStatus | null, tab: string): boolean {
+  return hasAnyPermission(adminStatus, TAB_PERMISSION_MAP[tab] ?? []);
+}
+
+/**
+ * Whether the user may add, edit or delete hub-level environment variables.
+ * The hub only accepts these writes from super-admins; holders of
+ * hub.env_vars.read alone get the read-only list.
+ */
+export function canEditHubEnvVars(adminStatus: AdminStatus | null): boolean {
+  return adminStatus?.isSuperAdmin === true;
+}
 
 // ---------------------------------------------------------------------------
 // Super-admin-only routes

@@ -21,12 +21,16 @@ The Hub is part of the main `scion` binary. You can start it using the `server s
 ```bash
 # Start the Hub, Web Dashboard, and a local Runtime Broker
 
-SESSION_SECRET=\${SESSION_SECRET} scion --global server start --foreground --production --debug --enable-hub --enable-runtime-broker --enable-web --runtime-broker-port 9800 --web-port 8080 --storage-bucket \${SCION_HUB_STORAGE_BUCKET} --auto-provide
+SESSION_SECRET=\${SESSION_SECRET} scion --global server start --foreground --production --enable-hub --enable-runtime-broker --enable-web --runtime-broker-port 9800 --web-port 8080 --storage-bucket \${SCION_HUB_STORAGE_BUCKET} --auto-provide
 
 ```
 
 :::caution[Session Secret Security]
 Pass the session secret via the `SESSION_SECRET` environment variable (e.g., through a systemd `EnvironmentFile`), **not** via the `--session-secret` CLI flag. CLI arguments are visible to any local user via `ps(1)` and `/proc/pid/cmdline`.
+:::
+
+:::note[Debug logging]
+Debug logging is off by default and should stay off in production. To troubleshoot, turn it on temporarily: set `SCION_LOG_LEVEL=debug` in the Hub's environment and restart the Hub. The `--debug` startup flag turns on server debug mode, which also includes debug logs. When you are done, remove the variable or flag and restart again.
 :::
 
 This is often best managed through something like systemd
@@ -262,6 +266,8 @@ The Hub stores agent templates and other artifacts.
 - **Google Cloud Storage (GCS)**: Recommended for cloud deployments. Set the `SCION_SERVER_STORAGE_BUCKET` environment variable.
 
 For Hub-managed workspaces, the Hub uploads the workspace to its GCS bucket and sends that bucket name to the Runtime Broker in the agent create request, so the Runtime Broker downloads from the same bucket (the bucket is also kept across reincarnation). A Runtime Broker that receives no bucket falls back to its own GCS storage bucket setting. With neither, the create request fails up front with `422 workspace_storage_unconfigured` instead of a generic gateway error.
+
+This upload works only with GCS Hub storage. On any other storage provider, a Hub-managed project that has a git remote still works on a remote Runtime Broker, because the Runtime Broker builds the workspace from the remote. A project with no git remote does not. Creating an agent for it on a remote Runtime Broker that has no local path for the project fails up front with `412 unsupported_capability`. Use GCS Hub storage, add a git remote to the project, or link the project at a local path on that Runtime Broker.
 
 ## Deployment
 

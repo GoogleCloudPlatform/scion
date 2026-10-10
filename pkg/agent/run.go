@@ -243,6 +243,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		ctx = api.ContextWithBrokerMode(ctx)
 	}
 	if opts.GitClone != nil {
+		// Presence only: clone_depth is applied to opts.GitClone below, so
+		// do not read Depth from the ctx copy.
 		ctx = api.ContextWithGitClone(ctx, opts.GitClone)
 	}
 	if opts.FreshProvision {
@@ -282,6 +284,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	agentDir, agentHome, agentWorkspace, finalScionCfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "", opts.Branch, opts.Workspace, startInlineConfig)
 	if err != nil {
 		return nil, err
+	}
+	if opts.FreshProvision {
+		recordNFSAgentDir(agentDir, opts.Name)
 	}
 	// Empty-per-agent (design #2703): the request's mode, or the mode
 	// persisted at provision, so a start that lost it (e.g. a dropped or
@@ -324,7 +329,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 
 	// Load settings for registry resolution
-	settings, settingsWarnings, err := config.LoadEffectiveSettings(projectDir)
+	settings, settingsWarnings, err := config.LoadEffectiveSettingsFor(ctx, projectDir)
 	if err != nil {
 		util.Debugf("Start: LoadEffectiveSettings(%s) error: %v", projectDir, err)
 	}
@@ -545,6 +550,33 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if finalScionCfg != nil && finalScionCfg.User != "" {
 		unixUsername = finalScionCfg.User
 		util.Debugf("user resolution: from ScionConfig user=%s", unixUsername)
+	}
+
+	// clone_depth for a clone-per-agent start: the template/agent value,
+	// else the profile's (the one named for this start, else the one the
+	// agent was created with, else the active profile). Unset keeps the
+	// depth sent with the request.
+	if opts.GitClone != nil {
+		cdProfile := opts.Profile
+		if cdProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
+			cdProfile = finalScionCfg.Info.Profile
+		}
+		var cdIn cloneDepthInput
+		if finalScionCfg != nil {
+			cdIn.Template = finalScionCfg.CloneDepth
+		}
+		cdIn.Profile, cdIn.ProfileSource = settings.ResolveCloneDepthWithSource(cdProfile)
+		if opts.Env == nil {
+			opts.Env = make(map[string]string)
+		}
+		gc, err := applyCloneDepth(opts.GitClone, opts.Env, cdIn)
+		if err != nil {
+			return nil, err
+		}
+		if gc != opts.GitClone && gc.Depth != nil {
+			slog.Debug("Start: resolved clone_depth", "agent", opts.Name, "depth", *gc.Depth)
+		}
+		opts.GitClone = gc
 	}
 
 	var warnings []string
@@ -819,6 +851,24 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 				harnessConfigSource = string(resolved.ConfigDir.Source)
 			}
 			util.Debugf("harness resolution: implementation=%s harness=%q", resolved.Implementation, resolved.Config.Harness)
+
+			// A --harness-config switch can select a harness whose skills
+			// directory differs from the one ProvisionAgent installed the
+			// skills into (the stored harness-config's). Carry the skills
+			// over so the agent keeps them (ptone/scion#3129).
+			if prevHC := storedHarnessConfigName(finalScionCfg); prevHC != "" && prevHC != harnessConfigName {
+				prevSkillsDir := previousHarnessSkillsDir(prevHC, projectDir, resolveTemplatePaths, settings, profileName)
+				if prevSkillsDir == "" {
+					// The stored harness-config may have been Hub-supplied
+					// and is not on disk at this Start; nothing is copied.
+					util.Debugf("Start: harness-config %q not found; skipping the skills carry-over to %s", prevHC, h.SkillsDir())
+				}
+				if copied, cpErr := carryOverSkillsDir(agentHome, prevSkillsDir, h.SkillsDir()); cpErr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: copying skills to the new harness skills directory failed: %v\n", cpErr)
+				} else if len(copied) > 0 {
+					util.Debugf("Start: copied skills %v from %s to %s after the harness-config switch", copied, prevSkillsDir, h.SkillsDir())
+				}
+			}
 		}
 	} else {
 		h = harness.New(harnessName)
@@ -1602,7 +1652,7 @@ authDone:
 		if recorded != nil {
 			recordedSharedDirBackend = recorded.Backend
 		}
-		globalSettings, _, gErr := config.LoadGlobalSettingsWithOverlay()
+		globalSettings, _, gErr := config.LoadGlobalSettingsWithOverlayFor(ctx)
 		if gErr != nil {
 			// A broken global settings file must fail closed (design G5)
 			// ONLY when the operator plausibly intended to configure
@@ -1774,6 +1824,8 @@ authDone:
 	nfsPVClaimName := ""
 	nfsSubPath := ""
 	nfsSubPathRoot := ""
+	nfsShareServer := ""
+	nfsShareExport := ""
 	nfsStorageClass := ""
 	nfsWorkspacePreCreated := false
 	nfsWorktreeName := ""
@@ -1870,6 +1922,16 @@ authDone:
 					claimSharedDirNames = append(claimSharedDirNames, name)
 				}
 			}
+			if agentDirName != "" && mount.PVClaimName != "" {
+				if keep, reason := nfsKeepSharedCheckout(opts.FreshProvision, agentDir, resolvedWorkspace, agentDirName); keep {
+					// The agent keeps the layout and mode it had before
+					// ptone/scion#3998, so its work stays where it is.
+					slog.Info("workspace_storage nfs: "+reason, "agent", opts.Name)
+					agentDirName, agentBranch = "", ""
+					opts.Env["SCION_WORKSPACE_MODE"] = string(store.SharingModeSharedPlain)
+					agentEnv = withEnvValue(agentEnv, "SCION_WORKSPACE_MODE", string(store.SharingModeSharedPlain))
+				}
+			}
 			if emptyAgentDirName != "" {
 				// Empty-per-agent: only the agent's own directory is ever
 				// mounted, never the project's workspace path resolved
@@ -1890,6 +1952,9 @@ authDone:
 			}
 			if err != nil {
 				return nil, err
+			}
+			if nfsAgentDirName != "" && !nfsAgentDirEmpty {
+				recordNFSAgentDir(agentDir, opts.Name)
 			}
 			if worktreeName != "" && mount.PVClaimName != "" {
 				worktreePreCreated, err := ensureNFSWorktreeLeaf(m.Runtime.Name(), resolvedWorkspace, mount.PVClaimName, worktreeName)
@@ -1924,6 +1989,10 @@ authDone:
 				nfsUID = settings.Server.WorkspaceStorage.NFS.UID
 				nfsGID = settings.Server.WorkspaceStorage.NFS.GID
 				nfsStorageClass = settings.Server.WorkspaceStorage.NFS.StorageClass
+				if shares := settings.Server.WorkspaceStorage.NFS.Shares; len(shares) > 0 {
+					nfsShareServer = shares[0].Server
+					nfsShareExport = shares[0].Export
+				}
 			}
 		}
 	}
@@ -2050,6 +2119,13 @@ authDone:
 	// request or template env is replaced.
 	agentEnv = withLaunchIDEnv(agentEnv, runID)
 
+	// Write the full task to the agent home, and pass a short pointer to
+	// it instead when the task is too large to pass inline.
+	task, err = deliverTaskFile(agentHome, task)
+	if err != nil {
+		return nil, err
+	}
+
 	runCfg := runtime.RunConfig{
 		Name:                 containerName(projectName, opts.Name),
 		Template:             template,
@@ -2069,6 +2145,8 @@ authDone:
 		NFSPVClaimName:       nfsPVClaimName,
 		NFSSubPath:           nfsSubPath,
 		NFSSubPathRoot:       nfsSubPathRoot,
+		NFSShareServer:       nfsShareServer,
+		NFSShareExport:       nfsShareExport,
 		NFSStorageClass:      nfsStorageClass,
 		// Lets the provisioning init container treat a failed chown as a
 		// warning for a workspace directory the broker created.
@@ -2157,6 +2235,7 @@ authDone:
 			}
 			return nil
 		}(),
+		KubernetesBlockIdentity: opts.KubernetesBlockIdentity != nil,
 		Kubernetes: func() *api.KubernetesConfig {
 			// Start from the template/agent config's Kubernetes settings
 			// (namespace, resources, node selector, etc.), then ALWAYS
@@ -2207,6 +2286,17 @@ authDone:
 					k8sCfg = &api.KubernetesConfig{}
 				}
 				k8sCfg.ServiceAccountName = opts.ResolvedKubernetesServiceAccountName
+			}
+			// GCP identity "block" (ptone/scion#4034): the pod runs as the
+			// block ServiceAccount, or as the namespace's default when none
+			// is configured. Either way it replaces any template or
+			// persisted serviceAccountName, which could name a KSA bound to
+			// a GCP service account.
+			if opts.KubernetesBlockIdentity != nil {
+				if k8sCfg == nil {
+					k8sCfg = &api.KubernetesConfig{}
+				}
+				k8sCfg.ServiceAccountName = opts.KubernetesBlockIdentity.ServiceAccountName
 			}
 			return k8sCfg
 		}(),

@@ -63,7 +63,7 @@ export function makeAgent(i: number, overrides: Partial<Agent> = {}): Agent {
     labels: { env: 'prod' },
     _capabilities: { actions: ['read', 'update', 'delete', 'stop_all'] },
     ...overrides,
-  } as Agent;
+  };
 }
 
 /** Ids in the fake `mine` and `shared` scopes. */
@@ -186,9 +186,7 @@ export function fakeFetch(fake: Fake) {
     } => ({
       total: sorted.length,
       running: sorted.filter((a) => a.phase === 'running').length,
-      ...(sorted.length <= 2000
-        ? { agents: sorted.map((a) => [a.id, a.phase]) as Array<[string, string]> }
-        : {}),
+      ...(sorted.length <= 2000 ? { agents: sorted.map((a) => [a.id, a.phase]) } : {}),
       ...(fake.approximate ? { totalApproximate: true } : {}),
     });
     const phase = u.searchParams.get('phase') ?? '';

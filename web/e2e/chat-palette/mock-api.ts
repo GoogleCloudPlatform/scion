@@ -123,7 +123,9 @@ export async function stubMainClientModule(page: Page): Promise<void> {
           getAgents() { return new Map(); }
           getDeletedAgentIds() { return new Set(); }
           removeAgent() {}
+          beginSeedEpoch() { return Symbol('seed-epoch'); }
           seedAgents() {}
+          endSeedEpoch() {}
         }
         export const stateManager = new FixtureStateManager();
         export function navigateTo(path) {
@@ -150,6 +152,14 @@ export async function stubMainClientModule(page: Page): Promise<void> {
  * and 0 people; passing overrides opts a spec into real Threads/People rows.
  */
 export interface PaletteFixtureOverrides {
+  /** Further messageable agents, listed after the default ones. */
+  agents?: Array<{
+    id: string;
+    name: string;
+    slug: string;
+    projectId?: string;
+    project?: string;
+  }>;
   spaces?: Array<{ projectId: string; projectName: string; projectSlug: string }>;
   threadsByProjectId?: Record<
     string,
@@ -288,6 +298,11 @@ export async function setupApiMocks(
               _capabilities: { actions: ['lifecycle', 'attach'] },
               _messageability: { canMessage: false, canReachViewer: true },
             },
+            ...(overrides.agents ?? []).map((agent) => ({
+              ...agent,
+              phase: 'running',
+              _capabilities: { actions: ['attach'] },
+            })),
           ],
         },
       });

@@ -24,13 +24,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -167,7 +171,7 @@ func TestDescribeAttachClose(t *testing.T) {
 		contains []string
 	}{
 		{name: "broker disconnected is retryable", code: wsprotocol.ClosePTYUpstreamUnavailable, reason: wsprotocol.CloseReasonBrokerDisconnected,
-			contains: []string{"lost its connection to the agent's runtime broker", "close code 4503: broker_disconnected", "does not reconnect automatically", "scion attach a1"}},
+			contains: []string{"lost its connection to the agent's runtime broker", "close code 4503: broker_disconnected", "This may be temporary", "scion attach a1"}},
 		{name: "agent stopped suggests resume", code: wsprotocol.ClosePTYSessionGone, reason: wsprotocol.CloseReasonAgentStopped,
 			contains: []string{"terminal session has ended", "close code 4410: agent_stopped", "scion resume a1 --attach"}},
 		{name: "agent not found", code: wsprotocol.ClosePTYAgentNotFound,
@@ -185,7 +189,7 @@ func TestDescribeAttachClose(t *testing.T) {
 		{name: "unknown application code is terminal", code: 4999, reason: "new_reason",
 			contains: []string{"the server ended the session", "close code 4999: new_reason", "scion list"}},
 		{name: "unknown retryable code", code: 1014,
-			contains: []string{"the server ended the session", "does not reconnect automatically"}},
+			contains: []string{"the server ended the session", "This may be temporary"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -215,7 +219,7 @@ func TestDescribeAttachClose_InputOverflowIsActionableAndTerminal(t *testing.T) 
 	assert.Equal(t, "attach to agent 'a1' ended: the input was too large for the session "+
 		"(pasted faster than the agent could read it) (close code 1009: input_overflow)\n\n"+
 		"Paste in smaller chunks, then reattach with: scion attach a1", err.Error())
-	assert.NotContains(t, err.Error(), "does not reconnect automatically")
+	assert.NotContains(t, err.Error(), "This may be temporary")
 }
 
 func TestDescribeAttachClose_HintFollowsClassifier(t *testing.T) {
@@ -227,8 +231,101 @@ func TestDescribeAttachClose_HintFollowsClassifier(t *testing.T) {
 		}
 		err := describeAttachClose(&wsclient.PTYCloseError{Code: code}, "a1")
 		retry := wsprotocol.ClassifyPTYClose(code) == wsprotocol.DispositionRetry
-		assert.Equal(t, retry, strings.Contains(err.Error(), "does not reconnect automatically"), "code %d", code)
+		assert.Equal(t, retry, strings.Contains(err.Error(), "This may be temporary"), "code %d", code)
 	}
+}
+
+// A close whose one automatic reconnect failed is described by the original
+// close code, plus why the reconnect failed, and both stay reachable.
+func TestDescribeAttachClose_ReconnectFailed(t *testing.T) {
+	orig := &wsclient.PTYCloseError{Code: wsprotocol.ClosePTYUpstreamUnavailable, Reason: "relay_restart"}
+	dialErr := errors.New("connection failed with status 503: no session")
+	err := describeAttachClose(&wsclient.PTYReconnectError{Close: orig, Err: dialErr}, "a1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "close code 4503: relay_restart")
+	assert.Contains(t, err.Error(), "The automatic reconnect also failed: connection failed with status 503: no session")
+	assert.Contains(t, err.Error(), "try again with: scion attach a1")
+	var ce *wsclient.PTYCloseError
+	require.True(t, errors.As(err, &ce))
+	assert.Same(t, orig, ce)
+	assert.ErrorIs(t, err, dialErr)
+}
+
+// When the automatic reconnect itself ended with a close code, the message
+// and hint follow that close, and mention the close that triggered it.
+func TestDescribeAttachClose_ReconnectEndedWithClose(t *testing.T) {
+	orig := &wsclient.PTYCloseError{Code: wsprotocol.ClosePTYUpstreamUnavailable, Reason: "relay_restart"}
+	second := &wsclient.PTYCloseError{Code: wsprotocol.ClosePTYSessionGone, Reason: wsprotocol.CloseReasonAgentStopped}
+	err := describeAttachClose(&wsclient.PTYReconnectError{Close: orig, Err: second}, "a1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "terminal session has ended")
+	assert.Contains(t, err.Error(), "close code 4410: agent_stopped")
+	assert.Contains(t, err.Error(), "on the automatic reconnect after close code 4503: relay_restart")
+	assert.Contains(t, err.Error(), "scion resume a1 --attach")
+	assert.NotContains(t, err.Error(), "This may be temporary")
+	var ce *wsclient.PTYCloseError
+	require.True(t, errors.As(err, &ce))
+	assert.Same(t, orig, ce, "the original close stays reachable first")
+}
+
+// When the CLI stopped because too many reconnected sessions ended quickly,
+// the message says so rather than offering only the generic retry text.
+func TestDescribeAttachClose_ReconnectLimit(t *testing.T) {
+	orig := &wsclient.PTYCloseError{Code: wsprotocol.ClosePTYUpstreamUnavailable, Reason: "relay_restart"}
+	err := describeAttachClose(&wsclient.PTYReconnectError{Close: orig, Err: wsclient.ErrPTYReconnectLimit}, "a1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "close code 4503: relay_restart")
+	assert.Contains(t, err.Error(), "scion attach stopped after 3 automatic reconnects whose sessions each ended within a minute.")
+	assert.NotContains(t, err.Error(), "automatic reconnect also failed")
+	assert.ErrorIs(t, err, wsclient.ErrPTYReconnectLimit)
+}
+
+// A Hub refusal at the automatic reconnect's preflight ends the attach
+// with the original close and the Hub's reason; describeAttachPreflight
+// leaves it to describeAttachClose.
+func TestDescribeAttachClose_ReconnectRefusedByHub(t *testing.T) {
+	orig := &wsclient.PTYCloseError{Code: wsprotocol.ClosePTYUpstreamUnavailable, Reason: "relay_restart"}
+	t.Run("no path", func(t *testing.T) {
+		refusal := &wsclient.PTYPreflightError{Status: 503, Code: wsprotocol.ErrCodeRuntimeAttachUnsupported,
+			Reason: "agent_pty_unavailable", Message: "No path to the terminal"}
+		in := &wsclient.PTYReconnectError{Close: orig, Err: refusal}
+		err := describeAttachPreflight(describeAttachClose(in, "a1"), "a1")
+		assert.Contains(t, err.Error(), "attach to agent 'a1' ended:")
+		assert.Contains(t, err.Error(), "close code 4503: relay_restart")
+		assert.Contains(t, err.Error(), "The Hub refused the automatic reconnect: "+wsclient.AttachUnsupportedMessage)
+		assert.Contains(t, err.Error(), "(status 503, runtime_attach_unsupported, reason agent_pty_unavailable)")
+		assert.Contains(t, err.Error(), "Check the agent with: scion list")
+		assert.NotContains(t, err.Error(), "try again")
+		assert.ErrorIs(t, err, refusal)
+	})
+	t.Run("denied: same text and hint as on the first attach", func(t *testing.T) {
+		refusal := &wsclient.PTYPreflightError{Status: 403, Code: "forbidden", Message: "no access"}
+		in := &wsclient.PTYReconnectError{Close: orig, Err: refusal}
+		err := describeAttachPreflight(describeAttachClose(in, "a1"), "a1")
+		assert.Contains(t, err.Error(),
+			"The Hub refused the automatic reconnect: you do not have permission to attach to this agent (status 403, forbidden).")
+		assert.Contains(t, err.Error(), "Ask a project owner for attach access to agent 'a1'")
+		assert.NotContains(t, err.Error(), "try again")
+	})
+	t.Run("empty message gets the fixed summary", func(t *testing.T) {
+		for _, tc := range []struct {
+			refusal *wsclient.PTYPreflightError
+			want    string
+		}{
+			{&wsclient.PTYPreflightError{Status: 503}, "the Hub cannot attach to this agent right now (status 503)."},
+			{&wsclient.PTYPreflightError{Status: 502}, "the Hub refused the attach (status 502)."},
+		} {
+			in := &wsclient.PTYReconnectError{Close: orig, Err: tc.refusal}
+			err := describeAttachPreflight(describeAttachClose(in, "a1"), "a1")
+			assert.Contains(t, err.Error(), "The Hub refused the automatic reconnect: "+tc.want)
+			assert.NotContains(t, err.Error(), ":  (")
+		}
+	})
+	t.Run("direct preflight refusal still described by describeAttachPreflight", func(t *testing.T) {
+		refusal := &wsclient.PTYPreflightError{Status: 403, Code: "forbidden", Message: "no"}
+		err := describeAttachPreflight(describeAttachClose(refusal, "a1"), "a1")
+		assert.Contains(t, err.Error(), "cannot attach to agent 'a1'")
+	})
 }
 
 func TestDescribeAttachClose_OtherErrorsUnchanged(t *testing.T) {
@@ -298,22 +395,25 @@ func TestStartAgentViaHub_Attach_CloseCodeIsDescribed(t *testing.T) {
 	}
 }
 
-// TestAttachViaHub_StoppedUnsupportedAgent_ReportsUnsupportedFirst: a stopped
-// agent on a runtime that can never be attached gets the unsupported error,
-// not a hint to resume it first.
-func TestAttachViaHub_StoppedUnsupportedAgent_ReportsUnsupportedFirst(t *testing.T) {
+// TestAttachViaHub_StoppedAgent_SuggestsResumeWithoutBrokerLookup: the CLI
+// no longer refuses from the broker record, so a stopped agent on a broker
+// whose runtime has no attach is told to resume (once running, it may be
+// attachable through the agent path), and the broker record is never read.
+func TestAttachViaHub_StoppedAgent_SuggestsResumeWithoutBrokerLookup(t *testing.T) {
 	const (
 		projectID = "proj-stopped-noattach"
 		agentName = "stopped-noattach"
 	)
+	var brokerGets atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/api/v1/projects/" + projectID + "/agents/" + agentName:
+		switch {
+		case r.URL.Path == "/api/v1/projects/"+projectID+"/agents/"+agentName:
 			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: "id-2", Name: agentName, Phase: "stopped",
 				Runtime: "noattach", RuntimeBrokerID: mockAttachBrokerID})
-		case "/api/v1/runtime-brokers/" + mockAttachBrokerID:
-			_ = json.NewEncoder(w).Encode(mockAttachBroker("noattach"))
+		case strings.HasPrefix(r.URL.Path, "/api/v1/runtime-brokers"):
+			brokerGets.Add(1)
+			w.WriteHeader(http.StatusNotFound)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -324,40 +424,159 @@ func TestAttachViaHub_StoppedUnsupportedAgent_ReportsUnsupportedFirst(t *testing
 
 	err = attachViaHub(&HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}, agentName)
 	require.Error(t, err)
-	assert.Equal(t, "attach is not supported for agents on the noattach runtime", err.Error())
+	assert.Contains(t, err.Error(), "scion resume "+agentName+" --attach")
+	assert.EqualValues(t, 0, brokerGets.Load(), "the CLI does not read the broker record")
 }
 
-// TestAttachViaHub_GateRunsOnce: scion attach runs the capability gate before
-// the phase check and tells attachHubSession not to repeat the broker lookup.
-func TestAttachViaHub_GateRunsOnce(t *testing.T) {
-	clearAppTokenSources(t)
-	t.Setenv("SCION_HUB_TOKEN", "test-token")
-	stubPlainTransport(t)
-	stubAttachSession(t, func() error { return nil })
+// ptyHub is a mock Hub for the full attach flow: the agent record, the
+// broker record (which says attach is unsupported, and is counted), and
+// the agent's /pty endpoint. A plain GET of /pty answers preflightStatus
+// and preflightBody; a WebSocket upgrade is accepted, sends one data frame
+// and closes 1000 (a clean detach).
+type ptyHub struct {
+	srv        *httptest.Server
+	preflights atomic.Int32
+	upgrades   atomic.Int32
+	brokerGets atomic.Int32
+}
 
-	const (
-		projectID = "proj-gate-once"
-		agentName = "gate-once"
-	)
-	brokerGets := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/api/v1/projects/" + projectID + "/agents/" + agentName:
-			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: "id-3", Name: agentName, Phase: "running", RuntimeBrokerID: mockAttachBrokerID})
-		case "/api/v1/runtime-brokers/" + mockAttachBrokerID:
-			brokerGets++
-			_ = json.NewEncoder(w).Encode(mockAttachBroker(""))
+func newPTYHub(t *testing.T, projectID, agentName, agentID string, preflightStatus int, preflightBody string) *ptyHub {
+	t.Helper()
+	h := &ptyHub{}
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	h.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/projects/"+projectID+"/agents/"+agentName:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{ID: agentID, Name: agentName, Phase: "running",
+				RuntimeBrokerID: mockAttachBrokerID})
+		case strings.HasPrefix(r.URL.Path, "/api/v1/runtime-brokers"):
+			h.brokerGets.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(hubclient.RuntimeBroker{ID: mockAttachBrokerID,
+				Capabilities: &hubclient.BrokerCapabilities{Attach: false}})
+		case r.URL.Path == "/api/v1/agents/"+agentID+"/pty" && websocket.IsWebSocketUpgrade(r):
+			h.upgrades.Add(1)
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer func() { _ = conn.Close() }()
+			_ = conn.WriteJSON(wsprotocol.NewPTYDataMessage([]byte("$ ")))
+			_ = conn.WriteControl(websocket.CloseMessage,
+				websocket.FormatCloseMessage(wsprotocol.ClosePTYNormal, ""), time.Now().Add(time.Second))
+		case r.URL.Path == "/api/v1/agents/"+agentID+"/pty":
+			h.preflights.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(preflightStatus)
+			_, _ = w.Write([]byte(preflightBody))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
-	t.Cleanup(srv.Close)
-	client, err := hubclient.New(srv.URL)
+	t.Cleanup(h.srv.Close)
+	return h
+}
+
+// TestAttachViaHub_UnsupportedBrokerAgentPath_Attaches: an agent whose
+// broker runtime has no attach, but which the Hub can reach through the
+// agent path (preflight 200, path agent), is attached: the CLI does not
+// refuse from the broker record, and dials after the preflight.
+func TestAttachViaHub_UnsupportedBrokerAgentPath_Attaches(t *testing.T) {
+	clearAppTokenSources(t)
+	t.Setenv("SCION_HUB_TOKEN", "test-token")
+	stubPlainTransport(t)
+
+	h := newPTYHub(t, "proj-agent-path", "agent-path", "agent-path-id", http.StatusOK, `{"path":"agent"}`)
+	client, err := hubclient.New(h.srv.URL)
 	require.NoError(t, err)
 
-	require.NoError(t, attachViaHub(&HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}, agentName))
-	assert.Equal(t, 1, brokerGets)
+	err = attachViaHub(&HubContext{Client: client, Endpoint: h.srv.URL, ProjectID: "proj-agent-path"}, "agent-path")
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, h.preflights.Load())
+	assert.EqualValues(t, 1, h.upgrades.Load(), "the attach dials after the preflight")
+	assert.EqualValues(t, 0, h.brokerGets.Load(), "the CLI does not read the broker record")
+}
+
+// TestAttachViaHub_NoPath_ExitsWithReasonWithoutRetry: when the Hub has no
+// path to the agent's terminal, the attach ends with the Hub's reason after
+// one preflight, with no WebSocket dial and no retry.
+func TestAttachViaHub_NoPath_ExitsWithReasonWithoutRetry(t *testing.T) {
+	clearAppTokenSources(t)
+	t.Setenv("SCION_HUB_TOKEN", "test-token")
+	stubPlainTransport(t)
+
+	h := newPTYHub(t, "proj-no-path", "no-path", "no-path-id", http.StatusServiceUnavailable, noPathPreflightBody)
+	client, err := hubclient.New(h.srv.URL)
+	require.NoError(t, err)
+
+	err = attachViaHub(&HubContext{Client: client, Endpoint: h.srv.URL, ProjectID: "proj-no-path"}, "no-path")
+	assertNoPathRefusal(t, err, "no-path")
+	assert.Contains(t, err.Error(), wsclient.AttachUnsupportedMessage)
+	assert.EqualValues(t, 1, h.preflights.Load(), "one preflight, no retry")
+	assert.EqualValues(t, 0, h.upgrades.Load(), "no WebSocket dial")
+}
+
+// TestDescribeAttachPreflight covers the CLI's wording for preflight
+// refusals: 401, 403 and 404 reuse the close-code hints, 422 says the
+// agent has no runtime broker, a no-path 503 is final, another 503 is
+// presented as temporary, and the "status N" detail is always kept.
+func TestDescribeAttachPreflight(t *testing.T) {
+	tests := []struct {
+		name     string
+		in       *wsclient.PTYPreflightError
+		contains []string
+		excludes []string
+	}{
+		{name: "401", in: &wsclient.PTYPreflightError{Status: 401, Code: "unauthorized", Message: "Authentication required"},
+			contains: []string{"cannot attach to agent 'a1': your Hub credentials are not valid (status 401, unauthorized)", "scion hub auth login"}},
+		{name: "403", in: &wsclient.PTYPreflightError{Status: 403, Code: "forbidden", Message: "no"},
+			contains: []string{"you do not have permission to attach to this agent (status 403, forbidden)", "attach access to agent 'a1'"}},
+		{name: "404", in: &wsclient.PTYPreflightError{Status: 404, Code: "not_found", Message: "Agent not found"},
+			contains: []string{"the Hub cannot find the agent (status 404, not_found)", "scion list"}},
+		{name: "422", in: &wsclient.PTYPreflightError{Status: 422, Code: "no_runtime_broker", Message: "Agent has no runtime broker"},
+			contains: []string{"the agent has no runtime broker (status 422, no_runtime_broker)", "Check the agent with: scion list"}},
+		{name: "no path", in: &wsclient.PTYPreflightError{Status: 503, Code: wsprotocol.ErrCodeRuntimeAttachUnsupported, Reason: "agent_pty_unavailable"},
+			contains: []string{wsclient.AttachUnsupportedMessage + ", and the agent has no session that serves a terminal",
+				"(status 503, runtime_attach_unsupported, reason agent_pty_unavailable)", "Check the agent with: scion list"},
+			excludes: []string{"try again"}},
+		{name: "other 503", in: &wsclient.PTYPreflightError{Status: 503, Code: "runtime_broker_unavailable",
+			Reason: "broker_not_connected", Message: "Runtime broker not connected"},
+			contains: []string{"Runtime broker not connected (status 503, runtime_broker_unavailable, reason broker_not_connected)",
+				"try again with: scion attach a1"}},
+		{name: "503 without a body", in: &wsclient.PTYPreflightError{Status: 503},
+			contains: []string{"the Hub cannot attach to this agent right now (status 503)"},
+			excludes: []string{"(503 )", "status 503, )"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := describeAttachPreflight(tc.in, "a1")
+			for _, want := range tc.contains {
+				assert.Contains(t, err.Error(), want)
+			}
+			for _, not := range tc.excludes {
+				assert.NotContains(t, err.Error(), not)
+			}
+			assert.NotContains(t, err.Error(), "{agent}")
+			assert.ErrorIs(t, err, tc.in)
+		})
+	}
+	t.Run("other statuses unchanged", func(t *testing.T) {
+		in := &wsclient.PTYPreflightError{Status: 502, Message: "bad gateway"}
+		assert.Same(t, error(in), describeAttachPreflight(in, "a1"))
+	})
+	t.Run("other errors unchanged", func(t *testing.T) {
+		in := errors.New("x")
+		assert.Same(t, in, describeAttachPreflight(in, "a1"))
+	})
+}
+
+// TestDescribeAttachPreflight_403KeepsUATHint: the described 403 still
+// carries "status 403", so a user access token gets the scope hint.
+func TestDescribeAttachPreflight_403KeepsUATHint(t *testing.T) {
+	in := &wsclient.PTYPreflightError{Status: 403, Code: "forbidden", Message: "no"}
+	err := attachErrorWithUATHint(describeAttachPreflight(in, "a1"), store.UATPrefix+"abc")
+	assert.Contains(t, err.Error(), "may lack agent:attach")
 }
 
 func TestAttachHubSession_CleanDetachReturnsNil(t *testing.T) {

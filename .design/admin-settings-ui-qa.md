@@ -155,7 +155,7 @@ These are correctly preserved during save via `rawConfig` passthrough (lines 794
 | Enable Telemetry Collection | false | OFF | YES |
 | Cloud Export Enabled | (not set) | OFF | YES |
 | Hub Reporting Enabled | (not set) | OFF | YES |
-| Local Debug Output Enabled | (not set) | OFF | YES |
+| Local Debug Output Enabled | (not set) | OFF | YES (control since removed: telemetry.local is accepted but ignored, ptone/scion#4103) |
 
 ## Save/Reload Tests
 

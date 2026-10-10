@@ -187,10 +187,25 @@ directory, not `/`.
 
 The Hub configuration file. The deploy script writes it in two stages:
 
-1. **During VM setup (Phase 3)** — `auth.mode: dev` for initial health checks
-   via SSH tunnel.
+1. **During VM setup (Phase 3)** — a bootstrap file with `server.auth.mode: dev` and
+   no proxy settings, so the Hub can start before IAP exists. Phase 3 checks
+   only the unauthenticated `/healthz` endpoint over SSH.
 2. **After IAP is ready (Phase 5)** — `auth.mode: proxy` with the IAP audience
    string, enabling IAP-based authentication.
+
+The Phase 3 file does **not** turn on dev auth. `server.auth.mode: dev` on its own
+does not enable it, so until Phase 5 the Hub answers `/healthz` normally and
+every authenticated API call with `401`. Dev auth is turned on only by the
+`--dev-auth` flag or `server.auth.dev_mode: true` (environment variable
+`SCION_SERVER_AUTH_DEVMODE=true`). The server refuses to start with dev auth
+when the web server binds a non-loopback address. The Hub unit binds
+`0.0.0.0` so that the IAP proxy can reach it, so do not enable dev auth on
+the VM. If you need authenticated access before Phase 5, configure OAuth
+(see [Authentication](../../docs-site/src/content/docs/hosted/single-node/auth.md)).
+For a short-lived test only, you can bind the Hub to loopback
+(`--host 127.0.0.1`) with dev auth and reach it through an SSH tunnel
+(`gcloud compute ssh scion-hub-my-hub -- -L 8080:localhost:8080`). Revert both
+before Phase 5, because the IAP proxy cannot reach a loopback-only Hub.
 
 Final configuration:
 
@@ -199,7 +214,7 @@ schema_version: "1"
 image_registry: "localhost/scion"
 server:
   hub:
-    name: "my-hub"
+    hub_name: "my-hub"
     admin_emails:
       - "you@example.com"
   maintenance:
@@ -216,7 +231,7 @@ server:
       provider: iap
       iap:
         audience: "/projects/PROJECT_NUMBER/locations/REGION/services/SERVICE"
-  listen_port: 8080
+  # Listen port: set by --web-port in scion-hub.service, not here.
 ```
 
 Key settings:
@@ -224,6 +239,11 @@ Key settings:
 - `schema_version` — must be `"1"` (not `settings_version`).
 - `image_registry` — required, even for locally built images. Set to
   `localhost/scion` for local builds, or the registry path for remote images.
+- `hub.hub_name` — display name for the Hub, also reported as the
+  `scion.hub.name` telemetry attribute. The name also appears in health
+  output and scopes the diagnostics log queries. The deploy script sets
+  it to the hub name you deploy with; when unset, the VM host name is
+  used.
 - `admin_emails` — email(s) auto-promoted to super-admin on login.
 - `storage.local_path` — all workspace data stored on the VM's local disk.
 - `secrets.backend: local` — secrets are read from `hub.env` on disk, not from
@@ -496,8 +516,9 @@ gcloud compute ssh scion-hub-my-hub \
 
 ### Hub starts but IAP authentication does not work
 
-After the IAP proxy is deployed, the script updates `settings.yaml` from
-`auth.mode: dev` to `auth.mode: proxy` and restarts the Hub. If authentication
+After the IAP proxy is deployed, the script updates `settings.yaml` from the
+Phase 3 bootstrap (`server.auth.mode: dev`, which does not enable dev auth; see
+[settings.yaml](#settingsyaml)) to `auth.mode: proxy` and restarts the Hub. If authentication
 is not working:
 
 1. Verify the settings on the VM:

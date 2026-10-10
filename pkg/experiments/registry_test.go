@@ -336,6 +336,25 @@ func TestDefaultOnFlagsConsistency_DetectsMissingEntry(t *testing.T) {
 	}
 }
 
+func TestFlatRuntimeBrokersExperimentRegistered(t *testing.T) {
+	e, ok := Default().Lookup(FlatRuntimeBrokers)
+	if !ok {
+		t.Fatalf("%s is not registered", FlatRuntimeBrokers)
+	}
+	if FlatRuntimeBrokers != "hub.flat_runtime_brokers" {
+		t.Fatalf("frozen name changed: %q", FlatRuntimeBrokers)
+	}
+	if e.Default {
+		t.Fatal("flat Runtime Brokers must default to off")
+	}
+	if !e.HasLayer(LayerServer) || e.HasLayer(LayerWeb) {
+		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
+	}
+	if e.Title == "" || e.Description == "" || e.Issue != "ptone/scion#2926" || e.Owner == "" || e.Stage != StageAlpha {
+		t.Fatalf("incomplete registration: %+v", e)
+	}
+}
+
 // TestArtifactsExperiment_Registered pins the hub.artifacts entry: it gates
 // both the web surfaces and the hub routes, so it needs both layers, and it
 // ships off.
@@ -364,7 +383,7 @@ func TestAuthorizationDecisionAuditV2_RegisteredDefaultOff(t *testing.T) {
 		t.Errorf("compiled registry entry %q absent", AuthorizationDecisionAuditV2)
 		return
 	}
-	if entry.Default || len(entry.Layers) != 1 || entry.Layers[0] != LayerServer || entry.Stage != StageAlpha || entry.Issue != "ptone/scion#2379" || entry.Owner != "audit-update" || entry.ReviewBy != "2026-11-30" || entry.Title != "Authorization decision audit v2" || entry.Description != "Routes admitted authorization decisions to the typed structured log sink; defaults to the retained legacy writer when admission, freshness or logging health fails." {
+	if entry.Default || len(entry.Layers) != 1 || entry.Layers[0] != LayerServer || entry.Stage != StageAlpha || entry.Issue != "ptone/scion#2379" || entry.Owner != "audit-update" || entry.ReviewBy != "2026-11-30" || entry.Title != "Authorization decision audit v2" || entry.Description != "Routes admitted authorization decisions to the typed structured log sink; decisions are not persisted when admission, freshness or logging health fails." {
 		t.Errorf("default-off decision-audit metadata mismatch: %+v", entry)
 	}
 }

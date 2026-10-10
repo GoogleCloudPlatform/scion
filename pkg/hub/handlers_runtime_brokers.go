@@ -424,6 +424,21 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 	}
 
 	if updates.Name != "" {
+		// A rename may not make a flat row's name or slug collide with
+		// another row, or another row's with a flat row (flat contract
+		// R2/R4); the refusal carries only the requested name and slug.
+		if !strings.EqualFold(updates.Name, broker.Name) {
+			slug := slugify(updates.Name)
+			conflict, err := store.RuntimeBrokerNameConflict(ctx, s.store, updates.Name, slug, broker.ID, !broker.IsFlat())
+			if err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			if conflict != nil {
+				writeRuntimeTargetRefusal(w, runtimeBrokerNameConflictRefusal(updates.Name, slug))
+				return
+			}
+		}
 		broker.Name = updates.Name
 	}
 	if updates.Labels != nil {
@@ -538,6 +553,14 @@ func (s *Server) checkBrokerDispatchAccess(ctx context.Context, w http.ResponseW
 		return false
 	}
 	return true
+}
+
+// writeBrokerDispatchForbidden writes the dispatch authorization denial
+// (canDispatchToBroker returned false). Every caller of canDispatchToBroker
+// that answers the request uses it, so the response cannot drift.
+func writeBrokerDispatchForbidden(w http.ResponseWriter) {
+	writeError(w, http.StatusForbidden, ErrCodeForbidden,
+		"You don't have permission to create agents on this broker", nil)
 }
 
 // enrichBrokerCreatorNames batch-resolves CreatedBy UUIDs to display names for a slice of brokers.
@@ -792,6 +815,14 @@ type brokerAgentHeartbeat struct {
 	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason: "crashed", "limits_exceeded", "preempted", or "evicted" (see state.ExitReason)
 }
 
+// heartbeatBrokerIsFlat reports whether the Runtime Broker sending a
+// heartbeat is flat. A broker that cannot be read is treated as before (not
+// flat), so legacy heartbeats are unchanged.
+func heartbeatBrokerIsFlat(load func() (*store.RuntimeBroker, error)) bool {
+	b, err := load()
+	return err == nil && b.IsFlat()
+}
+
 func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
@@ -894,6 +925,16 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			s.agentLifecycleLog.Warn("heartbeat: failed to load broker to refresh broker state",
 				"broker_id", id, "error", err)
 		} else {
+			// A flat row never stores Runtime Broker Profiles: a reported
+			// default profile, profile attach or profile SA mappings are
+			// dropped before the write.
+			if broker.IsFlat() && (heartbeat.DefaultProfile != nil || len(heartbeat.ProfileAttach) > 0 || len(heartbeat.ProfileSAMappings) > 0) {
+				s.agentLifecycleLog.Warn("heartbeat: ignoring Runtime Broker Profile fields reported for a flat Runtime Broker",
+					"broker_id", id)
+				heartbeat.DefaultProfile = nil
+				heartbeat.ProfileAttach = nil
+				heartbeat.ProfileSAMappings = nil
+			}
 			changed := false
 			if heartbeat.Capabilities != nil && !reflect.DeepEqual(broker.Capabilities, heartbeat.Capabilities) {
 				broker.Capabilities = heartbeat.Capabilities
@@ -1324,7 +1365,11 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				agent.AppliedConfig.HarnessAuth = agentHB.HarnessAuth
 				needsUpdate = true
 			}
-			if agentHB.Profile != "" && (agent.AppliedConfig == nil || agent.AppliedConfig.Profile == "") {
+			// No Runtime Broker-reported profile is written onto a pinned
+			// (flat) agent, or onto any agent of a flat Runtime Broker.
+			// The broker row is read last, only when a backfill would
+			// otherwise happen.
+			if agentHB.Profile != "" && !agent.IsPinned() && (agent.AppliedConfig == nil || agent.AppliedConfig.Profile == "") && !heartbeatBrokerIsFlat(loadHeartbeatBroker) {
 				if agent.AppliedConfig == nil {
 					agent.AppliedConfig = &store.AgentAppliedConfig{}
 				}

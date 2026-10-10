@@ -214,6 +214,62 @@ func (s *Server) resolveEnvSecretAccess(w http.ResponseWriter, r *http.Request, 
 	}
 }
 
+// authorizeHubEnvVarList decides read-only access to the hub-level
+// environment variable list for a user who does not pass the legacy admin
+// check in resolveEnvSecretAccess. Such a user is admitted when the standard
+// permission decision grants hub.env_vars.read on the hub.
+//
+// hubScope reports whether the request lists hub-level variables. readOnly is
+// true only when the caller was admitted here; the caller then lists plain
+// variables without secret metadata. When readOnly is false the caller must
+// fall through to resolveEnvSecretAccess, which keeps its existing checks for
+// legacy admins, agents, other scopes and refusals. ok is false only after an
+// error response has been written.
+//
+// This covers the list endpoint only. Single-variable reads, writes and every
+// secret endpoint keep using resolveEnvSecretAccess unchanged.
+func (s *Server) authorizeHubEnvVarList(w http.ResponseWriter, r *http.Request, scope string) (hubScope, readOnly, ok bool) {
+	if scope != store.ScopeHub {
+		return false, false, true
+	}
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	userIdent, isUser := identity.(UserIdentity)
+	if !isUser || isNilIdentity(userIdent) || userIdent.Role() == store.UserRoleAdmin {
+		// Agents, brokers, anonymous callers and legacy admins keep the
+		// existing hub-scope handling in resolveEnvSecretAccess.
+		return true, false, true
+	}
+	if s.authzService == nil {
+		return true, false, true
+	}
+	decision := s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(userIdent),
+		Credential: credentialContextForIdentity(userIdent),
+		Resource:   Resource{Type: "hub", ID: "hub"},
+		Action:     ActionRead,
+		Permission: "hub.env_vars.read",
+	})
+	if !decision.Allowed {
+		Forbidden(w)
+		return true, false, false
+	}
+	return true, true, true
+}
+
+// withoutSecretEnvVars drops entries flagged as secrets, so a read-only
+// hub-level list never carries secret metadata.
+func withoutSecretEnvVars(envVars []store.EnvVar) []store.EnvVar {
+	out := make([]store.EnvVar, 0, len(envVars))
+	for _, ev := range envVars {
+		if ev.Secret {
+			continue
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
 func (s *Server) handleEnvVars(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -232,9 +288,23 @@ func (s *Server) listEnvVars(w http.ResponseWriter, r *http.Request) {
 		scope = store.ScopeUser
 	}
 
-	scopeID, ok := s.resolveEnvSecretAccess(w, r, scope, query.Get("scopeId"), false)
-	if !ok {
+	// includeSecretMeta stays true for every caller that passes the shared
+	// env/secret access check. A caller admitted only by hub.env_vars.read
+	// gets plain variables: environment-type secrets are secret metadata
+	// and stay behind the secret access check.
+	includeSecretMeta := true
+	var scopeID string
+	if hubScope, readOnly, ok := s.authorizeHubEnvVarList(w, r, scope); !ok {
 		return
+	} else if hubScope && readOnly {
+		scopeID = s.hubID
+		includeSecretMeta = false
+	} else {
+		resolved, ok := s.resolveEnvSecretAccess(w, r, scope, query.Get("scopeId"), false)
+		if !ok {
+			return
+		}
+		scopeID = resolved
 	}
 
 	filter := store.EnvVarFilter{
@@ -249,8 +319,12 @@ func (s *Server) listEnvVars(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	envVars = s.mergeEnvironmentSecrets(ctx, envVars, filter,
-		"failed to list environment secrets for env var merge")
+	if includeSecretMeta {
+		envVars = s.mergeEnvironmentSecrets(ctx, envVars, filter,
+			"failed to list environment secrets for env var merge")
+	} else {
+		envVars = withoutSecretEnvVars(envVars)
+	}
 
 	// Mask sensitive values
 	for i := range envVars {
@@ -2154,6 +2228,12 @@ func (s *Server) autoLinkProviders(ctx context.Context, project *store.Project) 
 	}
 
 	for _, autoBroker := range autoProviders.Items {
+		// A flat Runtime Broker never receives an automatic link or
+		// default, whatever the experiment state: it is linked only by an
+		// explicit link action.
+		if autoBroker.IsFlat() {
+			continue
+		}
 		provider := &store.ProjectProvider{
 			ProjectID:  project.ID,
 			BrokerID:   autoBroker.ID,

@@ -26,9 +26,15 @@ schema_version: "1"
 # default_max_turns: 0                # Max conversation turns (0 = unlimited)
 # default_max_model_calls: 0          # Max model API calls (0 = unlimited)
 # default_max_duration: ""            # Max agent duration (e.g. "1h", "" = unlimited)
-# default_resources:                  # Default resource spec for agents
-#   cpu: "1"
-#   memory: "512Mi"
+# default_resources:                  # Default resource spec for agents (nested;
+#                                     # cpu/memory directly at this level are ignored)
+#   requests:
+#     cpu: "500m"                     # Kubernetes only
+#     memory: "1Gi"                   # Docker/Podman: --memory-reservation
+#   limits:
+#     cpu: "2"                        # Docker/Podman: --cpus (built-in default "2")
+#     memory: "8Gi"                   # Docker/Podman: --memory (no default limit)
+#   disk: "40Gi"                      # Kubernetes only: ephemeral-storage
 
 # Layer 1 — Image Registry
 # image_registry: ""                  # Container image registry URL
@@ -56,13 +62,13 @@ schema_version: "1"
 #   hub:
 #     enabled: true
 #     report_interval: "60s"
-#   local:
+#   local:                             # accepted but ignored (no reader today)
 #     enabled: false
 #     file: ""
 #     console: false
 #   filter:
 #     enabled: false
-#     respect_debug_mode: true
+#     respect_debug_mode: true         # accepted but ignored (no reader today)
 #     events:
 #       include: []
 #       exclude: []
@@ -81,7 +87,6 @@ server:
   mode: workstation                    # "workstation" or "hosted"
   env: prod                            # "prod", "dev", "staging"
   log_level: info                      # "debug", "info", "warn", "error"
-  # log_format: ""                     # "" (default), "json"
 
   # -------------------------------------------------------------------------
   # Layer 0 — Hub Listeners (restart required)

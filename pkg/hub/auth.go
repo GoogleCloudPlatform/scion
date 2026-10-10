@@ -68,7 +68,10 @@ type AuthConfig struct {
 	// proxy identity. It runs provisionUser and returns the stored user.
 	// Required when ProxyAuthenticator is set.
 	ProxyUserProvisioner func(ctx context.Context, info *ProxyUserInfo) (UserIdentity, error)
-	// AuthMode is the exclusive human auth mode: "oauth", "proxy", "dev".
+	// AuthMode is the configured human auth mode (server.auth.mode), copied
+	// from ServerConfig.AuthMode. It is informational here: the auth
+	// middleware does not read it. Proxy authentication is driven by
+	// ProxyAuthenticator, and dev auth by DevAuthToken.
 	AuthMode string
 	// FederationAuth points to the server's atomic.Pointer for the
 	// FederationAuthenticator. nil when federation was never configured.

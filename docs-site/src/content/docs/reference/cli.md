@@ -14,13 +14,19 @@ These flags are available on all commands:
 - `--format <string>`: Output format (`json` or `plain`).
 - `--hub <url>`: Hub API endpoint URL (overrides `SCION_HUB_ENDPOINT`).
 - `--no-hub`: Disable Hub integration for this invocation (local-only mode).
-- `-y, --yes`: Skip confirmation prompts.
-- `--non-interactive`: Full non-interactive mode (implies `--yes`, errors on ambiguous prompts).
-- `--debug`: Enable verbose debug output.
+- `-y, --yes`: Answer Yes to every confirmation prompt, including destructive ones whose interactive default is No. Required to confirm when stdin is not a terminal.
+- `--non-interactive`: Full non-interactive mode (implies `--yes`, so it also answers Yes to every confirmation; errors on ambiguous prompts).
+- `--debug`: Enable verbose debug output for this command. Agents it starts are not affected; use `--agent-log-level` on `scion start` or `scion resume` to debug an agent.
 - `--tz <IANA zone>`: Show times in this time zone, for example `America/New_York`. Defaults to the local zone (which honors `TZ`). `Local` and invalid names are rejected.
 - `--utc`: Show times in UTC. Takes precedence over `--tz`.
 
+**Without a terminal.** When stdin is not a terminal, the CLI never reads prompt answers from it: a yes/no confirmation without `--yes` answers No, and a choice with no safe default fails with an error naming the flag to use. Prompts and auto-confirm notes go to stderr, so `--format json` output on stdout stays parseable. ANSI colour is used only on a terminal and never when `NO_COLOR` is set. To drive the CLI from a coding agent, see [Using the scion CLI from a coding agent](/scion/hosted/user/coding-agent-cli/).
+
+**Behaviour change:** confirmations run without a terminal used to take their default, often Yes. They now answer No. Scripts that relied on this, for example auto-linking a project from cron or CI, must pass `--yes`.
+
 Human-readable times use a 24-hour clock and always include a zone. `--tz` and `--utc` only change human-readable output: JSON output (`--format json`) keeps the API's UTC values.
+
+**Debug output.** `SCION_LOG_LEVEL` controls the CLI's `[DEBUG]` and tagged lines such as `[hubsync]`; see [Controlling the Log Level](/scion/hosted/single-node/observability/#controlling-the-log-level). Inside an agent container (agent CLI mode), the CLI ignores the deprecated `SCION_DEBUG`, which older brokers set in every agent, so use `SCION_LOG_LEVEL=debug` or `--debug` there. Best-effort Hub sync steps that fail without stopping the command are reported as `Warning:` lines on stderr whatever the log level.
 
 **Project resolution order.** The CLI picks the project in this order:
 
@@ -98,10 +104,12 @@ ptone/scion#1855.
     - `--no-auth`: Disable authentication propagation (also sent to the Hub in Hub mode; applies when the agent is created).
     - `-d, --detached`: Run in detached mode (default true).
     - `--config <path>`: Path to inline agent config file (YAML/JSON) for Just-In-Time (JIT) overrides, or `-` for stdin.
+    - `--task-file <path>`: Read the task from a file, or `-` for stdin, up to 96 KiB. See [Long tasks and task files](#long-tasks-and-task-files).
     - `--harness-config <string>`: Named harness configuration to use.
     - `--thinking-level <value>`: Thinking level to inject into the agent config: an integer from 0 to 100, or a case-insensitive shorthand: `low` (25), `medium` (50), `high` (75), `max` (100). The level is stored as an integer; each harness maps it to its own tiers (see [Thinking Level Map](/scion/reference/harness-settings/#thinking-level-map-thinking)).
     - `--harness-auth <string>`: Override auth method for the harness. Universal types: `api-key`, `oauth-token`, `vertex-ai`, `auth-file` (each harness accepts a subset — see [Harness Authentication](/scion/local/agent-credentials/)).
     - `--broker <string>`: Preferred runtime broker ID, name, or slug for execution. In Hub mode, a broker that does not exist fails with `runtime_broker_not_found` (404), and the message lists the brokers you can use.
+    - `--agent-log-level <spec>`: Set `SCION_LOG_LEVEL` in the agent's environment, for example `debug` or `info,hubsync=debug` (same syntax as [`SCION_LOG_LEVEL`](/scion/hosted/single-node/observability/#debugging-an-agent)). Works for local and Hub agents; an invalid value fails before anything starts. Agents never inherit `--debug` or the server's debug setting. Through a Hub the value is saved in the agent's applied config and kept on later restarts (remove it by deleting and re-creating the agent); when the Hub reuses an existing agent, the flag is not applied and `scion start` or `scion resume` prints a warning. Locally it applies to that launch only, so a later `start` or `resume` without the flag drops it.
     - `--message-mode <mode>`: Set the agent's initial message mode (`project`, `branch`, `lineage`, `none`, or `hub`). Defaults to `project`. See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes).
     - `--notify`: Get notified via the browser or system when the spawned agent reaches a terminal state.
     - `--no-wait`: *(Hub mode)* Return as soon as the Hub accepts the launch instead of waiting for the agent to reach `running`. Ignored with `--attach`.
@@ -117,29 +125,65 @@ going instead of rolling the agent back. Each dispatch attempt is bounded at
 120 seconds, so a slow cold start (for example on Kubernetes) can still fail on
 a synchronous launch; enable [asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create) for those. While waiting, each launch step is printed to stderr (nothing
 extra under `--format json`). If the wait times out, or you press Ctrl-C, only
-the wait stops: the launch continues on the Hub, and re-running
-`scion start <agent-name>` resumes waiting. Ctrl-C exits with status 130 and
-SIGTERM with 143; a failed launch or a timeout exits 1. Network errors and
-Hub answers of 5xx, 408 or 429 are retried while waiting; any other 4xx (for
-example 401 or 403) stops the wait at once with the Hub's error, and the launch
-continues on the Hub. One exception: until the agent's status has been read
-once, a 403 or 404 is retried for up to 5 seconds while the Hub is still
-launching the agent (an asynchronous launch, or a start after a workspace
-upload). If an agent launcher still cannot read the new agent's status after
-that, the wait reports that the launch was accepted and its status is not
-readable with this credential's scope, and exits 1; the launch continues on the
-Hub. When the Hub has already finished the start and you wait with `--attach`,
-there is no retry: an agent launcher's 404 gives the same not-readable report
-at once. The agent is reported as deleted only on a 404 after its status was
-read, or, for a user's login, on a 404 before that: after the 5-second retry
-while the Hub is still launching the agent, and at once otherwise. If the
-agent's create did not complete (for example the image could not be pulled),
-the error shows the stored template and task. Delete the agent and create it
-again (`scion delete <agent-name>`, then `scion start` with the same template
-and task). If soft-delete retention is enabled on the Hub, the name stays
-reserved until the agent is deleted with force=true or purged; until then, use
-a new name. With `--format json`, `--attach` after a workspace upload attaches
+the wait stops: the launch continues on the Hub, and re-running `scion start
+<agent-name>` resumes waiting. When the Hub accepted the launch and the wait
+times out, `start` reports the agent as accepted and launching, says why it
+stopped following the launch, suggests `scion list` to check on it, and exits
+0, so a caller does not retry a launch that is under way (under `--format json`
+the result has status `success` and a `launchNote` detail). With `--attach`,
+which needs a running agent, a timeout exits 1. Ctrl-C exits with status 130
+and SIGTERM with 143; a rejected create, a failed launch or an agent deleted
+while launching exits 1. Network errors and Hub answers of 5xx, 408 or 429 are
+retried while waiting; any other 4xx (for example 401 or 403) stops the wait at
+once with the Hub's error, and the launch continues on the Hub. One exception:
+until the agent's status has been read once, a 403 or 404 is retried for up to
+5 seconds while the Hub is still launching the agent (an asynchronous launch,
+or a start after a workspace upload). If an agent launcher still cannot read
+the new agent's status after that, `start` reports that the launch was accepted
+and its status is not readable with this credential's scope, and exits 0 like a
+timeout (1 with `--attach`); the launch continues on the Hub. When the Hub has
+already finished the start and you wait with `--attach`, there is no retry: an
+agent launcher's 404 gives the same not-readable report at once, and exits 1.
+The agent is reported as deleted only on a 404 after its status was read that
+persists through a 5-second retry (or until the wait ends, if that is sooner),
+or, for a user's login, on a 404 before that: after the 5-second retry while
+the Hub is still launching the agent, and at once otherwise. If the agent's
+create did not complete (for example the image could not be pulled), the error
+shows the stored template and task. Delete the agent and create it again
+(`scion delete <agent-name>`, then `scion start` with the same template and
+task). If soft-delete retention is enabled on the Hub, the name stays reserved
+until the agent is deleted with force=true or purged; until then, use a new
+name. With `--format json`, `--attach` after a workspace upload attaches
 without printing the JSON result.
+
+#### Long tasks and task files
+
+`--task-file <path>` on `scion start` and `scion create` reads the task from a
+file (`-` reads stdin). Use it for long briefs that are too big for a command
+line or a message. Any `[task]` arguments come first, followed by a blank line
+and then the file. The file must be UTF-8 text and not empty or whitespace
+only. The whole task, arguments included, can be at most 96 KiB (98304 bytes).
+The CLI checks this before it contacts the Hub, and anything larger is
+rejected. The Hub forwards the create request to the runtime broker as JSON in
+a control channel message of at most 1 MiB. Even a task made only of characters
+that JSON escapes to six bytes, such as `<`, `>` and `&`, fits in that message
+with room for the rest of the request. The task goes in the create request like
+any other task. The Hub stores it with the agent, so this works for agents a
+Hub runs on any runtime, including Kubernetes agents without access to a
+storage bucket. It also works when an agent launches another agent: the agent's
+CLI reads the file from the agent's own filesystem.
+
+Whenever an agent starts with a task, from arguments, `--task-file` or
+`prompt.md`, the full text is written to `~/.scion/task.md` in the agent's home
+directory (mode 0644). Each start that has a task replaces that file; a
+symbolic link at that path is replaced, never written through, and the start
+fails if `~/.scion` is a symbolic link. The task starts the harness inside a
+tmux command, and tmux rejects commands larger than about 16 KB. The harness
+gets a task inline, as before, when it takes at most 8 KiB (8192 bytes) in that
+command once quoted for the shell. Each single quote (`'`) takes 13 bytes
+there, so a task with many quotes is passed as a file at a smaller size. A
+larger task is replaced by a short task that names `~/.scion/task.md` and its
+size and asks the agent to read the whole file.
 
 ### `scion create`
 
@@ -171,13 +215,14 @@ failed start.
     - `-b, --branch <string>`: Git branch to use for the agent workspace.
     - `-w, --workspace <string>`: Host path or project-relative subdirectory to mount as `/workspace`.
     - `--config <path>`: Path to inline agent config file (YAML/JSON), or `-` for stdin.
+    - `--task-file <path>`: Read the task from a file, or `-` for stdin, up to 96 KiB. See [Long tasks and task files](#long-tasks-and-task-files).
     - `--harness-config <string>` (alias `--harness`): Named harness configuration to use.
     - `--harness-auth <string>`: Override auth method for the harness (`api-key`, `oauth-token`, `auth-file`, `vertex-ai`).
     - `--broker <string>`: Preferred runtime broker ID or name.
     - `--label <key=value>`: Label for the agent (repeatable).
     - `--role <string>`: Agent role for Hub API access (`none`, `readonly`, `baseline`, `full`).
     - `--message-mode <mode>`: Set the agent's initial message mode (`project`, `branch`, `lineage`, `none`, or `hub`). See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes).
-    - `--service-account <string>`: GCP service account ID to assign (Hub mode).
+    - `--service-account <string>`: GCP service account to assign (Hub mode): its id, email or display name. An email matches the project's own account before a hub-wide one; a display name that matches more than one account returns `identity_ambiguous` with the candidates' ids, and you retry with an id.
     - `--upload-template`, `--no-upload`, `--template-scope <scope>`: Template upload behavior in Hub mode.
 
 ### `scion stop`
@@ -239,6 +284,7 @@ session.
     - `-a, --attach`: Attach to the agent immediately.
     - `-f, --force`: Force resume an agent in the `error` phase. This attempts an in-place restart of a crashed or interrupted session, preserving the prior harness conversation state instead of starting fresh.
     - `--no-wait`, `--wait-timeout <duration>`: *(Hub mode)* Same as for [`scion start`](#scion-start-or-run).
+    - `--agent-log-level <spec>`: Same as for [`scion start`](#scion-start-or-run). Through a Hub, resume reuses the existing agent, so the flag is not applied and `scion resume` prints a warning; the value saved when the agent was created stays in effect. Locally it applies to this launch only.
 
 ### `scion attach`
 
@@ -253,8 +299,9 @@ If the agent is stopped, the attach ends immediately rather than waiting and ret
 - **Key Bindings:**
     - `Ctrl-b`, then `d`: Detach from the session without stopping the agent (the tmux detach key; see [Interactive Sessions with Tmux](/scion/local/tmux/)). The container runtime's default `Ctrl-p Ctrl-q` detach sequence is not used, so `Ctrl-p` reaches the agent. Podman's detach keys are off. Docker's are moved to `Ctrl-\` then `Ctrl-^`: a single `Ctrl-\` is delayed until the next key, and the full sequence ends the attach while the agent keeps running (see [Interactive Sessions with Tmux](/scion/local/tmux/#basic-operations)).
 - **Requires a terminal:** `scion attach`, `scion start --attach` and `scion resume --attach` need an interactive terminal on both stdin and stdout. Without one (for example from a script or a coding harness) they fail at once with `attach requires an interactive terminal` and a non-zero exit, before starting anything. Use `scion look` to view a session and `scion message` to send input instead.
-- **Not running:** if the Hub reports the agent as not running, `scion attach` names the next step for the agent's phase: `scion resume <agent> --attach` for a stopped or suspended agent, waiting and then resuming for a stopping agent, `scion logs <agent>` and then resuming for an agent in the `error` phase, and `scion start <agent> --attach` for anything else. An agent whose runtime doesn't support attach gets that error first, whatever its phase.
-- **No reconnect:** in Hub mode `scion attach` does not reconnect. When the session ends for any reason other than a detach, the command exits non-zero with a message that says what happened and what to run next, based on the [PTY close code](/scion/reference/api/#pty-close-codes). For example, a dropped runtime broker (`4503`) suggests running `scion attach` again, and an ended session (`4410`) suggests `scion resume`. `scion start --attach` and `scion resume --attach` use the same attach flow and print the same messages.
+- **Not running:** if the Hub reports the agent as not running, `scion attach` names the next step for the agent's phase: `scion resume <agent> --attach` for a stopped or suspended agent, waiting and then resuming for a stopping agent, `scion logs <agent>` and then resuming for an agent in the `error` phase, and `scion start <agent> --attach` for anything else. A managed agent is refused before the phase check, whatever its phase; any other agent gets the Hub preflight (below) once it is running.
+- **Preflight:** in Hub mode `scion attach` asks the Hub whether it can reach the agent's terminal (a plain `GET` of the agent's `/pty` endpoint) before the first connection and before each automatic reconnect. The Hub picks the path: the Runtime Broker, or the agent's own session when the broker's runtime has no attach. A refusal (for example `503`) ends the command with the Hub's reason and is not retried; if the Hub cannot be reached before a reconnect, the reconnect is retried after the usual backoff, within the limit of 3 short attempts in a row; when the Hub has no path at all (`runtime_attach_unsupported`), the message says so. `scion start --attach` and `scion resume --attach` use the same preflight.
+- **Reconnect:** in Hub mode `scion attach` reconnects by itself, once per close, when the session closes with `4503` (after a random delay of up to 5 seconds) or `4504` or `1011` (after the normal backoff), and the screen redraws. It stops after 3 reconnects in a row whose sessions each ended within a minute, and Ctrl-C during the wait stops it. It does not reconnect after any other close. When the session ends for any other reason than a detach, a reconnect fails, or the CLI stops reconnecting after 3 short sessions in a row, the command exits non-zero with a message that says what happened and what to run next, based on the [PTY close code](/scion/reference/api/#pty-close-codes). For example, a dropped runtime broker (`4503`) whose reconnect also failed suggests running `scion attach` again, and an ended session (`4410`) suggests `scion resume`. `scion start --attach` and `scion resume --attach` use the same attach flow and print the same messages.
 - **Hub URL with a path prefix:** a Hub served under a path (for example `https://example.com/scion`) works for attach as it does for other commands.
 
 See [Attaching to a remote agent](/scion/hosted/user/hosted-user/#attaching-to-a-remote-agent) for Hub-mode details such as who can attach.
@@ -472,11 +519,26 @@ Displays the logs of an agent.
 - **Flags:**
     - `-f, --follow`: Stream logs.
 
+### `scion look`
+
+Shows an agent's current terminal output.
+
+**Usage:** `scion look <agent> [flags]`
+
+- **Flags:**
+    - `--plain`: Strip ANSI escape sequences from the output.
+    - `--full`: Capture the full scrollback history.
+    - `-n, --num-lines <n>`: Capture the last `n` lines of scrollback. Cannot be combined with `--full`.
+
+**GCP identity header (Hub mode).** When the Hub has recorded a GCP identity for the agent, `scion look` first prints one line naming it: the metadata mode, the assigned service account and the agent's profile, for example `GCP identity: assign as "Build worker" (profile: gke)`. The account is shown by its registered display name, or by its email when it has no display name or you cannot read the project's service account registrations. `block` and `passthrough` show the mode only. The line goes to stderr, so stdout still carries only the terminal output for scripts that parse it. No line is printed when no identity is recorded or the agent cannot be read.
+
 ### `scion list` (or `ps`)
 
 Lists all agents and their status.
 
 **Usage:** `scion list [flags]`
+
+**GCP identity (Hub mode).** With `--format json`, each agent carries a `gcpIdentity` object when the Hub has recorded one: `mode` (`block`, `passthrough` or `assign`) and, for `assign`, `serviceAccountId`, `serviceAccountEmail` and `displayName` (the registered display name, omitted when you cannot read the project's service account registrations). The table output has no identity column.
 
 `scion list` takes no positional arguments; passing one is an error. To name a reference agent for `--descendants`, `--ancestors`, or `--lineage`, use `=` (for example, `--descendants=foo`, not `--descendants foo`).
 
@@ -578,7 +640,7 @@ as stop, start, and restart); an agent can always reincarnate itself.
     - `--handoff-template`: Print the handoff template and exit. Ignores other flags and arguments, and does not contact the Hub.
     - `--dry-run`: Print the resolved plan (old → new template, image, harness config, model, env key names, and branch) without migrating anything.
     - `--broker <name|id>`: Move the agent to another Runtime Broker (see [Moving to another Runtime Broker](#moving-to-another-runtime-broker) below). Both Runtime Brokers must mount the same NFS export, so the workspace moves without being copied. The CLI dry-runs the move first and stops if it is refused; add `--dry-run` to only check it.
-    - `--service-account <id>`: Patch the GCP service account of the new generation. Gets the same access checks as `scion create`.
+    - `--service-account <id|email|name>`: Patch the GCP service account of the new generation. Accepts the same forms and gets the same access checks as `scion create`.
     - `--role <role>`: Patch the agent role of the new generation: `none`, `readonly`, `baseline`, or `full`. Gets the same access checks as `scion create`; an agent reincarnating itself can lower its own role but not raise it.
     - `--model <model>`: Patch the model of the new generation. Model aliases are accepted, as with `scion start`.
     - `--harness-auth <method>`: Patch the harness auth method of the new generation: `api-key`, `oauth-token`, `auth-file`, or `vertex-ai`.
@@ -601,10 +663,25 @@ To reincarnate another principal's agent you must be able to delegate the agent'
 keeps its existing delegator unless you change its role with `--role`; then you become its recorded
 delegator (refused with `403` if you descend from the agent, since that would close a delegation
 loop). If you are an agent, the agent then depends on your delegation chain, so prefer a user for role
-changes on long-lived agents. An agent whose delegator was changed by an earlier reincarnation by
-another agent (for example, one that now gets `403` when creating agents) is not repaired by this rule;
-recreate it. Two role changes by a signed-in user (for example to `baseline` and back) also re-point
-its edge to that user, but recreating is recommended. A caller who cannot delegate the role, for
+changes on long-lived agents.
+
+One exception repairs agents left without recorded provenance, for example after a hub upgrade. When
+a user reincarnates an agent without changing its role, and the agent's own delegation edge is
+missing or has no recorded provenance, or an edge further up its chain has no recorded provenance
+and every edge between it and the agent is accepted on this hub, the user becomes the agent's
+recorded delegator. This clears the
+`ceiling_unrecorded` denial, which blocks service-account assignment among other actions. The
+**Reincarnate** button in the web UI does the same. A reincarnation by the agent itself or by another
+agent keeps the edge, and so does a user's reincarnation of an agent whose chain is fully recorded,
+or whose first problem walking up from the agent is an edge this hub does not accept (for example
+one recorded with local development credentials on a hub without dev auth); recreate such an agent.
+An agent whose chain has a missing ancestor edge or a loop is suspended, and a reincarnation of it is
+refused with `409`.
+
+An agent whose delegator was changed by an earlier reincarnation by another agent (for example, one
+that now gets `403` when creating agents) is not repaired by this rule, because its chain is
+recorded; recreate it. Two role changes by a signed-in user (for example to `baseline` and back) also
+re-point its edge to that user, but recreating is recommended. A caller who cannot delegate the role, for
 example a non-admin reincarnating an agent with a privileged role, gets `403` from this authority
 check. It runs before the workspace and capability checks (`400`, `412`), so expect the `403` first.
 
@@ -923,13 +1000,15 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
 
 ### `scion artifact`
 
-Publishes files as artifacts and fetches them by reference (`scion://artifact/<id>[@<seq>]`). Requires Hub mode and the `hub.artifacts` experiment (off by default). Available in agent mode. See [Artifacts](/scion/reference/artifacts/) for access rules and the API.
+Publishes files as artifacts and fetches them by reference (`scion://artifact/<id>[@<seq>]`). Requires Hub mode and the `hub.artifacts` experiment (off by default). Available in agent mode, except `share`. See [Artifacts](/scion/reference/artifacts/) for access rules and the API.
 
 - `scion artifact publish <file|folder>`: Publish a file or folder in the current project; prints its reference, version and web page URL.
     - Flags: `--title <title>` (set when the artifact is created; default: the entry file's name), `--key <key>` (publishing again under the key adds a version), `--note <text>`, `--entry <path>` (a folder's entry file).
 - `scion artifact get <ref>`: Write an artifact's entry file to stdout, or with `--out` the file or the whole bundle.
     - Flags: `--out`, `-o <path>` (a file, an existing directory for a single file, or the directory a bundle is written into), `--force` (replace files that already exist under `--out`).
 - `scion artifact versions <ref>`: List an artifact's versions, newest first; the current one is marked `*`.
+- `scion artifact share <ref>`: Create a share link and print it, with its expiry and the command that revokes it. The link is shown only once. Only the artifact's owner or a user with an admin grant can share it; not available in agent mode, and the Hub refuses agents. See [Share links](/scion/reference/artifacts/#share-links).
+    - Flags: `--ttl <n>h|<n>d` (link lifetime; default: the Hub's, 7 days unless changed; a lifetime above the Hub's maximum, 30 days unless changed, is rejected, not shortened), `--list` (list the active links instead), `--revoke <link-id>` (revoke one instead).
 
 ## Notification Management
 
@@ -1018,6 +1097,8 @@ Manages Scion server components (Hub and Broker).
         - `--port <int>`: Port to listen on.
         - `--db <string>`: Database driver/connection.
         - `--dev-auth`: Enable dev-auth authentication.
+        - `--debug`: Set the server's default log level to `debug`. It changes logging only; see [Controlling the Log Level](/scion/hosted/single-node/observability/#controlling-the-log-level).
+        - `--enable-debug-endpoints`: Serve diagnostic endpoints for local development. Off by default and independent of `--debug`. Not for hosted deployments: the server refuses to start in hosted mode (`--hosted`, `--production`, or server mode `hosted` or `production` from `settings.yaml` or `SCION_SERVER_MODE`) when this flag is set.
         - `--admin-emails <emails>`: Email addresses to auto-promote to the administrator role. This flag is **repeatable** and also accepts a **comma-separated list** (e.g. `--admin-emails admin1@example.com,admin2@example.com --admin-emails admin3@example.com`). Strict empty-value validation is enforced.
 - `scion server backfill`: Scan historical messages that predate the conversation model and assign them to conversations based on their thread, sender, and recipient metadata.
     - **Safety Default (Dry-Run):** By default, the command runs in DRY-RUN mode — scanning and reporting what would change without modifying the database. You must explicitly pass `--execute` to apply changes.

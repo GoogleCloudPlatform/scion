@@ -103,7 +103,7 @@ These write into the local `env map[string]string` which becomes `opts.Env`:
 | B12 | `start_context.go:354` | `SCION_BROKER_NAME` | `s.config.BrokerName` | **plain** |
 | B13 | `start_context.go:357` | `SCION_BROKER_ID` | `s.config.BrokerID` | **plain** |
 | B14 | `start_context.go:360` | `SCION_CREATOR` | `in.CreatorName` | **plain** |
-| B15 | `start_context.go:364` | `SCION_DEBUG` | Literal `"1"` | **plain** |
+| B15 | _removed_ (ptone/scion#4098) | `SCION_DEBUG` | No longer written. The broker used to set literal `"1"` when it ran with debug; agents no longer inherit debug from the broker. An explicit `SCION_LOG_LEVEL` reaches the agent through B1/B2 (request env). | n/a |
 | B16 | `start_context.go:384-402` | `SCION_METADATA_MODE`, `SCION_METADATA_PORT`, `SCION_METADATA_SA_EMAIL`, `SCION_METADATA_PROJECT_ID`, `GCE_METADATA_HOST`, `GCE_METADATA_ROOT` | GCP metadata server config | **plain** |
 | B17 | `start_context.go:532` | `SCION_SHARED_WORKSPACE` | Literal `"true"` (deprecated) | **plain** |
 | B18 | `start_context.go:545` | `SCION_GIT_CLONE_URL` | `gc.URL` from GitClone config | **secret-injected** (URL may contain embedded credentials — this is the original #127 bug) |

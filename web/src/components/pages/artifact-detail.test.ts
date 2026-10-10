@@ -25,6 +25,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { ArtifactResponse, ArtifactVersion } from '../../client/artifacts.js';
 import type { ScionPageArtifactDetail } from './artifact-detail.js';
 import { resetPrincipalNames } from '../../client/principal-names.js';
+import { requestBodyText, requestUrl } from '../../client/__fixtures__/request-url.js';
 
 const ID = '5f1c2d3e-0000-4000-8000-000000000001';
 
@@ -83,7 +84,7 @@ function mockFetch(
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
+      const url = requestUrl(input);
       const method = init?.method ?? 'GET';
       urls.push(method === 'GET' ? url : `${method} ${url}`);
       if (method !== 'GET' && !url.endsWith('/view')) {
@@ -571,7 +572,7 @@ describe('artifact page', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-        const url = String(input);
+        const url = requestUrl(input);
         if (url === '/api/v1/agents/agent-1') {
           return Promise.resolve(
             new Response(JSON.stringify({ name: 'metrics-agent' }), { status: 200 })
@@ -626,7 +627,7 @@ describe('artifact page', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo | URL) => {
-        if (String(input) === `/api/v1/artifacts/${ID}`) {
+        if (requestUrl(input) === `/api/v1/artifacts/${ID}`) {
           return new Promise<Response>((resolve) => {
             release.push((m) => resolve(new Response(JSON.stringify(m), { status: 200 })));
           });
@@ -700,6 +701,44 @@ describe('artifact page', () => {
     releaseOlder!();
     await first;
     expect(priv.view!.url).toBe('/newer/');
+  });
+
+  it('offers Share only to who may manage the artifact, and opens the Share dialog', async () => {
+    mockFetch(artifact('notes.md', 'text/markdown'));
+    let el = await mount(true);
+    const shareButton = (): HTMLElement | undefined =>
+      Array.from(el.shadowRoot!.querySelectorAll('.header-actions sl-button')).find((b) =>
+        b.textContent!.includes('Share')
+      ) as HTMLElement | undefined;
+    expect(shareButton()).toBeUndefined();
+    expect(el.shadowRoot!.querySelector('scion-artifact-share-dialog')).toBeNull();
+    document.body.innerHTML = '';
+
+    mockFetch({ ...artifact('notes.md', 'text/markdown'), canManage: true });
+    el = await mount(true);
+    const dialog = el.shadowRoot!.querySelector('scion-artifact-share-dialog') as HTMLElement & {
+      open: boolean;
+      artifact: { id: string };
+    };
+    expect(dialog.open).toBe(false);
+    expect(dialog.artifact.id).toBe(ID);
+    shareButton()!.click();
+    await el.updateComplete;
+    expect(dialog.open).toBe(true);
+
+    // A saved expiry shows on the page's artifact; closing hides the dialog.
+    dialog.dispatchEvent(
+      new CustomEvent('artifact-changed', {
+        detail: {
+          ...artifact('notes.md', 'text/markdown').artifact,
+          expiresAt: '2026-12-01T00:00:00Z',
+        },
+      })
+    );
+    dialog.dispatchEvent(new CustomEvent('artifact-share-closed'));
+    await el.updateComplete;
+    expect(dialog.open).toBe(false);
+    expect(dialog.artifact).toMatchObject({ expiresAt: '2026-12-01T00:00:00Z' });
   });
   /** A review version (current) of a markdown artifact owned by an agent. */
   function reviewMeta(): ArtifactResponse {
@@ -811,10 +850,10 @@ describe('artifact page', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-        if (init?.method === 'POST' && String(input).endsWith('/versions'))
-          bodies.push(String(init.body));
-        if (init?.method === 'POST' && String(input).endsWith('/finalize'))
-          finalizeBodies.push(String(init.body));
+        if (init?.method === 'POST' && requestUrl(input).endsWith('/versions'))
+          bodies.push(requestBodyText(init.body));
+        if (init?.method === 'POST' && requestUrl(input).endsWith('/finalize'))
+          finalizeBodies.push(requestBodyText(init.body));
         return realFetch(input, init);
       })
     );
@@ -1053,7 +1092,7 @@ describe('artifact page', () => {
     });
     const inner = globalThis.fetch;
     vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) =>
-      fileStatus !== 200 && String(input).includes('/files/')
+      fileStatus !== 200 && requestUrl(input).includes('/files/')
         ? Promise.resolve(
             new Response('{"error":{"code":"internal","message":"boom"}}', { status: 500 })
           )
@@ -1365,7 +1404,7 @@ describe('artifact page', () => {
     });
     const inner = globalThis.fetch;
     vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) =>
-      gone && String(input) === `/api/v1/artifacts/${ID}` && (init?.method ?? 'GET') === 'GET'
+      gone && requestUrl(input) === `/api/v1/artifacts/${ID}` && (init?.method ?? 'GET') === 'GET'
         ? Promise.resolve(
             new Response('{"error":{"code":"not_found","message":"not found"}}', { status: 404 })
           )

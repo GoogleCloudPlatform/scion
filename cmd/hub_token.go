@@ -45,12 +45,35 @@ User access tokens (UATs) are scoped, revocable bearer tokens for
 non-interactive authentication. Each token is scoped to a single project
 and carries a set of action permissions.
 
+Most CLI commands that work in a project first look the project up, which
+needs the project:read scope. Include it in tokens used with the CLI.
+Scopes common CLI flows need:
+
+  Any command run in a project   project:read
+  scion list                     project:read, agent:list
+  scion look, scion logs         project:read, agent:read
+  scion start / create           project:read, agent:create, agent:read
+  scion message                  project:read, agent:message
+  scion attach                   project:read, agent:attach
+  scion stop, suspend, resume    project:read, agent:lifecycle
+  scion delete                   project:read, agent:delete
+
+Token scopes limit what the CLI can do on the Hub. Local actions, such
+as scion clean and any command run with --no-hub, act on the local
+machine with the user's file permissions, and token scopes don't limit
+them.
+
+A stored interactive login (from scion hub auth login) takes precedence
+over SCION_HUB_TOKEN. To run the CLI under a scoped token, use an
+environment with no stored login: a dedicated OS user, an isolated HOME,
+or log out first.
+
 Examples:
   # Create a token for CI that can create and monitor agents
   scion hub token create \
     --project my-project \
     --name "github-actions" \
-    --scopes agent:create,agent:read \
+    --scopes project:read,agent:create,agent:read,agent:list \
     --expires 90d
 
   # List your tokens
@@ -64,7 +87,7 @@ Examples:
 
   # Use the token in CI
   export SCION_HUB_TOKEN=scion_pat_...
-  scion hub agent dispatch --project my-project --template default --task "Run tests"`,
+  scion start ci-tests --project my-project --type default "Run tests"`,
 }
 
 var hubTokenCreateCmd = &cobra.Command{
@@ -91,9 +114,13 @@ Expiry (--expires) accepts %s.
 %s.
 Default: 90 days. Maximum: 1 year.
 
+CLI use: most CLI commands look the project up first, which needs
+project:read. See "scion hub token --help" for the scopes common CLI flows
+need.
+
 Examples:
-  scion hub token create --project my-project --name ci-token --scopes agent:create,agent:read
-  scion hub token create --project my-project --name deploy --scopes agent:manage --expires 30d`, permissions.UATScopeHelp(), expiryAcceptedForms, expiryUnitNote),
+  scion hub token create --project my-project --name ci-token --scopes project:read,agent:create,agent:read
+  scion hub token create --project my-project --name deploy --scopes project:read,agent:manage --expires 30d`, permissions.UATScopeHelp(), expiryAcceptedForms, expiryUnitNote),
 	Args: cobra.NoArgs,
 	RunE: runTokenCreate,
 }
@@ -549,9 +576,10 @@ func parseExpiryAt(s string, now time.Time) (time.Time, error) {
 	case 'd':
 		step = 24 * time.Hour
 	case 'y':
-		// A year is measured in calendar years below; for the limit check
-		// it counts as the hub's 1-year maximum.
-		step = store.UATMaxExpiry
+		// A year is a fixed 365 days, not a calendar year, so 1y always
+		// fits the hub's 365-day maximum token lifetime even when the
+		// following year contains 29 February.
+		step = 365 * 24 * time.Hour
 	default:
 		return time.Time{}, invalid
 	}
@@ -566,9 +594,6 @@ func parseExpiryAt(s string, now time.Time) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("%q exceeds the maximum expiry of 1 year (1y, %dd, %dh or %dm)",
 			s, int64(store.UATMaxExpiry/(24*time.Hour)), int64(store.UATMaxExpiry/time.Hour),
 			int64(store.UATMaxExpiry/time.Minute))
-	}
-	if unit == 'y' {
-		return now.AddDate(n, 0, 0), nil
 	}
 	return now.Add(time.Duration(n) * step), nil
 }

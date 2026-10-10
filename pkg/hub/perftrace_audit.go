@@ -25,9 +25,8 @@ import (
 // authorization service when server.hub.perf_trace is on. It forwards every
 // record to the wrapped emitter unchanged and exactly once, and counts it by
 // outcome against the request's trace. It never drops, copies, alters or
-// reorders a record. It reads only the record's Result field, before the
-// hand-off, because the emitter's asynchronous writer owns the record after
-// it.
+// reorders a record. It reads the Result field needed for counters, calls
+// the next emitter once, and measures that call.
 //
 // The authorization service emits exactly one record per decision (Decide
 // in authz.go), so with the default sampling rate of 1.0 the record count is

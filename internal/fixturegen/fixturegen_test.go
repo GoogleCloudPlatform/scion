@@ -45,6 +45,7 @@ func TestFixtureCoverage(t *testing.T) {
 
 	t.Logf("fixture covers %d domain tables", report.TotalTables())
 	for _, c := range report.Counts {
+		assert.NotEqual(t, "decision_audits", c.Table, "retired decision audit table must be absent")
 		t.Logf("  %-32s %d row(s)", c.Table, c.Count)
 	}
 

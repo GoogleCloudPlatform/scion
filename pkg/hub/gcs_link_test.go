@@ -384,6 +384,13 @@ type gcsFixture struct {
 func newGCSFixture(t *testing.T) *gcsFixture {
 	t.Helper()
 	srv, s := attachmentTestServer(t)
+	return gcsFixtureFor(t, srv, s)
+}
+
+// gcsFixtureFor wires the gs:// link fakes onto an already built server; s
+// is the raw store setup writes through.
+func gcsFixtureFor(t *testing.T, srv *Server, s store.Store) *gcsFixture {
+	t.Helper()
 	gen := &fakeGCSTokenGenerator{}
 	source := newFakeGCSSource()
 	audit := newGCSAuditRecorder()
@@ -422,11 +429,25 @@ func gcsTestAgent(t *testing.T, s store.Store, project *store.Project, seed stri
 	return a
 }
 
+// gcsTestSA creates a verified service account scoped to project: the
+// state an agent's assignment must be in for the hub to mint its token, and
+// so for a gs:// link to open.
 func gcsTestSA(t *testing.T, s store.Store, project *store.Project, seed, email string) *store.GCPServiceAccount {
+	t.Helper()
+	return gcsTestSAWith(t, s, project, seed, email, nil)
+}
+
+// gcsTestSAWith is gcsTestSA with a hook that adjusts the account before it
+// is stored (for example to leave it unverified or make it hub-scoped).
+func gcsTestSAWith(t *testing.T, s store.Store, project *store.Project, seed, email string, adjust func(*store.GCPServiceAccount)) *store.GCPServiceAccount {
 	t.Helper()
 	sa := &store.GCPServiceAccount{
 		ID: tid(seed), Scope: store.ScopeProject, ScopeID: project.ID, Email: email,
 		ProjectID: project.ID, CreatedAt: time.Now(),
+		Verified: true, VerificationStatus: store.GCPVerificationVerified,
+	}
+	if adjust != nil {
+		adjust(sa)
 	}
 	require.NoError(t, s.CreateGCPServiceAccount(context.Background(), sa))
 	return sa
@@ -2458,6 +2479,7 @@ func TestGCSLink_MethodNotAllowed(t *testing.T) {
 	viewer, msg := gcsHappyPathFixture(t, f, "method", "gs://bkt/o.txt")
 	rec := doRequestAsUser(t, f.srv, viewer, http.MethodPost, gcsRequestPath(msg.ID, "bkt", "o.txt"), nil)
 	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+	require.Equal(t, "GET", rec.Header().Get("Allow"))
 
 	// Exactly one audit event is emitted per request, including a
 	// wrong-method call — it has no reason enum value of its own, so it is

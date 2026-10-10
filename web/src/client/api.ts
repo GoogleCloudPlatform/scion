@@ -30,9 +30,21 @@ import { recordHubDateHeader } from '../shared/hub-clock.js';
 
 /** Detail payload for the scion:access-denied custom event. */
 export interface AccessDeniedDetail {
-  resource?: string;
-  action?: string;
-  reason?: string;
+  resource?: string | undefined;
+  action?: string | undefined;
+  reason?: string | undefined;
+}
+
+/** The parts of a 403 response body read by the access-denied handling. */
+interface AccessDeniedBody {
+  error?:
+    | {
+        code?: string;
+        message?: string;
+        details?: { denied_action?: string; resource_type?: string };
+      }
+    | string;
+  message?: string;
 }
 
 /**
@@ -130,7 +142,7 @@ export async function apiFetch(path: string, options?: ApiFetchOptions): Promise
     let isSuspended = false;
 
     try {
-      const body = await response.clone().json();
+      const body = (await response.clone().json()) as AccessDeniedBody;
       // The backend error envelope is {error: {code, message, details?}}.
       // When the central authorization path denied the request, details
       // carries {resource_type, denied_action}; legacy/generic 403s omit
@@ -219,10 +231,9 @@ export async function apiFetchAllPages<T>(
           : `Failed to fetch page ${page + 1}: ${res.status} ${res.statusText}`
       );
     }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let data: Record<string, any>;
+    let data: Record<string, unknown>;
     try {
-      data = (await res.json()) as Record<string, any>;
+      data = (await res.json()) as Record<string, unknown>;
     } catch {
       throw new Error(`Failed to parse page ${page + 1} response from ${baseUrl}`);
     }

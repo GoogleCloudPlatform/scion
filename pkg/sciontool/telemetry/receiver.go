@@ -343,6 +343,7 @@ func (r *Receiver) handleHTTPLogs(w http.ResponseWriter, req *http.Request) {
 
 func handleHTTPExport(w http.ResponseWriter, req *http.Request, exportReq, exportResp proto.Message, processError string, process func(context.Context) error) {
 	if req.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}

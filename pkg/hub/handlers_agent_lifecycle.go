@@ -149,8 +149,9 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		// Best effort: {"applied":true} means "not guarded when the handler
 		// read the agent". A delete or reincarnation claimed between that
 		// read and the write can make it inaccurate. The persisted state is
-		// still correct for a delete (the store repeats Guard 0c inside the
-		// UpdateAgentStatus transaction); Guard 0b has no store-side twin.
+		// still correct: the store repeats Guard 0c, and Guard 0b for a
+		// report marked GuardReincarnation, inside the UpdateAgentStatus
+		// transaction.
 		if reason := statusGuardNoopReason(agent); reason != "" && statusUpdateIsEmpty(status) {
 			writeJSON(w, http.StatusOK, statusUpdateResult{Applied: false, Reason: reason})
 			return
@@ -159,9 +160,18 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		// this self-reported status update will actually persist (post-guard,
 		// since the guard may clear status.Phase on a regression or while
 		// suspended) — ptone/scion#1963.
+		//
+		// This runs before the store write. If a reincarnation is claimed
+		// between the read above and that write, the store's Guard 0b drops
+		// the phase, so a reservation can be released for a phase that is
+		// never persisted. The periodic quota reconciler corrects the drift,
+		// as it does for the deletion guard's equivalent window.
 		s.reconcileBrokerQuotaOnPhaseChange(ctx, agent, oldPhase, status.Phase)
 	}
 
+	// A reincarnation that starts after the read above must still win: the
+	// store re-checks Guard 0b on the row it locks (ptone/scion#2887).
+	status.GuardReincarnation = true
 	if err := s.store.UpdateAgentStatus(ctx, id, status); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -230,11 +240,12 @@ func statusUpdateTouchesGuardedFields(su store.AgentStatusUpdate) bool {
 // statusUpdateIsEmpty reports whether the update carries nothing for the
 // store to persist (beyond the Updated/LastSeen bump every write does).
 // Every field counts, including the internal json:"-" ones a decoded status
-// POST never sets (ClearExit, ClearMessageIf, ClearTerminalRemnants,
-// IfPhase): erring towards "not empty" only means the store write runs.
-// The exceptions are the preconditions IfRunID and StartWrite: they only
-// condition the write (StartWrite selects the delete guard) and persist
-// nothing themselves, so they deliberately do not count.
+// POST never sets (ClearExit, ClearMessageIf, ClearTerminalRemnants):
+// erring towards "not empty" only means the store write runs.
+// The exceptions are the preconditions IfPhase, IfRunID, StartWrite and
+// GuardReincarnation: they only condition the write (StartWrite selects the
+// delete guard; GuardReincarnation turns on the store's reincarnation guard)
+// and persist nothing themselves, so they deliberately do not count.
 // TestStatusUpdateIsEmpty_EveryFieldCounts catches a field missing here.
 func statusUpdateIsEmpty(su store.AgentStatusUpdate) bool {
 	return !statusUpdateTouchesGuardedFields(su) &&
@@ -242,7 +253,7 @@ func statusUpdateIsEmpty(su store.AgentStatusUpdate) bool {
 		su.RuntimeState == "" && su.TaskSummary == "" && !su.Heartbeat &&
 		len(su.Metadata) == 0 && su.CurrentTurns == nil && su.CurrentModelCalls == nil &&
 		su.StartedAt == "" && !su.ClearExit && su.ClearMessageIf == "" &&
-		!su.ClearTerminalRemnants && su.IfPhase == ""
+		!su.ClearTerminalRemnants
 }
 
 // guardAgentPhaseTransition applies two guards to a status update:
@@ -657,11 +668,24 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					"agent_id", agent.ID, "agent", agent.Name, "container_status", agent.ContainerStatus)
 			}
 			resume := agent.Phase == string(state.PhaseSuspended) || forcedRecovery
+			// Flat placement pre-check: a stale pin is refused before the
+			// reservation, the run intent and any credential or run-ID
+			// write.
+			if err := s.checkPinnedPlacement(agent); err != nil {
+				if !writeRuntimeTargetRefusal(w, err) {
+					writeErrorFromErr(w, err, "")
+				}
+				return
+			}
 			// From here the start no longer follows the client
 			// (ptone/scion#1961): a client that gives up must not cancel the
 			// broker launch, the rollback or the final status write. The
 			// dispatch is bounded by syncDispatch (SyncDispatchBound).
 			ctx = detachLaunchFromClient(ctx)
+			// The response waits on that dispatch for up to
+			// syncDispatchTimeout: extend this request's write deadline to
+			// cover it (ptone/scion#3890, as ptone/scion#3850 did for create).
+			extendWriteDeadlineForSyncDispatch(ctx, w, s.config.WriteTimeout)
 			// The start runs under a start claim, which records run intent
 			// running (it stays running if the dispatch fails: a failed
 			// start is still a start the user asked for). startAgentCore
@@ -758,10 +782,22 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// client (ptone/scion#1961). Each leg is bounded by
 			// syncDispatch.
 			ctx = detachLaunchFromClient(ctx)
+			// The response waits on both legs: extend this request's write
+			// deadline to cover them (ptone/scion#3890).
+			extendWriteDeadline(ctx, w, s.config.WriteTimeout, restartWriteBudget())
 			// Refuse before the stop leg: otherwise a broker without
 			// the empty-per-agent capability would have the agent
 			// stopped and then the start refused (design #2703 D3).
 			if !s.requireEmptyPerAgentBrokerCapabilityForAgent(ctx, w, agent) {
+				return
+			}
+			// Flat placement pre-check, before the broker cap check, the
+			// start claim, the run intent and the stop leg: a refused
+			// restart never stops the agent.
+			if err := s.checkPinnedPlacement(agent); err != nil {
+				if !writeRuntimeTargetRefusal(w, err) {
+					writeErrorFromErr(w, err, "")
+				}
 				return
 			}
 			// Check the broker cap before the start claim, the run intent
@@ -950,10 +986,17 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		if writeEmptyPerAgentCapabilityError(w, dispatchErr) {
 			return
 		}
-		if relaySkillResolutionError(w, dispatchErr) {
+		// A flat Runtime Broker refusal is a definite start failure that no
+		// retry can fix: settle it by recording the refusal message on the
+		// agent, then relay the refusal.
+		s.settleRuntimeTargetRefusal(ctx, agent, dispatchErr)
+		if relayDispatchRefusal(w, dispatchErr) {
 			return
 		}
-		if relayHarnessConfigRefusal(w, dispatchErr) {
+		if relayIdentityMappingError(w, dispatchErr) {
+			return
+		}
+		if relayBrokerRefusal(w, dispatchErr) {
 			return
 		}
 		RuntimeError(w, "Failed to dispatch to runtime broker: "+dispatchErr.Error())

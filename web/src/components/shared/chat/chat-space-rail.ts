@@ -235,7 +235,7 @@ function parseRailPrefs(payload: unknown): RailPrefs {
   const rawThreadOrder =
     typeof data.threadOrder === 'string' ? safeJsonParse(data.threadOrder) : data.threadOrder;
   if (rawThreadOrder && typeof rawThreadOrder === 'object' && !Array.isArray(rawThreadOrder)) {
-    threadOrder = {} as Record<string, string[]>;
+    threadOrder = {};
     for (const [key, val] of Object.entries(rawThreadOrder as Record<string, unknown>)) {
       if (Array.isArray(val)) {
         threadOrder[key] = val.filter((id): id is string => typeof id === 'string');
@@ -248,7 +248,7 @@ function parseRailPrefs(payload: unknown): RailPrefs {
   const rawThreadGroups =
     typeof data.threadGroups === 'string' ? safeJsonParse(data.threadGroups) : data.threadGroups;
   if (rawThreadGroups && typeof rawThreadGroups === 'object' && !Array.isArray(rawThreadGroups)) {
-    threadGroups = {} as Record<string, ThreadGroup[]>;
+    threadGroups = {};
     for (const [key, val] of Object.entries(rawThreadGroups as Record<string, unknown>)) {
       if (Array.isArray(val)) {
         const groups: ThreadGroup[] = [];
@@ -3146,6 +3146,7 @@ export class ScionChatSpaceRail extends LitElement {
   // ---------------------------------------------------------------------------
 
   override render() {
+    // prettier-ignore
     return html`
       <div class="rail-header"><span>Projects</span></div>
 
@@ -3326,11 +3327,10 @@ export class ScionChatSpaceRail extends LitElement {
     return html`
       <div class="space-section">
         <div
-          class="space-header ${this.draggingSpaceId === space.projectId ? 'dragging' : ''} ${
-            this.dragOverSpaceId === space.projectId && this.draggingSpaceId !== space.projectId
-              ? 'drag-over'
-              : ''
-          }"
+          class="space-header ${this.draggingSpaceId === space.projectId ? 'dragging' : ''} ${this
+            .dragOverSpaceId === space.projectId && this.draggingSpaceId !== space.projectId
+            ? 'drag-over'
+            : ''}"
           draggable=${this.touchPrimary.isTouch ? nothing : 'true'}
           @dragstart=${(e: DragEvent): void => this.handleSpaceDragStart(e, space.projectId)}
           @dragover=${(e: DragEvent): void => this.handleSpaceDragOver(e, space.projectId)}
@@ -3345,13 +3345,11 @@ export class ScionChatSpaceRail extends LitElement {
           ${space.emoji ? html`<span class="space-emoji">${space.emoji}</span>` : nothing}
           <span class="space-name">${space.projectName}</span>
           <div class="space-actions" @click=${(e: Event) => e.stopPropagation()}>
-            ${
-              space.hasUnreadMention
-                ? html`<span class="mention-badge">@</span>`
-                : space.unreadCount > 0
-                  ? html`<span class="unread-badge">${space.unreadCount}</span>`
-                  : nothing
-            }
+            ${space.hasUnreadMention
+              ? html`<span class="mention-badge">@</span>`
+              : space.unreadCount > 0
+                ? html`<span class="unread-badge">${space.unreadCount}</span>`
+                : nothing}
             <sl-dropdown>
               <sl-icon-button
                 slot="trigger"
@@ -3480,6 +3478,7 @@ export class ScionChatSpaceRail extends LitElement {
         }
         const collapsed =
           this.collapsedGroups.has(group.id) && group.id !== this.autoExpandedGroupId;
+        // prettier-ignore
         return html`
           <div
             class="thread-group-header ${this.dragOverGroupId === group.id ? 'drag-over' : ''}"
@@ -3600,21 +3599,19 @@ export class ScionChatSpaceRail extends LitElement {
 
     return html`
       <div
-        class="thread-item ${isSelected ? 'selected' : ''} ${
-          isDragging ? 'dragging' : ''
-        } ${isDragOver ? 'drag-over' : ''}"
+        class="thread-item ${isSelected ? 'selected' : ''} ${isDragging
+          ? 'dragging'
+          : ''} ${isDragOver ? 'drag-over' : ''}"
         draggable=${isDraggable ? 'true' : nothing}
-        @dragstart=${
-          isDraggable ? (e: DragEvent) => this.handleThreadDragStart(e, thread.id) : nothing
-        }
-        @dragover=${
-          isDraggable ? (e: DragEvent) => this.handleThreadDragOver(e, thread.id) : nothing
-        }
-        @drop=${
-          isDraggable
-            ? (e: DragEvent) => void this.handleThreadDrop(e, thread.id, projectId)
-            : nothing
-        }
+        @dragstart=${isDraggable
+          ? (e: DragEvent) => this.handleThreadDragStart(e, thread.id)
+          : nothing}
+        @dragover=${isDraggable
+          ? (e: DragEvent) => this.handleThreadDragOver(e, thread.id)
+          : nothing}
+        @drop=${isDraggable
+          ? (e: DragEvent) => void this.handleThreadDrop(e, thread.id, projectId)
+          : nothing}
         @dragend=${isDraggable ? () => this.handleThreadDragEnd() : nothing}
         @click=${() => this.handleThreadClick(thread, projectId)}
         @pointerdown=${(e: PointerEvent): void =>
@@ -3626,15 +3623,13 @@ export class ScionChatSpaceRail extends LitElement {
           >${thread.name}</span
         >
         ${thread.pinned ? html`<sl-icon name="star-fill" class="pin-icon"></sl-icon>` : nothing}
-        ${
-          thread.muted
-            ? html`<sl-icon name="bell-slash" class="mute-icon" title="Muted"></sl-icon>`
-            : thread.hasUnreadMention
-              ? html`<span class="mention-dot"></span>`
-              : thread.hasUnread
-                ? html`<span class="unread-dot"></span>`
-                : nothing
-        }
+        ${thread.muted
+          ? html`<sl-icon name="bell-slash" class="mute-icon" title="Muted"></sl-icon>`
+          : thread.hasUnreadMention
+            ? html`<span class="mention-dot"></span>`
+            : thread.hasUnread
+              ? html`<span class="unread-dot"></span>`
+              : nothing}
       </div>
     `;
   }

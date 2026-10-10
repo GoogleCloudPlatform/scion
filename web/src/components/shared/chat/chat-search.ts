@@ -437,8 +437,8 @@ export class ScionChatSearch extends LitElement {
       .replace(/<\/mark>/g, '\x01MARK_CLOSE\x01')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
-      .replace(/\x01MARK_OPEN\x01/g, '<mark>')
-      .replace(/\x01MARK_CLOSE\x01/g, '</mark>');
+      .replaceAll('\x01MARK_OPEN\x01', '<mark>')
+      .replaceAll('\x01MARK_CLOSE\x01', '</mark>');
   }
 
   override render() {
@@ -446,6 +446,7 @@ export class ScionChatSearch extends LitElement {
 
     const hasConversation = !!this.conversationKey;
 
+    // prettier-ignore
     return html`
       <div class="search-header">
         <div class="search-input-wrap">

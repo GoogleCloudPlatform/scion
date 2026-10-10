@@ -58,6 +58,37 @@ type fakeHost struct {
 	memberErr error
 	// crossScope is the answer of CrossScopeSharingAllowed.
 	crossScope bool
+	// reviewers lists "userRef ownerAgentID homeScope" triples for which
+	// MayGrantReview answers yes.
+	reviewers map[string]bool
+}
+
+// allowReview makes MayGrantReview answer yes for u on artifacts owned by
+// agent homed in scope; revokeReview takes that back.
+func (h *fakeHost) allowReview(u principal, agent, scope string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.reviewers == nil {
+		h.reviewers = map[string]bool{}
+	}
+	h.reviewers[PrincipalRef(u.kind, u.ref)+" "+agent+" "+scope] = true
+}
+
+func (h *fakeHost) revokeReview(u principal, agent, scope string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.reviewers, PrincipalRef(u.kind, u.ref)+" "+agent+" "+scope)
+}
+
+func (h *fakeHost) MayGrantReview(ctx context.Context, ownerAgentID, homeScope string) bool {
+	kind, ref, _, ok := h.Principal(ctx)
+	if !ok {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.calls = append(h.calls, "review "+ownerAgentID+" "+homeScope)
+	return h.reviewers[PrincipalRef(kind, ref)+" "+ownerAgentID+" "+homeScope]
 }
 
 func (h *fakeHost) CrossScopeSharingAllowed(context.Context) bool {

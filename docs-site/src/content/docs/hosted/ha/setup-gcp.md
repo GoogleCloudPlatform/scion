@@ -1016,6 +1016,71 @@ deployment is not HA (see [HA overview](/scion/hosted/ha/overview/)).
 `--max-instances=3` leaves room for Cloud Run to scale up under load.
 :::
 
+:::caution[More than one replica requires shared workspace storage]
+The `settings.yaml` above leaves
+[`server.workspace_storage`](/scion/reference/server-config/#workspace-storage-serverworkspace_storage)
+at its default `local` backend. With that backend each replica keeps
+hub-managed project workspaces on its own container storage, so replicas
+can see different workspace content, and the content is lost when an
+instance is replaced. On Cloud Run the Hub also refuses workspace writes
+(file edits, WebDAV, git clone) with `503 Service Unavailable` while the
+backend is `local` (see
+[Ephemeral Storage & 503 Safety Gate](/scion/reference/server-config/#ephemeral-storage--503-safety-gate)).
+
+Before running more than one replica, declare a shared volume on the
+Cloud Run service, mount it at `/mnt/<volume_name>`, and select it in
+`settings.yaml`.
+
+For example, to use a Filestore (NFS) share, export the service with
+`gcloud run services describe scion-hub --region=${REGION} --format export > service.yaml`,
+add the volume and its mount, and apply the file with
+`gcloud run services replace service.yaml`:
+
+```yaml
+spec:
+  template:
+    metadata:
+      annotations:
+        run.googleapis.com/execution-environment: gen2   # required for NFS volumes
+    spec:
+      containers:
+      - image: IMAGE_URL                 # keep the existing container entry
+        volumeMounts:
+        - name: VOLUME_NAME
+          mountPath: /mnt/VOLUME_NAME    # must be /mnt/ + volume_name in settings.yaml
+      volumes:
+      - name: VOLUME_NAME
+        nfs:
+          server: FILESTORE_IP           # Filestore instance IP address
+          path: /FILE_SHARE              # Filestore file share name
+          readOnly: false
+```
+
+The mount path must equal `/mnt/VOLUME_NAME`, where `VOLUME_NAME` is the
+`volume_name` setting below. The Cloud Run volume's own `name` can
+differ; using the same name for both just keeps it simple. NFS volumes require the second
+generation (`gen2`) execution environment. Do not use an in-memory
+volume here: it is local to each instance and not shared between
+replicas, even though the readiness check passes because the path is
+mounted.
+
+```yaml
+server:
+  workspace_storage:
+    backend: cloudrun-volume
+    cloudrun_volume:
+      volume_name: VOLUME_NAME       # the volume declared on the service
+      subpath_root: projects         # default
+```
+
+The Hub derives every workspace path from `/mnt/<volume_name>`. If the
+volume is not mounted there, `GET /readyz` returns `503` instead of the
+Hub writing workspaces to container storage. A missing `volume_name`
+stops the Hub at startup. See
+[Workspace Storage](/scion/reference/server-config/#workspace-storage-serverworkspace_storage)
+for all backends and fields.
+:::
+
 :::caution[Cloud Run Timeout Warning]
 We explicitly set `--timeout=900` (15 minutes). When dispatching the very first agent, GKE Autopilot triggers node provisioning to scale up from 0 nodes, which routinely takes 5-10 minutes. The default Cloud Run timeout (300 seconds) will prematurely kill the request, return a `503 Service Unavailable`, and tear down the initiating container. Set the timeout to at least 900 seconds to prevent this.
 :::
@@ -1363,21 +1428,26 @@ When redeploying the Hub with a new image:
 
 ### 7b. Secret Name Migration
 
-A hub deployed exactly as this guide describes is **not covered** by the Cloud Run
-job runbook in
-[`docs/deploy/migrate-names-cloudrun.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/migrate-names-cloudrun.md):
-that runbook is scoped to hubs deployed with the hub-cloudrun Terraform module
-(private-IP Cloud SQL, Direct VPC egress, DSN as a separate secret env var). This
-guide's hub uses a public-IP Cloud SQL instance with no Direct VPC egress, and keeps
-its DSN inside `settings.yaml` (§3c) rather than a separate secret env var — none of
-which the runbook's discovery steps assume. No workstation ever fetches
-`scion-hub-settings` or runs `migrate-names` directly against this hub's database
-either; that path is deliberately unsupported (no human handles the DSN). There is
-currently no supported way to run `scion hub secret migrate-names` against a hub
-deployed exactly per this guide. A DSN-free migration path for this guide's hubs is
-tracked in [ptone/scion#2395](https://github.com/ptone/scion/issues/2395). (The
-guide's `settings.yaml` already sets an explicit `server.hub.hub_id`; see
-[Set a stable `hub_id`](#3c-configure-and-store-settingsyaml) in §3c.) See
+:::note
+This path has not been run against a live hub; it was checked against the code and
+`gcloud --help` only.
+:::
+
+Run `scion hub secret migrate-names` against a hub deployed with this guide from a
+one-off Cloud Run job, as described in §9 of
+[`docs/deploy/migrate-names-cloudrun.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/migrate-names-cloudrun.md#9-hubs-deployed-with-the-deploy-on-gcp-guide-public-ip-cloud-sql).
+The job uses the serving revision's image digest and runs as `scion-hub-runner`. It
+reaches this guide's public-IP Cloud SQL instance through the same Cloud Run Cloud
+SQL connection as the hub, so it needs no VPC configuration. The DSN is supplied
+only through Secret Manager: the job mounts the `scion-hub-settings` secret with
+`--set-secrets`, and no operator reads or handles the DSN. Do not run
+`migrate-names` from a workstation against this hub's database.
+
+The job takes the hub ID from `server.hub.hub_id` in that settings file (see
+[Set a stable `hub_id`](#3c-configure-and-store-settingsyaml) in §3c), and the
+command checks it against the hub's existing secret records. Sections 1, 4, 5, 6 and 8
+of the runbook apply to this guide's hubs, with the differences listed in its §9;
+section 7 (Terraform cleanup) does not. See
 [Secrets: IAM Permissions and Secret Naming](/scion/hosted/user/secrets/#iam-permissions-and-secret-naming)
 for what the command does in general, and `--help` for its flags.
 

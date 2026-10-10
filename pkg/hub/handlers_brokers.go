@@ -118,7 +118,11 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 	// (brokerRemintTargetAuthorized). A first-time registration (no existing
 	// match) requires only the broker.create gate above; the caller's user
 	// becomes the new broker's owner.
-	existingBroker, err := s.brokerAuthService.FindExistingBroker(r.Context(), req.Name, req.BrokerID)
+	if req.RuntimeTarget != nil && (req.BrokerID == "" || req.RuntimeTarget.ID == "" || req.RuntimeTarget.Type == "") {
+		ValidationError(w, errFlatRegistrationIncomplete.Error(), map[string]interface{}{"field": "runtimeTarget"})
+		return
+	}
+	existingBroker, err := s.brokerAuthService.FindExistingBroker(r.Context(), req.Name, req.BrokerID, req.RuntimeTarget)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -156,12 +160,18 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 	// broker.auto_provide check is also pinned to the broker still having
 	// auto-provide on.
 	var resp *CreateBrokerRegistrationResponse
-	if existingBroker != nil {
+	switch {
+	case req.RuntimeTarget != nil:
+		resp, err = s.createFlatBrokerRegistration(r.Context(), req, user.ID(), existingBroker)
+	case existingBroker != nil:
 		resp, err = s.brokerAuthService.CreateBrokerRegistrationForAuthorizedMatch(r.Context(), req, user.ID(), existingBroker.ID, autoProvideAuthorized)
-	} else {
+	default:
 		resp, err = s.brokerAuthService.CreateBrokerRegistrationForAuthorizedNew(r.Context(), req, user.ID())
 	}
 	if err != nil {
+		if writeRuntimeTargetRefusal(w, err) {
+			return
+		}
 		writeBrokerRegistrationError(w, err)
 		return
 	}
@@ -180,6 +190,49 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 		mergeBrokerAuditDetails(details, "operation", operation))
 
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+// createFlatBrokerRegistration registers a flat Runtime Broker through the
+// shared flat registration path (pinned to the row the caller was authorized
+// against) and issues its join token. The response echoes the stored runtime
+// target as the activation acknowledgement.
+func (s *Server) createFlatBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string, existing *store.RuntimeBroker) (*CreateBrokerRegistrationResponse, error) {
+	labels := registrationLabels(req.Labels)
+	saEmail := strings.ToLower(req.GCPHostServiceAccountEmail)
+	// PreserveSettings (GoogleCloudPlatform/scion#2702) applies as on the
+	// legacy path: a re-registration leaves the row's metadata as it is and
+	// only issues a new join token; a new row gets AutoProvide off and no
+	// GCP host fields, with only the labels applied.
+	preserve := req.PreserveSettings
+	row, created, err := s.registerFlatRuntimeBroker(ctx, flatRegistration{
+		BrokerID:  req.BrokerID,
+		Name:      req.Name,
+		Target:    *req.RuntimeTarget,
+		CreatedBy: createdBy,
+		Existing:  existing,
+		Apply: func(b *store.RuntimeBroker, created bool) {
+			if preserve && !created {
+				return
+			}
+			if !preserve {
+				b.AutoProvide = req.AutoProvide
+				b.GCPHostServiceAccountEmail = saEmail
+				b.GCPHostProjectID = req.GCPHostProjectID
+			}
+			if b.Labels == nil {
+				b.Labels = map[string]string{}
+			}
+			for k, v := range labels {
+				b.Labels[k] = v
+			}
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	// A flat re-registration re-mints the join token: issueJoinToken's upsert
+	// replaces an outstanding one (for example left by a refused join).
+	return s.brokerAuthService.issueJoinToken(ctx, row.ID, createdBy, !created, req.JoinTokenTTLSeconds, row.RuntimeTarget)
 }
 
 // joinTokenAuditDetails describes an issued join token for the register
@@ -513,6 +566,9 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 		// Log failed join attempt
 		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false, err.Error())
 
+		if writeRuntimeTargetRefusal(w, err) {
+			return
+		}
 		// Determine error type and return appropriate response
 		switch {
 		case errors.Is(err, ErrJoinTokenInvalid), errors.Is(err, ErrJoinTokenBrokerMismatch):

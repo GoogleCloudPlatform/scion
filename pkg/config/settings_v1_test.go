@@ -2107,7 +2107,6 @@ func TestConvertV1ServerToGlobalConfig_Basic(t *testing.T) {
 	gc := ConvertV1ServerToGlobalConfig(v1)
 
 	assert.Equal(t, "debug", gc.LogLevel)
-	assert.Equal(t, "json", gc.LogFormat)
 	assert.Equal(t, 9810, gc.Hub.Port)
 	assert.Equal(t, "test-hub-id", gc.Hub.HubID)
 	assert.Equal(t, "https://hub.example.com", gc.Hub.Endpoint)
@@ -2304,7 +2303,7 @@ server:
 	require.NoError(t, err)
 
 	assert.Equal(t, "debug", gc.LogLevel)
-	assert.Equal(t, "json", gc.LogFormat)
+	// server.log_format is accepted but ignored (ptone/scion#4103).
 	assert.Equal(t, 9999, gc.Hub.Port)
 	assert.Equal(t, "settings-hub-id", gc.Hub.HubID)
 	assert.Equal(t, true, gc.RuntimeBroker.Enabled)
@@ -6906,4 +6905,80 @@ runtimes:
 	assert.Equal(t, "ns-global", vs.Runtimes["k8s"].Namespace)
 	_, mapped := vs.ResolveKubernetesServiceAccountMappingForSelection("", "k8s", "agent-worker@my-project.iam.gserviceaccount.com")
 	assert.False(t, mapped, "the project-configs mapping must not be used")
+}
+
+// server.log_format is accepted and ignored (ptone/scion#4103): a settings
+// file that still sets it validates and decodes, and nothing is carried into
+// the hub's GlobalConfig.
+func TestServerLogFormat_AcceptedAndIgnored(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+server:
+  log_level: info
+  log_format: json
+`)
+	_, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+
+	var vs VersionedSettings
+	require.NoError(t, yaml.Unmarshal(data, &vs))
+	require.NotNil(t, vs.Server)
+	assert.Equal(t, "json", vs.Server.LogFormat)
+
+	gc := ConvertV1ServerToGlobalConfig(vs.Server)
+	assert.Equal(t, "info", gc.LogLevel)
+	assert.Empty(t, ConvertGlobalToV1ServerConfig(gc).LogFormat)
+}
+
+// TestResolveKubernetesBlockServiceAccountForSelection covers the block
+// ServiceAccount precedence (ptone/scion#4034): profile over runtime entry,
+// an empty value treated as unset, and the Kubernetes profiles reported as
+// having none.
+func TestResolveKubernetesBlockServiceAccountForSelection(t *testing.T) {
+	vs := &VersionedSettings{
+		Profiles: map[string]V1ProfileConfig{
+			"team":   {Runtime: "gke", KubernetesBlockServiceAccount: "team-block"},
+			"shared": {Runtime: "gke"},
+			"bare":   {Runtime: "k8s-bare"},
+			"empty":  {Runtime: "k8s-bare", KubernetesBlockServiceAccount: ""},
+			"local":  {Runtime: "docker"},
+		},
+		Runtimes: map[string]V1RuntimeConfig{
+			"gke":      {Type: "kubernetes", KubernetesBlockServiceAccount: "entry-block"},
+			"k8s-bare": {Type: "kubernetes"},
+			"docker":   {Type: "docker"},
+		},
+	}
+	cases := []struct {
+		profile, entry string
+		want           string
+		wantOK         bool
+	}{
+		{"team", "gke", "team-block", true},
+		{"shared", "gke", "entry-block", true},
+		{"", "gke", "entry-block", true},
+		{"bare", "k8s-bare", "", false},
+		{"empty", "k8s-bare", "", false},
+		{"", "", "", false},
+	}
+	for _, tc := range cases {
+		got, ok := vs.ResolveKubernetesBlockServiceAccountForSelection(tc.profile, tc.entry)
+		if got != tc.want || ok != tc.wantOK {
+			t.Errorf("(%q, %q) = (%q, %v), want (%q, %v)", tc.profile, tc.entry, got, ok, tc.want, tc.wantOK)
+		}
+	}
+	missing := vs.KubernetesProfilesWithoutBlockServiceAccount()
+	if strings.Join(missing, ",") != "bare,empty" {
+		t.Errorf("KubernetesProfilesWithoutBlockServiceAccount = %v, want [bare empty]", missing)
+	}
+	var nilVS *VersionedSettings
+	if _, ok := nilVS.ResolveKubernetesBlockServiceAccountForSelection("team", "gke"); ok {
+		t.Error("expected nil settings to resolve nothing")
+	}
+	if err := ValidateKubernetesBlockServiceAccount("scion-block"); err != nil {
+		t.Errorf("valid name refused: %v", err)
+	}
+	if err := ValidateKubernetesBlockServiceAccount("Not_Valid"); err == nil {
+		t.Error("expected an invalid name to be refused")
+	}
 }

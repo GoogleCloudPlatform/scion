@@ -189,7 +189,7 @@ type HTTPAgentDispatcher struct {
 	// Resource hash repair callbacks sync a resource's DB manifest from GCS
 	// when a hash mismatch is detected during dispatch. Nil = no repair.
 	harnessConfigRepairer func(ctx context.Context, ref HarnessConfigRepairRef) error
-	templateRepairer      func(ctx context.Context, ref string) error
+	templateRepairer      func(ctx context.Context, ref TemplateRepairRef) error
 	skillPreResolver      func(ctx context.Context, agent *store.Agent) *ResolveSkillsResponse
 
 	// creatorSkillPreResolver is skillPreResolver's start/restart counterpart:
@@ -458,7 +458,7 @@ func (d *HTTPAgentDispatcher) ImageRegistry() string {
 
 // SetTemplateRepairer registers a callback that syncs a template's DB manifest
 // from storage when a hash mismatch is detected during dispatch.
-func (d *HTTPAgentDispatcher) SetTemplateRepairer(fn func(ctx context.Context, ref string) error) {
+func (d *HTTPAgentDispatcher) SetTemplateRepairer(fn func(ctx context.Context, ref TemplateRepairRef) error) {
 	d.templateRepairer = fn
 }
 
@@ -556,24 +556,23 @@ func (d *HTTPAgentDispatcher) repairTemplate(ctx context.Context, agent *store.A
 	if d.templateRepairer == nil {
 		return fmt.Errorf("no template repairer")
 	}
-	var ref string
+	// Prefer the stamped record ID; the agent's template reference is only a
+	// fallback, resolved in the agent's project then global scope.
+	ref := TemplateRepairRef{Name: agent.Template, ProjectID: agent.ProjectID}
 	if agent.AppliedConfig != nil {
-		ref = agent.AppliedConfig.TemplateID
+		ref.ID = agent.AppliedConfig.TemplateID
 	}
-	if ref == "" {
-		ref = agent.Template
-	}
-	if ref == "" {
+	if ref.ID == "" && ref.Name == "" {
 		return fmt.Errorf("no template reference")
 	}
 	d.log.Warn("hash mismatch detected, attempting template DB→storage repair",
-		"agent", agent.Slug, "template", ref)
+		"agent", agent.Slug, "template", ref.Name, "templateId", ref.ID)
 	if err := d.templateRepairer(ctx, ref); err != nil {
-		d.log.Warn("template repair failed", "template", ref, "error", err)
+		d.log.Warn("template repair failed", "template", ref.Name, "templateId", ref.ID, "error", err)
 		return err
 	}
 	d.log.Info("template repair succeeded, retrying dispatch",
-		"agent", agent.Slug, "template", ref)
+		"agent", agent.Slug, "template", ref.Name, "templateId", ref.ID)
 	return nil
 }
 
@@ -739,6 +738,12 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		ProjectSlug:   projectInfo.projectSlug,
 		SharedDirs:    projectInfo.sharedDirs,
 		WorkspaceMode: projectInfo.workspaceMode,
+	}
+	// The single setter of the expected runtime target on create-shaped
+	// requests: any non-NULL pin. A stale pin sends the old target, which the
+	// receiving Runtime Broker refuses before any side effect.
+	if agent.IsPinned() {
+		req.ExpectedRuntimeTargetID = agent.PinnedRuntimeTargetID
 	}
 
 	// Propagate attach mode from applied config
@@ -1423,7 +1428,9 @@ func applyBrokerAgentConfig(agent *store.Agent, info *RemoteAgentInfo) {
 		if info.Image != "" {
 			agent.AppliedConfig.Image = info.Image
 		}
-		if info.Profile != "" {
+		// No Runtime Broker-reported profile is written onto a pinned (flat)
+		// agent.
+		if info.Profile != "" && !agent.IsPinned() {
 			agent.AppliedConfig.Profile = info.Profile
 		}
 	}
@@ -3296,6 +3303,14 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		attribute.String("scion.broker.id", agent.RuntimeBrokerID),
 	)
 
+	// Flat placement backstop, before the standing guard, the launch guard,
+	// credential mint and beginRun: a stale pin is refused here for every
+	// caller.
+	if _, err := checkAgentPinnedPlacement(ctx, d.store, agent); err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+
 	// Standing guard (ptone/scion#3433): no broker call for an agent that
 	// is held or not in good standing. Fails closed, separately from the
 	// launch guard below.
@@ -3459,6 +3474,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		Image:                d.dispatchImageForBroker(agent.AppliedConfig),
 		TemplateName:         agent.Template,
 	}
+	// A flat Runtime Broker receives the agent's valid pinned target.
+	extras.ExpectedRuntimeTargetID = validPinnedTarget(agent)
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
 	}
@@ -3560,6 +3577,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 // It generates a fresh auth token so the restarted container has valid
 // Hub credentials, preventing auth loss across container restarts.
 func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *store.Agent) error {
+	// Flat placement backstop (see DispatchAgentStart).
+	if _, err := checkAgentPinnedPlacement(ctx, d.store, agent); err != nil {
+		return err
+	}
 	// Standing guard (ptone/scion#3433), then the start guard.
 	if err := d.dispatchStandingError(ctx, agent); err != nil {
 		return err
@@ -3607,6 +3628,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		SharedWorkspace:      startEnv.projectInfo.sharedWorkspace,
 		TemplateName:         agent.Template,
 	}
+	// A flat Runtime Broker receives the agent's valid pinned target.
+	extras.ExpectedRuntimeTargetID = validPinnedTarget(agent)
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
 	}
@@ -3654,7 +3677,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentResetAuth(ctx context.Context, agent 
 	// current run, and handed out only once its credential is recorded.
 	var token string
 	if d.tokenGenerator != nil {
-		grant, err := authorizeAgentTokenAt(ctx, d.tokenGenerator, d.store, agent, mintSiteResetAuth)
+		// A scope re-issue dispatches through here with its own site
+		// (withMintSite), so a denial is recorded against it.
+		grant, err := authorizeAgentTokenAt(ctx, d.tokenGenerator, d.store, agent, mintSiteFromContext(ctx, mintSiteResetAuth))
 		if err != nil {
 			return fmt.Errorf("DispatchAgentResetAuth: failed to generate agent token: %w", err)
 		}
@@ -4054,12 +4079,29 @@ func (d *HTTPAgentDispatcher) deferredDelete(ctx context.Context, agent *store.A
 		DeletedAt:      deletedAt,
 		RunID:          agent.RunID,
 		PreviousRunIDs: agent.PreviousRunIDs,
+		// The target lets the executing node send the delete even after
+		// the agent row is gone, as after a project delete
+		// (ptone/scion#3665).
+		Target: &DeleteIntentTarget{
+			BrokerID:  agent.RuntimeBrokerID,
+			ProjectID: agent.ProjectID,
+			Slug:      agent.Slug,
+			Runtime:   agent.Runtime,
+		},
 	}
 	// An engine delete records its claim, not its notAfter: the executing
 	// node checks the claim is still live and computes notAfter when it
-	// actually sends (ptone/scion#2906).
-	if fence, ok := deleteDispatchFenceFrom(ctx); ok {
+	// actually sends (ptone/scion#2906). Any other delete records a
+	// notAfter fixed now (ptone/scion#3674), or keeps the one it is already
+	// executing under when the executing node defers it again.
+	fence, ok := deleteDispatchFenceFrom(ctx)
+	switch {
+	case ok && fence.claim != 0:
 		args.Claim = fence.claim
+	case ok && !fence.notAfter.IsZero():
+		args.NotAfter = fence.notAfter
+	default:
+		args.NotAfter = claimlessDeleteNotAfter(deleteClock())
 	}
 	return deferredDeleteError(d.deferredDataOp(ctx, agent, "delete", args))
 }

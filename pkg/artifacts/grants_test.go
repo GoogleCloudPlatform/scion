@@ -520,3 +520,138 @@ func TestPatchSameScopeIsNotAMove(t *testing.T) {
 		t.Errorf("same-scope patch result %+v", got)
 	}
 }
+
+// TestListAccessAndProjectShares: list rows say why the caller sees them,
+// and a list narrowed to a project includes artifacts shared with it,
+// marked, with shared=1 keeping only those.
+func TestListAccessAndProjectShares(t *testing.T) {
+	f, own := newLinkFixture(t)                                      // userU owns, homed in project-1
+	proj := f.publish(agentA, "p.md", []byte("p"), "").Artifact.ID   // homed in project-1, userU reads via role
+	other := f.publish(agentX, "x.md", []byte("x"), "").Artifact.ID  // homed in project-2
+	f.insertScopeGrant(other, "project-1")                           // shared with project-1
+	direct := f.publish(agentX, "d.md", []byte("d"), "").Artifact.ID // homed in project-2
+	f.grantPrincipal(direct, userU)                                  // shared with userU directly
+	access := map[string]string{}
+	shared := map[string]bool{}
+	for _, it := range f.list(&userU, listPath).Artifacts {
+		access[it.ID] = it.Access
+		shared[it.ID] = it.SharedWithScope
+	}
+	want := map[string]string{own: AccessOwned, proj: AccessProject, other: AccessShared, direct: AccessShared}
+	for id, a := range want {
+		if access[id] != a {
+			t.Errorf("%s: access %q, want %q", id, access[id], a)
+		}
+		if shared[id] {
+			t.Errorf("%s: sharedWithScope without scope=", id)
+		}
+	}
+	ids := func(target string) map[string]bool {
+		out := map[string]bool{}
+		for _, it := range f.list(&userU, target).Artifacts {
+			out[it.ID] = it.SharedWithScope
+		}
+		return out
+	}
+	got := ids(listPath + "&scope=project-1")
+	if len(got) != 3 || got[own] || got[proj] || !got[other] {
+		t.Errorf("scope=project-1: %v", got)
+	}
+	got = ids(listPath + "&scope=project-1&shared=1")
+	if len(got) != 1 || !got[other] {
+		t.Errorf("scope=project-1&shared=1: %v", got)
+	}
+	// An expired scope grant does not count.
+	f.exec(t, `UPDATE artifact_grant SET expires_at = ? WHERE artifact_id = ? AND subject_kind = 'scope' AND subject_ref = 'project-1'`, linkPast(), other)
+	if got := ids(listPath + "&scope=project-1&shared=1"); len(got) != 0 {
+		t.Errorf("expired scope grant listed: %v", got)
+	}
+	// shared=1 without a scope is the caller's own shared-with-me filter
+	// (TestListAccessAndSharedWithMe); a bad value is refused either way.
+	for _, q := range []string{"&shared=yes", "&scope=project-1&shared=maybe"} {
+		if rec := f.do(&userU, http.MethodGet, listPath+q, nil, nil); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: %d", q, rec.Code)
+		}
+	}
+}
+
+// TestGetSaysWhoMayManage: GET of an artifact and of a version say
+// whether the caller may share and change it: its owner and a user with an
+// admin grant may, a reader and an agent may not.
+func TestGetSaysWhoMayManage(t *testing.T) {
+	f, id := newLinkFixture(t)
+	get := func(p principal, target string) ArtifactResponse {
+		t.Helper()
+		rec := f.do(&p, http.MethodGet, target, nil, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s as %s: %d", target, p.ref, rec.Code)
+		}
+		return decodeInto[ArtifactResponse](t, rec)
+	}
+	base := "/api/v1/artifacts/" + id
+	check := func(p principal, want bool) {
+		t.Helper()
+		for _, target := range []string{base, base + "/versions/1"} {
+			if got := get(p, target).CanManage; got != want {
+				t.Errorf("%s as %s: canManage %v, want %v", target, p.ref, got, want)
+			}
+		}
+	}
+	check(userU, true)
+	check(agentA, false)
+	if rec, _ := f.putGrant(userU, id, SubjectPrincipal, PrincipalRef(PrincipalKindUser, outside.ref), GrantRead); rec.Code != http.StatusCreated {
+		t.Fatalf("grant: %d", rec.Code)
+	}
+	check(outside, false)
+	if rec, _ := f.putGrant(userU, id, SubjectPrincipal, PrincipalRef(PrincipalKindUser, outside.ref), GrantAdmin); rec.Code != http.StatusOK {
+		t.Fatalf("raise grant: %d", rec.Code)
+	}
+	check(outside, true)
+}
+
+// TestGrantListReportsCrossProjectSharing: the grants list says whether
+// grants to other projects are turned on.
+func TestGrantListReportsCrossProjectSharing(t *testing.T) {
+	f, id := newLinkFixture(t)
+	for _, on := range []bool{false, true} {
+		f.host.mu.Lock()
+		f.host.crossScope = on
+		f.host.mu.Unlock()
+		rec := f.do(&userU, http.MethodGet, grantsPath(id), nil, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("list grants: %d", rec.Code)
+		}
+		if got := decodeInto[GrantListResponse](t, rec).CrossProjectSharing; got != on {
+			t.Errorf("crossProjectSharing %v, want %v", got, on)
+		}
+	}
+}
+
+// TestList_SharedScopeRequiresScopeReadAuth: the artifacts shared with a
+// project are listed only to a caller that may read in that project. For
+// any other caller, scope= narrows to artifacts homed there, and shared=1
+// lists nothing, even when the caller can read the shared artifact itself.
+func TestList_SharedScopeRequiresScopeReadAuth(t *testing.T) {
+	f := newFixture(t, false)
+	a := f.publish(agentX, "a.md", []byte("a"), "").Artifact.ID // homed in project-2
+	f.grantPrincipal(a, userU)                                  // userU may read it directly
+	f.insertScopeGrant(a, "project-3")                          // and it is shared with project-3
+	ids := func(target string) []string { return listIDs(f.list(&userU, target)) }
+
+	if got := ids(listPath + "&scope=project-3&shared=1"); len(got) != 0 {
+		t.Errorf("shared=1 for a project the caller may not read in: %v", got)
+	}
+	if got := ids(listPath + "&scope=project-3"); len(got) != 0 {
+		t.Errorf("scope= for a project the caller may not read in: %v", got)
+	}
+	// The artifact itself stays listed and readable.
+	if got := ids(listPath); len(got) != 1 || got[0] != a {
+		t.Errorf("unnarrowed list: %v", got)
+	}
+
+	// Once the caller may read in project-3, the shared artifact is listed.
+	f.host.allow(userU, "project-3", PermissionRead)
+	if got := ids(listPath + "&scope=project-3&shared=1"); len(got) != 1 || got[0] != a {
+		t.Errorf("shared=1 for a project the caller may read in: %v", got)
+	}
+}

@@ -73,6 +73,13 @@ const (
 	// it unchanged instead of folding it into a 502 (ptone/scion#3422).
 	ErrCodeWorkspaceStorageUnconfigured = api.BrokerErrCodeWorkspaceStorageUnconfigured
 
+	// ErrCodeIdentityNotMapped and ErrCodeIdentityKSAMismatch mark a GCP
+	// identity "assign" dispatch on Kubernetes refused for a missing or
+	// conflicting kubernetes_service_account_mappings entry (400). The hub
+	// translates them into its own message (ptone/scion#4024).
+	ErrCodeIdentityNotMapped   = api.BrokerErrCodeIdentityNotMapped
+	ErrCodeIdentityKSAMismatch = api.BrokerErrCodeIdentityKSAMismatch
+
 	// ErrCodeAgentIdentityUnknown marks a delete/stop that could not be
 	// verified as safe because a runtime process restart dropped the
 	// in-memory record needed to tell "not found" apart from "exists, but
@@ -119,6 +126,12 @@ const (
 	// reads back to map this to the same fixed message the post-upgrade
 	// 4501 close code produces.
 	ErrCodeRuntimeAttachUnsupported = wsprotocol.ErrCodeRuntimeAttachUnsupported
+
+	// Flat Runtime Broker wire codes, shared with the Hub
+	// (.design/flat-runtime-brokers-contract.md section 9).
+	ErrCodeRuntimeTargetMismatch     = api.ErrCodeRuntimeTargetMismatch
+	ErrCodeRuntimeProfileUnsupported = api.ErrCodeRuntimeProfileUnsupported
+	ErrCodeRuntimeTargetRequired     = api.ErrCodeRuntimeTargetRequired
 )
 
 // writeError writes a JSON error response.
@@ -657,7 +670,11 @@ func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op str
 		return http.StatusInternalServerError
 	}
 	if sce.Status >= 400 && sce.Status < 500 {
-		writeError(w, sce.Status, ErrCodeValidationError, sce.Message, nil)
+		code := sce.Code
+		if code == "" {
+			code = ErrCodeValidationError
+		}
+		writeError(w, sce.Status, code, sce.Message, sce.Details)
 		return sce.Status
 	}
 	s.agentLifecycleLog.Warn("buildStartContext failed", "op", op, "error", startContextDiagnostic(sce))

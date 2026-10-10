@@ -447,7 +447,7 @@ func workstationFileEdits(req *ServerConfigUpdateDBRequest, leaves []bodyLeaf, o
 		}
 		if l.null {
 			var keep [][]string
-			for _, owned := range hubOwnedBrokerPaths {
+			for _, owned := range append(append([][]string{}, hubOwnedBrokerPaths...), nullPreservedBrokerPaths...) {
 				if len(owned) > len(l.path) && pathHasPrefixPath(owned, l.path) {
 					keep = append(keep, owned[len(l.path):])
 				}
@@ -640,6 +640,17 @@ func validateServerConfigFileKeys(req *ServerConfigUpdateRequest, fileKeys []str
 			return &serverConfigFileValidationError{err.Error()}
 		}
 	}
+	if under("server.broker.instances") && req.Server != nil && req.Server.Broker != nil {
+		// Flat Runtime Broker instances: validated before anything is
+		// written; a null leaf removes them.
+		if errs := config.ValidateRuntimeBrokerInstances(req.Server.Broker.Instances); len(errs) > 0 {
+			all := make([]error, 0, len(errs))
+			for _, e := range errs {
+				all = append(all, e)
+			}
+			return &serverConfigFileValidationError{errors.Join(all...).Error()}
+		}
+	}
 	if under("server.shared_dir_storage") && req.Server != nil {
 		runtimes, profiles := req.Runtimes, req.Profiles
 		snap := ops.Snapshot()
@@ -752,10 +763,12 @@ func (s *Server) applyServerConfigFileSideEffects(changed []string) (applied, re
 	}
 	for _, k := range changed {
 		if k == "server.log_level" {
-			if gc, err := config.LoadGlobalConfig(""); err != nil {
+			if gc, err := config.LoadGlobalConfig(s.config.ConfigPath); err != nil {
 				slog.Error("PUT server-config: failed to reload settings for log_level", "error", err)
 				requiresRestart = append(requiresRestart, k)
-			} else if gc.LogLevel != "" {
+			} else {
+				// Applied even when empty so that clearing the key
+				// reverts to the default level.
 				applySnapshotLogLevel(gc.LogLevel)
 				applied = append(applied, "log_level")
 			}

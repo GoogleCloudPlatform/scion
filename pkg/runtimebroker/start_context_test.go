@@ -317,8 +317,15 @@ func TestBuildStartContext_BasicFields(t *testing.T) {
 	if _, ok := sc.Opts.Env["SCION_GROVE_PATH"]; ok {
 		t.Errorf("expected SCION_GROVE_PATH to be absent, got %q", sc.Opts.Env["SCION_GROVE_PATH"])
 	}
-	if sc.Opts.Env["SCION_DEBUG"] != "1" {
-		t.Errorf("expected SCION_DEBUG='1', got %q", sc.Opts.Env["SCION_DEBUG"])
+	// cfg.Debug is set above: the broker's debug setting must not reach the
+	// agent environment (ptone/scion#4098).
+	for _, key := range []string{"SCION_DEBUG", "SCION_LOG_LEVEL"} {
+		if v, ok := sc.Opts.Env[key]; ok {
+			t.Errorf("expected %s to be absent when the broker runs with debug, got %q", key, v)
+		}
+		if _, ok := sc.EnvClassifications[key]; ok {
+			t.Errorf("expected no %s classification when the broker runs with debug", key)
+		}
 	}
 }
 
@@ -353,6 +360,57 @@ func TestBuildStartContext_EnvMerging(t *testing.T) {
 	}
 	if sc.Opts.Env["KEY_C"] != "from-config" {
 		t.Errorf("expected KEY_C='from-config', got %q", sc.Opts.Env["KEY_C"])
+	}
+}
+
+// TestBuildStartContext_DebugNotPropagatedExplicitLogLevelKept covers
+// ptone/scion#4098: a broker running with debug no longer adds SCION_DEBUG to
+// agent environments, and an explicit SCION_LOG_LEVEL in the request env (hub
+// env or the CLI's --agent-log-level) reaches the agent unchanged, with its
+// classification intact.
+func TestBuildStartContext_DebugNotPropagatedExplicitLogLevelKept(t *testing.T) {
+	const spec = "warn,hub.auth=debug"
+
+	for _, tc := range []struct {
+		name        string
+		resolvedEnv map[string]string
+		config      *CreateAgentConfig
+	}{
+		{name: "resolved env", resolvedEnv: map[string]string{"SCION_LOG_LEVEL": spec}},
+		{name: "config env", config: &CreateAgentConfig{Env: []string{"SCION_LOG_LEVEL=" + spec}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultServerConfig()
+			cfg.Debug = true
+			cfg.StateDir = t.TempDir()
+			srv := newTestServerForStartContext(t, cfg)
+
+			r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+			sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+				Name:               "agent-log-level",
+				ResolvedEnv:        tc.resolvedEnv,
+				EnvClassifications: map[string]api.EnvKind{"SCION_LOG_LEVEL": api.EnvKindPlain},
+				Config:             tc.config,
+				HTTPRequest:        r,
+				Operation:          opCreate,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if got := sc.Opts.Env["SCION_LOG_LEVEL"]; got != spec {
+				t.Errorf("SCION_LOG_LEVEL = %q, want %q unchanged", got, spec)
+			}
+			if got := sc.EnvClassifications["SCION_LOG_LEVEL"]; got != api.EnvKindPlain {
+				t.Errorf("SCION_LOG_LEVEL classification = %q, want %q", got, api.EnvKindPlain)
+			}
+			if v, ok := sc.Opts.Env["SCION_DEBUG"]; ok {
+				t.Errorf("SCION_DEBUG = %q, want it unset when the broker runs with debug", v)
+			}
+			if _, ok := sc.EnvClassifications["SCION_DEBUG"]; ok {
+				t.Error("SCION_DEBUG classification added when the broker runs with debug")
+			}
+		})
 	}
 }
 
@@ -2466,50 +2524,292 @@ func TestBuildStartContext_GCPMetadataExplicitBlock(t *testing.T) {
 	}
 }
 
-// TestBuildStartContext_GCPMetadataBlockRejectedOnKubernetes covers the phase
-// 1 rule from ptone/scion#2328: "block" is not offered on the Kubernetes
-// runtime. The broker is the enforcement point here because it is the one
-// place that knows the concrete runtime with certainty at dispatch time. Both
-// spellings the codebase accepts for the Kubernetes runtime name ("kubernetes"
-// and "k8s") must be covered.
-func TestBuildStartContext_GCPMetadataBlockRejectedOnKubernetes(t *testing.T) {
+// TestBuildStartContext_KubernetesBlockUnconfiguredUsesNamespaceDefault
+// covers ptone/scion#4034 with no kubernetes_block_service_account
+// configured: "block" on Kubernetes is accepted, not refused, and the pod
+// runs as the namespace's default ServiceAccount (an empty block
+// ServiceAccountName). It is never downgraded to passthrough. Both spellings
+// the codebase accepts for the Kubernetes runtime name are covered.
+func TestBuildStartContext_KubernetesBlockUnconfiguredUsesNamespaceDefault(t *testing.T) {
 	for _, runtimeName := range []string{"kubernetes", "k8s"} {
 		t.Run(runtimeName, func(t *testing.T) {
 			cfg := DefaultServerConfig()
 			cfg.StateDir = t.TempDir()
 			srv := newTestServerForStartContextRuntime(t, cfg, runtimeName)
 
-			r := httptest.NewRequest("POST", "/api/v1/agents", nil)
-
 			sc, err := srv.buildStartContext(context.Background(), startContextInputs{
 				Name: "agent-k8s-block",
 				Config: &CreateAgentConfig{
-					GCPIdentity: &GCPIdentityConfig{
-						MetadataMode: "block",
-					},
+					GCPIdentity: &GCPIdentityConfig{MetadataMode: "block"},
 				},
-				HTTPRequest: r,
+				HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents", nil),
 				Operation:   opCreate,
 			})
-			if err == nil {
-				t.Fatalf("expected an error for block mode on runtime %q, got nil (env: %v)", runtimeName, sc.Opts.Env)
+			if err != nil {
+				t.Fatalf("expected block on runtime %q to be accepted, got %v", runtimeName, err)
 			}
-			// Nothing must proceed: no partial pod/env context is returned
-			// alongside the rejection.
-			if sc != nil {
-				t.Errorf("expected nil startContext alongside the error, got %+v", sc)
-			}
-			if !strings.Contains(err.Error(), "Kubernetes") {
-				t.Errorf("expected the error to name the Kubernetes runtime, got %q", err.Error())
-			}
-			if !strings.Contains(err.Error(), "assign") || !strings.Contains(err.Error(), "passthrough") {
-				t.Errorf("expected the error to name assign/passthrough as alternatives, got %q", err.Error())
-			}
-			if !strings.Contains(err.Error(), "project or hub default") {
-				t.Errorf("expected the error to mention changing the project or hub default, got %q", err.Error())
+			assertKubernetesBlockContext(t, sc, "")
+			want := dispatchProfileSelection{RuntimeEntryName: runtimeName}
+			if sc.BlockSelection == nil || *sc.BlockSelection != want {
+				t.Errorf("BlockSelection = %+v, want %+v", sc.BlockSelection, want)
 			}
 		})
 	}
+}
+
+// assertKubernetesBlockContext checks the start context of a Kubernetes
+// "block" dispatch: the block env (never passthrough), the block identity
+// with wantKSA (empty for the namespace default), no "assign" ServiceAccount
+// and no assign identity env.
+func assertKubernetesBlockContext(t *testing.T, sc *startContext, wantKSA string) {
+	t.Helper()
+	if got := sc.Opts.Env["SCION_METADATA_MODE"]; got != "block" {
+		t.Errorf("SCION_METADATA_MODE = %q, want block", got)
+	}
+	if sc.Opts.KubernetesBlockIdentity == nil {
+		t.Fatalf("expected KubernetesBlockIdentity to be set")
+	}
+	if got := sc.Opts.KubernetesBlockIdentity.ServiceAccountName; got != wantKSA {
+		t.Errorf("block ServiceAccountName = %q, want %q", got, wantKSA)
+	}
+	if got := sc.Opts.ResolvedKubernetesServiceAccountName; got != "" {
+		t.Errorf("expected no assign ServiceAccount, got %q", got)
+	}
+	if sc.AssignSelection != nil {
+		t.Errorf("expected no AssignSelection, got %+v", sc.AssignSelection)
+	}
+	for _, key := range []string{"SCION_METADATA_SA_EMAIL", "SCION_METADATA_PROJECT_ID"} {
+		if v, ok := sc.Opts.Env[key]; ok {
+			t.Errorf("expected no %s for block, got %q", key, v)
+		}
+	}
+}
+
+// testKubernetesBlockGlobalSettingsYAML is operator global settings with a
+// block ServiceAccount on the "kubernetes" runtime entry (the entry a
+// ForceRuntime "kubernetes" test server resolves to).
+const testKubernetesBlockGlobalSettingsYAML = `schema_version: "1"
+active_profile: local
+profiles:
+    local:
+        runtime: kubernetes
+runtimes:
+    kubernetes:
+        type: kubernetes
+        kubernetes_block_service_account: scion-block
+`
+
+// TestBuildStartContext_KubernetesBlockConfiguredServiceAccount covers
+// "block" from the request, from a project default and from a hub default
+// (the latter two arrive as hub-supplied resolvedEnv) with a configured
+// kubernetes_block_service_account: each runs as the block ServiceAccount.
+func TestBuildStartContext_KubernetesBlockConfiguredServiceAccount(t *testing.T) {
+	cases := []struct {
+		name string
+		in   startContextInputs
+	}{
+		{"request", startContextInputs{
+			Config:    &CreateAgentConfig{GCPIdentity: &GCPIdentityConfig{MetadataMode: "block"}},
+			Operation: opCreate,
+		}},
+		{"project_default_create", startContextInputs{
+			Config:      &CreateAgentConfig{},
+			ResolvedEnv: map[string]string{"SCION_METADATA_MODE": "block", "SCION_METADATA_MODE_SOURCE": "hub"},
+			Operation:   opCreate,
+		}},
+		{"hub_default_start", startContextInputs{
+			ResolvedEnv: map[string]string{"SCION_METADATA_MODE": "block", "SCION_METADATA_MODE_SOURCE": "hub"},
+			Operation:   opHTTPStart,
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultServerConfig()
+			cfg.StateDir = t.TempDir()
+			srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
+			newTestGlobalSettings(t, testKubernetesBlockGlobalSettingsYAML)
+
+			in := tc.in
+			in.Name = "agent-k8s-block-" + strings.ReplaceAll(tc.name, "_", "-")
+			in.HTTPRequest = httptest.NewRequest("POST", "/api/v1/agents", nil)
+			sc, err := srv.buildStartContext(context.Background(), in)
+			if err != nil {
+				t.Fatalf("buildStartContext: %v", err)
+			}
+			assertKubernetesBlockContext(t, sc, "scion-block")
+		})
+	}
+}
+
+// TestBuildStartContext_KubernetesBlockProfileOverridesRuntimeEntry covers
+// the precedence: a profile's kubernetes_block_service_account wins over its
+// runtime entry's. See TestBuildStartContext_KubernetesBlockProjectSettingIgnored
+// for a project's own settings.
+func TestBuildStartContext_KubernetesBlockProfileOverridesRuntimeEntry(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv, _ := newTestServerForStartContextMultiProfile(t, cfg, "docker", "team", "kubernetes")
+	newTestGlobalSettings(t, `schema_version: "1"
+active_profile: local
+profiles:
+    local:
+        runtime: docker
+    team:
+        runtime: kubernetes
+        kubernetes_block_service_account: team-block
+runtimes:
+    docker:
+        type: docker
+    kubernetes:
+        type: kubernetes
+        kubernetes_block_service_account: entry-block
+`)
+
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name: "agent-k8s-block-profile",
+		Config: &CreateAgentConfig{
+			Profile:     "team",
+			GCPIdentity: &GCPIdentityConfig{MetadataMode: "block"},
+		},
+		HTTPRequest: httptest.NewRequest(http.MethodPost, "/api/v1/agents", nil),
+		Operation:   opCreate,
+	})
+	if err != nil {
+		t.Fatalf("buildStartContext: %v", err)
+	}
+	assertKubernetesBlockContext(t, sc, "team-block")
+	want := dispatchProfileSelection{ProfileName: "team", RuntimeEntryName: "kubernetes"}
+	if sc.BlockSelection == nil || *sc.BlockSelection != want {
+		t.Errorf("BlockSelection = %+v, want %+v", sc.BlockSelection, want)
+	}
+}
+
+// TestBuildStartContext_KubernetesBlockProjectSettingIgnored pins that a
+// kubernetes_block_service_account set only in a project's own
+// settings.yaml is never used: the setting decides the pod's identity, so it
+// is read only from the broker's global settings. With none there, the pod
+// runs as the namespace's default ServiceAccount.
+func TestBuildStartContext_KubernetesBlockProjectSettingIgnored(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
+	projectDir := newTestProjectSettings(t, testKubernetesBlockGlobalSettingsYAML)
+	newTestGlobalSettings(t, testKubernetesProjectSettingsYAML)
+
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "agent-k8s-block-project-setting",
+		ProjectPath: projectDir,
+		Config:      &CreateAgentConfig{GCPIdentity: &GCPIdentityConfig{MetadataMode: "block"}},
+		HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents", nil),
+		Operation:   opCreate,
+	})
+	if err != nil {
+		t.Fatalf("buildStartContext: %v", err)
+	}
+	assertKubernetesBlockContext(t, sc, "")
+}
+
+// TestBuildStartContext_KubernetesBlockInvalidServiceAccountRefused covers a
+// hand-edited, malformed kubernetes_block_service_account: refused at the
+// point of use rather than reaching the pod spec.
+func TestBuildStartContext_KubernetesBlockInvalidServiceAccountRefused(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
+	newTestGlobalSettings(t, strings.Replace(testKubernetesBlockGlobalSettingsYAML, "scion-block", "Not_Valid", 1))
+
+	_, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "agent-k8s-block-invalid",
+		Config:      &CreateAgentConfig{GCPIdentity: &GCPIdentityConfig{MetadataMode: "block"}},
+		HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents", nil),
+		Operation:   opCreate,
+	})
+	if err == nil || !strings.Contains(err.Error(), "kubernetes_block_service_account") {
+		t.Fatalf("expected the malformed block ServiceAccount to be refused, got %v", err)
+	}
+}
+
+// TestBuildStartContext_KubernetesBlockAssignAndPassthroughUnaffected pins
+// that the block ServiceAccount setting does not change "passthrough" or
+// "assign" on Kubernetes, or "block" on docker.
+func TestBuildStartContext_KubernetesBlockAssignAndPassthroughUnaffected(t *testing.T) {
+	const globalYAML = `schema_version: "1"
+active_profile: local
+profiles:
+    local:
+        runtime: kubernetes
+runtimes:
+    kubernetes:
+        type: kubernetes
+        kubernetes_block_service_account: scion-block
+        kubernetes_service_account_mappings:
+            agent-worker@my-project.iam.gserviceaccount.com: agent-worker-ksa
+`
+	t.Run("passthrough", func(t *testing.T) {
+		cfg := DefaultServerConfig()
+		cfg.StateDir = t.TempDir()
+		srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
+		newTestGlobalSettings(t, globalYAML)
+		sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name:        "agent-k8s-pt",
+			Config:      &CreateAgentConfig{GCPIdentity: &GCPIdentityConfig{MetadataMode: "passthrough"}},
+			HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents", nil),
+			Operation:   opCreate,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sc.Opts.KubernetesBlockIdentity != nil || sc.BlockSelection != nil {
+			t.Errorf("expected no block identity for passthrough, got %+v", sc.Opts.KubernetesBlockIdentity)
+		}
+		if got := sc.Opts.Env["SCION_METADATA_MODE"]; got != "passthrough" {
+			t.Errorf("SCION_METADATA_MODE = %q, want passthrough", got)
+		}
+	})
+	t.Run("assign", func(t *testing.T) {
+		cfg := DefaultServerConfig()
+		cfg.StateDir = t.TempDir()
+		srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
+		projectDir := newTestProjectSettings(t, testKubernetesProjectSettingsYAML)
+		newTestGlobalSettings(t, globalYAML)
+		sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name:        "agent-k8s-assign",
+			ProjectPath: projectDir,
+			Config: &CreateAgentConfig{GCPIdentity: &GCPIdentityConfig{
+				MetadataMode: "assign",
+				SAEmail:      "agent-worker@my-project.iam.gserviceaccount.com",
+			}},
+			HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents", nil),
+			Operation:   opCreate,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sc.Opts.KubernetesBlockIdentity != nil {
+			t.Errorf("expected no block identity for assign, got %+v", sc.Opts.KubernetesBlockIdentity)
+		}
+		if got := sc.Opts.ResolvedKubernetesServiceAccountName; got != "agent-worker-ksa" {
+			t.Errorf("assign ServiceAccount = %q, want agent-worker-ksa", got)
+		}
+	})
+	t.Run("docker_block", func(t *testing.T) {
+		cfg := DefaultServerConfig()
+		cfg.StateDir = t.TempDir()
+		srv := newTestServerForStartContextRuntime(t, cfg, "docker")
+		newTestGlobalSettings(t, globalYAML)
+		sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name:        "agent-docker-block",
+			Config:      &CreateAgentConfig{GCPIdentity: &GCPIdentityConfig{MetadataMode: "block"}},
+			HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents", nil),
+			Operation:   opCreate,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sc.Opts.KubernetesBlockIdentity != nil || sc.BlockSelection != nil {
+			t.Errorf("expected no Kubernetes block identity on docker, got %+v", sc.Opts.KubernetesBlockIdentity)
+		}
+	})
 }
 
 // TestBuildStartContext_GCPMetadataNoIdentityInputOnKubernetesDefaultsToPassthrough
@@ -2517,13 +2817,12 @@ func TestBuildStartContext_GCPMetadataBlockRejectedOnKubernetes(t *testing.T) {
 // information at all (no Config.GCPIdentity, no resolvedEnv
 // SCION_METADATA_MODE), buildStartContext's own secure default is
 // runtime-aware. On Kubernetes it resolves to "passthrough", not "block" —
-// Kubernetes does not support "block" (ptone/scion#2328 phase 1), and the
-// Hub's own resolution ladder deliberately leaves the mode unset for exactly
-// this "nothing configured" case (as opposed to an explicit project or hub
-// default of "block", which the Hub still threads through explicitly and
-// which is rejected — see
-// TestBuildStartContext_GCPMetadataBlockRejectedOnKubernetesFromResolvedEnv)
-// so this runtime-appropriate default can apply.
+// block on Kubernetes must be chosen explicitly (ptone/scion#2328 phase 1),
+// and the Hub's own resolution ladder deliberately leaves the mode unset for
+// exactly this "nothing configured" case (as opposed to an explicit project
+// or hub default of "block", which the Hub still threads through explicitly
+// — see TestBuildStartContext_KubernetesBlockConfiguredServiceAccount) so
+// this runtime-appropriate default can apply.
 func TestBuildStartContext_GCPMetadataNoIdentityInputOnKubernetesDefaultsToPassthrough(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
@@ -2575,47 +2874,14 @@ func TestBuildStartContext_GCPMetadataNoIdentityInputOnDockerDefaultsToBlock(t *
 	}
 }
 
-// TestBuildStartContext_GCPMetadataBlockRejectedOnKubernetesFromResolvedEnv
-// covers block arriving via a project or hub default, which reaches the
-// broker as hub-supplied resolvedEnv (the start path) rather than an explicit
-// Config.GCPIdentity. Stored block defaults are not migrated; they simply
-// fail a Kubernetes dispatch with the same actionable error.
-func TestBuildStartContext_GCPMetadataBlockRejectedOnKubernetesFromResolvedEnv(t *testing.T) {
-	cfg := DefaultServerConfig()
-	cfg.StateDir = t.TempDir()
-	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
-
-	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
-
-	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
-		Name:        "agent-k8s-default-block",
-		ResolvedEnv: map[string]string{"SCION_METADATA_MODE": "block"},
-		HTTPRequest: r,
-		Operation:   opCreate,
-	})
-	if err == nil {
-		t.Fatalf("expected an error for a resolved-env block default on Kubernetes, got nil (env: %v)", sc.Opts.Env)
-	}
-	if !strings.Contains(err.Error(), "Kubernetes") {
-		t.Errorf("expected the error to name the Kubernetes runtime, got %q", err.Error())
-	}
-}
-
-// TestBuildStartContext_GCPMetadataBlockRejectedAfterProjectDirResolution
-// pins the ordering of the Kubernetes/"block" rejection relative to
+// TestBuildStartContext_KubernetesBlockRefusedAfterProjectDirResolution
+// pins the ordering of the Kubernetes "block" resolution relative to
 // buildStartContext's own project-directory resolution (WriteProjectMarker,
-// MkdirAll): the rejection runs after that resolution, not before it.
-// Settings and the saved profile the rejection's runtime resolution depends
-// on must be read from the final, post-update location; a fresh hub-managed
-// project (the
-// ProjectSlug+ProjectID-with-no-existing-ProjectPath shape used below) or a
-// stale-marker rewrite would otherwise resolve against the pre-update
-// location. The rejection still runs before any pod or env is built, which
-// is covered by every other GCPMetadataBlockRejectedOnKubernetes* test
-// rejecting before Opts is ever populated; this test instead pins that the
-// project directory and marker now do exist by the time the rejection
-// happens.
-func TestBuildStartContext_GCPMetadataBlockRejectedAfterProjectDirResolution(t *testing.T) {
+// MkdirAll): it runs after that resolution, so settings and the saved
+// profile it depends on are read from the final, post-update location. A
+// request-level serviceAccountName that conflicts with block is refused at
+// that point, and the project directory must already exist by then.
+func TestBuildStartContext_KubernetesBlockRefusedAfterProjectDirResolution(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
@@ -2638,6 +2904,7 @@ func TestBuildStartContext_GCPMetadataBlockRejectedAfterProjectDirResolution(t *
 		ProjectID:   "project-id-for-side-effect-check",
 		Config: &CreateAgentConfig{
 			GCPIdentity: &GCPIdentityConfig{MetadataMode: "block"},
+			Kubernetes:  &api.KubernetesConfig{ServiceAccountName: "some-other-ksa"},
 		},
 		HTTPRequest: r,
 		Operation:   opCreate,
@@ -2645,14 +2912,17 @@ func TestBuildStartContext_GCPMetadataBlockRejectedAfterProjectDirResolution(t *
 	if err == nil {
 		t.Fatalf("expected the dispatch to be rejected, got nil (env: %v)", sc.Opts.Env)
 	}
+	if !strings.Contains(err.Error(), "conflicts with GCP identity mode") {
+		t.Errorf("expected the explicit ServiceAccount conflict, got %q", err.Error())
+	}
 	if _, statErr := os.Stat(projectDir); os.IsNotExist(statErr) {
 		t.Errorf("expected the project directory/marker to already exist by the time the rejection runs, but %s does not exist", projectDir)
 	}
 }
 
 // TestBuildStartContext_GCPMetadataPassthroughUnchangedOnKubernetes guards the
-// inversion against over-reach: only "block" is rejected on Kubernetes;
-// "passthrough" must behave exactly as on any other runtime.
+// Kubernetes block handling against over-reach: "passthrough" must behave
+// exactly as on any other runtime.
 //
 // This test used to also cover "assign" (as
 // TestBuildStartContext_GCPMetadataAssignAndPassthroughUnchangedOnKubernetes),
@@ -4246,25 +4516,25 @@ func TestBuildStartContext_GCPMetadataBothVarsAlwaysMatch(t *testing.T) {
 // profile THIS dispatch names resolves to, not the broker's default runtime
 // — covering both directions catches a fix that only handles one.
 var gcpIdentityDispatchProfileCases = []struct {
-	name                      string
-	defaultRuntime            string
-	profileRuntime            string
-	wantDefaultMode           string // resolved mode when no GCP identity is configured
-	wantExplicitBlockRejected bool
+	name                string
+	defaultRuntime      string
+	profileRuntime      string
+	wantDefaultMode     string // resolved mode when no GCP identity is configured
+	wantKubernetesBlock bool   // explicit block gets the Kubernetes block identity
 }{
 	{
-		name:                      "docker-default broker, kubernetes profile",
-		defaultRuntime:            "docker",
-		profileRuntime:            "kubernetes",
-		wantDefaultMode:           "passthrough",
-		wantExplicitBlockRejected: true,
+		name:                "docker-default broker, kubernetes profile",
+		defaultRuntime:      "docker",
+		profileRuntime:      "kubernetes",
+		wantDefaultMode:     "passthrough",
+		wantKubernetesBlock: true,
 	},
 	{
-		name:                      "kubernetes-default broker, docker profile",
-		defaultRuntime:            "kubernetes",
-		profileRuntime:            "docker",
-		wantDefaultMode:           "block",
-		wantExplicitBlockRejected: false,
+		name:                "kubernetes-default broker, docker profile",
+		defaultRuntime:      "kubernetes",
+		profileRuntime:      "docker",
+		wantDefaultMode:     "block",
+		wantKubernetesBlock: false,
 	},
 }
 
@@ -4285,25 +4555,21 @@ func assertGCPIdentityDefaultMode(t *testing.T, srv *Server, wantMode string, ma
 }
 
 // assertGCPIdentityExplicitBlock calls buildStartContext with makeInputs
-// (which must configure an explicit "block") and checks it is rejected or
-// accepted per wantRejected.
-func assertGCPIdentityExplicitBlock(t *testing.T, srv *Server, wantRejected bool, makeInputs func() startContextInputs) {
+// (which must configure an explicit "block") and checks it is accepted as
+// "block", with the Kubernetes block identity exactly when
+// wantKubernetesBlock (the dispatch's profile resolves to Kubernetes,
+// ptone/scion#4034).
+func assertGCPIdentityExplicitBlock(t *testing.T, srv *Server, wantKubernetesBlock bool, makeInputs func() startContextInputs) {
 	t.Helper()
 	sc, err := srv.buildStartContext(context.Background(), makeInputs())
-	if wantRejected {
-		if err == nil {
-			t.Fatalf("expected explicit block to be rejected, got nil (env: %v)", sc.Opts.Env)
-		}
-		if !strings.Contains(err.Error(), "Kubernetes") {
-			t.Errorf("expected the error to name the Kubernetes runtime, got %q", err.Error())
-		}
-		return
-	}
 	if err != nil {
 		t.Fatalf("expected explicit block to be accepted, got %v", err)
 	}
 	if got := sc.Opts.Env["SCION_METADATA_MODE"]; got != "block" {
 		t.Errorf("expected SCION_METADATA_MODE='block', got %q", got)
+	}
+	if got := sc.Opts.KubernetesBlockIdentity != nil; got != wantKubernetesBlock {
+		t.Errorf("KubernetesBlockIdentity set = %v, want %v", got, wantKubernetesBlock)
 	}
 }
 
@@ -4332,7 +4598,7 @@ func TestBuildStartContext_GCPIdentityUsesDispatchProfile_Create(t *testing.T) {
 				cfg.StateDir = t.TempDir()
 				srv, _ := newTestServerForStartContextMultiProfile(t, cfg, tt.defaultRuntime, gcpIdentityDispatchOtherProfile, tt.profileRuntime)
 				r := httptest.NewRequest("POST", "/api/v1/agents", nil)
-				assertGCPIdentityExplicitBlock(t, srv, tt.wantExplicitBlockRejected, func() startContextInputs {
+				assertGCPIdentityExplicitBlock(t, srv, tt.wantKubernetesBlock, func() startContextInputs {
 					return startContextInputs{
 						Name: "agent-profile-block",
 						Config: &CreateAgentConfig{
@@ -4414,7 +4680,7 @@ func TestBuildStartContext_GCPIdentityUsesDispatchProfile_Start(t *testing.T) {
 				srv, dotScion := newTestServerForStartContextMultiProfile(t, cfg, tt.defaultRuntime, gcpIdentityDispatchOtherProfile, tt.profileRuntime)
 				writeSavedAgentProfile(t, dotScion, "agent-saved-block", gcpIdentityDispatchOtherProfile)
 				r := httptest.NewRequest("POST", "/api/v1/agents/agent-saved-block/start", nil)
-				assertGCPIdentityExplicitBlock(t, srv, tt.wantExplicitBlockRejected, func() startContextInputs {
+				assertGCPIdentityExplicitBlock(t, srv, tt.wantKubernetesBlock, func() startContextInputs {
 					return startContextInputs{
 						Name:        "agent-saved-block",
 						ResolvedEnv: map[string]string{"SCION_METADATA_MODE": "block"},
@@ -4453,7 +4719,7 @@ func TestBuildStartContext_GCPIdentityUsesDispatchProfile_Restart(t *testing.T) 
 				srv, dotScion := newTestServerForStartContextMultiProfile(t, cfg, tt.defaultRuntime, gcpIdentityDispatchOtherProfile, tt.profileRuntime)
 				writeSavedAgentProfile(t, dotScion, "agent-saved-restart-block", gcpIdentityDispatchOtherProfile)
 				r := httptest.NewRequest("POST", "/api/v1/agents/agent-saved-restart-block/restart", nil)
-				assertGCPIdentityExplicitBlock(t, srv, tt.wantExplicitBlockRejected, func() startContextInputs {
+				assertGCPIdentityExplicitBlock(t, srv, tt.wantKubernetesBlock, func() startContextInputs {
 					return startContextInputs{
 						Name:        "agent-saved-restart-block",
 						ResolvedEnv: map[string]string{"SCION_METADATA_MODE": "block"},

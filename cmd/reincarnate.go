@@ -164,7 +164,10 @@ agent lifecycle permission, and can lower its own role but not raise it.
 
 To reincarnate another agent you must be able to delegate its role. The
 agent keeps its existing delegator unless you change its role with --role;
-then you become its recorded delegator.
+then you become its recorded delegator. A user also becomes the
+recorded delegator, without a role change, of an agent whose delegation
+chain has no recorded provenance (for example after a hub upgrade), which
+clears its ceiling_unrecorded denial.
 
 Use --broker <name|id> to move the agent to another runtime broker. Both
 brokers must mount the same NFS export, the agent's workspace must be on
@@ -710,7 +713,7 @@ func init() {
 	reincarnateCmd.Flags().BoolVar(&reincarnateHandoffTemplate, "handoff-template", false, "Print the handoff template and exit")
 	reincarnateCmd.Flags().StringArrayVar(&reincarnateSharedDirs, "shared-dir-backend", nil, "Change a shared dir's recorded storage backend, as NAME=nfs or NAME=local (repeatable). Only the record changes; copy the data to the new backend first")
 	reincarnateCmd.Flags().BoolVar(&reincarnateAllowEmptySD, "allow-empty-shared-dir", false, "With --shared-dir-backend, start even if the directory on the new backend is empty while the previous one is not")
-	reincarnateCmd.Flags().StringVar(&reincarnateServiceAccount, "service-account", "", "GCP service account ID for the new generation (same access checks as create)")
+	reincarnateCmd.Flags().StringVar(&reincarnateServiceAccount, "service-account", "", "GCP service account for the new generation: its id, email or display name (same access checks as create)")
 	reincarnateCmd.Flags().StringVar(&reincarnateRole, "role", "", "Agent role for the new generation: none, readonly, baseline, full (same access checks as create)")
 	reincarnateCmd.Flags().StringVar(&reincarnateModel, "model", "", "Model for the new generation (aliases accepted)")
 	reincarnateCmd.Flags().StringVar(&reincarnateThinkingLevel, "thinking-level", "", "Thinking level for the new generation: an integer 0-100, or low (25), medium (50), high (75), max (100)")

@@ -53,6 +53,7 @@ import { ARTIFACTS_FLAG, MAX_MESSAGE_ARTIFACTS } from '../../../client/artifacts
 import { isFeatureEnabled } from '../../../utils/feature-flags.js';
 import type { ArtifactPickerSelectDetail, PendingArtifact } from './artifact-picker.js';
 import './artifact-picker.js';
+import { findDefaultAgent } from './default-agent.js';
 
 /** The touch presentation of the send button's right-click menu. */
 const SEND_SHEET_INTERRUPT: ActionSheetItem = {
@@ -160,6 +161,8 @@ export interface MemberInfo {
   email: string;
   avatarUrl?: string;
   kind: 'user' | 'agent';
+  /** Agent slug, when the roster carries it. */
+  slug?: string;
 }
 
 /**
@@ -1389,12 +1392,13 @@ export class ScionChatComposer extends LitElement {
     const hasAgents = agentMembers.length > 0;
 
     if (this.defaultAgent) {
+      const defaultName = this.defaultAgentMember()?.name || this.defaultAgent;
       return html`
         <sl-dropdown>
           <div class="destination-chip clickable" slot="trigger">
             <span class="arrow">&rarr;</span>
             <span style="font-size: var(--chat-fs-base)">🤖</span>
-            <span class="agent-name" title=${this.defaultAgent}>${this.defaultAgent}</span>
+            <span class="agent-name" title=${defaultName}>${defaultName}</span>
             <span class="hint">(thread default)</span>
             ${hasAgents
               ? html`<sl-icon name="chevron-down" class="chip-chevron"></sl-icon>`
@@ -1420,8 +1424,19 @@ export class ScionChatComposer extends LitElement {
     `;
   }
 
+  /**
+   * The agent member the thread default names. The stored value may be an
+   * agent ID (a promoted DM stores the UUID), a slug, or a display name, so
+   * all three are matched, ID first.
+   */
+  private defaultAgentMember(): MemberInfo | undefined {
+    const agents = this.members.filter((m) => m.kind === 'agent');
+    return findDefaultAgent(this.defaultAgent, agents, (m) => m.name);
+  }
+
   /** Render the dropdown menu for selecting a default agent. */
   private renderAgentMenu(agentMembers: MemberInfo[]) {
+    const current = this.defaultAgentMember();
     return html`
       <sl-menu @sl-select=${this.handleAgentMenuSelect}>
         <sl-menu-label style="padding: 0 var(--sl-spacing-medium);"
@@ -1429,7 +1444,7 @@ export class ScionChatComposer extends LitElement {
         >
         ${agentMembers.map(
           (m) => html`
-            <sl-menu-item value=${m.name} ?checked=${this.defaultAgent === m.name}>
+            <sl-menu-item value=${m.name} ?checked=${current === m}>
               <span slot="prefix" style="font-size: 1.1em;">🤖</span>
               ${m.name}
             </sl-menu-item>
@@ -1452,6 +1467,9 @@ export class ScionChatComposer extends LitElement {
     const newDefault = value === '__clear__' ? '' : value;
 
     if (newDefault === this.defaultAgent) return;
+    // Picking the agent that is already the default (stored by ID or slug)
+    // is not a change.
+    if (newDefault && newDefault === this.defaultAgentMember()?.name) return;
 
     this.dispatchEvent(
       new CustomEvent('default-agent-change', {
@@ -2182,7 +2200,7 @@ export class ScionChatComposer extends LitElement {
   /** Blur the composer's textarea, retracting the on-screen keyboard. */
   private blurTextarea(): void {
     const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
-    blurElement(slTextarea as HTMLElement | null);
+    blurElement(slTextarea);
   }
 
   /**
@@ -2209,7 +2227,7 @@ export class ScionChatComposer extends LitElement {
           // horizontal drift (overflow:clip + inert on the panels is), but it
           // stops the message list from jumping when this runs while the
           // composer's panel isn't the one on screen.
-          focusElement(slTextarea as HTMLElement, { preventScroll: true });
+          focusElement(slTextarea, { preventScroll: true });
         }
       });
     });
@@ -2258,7 +2276,7 @@ export class ScionChatComposer extends LitElement {
     }
     const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
     if (slTextarea) {
-      focusElement(slTextarea as HTMLElement, { preventScroll: true });
+      focusElement(slTextarea, { preventScroll: true });
     }
   }
 

@@ -573,6 +573,71 @@ func TestListAgents_GroveIDQueryParamNotHonoured(t *testing.T) {
 	}
 }
 
+// TestListAgents_StatusFiltersByPhase verifies that ?status= keeps only the
+// agents whose Phase matches (case-insensitively), on the default and the
+// auxiliary runtimes, and that status is not passed to the runtimes as a
+// label filter: containers carry no status label, so a label match would
+// return nothing (ptone/scion#3020).
+func TestListAgents_StatusFiltersByPhase(t *testing.T) {
+	mgr := &mockManager{
+		agents: []api.AgentInfo{
+			{ID: "c-1", Name: "running-1", Phase: "running"},
+			{ID: "c-2", Name: "stopped-1", Phase: "stopped"},
+			{ID: "c-3", Name: "running-2", Phase: "Running"},
+			{ID: "c-4", Name: "error-1", Phase: "error"},
+		},
+	}
+	srv := newTestServerWithManager(t, mgr)
+
+	auxMgr := &mockManager{
+		agents: []api.AgentInfo{
+			{ID: "k8s-1", Name: "aux-running", Phase: "running", Runtime: "kubernetes"},
+			{ID: "k8s-2", Name: "aux-stopped", Phase: "stopped", Runtime: "kubernetes"},
+		},
+	}
+	auxRt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
+	srv.auxiliaryRuntimesMu.Lock()
+	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRt, Manager: auxMgr}
+	srv.auxiliaryRuntimesMu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents?status=running", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, w.Code, w.Body.String())
+	}
+
+	var resp ListAgentsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	got := make(map[string]bool)
+	for _, ag := range resp.Agents {
+		got[ag.Name] = true
+	}
+	want := []string{"running-1", "running-2", "aux-running"}
+	if len(resp.Agents) != len(want) {
+		t.Errorf("expected %d agents, got %d: %v", len(want), len(resp.Agents), got)
+	}
+	for _, name := range want {
+		if !got[name] {
+			t.Errorf("expected agent %q in the status=running list, got %v", name, got)
+		}
+	}
+	if resp.TotalCount != len(want) {
+		t.Errorf("expected totalCount %d, got %d", len(want), resp.TotalCount)
+	}
+
+	if v, ok := mgr.LastListFilter()["status"]; ok {
+		t.Errorf("status must not be passed to the runtime label filter, got status=%q", v)
+	}
+	if v, ok := auxMgr.LastListFilter()["status"]; ok {
+		t.Errorf("status must not be passed to the auxiliary runtime label filter, got status=%q", v)
+	}
+}
+
 func TestListAgentsIncludesAuxiliaryRuntimes(t *testing.T) {
 	srv := newTestServer(t)
 
@@ -1610,10 +1675,14 @@ func TestCreateAgentWithHubCredentials(t *testing.T) {
 	}
 }
 
-// TestCreateAgentWithDebugMode tests that SCION_DEBUG env var is set when debug mode is enabled.
-// This verifies Fix 4 from progress-report.md: Pass SCION_DEBUG env var.
-func TestCreateAgentWithDebugMode(t *testing.T) {
+// TestCreateAgentDebugServerDoesNotSetAgentDebug covers ptone/scion#4098:
+// the test server runs with Debug enabled, and the created agent's
+// environment must not gain SCION_DEBUG (or a SCION_LOG_LEVEL) from it.
+func TestCreateAgentDebugServerDoesNotSetAgentDebug(t *testing.T) {
 	srv, mgr := newTestServerWithEnvCapture()
+	if !srv.config.Debug {
+		t.Fatal("precondition: test server must run with Debug enabled")
+	}
 
 	body := `{"name": "debug-agent"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1625,14 +1694,36 @@ func TestCreateAgentWithDebugMode(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
 	}
-
-	// Verify SCION_DEBUG was set
 	if mgr.lastEnv == nil {
 		t.Fatal("expected environment variables to be set, got nil")
 	}
+	for _, key := range []string{"SCION_DEBUG", "SCION_LOG_LEVEL"} {
+		if v, ok := mgr.lastEnv[key]; ok {
+			t.Errorf("expected %s to be absent when the server runs with debug, got %q", key, v)
+		}
+	}
+}
 
-	if got := mgr.lastEnv["SCION_DEBUG"]; got != "1" {
-		t.Errorf("expected SCION_DEBUG='1' when server in debug mode, got %q", got)
+// TestCreateAgentExplicitLogLevelPassesThrough covers ptone/scion#4098: an
+// explicit SCION_LOG_LEVEL in the request env reaches the agent unchanged.
+func TestCreateAgentExplicitLogLevelPassesThrough(t *testing.T) {
+	srv, mgr := newTestServerWithEnvCapture()
+
+	body := `{"name": "log-level-agent", "config": {"env": ["SCION_LOG_LEVEL=info,hub=debug"]}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+	if got := mgr.lastEnv["SCION_LOG_LEVEL"]; got != "info,hub=debug" {
+		t.Errorf("expected SCION_LOG_LEVEL='info,hub=debug' unchanged, got %q", got)
+	}
+	if v, ok := mgr.lastEnv["SCION_DEBUG"]; ok {
+		t.Errorf("expected SCION_DEBUG to be absent, got %q", v)
 	}
 }
 
@@ -3142,14 +3233,14 @@ runtimes:
 	})
 }
 
-// TestGCPIdentityBlockRejectedOnKubernetes_HTTPStatus pins that the
-// Kubernetes/"block" rejection (ptone/scion#2328) reaches the HTTP caller as
-// the 400 startContextError.Status actually names, on all three dispatch
-// endpoints — not the generic 500 runtime_error every buildStartContext
-// error used to collapse into before writeStartContextError (errors.go)
-// started honoring Status.
-func TestGCPIdentityBlockRejectedOnKubernetes_HTTPStatus(t *testing.T) {
-	newKubernetesServer := func(t *testing.T) *Server {
+// TestGCPIdentityBlockAcceptedOnKubernetes_HTTP pins ptone/scion#4034 on all
+// three dispatch endpoints: "block" on Kubernetes, from the request or from
+// a hub-supplied project or hub default, is accepted and reaches the
+// manager with the Kubernetes block identity (here the namespace default
+// ServiceAccount, since none is configured) and the block mode, never
+// passthrough. The restart path runs the late consistency recheck too.
+func TestGCPIdentityBlockAcceptedOnKubernetes_HTTP(t *testing.T) {
+	newKubernetesServer := func(t *testing.T) (*Server, *envCapturingManager) {
 		t.Helper()
 		t.Setenv("HOME", t.TempDir())
 		origWd, err := os.Getwd()
@@ -3183,54 +3274,55 @@ runtimes:
 		cfg.ForceRuntime = "kubernetes"
 		mgr := &envCapturingManager{}
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-		return New(cfg, mgr, rt)
+		return New(cfg, mgr, rt), mgr
 	}
 
-	assertRejected := func(t *testing.T, w *httptest.ResponseRecorder) {
+	assertAccepted := func(t *testing.T, w *httptest.ResponseRecorder, mgr *envCapturingManager) {
 		t.Helper()
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, w.Code, w.Body.String())
+		if w.Code < 200 || w.Code > 299 {
+			t.Fatalf("expected a 2xx status, got %d: %s", w.Code, w.Body.String())
 		}
-		var resp ErrorResponse
-		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-			t.Fatalf("failed to decode error response: %v (body: %s)", err, w.Body.String())
+		opts := mgr.LastStartOpts()
+		if opts.KubernetesBlockIdentity == nil {
+			t.Fatalf("expected KubernetesBlockIdentity on the started agent")
 		}
-		if resp.Error.Code != ErrCodeValidationError {
-			t.Errorf("expected error code %q, got %q", ErrCodeValidationError, resp.Error.Code)
+		if got := opts.KubernetesBlockIdentity.ServiceAccountName; got != "" {
+			t.Errorf("expected the namespace default ServiceAccount (empty), got %q", got)
 		}
-		if !strings.Contains(resp.Error.Message, "Kubernetes") {
-			t.Errorf("expected the error message to name the Kubernetes runtime, got %q", resp.Error.Message)
+		if got := mgr.lastEnv["SCION_METADATA_MODE"]; got != "block" {
+			t.Errorf("SCION_METADATA_MODE = %q, want block", got)
 		}
 	}
 
 	t.Run("create", func(t *testing.T) {
-		srv := newKubernetesServer(t)
+		srv, mgr := newKubernetesServer(t)
 		body := `{"name": "gcp-block-k8s-agent", "config": {"gcpIdentity": {"metadata_mode": "block"}}}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(w, req)
-		assertRejected(t, w)
+		assertAccepted(t, w, mgr)
 	})
 
 	t.Run("start", func(t *testing.T) {
-		srv := newKubernetesServer(t)
-		body := `{"resolvedEnv": {"SCION_METADATA_MODE": "block"}}`
+		srv, mgr := newKubernetesServer(t)
+		body := `{"resolvedEnv": {"SCION_METADATA_MODE": "block", "SCION_METADATA_MODE_SOURCE": "hub"}}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/gcp-block-k8s-start/start", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(w, req)
-		assertRejected(t, w)
+		assertAccepted(t, w, mgr)
 	})
 
 	t.Run("restart", func(t *testing.T) {
-		srv := newKubernetesServer(t)
-		body := `{"resolvedEnv": {"SCION_METADATA_MODE": "block"}}`
+		srv, mgr := newKubernetesServer(t)
+		mgr.agents = []api.AgentInfo{{ID: "gcp-block-k8s-restart", Name: "gcp-block-k8s-restart", Phase: "running"}}
+		body := `{"resolvedEnv": {"SCION_METADATA_MODE": "block", "SCION_METADATA_MODE_SOURCE": "hub"}}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/gcp-block-k8s-restart/restart", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(w, req)
-		assertRejected(t, w)
+		assertAccepted(t, w, mgr)
 	})
 }
 

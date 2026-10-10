@@ -505,6 +505,10 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 		// which records run intent running; its dispatch is bounded by
 		// syncDispatch, derived from the claim's context.
 		ctx = detachLaunchFromClient(ctx)
+		// The response waits on that dispatch for up to
+		// syncDispatchTimeout: extend this request's write deadline to
+		// cover it (ptone/scion#3890, as ptone/scion#3850 did for create).
+		extendWriteDeadlineForSyncDispatch(ctx, w, s.config.WriteTimeout)
 		// The collector carries the outcome of the compensating delete of
 		// a run that landed after a delete won (compensateLandedRun).
 		ctx, dispatchWarns := withDispatchWarnings(ctx)
@@ -536,13 +540,16 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			if writeEmptyPerAgentCapabilityError(w, err) {
 				return
 			}
-			if relaySkillResolutionError(w, err) {
+			if relayDispatchRefusal(w, err) {
 				return
 			}
 			if relayWorkspaceStorageUnconfigured(w, err) {
 				return
 			}
-			if relayHarnessConfigRefusal(w, err) {
+			if relayIdentityMappingError(w, err) {
+				return
+			}
+			if relayBrokerRefusal(w, err) {
 				return
 			}
 			RuntimeError(w, "Failed to dispatch agent: "+err.Error())

@@ -52,7 +52,32 @@ var maxListScan = 500
 type ArtifactListItem struct {
 	ArtifactInfo
 	ReviewPending bool `json:"reviewPending"`
+	// Access is why the caller sees the artifact: AccessOwned,
+	// AccessProject (it may read artifacts homed in the artifact's
+	// project) or AccessShared (a grant to it or to one of its projects).
+	Access string `json:"access"`
+	// SharedWithScope is true, in a list narrowed to a project with
+	// scope=, for an artifact homed elsewhere and shared with that
+	// project.
+	SharedWithScope bool `json:"sharedWithScope,omitempty"`
+	// ScopeDeleted is true when the artifact's home project no longer
+	// exists (deleting a project never deletes its artifacts).
+	ScopeDeleted bool `json:"scopeDeleted,omitempty"`
+	// CanManage is set only on rows with ScopeDeleted: true when the
+	// caller may move the artifact to another project (see canAdminister)
+	// and moves are turned on (cross-project sharing).
+	CanManage bool `json:"canManage,omitempty"`
+
+	// src is the stored artifact of the row.
+	src *Artifact
 }
+
+// List item access values.
+const (
+	AccessOwned   = "owned"
+	AccessProject = "project"
+	AccessShared  = "shared"
+)
 
 // ArtifactListResponse is the body of GET /api/v1/artifacts?mine=1.
 type ArtifactListResponse struct {
@@ -67,6 +92,7 @@ type listParams struct {
 	reviewPending bool
 	ownedOnly     bool
 	scope         string
+	sharedOnly    bool
 	limit         int
 	cursor        string
 }
@@ -80,6 +106,9 @@ func (p listParams) binding() string {
 	v.Set("owned", strconv.FormatBool(p.ownedOnly))
 	if p.scope != "" {
 		v.Set("scope", p.scope)
+	}
+	if p.sharedOnly {
+		v.Set("shared", "true")
 	}
 	return v.Encode()
 }
@@ -115,6 +144,13 @@ func parseListParams(q url.Values) (listParams, string) {
 	p.scope = q.Get("scope")
 	if !utf8.ValidString(p.scope) || strings.ContainsRune(p.scope, 0) || len(p.scope) > maxScopeLength {
 		return p, "scope must be a project id"
+	}
+	switch q.Get("shared") {
+	case "", "0", "false":
+	case "1", "true":
+		p.sharedOnly = true
+	default:
+		return p, "shared must be 1 or 0"
 	}
 	if v := q.Get("limit"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -175,11 +211,25 @@ func (s *Service) handleList(w http.ResponseWriter, r *http.Request) {
 		scopes = candidateScopes(ctx, scopes)
 	}
 
+	// What is shared with a project is shown only to a caller that may read
+	// in it. Otherwise scope= narrows to artifacts homed there, and asking
+	// for only the shared ones gives an empty list.
+	scopeShares := p.scope != "" && host.Authorize(ctx, p.scope, PermissionRead)
+	if p.scope != "" && p.sharedOnly && !scopeShares {
+		writeJSON(w, http.StatusOK, ArtifactListResponse{Artifacts: []ArtifactListItem{}})
+		return
+	}
 	items, next, err := s.collect(ctx, host, b, CandidateQuery{
 		PrincipalKind: kind, PrincipalRef: ref, ScopeRefs: scopes, OwnedOnly: p.ownedOnly,
-		Search: p.search, ReviewPending: p.reviewPending, HomeScope: p.scope, After: after,
+		Search: p.search, ReviewPending: p.reviewPending, HomeScope: p.scope, ScopeShares: scopeShares,
+		SharedOnly: p.sharedOnly, After: after,
 	}, p.limit)
 	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: list failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not list artifacts")
+		return
+	}
+	if err := s.markDeletedScopes(ctx, b, items); err != nil {
 		slog.ErrorContext(ctx, "artifacts: list failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not list artifacts")
 		return
@@ -236,9 +286,16 @@ func (s *Service) collect(ctx context.Context, host Host, b backend, q Candidate
 		if !readable {
 			continue
 		}
+		access := listAccess(ctx, host, &c.Artifact)
+		if q.SharedOnly && q.HomeScope == "" && access != AccessShared {
+			continue
+		}
 		items = append(items, ArtifactListItem{
-			ArtifactInfo:  artifactInfo(&c.Artifact),
-			ReviewPending: c.CurrentKind == VersionKindReview,
+			ArtifactInfo:    artifactInfo(&c.Artifact),
+			ReviewPending:   c.CurrentKind == VersionKindReview,
+			Access:          access,
+			SharedWithScope: q.HomeScope != "" && c.ScopeRef != q.HomeScope,
+			src:             &c.Artifact,
 		})
 		if len(items) > limit {
 			items = items[:limit]
@@ -380,4 +437,84 @@ func (m *memoHost) Authorize(ctx context.Context, scopeRef, permission string) b
 		m.authorized[k] = v
 	}
 	return v
+}
+
+// listAccess says why the caller, who can read a, sees it: it owns a, the
+// host lets it read a's home project, or a grant does. host memoizes, so
+// the home project is asked once per request.
+func listAccess(ctx context.Context, host Host, a *Artifact) string {
+	kind, ref, _, _ := host.Principal(ctx)
+	switch {
+	case kind == a.OwnerKind && ref == a.OwnerRef:
+		return AccessOwned
+	case host.Authorize(ctx, a.ScopeRef, PermissionRead):
+		return AccessProject
+	default:
+		return AccessShared
+	}
+}
+
+// markDeletedScopes sets ScopeDeleted on the items whose home project no
+// longer exists, when the host can tell (ScopeChecker), and CanManage on
+// those the caller may move. While cross-project sharing is off no move
+// can succeed, so CanManage stays false rather than offer one. It asks the
+// host once per page, and reads the grants of the page's deleted-project
+// rows with one store query, only if a row's decision needs them (the
+// caller does not own it). A failed read fails the request.
+func (s *Service) markDeletedScopes(ctx context.Context, b backend, items []ArtifactListItem) error {
+	checker, ok := s.host.(ScopeChecker)
+	if !ok || len(items) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	var refs []string
+	for _, it := range items {
+		if it.ScopeKind == ScopeKindProject && !seen[it.ScopeRef] {
+			seen[it.ScopeRef] = true
+			refs = append(refs, it.ScopeRef)
+		}
+	}
+	exists, err := checker.ScopesExist(ctx, refs)
+	if err != nil {
+		return err
+	}
+	var deleted []int
+	for i := range items {
+		it := &items[i]
+		if it.ScopeKind != ScopeKindProject {
+			continue
+		}
+		if e, known := exists[it.ScopeRef]; !known || e {
+			continue
+		}
+		it.ScopeDeleted = true
+		deleted = append(deleted, i)
+	}
+	if len(deleted) == 0 || !s.crossScopeAllowed(ctx) {
+		return nil
+	}
+	// One page holds at most MaxListLimit rows, below MaxGrantsForIDs.
+	var byID map[string][]Grant
+	var loadErr error
+	loaded := false
+	grantsOf := func(id string) func() ([]Grant, error) {
+		return func() ([]Grant, error) {
+			if !loaded {
+				loaded = true
+				ids := make([]string, 0, len(deleted))
+				for _, i := range deleted {
+					ids = append(ids, items[i].ID)
+				}
+				byID, loadErr = b.store.ListGrantsFor(ctx, ids)
+			}
+			return byID[id], loadErr
+		}
+	}
+	for _, i := range deleted {
+		it := &items[i]
+		if it.CanManage, err = s.canAdministerWith(ctx, it.src, grantsOf(it.ID)); err != nil {
+			return err
+		}
+	}
+	return nil
 }

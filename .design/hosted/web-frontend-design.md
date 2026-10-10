@@ -478,9 +478,8 @@ export function getHtmlTemplate(opts: HtmlTemplateOptions): string {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${opts.title} - Scion</title>
 
-  <!-- Web Awesome / Shoelace -->
-  <link rel="stylesheet" href="https://cdn.webawesome.com/dist/themes/default.css">
-  <script type="module" src="https://cdn.webawesome.com/dist/webawesome.js"></script>
+  <!-- Shoelace components, theme CSS and icons are bundled with the client
+       and served from the hub's own origin. Nothing is loaded from a CDN. -->
 
   <!-- App styles -->
   ${opts.styles.map(s => `<link rel="stylesheet" href="${s}">`).join('\n  ')}
@@ -3003,7 +3002,7 @@ When `SCION_DEBUG=true`, the web frontend enables:
    - Session info (exists, isNew, keys)
    - Cookie presence and names
    - OAuth configuration status
-3. **Debug Endpoint:** `GET /auth/debug` returns JSON with full auth state
+3. **Debug Endpoint:** `GET /auth/debug` is not controlled by `SCION_DEBUG`; it is served only when the server is started with `--enable-debug-endpoints` (local development; refused in hosted mode).
 
 All fetch() calls to `/api/*` endpoints include `credentials: 'include'` to ensure session cookies are always sent.
 
@@ -3283,14 +3282,16 @@ import { Context, Next } from 'koa';
 export function security(config: AppConfig) {
   return async (ctx: Context, next: Next) => {
     // Content Security Policy
+    // Mirrors webContentSecurityPolicy in pkg/hub/web.go, which is the
+    // authoritative policy. The client bundles its components locally, so
+    // the only external hosts are Google Fonts and Cloud Storage.
     ctx.set('Content-Security-Policy', [
       "default-src 'self'",
-      "script-src 'self' 'unsafe-inline' https://cdn.webawesome.com",
-      "style-src 'self' 'unsafe-inline' https://cdn.webawesome.com",
-      "font-src 'self' https://cdn.webawesome.com",
+      "script-src 'self' 'unsafe-inline'",
+      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+      "font-src 'self' https://fonts.gstatic.com",
       "img-src 'self' data: blob: https:",
-      "connect-src 'self' wss: https:",
-      "frame-ancestors 'none'"
+      "connect-src 'self' data: ws: wss: http://localhost:* http://127.0.0.1:* https://storage.googleapis.com"
     ].join('; '));
 
     // Other security headers
@@ -3307,6 +3308,8 @@ export function security(config: AppConfig) {
   };
 }
 ```
+
+The docs-agent chat page (`extras/docs-agent/chat/index.html`) still loads assets from `cdn.jsdelivr.net`; it is outside the hub client and is not covered by this policy.
 
 ### 16.2 CSRF Protection
 

@@ -34,7 +34,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitsession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionaudit"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationadoption"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entitlementbinding"
@@ -46,6 +45,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/harnessconfig"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubinstance"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubsetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationconfig"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationupdate"
@@ -167,7 +167,6 @@ func checkColumn(t, c string) error {
 			conduitsession.Table:           conduitsession.ValidColumn,
 			conversation.Table:             conversation.ValidColumn,
 			conversationparticipant.Table:  conversationparticipant.ValidColumn,
-			decisionaudit.Table:            decisionaudit.ValidColumn,
 			delegationadoption.Table:       delegationadoption.ValidColumn,
 			delegationedge.Table:           delegationedge.ValidColumn,
 			entitlementbinding.Table:       entitlementbinding.ValidColumn,
@@ -179,6 +178,7 @@ func checkColumn(t, c string) error {
 			group.Table:                    group.ValidColumn,
 			groupmembership.Table:          groupmembership.ValidColumn,
 			harnessconfig.Table:            harnessconfig.ValidColumn,
+			hubinstance.Table:              hubinstance.ValidColumn,
 			hubsetting.Table:               hubsetting.ValidColumn,
 			integrationconfig.Table:        integrationconfig.ValidColumn,
 			integrationupdate.Table:        integrationupdate.ValidColumn,

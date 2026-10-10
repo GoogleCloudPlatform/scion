@@ -23,6 +23,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { defaultEntry, folderFiles } from './artifact-publish-dialog.js';
 import { resetPrincipalNames } from '../../client/principal-names.js';
 import type { ArtifactListItem } from '../../client/artifacts.js';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 function item(id: string, extra: Partial<ArtifactListItem> = {}): ArtifactListItem {
   return {
@@ -51,7 +52,7 @@ async function mountList(
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL) => {
-      const url = String(input);
+      const url = requestUrl(input);
       urls.push(url);
       const key = Object.keys(pages).find((k) => url.includes(k)) ?? '';
       return Promise.resolve(
@@ -218,7 +219,7 @@ describe('publish dialog retry', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-        const url = String(input);
+        const url = requestUrl(input);
         const method = init?.method ?? 'GET';
         calls.push(`${method} ${url}`);
         if (method === 'POST' && url === '/api/v1/artifacts') {
@@ -322,7 +323,7 @@ describe('artifact list paging', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-        const url = String(input);
+        const url = requestUrl(input);
         urls.push(url);
         if (url.includes('cursor=c1')) {
           // Answers only when released, like a slow page; the abort does not reject it.
@@ -368,6 +369,42 @@ describe('artifact list paging', () => {
     input.dispatchEvent(new CustomEvent('sl-input'));
     await el.updateComplete;
     expect(el.shadowRoot!.querySelector('.more sl-button')).toBeNull();
+  });
+
+  it('badges artifacts shared with the project, names their project and filters to them', async () => {
+    const { el, urls } = await mountList({
+      'shared=1': { artifacts: [item('s', { scopeRef: 'p-2', sharedWithScope: true })] },
+      'api/v1/projects/p-2': { name: 'web-frontend' },
+      'mine=1': {
+        artifacts: [item('a'), item('s', { scopeRef: 'p-2', sharedWithScope: true })],
+      },
+    });
+    let rows = el.shadowRoot!.querySelectorAll('tbody tr');
+    expect(rows[0].querySelector('sl-badge.shared')).toBeNull();
+    expect(rows[1].querySelector('sl-badge.shared')!.textContent).toContain(
+      'Shared with this project'
+    );
+    expect(rows[1].querySelector('.from')!.textContent!.replace(/\s+/g, ' ')).toContain(
+      'from web-frontend'
+    );
+    // The shared artifact opens under its own project.
+    expect(rows[1].querySelector('a.title')!.getAttribute('href')).toBe(
+      '/projects/p-2/artifacts/s'
+    );
+
+    const filter = el.shadowRoot!.querySelector('.toolbar sl-checkbox') as HTMLElement & {
+      checked: boolean;
+    };
+    expect(filter.textContent).toContain('Shared with this project');
+    filter.checked = true;
+    filter.dispatchEvent(new Event('sl-change'));
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+    }
+    expect(urls.at(-1)).toContain('shared=1');
+    rows = el.shadowRoot!.querySelectorAll('tbody tr');
+    expect(rows).toHaveLength(1);
   });
 });
 

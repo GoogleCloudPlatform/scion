@@ -25,6 +25,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import type { PageData } from '../../shared/types.js';
 import { resetHubProjectCapabilitiesCache } from '../../client/hub-capabilities.js';
 import { resetPrincipalNames } from '../../client/principal-names.js';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 class FakeEventSource extends EventTarget {
   static readonly CONNECTING = 0;
@@ -72,7 +73,7 @@ async function mount(flag: boolean, sharedDirs = [{ name: 'datasets' }]): Promis
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL) => {
-      const url = String(input);
+      const url = requestUrl(input);
       urls.push(url);
       if (url.startsWith('/api/v1/artifacts?')) {
         return Promise.resolve(json({ artifacts: [] }));

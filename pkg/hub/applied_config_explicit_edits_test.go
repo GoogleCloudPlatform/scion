@@ -375,9 +375,9 @@ func TestApplyAgentUpdate_NilCreateInputsStaysNil(t *testing.T) {
 
 // TestApplyAgentUpdate_HarnessConfigNeverReachesCreateInputs is test-plan
 // item 8: a PATCH that changes harness_config must never let that reach
-// CreateInputs -- a harness switch is not a validated PATCH operation today,
-// and reincarnate must not pick one up unvalidated against whatever harness
-// is current at that later point.
+// CreateInputs. harness_config is fixed at creation (ptone/scion#3972), so
+// such a PATCH is now refused with 400 and nothing reaches the live config
+// or CreateInputs.
 func TestApplyAgentUpdate_HarnessConfigNeverReachesCreateInputs(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
@@ -385,6 +385,7 @@ func TestApplyAgentUpdate_HarnessConfigNeverReachesCreateInputs(t *testing.T) {
 
 	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
 		a.Phase = string(state.PhaseCreated)
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{HarnessConfig: "original-harness-config"}
 		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{
 			HarnessConfig: "original-harness-config",
 			InlineConfig:  &api.ScionConfig{HarnessConfig: "original-harness-config"},
@@ -394,10 +395,13 @@ func TestApplyAgentUpdate_HarnessConfigNeverReachesCreateInputs(t *testing.T) {
 	rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
 		"harness_config": "new-harness-config",
 	})
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "config.harness_config")
 
 	updated, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
+	assert.Equal(t, "original-harness-config", updated.AppliedConfig.InlineConfig.HarnessConfig,
+		"a refused harness_config must not reach the live inline config")
 	ci := updated.AppliedConfig.CreateInputs
 	require.NotNil(t, ci)
 	assert.Equal(t, "original-harness-config", ci.HarnessConfig,
@@ -706,6 +710,91 @@ func TestApplyAgentUpdate_UntouchedSavePreservesExplicitTelemetryOptOut(t *testi
 		"an explicit telemetry opt-out must survive an untouched Save, not silently fall back to broker settings/template")
 }
 
+// TestApplyAgentUpdate_UntouchedSavePreservesInlineBranch pins
+// ptone/scion#3984: the configure page no longer sends "branch" (a
+// provisioned agent's worktree already fixes it), so a PATCH without the key
+// must keep the stored InlineConfig.Branch, and must not
+// record anything into CreateInputs.
+func TestApplyAgentUpdate_UntouchedSavePreservesInlineBranch(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	ctx := context.Background()
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseCreated)
+		a.AppliedConfig.Model = "golden-model"
+		a.AppliedConfig.Branch = "feature/x"
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{
+			Model:  "golden-model",
+			Branch: "feature/x",
+		}
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{}
+	})
+
+	before, err := json.Marshal(agent.AppliedConfig.CreateInputs)
+	require.NoError(t, err)
+
+	body := configureUntouchedBody(t)
+	require.NotContains(t, body, "branch", "the configure page must not send branch")
+	rec := patchAgentConfig(t, srv, agent.ID, body)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	after, err := json.Marshal(updated.AppliedConfig.CreateInputs)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(before), string(after), "an untouched Save must leave CreateInputs alone")
+	require.NotNil(t, updated.AppliedConfig.InlineConfig)
+	assert.Equal(t, "feature/x", updated.AppliedConfig.InlineConfig.Branch,
+		"an absent branch key must keep the stored inline branch, not blank it")
+}
+
+// TestApplyAgentUpdate_PresentBranchKeyRefusedUnlessEcho pins the other half of
+// mergePresentInlineFields for branch: only an ABSENT key keeps the stored
+// value silently. The branch is fixed at creation (ptone/scion#3972), so a
+// present key that would change it, to a new value or to empty, is refused
+// with 400 and stored nowhere; a present key equal to the stored branch is
+// an echo and changes nothing.
+func TestApplyAgentUpdate_PresentBranchKeyRefusedUnlessEcho(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		branch string
+		code   int
+	}{
+		{name: "set", branch: "y", code: http.StatusBadRequest},
+		{name: "cleared", branch: "", code: http.StatusBadRequest},
+		{name: "echoed", branch: "feature/x", code: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := newReincarnateTestDispatcher()
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			ctx := context.Background()
+
+			agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+				a.Phase = string(state.PhaseCreated)
+				a.AppliedConfig.InlineConfig = &api.ScionConfig{Branch: "feature/x"}
+				a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{}
+			})
+
+			rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{"branch": tc.branch})
+			require.Equal(t, tc.code, rec.Code, rec.Body.String())
+			if tc.code != http.StatusOK {
+				assert.Contains(t, rec.Body.String(), "config.branch")
+			}
+
+			updated, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			require.NotNil(t, updated.AppliedConfig.InlineConfig)
+			assert.Equal(t, "feature/x", updated.AppliedConfig.InlineConfig.Branch,
+				"the stored inline branch never changes")
+			require.NotNil(t, updated.AppliedConfig.CreateInputs)
+			if ci := updated.AppliedConfig.CreateInputs.InlineConfig; ci != nil {
+				assert.Empty(t, ci.Branch, "no branch edit is recorded")
+			}
+		})
+	}
+}
+
 // TestApplyAgentUpdate_UntouchedSaveThenReincarnateKeepsLegacyAgentExplicitEnv
 // is R4-1's dedicated regression, the exact scenario options.md §5's test
 // plan and the "Legacy agent (no CI): No-op" edge case both depend on: an
@@ -773,7 +862,6 @@ func TestApplyAgentUpdate_ReloadAfterUntouchedSavePreservesLiveAutoExposeValue(t
 	// Step 1: untouched Save (no env key at all).
 	rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
 		"thinking_level":     nil,
-		"branch":             "",
 		"user":               "",
 		"agent_instructions": "",
 		"system_prompt":      "",

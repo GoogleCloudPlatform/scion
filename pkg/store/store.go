@@ -20,6 +20,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // Common errors returned by store implementations.
@@ -31,6 +33,11 @@ var (
 	ErrInvalidInput     = errors.New("invalid input")
 	ErrRevisionConflict = errors.New("revision conflict")
 	ErrQuotaExceeded    = errors.New("quota exceeded")
+	// ErrConversationProjectMismatch is returned when a write names a project
+	// other than the one an existing conversation was created with, or names
+	// a project for a group conversation created without one. A conversation
+	// keeps the project it was created with; nothing is written.
+	ErrConversationProjectMismatch = errors.New("conversation project cannot change")
 	// ErrDeleteInProgress is returned by SetAgentRunID when a delete holds
 	// the agent's row (see AgentStore.SetAgentRunID).
 	ErrDeleteInProgress = errors.New("agent delete in progress")
@@ -286,9 +293,6 @@ type Store interface {
 	// Agent Identity Key operations (per-project display-name / slug uniqueness)
 	AgentIdentityKeyStore
 
-	// Decision Audit operations (Authorization Decision Audit Phase 1I)
-	DecisionAuditStore
-
 	// Mutation Audit operations (Authorization Mutation Audit Phase 1I)
 	MutationAuditStore
 
@@ -303,6 +307,9 @@ type Store interface {
 
 	// Agent Reincarnation operations (agent-reincarnate, ptone/scion#1821)
 	AgentReincarnationStore
+
+	// Hub-instance registry operations (health dashboard F3)
+	HubInstanceStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -556,6 +563,16 @@ type AgentStore interface {
 	// active remote brokers are left untouched. Returns the number of projects
 	// updated.
 	ReassignProjectBroker(ctx context.Context, oldBrokerID, newBrokerID string) (int, error)
+
+	// SetAgentPinnedRuntimeTarget compare-and-sets an agent's placement:
+	// runtime_broker_id must equal expected.RuntimeBrokerID ("" also matches
+	// NULL) and the pin columns must match the rest of expected (NULL when
+	// expected.RuntimeTargetID is ""). It writes runtime_broker_id and the
+	// pin from next and bumps state_version in the same conditional update,
+	// so a stale UpdateAgent conflicts instead of reverting the move. next
+	// must be complete (it never unpins): ErrInvalidPinnedPlacement. A miss
+	// returns ErrPinnedPlacementChanged; a missing agent ErrNotFound.
+	SetAgentPinnedRuntimeTarget(ctx context.Context, agentID string, expected, next PinnedPlacement) (*Agent, error)
 
 	// AggregateAgentHealth returns lightweight health-oriented counts and lists
 	// for the health-summary endpoint without fetching full agent records.
@@ -1099,6 +1116,16 @@ type AgentStatusUpdate struct {
 	// the hub's deleteWonAfterLanding check answers. A status report
 	// (heartbeat) keeps the lease-aware rule. Internal to the hub — json:"-".
 	StartWrite bool `json:"-"`
+	// GuardReincarnation marks an agent's own status report. When set, the
+	// store re-checks the reincarnation guard (the hub's Guard 0b) on the
+	// row read inside the update's transaction: while a reincarnation is in
+	// flight (ReincarnationState is not none or failed), Phase, Activity,
+	// ExitCode, ExitReason and Message are dropped, and the other fields
+	// (ContainerStatus, heartbeat, ...) still apply. This covers a
+	// reincarnation that starts after the hub read the agent. It is opt-in
+	// because hub-internal writers, including the reincarnation worker,
+	// must keep writing the phase. Internal to the hub — json:"-".
+	GuardReincarnation bool `json:"-"`
 }
 
 // ProjectStore defines project-related persistence operations.
@@ -1251,6 +1278,16 @@ type RuntimeBrokerStore interface {
 	// Returns ErrNotFound if the broker doesn't exist.
 	GetRuntimeBrokerByName(ctx context.Context, name string) (*RuntimeBroker, error)
 
+	// GetLegacyRuntimeBrokerByName is GetRuntimeBrokerByName restricted to
+	// legacy rows (no stored runtime target). When several legacy rows
+	// match it returns the oldest by creation time. ErrNotFound when none.
+	GetLegacyRuntimeBrokerByName(ctx context.Context, name string) (*RuntimeBroker, error)
+
+	// SetRuntimeBrokerTarget updates a flat Runtime Broker's target display
+	// name. It never converts a legacy row (ErrRuntimeBrokerNotFlat) and
+	// never changes a stored target ID or type (ErrRuntimeTargetChanged).
+	SetRuntimeBrokerTarget(ctx context.Context, brokerID string, desc api.RuntimeTargetDescriptor) (*RuntimeBroker, error)
+
 	// UpdateRuntimeBroker updates an existing runtime broker.
 	// Returns ErrNotFound if the broker doesn't exist.
 	UpdateRuntimeBroker(ctx context.Context, broker *RuntimeBroker) error
@@ -1277,7 +1314,9 @@ type RuntimeBrokerStore interface {
 	// FindEmbeddedBroker returns the single embedded broker if exactly one
 	// exists, or nil if zero or multiple embedded brokers are found (ambiguous).
 	// "Embedded" means the broker's labels contain {"scion.io/broker-role": "embedded"}.
-	// Used to recover broker ID from DB when settings are lost.
+	// Used to recover the legacy broker ID from DB when settings are lost;
+	// rows with a stored runtime target (flat Runtime Brokers) are never
+	// candidates.
 	FindEmbeddedBroker(ctx context.Context) (*RuntimeBroker, error)
 
 	// UpdateRuntimeBrokerHeartbeat updates the last heartbeat and status.
@@ -2749,6 +2788,13 @@ type ConversationStore interface {
 
 	// UpdateConversation updates an existing conversation.
 	// Returns ErrNotFound if the conversation doesn't exist.
+	//
+	// A conversation keeps the project it was created with. The row is
+	// written only when the requested ProjectID equals the stored one; a nil
+	// ProjectID clears the project of a direct conversation (direct
+	// conversations carry no project) and otherwise matches only a row with
+	// no project. Any other combination returns
+	// ErrConversationProjectMismatch and writes nothing.
 	UpdateConversation(ctx context.Context, conv *Conversation) error
 
 	// DeleteConversation soft-deletes a conversation by setting DeletedAt.
@@ -2771,6 +2817,10 @@ type ConversationStore interface {
 
 	// UpsertConversationByExternalRef creates or updates a conversation keyed on (surface, external_ref).
 	// This is the idempotent broker-edge operation. Returns the conversation (created or existing).
+	// The project is set only when the conversation is created. Updating an
+	// existing conversation never writes its project: a different non-nil
+	// ProjectID returns ErrConversationProjectMismatch with no write, and a
+	// conversation created without a project stays without one.
 	// CRITICAL: this must be safe under concurrent calls — the UNIQUE partial index is the guard.
 	UpsertConversationByExternalRef(ctx context.Context, conv *Conversation) (*Conversation, error)
 
@@ -3205,24 +3255,6 @@ type AgentIdentityKeyStore interface {
 }
 
 // =============================================================================
-// Decision Audit Store (Authorization Decision Audit Phase 1I)
-// =============================================================================
-
-// DecisionAuditStore defines persistence operations for authorization decision audit records.
-type DecisionAuditStore interface {
-	// CreateDecisionAudit stores a new decision audit record.
-	CreateDecisionAudit(ctx context.Context, record *DecisionAuditRecord) error
-
-	// ListDecisionAudits returns decision audit records matching the filter.
-	// Returns (records, total count, error).
-	ListDecisionAudits(ctx context.Context, filter DecisionAuditFilter) ([]*DecisionAuditRecord, int, error)
-
-	// DeleteDecisionAuditsBefore removes decision audit records older than the given time.
-	// Returns the number of records deleted.
-	DeleteDecisionAuditsBefore(ctx context.Context, before time.Time) (int, error)
-}
-
-// =============================================================================
 // Mutation Audit Store (Authorization Mutation Audit Phase 1I)
 // =============================================================================
 
@@ -3310,6 +3342,19 @@ type QuotaStore interface {
 
 	// ListActiveReservations returns active (non-released) reservations for a limit and scope.
 	ListActiveReservations(ctx context.Context, limitDefinitionID, scopeType, scopeID string) ([]*UsageReservation, error)
+
+	// ListActiveReservationsByScopeType returns active (non-released)
+	// reservations for a limit across every scope ID of scopeType, in one
+	// query, ordered by created_at ascending (the same order
+	// ListActiveReservations uses within a single scope). Callers that need
+	// one scope's rows filter on UsageReservation.ScopeID (ptone/scion#2314).
+	ListActiveReservationsByScopeType(ctx context.Context, limitDefinitionID, scopeType string) ([]*UsageReservation, error)
+
+	// CountActiveReservationsByScope returns the number of active
+	// (non-released) reservations for a limit and scopeType, grouped by scope
+	// ID, in one query. Scope IDs with no active reservation are absent from
+	// the map (ptone/scion#2314).
+	CountActiveReservationsByScope(ctx context.Context, limitDefinitionID, scopeType string) (map[string]int64, error)
 
 	// HasActiveReservation reports whether resourceID already holds a
 	// non-released reservation for the given limit, regardless of scope.

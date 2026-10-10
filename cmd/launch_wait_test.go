@@ -353,8 +353,6 @@ func (h *launchMockHub) serve(projectID, agentName string) *httptest.Server {
 			h.created = true
 			w.WriteHeader(h.createStatus)
 			_ = json.NewEncoder(w).Encode(h.createBody)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runtime-brokers/"+mockAttachBrokerID:
-			_ = json.NewEncoder(w).Encode(mockAttachBroker(""))
 		case r.Method == http.MethodGet && r.URL.Path == agentPath:
 			if !h.created {
 				w.WriteHeader(http.StatusNotFound) // suspend check: no agent yet
@@ -603,12 +601,58 @@ func TestStartAgentViaHub_WaitTimeout(t *testing.T) {
 	hubCtx := setupLaunchStartTest(t, hub)
 	startWaitTimeout = 50 * time.Millisecond
 	var err error
+	stderr := captureStderr(t, func() {
+		_ = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
+	})
+	require.NoError(t, err, "an accepted launch still provisioning at the wait deadline exits 0")
+	assert.Contains(t, stderr, "Agent 'a1' accepted by Hub and launching.")
+	assert.Contains(t, stderr, "It was still launching when the wait ended; the launch continues on the Hub.")
+	assert.Contains(t, stderr, "Phase: provisioning")
+	assert.Contains(t, stderr, "Check its status with: scion list")
+	assert.NotContains(t, stderr, "started via Hub")
+}
+
+func TestStartAgentViaHub_WaitTimeoutWithAttachFails(t *testing.T) {
+	// --attach needs a running agent, so a wait that ends before it runs
+	// is still an error.
+	hub := &launchMockHub{t: t, createStatus: http.StatusCreated, createBody: asyncCreateResponse(),
+		afterCreate: []interface{}{
+			hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "provisioning", Launch: activeLaunch("scheduling", 2, nil)},
+		}}
+	hubCtx := setupLaunchStartTest(t, hub)
+	startWaitTimeout = 50 * time.Millisecond
+	attach = true
+	var err error
 	_ = captureStderr(t, func() {
 		_ = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
 	})
 	var timeout *launchWaitTimeoutError
 	require.ErrorAs(t, err, &timeout)
 	assert.Contains(t, err.Error(), "re-run scion start a1 to keep waiting")
+	assert.Equal(t, 1, exitCodeFor(err))
+}
+
+func TestStartAgentViaHub_WaitTimeoutJSON(t *testing.T) {
+	hub := &launchMockHub{t: t, createStatus: http.StatusCreated, createBody: asyncCreateResponse(),
+		afterCreate: []interface{}{
+			hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "provisioning", Launch: activeLaunch("scheduling", 2, nil)},
+		}}
+	hubCtx := setupLaunchStartTest(t, hub)
+	startWaitTimeout = 50 * time.Millisecond
+	outputFormat = "json"
+	var err error
+	var stdout string
+	_ = captureStderr(t, func() {
+		stdout = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
+	})
+	require.NoError(t, err)
+	var result ActionResult
+	require.NoError(t, json.Unmarshal([]byte(stdout), &result), "stdout must be a single JSON document: %q", stdout)
+	assert.Equal(t, "success", result.Status)
+	assert.Equal(t, "Agent 'a1' accepted by Hub and launching.", result.Message)
+	assert.Equal(t, "provisioning", result.Details["phase"])
+	assert.Equal(t, "launch-1", result.Details["launchId"])
+	assert.Contains(t, result.Details["launchNote"], "still launching when the wait ended")
 }
 
 func TestStartAgentViaHub_CreateIncomplete409(t *testing.T) {
@@ -667,8 +711,6 @@ func TestAttachViaHub_LaunchingAgentHint(t *testing.T) {
 				ID: "id-1", Name: agentName, Phase: "provisioning", RuntimeBrokerID: mockAttachBrokerID,
 				Launch: activeLaunch("image_pull", 2, nil),
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runtime-brokers/"+mockAttachBrokerID:
-			_ = json.NewEncoder(w).Encode(mockAttachBroker(""))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -775,13 +817,14 @@ func TestFinishHubStart_FinalizeBudgetFromFirstGet(t *testing.T) {
 	startWaitTimeout = 0
 	var err error
 	start := time.Now()
-	_ = captureStderr(t, func() {
+	stderr := captureStderr(t, func() {
 		_ = captureStdout(t, func() {
 			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, false, finalizeCreateResponse(activeLaunch("", 3, nil)), nil, true)
 		})
 	})
-	var timeout *launchWaitTimeoutError
-	require.ErrorAs(t, err, &timeout)
+	require.NoError(t, err, "the accepted start is reported as launching when the wait ends")
+	assert.Contains(t, stderr, "still launching when the wait ended")
+	assert.Contains(t, stderr, "Phase: provisioning")
 	assert.Less(t, time.Since(start), 2*time.Second)
 }
 
@@ -1089,7 +1132,7 @@ func TestWaitForAgentLaunch_ReadableLauncherSeesDeletion(t *testing.T) {
 			})
 			require.Error(t, err)
 			assert.Equal(t, "agent 'a1' no longer exists; it was deleted while launching", err.Error())
-			assert.Equal(t, 2, seq.calls, "a not-found after the agent was read is not retried")
+			assert.Greater(t, seq.calls, 2, "a not-found after the agent was read is confirmed within the grace")
 		})
 	}
 }
@@ -1128,12 +1171,84 @@ func TestStartAgentViaHub_AgentLauncherCannotReadStatus(t *testing.T) {
 		afterCreate: []interface{}{http.StatusNotFound}}
 	hubCtx := setupLaunchStartTest(t, hub)
 	var err error
-	_ = captureStderr(t, func() {
+	stderr := captureStderr(t, func() {
 		_ = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
 	})
-	require.Error(t, err)
-	assert.Equal(t, unreadableMessage, err.Error())
-	assert.Equal(t, 1, exitCodeFor(err))
+	require.NoError(t, err, "an accepted launch whose status cannot be read exits 0")
+	assert.Contains(t, stderr, "Agent 'a1' accepted by Hub and launching.")
+	assert.Contains(t, stderr, "Its status is not readable with this credential's scope (launch launch-1); the launch continues on the Hub.")
+	assert.Contains(t, stderr, "Check its status with: scion list")
+	assert.Contains(t, stderr, "Agent Slug: a1")
+	assert.NotContains(t, stderr, "Phase:", "the create answer's phase predates the launch")
+	assert.NotContains(t, stderr, "no longer exists")
+}
+
+func TestStartAgentViaHub_AgentLauncherCannotReadStatusJSON(t *testing.T) {
+	t.Setenv("SCION_AGENT_ID", "agent-launcher")
+	hub := &launchMockHub{t: t, createStatus: http.StatusCreated, createBody: asyncCreateResponse(),
+		afterCreate: []interface{}{http.StatusForbidden}}
+	hubCtx := setupLaunchStartTest(t, hub)
+	outputFormat = "json"
+	var err error
+	var stdout string
+	_ = captureStderr(t, func() {
+		stdout = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
+	})
+	require.NoError(t, err)
+	var result ActionResult
+	require.NoError(t, json.Unmarshal([]byte(stdout), &result), "stdout must be a single JSON document: %q", stdout)
+	assert.Equal(t, "success", result.Status)
+	assert.Equal(t, "Agent 'a1' accepted by Hub and launching.", result.Message)
+	assert.Equal(t, "launch-1", result.Details["launchId"])
+	assert.Contains(t, result.Details["launchNote"], "status is not readable")
+	assert.NotContains(t, result.Details, "phase")
+}
+
+func TestStartAgentViaHub_DeletedWhileLaunchingFails(t *testing.T) {
+	// An agent that was read in the wait and then stays not-found is
+	// gone: the start fails.
+	for _, agentID := range []string{"agent-launcher", ""} {
+		t.Run("agent="+agentID, func(t *testing.T) {
+			t.Setenv("SCION_AGENT_ID", agentID)
+			hub := &launchMockHub{t: t, createStatus: http.StatusCreated, createBody: asyncCreateResponse(),
+				afterCreate: []interface{}{
+					hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "provisioning", Launch: activeLaunch("pod_create", 2, nil)},
+					http.StatusNotFound,
+				}}
+			hubCtx := setupLaunchStartTest(t, hub)
+			var err error
+			_ = captureStderr(t, func() {
+				_ = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
+			})
+			require.Error(t, err)
+			assert.Equal(t, "agent 'a1' no longer exists; it was deleted while launching", err.Error())
+			assert.Equal(t, 1, exitCodeFor(err))
+		})
+	}
+}
+
+func TestStartAgentViaHub_TransientNotFoundIsNotADeletion(t *testing.T) {
+	// A single not-found between reads of a launch that goes on to run is
+	// not reported as a deletion.
+	for _, agentID := range []string{"agent-launcher", ""} {
+		t.Run("agent="+agentID, func(t *testing.T) {
+			t.Setenv("SCION_AGENT_ID", agentID)
+			hub := &launchMockHub{t: t, createStatus: http.StatusCreated, createBody: asyncCreateResponse(),
+				afterCreate: []interface{}{
+					hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "provisioning", Launch: activeLaunch("pod_create", 2, nil)},
+					http.StatusNotFound,
+					hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "running", Activity: "working"},
+				}}
+			hubCtx := setupLaunchStartTest(t, hub)
+			var err error
+			stderr := captureStderr(t, func() {
+				_ = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
+			})
+			require.NoError(t, err)
+			assert.Contains(t, stderr, "Agent 'a1' started via Hub.")
+			assert.NotContains(t, stderr, "no longer exists")
+		})
+	}
 }
 
 func TestStartAgentViaHub_AgentLauncherBrieflyUnreadable(t *testing.T) {
@@ -1273,15 +1388,36 @@ func TestFinishHubStart_FinalizeAgentLauncherCannotReadStatus(t *testing.T) {
 			hub := &launchMockHub{t: t, created: true, afterCreate: []interface{}{http.StatusNotFound}}
 			hubCtx := setupLaunchStartTest(t, hub)
 			var err error
-			_ = captureStderr(t, func() {
+			stderr := captureStderr(t, func() {
 				_ = captureStdout(t, func() {
 					err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, false, finalizeCreateResponse(launch), nil, true)
 				})
 			})
-			var unreadable *launchStatusUnreadableError
-			require.ErrorAs(t, err, &unreadable)
-			assert.Equal(t, "agent 'a1': launch accepted; status not readable with this credential's scope; the launch continues on the Hub", err.Error())
+			assert.Contains(t, stderr, "Its status is not readable with this credential's scope; the launch continues on the Hub.")
+			assert.NotContains(t, stderr, "launch-old")
+			require.NoError(t, err, "an accepted start whose status cannot be read exits 0")
 			assert.Greater(t, hub.getsAfterCR, 1, "the read is retried within the grace")
+		})
+		t.Run(name+"/json", func(t *testing.T) {
+			t.Setenv("SCION_AGENT_ID", "agent-launcher")
+			hub := &launchMockHub{t: t, created: true, afterCreate: []interface{}{http.StatusNotFound}}
+			hubCtx := setupLaunchStartTest(t, hub)
+			outputFormat = "json"
+			var err error
+			var stdout string
+			_ = captureStderr(t, func() {
+				stdout = captureStdout(t, func() {
+					err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, false, finalizeCreateResponse(launch), nil, true)
+				})
+			})
+			require.NoError(t, err)
+			var result ActionResult
+			require.NoError(t, json.Unmarshal([]byte(stdout), &result), "stdout must be a single JSON document: %q", stdout)
+			assert.Equal(t, "success", result.Status)
+			assert.Contains(t, result.Details["launchNote"], "status is not readable")
+			assert.NotContains(t, result.Details, "launchId", "the create answer's launch is not the finalize's")
+			assert.NotContains(t, result.Details, "launchDeadline")
+			assert.NotContains(t, result.Details, "phase")
 		})
 	}
 }
@@ -1346,4 +1482,128 @@ func TestWaitForAgentLaunch_AgentCallerForbiddenWithoutAcceptedLaunch(t *testing
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "the Hub refused the status request")
 	assert.Equal(t, 1, seq.calls)
+}
+
+func TestWaitForAgentLaunch_DeletionWhenBudgetEndsDuringConfirmation(t *testing.T) {
+	// A not-found after the agent was read that lasts until the wait
+	// budget runs out is a deletion, not a launch still in progress.
+	for _, agentID := range []string{"agent-launcher", ""} {
+		t.Run("agent="+agentID, func(t *testing.T) {
+			clock := shortenLaunchWaitTimings(t)
+			t.Setenv("SCION_AGENT_ID", agentID)
+			clock.blocked = true
+			launchUnreadableGrace = time.Hour
+			seq := &agentSequence{results: []func() (*hubclient.Agent, error){
+				agentResult(&hubclient.Agent{Phase: "provisioning", Launch: activeLaunch("", 2, nil)}),
+				errResult(&apiclient.APIError{StatusCode: http.StatusNotFound, Code: "not_found", Message: "agent not found"}),
+			}}
+			elapsed, err := runLaunchWaitGuarded(t, context.Background(), launchWaitOptions{
+				AgentName: "a1", Accepted: true, LaunchID: "launch-1", Get: seq.get, PollInterval: time.Millisecond, Timeout: 50 * time.Millisecond,
+			})
+			require.Error(t, err)
+			assert.Equal(t, "agent 'a1' no longer exists; it was deleted while launching", err.Error())
+			_, notFollowed := acceptedLaunchNotFollowed(err)
+			assert.False(t, notFollowed)
+			assert.Equal(t, 1, exitCodeFor(err))
+			assert.Less(t, elapsed, 2*time.Second)
+		})
+	}
+}
+
+func TestWaitForAgentLaunch_InterruptDuringDeletionConfirmation(t *testing.T) {
+	// Ctrl-C while a not-found is being confirmed is an interrupt.
+	clock := shortenLaunchWaitTimings(t)
+	t.Setenv("SCION_AGENT_ID", "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	clock.blocked = true
+	clock.onBlock = cancel
+	launchUnreadableGrace = time.Hour
+	seq := &agentSequence{results: []func() (*hubclient.Agent, error){
+		agentResult(&hubclient.Agent{Phase: "provisioning", Launch: activeLaunch("", 2, nil)}),
+		errResult(&apiclient.APIError{StatusCode: http.StatusNotFound, Code: "not_found", Message: "agent not found"}),
+	}}
+	_, err := runLaunchWaitGuarded(t, ctx, launchWaitOptions{
+		AgentName: "a1", Accepted: true, LaunchID: "launch-1", Get: seq.get, PollInterval: time.Millisecond, Timeout: time.Hour,
+	})
+	var interrupted *launchWaitInterruptedError
+	require.ErrorAs(t, err, &interrupted)
+	assert.Equal(t, exitCodeInterrupted, exitCodeFor(err))
+}
+
+func TestWaitForAgentLaunch_UserCallerBudgetEndsDuringRetry(t *testing.T) {
+	// A user caller's 404 or 403 before any read is a definite answer;
+	// a wait budget that runs out while it is retried does not turn it
+	// into a launch still in progress.
+	cases := []struct {
+		status int
+		want   string
+	}{
+		{http.StatusNotFound, "agent 'a1' no longer exists; it was deleted while launching"},
+		{http.StatusForbidden, "the Hub refused the status request"},
+	}
+	for _, tc := range cases {
+		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+			clock := shortenLaunchWaitTimings(t)
+			t.Setenv("SCION_AGENT_ID", "")
+			clock.blocked = true
+			launchUnreadableGrace = time.Hour
+			seq := &agentSequence{results: []func() (*hubclient.Agent, error){
+				errResult(&apiclient.APIError{StatusCode: tc.status, Code: "x", Message: "no"}),
+			}}
+			_, err := runLaunchWaitGuarded(t, context.Background(), launchWaitOptions{
+				AgentName: "a1", Accepted: true, LaunchID: "launch-1", Get: seq.get, PollInterval: time.Millisecond, Timeout: 50 * time.Millisecond,
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+			_, notFollowed := acceptedLaunchNotFollowed(err)
+			assert.False(t, notFollowed)
+		})
+	}
+}
+
+func TestStartAgentViaHub_DeletedBeforeShortWaitTimeoutFails(t *testing.T) {
+	// --wait-timeout shorter than the not-found confirmation: a deletion
+	// still fails the start.
+	for _, agentID := range []string{"agent-launcher", ""} {
+		t.Run("agent="+agentID, func(t *testing.T) {
+			t.Setenv("SCION_AGENT_ID", agentID)
+			hub := &launchMockHub{t: t, createStatus: http.StatusCreated, createBody: asyncCreateResponse(),
+				afterCreate: []interface{}{
+					hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "provisioning", Launch: activeLaunch("pod_create", 2, nil)},
+					http.StatusNotFound,
+				}}
+			hubCtx := setupLaunchStartTest(t, hub)
+			launchUnreadableGrace = time.Hour
+			startWaitTimeout = 50 * time.Millisecond
+			var err error
+			stderr := captureStderr(t, func() {
+				_ = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
+			})
+			require.Error(t, err)
+			assert.Equal(t, "agent 'a1' no longer exists; it was deleted while launching", err.Error())
+			assert.Equal(t, 1, exitCodeFor(err))
+			assert.NotContains(t, stderr, "accepted by Hub")
+		})
+	}
+}
+
+func TestStartAgentViaHub_AttachAcceptedLaunchCannotReadStatusFails(t *testing.T) {
+	// --attach needs a running agent, so an accepted launch whose status
+	// cannot be read still fails the start.
+	t.Setenv("SCION_AGENT_ID", "agent-launcher")
+	hub := &launchMockHub{t: t, createStatus: http.StatusCreated, createBody: asyncCreateResponse(),
+		afterCreate: []interface{}{http.StatusNotFound}}
+	hubCtx := setupLaunchStartTest(t, hub)
+	attach = true
+	var err error
+	stderr := captureStderr(t, func() {
+		_ = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
+	})
+	var unreadable *launchStatusUnreadableError
+	require.ErrorAs(t, err, &unreadable)
+	assert.Equal(t, unreadableMessage, err.Error())
+	assert.Equal(t, 1, exitCodeFor(err))
+	assert.Greater(t, hub.getsAfterCR, 1, "the read is retried within the grace")
+	assert.NotContains(t, stderr, "accepted by Hub and launching")
 }

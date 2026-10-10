@@ -53,15 +53,15 @@ func init() {
 }
 
 func runDoctor() error {
-	fmt.Printf("%sScion Doctor%s\n\n", util.Bold, util.Reset)
+	fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("%sScion Doctor%s\n\n", util.Bold, util.Reset)))
 
 	// General checks
-	fmt.Printf("%sGeneral%s\n", util.Bold, util.Reset)
+	fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("%sGeneral%s\n", util.Bold, util.Reset)))
 	checkGit()
 	checkTmux()
 
 	// Hub Health checks
-	fmt.Printf("\n%sHub Health%s\n", util.Bold, util.Reset)
+	fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("\n%sHub Health%s\n", util.Bold, util.Reset)))
 	var hubChecks []scionruntime.CheckResult
 
 	// Resolve settings and hub endpoint
@@ -134,6 +134,21 @@ func runDoctor() error {
 	hubChecks = append(hubChecks, d5)
 	printCheck(d5.Name, d5.Status, d5.Message, d5.Remediation)
 
+	// D10: Kubernetes block ServiceAccount (information only): Kubernetes
+	// profiles in this host's global settings with no
+	// kubernetes_block_service_account, whose GCP identity "block" pods run
+	// as the namespace's default ServiceAccount.
+	d10 := scionruntime.CheckResult{
+		Name:    "k8s-block-service-account",
+		Status:  "skip",
+		Message: fmt.Sprintf("Could not load settings to check Kubernetes profiles: %v", nfsErr),
+	}
+	if nfsErr == nil {
+		d10 = checkDoctorKubernetesBlockServiceAccount(nfsSettings)
+	}
+	hubChecks = append(hubChecks, d10)
+	printCheck(d10.Name, d10.Status, d10.Message, d10.Remediation)
+
 	// D6: Telemetry Pipeline (local check)
 	d6 := checkDoctorTelemetry()
 	hubChecks = append(hubChecks, d6)
@@ -150,7 +165,7 @@ func runDoctor() error {
 	printCheck(d8.Name, d8.Status, d8.Message, d8.Remediation)
 
 	// Resolve the active runtime
-	fmt.Printf("\n%sRuntime%s\n", util.Bold, util.Reset)
+	fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("\n%sRuntime%s\n", util.Bold, util.Reset)))
 
 	resolved, err := resolveActiveProjectPath()
 	if err != nil {
@@ -184,7 +199,7 @@ func runDoctor() error {
 			GKEMode:   gkeMode,
 		}
 
-		fmt.Printf("\n%sRuntime Diagnostics (%s)%s\n", util.Bold, rtName, util.Reset)
+		fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("\n%sRuntime Diagnostics (%s)%s\n", util.Bold, rtName, util.Reset)))
 		report := diag.RunDiagnostics(opts)
 
 		if outputFormat == "json" {
@@ -210,16 +225,16 @@ func runDoctor() error {
 		}
 
 		if fails > 0 {
-			fmt.Printf("%s%d checks passed, %d warnings, %d failures%s\n",
-				util.Red, passes, warns, fails, util.Reset)
+			fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("%s%d checks passed, %d warnings, %d failures%s\n",
+				util.Red, passes, warns, fails, util.Reset)))
 			return fmt.Errorf("%d diagnostic check(s) failed", fails)
 		}
 		if warns > 0 {
-			fmt.Printf("%s%d checks passed, %d warnings%s\n",
-				util.Yellow, passes, warns, util.Reset)
+			fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("%s%d checks passed, %d warnings%s\n",
+				util.Yellow, passes, warns, util.Reset)))
 		} else {
-			fmt.Printf("%s%d checks passed%s\n",
-				util.Green, passes, util.Reset)
+			fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("%s%d checks passed%s\n",
+				util.Green, passes, util.Reset)))
 		}
 	} else {
 		// Non-diagnosable runtimes get basic checks
@@ -327,8 +342,10 @@ func printCheck(name, status, message, remediation string) {
 		icon = fmt.Sprintf("%s✗%s", util.Red, util.Reset)
 	case "skip":
 		icon = fmt.Sprintf("%s-%s", util.Gray, util.Reset)
+	case "info":
+		icon = fmt.Sprintf("%si%s", util.Gray, util.Reset)
 	}
-	fmt.Printf("  %s %s: %s\n", icon, name, message)
+	fmt.Print(util.ColorFor(os.Stdout, fmt.Sprintf("  %s %s: %s\n", icon, name, message)))
 	if remediation != "" && status != "pass" {
 		fmt.Printf("    → %s\n", remediation)
 	}
@@ -624,6 +641,33 @@ func checkDoctorSAMappings(hubEP string, hubConnected bool, client hubclient.Cli
 		Name:    name,
 		Status:  "pass",
 		Message: fmt.Sprintf("No unmapped GCP service accounts reported (%d registered)", len(sas)),
+	}
+}
+
+// checkDoctorKubernetesBlockServiceAccount performs D10: it reports, as
+// information, the Kubernetes profiles in vs (the local broker's global
+// settings file; the Hub database overlay is not read) that have no
+// kubernetes_block_service_account (ptone/scion#4034). A GCP identity
+// "block" pod under such a profile runs as the namespace's default
+// ServiceAccount, so its zero privilege depends on the namespace admin. It
+// never warns or fails: running block pods as the namespace default is a
+// supported choice.
+func checkDoctorKubernetesBlockServiceAccount(vs *config.VersionedSettings) scionruntime.CheckResult {
+	const name = "k8s-block-service-account"
+	missing := vs.KubernetesProfilesWithoutBlockServiceAccount()
+	if len(missing) == 0 {
+		return scionruntime.CheckResult{
+			Name:    name,
+			Status:  "pass",
+			Message: "Every Kubernetes profile in the local broker settings names a block ServiceAccount, or none is defined",
+		}
+	}
+	return scionruntime.CheckResult{
+		Name:   name,
+		Status: "info",
+		Message: fmt.Sprintf("%d Kubernetes profile(s) with no kubernetes_block_service_account in the local broker settings (~/.scion/settings.yaml; a Hub database overlay is not read); GCP identity \"block\" agents on them run as the namespace's default ServiceAccount: %s",
+			len(missing), strings.Join(missing, ", ")),
+		Remediation: "Optional: provision a dedicated Kubernetes ServiceAccount with no Workload Identity annotation and no IAM grants, and set kubernetes_block_service_account on the profile or its runtime entry",
 	}
 }
 

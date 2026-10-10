@@ -42,9 +42,18 @@ import (
 	"github.com/google/uuid"
 )
 
+// ErrAgentProjectUnresolved is returned by DeleteAgentFiles when the
+// project path resolves to no existing project directory.
+var ErrAgentProjectUnresolved = errors.New("the agent's project directory does not exist")
+
+// DeleteAgentFiles removes agentName's files in the project projectPath
+// resolves to (its agent directory and workspace, worktree and, with
+// removeBranch, branch, and its external per-agent state). It never touches
+// another project's directories; the global project's agents are deleted
+// only when the global project is the target.
 func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (bool, error) {
 	// Every path built below joins agentName onto some directory -- the
-	// project's agents dir, the global agents dir, the external per-agent
+	// project's agents dir, the external per-agent
 	// state dir, or the shared worktree base -- so an unvalidated name could
 	// otherwise resolve outside all of them (e.g. "../sibling"). Containment
 	// under checkAgentDirContained is invariant of which root and
@@ -55,6 +64,16 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	// branch regardless of which directory ends up being touched.
 	if _, err := checkAgentDirContained(projectPath, agentName, false); err != nil {
 		return false, fmt.Errorf("delete: %w", err)
+	}
+
+	// The agent's files live under its project only. A project path that
+	// resolves to no existing project directory has nothing of the agent's
+	// to delete: it is reported (ErrAgentProjectUnresolved), never resolved
+	// to another project.
+	if pd, err := config.GetResolvedProjectDir(projectPath); err != nil {
+		return false, fmt.Errorf("delete: %w: %v", ErrAgentProjectUnresolved, err)
+	} else if _, statErr := os.Stat(pd); errors.Is(statErr, fs.ErrNotExist) {
+		return false, fmt.Errorf("delete: %w: %s", ErrAgentProjectUnresolved, pd)
 	}
 
 	var agentsDirs []string
@@ -123,11 +142,6 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 			externalAgentDir = filepath.Join(extDir, agentName)
 		}
 	}
-	// Also check global just in case
-	if globalDir, err := config.GetGlobalAgentsDir(); err == nil {
-		agentsDirs = append(agentsDirs, globalDir)
-	}
-
 	// Empty-per-agent (design #2703): the agent's workspace is a private,
 	// non-git directory that owns no worktree or branch. Even when the
 	// agent ran `git init` in it, or the project sits inside an enclosing
@@ -738,7 +752,7 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 			// (§3.7), same as every other precondition here; the
 			// reincarnation is recorded failed with this error as the
 			// reason, and the agent stays stopped until a retry.
-			settings, _, err := config.LoadEffectiveSettings(projectDir)
+			settings, _, err := config.LoadEffectiveSettingsFor(ctx, projectDir)
 			if err != nil {
 				return nil, fmt.Errorf("reprovision: load effective settings: %w", err)
 			}
@@ -790,16 +804,43 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 		return cfg, err
 	}
 
+	// prompt.md must never hold the previous generation's task once the
+	// disk is re-rendered for the new one (ptone/scion#3985). The new
+	// generation's first task (the hub-built preamble plus handoff) is
+	// still delivered by the subsequent DispatchAgentStart call, but if
+	// that start never reaches this broker's Start (a timeout, a deferred
+	// or failed start), a later task-less, non-resume start falls back to
+	// prompt.md and would otherwise replay generation N's task. So stage
+	// the request's task here, matching AppliedConfig.Task (the hub's own
+	// restart source), or empty the file when the request carries none.
+	// Staging does not deliver the task: prompt.md is only read by Start as
+	// a fallback when its request has no task, and a start that carries
+	// the same task overwrites the file with it and delivers it once.
+	// This runs before the shared dir backend change is recorded, so a
+	// failed write leaves that change unrecorded ("recorded only after
+	// provisioning succeeds").
+	if err := writeReprovisionPrompt(agentDir, opts.Task); err != nil {
+		return cfg, err
+	}
+
 	if sdChange != nil {
 		if err := sdChange.record(opts, cfg); err != nil {
 			return cfg, err
 		}
 	}
 
-	// Deliberately no prompt.md write here: the new generation's first task
-	// (the hub-built preamble plus handoff) is delivered by the subsequent
-	// DispatchAgentStart call, not pre-staged as a file.
-	return withProvisionedImage(opts, agentDir, cfg)
+	return withProvisionedImage(ctx, opts, agentDir, cfg)
+}
+
+// writeReprovisionPrompt replaces prompt.md in agentDir with task, or
+// empties it when task is empty, so no earlier generation's task survives
+// a reprovision.
+func writeReprovisionPrompt(agentDir, task string) error {
+	promptFile := filepath.Join(agentDir, "prompt.md")
+	if err := os.WriteFile(promptFile, []byte(task), 0644); err != nil {
+		return fmt.Errorf("reprovision: failed to write prompt.md: %w", err)
+	}
+	return nil
 }
 
 // reprovisionEmptyPerAgentPreflight runs Reprovision's empty-per-agent
@@ -845,6 +886,11 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 	if err := m.finishProvision(opts, agentDir, agentHome, cfg); err != nil {
 		return cfg, err
 	}
+	// A create: the later start must not mistake this agent for one that
+	// predates per-agent NFS directories (see nfsKeepSharedCheckout).
+	if opts.FreshProvision {
+		recordNFSAgentDir(agentDir, opts.Name)
+	}
 
 	// A provision-only create carries no run (the hub mints runs only for
 	// starts), yet it may reuse, or newly provision, files under a name an
@@ -869,7 +915,7 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 		}
 	}
 
-	return withProvisionedImage(opts, agentDir, cfg)
+	return withProvisionedImage(ctx, opts, agentDir, cfg)
 }
 
 // resolveHarnessConfigDir returns the harness-config directory for an agent,
@@ -1037,7 +1083,7 @@ func PreflightResolve(ctx context.Context, opts api.StartOptions) error {
 		return err
 	}
 
-	settings, warnings, _ := config.LoadEffectiveSettings(projectDir)
+	settings, warnings, _ := config.LoadEffectiveSettingsFor(ctx, projectDir)
 	config.PrintDeprecationWarnings(warnings)
 
 	profileName := opts.Profile
@@ -1244,7 +1290,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		return "", "", nil, err
 	}
 
-	settings, warnings, _ := config.LoadEffectiveSettings(projectDir)
+	settings, warnings, _ := config.LoadEffectiveSettingsFor(ctx, projectDir)
 	config.PrintDeprecationWarnings(warnings)
 	if profileName == "" && settings != nil {
 		profileName = settings.ActiveProfile
@@ -1322,6 +1368,41 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
+	// 2a-inline. Capture the inline config (if provided) for the merge below.
+	var inlineCfg *api.ScionConfig
+	if len(inlineConfig) > 0 && inlineConfig[0] != nil {
+		inlineCfg = inlineConfig[0]
+	}
+
+	// Capture the inline config's own image/pull-policy — if any — before
+	// harness-config resolution. Deliberately NOT finalScionCfg.Image: that
+	// already includes the template's contribution, and a template is
+	// re-read live on every Start (see run.go), so persisting it here would
+	// let a create-time template snapshot outrank the CURRENT template on a
+	// later restart. Only the inline config has no live source to re-derive
+	// from at Start time — a local restart's request has no --config unless
+	// the caller repeats it — so only its contribution needs to survive via
+	// agent-info.json (AgentInfo.ExplicitImage / .ExplicitImagePullPolicy),
+	// as the explicit tier's fallback when the current Start request has no
+	// inline image/pull-policy of its own (ptone/scion#2156).
+	explicitImage := ""
+	explicitPullPolicy := ""
+	if inlineCfg != nil {
+		explicitImage = inlineCfg.Image
+		if inlineCfg.Kubernetes != nil {
+			explicitPullPolicy = inlineCfg.Kubernetes.ImagePullPolicy
+		}
+	}
+
+	// 2, 2b, 2c. Load the template chain, merge configs and resolve the
+	// harness-config, through the same resolution Preflight uses. This runs
+	// before the agent directory and workspace are created, so a resolution
+	// failure (unknown template or harness-config) leaves nothing behind:
+	// no agent dir, no worktree and no branch (ptone/scion#3135).
+	rt, err := resolveTemplateAndHarnessConfig(ctx, templateName, harnessConfig, projectPath, projectDir, profileName, settings, inlineCfg)
+	if err != nil {
+		return "", "", nil, err
+	}
 	_, agentDirStatErr := os.Lstat(agentDir)
 	newAgentDir := errors.Is(agentDirStatErr, fs.ErrNotExist)
 	if err := os.MkdirAll(agentDir, 0755); err != nil {
@@ -1549,38 +1630,6 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
-	// 2a-inline. Capture the inline config (if provided) for the merge below.
-	var inlineCfg *api.ScionConfig
-	if len(inlineConfig) > 0 && inlineConfig[0] != nil {
-		inlineCfg = inlineConfig[0]
-	}
-
-	// Capture the inline config's own image/pull-policy — if any — before
-	// harness-config resolution. Deliberately NOT finalScionCfg.Image: that
-	// already includes the template's contribution, and a template is
-	// re-read live on every Start (see run.go), so persisting it here would
-	// let a create-time template snapshot outrank the CURRENT template on a
-	// later restart. Only the inline config has no live source to re-derive
-	// from at Start time — a local restart's request has no --config unless
-	// the caller repeats it — so only its contribution needs to survive via
-	// agent-info.json (AgentInfo.ExplicitImage / .ExplicitImagePullPolicy),
-	// as the explicit tier's fallback when the current Start request has no
-	// inline image/pull-policy of its own (ptone/scion#2156).
-	explicitImage := ""
-	explicitPullPolicy := ""
-	if inlineCfg != nil {
-		explicitImage = inlineCfg.Image
-		if inlineCfg.Kubernetes != nil {
-			explicitPullPolicy = inlineCfg.Kubernetes.ImagePullPolicy
-		}
-	}
-
-	// 2, 2b, 2c. Load the template chain, merge configs and resolve the
-	// harness-config, through the same resolution Preflight uses.
-	rt, err := resolveTemplateAndHarnessConfig(ctx, templateName, harnessConfig, projectPath, projectDir, profileName, settings, inlineCfg)
-	if err != nil {
-		return "", "", nil, err
-	}
 	chain := rt.Chain
 	finalScionCfg := rt.Config
 	harnessConfigName := rt.HarnessConfigName
@@ -3016,7 +3065,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	}
 
 	// Load settings for default template
-	vs, vsWarnings, err := config.LoadEffectiveSettings(projectDir)
+	vs, vsWarnings, err := config.LoadEffectiveSettingsFor(ctx, projectDir)
 	if err != nil {
 		util.Debugf("failed to load effective settings: %v", err)
 	}
