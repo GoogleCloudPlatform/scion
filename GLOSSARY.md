@@ -231,7 +231,7 @@ _Avoid_: A2A bridge, A2A adapter, A2A proxy
 _See also_: A2A Protocol, Hub
 
 **Join token**:
-A short-lived, single-use token the Hub issues when a user creates or re-registers a Runtime Broker. The Runtime Broker host redeems it at `POST /api/v1/brokers/join` for its Runtime Broker credentials, and the token is consumed in the same step. Its lifetime defaults to 1 hour (`joinTokenTtlSeconds`, 300 to 86400 seconds). `scion runtime-broker register` creates and redeems one in a single step; `scion hub brokers join-token create` and `scion runtime-broker join` split the two across machines.
+A short-lived, single-use token the Hub issues when a user creates or re-registers a Runtime Broker. The Runtime Broker host redeems it at `POST /api/v1/brokers/join` for its Runtime Broker credentials, and the token is consumed in the same step. Its lifetime defaults to 1 hour and can be set per request, from 5 minutes to 24 hours (`joinTokenTtlSeconds` on `POST /api/v1/brokers`, or `--ttl` on `scion hub brokers join-token create`). `scion runtime-broker register` creates and redeems one in a single step; `scion hub brokers join-token create` and `scion runtime-broker join` split the two across machines.
 _Avoid_: registration token, bootstrap secret
 _See also_: Runtime Broker, User Access Token (UAT) (a different credential)
 
@@ -253,7 +253,7 @@ _Avoid_: raw template scopes, agent scopes
 _See also_: User Access Token (UAT)
 
 **Group**:
-A named collection of Hub users (and nested groups) used by the Hub permissions system to assign access. This is the primary meaning of "group" in Scion.
+A named collection of Hub users, agents and nested groups used by the Hub permissions system to assign access. This is the primary meaning of "group" in Scion.
 _Avoid_: team, org, role
 _See also_: Message Group (different concept — message recipients, not users)
 

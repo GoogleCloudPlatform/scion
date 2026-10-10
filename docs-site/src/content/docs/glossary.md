@@ -158,7 +158,7 @@ An open standard (developed by Google) for secure, structured communication betw
 A standalone, self-managed service that translates standard A2A JSON-RPC payloads into Scion Hub API calls and vice versa. It exposes Scion agents as standard A2A-compliant JSON-RPC endpoints, enabling multi-agent orchestration, third-party platform integrations, and desktop client federation.
 
 ### Join token
-A short-lived, single-use token the Hub issues when a user creates or re-registers a Runtime Broker. The Runtime Broker host redeems it at `POST /api/v1/brokers/join` for its Runtime Broker credentials, and the token is consumed in the same step. Its lifetime defaults to 1 hour (`joinTokenTtlSeconds`, 300 to 86400 seconds). `scion runtime-broker register` creates and redeems one in a single step; `scion hub brokers join-token create` and `scion runtime-broker join` split the two across machines. See [Headless Registration with a Join Token](/scion/hosted/ha/runtime-broker/#headless-registration-with-a-join-token).
+A short-lived, single-use token the Hub issues when a user creates or re-registers a Runtime Broker. The Runtime Broker host redeems it at `POST /api/v1/brokers/join` for its Runtime Broker credentials, and the token is consumed in the same step. Its lifetime defaults to 1 hour and can be set per request, from 5 minutes to 24 hours (`joinTokenTtlSeconds` on `POST /api/v1/brokers`, or `--ttl` on `scion hub brokers join-token create`). `scion runtime-broker register` creates and redeems one in a single step; `scion hub brokers join-token create` and `scion runtime-broker join` split the two across machines. See [Headless Registration with a Join Token](/scion/hosted/ha/runtime-broker/#headless-registration-with-a-join-token).
 
 ### Artifact
 A published file or folder (a bundle) stored by the Hub, with numbered immutable versions and a stable reference `scion://artifact/<id>[@<seq>]` that works from any Runtime Broker and in the web UI. Owned by the publishing agent or user and homed in a project. Gated by the `hub.artifacts` experiment. Not a build output or a chat attachment. See [Artifacts](/scion/reference/artifacts/).
@@ -174,7 +174,7 @@ _See also_: AccessConstraint, Group, RoleBinding, User Access Token (UAT)
 A named authority tier (one of `none`, `readonly`, `baseline`, or `full`) assigned to an agent that governs the API scopes granted in its Hub-issued JWT. At creation, the requested or default role is capped by the project maximum and, for sub-agents, the parent agent's role. Live delegation checks separately verify the caller's authority.
 
 ### Group
-A named collection of Hub users (and nested groups) used by the Hub permissions system to assign access. This is the primary meaning of "group" in Scion. Distinct from a **Message Group** (a set of message recipients) and from a **Project**.
+A named collection of Hub users, agents and nested groups used by the Hub permissions system to assign access. This is the primary meaning of "group" in Scion. Distinct from a **Message Group** (a set of message recipients) and from a **Project**.
 
 ### User Access Token (UAT)
 A scoped, revocable bearer token (prefixed with `scion_pat_`) linked to a user account and used for non-interactive Hub authentication (e.g., CLI, CI/CD pipelines, desktop app integration). Every UAT has a boundary, either a single project or (for a hub-bound token, minted through the API) the hub, and carries a specific list of action permissions (scopes). The token boundary is not an **Access Boundary**. Formerly known as a *Personal Access Token (PAT)*.
@@ -276,7 +276,6 @@ A platform-set activity for an agent whose heartbeat is still arriving (the proc
 ### Auto-Suspend
 A Hub behavior, off by default (`server.hub.auto_suspend_stalled`), that suspends an agent when it is marked `stalled`, reclaiming its container. The agent resumes automatically on the next message, provided its harness supports session resume and the container is still alive.
 
-
 ### Run intent
 Whether the Hub has been asked to keep an agent running (`running`) or stopped (`stopped`). It is recorded when a lifecycle request (start, restart, wake, create-and-start, stop, suspend or delete) is accepted, before dispatch to the Runtime Broker, so it reflects the request even when the dispatch is queued or fails. Kept separately from phase and not shown in the agent's API record.
 
@@ -285,6 +284,7 @@ The identity of one run of an agent, minted by the Hub for each create, start or
 
 ### Start claim
 A leased, per-agent claim the Hub takes for every start, restart, create-and-start, message wake, automatic recovery and reincarnation start, and while applying a queued stop, so only one of these runs at a time. A competing request gets `409 start_in_progress`, with the holder's kind and state (`live`, or `unconfirmed` when the outcome is not yet known) in `error.details`.
+
 ## Modes
 
 The run modes form a spine of increasing infrastructure — **Local → Workstation → Single-node hosted → HA hosted**. Two independent dimensions separate them: the **availability tier** of the control plane (whether the Hub runs as a single instance on an embedded database, or is replicated across an external one), and **Tenancy** (whether it serves one user or many). Tenancy is orthogonal and only opens up once hosted; the availability tier is fixed by the Hub's database driver (`SCION_SERVER_DATABASE_DRIVER`: `sqlite` vs. `postgres`).

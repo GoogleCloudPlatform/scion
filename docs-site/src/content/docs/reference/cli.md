@@ -1157,9 +1157,9 @@ Manages Scion server components (Hub and Broker).
         - `--admin-emails <emails>`: Email addresses to auto-promote to the administrator role. This flag is **repeatable** and also accepts a **comma-separated list** (e.g. `--admin-emails admin1@example.com,admin2@example.com --admin-emails admin3@example.com`). Strict empty-value validation is enforced.
 - `scion server migrate`: Copy all Hub data from a SQLite database into a PostgreSQL database. Parents are copied before children, rows whose primary key already exists in the destination are skipped (so a failed run can be restarted), the SQLite file is opened read-only (so a running SQLite Hub can stay up until you cut over), and row counts are compared after each table, stopping on any mismatch. See [PostgreSQL](/scion/hosted/single-node/hub-server/#postgresql-production).
     - Flags:
-        - `--from <dsn>` (required): Source SQLite database, for example `sqlite:///var/lib/scion/hub.db` (also `sqlite:`, `file://` or `file:` forms).
+        - `--from <dsn>` (required): Source SQLite database, for example `sqlite:///var/lib/scion/hub.db` (also `sqlite:`, `file://`, `file:` forms or a bare path).
         - `--to <dsn>` (required): Destination PostgreSQL connection string, for example `postgres://user:pass@host:5432/db?sslmode=require`.
-        - `--keep-source`: Leave the source SQLite file untouched (default `true`).
+        - `--keep-source`: Accepted for clarity; the source is always kept unless you pass `--drop-source`.
         - `--drop-source`: Delete the source SQLite file after a successful, verified migration.
         - `--batch-size <int>`: Maximum rows per bulk insert (`0`, the default, uses the built-in size).
 - `scion server backfill`: Scan historical messages that predate the conversation model and assign them to conversations based on their thread, sender, and recipient metadata.
