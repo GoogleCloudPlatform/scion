@@ -65,7 +65,10 @@ func entAgentSessionMetricsToStore(e *ent.AgentSessionMetrics) *store.AgentSessi
 // CRUD operations
 // ============================================================================
 
-// CreateAgentSessionMetrics persists a new session metrics record.
+// CreateAgentSessionMetrics persists a new session metrics record. A record
+// for the same agent and session ID is never replaced: the unique index on
+// (agent_id, session_id) rejects the insert, m is filled with the stored
+// record's ID and creation time, and store.ErrAlreadyExists is returned.
 func (s *AgentSessionMetricsStore) CreateAgentSessionMetrics(ctx context.Context, m *store.AgentSessionMetrics) error {
 	if m.AgentID == "" || m.ProjectID == "" || m.SessionID == "" {
 		return store.ErrInvalidInput
@@ -105,6 +108,15 @@ func (s *AgentSessionMetricsStore) CreateAgentSessionMetrics(ctx context.Context
 
 	created, err := builder.Save(ctx)
 	if err != nil {
+		if ent.IsConstraintError(err) {
+			if existing, qerr := s.client.AgentSessionMetrics.Query().
+				Where(entasm.AgentIDEQ(m.AgentID), entasm.SessionIDEQ(m.SessionID)).
+				Only(ctx); qerr == nil {
+				m.ID = existing.ID.String()
+				m.CreatedAt = existing.CreatedAt
+				return store.ErrAlreadyExists
+			}
+		}
 		return mapError(err)
 	}
 

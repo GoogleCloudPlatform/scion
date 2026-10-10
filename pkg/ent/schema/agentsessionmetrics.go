@@ -93,6 +93,14 @@ func (AgentSessionMetrics) Indexes() []ent.Index {
 		index.Fields("project_id").
 			StorageKey("agentsessionmetrics_grove_id"),
 		index.Fields("started_at"),
+		// One row per agent and session: a repeated report for the same
+		// session (a retry, or a resend after the sender died before
+		// confirming it) is not stored again. Rows written before this
+		// index existed are deduplicated before migration
+		// (CompositeStore.deduplicateAgentSessionMetrics).
+		index.Fields("agent_id", "session_id").
+			Unique().
+			StorageKey("agentsessionmetrics_agent_id_session_id"),
 	}
 }
 

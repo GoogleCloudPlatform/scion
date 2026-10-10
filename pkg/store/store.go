@@ -2743,7 +2743,10 @@ type BrokerSettingStore interface {
 
 // AgentSessionMetricsStore defines operations for agent session metrics.
 type AgentSessionMetricsStore interface {
-	// CreateAgentSessionMetrics creates a new session metrics record.
+	// CreateAgentSessionMetrics creates a new session metrics record. The
+	// store keeps one record per agent and session ID: when one exists, it
+	// is left unchanged, m.ID and m.CreatedAt are set from it, and
+	// ErrAlreadyExists is returned.
 	CreateAgentSessionMetrics(ctx context.Context, m *AgentSessionMetrics) error
 
 	// GetAgentSessionMetrics retrieves a session metrics record by ID.
