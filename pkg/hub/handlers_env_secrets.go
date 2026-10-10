@@ -81,6 +81,9 @@ func (s *Server) resolveEnvSecretAccess(w http.ResponseWriter, r *http.Request, 
 			Unauthorized(w)
 			return "", false
 		}
+		if isWrite && !requireProfileWriter(w, r) {
+			return "", false
+		}
 		return userIdent.ID(), true
 
 	case store.ScopeProject:

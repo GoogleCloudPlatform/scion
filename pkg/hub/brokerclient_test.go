@@ -37,7 +37,7 @@ func TestAuthenticatedBrokerClient_CreateAgent(t *testing.T) {
 		t.Fatalf("failed to create test store: %v", err)
 	}
 
-	if err := db.Migrate(context.Background()); err != nil {
+	if err := migrateTestStore(context.Background(), db); err != nil {
 		t.Fatalf("failed to migrate: %v", err)
 	}
 
@@ -150,7 +150,7 @@ func TestAuthenticatedBrokerClient_StartAgent(t *testing.T) {
 		t.Fatalf("failed to create test store: %v", err)
 	}
 
-	if err := db.Migrate(context.Background()); err != nil {
+	if err := migrateTestStore(context.Background(), db); err != nil {
 		t.Fatalf("failed to migrate: %v", err)
 	}
 
@@ -258,7 +258,7 @@ func TestAuthenticatedBrokerClient_MissingSecretFailsClosed(t *testing.T) {
 		t.Fatalf("failed to create test store: %v", err)
 	}
 
-	if err := db.Migrate(context.Background()); err != nil {
+	if err := migrateTestStore(context.Background(), db); err != nil {
 		t.Fatalf("failed to migrate: %v", err)
 	}
 
@@ -315,7 +315,7 @@ func TestAuthenticatedBrokerClient_ExpiredSecretFailsClosed(t *testing.T) {
 		t.Fatalf("failed to create test store: %v", err)
 	}
 
-	if err := db.Migrate(context.Background()); err != nil {
+	if err := migrateTestStore(context.Background(), db); err != nil {
 		t.Fatalf("failed to migrate: %v", err)
 	}
 
@@ -384,7 +384,7 @@ func TestAuthenticatedBrokerClient_StartAgent_InvalidJSONFails(t *testing.T) {
 		t.Fatalf("failed to create test store: %v", err)
 	}
 
-	if err := db.Migrate(context.Background()); err != nil {
+	if err := migrateTestStore(context.Background(), db); err != nil {
 		t.Fatalf("failed to migrate: %v", err)
 	}
 
@@ -436,7 +436,7 @@ func TestAuthenticatedBrokerClient_AllOperations(t *testing.T) {
 		t.Fatalf("failed to create test store: %v", err)
 	}
 
-	if err := db.Migrate(context.Background()); err != nil {
+	if err := migrateTestStore(context.Background(), db); err != nil {
 		t.Fatalf("failed to migrate: %v", err)
 	}
 

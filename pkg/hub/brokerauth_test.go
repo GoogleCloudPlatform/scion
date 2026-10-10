@@ -44,7 +44,7 @@ func setupTestBrokerAuthService(t *testing.T) (*BrokerAuthService, store.Store) 
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
+	if err := migrateTestStore(context.Background(), s); err != nil {
 		t.Fatalf("failed to migrate store: %v", err)
 	}
 
@@ -360,7 +360,7 @@ func TestJoinWithExpiredToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
+	if err := migrateTestStore(context.Background(), s); err != nil {
 		t.Fatalf("failed to migrate store: %v", err)
 	}
 
@@ -540,7 +540,7 @@ func TestValidateBrokerSignature_ClockSkew(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
+	if err := migrateTestStore(context.Background(), s); err != nil {
 		t.Fatalf("failed to migrate store: %v", err)
 	}
 

@@ -1,0 +1,33 @@
+pkgmove plan: example.com/fx/hub -> example.com/fx/hub/sub (package sub)
+
+Files (1):
+  git mv hub/move.go hub/sub/move.go
+
+Renames (1):
+  method Task.string -> String  (hub/move.go:6)
+
+Alias entries (1):
+  type  Task = sub.Task
+
+Alias files (1):
+  hub/zz_alias_sub.go (13 lines)
+
+Reference rewrites in remaining files (vars and func values) (0):
+
+Remaining source files edited (0):
+
+ERRORS (1) - the move cannot be generated; see the safety report below.
+
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 1. Findings: 1. Errors: 1.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== ERRORS (the move was not generated) ==
+  - hub/move.go:6: method Task.string would be exported as String, a name with dynamic meaning (fmt/encoding/io/errors/...); this can silently change behaviour - rename it by hand first
+
+== WARN: reflect-visible type name changes (all users, not only moved files) ==
+  hub/move.go:4: hub.Task becomes sub.Task for %T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)

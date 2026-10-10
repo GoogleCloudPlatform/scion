@@ -66,6 +66,13 @@ type Store interface {
 	TouchSession(ctx context.Context, sessionID string, now time.Time) error
 	// SetSessionDraining sets draining=true; ErrSessionNotFound if gone.
 	SetSessionDraining(ctx context.Context, sessionID string) error
+	// SetRelaySessionsDraining sets draining=true on every session row with
+	// this relay_instance_id and relay_generation == gen, in one UPDATE
+	// fenced on the relay row: it updates nothing unless the stored relay
+	// generation equals gen. It returns the number of rows updated, or
+	// ErrRelaySuperseded if the relay row is missing or at another
+	// generation.
+	SetRelaySessionsDraining(ctx context.Context, instanceID string, gen int64) (int, error)
 	// DeleteSessionCAS deletes the row iff all three of session_id,
 	// relay_instance_id and relay_generation match.
 	DeleteSessionCAS(ctx context.Context, sessionID, relayInstanceID string, relayGen int64) (bool, error)

@@ -1,0 +1,50 @@
+pkgmove plan: example.com/fx/hub -> example.com/fx/hub/sub (package sub)
+
+Files (1):
+  git mv hub/move.go hub/sub/move.go
+
+Renames (2):
+  func   defaultHook -> DefaultHook  (hub/move.go:3)
+  method T.run -> Run  (hub/move.go:7)
+
+Alias entries (2):
+  type  T = sub.T
+  func  defaultHook = sub.DefaultHook
+
+Alias files (1):
+  hub/zz_alias_sub.go (17 lines)
+
+Reference rewrites in remaining files (vars and func values) (2):
+  hub/stay.go:8: defaultHook -> sub.DefaultHook
+  hub/stay.go:13: defaultHook -> sub.DefaultHook
+
+Remaining source files edited (1):
+  hub/stay.go
+
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 1. Findings: 5. Errors: 0.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== WARN: exported method (may newly satisfy interfaces) ==
+  hub/move.go:7: T.run -> Run: check dynamic interface assertions that could now match; types in other packages that embed T are not checked for shadowing or newly promoted methods
+
+== WARN: func name seen through its value changes (runtime.FuncForPC, stack traces) ==
+  hub/move.go:3: example.com/fx/hub.defaultHook is now example.com/fx/hub/sub.DefaultHook for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+  hub/move.go:7: example.com/fx/hub.T.run is now example.com/fx/hub/sub.T.Run for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+
+== WARN: reflect-visible type name changes (all users, not only moved files) ==
+  hub/move.go:5: hub.T becomes sub.T for %T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)
+
+== INFO: staying var initialiser uses moved consts, types or func values only ==
+  hub/stay.go:9: methodExpr = ... (no moved code runs and no moved var is read at init)
+
+safety report written to hub/zz_alias_sub_safety.txt
+
+sanity: go list example.com/fx/hub example.com/fx/hub/sub
+sanity: go list OK
+sanity: type-checking both packages (with in-package tests)
+sanity: type-check OK

@@ -89,7 +89,7 @@ func newCommitTestServer(t *testing.T, stor storage.Storage) (*Server, store.Sto
 		}
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
+	if err := migrateTestStore(context.Background(), s); err != nil {
 		t.Fatalf("failed to migrate: %v", err)
 	}
 	cfg := DefaultServerConfig()
@@ -168,7 +168,7 @@ func corruptDerivedFields(t *testing.T, s store.Store, id string) {
 	tmpl.Harness = "stale"
 	tmpl.DefaultHarnessConfig = ""
 	tmpl.AgentConfig = nil
-	if err := s.UpdateTemplate(ctx, tmpl); err != nil {
+	if err := setTemplateContentForTest(ctx, s, tmpl); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -365,7 +365,7 @@ func TestTemplateCommit_RoutedPaths(t *testing.T) {
 				got.StoragePath = ""
 				got.DefaultHarnessConfig = ""
 				got.AgentConfig = nil
-				if err := s.UpdateTemplate(ctx, got); err != nil {
+				if err := setTemplateContentForTest(ctx, s, got); err != nil {
 					t.Fatal(err)
 				}
 				if _, err := srv.templateStore().Bootstrap(ctx, "tpl-legacy", dir, store.TemplateScopeGlobal, "", "", false); err != nil {
