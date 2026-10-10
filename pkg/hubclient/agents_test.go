@@ -607,3 +607,27 @@ func TestProjectAgentService_ReissueScopes(t *testing.T) {
 	assert.Equal(t, []string{"project:artifact:read"}, res.Added)
 	assert.Equal(t, "op-1", res.OpID)
 }
+
+// ReissueScopesAll posts to the admin reset-auth-all route, dry run unless
+// apply is set.
+func TestAgentService_ReissueScopesAll(t *testing.T) {
+	for _, apply := range []bool{false, true} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, "/api/v1/admin/agents/reset-auth-all", r.URL.Path)
+			var body map[string]bool
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			assert.Equal(t, map[string]bool{"reissue_scopes": true, "dry_run": !apply}, body)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"batch_op_id":"b-1","dry_run":true,"total":2,"agents":[{"id":"a1","outcome":"changed"}]}`))
+		}))
+		client, err := New(server.URL)
+		require.NoError(t, err)
+		reissuer, ok := client.Agents().(BulkScopeReissuer)
+		require.True(t, ok)
+		res, err := reissuer.ReissueScopesAll(context.Background(), apply)
+		require.NoError(t, err)
+		assert.Equal(t, 2, res.Total)
+		assert.Equal(t, "changed", res.Agents[0].Outcome)
+		server.Close()
+	}
+}

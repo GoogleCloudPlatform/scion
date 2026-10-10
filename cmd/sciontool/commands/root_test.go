@@ -46,6 +46,12 @@ func TestLogLevelFlag(t *testing.T) {
 	flag := rootCmd.PersistentFlags().Lookup("log-level")
 	require.NotNil(t, flag)
 	assert.Equal(t, "info", flag.DefValue)
+	// The help text must describe the levels that are honoured
+	// (ptone/scion#4103): all four levels go through the shared parser.
+	for _, want := range []string{"debug", "info", "warn", "error", "SCION_LOG_LEVEL"} {
+		assert.Contains(t, flag.Usage, want)
+	}
+	assert.NotContains(t, flag.Usage, "Only \"debug\" has an effect")
 }
 
 // resetLogLevelState clears leaked SCION_* level variables and the shared

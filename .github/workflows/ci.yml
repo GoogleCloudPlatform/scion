@@ -623,7 +623,8 @@ jobs:
     timeout-minutes: 90
     services:
       postgres:
-        image: postgres:16
+        # Pulled through the Google Docker Hub mirror to avoid the Docker Hub unauthenticated pull limit (ptone/scion#4147).
+        image: mirror.gcr.io/library/postgres:16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres

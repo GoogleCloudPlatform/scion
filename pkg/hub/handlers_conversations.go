@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // conversationResponse wraps a conversation with its participants for API responses.
@@ -163,6 +164,15 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 	if cls == inboxCredentialToken {
 		tokenCheck = s.newSelfScopeCheck(ctx, token, permInboxRead)
 	}
+	// The list shows only group conversations the caller can read now: a
+	// participant row is an index, not a grant. A token is checked as its
+	// user here; the token boundary is checked below.
+	readerIdentity := identity
+	if token != nil {
+		readerIdentity = token.UserIdentity
+	}
+	groupReads := newGroupReadMemo(s, readerIdentity)
+	droppedGroups := 0
 	var filtered []store.Conversation
 	for _, conv := range conversations {
 		if kindFilter != "" && conv.Kind != kindFilter {
@@ -175,6 +185,10 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 			if conv.ProjectID == nil || *conv.ProjectID != projectFilter {
 				continue
 			}
+		}
+		if conv.Kind != "direct" && !groupReads.canRead(ctx, &conv) {
+			droppedGroups++
+			continue
 		}
 		// For direct conversations, verify the caller is named in the canonical
 		// DM key. A stale participant row that does not match the key must not
@@ -196,6 +210,10 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 			}
 		}
 		filtered = append(filtered, conv)
+	}
+	if droppedGroups > 0 {
+		slog.DebugContext(ctx, "conversation list omitted group conversations the caller cannot read",
+			"count", droppedGroups)
 	}
 
 	// Review round 2 finding #1: GetConversationsForPrincipal returns the
@@ -946,17 +964,52 @@ func (s *Server) handleAddParticipant(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	// Authorization: caller must be a participant.
+	// Authorization: caller must be a participant. Anyone else gets the
+	// same answer as for an unknown conversation; the reason is logged.
 	isParticipant, err := isConversationParticipant(ctx, s.store, id, identity.Type(), identity.ID())
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 	if !isParticipant {
-		Forbidden(w)
+		logReferenceRefused(ctx, logging.RequestPath(r), "caller is not a participant of the conversation", identity)
+		NotFound(w, "Conversation")
 		return
 	}
 
+	// Reject participant addition for direct conversations. DM membership is
+	// immutable: it is derived from the canonical two-principal key. Adding a
+	// third principal would not grant them read access (key-based auth denies
+	// it), but the rejection must be explicit.
+	conv, err := s.store.GetConversation(ctx, id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			NotFound(w, "Conversation")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if conv.Kind == "direct" {
+		BadRequest(w, "cannot add participants to a direct conversation")
+		return
+	}
+
+	// A token needs inbox:write for the conversation's project; a group
+	// with no project needs a hub boundary. Every caller then needs read
+	// access to the conversation's project (for a group with no project,
+	// the participant rule above); a caller without it gets the same answer
+	// as for an unknown conversation.
+	if cls == inboxCredentialToken && !s.authorizeTokenConversation(w, r, token, permInboxWrite, conv) {
+		return
+	}
+	if !s.authorizeGroupConversationReadAsNotFound(w, r, conv) {
+		return
+	}
+
+	// The body is read only after every check on the conversation, so a
+	// caller who cannot use the conversation gets the same answer whatever
+	// the body holds.
 	var req addParticipantRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body")
@@ -970,31 +1023,6 @@ func (s *Server) handleAddParticipant(w http.ResponseWriter, r *http.Request, id
 
 	if req.PrincipalKind != "user" && req.PrincipalKind != "agent" {
 		BadRequest(w, "principalKind must be 'user' or 'agent'")
-		return
-	}
-
-	// Reject participant addition for direct conversations. DM membership is
-	// immutable: it is derived from the canonical two-principal key. Adding a
-	// third principal would not grant them read access (key-based auth denies
-	// it), but the rejection must be explicit.
-	conv, err := s.store.GetConversation(ctx, id)
-	if err != nil {
-		writeErrorFromErr(w, err, "Conversation")
-		return
-	}
-	if conv.Kind == "direct" {
-		BadRequest(w, "cannot add participants to a direct conversation")
-		return
-	}
-
-	// Every caller needs read access to the conversation's project (for a
-	// group with no project, the participant rule above). A token also
-	// needs inbox:write for that project; a group with no project needs a
-	// hub boundary.
-	if !s.authorizeGroupConversationAccess(w, r, conv, ActionRead) {
-		return
-	}
-	if cls == inboxCredentialToken && !s.authorizeTokenConversation(w, r, token, permInboxWrite, conv) {
 		return
 	}
 
@@ -1013,8 +1041,11 @@ func (s *Server) handleAddParticipant(w http.ResponseWriter, r *http.Request, id
 			return
 		}
 
+		// An agent of another project gets the same answer as an
+		// unknown agent; the reason is logged.
 		if conv.ProjectID != nil && agent.ProjectID != *conv.ProjectID {
-			BadRequest(w, "agent does not belong to the conversation's project")
+			logReferenceRefused(ctx, logging.RequestPath(r), "agent belongs to another project than the conversation", identity)
+			writeError(w, http.StatusNotFound, "not_found", "agent not found", nil)
 			return
 		}
 	}
