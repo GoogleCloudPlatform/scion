@@ -118,7 +118,8 @@ var relationshipCharacterizedAllowlist = map[relationshipAllowKey][]string{
 	// the set reachable when the agent holds every registered agent scope.
 	{"ancestor", "agent", "agent"}: {
 		"agent.create", "agent.delete", "agent.attach", "agent.lifecycle",
-		"agent.set_message_mode", "agent.status_update", "agent.notify", "agent.token_refresh", "agent.port_forward", "agent.identity_token",
+		"agent.set_message_mode", "agent.status_update", "agent.notify",
+		"agent.token_refresh", "agent.port_forward", "agent.identity_token",
 	},
 
 	// An agent reads the status of an agent it directly launched, in the

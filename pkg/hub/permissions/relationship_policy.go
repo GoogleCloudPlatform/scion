@@ -168,7 +168,8 @@ var RelationshipPolicies = []RelationshipPolicy{
 		ResourceType:   ResourceAgent,
 		PermissionIDs: []string{
 			"agent.create", "agent.delete", "agent.attach", "agent.lifecycle",
-			"agent.set_message_mode", "agent.status_update", "agent.notify", "agent.token_refresh", "agent.port_forward", "agent.identity_token",
+			"agent.set_message_mode", "agent.status_update", "agent.notify",
+			"agent.token_refresh", "agent.port_forward", "agent.identity_token",
 		},
 	},
 	{
