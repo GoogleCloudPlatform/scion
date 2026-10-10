@@ -297,6 +297,9 @@ type Store interface {
 	// Agent Credential operations (Permissions Foundation Phase 1H)
 	AgentCredentialStore
 
+	// Agent delegation grant and delegated credential operations
+	AgentDelegationStore
+
 	// Agent Identity Key operations (per-project display-name / slug uniqueness)
 	AgentIdentityKeyStore
 
@@ -3258,6 +3261,11 @@ type AgentCredentialStore interface {
 	// Returns ErrNotFound if no credential exists with that hash.
 	GetAgentCredentialByJTIHash(ctx context.Context, jtiHash string) (*AgentCredential, error)
 
+	// GetAgentCredentialByID returns the credential with id, or ErrNotFound.
+	// Agent delegation reads the exchange agent credential of a delegated
+	// credential through it.
+	GetAgentCredentialByID(ctx context.Context, id string) (*AgentCredential, error)
+
 	// RevokeAgentCredential marks a credential as revoked.
 	// Returns ErrNotFound if the credential doesn't exist.
 	RevokeAgentCredential(ctx context.Context, id string, revokedBy string, reason string) error
@@ -3276,6 +3284,46 @@ type AgentCredentialStore interface {
 	// DeleteAgentCredentialsByProject permanently removes all agent credentials for a project.
 	// Returns the number of credentials deleted.
 	DeleteAgentCredentialsByProject(ctx context.Context, projectID string) (int, error)
+}
+
+// =============================================================================
+// Agent Delegation Store (.design/agent-delegation.md §18.2)
+// =============================================================================
+
+// AgentDelegationStore persists agent delegation grants and the delegated
+// credentials exchanged from them.
+type AgentDelegationStore interface {
+	// CreateAgentDelegationGrant inserts grant and sets grant.ID when it is
+	// empty. It validates the boundary (a project boundary names a project,
+	// a hub boundary names none) and refuses a ceiling version below 1 or
+	// an empty ceiling.
+	CreateAgentDelegationGrant(ctx context.Context, grant *AgentDelegationGrant) error
+
+	// GetAgentDelegationGrant returns the grant with id, or ErrNotFound.
+	GetAgentDelegationGrant(ctx context.Context, id string) (*AgentDelegationGrant, error)
+
+	// MarkAgentDelegationGrantExchanged sets the grant's last_exchanged_at.
+	// Returns ErrNotFound if the grant does not exist.
+	MarkAgentDelegationGrantExchanged(ctx context.Context, id string, at time.Time) error
+
+	// RevokeAgentDelegationGrant revokes the grant with id and every
+	// unrevoked credential exchanged from it, with reason, recording
+	// revokedBy and auditID on the grant. A grant that is already revoked
+	// is left unchanged and reports revoked=false. Returns ErrNotFound if
+	// the grant does not exist.
+	RevokeAgentDelegationGrant(ctx context.Context, id, revokedBy, reason, auditID string, at time.Time) (revoked bool, err error)
+
+	// CreateAgentDelegatedCredential inserts cred and sets cred.ID when it
+	// is empty.
+	CreateAgentDelegatedCredential(ctx context.Context, cred *AgentDelegatedCredential) error
+
+	// GetAgentDelegatedCredentialByKeyHash returns the credential whose
+	// key hash is keyHash, or ErrNotFound.
+	GetAgentDelegatedCredentialByKeyHash(ctx context.Context, keyHash string) (*AgentDelegatedCredential, error)
+
+	// UpdateAgentDelegatedCredentialLastSeen sets the credential's
+	// last_seen_at. Callers treat a failure as best effort.
+	UpdateAgentDelegatedCredentialLastSeen(ctx context.Context, id string, at time.Time) error
 }
 
 // =============================================================================

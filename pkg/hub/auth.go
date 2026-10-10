@@ -128,6 +128,13 @@ type AuthConfig struct {
 	// AgentRunScope checks the run an agent token was issued for. Nil when
 	// server.auth.agent_run_scope is off: the check is then not run.
 	AgentRunScope *agentRunScopeChecker
+	// DelegatedAgentAuth authenticates an agent delegated credential
+	// (Authorization: Bearer scion_adt_...) and returns its request state
+	// (the delegated identity and the rows loaded for it). It returns
+	// errDelegatedCredentialUnavailable when the credential's status could
+	// not be determined and any other error to refuse the credential. Nil
+	// refuses every delegated credential.
+	DelegatedAgentAuth func(ctx context.Context, token string) (*delegatedRequestState, error)
 }
 
 // tokenType represents the type of authentication token.
@@ -139,6 +146,7 @@ const (
 	tokenTypeUser
 	tokenTypeUAT
 	tokenTypeAgent
+	tokenTypeDelegatedAgent
 )
 
 // brokerAuthActive reports whether BrokerAuthMiddleware will actually validate
@@ -599,6 +607,41 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					log.Debug("UAT authenticated", "email", scopedUser.Email(), "boundary_kind", string(boundary.Kind), "project_id", boundary.ProjectID)
 				}
 
+			case tokenTypeDelegatedAgent:
+				// An agent delegated credential (.design/agent-delegation.md
+				// §11.1). Reached only when no agent token header
+				// authenticated the request: a valid X-Scion-Agent-Token wins
+				// as the plain agent (step 1), and an invalid one is refused
+				// there. Every refusal, including the experiment being off,
+				// is the same 401 as any unusable credential.
+				if cfg.DelegatedAgentAuth == nil {
+					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+						"invalid access token", nil)
+					return
+				}
+				state, err := cfg.DelegatedAgentAuth(ctx, token)
+				if err == nil && (state == nil || state.identity == nil) {
+					err = errDelegatedCredentialRefused
+				}
+				if err != nil {
+					if errors.Is(err, errDelegatedCredentialUnavailable) {
+						log.Error("Delegated credential status lookup failed", "error", err)
+						writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+							"unable to verify credential status", nil)
+						return
+					}
+					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+						"invalid access token", nil)
+					return
+				}
+				// The identity is set before its credential context, with the
+				// same pointer, so the credential binds the identity.
+				ctx = contextWithIdentity(ctx, state.identity)
+				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(state.identity))
+				ctx = contextWithAuthType(ctx, AuthTypeAgentDelegation)
+				ctx = withStandingMemo(ctx)
+				ctx = contextWithDelegatedState(ctx, state)
+
 			case tokenTypeUser:
 				if cfg.UserTokenSvc == nil {
 					// Fall back to dev auth if user tokens not configured
@@ -768,6 +811,10 @@ func detectTokenType(token string) tokenType {
 		return tokenTypeDev
 	case strings.HasPrefix(token, "scion_pat_"):
 		return tokenTypeUAT
+	case strings.HasPrefix(token, delegatedCredentialPrefix):
+		// Before the JWT check and the external-bearer fallback, so a
+		// delegated credential is never offered to either.
+		return tokenTypeDelegatedAgent
 	case looksLikeJWT(token):
 		// Could be user or agent JWT - need to inspect claims
 		// For now, assume user token (agent tokens use X-Scion-Agent-Token)
@@ -871,6 +918,11 @@ func isUnauthenticatedEndpoint(path string) bool {
 //     UnifiedAuthMiddleware's tokenTypeUser arm (the primary choke — every
 //     self-contained hub-issued user JWT passes through it) and its
 //     tokenTypeUAT arm (PATs), and Server.handleAuthValidate.
+//   - Agent delegation: grant issuance refuses a reserved issuer
+//     (Server.handleCreateAgentDelegation), and the delegated credential
+//     arm (Server.authenticateDelegatedAgentCredential) and exchange
+//     (Server.handleExchangeAgentDelegation) refuse, and revoke, a grant
+//     whose issuer is reserved; decideAgentDelegation denies it too.
 //
 // Intentionally NOT checked, because none of them can authenticate as this
 // identity or are gated some other way: devAuthMiddleware (mints a token

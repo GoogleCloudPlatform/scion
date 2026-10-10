@@ -16,11 +16,16 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// errDelegatedListScope is ResolveListScopes's answer for an agent
+// delegated credential.
+var errDelegatedListScope = errors.New("ResolveListScopes: no list scope for a delegated credential")
 
 // ListScopeResult is the outcome of a single authoritative scope decision
 // for a list request. It communicates both the authorized scope set and any
@@ -68,6 +73,13 @@ func (a *AuthzService) ResolveListScopes(ctx context.Context, identity Identity,
 
 	if identity == nil {
 		return none, nil
+	}
+	// An agent delegated credential never gets a list scope from this
+	// function: the agent's own principals contribute nothing, and no list
+	// operation admits a delegated credential yet (.design/agent-delegation.md
+	// §11.8). An error, never a scope, so the caller fails closed.
+	if isDelegatedAgentIdentity(identity) {
+		return none, errDelegatedListScope
 	}
 
 	// Note: Suspension is enforced at the auth middleware layer, which rejects

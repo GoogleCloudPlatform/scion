@@ -114,6 +114,12 @@ var SecurityMutationSymbols = map[string]string{
 	"RevokeAgentCredential":         "revoke-authority",
 	"RevokeAgentCredentialsByAgent": "revoke-authority",
 
+	// Agent delegation (.design/agent-delegation.md §18.2): grant issuance,
+	// delegated credential exchange, and grant revocation.
+	"CreateAgentDelegationGrant":     "issue-credential",
+	"CreateAgentDelegatedCredential": "mint-credential",
+	"RevokeAgentDelegationGrant":     "revoke-authority",
+
 	// Secret operations
 	"CreateSecret":               "create-resource",
 	"UpdateSecret":               "update-resource",
@@ -176,6 +182,7 @@ var Catalog = concatOperations(
 	catalogResourceOperations,
 	brokerOperations,
 	materialOperations,
+	agentDelegationOperations,
 )
 
 // EntryPointExemptions documents routes and entry points that do not map to
@@ -305,6 +312,14 @@ var EntryPointExemptions = []EntryPointExemption{
 //
 // Organized by source file for reviewability.
 var MutationClassifications = []MutationClassification{
+	// -----------------------------------------------------------------------
+	// Agent delegation (.design/agent-delegation.md): issuance, exchange,
+	// and the hub's own revocation of a grant whose issuer is a reserved
+	// platform identity.
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/handlers_agent_delegation.go", Function: "handleCreateAgentDelegation", Symbol: "CreateAgentDelegationGrant", OperationID: "agent.delegation.create"},
+	{File: "pkg/hub/handlers_agent_delegation.go", Function: "handleExchangeAgentDelegation", Symbol: "CreateAgentDelegatedCredential", OperationID: "agent.delegation.exchange"},
+	{File: "pkg/hub/agent_delegation.go", Function: "revokeAgentDelegationGrantBySystem", Symbol: "RevokeAgentDelegationGrant", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Hub-initiated revocation of a grant whose issuer is a reserved platform identity, with its mutation audit in the same transaction; it only narrows access", Scope: "pkg/hub/agent_delegation.go"}},
 	// -----------------------------------------------------------------------
 	// pkg/hub/project_membership_service.go — RS1 bounded domain service
 	// Mutations moved from handlers to the service in RS1. Handlers now

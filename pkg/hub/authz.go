@@ -149,6 +149,11 @@ const (
 	PrincipalKindFederatedService PrincipalKind = "federated_service"
 	PrincipalKindBroker           PrincipalKind = "broker"
 	PrincipalKindDev              PrincipalKind = "dev"
+	// PrincipalKindAgentDelegated classifies a request made with an agent
+	// delegated credential (.design/agent-delegation.md §12.1): the actor is
+	// the agent the grant is bound to, and the grant issuer is the
+	// authorizing user. Only *DelegatedAgentIdentity classifies to it.
+	PrincipalKindAgentDelegated PrincipalKind = "agent_delegated"
 )
 
 // PrincipalContext identifies the authenticated actor for an authorization request.
@@ -341,6 +346,11 @@ type Decision struct {
 	// only selects the additive response details; see adoptionDetailsCause.
 	adoptionRemediable bool
 
+	// AgentDelegation is the attribution block of a decision made for an
+	// agent delegated credential (decideAgentDelegation); nil for every
+	// other decision. Audit-only: it never contributes to Allowed.
+	AgentDelegation *AgentDelegationAttribution `json:"-"`
+
 	// Provenance contains the full decision provenance when Explain=true.
 	// For non-explain requests, this is populated with minimal data
 	// (matched grant and deny reason).
@@ -367,6 +377,12 @@ const (
 	// not hold the permission, a missing or ambiguous edge, or a failed
 	// lookup).
 	DeniedByDelegationCeiling DeniedBy = "delegation_ceiling"
+
+	// DeniedByAgentDelegation: the agent delegation decision procedure
+	// (decideAgentDelegation) denied a request made with an agent
+	// delegated credential. The fine-grained code is in
+	// Decision.AgentDelegation.
+	DeniedByAgentDelegation DeniedBy = "agent_delegation"
 )
 
 // DenyCause is a structural tag for a subset of deny reasons that callers
@@ -497,6 +513,12 @@ type AuthzService struct {
 	// construction from ServerConfig.DevAuthToken != "". It is separate
 	// from devLocalEnabled and is read only by mintCandidateScopes.
 	mintDevAuthOverride bool
+
+	// agentDelegation holds the server facts decideAgentDelegation needs
+	// (experiment state, audience, reserved identities, agent standing).
+	// Set once at server construction by Server.wireAgentDelegation. The
+	// zero value denies every delegated request.
+	agentDelegation agentDelegationHooks
 }
 
 // NewAuthzService creates a new AuthzService.
@@ -645,6 +667,21 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	}
 	if denyReason != "" {
 		return decorateDecision(Decision{Allowed: false, Reason: denyReason}, request, derivedPrincipal, derivedCredential, auditPermissionID(request))
+	}
+
+	// ── Agent delegated credentials (.design/agent-delegation.md §11.1) ──
+	// A request made with an agent delegated credential is decided only by
+	// decideAgentDelegation; no other step below runs for it. A delegated
+	// principal without the delegated credential kind, or the reverse,
+	// denies.
+	if derivedPrincipal.Kind == PrincipalKindAgentDelegated || derivedCredential.Kind == CredentialKindDelegatedAgent ||
+		request.Credential.Kind == CredentialKindDelegatedAgent {
+		if derivedPrincipal.Kind != PrincipalKindAgentDelegated || derivedCredential.Kind != CredentialKindDelegatedAgent ||
+			(request.Credential.Kind != "" && request.Credential.Kind != CredentialKindDelegatedAgent) {
+			d := Decision{Allowed: false, Reason: "agent delegation: principal and credential kinds do not match", DeniedBy: DeniedByAgentDelegation, AlwaysAudit: true}
+			return decorateDecision(d, request, derivedPrincipal, derivedCredential, auditPermissionID(request))
+		}
+		return a.decideAgentDelegation(ctx, request, admissionMemo)
 	}
 
 	principal := request.Principal
@@ -2071,7 +2108,8 @@ func isUserPrincipal(kind PrincipalKind) bool {
 func isRecognizedPrincipalKind(kind PrincipalKind) bool {
 	switch kind {
 	case PrincipalKindUser, PrincipalKindAgent, PrincipalKindFederatedUser,
-		PrincipalKindFederatedAgent, PrincipalKindFederatedService, PrincipalKindBroker, PrincipalKindDev:
+		PrincipalKindFederatedAgent, PrincipalKindFederatedService, PrincipalKindBroker, PrincipalKindDev,
+		PrincipalKindAgentDelegated:
 		return true
 	default:
 		return false
@@ -2086,7 +2124,7 @@ func isRecognizedCredentialKind(kind CredentialKind) bool {
 	switch kind {
 	case CredentialKindInteractive, CredentialKindUAT, CredentialKindAgentJWT,
 		CredentialKindFederation, CredentialKindBroker, CredentialKindDev,
-		CredentialKindHubDelivery:
+		CredentialKindHubDelivery, CredentialKindDelegatedAgent:
 		return true
 	default:
 		return false
@@ -2239,6 +2277,10 @@ func principalContextForIdentity(identity Identity) PrincipalContext {
 		principal.Kind = PrincipalKindFederatedService
 	case *brokerIdentityImpl:
 		principal.Kind = PrincipalKindBroker
+	case *DelegatedAgentIdentity:
+		// By concrete type only: a Type() of "agent_delegated" on any other
+		// type classifies to nothing.
+		principal.Kind = PrincipalKindAgentDelegated
 	default:
 		if c, ok := identity.(explicitIdentityClassification); ok {
 			principal.Kind, _ = c.authzClassification()
@@ -2309,6 +2351,11 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 		return CredentialContext{Kind: CredentialKindFederation, Type: identity.Type()}
 	case *brokerIdentityImpl:
 		return CredentialContext{Kind: CredentialKindBroker}
+	case *DelegatedAgentIdentity:
+		// Never interactive, UAT or agent JWT. Boundary and Ceiling come
+		// from the grant and the credential row.
+		boundary := v.Boundary()
+		return CredentialContext{Kind: CredentialKindDelegatedAgent, ID: v.CredentialID(), ProjectID: boundary.ProjectID, Boundary: &boundary, Ceiling: v.Ceiling()}
 	default:
 		if c, ok := identity.(explicitIdentityClassification); ok {
 			_, kind := c.authzClassification()

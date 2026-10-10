@@ -128,6 +128,7 @@ var identityInventoryExpectation = map[string]bool{
 	"FederatedAgentIdentity":   false,
 	"FederatedServiceIdentity": false,
 	"hubDeliveryIdentity":      false,
+	"DelegatedAgentIdentity":   false,
 }
 
 // identitySourceInventory is a structural (AST-level) description of the
@@ -392,6 +393,13 @@ func TestIdentityClassification_EveryTypeHasExplicitOutcome(t *testing.T) {
 				wantPrincipalKind:  PrincipalKindAgent,
 				wantCredentialKind: CredentialKindHubDelivery,
 				wantAttested:       false, // even though evidence alone is attested
+			},
+			{
+				name:               "DelegatedAgentIdentity",
+				identity:           adtTestIdentity(tid("classify-delegated-agent"), tid("classify-project")),
+				wantPrincipalKind:  PrincipalKindAgentDelegated,
+				wantCredentialKind: CredentialKindDelegatedAgent,
+				wantAttested:       false,
 			},
 			{
 				name:               "brokerIdentityImpl",
@@ -927,6 +935,7 @@ func TestSessionGates_DenyNonSessionCredentials(t *testing.T) {
 	scopedUAT := NewScopedUserIdentityWithCredentialID(interactiveUser, tid("session-gate-project"), []string{"agent:read"}, tid("session-gate-cred"))
 	agentJWT := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: "agent-1"}}}
 	hubDelivery := &hubDeliveryIdentity{agentID: "session-gate-hub-delivery-agent", boundAgentID: "session-gate-hub-delivery-agent"}
+	delegated := adtTestIdentity("session-gate-delegated-agent", tid("session-gate-project"))
 	unknown := &unclassifiedMockIdentity{id: tid("session-gate-unknown")}
 
 	svc := &UserAccessTokenService{}
@@ -947,6 +956,7 @@ func TestSessionGates_DenyNonSessionCredentials(t *testing.T) {
 		{"UAT credential", scopedUAT, userID, true},
 		{"agent JWT credential", agentJWT, "agent-1", true},
 		{"hub_delivery credential", hubDelivery, "session-gate-hub-delivery-agent", true},
+		{"delegated agent credential", delegated, "session-gate-delegated-agent", true},
 		{"unrecognized identity", unknown, tid("session-gate-unknown"), true},
 		{"nil identity", nil, tid("session-gate-nonexistent"), true},
 	}
@@ -1184,6 +1194,8 @@ func TestIdentityClassification_TypedNilTreatedAsMissing(t *testing.T) {
 				identity = (*explainAgentIdentity)(nil)
 			case "hubDeliveryIdentity":
 				identity = (*hubDeliveryIdentity)(nil)
+			case "DelegatedAgentIdentity":
+				identity = (*DelegatedAgentIdentity)(nil)
 			case "brokerIdentityImpl":
 				identity = (*brokerIdentityImpl)(nil)
 			case "FederatedUserIdentity":

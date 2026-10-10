@@ -234,8 +234,10 @@ var agentOperations = []OperationSpec{
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}", Method: "GET"},
 		},
-		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		// An agent delegated credential is admitted here behind
+		// hub.agent_delegation (agentDelegationAdmittedRoutes in pkg/hub).
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent, PrincipalAgentDelegated},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT, CredentialDelegatedAgent},
 		ResourceResolver: "agent-from-url",
 		BasePermission:   "agent.read",
 		Effects:          []SecurityEffect{EffectReadOne},

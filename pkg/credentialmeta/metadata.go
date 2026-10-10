@@ -46,9 +46,13 @@ const (
 	KindFederation  Kind = "federation"
 	KindBroker      Kind = "broker"
 	KindDev         Kind = "dev"
+	// KindDelegatedAgent is an agent delegated credential, the opaque
+	// bearer an agent obtains by exchanging an agent delegation grant
+	// (.design/agent-delegation.md §12.1).
+	KindDelegatedAgent Kind = "delegated_agent"
 )
 
-var kinds = []Kind{KindInteractive, KindUAT, KindAgentJWT, KindFederation, KindBroker, KindDev}
+var kinds = []Kind{KindInteractive, KindUAT, KindAgentJWT, KindFederation, KindBroker, KindDev, KindDelegatedAgent}
 
 // Kinds returns every canonical credential kind.
 func Kinds() []Kind {
@@ -282,7 +286,7 @@ var reservedLabelKeys = map[string]struct{}{
 	"credential_id": {}, "token": {}, "token_id": {}, "role": {},
 	"scope": {}, "scopes": {}, "permission": {}, "permissions": {},
 	"verified": {}, "system": {}, "executor": {}, "initiator": {},
-	"actor_binding": {},
+	"actor_binding": {}, "verified_actor": {},
 }
 
 var reservedActorLabelKeys = []string{

@@ -622,4 +622,7 @@ const (
 	// token issued by a trusted external issuer (e.g. a Google ID token)
 	// rather than a Hub-issued credential. See auth_external_bearer.go.
 	AuthTypeExternalBearer = "external-bearer"
+	// AuthTypeAgentDelegation marks a request authenticated with an agent
+	// delegated credential (.design/agent-delegation.md §12.1).
+	AuthTypeAgentDelegation = "agent-delegation"
 )

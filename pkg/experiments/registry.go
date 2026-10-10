@@ -150,10 +150,28 @@ const AuthorizationDecisionAuditV2 = "hub.authorization_decision_audit_v2"
 // accepts edits of agents with no container whether or not it is on.
 const AgentEdit = "web.agent_edit"
 
+// AgentDelegation gates agent delegation (.design/agent-delegation.md §10):
+// the grant issuance and credential exchange routes, the delegated
+// credential middleware arm, and the delegated decision procedure. While it
+// is off, issuance and exchange answer 404 and every delegated credential is
+// refused. Turning it off suspends stored grants; it does not revoke them.
+const AgentDelegation = "hub.agent_delegation"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
+	{
+		Name:        AgentDelegation,
+		Title:       "Agent delegation",
+		Description: "Lets a user issue an agent delegation grant and lets the bound agent exchange it for a short-lived delegated credential. While off, issuance and exchange answer 404 and delegated credentials are refused; stored grants are kept.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#2131",
+		Owner:       "authz",
+		ReviewBy:    "2027-01-31",
+	},
 	{
 		Name:        AuthorizationDecisionAuditV2,
 		Title:       "Authorization decision audit v2",
