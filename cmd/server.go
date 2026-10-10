@@ -22,19 +22,20 @@ import (
 const GlobalProjectName = "global"
 
 var (
-	serverConfigPath    string
-	hubPort             int
-	hubHost             string
-	enableHub           bool
-	enableRuntimeBroker bool
-	runtimeBrokerPort   int
-	dbURL               string
-	noAutoMigrate       bool
-	enableDevAuth       bool
-	enableTestLogin     bool
-	enableDebug         bool
-	storageBucket       string
-	storageDir          string
+	serverConfigPath     string
+	hubPort              int
+	hubHost              string
+	enableHub            bool
+	enableRuntimeBroker  bool
+	runtimeBrokerPort    int
+	dbURL                string
+	noAutoMigrate        bool
+	enableDevAuth        bool
+	enableTestLogin      bool
+	enableDebugEndpoints bool
+	enableDebug          bool
+	storageBucket        string
+	storageDir           string
 
 	// Template cache settings for Runtime Broker
 	templateCacheDir string
@@ -253,6 +254,7 @@ func init() {
 	serverStartCmd.Flags().BoolVar(&enableTestLogin, "enable-test-login", false, "Enable the test-login endpoint for integration testing (do not use in production)")
 
 	// Debug flags
+	serverStartCmd.Flags().BoolVar(&enableDebugEndpoints, "enable-debug-endpoints", false, "Serve diagnostic endpoints for local development; refused in hosted mode and independent of --debug")
 	serverStartCmd.Flags().BoolVar(&enableDebug, "debug", false, "Enable server debug mode; sets the default log level to debug, overriding the SCION_LOG_LEVEL default (per-component levels are kept)")
 
 	// Storage flags

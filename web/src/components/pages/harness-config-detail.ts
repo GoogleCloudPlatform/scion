@@ -609,6 +609,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
     const browser = this.shadowRoot?.querySelector('scion-file-browser') as
       | import('../shared/file-browser.js').ScionFileBrowser
       | null;
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises -- fire-and-forget by design; per-site decision tracked in ptone/scion#4126.
     browser?.loadFiles();
   }
 

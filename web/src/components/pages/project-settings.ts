@@ -1578,25 +1578,30 @@ export class ScionPageProjectSettings extends LitElement {
           ? this.defaultCustomModelId
           : this.defaultModelSelection;
 
+      // The PUT keeps any field the body leaves out, so every field this
+      // page manages is sent: "" / 0 / {} clears it, and null resets a
+      // tri-state field (telemetry, auto-expose, thinking level) to inherit.
+      // Fields this page does not manage (activeProfile, the per-profile
+      // service account map) are left out so a save keeps them.
       const body: ProjectSettings = {
-        defaultTemplate: this.configDefaultTemplate || undefined,
-        defaultHarnessConfig: this.configDefaultHarnessConfig || undefined,
-        defaultHarnessAuth: this.configDefaultHarnessAuth || undefined,
-        defaultModel: defaultModel || undefined,
+        defaultTemplate: this.configDefaultTemplate || '',
+        defaultHarnessConfig: this.configDefaultHarnessConfig || '',
+        defaultHarnessAuth: this.configDefaultHarnessAuth || '',
+        defaultModel: defaultModel || '',
         telemetryEnabled: this.configTelemetryEnabled,
         autoExposePortsEnabled: this.configAutoExposePortsEnabled,
-        defaultMaxTurns: this.configDefaultMaxTurns || undefined,
-        defaultMaxModelCalls: this.configDefaultMaxModelCalls || undefined,
-        defaultMaxDuration: this.configDefaultMaxDuration || undefined,
-        defaultResources,
+        defaultMaxTurns: this.configDefaultMaxTurns || 0,
+        defaultMaxModelCalls: this.configDefaultMaxModelCalls || 0,
+        defaultMaxDuration: this.configDefaultMaxDuration || '',
+        defaultResources: defaultResources ?? {},
         defaultThinkingLevel: this.defaultThinkingLevel,
-        defaultGCPIdentityMode: this.configDefaultGCPIdentityMode || undefined,
+        defaultGCPIdentityMode: this.configDefaultGCPIdentityMode || '',
         defaultGCPIdentityServiceAccountID:
           this.configDefaultGCPIdentityMode === 'assign'
-            ? this.configDefaultGCPIdentitySAID || undefined
-            : undefined,
-        maxAgentRole: this.configMaxAgentRole || undefined,
-        defaultAgentRole: this.configDefaultAgentRole || undefined,
+            ? this.configDefaultGCPIdentitySAID || ''
+            : '',
+        maxAgentRole: this.configMaxAgentRole || '',
+        defaultAgentRole: this.configDefaultAgentRole || '',
       };
 
       const response = await apiFetch(`/api/v1/projects/${this.projectId}/settings`, {

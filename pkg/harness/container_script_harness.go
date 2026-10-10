@@ -107,8 +107,9 @@ func (c *ContainerScriptHarness) Name() string { return c.entry.Harness }
 // DefaultConfigDir returns the harness-native config directory (e.g. .claude).
 func (c *ContainerScriptHarness) DefaultConfigDir() string { return c.entry.ConfigDir }
 
-// SkillsDir returns the harness skills subdirectory.
-func (c *ContainerScriptHarness) SkillsDir() string { return c.entry.SkillsDir }
+// SkillsDir returns the harness skills subdirectory (SkillsDirForEntry; the
+// constructor guarantees a provisioner block, so this is entry.SkillsDir).
+func (c *ContainerScriptHarness) SkillsDir() string { return SkillsDirForEntry(c.entry) }
 
 // GetInterruptKey returns the configured interrupt key, defaulting to C-c.
 func (c *ContainerScriptHarness) GetInterruptKey() string {

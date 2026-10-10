@@ -6,8 +6,8 @@ Run from `web` with dependencies installed:
 npm run test:e2e -- --config e2e/terminal-coordinator/playwright.config.ts
 ```
 
-The runner uses `/usr/bin/chromium` by default; set `TERMINAL_OWNER_CHROMIUM`
-for another installed Chromium executable. Remove inherited `SCION_*` variables
+The runner uses Playwright's installed Chromium; set `CHROMIUM_EXECUTABLE`
+to use another installed Chromium executable. Remove inherited `SCION_*` variables
 from the test process environment. The fixture binds loopback port 4519, bundles
 `src/client/terminal-coordinator.ts` with esbuild, and never proxies to a Hub.
 Playwright intercepts metadata/preflight HTTP and WebSocket connections. Web Locks,

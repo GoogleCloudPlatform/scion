@@ -73,6 +73,7 @@ export class ScionPageGitHubAppSetup extends LitElement {
     super.connectedCallback();
 
     void this.loadHubProjectCapabilities();
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises -- fire-and-forget by design; per-site decision tracked in ptone/scion#4126.
     this.initPage();
   }
 

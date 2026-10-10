@@ -24,6 +24,8 @@
  * - Needs attention (health-attention.ts), full width and first
  * - Hub (health-hub-card.ts, database and the service account check
  *   diagnostic folded in) | Dispatch (health-dispatch-card.ts)
+ * - Hub instances (health-hub-instances.ts; hidden when the summary has no
+ *   hub_instances field, i.e. an older hub replica served it)
  * - Runtime brokers (compact table, health-broker-table.ts)
  * - Integrations (chat plugins, health-integrations.ts)
  * - Agents (phase counts and problem groups, health-agents-card.ts)
@@ -45,6 +47,8 @@ import type {
   HealthSummaryServiceAccountCheck,
 } from './health-hub-card.js';
 import './health-hub-card.js';
+import type { HealthSummaryHubInstances } from './health-hub-instances.js';
+import './health-hub-instances.js';
 import type { HealthSummaryBrokerList } from './health-broker-table.js';
 import './health-broker-table.js';
 import type { HealthSummaryAgents } from './health-agents-card.js';
@@ -89,6 +93,12 @@ export interface HealthSummary {
    * because the hub's identity lacks the access it needs.
    */
   service_account_check?: HealthSummaryServiceAccountCheck;
+  /**
+   * Hub instances from the hub-instance registry. Absent when an older hub
+   * replica served the summary (the table is then hidden); null when the
+   * registry could not be read.
+   */
+  hub_instances?: HealthSummaryHubInstances | null;
   /** Operator-configured links; absent when none is configured. */
   links?: HealthSummaryLinks;
 }
@@ -327,6 +337,15 @@ export class ScionPageHealthDashboard extends LitElement {
         ></scion-health-hub-card>
         <scion-health-dispatch-card .dispatch=${d.dispatch ?? null}></scion-health-dispatch-card>
       </div>
+
+      ${d.hub_instances !== undefined
+        ? html`<div class="grid-full">
+            <scion-health-hub-instances
+              .instances=${d.hub_instances}
+              .generatedAt=${d.generated_at ?? ''}
+            ></scion-health-hub-instances>
+          </div>`
+        : nothing}
 
       <div class="grid-full">
         <scion-health-broker-table .brokers=${d.runtime_brokers}></scion-health-broker-table>

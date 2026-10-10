@@ -144,6 +144,59 @@ describe('scion-page-health-dashboard cards', () => {
     ).toBeNull();
   });
 
+  it('hides the Hub instances table when hub_instances is absent (older hub replica)', async () => {
+    await rendered();
+    expect(el.shadowRoot?.querySelector('scion-health-hub-instances')).toBeNull();
+  });
+
+  it('renders the Hub instances table when hub_instances is present', async () => {
+    el.remove();
+    extra = {
+      generated_at: '2026-10-09T12:00:00Z',
+      hub_instances: {
+        items: [
+          {
+            id: 'hub-a-1',
+            label: 'hub-a',
+            version: 'v1',
+            state: 'live',
+            serving: true,
+            started_at: '2026-10-09T10:00:00Z',
+            last_seen: '2026-10-09T11:59:50Z',
+            stopped_at: null,
+            status: 'healthy',
+            checks: { database: 'healthy' },
+          },
+        ],
+        live: 1,
+        total: 1,
+        truncated: false,
+      },
+    };
+    el = new ScionPageHealthDashboard();
+    document.body.appendChild(el);
+    await rendered();
+    const table = el.shadowRoot!.querySelector('scion-health-hub-instances')!;
+    expect(table).not.toBeNull();
+    await (table as LitLike).updateComplete;
+    const text = (table.shadowRoot?.textContent ?? '').replace(/\s+/g, ' ');
+    expect(text).toContain('hub-a');
+    expect(text).toContain('(this instance)');
+    expect(text).toContain('2h 0m');
+  });
+
+  it('shows Hub instance data not available when hub_instances is null', async () => {
+    el.remove();
+    extra = { hub_instances: null };
+    el = new ScionPageHealthDashboard();
+    document.body.appendChild(el);
+    await rendered();
+    const table = el.shadowRoot!.querySelector('scion-health-hub-instances')!;
+    expect(table).not.toBeNull();
+    await (table as LitLike).updateComplete;
+    expect(table.shadowRoot?.textContent).toContain('Hub instance data not available');
+  });
+
   it('never reads or writes the server config', async () => {
     await rendered();
     // One manual refresh cycle, as the Refresh button and the poll timer run it.

@@ -1321,6 +1321,24 @@ var (
 			},
 		},
 	}
+	// HubInstancesColumns holds the columns for the "hub_instances" table.
+	HubInstancesColumns = []*schema.Column{
+		{Name: "instance_id", Type: field.TypeString},
+		{Name: "label", Type: field.TypeString, Default: ""},
+		{Name: "version", Type: field.TypeString, Default: ""},
+		{Name: "started_at", Type: field.TypeTime},
+		{Name: "last_seen", Type: field.TypeTime},
+		{Name: "stopped_at", Type: field.TypeTime, Nullable: true},
+		{Name: "status", Type: field.TypeString, Default: ""},
+		{Name: "checks", Type: field.TypeJSON, Nullable: true},
+		{Name: "stats", Type: field.TypeJSON, Nullable: true},
+	}
+	// HubInstancesTable holds the schema information for the "hub_instances" table.
+	HubInstancesTable = &schema.Table{
+		Name:       "hub_instances",
+		Columns:    HubInstancesColumns,
+		PrimaryKey: []*schema.Column{HubInstancesColumns[0]},
+	}
 	// HubSettingsColumns holds the columns for the "hub_settings" table.
 	HubSettingsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -2694,6 +2712,7 @@ var (
 		GroupsTable,
 		GroupMembershipsTable,
 		HarnessConfigsTable,
+		HubInstancesTable,
 		HubSettingsTable,
 		IntegrationConfigsTable,
 		IntegrationUpdatesTable,
@@ -2807,6 +2826,9 @@ func init() {
 	GroupMembershipsTable.ForeignKeys[2].RefTable = AgentsTable
 	HarnessConfigsTable.Annotation = &entsql.Annotation{
 		Table: "harness_configs",
+	}
+	HubInstancesTable.Annotation = &entsql.Annotation{
+		Table: "hub_instances",
 	}
 	HubSettingsTable.Annotation = &entsql.Annotation{
 		Table: "hub_settings",
