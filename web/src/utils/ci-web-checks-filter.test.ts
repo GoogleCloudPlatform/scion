@@ -42,6 +42,20 @@
  * as a path prefix. A reference counts only if it exists on disk (for a
  * prefix: it or its parent directory), so string data that only looks like
  * a path (e.g. '../../../OTHER-PROJECT/...' in URL tests) is skipped.
+ * Paths outside the repo root are skipped too.
+ *
+ * Not detected (the scanner is static and file-local):
+ *   - unknown segments after a repo-root base: join(REPO_ROOT, dirVar,
+ *     'x.json') leaves only the repo root, which is not a reference, so the
+ *     call is dropped;
+ *   - constants imported from other modules, reassigned `let`s, and
+ *     constants used before their declaration;
+ *   - process.cwd()-based paths;
+ *   - child-process work (a spawned command with cwd: repoRoot, go build,
+ *     git);
+ *   - absolute literals and fetch('/...') URLs;
+ *   - directories that are not scanned: web/test-scripts, web/public,
+ *     web/design.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -291,11 +305,7 @@ function scanSource(file: string, text: string): OutOfTreeRef[] {
         break;
       }
     }
-    // A join() with no absolute segment is a relative path: the literal
-    // rule below already covers its leading './' or '../' segment.
-    if (acc === undefined || (name === 'join' && !n.arguments.some((a) => evalPath(a)))) {
-      return undefined;
-    }
+    if (acc === undefined) return undefined;
     return { abs: resolve(acc), partial };
   };
 
@@ -345,6 +355,10 @@ function outOfTree(abs: string, partial: boolean): Omit<OutOfTreeRef, 'from'> | 
   const insideWeb = fromWeb === '' || (!fromWeb.startsWith('..') && !fromWeb.startsWith(sep));
   if (insideWeb) return undefined;
   if ((WEB_ROOT + sep).startsWith(abs.endsWith(sep) ? abs : abs + sep)) return undefined;
+  // Outside the repo (a traversal literal clamped at '/', a sibling of the
+  // checkout): no repo change can touch it, and whether it exists depends on
+  // the machine.
+  if (relative(REPO_ROOT, abs).startsWith('..')) return undefined;
   if (!existsSync(abs) && !(partial && existsSync(dirname(abs)))) return undefined;
   const path = relative(REPO_ROOT, abs).split(sep).join('/');
   const isDir = existsSync(abs) && statSync(abs).isDirectory();
@@ -392,6 +406,9 @@ describe('CI web_checks path filter', () => {
     // terminal-close-codes.test.ts imports this JSON fixture from pkg/. If the
     // scanner stops finding it, the coverage check below could pass vacuously.
     expect(refs.map((r) => r.path)).toContain('pkg/wsprotocol/testdata/pty_close_codes.json');
+    // harness-utils.test.ts reaches harnesses/ through a REPO_ROOT constant,
+    // which proves the path-expression evaluation on the real tree too.
+    expect(refs.map((r) => r.path)).toContain('harnesses/');
   });
 
   it('covers every path outside web/ that web sources reference', () => {
@@ -461,6 +478,10 @@ describe('out-of-tree reference scanner', () => {
   it('skips paths that do not exist and the repo root itself', () => {
     expect(paths("const s = '../../../OTHER-PROJECT/workspace/files/secret.txt';")).toEqual([]);
     expect(paths("const ROOT = resolve(__dirname, '../../..');")).toEqual([]);
+  });
+
+  it('skips paths outside the repo root', () => {
+    expect(paths(`const p = '${'../'.repeat(12)}etc';`)).toEqual([]);
   });
 
   it('reads relative paths from tsconfig and package.json', () => {
