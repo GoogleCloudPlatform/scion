@@ -111,8 +111,7 @@ const VIEWS: ViewBudget[] = [
 //                 5-7; graph 4-9, medians 5-7.
 //   main 7049f53: grid per load 3-7, run medians 4-6; list 4-8, medians
 //                 5-6; graph 3-7, medians 4-6.
-//   main ece808d (head 9345466): one run; run medians grid 3, list 4,
-//                 graph 5.
+//   main ece808d: one run; run medians grid 3, list 4, graph 5.
 // Across all these runs the run medians were about 3 to 7 in every view;
 // that is the basis for the limits 11 (grid), 9 (list) and 11 (graph).
 // The DOM margin (+10) has no such spread: DOM counts were identical on
