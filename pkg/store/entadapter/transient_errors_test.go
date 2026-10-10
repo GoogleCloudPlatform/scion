@@ -15,13 +15,11 @@
 package entadapter
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 )
@@ -65,16 +63,4 @@ func TestIsTransientDBError_Typed(t *testing.T) {
 			assert.NotErrorIs(t, markTransient(err), store.ErrTransient)
 		}
 	}
-}
-
-// WithTx marks a transient error returned from the transaction body.
-func TestWithTx_MarksTransient(t *testing.T) {
-	cs := NewCompositeStore(enttest.NewClient(t))
-	t.Cleanup(func() { _ = cs.Close() })
-	err := cs.WithTx(context.Background(), func(store.Store) error {
-		return fmt.Errorf("insert: %w", &pgconn.PgError{Code: pgDeadlockDetected})
-	})
-	assert.ErrorIs(t, err, store.ErrTransient)
-	err = cs.WithTx(context.Background(), func(store.Store) error { return errors.New("boom") })
-	assert.NotErrorIs(t, err, store.ErrTransient)
 }

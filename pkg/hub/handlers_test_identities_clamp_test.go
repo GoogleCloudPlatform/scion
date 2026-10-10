@@ -300,7 +300,8 @@ func TestTestIdentity_ClampCachesShared(t *testing.T) {
 	counting := &countingKindStore{Store: s}
 	main := NewAuthzService(counting, srv.authzService.logger)
 	require.True(t, main.IsHubAdmin(ctx, human.ID))
-	require.Equal(t, 1, counting.getUser, "a privileged binding loads the kind once")
+	require.Equal(t, 1, counting.getUser, "a system binding loads the kind once")
+	assert.Equal(t, 0, counting.roleByIDs, "an ordinary principal causes no role-definition read")
 	roleReads := counting.roleByIDs
 
 	// A transaction-bound service (as Server.authzFor builds) shares the cache.
@@ -353,4 +354,44 @@ func TestTestIdentity_EffectiveAccessViewClamped(t *testing.T) {
 	}
 	fixtureCount, humanCount := count(fx.Identity.ID), count(human.ID)
 	assert.Equal(t, humanCount-1, fixtureCount, "the fixture's inherited hub-admin binding is not shown")
+}
+
+// A non-fixture principal with system-scoped bindings (hub-member via the
+// hub-members group, hub-admin via a group) causes no role-definition read
+// from the clamp, and a missing user's kind is not cached.
+func TestTestIdentity_ClampNoRoleReadForNonFixtures(t *testing.T) {
+	srv, s := newTestIdentityServer(t, true)
+	ctx := context.Background()
+	group := tiGroupWithSystemRole(t, s, "ti-norole-hubadmin", store.SystemRoleHubAdmin, DevUserID)
+	human := &store.User{ID: tid("ti-norole-human"), Email: "ti-norole@test.com", DisplayName: "h", Role: store.UserRoleMember, Status: store.UserStatusActive}
+	require.NoError(t, s.CreateUser(ctx, human))
+	ensureHubMembership(ctx, s, human.ID)
+	tiAddToGroup(t, s, group.ID, human.ID, store.GroupMemberRoleMember)
+
+	counting := &countingKindStore{Store: s}
+	clamped := wrapAuthzStoreWithTestFixtureClamp(counting)
+	groups, err := s.GetEffectiveGroups(ctx, human.ID)
+	require.NoError(t, err)
+	principals := []store.PrincipalRef{{Type: store.RoleBindingPrincipalUser, ID: human.ID}}
+	for _, g := range groups {
+		principals = append(principals, store.PrincipalRef{Type: store.RoleBindingPrincipalGroup, ID: g})
+	}
+	for i := 0; i < 3; i++ {
+		got, err := clamped.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+		require.NoError(t, err)
+		raw, err := s.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+		require.NoError(t, err)
+		assert.Len(t, got, len(raw), "a non-fixture's bindings are unchanged")
+	}
+	assert.Equal(t, 0, counting.roleByIDs, "the clamp reads no role definitions for a non-fixture")
+	assert.Equal(t, 1, counting.getUser, "the kind is read once and cached")
+
+	// A missing user is not a fixture and is not cached.
+	missing := generateID()
+	_, err = clamped.ListRoleBindingsForPrincipals(ctx, []store.PrincipalRef{{Type: store.RoleBindingPrincipalUser, ID: missing}, {Type: store.RoleBindingPrincipalGroup, ID: group.ID}}, nil, nil)
+	require.NoError(t, err)
+	c := clamped.(*testFixtureGrantClamp)
+	_, cached := c.cache.fixture[missing]
+	assert.False(t, cached)
+	_ = srv
 }

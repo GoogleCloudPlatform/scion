@@ -36,16 +36,18 @@ import (
 // principal pass through unchanged, so no other principal's grants change.
 //
 // Invariant: the clamp recognizes a test identity only by a USER principal
-// present in the same list. A caller that evaluates a group's bindings in a
+// present in the same list (it reads that principal's kind whenever the
+// list holds a system-scoped binding, before classifying any role). A caller that evaluates a group's bindings in a
 // list without the member user, and then merges the result into a user's
 // authority outside the clamp, bypasses it. Callers must resolve a user's
 // authority with the user principal and its groups in one list (as the
 // authorization service does), never by merging group-only results.
 //
 // The clamp is keyed only on the stored kind. It costs nothing for a list
-// with no system-scoped binding; otherwise it classifies each system role
-// once per process, and reads a user principal's kind (once per process)
-// only when a privileged system binding is present (testFixtureClampCache).
+// with no system-scoped binding; otherwise it reads each user principal's
+// kind once per process, and classifies system roles (once per role) only
+// for a test identity (testFixtureClampCache). Other principals never cause
+// a role-definition read, so request-level memo counts are unaffected.
 type testFixtureGrantClamp struct {
 	store.Store
 	cache *testFixtureClampCache
@@ -90,7 +92,9 @@ func shareTestFixtureClampCache(dst, src store.Store) {
 }
 
 // isFixture reports whether userID is a test-fixture user, reading the row
-// once per user. A missing user is not a fixture and is not cached.
+// once per user. Only successful reads of an existing row are cached (a
+// kind is immutable); a missing user is not a fixture and is not cached; a
+// read error is returned and never cached.
 func (c *testFixtureGrantClamp) isFixture(ctx context.Context, userID string) (bool, error) {
 	c.cache.mu.Lock()
 	v, ok := c.cache.fixture[userID]
@@ -98,9 +102,14 @@ func (c *testFixtureGrantClamp) isFixture(ctx context.Context, userID string) (b
 	if ok {
 		return v, nil
 	}
-	v, err := lookupUserIsTestFixture(ctx, c.Store, userID)
+	v, found, err := lookupUserKind(ctx, c.Store, userID)
 	if err != nil {
 		return false, err
+	}
+	if !found {
+		// No row: not a fixture, and not cached (only successful reads
+		// of an existing, immutable kind are cached).
+		return false, nil
 	}
 	c.cache.mu.Lock()
 	if c.cache.fixture == nil || len(c.cache.fixture) >= testFixtureClampCacheMax {
@@ -117,14 +126,21 @@ func (c *testFixtureGrantClamp) isFixture(ctx context.Context, userID string) (b
 // deny", never as an ordinary user. A missing or malformed user ID has no
 // row and so no grants to clamp; it reports false.
 func lookupUserIsTestFixture(ctx context.Context, users store.UserStore, userID string) (bool, error) {
+	v, _, err := lookupUserKind(ctx, users, userID)
+	return v, err
+}
+
+// lookupUserKind is lookupUserIsTestFixture that also reports whether the
+// user row exists, so callers can cache only successful reads.
+func lookupUserKind(ctx context.Context, users store.UserStore, userID string) (isFixture, found bool, err error) {
 	u, err := users.GetUser(ctx, userID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
-			return false, nil
+			return false, false, nil
 		}
-		return false, err
+		return false, false, err
 	}
-	return u.IsTestFixture(), nil
+	return u.IsTestFixture(), true, nil
 }
 
 // allowedRoles reports, for each role definition ID in ids, whether it is
@@ -169,12 +185,13 @@ func (c *testFixtureGrantClamp) allowedRoles(ctx context.Context, ids []string) 
 }
 
 // clamp drops the system-scoped bindings a test identity may not hold when
-// principals include a test-fixture user. It classifies the system-scoped
-// roles first (cached per role definition ID) and reads a user principal's
-// kind only when a privileged system binding is present, so members and
-// viewers cost no kind read. If a user's kind cannot be read it returns the
-// error: every caller then fails closed (the request is denied), so an
-// unreadable kind never leaves grants unclamped.
+// principals include a test-fixture user. When a list has a system-scoped
+// binding it reads each user principal's kind (cached per user); only for a
+// test identity does it classify the system roles (cached per role), so
+// any other principal costs at most one cached kind read and no role
+// lookup, and its bindings are returned unchanged. If a user's kind cannot
+// be read it returns the error: every caller then fails closed (the request
+// is denied), so an unreadable kind never leaves grants unclamped.
 func (c *testFixtureGrantClamp) clamp(ctx context.Context, principals []store.PrincipalRef, bindings []*store.RoleBinding) ([]*store.RoleBinding, error) {
 	var systemRoleIDs []string
 	for _, b := range bindings {
@@ -185,17 +202,6 @@ func (c *testFixtureGrantClamp) clamp(ctx context.Context, principals []store.Pr
 	if len(systemRoleIDs) == 0 {
 		return bindings, nil
 	}
-	allowed := c.allowedRoles(ctx, systemRoleIDs)
-	privileged := false
-	for _, id := range systemRoleIDs {
-		if !allowed[id] {
-			privileged = true
-			break
-		}
-	}
-	if !privileged {
-		return bindings, nil
-	}
 	fixture := false
 	for _, p := range principals {
 		if p.Type != store.RoleBindingPrincipalUser {
@@ -203,8 +209,11 @@ func (c *testFixtureGrantClamp) clamp(ctx context.Context, principals []store.Pr
 		}
 		isFx, err := c.isFixture(ctx, p.ID)
 		if err != nil {
-			// Fail closed by design: an unreadable kind denies this
-			// request, even for a non-fixture admin on a cold cache.
+			// Fail closed by design: on a cold cache, an unreadable kind
+			// denies this request for ANY principal whose binding list has
+			// a system-scoped binding (members and viewers included, since
+			// the kind is read before roles are classified), not only for
+			// test identities.
 			return nil, err
 		}
 		if isFx {
@@ -215,6 +224,7 @@ func (c *testFixtureGrantClamp) clamp(ctx context.Context, principals []store.Pr
 	if !fixture {
 		return bindings, nil
 	}
+	allowed := c.allowedRoles(ctx, systemRoleIDs)
 	out := make([]*store.RoleBinding, 0, len(bindings))
 	for _, b := range bindings {
 		if b != nil && b.ScopeType == store.RoleScopeSystem && !allowed[b.RoleDefinitionID] {
