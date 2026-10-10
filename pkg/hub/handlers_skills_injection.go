@@ -397,6 +397,29 @@ func (s *Server) removeProjectInjectedSkill(w http.ResponseWriter, r *http.Reque
 // User-scope injected skills (/users/me/...)
 // =============================================================================
 
+// permUserSkillInjectionUpdate is the self-scoped permission a user access
+// token needs on the user-scope write routes (POST, PUT, DELETE).
+const permUserSkillInjectionUpdate = "user_skill_injection.update"
+
+// authorizeUserSkillInjectionWrite checks a user-scope injected-skills write
+// by the caller with authorizeSelfScoped. An interactive session or a dev
+// credential passes. A user access token needs the
+// user_skill_injection:update scope and a hub boundary, because a user's
+// injected skills belong to no project. Every other identity, including a
+// federated user, is refused, as on the inbox routes. A request whose
+// credential record names a user access token but whose identity is not a
+// token identity is refused too. It writes 403 on denial.
+func (s *Server) authorizeUserSkillInjectionWrite(w http.ResponseWriter, r *http.Request, userIdent UserIdentity) bool {
+	_, isToken := userIdent.(*ScopedUserIdentity)
+	if !isToken && GetCredentialContextFromContext(r.Context()).Kind == CredentialKindUAT {
+		resourceType, action := selfPermissionResourceAction(permUserSkillInjectionUpdate)
+		logAuthzDenial(r, userIdent, Resource{Type: resourceType}, action, selfScopeReasonCredential)
+		writeForbiddenStructured(w, "", resourceType, action)
+		return false
+	}
+	return s.authorizeSelfScoped(w, r, permUserSkillInjectionUpdate, "")
+}
+
 // handleUserMeInjectedSkills routes GET/POST/PUT on
 // /api/v1/users/me/injected-skills.
 func (s *Server) handleUserMeInjectedSkills(w http.ResponseWriter, r *http.Request) {
@@ -451,6 +474,9 @@ func (s *Server) addUserInjectedSkill(w http.ResponseWriter, r *http.Request) {
 	userIdent := GetUserIdentityFromContext(ctx)
 	if userIdent == nil {
 		Unauthorized(w)
+		return
+	}
+	if !s.authorizeUserSkillInjectionWrite(w, r, userIdent) {
 		return
 	}
 
@@ -523,6 +549,9 @@ func (s *Server) setUserInjectedSkills(w http.ResponseWriter, r *http.Request) {
 	userIdent := GetUserIdentityFromContext(ctx)
 	if userIdent == nil {
 		Unauthorized(w)
+		return
+	}
+	if !s.authorizeUserSkillInjectionWrite(w, r, userIdent) {
 		return
 	}
 
@@ -607,6 +636,9 @@ func (s *Server) removeUserInjectedSkill(w http.ResponseWriter, r *http.Request,
 	userIdent := GetUserIdentityFromContext(ctx)
 	if userIdent == nil {
 		Unauthorized(w)
+		return
+	}
+	if !s.authorizeUserSkillInjectionWrite(w, r, userIdent) {
 		return
 	}
 

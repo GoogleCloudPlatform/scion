@@ -577,7 +577,10 @@ func TestExitReasonIsValid(t *testing.T) {
 		{ExitReasonLimitsExceeded, true},
 		{ExitReasonPreempted, true},
 		{ExitReasonEvicted, true},
+		{ExitReasonOOMKilled, true},
+		{"oom_killed", true},
 		// Unrecognised values.
+		{"OOMKilled", false},
 		{"bogus", false},
 		{"Preempted", false},
 		{"EVICTED", false},
