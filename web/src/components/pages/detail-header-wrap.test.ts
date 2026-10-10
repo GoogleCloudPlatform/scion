@@ -329,7 +329,7 @@ const cases: Array<[string, PageCase]> = [
       },
       method: 'render',
       icon: null,
-      back: [],
+      back: [['/settings?tab=service-accounts', 'Hub Resources']],
       badges: [],
       meta: ['display-name'],
       noActions: {
@@ -400,7 +400,14 @@ const LAYOUT_SELECTORS = [
 ];
 
 /** Back-link selectors the pages used to define for themselves. */
-const BACK_LINK_SELECTORS = ['.back-link', '.back-link:hover', '.back-links', '.header-top'];
+const BACK_LINK_SELECTORS = [
+  '.back-link',
+  '.back-link:hover',
+  '.back-links',
+  '.header-top',
+  '.breadcrumb',
+  '.breadcrumb a',
+];
 
 const loaded = new Map<string, Map<string, string>>();
 const rulesOf = (c: { tag: string }): Map<string, string> => loaded.get(c.tag)!;
@@ -571,6 +578,13 @@ describe.each([
     'Back to Registries',
   ],
   ['role', './admin-role-detail.js', 'scion-page-admin-role-detail', '/admin/roles', 'Roles'],
+  [
+    'gcp service account',
+    './gcp-service-account-detail.js',
+    'scion-page-gcp-service-account-detail',
+    '/settings?tab=service-accounts',
+    'Hub Resources',
+  ],
 ])('%s error state', (_label, module, tag, href, text) => {
   it('renders the shared back link on its own', async () => {
     await import(/* @vite-ignore */ module);
@@ -584,6 +598,6 @@ describe.each([
     expect(links[0].getAttribute('href')).toBe(href);
     expect(links[0].hasAttribute('slot')).toBe(false);
     expect(links[0].textContent?.trim()).toBe(text);
-    expect(host.querySelector('a.back-link')).toBeNull();
+    expect(host.querySelector('a.back-link, .breadcrumb')).toBeNull();
   });
 });
