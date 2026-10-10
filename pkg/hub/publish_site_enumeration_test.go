@@ -15,11 +15,14 @@
 package hub
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -31,10 +34,14 @@ import (
 // site causes a hard failure.
 //
 // Effect categories in scope:
-//   - SSE publish: the event publisher's PublishUserMessage (called on an
-//     `events` field). Broker proxy calls (on the proxy) are excluded —
-//     persistence is handled by the deliverToUser callback, not by the
-//     caller.
+//   - SSE publish: the event publisher's PublishUserMessage (a 4-argument
+//     call on an `events` field or variable). Every one must be in the
+//     guarded set. Every other PublishUserMessage call must be one of the
+//     broker proxy calls listed in proxyExcluded (by file, function and
+//     receiver, exactly once each): persistence for those is handled by
+//     the deliverToUser callback, not by the caller. A PublishUserMessage
+//     selector that is not called directly (a method value or method
+//     expression) is reported as unclassified. See scanPublishUserMessage.
 //
 // Effect categories deliberately NOT enumerated:
 //   - Watermark updates (TouchDMActivity, TouchTopicActivity): currently
@@ -127,10 +134,15 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 	// not the event publish (see classifyPublishUserMessageCall) must be
 	// one of these, keyed by file:enclosing function.
 	// -------------------------------------------------------------------
-	proxyExcluded := map[string]string{
-		"handlers_agent_messaging.go:handleAgentOutboundMessage": "bp.PublishUserMessage: broker path to a user",
-		"notifications.go:publishToBroker":                       "nd.brokerProxy.PublishUserMessage: notification delivery",
-		"messagebroker.go:PublishToGroup":                        "p.PublishUserMessage: group fan-out to user recipients",
+	// Each entry is file, enclosing function and receiver expression, with
+	// the exact number of such calls expected (see checkProxyCalls).
+	proxyExcluded := map[proxyCallKey]int{
+		// bp.PublishUserMessage: broker path to a user.
+		{"handlers_agent_messaging.go", "handleAgentOutboundMessage", "bp"}: 1,
+		// nd.brokerProxy.PublishUserMessage: notification delivery.
+		{"notifications.go", "publishToBroker", "nd.brokerProxy"}: 1,
+		// p.PublishUserMessage: group fan-out to user recipients.
+		{"messagebroker.go", "PublishToGroup", "p"}: 1,
 	}
 
 	// Build accounted set from guarded entries.
@@ -151,15 +163,9 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		t.Fatalf("failed to read hub directory: %v", err)
 	}
 
-	type callSite struct {
-		file     string // base filename
-		line     int
-		funcName string // enclosing function name
-		target   string // "publish" or "notify"
-	}
-	var sites []callSite
-	// proxySites holds every other PublishUserMessage call, by file:func.
-	proxySites := map[string]int{}
+	var sites []publishCallSite
+	var proxyCalls []proxyCall
+	var unclassified []string
 
 	for _, entry := range entries {
 		name := entry.Name()
@@ -172,35 +178,18 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to parse %s: %v", name, err)
 		}
+		ev, px, un := scanPublishUserMessage(fset, f, name)
+		sites = append(sites, ev...)
+		proxyCalls = append(proxyCalls, px...)
+		unclassified = append(unclassified, un...)
+	}
 
-		// Walk the AST and find every CallExpr matching either
-		// PublishUserMessage on the event publisher (see isPublishUserMessageCall).
-		ast.Inspect(f, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			var target string
-			switch classifyPublishUserMessageCall(call) {
-			case publishCallEvent:
-				target = "publish"
-			case publishCallOther:
-				pos := fset.Position(call.Pos())
-				proxySites[name+":"+enclosingFuncName(fset, f, pos.Offset)] = pos.Line
-				return true
-			default:
-				return true
-			}
-			pos := fset.Position(call.Pos())
-			funcName := enclosingFuncName(fset, f, pos.Offset)
-			sites = append(sites, callSite{
-				file:     name,
-				line:     pos.Line,
-				funcName: funcName,
-				target:   target,
-			})
-			return true
-		})
+	for _, u := range unclassified {
+		t.Errorf("unclassified PublishUserMessage use at %s: a PublishUserMessage selector that is not "+
+			"called directly (method value or method expression) cannot be checked; call it directly.", u)
+	}
+	for _, e := range checkProxyCalls(proxyCalls, proxyExcluded) {
+		t.Error(e)
 	}
 
 	if len(sites) == 0 {
@@ -216,7 +205,7 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 
 	// Group sites by file:func to detect duplicates.
 	type groupKey struct{ file, fn string }
-	grouped := make(map[groupKey][]callSite)
+	grouped := make(map[groupKey][]publishCallSite)
 	for _, s := range sites {
 		k := groupKey{s.file, s.funcName}
 		grouped[k] = append(grouped[k], s)
@@ -252,7 +241,7 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 			mixedTargets := hasPublish && hasNotify
 
 			// Sub-group by target kind for disambiguation within each kind.
-			targetGroups := make(map[string][]callSite)
+			targetGroups := make(map[string][]publishCallSite)
 			for _, s := range groupSites {
 				targetGroups[s.target] = append(targetGroups[s.target], s)
 			}
@@ -327,24 +316,102 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		}
 	}
 
-	// Every other PublishUserMessage call must be a listed broker proxy
-	// call, and every listed one must still exist.
-	for key, line := range proxySites {
-		if _, ok := proxyExcluded[key]; !ok {
-			t.Errorf("unclassified PublishUserMessage call at %s (line %d): neither the event publish "+
-				"(a 4-argument call on an `events` field or variable) nor a listed broker proxy call. "+
-				"Add it to guarded (as an event publish) or to proxyExcluded.", key, line)
-		}
-	}
-	for key := range proxyExcluded {
-		if _, ok := proxySites[key]; !ok {
-			t.Errorf("Broker proxy call site %q is listed in proxyExcluded but was not found in source. "+
-				"The function may have been renamed, moved, or deleted.", key)
-		}
-	}
-
 	t.Logf("Verified %d persisted-row effect call sites: %d guarded, %d broker proxy calls excluded",
-		len(sites), len(guarded), len(proxySites))
+		len(sites), len(guarded), len(proxyCalls))
+}
+
+// publishCallSite is one event publish call found by the scanner.
+type publishCallSite struct {
+	file     string // base filename
+	line     int
+	funcName string // enclosing function name
+	target   string // "publish" (the only enumerated target today)
+}
+
+// proxyCallKey identifies a non-event PublishUserMessage call: file,
+// enclosing function and the receiver expression as written.
+type proxyCallKey struct {
+	file, funcName, receiver string
+}
+
+// proxyCall is one non-event PublishUserMessage call found by the scanner.
+type proxyCall struct {
+	key  proxyCallKey
+	line int
+}
+
+// scanPublishUserMessage finds, in one parsed file, every event publish
+// call (classifyPublishUserMessageCall == publishCallEvent), every other
+// PublishUserMessage call with its receiver expression, and every
+// PublishUserMessage selector that is not the function of a call (a method
+// value such as f := s.events.PublishUserMessage, or a method expression),
+// which a call-based scan could not see and so is reported as
+// unclassified ("file:func (line N)").
+func scanPublishUserMessage(fset *token.FileSet, f *ast.File, name string) (events []publishCallSite, proxies []proxyCall, unclassified []string) {
+	calledFuns := map[ast.Expr]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.CallExpr:
+			// Pre-order: a call is visited before its Fun, so the selector
+			// check below already knows which selectors are called.
+			calledFuns[x.Fun] = true
+			kind := classifyPublishUserMessageCall(x)
+			if kind == publishCallNone {
+				return true
+			}
+			pos := fset.Position(x.Pos())
+			funcName := enclosingFuncName(fset, f, pos.Offset)
+			if kind == publishCallEvent {
+				events = append(events, publishCallSite{file: name, line: pos.Line, funcName: funcName, target: "publish"})
+				return true
+			}
+			receiver := ""
+			if sel, ok := x.Fun.(*ast.SelectorExpr); ok {
+				receiver = types.ExprString(sel.X)
+			}
+			proxies = append(proxies, proxyCall{key: proxyCallKey{file: name, funcName: funcName, receiver: receiver}, line: pos.Line})
+		case *ast.SelectorExpr:
+			if x.Sel.Name == "PublishUserMessage" && !calledFuns[x] {
+				pos := fset.Position(x.Pos())
+				unclassified = append(unclassified, fmt.Sprintf("%s:%s (line %d)", name, enclosingFuncName(fset, f, pos.Offset), pos.Line))
+			}
+		}
+		return true
+	})
+	return events, proxies, unclassified
+}
+
+// checkProxyCalls compares the non-event PublishUserMessage calls found
+// with the expected ones (key -> exact count) and returns one error per
+// difference: a call whose file, function and receiver is not listed (for
+// example an aliased event publisher inside a listed function), a listed
+// call that occurs a different number of times, or one that is missing.
+func checkProxyCalls(found []proxyCall, expected map[proxyCallKey]int) []string {
+	lines := map[proxyCallKey][]int{}
+	for _, c := range found {
+		lines[c.key] = append(lines[c.key], c.line)
+	}
+	var errs []string
+	for key, ls := range lines {
+		want, listed := expected[key]
+		switch {
+		case !listed:
+			errs = append(errs, fmt.Sprintf("unclassified PublishUserMessage call at %s:%s on receiver %q (lines %v): "+
+				"neither the event publish (a 4-argument call on an `events` field or variable) nor a listed broker "+
+				"proxy call. Add it to guarded (as an event publish) or to proxyExcluded.", key.file, key.funcName, key.receiver, ls))
+		case len(ls) != want:
+			errs = append(errs, fmt.Sprintf("broker proxy call %s:%s on receiver %q occurs %d times (lines %v), "+
+				"proxyExcluded expects exactly %d.", key.file, key.funcName, key.receiver, len(ls), ls, want))
+		}
+	}
+	for key := range expected {
+		if len(lines[key]) == 0 {
+			errs = append(errs, fmt.Sprintf("broker proxy call %s:%s on receiver %q is listed in proxyExcluded but was "+
+				"not found in source. The function may have been renamed, moved, or deleted.", key.file, key.funcName, key.receiver))
+		}
+	}
+	sort.Strings(errs)
+	return errs
 }
 
 // publishCallKind classifies a call for the persisted-row scanners.
@@ -529,6 +596,8 @@ func TestClassifyPublishUserMessageCall(t *testing.T) {
 		`p.PublishUserMessage(ctx, projectID, r.Name, &recipMsg)`:                      publishCallOther,
 		`nd.brokerProxy.PublishUserMessage(ctx, sub.ProjectID, sub.SubscriberID, msg)`: publishCallOther,
 		`ep.PublishUserMessage(ctx, msg, nil, nil)`:                                    publishCallOther,
+		`pub.PublishUserMessage(ctx, msg, nil, nil)`:                                   publishCallOther,
+		`(*eventBuilder).PublishUserMessage(p, ctx, msg, nil, nil)`:                    publishCallOther,
 		`s.events.PublishUserMessage(ctx, msg, attachments)`:                           publishCallOther,
 		`PublishUserMessage(ctx, msg, nil, nil)`:                                       publishCallOther,
 		`s.events.PublishChatMemberMessage(ctx, msg, nil, nil, ids)`:                   publishCallNone,
@@ -545,5 +614,81 @@ func TestClassifyPublishUserMessageCall(t *testing.T) {
 		if got := classifyPublishUserMessageCall(call); got != want {
 			t.Errorf("classifyPublishUserMessageCall(%s) = %v, want %v", src, got, want)
 		}
+	}
+}
+
+// TestScanPublishUserMessageFixtures runs the scanner and the broker proxy
+// check over fixture source, so each way a new publish could hide is pinned:
+// an aliased event publisher inside a listed function, a second call on a
+// listed receiver, a missing listed call, a method value and a method
+// expression.
+func TestScanPublishUserMessageFixtures(t *testing.T) {
+	const src = `package hub
+
+func (s *Server) handleAgentOutboundMessage() {
+	bp.PublishUserMessage(ctx, projectID, userID, msg)
+	pub := s.events
+	pub.PublishUserMessage(ctx, msg, nil, nil)
+	s.events.PublishUserMessage(ctx, msg, nil, nil)
+}
+
+func (p *MessageBrokerProxy) PublishToGroup() {
+	p.PublishUserMessage(ctx, projectID, a, msg)
+	p.PublishUserMessage(ctx, projectID, b, msg)
+}
+
+func (s *Server) methodValue() {
+	f := s.events.PublishUserMessage
+	f(ctx, msg, nil, nil)
+}
+
+func methodExpr() {
+	g := (*eventBuilder).PublishUserMessage
+	_ = g
+}
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "fixture.go", src, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, proxies, unclassified := scanPublishUserMessage(fset, f, "fixture.go")
+
+	if len(events) != 1 || events[0].funcName != "handleAgentOutboundMessage" || events[0].line != 7 {
+		t.Errorf("event publish sites = %+v, want the one s.events call at line 7", events)
+	}
+	if want := []string{"fixture.go:methodValue (line 16)", "fixture.go:methodExpr (line 21)"}; strings.Join(unclassified, "|") != strings.Join(want, "|") {
+		t.Errorf("unclassified = %v, want %v", unclassified, want)
+	}
+
+	expected := map[proxyCallKey]int{
+		{"fixture.go", "handleAgentOutboundMessage", "bp"}:  1,
+		{"fixture.go", "PublishToGroup", "p"}:               1,
+		{"fixture.go", "publishToBroker", "nd.brokerProxy"}: 1,
+	}
+	errs := strings.Join(checkProxyCalls(proxies, expected), "\n")
+	for _, want := range []string{
+		// The alias inside a listed function is not hidden by the listed bp call.
+		`unclassified PublishUserMessage call at fixture.go:handleAgentOutboundMessage on receiver "pub" (lines [6])`,
+		// A second call on a listed receiver is counted, not collapsed.
+		`broker proxy call fixture.go:PublishToGroup on receiver "p" occurs 2 times (lines [11 12])`,
+		// A listed call that is gone is reported.
+		`broker proxy call fixture.go:publishToBroker on receiver "nd.brokerProxy" is listed in proxyExcluded but was not found`,
+	} {
+		if !strings.Contains(errs, want) {
+			t.Errorf("checkProxyCalls errors missing %q; got:\n%s", want, errs)
+		}
+	}
+	if strings.Contains(errs, `receiver "bp"`) {
+		t.Errorf("the listed bp call must pass; got:\n%s", errs)
+	}
+
+	// The real proxy calls pass exactly.
+	if errs := checkProxyCalls([]proxyCall{
+		{key: proxyCallKey{"fixture.go", "handleAgentOutboundMessage", "bp"}, line: 4},
+		{key: proxyCallKey{"fixture.go", "PublishToGroup", "p"}, line: 11},
+		{key: proxyCallKey{"fixture.go", "publishToBroker", "nd.brokerProxy"}, line: 30},
+	}, expected); len(errs) != 0 {
+		t.Errorf("an exact match must pass; got %v", errs)
 	}
 }
