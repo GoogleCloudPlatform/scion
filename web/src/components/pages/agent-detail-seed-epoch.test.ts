@@ -33,6 +33,7 @@ vi.mock('../../client/main.js', async () => {
 import './agent-detail.js';
 import { stateManager } from '../../client/state.js';
 import type { Agent } from '../../shared/types.js';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 /** happy-dom has no EventSource; setScope opens one. */
 class FakeEventSource extends EventTarget {
@@ -104,7 +105,7 @@ beforeEach(() => {
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL) => {
-      const url = typeof input === 'string' ? input : input.toString();
+      const url = requestUrl(input);
       const path = url.replace(/^https?:\/\/[^/]+/, '');
       let body: unknown = {};
       let status = 404;

@@ -24,6 +24,9 @@
 
 import { describe, it, expect, vi, afterEach, beforeAll } from 'vitest';
 import { setPreferredTimeZone } from '../../utils/time.js';
+import type { CSSResult } from 'lit';
+import type { ScionDetailHeader } from '../shared/detail-header.js';
+import { styleRules } from './__fixtures__/css-rules.js';
 
 // ---------------------------------------------------------------------------
 // Mock data
@@ -241,7 +244,7 @@ async function createElement(
     await el.updateComplete;
     // Check if the component has rendered content (not just loading)
     if (
-      el.shadowRoot?.querySelector('h1') ||
+      el.shadowRoot?.querySelector('scion-detail-header') ||
       el.shadowRoot?.querySelector('.error-state') ||
       el.shadowRoot?.querySelector('.empty-state')
     ) {
@@ -275,8 +278,12 @@ describe('admin-role-detail', () => {
     const handler = createFetchHandler({ role: CUSTOM_ROLE });
     el = await createElement(handler);
 
-    const h1 = el.shadowRoot?.querySelector('h1');
+    // The h1 is rendered by the shared detail header from its heading.
+    const header = el.shadowRoot?.querySelector('scion-detail-header') as ScionDetailHeader;
+    await header.updateComplete;
+    const h1 = header.shadowRoot?.querySelector('h1');
     expect(h1?.textContent?.trim()).toBe('test-editor');
+    expect(el.shadowRoot?.querySelector('h1')).toBeNull();
 
     const desc = el.shadowRoot?.querySelector('.header-description');
     expect(desc?.textContent?.trim()).toBe('A custom editor role');
@@ -310,6 +317,71 @@ describe('admin-role-detail', () => {
     const buttons = el.shadowRoot?.querySelectorAll('.header-actions sl-button');
     const labels = [...(buttons ?? [])].map((b) => b.textContent?.trim());
     expect(labels).toEqual(['Duplicate']);
+  });
+
+  // -- Shared detail header (ptone/scion#4066) --
+
+  it('renders the header through scion-detail-header', async () => {
+    const handler = createFetchHandler({ role: CUSTOM_ROLE });
+    el = await createElement(handler);
+
+    const headers = el.shadowRoot?.querySelectorAll('scion-detail-header') ?? [];
+    expect(headers).toHaveLength(1);
+    const header = headers[0] as ScionDetailHeader;
+    expect(header.heading).toBe('test-editor');
+    // No page-owned header wrapper is left beside it.
+    expect(el.shadowRoot?.querySelector('.header')).toBeNull();
+    expect(el.shadowRoot?.querySelector('.badges')).toBeNull();
+  });
+
+  it('puts the badges after the name in the default slot', async () => {
+    const handler = createFetchHandler({ role: CUSTOM_ROLE });
+    el = await createElement(handler);
+
+    const header = el.shadowRoot?.querySelector('scion-detail-header') as ScionDetailHeader;
+    const badges = Array.from(header.children).filter((n) => !n.hasAttribute('slot'));
+    expect(badges.map((n) => n.className.trim())).toEqual(['type-badge custom', 'scope-badge']);
+    expect(badges.map((n) => n.textContent?.trim())).toEqual(['Custom', 'system']);
+  });
+
+  it('puts the description and metadata in the meta slot', async () => {
+    const handler = createFetchHandler({ role: CUSTOM_ROLE });
+    el = await createElement(handler);
+
+    const header = el.shadowRoot?.querySelector('scion-detail-header') as ScionDetailHeader;
+    const meta = Array.from(header.querySelectorAll(':scope > [slot="meta"]'));
+    expect(meta.map((n) => n.className)).toEqual(['header-description', 'metadata-row']);
+    expect(meta[1].textContent).toMatch(/Updated .* · Created /);
+  });
+
+  it('breaks a long description inside the meta line', () => {
+    const ctor = customElements.get('scion-page-admin-role-detail') as unknown as {
+      elementStyles: CSSResult[];
+    };
+    const rules = styleRules(ctor.elementStyles.map((s) => s.cssText).join('\n'));
+    expect(rules.get('.header-description') ?? '').toMatch(/overflow-wrap:\s*anywhere/);
+  });
+
+  it('omits the description from the meta slot when the role has none', async () => {
+    const handler = createFetchHandler({ role: { ...CUSTOM_ROLE, description: '' } });
+    el = await createElement(handler);
+
+    const header = el.shadowRoot?.querySelector('scion-detail-header') as ScionDetailHeader;
+    const meta = Array.from(header.querySelectorAll(':scope > [slot="meta"]'));
+    expect(meta.map((n) => n.className)).toEqual(['metadata-row']);
+  });
+
+  it('puts the actions in a single actions-slot wrapper', async () => {
+    const handler = createFetchHandler({ role: CUSTOM_ROLE });
+    el = await createElement(handler);
+
+    const header = el.shadowRoot?.querySelector('scion-detail-header') as ScionDetailHeader;
+    const actions = Array.from(header.querySelectorAll(':scope > [slot="actions"]'));
+    expect(actions.map((n) => n.className)).toEqual(['header-actions']);
+    const labels = Array.from(actions[0].querySelectorAll('sl-button')).map((b) =>
+      b.textContent?.trim()
+    );
+    expect(labels).toEqual(['Duplicate', 'Export', 'Edit', 'Delete']);
   });
 
   // -- Error / not found --

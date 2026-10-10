@@ -31,6 +31,7 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { apiFetch } from '../../../client/api.js';
 import type { ChatSpace, ChatSpaceThread } from './chat-space-rail.js';
+import { requestBodyText } from '../../../client/__fixtures__/request-url.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- `el` is the rail
    custom element accessed through its private fields, same as the sibling
@@ -139,7 +140,7 @@ async function setThreadSortMode(el: any, mode: 'alpha' | 'activity'): Promise<v
 function serveUserPrefsEcho(): void {
   apiFetchMock.mockImplementation((path: string, init?: RequestInit) => {
     if (path === '/api/v1/chat/user-prefs' && init?.method === 'PUT') {
-      return Promise.resolve(new Response(String(init.body), { status: 200 }));
+      return Promise.resolve(new Response(requestBodyText(init.body), { status: 200 }));
     }
     return Promise.resolve(new Response('{}', { status: 200 }));
   });
@@ -881,7 +882,7 @@ describe('space rail — a legacy threadOrder entry outside custom loads as an e
     // loads as Q's explicit order rather than being dropped.
     apiFetchMock.mockImplementation((path: string, init?: RequestInit) => {
       if (path === '/api/v1/chat/user-prefs' && init?.method === 'PUT') {
-        return Promise.resolve(new Response(String(init.body), { status: 200 }));
+        return Promise.resolve(new Response(requestBodyText(init.body), { status: 200 }));
       }
       if (path === '/api/v1/chat/user-prefs') {
         return Promise.resolve(

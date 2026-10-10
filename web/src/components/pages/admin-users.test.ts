@@ -23,6 +23,7 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 
 import type { AdminUser } from '../../shared/types.js';
+import { requestBodyText, requestUrl } from '../../client/__fixtures__/request-url.js';
 
 const SELF_ID = 'u-self';
 
@@ -55,7 +56,7 @@ function createFetchHandler(users: AdminUser[]) {
       return Promise.resolve(jsonResponse({ id: SELF_ID, role: 'admin' }));
     }
     if (method === 'PATCH' && path.includes('/api/v1/users/')) {
-      const body = JSON.parse(String(init?.body ?? '{}')) as { role?: string };
+      const body = JSON.parse(requestBodyText(init?.body ?? '{}')) as { role?: string };
       const id = path.split('/api/v1/users/')[1];
       const u = users.find((x) => x.id === id);
       return Promise.resolve(jsonResponse({ ...u, ...body }));
@@ -205,8 +206,8 @@ describe('scion-page-admin-users — Change role submenu', () => {
     const calls = patchCalls();
     expect(calls).toHaveLength(1);
     const [url, init] = calls[0];
-    expect(String(url)).toContain(`/api/v1/users/${user.id}`);
-    expect(JSON.parse(String((init as RequestInit).body))).toEqual({ role: 'viewer' });
+    expect(requestUrl(url)).toContain(`/api/v1/users/${user.id}`);
+    expect(JSON.parse(requestBodyText((init as RequestInit).body))).toEqual({ role: 'viewer' });
   });
 
   it('cancelling the confirmation sends nothing and keeps the current role checked', async () => {
@@ -250,7 +251,7 @@ function listCalls(): URL[] {
   return vi
     .mocked(fetch)
     .mock.calls.map(([url, init]) => ({
-      url: String(url),
+      url: requestUrl(url),
       method: (init as RequestInit | undefined)?.method ?? 'GET',
     }))
     .filter((c) => c.method === 'GET' && c.url.includes('/api/v1/users?'))
@@ -621,8 +622,8 @@ describe('scion-page-admin-users — invite dialog display name and submit routi
       .mocked(fetch)
       .mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'POST')
       .map(([url, init]) => ({
-        path: String(url),
-        body: JSON.parse(String((init as RequestInit).body)) as Record<string, unknown>,
+        path: requestUrl(url),
+        body: JSON.parse(requestBodyText((init as RequestInit).body)) as Record<string, unknown>,
       }));
   }
 
@@ -973,7 +974,7 @@ describe('scion-page-admin-users — invite dialog display name and submit routi
       .mocked(fetch)
       .mock.calls.filter(
         ([url, init]) =>
-          String(url).includes('/api/v1/users') &&
+          requestUrl(url).includes('/api/v1/users') &&
           ((init as RequestInit | undefined)?.method ?? 'GET') === 'GET'
       );
     expect(listCalls.length).toBeGreaterThan(0);

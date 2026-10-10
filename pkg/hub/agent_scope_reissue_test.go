@@ -148,6 +148,24 @@ type reissueFaultStore struct {
 	// this ID answers no row and no error.
 	nilAgentAfterCommitID string
 	committed             atomic.Bool
+	// failUserID: GetUser for this ID fails.
+	failUserID string
+	// uatReadErr: GetUserAccessToken fails.
+	uatReadErr bool
+}
+
+func (s *reissueFaultStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if s.fault.Active() && s.failUserID != "" && id == s.failUserID {
+		return nil, errors.New("injected user read fault")
+	}
+	return s.Store.GetUser(ctx, id)
+}
+
+func (s *reissueFaultStore) GetUserAccessToken(ctx context.Context, id string) (*store.UserAccessToken, error) {
+	if s.fault.Active() && s.uatReadErr {
+		return nil, errors.New("injected access token read fault")
+	}
+	return s.Store.GetUserAccessToken(ctx, id)
 }
 
 // arm turns the configured faults on.
@@ -954,17 +972,6 @@ func TestScopeReissue_StoppedAgentNotPushed(t *testing.T) {
 	recs := reissueAudits(t, f.store, f.child.ID, mutationTypeAgentScopesReissueDispatch)
 	require.Len(t, recs, 1)
 	assert.Contains(t, recs[0].AfterSummary, `"skipped":"agent_not_running"`)
-}
-
-// Phase 1 refuses a user-delegated agent without writing anything.
-func TestScopeReissue_UserDelegatorNotYetSupported(t *testing.T) {
-	f := newReissueFixture(t, "rs-user", store.ProjectRoleOwner)
-	_, err := f.srv.runScopeReissue(context.Background(), f.reload(t, f.root), f.operator, false)
-	require.ErrorIs(t, err, errReissueUnsupportedDelegator)
-	rec := httptest.NewRecorder()
-	writeScopeReissueError(rec, err)
-	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
-	assert.Len(t, f.allEdges(t, f.root), 1)
 }
 
 // A dispatch during a re-issue records a mint denial against the reissue

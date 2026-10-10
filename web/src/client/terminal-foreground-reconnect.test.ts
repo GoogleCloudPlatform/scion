@@ -826,27 +826,53 @@ describe('accept-then-close does not loop', () => {
   });
 });
 
-describe('the first-frame guard applies to reconnect attempts only, not the initial connect', () => {
-  it('an initial connect with no data for over 10s is not failed', async () => {
+describe('the first-frame guard: 60s on the initial connect, 10s on reconnect attempts', () => {
+  it('an initial connect whose first data arrives after 30s still connects', async () => {
     vi.useFakeTimers();
     const f = fixture();
     const session = f.registry.open(agentId, f.initialize);
+    session.setFrontmost(true);
     await session.connect();
     FakeSocket.instances[0].open(); // Hub upgrades; the broker exec/attach is still slow
 
-    await vi.advanceTimersByTimeAsync(10_000 + 1);
+    await vi.advanceTimersByTimeAsync(30_000);
 
-    // Before this fix, the 10s guard would have applied to every attempt,
-    // including this one, and failed a legitimately slow cold start (e.g. a
-    // Cloud Run sandbox exec) that main accepts today.
+    // A slow cold start (e.g. a sandbox exec) that sends nothing for longer
+    // than the 10s reconnect bound is not failed on the very first attach.
     expect(session.state.connection).toBe('connecting');
     expect(session.state.reconnectFailed).toBe(false);
     expect(FakeSocket.instances).toHaveLength(1); // no guard-triggered redial
 
-    // It still only counts as connected once data actually arrives, however
-    // late — counting a data frame as live is unconditional, unlike the guard.
     FakeSocket.instances[0].data();
     expect(session.state.connection).toBe('connected');
+    expect(session.state.reconnectFailed).toBe(false);
+    expect(FakeSocket.instances).toHaveLength(1);
+  });
+
+  it('an initial connect with no data for over 60s ends in disconnected, with no redial and one notification', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const session = f.registry.open(agentId, f.initialize);
+    session.setFrontmost(true);
+    await session.connect();
+    FakeSocket.instances[0].open(); // Hub upgrades; no data frame ever follows
+    const listener = vi.fn();
+    session.subscribe(listener);
+    listener.mockClear();
+
+    await vi.advanceTimersByTimeAsync(10_000 + 1);
+    expect(session.state.connection).toBe('connecting'); // not failed at 10s
+    expect(listener).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(60_000 - 10_000);
+
+    expect(session.state.connection).toBe('disconnected');
+    expect(session.state.disconnectReason).toBe('network');
+    expect(session.state.reconnectFailed).toBe(false);
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(FakeSocket.instances).toHaveLength(1); // no guard-triggered redial
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(FakeSocket.instances).toHaveLength(1);
   });
 
   it('a reconnect attempt (after the session has connected once) is still bounded by the guard', async () => {
@@ -985,7 +1011,9 @@ describe("the first-frame guard's timer is cleared on every teardown path", () =
     session.setFrontmost(true);
     session.noteAgentAvailable(); // the agent-restart re-arm: a fresh attempt
     await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(3));
-    expect(vi.getTimerCount()).toBe(0); // the new attempt hasn't reached 'connecting' yet
+    // Only the new attempt's own guard (waiting for onopen) runs: nothing
+    // is left over from the ended attempt.
+    expect(vi.getTimerCount()).toBe(1);
   });
 });
 
@@ -994,45 +1022,42 @@ describe('the reconnect after a 4503 close waits a full-jitter delay of 0-5s', (
     [0, 0],
     [0.5, 2_500],
     [0.999_999, PROMPT_RECONNECT_MAX_DELAY_MS],
-  ] as const)(
-    'random() = %d -> waits %d ms, then attempts once',
-    async (random, delay) => {
-      vi.useFakeTimers();
-      const f = fixture({ random: () => random });
-      const session = f.registry.open(agentId, f.initialize);
-      const socket0 = await connectAndOpen(session);
-      session.setFrontmost(true);
+  ] as const)('random() = %d -> waits %d ms, then attempts once', async (random, delay) => {
+    vi.useFakeTimers();
+    const f = fixture({ random: () => random });
+    const session = f.registry.open(agentId, f.initialize);
+    const socket0 = await connectAndOpen(session);
+    session.setFrontmost(true);
 
-      socket0.readyState = 3;
-      socket0.onclose?.({ code: 4503, reason: 'relay_restart' });
-      // The wait counts as reconnecting (the pane shows RECONNECTING...),
-      // but nothing is redialed yet.
+    socket0.readyState = 3;
+    socket0.onclose?.({ code: 4503, reason: 'relay_restart' });
+    // The wait counts as reconnecting (the pane shows RECONNECTING...),
+    // but nothing is redialed yet.
+    expect(session.reconnecting).toBe(true);
+    expect(FakeSocket.instances).toHaveLength(1);
+    expect(f.fetcher).toHaveBeenCalledTimes(2); // the first attach only
+    expect(session.state.disconnectReason).toBe('network');
+
+    if (delay > 0) {
+      await vi.advanceTimersByTimeAsync(delay - 1);
       expect(session.reconnecting).toBe(true);
       expect(FakeSocket.instances).toHaveLength(1);
-      expect(f.fetcher).toHaveBeenCalledTimes(2); // the first attach only
-      expect(session.state.disconnectReason).toBe('network');
-
-      if (delay > 0) {
-        await vi.advanceTimersByTimeAsync(delay - 1);
-        expect(session.reconnecting).toBe(true);
-        expect(FakeSocket.instances).toHaveLength(1);
-        expect(f.fetcher).toHaveBeenCalledTimes(2);
-      }
-      // Synchronous advance: the timer callback starts the attempt, and
-      // `reconnecting` is observed before the (mocked, instantly resolving)
-      // attempt settles. The async variant would also flush the attempt's
-      // promises, clearing `pending` before the assertion.
-      vi.advanceTimersByTime(1);
-      expect(session.reconnecting).toBe(true); // the jitter timer, not connect(), dialed
-
-      await session.connect();
-      expect(FakeSocket.instances).toHaveLength(2);
-      FakeSocket.instances[1].open();
-      FakeSocket.instances[1].data();
-      expect(session.state.connection).toBe('connected');
-      expect(f.resources.reset).toHaveBeenCalledTimes(1); // redraw after reconnect
+      expect(f.fetcher).toHaveBeenCalledTimes(2);
     }
-  );
+    // Synchronous advance: the timer callback starts the attempt, and
+    // `reconnecting` is observed before the (mocked, instantly resolving)
+    // attempt settles. The async variant would also flush the attempt's
+    // promises, clearing `pending` before the assertion.
+    vi.advanceTimersByTime(1);
+    expect(session.reconnecting).toBe(true); // the jitter timer, not connect(), dialed
+
+    await session.connect();
+    expect(FakeSocket.instances).toHaveLength(2);
+    FakeSocket.instances[1].open();
+    FakeSocket.instances[1].data();
+    expect(session.state.connection).toBe('connected');
+    expect(f.resources.reset).toHaveBeenCalledTimes(1); // redraw after reconnect
+  });
 
   it('the delay never exceeds the 5s bound', async () => {
     vi.useFakeTimers();
