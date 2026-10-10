@@ -146,8 +146,8 @@ Goals:
 - Each catalog operation declares a `Bearer BearerDisposition` (`authzop/operation.go:109-113`,
   `authzop/bearer.go`): `admit`, `admit_self`, `session_only` (with a reason), `non_user` or
   `out_of_scope`. The only exemption is the `PendingBearerOperations` set
-  (`authzop/pending.go:282`), whose members still await a disposition. It includes `agent.list`
-  and `agent.message.send`, which G admits later. `TestBearerDisposition_EveryOperationDeclaresOne`
+  (`authzop/pending.go:282`), whose members still await a disposition. It includes `agent.list`,
+  `agent.message.send`, `skill.read` and `template.read`, which G admits later. `TestBearerDisposition_EveryOperationDeclaresOne`
   (`authzop/bearer_test.go:92`) and `TestBearerDispositionMatrix_CatalogEntryPoints`
   (`pkg/hub/bearer_disposition_matrix_test.go:452`) enforce it. G admitting a pending operation
   for delegated use does not depend on its UAT disposition, but the operation must have left the
@@ -177,7 +177,7 @@ hooks, then audit.
   record. `AuthzRequest.AlwaysAudit` (`:252`) and `Decision.AlwaysAudit` (`:375`) exempt a
   decision from allow sampling. `BuildDecisionAuditRecord` (`audit_authz.go:78`) builds a record
   for paths outside `Decide`.
-- Routine decision records are no longer persisted in the database. GCP#2986 removed the
+- Routine decision records are no longer persisted in the database. GoogleCloudPlatform/scion#2986 removed the
   `decision_audits` table. The production emitter is inert (`server.go:2317`), and decision records
   reach the typed `pkg/hub/auditevent` sink only when the default-off experiment
   `hub.authorization_decision_audit_v2` is admitted.
@@ -278,12 +278,19 @@ Rules, applied in order. Each one fails closed. §8.4 collects every error code.
    mint eligibility, which stays target-free: `CanMintSelector(ctx, issuerPC, boundary,
    selectors)` must return `OK` for every selector. For a hub boundary this applies D.1's hub
    eligibility (system authority, or the permission held through an active project-scoped binding,
-   or relationship eligibility).
+   or relationship eligibility). A malformed boundary (unknown kind, or `projectId` present or
+   missing contrary to the kind) answers 400 `validation_error` with `details.field = "boundary"`
+   and `details.reason` = `boundary_invalid` or `boundary_required`, exactly as UAT mint does
+   (`writeTokenBoundaryError`, `handlers_auth.go:1036`). A well-formed project boundary naming a
+   project that does not exist, or that the issuer cannot access, fails mint eligibility and
+   answers 403 `permission_not_eligible` with `details.reason = project_access_required`, so
+   project existence is not disclosed.
 5. **Ceiling.** Resolve and freeze the selectors.
    1. Every selector resolves through `ResolveSelector` (`permissions/registry.go:659`), its
       allowed boundaries include the boundary kind, and `CanMintSelector` returns `OK`. A non-OK
       result answers 403 `permission_not_eligible`, with the `MintDenialReason` in
-      `details.reason`. This is the same eligibility function as UAT mint,
+      `details.reason`; a selector whose allowed boundaries exclude the boundary kind gives
+      `boundary_not_allowed`, and an unknown selector gives `unknown_selector`. This is the same eligibility function as UAT mint,
       so an owner can delegate `agent.attach` on their own agents through relationship
       eligibility.
    2. Every resulting permission ID is in the hub agent-delegation policy for that boundary kind,
@@ -352,7 +359,7 @@ the claim transaction.
   notification as UAT revoke (`publishConduitAuthzChanged`).
 - **Never returned:** credential plaintext, `key_hash`, or any credential prefix beyond the fixed
   `scion_adt_` marker. Returned: grant ID, agent, issuer, boundary, canonical permission IDs,
-  ceiling version, name and purpose (labelled as user-supplied), expiry, maximum credential TTL,
+  ceiling version, name, purpose and labels (all labelled as user-supplied), expiry, maximum credential TTL,
   created, last exchanged, status, revocation fields, and the count and expiry of active
   credentials.
 - **Refused:** a delegated credential on any of these operations, and a UAT on any of them (grant
@@ -453,7 +460,7 @@ external code, goes to the decision record (§14.2).
 
 | HTTP | Code | Where |
 | --- | --- | --- |
-| 400 | `validation_error` | malformed body; empty ceiling; unknown selector; expiry missing, past or beyond 30 days; TTL above 60 minutes; invalid name, purpose or labels (the value is never echoed) |
+| 400 | `validation_error` | malformed body; malformed boundary (`details.field = boundary`, `details.reason` = `boundary_invalid` or `boundary_required`); empty ceiling; unknown selector at exchange; expiry missing, past or beyond 30 days; TTL above 60 minutes; invalid name, purpose or labels (the value is never echoed) |
 | 400 | `subdelegation_not_supported` | issuance sets `allowSubdelegation` or `parentGrantId` |
 | 400 | `invalid_audience` | exchange audience is not this hub's |
 | 401 | `agent_credential_invalid` | exchange or bound-agent management: agent credential row missing, revoked or expired, or its lookup failed |
@@ -464,14 +471,14 @@ external code, goes to the decision record (§14.2).
 | 403 | `issuer_not_controller` | issuer is not the agent's owner or recorded ancestor, or lacks `agent.delegation.create` |
 | 403 | `issuer_project_access` | issuer not admitted to the agent's project (issuance, exchange) |
 | 403 | `issuer_invalid` | exchange: issuer suspended, deleted, federated or a reserved platform identity |
-| 403 | `permission_not_eligible` | issuance: `CanMintSelector` refused a selector; `details.reason` carries the `MintDenialReason` |
+| 403 | `permission_not_eligible` | issuance: `CanMintSelector` refused a selector, including an unknown selector, a boundary kind the selector does not allow, and a project boundary naming a project that does not exist or that the issuer cannot access; `details.reason` carries the `MintDenialReason` (`unknown_selector`, `boundary_not_allowed`, `project_access_required`, `flat_role_insufficient`, `no_relationship_candidacy`) |
 | 403 | `permission_not_delegable` | a permission outside the hub agent-delegation policy, or an empty intersection after narrowing |
 | 403 | `outside_ceiling` | exchange: requested permissions exceed the grant ceiling |
 | 403 | `grant_inactive` | exchange: grant revoked, expired, or with an unsupported ceiling version |
 | 403 | `grant_agent_changed` | exchange: agent project or generation changed, or a reincarnation is in flight |
 | 404 | `agent_not_found` | issuance: agent missing or deleted |
 | 404 | `grant_not_found` | grant missing, bound to another agent, or not visible to the caller |
-| 404 | (not found) | issuance or exchange while the experiment is off (`requireExperiment`) |
+| 404 | `not_found` | issuance or exchange while the experiment is off (`requireExperiment`) |
 | 409 | `agent_not_eligible` | issuance: agent fails standing, is suspended or lacks attested ancestry |
 | 409 | `agent_reincarnating` | issuance during a reincarnation, or after the agent row changed under the lock |
 | 409 | `grant_limit_reached` | issuance past the per-agent or per-issuer cap |
@@ -1188,8 +1195,19 @@ agent_delegated_credentials
   agent_delegation_code          string NULL   -- the G code on a denial-related record
   ```
 
-  The delegated credential's own ID and kind go in the existing `ActorCredentialID` and
-  `ActorCredentialType` fields. `store.MutationAuditRecord` (`pkg/store/models.go:3817`) gets the
+  The remaining §14.1 fields reuse existing columns, filled by `ApplyActor` from the delegated
+  request's credential context, as E.2a does for a UAT:
+  - credential ID and kind → `ActorCredentialID`, `ActorCredentialType`;
+  - grant boundary → `CredentialBoundaryKind`, `CredentialBoundaryProjectID`;
+  - grant name and labels → `CredentialName`, `CredentialLabels` (bounded snapshot, still
+    user-supplied);
+  - correlation ID → `CorrelationID`.
+
+  Mutation records have no permission column, and G adds none. The permission is recorded in the
+  decision record (`permission_id`, when retained, §14.4). The mutation record of an exchange
+  carries the issued credential's canonical permission IDs in its `AfterSummary`, and the grant
+  create record carries the frozen ceiling there, so the durable trail always names the delegated
+  permissions. `store.MutationAuditRecord` (`pkg/store/models.go:3817`) gets the
   matching Go fields with the names reserved in `e2a_no_g_column_test.go:43` (`ActorAgentID`,
   `AuthorizingUserID`, `SourceGrantID`, `ParentGrantID`, `DelegationEdgeID`,
   `ExchangeAgentCredentialID`, `ActorKind`, `AgentDelegationCode`), and
