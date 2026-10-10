@@ -162,18 +162,18 @@
 - [quota.delete](#quotadelete) — Delete limit definitions and entitlement bindings
 - [hub.policies.removed](#hubpoliciesremoved) — Removed policy API; every method and sub-path answers 410 Gone and points callers to role bindings
 - [skill.read](#skillread) — Read skill definitions or list/discover skills
-- [skill.create](#skillcreate) — Create a new skill definition
-- [skill.update](#skillupdate) — Update an existing skill definition
-- [skill.delete](#skilldelete) — Delete a skill definition
+- [skill.create](#skillcreate) — Create a new skill definition. A user-scope skill refuses a federated user (requireProfileWriter)
+- [skill.update](#skillupdate) — Update an existing skill definition. A user-scope skill refuses a federated user (requireProfileWriter)
+- [skill.delete](#skilldelete) — Delete a skill definition. A user-scope skill refuses a federated user (requireProfileWriter)
 - [skill.register](#skillregister) — Register skills in a skill registry
 - [template.read](#templateread) — Read template definitions or discover available templates
-- [template.create](#templatecreate) — Create a new template or import resources. A user-scope create through /api/v1/templates refuses a federated user (requireProfileWriter)
+- [template.create](#templatecreate) — Create a new template or import resources. A user-scope create through /api/v1/templates or /api/v1/resources/import refuses a federated user (requireProfileWriter)
 - [template.update](#templateupdate) — Update an existing template definition. A user-scope template refuses a federated user (requireProfileWriter)
 - [template.delete](#templatedelete) — Delete a template definition. A user-scope template refuses a federated user (requireProfileWriter)
 - [harnessconfig.read](#harnessconfigread) — Read harness configurations or list available configs
-- [harnessconfig.create](#harnessconfigcreate) — Create a new harness configuration
-- [harnessconfig.update](#harnessconfigupdate) — Update a harness configuration
-- [harnessconfig.delete](#harnessconfigdelete) — Delete a harness configuration
+- [harnessconfig.create](#harnessconfigcreate) — Create a new harness configuration. A user-scope harness config refuses a federated user (requireProfileWriter)
+- [harnessconfig.update](#harnessconfigupdate) — Update a harness configuration. A user-scope harness config refuses a federated user (requireProfileWriter)
+- [harnessconfig.delete](#harnessconfigdelete) — Delete a harness configuration. A user-scope harness config refuses a federated user (requireProfileWriter)
 - [broker.read](#brokerread) — Read runtime broker status or list brokers
 - [broker.agent.launchreport](#brokeragentlaunchreport) — Record a broker's launch report for an agent it runs
 - [broker.messagefailures.report](#brokermessagefailuresreport) — Record buffered message delivery failures reported by a broker
@@ -5948,7 +5948,7 @@
 
 **Domain:** skill
 
-**Description:** Create a new skill definition
+**Description:** Create a new skill definition. A user-scope skill refuses a federated user (requireProfileWriter)
 
 ### Entry Points
 
@@ -5971,6 +5971,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserSkillWrites_FederatedUserRefused`
 
 ---
 
@@ -5978,7 +5979,7 @@
 
 **Domain:** skill
 
-**Description:** Update an existing skill definition
+**Description:** Update an existing skill definition. A user-scope skill refuses a federated user (requireProfileWriter)
 
 ### Entry Points
 
@@ -6003,6 +6004,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserSkillWrites_FederatedUserRefused`
 
 ---
 
@@ -6010,7 +6012,7 @@
 
 **Domain:** skill
 
-**Description:** Delete a skill definition
+**Description:** Delete a skill definition. A user-scope skill refuses a federated user (requireProfileWriter)
 
 ### Entry Points
 
@@ -6042,6 +6044,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserSkillWrites_FederatedUserRefused`
 
 ---
 
@@ -6122,7 +6125,7 @@
 
 **Domain:** template
 
-**Description:** Create a new template or import resources. A user-scope create through /api/v1/templates refuses a federated user (requireProfileWriter)
+**Description:** Create a new template or import resources. A user-scope create through /api/v1/templates or /api/v1/resources/import refuses a federated user (requireProfileWriter)
 
 ### Entry Points
 
@@ -6147,6 +6150,7 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestGenericUserTemplateWrites_FederatedUserRefused`
+- `pkg/hub:TestUserResourceImport_FederatedUserRefused`
 
 ---
 
@@ -6258,7 +6262,7 @@
 
 **Domain:** harnessconfig
 
-**Description:** Create a new harness configuration
+**Description:** Create a new harness configuration. A user-scope harness config refuses a federated user (requireProfileWriter)
 
 ### Entry Points
 
@@ -6281,6 +6285,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserHarnessConfigWrites_FederatedUserRefused`
 
 ---
 
@@ -6288,7 +6293,7 @@
 
 **Domain:** harnessconfig
 
-**Description:** Update a harness configuration
+**Description:** Update a harness configuration. A user-scope harness config refuses a federated user (requireProfileWriter)
 
 ### Entry Points
 
@@ -6313,6 +6318,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserHarnessConfigWrites_FederatedUserRefused`
 
 ---
 
@@ -6320,7 +6326,7 @@
 
 **Domain:** harnessconfig
 
-**Description:** Delete a harness configuration
+**Description:** Delete a harness configuration. A user-scope harness config refuses a federated user (requireProfileWriter)
 
 ### Entry Points
 
@@ -6350,6 +6356,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserHarnessConfigWrites_FederatedUserRefused`
 
 ---
 

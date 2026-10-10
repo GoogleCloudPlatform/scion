@@ -496,3 +496,109 @@ func TestGenericUserTemplateWrites_SessionAndTokenUnchanged(t *testing.T) {
 		}
 	}
 }
+
+// TestUserSkillWrites_FederatedUserRefused pins that a federated user gets
+// 403 on every write to a user-scope skill, including the user-scope
+// create, and that its skill is unchanged.
+func TestUserSkillWrites_FederatedUserRefused(t *testing.T) {
+	f := newProfileWriteFixture(t)
+	ctx := context.Background()
+	owned := &store.Skill{ID: tid("pw-skill"), Name: "fed-skill", Slug: "fed-skill", Scope: store.SkillScopeUser, ScopeID: f.fed.ID(), OwnerID: f.fed.ID(), CreatedBy: f.fed.ID(), Status: "active"}
+	require.NoError(t, f.store.CreateSkill(ctx, owned))
+
+	base := "/api/v1/skills"
+	writes := []profileRequest{
+		jsonProfileRequest(t, http.MethodPost, base, CreateSkillRequest{Name: "fed-created", Scope: store.SkillScopeUser}),
+		jsonProfileRequest(t, http.MethodPatch, base+"/"+owned.ID, map[string]string{"description": "patched"}),
+		jsonProfileRequest(t, http.MethodPost, base+"/"+owned.ID+"/versions", map[string]string{"version": "1.0.0"}),
+		jsonProfileRequest(t, http.MethodPost, base+"/"+owned.ID+"/versions/"+tid("pw-version")+"/deprecate", nil),
+		jsonProfileRequest(t, http.MethodPost, base+"/"+owned.ID+"/upload", map[string]string{"version": "1.0.0"}),
+		jsonProfileRequest(t, http.MethodPost, base+"/"+owned.ID+"/finalize", map[string]string{"version": "1.0.0"}),
+		{method: http.MethodPut, path: base + "/" + owned.ID + "/files/SKILL.md?version=1.0.0", contentType: "text/markdown", body: []byte("# skill")},
+		jsonProfileRequest(t, http.MethodDelete, base+"/"+owned.ID, nil),
+	}
+	for _, pr := range writes {
+		requireProfileWriteRefused(t, f.asIdentity(pr, f.fed), pr.method+" "+pr.path)
+	}
+
+	got, err := f.store.GetSkill(ctx, owned.ID)
+	require.NoError(t, err, "a refused delete leaves the skill")
+	assert.Equal(t, owned.Description, got.Description)
+	result, err := f.store.ListSkills(ctx, store.SkillFilter{Scope: store.SkillScopeUser, ScopeID: f.fed.ID()}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Len(t, result.Items, 1, "a refused create adds nothing")
+}
+
+// TestUserSkillWrites_SessionUnchanged pins that a session still creates,
+// patches and deletes a user-scope skill.
+func TestUserSkillWrites_SessionUnchanged(t *testing.T) {
+	f := newProfileWriteFixture(t)
+	rec := f.asBearer(jsonProfileRequest(t, http.MethodPost, "/api/v1/skills", CreateSkillRequest{Name: "session-skill", Scope: store.SkillScopeUser}), f.session)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var created CreateSkillResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+	rec = f.asBearer(jsonProfileRequest(t, http.MethodPatch, "/api/v1/skills/"+created.Skill.ID, map[string]string{"description": "patched"}), f.session)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = f.asBearer(jsonProfileRequest(t, http.MethodDelete, "/api/v1/skills/"+created.Skill.ID, nil), f.session)
+	assert.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+}
+
+// TestUserHarnessConfigWrites_FederatedUserRefused pins that a federated
+// user gets 403 on every write to a user-scope harness config, including
+// the user-scope create and a clone into user scope, and that its config is
+// unchanged.
+func TestUserHarnessConfigWrites_FederatedUserRefused(t *testing.T) {
+	f := newProfileWriteFixture(t)
+	ctx := context.Background()
+	owned := &store.HarnessConfig{ID: tid("pw-hc"), Name: "fed-hc", Slug: "fed-hc", Harness: "claude", Scope: store.HarnessConfigScopeUser, ScopeID: f.fed.ID(), OwnerID: f.fed.ID(), CreatedBy: f.fed.ID(), Status: store.HarnessConfigStatusActive}
+	require.NoError(t, f.store.CreateHarnessConfig(ctx, owned))
+
+	base := "/api/v1/harness-configs"
+	writes := []profileRequest{
+		jsonProfileRequest(t, http.MethodPost, base, CreateHarnessConfigRequest{Name: "fed-created", Harness: "claude", Scope: store.HarnessConfigScopeUser}),
+		jsonProfileRequest(t, http.MethodPost, base+"/"+owned.ID+"/clone", CloneTemplateRequest{Name: "fed-clone", Scope: store.HarnessConfigScopeUser}),
+		jsonProfileRequest(t, http.MethodPut, base+"/"+owned.ID, map[string]string{"name": "fed-renamed", "harness": "claude"}),
+		jsonProfileRequest(t, http.MethodPatch, base+"/"+owned.ID, map[string]string{"description": "patched"}),
+		jsonProfileRequest(t, http.MethodPost, base+"/"+owned.ID+"/upload", UploadRequest{Files: []FileUploadRequest{{Path: "config.yaml", Size: 10}}}),
+		jsonProfileRequest(t, http.MethodPost, base+"/"+owned.ID+"/finalize", FinalizeRequest{}),
+		jsonProfileRequest(t, http.MethodPut, base+"/"+owned.ID+"/files/config.yaml", map[string]string{"content": "x"}),
+		jsonProfileRequest(t, http.MethodPost, base+"/"+owned.ID+"/reimport", nil),
+		jsonProfileRequest(t, http.MethodDelete, base+"/"+owned.ID, nil),
+	}
+	for _, pr := range writes {
+		requireProfileWriteRefused(t, f.asIdentity(pr, f.fed), pr.method+" "+pr.path)
+	}
+
+	got, err := f.store.GetHarnessConfig(ctx, owned.ID)
+	require.NoError(t, err, "a refused delete leaves the config")
+	assert.Equal(t, owned.Name, got.Name)
+	assert.Equal(t, owned.Description, got.Description)
+	result, err := f.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{Scope: store.HarnessConfigScopeUser, ScopeID: f.fed.ID()}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Len(t, result.Items, 1, "a refused create or clone adds nothing")
+}
+
+// TestUserHarnessConfigWrites_SessionUnchanged pins that a session still
+// patches and deletes its own user-scope harness config.
+func TestUserHarnessConfigWrites_SessionUnchanged(t *testing.T) {
+	f := newProfileWriteFixture(t)
+	owned := &store.HarnessConfig{ID: tid("pw-hc-session"), Name: "session-hc", Slug: "session-hc", Harness: "claude", Scope: store.HarnessConfigScopeUser, ScopeID: f.alice.ID, OwnerID: f.alice.ID, CreatedBy: f.alice.ID, Status: store.HarnessConfigStatusActive}
+	require.NoError(t, f.store.CreateHarnessConfig(context.Background(), owned))
+	rec := f.asBearer(jsonProfileRequest(t, http.MethodPatch, "/api/v1/harness-configs/"+owned.ID, map[string]string{"description": "patched"}), f.session)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = f.asBearer(jsonProfileRequest(t, http.MethodDelete, "/api/v1/harness-configs/"+owned.ID, nil), f.session)
+	assert.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+}
+
+// TestUserResourceImport_FederatedUserRefused pins that a federated user
+// gets 403 on a user-scope resource import, before any fetch.
+func TestUserResourceImport_FederatedUserRefused(t *testing.T) {
+	f := newProfileWriteFixture(t)
+	for _, kind := range []string{"template", "harness-config"} {
+		pr := jsonProfileRequest(t, http.MethodPost, "/api/v1/resources/import", map[string]string{"kind": kind, "sourceUrl": "https://example.invalid/repo", "scope": "user"})
+		requireProfileWriteRefused(t, f.asIdentity(pr, f.fed), kind)
+	}
+	result, err := f.store.ListTemplates(context.Background(), store.TemplateFilter{Scope: store.TemplateScopeUser, ScopeID: f.fed.ID()}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, result.Items)
+}

@@ -86,3 +86,12 @@ func requireTemplateProfileWriter(w http.ResponseWriter, r *http.Request, t *sto
 	}
 	return requireProfileWriter(w, r)
 }
+
+// requireSkillProfileWriter applies requireProfileWriter to a write on
+// skill sk when sk is a user-scope skill. Skills in other scopes pass.
+func requireSkillProfileWriter(w http.ResponseWriter, r *http.Request, sk *store.Skill) bool {
+	if sk == nil || sk.Scope != store.SkillScopeUser {
+		return true
+	}
+	return requireProfileWriter(w, r)
+}
