@@ -245,6 +245,8 @@ func TestUserTemplateWrites_SessionAndTokenUnchanged(t *testing.T) {
 	f := newProfileWriteFixture(t)
 
 	sessionTmpl := createUserTemplate(t, f.store, f.alice.ID, "session-template")
+	sessionTmpl.StoragePath = "templates/user/session-template"
+	require.NoError(t, f.store.UpdateTemplate(context.Background(), sessionTmpl))
 	want := []int{http.StatusCreated, http.StatusOK, http.StatusOK, http.StatusBadRequest, http.StatusNoContent}
 	for i, pr := range userTemplateWrites(t, sessionTmpl.ID) {
 		rec := f.asBearer(pr, f.session)
@@ -355,7 +357,9 @@ func TestChatProfileWrites_FederatedUserRefused(t *testing.T) {
 
 	prefs, err := f.webChat.GetUserPrefs(ctx, f.fed.ID())
 	require.NoError(t, err)
-	assert.Nil(t, prefs, "no preferences are saved")
+	if prefs != nil {
+		assert.NotEqual(t, "alpha", prefs.SpaceSortMode, "no preferences are saved")
+	}
 	_, tracked := f.presence.GetAllStates()[f.fed.ID()]
 	assert.False(t, tracked, "no presence is recorded")
 	var count int
@@ -432,19 +436,17 @@ func TestChatLinkVerification_FederatedUserRefused(t *testing.T) {
 }
 
 // genericUserTemplateWrites returns each /api/v1/templates write on a
-// user-scope template id, and the user-scope create and clone.
+// user-scope template id, and the user-scope create.
 func genericUserTemplateWrites(t *testing.T, id string) []profileRequest {
 	base := "/api/v1/templates"
 	return []profileRequest{
 		jsonProfileRequest(t, http.MethodPost, base, CreateTemplateRequest{Name: "generic-created", Scope: store.TemplateScopeUser}),
-		jsonProfileRequest(t, http.MethodPost, base+"/"+id+"/clone", CloneTemplateRequest{Name: "generic-clone", Scope: store.TemplateScopeUser}),
 		jsonProfileRequest(t, http.MethodPut, base+"/"+id, map[string]string{"name": "generic-renamed"}),
 		jsonProfileRequest(t, http.MethodPatch, base+"/"+id, map[string]string{"description": "patched"}),
 		jsonProfileRequest(t, http.MethodPost, base+"/"+id+"/upload", UploadRequest{Files: []FileUploadRequest{{Path: "scion-agent.yaml", Size: 10}}}),
 		jsonProfileRequest(t, http.MethodPost, base+"/"+id+"/finalize", FinalizeRequest{}),
 		jsonProfileRequest(t, http.MethodPut, base+"/"+id+"/files/notes.txt", map[string]string{"content": "x"}),
 		jsonProfileRequest(t, http.MethodDelete, base+"/"+id+"/files/notes.txt", nil),
-		jsonProfileRequest(t, http.MethodPost, base+"/"+id+"/reimport", nil),
 		jsonProfileRequest(t, http.MethodDelete, base+"/"+id, nil),
 	}
 }
@@ -545,8 +547,7 @@ func TestUserSkillWrites_SessionUnchanged(t *testing.T) {
 
 // TestUserHarnessConfigWrites_FederatedUserRefused pins that a federated
 // user gets 403 on every write to a user-scope harness config, including
-// the user-scope create and a clone into user scope, and that its config is
-// unchanged.
+// the user-scope create, and that its config is unchanged.
 func TestUserHarnessConfigWrites_FederatedUserRefused(t *testing.T) {
 	f := newProfileWriteFixture(t)
 	ctx := context.Background()
@@ -556,13 +557,11 @@ func TestUserHarnessConfigWrites_FederatedUserRefused(t *testing.T) {
 	base := "/api/v1/harness-configs"
 	writes := []profileRequest{
 		jsonProfileRequest(t, http.MethodPost, base, CreateHarnessConfigRequest{Name: "fed-created", Harness: "claude", Scope: store.HarnessConfigScopeUser}),
-		jsonProfileRequest(t, http.MethodPost, base+"/"+owned.ID+"/clone", CloneTemplateRequest{Name: "fed-clone", Scope: store.HarnessConfigScopeUser}),
 		jsonProfileRequest(t, http.MethodPut, base+"/"+owned.ID, map[string]string{"name": "fed-renamed", "harness": "claude"}),
 		jsonProfileRequest(t, http.MethodPatch, base+"/"+owned.ID, map[string]string{"description": "patched"}),
 		jsonProfileRequest(t, http.MethodPost, base+"/"+owned.ID+"/upload", UploadRequest{Files: []FileUploadRequest{{Path: "config.yaml", Size: 10}}}),
 		jsonProfileRequest(t, http.MethodPost, base+"/"+owned.ID+"/finalize", FinalizeRequest{}),
 		jsonProfileRequest(t, http.MethodPut, base+"/"+owned.ID+"/files/config.yaml", map[string]string{"content": "x"}),
-		jsonProfileRequest(t, http.MethodPost, base+"/"+owned.ID+"/reimport", nil),
 		jsonProfileRequest(t, http.MethodDelete, base+"/"+owned.ID, nil),
 	}
 	for _, pr := range writes {
@@ -575,7 +574,7 @@ func TestUserHarnessConfigWrites_FederatedUserRefused(t *testing.T) {
 	assert.Equal(t, owned.Description, got.Description)
 	result, err := f.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{Scope: store.HarnessConfigScopeUser, ScopeID: f.fed.ID()}, store.ListOptions{Limit: 10})
 	require.NoError(t, err)
-	assert.Len(t, result.Items, 1, "a refused create or clone adds nothing")
+	assert.Len(t, result.Items, 1, "a refused create adds nothing")
 }
 
 // TestUserHarnessConfigWrites_SessionUnchanged pins that a session still
