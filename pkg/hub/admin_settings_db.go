@@ -921,6 +921,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
 			return
 		}
+		// This check runs before the section validation below, so a body
+		// that sends an invalid telemetry.cloud member next to a masked
+		// header gets this 400 rather than the validation 400; either way
+		// nothing is written.
 		if len(maskedTelemetryHeaderNames(req.Telemetry)) > 0 {
 			var restored int
 			merged, restored, err = restoreMaskedTelemetryHeadersInDoc(merged, cur)

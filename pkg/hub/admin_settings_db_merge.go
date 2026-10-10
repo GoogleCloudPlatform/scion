@@ -189,11 +189,7 @@ func mergeSectionOnCurrentWith(ctx context.Context, ops *OperationalSettings, se
 		for k, v := range base {
 			cp[k] = v
 		}
-		dropKeysForbiddenBySchema(section, schema, cp)
-		if deepMergeSections[section] {
-			dropInvalidCarriedNestedKeys(section, cp, sentTree{}, validate)
-		}
-		dropInvalidCarriedKeys(section, schema, cp, nil, validate)
+		dropCarriedKeysFailingSchema(section, schema, cp, sentTree{}, validate)
 		b, err := json.Marshal(cp)
 		if err != nil {
 			return nil, 0, fmt.Errorf("marshalling %s base: %w", section, err)
@@ -203,16 +199,11 @@ func mergeSectionOnCurrentWith(ctx context.Context, ops *OperationalSettings, se
 
 	tree := patchSection(section, base, next, fp)
 
-	if dropped := dropKeysForbiddenBySchema(section, schema, base); len(dropped) > 0 {
+	forbidden, dropped := dropCarriedKeysFailingSchema(section, schema, base, tree, validate)
+	if len(forbidden) > 0 {
 		slog.Warn("admin settings save: removing stored keys the section schema does not allow (takes effect only if the save is written)",
-			"section", section, "keys", dropped)
+			"section", section, "keys", forbidden)
 	}
-	var dropped []string
-	if deepMergeSections[section] {
-		dropped = dropInvalidCarriedNestedKeys(section, base, tree, validate)
-	}
-	dropped = append(dropped, dropInvalidCarriedKeys(section, schema, base, tree.keys(), validate)...)
-	sort.Strings(dropped)
 	if len(dropped) > 0 {
 		slog.Warn("admin settings save: removing stored keys whose value fails the section schema (takes effect only if the save is written)",
 			"section", section, "keys", dropped)
@@ -223,6 +214,24 @@ func mergeSectionOnCurrentWith(ctx context.Context, ops *OperationalSettings, se
 		return nil, 0, fmt.Errorf("marshalling %s doc: %w", section, err)
 	}
 	return doc, baseRev, nil
+}
+
+// dropCarriedKeysFailingSchema applies to doc the schema drops a save
+// applies to the keys it carries (see mergeSectionOnCurrent), in order:
+// stored keys the section schema forbids (dropKeysForbiddenBySchema), then,
+// in a deep-merge section, carried nested keys whose value fails the
+// schema (dropInvalidCarriedNestedKeys), then carried top-level keys whose
+// value fails it (dropInvalidCarriedKeys). tree holds the keys the body
+// sent, which are never dropped. It returns the forbidden key paths and
+// the invalid key paths, the latter sorted.
+func dropCarriedKeysFailingSchema(section string, schema map[string]interface{}, doc map[string]json.RawMessage, tree sentTree, validate func(json.RawMessage) bool) (forbidden, invalid []string) {
+	forbidden = dropKeysForbiddenBySchema(section, schema, doc)
+	if deepMergeSections[section] {
+		invalid = dropInvalidCarriedNestedKeys(section, doc, tree, validate)
+	}
+	invalid = append(invalid, dropInvalidCarriedKeys(section, schema, doc, tree.keys(), validate)...)
+	sort.Strings(invalid)
+	return forbidden, invalid
 }
 
 // deepMergeSections lists the sections whose nested objects
