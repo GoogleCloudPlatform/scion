@@ -311,6 +311,15 @@ func TestShellJoin(t *testing.T) {
 	}
 }
 
+func TestTruncate(t *testing.T) {
+	if got := truncate("abc", 5); got != "abc" {
+		t.Errorf("short: %q", got)
+	}
+	if got := truncate("abcdefgh", 3); !strings.HasPrefix(got, "abc... (5 more bytes") {
+		t.Errorf("long: %q", got)
+	}
+}
+
 func TestDiffRecords(t *testing.T) {
 	old := &Record{
 		Kind:   "compile",

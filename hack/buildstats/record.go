@@ -138,7 +138,7 @@ func printRecord(w io.Writer, rec *Record) {
 		fmt.Fprintf(w, "== %s (%s)\n", rec.Label, rec.Kind)
 	}
 	if len(rec.Command) > 0 {
-		fmt.Fprintf(w, "command: %s\n", shellJoin(rec.Command))
+		fmt.Fprintf(w, "command: %s\n", truncate(shellJoin(rec.Command), maxCommandDisplay))
 	}
 	if rec.Host != nil && len(rec.Host.Env) > 0 {
 		var parts []string
@@ -189,4 +189,15 @@ func shellJoin(argv []string) string {
 		q[i] = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
 	}
 	return strings.Join(q, " ")
+}
+
+// maxCommandDisplay caps the command shown in tables; the JSON record always
+// holds the full argv.
+const maxCommandDisplay = 400
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + fmt.Sprintf("... (%d more bytes; full command in the JSON record)", len(s)-n)
 }
