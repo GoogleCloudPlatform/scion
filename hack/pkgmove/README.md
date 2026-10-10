@@ -318,7 +318,7 @@ severity:
 | HIGH | exported struct fields (only with `-allow-field-export`). **This includes embedded fields:** exporting a moved type `inner` as `Inner` renames every field that embeds it (`Outer.inner` becomes `Outer.Inner`), which changes `%+v`, encoding/json, gob, cmp, templates and reflection |
 | HIGH | a staying var initialiser that calls a moved func or a method of a moved type. This includes calls inside immediately-invoked func literals and calls through staying helpers that reach moved code (a static call graph over the package). Moved package state is now initialised before every source initialiser; for example, a registry filled by a staying initialiser looks empty to a moved initialiser |
 | HIGH | TestMain separation: moved tests leave a package that has a `TestMain` (see [TestMain](#testmain)), including into an existing target whose own `TestMain` differs |
-| HIGH | source-scanning test does not cover the target: a test file of the source package (staying or moved) imports `go/parser` or `go/packages` and enumerates files (`os.ReadDir`, `filepath.Glob`, `WalkDir`, `os.Getwd`, `parser.ParseDir`, `packages.Load`, ...). Such guard tests silently stop scanning the moved files and still pass |
+| HIGH | source-scanning test does not cover the target: a test file of the source package (staying or moved) imports `go/parser` or `go/packages` and enumerates files (`os.ReadDir`, `filepath.Glob`, `WalkDir`, `os.Getwd`, `parser.ParseDir`, `packages.Load`, ...). Such guard tests silently stop scanning the moved files and still pass. A file with a [`pkgmove:scan-covers`](#declaring-scan-coverage-pkgmovescan-covers) marker that covers the target gets the INFO below instead |
 | WARN | a staying var initialiser that makes dynamic calls (through func values or interfaces), directly or through helpers, when the moved files have package-level state |
 | WARN | each moved func or method whose value is taken, plus exported funcs (var aliases): `runtime.FuncForPC` names and panic traces show the new package path |
 | WARN | a wrapper alias used as a func value in a moved file: the moved file now uses the target func, whose identity differs from staying uses of the wrapper |
@@ -346,6 +346,7 @@ severity:
 | INFO | moved external tests, and moved files with build constraints |
 | INFO | files excluded by the build tags that do not reference moved names |
 | INFO | test companions left behind |
+| INFO | source-scanning test declares coverage of the target: a source-scanning test file that carries a `pkgmove:scan-covers` marker covering the target. The line names the marker's file:line and echoes its reason line, so the reviewer can verify each one |
 | INFO | test-only move: the target's `TestMain` is equivalent to the source's |
 
 `-rewrite-aliases` reports: WARN for files excluded by build tags that name
@@ -390,6 +391,47 @@ not resolved (with the reason).
 - A `go:embed` pattern matches files that are not in the move set.
 - The target directory already has Go files and the move set has a non-test
   Go file (exit code 3), or an alias file already exists.
+
+### Declaring scan coverage (`pkgmove:scan-covers`)
+
+The source-scanning check is syntactic: it cannot tell whether a guard test
+already scans the target directory. A test file declares that it does with a
+marker, a whole comment line followed by a comment line that gives the reason:
+
+```go
+	// pkgmove:scan-covers pkg/hub/apierr
+	// recursive walk already includes pkg/hub/apierr (walks the whole module).
+	err := filepath.WalkDir(root, func(...) error { ... })
+```
+
+- **Format:** the marker line is exactly `// pkgmove:scan-covers <dir>`, alone
+  on its line (indentation is fine), with exactly one space after `//` and
+  one directory. A marker after code on the same line, with extra words, or
+  with a malformed directory covers nothing. So does the no-space form
+  `//pkgmove:scan-covers`: that is Go directive syntax, and gofmt moves
+  directives to the end of a doc comment, away from their reason line.
+- **Reason line (required):** the next comment line says why the claim holds,
+  for example "recursive walk already includes ..." or "unaffected: guards X,
+  which the moved files do not contain". The tool does not interpret it but
+  echoes it in the report. A marker without one clears nothing; the HIGH
+  then says "marker at file:line has no reason line".
+- **Directory:** relative to the module root, slash-separated (`./` prefix
+  and trailing `/` are allowed). `pkg/hub/...` covers `pkg/hub` and every
+  directory below it, `./...` (or `...`) the whole module. Use a `/...`
+  marker only for a test that really walks recursively. Absolute paths, `..`
+  elements and other glob characters (`*`, `?`, `[`) are malformed.
+- **Placement:** anywhere in the file; put it next to the directory
+  enumeration it describes. A file may carry several markers (one per line),
+  for example one per move it has been checked for.
+
+For each source-scanning test file, the HIGH is cleared only if one of its
+markers names the move's target directory, or a parent of it with `/...`,
+and has a reason line.
+The report then lists the file as INFO "source-scanning test declares
+coverage of <target> (marker at file:line; reason: ...)". Otherwise the HIGH
+stays (and fails `-strict`); when the file has markers for other
+directories, malformed markers or markers without a reason line, the HIGH
+lists them.
 
 ### What counts as a pure initialiser call
 
@@ -547,6 +589,7 @@ Each is phrased as a check for the reviewer of a generated PR.
   x_test`) use the source package beyond plain selectors, run them; they are
   rewritten syntactically.
 - **Source-scanning guard tests:** if the report lists "source-scanning test does not cover the target", extend each listed test to scan the target directory as well. For example, use the package directory from `go list`, or walk both directories. Then check that it still fails on a planted violation in a moved file. pkg/hub has dozens of these, such as the `*_resource_literal_guard_test.go`, `*_enumeration_test.go` and `*_callsite*_test.go` files.
+- **`pkgmove:scan-covers` markers:** for each scan-covers marker listed as INFO, verify the test really enumerates the target dir (or that its subject cannot appear in the moved files), and that the reason line says which. The marker is a claim, not a proof: the tool only checks that the named directory covers the target.
 - **Working-directory paths in moved tests:** if moved tests build paths from the working directory (`..`, `../`, `os.Getwd`, a `find...Dir` helper walking up to the module root), check that each path still resolves from the target directory, which is one level deeper. A test that skips when a file is missing passes silently.
 - **Assets read at run time:** if moved code reads files relative to the
   working directory or the package directory (beyond `testdata/` and `./`

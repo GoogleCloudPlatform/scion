@@ -23,6 +23,7 @@ import (
 	"go/token"
 	"go/types"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -1914,8 +1915,143 @@ func (a *analysis) sourceScanFindings() {
 		if f.Moved {
 			side = "moved"
 		}
+		enum := strings.Join(dedupStrings(sortedCopy(calls)), ", ")
+		target := a.rel(a.cfg.DstDir)
+		var others, notes []string
+		cleared := false
+		for _, m := range scanCoversMarkers(a.fset, f.AST, f.Src) {
+			pos := a.posOf(m.pos)
+			if !m.covers(target) {
+				others = append(others, fmt.Sprintf("%q at %s", m.text, pos))
+				continue
+			}
+			if m.reason == "" {
+				notes = append(notes, fmt.Sprintf("marker at %s has no reason line", pos))
+				continue
+			}
+			a.plan.add(levelInfo, "source-scanning test declares coverage of the target", a.rel(f.Path),
+				"source-scanning test declares coverage of %s (marker at %s; reason: %q); %s test enumerates files (%s) - the marker is a claim, not a proof: verify the test really scans %s",
+				target, pos, m.reason, side, enum, target)
+			cleared = true
+			break
+		}
+		if cleared {
+			continue
+		}
+		if len(others) > 0 {
+			notes = append(notes, fmt.Sprintf("its pkgmove:scan-covers markers do not cover %s (or are malformed): %s", target, strings.Join(others, ", ")))
+		}
+		note := ""
+		if len(notes) > 0 {
+			note = " (" + strings.Join(notes, "; ") + ")"
+		}
 		a.plan.add(levelHigh, "source-scanning test does not cover the target", a.rel(f.Path),
-			"%s test parses Go sources and enumerates files (%s); after the move it no longer scans the moved files in %s (or scans the wrong set) and still passes - extend the scan to cover both directories",
-			side, strings.Join(dedupStrings(sortedCopy(calls)), ", "), a.rel(a.cfg.DstDir))
+			"%s test parses Go sources and enumerates files (%s); after the move it no longer scans the moved files in %s (or scans the wrong set) and still passes - extend the scan to cover both directories%s",
+			side, enum, target, note)
+	}
+}
+
+// scanCoversPrefix starts a marker comment by which a source-scanning test
+// declares the directories it scans:
+//
+//	// pkgmove:scan-covers pkg/hub/sub
+//	// pkgmove:scan-covers pkg/hub/...
+//
+// The marker must be a whole comment line written exactly as above (one
+// space after the slashes; "//pkgmove:" is directive syntax, which gofmt
+// moves within doc comments), with one directory, relative to the module root. A trailing "/..." covers the directory and
+// every directory below it. The next comment line must state the reason; a
+// marker without one clears nothing. The reason is echoed in the report but
+// not interpreted.
+const scanCoversPrefix = "pkgmove:scan-covers"
+
+type scanCoversMarker struct {
+	pos       token.Pos
+	text      string // the marker comment as written
+	reason    string // the following comment line, "" when there is none
+	dir       string // cleaned module-relative directory, "" when malformed
+	recursive bool
+}
+
+// scanCoversMarkers returns the scan-covers markers of a file in source order.
+// A marker that does not start its line, lacks the space after "//", or has a
+// malformed directory, is returned with dir "" so that it covers nothing.
+func scanCoversMarkers(fset *token.FileSet, file *ast.File, src []byte) []scanCoversMarker {
+	var out []scanCoversMarker
+	for _, cg := range file.Comments {
+		for i, c := range cg.List {
+			if !strings.HasPrefix(c.Text, "//") {
+				continue
+			}
+			text := strings.TrimSpace(strings.TrimPrefix(c.Text, "//"))
+			fields := strings.Fields(text)
+			if len(fields) == 0 || fields[0] != scanCoversPrefix {
+				continue
+			}
+			m := scanCoversMarker{pos: c.Pos(), text: c.Text}
+			if len(fields) == 2 && strings.HasPrefix(c.Text, "// "+scanCoversPrefix) && startsLine(src, fset.Position(c.Pos()).Offset) {
+				m.dir, m.recursive = parseScanCoversDir(fields[1])
+			}
+			if i+1 < len(cg.List) {
+				next := cg.List[i+1]
+				if strings.HasPrefix(next.Text, "//") && fset.Position(next.Pos()).Line == fset.Position(c.Pos()).Line+1 {
+					if r := strings.TrimSpace(strings.TrimPrefix(next.Text, "//")); !strings.HasPrefix(r, scanCoversPrefix) {
+						m.reason = r
+					}
+				}
+			}
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// startsLine reports whether only blanks precede offset on its line of src.
+func startsLine(src []byte, offset int) bool {
+	if offset < 0 || offset > len(src) {
+		return false
+	}
+	for i := offset - 1; i >= 0 && src[i] != '\n'; i-- {
+		if src[i] != ' ' && src[i] != '\t' {
+			return false
+		}
+	}
+	return true
+}
+
+// parseScanCoversDir validates a marker directory: module-relative, slash
+// separated, no ".." element and no glob characters other than a trailing
+// "/...". It returns "" for a malformed directory, which covers nothing.
+func parseScanCoversDir(d string) (dir string, recursive bool) {
+	if rest, ok := strings.CutSuffix(d, "/..."); ok {
+		d, recursive = rest, true
+	} else if d == "..." {
+		d, recursive = ".", true
+	}
+	if d == "" || strings.HasPrefix(d, "/") || strings.ContainsAny(d, "*?[]\\") {
+		return "", false
+	}
+	for _, el := range strings.Split(d, "/") {
+		if el == ".." || el == "..." {
+			return "", false
+		}
+	}
+	return path.Clean(d), recursive
+}
+
+// covers reports whether the marker names target (a module-relative
+// directory), or a directory above it with "/...".
+func (m scanCoversMarker) covers(target string) bool {
+	switch {
+	case m.dir == "":
+		return false
+	case m.dir == target:
+		return true
+	case !m.recursive:
+		return false
+	case m.dir == ".":
+		return true
+	default:
+		return strings.HasPrefix(target, m.dir+"/")
 	}
 }
