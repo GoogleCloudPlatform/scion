@@ -1,0 +1,11 @@
+[
+ {"ID": 0, "Mode": "link-install", "Package": "example.com/m/pkg/big", "TimeReady": "2026-10-09T21:30:00.000000000Z", "TimeStart": "2026-10-09T21:37:10.000000000Z", "TimeDone": "2026-10-09T21:37:10.250000000Z", "Cmd": null},
+ {"ID": 1, "Mode": "link", "Package": "example.com/m/pkg/big.test", "TimeStart": "2026-10-09T21:36:47.000000000Z", "TimeDone": "2026-10-09T21:37:10.000000000Z", "Cmd": ["/go/pkg/tool/linux_amd64/link -o a.out"], "CmdReal": 23000000000, "CmdUser": 30500000000, "CmdSys": 2000000000},
+ {"ID": 2, "Mode": "build", "Package": "example.com/m/pkg/big", "TimeStart": "2026-10-09T21:29:46.5Z", "TimeDone": "2026-10-09T21:36:45.0Z", "Cmd": ["/go/pkg/tool/linux_amd64/compile -p example.com/m/pkg/big"], "CmdReal": 418500000000, "CmdUser": 470000000000, "CmdSys": 9000000000},
+ {"ID": 3, "Mode": "build", "Package": "example.com/m/pkg/big.test", "TimeStart": "2026-10-09T21:36:45.0Z", "TimeDone": "2026-10-09T21:36:46.5Z", "Cmd": ["/go/pkg/tool/linux_amd64/compile -p main"], "CmdReal": 1500000000, "CmdUser": 1400000000, "CmdSys": 100000000},
+ {"ID": 4, "Mode": "build", "Package": "example.com/m/pkg/ent", "TimeStart": "2026-10-09T21:29:00Z", "TimeDone": "2026-10-09T21:29:46.4Z", "Cmd": ["/go/pkg/tool/linux_amd64/compile -p example.com/m/pkg/ent"], "CmdReal": 46400000000, "CmdUser": 60000000000, "CmdSys": 1000000000},
+ {"ID": 5, "Mode": "build", "Package": "fmt", "TimeStart": "2026-10-09T21:29:00.000Z", "TimeDone": "2026-10-09T21:29:00.004Z", "Cmd": null},
+ {"ID": 6, "Mode": "build check cache", "Package": "fmt", "TimeStart": "2026-10-09T21:28:59.990Z", "TimeDone": "2026-10-09T21:29:00.000Z", "Cmd": null},
+ {"ID": 7, "Mode": "vet", "Package": "example.com/m/pkg/big", "TimeReady": "2026-10-09T21:30:00Z", "Cmd": null},
+ {"ID": 8, "Mode": "build", "Package": "example.com/m/pkg/small", "TimeStart": "2026-10-09T21:29:00.0Z", "TimeDone": "2026-10-09T21:29:00.8Z", "Cmd": ["/go/pkg/tool/linux_amd64/compile -p example.com/m/pkg/small"], "CmdReal": 800000000, "CmdUser": 900000000, "CmdSys": 50000000}
+]

@@ -1,0 +1,22 @@
+# go: downloading example.com/dep v1.0.0
+{"Time":"2026-10-09T21:00:00Z","Action":"start","Package":"example.com/m/pkg/a"}
+{"Time":"2026-10-09T21:00:00Z","Action":"run","Package":"example.com/m/pkg/a","Test":"TestFast"}
+{"Time":"2026-10-09T21:00:00Z","Action":"output","Package":"example.com/m/pkg/a","Test":"TestFast","Output":"=== RUN   TestFast\n"}
+{"Time":"2026-10-09T21:00:00Z","Action":"pass","Package":"example.com/m/pkg/a","Test":"TestFast","Elapsed":0.01}
+{"Time":"2026-10-09T21:00:00Z","Action":"run","Package":"example.com/m/pkg/a","Test":"TestSlow"}
+{"Time":"2026-10-09T21:00:00Z","Action":"run","Package":"example.com/m/pkg/a","Test":"TestSlow/case_1"}
+{"Time":"2026-10-09T21:00:00Z","Action":"pass","Package":"example.com/m/pkg/a","Test":"TestSlow/case_1","Elapsed":9}
+{"Time":"2026-10-09T21:00:00Z","Action":"run","Package":"example.com/m/pkg/a","Test":"TestSlow/case_2"}
+{"Time":"2026-10-09T21:00:00Z","Action":"fail","Package":"example.com/m/pkg/a","Test":"TestSlow/case_2","Elapsed":9}
+{"Time":"2026-10-09T21:00:18Z","Action":"fail","Package":"example.com/m/pkg/a","Test":"TestSlow","Elapsed":18}
+{"Time":"2026-10-09T21:00:18Z","Action":"skip","Package":"example.com/m/pkg/a","Test":"TestSkipped","Elapsed":0}
+{"Time":"2026-10-09T21:00:18Z","Action":"pass","Package":"example.com/m/pkg/a","Test":"TestMedium","Elapsed":2.5}
+not json at all
+{"Time":"2026-10-09T21:00:18Z","Action":"fail","Package":"example.com/m/pkg/a","Elapsed":20.6}
+{"Time":"2026-10-09T21:00:18Z","Action":"start","Package":"example.com/m/pkg/b"}
+{"Time":"2026-10-09T21:00:18Z","Action":"pass","Package":"example.com/m/pkg/b","Test":"TestOne","Elapsed":0.5}
+{"Time":"2026-10-09T21:00:19Z","Action":"pass","Package":"example.com/m/pkg/b","Test":"TestTwo","Elapsed":0.5}
+{"Time":"2026-10-09T21:00:19Z","Action":"pass","Package":"example.com/m/pkg/b","Elapsed":1.1}
+{"Time":"2026-10-09T21:00:19Z","Action":"start","Package":"example.com/m/pkg/c"}
+{"Time":"2026-10-09T21:00:19Z","Action":"pass","Package":"example.com/m/pkg/c","Test":"TestKilledHalfway","Elapsed":3}
+{"Time":"2026-10-09T21:00:19Z","Action":"run","Package":"example.com/m/pkg/c","Test":"TestHangs"}
