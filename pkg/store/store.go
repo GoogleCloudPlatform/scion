@@ -20,6 +20,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // Common errors returned by store implementations.
@@ -558,6 +560,16 @@ type AgentStore interface {
 	// active remote brokers are left untouched. Returns the number of projects
 	// updated.
 	ReassignProjectBroker(ctx context.Context, oldBrokerID, newBrokerID string) (int, error)
+
+	// SetAgentPinnedRuntimeTarget compare-and-sets an agent's placement:
+	// runtime_broker_id must equal expected.RuntimeBrokerID ("" also matches
+	// NULL) and the pin columns must match the rest of expected (NULL when
+	// expected.RuntimeTargetID is ""). It writes runtime_broker_id and the
+	// pin from next and bumps state_version in the same conditional update,
+	// so a stale UpdateAgent conflicts instead of reverting the move. next
+	// must be complete (it never unpins): ErrInvalidPinnedPlacement. A miss
+	// returns ErrPinnedPlacementChanged; a missing agent ErrNotFound.
+	SetAgentPinnedRuntimeTarget(ctx context.Context, agentID string, expected, next PinnedPlacement) (*Agent, error)
 
 	// AggregateAgentHealth returns lightweight health-oriented counts and lists
 	// for the health-summary endpoint without fetching full agent records.
@@ -1263,6 +1275,16 @@ type RuntimeBrokerStore interface {
 	// Returns ErrNotFound if the broker doesn't exist.
 	GetRuntimeBrokerByName(ctx context.Context, name string) (*RuntimeBroker, error)
 
+	// GetLegacyRuntimeBrokerByName is GetRuntimeBrokerByName restricted to
+	// legacy rows (no stored runtime target). When several legacy rows
+	// match it returns the oldest by creation time. ErrNotFound when none.
+	GetLegacyRuntimeBrokerByName(ctx context.Context, name string) (*RuntimeBroker, error)
+
+	// SetRuntimeBrokerTarget updates a flat Runtime Broker's target display
+	// name. It never converts a legacy row (ErrRuntimeBrokerNotFlat) and
+	// never changes a stored target ID or type (ErrRuntimeTargetChanged).
+	SetRuntimeBrokerTarget(ctx context.Context, brokerID string, desc api.RuntimeTargetDescriptor) (*RuntimeBroker, error)
+
 	// UpdateRuntimeBroker updates an existing runtime broker.
 	// Returns ErrNotFound if the broker doesn't exist.
 	UpdateRuntimeBroker(ctx context.Context, broker *RuntimeBroker) error
@@ -1289,7 +1311,9 @@ type RuntimeBrokerStore interface {
 	// FindEmbeddedBroker returns the single embedded broker if exactly one
 	// exists, or nil if zero or multiple embedded brokers are found (ambiguous).
 	// "Embedded" means the broker's labels contain {"scion.io/broker-role": "embedded"}.
-	// Used to recover broker ID from DB when settings are lost.
+	// Used to recover the legacy broker ID from DB when settings are lost;
+	// rows with a stored runtime target (flat Runtime Brokers) are never
+	// candidates.
 	FindEmbeddedBroker(ctx context.Context) (*RuntimeBroker, error)
 
 	// UpdateRuntimeBrokerHeartbeat updates the last heartbeat and status.

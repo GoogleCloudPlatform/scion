@@ -668,6 +668,15 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					"agent_id", agent.ID, "agent", agent.Name, "container_status", agent.ContainerStatus)
 			}
 			resume := agent.Phase == string(state.PhaseSuspended) || forcedRecovery
+			// Flat placement pre-check: a stale pin is refused before the
+			// reservation, the run intent and any credential or run-ID
+			// write.
+			if err := s.checkPinnedPlacement(agent); err != nil {
+				if !writeRuntimeTargetRefusal(w, err) {
+					writeErrorFromErr(w, err, "")
+				}
+				return
+			}
 			// From here the start no longer follows the client
 			// (ptone/scion#1961): a client that gives up must not cancel the
 			// broker launch, the rollback or the final status write. The
@@ -780,6 +789,15 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// the empty-per-agent capability would have the agent
 			// stopped and then the start refused (design #2703 D3).
 			if !s.requireEmptyPerAgentBrokerCapabilityForAgent(ctx, w, agent) {
+				return
+			}
+			// Flat placement pre-check, before the broker cap check, the
+			// start claim, the run intent and the stop leg: a refused
+			// restart never stops the agent.
+			if err := s.checkPinnedPlacement(agent); err != nil {
+				if !writeRuntimeTargetRefusal(w, err) {
+					writeErrorFromErr(w, err, "")
+				}
 				return
 			}
 			// Check the broker cap before the start claim, the run intent
@@ -968,7 +986,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		if writeEmptyPerAgentCapabilityError(w, dispatchErr) {
 			return
 		}
-		if relaySkillResolutionError(w, dispatchErr) {
+		// A flat Runtime Broker refusal is a definite start failure that no
+		// retry can fix: settle it by recording the refusal message on the
+		// agent, then relay the refusal.
+		s.settleRuntimeTargetRefusal(ctx, agent, dispatchErr)
+		if relayDispatchRefusal(w, dispatchErr) {
 			return
 		}
 		if relayIdentityMappingError(w, dispatchErr) {

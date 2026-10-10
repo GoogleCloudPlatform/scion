@@ -206,6 +206,11 @@ type ServerConfig struct {
 	// Nil selects ExecMountChecker (mount(8)/umount(8)); tests set a fake.
 	NFSMountChecker MountChecker
 
+	// FlatInstance, when set, makes this server host exactly one flat Runtime
+	// Broker instance bound to one runtime target (see FlatInstanceConfig).
+	// Nil keeps the legacy, profile-resolving Runtime Broker.
+	FlatInstance *FlatInstanceConfig
+
 	// ColocatedStorage is the storage backend of a Hub running co-located in the
 	// same process. When set and backed by the local filesystem, the broker
 	// resolves resources for the co-located connection by reading directly from
@@ -478,8 +483,10 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		}
 	}
 
-	// Initialize Hub integration if enabled
-	if cfg.HubEnabled && (cfg.HubEndpoint != "" || cfg.InMemoryCredentials != nil) {
+	// Initialize Hub integration if enabled. A flat instance that may not be
+	// hosted here (no Hub in the same process) sets up no Hub connection at
+	// all; Start refuses it.
+	if cfg.HubEnabled && (cfg.HubEndpoint != "" || cfg.InMemoryCredentials != nil) && srv.flatHostingError() == nil {
 		if err := srv.initHubIntegration(); err != nil {
 			slog.Warn("Failed to initialize Hub integration", "error", err)
 		}
@@ -620,6 +627,18 @@ func (s *Server) initHubIntegration() error {
 			s.hubMu.Unlock()
 			slog.Info("Created local hub connection (co-located mode)", "name", creds.Name, "brokerID", creds.BrokerID)
 		}
+	}
+
+	// A flat instance is served only through the embedded registration's
+	// in-memory credentials: it never loads the legacy multi-store,
+	// broker-credentials.json or a config-derived connection, so the
+	// steps below are skipped and no credential watcher is started.
+	if s.isFlat() {
+		s.buildAuthMiddleware()
+		slog.Info("Hub integration initialized for flat Runtime Broker instance",
+			"connections", len(s.hubConnections),
+			"runtimeBrokerID", s.flatInstance().Identity.RuntimeBrokerID)
+		return nil
 	}
 
 	// 4. Load MultiStore credentials
@@ -1060,6 +1079,13 @@ func (s *Server) GetHydrator() *templatecache.Hydrator {
 
 // Start starts the HTTP server.
 func (s *Server) Start(ctx context.Context) error {
+	// P1 hosts a flat instance only co-located with its Hub
+	// (flat_runtime_broker_remote_unsupported); refuse before serving,
+	// connecting or accepting any dispatch.
+	if err := s.flatHostingError(); err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	s.startTime = time.Now()
 	if err := s.validateBrokerAuthStartup(); err != nil {
@@ -1116,8 +1142,11 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Discover auxiliary runtimes (e.g. Kubernetes) from project settings
 	// so that agents running on non-default runtimes can be found after
-	// a broker restart.
-	s.discoverAuxiliaryRuntimes()
+	// a broker restart. A flat instance serves only its single target and
+	// never resolves profiles, so it has no auxiliary runtimes.
+	if !s.isFlat() {
+		s.discoverAuxiliaryRuntimes()
+	}
 
 	// Check (and, with nfs.auto_mount, mount) the configured NFS shares.
 	// This runs in the background: an NFS mount or mountpoint check against
@@ -2545,6 +2574,7 @@ func (s *Server) registerRoutes() {
 // applyMiddleware wraps the handler with middleware.
 func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply middleware in reverse order (last applied runs first)
+	h = s.profileResolutionMiddleware(h)
 	h = s.recoveryMiddleware(h)
 	if s.requestLogger != nil {
 		h = logging.RequestLogMiddleware(s.requestLogger, "broker", logging.BrokerPathPatterns(), s.config.SlowRequestThreshold)(h)

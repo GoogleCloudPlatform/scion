@@ -74,6 +74,8 @@ const componentTests = [
   'src/components/pages/chat-hub-members.test.ts',
   'src/components/shared/chat/chat-thread-peer-project.test.ts',
   'src/components/pages/agent-detail-reincarnate.test.ts',
+  'src/components/pages/agent-placement.test.ts',
+  'src/components/pages/agent-detail-placement.test.ts',
 ];
 
 /** Points the given files at their own TypeScript project. */

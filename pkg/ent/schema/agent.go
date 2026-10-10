@@ -123,6 +123,22 @@ func (Agent) Fields() []ent.Field {
 		field.String("workspace_placement").
 			Optional().
 			Default(""),
+		// --- Pinned placement (flat Runtime Brokers) ---
+		// The agent's pinned Runtime Broker and runtime target
+		// (.design/flat-runtime-brokers-contract.md section 8). NULL means
+		// unpinned (legacy). Written only by CreateAgent and
+		// SetAgentPinnedRuntimeTarget, never by UpdateAgent, so neither a
+		// stale in-memory model nor an older binary can erase them. A pin is
+		// valid only while pinned_runtime_broker_id == runtime_broker_id.
+		field.String("pinned_runtime_broker_id").
+			Optional().
+			Nillable(),
+		field.String("pinned_runtime_target_id").
+			Optional().
+			Nillable(),
+		field.String("pinned_runtime_target_type").
+			Optional().
+			Default(""),
 		field.Bool("web_pty_enabled").
 			Default(false),
 		field.JSON("exposed_ports", []store.ExposedPort{}).
