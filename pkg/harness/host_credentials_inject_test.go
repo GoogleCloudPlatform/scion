@@ -177,3 +177,90 @@ func TestPathWithin(t *testing.T) {
 		}
 	}
 }
+
+func TestReadInjectableHostCredentialFile(t *testing.T) {
+	meta := shippedClaudeAuthMeta(t)
+
+	t.Run("reads the checked file", func(t *testing.T) {
+		home := t.TempDir()
+		writeHomeFile(t, home, "/.claude/.credentials.json")
+		files := InjectableHostCredentialFiles(meta, home)
+		if len(files) != 1 {
+			t.Fatalf("files = %+v", files)
+		}
+		data, err := ReadInjectableHostCredentialFile(files[0], home)
+		if err != nil || string(data) != "{}" {
+			t.Fatalf("read = %q, %v", data, err)
+		}
+	})
+
+	t.Run("declared path swapped to a symlink out of home after the check", func(t *testing.T) {
+		root := t.TempDir()
+		home := filepath.Join(root, "home")
+		p := writeHomeFile(t, home, "/.claude/.credentials.json")
+		outside := writeHomeFile(t, root, "/outside.json")
+		files := InjectableHostCredentialFiles(meta, home)
+		if len(files) != 1 {
+			t.Fatalf("files = %+v", files)
+		}
+		// Attacker moves the checked file out and links the declared path
+		// outside home; the checked Path now names the moved-away file.
+		if err := os.Rename(p, outside); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, p); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ReadInjectableHostCredentialFile(files[0], home); err == nil {
+			t.Fatal("expected an error after the swap")
+		}
+	})
+
+	t.Run("declared path re-pointed to another in-home file after the check", func(t *testing.T) {
+		home := t.TempDir()
+		first := writeHomeFile(t, home, "/.dotfiles/a.json")
+		other := writeHomeFile(t, home, "/.dotfiles/b.json")
+		link := filepath.Join(home, ".claude", ".credentials.json")
+		if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(first, link); err != nil {
+			t.Fatal(err)
+		}
+		files := InjectableHostCredentialFiles(meta, home)
+		if len(files) != 1 {
+			t.Fatalf("files = %+v", files)
+		}
+		if err := os.Remove(link); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(other, link); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ReadInjectableHostCredentialFile(files[0], home); err == nil {
+			t.Fatal("expected an error: the declared path no longer names the checked file")
+		}
+	})
+
+	t.Run("oversized file is refused", func(t *testing.T) {
+		home := t.TempDir()
+		p := writeHomeFile(t, home, "/.claude/.credentials.json")
+		if err := os.WriteFile(p, make([]byte, maxHostCredentialFileSize+1), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		files := InjectableHostCredentialFiles(meta, home)
+		if len(files) != 1 {
+			t.Fatalf("files = %+v", files)
+		}
+		if _, err := ReadInjectableHostCredentialFile(files[0], home); err == nil {
+			t.Fatal("expected an error for an oversized file")
+		}
+	})
+
+	t.Run("escaping suffix is refused", func(t *testing.T) {
+		home := t.TempDir()
+		if _, err := ReadInjectableHostCredentialFile(HostCredentialFile{Name: "x", TargetSuffix: "/../x", Path: "/etc/hostname"}, home); err == nil {
+			t.Fatal("expected an error for an escaping suffix")
+		}
+	})
+}

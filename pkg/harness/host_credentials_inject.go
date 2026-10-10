@@ -15,6 +15,8 @@
 package harness
 
 import (
+	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -127,4 +129,63 @@ func pathWithin(dir, path string) bool {
 		return false
 	}
 	return rel != "." && filepath.IsLocal(rel)
+}
+
+// maxHostCredentialFileSize bounds how much of a host credential file is
+// read. Harness login files are a few KiB.
+const maxHostCredentialFileSize = 1 << 20
+
+// ReadInjectableHostCredentialFile reads a file returned by
+// InjectableHostCredentialFiles while closing the gap between that check and
+// the read: it opens the file, then re-resolves the declared path under home
+// and requires that the resolved path is still strictly inside the resolved
+// home and names the very file that was opened (same device and inode), and
+// that it is a regular file no larger than 1 MiB. The content is read from
+// the already-open descriptor.
+func ReadInjectableHostCredentialFile(f HostCredentialFile, home string) ([]byte, error) {
+	rel, ok := homeRelativeSuffix(f.TargetSuffix)
+	if !ok {
+		return nil, fmt.Errorf("target_suffix escapes the home directory")
+	}
+	realHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		return nil, err
+	}
+	file, err := os.Open(f.Path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !opened.Mode().IsRegular() {
+		return nil, fmt.Errorf("not a regular file")
+	}
+	if opened.Size() > maxHostCredentialFileSize {
+		return nil, fmt.Errorf("file larger than %d bytes", maxHostCredentialFileSize)
+	}
+	resolved, err := filepath.EvalSymlinks(filepath.Join(home, rel))
+	if err != nil {
+		return nil, err
+	}
+	if !pathWithin(realHome, resolved) {
+		return nil, fmt.Errorf("resolves outside the home directory")
+	}
+	current, err := os.Stat(resolved)
+	if err != nil {
+		return nil, err
+	}
+	if !os.SameFile(opened, current) {
+		return nil, fmt.Errorf("file changed while it was being read")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxHostCredentialFileSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxHostCredentialFileSize {
+		return nil, fmt.Errorf("file larger than %d bytes", maxHostCredentialFileSize)
+	}
+	return data, nil
 }
