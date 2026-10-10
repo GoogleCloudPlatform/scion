@@ -160,6 +160,22 @@ func isReservedTestIdentityEmail(email string) bool {
 	return store.IsTestFixtureEmail(email)
 }
 
+// emailResolvedPrincipalRefused reports whether a path that resolves a user
+// by email must refuse it. Such a path does not go through the hub-issued
+// JWT and its per-request row block (testFixtureRejection), so it cannot
+// apply a test identity's expiry or the feature switch; it refuses test
+// identities outright instead, whether or not the feature is enabled. Call
+// it with u == nil on the presented email before the lookup, and again
+// with the resolved row. Callers today: broker on-behalf-of
+// (resolveOnBehalfOf) and the broker inbound message paths
+// (handleBrokerInbound, handleBrokerInboundRouted).
+func emailResolvedPrincipalRefused(email string, u *store.User) bool {
+	if isReservedTestIdentityEmail(email) {
+		return true
+	}
+	return u != nil && (u.IsTestFixture() || isReservedTestIdentityEmail(u.Email))
+}
+
 // testFixtureRejection returns a non-empty reason when u must not
 // authenticate: a test-fixture row while the feature is off, with no
 // expiry, or past its expiry; or a non-fixture row in the reserved domain.

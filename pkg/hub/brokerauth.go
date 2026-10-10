@@ -1259,7 +1259,7 @@ func (svc *BrokerAuthService) resolveOnBehalfOf(ctx context.Context, r *http.Req
 	// feature switch. On-behalf-of resolves by email without that check, so
 	// it refuses the reserved domain (before any lookup) and any
 	// test-fixture row, whether or not test identities are enabled.
-	if isReservedTestIdentityEmail(identifier) {
+	if emailResolvedPrincipalRefused(identifier, nil) {
 		return nil, http.StatusForbidden, errOnBehalfOfIneligible
 	}
 
@@ -1281,7 +1281,7 @@ func (svc *BrokerAuthService) resolveOnBehalfOf(ctx context.Context, r *http.Req
 	if user.Status != store.UserStatusActive {
 		return nil, http.StatusForbidden, fmt.Errorf("on-behalf-of principal is not active (status: %s)", user.Status)
 	}
-	if user.IsTestFixture() || isReservedTestIdentityEmail(user.Email) {
+	if emailResolvedPrincipalRefused(identifier, user) {
 		return nil, http.StatusForbidden, errOnBehalfOfIneligible
 	}
 
