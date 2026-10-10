@@ -307,3 +307,72 @@ describe('criticToolBlocked with an unclosed opener directly before the selectio
     }
   });
 });
+
+describe('criticToolBlocked and code', () => {
+  const tools = ['comment', 'suggest', 'insert', 'delete'] as const;
+  const sel = (doc: string, word: string, nth = 0) => {
+    let from = -1;
+    for (let i = 0; i <= nth; i++) from = doc.indexOf(word, from + 1);
+    return { from, to: from + word.length, text: word };
+  };
+  const apply = (doc: string, tool: CriticTool, s: { from: number; to: number; text: string }) => {
+    const e = criticToolEdit(tool, s)!;
+    return doc.slice(0, e.from) + e.insert + doc.slice(e.to);
+  };
+
+  it('treats mark-like text in code as text: a whole code span can be marked', () => {
+    const doc = 'Write `{++x++}` to insert. Done.';
+    const s = sel(doc, '`{++x++}`');
+    for (const tool of tools) {
+      expect(criticToolBlocked(tool, s, doc), tool).toBeNull();
+      expect(onlyMarksChanged(apply(doc, tool, s), doc), tool).toBe(true);
+    }
+    // Next to code that looks like a mark is not inside a mark.
+    const done = sel(doc, 'Done');
+    for (const tool of tools) expect(criticToolBlocked(tool, done, doc), tool).toBeNull();
+  });
+
+  it('still refuses mark tokens outside code in a selection that also holds code', () => {
+    const doc = 'a `{++x++}` b++} c';
+    expect(criticToolBlocked('comment', sel(doc, '`{++x++}` b++}'), doc)).toMatch(/CriticMarkup/);
+  });
+
+  it('refuses a selection or insertion point inside or across code', () => {
+    const doc = 'Run `make test` now.\n\n```sh\ngo test ./...\n```\nEnd.';
+    for (const tool of tools) {
+      expect(criticToolBlocked(tool, sel(doc, 'make'), doc), tool).toMatch(/inside or across code/);
+      // Insert keeps the selection and adds after it, outside code.
+      if (tool !== 'insert') {
+        expect(criticToolBlocked(tool, sel(doc, 'test` now'), doc), tool).toMatch(
+          /inside or across code/
+        );
+      }
+      expect(criticToolBlocked(tool, sel(doc, 'go test'), doc), tool).toMatch(
+        /inside or across code/
+      );
+    }
+    const p = doc.indexOf('test');
+    for (const tool of ['comment', 'suggest', 'insert'] as const) {
+      expect(criticToolBlocked(tool, { from: p, to: p, text: '' }, doc), tool).toMatch(
+        /inside or across code/
+      );
+    }
+    // Right after a code span, and a whole code span, are fine.
+    const after = doc.indexOf(' now');
+    expect(criticToolBlocked('insert', { from: after, to: after, text: '' }, doc)).toBeNull();
+    expect(criticToolBlocked('delete', sel(doc, '`make test`'), doc)).toBeNull();
+  });
+
+  it('refuses a mark that changes which text is code', () => {
+    const doc = 'Intro\n```\ncode\n```\nEnd';
+    const at = doc.indexOf('```');
+    const s = { from: at, to: at, text: '' };
+    const result = apply(doc, 'comment', s);
+    // The clean text is unchanged, so only the code check sees it.
+    expect(onlyMarksChanged(result, doc)).toBe(true);
+    expect(criticToolBlocked('comment', s, doc)).toMatch(/which text is code/);
+    // At the end of the paragraph before the fence it is fine.
+    const end = doc.indexOf('\n');
+    expect(criticToolBlocked('comment', { from: end, to: end, text: '' }, doc)).toBeNull();
+  });
+});

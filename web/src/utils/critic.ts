@@ -571,15 +571,17 @@ export function criticToolEdit(
   }
 }
 
-/** The CriticMarkup tokens a toolbar selection may not contain. */
+/** The CriticMarkup tokens a toolbar selection may not contain outside code. */
 const MARK_TOKENS = ['{++', '++}', '{--', '--}', '{~~', '~>', '~~}', '{>>', '<<}', '{==', '==}'];
 
 /**
  * Explains why a toolbar action cannot apply to a selection of doc, or
  * returns null when it can. Marks do not nest, so the selection (or the
  * insertion point) must not touch an existing mark, and the selected text
- * must not contain mark tokens; otherwise the result would read as
- * different marks than intended.
+ * must not contain mark tokens outside code; otherwise the result would
+ * read as different marks than intended. Markdown code is literal text, so
+ * the selection must not cut into code, and the new mark must not change
+ * which text is code.
  */
 export function criticToolBlocked(
   tool: CriticTool,
@@ -587,8 +589,12 @@ export function criticToolBlocked(
   doc: string
 ): string | null {
   if (tool === 'delete' && sel.text === '') return 'Select the text to delete.';
-  if (MARK_TOKENS.some((t) => sel.text.includes(t))) {
-    return 'The selection contains CriticMarkup. Select plain text.';
+  const code = criticCodeRanges(doc);
+  const inCode = (p: number): boolean => code.some((r) => r.start <= p && p < r.end);
+  for (const t of MARK_TOKENS) {
+    for (let k = sel.text.indexOf(t); k >= 0; k = sel.text.indexOf(t, k + 1)) {
+      if (!inCode(sel.from + k)) return 'The selection contains CriticMarkup. Select plain text.';
+    }
   }
   const at = tool === 'insert' ? { from: sel.to, to: sel.to } : sel;
   for (const seg of parseCritic(doc)) {
@@ -599,6 +605,10 @@ export function criticToolBlocked(
       : at.from < seg.end && at.to > seg.start;
     if (touches) return INSIDE_MARK_HINT;
   }
+  // A boundary strictly inside a code range would put mark tokens into
+  // code, where they are literal text. Whole code ranges may be selected.
+  const cuts = (p: number): boolean => code.some((r) => r.start < p && p < r.end);
+  if (cuts(at.from) || cuts(at.to)) return INSIDE_CODE_HINT;
   // The new mark must read as intended in the whole document. Apply the
   // edit, then require (1) that the text with every mark rejected is
   // unchanged, and (2) that the result parses with exactly the inserted
@@ -609,7 +619,10 @@ export function criticToolBlocked(
   // mark's opener (the mark then starts before the edit). Marks elsewhere
   // need no check: the selection does not touch a mark and the tool
   // inserts a balanced mark, so a mark outside the edit could only change
-  // by pairing with the new tokens, which (2) refuses.
+  // by pairing with the new tokens, which (2) refuses. (3) The code of the
+  // text with every mark rejected must be the same code as before: a mark
+  // at the start of a fence line, for example, stops the line being a
+  // fence, which (1) and (2) do not see.
   const edit = criticToolEdit(tool, sel);
   if (!edit) return null;
   const result = doc.slice(0, edit.from) + edit.insert + doc.slice(edit.to);
@@ -617,7 +630,37 @@ export function criticToolBlocked(
   if (!marksAsIntended(result, edit, tool === 'comment' && sel.text !== '' ? 2 : 1)) {
     return UNCLOSED_MARK_HINT;
   }
+  if (cleanCode(result) !== cleanCode(doc)) return CODE_STRUCTURE_HINT;
   return null;
+}
+
+/**
+ * The code ranges of src that survive the clean projection, as offsets
+ * into that projection, listed "start-end" and joined by commas. Code in
+ * an insertion, a comment or a substitution's new side is dropped. A code
+ * range never crosses a mark token, so each lies inside one segment.
+ */
+function cleanCode(src: string): string {
+  const code = criticCodeRanges(src);
+  const out: string[] = [];
+  let k = 0;
+  let clean = 0;
+  for (const s of parseCritic(src)) {
+    // The part of the segment the clean projection keeps, if any.
+    let kept: CriticRange | null = null;
+    if (s.kind === 'text') kept = { start: s.start, end: s.end };
+    else if (s.kind === 'deletion' || s.kind === 'highlight' || s.kind === 'substitution') {
+      kept = { start: s.start + 3, end: s.start + 3 + s.text.length };
+    }
+    for (; k < code.length && code[k].start < s.end; k++) {
+      const r = code[k];
+      if (kept && r.start >= kept.start && r.end <= kept.end) {
+        out.push(`${clean + r.start - kept.start}-${clean + r.end - kept.start}`);
+      }
+    }
+    if (kept) clean += kept.end - kept.start;
+  }
+  return out.join(',');
 }
 
 /**
@@ -640,5 +683,9 @@ function marksAsIntended(result: string, edit: CriticEdit, inserted: number): bo
 }
 
 const INSIDE_MARK_HINT = 'The selection is inside or across a mark. Select text outside marks.';
+const INSIDE_CODE_HINT =
+  'The selection is inside or across code. Text in code is literal, so a mark there would change it. Select the whole code, or mark beside it.';
+const CODE_STRUCTURE_HINT =
+  'This mark would change which text is code, for example at the start of a fence line. Place it elsewhere.';
 const UNCLOSED_MARK_HINT =
   'An unclosed CriticMarkup opener earlier in the text would swallow this mark. Remove or close it first.';
