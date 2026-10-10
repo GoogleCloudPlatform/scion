@@ -5,6 +5,18 @@ move does not change behaviour, and every package that used to compile still
 does. Existing callers in the source package need no edits, because the tool
 leaves an alias file behind.
 
+It also has two modes for the later stages of a split:
+- **Test-only moves into an existing package** (see
+  [below](#test-only-moves-into-an-existing-package)): `_test.go` files follow
+  code that an earlier move took out, in waves.
+- **`-rewrite-aliases`** (see [below](#-rewrite-aliases-shrinking-alias-files)):
+  references to alias entries become direct references to their targets, so
+  alias files can shrink.
+
+Every move also [sees through existing aliases](#alias-references): a moved
+file that uses an alias left by an earlier move refers to the alias target
+directly.
+
 It is the generator for the `pkg/hub` split. Every move PR is **generated
 against the current main tip**. When main moves, the PR is regenerated rather
 than rebased (see [Workflow](#workflow-regenerate-dont-rebase)).
@@ -21,6 +33,13 @@ go build -buildvcs=false -o /tmp/pkgmove ./hack/pkgmove
 # 2. Real run (in a clean checkout of the main tip).
 /tmp/pkgmove -from pkg/hub -to pkg/hub/maintenance \
     maintenance_executors.go maintenance_executors_test.go
+
+# 3. A later wave of tests, into the package that step 2 created.
+/tmp/pkgmove -from pkg/hub -to pkg/hub/maintenance maintenance_wave2_test.go
+
+# 4. Rewrite references to the aliases of one package, and drop the unused
+#    unexported entries (no -to: the aliases of every package).
+/tmp/pkgmove -rewrite-aliases -from pkg/hub -to pkg/hub/apierr
 ```
 
 The files to move are named by base name, relative to `-from`. List the
@@ -31,8 +50,8 @@ file (`foo.go` / `foo_test.go`) that you leave behind. Non-Go files, such as
 | Flag | Default | Meaning |
 |---|---|---|
 | `-from` | (required) | source package directory |
-| `-to` | (required) | target package directory; must not contain Go files yet |
-| `-name` | base of `-to` | target package name |
+| `-to` | (required, except with `-rewrite-aliases`) | target package directory. It must not contain Go files yet, unless every moved Go file is a `_test.go` file ([test-only move](#test-only-moves-into-an-existing-package)). With `-rewrite-aliases` it selects the aliases of that package |
+| `-name` | the existing package's name, else base of `-to` | target package name; for an existing package it must match |
 | `-area` | package name | alias file stem: `zz_alias_<area>.go` |
 | `-tags` | none | build tags for the analysis (see [Build tags](#build-tags)) |
 | `-dry-run` | off | print the plan and safety report; touch nothing |
@@ -42,7 +61,8 @@ file (`foo.go` / `foo_test.go`) that you leave behind. Non-Go files, such as
 | `-strict` | off | treat every HIGH finding as an error (see the [Safety report](#safety-report) table) |
 | `-testmain-support` | none | import path of a test-support package exporting `RunTestMain(m *testing.M) int`; when moved tests leave a package that has a `TestMain`, generates a delegating `TestMain` in the target (see [TestMain](#testmain)) |
 | `-no-git` | off | use `os.Rename` instead of `git mv` / `git add` |
-| `-report` | `<from>/zz_alias_<area>_safety.txt` | where the safety report is written |
+| `-report` | `<from>/zz_alias_<area>_safety.txt` (`<from>/zz_alias_rewrite_safety.txt` with `-rewrite-aliases`) | where the safety report is written |
+| `-rewrite-aliases` | off | move nothing: rewrite alias references in the source package and its external tests (see [`-rewrite-aliases`](#-rewrite-aliases-shrinking-alias-files)); takes no files |
 
 Exit codes: `0` success, `1` the move cannot be generated (errors are listed in
 the report, and the tree is untouched), `2` usage, `3` tool or post-check failure.
@@ -92,6 +112,9 @@ the report, and the tree is untouched), `2` usage, `3` tool or post-check failur
      alias file makes the source import the target, so the target cannot
      import the source. Move the dependency too, or invert it first (P1-3
      does this for `errors.go`).
+   - **References to aliases** of the source package (left by earlier moves)
+     are not backward references: they are rewritten to the alias target
+     (see [Alias references](#alias-references)).
 3. **Generates the alias file** `zz_alias_<area>.go` in the source package:
    - types: `type foo = target.Foo`, including generic aliases
      `type P[K comparable] = target.P[K]`;
@@ -158,6 +181,118 @@ the report, and the tree is untouched), `2` usage, `3` tool or post-check failur
    timestamps or absolute paths, so the same inputs on the same commit give a
    byte-identical tree and output. The tests check this.
 
+## Alias references
+
+After a move, staying code reaches the moved symbols through the alias file.
+A later move of such code must not treat those aliases as staying code: the
+tool sees through them and rewrites each reference to the alias target (for
+example `writeError` becomes `apierr.WriteError`, with the import added). The
+plan lists every rewrite under "Alias references resolved to their targets".
+
+**What counts as an alias** (any other declaration is ordinary staying code):
+
+| Declaration | Where | Why it is equivalent |
+|---|---|---|
+| `type x = pkg.Y`, `type x[P any] = pkg.Y[P]` (type parameters forwarded in order) | any file | an alias is the same type |
+| `const x = pkg.Y` (one name, no type, one value) | any file | the same constant |
+| `var x = pkg.F` for a non-generic func `F` | pkgmove-generated alias files only, and only if nothing assigns `x`, increments it, ranges into it or takes its address: in the package (by type), in its tag-excluded files and external tests (by name), and, for exported names, in every importer in the module | the var holds `F` itself, so calls and values are identical |
+| `func x(p0 T) R { return pkg.F(p0) }` (parameters forwarded in order, generic ones explicitly instantiated with their own type parameters, signature identical to `F`'s) | pkgmove-generated alias files only | the generator never wraps a function that calls `recover()` directly or inspects its call stack (those get var aliases), so dropping the wrapper frame changes nothing |
+
+A generated alias file is a `zz_alias_*.go` file carrying the generator's
+comment ("by hack/pkgmove, so existing references in package ..."). Hand-written
+wrappers and vars are not resolved, because the target might call `recover()`
+or inspect its call stack, or the var might be a hook. When a moved file uses
+one, the back-reference error says why it was not resolved.
+
+**Checks** on each resolved reference:
+- an embedded field whose type is an alias with a different name than its
+  target (`struct{ errBox }` for `apierr.ErrBox`) would be renamed: ERROR;
+- a wrapper used as a func value (not called) now has the target's identity:
+  WARN;
+- in a [test-only move](#test-only-moves-into-an-existing-package), an
+  in-package test may not import the alias target if that package imports the
+  target package (an import cycle): ERROR. A reference to an alias of the
+  target package itself becomes a bare name.
+
+Moved external tests are rewritten the same way (`hub.WriteJSON` becomes
+`apierr.WriteJSON`), except wrapper values and renamed embedded fields, which
+keep the source import.
+
+## Test-only moves into an existing package
+
+When the target directory already holds a package, only `_test.go` files
+(plus assets) may move into it. This lets tests follow their source in waves
+(P3-1: authz moves its source once, then its tests in four waves). Source
+moves always create a new package; a move set with a non-test Go file is
+refused with exit code 3, before anything is analysed.
+
+- **Package clause:** each moved test keeps its kind. In-package tests
+  (`package hub`) join the target package (`package authz`); external tests
+  (`package hub_test`) join `authz_test`. `-name` defaults to the existing
+  package's name and must match it.
+- **Nothing is aliased or renamed.** The moved tests may use: other moved
+  test files, aliases of the source (resolved, see above), and other
+  packages. Anything else in the source is a back-reference (ERROR), as for any
+  move. If the move would export a source member (a moved test type shares an
+  unexported method name with a staying interface), it is refused.
+- **References into the target:** `authz.X` in a moved in-package test
+  becomes `X` and the import is dropped; an alias of `authz.X` becomes `X`.
+  A local declaration that would shadow the bare name is an ERROR.
+- **Collisions fail loudly.** A package-level name of a moved in-package test
+  that the target already declares (in any file, whatever its build tags) is
+  an ERROR, as is a moved external test's name that an existing external test
+  declares, and an import name that collides with a package-level name on
+  the other side. The one exception is an **equivalent duplicate** (below).
+- **Helper reuse.** A func or const declared by an in-package test file of
+  both packages is *equivalent* when both have the same build constraint and
+  the same tokens once every identifier is replaced by what it denotes (type
+  information on both sides; aliases of the source are seen through; helpers
+  they use must be equivalent too; comments, layout and trailing commas are
+  ignored; `iota` is never equivalent). Then:
+  - a moved test may use a staying helper whose target equivalent exists (the
+    plan lists it under "Staying helpers reused from the target");
+  - a moved declaration with a target equivalent is dropped from the moved
+    file, with any imports only it used ("Moved declarations dropped").
+
+  Types and vars are never reused: a shared var would share state. To let
+  several waves use a helper, copy it into the target first (a prep PR); the
+  last wave then moves the original, which is dropped as a duplicate.
+- **TestMain:** see [TestMain](#testmain).
+- **Import cycles:** a moved in-package test that imports (directly, or
+  through an alias target) a package that imports the target is an ERROR
+  (an in-package test cannot import its own package's importers). Move it as
+  an external test instead.
+- The post-move type-check covers the target with all its in-package tests,
+  old and new.
+
+## `-rewrite-aliases`: shrinking alias files
+
+`pkgmove -rewrite-aliases -from <dir> [-to <dir>]` moves nothing. In the source
+package (every type-checked file, including in-package tests) and its external
+tests, each reference to an [alias](#alias-references) becomes a direct
+reference to its target, with imports added (and the source import dropped
+from external tests that no longer use it). With `-to`, only aliases of that
+package are rewritten.
+
+Then unexported entries of generated alias files that nothing references any
+more are deleted; a file left without entries is deleted (`git rm`).
+
+**Kept** (each listed in the report):
+- exported entries: importers may use them (remove them in a separate step,
+  after rewriting the importers);
+- hand-written aliases (in ordinary files): never removed;
+- references that cannot be rewritten without a change: wrappers used as func
+  values, and embedded fields whose name would change; their entries stay;
+- names that a file excluded by build tags uses (matched by name, WARN): those
+  files are not rewritten;
+- entries used by other kept entries of an alias file (a wrapper signature
+  that names an alias type), and entries that a `//go:linkname` anywhere in
+  the module targets.
+
+References inside generated alias files are never rewritten. The post-run
+checks are `go list -test` and an in-process type-check of the package with
+its in-package tests.
+
 ## Safety report
 
 A pure move can still change behaviour, mainly through **initialisation
@@ -177,10 +312,12 @@ severity:
 | HIGH | `gob.Register` of a moved type anywhere in the source package (element types of pointers, slices, arrays, maps and chans included): the gob name embeds the package path, so encoded data and peers that use the old name break |
 | HIGH | exported struct fields (only with `-allow-field-export`). **This includes embedded fields:** exporting a moved type `inner` as `Inner` renames every field that embeds it (`Outer.inner` becomes `Outer.Inner`), which changes `%+v`, encoding/json, gob, cmp, templates and reflection |
 | HIGH | a staying var initialiser that calls a moved func or a method of a moved type. This includes calls inside immediately-invoked func literals and calls through staying helpers that reach moved code (a static call graph over the package). Moved package state is now initialised before every source initialiser; for example, a registry filled by a staying initialiser looks empty to a moved initialiser |
-| HIGH | TestMain separation: moved tests leave a package that has a `TestMain` (see [TestMain](#testmain)) |
+| HIGH | TestMain separation: moved tests leave a package that has a `TestMain` (see [TestMain](#testmain)), including into an existing target whose own `TestMain` differs |
 | HIGH | source-scanning test does not cover the target: a test file of the source package (staying or moved) imports `go/parser` or `go/packages` and enumerates files (`os.ReadDir`, `filepath.Glob`, `WalkDir`, `os.Getwd`, `parser.ParseDir`, `packages.Load`, ...). Such guard tests silently stop scanning the moved files and still pass |
 | WARN | a staying var initialiser that makes dynamic calls (through func values or interfaces), directly or through helpers, when the moved files have package-level state |
 | WARN | each moved func or method whose value is taken, plus exported funcs (var aliases): `runtime.FuncForPC` names and panic traces show the new package path |
+| WARN | a wrapper alias used as a func value in a moved file: the moved file now uses the target func, whose identity differs from staying uses of the wrapper |
+| WARN | test-only move: the target's `TestMain` delegates to `-testmain-support` (check it does everything the source's does), or the source has no `TestMain` but the target does |
 | WARN | a moved test with a string literal starting with `testdata/`, `./`, `../` or equal to `..`, a call to `os.Getwd` or a `find...Dir` helper, or a `testdata` directory left behind while tests move: the package directory changes, so list the files in the file set (to move them as assets) or adjust the paths |
 | WARN | an interface method spec (named or anonymous) in a tag-excluded file that matches an unexported method of a moved type |
 | WARN | a moved var initialiser that calls another package's functions (for example `os.Getenv` or `slog.Default`), unless the call is provably pure (see below). It now runs before all of the source package's initialisers, so state they set is no longer visible to it, and its own effects happen earlier |
@@ -204,6 +341,13 @@ severity:
 | INFO | moved external tests, and moved files with build constraints |
 | INFO | files excluded by the build tags that do not reference moved names |
 | INFO | test companions left behind |
+| INFO | test-only move: the target's `TestMain` is equivalent to the source's |
+
+`-rewrite-aliases` reports: WARN for files excluded by build tags that name
+aliases (not rewritten), INFO for references kept (wrapper func values,
+embedded fields), for entries kept (exported, hand-written, still referenced,
+targeted by `//go:linkname`), and for forwarding-shaped declarations that are
+not resolved (with the reason).
 
 **Errors** (the tool refuses the move):
 
@@ -228,11 +372,19 @@ severity:
 - A moved file is excluded by the build tags, or uses cgo.
 - A moved func has no body (assembly or `go:linkname` pull), or the source
   directory has `.s` or `.syso` files.
+- A moved file embeds an alias whose target has another name (the field
+  would be renamed).
+- A pkgmove-generated alias file is in the move set, or a destination file
+  already exists.
+- Test-only moves into an existing package: a name collision that is not an
+  equivalent duplicate, a needed rename of a source member, an import cycle,
+  or a bare target name shadowed by a local.
 - A `//go:linkname` anywhere in the module (test and build-excluded files
   included) targets `<source import path>.<moved name>`.
 - `TestMain` itself is in the move set.
 - A `go:embed` pattern matches files that are not in the move set.
-- The target directory already has Go files, or an alias file already exists.
+- The target directory already has Go files and the move set has a non-test
+  Go file (exit code 3), or an alias file already exists.
 
 ### What counts as a pure initialiser call
 
@@ -276,12 +428,12 @@ The analysis uses one build configuration: the default, plus `-tags`.
 
 All file contents are computed before the tree is touched. Git mode also
 refuses to start in two cases:
-- a file to move is untracked;
-- a file the move edits has staged changes.
+- a file to move (or to delete, with `-rewrite-aliases`) is untracked;
+- a file the move edits (or deletes) has staged changes.
 
-If any later step fails (`git mv`, a write, `git add`), everything done so far
-is rolled back: moves, rewritten files, alias files, staging, and the target
-directory if the run created it. The error says whether the rollback was
+If any later step fails (`git mv`, a write, a delete, `git add`), everything
+done so far is rolled back: moves, rewritten and deleted files, alias files,
+staging, and the target directory if the run created it. The error says whether the rollback was
 complete. Post-move sanity-check failures (`go list`, type-check, vet) leave the
 generated tree in place for inspection; use `git checkout`/`git reset` to
 discard it.
@@ -308,6 +460,18 @@ one.
 
   The report then carries a WARN to check the harness is equivalent.
 
+**Into an existing package** that already has a `TestMain`, nothing is
+generated (a second `TestMain` would not compile). Instead:
+- the target's `TestMain` is equivalent to the source's (same canonical
+  tokens, as for [helper reuse](#test-only-moves-into-an-existing-package)):
+  INFO;
+- it is the delegating form for `-testmain-support`: WARN, as above;
+- otherwise: HIGH (ERROR under `-strict`);
+- the source has no `TestMain` but the target does: WARN.
+
+If the target has none, the rules above apply (stub, or generated with
+`-testmain-support`; an existing `zz_testmain_test.go` is an ERROR).
+
 **Expected helper:** a small test-support package (for pkg/hub, created by the
 first real move, for example under `pkg/hub/internal/`) exporting:
 
@@ -323,11 +487,12 @@ once.
 
 ## Not supported (rejected, or out of scope)
 
-- Moving into a package that already has Go files: **planned, decision at
-  P3-1**. Each move creates a new package. Moving a second batch into an
-  existing package would also need references through the first batch's
-  aliases to be rewritten. This is not needed if the P3-1 design gives the
-  authz sub-moves sibling subpackages.
+- Moving non-test code into a package that already has Go files (P3-1
+  decision): source moves always create a new package. Test-only moves are
+  supported.
+- Rewriting importers of the source package in `-rewrite-aliases` (only the
+  source package and its external tests are rewritten; exported entries are
+  kept for the importers).
 - Backward-only moves, where the target imports the source and nothing aliases
   back (for example, moving e2e tests out of `pkg/hub`). **This is a non-goal.**
 - Analysing several build configurations in one run.
@@ -376,6 +541,31 @@ Each is phrased as a check for the reviewer of a generated PR.
   values. Only this module is scanned.
 - **TestMain equivalence:** if `-testmain-support` was used, verify that the
   helper does everything the source `TestMain` does.
+- **Hand-written forwarding funcs and vars:** only type and const aliases are
+  resolved wherever they are; wrappers and func vars only in generated alias
+  files. If a back-reference error says a declaration "is not in a
+  pkgmove-generated alias file", either move it into one (after checking the
+  target does not call `recover()` or inspect its stack, and that the var is
+  not a hook) or rewrite the reference by hand.
+- **Wrapper func values:** if the report lists "func value through a wrapper
+  alias resolved to its target", check that nothing compares that value with
+  staying uses of the wrapper (`reflect` `Pointer`, `FuncForPC` names).
+- **Var aliases and init order:** a resolved var alias is read directly as
+  its target func. If code ran during the source package's initialisation
+  before the var was set (only possible through an initialisation-order
+  cycle the compiler cannot see, such as an interface call), it saw `nil`
+  before and now sees the function. pkgmove-generated var aliases are
+  initialised first by dependency order, so this needs a hand-made cycle.
+- **Helper reuse is for in-package tests:** equivalence is decided with type
+  information on both sides, so external tests (which pkgmove does not
+  type-check) never reuse helpers; their collisions are errors. Moved external
+  tests that use helpers declared in staying external tests are not detected
+  (as for any move); run them.
+- **Test-only moves and `init()`:** an `init()` in a moved test file is
+  reported as HIGH as for any move. In a test-only move it runs in the
+  target's test binary; check what it initialises.
+- **Excluded files in `-rewrite-aliases`:** files excluded by build tags are
+  not rewritten; rewrite the names the report lists by hand under those tags.
 
 ## Workflow: regenerate, don't rebase
 
@@ -410,8 +600,12 @@ go test ./hack/pkgmove/ -update      # rewrite the goldens after an intended cha
 ```
 
 Each fixture under `testdata/<case>/in` is a small module. A test copies it to
-a temp dir, moves files from `hub/` to `hub/sub/`, and compares the result with
-`want/` and `stdout.golden`. Failing cases must leave the tree untouched.
+a temp dir, moves files from `hub/` to `hub/sub/` (which already holds a
+package in the `intoexisting*` fixtures; `rewritealiases` runs
+`-rewrite-aliases` instead), and compares the result with `want/` and
+`stdout.golden`. Failing cases must leave the tree untouched. The alias files
+in the `alias*`, `rewritealiases` and `intoexisting*` inputs were generated by
+pkgmove itself from an earlier move.
 
 `TestBehaviour` runs the tests of every successful fixture before and after the move:
 - **Where the move changes behaviour:** the tests must fail afterwards, and
@@ -451,3 +645,9 @@ a temp dir, moves files from `hub/` to `hub/sub/`, and compares the result with
 | `sourcescan` | a staying go/parser guard test enumerating the package with `os.ReadDir`: HIGH. Even its `STRICT_GUARD=1` file-count check still passes after the move, because the alias file takes the moved file's place: the coverage loss is silent |
 | `asm` | a body-less func with an assembly file: refused |
 | `linkname` | a linkname in another package targeting a moved var: refused |
+| `aliasresolve` | a move after an earlier one (alias file generated by pkgmove): type, generic type, const, wrapper, generic wrapper, var-alias (recover and stack-inspecting funcs) references resolved; an existing import reused; a parameter shadowing the import name; a wrapper func value WARN. The moved tests (including the call-site check) pass |
+| `aliasreject` | refused: a hand-written wrapper and a hand-written func var (with the reason in the error), a var alias assigned by a staying test and by another package, and an embedded alias with a different target name |
+| `rewritealiases` | `-rewrite-aliases -to apierr` (git): staying and external-test references rewritten; unused unexported entries removed; exported, embedded, func-value and tag-excluded uses kept; a hand-written alias of another package untouched. The package's tests pass |
+| `intoexisting` | a test wave into the package of an earlier source move (git): aliases to the target become bare names, `sub.X` becomes `X`, an alias of another package is qualified, a staying helper is reused, a duplicate helper is dropped with its import, the external test is re-qualified, and the target's TestMain is equivalent. The moved tests pass |
+| `intoexistingtestmain` | the same wave into a target whose TestMain differs: HIGH, and the moved test (which needs the source harness) fails after the move |
+| `intoexistingreject` | refused: a test name collision, a staying helper whose target copy differs, and import cycles (directly and through an alias target) |

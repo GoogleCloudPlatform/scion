@@ -92,7 +92,7 @@ var goldenCases = []goldenCase{
 	{fixture: "embed", files: []string{"move.go"}, wantErr: true}, // embedded-field export needs -allow-field-export
 	{fixture: "asm", files: []string{"move.go"}, wantErr: true},
 	{fixture: "linkname", files: []string{"move.go"}, wantErr: true},
-	{fixture: "aliasreject", files: []string{"move.go"}, wantErr: true}, // hand-written wrapper and var, assigned var alias, embedded alias
+	{fixture: "aliasreject", files: []string{"move.go"}, wantErr: true},                                     // hand-written wrapper and var, assigned var alias, embedded alias
 	{fixture: "intoexistingreject", files: []string{"policy_a_test.go", "policy_c_test.go"}, wantErr: true}, // collision, non-equivalent helper, import cycles
 }
 
@@ -432,6 +432,7 @@ func TestStrictRejectsHigh(t *testing.T) {
 		{"basic", []string{"maint.go", "maint_test.go"}, []string{
 			"-strict: init() in moved file", "-strict: package-level var initialiser calls package code"}},
 		{"sourcescan", []string{"move.go"}, []string{"-strict: source-scanning test does not cover the target"}},
+		{"intoexistingtestmain", []string{"policy_a_test.go"}, []string{"-strict: TestMain separation"}},
 	} {
 		t.Run(tc.fixture, func(t *testing.T) {
 			dir := t.TempDir()
@@ -534,5 +535,157 @@ func TestBehaviour(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRewriteAliasesAll rewrites the aliases of every package (no -to),
+// including hand-written ones, which are never removed.
+func TestRewriteAliasesAll(t *testing.T) {
+	requireGo(t)
+	_, out, err := runFixture(t, goldenCase{fixture: "rewritealiases", rewrite: true}, true)
+	if err != nil {
+		t.Fatalf("dry run: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"pkgmove alias rewrite: example.com/fx/hub (aliases of all packages)",
+		"hub/clock.go:12: Clock -> other.Clock",
+		"hand-written alias (never removed): hub/clock.go: Clock",
+		"hub/users.go:8: code -> apierr.Code",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// aliasOnlyTree is a module whose generated alias file has one unexported
+// entry, used by one staying file.
+var aliasOnlyTree = map[string]string{
+	"go.mod":         "module example.com/fx\n\ngo 1.26\n",
+	"apierr/code.go": "package apierr\n\n// Code is an error code.\ntype Code string\n",
+	"hub/zz_alias_apierr.go": `package hub
+
+// Aliases for symbols moved to
+// example.com/fx/apierr
+// by hack/pkgmove, so existing references in package hub keep compiling.
+
+import (
+	"example.com/fx/apierr"
+)
+
+type (
+	code = apierr.Code
+)
+`,
+	"hub/use.go": "package hub\n\nfunc use() code { return \"x\" }\n",
+}
+
+// TestRewriteAliasesDeletesFile checks that an alias file left without
+// entries is deleted (and staged as deleted), and that a failure restores it.
+func TestRewriteAliasesDeletesFile(t *testing.T) {
+	requireGo(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not in PATH")
+	}
+	setup := func(t *testing.T) string {
+		dir := t.TempDir()
+		writeTree(t, dir, aliasOnlyTree)
+		gitRun(t, dir, "init", "-q")
+		gitRun(t, dir, "add", "-A")
+		gitRun(t, dir, "commit", "-q", "-m", "fixture")
+		return dir
+	}
+	cfg := func(dir string, buf *bytes.Buffer) *Config {
+		return &Config{SrcDir: filepath.Join(dir, "hub"), RewriteAliases: true, Typecheck: true, Stdout: buf}
+	}
+	t.Run("delete", func(t *testing.T) {
+		dir := setup(t)
+		var buf bytes.Buffer
+		if err := run(cfg(dir, &buf)); err != nil {
+			t.Fatalf("run: %v\n%s", err, buf.String())
+		}
+		if _, err := os.Stat(filepath.Join(dir, "hub", "zz_alias_apierr.go")); !os.IsNotExist(err) {
+			t.Fatalf("alias file not deleted: %v", err)
+		}
+		cmd := exec.Command("git", "status", "--porcelain")
+		cmd.Dir = dir
+		b, _ := cmd.Output()
+		for _, want := range []string{"D  hub/zz_alias_apierr.go", "M  hub/use.go"} {
+			if !strings.Contains(string(b), want) {
+				t.Errorf("git status missing %q:\n%s", want, b)
+			}
+		}
+		if !strings.Contains(buf.String(), "Files deleted (1):\n  hub/zz_alias_apierr.go") {
+			t.Errorf("plan does not list the deletion:\n%s", buf.String())
+		}
+	})
+	t.Run("rollback", func(t *testing.T) {
+		dir := setup(t)
+		testHookBeforeStage = func() error { return errors.New("injected failure") }
+		defer func() { testHookBeforeStage = nil }()
+		var buf bytes.Buffer
+		err := run(cfg(dir, &buf))
+		if err == nil || !strings.Contains(err.Error(), "injected failure (all changes rolled back)") {
+			t.Fatalf("want a rolled-back failure, got %v\n%s", err, buf.String())
+		}
+		got := readTree(t, dir)
+		for name, content := range aliasOnlyTree {
+			if got[name] != content {
+				t.Errorf("%s not restored:\n%s", name, got[name])
+			}
+		}
+		cmd := exec.Command("git", "status", "--porcelain")
+		cmd.Dir = dir
+		if b, _ := cmd.Output(); len(b) != 0 {
+			t.Errorf("git status not clean after rollback:\n%s", b)
+		}
+	})
+}
+
+// TestIntoExistingRejectsSource checks that only _test.go files may move
+// into an existing package, and that -name must match it.
+func TestIntoExistingRejectsSource(t *testing.T) {
+	requireGo(t)
+	for _, tc := range []struct {
+		name  string
+		files []string
+		pkg   string
+		want  string
+	}{
+		{"source", []string{"users.go"}, "", "supported only for _test.go file sets (and assets), but the move set includes users.go"},
+		{"name", []string{"policy_a_test.go"}, "other", "is in package sub, but the move targets package other"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			copyTree(t, filepath.Join("testdata", "intoexisting", "in"), dir)
+			var buf bytes.Buffer
+			err := run(&Config{SrcDir: filepath.Join(dir, "hub"), DstDir: filepath.Join(dir, "hub", "sub"), PkgName: tc.pkg,
+				Files: tc.files, NoGit: true, DryRun: true, Stdout: &buf})
+			if err == nil || errors.Is(err, errPlan) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want an error containing %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+// TestHelperReuseIsSemantic checks that a staying helper whose text matches
+// the target's is not reused when its identifiers denote different objects.
+func TestHelperReuseIsSemantic(t *testing.T) {
+	requireGo(t)
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"go.mod":                   "module example.com/fx\n\ngo 1.26\n",
+		"hub/limits.go":            "package hub\n\nconst limit = 1\n",
+		"hub/helpers_test.go":      "package hub\n\nfunc mkLimit() int { return limit }\n",
+		"hub/limit_test.go":        "package hub\n\nimport \"testing\"\n\nfunc TestLimit(t *testing.T) {\n\tif mkLimit() != 1 {\n\t\tt.Fatal(\"limit\")\n\t}\n}\n",
+		"hub/sub/limits.go":        "package sub\n\nconst limit = 2\n",
+		"hub/sub/helpers_test.go":  "package sub\n\nfunc mkLimit() int { return limit }\n",
+		"hub/sub/existing_test.go": "package sub\n\nimport \"testing\"\n\nfunc TestExisting(t *testing.T) { _ = mkLimit() }\n",
+	})
+	var buf bytes.Buffer
+	err := run(&Config{SrcDir: filepath.Join(dir, "hub"), DstDir: filepath.Join(dir, "hub", "sub"),
+		Files: []string{"limit_test.go"}, NoGit: true, DryRun: true, Stdout: &buf})
+	if !errors.Is(err, errPlan) || !strings.Contains(buf.String(), "moved test file uses func mkLimit declared in the staying test file helpers_test.go") {
+		t.Fatalf("want a helper-separation error, got %v\n%s", err, buf.String())
 	}
 }

@@ -254,13 +254,13 @@ var dynamicMethodNames = map[string]bool{
 
 func analyze(cfg *Config) (*analysis, error) {
 	a := &analysis{
-		cfg:          cfg,
-		fset:         token.NewFileSet(),
-		byPath:       map[string]*srcFile{},
-		forward:      map[types.Object][]*srcFile{},
-		pkgRename:    map[types.Object]string{},
-		memberRename: map[types.Object]string{},
-		embedFollow:  map[types.Object]string{},
+		cfg:            cfg,
+		fset:           token.NewFileSet(),
+		byPath:         map[string]*srcFile{},
+		forward:        map[types.Object][]*srcFile{},
+		pkgRename:      map[types.Object]string{},
+		memberRename:   map[types.Object]string{},
+		embedFollow:    map[types.Object]string{},
 		edits:          map[*srcFile]*fileEdits{},
 		xtestSels:      map[*srcFile][]*ast.SelectorExpr{},
 		xtestAliasSels: map[*srcFile][]*ast.SelectorExpr{},

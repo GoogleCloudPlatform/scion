@@ -10,5 +10,6 @@ func Move(w io.Writer) error {
 	_ = callerAt()
 	_ = hook(w, "h")
 	_ = writeJSON(w, "j")
+	_ = WriteJSON(w, "k")
 	return notFound(w, "m")
 }

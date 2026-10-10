@@ -1070,7 +1070,7 @@ func (a *analysis) inDropped(f *srcFile, pos token.Pos) bool {
 		if d.file != f {
 			continue
 		}
-		var n ast.Node = d.node
+		n := d.node
 		if d.gen != nil && len(d.gen.Specs) == 1 {
 			n = d.gen
 		}

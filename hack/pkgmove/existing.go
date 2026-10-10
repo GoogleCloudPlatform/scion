@@ -78,9 +78,13 @@ func existingPkgName(dir string, tags []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	for _, f := range files {
-		if !f.XTest {
-			return f.PkgName, nil
+	// Files the build excludes (such as a //go:build ignore generator in
+	// package main) may belong to another package; prefer included files.
+	for _, included := range []bool{true, false} {
+		for _, f := range files {
+			if f.Included == included && !f.XTest {
+				return f.PkgName, nil
+			}
 		}
 	}
 	for _, f := range files {
@@ -103,7 +107,6 @@ func (a *analysis) setupIntoExisting(dstFiles []*srcFile) error {
 			a.rel(a.cfg.DstDir), strings.Join(nonTest, ", "))
 	}
 	a.intoExisting = true
-	a.dstFiles = dstFiles
 	a.dstScope = map[string]bool{}
 	a.dstDecls = map[string]declRef{}
 	a.dstXDecls = map[string]declRef{}
@@ -113,8 +116,12 @@ func (a *analysis) setupIntoExisting(dstFiles []*srcFile) error {
 			want += "_test"
 		}
 		if f.PkgName != want {
+			if !f.Included {
+				continue // not part of the package (for example a //go:build ignore program)
+			}
 			return fmt.Errorf("%s is in package %s, but the move targets package %s (pass -name to match the existing package)", a.rel(f.Path), f.PkgName, want)
 		}
+		a.dstFiles = append(a.dstFiles, f)
 		for _, d := range pkgDecls(f) {
 			m := a.dstDecls
 			if f.XTest {

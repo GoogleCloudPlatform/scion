@@ -230,8 +230,10 @@ func (a *analysis) execute() (err error) {
 		for _, f := range a.deletes {
 			paths = append(paths, f.Path)
 		}
-		if err := a.git(append([]string{"diff", "--cached", "--quiet", "--"}, paths...)...); err != nil {
-			return fmt.Errorf("files touched by the move have staged changes; commit or unstage them first")
+		if len(paths) > 0 {
+			if err := a.git(append([]string{"diff", "--cached", "--quiet", "--"}, paths...)...); err != nil {
+				return fmt.Errorf("files touched by the move have staged changes; commit or unstage them first")
+			}
 		}
 	}
 

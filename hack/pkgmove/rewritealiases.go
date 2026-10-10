@@ -15,11 +15,15 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"go/ast"
 	"go/token"
 	"go/types"
+	"os"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -131,6 +135,13 @@ func (a *analysis) analyzeRewriteAliases() (*analysis, error) {
 		}
 	}
 	sort.Slice(objs, func(i, j int) bool { return objs[i].Pos() < objs[j].Pos() })
+	// A //go:linkname anywhere in the module may pull an entry by name.
+	linked := a.linknamed()
+	for _, obj := range objs {
+		if pos, ok := linked[obj.Name()]; ok {
+			keep(obj, "targeted by //go:linkname at "+pos)
+		}
+	}
 	// Removable: unexported generated entries with no references left, other
 	// than from alias entries that are removed too (a greatest fixpoint).
 	cand := map[types.Object]bool{}
@@ -221,6 +232,47 @@ func (a *analysis) analyzeRewriteAliases() (*analysis, error) {
 	}
 	a.plan.normalize()
 	return a, nil
+}
+
+// linknamed returns the names of the source package that a //go:linkname
+// directive anywhere in the module targets (with the first position).
+func (a *analysis) linknamed() map[string]string {
+	out := map[string]string{}
+	pkgs, err := a.modulePackages()
+	if err != nil {
+		a.plan.errorf("scanning the module for go:linkname: %v", err)
+		return out
+	}
+	prefix := a.mod.ImportPath + "."
+	for _, p := range pkgs {
+		var names []string
+		names = append(names, p.GoFiles...)
+		names = append(names, p.TestGoFiles...)
+		names = append(names, p.XTestGoFiles...)
+		names = append(names, p.IgnoredGoFiles...)
+		sort.Strings(names)
+		for _, name := range names {
+			path := filepath.Join(p.Dir, name)
+			b, err := os.ReadFile(path)
+			if err != nil || !bytes.Contains(b, []byte("go:linkname")) {
+				continue
+			}
+			for i, line := range strings.Split(string(b), "\n") {
+				fields := strings.Fields(strings.TrimSpace(line))
+				if len(fields) < 3 || fields[0] != "//go:linkname" || !strings.HasPrefix(fields[2], prefix) {
+					continue
+				}
+				sym := strings.TrimPrefix(fields[2], prefix)
+				if j := strings.IndexAny(sym, ".)"); j >= 0 {
+					sym = sym[:j]
+				}
+				if _, ok := out[sym]; !ok {
+					out[sym] = a.rel(path) + ":" + strconv.Itoa(i+1)
+				}
+			}
+		}
+	}
+	return out
 }
 
 // enclosingAlias returns the alias whose declaration in f contains pos.
