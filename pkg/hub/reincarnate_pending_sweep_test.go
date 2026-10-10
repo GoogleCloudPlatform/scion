@@ -53,7 +53,7 @@ func claimReincarnationWithoutWorker(t *testing.T, srv *Server, s store.Store, a
 	}
 	require.NoError(t, srv.reincarnateClaimTx(ctx, a, rec, nil, AuditActor{}))
 	if age > 0 {
-		// The record's updated_at defaults to the commit time; date it back
+		// The record's updated_at defaults to the insert time; date it back
 		// to the claim time without changing its state.
 		got, err := s.GetAgentReincarnation(ctx, rec.ID)
 		require.NoError(t, err)
@@ -250,4 +250,41 @@ func TestSweepStaleReincarnations_OrphanPendingUsesPendingBound(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, store.ReincarnationStateFailed, after.ReincarnationState)
 	assert.Contains(t, after.Message, reincarnationDidNotStartReason)
+}
+
+// TestSweepStaleReincarnations_OrphanNonPendingKeepsGeneralBound: an agent
+// left in a non-pending reincarnation state with no matching record is held
+// to the general bound, not the pending one: untouched at 5 minutes old,
+// swept with the restart reason past reincarnationStaleAfter.
+func TestSweepStaleReincarnations_OrphanNonPendingKeepsGeneralBound(t *testing.T) {
+	ctx := context.Background()
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	agent.ReincarnationState = store.ReincarnationStateStarting
+	agent.Message = "migrating to generation 2"
+	stamp := time.Now().Add(-5 * time.Minute)
+	agent.ReincarnationUpdatedAt = &stamp
+	require.NoError(t, s.UpdateAgent(ctx, agent))
+	before := snapshotAgent(t, s, agent.ID)
+
+	n, err := srv.sweepStaleReincarnations(ctx)
+	require.NoError(t, err)
+	assert.Zero(t, n, "a non-pending orphan younger than the general bound must not be swept")
+	after, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, before, snapshotAgent(t, s, agent.ID), "the agent must be unchanged")
+	assert.Equal(t, "migrating to generation 2", after.Message)
+
+	stamp = time.Now().Add(-reincarnationStaleAfter - time.Minute)
+	after.ReincarnationUpdatedAt = &stamp
+	require.NoError(t, s.UpdateAgent(ctx, after))
+
+	n, err = srv.sweepStaleReincarnations(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+	swept, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ReincarnationStateFailed, swept.ReincarnationState)
+	assert.Contains(t, swept.Message, "reincarnation failed: hub restarted during reincarnation")
 }
