@@ -161,6 +161,18 @@ describe('artifact move dialog', () => {
     expect(button(el, 'Move').hasAttribute('disabled')).toBe(true);
   });
 
+  it('says which access a move keeps and which the old home project loses (ptone/scion#4334)', async () => {
+    mockFetch([{ id: 'proj-2', name: 'docs' }], json({}));
+    const el = await mount();
+    const hint = el.shadowRoot!.querySelector('p.hint')!.textContent!.replace(/\s+/g, ' ').trim();
+    expect(hint).toBe(
+      'Your projects are listed; you need permission to publish in the one you choose. ' +
+        'Share links and grants to people and other projects are kept. ' +
+        'The old home project loses its access unless you grant it explicitly.'
+    );
+    expect(hint).not.toContain('Links and grants are kept.');
+  });
+
   it('says so when the user has no other project', async () => {
     mockFetch([{ id: 'gone-1', name: 'old' }], json({}));
     const el = await mount();
