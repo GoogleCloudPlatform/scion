@@ -158,7 +158,7 @@ func ReadInjectableHostCredentialFile(f HostCredentialFile, home string) ([]byte
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	opened, err := file.Stat()
 	if err != nil {
 		return nil, err
