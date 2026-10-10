@@ -41,8 +41,9 @@ var serverDMMigrationCmd = &cobra.Command{
 (dm:<uuidA>:<uuidB>) to the kind-encoded format
 (dm:<kind>:<uuid>:<kind>:<uuid>).
 
-By default runs in DRY-RUN mode — scans and reports what would change
-without modifying the database. Pass --execute to apply changes.
+By default runs in DRY-RUN mode — scans and reports what would change;
+it removes or rewrites no rows but still applies the schema migration.
+Pass --execute to apply changes.
 
 The migration is idempotent: conversations with kind-encoded keys are
 scanned but not modified (they may gain missing participants), so
@@ -147,9 +148,9 @@ func openDMMigrationStore(ctx context.Context) (*entadapter.CompositeStore, erro
 		if err != nil {
 			return nil, fmt.Errorf("opening sqlite: %w", err)
 		}
-		if err := entc.AutoMigrate(ctx, client); err != nil {
+		if err := migrateMaintenanceDB(ctx, client, dmMigrationExecute); err != nil {
 			_ = client.Close()
-			return nil, fmt.Errorf("running migrations: %w", err)
+			return nil, err
 		}
 		s = entadapter.NewCompositeStore(client)
 
@@ -158,9 +159,9 @@ func openDMMigrationStore(ctx context.Context) (*entadapter.CompositeStore, erro
 		if err != nil {
 			return nil, fmt.Errorf("opening postgres (verify DSN and network connectivity): %w", err)
 		}
-		if err := entc.AutoMigrate(ctx, client); err != nil {
+		if err := migrateMaintenanceDB(ctx, client, dmMigrationExecute); err != nil {
 			_ = client.Close()
-			return nil, fmt.Errorf("running migrations: %w", err)
+			return nil, err
 		}
 		s = entadapter.NewCompositeStore(client)
 

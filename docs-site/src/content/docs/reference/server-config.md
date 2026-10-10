@@ -209,10 +209,15 @@ Direct maintenance callers include:
 These direct calls run outside the Hub's advisory schema lock. Mixed old replicas may report degraded legacy health as well as write failures after the drop. Rolling back to an old binary can recreate an empty table but cannot restore the deleted data.
 :::
 
-:::caution[Session metrics: one row per session segment on upgrade]
-The Hub keeps one `agent_session_metrics` row per agent, session ID and segment start (`started_at`), enforced by a unique index. Older Hubs stored every report, so a database can hold repeated rows for one segment. When the Hub starts (`CompositeStore.Migrate`), it removes those repeats before creating the index, keeping the earliest stored row. Rows for separate segments of a resumed session are kept.
+:::caution[Duplicate rows removed before schema migration]
+Three tables get a unique index that older Hubs did not enforce, so an existing database can hold rows the index rejects. Before the schema migration, every migrate entry point runs the same pre-migration steps (`entadapter.PreMigrate`), in this order:
 
-`server backfill` and `server migrate-dm-keys` call `entc.AutoMigrate` directly and skip that cleanup. On a database with repeated rows, their index creation fails with a unique-constraint error. No data is changed. Start the Hub on the new version once, so it removes the repeats, and then rerun the command. `server migrate` is unaffected: it does not copy `agent_session_metrics`.
+1. `access_policies`: a NULL `scope_id` becomes an empty string, so the next step also finds those duplicates.
+2. `access_policies`: one row is kept per (`name`, `scope_type`, `scope_id`), the oldest by `created`.
+3. `delegation_edges`: one active edge is kept per (`delegate_type`, `delegate_id`, `scope_type`, `scope_id`), the oldest by `created`. Inactive edges are kept.
+4. `agent_session_metrics`: one row is kept per agent, session ID and segment start (`started_at`), the earliest stored. Older Hubs stored every report, so a database can hold repeated rows for one segment. Rows for separate segments of a resumed session are kept.
+
+The steps are idempotent and do nothing on a fresh database. They run on Hub start (`CompositeStore.Migrate`, which `server recover-authz`, `hub secret migrate-names` and `hub secret migrate` also use), and in `server backfill`, `server migrate-dm-keys` and `server migrate` (on the PostgreSQL destination) before those commands call `entc.AutoMigrate`. `server backfill` and `server migrate-dm-keys` run them only with `--execute`, so their default dry run removes no rows (it still applies the schema migration); on a database holding such duplicates the dry run therefore fails with a unique-constraint error. Rerun with `--execute`, or start the Hub once on the new version, to remove them. `server migrate` opens its SQLite source read-only and does not de-duplicate it, so duplicate `access_policies` rows in an older source still fail the copy; start the Hub on the source database with the new version first (or run `server backfill --execute` against it), then copy. The read-only `server attribution-report` runs no migration and no pre-migration steps.
 :::
 
 :::caution[Postgres: `broker_dispatch` index on upgrade]

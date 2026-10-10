@@ -97,7 +97,7 @@ func TestDeduplicateAccessPolicies_RemovesDuplicates(t *testing.T) {
 	require.NoError(t, raw.Close())
 
 	cs := newTestCompositeStoreFromDSN(t, dsn)
-	require.NoError(t, cs.deduplicateAccessPolicies(ctx))
+	require.NoError(t, deduplicateAccessPolicies(ctx, cs.client))
 
 	db := cs.DB()
 	require.NotNil(t, db)
@@ -141,7 +141,7 @@ func TestDeduplicateAccessPolicies_NoDuplicates(t *testing.T) {
 	require.NoError(t, raw.Close())
 
 	cs := newTestCompositeStoreFromDSN(t, dsn)
-	require.NoError(t, cs.deduplicateAccessPolicies(ctx))
+	require.NoError(t, deduplicateAccessPolicies(ctx, cs.client))
 
 	assert.Equal(t, 3, countAccessPolicies(t, cs.DB()))
 }
@@ -155,7 +155,7 @@ func TestDeduplicateAccessPolicies_FreshDatabase(t *testing.T) {
 	cs := newTestCompositeStoreFromDSN(t, dsn)
 
 	// No tables exist — dedup should return nil without error.
-	require.NoError(t, cs.deduplicateAccessPolicies(ctx))
+	require.NoError(t, deduplicateAccessPolicies(ctx, cs.client))
 }
 
 // TestDeduplicateAccessPolicies_TimestampTies verifies that when duplicates
@@ -185,7 +185,7 @@ func TestDeduplicateAccessPolicies_TimestampTies(t *testing.T) {
 	require.NoError(t, raw.Close())
 
 	cs := newTestCompositeStoreFromDSN(t, dsn)
-	require.NoError(t, cs.deduplicateAccessPolicies(ctx))
+	require.NoError(t, deduplicateAccessPolicies(ctx, cs.client))
 
 	// Exactly 1 row survives (either is acceptable).
 	assert.Equal(t, 1, countAccessPolicies(t, cs.DB()))
