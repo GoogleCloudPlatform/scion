@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"net"
 	"sync"
 	"time"
 )
@@ -33,49 +34,57 @@ const (
 	// A bucket idle this long has fully refilled, so dropping it is
 	// equivalent to keeping it.
 	testLoginLimiterMaxAge = 10 * time.Minute
-	// testLoginLimiterSweepSize is the bucket count above which Allow
-	// sweeps idle buckets, bounding memory without a background goroutine.
-	testLoginLimiterSweepSize = 1024
+	// testLoginLimiterMaxBuckets caps how many sources are tracked. The
+	// limiter runs before the challenge token is checked, so the table
+	// must stay bounded whatever callers send. At the cap, known sources
+	// keep their buckets and new sources are refused (fail closed) until
+	// idle buckets age out.
+	testLoginLimiterMaxBuckets = 4096
+	// testLoginLimiterSweepInterval is the minimum time between sweeps of
+	// idle buckets, so a flood of new sources at the cap cannot make every
+	// call scan the whole table.
+	testLoginLimiterSweepInterval = time.Minute
 )
 
 // testLoginLimiter is a per-source-IP token-bucket limiter for test-login.
 // It is per WebServer instance: with several hub instances the effective
 // limit scales with the instance count.
 type testLoginLimiter struct {
-	mu        sync.Mutex
-	buckets   map[string]*tokenBucket
-	burst     float64
-	perSecond float64
-	now       func() time.Time
+	mu         sync.Mutex
+	buckets    map[string]*tokenBucket
+	burst      float64
+	perSecond  float64
+	maxBuckets int
+	lastSweep  time.Time
+	now        func() time.Time
 }
 
 func newTestLoginLimiter() *testLoginLimiter {
 	return &testLoginLimiter{
-		buckets:   make(map[string]*tokenBucket),
-		burst:     testLoginRateBurst,
-		perSecond: testLoginRatePerSecond,
-		now:       time.Now,
+		buckets:    make(map[string]*tokenBucket),
+		burst:      testLoginRateBurst,
+		perSecond:  testLoginRatePerSecond,
+		maxBuckets: testLoginLimiterMaxBuckets,
+		now:        time.Now,
 	}
 }
 
-// Allow reports whether a call from ip may proceed, consuming one token if so.
-func (l *testLoginLimiter) Allow(ip string) bool {
+// Allow reports whether a call from source key may proceed, consuming one
+// token if so.
+func (l *testLoginLimiter) Allow(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	now := l.now()
-	if len(l.buckets) >= testLoginLimiterSweepSize {
-		cutoff := now.Add(-testLoginLimiterMaxAge)
-		for k, b := range l.buckets {
-			if b.lastCheck.Before(cutoff) {
-				delete(l.buckets, k)
+	b, ok := l.buckets[key]
+	if !ok {
+		if len(l.buckets) >= l.maxBuckets {
+			l.sweepLocked(now)
+			if len(l.buckets) >= l.maxBuckets {
+				return false
 			}
 		}
-	}
-
-	b, ok := l.buckets[ip]
-	if !ok {
-		l.buckets[ip] = &tokenBucket{tokens: l.burst - 1, lastCheck: now}
+		l.buckets[key] = &tokenBucket{tokens: l.burst - 1, lastCheck: now}
 		return true
 	}
 
@@ -90,4 +99,34 @@ func (l *testLoginLimiter) Allow(ip string) bool {
 	}
 	b.tokens--
 	return true
+}
+
+// sweepLocked drops buckets idle longer than testLoginLimiterMaxAge, at most
+// once per testLoginLimiterSweepInterval. The caller holds l.mu.
+func (l *testLoginLimiter) sweepLocked(now time.Time) {
+	if !l.lastSweep.IsZero() && now.Sub(l.lastSweep) < testLoginLimiterSweepInterval {
+		return
+	}
+	l.lastSweep = now
+	cutoff := now.Add(-testLoginLimiterMaxAge)
+	for k, b := range l.buckets {
+		if b.lastCheck.Before(cutoff) {
+			delete(l.buckets, k)
+		}
+	}
+}
+
+// testLoginRateKey returns the rate-limit key for a request's remote
+// address: the IP for IPv4, and the /64 prefix for IPv6, since a single
+// IPv6 client usually controls a whole /64.
+func testLoginRateKey(remoteAddr string) string {
+	host := remoteIP(remoteAddr)
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return host
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		return ip4.String()
+	}
+	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
 }

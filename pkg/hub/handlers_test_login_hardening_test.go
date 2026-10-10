@@ -280,6 +280,9 @@ func TestHandleTestLogin_AuditRowPerSuccessfulCall(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(a.AfterSummary), &after))
 	assert.Equal(t, store.UserRoleMember, after["role"])
 	assert.Equal(t, true, after["created"])
+	assert.NotContains(t, a.AfterSummary, fixtureTestLoginEmail, "no personal data in the audit summary")
+	assert.NotContains(t, a.AfterSummary, "Fixture User", "no personal data in the audit summary")
+	assert.ElementsMatch(t, []string{"role", "created"}, testLoginSummaryKeys(after))
 
 	// Role change on an existing user.
 	decodeTestLoginResponse(t, doTestLogin(t, ws, svc,
@@ -485,17 +488,128 @@ func TestHandleTestLogin_RateLimitCountsRejectedCalls(t *testing.T) {
 	assert.Equal(t, http.StatusTooManyRequests, doTestLogin(t, ws, svc, `{"email":"a@example.com"}`, addr).Code)
 }
 
-// Idle buckets are swept once the table is large.
-func TestTestLoginLimiter_SweepsIdleBuckets(t *testing.T) {
+// The bucket table is capped: at the cap, known sources are still served,
+// new sources are refused (fail closed), and new sources are admitted again
+// once idle buckets age out and a sweep runs.
+func TestTestLoginLimiter_CapFailsClosedForNewSources(t *testing.T) {
 	l := newTestLoginLimiter()
 	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	l.now = func() time.Time { return clock }
-	for i := 0; i < testLoginLimiterSweepSize; i++ {
-		require.True(t, l.Allow(fmt.Sprintf("10.0.%d.%d", i/256, i%256)))
+
+	ip := func(i int) string { return fmt.Sprintf("10.%d.%d.%d", i/65536, (i/256)%256, i%256) }
+	for i := 0; i < testLoginLimiterMaxBuckets; i++ {
+		require.True(t, l.Allow(ip(i)))
 	}
+	require.Len(t, l.buckets, testLoginLimiterMaxBuckets)
+
+	// All buckets are live: a new source is refused, a known one served.
+	clock = clock.Add(2 * testLoginLimiterSweepInterval)
+	assert.False(t, l.Allow("192.0.2.1"), "new source at the cap must be refused")
+	assert.True(t, l.Allow(ip(0)), "known source at the cap must be served")
+	assert.Len(t, l.buckets, testLoginLimiterMaxBuckets, "the table never grows past the cap")
+
+	// Buckets age out (ip(0) was refreshed above and stays).
+	clock = clock.Add(testLoginLimiterMaxAge - time.Second)
+	assert.True(t, l.Allow(ip(0)))
+	clock = clock.Add(2 * time.Second)
+	assert.True(t, l.Allow("192.0.2.1"), "new sources are admitted after idle buckets age out")
+	assert.Len(t, l.buckets, 2)
+}
+
+// The sweep runs at most once per interval, so new sources flooding a full
+// table do not each trigger a full scan.
+func TestTestLoginLimiter_SweepIsRateLimited(t *testing.T) {
+	l := newTestLoginLimiter()
+	l.maxBuckets = 4
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	l.now = func() time.Time { return clock }
+
+	for i := 0; i < 4; i++ {
+		require.True(t, l.Allow(fmt.Sprintf("10.0.0.%d", i)))
+	}
+	// First refusal sweeps (nothing idle yet) and records the sweep time.
+	assert.False(t, l.Allow("10.0.1.1"))
+	sweptAt := l.lastSweep
+	require.Equal(t, clock, sweptAt)
+
+	// The buckets become idle, but within the interval no sweep runs.
 	clock = clock.Add(testLoginLimiterMaxAge + time.Second)
-	require.True(t, l.Allow("10.9.9.9"))
+	l.lastSweep = clock.Add(-testLoginLimiterSweepInterval / 2)
+	assert.False(t, l.Allow("10.0.1.2"), "no sweep within the interval")
+	assert.Len(t, l.buckets, 4)
+
+	// Once the interval has passed, the next new source sweeps and is admitted.
+	clock = clock.Add(testLoginLimiterSweepInterval)
+	assert.True(t, l.Allow("10.0.1.3"))
 	assert.Len(t, l.buckets, 1)
+}
+
+func TestTestLoginRateKey(t *testing.T) {
+	assert.Equal(t, "198.51.100.7", testLoginRateKey("198.51.100.7:4000"))
+	assert.Equal(t, "198.51.100.7", testLoginRateKey("[::ffff:198.51.100.7]:4000"))
+	assert.Equal(t, "2001:db8:1:2::/64", testLoginRateKey("[2001:db8:1:2:aaaa:bbbb:cccc:dddd]:443"))
+	assert.Equal(t, testLoginRateKey("[2001:db8:1:2::1]:1"), testLoginRateKey("[2001:db8:1:2:ffff::9]:2"),
+		"addresses in one /64 share a bucket")
+	assert.NotEqual(t, testLoginRateKey("[2001:db8:1:2::1]:1"), testLoginRateKey("[2001:db8:1:3::1]:1"))
+	assert.Equal(t, "not-an-ip", testLoginRateKey("not-an-ip"))
+}
+
+// racingCreateStore simulates a concurrent test-login that creates the same
+// email between this call's lookup and its transaction: WithTx first
+// inserts the competing user through the base store, so the in-transaction
+// CreateUser hits the real unique constraint.
+type racingCreateStore struct {
+	store.Store
+	competitor *store.User
+	raced      bool
+}
+
+func (r *racingCreateStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	if !r.raced {
+		r.raced = true
+		if err := r.Store.CreateUser(ctx, r.competitor); err != nil {
+			return err
+		}
+	}
+	return r.Store.WithTx(ctx, fn)
+}
+
+func TestHandleTestLogin_ConcurrentCreateRace(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		createOnly bool
+		status     int
+		code       string
+		message    string
+	}{
+		{"createOnly returns 409", true, http.StatusConflict, ErrCodeConflict, "user already exists"},
+		{"without createOnly returns 500", false, http.StatusInternalServerError, ErrCodeInternalError, "failed to create user"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws, svc, s := newRealStoreTestLogin(t)
+			competitor := &store.User{
+				ID:          "competing-user",
+				Email:       fixtureTestLoginEmail,
+				DisplayName: "Competitor",
+				Role:        store.UserRoleViewer,
+				Status:      store.UserStatusActive,
+				Created:     time.Now().Add(-time.Minute).UTC().Truncate(time.Second),
+			}
+			ws.SetStore(&racingCreateStore{Store: s, competitor: competitor})
+
+			rec := doTestLogin(t, ws, svc, fmt.Sprintf(
+				`{"email":%q,"role":"admin","displayName":"Mine","createOnly":%t}`, fixtureTestLoginEmail, tc.createOnly), "")
+			assertTestLoginJSONError(t, rec, tc.status, tc.code, tc.message)
+			assert.Empty(t, rec.Result().Cookies(), "no session on a failed call")
+			assert.Empty(t, testLoginAudits(t, s), "no test_login audit row on a failed call")
+
+			got, err := s.GetUserByEmail(context.Background(), fixtureTestLoginEmail)
+			require.NoError(t, err)
+			assert.Equal(t, competitor.ID, got.ID, "competing row is the one stored")
+			assert.Equal(t, store.UserRoleViewer, got.Role, "competing row role unchanged")
+			assert.Equal(t, "Competitor", got.DisplayName, "competing row display name unchanged")
+		})
+	}
 }
 
 // AC (e): the test_fixture refusal hook is a no-op until Phase 2a adds the
@@ -516,4 +630,12 @@ func TestHandleTestLogin_FixtureRefusalIsNoOp(t *testing.T) {
 			`{"email":"`+fixtureTestLoginEmail+`","role":"`+role+`"}`, ""))
 		assert.Equal(t, role, resp.User.Role)
 	}
+}
+
+func testLoginSummaryKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }

@@ -79,9 +79,9 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Per-source-IP rate limit, applied before the challenge token is
 	// checked so rejected calls count too. The key is the connection's
-	// remote address: forwarding headers are client-controlled and the web
-	// server has no trusted-proxy configuration to vet them.
-	if !ws.testLoginLimiter.Allow(remoteIP(r.RemoteAddr)) {
+	// remote address (IPv6 by /64): forwarding headers are client-controlled
+	// and the web server has no trusted-proxy configuration to vet them.
+	if !ws.testLoginLimiter.Allow(testLoginRateKey(r.RemoteAddr)) {
 		w.Header().Set("Retry-After", "1")
 		writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "too many test-login requests", nil)
 		return
@@ -285,14 +285,15 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 
 // testLoginAuditRecord builds the mutation_audits row for a successful
 // test-login call. It records the user and the role before and after the
-// call (no before summary when the call created the user). It never carries
-// token material.
+// call (no before summary when the call created the user). It carries no
+// token material and no personal data.
 func testLoginAuditRecord(user *store.User, oldRole string, created bool, at time.Time) *store.MutationAuditRecord {
+	// Only the role (and, after the call, whether it created the row) is
+	// recorded: the user is identified by TargetID, and no personal data
+	// is copied into the audit table, which outlives the user.
 	type summary struct {
-		Role        string `json:"role"`
-		Email       string `json:"email,omitempty"`
-		DisplayName string `json:"displayName,omitempty"`
-		Created     *bool  `json:"created,omitempty"`
+		Role    string `json:"role"`
+		Created *bool  `json:"created,omitempty"`
 	}
 	record := &store.MutationAuditRecord{
 		MutationType: testLoginMutationType,
@@ -304,7 +305,7 @@ func testLoginAuditRecord(user *store.User, oldRole string, created bool, at tim
 		b, _ := json.Marshal(summary{Role: oldRole})
 		record.BeforeSummary = string(b)
 	}
-	b, _ := json.Marshal(summary{Role: user.Role, Email: user.Email, DisplayName: user.DisplayName, Created: &created})
+	b, _ := json.Marshal(summary{Role: user.Role, Created: &created})
 	record.AfterSummary = string(b)
 	return record
 }
