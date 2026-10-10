@@ -302,9 +302,9 @@ func TestCommitTemplateFiles_StaleReadConflicts(t *testing.T) {
 		t.Fatalf("first commit: %v", err)
 	}
 	before := *second
-	err = srv.commitTemplateFiles(ctx, second, upsertTemplateFile(second.Files, commitManifest(map[string]string{"two.md": "2"})[0]), commitOpts{})
-	if !errors.Is(err, store.ErrTemplateConflict) {
-		t.Fatalf("stale commit: err = %v, want store.ErrTemplateConflict", err)
+	conflictErr := srv.commitTemplateFiles(ctx, second, upsertTemplateFile(second.Files, commitManifest(map[string]string{"two.md": "2"})[0]), commitOpts{})
+	if !errors.Is(conflictErr, store.ErrTemplateConflict) {
+		t.Fatalf("stale commit: err = %v, want store.ErrTemplateConflict", conflictErr)
 	}
 	if !reflect.DeepEqual(*second, before) {
 		t.Errorf("a refused commit changed the caller's template: %+v, want %+v", *second, before)
@@ -318,7 +318,7 @@ func TestCommitTemplateFiles_StaleReadConflicts(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	writeTemplateCommitError(rec, err)
+	writeTemplateCommitError(rec, conflictErr)
 	if rec.Code != http.StatusConflict || templateErrorCode(t, rec) != templateConflictErrorCode {
 		t.Errorf("writeTemplateCommitError: %d %s, want 409 %s", rec.Code, rec.Body.String(), templateConflictErrorCode)
 	}
