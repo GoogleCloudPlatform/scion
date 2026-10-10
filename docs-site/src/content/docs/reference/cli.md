@@ -664,6 +664,15 @@ flag is local and offline, so it works without a Hub connection and from inside 
 The new generation's preamble names who requested the migration. While a migration is in progress,
 the agent's status message reads "migrating to generation N".
 
+An interrupted migration is not resumed. For example, if the Hub restarts in the middle of a
+migration, the Hub marks it failed and puts the agent in the `error` phase with the reason in its
+status message. Run `scion reincarnate` again with the same flags: the Hub does not keep a failed
+migration's patch flags. A migration that had not started yet fails within about 10 minutes with
+"reincarnation failed: did not start, so no changes were applied; run reincarnate again". None of
+its patch flags are applied. A migration that had started fails after 30 minutes without progress.
+The Hub restores the previous configuration unless the new generation had already been provisioned.
+Until the migration fails, a new request for the agent is refused with `409`.
+
 Reincarnation works for agents in clone-per-agent, shared-workspace (shared-plain), and
 Hub-managed workspaces. For a shared-workspace agent, the agent record, identity, and shared
 checkout are preserved, and sibling agents sharing the checkout are not restarted. Agents in
