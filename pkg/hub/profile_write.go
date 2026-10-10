@@ -17,6 +17,8 @@ package hub
 import (
 	"context"
 	"net/http"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // Profile writes.
@@ -72,4 +74,15 @@ func requireProfileWriter(w http.ResponseWriter, r *http.Request) bool {
 	logAuthzDenial(r, GetIdentityFromContext(r.Context()), Resource{Type: "user"}, ActionUpdate, profileWriteReasonFederated)
 	writeForbiddenStructured(w, "", "user", ActionUpdate)
 	return false
+}
+
+// requireTemplateProfileWriter applies requireProfileWriter to a write on
+// template t when t is a user-scope template, whichever route reaches it
+// (/api/v1/templates or /api/v1/users/me/templates). Templates in other
+// scopes are not profile resources and pass.
+func requireTemplateProfileWriter(w http.ResponseWriter, r *http.Request, t *store.Template) bool {
+	if t.Scope != store.TemplateScopeUser {
+		return true
+	}
+	return requireProfileWriter(w, r)
 }

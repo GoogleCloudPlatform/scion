@@ -430,3 +430,69 @@ func TestChatLinkVerification_FederatedUserRefused(t *testing.T) {
 		})
 	}
 }
+
+// genericUserTemplateWrites returns each /api/v1/templates write on a
+// user-scope template id, and the user-scope create and clone.
+func genericUserTemplateWrites(t *testing.T, id string) []profileRequest {
+	base := "/api/v1/templates"
+	return []profileRequest{
+		jsonProfileRequest(t, http.MethodPost, base, CreateTemplateRequest{Name: "generic-created", Scope: store.TemplateScopeUser}),
+		jsonProfileRequest(t, http.MethodPost, base+"/"+id+"/clone", CloneTemplateRequest{Name: "generic-clone", Scope: store.TemplateScopeUser}),
+		jsonProfileRequest(t, http.MethodPut, base+"/"+id, map[string]string{"name": "generic-renamed"}),
+		jsonProfileRequest(t, http.MethodPatch, base+"/"+id, map[string]string{"description": "patched"}),
+		jsonProfileRequest(t, http.MethodPost, base+"/"+id+"/upload", UploadRequest{Files: []FileUploadRequest{{Path: "scion-agent.yaml", Size: 10}}}),
+		jsonProfileRequest(t, http.MethodPost, base+"/"+id+"/finalize", FinalizeRequest{}),
+		jsonProfileRequest(t, http.MethodPut, base+"/"+id+"/files/notes.txt", map[string]string{"content": "x"}),
+		jsonProfileRequest(t, http.MethodDelete, base+"/"+id+"/files/notes.txt", nil),
+		jsonProfileRequest(t, http.MethodPost, base+"/"+id+"/reimport", nil),
+		jsonProfileRequest(t, http.MethodDelete, base+"/"+id, nil),
+	}
+}
+
+// TestGenericUserTemplateWrites_FederatedUserRefused pins that the
+// /api/v1/templates routes refuse a federated user on a user-scope
+// template, as /api/v1/users/me/templates does, and change nothing.
+func TestGenericUserTemplateWrites_FederatedUserRefused(t *testing.T) {
+	f := newProfileWriteFixture(t)
+	owned := createUserTemplate(t, f.store, f.fed.ID(), "fed-generic")
+
+	for _, pr := range genericUserTemplateWrites(t, owned.ID) {
+		requireProfileWriteRefused(t, f.asIdentity(pr, f.fed), pr.method+" "+pr.path)
+	}
+
+	result, err := f.store.ListTemplates(context.Background(), store.TemplateFilter{Scope: store.TemplateScopeUser, ScopeID: f.fed.ID()}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, result.Items, 1, "a refused write creates and deletes nothing")
+	assert.Equal(t, owned.Name, result.Items[0].Name)
+	assert.Equal(t, owned.Description, result.Items[0].Description)
+	assert.Equal(t, owned.Status, result.Items[0].Status)
+}
+
+// TestGenericUserTemplateWrites_SessionAndTokenUnchanged pins that a
+// session and a user access token keep their behaviour on the
+// /api/v1/templates user-scope create, patch and delete.
+func TestGenericUserTemplateWrites_SessionAndTokenUnchanged(t *testing.T) {
+	f := newProfileWriteFixture(t)
+	writes := func(id, name string) []profileRequest {
+		return []profileRequest{
+			jsonProfileRequest(t, http.MethodPost, "/api/v1/templates", CreateTemplateRequest{Name: name, Scope: store.TemplateScopeUser}),
+			jsonProfileRequest(t, http.MethodPatch, "/api/v1/templates/"+id, map[string]string{"description": "patched"}),
+			jsonProfileRequest(t, http.MethodDelete, "/api/v1/templates/"+id, nil),
+		}
+	}
+	cases := []struct {
+		name string
+		key  string
+		want []int
+	}{
+		{"session", f.session, []int{http.StatusCreated, http.StatusOK, http.StatusNoContent}},
+		{"token", f.token, []int{http.StatusForbidden, http.StatusForbidden, http.StatusNoContent}},
+	}
+	for _, tc := range cases {
+		tmpl := createUserTemplate(t, f.store, f.alice.ID, tc.name+"-generic")
+		for i, pr := range writes(tmpl.ID, tc.name+"-generic-created") {
+			rec := f.asBearer(pr, tc.key)
+			assert.Equal(t, tc.want[i], rec.Code, "%s %s %s: %s", tc.name, pr.method, pr.path, rec.Body.String())
+		}
+	}
+}
