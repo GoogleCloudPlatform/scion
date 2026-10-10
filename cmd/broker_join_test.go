@@ -382,7 +382,8 @@ func TestBrokerJoinToken_MintOnOneMachineJoinOnAnother(t *testing.T) {
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	require.NoError(t, brokerClient.RuntimeBrokers().Heartbeat(ctx, creds.BrokerID, &hubclient.BrokerHeartbeat{Status: "online"}))
+	_, err = brokerClient.RuntimeBrokers().Heartbeat(ctx, creds.BrokerID, &hubclient.BrokerHeartbeat{Status: "online"})
+	require.NoError(t, err)
 
 	// A wrong key does not authenticate, so the heartbeat above passed
 	// because of the saved secret.
@@ -390,7 +391,7 @@ func TestBrokerJoinToken_MintOnOneMachineJoinOnAnother(t *testing.T) {
 	wrongKey[0] ^= 0xFF
 	wrongClient, err := hubclient.New(ts.URL, hubclient.WithHMACAuth(creds.BrokerID, wrongKey))
 	require.NoError(t, err)
-	err = wrongClient.RuntimeBrokers().Heartbeat(ctx, creds.BrokerID, &hubclient.BrokerHeartbeat{Status: "online"})
+	_, err = wrongClient.RuntimeBrokers().Heartbeat(ctx, creds.BrokerID, &hubclient.BrokerHeartbeat{Status: "online"})
 	require.Error(t, err)
 	assert.True(t, apiclient.IsUnauthorizedError(err), "a wrong key gets 401; got %v", err)
 
