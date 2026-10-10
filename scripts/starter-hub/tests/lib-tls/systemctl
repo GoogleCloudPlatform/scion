@@ -20,7 +20,9 @@
 #   is-enabled UNIT         -> "enabled" if enabled-UNIT exists, else "disabled"
 #   is-active [--quiet] U   -> "active" if active-U exists, else "inactive"
 #   enable --now UNIT       -> creates enabled-UNIT and active-UNIT
-#   show -p ExecReload U    -> a Caddy ExecReload line with --force
+#   show -p User --value caddy -> $STUB_CADDY_USER
+#   show -p ExecReload caddy   -> a Caddy ExecReload line, with --force
+#                                 unless $STUB_TLS_STATE/execreload-no-force
 #   reload caddy            -> "serves" $STUB_TLS_LIVE (copies it to served.pem)
 set -u
 printf 'systemctl %s\n' "$*" >> "${STUB_LOG:?}"
@@ -38,7 +40,15 @@ case "${1:-}" in
     [ "$2" = "--now" ] && shift
     : > "$st/enabled-$2"; : > "$st/active-$2" ;;
   show)
-    echo "ExecReload={ path=/usr/bin/caddy ; argv[]=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force ; }" ;;
+    case "$*" in
+      *"-p User"*) echo "${STUB_CADDY_USER:-}" ;;
+      *"-p ExecReload"*)
+        if [ -f "$st/execreload-no-force" ]; then
+          echo "ExecReload={ path=/usr/bin/caddy ; argv[]=/usr/bin/caddy reload --config /etc/caddy/Caddyfile ; }"
+        else
+          echo "ExecReload={ path=/usr/bin/caddy ; argv[]=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force ; }"
+        fi ;;
+    esac ;;
   reload)
     [ "$2" = "caddy" ] && cp "${STUB_TLS_LIVE:?}" "$st/served.pem" ;;
 esac

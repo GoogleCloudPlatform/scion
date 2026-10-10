@@ -779,7 +779,9 @@ jobs:
               echo './scripts/single-node-vm/tests/lib/gcloud'
               echo './scripts/starter-hub/tests/lib-tls/caddy'
               echo './scripts/starter-hub/tests/lib-tls/certbot'
+              echo './scripts/starter-hub/tests/lib-tls/id'
               echo './scripts/starter-hub/tests/lib-tls/openssl'
+              echo './scripts/starter-hub/tests/lib-tls/runuser'
               echo './scripts/starter-hub/tests/lib-tls/systemctl'
               echo './scripts/starter-hub/tests/lib/curl'
               echo './scripts/starter-hub/tests/lib/gcloud'
@@ -928,8 +930,9 @@ jobs:
           persist-credentials: false
 
       # Never contacts GCP or the network: stub gcloud, curl and sleep in
-      # scripts/starter-hub/tests/lib, and stub systemctl, certbot, caddy and
-      # openssl s_client in tests/lib-tls, shadow any real ones on PATH. Needs
+      # scripts/starter-hub/tests/lib, and stub systemctl, certbot, caddy,
+      # runuser, id and openssl s_client in tests/lib-tls, shadow any real
+      # ones on PATH. Needs
       # only bash and openssl, which ubuntu-latest ships.
       - name: Run scripts/starter-hub/tests/run.sh
         run: ./scripts/starter-hub/tests/run.sh

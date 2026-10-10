@@ -13,9 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Stub caddy for the fix-tls-rotation.sh tests. Logs to $STUB_LOG;
-# "caddy reload ..." makes the stub server serve $STUB_TLS_LIVE.
+# Stub caddy for the fix-tls-rotation.sh tests. Logs to $STUB_LOG.
+#   caddy reload --help -> usage text, listing --force unless
+#                          $STUB_TLS_STATE/caddy-no-force exists
+#   caddy reload ...    -> the stub server serves $STUB_TLS_LIVE
 set -u
 printf 'caddy %s\n' "$*" >> "${STUB_LOG:?}"
-if [ "${1:-}" = "reload" ]; then cp "${STUB_TLS_LIVE:?}" "${STUB_TLS_STATE:?}/served.pem"; fi
+if [ "${1:-}" = "reload" ]; then
+  if [ "${2:-}" = "--help" ]; then
+    echo "Usage: caddy reload [--config <path>] [--adapter <name>] [--address <interface>]"
+    [ -f "${STUB_TLS_STATE:?}/caddy-no-force" ] || echo "  -f, --force   Force config reload, even if it is unchanged"
+    exit 0
+  fi
+  cp "${STUB_TLS_LIVE:?}" "${STUB_TLS_STATE:?}/served.pem"
+fi
 exit 0

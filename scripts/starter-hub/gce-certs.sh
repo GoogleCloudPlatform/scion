@@ -105,8 +105,16 @@ fi
 # on both paths above: hubs whose certificate already existed never got the
 # hook from the certonly call (ptone/scion#4207).
 echo "Installing certificate rotation (certbot deploy hook, renewal timer) on ${INSTANCE_NAME}..."
-gcloud compute scp "${SCRIPT_DIR}/fix-tls-rotation.sh" "${INSTANCE_NAME}:/tmp/fix-tls-rotation.sh" --zone="${GCE_ZONE}"
-gcloud compute ssh "${INSTANCE_NAME}" --zone="${GCE_ZONE}" --command="sudo bash /tmp/fix-tls-rotation.sh --domain '${DOMAIN}' --host '${HUB_SUBDOMAIN}'; rc=\$?; rm -f /tmp/fix-tls-rotation.sh; exit \$rc"
+# A private directory (mktemp -d, mode 0700) rather than a fixed /tmp path.
+REMOTE_DIR="$(gcloud compute ssh "${INSTANCE_NAME}" --zone="${GCE_ZONE}" \
+    --command="mktemp -d /tmp/fix-tls-rotation.XXXXXX" | tr -d '\r' | tail -n 1)"
+if [[ ! "${REMOTE_DIR}" =~ ^/tmp/fix-tls-rotation\.[A-Za-z0-9]+$ ]]; then
+    echo "Error: could not create a temporary directory on ${INSTANCE_NAME} (got '${REMOTE_DIR}')."
+    exit 1
+fi
+gcloud compute scp "${SCRIPT_DIR}/fix-tls-rotation.sh" "${INSTANCE_NAME}:${REMOTE_DIR}/fix-tls-rotation.sh" --zone="${GCE_ZONE}"
+# A non-zero exit (a PROBLEM in its final check) stops this script here.
+gcloud compute ssh "${INSTANCE_NAME}" --zone="${GCE_ZONE}" --command="sudo bash ${REMOTE_DIR}/fix-tls-rotation.sh --domain '${DOMAIN}' --host '${HUB_SUBDOMAIN}'; rc=\$?; rm -rf ${REMOTE_DIR}; exit \$rc"
 
 echo ""
 echo "=== Success ==="
