@@ -4762,6 +4762,10 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestScopeReissue_OperatorRefusals`
+- `pkg/hub:TestScopeReissue_UserDelegatorFailClosed`
+- `pkg/hub:TestScopeReissue_UserDelegatorLookupFault`
+- `pkg/hub:TestScopeReissue_SessionRootedEqualsCreateToday`
+- `pkg/hub:TestScopeReissue_SessionRootedEqualsCreateTodayAfterChange`
 
 ---
 
