@@ -204,7 +204,8 @@ type WebServerConfig struct {
 	// Defaults to defaultSSEMaxConnectionAge (3500s) when zero.
 	SSEMaxConnectionAge time.Duration
 	// SSEHeartbeatInterval is how often the events stream sends a heartbeat
-	// event. Defaults to defaultSSEHeartbeatInterval (30s) when zero.
+	// event. Defaults to defaultSSEHeartbeatInterval (30s) when zero or
+	// negative.
 	SSEHeartbeatInterval time.Duration
 
 	// PerfTrace turns on performance tracing for the SSE endpoint
@@ -1483,8 +1484,8 @@ func (ws *WebServer) tryServeStaticFile(w http.ResponseWriter, r *http.Request) 
 const defaultSSEMaxConnectionAge = 3500 * time.Second
 
 // defaultSSEHeartbeatInterval is the default interval between events stream
-// heartbeats. The web client treats 75s without traffic as a stale stream,
-// so this must stay well below that.
+// heartbeats. Keep it well below the web client's stale-stream threshold
+// (75s).
 const defaultSSEHeartbeatInterval = 30 * time.Second
 
 // Route: GET /events?sub=<pattern>&sub=<pattern>...
@@ -1589,7 +1590,7 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	eventID := 0
 	heartbeatInterval := ws.config.SSEHeartbeatInterval
-	if heartbeatInterval == 0 {
+	if heartbeatInterval <= 0 {
 		heartbeatInterval = defaultSSEHeartbeatInterval
 	}
 	heartbeat := time.NewTicker(heartbeatInterval)
