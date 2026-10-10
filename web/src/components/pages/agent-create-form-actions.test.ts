@@ -24,8 +24,6 @@
  * keeps that behaviour; it is not part of this page.)
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
 

@@ -17,11 +17,14 @@ package runtimebroker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -113,20 +116,22 @@ type HeartbeatService struct {
 	// runtime changes without a re-registration. Nil omits the field.
 	profileAttach func() []hubclient.ProfileAttachState
 
-	// profileSAMappings, when set, returns each Kubernetes profile's GSA
-	// mappings, or nil when they cannot be read. They are sent on the first
-	// successful heartbeat, whenever they change, and every
-	// saMappingsResendInterval, so a broker restart or a mapping edit
-	// refreshes the hub without a re-registration.
+	// profileSAMappings, when set, returns each Kubernetes profile's GCP
+	// service account report, or nil when it cannot be read. The hash of
+	// every profile's report is sent on every heartbeat; the full report
+	// is sent on the first successful heartbeat, whenever it changes, and
+	// when the hub asks for it (BrokerHeartbeatResponse). A hub that does
+	// not read hashes (an empty heartbeat response) also gets the unchanged
+	// report every saMappingsResendInterval, as before hashes existed.
 	profileSAMappings func() []hubclient.ProfileSAMappingsState
-	// sentSAMappingsKey is the fingerprint of the last profileSAMappings
-	// the hub accepted, "" before the first, and sentSAMappingsAt when it
-	// was accepted (both guarded by mu). Unchanged mappings are re-sent
-	// once saMappingsResendInterval has passed, so a hub that lost or never
-	// stored a report (an upgrade under a running broker, an overlapping
-	// send) catches up; the hub persists only on change.
+	// sentSAMappingsKey is the fingerprint of the last full report the hub
+	// accepted, "" before the first or after the hub asked for it, and
+	// sentSAMappingsAt when it was accepted. hubReadsSAHashes records
+	// whether the last heartbeat response said the hub reads the hashes.
+	// All guarded by mu.
 	sentSAMappingsKey string
 	sentSAMappingsAt  time.Time
+	hubReadsSAHashes  bool
 
 	// defaultProfile, when set, returns the broker's default (active)
 	// profile name, reported on every heartbeat. A nil func, or a nil
@@ -329,26 +334,47 @@ func (s *HeartbeatService) run(ctx context.Context) {
 func (s *HeartbeatService) sendHeartbeat(ctx context.Context) error {
 	heartbeat := s.buildHeartbeat(ctx)
 	saKey := s.addProfileSAMappings(heartbeat)
-	if err := s.client.Heartbeat(ctx, s.brokerID, heartbeat); err != nil {
+	resp, err := s.client.Heartbeat(ctx, s.brokerID, heartbeat)
+	if err != nil {
 		return err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if saKey != "" {
-		s.mu.Lock()
 		s.sentSAMappingsKey = saKey
 		s.sentSAMappingsAt = time.Now()
-		s.mu.Unlock()
+	}
+	s.hubReadsSAHashes = resp != nil && resp.ProfileSAMappingsHashes
+	if resp != nil && resp.ProfileSAMappingsRequested {
+		// The hub's stored report does not match: send it in full next time.
+		s.sentSAMappingsKey = ""
 	}
 	return nil
 }
 
-// saMappingsResendInterval is how often unchanged profile SA mappings are
-// re-sent on the heartbeat.
+// saMappingsResendInterval is how often an unchanged profile SA report is
+// re-sent to a hub that does not read the report hashes.
 const saMappingsResendInterval = 10 * time.Minute
 
-// addProfileSAMappings sets heartbeat.ProfileSAMappings when the current
-// mappings differ from the last ones the hub accepted (always on the first
-// heartbeat) or saMappingsResendInterval has passed since then, and returns
-// their fingerprint, or "" when nothing was added.
+// profileSAMappingsHash returns the hash of one profile's report: the hex
+// SHA-256 of its JSON encoding. The broker builds the report in a fixed
+// order (entries and ambiguous GSAs sorted), so equal reports hash equally.
+func profileSAMappingsHash(state hubclient.ProfileSAMappingsState) string {
+	b, err := json.Marshal(state)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// addProfileSAMappings sets heartbeat.ProfileSAMappingsHashes on every
+// heartbeat, and heartbeat.ProfileSAMappings when the report differs from
+// the last one the hub accepted (always on the first heartbeat, and after
+// the hub asked for it). For a hub that does not read the hashes, an
+// unchanged report is also re-sent once saMappingsResendInterval has
+// passed. It returns the report's fingerprint when the full report was
+// added, else "".
 func (s *HeartbeatService) addProfileSAMappings(heartbeat *hubclient.BrokerHeartbeat) string {
 	if s.flat || s.profileSAMappings == nil {
 		return ""
@@ -357,19 +383,38 @@ func (s *HeartbeatService) addProfileSAMappings(heartbeat *hubclient.BrokerHeart
 	if mappings == nil {
 		return ""
 	}
-	b, err := json.Marshal(mappings)
-	if err != nil {
-		return ""
+	hashes := make([]hubclient.ProfileSAMappingsHash, 0, len(mappings))
+	var key strings.Builder
+	for _, m := range mappings {
+		h := profileSAMappingsHash(m)
+		if h == "" {
+			return ""
+		}
+		hashes = append(hashes, hubclient.ProfileSAMappingsHash{Name: m.Name, Hash: h})
+		key.WriteString(m.Name)
+		key.WriteByte('=')
+		key.WriteString(h)
+		key.WriteByte(';')
 	}
-	key := string(b)
+	if len(hashes) > 0 {
+		heartbeat.ProfileSAMappingsHashes = hashes
+	}
+	k := key.String()
+	if k == "" {
+		// No Kubernetes profiles. The empty report and hashes are dropped
+		// from the wire (omitempty), so nothing reaches the hub and its
+		// stored reports are left as they are (a known limit, as in phase
+		// 2). The non-empty key only keeps the state machine uniform.
+		k = "-"
+	}
 	s.mu.Lock()
-	skip := key == s.sentSAMappingsKey && time.Since(s.sentSAMappingsAt) < saMappingsResendInterval
+	skip := k == s.sentSAMappingsKey && (s.hubReadsSAHashes || time.Since(s.sentSAMappingsAt) < saMappingsResendInterval)
 	s.mu.Unlock()
 	if skip {
 		return ""
 	}
 	heartbeat.ProfileSAMappings = mappings
-	return key
+	return k
 }
 
 // buildHeartbeat constructs the heartbeat payload from current state.

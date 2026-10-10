@@ -45,6 +45,30 @@ const (
 	keepaliveMaxBackoff = 5 * time.Second
 )
 
+// launchTimings is the retry backoff ranges a launchSender uses, plus an
+// optional keepalive interval override. Production senders always use
+// defaultLaunchTimings(); Server.launchTimingOverride lets a test shorten
+// them without changing any of the code paths they drive.
+type launchTimings struct {
+	reportMinBackoff    time.Duration
+	reportMaxBackoff    time.Duration
+	keepaliveMinBackoff time.Duration
+	keepaliveMaxBackoff time.Duration
+	// keepaliveInterval, when positive, replaces the interval newLaunchSender
+	// was given. Always zero in defaultLaunchTimings().
+	keepaliveInterval time.Duration
+}
+
+// defaultLaunchTimings returns the production backoff ranges above.
+func defaultLaunchTimings() launchTimings {
+	return launchTimings{
+		reportMinBackoff:    reportMinBackoff,
+		reportMaxBackoff:    reportMaxBackoff,
+		keepaliveMinBackoff: keepaliveMinBackoff,
+		keepaliveMaxBackoff: keepaliveMaxBackoff,
+	}
+}
+
 // errLaunchReportUnreachable is sendOnce's "retry" bucket: a transport
 // failure, a 5xx, a non-structured 404 (design §5 N-9, handled inside
 // hubclient.ReportAgentLaunch), or no hub connection at all.
@@ -70,6 +94,7 @@ type launchSender struct {
 	rec        *launchRecord
 
 	keepaliveInterval time.Duration
+	timings           launchTimings
 
 	mu           sync.Mutex
 	seq          int64
@@ -93,10 +118,19 @@ type launchSender struct {
 
 // newLaunchSender builds a sender for rec. keepaliveInterval <= 0 defaults to
 // 15s (design §3.7's broker-side default, used when the Hub's create request
-// omitted LaunchKeepaliveSeconds).
+// omitted LaunchKeepaliveSeconds). server.launchTimingOverride, set only by
+// tests, replaces the default backoffs (and a positive keepaliveInterval in
+// it replaces this one).
 func newLaunchSender(server *Server, rec *launchRecord, agentID, instanceID string, keepaliveInterval time.Duration) *launchSender {
 	if keepaliveInterval <= 0 {
 		keepaliveInterval = 15 * time.Second
+	}
+	timings := defaultLaunchTimings()
+	if server != nil && server.launchTimingOverride != nil {
+		timings = *server.launchTimingOverride
+		if timings.keepaliveInterval > 0 {
+			keepaliveInterval = timings.keepaliveInterval
+		}
 	}
 	return &launchSender{
 		server:            server,
@@ -104,6 +138,7 @@ func newLaunchSender(server *Server, rec *launchRecord, agentID, instanceID stri
 		instanceID:        instanceID,
 		rec:               rec,
 		keepaliveInterval: keepaliveInterval,
+		timings:           timings,
 		stopKeepalive:     make(chan struct{}),
 		abortCh:           make(chan struct{}),
 	}
@@ -382,7 +417,7 @@ func (s *launchSender) SendClaim(ctx context.Context) (*hubclient.AgentLaunchRep
 		State:      hubclient.AgentLaunchReportStateClaim,
 		At:         time.Now(),
 	}
-	return s.sendReportBlocking(ctx, report, reportMinBackoff, reportMaxBackoff, claimAttemptTimeout, true)
+	return s.sendReportBlocking(ctx, report, s.timings.reportMinBackoff, s.timings.reportMaxBackoff, claimAttemptTimeout, true)
 }
 
 // errLaunchEndedAtCheckpoint is what Checkpoint returns to the runtime when
@@ -420,7 +455,7 @@ func (s *launchSender) Checkpoint(ctx context.Context, step string) error {
 		Step:       step,
 		At:         time.Now(),
 	}
-	result, err := s.sendReportBlocking(ctx, report, reportMinBackoff, reportMaxBackoff, checkpointAttemptTimeout, true)
+	result, err := s.sendReportBlocking(ctx, report, s.timings.reportMinBackoff, s.timings.reportMaxBackoff, checkpointAttemptTimeout, true)
 	if err != nil {
 		if errors.Is(err, errAbortedByKeepalive) {
 			return errLaunchEndedAtCheckpoint
@@ -565,7 +600,7 @@ func (s *launchSender) sendKeepaliveOnce(ctx context.Context) {
 			}
 			return
 		}
-		timer := time.NewTimer(jitteredBackoff(keepaliveMinBackoff, keepaliveMaxBackoff))
+		timer := time.NewTimer(jitteredBackoff(s.timings.keepaliveMinBackoff, s.timings.keepaliveMaxBackoff))
 		select {
 		case <-timer.C:
 		case <-ctx.Done():
@@ -604,5 +639,5 @@ func (s *launchSender) SendTerminal(ctx context.Context, succeeded bool, step, e
 		Agent:      agentInfo,
 		At:         time.Now(),
 	}
-	return s.sendReportBlocking(ctx, report, reportMinBackoff, reportMaxBackoff, terminalAttemptTimeout, false)
+	return s.sendReportBlocking(ctx, report, s.timings.reportMinBackoff, s.timings.reportMaxBackoff, terminalAttemptTimeout, false)
 }

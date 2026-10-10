@@ -17,11 +17,9 @@ package hub
 
 import (
 	"context"
-	"log/slog"
 	"reflect"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
-	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // Identity represents an authenticated identity (user or agent).
@@ -56,6 +54,24 @@ type AgentIdentity interface {
 	Ancestry() []string   // Ordered ancestor chain: [root_user, ..., parent_agent]
 	OriginUserID() string // Returns Ancestry[0] if present, empty string otherwise
 	TokenID() string      // JWT ID (jti) of the current token
+}
+
+// AgentTokenScope represents the authorized scopes for an agent. The scope
+// values, and the token logic that mints and checks them, live in
+// agenttoken.go.
+type AgentTokenScope string
+
+// FederatedIdentity is implemented by all identity types that originate from
+// an external OIDC issuer. It provides the common federation metadata.
+type FederatedIdentity interface {
+	Identity
+	IssuerURL() string
+}
+
+// BrokerIdentity represents an authenticated Runtime Broker.
+type BrokerIdentity interface {
+	Identity
+	BrokerID() string
 }
 
 // AuthenticatedUser implements UserIdentity.
@@ -321,16 +337,50 @@ type localAncestryProvenanceIdentity interface {
 	localAncestryProvenance() ancestryProvenance
 }
 
-// isNilIdentity (scheduled_initiator.go) reports whether identity is nil at
-// the interface level, or is a non-nil Identity interface value holding a
-// nil concrete pointer — for example an Identity holding
-// (*ScopedUserIdentity)(nil), which is never == nil even though a type
-// assertion or type switch against it succeeds with a nil concrete value and
-// a method call or field read on that value then dereferences a nil
-// pointer. Every classifier in this package (principalContextForIdentity,
-// credentialContextForIdentity, AncestryIsHubAttested) and decide's entry
-// check treats that case identically to a nil interface, before doing
-// anything else with identity.
+// isNilIdentity reports whether identity is either the nil interface or a
+// non-nil Identity value holding a nil concrete pointer (a "typed nil" — for
+// example a nil *DevUser or nil *AuthenticatedUser boxed into the Identity
+// interface). In Go, an interface value equals nil only when both its type
+// and value are nil; a typed nil has a non-nil type descriptor, so
+// identity == nil is false for it even though the concrete pointer it holds
+// is nil. Every concrete Identity implementation in this package is a
+// pointer type, and several of their ID()/Type() methods dereference the
+// receiver with no nil guard (e.g. DevUser.ID() returns u.id directly), so
+// calling one on a typed-nil identity panics (GCP#2188 review comment on
+// initiatorMatchesExecutor, ptone/scion#2342).
+//
+// Deliberately reflect-based rather than a type switch enumerating every
+// concrete Identity implementation, which is what the review comment
+// suggested: a hand-written switch must be extended every time a new
+// Identity implementation is added anywhere in the package, and silently
+// stops catching that type's typed-nil case if a future author forgets. A
+// pointer-kind nil check via reflection generalizes over any current or
+// future implementation without that maintenance burden, at the cost of one
+// reflect call in a defensive guard that is not on any hot path. This helper
+// answers only the narrow nil-safety question — it says nothing about which
+// concrete type identity is or what it means; principalContextForIdentity
+// and credentialContextForIdentity's type switches (authz.go) remain the
+// place concrete Identity types are classified by meaning, and are
+// unaffected by this helper. Every classifier in this package
+// (principalContextForIdentity, credentialContextForIdentity,
+// AncestryIsHubAttested) and decide's entry check treats a typed-nil identity
+// identically to a nil interface, before doing anything else with identity.
+func isNilIdentity(identity Identity) bool {
+	if identity == nil {
+		return true
+	}
+	// reflect.ValueOf(identity) already unwraps the interface to its
+	// concrete dynamic value, so v.Kind() can never itself be
+	// reflect.Interface here — that case is omitted so this list names only
+	// the kinds IsNil can actually observe through this call.
+	v := reflect.ValueOf(identity)
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func:
+		return v.IsNil()
+	default:
+		return false
+	}
+}
 
 // AncestryIsHubAttested returns true when the identity's ancestry chain has
 // recognized local provenance: signed by this hub (agent JWT) or persisted
@@ -392,30 +442,6 @@ func AncestryIsHubAttested(identity Identity) bool {
 	return ok
 }
 
-// explicitIdentityClassification is an opt-in marker for identity types that
-// need a PrincipalKind/CredentialKind from principalContextForIdentity and
-// credentialContextForIdentity without being one of the explicitly classified
-// concrete production types those functions switch on directly
-// (AuthenticatedUser, ScopedUserIdentity, DevUser, agentIdentityWrapper,
-// storedAgentIdentity, peerAgentIdentity, explainAgentIdentity,
-// brokerIdentityImpl, FederatedUserIdentity, FederatedAgentIdentity,
-// FederatedServiceIdentity, hubDeliveryIdentity — the last classifies to
-// PrincipalKindAgent / CredentialKindHubDelivery and is never hub-attested,
-// see AncestryIsHubAttested). Its only current implementers are package-hub
-// test fakes that stand in for one of those types (ptone/scion#2123). The
-// method is unexported for the same reason localAncestryProvenance is: no
-// type outside package hub can implement it, so classification can never be
-// forged by an external caller, and a package-hub test fake must opt in with
-// an explicit, classified method rather than acquiring a kind by accident —
-// in particular, never by returning a Type() string that happens to match a
-// recognized one. A type that does not implement this interface, and is not
-// one of the concrete types above, is classified with an empty
-// PrincipalKind/CredentialKind, which Decide's fail-closed entry check
-// denies.
-type explicitIdentityClassification interface {
-	authzClassification() (PrincipalKind, CredentialKind)
-}
-
 // HasScope returns true if this identity has the given scope.
 func (s *ScopedUserIdentity) HasScope(scope string) bool {
 	for _, sc := range s.scopes {
@@ -426,108 +452,21 @@ func (s *ScopedUserIdentity) HasScope(scope string) bool {
 	return false
 }
 
-// agentIdentityWrapper wraps AgentTokenClaims to implement AgentIdentity.
-type agentIdentityWrapper struct {
-	*AgentTokenClaims
-}
-
-// ID returns the agent ID (from JWT subject).
-func (a *agentIdentityWrapper) ID() string { return a.Subject }
-
-// Type returns the identity type ("agent").
-func (a *agentIdentityWrapper) Type() string { return "agent" }
-
-// localAncestryProvenance reports that this ancestry chain came from a
-// hub-signed agent JWT.
-func (a *agentIdentityWrapper) localAncestryProvenance() ancestryProvenance {
-	return ancestryProvenanceAgentJWT
-}
-
-// ProjectID returns the project ID.
-func (a *agentIdentityWrapper) ProjectID() string { return a.AgentTokenClaims.ProjectID }
-
-// Scopes returns the agent scopes.
-func (a *agentIdentityWrapper) Scopes() []AgentTokenScope { return a.AgentTokenClaims.Scopes }
-
-// HasScope checks whether this agent identity has a given scope.
-func (a *agentIdentityWrapper) HasScope(scope AgentTokenScope) bool {
-	for _, s := range a.AgentTokenClaims.Scopes {
-		if s == scope {
-			return true
-		}
-	}
-	return false
-}
-
-// Ancestry returns the ordered ancestor chain from the token claims.
-func (a *agentIdentityWrapper) Ancestry() []string { return a.AgentTokenClaims.Ancestry }
-
-// OriginUserID returns the originating user ID (first element of ancestry).
-func (a *agentIdentityWrapper) TokenID() string { return a.AgentTokenClaims.ID }
-
-func (a *agentIdentityWrapper) OriginUserID() string {
-	if len(a.AgentTokenClaims.Ancestry) > 0 {
-		return a.AgentTokenClaims.Ancestry[0]
-	}
-	return ""
-}
-
 // identityContextKey is the key for storing identity in the request context.
 type identityContextKey struct{}
 
 // credentialContextKey is the key for request credential metadata.
 type credentialContextKey struct{}
 
-// GetIdentityFromContext returns the authenticated identity (user or agent).
-func GetIdentityFromContext(ctx context.Context) Identity {
-	// First check for identity set by unified auth middleware
-	if identity, ok := ctx.Value(identityContextKey{}).(Identity); ok {
-		// A typed-nil identity (for example an Identity holding
-		// (*ScopedUserIdentity)(nil)) is treated as missing, the same as a
-		// nil interface; see isNilIdentity.
-		if isNilIdentity(identity) {
-			return nil
-		}
-		return identity
-	}
-	// Fall back to checking individual context keys for backwards compatibility
-	if user := GetUserFromContext(ctx); user != nil {
-		return user
-	}
-	if agent := GetAgentFromContext(ctx); agent != nil {
-		return &agentIdentityWrapper{agent}
-	}
-	return nil
-}
-
-// GetUserIdentityFromContext returns the user identity if present.
-func GetUserIdentityFromContext(ctx context.Context) UserIdentity {
-	identity := GetIdentityFromContext(ctx)
-	// isNilIdentity, not a plain interface comparison: a typed-nil identity
-	// (see isNilIdentity) is treated as missing here too, before the type
-	// assertion below hands a nil concrete value to the caller.
-	if isNilIdentity(identity) {
-		return nil
-	}
-	if user, ok := identity.(UserIdentity); ok {
-		return user
-	}
-	return nil
-}
-
-// GetAgentIdentityFromContext returns the agent identity if present.
-func GetAgentIdentityFromContext(ctx context.Context) AgentIdentity {
-	identity := GetIdentityFromContext(ctx)
-	// isNilIdentity, not a plain interface comparison: a typed-nil identity
-	// (see isNilIdentity) is treated as missing here too, before the type
-	// assertion below hands a nil concrete value to the caller.
-	if isNilIdentity(identity) {
-		return nil
-	}
-	if agent, ok := identity.(AgentIdentity); ok {
-		return agent
-	}
-	return nil
+// contextIdentityValue returns the identity stored under identityContextKey
+// by contextWithIdentity, and whether one was stored at all. It performs no
+// nil or typed-nil filtering: callers apply isNilIdentity themselves. It
+// exists so code outside the principal types (GetIdentityFromContext's
+// legacy fallback, auth_identity_context.go) can read the key without
+// naming identityContextKey.
+func contextIdentityValue(ctx context.Context) (Identity, bool) {
+	identity, ok := ctx.Value(identityContextKey{}).(Identity)
+	return identity, ok
 }
 
 // contextWithIdentity returns a new context with the identity set.
@@ -687,43 +626,3 @@ const (
 	// delegated credential (.design/agent-delegation.md §12.1).
 	AuthTypeAgentDelegation = "agent-delegation"
 )
-
-// contextWithAuthType returns a new context with the auth type set.
-//
-// E.2a (ptone/scion#2127, plan §3.1): every UnifiedAuthMiddleware branch calls
-// this exactly once, after it has already called contextWithIdentity and (for
-// branches that establish a credential) contextWithCredentialContext — so by
-// the time this runs, ctx reflects the branch's full outcome. This is
-// therefore also the single, centralized place to populate the request log's
-// mutable auth fields (logging.SetRequestAuth) for every successful
-// authentication branch, instead of one hand-written call per branch: a
-// branch that is ever added or reordered cannot forget to log auth
-// attribution, because the outcome is derived from ctx rather than
-// hand-carried. Rejections (no identity ever gets set) are logged separately,
-// at the point of rejection — see auth.go's UAT branch.
-func contextWithAuthType(ctx context.Context, authType string) context.Context {
-	ctx = context.WithValue(ctx, logging.AuthTypeKey{}, authType)
-	logging.SetRequestAuth(ctx, authType, requestAuthAttrs(ctx)...)
-	return ctx
-}
-
-// requestAuthAttrs builds the request-log attributes for the principal and
-// credential established on ctx. See contextWithAuthType.
-func requestAuthAttrs(ctx context.Context) []slog.Attr {
-	var attrs []slog.Attr
-	// isNilIdentity, not a plain interface comparison: a typed-nil identity
-	// (see isNilIdentity) must not reach identity.ID() below.
-	if identity := GetIdentityFromContext(ctx); !isNilIdentity(identity) {
-		attrs = append(attrs, slog.String(logging.AttrUserID, identity.ID()))
-		if pc := principalContextForIdentity(identity); pc.Kind != "" {
-			attrs = append(attrs, slog.String("principal_kind", string(pc.Kind)))
-		}
-	}
-	// The "credential" group is E.1's descriptive decoration (currently UAT
-	// only); other credential kinds are already fully identified by
-	// auth_type and user_id, per plan §3.1(2) ("emit them only when set").
-	if cc := GetCredentialContextFromContext(ctx); cc.Decoration != nil {
-		attrs = append(attrs, slog.Any("credential", *cc.Decoration))
-	}
-	return attrs
-}

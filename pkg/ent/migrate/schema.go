@@ -618,6 +618,11 @@ var (
 				Unique:  false,
 				Columns: []*schema.Column{AgentSessionMetricsColumns[4]},
 			},
+			{
+				Name:    "agentsessionmetrics_agent_id_session_id_started_at",
+				Unique:  true,
+				Columns: []*schema.Column{AgentSessionMetricsColumns[1], AgentSessionMetricsColumns[3], AgentSessionMetricsColumns[4]},
+			},
 		},
 	}
 	// AllowListColumns holds the columns for the "allow_list" table.

@@ -64,9 +64,10 @@ var readClassActions = map[string]bool{"read": true, "list": true, "verify": tru
 // registered permission on one of these resource types fails
 // TestRelationshipPolicy_DriftRequiresDecision until it is placed in one list.
 var relationshipOwnerExcluded = map[relationshipAllowKey][]string{
+	// agent.log_append is Reserved: no relationship grants a reserved row.
 	// Exchange authenticates the bound agent's own token and is never
 	// granted through a relationship.
-	{"owner", "user", "agent"}: {"agent.delegation.exchange"},
+	{"owner", "user", "agent"}: {"agent.log_append", "agent.delegation.exchange"},
 	// Project.OwnerID grants nothing (ptone/scion#2586): project authority
 	// comes only from project-scoped role bindings, so every project
 	// permission is excluded from the owner relationship.
@@ -88,11 +89,12 @@ var relationshipOwnerExcluded = map[relationshipAllowKey][]string{
 	// mapping. No user relationship, including ownership, should grant it.
 	{"owner", "user", "gcp_service_account"}: {"gcp_service_account.use"},
 	{"owner", "user", "skill"}:               {},
-	{"ancestor", "user", "agent"}:            {"agent.delegation.exchange"},
-	// Agent ancestors: permissions with no agent JWT scope.
+	{"ancestor", "user", "agent"}:            {"agent.log_append", "agent.delegation.exchange"},
+	// Agent ancestors: permissions with no agent JWT scope, and the
+	// Reserved agent.log_append.
 	{"ancestor", "agent", "agent"}: {
 		"agent.read", "agent.list", "agent.update", "agent.port_access", "agent.stop_all",
-		"agent.message", "agent.grant_hub_mode", "agent.delegation.create", "agent.delegation.exchange",
+		"agent.message", "agent.grant_hub_mode", "agent.log_append", "agent.delegation.create", "agent.delegation.exchange",
 	},
 	// Launcher status read (ptone/scion#3409): agent.read only.
 	{"launcher", "agent", "agent"}: {
@@ -402,6 +404,20 @@ func TestRelationshipPolicy_DriftRequiresDecision(t *testing.T) {
 		}
 		_, ok := relationshipOwnerExcluded[key]
 		assert.True(t, ok, "cell %v has no drift entry", key)
+	}
+}
+
+// TestRelationshipPolicy_NoReservedPermissions: a Reserved registry row is
+// granted by nothing, so no relationship row may name one.
+func TestRelationshipPolicy_NoReservedPermissions(t *testing.T) {
+	reserved := map[string]bool{}
+	for _, id := range permissions.ReservedIDs() {
+		reserved[id] = true
+	}
+	for _, row := range permissions.RelationshipPolicies {
+		for _, id := range row.PermissionIDs {
+			assert.False(t, reserved[id], "relationship %s on %s names Reserved permission %s", row.Relationship, row.ResourceType, id)
+		}
 	}
 }
 

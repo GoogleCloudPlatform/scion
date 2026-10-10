@@ -16,6 +16,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   apiMatcherFor,
@@ -41,6 +46,10 @@ import {
   readinessMarksFrom,
   checkReadinessMarks,
   summarizeReadinessMarks,
+  wallClockSamples,
+  compareMedianRatio,
+  buildWallClockBaseline,
+  checkMedianRatioOptions,
 } from './lib.mjs';
 import { readFileSync } from 'node:fs';
 
@@ -764,4 +773,153 @@ test('summarizeReadinessMarks: populated runs only, cold and warm split', () => 
   });
   assert.equal(s.readinessMarksMissingRunCount, 1);
   assert.equal(s.readinessMarksUnexpectedRunCount, 1);
+});
+
+// ---- wall-clock median-ratio budgets ----------------------------------------
+
+const apiReport = {
+  scenarios: [
+    {
+      name: 'project-agents-list',
+      attempts: [
+        { success: true, totalMs: 100 },
+        { success: true, totalMs: 120 },
+        { success: false, totalMs: 9000 },
+        { success: true, totalMs: 110 },
+      ],
+    },
+  ],
+};
+const browserReport = {
+  scenarios: {
+    'project-grid': {
+      runs: [
+        { cold: true, outcome: 'populated', navToPopulatedMs: 5000 },
+        { cold: false, outcome: 'populated', navToPopulatedMs: 1400 },
+        { cold: false, outcome: 'loaded-not-rendered', navToPopulatedMs: null },
+        { cold: false, outcome: 'populated', navToPopulatedMs: 1600 },
+      ],
+    },
+  },
+};
+
+test('wallClockSamples keeps successful api attempts and warm populated browser runs only', () => {
+  const s = wallClockSamples({ api: apiReport, browser: browserReport });
+  assert.deepEqual(s['api:project-agents-list'], [100, 120, 110]);
+  // The cold run is the warm-up; the unpopulated run is not a sample.
+  assert.deepEqual(s['browser:project-grid'], [1400, 1600]);
+});
+
+test('compareMedianRatio passes at the ratio and fails just above it', () => {
+  const baseline = { metrics: { 'api:x': { medianMs: 100 } } };
+  const at = compareMedianRatio({ 'api:x': [125, 125, 125] }, baseline, {
+    ratio: 1.25,
+    minTrials: 3,
+  });
+  assert.equal(at.ok, true);
+  assert.equal(at.rows[0].status, 'ok');
+  const over = compareMedianRatio({ 'api:x': [126, 126, 126] }, baseline, {
+    ratio: 1.25,
+    minTrials: 3,
+  });
+  assert.equal(over.ok, false);
+  assert.equal(over.rows[0].status, 'over');
+});
+
+test('compareMedianRatio uses the median, so one slow trial does not fail', () => {
+  const baseline = { metrics: { 'api:x': { medianMs: 100 } } };
+  const r = compareMedianRatio({ 'api:x': [100, 101, 99, 5000, 102] }, baseline, { minTrials: 5 });
+  assert.equal(r.ok, true);
+  assert.equal(r.rows[0].medianMs, 101);
+});
+
+test('compareMedianRatio fails a metric with too few or no trials, and reports new metrics', () => {
+  const baseline = {
+    ratio: 1.25,
+    minTrials: 7,
+    metrics: { 'api:x': { medianMs: 100 }, 'api:y': { medianMs: 50 } },
+  };
+  const r = compareMedianRatio({ 'api:x': [100, 100], 'api:z': [1] }, baseline);
+  assert.equal(r.ok, false);
+  const byMetric = Object.fromEntries(r.rows.map((row) => [row.metric, row.status]));
+  assert.deepEqual(byMetric, { 'api:x': 'insufficient', 'api:y': 'insufficient', 'api:z': 'new' });
+});
+
+test('buildWallClockBaseline stores medians and refuses too few trials', () => {
+  const b = buildWallClockBaseline(
+    { 'api:x': [3, 1, 2] },
+    { commit: 'abc' },
+    { minTrials: 3, smoke: true }
+  );
+  assert.deepEqual(b, {
+    commit: 'abc',
+    smoke: true,
+    ratio: 1.25,
+    minTrials: 3,
+    metrics: { 'api:x': { medianMs: 2, trials: 3 } },
+  });
+  assert.throws(
+    () => buildWallClockBaseline({ 'api:x': [1] }, {}, { minTrials: 3, smoke: true }),
+    /need at least 3/
+  );
+  const full = buildWallClockBaseline({ 'api:x': Array(10).fill(5) }, {});
+  assert.equal(full.minTrials, 10);
+  assert.equal('smoke' in full, false);
+});
+
+test('buildWallClockBaseline refuses a trial minimum below the default unless it is a smoke run', () => {
+  assert.throws(
+    () => buildWallClockBaseline({ 'api:x': [1, 2, 3] }, {}, { minTrials: 3 }),
+    /only a smoke run/
+  );
+  assert.throws(() => buildWallClockBaseline({}, {}), /no samples/);
+});
+
+test('a smoke baseline is refused by a normal check and accepted by a smoke check', () => {
+  const smoke = buildWallClockBaseline({ 'api:x': [1, 2, 3] }, {}, { minTrials: 2, smoke: true });
+  assert.throws(() => compareMedianRatio({ 'api:x': [1, 2, 3] }, smoke), /smoke run/);
+  assert.equal(compareMedianRatio({ 'api:x': [1, 2, 3] }, smoke, { smoke: true }).ok, true);
+});
+
+test('compareMedianRatio refuses an empty baseline instead of passing it', () => {
+  assert.throws(() => compareMedianRatio({ 'api:x': [1] }, { metrics: {} }), /no metrics/);
+  assert.throws(() => compareMedianRatio({ 'api:x': [1] }, {}), /no metrics/);
+});
+
+test('an unusable ratio or trial minimum is an error, not a pass', () => {
+  const baseline = { metrics: { 'api:x': { medianMs: 100 } } };
+  const samples = { 'api:x': Array(10).fill(1000) };
+  for (const ratio of [NaN, 0, -1, Infinity]) {
+    assert.throws(() => compareMedianRatio(samples, baseline, { ratio }), /ratio must be/);
+    assert.throws(() => buildWallClockBaseline(samples, {}, { ratio }), /ratio must be/);
+  }
+  for (const minTrials of [NaN, 0, 1.5, -2]) {
+    assert.throws(() => compareMedianRatio(samples, baseline, { minTrials }), /minimum trials/);
+  }
+  // From the baseline file, too.
+  assert.throws(() => compareMedianRatio(samples, { ...baseline, ratio: 'x' }), /ratio must be/);
+  assert.doesNotThrow(() => checkMedianRatioOptions({}));
+});
+
+test('median-ratio.mjs exits 2 on a setup error and 1 over budget', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'median-ratio-'));
+  const api = join(dir, 'api.json');
+  const base = join(dir, 'base.json');
+  const bad = join(dir, 'bad.json');
+  writeFileSync(
+    api,
+    JSON.stringify({
+      scenarios: [{ name: 's', attempts: Array(10).fill({ success: true, totalMs: 200 }) }],
+    })
+  );
+  writeFileSync(base, JSON.stringify({ metrics: { 'api:s': { medianMs: 100 } } }));
+  writeFileSync(bad, '{ not json');
+  const cli = fileURLToPath(new URL('./median-ratio.mjs', import.meta.url));
+  const run = (...args) => spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8' }).status;
+  assert.equal(run('--baseline', base, '--api', api), 1, 'over budget');
+  assert.equal(run('--baseline', base, '--api', api, '--ratio', '1,25'), 2, 'NaN ratio');
+  assert.equal(run('--baseline', base, '--api', api, '--min-trials', '0'), 2, 'zero trials');
+  assert.equal(run('--baseline', bad, '--api', api), 2, 'unparsable baseline');
+  assert.equal(run('--baseline', base, '--api', join(dir, 'missing.json')), 2, 'missing report');
+  assert.equal(run('--baseline', base, '--api', api, '--ratio', '3'), 0, 'within a 3x ratio');
 });

@@ -909,6 +909,17 @@ func (d *createAgentDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.
 func setupCreateAgentServer(t *testing.T, disp AgentDispatcher) (*Server, store.Store, *store.Project) {
 	t.Helper()
 	srv, s := testServer(t)
+	project := setupCreateAgentProject(t, s)
+	srv.SetDispatcher(disp)
+	return srv, s, project
+}
+
+// setupCreateAgentProject seeds, through the raw store s, the project and
+// online default broker that setupCreateAgentServer uses. Fixtures that
+// install a store fault wrapper first (installStoreFault) call it on the
+// server they built.
+func setupCreateAgentProject(t *testing.T, s store.Store) *store.Project {
+	t.Helper()
 	ctx := context.Background()
 
 	project := &store.Project{
@@ -936,9 +947,7 @@ func setupCreateAgentServer(t *testing.T, disp AgentDispatcher) (*Server, store.
 
 	project.DefaultRuntimeBrokerID = broker.ID
 	require.NoError(t, s.UpdateProject(ctx, project))
-
-	srv.SetDispatcher(disp)
-	return srv, s, project
+	return project
 }
 
 func TestCreateAgent_BrokerStatusPreserved(t *testing.T) {

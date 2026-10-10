@@ -387,7 +387,11 @@ var errConduitAgentGone = errors.New("agent no longer exists")
 // session) is closed with 4401. A read error other than not-found keeps
 // the session; the forget step and the reapers still cover it.
 func (s *Server) conduitRevalidatePrincipal(ctx context.Context, p relay.Principal) error {
-	if p.Kind != registry.PrincipalAgent {
+	switch p.Kind {
+	case registry.PrincipalBroker:
+		return s.conduitRevalidateBroker(ctx, p)
+	case registry.PrincipalAgent:
+	default:
 		return nil
 	}
 	a, err := s.store.GetAgent(ctx, p.ID)
@@ -404,12 +408,13 @@ func (s *Server) conduitRevalidatePrincipal(ctx context.Context, p relay.Princip
 }
 
 // handleConduit serves GET /api/v1/conduit: an agent's conduit session.
-// Only agent principals (agent token with agent:port:forward) may connect;
-// users, brokers and anonymous callers are refused at the HTTP layer
-// before any upgrade. The principal's project, launch id and generation
-// come from the agent row read here, never from the Hello; admission then
-// applies the 1d-i incarnation policy (launch-id match, the
-// legacy-fallback fence, gen-N fallback).
+// Agent principals (agent token with agent:port:forward) and Runtime
+// Brokers (HMAC headers, handleConduitBroker) may connect; users and
+// anonymous callers are refused at the HTTP layer before any upgrade. An
+// agent's project, launch id and generation come from the agent row read
+// here, never from the Hello; admission then applies the 1d-i
+// incarnation policy (launch-id match, the legacy-fallback fence, gen-N
+// fallback).
 func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
 	if !s.experimentEnabled(conduitExperiment) {
 		NotFound(w, "route")
@@ -417,6 +422,10 @@ func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	if r.Header.Get(HeaderBrokerID) != "" {
+		s.handleConduitBroker(w, r)
 		return
 	}
 	ident := GetAgentIdentityFromContext(r.Context())

@@ -525,12 +525,12 @@ func TestScopedAdmin_HubAdminCanCreateCustomRoleWithHeldPermissions(t *testing.T
 	srv, _, hubAdmin, _ := setupScopedAdminTest(t)
 
 	// Hub-admin should be able to create a custom role that contains
-	// only permissions they hold (user.read, user.list are in hub-admin).
+	// only permissions they hold (user.read, group.read are in hub-admin).
 	rec := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, "/api/v1/admin/roles", createRoleDefinitionRequest{
 		Name:        "custom-reader",
 		Description: "Custom read-only role",
 		ScopeType:   store.RoleScopeSystem,
-		Permissions: []string{"user.read", "user.list"},
+		Permissions: []string{"user.read", "group.read"},
 	})
 	assert.Equal(t, http.StatusCreated, rec.Code,
 		"hub-admin should be able to create custom role with held permissions; got body: %s", rec.Body.String())

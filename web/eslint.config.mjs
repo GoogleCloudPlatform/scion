@@ -145,6 +145,7 @@ export default defineConfig([
   ),
   project(['e2e/terminal-lifecycle/*.ts'], './e2e/terminal-lifecycle/tsconfig.json'),
   project(['e2e/terminal-owner/*.ts'], './e2e/terminal-owner/tsconfig.json'),
+  project(['e2e-perf/budgets/*.ts'], './e2e-perf/budgets/tsconfig.json'),
 
   // Test files: a looser type-aware rule set than sources. Tests reach
   // into private members and use `as any` fakes, so the no-unsafe-* rules

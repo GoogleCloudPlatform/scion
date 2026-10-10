@@ -16,8 +16,10 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -45,12 +47,23 @@ const artifactRefsDroppedWarning = "%d artifact reference(s) not attached: each 
 // enabled on the hub at all. It depends on no reference.
 const artifactRefsDisabledWarning = "artifact references are not enabled on this hub: %d reference(s) not attached"
 
-// artifactRefsWarning returns the warning for dropped references, or "".
-func artifactRefsWarning(dropped int) string {
-	if dropped <= 0 {
-		return ""
+// artifactRefsUncheckedWarning is the warning when references could not be
+// checked because a store read failed (artifacts.ResolveError). Like
+// artifactRefsDroppedWarning it carries a count only.
+const artifactRefsUncheckedWarning = "%d artifact reference(s) not attached: they could not be checked because of a server error; try again"
+
+// artifactRefsWarning returns the warning for references dropped as
+// unreadable or malformed and for references that could not be checked,
+// or "" when there are none.
+func artifactRefsWarning(dropped, unchecked int) string {
+	var parts []string
+	if dropped > 0 {
+		parts = append(parts, fmt.Sprintf(artifactRefsDroppedWarning, dropped, artifacts.MaxMessageRefs))
 	}
-	return fmt.Sprintf(artifactRefsDroppedWarning, dropped, artifacts.MaxMessageRefs)
+	if unchecked > 0 {
+		parts = append(parts, fmt.Sprintf(artifactRefsUncheckedWarning, unchecked))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // artifactRefsDisabled returns the warning for references sent while the
@@ -82,18 +95,32 @@ func (s *Server) artifactRefsActive() bool {
 // replaced, resolves nothing, so artifacts.Host keeps seeing only
 // request-derived identities. With references inactive every view is
 // unavailable too.
-func (s *Server) resolveArtifactRefs(ctx context.Context, refs []artifacts.MessageRef) []artifacts.RefView {
+//
+// unchecked counts the references that could not be checked because a
+// store read failed (artifacts.ResolveError); their views are unavailable.
+func (s *Server) resolveArtifactRefs(ctx context.Context, refs []artifacts.MessageRef) (views []artifacts.RefView, unchecked int) {
 	if len(refs) == 0 {
-		return nil
+		return nil, 0
 	}
 	if !s.artifactRefsActive() || !requestCredentialBindsIdentity(ctx) {
 		out := make([]artifacts.RefView, len(refs))
 		for i, r := range refs {
 			out[i] = artifacts.RefView{Ref: r.String(), ID: r.ArtifactID, Seq: r.Seq}
 		}
-		return out
+		return out, 0
 	}
-	return s.artifactRefResolver().ResolveRefs(ctx, refs)
+	views, err := s.artifactRefResolver().ResolveRefs(ctx, refs)
+	if err != nil {
+		var resErr *artifacts.ResolveError
+		if !errors.As(err, &resErr) {
+			// ResolveRefs returns only *ResolveError; count every
+			// reference if that ever changes.
+			resErr = &artifacts.ResolveError{Unchecked: len(refs), Err: err}
+		}
+		slog.ErrorContext(ctx, "artifact references could not be checked", "unchecked", resErr.Unchecked, "error", err)
+		unchecked = resErr.Unchecked
+	}
+	return views, unchecked
 }
 
 // admitMessageArtifacts is the only way artifact references enter a
@@ -104,7 +131,8 @@ func (s *Server) resolveArtifactRefs(ctx context.Context, refs []artifacts.Messa
 // must be the sender's own request context. Admitted references are
 // re-encoded canonically under the key; the key is absent when none are
 // admitted. warning is "" when every reference was admitted, otherwise the
-// sender-facing warning (artifactRefsWarning, or artifactRefsDisabled when
+// sender-facing warning (artifactRefsWarning, which also counts references a
+// failed store read left unchecked, or artifactRefsDisabled when
 // references are off on this hub). md is never mutated.
 func (s *Server) admitMessageArtifacts(ctx context.Context, md map[string]string) (out map[string]string, admitted []artifacts.MessageRef, warning string) {
 	raw := md[artifacts.MessageMetadataKey]
@@ -116,13 +144,17 @@ func (s *Server) admitMessageArtifacts(ctx context.Context, md map[string]string
 	if !s.artifactRefsActive() {
 		return out, nil, artifactRefsDisabled(dropped + len(refs))
 	}
-	for i, v := range s.resolveArtifactRefs(ctx, refs) {
+	views, unchecked := s.resolveArtifactRefs(ctx, refs)
+	for i, v := range views {
 		if v.Available {
 			admitted = append(admitted, refs[i])
 		} else {
 			dropped++
 		}
 	}
+	// A reference that could not be checked is not attached (unavailable
+	// above) and is warned about separately, as a server error.
+	dropped -= unchecked
 	if len(admitted) > 0 {
 		next := make(map[string]string, len(out)+1)
 		for k, v := range out {
@@ -131,27 +163,32 @@ func (s *Server) admitMessageArtifacts(ctx context.Context, md map[string]string
 		next[artifacts.MessageMetadataKey] = artifacts.EncodeMessageRefs(admitted)
 		out = next
 	}
-	if dropped > 0 {
-		slog.InfoContext(ctx, "message artifact references not attached", "dropped", dropped, "admitted", len(admitted))
+	if dropped > 0 || unchecked > 0 {
+		slog.InfoContext(ctx, "message artifact references not attached", "dropped", dropped, "unchecked", unchecked, "admitted", len(admitted))
 	}
-	return out, admitted, artifactRefsWarning(dropped)
+	return out, admitted, artifactRefsWarning(dropped, unchecked)
 }
 
 // recordMessageArtifacts persists admitted references for a stored
-// message, so the web chat can show them later. A failure is logged, not
-// returned: the message itself is already stored and its body still names
-// the artifacts.
-func (s *Server) recordMessageArtifacts(ctx context.Context, messageID string, refs []artifacts.MessageRef) {
+// message, so the web chat can show them later, and returns the references
+// it stored: refs, or nil when there is nothing to record, no artifact
+// store, or the write failed. Callers publish the live chat event with the
+// returned value, so the event never names a reference history would not
+// return. A failure is logged, not returned: the message itself is already
+// stored and its body still names the artifacts.
+func (s *Server) recordMessageArtifacts(ctx context.Context, messageID string, refs []artifacts.MessageRef) []artifacts.MessageRef {
 	if messageID == "" || len(refs) == 0 {
-		return
+		return nil
 	}
 	st := s.ArtifactStore()
 	if st == nil {
-		return
+		return nil
 	}
 	if err := st.AddMessageRefs(ctx, messageID, refs); err != nil {
 		slog.ErrorContext(ctx, "failed to record message artifact references", "message_id", messageID, "error", err)
+		return nil
 	}
+	return refs
 }
 
 // chatArtifactRef is one artifact reference on a chat message, as the
@@ -164,7 +201,9 @@ type chatArtifactRef struct {
 // chatArtifactViews resolves refs for the caller of ctx and names the owner
 // of every available artifact.
 func (s *Server) chatArtifactViews(ctx context.Context, refs []artifacts.MessageRef) []chatArtifactRef {
-	views := s.resolveArtifactRefs(ctx, refs)
+	// A reference that could not be checked shows as unavailable;
+	// resolveArtifactRefs logs the failure.
+	views, _ := s.resolveArtifactRefs(ctx, refs)
 	owners := map[string]string{}
 	out := make([]chatArtifactRef, len(views))
 	for i, v := range views {

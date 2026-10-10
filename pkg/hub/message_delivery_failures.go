@@ -211,7 +211,7 @@ func (s *Server) applyBrokerMessageFailure(ctx context.Context, brokerID string,
 	if strings.HasPrefix(msg.Sender, "user:") && s.events != nil {
 		msg.DispatchState = store.MessageDispatchFailed
 		msg.DispatchFailureReason = &reason
-		s.events.PublishUserMessage(ctx, msg, nil)
+		s.events.PublishUserMessage(ctx, msg, nil, nil)
 	}
 	return true
 }

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -518,8 +519,19 @@ const listCursorPrefix = "c1."
 // malformed input, truncation, a tampered byte, a cursor sealed under a key
 // this sealer does not currently hold, or a binding (endpoint, filter or
 // caller) that does not match the one the cursor was sealed under -- so all
-// cursor failures get one uniform response.
-var errInvalidCursor = errors.New("invalid cursor")
+// cursor failures get one uniform response. invalidCursorError has a
+// single (empty) value, so errors.Is matches it as it would a sentinel.
+var errInvalidCursor error = invalidCursorError{}
+
+// invalidCursorError is the type of errInvalidCursor.
+type invalidCursorError struct{}
+
+func (invalidCursorError) Error() string { return "invalid cursor" }
+
+// httpStatus implements httpStatusError: a 400 invalid_cursor.
+func (invalidCursorError) httpStatus() (int, string, string) {
+	return http.StatusBadRequest, ErrCodeInvalidCursor, "invalid cursor: restart pagination from the first page"
+}
 
 // errListCursorSealerUnavailable is returned by Seal when called on a nil
 // sealer -- a state New() never produces in production (it always either
