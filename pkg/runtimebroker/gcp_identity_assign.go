@@ -283,8 +283,11 @@ const assignDiscoveryTimeout = 15 * time.Second
 // text.
 func (s *Server) discoverAssignKSA(ctx context.Context, mgr agent.Manager, agentName, namespace, saEmail string, sel dispatchProfileSelection) (string, *startContextError) {
 	notMapped := func(result, reason string, cause error) *startContextError {
-		s.agentLifecycleLog.Warn("GCP identity mode assign: no Kubernetes ServiceAccount mapped or discovered by annotation",
-			"agent", agentName, "service_account", saEmail, "namespace", namespace, "discovery", result, "error", cause)
+		attrs := []any{"agent", agentName, "service_account", saEmail, "namespace", namespace, "discovery", result}
+		if cause != nil {
+			attrs = append(attrs, "error", cause)
+		}
+		s.agentLifecycleLog.Warn("GCP identity mode assign: no Kubernetes ServiceAccount mapped or discovered by annotation", attrs...)
 		details := s.identityMappingErrorDetails(saEmail, sel)
 		details[api.BrokerErrDetailDiscovery] = result
 		details[api.BrokerErrDetailNamespace] = namespace

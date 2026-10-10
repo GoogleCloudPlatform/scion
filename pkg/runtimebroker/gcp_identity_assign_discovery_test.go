@@ -237,6 +237,9 @@ func TestKSADiscovery_NoMatchKeepsNotMapped(t *testing.T) {
 		objects:    []k8sruntime.Object{annotatedKSA(discoveryTestNamespace, "other-ksa", "other@my-project.iam.gserviceaccount.com")},
 	}.run(t)
 	assertNotMappedWith(t, res, api.BrokerKSADiscoveryNoMatch, "annotation discovery found no ServiceAccount in namespace \"agents-ns\"")
+	if strings.Contains(res.logs, "error=") {
+		t.Errorf("no-match log carries an error attribute:\n%s", res.logs)
+	}
 	if res.listCalls != 1 {
 		t.Errorf("list calls = %d, want 1", res.listCalls)
 	}
