@@ -93,24 +93,28 @@ func TestBuildStartContext_TelemetryPolicyBeatsEnv(t *testing.T) {
 	cases := []struct {
 		name   string
 		in     startContextInputs
+		policy *bool // the policy carried by in, for the env assertion
 		envVal string
 		want   bool
 	}{
 		{
 			name:   "create config policy false beats env true",
 			in:     startContextInputs{Config: &CreateAgentConfig{TelemetryPolicy: tiersBoolPtr(false)}, Operation: opCreate},
+			policy: tiersBoolPtr(false),
 			envVal: "true",
 			want:   false,
 		},
 		{
 			name:   "start policy true beats env false",
 			in:     startContextInputs{TelemetryPolicy: tiersBoolPtr(true), Operation: opHTTPStart},
+			policy: tiersBoolPtr(true),
 			envVal: "false",
 			want:   true,
 		},
 		{
 			name:   "restart policy false beats env true",
 			in:     startContextInputs{TelemetryPolicy: tiersBoolPtr(false), Operation: opHTTPRestart},
+			policy: tiersBoolPtr(false),
 			envVal: "true",
 			want:   false,
 		},
@@ -137,6 +141,16 @@ func TestBuildStartContext_TelemetryPolicyBeatsEnv(t *testing.T) {
 			}
 			if sc.Opts.TelemetryOverride == nil || *sc.Opts.TelemetryOverride != tc.want {
 				t.Fatalf("TelemetryOverride = %s, want %v", tiersFmt(sc.Opts.TelemetryOverride), tc.want)
+			}
+			// The container env must carry the winning value too: Start
+			// only fills telemetry env keys that are absent, so a stale
+			// requester flag would otherwise reach sciontool.
+			wantEnv := tc.envVal
+			if tc.policy != nil {
+				wantEnv = tiersFmt(tc.policy)
+			}
+			if got := sc.Opts.Env["SCION_TELEMETRY_ENABLED"]; got != wantEnv {
+				t.Errorf("container env SCION_TELEMETRY_ENABLED = %q, want %q", got, wantEnv)
 			}
 		})
 	}
@@ -283,6 +297,86 @@ func TestExtractRequiredEnvKeys_TemplateSecretsFromHydratedTemplate(t *testing.T
 		required, _, _, _ := srv.extractRequiredEnvKeys(req, "")
 		if !has(required, "LOCAL_SECRET") {
 			t.Errorf("local template secret not listed: required=%v", required)
+		}
+	})
+}
+
+// TestExtractRequiredEnvKeys_TemplateAuthTypeFromHydratedTemplate pins the
+// same rule for the template-level auth_selectedType cascade: for a hub
+// template, env-gather reads it from the hydrated template, never from a
+// local template of the same slug.
+func TestExtractRequiredEnvKeys_TemplateAuthTypeFromHydratedTemplate(t *testing.T) {
+	writeTpl := func(t *testing.T, dir, authType string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		yaml := "harness_config: claude\n"
+		if authType != "" {
+			yaml += "auth_selectedType: " + authType + "\n"
+		}
+		if err := os.WriteFile(filepath.Join(dir, "scion-agent.yaml"), []byte(yaml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	newSrv := func(t *testing.T) (*Server, string) {
+		// The harness-config selects api-key; ANTHROPIC_API_KEY is
+		// supplied, so only a template-selected vertex-ai makes
+		// GOOGLE_CLOUD_PROJECT required.
+		srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+			"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: api-key\n"+claudeAuthBlock,
+			"schema_version: \"1\"\nprofiles:\n  default:\n    runtime: mock\n")
+		return srv, projectDir
+	}
+	hubReq := func(projectDir string) CreateAgentRequest {
+		return CreateAgentRequest{
+			Name:        "tpl-auth",
+			ProjectPath: projectDir,
+			ResolvedEnv: map[string]string{"ANTHROPIC_API_KEY": "x"},
+			Config:      &CreateAgentConfig{Template: "mytpl", TemplateID: "tpl-uuid", TemplateHash: "h1", HarnessConfig: "claude", Profile: "default"},
+		}
+	}
+	has := func(keys []string, k string) bool {
+		for _, x := range keys {
+			if x == k {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("hydrated vertex-ai, no local template", func(t *testing.T) {
+		srv, projectDir := newSrv(t)
+		hydrated := filepath.Join(t.TempDir(), "hydrated", "mytpl")
+		writeTpl(t, hydrated, "vertex-ai")
+
+		required, _, _, _ := srv.extractRequiredEnvKeys(hubReq(projectDir), hydrated)
+		if !has(required, "GOOGLE_CLOUD_PROJECT") {
+			t.Errorf("hydrated template auth_selectedType vertex-ai ignored: required=%v", required)
+		}
+	})
+
+	t.Run("hydrated vertex-ai, local slug says api-key", func(t *testing.T) {
+		srv, projectDir := newSrv(t)
+		writeTpl(t, filepath.Join(projectDir, "templates", "mytpl"), "api-key")
+		hydrated := filepath.Join(t.TempDir(), "hydrated", "mytpl")
+		writeTpl(t, hydrated, "vertex-ai")
+
+		required, _, _, _ := srv.extractRequiredEnvKeys(hubReq(projectDir), hydrated)
+		if !has(required, "GOOGLE_CLOUD_PROJECT") {
+			t.Errorf("local template of the same slug was read instead of the hydrated one: required=%v", required)
+		}
+	})
+
+	t.Run("hydrated has none, local slug says vertex-ai", func(t *testing.T) {
+		srv, projectDir := newSrv(t)
+		writeTpl(t, filepath.Join(projectDir, "templates", "mytpl"), "vertex-ai")
+		hydrated := filepath.Join(t.TempDir(), "hydrated", "mytpl")
+		writeTpl(t, hydrated, "")
+
+		required, _, _, _ := srv.extractRequiredEnvKeys(hubReq(projectDir), hydrated)
+		if has(required, "GOOGLE_CLOUD_PROJECT") {
+			t.Errorf("local template auth_selectedType leaked into a hub-template preflight: required=%v", required)
 		}
 	})
 }

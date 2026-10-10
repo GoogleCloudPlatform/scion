@@ -5141,12 +5141,13 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 			}
 		}
 
-		// Template-level auth_selectedType takes high precedence
-		if req.Config != nil && req.Config.Template != "" && req.ProjectPath != "" {
-			if tmpl, err := config.FindTemplateInProjectPath(req.Config.Template, req.ProjectPath); err == nil {
-				if cfg, err := tmpl.LoadConfig(); err == nil && cfg != nil && cfg.AuthSelectedType != "" {
-					authType = cfg.AuthSelectedType
-				}
+		// Template-level auth_selectedType takes high precedence. Read from
+		// the same template launch uses: the hydrated copy for a hub
+		// template, never a local template of the same slug
+		// (ptone/scion#4218, P6).
+		if tmpl := envGatherTemplate(req, hydratedTemplatePath); tmpl != nil {
+			if cfg, err := tmpl.LoadConfig(); err == nil && cfg != nil && cfg.AuthSelectedType != "" {
+				authType = cfg.AuthSelectedType
 			}
 		}
 
@@ -7628,6 +7629,11 @@ func envGatherTemplate(req CreateAgentRequest, hydratedTemplatePath string) *con
 	if hydratedTemplatePath != "" {
 		return &config.Template{Name: filepath.Base(hydratedTemplatePath), Path: hydratedTemplatePath}
 	}
+	// Rule: env-gather reads the same template start will use. When
+	// nothing was hydrated (no hub connection, or no TemplateID/hash),
+	// buildStartContext leaves opts.Template as the slug and provisioning
+	// resolves it from the local project, so the slug lookup here matches.
+	// A hydration error fails the create before this point.
 	if req.Config == nil || req.Config.Template == "" || req.ProjectPath == "" {
 		return nil
 	}
