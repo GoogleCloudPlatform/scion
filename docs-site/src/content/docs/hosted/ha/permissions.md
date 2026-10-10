@@ -172,6 +172,8 @@ If the Hub cannot save the result of a service account verification (on registra
 
 Hub-scoped service accounts are defined globally at the Hub level rather than being restricted to a single project. This allows Platform Ops to make shared service accounts available for selection across multiple project-level workspaces.
 
+Any current hub member may register an existing (bring-your-own) account at hub scope, with `scion service-accounts add <email> --gcp-project <gcp-project> --global` or the API. Registering does not make the account assignable on its own: assignment goes through the gates below.
+
 To prevent unauthorized assignment of global resources, Scion applies specialized security logic:
 - **Enforcement Mode Dependency**: Assignment of a hub-scoped service account is **unconditionally denied** if `gcp_iam_check_mode` is set to `off`. Because "off" mode disables the GCP IAM validation layer, letting users assign global service accounts without an `actAs` check would create a massive security risk. Hub-scoped service accounts require `gcp_iam_check_mode: enforce` to be assigned.
 - **Dynamic Membership Checks**: Only current, active members of the Hub or project who possess `ActionAssign` on the resource and pass the Policy Troubleshooter `actAs` check can bind the service account.

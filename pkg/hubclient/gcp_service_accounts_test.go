@@ -614,14 +614,15 @@ func TestGCPServiceAccounts_List_EmptyResponseIsAnEmptyList(t *testing.T) {
 	}
 }
 
-// CREATION AT HUB SCOPE IS THE HUB'S REFUSAL TO MAKE, NOT THIS CLIENT'S.
+// CREATION AT HUB SCOPE IS THE HUB'S DECISION, NOT THIS CLIENT'S.
 //
-// The request is representable here on purpose. The Hub holds hub-scoped
-// creation closed at handlers_gcp_identity_scoped.go with a message that
-// explains itself; a client that rejected it first would report a different and
-// less true reason, and would keep reporting it after the hold is lifted. So
-// the assertion is that the request REACHES the server carrying scope=hub, and
-// that the server's refusal is what the caller sees.
+// The request is representable here on purpose. The Hub decides who may
+// register at hub scope (handlers_gcp_identity_scoped.go accepts a
+// bring-your-own registration from any current hub member) and explains any
+// refusal in its own message; a client that rejected the request first would
+// report a different and less true reason. So the assertion is that the
+// request REACHES the server carrying scope=hub, and that when the server
+// refuses (simulated below), its refusal is what the caller sees.
 func TestGCPServiceAccounts_Create_HubScopeReachesTheServersRefusal(t *testing.T) {
 	var seenScope string
 	reached := false

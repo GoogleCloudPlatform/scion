@@ -406,6 +406,28 @@ An agent's GCP identity mode decides which Google identity, if any, GCP client l
 | `passthrough` | The pod uses whatever identity the cluster gives it, configured outside Scion. The default when no identity is configured (see **No identity configured** below). |
 | `assign` | Uses GKE Workload Identity: the pod runs as a Kubernetes ServiceAccount (KSA) that the operator has bound to the assigned Google service account (GSA). Requires a GSA-to-KSA mapping in the broker's settings. |
 
+#### Setup checklist: give agents a GCP identity
+
+An agent on the Kubernetes runtime gets a GSA only when all of the links below are in place. They are held in different places and set by different people, and a missing one usually shows up only at dispatch or inside the pod. Do them in this order for each GSA:
+
+1. **Register the GSA with the Hub** (a project owner or admin, or any hub member for a hub-scoped account). Use `scion project service-accounts add <email> --gcp-project <gcp-project>` to register it to one project, or `scion service-accounts add <email> --gcp-project <gcp-project> --global` to register it at hub scope, assignable from every project. A hub-scoped account can be assigned only while `gcp_iam_check_mode` is `enforce`. See [Hub-Scoped Service Accounts](/scion/hosted/ha/permissions/#hub-scoped-service-accounts) and the [CLI reference](/scion/reference/cli/#scion-service-accounts). `scion project service-accounts mint` creates and registers a new GSA instead, and also does step 2 for you.
+2. **Grant the Hub token-creator on the GSA, then verify.** The Hub's own identity needs `roles/iam.serviceAccountTokenCreator` on the GSA:
+
+   ```bash
+   gcloud iam service-accounts add-iam-policy-binding <email> \
+     --member="serviceAccount:<hub-identity>" \
+     --role="roles/iam.serviceAccountTokenCreator"
+   ```
+
+   Registration checks this once. If you grant the role afterwards, re-run the check with `scion project service-accounts verify <id>` (or `scion service-accounts verify <id> --global`). See [GCP Identity & Hub-Minted Service Accounts](/scion/hosted/single-node/hub-server/#gcp-identity--hub-minted-service-accounts).
+3. **Map the GSA to a KSA on the broker** (broker operator). Add `<email>: <ksa>` to `kubernetes_service_account_mappings` on a `kubernetes`-type runtime entry (its key can be any name) or on a profile, in the broker's global settings. For a broker in the same process as a database-backed Hub, a hub admin sets it through the server config (`PUT /api/v1/admin/server-config`, or the Hub's Settings admin page) instead. The mapping can be skipped when exactly one KSA in the namespace carries the GSA's Workload Identity annotation and the broker may list ServiceAccounts there. See [the mapping setting](#gcp-identity-mode-assign-workload-identity-mapping) and [GKE Workload Identity for GCP Identity Mode Assign](/scion/hosted/ha/setup-gcp/#2i-gke-workload-identity-for-gcp-identity-mode-assign).
+4. **Create the Workload Identity binding for the KSA** (cluster and GCP project admin). Create the KSA in the namespace the runtime entry resolves to, annotate it with `iam.gke.io/gcp-service-account: <email>`, and grant `roles/iam.workloadIdentityUser` on the GSA to that namespace and KSA. Scion does not do this step or check the IAM binding; the broker only reads the annotation, to find the KSA when there is no mapping. See the [`gcloud` and `kubectl` steps](/scion/hosted/ha/setup-gcp/#2i-gke-workload-identity-for-gcp-identity-mode-assign).
+5. **Optional: set a default** (project admin, or hub admin for the hub default). Without a default, assign the GSA per agent with `--service-account <id|email|name>`. A project can set a project default or, for projects that also use other runtimes, a default per Kubernetes profile; a hub admin can set a hub default, which must name a hub-scoped account. See [Per-Profile Default Service Accounts](/scion/hosted/ha/permissions/#per-profile-default-service-accounts) and [Hub-Default GCP Identity](/scion/hosted/ha/permissions/#hub-default-gcp-identity).
+
+To check step 2, run `scion service-accounts show <id>` (add `--global` for a hub-scoped account). It shows whether the Hub's token-creator check passed and, if not, why. For step 3 on a project-scoped account, the `add`, `mint`, `verify` and `list` subcommands of `scion project service-accounts`, and the `gcp-sa-mappings` check of `scion doctor`, warn when no Kubernetes profile of the project maps it (see **Early warning for unmapped service accounts** below); hub-scoped accounts get no such warning. The Hub cannot see the KSA annotation or the IAM binding, so step 4 is confirmed only by a successful dispatch.
+
+For agents whose identity resolves to `block`, none of the steps above apply. Instead, the broker operator names a block KSA with `kubernetes_block_service_account`; without one, the pod runs as the namespace's `default` KSA. Either way, the KSA is zero-privilege only while the IAM preconditions under [block](#block) hold.
+
 #### block
 
 GKE cannot give a single pod no Google identity: on a node pool with Workload Identity, every Kubernetes ServiceAccount (KSA) receives a federated token, with or without a Google service account annotation. On Kubernetes, `block` therefore means a zero-privilege identity. When the mode resolved for a Kubernetes dispatch is `block`, from the request, a project default, a hub default, or an agent's own stored identity, the broker starts the pod with:
@@ -652,7 +674,7 @@ With this file:
 - On profile `restricted`, the same GSA runs as `agent-worker-restricted-ksa` in `scion-agents`, and `agent-reader@...` still runs as `agent-reader-ksa` from the runtime entry.
 - On profile `team`, the same GSA runs as `team-worker-ksa` in `team-agents`. `agent-reader@...` has no mapping there, so the broker looks in `team-agents` for a KSA annotated with that GSA. If there is exactly one, the pod runs as it; otherwise the dispatch fails with the "no Kubernetes ServiceAccount mapped" error.
 
-Each KSA must exist in its namespace, carry the `iam.gke.io/gcp-service-account` annotation for its GSA, and hold the `roles/iam.workloadIdentityUser` binding for that namespace and name. The GSA itself is chosen on the Hub as usual: register it as a Hub service account (`scion service-accounts`), then assign it per agent with `scion start <agent> --service-account <id>`, or as a project or hub default with mode `assign`.
+Each KSA must exist in its namespace, carry the `iam.gke.io/gcp-service-account` annotation for its GSA, and hold the `roles/iam.workloadIdentityUser` binding for that namespace and name. The GSA itself is chosen on the Hub as usual: register it with the Hub, either to a project (`scion project service-accounts add`) or at hub scope (`scion service-accounts add --global`), then assign it per agent with `scion start <agent> --service-account <id>`, or as a project or hub default with mode `assign`.
 
 #### Troubleshooting
 
