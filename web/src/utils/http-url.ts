@@ -24,6 +24,8 @@
  * characters (U+00AD, U+180E, U+200B to U+200D, U+2060) and U+FFFD.
  */
 const DISALLOWED =
+  // The control-character ranges are intentional (see ptone/scion#4126).
+  // eslint-disable-next-line no-control-regex
   /[\s\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufffd]/;
 
 /**

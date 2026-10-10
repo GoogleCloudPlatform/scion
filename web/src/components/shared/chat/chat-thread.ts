@@ -390,7 +390,6 @@ function withDispatchFailure(
   reason: string | undefined,
   code: string | undefined
 ): Message {
-  /* eslint-disable-next-line @typescript-eslint/no-unused-vars -- rest-omit idiom: bind and drop these two keys so `...rest` excludes them */
   const { dispatchFailureReason: _reason, dispatchFailureCode: _code, ...rest } = msg;
   return {
     ...rest,
