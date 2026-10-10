@@ -840,8 +840,9 @@ func (s *Server) syncHubManagedWorkspaceBack(ctx context.Context, agent *store.A
 	// Download from storagePath, the path the caller's upload just wrote
 	// (sync-from uploads to the agent's WorkspaceStoragePath). The
 	// project-level ProjectWorkspaceStoragePath is written only by the
-	// hub's own upload at create and by the stop-time sync-back, so reading
-	// it here found nothing or stale content (ptone/scion#4244).
+	// hub's own upload at create, by the stop-time sync-back and by
+	// project-cache refreshes, so reading it here found nothing or stale
+	// content (ptone/scion#4244).
 	if err := s.syncHubWorkspaceFromGCS(ctx, stor.Bucket(), storagePath+"/files", workspacePath); err != nil {
 		s.workspaceLog.Warn("syncHubManagedWorkspaceBack: GCS download failed",
 			"project_id", project.ID, "storagePath", storagePath, "error", err)
