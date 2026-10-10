@@ -1340,7 +1340,10 @@ describe('view mode shortcuts', () => {
         // The menu item carries both suffix nodes: the count, then the hint.
         const item = el.shadowRoot?.querySelector('sl-menu-item[value="chat"]');
         const suffixes = Array.from(item?.querySelectorAll('[slot="suffix"]') ?? []);
-        expect(suffixes.map((n) => n.className)).toEqual(['count-badge chat-count', 'mode-shortcut']);
+        expect(suffixes.map((n) => n.className)).toEqual([
+          'count-badge chat-count',
+          'mode-shortcut',
+        ]);
         expect(suffixes.map((n) => n.textContent?.trim())).toEqual(['3', 'Ctrl+2']);
         expect(suffixes[0]?.getAttribute('aria-label')).toBe('3 unread conversations');
       } finally {

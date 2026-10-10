@@ -274,7 +274,7 @@ export class ChatNotificationDispatcher {
   private readonly threadCache = new Map<string, CachedList<ThreadEntry[] | null>>();
   private readonly boundHandler = (e: Event): void => {
     const detail = (e as CustomEvent<{ data?: unknown }>).detail;
-    void this.handle((detail?.data ?? {}) as ChatMessagePayload);
+    void this.handle(detail?.data ?? {});
   };
 
   /** Test seams: the popup constructor, navigation and the info lookup. */

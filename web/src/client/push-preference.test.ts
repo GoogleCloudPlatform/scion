@@ -35,7 +35,7 @@ import {
 
 class FakeNotification {
   static permission: NotificationPermission = 'granted';
-  static requestPermission = vi.fn(async () => FakeNotification.permission);
+  static requestPermission = vi.fn(() => Promise.resolve(FakeNotification.permission));
 }
 
 beforeEach(() => {
@@ -113,9 +113,9 @@ describe('per-category opt-in', () => {
 
   it('enables only the requested category after permission is granted', async () => {
     FakeNotification.permission = 'default';
-    FakeNotification.requestPermission.mockImplementation(async () => {
+    FakeNotification.requestPermission.mockImplementation(() => {
       FakeNotification.permission = 'granted';
-      return 'granted';
+      return Promise.resolve<NotificationPermission>('granted');
     });
     expect(await enablePushWithPermission('chat')).toBe('granted');
     expect(isPushOptedIn('chat')).toBe(true);

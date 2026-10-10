@@ -364,7 +364,7 @@ describe('scion-page-profile-settings — alert toggles', () => {
 
   class FakeNotification {
     static permission: NotificationPermission = 'granted';
-    static requestPermission = vi.fn(async () => FakeNotification.permission);
+    static requestPermission = vi.fn(() => Promise.resolve(FakeNotification.permission));
   }
 
   beforeAll(async () => {
