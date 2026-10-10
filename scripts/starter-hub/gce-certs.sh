@@ -94,15 +94,19 @@ else
         -d '*.${DOMAIN}' \
         --email ${EMAIL} \
         --non-interactive \
-        --agree-tos \
-        --deploy-hook 'chown root:caddy /etc/letsencrypt/live /etc/letsencrypt/archive && chmod g+x /etc/letsencrypt/live /etc/letsencrypt/archive && chown -R root:caddy /etc/letsencrypt/live/\${RENEWED_DOMAINS%%,*} /etc/letsencrypt/archive/\${RENEWED_DOMAINS%%,*} && chmod -R g+rX /etc/letsencrypt/live/\${RENEWED_DOMAINS%%,*} /etc/letsencrypt/archive/\${RENEWED_DOMAINS%%,*} && (systemctl reload caddy || caddy reload --config /etc/caddy/Caddyfile)'"
+        --agree-tos"
 fi
 
-# 5. Reload Caddy if it's installed to pick up new/renewed certificates
-if gcloud compute ssh "${INSTANCE_NAME}" --zone="${GCE_ZONE}" --command="command -v caddy" &>/dev/null; then
-    echo "Reloading Caddy on ${INSTANCE_NAME}..."
-    gcloud compute ssh "${INSTANCE_NAME}" --zone="${GCE_ZONE}" --command="sudo systemctl reload caddy || sudo caddy reload --config /etc/caddy/Caddyfile"
-fi
+# 5. Make renewals reach Caddy, for new and existing certificates alike.
+# Caddy serves the files under /etc/letsencrypt/live/ and only re-reads them
+# on reload. fix-tls-rotation.sh installs a certbot deploy hook that reloads
+# Caddy after each successful renewal, enables the renewal timer, and reloads
+# Caddy now if it serves an older certificate than the one on disk. It runs
+# on both paths above: hubs whose certificate already existed never got the
+# hook from the certonly call (ptone/scion#4207).
+echo "Installing certificate rotation (certbot deploy hook, renewal timer) on ${INSTANCE_NAME}..."
+gcloud compute scp "${SCRIPT_DIR}/fix-tls-rotation.sh" "${INSTANCE_NAME}:/tmp/fix-tls-rotation.sh" --zone="${GCE_ZONE}"
+gcloud compute ssh "${INSTANCE_NAME}" --zone="${GCE_ZONE}" --command="sudo bash /tmp/fix-tls-rotation.sh --domain '${DOMAIN}' --host '${HUB_SUBDOMAIN}'; rc=\$?; rm -f /tmp/fix-tls-rotation.sh; exit \$rc"
 
 echo ""
 echo "=== Success ==="

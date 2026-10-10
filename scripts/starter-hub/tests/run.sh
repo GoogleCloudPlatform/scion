@@ -407,6 +407,18 @@ test_tls_fix_renews_near_expiry_and_hook_reloads() {
     assert_eq "" "$(mutating_calls)" "second run makes no mutating call"
 }
 
+test_tls_certs_installs_rotation_on_existing_and_new_certs() {
+    # The gcloud stub's "test -f fullchain.pem" succeeds, so this is the
+    # existing-certificate path that #942 skipped.
+    fresh_state
+    EXTRA_ENV=(CERT_EMAIL=admin@example.com)
+    run_script gce-certs.sh
+    assert_eq 0 "$RC" "gce-certs.sh succeeds"
+    if [[ -f "${STUB_SCP_DIR}/fix-tls-rotation.sh" ]]; then pass; else fail "fix-tls-rotation.sh copied to the VM"; fi
+    assert_contains "$(cat "${STUB_SSH_LOG}")" "fix-tls-rotation.sh --domain" "runs it on the VM"
+    assert_not_contains "$(cat "${STUB_SSH_LOG}")" "RENEWED_DOMAINS%%" "no inline deploy hook"
+}
+
 mapfile -t TESTS < <(declare -F | awk '{print $3}' | grep '^test_' | sort)
 for t in "${TESTS[@]}"; do
     CURRENT="$t"
