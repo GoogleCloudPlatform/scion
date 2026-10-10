@@ -1799,9 +1799,13 @@ const containerMissingStatus = "missing"
 // container_missing, that MarkAgentContainerMissing keeps (together with the
 // stored message and exit code) when the agent already has one: the runtime
 // broker recorded why the container went away before it disappeared.
-// These match the ExitReason values added by ptone/scion#2542; switch to
-// those constants once both changes have landed.
-var containerMissingKeptExitReasons = []string{"preempted", "evicted"}
+// An OOM kill is kept too: the container was killed for exceeding its memory
+// limit, which says more than that it later went missing.
+var containerMissingKeptExitReasons = []string{
+	string(state.ExitReasonPreempted),
+	string(state.ExitReasonEvicted),
+	string(state.ExitReasonOOMKilled),
+}
 
 // MarkAgentContainerMissing implements store.AgentStore. See the interface
 // documentation for the guard conditions.
