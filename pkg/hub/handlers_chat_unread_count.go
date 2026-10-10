@@ -219,8 +219,12 @@ func (s *Server) memberThreads(ctx context.Context, wcs WebChatStore, identity I
 }
 
 // chatReadStatesBatched reads userID's read states for keys in batches of
-// batch keys, keyed by conversation key.
+// batch keys, keyed by conversation key. A batch of zero or less uses the
+// default read-state batch size.
 func chatReadStatesBatched(ctx context.Context, wcs WebChatStore, userID string, keys []string, batch int) (map[string]WebChatReadState, error) {
+	if batch <= 0 {
+		batch = defaultChatSpacesReadStateBatch
+	}
 	out := make(map[string]WebChatReadState, len(keys))
 	for start := 0; start < len(keys); start += batch {
 		end := min(start+batch, len(keys))
