@@ -101,6 +101,12 @@ func (s *Server) ComputeMessageability(
 	if viewerIdentity == nil || targetAgent == nil {
 		return &AgentMessageability{}
 	}
+	// An agent delegated credential is reported as not messageable, and
+	// nothing about the target's reachability is computed for it
+	// (.design/agent-delegation.md §11.7).
+	if isDelegatedAgentIdentity(viewerIdentity) {
+		return &AgentMessageability{CanMessage: false, Reason: mapReasonToCode(messageReasonSenderNotPermitted)}
+	}
 
 	// canMessage: can the viewer send a message to this agent?
 	canMessage, reason, _ := s.authorizeAgentMessage(ctx, viewerIdentity, targetAgent, false)
@@ -173,6 +179,9 @@ func (s *Server) ComputeMessageabilityDetail(
 	projectAgents []store.Agent,
 ) *AgentMessageabilityDetail {
 	base := s.ComputeMessageability(ctx, viewerIdentity, targetAgent)
+	if isDelegatedAgentIdentity(viewerIdentity) {
+		return &AgentMessageabilityDetail{AgentMessageability: *base}
+	}
 
 	// Count reachable agents: for each agent in projectAgents, check if
 	// targetAgent could message it. We construct a temporary AgentIdentity

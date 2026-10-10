@@ -125,6 +125,13 @@ func (s *Server) hasCatalogWideListAccess(ctx context.Context, identity Identity
 // Every other identity kind uses the ordinary AuthorizeReadBatch path
 // unchanged.
 func (s *Server) catalogListReadBatch(identity Identity) func(context.Context, Identity, []Resource) ([]bool, error) {
+	// No list operation admits an agent delegated credential yet
+	// (.design/agent-delegation.md §11.8): deny every row.
+	if isDelegatedAgentIdentity(identity) {
+		return func(_ context.Context, _ Identity, resources []Resource) ([]bool, error) {
+			return make([]bool, len(resources)), nil
+		}
+	}
 	if broker, ok := identity.(BrokerIdentity); ok {
 		return func(ctx context.Context, _ Identity, resources []Resource) ([]bool, error) {
 			allowed := make([]bool, len(resources))
@@ -422,6 +429,12 @@ func scopedCursorBinding(endpoint string, filter any, identity Identity) string 
 			identityKey = fmt.Sprintf("scoped_uat:%s:%s:%s:%s", id.ID(), boundary.Kind, boundary.ProjectID, id.CredentialID())
 		case AgentIdentity:
 			identityKey = fmt.Sprintf("agent_jwt:%s:%s:%s", id.ID(), id.ProjectID(), id.TokenID())
+		case *DelegatedAgentIdentity:
+			// Bound to the agent, grant, credential and boundary, so a
+			// cursor never carries over to another grant, credential or
+			// boundary (.design/agent-delegation.md §11.8).
+			boundary := id.Boundary()
+			identityKey = fmt.Sprintf("delegated_agent:%s:%s:%s:%s:%s", id.ID(), id.GrantID(), id.CredentialID(), boundary.Kind, boundary.ProjectID)
 		default:
 			identityKey = fmt.Sprintf("%s:%s", identity.Type(), identity.ID())
 		}

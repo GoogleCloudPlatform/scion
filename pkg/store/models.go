@@ -3845,6 +3845,26 @@ type MutationAuditRecord struct {
 	// Empty for an ordinary live request.
 	ExecutorKind string
 	ExecutorID   string
+
+	// Agent delegation block (.design/agent-delegation.md §18.1). All
+	// optional, default "", and written only by the agent delegation paths
+	// (grant issuance, credential exchange, revocation). Every other writer
+	// leaves them empty.
+	//
+	// ActorAgentID is the verified actor agent; AuthorizingUserID is the
+	// grant issuer; SourceGrantID is the grant; ParentGrantID and
+	// DelegationEdgeID are reserved and always empty in v1;
+	// ExchangeAgentCredentialID is the agent credential verified at
+	// exchange; ActorKind is "agent_delegated"; AgentDelegationCode is the
+	// agent delegation code on a denial-related record.
+	ActorAgentID              string
+	AuthorizingUserID         string
+	SourceGrantID             string
+	ParentGrantID             string
+	DelegationEdgeID          string
+	ExchangeAgentCredentialID string
+	ActorKind                 string
+	AgentDelegationCode       string
 }
 
 // MutationAuditFilter defines query parameters for listing mutation audit records.
@@ -4034,3 +4054,93 @@ const (
 	// type "group". Legacy rows are marked Degraded and evaluated fail-closed.
 	ConstraintPrincipalTypeGroup = "group"
 )
+
+// =============================================================================
+// Agent delegation (.design/agent-delegation.md §18.1)
+// =============================================================================
+
+// AgentDelegationGrant is a durable record, created by an interactive user
+// (the issuer), that binds one agent to a boundary, a frozen permission
+// ceiling and an expiry. It confers nothing until the bound agent exchanges
+// it for an AgentDelegatedCredential.
+type AgentDelegationGrant struct {
+	ID string
+	// AgentID is the bound agent. AgentProjectID, AgentGeneration and
+	// AgentStateVersion snapshot the agent row at issuance.
+	AgentID           string
+	AgentProjectID    string
+	AgentGeneration   int
+	AgentStateVersion int64
+	// IssuerUserID is the user who created the grant.
+	IssuerUserID string
+	// BoundaryKind is "project" or "hub"; BoundaryProjectID is set iff
+	// the kind is "project".
+	BoundaryKind      string
+	BoundaryProjectID string
+	// CeilingVersion is always >= 1; CeilingPermissionIDs are canonical
+	// permission IDs.
+	CeilingVersion       int
+	CeilingPermissionIDs []string
+	// Name, Purpose and Labels are issuer-supplied descriptive metadata.
+	// They never affect a decision.
+	Name    string
+	Purpose string
+	Labels  map[string]string
+	// AllowSubdelegation, ParentGrantID and Depth are always false, "" and
+	// 0 in v1.
+	AllowSubdelegation      bool
+	ParentGrantID           string
+	Depth                   int
+	MaxCredentialTTLSeconds int
+	ExpiresAt               time.Time
+	Created                 time.Time
+	LastExchangedAt         *time.Time
+	RevokedAt               *time.Time
+	RevokedBy               string
+	RevokeReason            string
+	IssuanceAuditID         string
+	RevocationAuditID       string
+}
+
+// AgentDelegatedCredential is a short-lived opaque bearer produced by
+// exchanging one AgentDelegationGrant. Only KeyHash (the SHA-256 of the
+// bearer) is stored; Prefix is the fixed credential marker.
+type AgentDelegatedCredential struct {
+	ID                        string
+	GrantID                   string
+	AgentID                   string
+	KeyHash                   string
+	Prefix                    string
+	Audience                  string
+	CeilingPermissionIDs      []string
+	ExchangeAgentCredentialID string
+	IssuedAt                  time.Time
+	ExpiresAt                 time.Time
+	RevokedAt                 *time.Time
+	RevokeReason              string
+	LastSeenAt                *time.Time
+}
+
+// ErrAgentDelegationGrantInvalid is returned for an agent delegation grant
+// whose boundary or ceiling is malformed.
+var ErrAgentDelegationGrantInvalid = errors.New("invalid agent delegation grant")
+
+// Validate checks the structural invariants every stored grant holds: a
+// well-formed boundary (permissions.ValidBoundary), a ceiling version of at
+// least 1 with at least one permission, and the v1 subdelegation shape (no
+// subdelegation, no parent, depth 0).
+func (g *AgentDelegationGrant) Validate() error {
+	if g == nil {
+		return fmt.Errorf("%w: missing grant", ErrAgentDelegationGrantInvalid)
+	}
+	if !permissions.ValidBoundary(permissions.BoundaryKind(g.BoundaryKind), g.BoundaryProjectID) {
+		return fmt.Errorf("%w: boundary", ErrAgentDelegationGrantInvalid)
+	}
+	if g.CeilingVersion < 1 || len(g.CeilingPermissionIDs) == 0 {
+		return fmt.Errorf("%w: ceiling", ErrAgentDelegationGrantInvalid)
+	}
+	if g.AllowSubdelegation || g.ParentGrantID != "" || g.Depth != 0 {
+		return fmt.Errorf("%w: subdelegation", ErrAgentDelegationGrantInvalid)
+	}
+	return nil
+}

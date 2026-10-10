@@ -602,6 +602,11 @@ func (s *Server) addAgentCreateIfAnyProjectAllows(
 		}
 	}
 
+	// An agent delegated credential gets no create hint
+	// (.design/agent-delegation.md §11.7).
+	if isDelegatedAgentIdentity(identity) {
+		return
+	}
 	// Only human callers. Agents create agents through the delegation path,
 	// which has its own ceiling checks, and this page is not their surface.
 	user, isUser := identity.(UserIdentity)
@@ -3831,6 +3836,11 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 
 	case AgentRouteHoldLift:
 		s.handleAgentHoldLift(w, r, id)
+
+	case AgentRouteDelegations:
+		s.handleAgentDelegations(w, r, id)
+	case AgentRouteDelegationExchange:
+		s.handleAgentDelegationExchange(w, r, id, route.Suffix.Param)
 
 	case AgentRouteActionStatus:
 		s.handleAgentAction(w, r, id, api.AgentActionStatus)

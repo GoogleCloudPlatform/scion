@@ -242,6 +242,14 @@ func (s *Server) authorizeAgentMessage(
 		return false, "nil target agent", nil
 	}
 
+	// An agent delegated credential is decided before every ancestor,
+	// owner or system-plane allow and pierces no message mode. No grant can
+	// carry agent.message yet, so it is refused
+	// (.design/agent-delegation.md §12.3).
+	if isDelegatedAgentIdentity(senderIdentity) {
+		return false, messageReasonSenderNotPermitted, nil
+	}
+
 	// ---- D8: system-plane messages bypass all mode checks ----
 	if isSystemPlane {
 		return true, "system plane bypass", nil

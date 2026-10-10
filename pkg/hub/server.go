@@ -2312,6 +2312,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// all. See devLocalAuthorityEnabled's doc comment (devauth.go).
 	srv.authzService.setDevLocalAuthorityEnabled(cfg.DevAuthToken != "")
 	srv.authzService.mintDevAuthOverride = cfg.DevAuthToken != ""
+	srv.wireAgentDelegation()
 
 	// Wire decision audit emitter
 	auditEmitter := inertDecisionAuditTarget
@@ -2561,6 +2562,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		// can never diverge.
 		PlatformAuthSA: srv.platformAuthSA,
 		AgentRunScope:  newAgentRunScopeChecker(cfg.AgentRunScope, s, srv.authLog),
+
+		// Agent delegated credentials (scion_adt_ bearers); refused while
+		// hub.agent_delegation is off.
+		DelegatedAgentAuth: srv.authenticateDelegatedAgentCredential,
 	}
 	if rs := srv.authConfig.AgentRunScope; rs != nil {
 		rs.route = func(r *http.Request) string {

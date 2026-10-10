@@ -94,6 +94,11 @@ const (
 	// ActionWrite covers creating, changing and removing the holder's own
 	// self-scoped records.
 	ActionWrite = "write"
+	// ActionDelegationCreate and ActionDelegationExchange are the agent
+	// delegation grant issuance and credential exchange actions
+	// (.design/agent-delegation.md §18.5).
+	ActionDelegationCreate   = "delegation_create"
+	ActionDelegationExchange = "delegation_exchange"
 
 	// PermissionGCPServiceAccountUse is the gcp_service_account.use
 	// permission ID. Named so pkg/hub/authz.go's agent-scope handling for
@@ -189,6 +194,8 @@ var Registry = []Permission{
 	{ID: "agent.message", Resource: ResourceAgent, Action: ActionMessage, CapabilityKind: CapabilityScope, UATScope: "agent:message", Description: "Send messages to agents", NonRouteUse: []string{"Phase 2: pkg/hub/authorize.go:authorizeAgentMessage"}},
 	{ID: "agent.set_message_mode", Resource: ResourceAgent, Action: ActionSetMessageMode, CapabilityKind: CapabilityResource, AgentScopes: []string{"project:agent:set_message_mode"}, Description: "Change agent message mode", Enforcement: []string{"pkg/hub/handlers_agents_core.go"}},
 	{ID: "agent.grant_hub_mode", Resource: ResourceAgent, Action: "grant_hub_mode", CapabilityKind: CapabilityResource, Description: "Grant hub message mode (requires full role + hub mode for agent callers)", Enforcement: []string{"pkg/hub/authorize_message_mode_grant.go"}},
+	{ID: "agent.delegation.create", Resource: ResourceAgent, Action: ActionDelegationCreate, Description: "Issue an agent delegation grant to an agent the issuer controls", Enforcement: []string{"pkg/hub/handlers_agent_delegation.go:handleCreateAgentDelegation"}},
+	{ID: "agent.delegation.exchange", Resource: ResourceAgent, Action: ActionDelegationExchange, Description: "Exchange an agent delegation grant for a delegated credential (the bound agent, with its own agent token; no role binding is consulted)", Enforcement: []string{"pkg/hub/handlers_agent_delegation.go:handleExchangeAgentDelegation"}},
 
 	{ID: "project.create", Resource: ResourceProject, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create projects", Enforcement: []string{"pkg/hub/handlers_projects_core.go"}},
 	{ID: "project.read", Resource: ResourceProject, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "project:read", AgentScopes: []string{"project:read"}, Description: "Read project metadata", Enforcement: []string{"pkg/hub/handlers_projects_core.go", "pkg/hub/authz.go"}},

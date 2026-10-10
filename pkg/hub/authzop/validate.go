@@ -273,6 +273,24 @@ func (s *OperationSpec) Validate() error {
 		invSeen[inv.ID] = true
 	}
 
+	// --- Agent delegated pairing ---
+	// The agent delegated principal and the agent delegated credential are
+	// admitted together or not at all (.design/agent-delegation.md §12.1).
+	admitsDelegatedPrincipal, admitsDelegatedCredential := false, false
+	for _, p := range s.Principals {
+		if p == PrincipalAgentDelegated {
+			admitsDelegatedPrincipal = true
+		}
+	}
+	for _, c := range s.Credentials {
+		if c == CredentialDelegatedAgent {
+			admitsDelegatedCredential = true
+		}
+	}
+	if admitsDelegatedPrincipal != admitsDelegatedCredential {
+		errs = append(errs, errors.New("the agent_delegated principal and the delegated_agent credential must be admitted together"))
+	}
+
 	// --- Denial code validation ---
 	dcSeen := make(map[DenialCode]bool)
 	for i, dc := range s.DenialCodes {

@@ -550,7 +550,7 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 	s.enrichAgents(ctx, plainAgents)
 	for i := range agents {
 		agents[i].Agent = plainAgents[i]
-		agents[i].AppliedConfig = redactAppliedConfigEnvForResponse(plainAgents[i].AppliedConfig, capabilityAllows(agents[i].Cap, ActionAttach))
+		agents[i].AppliedConfig = redactAppliedConfigEnvForResponse(plainAgents[i].AppliedConfig, s.envViewAllowed(ctx, identity, &plainAgents[i], agents[i].Cap))
 	}
 
 	// A complete response IS the whole set: a race drop (missing row,

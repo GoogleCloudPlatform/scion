@@ -438,6 +438,12 @@ func (s *Server) authorizeAgentTargetAction(ctx context.Context, identity Identi
 		return &agentTargetDenial{status: http.StatusForbidden, reason: "no permission for action " + string(action)}
 	}
 
+	// No agent lifecycle operation admits an agent delegated credential
+	// (.design/agent-delegation.md §12.3).
+	if isDelegatedAgentIdentity(identity) {
+		return &agentTargetDenial{status: http.StatusForbidden, reason: "delegated credential may not act on agents"}
+	}
+
 	switch identity.Type() {
 	case "agent":
 		agentIdent, ok := identity.(AgentIdentity)

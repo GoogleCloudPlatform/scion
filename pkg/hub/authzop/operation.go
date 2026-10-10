@@ -180,6 +180,10 @@ const (
 	PrincipalBroker         PrincipalKind = "broker"
 	PrincipalServiceAccount PrincipalKind = "service_account"
 	PrincipalSystem         PrincipalKind = "system"
+	// PrincipalAgentDelegated is an agent acting with an agent delegated
+	// credential (.design/agent-delegation.md §12.1). An operation admits
+	// it only together with CredentialDelegatedAgent.
+	PrincipalAgentDelegated PrincipalKind = "agent_delegated"
 )
 
 // validPrincipalKinds is the closed set of recognized principal kinds.
@@ -189,6 +193,7 @@ var validPrincipalKinds = map[PrincipalKind]bool{
 	PrincipalBroker:         true,
 	PrincipalServiceAccount: true,
 	PrincipalSystem:         true,
+	PrincipalAgentDelegated: true,
 }
 
 // CredentialKind identifies a class of authentication credential
@@ -204,6 +209,9 @@ const (
 	CredentialServiceAccount CredentialKind = "service_account_key"
 	CredentialSystemInternal CredentialKind = "system_internal"
 	CredentialIdentityToken  CredentialKind = "identity_token"
+	// CredentialDelegatedAgent is an agent delegated credential. An
+	// operation admits it only together with PrincipalAgentDelegated.
+	CredentialDelegatedAgent CredentialKind = "delegated_agent"
 )
 
 // validCredentialKinds is the closed set of recognized credential kinds.
@@ -215,6 +223,7 @@ var validCredentialKinds = map[CredentialKind]bool{
 	CredentialServiceAccount: true,
 	CredentialSystemInternal: true,
 	CredentialIdentityToken:  true,
+	CredentialDelegatedAgent: true,
 }
 
 // SecurityEffect classifies the security-meaningful consequence of an
