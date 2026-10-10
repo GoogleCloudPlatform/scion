@@ -510,6 +510,15 @@
    ]
   },
   {
+   "name": "fence ends a paragraph for code spans",
+   "in": "a `b\n```\nc\n```\nd` {++e++}",
+   "clean": "a `b\n```\nc\n```\nd` ",
+   "accept": "a `b\n```\nc\n```\nd` e",
+   "code": [
+    "```\nc\n```\n"
+   ]
+  },
+  {
    "name": "crlf fence",
    "in": "```\r\n{++x++}\r\n```\r\n",
    "clean": "```\r\n{++x++}\r\n```\r\n",

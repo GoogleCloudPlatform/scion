@@ -20,6 +20,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   countCritic,
+  criticCodeRanges,
   criticToolBlocked,
   criticToolEdit,
   criticToSentinels,
@@ -36,6 +37,8 @@ interface Case {
   in: string;
   clean: string;
   accept: string;
+  /** When set, the text of each code range criticCodeRanges finds. */
+  code?: string[];
 }
 
 const corpus = (
@@ -61,9 +64,29 @@ describe('critic corpus shared with the hub', () => {
         pos = s.end;
       }
       expect(pos).toBe(c.in.length);
+      const code = criticCodeRanges(c.in);
+      if (c.code) expect(code.map((r) => c.in.slice(r.start, r.end))).toEqual(c.code);
+      // No mark token lies in code.
+      const inCode = (p: number): boolean => code.some((r) => r.start <= p && p < r.end);
+      for (const s of parseCritic(c.in)) {
+        if (s.kind === 'text') continue;
+        expect(inCode(s.start) || inCode(s.end - 3)).toBe(false);
+        if (s.kind === 'substitution') expect(inCode(s.start + 3 + s.text.length)).toBe(false);
+      }
     });
   }
+  it('pins code for enough cases, some with none', () => {
+    const pinned = corpus.filter((c) => c.code);
+    expect(pinned.length).toBeGreaterThanOrEqual(40);
+    expect(pinned.filter((c) => c.code!.length === 0).length).toBeGreaterThanOrEqual(10);
+  });
 });
+
+function risingRuns(n: number): string {
+  let out = '';
+  for (let k = 2; out.length < n / 3; k++) out += '`'.repeat(k) + 'x';
+  return out + '`x'.repeat(n / 3);
+}
 
 describe('parseCritic cost', () => {
   // A per-opener rescan of the tail examines O(n^2) characters and fails.
@@ -75,6 +98,16 @@ describe('parseCritic cost', () => {
     'separator far away': '{~~a~~}'.repeat(n) + '~>',
     'openers then one closer': '{++a'.repeat(n) + '++}',
     'malformed then valid': '{~~x~~}{++'.repeat(n / 2),
+    // Unmatched runs of lengths 2, 3, ... then single-backtick pairs:
+    // scanning the runs ahead for each opener's partner is O(n^1.5).
+    'rising backtick runs': risingRuns(n),
+    'single backtick spans': '`x'.repeat(n / 2),
+    'closers hidden in code': '{++' + '`++}`'.repeat(n / 5),
+    'separators in code': '{~~' + '`~>`'.repeat(n / 4) + '~~}',
+    'openers hidden in code': '`{++`'.repeat(n / 5) + '++}',
+    'fence lines': '```\n{++\n'.repeat(n / 8),
+    'unterminated fence': '```\n' + '{++a++}\n'.repeat(n / 8),
+    'escaped runs': '\\\\\\`'.repeat(n / 7),
   };
   for (const [name, src] of Object.entries(inputs)) {
     it(name, () => {

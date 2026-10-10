@@ -23,10 +23,16 @@
  * - An opening token with no closing token of its kind, or a substitution
  *   with no "~>" before its closing token, is literal text.
  * - The first "~>" separates a substitution's sides; either may be empty.
- * - Marks may span lines; code spans and fences are not special.
+ * - Marks may span lines.
+ * - Markdown code is literal text: a token inside an inline code span or a
+ *   fenced code block (see criticCodeRanges) is not a token. A mark may
+ *   contain code; code never contains a mark.
  *
- * Parsing is one forward pass: each closing-token search keeps a cursor
- * that only moves forward and remembers a failed search.
+ * Parsing is one forward pass for code and one for marks: each
+ * closing-token search keeps a cursor that only moves forward and
+ * remembers a failed search, and steps over code with its own
+ * forward-only index into the code ranges, so the work is linear in the
+ * input.
  */
 
 export type CriticKind =
@@ -60,31 +66,212 @@ const MARKS: { kind: CriticKind; open: string; close: string }[] = [
 
 const SUB_SEP = '~>';
 
-/** Finds a fixed token at or after a position; see the file comment. */
+/** A half-open range [start, end) of a text. */
+export interface CriticRange {
+  start: number;
+  end: number;
+}
+
+/** A run of backticks in a paragraph; escaped when its first is escaped. */
+interface BacktickRun {
+  start: number;
+  n: number;
+  escaped: boolean;
+}
+
+/**
+ * The Markdown code in src, in order and not overlapping: fenced code
+ * blocks and inline code spans, following CommonMark for documents
+ * without container blocks, as pkg/artifacts/critic does.
+ *
+ * - Lines end at LF, CRLF or a lone CR.
+ * - A fence is a line of up to three spaces, then at least three backticks
+ *   or at least three tildes. A backtick fence's info string holds no
+ *   backtick. The block ends at a line of up to three spaces, a run of the
+ *   same character at least as long as the opening one, and only spaces
+ *   or tabs after it; with no such line it runs to the end of the text.
+ *   The range covers the opening line through the closing line's
+ *   terminator.
+ * - A code span opens at a run of n backticks and closes at the next run of
+ *   exactly n backticks. A run with no partner is literal. A backslash
+ *   escapes the first backtick of a run that would open (the run is one
+ *   shorter); it does not escape a closing run. Spans may cross line ends
+ *   but not a blank line or a fence.
+ *
+ * Indented code blocks, block quotes and list items are not recognised,
+ * nor the precedence of HTML tags and autolinks over code spans.
+ */
+export function criticCodeRanges(src: string, steps: { n: number } = { n: 0 }): CriticRange[] {
+  const out: CriticRange[] = [];
+  let runs: BacktickRun[] = [];
+  const n = src.length;
+  let fenceOpen = -1;
+  let fenceChar = '';
+  let fenceLen = 0;
+  const flush = (): void => {
+    matchRuns(runs, out, steps);
+    runs = [];
+  };
+  for (let ls = 0; ls < n; ) {
+    let le = ls;
+    while (le < n && src[le] !== '\n' && src[le] !== '\r') le++;
+    const next = le < n && src[le] === '\r' && src[le + 1] === '\n' ? le + 2 : Math.min(le + 1, n);
+    steps.n += next - ls;
+    const line = src.slice(ls, le);
+    const f = fenceRun(line);
+    if (fenceOpen >= 0) {
+      if (f && f.c === fenceChar && f.len >= fenceLen && isBlank(f.rest)) {
+        out.push({ start: fenceOpen, end: next });
+        fenceOpen = -1;
+      }
+    } else if (f && (f.c === '~' || !f.rest.includes('`'))) {
+      flush();
+      fenceOpen = ls;
+      fenceChar = f.c;
+      fenceLen = f.len;
+    } else if (isBlank(line)) {
+      flush();
+    } else {
+      for (let i = ls; i < le; ) {
+        if (src[i] !== '`') {
+          i++;
+          continue;
+        }
+        let j = i;
+        while (j < le && src[j] === '`') j++;
+        let bs = 0;
+        for (let k = i - 1; k >= ls && src[k] === '\\'; k--) bs++;
+        steps.n += bs;
+        runs.push({ start: i, n: j - i, escaped: bs % 2 === 1 });
+        i = j;
+      }
+    }
+    ls = next;
+  }
+  if (fenceOpen >= 0) {
+    out.push({ start: fenceOpen, end: n });
+    return out;
+  }
+  flush();
+  return out;
+}
+
+/** The fence a line opens with, after up to three spaces, or null. */
+function fenceRun(line: string): { c: string; len: number; rest: string } | null {
+  let i = 0;
+  while (i < line.length && i < 3 && line[i] === ' ') i++;
+  const c = line[i];
+  if (c !== '`' && c !== '~') return null;
+  let j = i;
+  while (j < line.length && line[j] === c) j++;
+  return j - i < 3 ? null : { c, len: j - i, rest: line.slice(j) };
+}
+
+function isBlank(s: string): boolean {
+  return /^[ \t]*$/.test(s);
+}
+
+/**
+ * Pairs a paragraph's backtick runs into code spans. byLen lists the runs
+ * of each length in order and ptr the first entry not yet passed; the
+ * pointers only move forward.
+ */
+function matchRuns(runs: BacktickRun[], out: CriticRange[], steps: { n: number }): void {
+  if (runs.length < 2) return;
+  const byLen = new Map<number, number[]>();
+  runs.forEach((r, i) => {
+    const l = byLen.get(r.n);
+    if (l) l.push(i);
+    else byLen.set(r.n, [i]);
+  });
+  const ptr = new Map<number, number>();
+  for (let i = 0; i < runs.length; ) {
+    steps.n++;
+    const r = runs[i];
+    const start = r.escaped ? r.start + 1 : r.start;
+    const n = r.escaped ? r.n - 1 : r.n;
+    const list = n > 0 ? byLen.get(n) : undefined;
+    if (!list) {
+      i++;
+      continue;
+    }
+    let k = ptr.get(n) ?? 0;
+    while (k < list.length && list[k] <= i) {
+      k++;
+      steps.n++;
+    }
+    ptr.set(n, k);
+    if (k === list.length) {
+      i++;
+      continue;
+    }
+    const j = list[k];
+    out.push({ start, end: runs[j].start + n });
+    i = j + 1;
+  }
+}
+
+/** Answers whether non-decreasing positions lie in code; moves forward. */
+class CodeIndex {
+  private i = 0;
+  constructor(private readonly code: CriticRange[]) {}
+
+  /** The code range containing p, or null. */
+  at(p: number, steps: { n: number }): CriticRange | null {
+    while (this.i < this.code.length && this.code[this.i].end <= p) {
+      this.i++;
+      steps.n++;
+    }
+    const r = this.code[this.i];
+    return r && r.start <= p ? r : null;
+  }
+}
+
+/**
+ * Finds a fixed token outside code at or after a position; see the file
+ * comment. A code range starts at a backtick or a line start and ends
+ * after a backtick or a line terminator, and no token holds either, so an
+ * occurrence that starts outside code lies wholly outside it.
+ */
 class Cursor {
   private found = -1;
   private exhausted = false;
-  constructor(private readonly tok: string) {}
+  private readonly code: CodeIndex;
+  constructor(
+    private readonly tok: string,
+    code: CriticRange[]
+  ) {
+    this.code = new CodeIndex(code);
+  }
 
   next(src: string, from: number, steps: { n: number }): number {
     if (this.found >= from) return this.found;
-    if (this.exhausted || from >= src.length) return -1;
-    const i = src.indexOf(this.tok, from);
-    if (i < 0) {
-      steps.n += src.length - from;
-      this.exhausted = true;
-      return -1;
+    for (;;) {
+      if (this.exhausted || from >= src.length) return -1;
+      const i = src.indexOf(this.tok, from);
+      if (i < 0) {
+        steps.n += src.length - from;
+        this.exhausted = true;
+        return -1;
+      }
+      steps.n += i - from + this.tok.length;
+      const r = this.code.at(i, steps);
+      if (r) {
+        from = r.end;
+        continue;
+      }
+      this.found = i;
+      return i;
     }
-    steps.n += i - from + this.tok.length;
-    this.found = i;
-    return i;
   }
 }
 
 /** Parses src; with steps, also counts the characters examined. */
 export function parseCritic(src: string, steps: { n: number } = { n: 0 }): CriticSegment[] {
-  const cursors = MARKS.map((m) => new Cursor(m.close));
-  const sep = new Cursor(SUB_SEP);
+  const code = criticCodeRanges(src, steps);
+  const cursors = MARKS.map((m) => new Cursor(m.close, code));
+  const sep = new Cursor(SUB_SEP, code);
+  const open = new CodeIndex(code);
   const segs: CriticSegment[] = [];
   let textStart = 0;
   const flush = (end: number): void => {
@@ -101,6 +288,11 @@ export function parseCritic(src: string, steps: { n: number } = { n: 0 }): Criti
     }
     steps.n += j - i + 1;
     i = j;
+    const inCode = open.at(i, steps);
+    if (inCode) {
+      i = inCode.end;
+      continue;
+    }
     let slot = -1;
     if (i + 2 < src.length && src[i + 1] === src[i + 2]) {
       slot = MARKS.findIndex((m) => m.open === src[i + 1]);
