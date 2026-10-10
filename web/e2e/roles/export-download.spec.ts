@@ -130,8 +130,8 @@ test.describe('Role export -- browser download', () => {
     const downloadPath = await download.path();
     expect(downloadPath).toBeTruthy();
 
-    const content = fs.readFileSync(downloadPath!, 'utf-8');
-    const envelope: RoleExportEnvelope = JSON.parse(content);
+    const content = fs.readFileSync(downloadPath, 'utf-8');
+    const envelope = JSON.parse(content) as RoleExportEnvelope;
 
     // Validate envelope structure
     expect(envelope.version).toBe('1');
@@ -180,8 +180,8 @@ test.describe('Role export -- browser download', () => {
     const downloadPath = await download.path();
     expect(downloadPath).toBeTruthy();
 
-    const content = fs.readFileSync(downloadPath!, 'utf-8');
-    const envelope: RoleExportEnvelope = JSON.parse(content);
+    const content = fs.readFileSync(downloadPath, 'utf-8');
+    const envelope = JSON.parse(content) as RoleExportEnvelope;
 
     expect(envelope.version).toBe('1');
     expect(envelope.exportedAt).toBeTruthy();
@@ -228,7 +228,7 @@ test.describe('Role export -- browser download', () => {
 
     const exportRes = await request.get(`/api/v1/admin/roles/${systemRole!.id}/export`);
     expect(exportRes.status()).toBe(422);
-    const body = await exportRes.json();
+    const body = (await exportRes.json()) as { code?: unknown };
     expect(body.code).toBe('system_role');
   });
 });

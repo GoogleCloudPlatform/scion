@@ -96,6 +96,7 @@ test.describe('Experiments tab', () => {
       `${EXPERIMENT_NAME} must have no stored override before this spec runs`
     ).toBeNull();
 
+    // eslint-disable-next-line no-useless-assignment -- the initial store is overwritten before any read; kept unchanged pending a decision on whether the precondition revision should be used
     let currentRevision = before.revision;
 
     try {

@@ -79,7 +79,7 @@ async function apiRequest(
     method,
     headers,
     body: body ? JSON.stringify(body) : undefined,
-  });
+  } as RequestInit);
 
   return res;
 }

@@ -12,9 +12,8 @@
  * Requires: hub running on http://127.0.0.1:4520 with --dev-auth
  */
 
-import { chromium, webkit, type BrowserType, type Download, type Browser } from 'playwright';
+import { chromium, webkit, type BrowserType, type Browser } from 'playwright';
 import * as fs from 'node:fs';
-import * as path from 'node:path';
 
 const BASE_URL = process.env.E2E_BASE_URL || 'http://127.0.0.1:4520';
 const DEV_TOKEN =
@@ -98,7 +97,7 @@ async function testBrowser(browserType: BrowserType, label: string): Promise<boo
     if (!listPath) throw new Error('Download path is null');
 
     const listContent = fs.readFileSync(listPath, 'utf-8');
-    const listEnvelope: RoleExportEnvelope = JSON.parse(listContent);
+    const listEnvelope = JSON.parse(listContent) as RoleExportEnvelope;
 
     if (listEnvelope.version !== '1') {
       throw new Error(`Expected version '1', got '${listEnvelope.version}'`);
@@ -134,7 +133,7 @@ async function testBrowser(browserType: BrowserType, label: string): Promise<boo
     if (!singlePath) throw new Error('Single download path is null');
 
     const singleContent = fs.readFileSync(singlePath, 'utf-8');
-    const singleEnvelope: RoleExportEnvelope = JSON.parse(singleContent);
+    const singleEnvelope = JSON.parse(singleContent) as RoleExportEnvelope;
 
     if (singleEnvelope.version !== '1') {
       throw new Error(`Expected version '1', got '${singleEnvelope.version}'`);
@@ -152,6 +151,7 @@ async function testBrowser(browserType: BrowserType, label: string): Promise<boo
     console.log(`\n  All ${label} tests passed!\n`);
     return true;
   } catch (err) {
+    // eslint-disable-next-line @typescript-eslint/restrict-template-expressions -- template conversion of the caught value is kept so the logged text stays the same
     console.error(`\n  ${label} failed: ${err}\n`);
     return false;
   } finally {

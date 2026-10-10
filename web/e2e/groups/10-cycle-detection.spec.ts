@@ -74,7 +74,7 @@ test.describe('Cycle detection (AC11)', () => {
 
     // The principal picker renders an sl-input for searching; type into it
     const pickerInput = picker.locator('sl-input').first();
-    await pickerInput.evaluate((el: any, val: string) => {
+    await pickerInput.evaluate((el: HTMLElement & { value: string }, val: string) => {
       el.value = val;
       el.dispatchEvent(new Event('sl-input', { bubbles: true }));
     }, 'Cycle Group B');
@@ -83,7 +83,7 @@ test.describe('Cycle detection (AC11)', () => {
     const pickerOption = page.getByText('Cycle Group B').last();
     await pickerOption.click({ timeout: 10_000 }).catch(async () => {
       // Fallback: try filling the group ID directly via principal-change event
-      await picker.evaluate((el: any, id: string) => {
+      await picker.evaluate((el: HTMLElement, id: string) => {
         el.dispatchEvent(
           new CustomEvent('principal-change', {
             bubbles: true,

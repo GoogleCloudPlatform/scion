@@ -23,7 +23,7 @@
  */
 
 import { test, expect } from '@playwright/test';
-import AxeBuilder from '@axe-core/playwright';
+import { AxeBuilder } from '@axe-core/playwright';
 import { getE2EEnv } from './harness/env.js';
 
 test.describe('Smoke test', () => {

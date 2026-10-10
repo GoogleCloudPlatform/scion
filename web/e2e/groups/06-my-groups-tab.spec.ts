@@ -17,7 +17,7 @@
  */
 
 import { test, expect } from '@playwright/test';
-import { getE2EEnv, createGroup, addGroupMember, uniqueSlug } from './groups-setup.js';
+import { getE2EEnv } from './groups-setup.js';
 
 test.describe('My groups tab (AC6)', () => {
   const env = getE2EEnv();

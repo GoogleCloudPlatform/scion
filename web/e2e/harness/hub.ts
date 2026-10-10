@@ -21,7 +21,7 @@
  * returning.
  */
 
-import { execSync, spawn, type ChildProcess } from 'node:child_process';
+import { execSync, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as os from 'node:os';
@@ -105,7 +105,7 @@ async function waitForHealth(baseURL: string, timeoutMs = 30_000): Promise<void>
       const res = await fetch(healthURL, { signal: AbortSignal.timeout(2000) });
       if (res.ok) {
         lastBody = await res.text();
-        const body = JSON.parse(lastBody);
+        const body = JSON.parse(lastBody) as { status?: unknown };
         if (body.status === 'healthy') {
           console.log('[hub] Hub is healthy.');
           return;
@@ -263,6 +263,7 @@ export function stopHub(): void {
     process.kill(-state.pid, 'SIGTERM');
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
+      // eslint-disable-next-line @typescript-eslint/restrict-template-expressions -- template conversion of the caught value is kept so the logged text stays the same
       console.warn(`[hub] Error stopping hub: ${err}`);
     }
   }

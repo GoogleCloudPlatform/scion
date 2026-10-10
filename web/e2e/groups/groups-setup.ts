@@ -62,7 +62,7 @@ export async function apiRequest(
     method,
     headers,
     body: body ? JSON.stringify(body) : undefined,
-  });
+  } as RequestInit);
 }
 
 /**
@@ -128,7 +128,7 @@ export async function fillSlInput(
   value: string
 ): Promise<void> {
   await locator.evaluate((el: HTMLElement, val: string) => {
-    (el as any).value = val;
+    (el as HTMLElement & { value: string }).value = val;
     el.dispatchEvent(new Event('sl-input', { bubbles: true }));
     el.dispatchEvent(new Event('sl-change', { bubbles: true }));
   }, value);
@@ -142,7 +142,7 @@ export async function clearAndFillSlInput(
   value: string
 ): Promise<void> {
   await locator.evaluate((el: HTMLElement, val: string) => {
-    (el as any).value = val;
+    (el as HTMLElement & { value: string }).value = val;
     el.dispatchEvent(new Event('sl-input', { bubbles: true }));
     el.dispatchEvent(new Event('sl-change', { bubbles: true }));
   }, value);

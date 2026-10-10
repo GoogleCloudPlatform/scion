@@ -19,14 +19,7 @@
  */
 
 import { test, expect } from '@playwright/test';
-import {
-  getE2EEnv,
-  createSession,
-  createGroup,
-  createRoleBinding,
-  findRoleDefinition,
-  uniqueSlug,
-} from './groups-setup.js';
+import { getE2EEnv, createSession, createRoleBinding, findRoleDefinition } from './groups-setup.js';
 
 test.describe('Capability gating: admin vs read-only (AC1, AC8)', () => {
   const env = getE2EEnv();

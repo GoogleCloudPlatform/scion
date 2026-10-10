@@ -147,7 +147,7 @@ export async function createSession(baseURL: string, testUser: TestUser): Promis
     throw new Error(`test-login failed (${res.status}): ${body}`);
   }
 
-  const data = await res.json();
+  const data = (await res.json()) as Pick<AuthSession, 'user' | 'accessToken' | 'refreshToken'>;
 
   // Extract Set-Cookie headers
   const cookies = extractCookies(res, baseURL);
