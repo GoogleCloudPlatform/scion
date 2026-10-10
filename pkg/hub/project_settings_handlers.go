@@ -665,7 +665,7 @@ func mergeProjectSettingsPut(stored *hubclient.ProjectSettings, body []byte) (*h
 	t := mv.Type()
 	names := make([]string, t.NumField())
 	for i := range names {
-		names[i] = jsonFieldName(t.Field(i))
+		names[i] = serializedJSONFieldName(t.Field(i))
 	}
 
 	// Map each body key to the field encoding/json decodes it into. Keys
@@ -721,9 +721,9 @@ func projectSettingsFieldIndex(names []string, key string) int {
 	return -1
 }
 
-// jsonFieldName returns the JSON name of an exported struct field, or ""
+// serializedJSONFieldName returns the JSON name of an exported struct field, or ""
 // when the field is not serialized.
-func jsonFieldName(f reflect.StructField) string {
+func serializedJSONFieldName(f reflect.StructField) string {
 	if !f.IsExported() {
 		return ""
 	}

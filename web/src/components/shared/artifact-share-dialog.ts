@@ -622,6 +622,11 @@ export class ScionArtifactShareDialog extends LitElement {
     const c = this.created;
     if (!c) return nothing;
     const url = shareLinkUrl(c.url, window.location.origin);
+    // Copy follows the approved Share mock: the success alert says the link
+    // is shown once and until when it works; when the artifact's expiry cut
+    // the link short, the alert keeps only the shown-once line and a
+    // separate notice gives the end (mock states 1b and 1d).
+    const until = formatInstant(c.link.expiresAt);
     return html`
       <sl-alert class="created" variant="success" open>
         <sl-icon slot="icon" name="check-circle-fill"></sl-icon>
@@ -639,18 +644,19 @@ export class ScionArtifactShareDialog extends LitElement {
             ${this.copied ? 'Copied' : 'Copy'}
           </sl-button>
         </div>
-        <div>
+        <div class="once">
           <sl-icon name="exclamation-triangle"></sl-icon>
-          Copy it now: the link is shown only once. Anyone with it can view this artifact until
-          ${formatInstant(c.link.expiresAt)} or until you revoke it.
+          ${c.clampedToArtifactExpiry
+            ? 'Copy it now: the link is shown only once.'
+            : `Copy it now: the link is shown only once. Anyone with it can view this artifact until ${until} or until you revoke it.`}
         </div>
-        ${c.clampedToArtifactExpiry
-          ? html`<div>
-              <sl-icon name="info-circle"></sl-icon>
-              The link ends ${formatInstant(c.link.expiresAt)}, when the artifact expires.
-            </div>`
-          : nothing}
       </sl-alert>
+      ${c.clampedToArtifactExpiry
+        ? html`<sl-alert class="clamped" variant="primary" open>
+            <sl-icon slot="icon" name="clock"></sl-icon>
+            The link ends <strong>${until}</strong>, when the artifact expires.
+          </sl-alert>`
+        : nothing}
     `;
   }
 
