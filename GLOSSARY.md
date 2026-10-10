@@ -102,7 +102,7 @@ A workspace sharing mode where each agent gets its own git worktree over a share
 _Avoid_: worktree mode, shared checkout
 
 **Clone-per-agent**:
-A workspace sharing mode where each agent gets its own full git clone of the repository.
+A workspace sharing mode where each agent gets its own full git clone of the repository. It is also what a Hub git project resolves to when it has no workspace mode set: only `shared` selects the shared checkout.
 _Avoid_: clone mode, per-agent clone
 
 **Empty-per-agent**:
