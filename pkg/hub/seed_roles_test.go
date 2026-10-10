@@ -20,13 +20,11 @@ package hub
 // reconciliation, and hub-member RoleBinding seeding.
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -363,28 +361,11 @@ func TestReconcileBuiltInRoles_DoesNotDowngrade(t *testing.T) {
 		"permissions should not be modified when stored revision >= code revision")
 }
 
-// roleWarnLogBuffer collects slog output for the role revision warning
-// tests; safe for concurrent writes from background goroutines.
-type roleWarnLogBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *roleWarnLogBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *roleWarnLogBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
-
-func captureRoleWarnLogs(t *testing.T) *roleWarnLogBuffer {
+// captureRoleWarnLogs routes slog output to a goroutine-safe buffer
+// (lockedBuffer) for the role revision warning tests.
+func captureRoleWarnLogs(t *testing.T) *lockedBuffer {
 	t.Helper()
-	buf := &roleWarnLogBuffer{}
+	buf := &lockedBuffer{}
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(buf, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
