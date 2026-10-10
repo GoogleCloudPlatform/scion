@@ -91,10 +91,7 @@ function buildHub(): void {
 }
 
 /** Wait for the hub health endpoint to respond with a healthy status. */
-async function waitForHealth(
-  baseURL: string,
-  timeoutMs = 30_000,
-): Promise<void> {
+async function waitForHealth(baseURL: string, timeoutMs = 30_000): Promise<void> {
   const start = Date.now();
   const healthURL = `${baseURL}/healthz`;
   console.log(`[hub] Waiting for health at ${healthURL}...`);
@@ -121,7 +118,7 @@ async function waitForHealth(
   }
   throw new Error(
     `Hub did not become healthy within ${timeoutMs}ms` +
-      (lastBody ? `; last /healthz response: ${lastBody}` : ' (no response)'),
+      (lastBody ? `; last /healthz response: ${lastBody}` : ' (no response)')
   );
 }
 
@@ -178,7 +175,7 @@ export async function startHub(): Promise<HubState> {
         // The binary restricts commands by CLI mode; server requires human mode
         SCION_CLI_MODE: 'human',
       },
-    },
+    }
   );
 
   // Capture the dev token from hub startup logs
@@ -218,8 +215,7 @@ export async function startHub(): Promise<HubState> {
 
   if (!devToken) {
     throw new Error(
-      'Failed to capture dev token from hub output. ' +
-        'Ensure the hub is started with --dev-auth.',
+      'Failed to capture dev token from hub output. ' + 'Ensure the hub is started with --dev-auth.'
     );
   }
 

@@ -17,12 +17,7 @@
  */
 
 import { test, expect } from '@playwright/test';
-import {
-  getE2EEnv,
-  createGroup,
-  addGroupMember,
-  uniqueSlug,
-} from './groups-setup.js';
+import { getE2EEnv, createGroup, addGroupMember, uniqueSlug } from './groups-setup.js';
 
 test.describe('My groups tab (AC6)', () => {
   const env = getE2EEnv();
@@ -45,7 +40,8 @@ test.describe('My groups tab (AC6)', () => {
     // Use toPass() to retry until content is loaded (data is fetched on tab activation).
     await expect(async () => {
       const panelContent = await myGroupsPanel.textContent();
-      const hasGroupContent = panelContent?.includes('E2E Test Group') ||
+      const hasGroupContent =
+        panelContent?.includes('E2E Test Group') ||
         panelContent?.includes('No Group') ||
         panelContent?.includes('member') ||
         // Any content means the panel loaded

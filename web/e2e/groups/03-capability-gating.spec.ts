@@ -86,7 +86,10 @@ test.describe('Capability gating: admin vs read-only (AC1, AC8)', () => {
     // When one is added, remove this skip and enable the role-binding below.
     const roleDef = await findRoleDefinition(env.baseURL, env.devToken, 'group-viewer');
     if (!roleDef) {
-      test.skip(true, 'No group-viewer role definition exists in the hub — cannot test read-only capability gating (AC1 read-only arm)');
+      test.skip(
+        true,
+        'No group-viewer role definition exists in the hub — cannot test read-only capability gating (AC1 read-only arm)'
+      );
       return;
     }
     await createRoleBinding(env.baseURL, env.devToken, {

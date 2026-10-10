@@ -17,12 +17,7 @@
  */
 
 import { test, expect } from '@playwright/test';
-import {
-  getE2EEnv,
-  createGroup,
-  addGroupMember,
-  uniqueSlug,
-} from './groups-setup.js';
+import { getE2EEnv, createGroup, addGroupMember, uniqueSlug } from './groups-setup.js';
 
 test.describe('Cycle detection (AC11)', () => {
   const env = getE2EEnv();
@@ -89,10 +84,13 @@ test.describe('Cycle detection (AC11)', () => {
     await pickerOption.click({ timeout: 10_000 }).catch(async () => {
       // Fallback: try filling the group ID directly via principal-change event
       await picker.evaluate((el: any, id: string) => {
-        el.dispatchEvent(new CustomEvent('principal-change', {
-          bubbles: true, composed: true,
-          detail: { principalType: 'group', principalId: id, displayLabel: 'Cycle Group B' },
-        }));
+        el.dispatchEvent(
+          new CustomEvent('principal-change', {
+            bubbles: true,
+            composed: true,
+            detail: { principalType: 'group', principalId: id, displayLabel: 'Cycle Group B' },
+          })
+        );
       }, groupBId);
     });
 

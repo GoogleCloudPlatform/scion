@@ -52,10 +52,7 @@ const USER_SIGNING_KEY_NAME = 'user_signing_key';
  *   sha256("scion-hub-signing-key:" + keyName + ":" + secret)
  */
 function deriveSigningKey(secret: string, keyName: string): Buffer {
-  return crypto
-    .createHash('sha256')
-    .update(`scion-hub-signing-key:${keyName}:${secret}`)
-    .digest();
+  return crypto.createHash('sha256').update(`scion-hub-signing-key:${keyName}:${secret}`).digest();
 }
 
 // ── JWT helpers (HS256, no external dependencies) ─────────────────────────
@@ -71,18 +68,12 @@ function base64urlJSON(obj: unknown): string {
 /**
  * Mint an HS256 JWT.
  */
-function signJWT(
-  payload: Record<string, unknown>,
-  signingKey: Buffer,
-): string {
+function signJWT(payload: Record<string, unknown>, signingKey: Buffer): string {
   const header = { alg: 'HS256', typ: 'JWT' };
   const headerB64 = base64urlJSON(header);
   const payloadB64 = base64urlJSON(payload);
   const signingInput = `${headerB64}.${payloadB64}`;
-  const signature = crypto
-    .createHmac('sha256', signingKey)
-    .update(signingInput)
-    .digest();
+  const signature = crypto.createHmac('sha256', signingKey).update(signingInput).digest();
   return `${signingInput}.${base64url(signature)}`;
 }
 
@@ -134,10 +125,7 @@ export interface AuthSession {
  * Create a session for the given user via the test-login endpoint.
  * Returns the session info and the path to a storageState JSON file.
  */
-export async function createSession(
-  baseURL: string,
-  testUser: TestUser,
-): Promise<AuthSession> {
+export async function createSession(baseURL: string, testUser: TestUser): Promise<AuthSession> {
   const challengeToken = generateTestLoginToken();
 
   const res = await fetch(`${baseURL}/api/v1/auth/test-login`, {
@@ -156,9 +144,7 @@ export async function createSession(
 
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(
-      `test-login failed (${res.status}): ${body}`,
-    );
+    throw new Error(`test-login failed (${res.status}): ${body}`);
   }
 
   const data = await res.json();
@@ -191,10 +177,7 @@ export async function createSession(
  * Extract cookies from the response's Set-Cookie headers and convert them
  * to Playwright's storageState cookie format.
  */
-function extractCookies(
-  res: Response,
-  baseURL: string,
-): Array<Record<string, unknown>> {
+function extractCookies(res: Response, baseURL: string): Array<Record<string, unknown>> {
   const url = new URL(baseURL);
   const cookies: Array<Record<string, unknown>> = [];
 
@@ -231,8 +214,7 @@ function extractCookies(
       if (lower === 'httponly') cookie.httpOnly = true;
       else if (lower === 'secure') cookie.secure = true;
       else if (lower.startsWith('path=')) cookie.path = attr.split('=')[1];
-      else if (lower.startsWith('samesite='))
-        cookie.sameSite = attr.split('=')[1];
+      else if (lower.startsWith('samesite=')) cookie.sameSite = attr.split('=')[1];
       else if (lower.startsWith('max-age=')) {
         const maxAge = parseInt(attr.split('=')[1], 10);
         cookie.expires = Math.floor(Date.now() / 1000) + maxAge;
@@ -248,9 +230,7 @@ function extractCookies(
 /**
  * Create a session for the default admin user.
  */
-export async function createAdminSession(
-  baseURL: string,
-): Promise<AuthSession> {
+export async function createAdminSession(baseURL: string): Promise<AuthSession> {
   return createSession(baseURL, {
     email: 'admin@e2e.test',
     role: 'admin',

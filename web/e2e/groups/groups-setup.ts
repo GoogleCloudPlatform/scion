@@ -50,7 +50,7 @@ export async function apiRequest(
   token: string,
   method: string,
   path: string,
-  body?: unknown,
+  body?: unknown
 ): Promise<Response> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${token}`,
@@ -71,7 +71,7 @@ export async function apiRequest(
 export async function deleteGroupAPI(
   baseURL: string,
   token: string,
-  groupId: string,
+  groupId: string
 ): Promise<void> {
   await apiRequest(baseURL, token, 'DELETE', `/api/v1/groups/${groupId}`);
 }
@@ -82,14 +82,9 @@ export async function deleteGroupAPI(
 export async function getGroupAPI(
   baseURL: string,
   token: string,
-  groupId: string,
+  groupId: string
 ): Promise<Record<string, unknown>> {
-  const res = await apiRequest(
-    baseURL,
-    token,
-    'GET',
-    `/api/v1/groups/${groupId}`,
-  );
+  const res = await apiRequest(baseURL, token, 'GET', `/api/v1/groups/${groupId}`);
   return (await res.json()) as Record<string, unknown>;
 }
 
@@ -99,14 +94,9 @@ export async function getGroupAPI(
 export async function listMembersAPI(
   baseURL: string,
   token: string,
-  groupId: string,
+  groupId: string
 ): Promise<Array<Record<string, unknown>>> {
-  const res = await apiRequest(
-    baseURL,
-    token,
-    'GET',
-    `/api/v1/groups/${groupId}/members`,
-  );
+  const res = await apiRequest(baseURL, token, 'GET', `/api/v1/groups/${groupId}/members`);
   const data = (await res.json()) as { members: Array<Record<string, unknown>> };
   return data.members ?? [];
 }
@@ -135,7 +125,7 @@ export function uniqueName(prefix: string): string {
  */
 export async function fillSlInput(
   locator: import('@playwright/test').Locator,
-  value: string,
+  value: string
 ): Promise<void> {
   await locator.evaluate((el: HTMLElement, val: string) => {
     (el as any).value = val;
@@ -149,7 +139,7 @@ export async function fillSlInput(
  */
 export async function clearAndFillSlInput(
   locator: import('@playwright/test').Locator,
-  value: string,
+  value: string
 ): Promise<void> {
   await locator.evaluate((el: HTMLElement, val: string) => {
     (el as any).value = val;

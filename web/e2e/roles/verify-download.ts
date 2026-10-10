@@ -17,7 +17,9 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 const BASE_URL = process.env.E2E_BASE_URL || 'http://127.0.0.1:4520';
-const DEV_TOKEN = process.env.SCION_DEV_TOKEN || 'scion_dev_7bf2a54bf5856eef7bf7bcb75ff613c2d8e6a33440fe1c9ed8d23b4e9bdce72d';
+const DEV_TOKEN =
+  process.env.SCION_DEV_TOKEN ||
+  'scion_dev_7bf2a54bf5856eef7bf7bcb75ff613c2d8e6a33440fe1c9ed8d23b4e9bdce72d';
 
 interface RoleExportEnvelope {
   version: string;
@@ -102,10 +104,12 @@ async function testBrowser(browserType: BrowserType, label: string): Promise<boo
       throw new Error(`Expected version '1', got '${listEnvelope.version}'`);
     }
 
-    const foundInList = listEnvelope.roles.find(r => r.name === roleName);
+    const foundInList = listEnvelope.roles.find((r) => r.name === roleName);
     if (!foundInList) throw new Error(`Test role '${roleName}' not found in list export`);
 
-    console.log(`    List export: ${listEnvelope.roles.length} custom role(s), version=${listEnvelope.version}`);
+    console.log(
+      `    List export: ${listEnvelope.roles.length} custom role(s), version=${listEnvelope.version}`
+    );
 
     // --- Test 2: Single-role export via direct navigation ---
     console.log(`  Test 2: Single-role export download event...`);
@@ -180,7 +184,9 @@ async function main(): Promise<void> {
   try {
     results['WebKit'] = await testBrowser(webkit, 'WebKit');
   } catch (err) {
-    console.warn(`\n  WebKit not available (missing system dependencies). Safari verification not possible in this environment.\n`);
+    console.warn(
+      `\n  WebKit not available (missing system dependencies). Safari verification not possible in this environment.\n`
+    );
     results['WebKit'] = false;
   }
 
