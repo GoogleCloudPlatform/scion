@@ -35,6 +35,9 @@ import (
 // updateGolden rewrites golden files from the hub's actual output:
 //
 //	go test ./pkg/hub -run TestCreateAgent_InheritedValuesGolden -update
+//
+// It is package-wide: another golden test in this package reuses it rather
+// than registering a second "update" flag, which would panic at init.
 var updateGolden = flag.Bool("update", false, "rewrite golden files in testdata from the hub's output")
 
 const inheritedGoldenPath = "testdata/agent-create-inherited-golden.json"
@@ -99,7 +102,9 @@ func TestCreateAgent_InheritedValuesGolden(t *testing.T) {
 		})
 	}
 
-	if *updateGolden {
+	// Write only when every case regenerated: a failed case keeps its old
+	// dispatched values, and the file must not mix them with new ones.
+	if *updateGolden && !t.Failed() {
 		out, err := json.MarshalIndent(golden, "", "  ")
 		require.NoError(t, err)
 		require.NoError(t, os.WriteFile(filepath.FromSlash(inheritedGoldenPath), append(out, '\n'), 0o644))
