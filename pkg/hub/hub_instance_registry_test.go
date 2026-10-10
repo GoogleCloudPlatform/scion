@@ -893,12 +893,17 @@ func TestHubInstanceRegistryStop_WriteDeadlineDuringJoinSkipsStopWrite(t *testin
 	st := newCommittingUpsertHubInstanceStore()
 	reg := newTestHubInstanceRegistry(st, quietSnapshot())
 	// The tick's deadline (and so the write's) comes from the loop's
-	// parent context: 300 ms instead of hubInstanceTickTimeout.
-	parent, cancelParent := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	// parent context: 1 s instead of hubInstanceTickTimeout. The stop
+	// returns as soon as it fires.
+	parent, cancelParent := context.WithTimeout(context.Background(), time.Second)
 	defer cancelParent()
 	h := newTestHubInstanceRegistryStopOn(parent, reg)
 
-	<-st.entered // the first tick's upsert has reached the database
+	select {
+	case <-st.entered: // the first tick's upsert has reached the database
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first tick's upsert never started")
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -939,4 +944,34 @@ func TestHubInstanceRegistry_WriteUncertainClearedBySuccessfulWrite(t *testing.T
 	defer cancel()
 	require.NoError(t, h.stop(stopCtx))
 	assert.Contains(t, st.opsSnapshot(), "mark_stopped")
+}
+
+// A tick that panics (recovered by safeTick) may have panicked inside a
+// store write, so its outcome is unknown: a clean stop right after skips
+// its write, and the next successful write clears the flag.
+func TestHubInstanceRegistry_PanickingTickMarksWriteUncertain(t *testing.T) {
+	st := newCountingHubInstanceStore()
+	snap := quietSnapshot()
+	reg := newTestHubInstanceRegistry(st, snap)
+	ctx := context.Background()
+
+	reg.tick(ctx) // a successful upsert
+	require.False(t, reg.writeUncertain.Load())
+
+	healthy := reg.snapshot
+	reg.snapshot = func(context.Context) hubInstanceSnapshot { panic("write fault") }
+	reg.safeTick(ctx)
+	assert.True(t, reg.writeUncertain.Load(), "a recovered panic leaves the write outcome unknown")
+
+	h := newTestHubInstanceRegistryStop(reg)
+	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// The loop's first tick panics again, so the flag stays set.
+	assert.ErrorIs(t, h.stop(stopCtx), errHubInstanceRegistryWriteUnknown)
+	assert.NotContains(t, st.opsSnapshot(), "mark_stopped")
+
+	// A later successful write clears it.
+	reg.snapshot = healthy
+	reg.tick(ctx)
+	assert.False(t, reg.writeUncertain.Load())
 }
