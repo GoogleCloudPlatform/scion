@@ -64,7 +64,9 @@ var readClassActions = map[string]bool{"read": true, "list": true, "verify": tru
 // registered permission on one of these resource types fails
 // TestRelationshipPolicy_DriftRequiresDecision until it is placed in one list.
 var relationshipOwnerExcluded = map[relationshipAllowKey][]string{
-	{"owner", "user", "agent"}: {},
+	// Exchange authenticates the bound agent's own token and is never
+	// granted through a relationship.
+	{"owner", "user", "agent"}: {"agent.delegation.exchange"},
 	// Project.OwnerID grants nothing (ptone/scion#2586): project authority
 	// comes only from project-scoped role bindings, so every project
 	// permission is excluded from the owner relationship.
@@ -86,11 +88,11 @@ var relationshipOwnerExcluded = map[relationshipAllowKey][]string{
 	// mapping. No user relationship, including ownership, should grant it.
 	{"owner", "user", "gcp_service_account"}: {"gcp_service_account.use"},
 	{"owner", "user", "skill"}:               {},
-	{"ancestor", "user", "agent"}:            {},
+	{"ancestor", "user", "agent"}:            {"agent.delegation.exchange"},
 	// Agent ancestors: permissions with no agent JWT scope.
 	{"ancestor", "agent", "agent"}: {
 		"agent.read", "agent.list", "agent.update", "agent.port_access", "agent.stop_all",
-		"agent.message", "agent.grant_hub_mode",
+		"agent.message", "agent.grant_hub_mode", "agent.delegation.create", "agent.delegation.exchange",
 	},
 	// Launcher status read (ptone/scion#3409): agent.read only.
 	{"launcher", "agent", "agent"}: {
@@ -98,7 +100,7 @@ var relationshipOwnerExcluded = map[relationshipAllowKey][]string{
 		"agent.lifecycle", "agent.port_access", "agent.stop_all", "agent.message",
 		"agent.set_message_mode", "agent.grant_hub_mode", "agent.status_update",
 		"agent.log_append", "agent.notify", "agent.token_refresh", "agent.port_forward",
-		"agent.identity_token",
+		"agent.identity_token", "agent.delegation.create", "agent.delegation.exchange",
 	},
 	{"hub_member_sa_assign", "user", "gcp_service_account"}: {
 		"gcp_service_account.create", "gcp_service_account.read", "gcp_service_account.delete",
