@@ -41,32 +41,34 @@ describe('scion-page-health-dashboard cards', () => {
   let extra: Record<string, unknown> = {};
 
   beforeEach(() => {
-    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
       if (url === '/api/v1/admin/health/summary') {
-        return json({
-          status: 'healthy',
-          hub: {
+        return Promise.resolve(
+          json({
             status: 'healthy',
-            version: 'v1',
-            uptime: '1h',
-            connected_brokers: 0,
-            active_agents: 0,
-            projects: 0,
-          },
-          database: {
-            status: 'healthy',
-            pool_active: 0,
-            pool_max: 10,
-            pool_wait_count_total: 0,
-            pool_idle: 0,
-          },
-          brokers: [],
-          agents: { total: 0, active: 0, errored: 0, considered: 0, by_phase: [], problems: [] },
-          dispatch: null,
-          ...extra,
-        });
+            hub: {
+              status: 'healthy',
+              version: 'v1',
+              uptime: '1h',
+              connected_brokers: 0,
+              active_agents: 0,
+              projects: 0,
+            },
+            database: {
+              status: 'healthy',
+              pool_active: 0,
+              pool_max: 10,
+              pool_wait_count_total: 0,
+              pool_idle: 0,
+            },
+            brokers: [],
+            agents: { total: 0, active: 0, errored: 0, considered: 0, by_phase: [], problems: [] },
+            dispatch: null,
+            ...extra,
+          })
+        );
       }
-      throw new Error(`unexpected request ${url}`);
+      return Promise.reject(new Error(`unexpected request ${url}`));
     });
     el = new ScionPageHealthDashboard();
     document.body.appendChild(el);
@@ -198,41 +200,43 @@ describe('scion-page-health-dashboard runtime brokers (ptone/scion#3582)', () =>
   });
 
   it('renders runtime_brokers as one table row per broker', async () => {
-    vi.mocked(apiFetch).mockImplementation(async () =>
-      json({
-        status: 'healthy',
-        hub: { status: 'healthy', version: 'v1', uptime: '1h', connected_brokers: 2 },
-        database: { status: 'healthy', pool_active: 1, pool_max: 10, pool_idle: 1 },
-        runtime_brokers: {
-          items: [
-            {
-              id: 'b1',
-              name: 'zulu',
-              version: '1.0.0',
-              status: 'online',
-              last_heartbeat: null,
-              runtime: null,
-              workspace_storage: { backend: 'nfs', nfs_healthy: true },
-              agents: { running: 0, attention: 0 },
-            },
-            {
-              id: 'b2',
-              name: 'alpha',
-              version: '1.0.0',
-              status: 'offline',
-              last_heartbeat: null,
-              runtime: { type: 'docker', profile: 'docker' },
-              workspace_storage: { backend: 'local' },
-              agents: { running: 0, attention: 0 },
-            },
-          ],
-          total: 5,
-          truncated: true,
-        },
-        agents: { total: 0, active: 0, errored: 0, considered: 0, by_phase: [], problems: [] },
-        dispatch: null,
-        stall_config: { threshold_seconds: 300, auto_suspend: false },
-      })
+    vi.mocked(apiFetch).mockImplementation(() =>
+      Promise.resolve(
+        json({
+          status: 'healthy',
+          hub: { status: 'healthy', version: 'v1', uptime: '1h', connected_brokers: 2 },
+          database: { status: 'healthy', pool_active: 1, pool_max: 10, pool_idle: 1 },
+          runtime_brokers: {
+            items: [
+              {
+                id: 'b1',
+                name: 'zulu',
+                version: '1.0.0',
+                status: 'online',
+                last_heartbeat: null,
+                runtime: null,
+                workspace_storage: { backend: 'nfs', nfs_healthy: true },
+                agents: { running: 0, attention: 0 },
+              },
+              {
+                id: 'b2',
+                name: 'alpha',
+                version: '1.0.0',
+                status: 'offline',
+                last_heartbeat: null,
+                runtime: { type: 'docker', profile: 'docker' },
+                workspace_storage: { backend: 'local' },
+                agents: { running: 0, attention: 0 },
+              },
+            ],
+            total: 5,
+            truncated: true,
+          },
+          agents: { total: 0, active: 0, errored: 0, considered: 0, by_phase: [], problems: [] },
+          dispatch: null,
+          stall_config: { threshold_seconds: 300, auto_suspend: false },
+        })
+      )
     );
     const page = document.createElement('scion-page-health-dashboard') as ScionPageHealthDashboard;
     document.body.appendChild(page);
@@ -256,33 +260,35 @@ describe('scion-page-health-dashboard agents (ptone/scion#3587)', () => {
   });
 
   it('hands the agents block to the agents card and shows no stall data', async () => {
-    vi.mocked(apiFetch).mockImplementation(async () =>
-      json({
-        status: 'degraded',
-        hub: { status: 'healthy', version: 'v1', uptime: '1h', connected_brokers: 0 },
-        database: { status: 'healthy', pool_active: 0, pool_max: 10, pool_idle: 0 },
-        runtime_brokers: { items: [], total: 0, truncated: false },
-        agents: {
-          total: 3,
-          active: 2,
-          errored: 1,
-          considered: 3,
-          by_phase: [
-            { phase: 'running', count: 2 },
-            { phase: 'error', count: 1 },
-          ],
-          problems: [
-            {
-              kind: 'errored',
-              count: 1,
-              items: [
-                { id: 'ag1', name: 'w', project_id: 'p', project_slug: 'proj', broker_id: '' },
-              ],
-            },
-          ],
-        },
-        dispatch: null,
-      })
+    vi.mocked(apiFetch).mockImplementation(() =>
+      Promise.resolve(
+        json({
+          status: 'degraded',
+          hub: { status: 'healthy', version: 'v1', uptime: '1h', connected_brokers: 0 },
+          database: { status: 'healthy', pool_active: 0, pool_max: 10, pool_idle: 0 },
+          runtime_brokers: { items: [], total: 0, truncated: false },
+          agents: {
+            total: 3,
+            active: 2,
+            errored: 1,
+            considered: 3,
+            by_phase: [
+              { phase: 'running', count: 2 },
+              { phase: 'error', count: 1 },
+            ],
+            problems: [
+              {
+                kind: 'errored',
+                count: 1,
+                items: [
+                  { id: 'ag1', name: 'w', project_id: 'p', project_slug: 'proj', broker_id: '' },
+                ],
+              },
+            ],
+          },
+          dispatch: null,
+        })
+      )
     );
     const page = document.createElement('scion-page-health-dashboard') as ScionPageHealthDashboard;
     document.body.appendChild(page);
@@ -300,15 +306,17 @@ describe('scion-page-health-dashboard agents (ptone/scion#3587)', () => {
   });
 
   it('shows agents as not reported, not as all clear, when agents is null', async () => {
-    vi.mocked(apiFetch).mockImplementation(async () =>
-      json({
-        status: 'degraded',
-        hub: { status: 'healthy', version: 'v1', uptime: '1h', connected_brokers: 0 },
-        database: { status: 'healthy', pool_active: 0, pool_max: 10, pool_idle: 0 },
-        runtime_brokers: { items: [], total: 0, truncated: false },
-        agents: null,
-        dispatch: null,
-      })
+    vi.mocked(apiFetch).mockImplementation(() =>
+      Promise.resolve(
+        json({
+          status: 'degraded',
+          hub: { status: 'healthy', version: 'v1', uptime: '1h', connected_brokers: 0 },
+          database: { status: 'healthy', pool_active: 0, pool_max: 10, pool_idle: 0 },
+          runtime_brokers: { items: [], total: 0, truncated: false },
+          agents: null,
+          dispatch: null,
+        })
+      )
     );
     const page = document.createElement('scion-page-health-dashboard') as ScionPageHealthDashboard;
     document.body.appendChild(page);
@@ -331,15 +339,17 @@ describe('scion-page-health-dashboard dispatch (ptone/scion#3589)', () => {
   });
 
   it('hands the dispatch block to the dispatch card, with no placeholder prose', async () => {
-    vi.mocked(apiFetch).mockImplementation(async () =>
-      json({
-        status: 'degraded',
-        hub: { status: 'healthy', version: 'v1', uptime: '1h', connected_brokers: 0 },
-        database: { status: 'healthy', pool_active: 0, pool_max: 10, pool_idle: 0 },
-        runtime_brokers: { items: [], total: 0, truncated: false },
-        agents: null,
-        dispatch: { stuck_messages: 2, stuck_broker_dispatch: 1, failed_broker_dispatch_1h: 4 },
-      })
+    vi.mocked(apiFetch).mockImplementation(() =>
+      Promise.resolve(
+        json({
+          status: 'degraded',
+          hub: { status: 'healthy', version: 'v1', uptime: '1h', connected_brokers: 0 },
+          database: { status: 'healthy', pool_active: 0, pool_max: 10, pool_idle: 0 },
+          runtime_brokers: { items: [], total: 0, truncated: false },
+          agents: null,
+          dispatch: { stuck_messages: 2, stuck_broker_dispatch: 1, failed_broker_dispatch_1h: 4 },
+        })
+      )
     );
     const page = document.createElement('scion-page-health-dashboard') as ScionPageHealthDashboard;
     document.body.appendChild(page);
@@ -409,7 +419,7 @@ function summaryBody(over: Record<string, unknown> = {}) {
 }
 
 async function mountPage(body: unknown): Promise<ScionPageHealthDashboard> {
-  vi.mocked(apiFetch).mockImplementation(async () => json(body));
+  vi.mocked(apiFetch).mockImplementation(() => Promise.resolve(json(body)));
   const page = document.createElement('scion-page-health-dashboard') as ScionPageHealthDashboard;
   document.body.appendChild(page);
   await (page as unknown as { fetchData(): Promise<void> }).fetchData();

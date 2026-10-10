@@ -335,6 +335,10 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 // routed delivery, whatever the internal reason.
 const routedRefusalError = "message delivery refused"
 
+// routedInboundRoute is the route logged for refusals in routed inbound
+// dispatch, which runs per recipient without the request at hand.
+const routedInboundRoute = "/api/v1/broker/inbound/routed"
+
 // dispatchRoutedParams holds parameters for a single recipient dispatch.
 type dispatchRoutedParams struct {
 	agent            *store.Agent
@@ -483,6 +487,12 @@ func (s *Server) dispatchRoutedRecipient(
 		convResult, convErr := messaging.ResolveOrCreateConversationByKey(
 			ctx, s.store, s.messageLog, params.req.ExternalRef, "group", &agent.ProjectID, keyOpts...)
 		if convErr != nil {
+			if externalRefOfOtherProject(convErr) {
+				logReferenceRefused(ctx, routedInboundRoute, reasonExternalRefOfOtherProject, GetIdentityFromContext(ctx))
+				result.Status = "conversation_not_resolved"
+				result.Error = "conversation resolution failed"
+				return result
+			}
 			if s.writeDenyEnabled() {
 				messaging.WriteDenialMetrics.Inc("broker.routed.phase11")
 				result.Status = "conversation_not_resolved"

@@ -228,8 +228,7 @@ Environment=\"SCION_SERVER_BASE_URL=${HUB_BASE_URL}\"
 # Use journald for log management
 StandardOutput=journal
 StandardError=journal
-ExecStartPre=/usr/bin/env
-ExecStart=%s --global server start --foreground --hosted --debug --enable-hub%s --enable-web --web-port 8080 --storage-bucket \${SCION_HUB_STORAGE_BUCKET} --auto-provide
+ExecStart=%s --global server start --foreground --hosted --enable-hub%s --enable-web --web-port 8080 --storage-bucket \${SCION_HUB_STORAGE_BUCKET} --auto-provide
 Restart=always
 RestartSec=5
 

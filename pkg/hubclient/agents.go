@@ -483,23 +483,31 @@ func (s *agentService) Delete(ctx context.Context, agentID string, opts *DeleteA
 
 // deletePath builds the DELETE URL, with the query parameters for opts.
 func (s *agentService) deletePath(agentID string, opts *DeleteAgentOptions) string {
-	path := s.agentPath(agentID)
-	if opts != nil {
-		query := url.Values{}
-		// Server defaults deleteFiles/removeBranch to true, so only send
-		// the parameter when the caller explicitly wants to preserve them.
-		if !opts.DeleteFiles {
-			query.Set("deleteFiles", "false")
-		}
-		if !opts.RemoveBranch {
-			query.Set("removeBranch", "false")
-		}
-		if opts.Force {
-			query.Set("force", "true")
-		}
-		if len(query) > 0 {
-			path += "?" + query.Encode()
-		}
+	return withDeleteAgentQuery(s.agentPath(agentID), opts)
+}
+
+// withDeleteAgentQuery appends the DELETE query parameters for opts to path.
+// It is shared by the agent-scoped and project-scoped delete calls so both
+// encode the options identically. A nil opts sends no parameters, leaving the
+// server defaults in place.
+func withDeleteAgentQuery(path string, opts *DeleteAgentOptions) string {
+	if opts == nil {
+		return path
+	}
+	query := url.Values{}
+	// Server defaults deleteFiles/removeBranch to true, so only send
+	// the parameter when the caller explicitly wants to preserve them.
+	if !opts.DeleteFiles {
+		query.Set("deleteFiles", "false")
+	}
+	if !opts.RemoveBranch {
+		query.Set("removeBranch", "false")
+	}
+	if opts.Force {
+		query.Set("force", "true")
+	}
+	if len(query) > 0 {
+		path += "?" + query.Encode()
 	}
 	return path
 }

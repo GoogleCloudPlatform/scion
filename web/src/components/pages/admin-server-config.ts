@@ -225,7 +225,6 @@ interface V1GitHubAppConfig {
 interface V1ServerConfig {
   mode?: string;
   log_level?: string;
-  log_format?: string;
   hub?: V1ServerHubConfig;
   broker?: V1BrokerConfig;
   database?: V1DatabaseConfig;
@@ -254,6 +253,7 @@ interface V1TelemetryHubConfig {
   report_interval?: string;
 }
 
+/** telemetry.local: accepted but ignored (ptone/scion#4103); no UI edits it. */
 interface V1TelemetryLocalConfig {
   enabled?: boolean;
   file?: string;
@@ -525,9 +525,6 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   'telemetry.cloud.cloud_logging': 'Cloud Logging',
   'telemetry.hub.enabled': 'Hub Reporting Enabled',
   'telemetry.hub.report_interval': 'Hub Report Interval',
-  'telemetry.local.enabled': 'Local Telemetry Enabled',
-  'telemetry.local.file': 'Local Telemetry File',
-  'telemetry.local.console': 'Local Telemetry Console',
   // agent_defaults section
   default_template: 'Default Template',
   default_harness_config: 'Default Harness Config',
@@ -679,7 +676,6 @@ export class ScionPageAdminServerConfig extends LitElement {
   // Server
   @state() private serverMode = '';
   @state() private logLevel = '';
-  @state() private logFormat = '';
 
   // Hub Server
   @state() private hubPort = 0;
@@ -756,9 +752,12 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private telemetryCloudCloudLogging = false;
   @state() private telemetryHubEnabled = false;
   @state() private telemetryHubReportInterval = '';
-  @state() private telemetryLocalEnabled = false;
-  @state() private telemetryLocalFile = '';
-  @state() private telemetryLocalConsole = false;
+  /**
+   * Stored telemetry.local, kept only so a file-mode save (which replaces the
+   * whole telemetry object) writes it back unchanged. No UI edits it: nothing
+   * reads these keys (ptone/scion#4103).
+   */
+  private storedTelemetryLocal: V1TelemetryLocalConfig | undefined;
 
   // Message Broker
   @state() private messageBrokerEnabled = false;
@@ -1746,7 +1745,6 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (srv) {
       this.serverMode = srv.mode || '';
       this.logLevel = srv.log_level || '';
-      this.logFormat = srv.log_format || '';
 
       // Hub
       if (srv.hub) {
@@ -1825,6 +1823,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
     // Telemetry
     const tel = data.telemetry;
+    this.storedTelemetryLocal = tel?.local;
     if (tel) {
       this.telemetryEnabled = tel.enabled || false;
       if (tel.cloud) {
@@ -1838,11 +1837,6 @@ export class ScionPageAdminServerConfig extends LitElement {
       if (tel.hub) {
         this.telemetryHubEnabled = tel.hub.enabled || false;
         this.telemetryHubReportInterval = tel.hub.report_interval || '';
-      }
-      if (tel.local) {
-        this.telemetryLocalEnabled = tel.local.enabled || false;
-        this.telemetryLocalFile = tel.local.file || '';
-        this.telemetryLocalConsole = tel.local.console || false;
       }
     }
 
@@ -2218,13 +2212,6 @@ export class ScionPageAdminServerConfig extends LitElement {
           report_interval: this.telemetryHubReportInterval,
         };
       }
-      if (ok('telemetry.local.enabled')) {
-        telemetry.local = {
-          enabled: this.telemetryLocalEnabled,
-          file: this.telemetryLocalFile,
-          console: this.telemetryLocalConsole,
-        };
-      }
       payload.telemetry = telemetry;
     }
 
@@ -2319,7 +2306,6 @@ export class ScionPageAdminServerConfig extends LitElement {
     const server: Record<string, unknown> = {};
     if (ok('server.mode')) server.mode = this.serverMode || '';
     if (ok('server.log_level')) server.log_level = this.logLevel || '';
-    if (ok('server.log_format')) server.log_format = this.logFormat || '';
 
     const hub: Record<string, unknown> = {};
     if (ok('server.hub.port')) hub.port = this.hubPort || 0;
@@ -2470,7 +2456,6 @@ export class ScionPageAdminServerConfig extends LitElement {
     const server: Record<string, unknown> = {};
     if (ok('server.mode')) server.mode = this.serverMode || '';
     if (ok('server.log_level')) server.log_level = this.logLevel || '';
-    if (ok('server.log_format')) server.log_format = this.logFormat || '';
 
     // Hub server
     const hub: Record<string, unknown> = {};
@@ -2625,14 +2610,12 @@ export class ScionPageAdminServerConfig extends LitElement {
           : undefined,
       };
     }
-    if (ok('telemetry.local.enabled')) {
-      telemetry.local = {
-        enabled: this.telemetryLocalEnabled,
-        file: ok('telemetry.local.file') ? this.telemetryLocalFile || undefined : undefined,
-        console: ok('telemetry.local.console') ? this.telemetryLocalConsole : undefined,
-      };
+    if (Object.keys(telemetry).length > 0) {
+      // A file-mode save replaces the whole telemetry object, so echo the
+      // stored telemetry.local back to keep it (ptone/scion#4103).
+      if (this.storedTelemetryLocal) telemetry.local = this.storedTelemetryLocal;
+      payload.telemetry = telemetry;
     }
-    if (Object.keys(telemetry).length > 0) payload.telemetry = telemetry;
 
     // Auto-expose ports
     if (ok('auto_expose_ports.enabled')) {
@@ -3451,22 +3434,6 @@ export class ScionPageAdminServerConfig extends LitElement {
                 <sl-option value="info">Info</sl-option>
                 <sl-option value="warn">Warn</sl-option>
                 <sl-option value="error">Error</sl-option>
-              </sl-select>`
-            )}
-          </div>
-          <div class="form-field">
-            <label>Log Format</label>
-            ${this.renderFieldValue(
-              'server.log_format',
-              this.logFormat || 'text',
-              html`<sl-select
-                value=${this.logFormat || 'text'}
-                @sl-change=${(e: Event) => {
-                  this.logFormat = (e.target as HTMLSelectElement).value;
-                }}
-              >
-                <sl-option value="text">Text</sl-option>
-                <sl-option value="json">JSON</sl-option>
               </sl-select>`
             )}
           </div>
@@ -5942,52 +5909,6 @@ export class ScionPageAdminServerConfig extends LitElement {
                   placeholder="30s"
                   @sl-input=${(e: Event) => {
                     this.telemetryHubReportInterval = (e.target as HTMLInputElement).value;
-                  }}
-                ></sl-input>`
-            )}
-          </div>
-        </div>
-      </div>
-
-      <div class="section">
-        <h3 class="section-title">Local Debug Output</h3>
-        <div class="form-grid">
-          <div class="form-field">
-            ${this.renderFieldValue(
-              'telemetry.local.enabled',
-              this.telemetryLocalEnabled ? 'Enabled' : 'Disabled',
-              html`${this.renderEnvBadge('telemetry.local.enabled')}<sl-switch
-                  ?checked=${this.telemetryLocalEnabled}
-                  @sl-change=${(e: Event) => {
-                    this.telemetryLocalEnabled = (e.target as HTMLInputElement).checked;
-                  }}
-                  >Enable Local Output</sl-switch
-                >`
-            )}
-          </div>
-          <div class="form-field">
-            ${this.renderFieldValue(
-              'telemetry.local.console',
-              this.telemetryLocalConsole ? 'Enabled' : 'Disabled',
-              html`${this.renderEnvBadge('telemetry.local.console')}<sl-switch
-                  ?checked=${this.telemetryLocalConsole}
-                  @sl-change=${(e: Event) => {
-                    this.telemetryLocalConsole = (e.target as HTMLInputElement).checked;
-                  }}
-                  >Console Output</sl-switch
-                >`
-            )}
-          </div>
-          <div class="form-field full-width">
-            <label>Log File</label>
-            ${this.renderFieldValue(
-              'telemetry.local.file',
-              this.telemetryLocalFile || '—',
-              html`${this.renderEnvBadge('telemetry.local.file')}<sl-input
-                  value=${this.telemetryLocalFile}
-                  placeholder="/var/log/scion/telemetry.log"
-                  @sl-input=${(e: Event) => {
-                    this.telemetryLocalFile = (e.target as HTMLInputElement).value;
                   }}
                 ></sl-input>`
             )}

@@ -70,6 +70,8 @@ type refFaultStore struct {
 	failConvByExtRef    bool
 	failGetProject      bool
 	failGetConversation bool
+	// failGetProjectID, when set, fails GetProject for that project only.
+	failGetProjectID string
 }
 
 func (r *refFaultStore) GetMessage(ctx context.Context, id string) (*store.Message, error) {
@@ -87,7 +89,7 @@ func (r *refFaultStore) GetConversationByExternalRef(ctx context.Context, surfac
 }
 
 func (r *refFaultStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
-	if r.failGetProject && r.fault.Active() {
+	if (r.failGetProject || (r.failGetProjectID != "" && id == r.failGetProjectID)) && r.fault.Active() {
 		return nil, errRefStoreFault
 	}
 	return r.Store.GetProject(ctx, id)

@@ -1282,7 +1282,9 @@ type V1ServerConfig struct {
 	HomeStorage *V1HomeStorageConfig `json:"home_storage,omitempty" yaml:"home_storage,omitempty" koanf:"home_storage"`
 	Secrets     *V1SecretsConfig     `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
 	LogLevel    string               `json:"log_level,omitempty" yaml:"log_level,omitempty" koanf:"log_level"`
-	LogFormat   string               `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
+	// LogFormat is accepted so existing settings files still load, but nothing
+	// reads it (ptone/scion#4103). It is not carried into GlobalConfig.
+	LogFormat string `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
 
 	// Maintenance holds binary auto-update and deployment tier settings.
 	Maintenance *V1MaintenanceConfig `json:"maintenance,omitempty" yaml:"maintenance,omitempty" koanf:"maintenance"`
@@ -2278,7 +2280,9 @@ type V1TelemetryHubConfig struct {
 	ReportInterval string `json:"report_interval,omitempty" yaml:"report_interval,omitempty" koanf:"report_interval"`
 }
 
-// V1TelemetryLocalConfig holds local debug telemetry output settings.
+// V1TelemetryLocalConfig holds local debug telemetry output settings. The
+// keys are accepted so existing settings files still load, but no component
+// reads them (ptone/scion#4103).
 type V1TelemetryLocalConfig struct {
 	Enabled *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
 	File    string `json:"file,omitempty" yaml:"file,omitempty" koanf:"file"`
@@ -2286,6 +2290,7 @@ type V1TelemetryLocalConfig struct {
 }
 
 // V1TelemetryFilterConfig holds event filtering and sampling settings.
+// RespectDebugMode is accepted but not read (ptone/scion#4103).
 type V1TelemetryFilterConfig struct {
 	Enabled          *bool                        `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
 	RespectDebugMode *bool                        `json:"respect_debug_mode,omitempty" yaml:"respect_debug_mode,omitempty" koanf:"respect_debug_mode"`
@@ -3270,9 +3275,6 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 	if v1.LogLevel != "" {
 		gc.LogLevel = v1.LogLevel
 	}
-	if v1.LogFormat != "" {
-		gc.LogFormat = v1.LogFormat
-	}
 
 	// Hub server config
 	if v1.Hub != nil {
@@ -3694,9 +3696,8 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 
 	v1 := &V1ServerConfig{
-		Mode:      gc.Mode,
-		LogLevel:  gc.LogLevel,
-		LogFormat: gc.LogFormat,
+		Mode:     gc.Mode,
+		LogLevel: gc.LogLevel,
 	}
 
 	// Hub server config
