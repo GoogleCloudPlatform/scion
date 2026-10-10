@@ -36,8 +36,9 @@ import (
 //
 //	go test ./pkg/hub -run TestCreateAgent_InheritedValuesGolden -update
 //
-// It is package-wide: another golden test in this package reuses it rather
-// than registering a second "update" flag, which would panic at init.
+// It is package-wide: a future golden test in this package must reuse it
+// rather than register a second "update" flag, which would panic at init
+// (one flag per package).
 var updateGolden = flag.Bool("update", false, "rewrite golden files in testdata from the hub's output")
 
 const inheritedGoldenPath = "testdata/agent-create-inherited-golden.json"
