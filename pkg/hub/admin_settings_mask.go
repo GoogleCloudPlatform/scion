@@ -327,13 +327,13 @@ func maskedTelemetry(t *config.V1TelemetryConfig) *config.V1TelemetryConfig {
 // alone and replaces the stored one as usual.
 //
 // A masked value is restored only when every other telemetry.cloud member
-// the request sends equals what GET showed for it (stored, masked). The
-// sent members are read from rawTelemetry, the telemetry object of the
-// request body, so a member sent as "" or null counts as sent: it equals
-// the shown value only when GET showed none (null), and is a change
-// otherwise. Nested objects are compared whole. A masked header with no
-// stored value, or with a stored value that is itself the placeholder, is
-// an error too. The caller answers 400 to an error.
+// the request sends is unchanged from what GET showed for it (stored,
+// masked; see sentValueUnchanged). The sent members are read from
+// rawTelemetry, the telemetry object of the request body, so a member
+// sent as "", null or {} counts as sent. Members the request does not
+// send are not compared. A masked header with no stored value, or with a
+// stored value that is itself the placeholder, is an error too. The
+// caller answers 400 to an error.
 func restoreMaskedTelemetryHeaders(incoming, stored *config.V1TelemetryConfig, rawTelemetry json.RawMessage) error {
 	if incoming == nil || incoming.Cloud == nil {
 		return nil
@@ -376,11 +376,10 @@ func restoreMaskedTelemetryHeaders(incoming, stored *config.V1TelemetryConfig, r
 }
 
 // sentCloudMembersEqual reports whether every member the telemetry object
-// rawTelemetry sends in its cloud object, other than headers, equals the
-// same member of shown (as JSON values; a member shown has none of is
-// null). Members are matched to fields with sentStructFields, the rule
-// the typed request decode follows. A body that sends no cloud object
-// sends no members.
+// rawTelemetry sends in its cloud object, other than headers, leaves the
+// same member of shown unchanged (sentValueUnchanged). Members are matched
+// to fields with sentStructFields, the rule the typed request decode
+// follows. A body that sends no cloud object sends no members.
 func sentCloudMembersEqual(rawTelemetry json.RawMessage, shown *config.V1TelemetryCloudConfig) bool {
 	rawCloud, ok := sentAtPath(reflect.TypeOf(config.V1TelemetryConfig{}), rawTelemetry, []string{"cloud"})
 	if !ok {
@@ -404,11 +403,61 @@ func sentCloudMembersEqual(rawTelemetry json.RawMessage, shown *config.V1Telemet
 		if err := json.Unmarshal(sf.val, &sent); err != nil {
 			return false
 		}
-		if !reflect.DeepEqual(sent, shownMembers[name]) {
+		shownVal, shown := shownMembers[name]
+		if !sentValueUnchanged(sent, shownVal, shown) {
 			return false
 		}
 	}
 	return true
+}
+
+// sentValueUnchanged reports whether a sent JSON value leaves a member as
+// GET showed it. shown is false when GET showed no value for the member.
+//   - GET showed no value: the sent value is unchanged only when it holds
+//     no value either: null, "", or an object whose members all hold no
+//     value ({} included). Any other value (false and 0 included) is a
+//     change.
+//   - GET showed an object and an object is sent: each sent member is
+//     checked by the same rules against the shown member, and members the
+//     object does not send are not compared (the telemetry section is
+//     merged key by key).
+//   - Otherwise the sent value must equal the shown value exactly, so ""
+//     or null for a member GET showed is a change.
+func sentValueUnchanged(sent, shownVal any, shown bool) bool {
+	if !shown || shownVal == nil {
+		return holdsNoValue(sent)
+	}
+	sentObj, sentIsObj := sent.(map[string]any)
+	shownObj, shownIsObj := shownVal.(map[string]any)
+	if sentIsObj && shownIsObj {
+		for k, v := range sentObj {
+			sv, ok := shownObj[k]
+			if !sentValueUnchanged(v, sv, ok) {
+				return false
+			}
+		}
+		return true
+	}
+	return reflect.DeepEqual(sent, shownVal)
+}
+
+// holdsNoValue reports whether a decoded JSON value carries no value:
+// null, "", or an object whose members all carry no value.
+func holdsNoValue(v any) bool {
+	switch t := v.(type) {
+	case nil:
+		return true
+	case string:
+		return t == ""
+	case map[string]any:
+		for _, m := range t {
+			if !holdsNoValue(m) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // rawTelemetryObject returns the telemetry member of a server-config PUT

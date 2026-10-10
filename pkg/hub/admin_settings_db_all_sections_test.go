@@ -739,6 +739,75 @@ func TestPutServerConfigDB_TelemetryMaskedHeaderSameMembersKeeps(t *testing.T) {
 	assert.Equal(t, map[string]any{"x-api-key": "real-key", "x-tenant": "t9"}, headers)
 }
 
+// storedTelemetryWithTLS has a nested tls object beside the headers.
+const storedTelemetryWithTLS = `{"cloud":{"endpoint":"otel.example.com:4317","tls":{"enabled":true,"ca_file":"/etc/ca.pem"},"headers":{"x-api-key":"real-key"}}}`
+
+// A masked header next to sent members that change nothing relative to
+// GET keeps the stored header; next to a real change it is rejected.
+func TestPutServerConfigDB_TelemetryMaskedHeaderNoOpMembers(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		wantCode   int
+	}{
+		// Page-shaped echo of the GET block with empty values for the
+		// members GET did not show.
+		{"empty values for members GET omitted", `{"telemetry":{"cloud":{"endpoint":"otel.example.com:4317","protocol":"","provider":"","gcp_project_id":null,"batch":{},"tls":{"enabled":true,"ca_file":"/etc/ca.pem"},"headers":{"x-api-key":"********"}}}}`, http.StatusOK},
+		{"empty nested object for an absent member", `{"telemetry":{"cloud":{"batch":{"max_size":null,"timeout":""},"headers":{"x-api-key":"********"}}}}`, http.StatusOK},
+		{"partial nested object, no-op", `{"telemetry":{"cloud":{"tls":{"enabled":true},"headers":{"x-api-key":"********"}}}}`, http.StatusOK},
+		{"partial nested object, changed", `{"telemetry":{"cloud":{"tls":{"enabled":false},"headers":{"x-api-key":"********"}}}}`, http.StatusBadRequest},
+		{"partial nested object, cleared member", `{"telemetry":{"cloud":{"tls":{"ca_file":""},"headers":{"x-api-key":"********"}}}}`, http.StatusBadRequest},
+		{"empty nested object over a stored one", `{"telemetry":{"cloud":{"tls":{},"headers":{"x-api-key":"********"}}}}`, http.StatusOK},
+		{"null nested object over a stored one", `{"telemetry":{"cloud":{"tls":null,"headers":{"x-api-key":"********"}}}}`, http.StatusBadRequest},
+		{"empty string over a shown endpoint", `{"telemetry":{"cloud":{"endpoint":"","headers":{"x-api-key":"********"}}}}`, http.StatusBadRequest},
+		{"false for a member GET omitted", `{"telemetry":{"cloud":{"cloud_logging":false,"headers":{"x-api-key":"********"}}}}`, http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			srv, fake, ops := newTestDBServer(t)
+			fake.seedWithOrigin("telemetry", json.RawMessage(storedTelemetryWithTLS), "managed")
+			_, err := ops.Refresh(context.Background())
+			require.NoError(t, err)
+
+			rr := putServerConfigDB(t, srv, ops, tc.body)
+			require.Equal(t, tc.wantCode, rr.Code, rr.Body.String())
+			row := storedRow(fake, "telemetry")
+			headers, _ := valueAtPath(decodeJSONValue(t, row.Value), []string{"cloud", "headers"})
+			assert.Equal(t, map[string]any{"x-api-key": "real-key"}, headers, "the stored header is never replaced by the placeholder")
+			assert.NotContains(t, string(row.Value), maskedValue)
+		})
+	}
+}
+
+func TestSentValueUnchanged(t *testing.T) {
+	obj := func(s string) any { var v any; _ = json.Unmarshal([]byte(s), &v); return v }
+	for _, tc := range []struct {
+		name         string
+		sent, shownV any
+		shown, want  bool
+	}{
+		{"null for absent", nil, nil, false, true},
+		{"empty string for absent", "", nil, false, true},
+		{"empty object for absent", obj(`{}`), nil, false, true},
+		{"object of empties for absent", obj(`{"a":"","b":null,"c":{}}`), nil, false, true},
+		{"value for absent", "x", nil, false, false},
+		{"false for absent", false, nil, false, false},
+		{"zero for absent", float64(0), nil, false, false},
+		{"equal scalar", "x", "x", true, true},
+		{"changed scalar", "y", "x", true, false},
+		{"empty string for shown", "", "x", true, false},
+		{"null for shown", nil, "x", true, false},
+		{"partial object", obj(`{"a":1}`), obj(`{"a":1,"b":2}`), true, true},
+		{"partial object changed", obj(`{"a":2}`), obj(`{"a":1,"b":2}`), true, false},
+		{"partial object clears", obj(`{"b":""}`), obj(`{"a":1,"b":2}`), true, false},
+		{"array equal", obj(`["a"]`), obj(`["a"]`), true, true},
+		{"array changed", obj(`["b"]`), obj(`["a"]`), true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, sentValueUnchanged(tc.sent, tc.shownV, tc.shown))
+		})
+	}
+}
+
 // File mode: a masked header sent next to a cleared endpoint is rejected
 // and settings.yaml is left as it is.
 func TestPutServerConfig_FileMode_TelemetryMaskedHeaderClearedEndpointRejected(t *testing.T) {
