@@ -1842,13 +1842,32 @@ export class TerminalWorkspaceRoot {
 
   /**
    * Rail selection (a click, or Enter or Space on the rail button, which
-   * the browser turns into a click): navigates to the agent and moves
-   * keyboard focus into its terminal — see {@link focusRailTarget}.
+   * the browser turns into a click): in a multi-pane layout, first puts
+   * the terminal in the next free slot (see {@link placeInNextFreeSlot}),
+   * then navigates to the agent and moves keyboard focus into its
+   * terminal — see {@link focusRailTarget}.
    */
   private openSessionRoute(entry: RailEntry): void {
+    this.placeInNextFreeSlot(entry.state.key);
     this.railFocusAgentId = entry.state.agentId;
     this.dispatchNavigation(`/terminals/${entry.state.agentId}`);
     this.focusRailTarget();
+  }
+
+  /**
+   * With several panes on screen (a multi-pane preset, not narrow or
+   * zoomed), puts a rail terminal that is in none of the preset's slots
+   * into its lowest-index empty slot (ptone/scion#4324), where it connects
+   * once shown, like any placed pane. A terminal already in a slot is left
+   * where it is (the rail selection then focuses it), and with no empty
+   * slot nothing changes. The session is already open in this window, so,
+   * as for "Place in pane", there is nothing for the coordinator to decide.
+   */
+  private placeInNextFreeSlot(sessionKey: string): void {
+    if (this.isSinglePaneView() || this.layoutManager.getZoomed() !== null) return;
+    const slots = this.layoutManager.getVisibleSlots();
+    if (slots.includes(sessionKey) || !slots.includes(null)) return;
+    this.layoutManager.open(sessionKey);
   }
 
   private dispatchNavigation(path: string): void {

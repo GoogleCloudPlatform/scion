@@ -3977,3 +3977,199 @@ describe('open terminals rail: selection focuses the terminal (ptone/scion#2900)
     expect(document.activeElement).not.toBe(paneFor(root, AGENT_A));
   });
 });
+
+describe('open terminals rail: a click fills the next free slot (ptone/scion#4324)', () => {
+  const AGENT_D = AGENT_NEW;
+  const AGENT_E = '66666666-6666-4666-8666-666666666666';
+  let root: TerminalWorkspaceRoot;
+  let reg: TerminalSessionRegistry;
+  const sessions = new Map<string, TerminalSession>();
+  const sockets: Array<{
+    url: string;
+    readyState: number;
+    onopen: (() => void) | null;
+    onmessage: ((event: { data: unknown }) => void) | null;
+  }> = [];
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        const id =
+          [AGENT_A, AGENT_B, AGENT_C, AGENT_D, AGENT_E].find((agent) =>
+            String(url).includes(agent)
+          ) ?? AGENT_A;
+        return Promise.resolve(
+          new Response(JSON.stringify({ id, name: id, phase: 'running' }), { status: 200 })
+        );
+      })
+    );
+    stubWebSocketAndEventSource();
+    sockets.length = 0;
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        onopen: (() => void) | null = null;
+        onclose = null;
+        onmessage: ((event: { data: unknown }) => void) | null = null;
+        send = vi.fn();
+        close = vi.fn();
+        readyState = 0;
+        constructor(public url: string) {
+          sockets.push(this);
+        }
+      }
+    );
+    // jsdom does no layout: give a shown pane a measurable container.
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(500);
+    reg = new TerminalSessionRegistry({ hubUrl: window.location.origin, accountId: 'r4324' });
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+    sessions.clear();
+    // Stands in for main.ts: a rail navigation to an open agent ends in
+    // select(), as the coordinator does once the route settles.
+    root.element.addEventListener('nav-click', (e) => {
+      const agentId = (e as CustomEvent<{ path: string }>).detail.path.split('/').pop()!;
+      const session = sessions.get(agentId);
+      if (session) queueMicrotask(() => root.select(session));
+    });
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function key(agentId: string): string {
+    return sessions.get(agentId)!.state.key;
+  }
+
+  function railItem(agentId: string): HTMLElement {
+    const item = [...root.element.querySelectorAll<HTMLElement>('.terminal-rail-item')].find(
+      (el) =>
+        el.querySelector<HTMLElement>('.terminal-rail-select')?.dataset.railFocusId ===
+        `${key(agentId)}:select`
+    );
+    if (!item) throw new Error(`No rail item for ${agentId}`);
+    return item;
+  }
+
+  function clickRail(agentId: string): void {
+    railItem(agentId)
+      .querySelector<HTMLButtonElement>('.terminal-rail-select')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+  }
+
+  /** Brings a session's stream live, so its rail dot turns green. */
+  async function goLive(agentId: string): Promise<void> {
+    const socket = await vi.waitFor(() => {
+      const found = sockets.filter((s) => s.url.includes(agentId)).at(-1);
+      if (!found) throw new Error('no socket yet');
+      return found;
+    });
+    socket.readyState = 1;
+    socket.onopen?.();
+    socket.onmessage?.({ data: JSON.stringify({ type: 'data', data: btoa('screen') }) });
+    await vi.waitFor(() => expect(sessions.get(agentId)!.state.connection).toBe('connected'));
+  }
+
+  /**
+   * 4-up with A and B in slots 1 and 2. C is connected (green) and D was
+   * never opened (its hollow dot: not connected); neither is in a slot.
+   */
+  async function fourUpWithTwoFilled(): Promise<void> {
+    // C connects in the single layout, then stays open in the rail only.
+    sessions.set(AGENT_C, root.create(reg, AGENT_C));
+    await goLive(AGENT_C);
+    root.layoutManager.setLayout('four');
+    sessions.set(AGENT_A, root.create(reg, AGENT_A));
+    sessions.set(AGENT_B, root.create(reg, AGENT_B));
+    sessions.set(
+      AGENT_D,
+      root.withAutoSelectSuspended(() => root.create(reg, AGENT_D, { deferConnect: true }))
+    );
+    await flush();
+    expect(root.layoutManager.getVisibleSlots()).toEqual([key(AGENT_A), key(AGENT_B), null, null]);
+    expect(railItem(AGENT_C).dataset.dot).toBe('green');
+    expect(['grey', 'neutral']).toContain(railItem(AGENT_D).dataset.dot);
+  }
+
+  it('a not-connected entry fills slot 3, then a connected one fills slot 4', async () => {
+    await fourUpWithTwoFilled();
+
+    clickRail(AGENT_D);
+    await flush();
+    expect(root.layoutManager.getVisibleSlots()).toEqual([
+      key(AGENT_A),
+      key(AGENT_B),
+      key(AGENT_D),
+      null,
+    ]);
+    // Shown, so the deferred entry now connects.
+    await vi.waitFor(() => expect(paneFor(root, AGENT_D).hidden).toBe(false));
+    await vi.waitFor(() => expect(sockets.some((s) => s.url.includes(AGENT_D))).toBe(true));
+
+    clickRail(AGENT_C);
+    await flush();
+    expect(root.layoutManager.getVisibleSlots()).toEqual([
+      key(AGENT_A),
+      key(AGENT_B),
+      key(AGENT_D),
+      key(AGENT_C),
+    ]);
+    expect(root.layoutManager.getState().active).toBe('four');
+  });
+
+  it('a click on an entry already in a slot leaves the slots as they are, with no duplicate', async () => {
+    await fourUpWithTwoFilled();
+
+    clickRail(AGENT_B);
+    await flush();
+    await flush();
+    expect(root.layoutManager.getVisibleSlots()).toEqual([key(AGENT_A), key(AGENT_B), null, null]);
+    expect(railItem(AGENT_B).dataset.selected).toBe('true');
+  });
+
+  it('with no free slot, a click changes no slot', async () => {
+    await fourUpWithTwoFilled();
+    clickRail(AGENT_D);
+    clickRail(AGENT_C);
+    await flush();
+    const full = [...root.layoutManager.getVisibleSlots()];
+    sessions.set(
+      AGENT_E,
+      root.withAutoSelectSuspended(() => root.create(reg, AGENT_E, { deferConnect: true }))
+    );
+    await flush();
+
+    clickRail(AGENT_E);
+    await flush();
+    await flush();
+    expect(root.layoutManager.getState().active).toBe('four');
+    expect(root.layoutManager.getVisibleSlots()).toEqual(full);
+  });
+
+  it('in the single layout, a click shows the entry in the one pane, as before', async () => {
+    sessions.set(AGENT_A, root.create(reg, AGENT_A));
+    sessions.set(
+      AGENT_D,
+      root.withAutoSelectSuspended(() => root.create(reg, AGENT_D, { deferConnect: true }))
+    );
+    await flush();
+    expect(root.layoutManager.getVisibleSlots()).toEqual([key(AGENT_A)]);
+
+    clickRail(AGENT_D);
+    await vi.waitFor(() => expect(root.layoutManager.getVisibleSlots()).toEqual([key(AGENT_D)]));
+    const state = root.layoutManager.getState();
+    expect(state.active).toBe('single');
+    expect(state.four).toEqual([null, null, null, null]);
+  });
+});
