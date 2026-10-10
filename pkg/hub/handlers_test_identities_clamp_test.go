@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -49,9 +50,26 @@ func tiBindSystemRoleToGroup(t *testing.T, s store.Store, groupID, roleName stri
 	ctx := context.Background()
 	rd, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeSystem)
 	require.NoError(t, err)
+	createdBy := "test"
+	if roleName == store.SystemRoleSuperAdmin {
+		createdBy = store.SystemReconcileCreatedBy // the store's rule for super-admin bindings
+	}
 	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalGroup,
-		PrincipalID: groupID, ScopeType: store.RoleScopeSystem, CreatedBy: "test"})
+		PrincipalID: groupID, ScopeType: store.RoleScopeSystem, CreatedBy: createdBy})
 	require.NoError(t, err)
+}
+
+// tiCustomSystemRole creates a system-scoped custom role with perms and
+// returns its name. Super-admin is direct-user-only, so a group carries
+// hub-level authority through hub-admin or a custom system role.
+func tiCustomSystemRole(t *testing.T, s store.Store, name string, perms ...string) string {
+	t.Helper()
+	_, err := s.CreateRoleDefinition(context.Background(), &store.RoleDefinition{
+		ID: generateID(), Name: name, Description: "test identity clamp test role",
+		ScopeType: store.RoleScopeSystem, Permissions: perms,
+	})
+	require.NoError(t, err)
+	return name
 }
 
 func tiAddToGroup(t *testing.T, s store.Store, groupID, userID, role string) {
@@ -88,9 +106,11 @@ func TestTestIdentity_GroupGrantsClampedToMember(t *testing.T) {
 	ensureHubMembership(ctx, s, human.ID)
 	humanIdent := NewAuthenticatedUser(human.ID, human.Email, "", store.UserRoleMember, string(ClientTypeAPI))
 
-	// (a) A group already bound to super-admin; the fixture is added after
-	// issuance.
-	superGroup := tiGroupWithSystemRole(t, s, "ti-clamp-super", store.SystemRoleSuperAdmin, DevUserID)
+	// (a) A group already bound to a broad custom system role; the fixture
+	// is added after issuance.
+	adminRole := tiCustomSystemRole(t, s, "ti-clamp-admin-role", "hub.config.read", "hub.health.read",
+		"role_binding.create", permissionTestIdentityIssue)
+	superGroup := tiGroupWithSystemRole(t, s, "ti-clamp-super", adminRole, DevUserID)
 	tiAddToGroup(t, s, superGroup.ID, fid, store.GroupMemberRoleMember)
 	tiAddToGroup(t, s, superGroup.ID, human.ID, store.GroupMemberRoleMember)
 
@@ -100,26 +120,25 @@ func TestTestIdentity_GroupGrantsClampedToMember(t *testing.T) {
 		rec := doRequestWithToken(t, srv, fx.AccessToken, http.MethodGet, path, nil)
 		assert.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", path, rec.Body.String())
 	}
-	superRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	adminRD, err := s.GetRoleDefinitionByName(ctx, adminRole, store.RoleScopeSystem)
 	require.NoError(t, err)
 	rec := doRequestWithToken(t, srv, fx.AccessToken, http.MethodPost, "/api/v1/admin/role-bindings", map[string]string{
-		"roleDefinitionId": superRD.ID, "principalType": "user", "principalId": human.ID, "scopeType": "system",
+		"roleDefinitionId": adminRD.ID, "principalType": "user", "principalId": human.ID, "scopeType": "system",
 	})
-	assert.Equal(t, http.StatusForbidden, rec.Code, "fixture granting super-admin: %s", rec.Body.String())
+	assert.Equal(t, http.StatusForbidden, rec.Code, "fixture granting a system role: %s", rec.Body.String())
+	rec = tiPost(t, srv, fx.AccessToken, "/api/v1/test-identities", nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "inherited issuer grant is clamped: %s", rec.Body.String())
 
-	// The inherited path through Decide, IsSystemAdmin and CanDelegate.
+	// The inherited path through Decide and CanDelegate.
+	grant := GrantDescriptor{Type: GrantTypeRoleBinding, RoleDefinitionID: adminRD.ID, RolePermissions: adminRD.Permissions, ScopeType: store.RoleScopeSystem}
 	assert.False(t, IsUnscopedLocalPlatformAdmin(fixtureIdent))
-	assert.False(t, tiHubDecision(srv, fixtureIdent, "hub.config.read").Allowed, "Decide: fixture inherits no super-admin")
-	assert.False(t, srv.authzService.IsSystemAdmin(ctx, fid))
-	assert.False(t, srv.authzService.CanDelegate(ctx, fixtureIdent, GrantDescriptor{
-		Type: GrantTypeRoleBinding, RoleDefinitionID: superRD.ID, ScopeType: store.RoleScopeSystem}).Allowed,
-		"CanDelegate: fixture cannot delegate inherited super-admin")
+	assert.False(t, tiHubDecision(srv, fixtureIdent, "hub.config.read").Allowed, "Decide: fixture inherits nothing through the group")
+	assert.False(t, srv.authzService.CanDelegate(ctx, fixtureIdent, grant).Allowed,
+		"CanDelegate: fixture cannot delegate an inherited system role")
 
 	// Negative control: the human member keeps every inherited grant.
-	assert.True(t, tiHubDecision(srv, humanIdent, "hub.config.read").Allowed, "Decide: human inherits super-admin")
-	assert.True(t, srv.authzService.IsSystemAdmin(ctx, human.ID))
-	assert.True(t, srv.authzService.CanDelegate(ctx, humanIdent, GrantDescriptor{
-		Type: GrantTypeRoleBinding, RoleDefinitionID: superRD.ID, ScopeType: store.RoleScopeSystem}).Allowed)
+	assert.True(t, tiHubDecision(srv, humanIdent, "hub.config.read").Allowed, "Decide: human inherits the group's role")
+	assert.True(t, srv.authzService.CanDelegate(ctx, humanIdent, grant).Allowed, "CanDelegate: human holds the inherited role")
 	humanRow, err := s.GetUser(ctx, human.ID)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, doRequestAsUser(t, srv, humanRow, http.MethodGet, "/api/v1/admin/server-config", nil).Code)
@@ -137,8 +156,9 @@ func TestTestIdentity_GroupGrantsClampedToMember(t *testing.T) {
 	// (c) A group the fixture owns, later bound to super-admin.
 	owned := tiGroupWithSystemRole(t, s, "ti-clamp-owned", "", fid)
 	tiAddToGroup(t, s, owned.ID, fid, store.GroupMemberRoleOwner)
-	tiBindSystemRoleToGroup(t, s, owned.ID, store.SystemRoleSuperAdmin)
-	assert.False(t, srv.authzService.IsSystemAdmin(ctx, fid))
+	tiBindSystemRoleToGroup(t, s, owned.ID, store.SystemRoleHubAdmin)
+	tiBindSystemRoleToGroup(t, s, owned.ID, adminRole)
+	assert.False(t, srv.authzService.IsHubAdmin(ctx, fid))
 	assert.False(t, tiHubDecision(srv, fixtureIdent, "hub.config.read").Allowed)
 
 	// The member grants stay: the fixture still creates a project.
@@ -147,15 +167,15 @@ func TestTestIdentity_GroupGrantsClampedToMember(t *testing.T) {
 	assert.Equal(t, http.StatusOK, tiAuthMe(t, srv, fx.AccessToken).Code)
 }
 
-// Message authorization honours the cap: a test identity in a super-admin
-// group cannot message an agent in a project it has no access to; a human
+// Message authorization honours the cap: a test identity in a group with a
+// system-scoped agent.message grant cannot message an agent in a project it has no access to; a human
 // in the same group can.
 func TestTestIdentity_MessageAuthzHonoursCap(t *testing.T) {
 	srv, s := newTestIdentityServer(t, true)
 	ctx := context.Background()
 	_, issuerTok := tiIssuer(t, srv, s, "ti-msg-issuer")
 	fx := tiIssue(t, srv, issuerTok, nil)
-	group := tiGroupWithSystemRole(t, s, "ti-msg-super", store.SystemRoleSuperAdmin, DevUserID)
+	group := tiGroupWithSystemRole(t, s, "ti-msg-super", tiCustomSystemRole(t, s, "ti-msg-role", "agent.message"), DevUserID)
 	tiAddToGroup(t, s, group.ID, fx.Identity.ID, store.GroupMemberRoleMember)
 	human := &store.User{ID: tid("ti-msg-human"), Email: "ti-msg-human@test.com", DisplayName: "h", Role: store.UserRoleMember, Status: store.UserStatusActive}
 	require.NoError(t, s.CreateUser(ctx, human))
@@ -194,4 +214,42 @@ func TestTestIdentity_AuthzStoreIsClamped(t *testing.T) {
 	_, ok = srv.authzFor(&testFixtureGrantClamp{}).store.(*testFixtureGrantClamp)
 	assert.True(t, ok, "a transaction-bound authorization service is clamped too")
 	assert.Nil(t, NewAuthzService(nil, nil).store)
+}
+
+// kindErrStore fails every user lookup with a store error.
+type kindErrStore struct{ store.Store }
+
+func (kindErrStore) GetUser(context.Context, string) (*store.User, error) {
+	return nil, errors.New("store unavailable")
+}
+
+// If the kind lookup errors, the clamp fails closed: the binding read
+// errors, so authorization denies instead of treating the user as human.
+func TestTestIdentity_ClampFailsClosedOnKindLookupError(t *testing.T) {
+	srv, s := newTestIdentityServer(t, true)
+	ctx := context.Background()
+	group := tiGroupWithSystemRole(t, s, "ti-failclosed-super", store.SystemRoleHubAdmin, DevUserID)
+	human := &store.User{ID: tid("ti-failclosed-human"), Email: "ti-failclosed@test.com", DisplayName: "h", Role: store.UserRoleMember, Status: store.UserStatusActive}
+	require.NoError(t, s.CreateUser(ctx, human))
+	tiAddToGroup(t, s, group.ID, human.ID, store.GroupMemberRoleMember)
+
+	authz := NewAuthzService(kindErrStore{Store: s}, srv.authzService.logger)
+	groups, err := s.GetEffectiveGroups(ctx, human.ID)
+	require.NoError(t, err)
+	principals := []store.PrincipalRef{{Type: store.RoleBindingPrincipalUser, ID: human.ID}}
+	for _, g := range groups {
+		principals = append(principals, store.PrincipalRef{Type: store.RoleBindingPrincipalGroup, ID: g})
+	}
+	_, err = authz.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+	require.Error(t, err, "an unreadable kind must not resolve to an ordinary user")
+	assert.False(t, authz.IsHubAdmin(ctx, human.ID), "fails closed")
+
+	_, err = lookupUserIsTestFixture(ctx, kindErrStore{Store: s}, human.ID)
+	assert.Error(t, err)
+	isFx, err := lookupUserIsTestFixture(ctx, s, generateID())
+	require.NoError(t, err)
+	assert.False(t, isFx, "a missing user has no row and no grants")
+
+	// The same lookup through the working store: not a fixture, grants kept.
+	assert.True(t, srv.authzService.IsHubAdmin(ctx, human.ID))
 }

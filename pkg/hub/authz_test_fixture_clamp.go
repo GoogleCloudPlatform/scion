@@ -48,6 +48,22 @@ type testFixtureGrantClamp struct {
 	fixture map[string]bool
 }
 
+// lookupUserIsTestFixture is the one place authorization reads whether a
+// user is a hub test identity. It fails closed: a store error other than a
+// missing user returns the error, and callers must treat that as "clamp or
+// deny", never as an ordinary user. A missing or malformed user ID has no
+// row and so no grants to clamp; it reports false.
+func lookupUserIsTestFixture(ctx context.Context, users store.UserStore, userID string) (bool, error) {
+	u, err := users.GetUser(ctx, userID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
+			return false, nil
+		}
+		return false, err
+	}
+	return u.IsTestFixture(), nil
+}
+
 // testFixtureClampCacheMax bounds the kind cache; it is reset when full.
 const testFixtureClampCacheMax = 10000
 
@@ -60,14 +76,10 @@ func (c *testFixtureGrantClamp) isFixture(ctx context.Context, userID string) (b
 	if ok {
 		return v, nil
 	}
-	u, err := c.Store.GetUser(ctx, userID)
+	v, err := lookupUserIsTestFixture(ctx, c.Store, userID)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
-			return false, nil
-		}
 		return false, err
 	}
-	v = u.IsTestFixture()
 	c.mu.Lock()
 	if c.fixture == nil || len(c.fixture) >= testFixtureClampCacheMax {
 		c.fixture = make(map[string]bool)
@@ -108,8 +120,20 @@ func (c *testFixtureGrantClamp) allowedRoleIDs(ctx context.Context) map[string]b
 }
 
 // clamp drops the system-scoped bindings a test identity may not hold when
-// principals include a test-fixture user.
+// principals include a test-fixture user. If a user's kind cannot be read,
+// it returns the error: every caller then fails closed (the request is
+// denied), so an unreadable kind never leaves grants unclamped.
 func (c *testFixtureGrantClamp) clamp(ctx context.Context, principals []store.PrincipalRef, bindings []*store.RoleBinding) ([]*store.RoleBinding, error) {
+	hasSystem := false
+	for _, b := range bindings {
+		if b != nil && b.ScopeType == store.RoleScopeSystem {
+			hasSystem = true
+			break
+		}
+	}
+	if !hasSystem {
+		return bindings, nil
+	}
 	allowed := c.allowedRoleIDs(ctx)
 	privileged := false
 	for _, b := range bindings {

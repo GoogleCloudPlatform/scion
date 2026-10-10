@@ -875,9 +875,18 @@ func TestTestIdentity_Containment(t *testing.T) {
 		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser,
 			PrincipalID: fid, ScopeType: store.RoleScopeSystem, CreatedBy: "test"})
 		require.NoError(t, err)
+		// The authorization clamp drops the stored system-scoped grant, so
+		// the route guard refuses before the handler's own fixture check.
 		rec := tiPost(t, srv, fx.AccessToken, "/api/v1/test-identities", nil)
 		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-		assert.Contains(t, rec.Body.String(), testIdentityReasonFixtureCall)
+		assert.False(t, srv.authzService.Decide(ctx, AuthzRequest{
+			Principal:      principalContextForIdentity(NewAuthenticatedUser(fid, fx.Identity.Email, "", "member", string(ClientTypeAPI))),
+			Credential:     CredentialContext{Kind: CredentialKindInteractive, ID: "s"},
+			Resource:       Resource{Type: "test_identity"},
+			Action:         ActionIssue,
+			Permission:     permissionTestIdentityIssue,
+			TargetEvidence: hubCollectionEvidence(permissionTestIdentityIssue),
+		}).Allowed, "the stored issuer grant is clamped away")
 	})
 }
 
