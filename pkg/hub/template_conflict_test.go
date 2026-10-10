@@ -99,17 +99,46 @@ func errorCode(t *testing.T, rec *httptest.ResponseRecorder) string {
 	return body.Error.Code
 }
 
-// Acceptance 1 (as amended): two concurrent finalizes that diffed against
-// the same version produce exactly one success and one 409
-// template_conflict, the row is the winner's manifest, and no file of the
-// winner is lost.
-func TestTemplateFinalize_ConcurrentFinalizesExactlyOneWins(t *testing.T) {
-	stor := newCommitTestStorage(t)
-	srv, s := newCommitTestServer(t, stor)
-	ctx := context.Background()
+// casDisabledStore is the in-test mutant for the compare-and-swap: it
+// ignores the caller's precondition and writes against whatever the row
+// holds, which is what a plain whole-row update did before ptone/scion#4221.
+// The mutant subtests run the acceptance scenarios against it and assert
+// that the acceptance check fails, so each test is shown to depend on the
+// CAS within the same compile.
+type casDisabledStore struct {
+	store.Store
+}
 
-	base := map[string]string{"scion-agent.yaml": commitCfgOld}
-	tmpl := seedCommittedTemplate(t, srv, "race", "global", "", base)
+func (c casDisabledStore) UpdateTemplateContent(ctx context.Context, t *store.Template, _ store.TemplateContentPrecondition) error {
+	// Last writer wins: write against the row's current hash, re-reading if
+	// another writer slipped in between the read and the write.
+	for {
+		cur, err := c.Store.GetTemplate(ctx, t.ID)
+		if err != nil {
+			return err
+		}
+		err = c.Store.UpdateTemplateContent(ctx, t, store.TemplateContentPrecondition{ContentHash: cur.ContentHash})
+		if !errors.Is(err, store.ErrTemplateConflict) {
+			return err
+		}
+	}
+}
+
+// concurrentFinalizeOutcome is the result of two finalizes racing against
+// the same base version.
+type concurrentFinalizeOutcome struct {
+	recs    []*httptest.ResponseRecorder
+	pushes  []map[string]string
+	tmpl    *store.Template
+	winners []int
+}
+
+// raceTwoFinalizes seeds a template, stores the objects of two competing
+// pushes (each adds a different file), and sends both finalizes at once,
+// each naming the seeded content hash as its expectedContentHash.
+func raceTwoFinalizes(t *testing.T, srv *Server) concurrentFinalizeOutcome {
+	t.Helper()
+	tmpl := seedCommittedTemplate(t, srv, "race", "global", "", map[string]string{"scion-agent.yaml": commitCfgOld})
 	h0 := tmpl.ContentHash
 
 	pushes := []map[string]string{
@@ -117,7 +146,7 @@ func TestTemplateFinalize_ConcurrentFinalizesExactlyOneWins(t *testing.T) {
 		{"scion-agent.yaml": commitCfgOld, "b.md": "from writer B"},
 	}
 	for _, files := range pushes {
-		putObjects(t, stor, tmpl.StoragePath, files)
+		putObjects(t, srv.GetStorage(), tmpl.StoragePath, files)
 	}
 
 	recs := make([]*httptest.ResponseRecorder, len(pushes))
@@ -135,31 +164,46 @@ func TestTemplateFinalize_ConcurrentFinalizesExactlyOneWins(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	winner := -1
+	out := concurrentFinalizeOutcome{recs: recs, pushes: pushes, tmpl: tmpl}
 	for i, rec := range recs {
-		switch rec.Code {
-		case http.StatusOK:
-			if winner != -1 {
-				t.Fatalf("both finalizes succeeded; want exactly one 200 and one 409 (bodies: %s | %s)", recs[0].Body.String(), recs[1].Body.String())
-			}
-			winner = i
-		case http.StatusConflict:
-			if code := errorCode(t, rec); code != templateConflictErrorCode {
-				t.Errorf("409 code = %q, want %q", code, templateConflictErrorCode)
-			}
-		default:
-			t.Fatalf("finalize %d: status %d, want 200 or 409: %s", i, rec.Code, rec.Body.String())
+		if rec.Code == http.StatusOK {
+			out.winners = append(out.winners, i)
 		}
 	}
-	if winner == -1 {
-		t.Fatalf("no finalize succeeded; want exactly one 200 (bodies: %s | %s)", recs[0].Body.String(), recs[1].Body.String())
+	return out
+}
+
+// Acceptance 1 (as amended): two concurrent finalizes that diffed against
+// the same version produce exactly one success and one 409
+// template_conflict, the row is the winner's manifest, and no file of the
+// winner is lost.
+func TestTemplateFinalize_ConcurrentFinalizesExactlyOneWins(t *testing.T) {
+	stor := newCommitTestStorage(t)
+	srv, s := newCommitTestServer(t, stor)
+	ctx := context.Background()
+
+	out := raceTwoFinalizes(t, srv)
+	if len(out.winners) != 1 {
+		t.Fatalf("%d finalizes succeeded; want exactly one 200 and one 409 (bodies: %s | %s)", len(out.winners), out.recs[0].Body.String(), out.recs[1].Body.String())
+	}
+	winner := out.winners[0]
+	for i, rec := range out.recs {
+		if i == winner {
+			continue
+		}
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("losing finalize: status %d, want 409: %s", rec.Code, rec.Body.String())
+		}
+		if code := errorCode(t, rec); code != templateConflictErrorCode {
+			t.Errorf("409 code = %q, want %q", code, templateConflictErrorCode)
+		}
 	}
 
-	got, err := s.GetTemplate(ctx, tmpl.ID)
+	got, err := s.GetTemplate(ctx, out.tmpl.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := commitManifest(pushes[winner])
+	want := commitManifest(out.pushes[winner])
 	if !reflect.DeepEqual(got.Files, want) {
 		t.Errorf("row files = %+v, want the winner's manifest %+v", got.Files, want)
 	}
@@ -167,9 +211,22 @@ func TestTemplateFinalize_ConcurrentFinalizesExactlyOneWins(t *testing.T) {
 		t.Errorf("ContentHash = %q, want the winner's %q", got.ContentHash, computeContentHash(want))
 	}
 	for _, f := range got.Files {
-		if !objectExists(t, stor, tmpl.StoragePath+"/"+f.Path) {
+		if !objectExists(t, stor, out.tmpl.StoragePath+"/"+f.Path) {
 			t.Errorf("object %s listed by the row is missing from storage", f.Path)
 		}
+	}
+}
+
+// Mutant (a): with the CAS disabled, both racing finalizes succeed, so the
+// exactly-one-winner check above fails.
+func TestTemplateFinalize_ConcurrentFinalizesMutantCASDisabled(t *testing.T) {
+	stor := newCommitTestStorage(t)
+	srv, s := newCommitTestServer(t, stor)
+	srv.store = casDisabledStore{Store: s}
+
+	out := raceTwoFinalizes(t, srv)
+	if len(out.winners) == 1 {
+		t.Fatalf("with the CAS disabled exactly one finalize still won; the acceptance test would not catch a missing CAS (codes %d, %d)", out.recs[0].Code, out.recs[1].Code)
 	}
 }
 
@@ -264,6 +321,32 @@ func TestCommitTemplateFiles_StaleReadConflicts(t *testing.T) {
 	writeTemplateCommitError(rec, err)
 	if rec.Code != http.StatusConflict || errorCode(t, rec) != templateConflictErrorCode {
 		t.Errorf("writeTemplateCommitError: %d %s, want 409 %s", rec.Code, rec.Body.String(), templateConflictErrorCode)
+	}
+}
+
+// Mutant (a) for the stale-read case: without the CAS the stale commit
+// overwrites the newer one.
+func TestCommitTemplateFiles_StaleReadMutantCASDisabled(t *testing.T) {
+	stor := newCommitTestStorage(t)
+	srv, s := newCommitTestServer(t, stor)
+	ctx := context.Background()
+
+	tmpl := seedCommittedTemplate(t, srv, "stale", "global", "", map[string]string{"scion-agent.yaml": commitCfgOld})
+	srv.store = casDisabledStore{Store: s}
+	first, err := s.GetTemplate(ctx, tmpl.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.GetTemplate(ctx, tmpl.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	putObjects(t, stor, tmpl.StoragePath, map[string]string{"one.md": "1", "two.md": "2"})
+	if err := srv.commitTemplateFiles(ctx, first, upsertTemplateFile(first.Files, commitManifest(map[string]string{"one.md": "1"})[0]), commitOpts{}); err != nil {
+		t.Fatalf("first commit: %v", err)
+	}
+	if err := srv.commitTemplateFiles(ctx, second, upsertTemplateFile(second.Files, commitManifest(map[string]string{"two.md": "2"})[0]), commitOpts{}); errors.Is(err, store.ErrTemplateConflict) {
+		t.Fatal("with the CAS disabled the stale commit still conflicted; the acceptance test would not catch a missing CAS")
 	}
 }
 
