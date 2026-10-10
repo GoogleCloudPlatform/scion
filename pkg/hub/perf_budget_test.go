@@ -213,7 +213,7 @@ func newPerfBudgetFixture(t *testing.T) *perfBudgetFixture {
 		t.Fatalf("test store: %v", err)
 	}
 	ctx := context.Background()
-	require.NoError(t, s.Migrate(ctx))
+	require.NoError(t, migrateTestStore(ctx, s))
 	_ = s.DeleteHubSetting(ctx, "migration_delegation_edge_backfill_v1")
 
 	srv := newPerfServer(t, s, true)

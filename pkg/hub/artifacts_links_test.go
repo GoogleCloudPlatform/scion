@@ -251,7 +251,7 @@ func TestShareLinkClientKey(t *testing.T) {
 func TestArtifactsShareLinkClientsBehindProxy(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
-	require.NoError(t, s.Migrate(context.Background()))
+	require.NoError(t, migrateTestStore(context.Background(), s))
 	cfg := testServerConfig()
 	cfg.TrustedProxies = []string{"192.0.2.0/24"} // httptest's RemoteAddr
 	srv, _ := testServerWithStoreConfig(t, s, cfg)
