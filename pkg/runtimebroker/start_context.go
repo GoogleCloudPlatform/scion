@@ -123,6 +123,11 @@ type startContextInputs struct {
 	// Config from CreateAgentConfig (nil for startAgent/restartAgent)
 	Config *CreateAgentConfig
 
+	// TelemetryPolicy is the project's enforced telemetry on/off sent on a
+	// start or restart body (create carries it as Config.TelemetryPolicy).
+	// See resolveTelemetryOverride.
+	TelemetryPolicy *bool
+
 	// InlineConfig for provisioning
 	InlineConfig *api.ScionConfig
 
@@ -1115,10 +1120,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// --- Env + telemetry + secrets ---
 	opts.Env = env
 
-	if v, ok := env["SCION_TELEMETRY_ENABLED"]; ok {
-		enabled := v == "true" || v == "1"
-		opts.TelemetryOverride = &enabled
-	}
+	opts.TelemetryOverride = resolveTelemetryOverride(in.telemetryPolicy(), env)
 
 	if in.NoAuth {
 		opts.ResolvedSecrets = nil
@@ -2184,4 +2186,41 @@ func ambiguousNonGitWorkspace(in startContextInputs, worktreeProvisioned bool) s
 	}
 	return "ambiguous workspace for hub-managed project " + in.ProjectSlug +
 		": the request has no workspace mode, workspace path or git clone; refusing to fall back to the shared project directory"
+}
+
+// telemetryPolicy returns the telemetry policy for this dispatch: the start or
+// restart body's field, else the create config's. Nil = no policy.
+func (in startContextInputs) telemetryPolicy() *bool {
+	if in.TelemetryPolicy != nil {
+		return in.TelemetryPolicy
+	}
+	if in.Config != nil {
+		return in.Config.TelemetryPolicy
+	}
+	return nil
+}
+
+// resolveTelemetryOverride computes opts.TelemetryOverride, which Start
+// applies last, above every config tier. Precedence (decision E6,
+// ptone/scion#4218): the project's telemetry policy > the requester's
+// SCION_TELEMETRY_ENABLED env flag (--enable/--disable-telemetry in hosted
+// mode) > config (nil override).
+//
+// When a policy is set and env carries a contrary SCION_TELEMETRY_ENABLED,
+// the env entry is rewritten to the policy value too: Start only fills
+// telemetry env keys that are absent, so the requester's flag would
+// otherwise still reach sciontool in the container.
+func resolveTelemetryOverride(policy *bool, env map[string]string) *bool {
+	if policy != nil {
+		v := *policy
+		if _, ok := env["SCION_TELEMETRY_ENABLED"]; ok {
+			env["SCION_TELEMETRY_ENABLED"] = strconv.FormatBool(v)
+		}
+		return &v
+	}
+	if v, ok := env["SCION_TELEMETRY_ENABLED"]; ok {
+		enabled := v == "true" || v == "1"
+		return &enabled
+	}
+	return nil
 }

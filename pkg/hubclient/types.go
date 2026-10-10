@@ -388,6 +388,12 @@ type BrokerCapabilities struct {
 	// then does the hub read a start's absence from that list as "no start
 	// in flight".
 	StartsInFlight bool `json:"startsInFlight,omitempty"`
+	// TemplateTiers indicates the broker takes hub settings as separate
+	// tiers (ptone/scion#4218): HubAgentDefaults.Telemetry as a default
+	// below the template, and TelemetryPolicy on create/start/restart as
+	// policy above everything. A hub may stop writing those values into
+	// InlineConfig only for a broker that reports this (ptone/scion#4222).
+	TemplateTiers bool `json:"templateTiers,omitempty"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.

@@ -1175,6 +1175,14 @@ type HubAgentDefaults struct {
 	// experiments.K8sNFSHome). The hub sends only names that are on; an
 	// absent name is off.
 	Experiments []string `json:"experiments,omitempty"`
+	// Telemetry is the hub's default telemetry config. It is a DEFAULT,
+	// not policy: the broker applies it at Start in base position, above
+	// broker settings telemetry and below the agent's own config (template
+	// chain, stored scion-agent.json and inline config), so a template's
+	// telemetry: block wins per field. It is applied per start and never
+	// persisted into scion-agent.json, so a later hub change reaches the
+	// agent at its next start (ptone/scion#4218).
+	Telemetry *TelemetryConfig `json:"telemetry,omitempty"`
 }
 
 // ExperimentEnabled reports whether the hub sent name as enabled.
@@ -1190,6 +1198,15 @@ func (d *HubAgentDefaults) ExperimentEnabled(name string) bool {
 	return false
 }
 
+// TelemetryDefault returns the hub's default telemetry config, or nil when
+// the hub sent none. Safe on a nil receiver.
+func (d *HubAgentDefaults) TelemetryDefault() *TelemetryConfig {
+	if d == nil {
+		return nil
+	}
+	return d.Telemetry
+}
+
 // IsEmpty reports whether no default carries a value. An empty set is not put
 // on the wire, which is what keeps file-mode dispatch byte-identical to the
 // pre-change behaviour (the file-mode snapshot leaves these fields zero).
@@ -1198,7 +1215,7 @@ func (d *HubAgentDefaults) IsEmpty() bool {
 		return true
 	}
 	return d.MaxTurns == 0 && d.MaxModelCalls == 0 && d.MaxDuration == "" && d.Resources == nil &&
-		d.AutoExposePorts == nil && len(d.Experiments) == 0
+		d.AutoExposePorts == nil && len(d.Experiments) == 0 && d.Telemetry == nil
 }
 
 // EnvAutoExposePorts is the env key that enables in-container port

@@ -401,6 +401,9 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 			// This broker's reprovision reuses an empty-per-agent
 			// workspace in place (miller79/scion#167).
 			ReprovisionEmptyPerAgent: true,
+			// This broker applies hub telemetry defaults and policy as
+			// separate tiers (ptone/scion#4218).
+			TemplateTiers: true,
 		},
 	}
 	if s.workspaceStorage != nil {

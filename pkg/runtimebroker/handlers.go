@@ -298,6 +298,9 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			// This broker's reprovision reuses an empty-per-agent
 			// workspace in place (miller79/scion#167).
 			ReprovisionEmptyPerAgent: true,
+			// Hub telemetry defaults and policy are separate tiers
+			// (ptone/scion#4218).
+			TemplateTiers: true,
 		},
 		Profiles:         s.buildInfoProfiles(runtimeType),
 		WorkspaceStorage: s.workspaceStorageDescriptor(),
@@ -2762,6 +2765,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		// HubAgentDefaults carries the hub defaults a start applies at its
 		// lowest tier (today the auto-expose default, for buildAgentEnv).
 		HubAgentDefaults *api.HubAgentDefaults `json:"hubAgentDefaults,omitempty"`
+		// TelemetryPolicy is the project's enforced telemetry on/off; see
+		// CreateAgentConfig.TelemetryPolicy (ptone/scion#4218).
+		TelemetryPolicy *bool `json:"telemetryPolicy,omitempty"`
 		// ExpectedRuntimeTargetID is the agent's pinned runtime target
 		// (flat Runtime Brokers; see CreateAgentRequest).
 		ExpectedRuntimeTargetID string `json:"expectedRuntimeTargetId,omitempty"`
@@ -2904,6 +2910,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		WorkspaceMode:            startReq.WorkspaceMode,
 		RunID:                    startReq.RunID,
 		TemplateName:             startReq.TemplateName,
+		TelemetryPolicy:          startReq.TelemetryPolicy,
 		HTTPRequest:              r,
 		Operation:                opHTTPStart,
 	})
@@ -3753,6 +3760,8 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		TemplateName string `json:"templateName,omitempty"`
 		// HubAgentDefaults mirrors the same field on the start path.
 		HubAgentDefaults *api.HubAgentDefaults `json:"hubAgentDefaults,omitempty"`
+		// TelemetryPolicy mirrors the same field on the start path.
+		TelemetryPolicy *bool `json:"telemetryPolicy,omitempty"`
 		// ExpectedRuntimeTargetID mirrors the same field on the start path.
 		ExpectedRuntimeTargetID string `json:"expectedRuntimeTargetId,omitempty"`
 		// Image mirrors the same field on the start path: the user's
@@ -3867,6 +3876,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		RunID:                    restartReq.RunID,
 		SharedWorkspace:          restartReq.SharedWorkspace,
 		TemplateName:             restartReq.TemplateName,
+		TelemetryPolicy:          restartReq.TelemetryPolicy,
 		// The Hub-supplied project ID (the request's projectId) locates a
 		// shared-workspace agent's broker-side external state root, as on
 		// start; never the project-id marker inside the workspace.
@@ -5434,18 +5444,18 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 			Type:        sec.Type,
 		}
 	}
-	// Also try loading local template config
-	if req.Config != nil && req.Config.Template != "" && req.ProjectPath != "" {
-		if tmpl, err := config.FindTemplateInProjectPath(req.Config.Template, req.ProjectPath); err == nil {
-			if cfg, err := tmpl.LoadConfig(); err == nil && cfg != nil {
-				for _, sec := range cfg.Secrets {
-					required[sec.Key] = struct{}{}
-					if _, exists := secretInfo[sec.Key]; !exists {
-						secretInfo[sec.Key] = api.SecretKeyInfo{
-							Description: sec.Description,
-							Source:      "template",
-							Type:        sec.Type,
-						}
+	// Also load the template's own config. For a hub template this is the
+	// hydrated copy launch uses: the broker's local project may have no
+	// template of that slug, or a different one (ptone/scion#4218, P6).
+	if tmpl := envGatherTemplate(req, hydratedTemplatePath); tmpl != nil {
+		if cfg, err := tmpl.LoadConfig(); err == nil && cfg != nil {
+			for _, sec := range cfg.Secrets {
+				required[sec.Key] = struct{}{}
+				if _, exists := secretInfo[sec.Key]; !exists {
+					secretInfo[sec.Key] = api.SecretKeyInfo{
+						Description: sec.Description,
+						Source:      "template",
+						Type:        sec.Type,
 					}
 				}
 			}
@@ -7606,4 +7616,24 @@ func preResolvedHubEndpoint(conn *HubConnection, advertised string) string {
 		return conn.HubEndpoint
 	}
 	return advertised
+}
+
+// envGatherTemplate returns the template whose declared secrets env-gather
+// lists. A hydrated hub template (hydratedTemplatePath, from hydrateTemplate)
+// is used whenever one was supplied, so a hub template is never looked up by
+// slug in the broker's local project path. Otherwise (local mode, or a hub
+// dispatch the broker could not hydrate) the template is resolved by slug
+// from the project path, as before. Nil when there is none.
+func envGatherTemplate(req CreateAgentRequest, hydratedTemplatePath string) *config.Template {
+	if hydratedTemplatePath != "" {
+		return &config.Template{Name: filepath.Base(hydratedTemplatePath), Path: hydratedTemplatePath}
+	}
+	if req.Config == nil || req.Config.Template == "" || req.ProjectPath == "" {
+		return nil
+	}
+	tmpl, err := config.FindTemplateInProjectPath(req.Config.Template, req.ProjectPath)
+	if err != nil {
+		return nil
+	}
+	return tmpl
 }

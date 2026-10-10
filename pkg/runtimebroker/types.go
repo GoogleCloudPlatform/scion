@@ -113,6 +113,12 @@ type BrokerCapabilities struct {
 	// then does the hub read a start's absence from that list as "no start
 	// in flight".
 	StartsInFlight bool `json:"startsInFlight,omitempty"`
+	// TemplateTiers indicates the broker takes hub settings as separate
+	// tiers (ptone/scion#4218): HubAgentDefaults.Telemetry as a default
+	// below the template, and TelemetryPolicy on create/start/restart as
+	// policy above everything. A hub may stop writing those values into
+	// InlineConfig only for a broker that reports this (ptone/scion#4222).
+	TemplateTiers bool `json:"templateTiers,omitempty"`
 }
 
 // ProjectInfo is a summary of a project registered on this broker.
@@ -461,6 +467,13 @@ type CreateAgentConfig struct {
 	// top-of-chain slot. Nil when the hub sent none: local dispatch, a
 	// file-mode hub, or a hub that predates the field. See design §3.2.3.
 	HubAgentDefaults *api.HubAgentDefaults `json:"hubAgentDefaults,omitempty"`
+
+	// TelemetryPolicy is the project's enforced telemetry on/off (a POLICY
+	// tier, not a default). When set it becomes opts.TelemetryOverride,
+	// applied last at Start, and beats both the agent's config and the
+	// requester's SCION_TELEMETRY_ENABLED env flag (decision E6,
+	// ptone/scion#4218). Nil = no policy.
+	TelemetryPolicy *bool `json:"telemetryPolicy,omitempty"`
 }
 
 // GCPIdentityConfig holds GCP identity configuration passed from Hub to Broker.
