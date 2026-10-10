@@ -241,8 +241,8 @@ func (s *TemplateStore) UpdateTemplate(ctx context.Context, template *store.Temp
 	return nil
 }
 
-// UpdateTemplateContent writes every column of template, content columns
-// included, only if the stored row still matches expected. It is one
+// UpdateTemplateContent writes the content columns of template (see the
+// column list below) only if the stored row still matches expected. It is one
 // conditional UPDATE (UPDATE ... WHERE id = ? AND content_hash = ? AND
 // layout = ?), so two
 // concurrent commits that read the same row cannot both succeed.
@@ -265,30 +265,27 @@ func (s *TemplateStore) UpdateTemplateContent(ctx context.Context, template *sto
 		layoutMatches = enttemplate.Or(enttemplate.LayoutEQ(""), enttemplate.LayoutIsNil())
 	}
 
+	// Only the columns a commit owns are written: the files, what is
+	// derived from them, where they are stored, the lifecycle status and the
+	// import provenance. Metadata (name, slug, display name, description,
+	// image, base template, owner, scope) belongs to UpdateTemplate, so a
+	// commit computed from an older read cannot revert a concurrent metadata
+	// edit, just as a metadata edit cannot revert a commit.
 	n, err := s.client.Template.Update().
 		Where(enttemplate.IDEQ(uid), hashMatches, layoutMatches).
-		SetName(template.Name).
-		SetSlug(template.Slug).
-		SetDisplayName(template.DisplayName).
-		SetDescription(template.Description).
 		SetHarness(template.Harness).
 		SetDefaultHarnessConfig(template.DefaultHarnessConfig).
-		SetImage(template.Image).
+		// temporary: removed with the file-telemetry helper (ptone/scion#4223)
 		SetConfig(marshalJSONString(template.Config)).
 		SetAgentConfig(marshalAgentConfig(template.AgentConfig)).
 		SetContentHash(template.ContentHash).
-		SetScope(template.Scope).
-		SetScopeID(template.ScopeID).
-		SetProjectID(template.ProjectID).
 		SetStorageURI(template.StorageURI).
 		SetStorageBucket(template.StorageBucket).
 		SetStoragePath(template.StoragePath).
 		SetLayout(template.Layout).
 		SetFiles(marshalJSONString(template.Files)).
-		SetBaseTemplate(template.BaseTemplate).
 		SetSourceURL(template.SourceURL).
 		SetStatus(enttemplate.Status(template.Status)).
-		SetOwnerID(template.OwnerID).
 		SetUpdatedBy(template.UpdatedBy).
 		SetUpdated(updated).
 		Save(ctx)
