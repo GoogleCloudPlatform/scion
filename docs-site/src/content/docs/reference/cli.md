@@ -517,11 +517,26 @@ Displays the logs of an agent.
 - **Flags:**
     - `-f, --follow`: Stream logs.
 
+### `scion look`
+
+Shows an agent's current terminal output.
+
+**Usage:** `scion look <agent> [flags]`
+
+- **Flags:**
+    - `--plain`: Strip ANSI escape sequences from the output.
+    - `--full`: Capture the full scrollback history.
+    - `-n, --num-lines <n>`: Capture the last `n` lines of scrollback. Cannot be combined with `--full`.
+
+**GCP identity header (Hub mode).** When the Hub has recorded a GCP identity for the agent, `scion look` first prints one line naming it: the metadata mode, the assigned service account and the agent's profile, for example `GCP identity: assign as "Build worker" (profile: gke)`. The account is shown by its registered display name, or by its email when it has no display name or you cannot read the project's service account registrations. `block` and `passthrough` show the mode only. The line goes to stderr, so stdout still carries only the terminal output for scripts that parse it. No line is printed when no identity is recorded or the agent cannot be read.
+
 ### `scion list` (or `ps`)
 
 Lists all agents and their status.
 
 **Usage:** `scion list [flags]`
+
+**GCP identity (Hub mode).** With `--format json`, each agent carries a `gcpIdentity` object when the Hub has recorded one: `mode` (`block`, `passthrough` or `assign`) and, for `assign`, `serviceAccountId`, `serviceAccountEmail` and `displayName` (the registered display name, omitted when you cannot read the project's service account registrations). The table output has no identity column.
 
 `scion list` takes no positional arguments; passing one is an error. To name a reference agent for `--descendants`, `--ancestors`, or `--lineage`, use `=` (for example, `--descendants=foo`, not `--descendants foo`).
 
