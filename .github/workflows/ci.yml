@@ -721,6 +721,12 @@ jobs:
           cache: true
 
       - name: golangci-lint
+        # Bound golangci-lint memory so type-checking the module (pkg/hub in
+        # particular) cannot exhaust the ~16 GB runner, which shows up as
+        # "The runner has received a shutdown signal" (ptone/scion#4208).
+        env:
+          GOGC: '50'
+          GOMEMLIMIT: 8GiB
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
           args: '--new-from-merge-base=origin/main'
