@@ -95,7 +95,7 @@ terraform -chdir=deploy/terraform/configurations/hub apply \
   -var-file=<hub_name>.tfvars
 ```
 
-The first shared-infra apply creates the GKE cluster last, after the
+The first shared-infra apply creates the GKE cluster only after the
 private-services connection, Filestore and Cloud SQL, so it takes roughly
 10–15 minutes longer than a fully parallel apply would. This ordering is
 deliberate: an Autopilot cluster created while those services were still
