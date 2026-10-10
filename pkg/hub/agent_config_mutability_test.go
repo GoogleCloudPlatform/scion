@@ -332,7 +332,7 @@ func TestReincarnateOnlyConfigEdits(t *testing.T) {
 	assert.Equal(t, []string{"config.skills", "config.system_prompt"}, provision)
 	assert.Equal(t, []string{"config.env", "config.image", "config.max_duration", "config.max_turns"}, cleared)
 
-	warnings := reincarnateOnlyEditWarnings(raw, &req, stored)
+	warnings := reincarnateOnlyEditWarnings(provision, cleared)
 	require.Len(t, warnings, 2)
 	assert.Contains(t, warnings[0], "config.skills, config.system_prompt: stored now; rendered at the next reincarnation")
 	assert.Contains(t, warnings[1], "config.env, config.image, config.max_duration, config.max_turns: cleared now")
@@ -361,12 +361,12 @@ func TestReincarnateOnlyConfigEdits(t *testing.T) {
 		provision, cleared := reincarnateOnlyConfigEdits(rawConfigOf(t, body), &req, stored)
 		assert.Empty(t, provision)
 		assert.Empty(t, cleared)
-		assert.Empty(t, reincarnateOnlyEditWarnings(rawConfigOf(t, body), &req, stored))
+		assert.Empty(t, reincarnateOnlyEditWarnings(reincarnateOnlyConfigEdits(rawConfigOf(t, body), &req, stored)))
 	})
 
 	five := rawConfigOf(t, `{"model":"m","max_turns":5}`)
-	assert.Empty(t, reincarnateOnlyEditWarnings(five, &api.ScionConfig{Model: "m", MaxTurns: 5}, stored))
-	assert.Empty(t, reincarnateOnlyEditWarnings(nil, nil, stored))
+	assert.Empty(t, reincarnateOnlyEditWarnings(reincarnateOnlyConfigEdits(five, &api.ScionConfig{Model: "m", MaxTurns: 5}, stored)))
+	assert.Empty(t, reincarnateOnlyEditWarnings(reincarnateOnlyConfigEdits(nil, nil, stored)))
 }
 
 func TestConfigEditDisposition(t *testing.T) {
@@ -379,15 +379,18 @@ func TestConfigEditDisposition(t *testing.T) {
 		Env: map[string]string{"A": "1"}, Skills: []api.SkillReference{{URI: "s"}},
 	}
 	removed := map[string][]string{"env": {"A"}}
-	applied, held := configEditDisposition(rawConfigOf(t, body), &req, stored, removed)
+	provision, cleared := reincarnateOnlyConfigEdits(rawConfigOf(t, body), &req, stored)
+	applied, held := configEditDisposition(rawConfigOf(t, body), &req, stored, provision, cleared, removed)
 	// max_duration "0" and thinking_level 0 apply at the next start; the
 	// image and branch are echoes and volumes clears nothing.
 	assert.Equal(t, []string{"config.max_duration", "config.model", "config.thinking_level"}, applied)
 	assert.Equal(t, []string{"config.env", "config.max_turns", "config.skills", "config.system_prompt"}, held)
 
 	t.Run("an env edit that removes nothing is applied", func(t *testing.T) {
-		applied, held := configEditDisposition(rawConfigOf(t, `{"env":{"A":"1","B":"2"}}`),
-			&api.ScionConfig{Env: map[string]string{"A": "1", "B": "2"}}, stored, nil)
+		raw := rawConfigOf(t, `{"env":{"A":"1","B":"2"}}`)
+		req := &api.ScionConfig{Env: map[string]string{"A": "1", "B": "2"}}
+		provision, cleared := reincarnateOnlyConfigEdits(raw, req, stored)
+		applied, held := configEditDisposition(raw, req, stored, provision, cleared, nil)
 		assert.Equal(t, []string{"config.env"}, applied)
 		assert.Empty(t, held)
 	})
@@ -396,7 +399,9 @@ func TestConfigEditDisposition(t *testing.T) {
 		echo := `{"model":"old","system_prompt":"p"}`
 		var req api.ScionConfig
 		require.NoError(t, json.Unmarshal([]byte(echo), &req))
-		applied, held := configEditDisposition(rawConfigOf(t, echo), &req, &api.ScionConfig{Model: "old", SystemPrompt: "p"}, nil)
+		stored := &api.ScionConfig{Model: "old", SystemPrompt: "p"}
+		provision, cleared := reincarnateOnlyConfigEdits(rawConfigOf(t, echo), &req, stored)
+		applied, held := configEditDisposition(rawConfigOf(t, echo), &req, stored, provision, cleared, nil)
 		assert.Empty(t, applied)
 		assert.Empty(t, held)
 	})

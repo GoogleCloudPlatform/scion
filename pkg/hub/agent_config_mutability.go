@@ -553,10 +553,11 @@ type AgentUpdateDisposition struct {
 	// creation (start, restart, resume or reincarnation), or at once for
 	// metadata.
 	Applied []string `json:"applied"`
-	// Held lists the keys whose edit takes effect at the next container
-	// creation after the current run. It is empty until edits of an agent
-	// with a live container are held rather than refused
-	// (ptone/scion#3976).
+	// Held is reserved for config edits kept aside while a container is
+	// live and applied at the next container creation after the current
+	// run. It is always empty until such edits are held rather than
+	// refused (ptone/scion#3976). A timezone pin edited while a container
+	// is live is listed under Applied, with a warning.
 	Held []string `json:"held"`
 	// HeldForReincarnate lists the keys whose edit takes effect only at the
 	// next reincarnation.
@@ -565,15 +566,16 @@ type AgentUpdateDisposition struct {
 
 // configEditDisposition splits the request's config keys whose value
 // changes from stored (req is the decoded request) by when the edit takes
-// effect. heldForReincarnate holds the keys reincarnateOnlyConfigEdits
-// reports (provision-rendered keys, and container keys the start merge
-// would keep) and the keys removed names (entries a start would keep);
+// effect. heldForReincarnate holds provision and cleared, as
+// reincarnateOnlyConfigEdits reports them (provision-rendered keys, and
+// container keys the start merge would keep), and the keys removed names
+// (entries a start would keep);
 // applied holds the other changed keys. A fixed key, which reaches here
 // only as an unchanged echo, and an unchanged key are in neither list.
-// These are the keys the PATCH warnings name, so the warnings and the
-// disposition agree. Both are sorted wire keys.
-func configEditDisposition(rawConfig map[string]json.RawMessage, req, stored *api.ScionConfig, removed map[string][]string) (applied, heldForReincarnate []string) {
-	provision, cleared := reincarnateOnlyConfigEdits(rawConfig, req, stored)
+// Each heldForReincarnate key is named by a reincarnation warning built
+// from the same provision, cleared and removed values, so the two agree.
+// Both are sorted wire keys.
+func configEditDisposition(rawConfig map[string]json.RawMessage, req, stored *api.ScionConfig, provision, cleared []string, removed map[string][]string) (applied, heldForReincarnate []string) {
 	held := make(map[string]bool, len(provision)+len(cleared)+len(removed))
 	for _, k := range provision {
 		held[k] = true
@@ -643,8 +645,7 @@ func reincarnateOnlyConfigEdits(rawConfig map[string]json.RawMessage, req, store
 
 // reincarnateOnlyEditWarnings returns the PATCH warnings for the config
 // keys reincarnateOnlyConfigEdits reports.
-func reincarnateOnlyEditWarnings(rawConfig map[string]json.RawMessage, req, stored *api.ScionConfig) []string {
-	provision, cleared := reincarnateOnlyConfigEdits(rawConfig, req, stored)
+func reincarnateOnlyEditWarnings(provision, cleared []string) []string {
 	var out []string
 	if len(provision) > 0 {
 		out = append(out, strings.Join(provision, ", ")+": stored now; rendered at the next reincarnation (a plain start does not re-render prompts, skills or services)")

@@ -538,12 +538,25 @@ func TestAgentConfigPatch_RemovedEnvKeysWarning(t *testing.T) {
 	require.Equal(t, http.StatusOK, code, body)
 	require.Len(t, resp.Warnings, 1, "%v", resp.Warnings)
 	assert.Contains(t, resp.Warnings[0], "config.env: removed DROP_A, DROP_B now; the agent keeps those variables until the next reincarnation")
+	// The removal reaches the agent only at the next reincarnation, so the
+	// env edit is held for it, even though it also adds a key.
+	assert.Empty(t, resp.Disposition.Applied)
+	assert.Equal(t, []string{"config.env"}, resp.Disposition.HeldForReincarnate)
 
 	resp, code, body = patchAgentBody(t, srv, agent.ID, map[string]interface{}{
 		"config": map[string]interface{}{"max_turns": 2},
 	})
 	require.Equal(t, http.StatusOK, code, body)
 	assert.Empty(t, resp.Warnings, "no env in the request, no env warning")
+
+	// An env edit that only adds a key applies at the next start.
+	resp, code, body = patchAgentBody(t, srv, agent.ID, map[string]interface{}{
+		"config": map[string]interface{}{"env": map[string]string{"KEEP": "1", "NEW": "4", "MORE": "5"}},
+	})
+	require.Equal(t, http.StatusOK, code, body)
+	assert.Empty(t, resp.Warnings, "%v", resp.Warnings)
+	assert.Equal(t, []string{"config.env"}, resp.Disposition.Applied)
+	assert.Empty(t, resp.Disposition.HeldForReincarnate)
 }
 
 // TestAgentEditAccess_RoleNeedsCeiling: changing the role needs, besides
@@ -823,4 +836,21 @@ func TestAgentConfigPatch_RemovedEntriesWarnings(t *testing.T) {
 	require.Len(t, resp.Warnings, 2, "%v", resp.Warnings)
 	assert.Contains(t, resp.Warnings[0], "config.mcp_servers: removed search now; the agent keeps those MCP servers until the next reincarnation")
 	assert.Contains(t, resp.Warnings[1], "config.volumes: removed /b now; the agent keeps those volumes until the next reincarnation")
+	assert.Empty(t, resp.Disposition.Applied)
+	assert.Equal(t, []string{"config.mcp_servers", "config.volumes"}, resp.Disposition.HeldForReincarnate)
+
+	// Adding an entry to each, removing none, applies at the next start.
+	resp, code, body = patchAgentBody(t, srv, agent.ID, map[string]interface{}{
+		"config": map[string]interface{}{
+			"mcp_servers": map[string]interface{}{
+				"docs": map[string]string{"transport": "stdio", "command": "docs"},
+				"wiki": map[string]string{"transport": "stdio", "command": "wiki"},
+			},
+			"volumes": []map[string]string{{"source": "/h/a", "target": "/a"}, {"source": "/h/c", "target": "/c"}},
+		},
+	})
+	require.Equal(t, http.StatusOK, code, body)
+	assert.Empty(t, resp.Warnings, "%v", resp.Warnings)
+	assert.Equal(t, []string{"config.mcp_servers", "config.volumes"}, resp.Disposition.Applied)
+	assert.Empty(t, resp.Disposition.HeldForReincarnate)
 }

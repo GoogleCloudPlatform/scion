@@ -4363,13 +4363,15 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		// sends, and kept keys are left as they were.
 		merged := mergePresentInlineFields(old.InlineConfig, cfg, presentConfigKeys)
 		agent.AppliedConfig.InlineConfig = merged
-		// One computation drives both the warnings and the disposition, so
-		// a key warned as taking effect at the next reincarnation is the
-		// key reported held for it.
+		// provision, cleared and removed are computed once and drive both
+		// the reincarnation warnings and the disposition, so a key warned
+		// as taking effect at the next reincarnation is the key reported
+		// held for it.
+		provision, cleared := reincarnateOnlyConfigEdits(rawFields, cfg, old.InlineConfig)
 		removed := removedConfigEntries(old.InlineConfig, cfg, presentConfigKeys, canViewAgentEnv(ctx, s, agent))
-		warnings = append(warnings, reincarnateOnlyEditWarnings(rawFields, cfg, old.InlineConfig)...)
+		warnings = append(warnings, reincarnateOnlyEditWarnings(provision, cleared)...)
 		warnings = append(warnings, removedEntriesWarnings(removed)...)
-		configApplied, configHeldForReincarnate = configEditDisposition(rawFields, cfg, old.InlineConfig, removed)
+		configApplied, configHeldForReincarnate = configEditDisposition(rawFields, cfg, old.InlineConfig, provision, cleared, removed)
 	}
 
 	// Apply GCP identity update (only allowed for agents in 'created' phase)
@@ -4705,8 +4707,9 @@ func agentPatchSnapshotOf(agent *store.Agent) agentPatchSnapshot {
 // effect. A key sent with its current value is in no list. Metadata, the
 // GCP identity (writable only before the first start) and the timezone
 // pin are applied; the config keys are split by configEditDisposition.
-// held is always empty: a config PATCH of an agent with a live container
-// is refused. before is the agent as it stood before the writes, after the
+// held is reserved for config edits held while a container is live and is
+// always empty, because such edits are refused; a timezone pin edited on a
+// live agent is applied (with a warning). before is the agent as it stood before the writes, after the
 // agent as written.
 func agentUpdateDisposition(before agentPatchSnapshot, after *store.Agent, configApplied, configHeldForReincarnate []string, timezoneChanged bool) AgentUpdateDisposition {
 	applied := append([]string{}, configApplied...)
