@@ -16,7 +16,6 @@ package hub
 
 import (
 	"context"
-	"log/slog"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -205,16 +204,16 @@ func (s *Server) ComputeMessageabilityDetail(
 
 // countReachableAgents counts the agents in projectAgents that targetAgent
 // could message. Each decision is authorizeAgentMessage's agent-sender path
-// (EvaluateAgentMessage) for a sender built from targetAgent; the sender's
-// row is read once for all targets instead of once per target. A failed
-// read denies every target, as it does per target in EvaluateAgentMessage.
+// (EvaluateAgentMessage) for a sender built from targetAgent. The sender row
+// is targetAgent itself, which the caller read from the store in this
+// request, so it is not read again per target; the sender's standing is
+// still evaluated on its own fresh read by ID (agentStanding), and a sender
+// with no stored row or a failed standing lookup reaches no agent.
 func (s *Server) countReachableAgents(ctx context.Context, targetAgent *store.Agent, projectAgents []store.Agent) int {
 	if targetAgent == nil {
 		return 0
 	}
 	senderIdentity := agentIdentityFromAgent(targetAgent)
-	var senderAgent *store.Agent
-	senderRead := false
 	reachable := 0
 	for i := range projectAgents {
 		other := &projectAgents[i]
@@ -223,20 +222,7 @@ func (s *Server) countReachableAgents(ctx context.Context, targetAgent *store.Ag
 		if other.ID == targetAgent.ID {
 			continue
 		}
-		if !senderRead {
-			senderRead = true
-			row, err := s.store.GetAgent(ctx, senderIdentity.ID())
-			if err != nil {
-				slog.Warn("countReachableAgents: failed to fetch sender agent",
-					"sender_id", senderIdentity.ID(), "error", err)
-				return 0
-			}
-			if row == nil {
-				return 0
-			}
-			senderAgent = row
-		}
-		if s.evaluateAgentMessageForSender(ctx, senderIdentity, senderAgent, other).Allowed {
+		if s.evaluateAgentMessageForSender(ctx, senderIdentity, targetAgent, other).Allowed {
 			reachable++
 		}
 	}

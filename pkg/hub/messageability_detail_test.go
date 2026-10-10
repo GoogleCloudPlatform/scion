@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -43,6 +44,15 @@ type mdCountingStore struct {
 	store.Store
 	mu     sync.Mutex
 	counts map[string]int64
+	// failGetAgent, when set, makes GetAgent for that ID fail with a
+	// lookup error (not ErrNotFound).
+	failGetAgent string
+}
+
+func (c *mdCountingStore) setFailGetAgent(id string) {
+	c.mu.Lock()
+	c.failGetAgent = id
+	c.mu.Unlock()
 }
 
 // DB exposes the wrapped store's pool, which the server's startup
@@ -73,6 +83,12 @@ func (c *mdCountingStore) take() map[string]int64 {
 
 func (c *mdCountingStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
 	c.note(ctx, "GetAgent")
+	c.mu.Lock()
+	fail := c.failGetAgent != "" && c.failGetAgent == id
+	c.mu.Unlock()
+	if fail {
+		return nil, errors.New("injected agent lookup failure")
+	}
 	return c.Store.GetAgent(ctx, id)
 }
 
@@ -402,8 +418,10 @@ func TestAgentGet_MessageabilityMemoDoesNotCrossRequests(t *testing.T) {
 	assert.Nil(t, standingMemoFrom(ctx))
 }
 
-// A failed sender-row read denies every target, as it did per target.
-func TestCountReachableAgents_SenderReadFaultDeniesAll(t *testing.T) {
+// A sender with no stored row reaches no agent: the decision uses the
+// caller's row, and the sender's standing check, which reads by ID, refuses
+// it (agent_missing) on every target the modes allow.
+func TestCountReachableAgents_SenderWithoutStoredRowReachesNone(t *testing.T) {
 	f := newMDFixture(t, 4)
 	agents := f.listProject(t)
 	ghost := *f.aliceAgent
@@ -411,4 +429,22 @@ func TestCountReachableAgents_SenderReadFaultDeniesAll(t *testing.T) {
 	assert.Zero(t, f.srv.countReachableAgents(context.Background(), &ghost, agents))
 	assert.Zero(t, f.referenceDetail(t, f.identity(mdMember), &ghost).ReachableAgentCount)
 	assert.Zero(t, f.srv.countReachableAgents(context.Background(), nil, agents))
+}
+
+// A store error during the sender's standing check denies every target,
+// and the fault is not memoised: the same request context recomputes it.
+func TestCountReachableAgents_StandingLookupFaultDeniesAll(t *testing.T) {
+	f := newMDFixture(t, 6)
+	agents := f.listProject(t)
+	ctx := withStandingMemo(context.Background())
+	want := f.srv.countReachableAgents(context.Background(), f.carolAgent, agents)
+	require.Positive(t, want, "carol's agent reaches agents while in standing")
+
+	f.counter.setFailGetAgent(f.carolAgent.ID)
+	assert.Zero(t, f.srv.countReachableAgents(ctx, f.carolAgent, agents), "a standing lookup fault denies every target")
+	assert.Zero(t, f.referenceDetail(t, f.identity(mdMember), f.carolAgent).ReachableAgentCount,
+		"the per-target reference denies too")
+
+	f.counter.setFailGetAgent("")
+	assert.Equal(t, want, f.srv.countReachableAgents(ctx, f.carolAgent, agents), "the fault was not memoised")
 }

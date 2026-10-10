@@ -422,9 +422,10 @@ func (s *Server) EvaluateAgentMessage(
 
 // evaluateAgentMessageForSender is EvaluateAgentMessage after the sender
 // row is read: the mode and project-policy evaluation, then the sender's
-// standing check for an allowed send. senderAgent must be the store's
-// current row for agentIdent. A caller that evaluates one sender against
-// many targets in a request reads the row once and calls this per target.
+// standing check for an allowed send. senderAgent must be agentIdent's row
+// as read from the store in the current request; standing re-reads it by
+// ID. A caller that evaluates one sender against many targets in a request
+// passes that one row for every target.
 func (s *Server) evaluateAgentMessageForSender(ctx context.Context, agentIdent AgentIdentity, senderAgent, targetAgent *store.Agent) MessageDecision {
 	decision := s.evaluateAgentMessageModes(ctx, agentIdent, senderAgent, targetAgent)
 	if !decision.Allowed {
