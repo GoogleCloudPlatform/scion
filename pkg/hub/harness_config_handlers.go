@@ -1374,8 +1374,9 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 // under Slugify(name), so selection compares that against the record's slug;
 // matching the record's Name instead could pick another config, since Name and
 // Slug can be changed independently. There is no fallback for an empty slug:
-// it matches no entry, so the reimport fails with a no-match error rather than
-// writing to another record.
+// every API write path sets a non-empty slug, and an empty slug would match
+// only entries whose names slugify to empty, so the reimport does not guess a
+// different record.
 func reimportTargetSlug(hc *store.HarnessConfig) string {
 	return hc.Slug
 }
