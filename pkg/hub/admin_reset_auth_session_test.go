@@ -17,7 +17,6 @@
 package hub
 
 import (
-	"context"
 	"net/http"
 	"testing"
 
@@ -33,7 +32,7 @@ const adminResetAuthAllPath = "/api/v1/admin/agents/reset-auth-all"
 // the session-only reason, before the handler runs.
 func TestAdminResetAuthAll_TokenRefused(t *testing.T) {
 	srv, s := testServerWithOps(t, nil)
-	admin, err := s.GetUser(context.Background(), hubConfigTokenUser(t, s, "reset-admin", store.SystemRoleSuperAdmin))
+	admin, err := s.GetUser(t.Context(), hubConfigTokenUser(t, s, "reset-admin", store.SystemRoleSuperAdmin))
 	require.NoError(t, err)
 	key := mintHubConfigToken(t, srv, admin.ID, hubBoundary(), "hub_config:read", "hub_config:update")
 
@@ -51,7 +50,7 @@ func TestAdminResetAuthAll_TokenRefused(t *testing.T) {
 // passes the session-only guard and reaches the handler.
 func TestAdminResetAuthAll_SessionPassesGuard(t *testing.T) {
 	srv, s := testServerWithOps(t, nil)
-	admin, err := s.GetUser(context.Background(), hubConfigTokenUser(t, s, "reset-admin", store.SystemRoleSuperAdmin))
+	admin, err := s.GetUser(t.Context(), hubConfigTokenUser(t, s, "reset-admin", store.SystemRoleSuperAdmin))
 	require.NoError(t, err)
 
 	// A body the handler rejects proves the request got past the guard
