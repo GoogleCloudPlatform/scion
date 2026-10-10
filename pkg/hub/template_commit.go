@@ -392,19 +392,20 @@ func (s *Server) commitTemplateFiles(ctx context.Context, tmpl *store.Template, 
 }
 
 // templateCommitPrecondition returns the stored state a commit of tmpl
-// requires: the content hash the caller read (unless opts names one) and the
-// layout the caller read.
+// requires: the content hash and layout the caller read, unless opts names
+// the content hash.
+//
+// The precondition is built from the row as read, and opts overrides only
+// the fields it names, so every field of TemplateContentPrecondition (the
+// layout included, ptone/scion#4221) is checked for every commit, including
+// a finalize that names its content hash.
 func templateCommitPrecondition(tmpl *store.Template, opts commitOpts) store.TemplateContentPrecondition {
-	hash := tmpl.ContentHash
+	p := store.TemplateContentPrecondition{ContentHash: tmpl.ContentHash, Layout: tmpl.Layout}
 	if opts.expectedContentHash != "" {
-		hash = opts.expectedContentHash
+		p.ContentHash = opts.expectedContentHash
 	}
-	return store.TemplateContentPrecondition{ContentHash: hash, Layout: tmpl.Layout}
+	return p
 }
-
-// templateConflictErrorCode is the API error code of a template commit that
-// lost a compare-and-swap to a concurrent commit (HTTP 409).
-const templateConflictErrorCode = "template_conflict"
 
 // writeTemplateCommitError maps a commitTemplateFiles error to an HTTP
 // response.
@@ -437,7 +438,7 @@ func writeTemplateCommitError(w http.ResponseWriter, err error) {
 		return
 	}
 	if errors.Is(err, store.ErrTemplateConflict) {
-		writeError(w, http.StatusConflict, templateConflictErrorCode,
+		writeError(w, http.StatusConflict, ErrCodeTemplateConflict,
 			"template was changed by another commit; re-read it and retry", nil)
 		return
 	}

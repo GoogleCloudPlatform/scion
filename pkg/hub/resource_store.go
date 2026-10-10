@@ -418,8 +418,9 @@ func (p *templatePersistence) rereadAfterConflict(ctx context.Context, t *store.
 // (a row written before a derived field existed, or before the derivation
 // changed). The re-derivation goes through commitTemplateFiles. A commit
 // conflict is retried once against the re-read row while that row still has
-// the directory's content hash; when it no longer does, another writer has replaced the content and there is nothing left to
-// re-derive here, so the resource is skipped.
+// the directory's content hash; when it no longer does, another writer has
+// replaced the content and there is nothing left to re-derive here, so the
+// resource is skipped.
 func (p *templatePersistence) OnHashMatch(ctx context.Context, rec *ResourceRecord, dir string) (bool, error) {
 	t := p.model
 	idx := deriveTemplateIndexFromDir(dir, t.Name)
