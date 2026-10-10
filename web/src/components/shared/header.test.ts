@@ -1323,6 +1323,31 @@ describe('view mode shortcuts', () => {
       expect(menuHints(el)).toEqual(['Ctrl+1', 'Ctrl+2', 'Ctrl+3']);
     });
 
+    it('keeps the unread count alongside the hints', async () => {
+      const el = await mountHeader({ currentPath: '/projects/p1' });
+      window.dispatchEvent(new CustomEvent(CHAT_UNREAD_COUNT_EVENT, { detail: { count: 3 } }));
+      await el.updateComplete;
+      try {
+        expect(modeTooltips(el)).toEqual([
+          'Dashboard · Ctrl+1',
+          'Chat, 3 unread conversations · Ctrl+2',
+          'Terminals (0) · Ctrl+3',
+        ]);
+        const chatButton = el.shadowRoot?.querySelector('.mode-switch button[data-mode="chat"]');
+        expect(chatButton?.getAttribute('aria-label')).toBe('Chat, 3 unread conversations');
+        expect(chatButton?.getAttribute('aria-keyshortcuts')).toBe('Control+2');
+
+        // The menu item carries both suffix nodes: the count, then the hint.
+        const item = el.shadowRoot?.querySelector('sl-menu-item[value="chat"]');
+        const suffixes = Array.from(item?.querySelectorAll('[slot="suffix"]') ?? []);
+        expect(suffixes.map((n) => n.className)).toEqual(['count-badge chat-count', 'mode-shortcut']);
+        expect(suffixes.map((n) => n.textContent?.trim())).toEqual(['3', 'Ctrl+2']);
+        expect(suffixes[0]?.getAttribute('aria-label')).toBe('3 unread conversations');
+      } finally {
+        window.dispatchEvent(new CustomEvent(CHAT_UNREAD_COUNT_EVENT, { detail: { count: 0 } }));
+      }
+    });
+
     it('shows the command symbol on macOS', async () => {
       setPlatform('MacIntel');
       const el = await mountHeader({ currentPath: '/projects/p1' });

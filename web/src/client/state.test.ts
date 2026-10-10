@@ -110,16 +110,19 @@ describe('StateManager own chat subject', () => {
     });
   });
 
-  it('no longer routes the retired per-user notification subject', () => {
+  it('routes the per-user notification subject to notification-created only', () => {
     const sm = new StateManager();
     const created = vi.fn();
     const message = vi.fn();
     sm.addEventListener('notification-created', created);
     sm.addEventListener('chat-message-received', message);
 
-    emit(sm, 'user.b.notification', { id: 'n1', status: 'MENTION' });
+    const data = { id: 'n1', status: 'SCHEDULE_BLOCKED' };
+    emit(sm, 'user.b.notification', data);
 
-    expect(created).not.toHaveBeenCalled();
+    expect(created).toHaveBeenCalledTimes(1);
+    const detail = (created.mock.calls[0]?.[0] as CustomEvent).detail as { data: unknown };
+    expect(detail.data).toEqual(data);
     expect(message).not.toHaveBeenCalled();
   });
 
@@ -147,7 +150,7 @@ describe('StateManager own chat subject', () => {
     expect(message).toHaveBeenCalledTimes(1);
   });
 
-  it('subscribes to the own chat subject in every view scope', () => {
+  it('subscribes to the own chat and notification subjects in every view scope', () => {
     const sm = new StateManager();
     expect(subjectsFor(sm, { type: 'dashboard' })).not.toContain('user.me.chat.>');
 
@@ -161,7 +164,7 @@ describe('StateManager own chat subject', () => {
     ] as const) {
       const subjects = subjectsFor(sm, scope);
       expect(subjects).toContain('user.me.chat.>');
-      expect(subjects).not.toContain('user.me.notification');
+      expect(subjects).toContain('user.me.notification');
     }
   });
 

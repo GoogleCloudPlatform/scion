@@ -743,10 +743,18 @@ export class StateManager extends EventTarget {
     // move the unread badge while the user is looking at the agent list.
     // The same subject also carries DM typing, edit and delete events; pages
     // without a chat view have no listener for those and ignore them.
+    //
+    // The subscriber-scoped notification subject carries bell rows addressed
+    // to this user alone, such as SCHEDULE_BLOCKED, which name the user's
+    // agents and schedules and so never go out on `notification.*`. The
+    // chat subject's `chat.>` does not cover it: `notification` is not under
+    // `chat`. It is added in every scope so the bell hears about them live.
     const userId = this.currentUserId || (scope.type === 'chat' ? scope.userId : '');
     if (userId) {
       const own = `user.${userId}.chat.>`;
       if (!subs.includes(own)) subs.push(own);
+      const ownNotifications = `user.${userId}.notification`;
+      if (!subs.includes(ownNotifications)) subs.push(ownNotifications);
     }
     return subs;
   }
@@ -783,6 +791,15 @@ export class StateManager extends EventTarget {
     // Notification events: notification.created
     if (parts[0] === 'notification') {
       this.notify('notification-created');
+      return;
+    }
+
+    // User-scoped notifications: user.{userId}.notification, bell rows
+    // addressed to this user alone (such as SCHEDULE_BLOCKED). Without an
+    // explicit case the subject is dropped: it has three tokens, and the
+    // user-scoped chat branch below requires four.
+    if (parts[0] === 'user' && parts.length === 3 && parts[2] === 'notification') {
+      this.notifyWithData('notification-created', data);
       return;
     }
 

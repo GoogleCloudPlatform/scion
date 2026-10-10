@@ -26,7 +26,9 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { render } from 'lit';
 
-import { PUSH_STORAGE_KEY } from '../../client/push-preference.js';
+import { apiFetch } from '../../client/api.js';
+import { PUSH_STORAGE_KEYS } from '../../client/push-preference.js';
+import { stateManager } from '../../client/state.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -62,7 +64,7 @@ describe('notification tray: SCHEDULE_BLOCKED', () => {
   beforeEach(() => {
     popups = [];
     (window as unknown as { Notification: unknown }).Notification = FakeNotification;
-    localStorage.setItem(PUSH_STORAGE_KEY, 'true');
+    localStorage.setItem(PUSH_STORAGE_KEYS.agent, 'true');
   });
 
   afterEach(() => {
@@ -93,6 +95,36 @@ describe('notification tray: SCHEDULE_BLOCKED', () => {
     tray.dispatchBrowserNotification(blocked);
     expect(popups.map((p) => p.title)).toEqual(['Schedule Blocked']);
     expect(popups[0].options.body).toBe(blocked.message);
+  });
+
+  it('fetches and pops when the user notification subject reports a block', async () => {
+    const tray: any = document.createElement('scion-notification-tray');
+    tray.user = { id: 'me', email: 'me@example.com', name: 'me' };
+    document.body.appendChild(tray);
+    const settle = async (): Promise<void> => {
+      for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+    };
+    await settle();
+
+    vi.mocked(apiFetch).mockClear();
+    vi.mocked(apiFetch).mockImplementation(() =>
+      Promise.resolve(new Response(JSON.stringify([blocked]), { status: 200 }))
+    );
+    // Published only on the subscriber-scoped subject, never notification.*.
+    (
+      stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+    ).handleUpdate({
+      subject: 'user.me.notification',
+      data: { id: blocked.id, status: 'SCHEDULE_BLOCKED' },
+    });
+    await settle();
+
+    expect(apiFetch).toHaveBeenCalledWith('/api/v1/notifications?acknowledged=false');
+    expect(popups.map((p) => p.title)).toEqual(['Schedule Blocked']);
+    tray.remove();
+    vi.mocked(apiFetch).mockImplementation(() =>
+      Promise.resolve(new Response('[]', { status: 200 }))
+    );
   });
 
   it('ships its icon in production builds', async () => {
