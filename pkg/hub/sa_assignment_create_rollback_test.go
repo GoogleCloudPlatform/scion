@@ -123,8 +123,8 @@ func assertAuthorityLeftToDelete(t *testing.T, s store.Store, agentID string, as
 	require.Len(t, rows, 1, "the assignment is left to the delete")
 	assert.Equal(t, assignment.ID, rows[0].ID)
 	assert.Equal(t, assignment.ServiceAccountID, rows[0].ServiceAccountID)
-	assert.Empty(t, rows[0].Deactivation.Cause, "no deactivation cause on the assignment")
-	assert.Empty(t, rows[0].Deactivation.OpID, "no deactivation op on the assignment")
+	assert.Empty(t, rows[0].Cause, "no deactivation cause on the assignment")
+	assert.Empty(t, rows[0].OpID, "no deactivation op on the assignment")
 
 	edges := activeEdgesFor(t, s, agentID)
 	require.Len(t, edges, 1, "the edge is left to the delete")
