@@ -177,6 +177,9 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 	if err != nil {
 		return "", err
 	}
+	if err := s.refuseQueuedStartForDelete(ctx, agent, "start"); err != nil {
+		return "", err
+	}
 	defer s.beginLifecycleOp(agent.ID)()
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
@@ -329,6 +332,9 @@ func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (
 func (s *Server) execDispatchRestart(ctx context.Context, d store.BrokerDispatch) (string, error) {
 	agent, err := s.resolveDispatchAgent(ctx, d)
 	if err != nil {
+		return "", err
+	}
+	if err := s.refuseQueuedStartForDelete(ctx, agent, "restart"); err != nil {
 		return "", err
 	}
 	defer s.beginLifecycleOp(agent.ID)()

@@ -395,6 +395,7 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 		HarnessConfig:   harnessConfigFlag,
 		HarnessAuth:     harnessAuthFlag,
 		RuntimeBrokerID: runtimeBrokerID,
+		Profile:         profile,
 		Task:            task,
 		Branch:          branch,
 		Labels:          parsedLabels,

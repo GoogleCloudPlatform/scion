@@ -148,10 +148,19 @@ type reissueFaultStore struct {
 	// this ID answers no row and no error.
 	nilAgentAfterCommitID string
 	committed             atomic.Bool
+	// batchAuditFail: the agent_scopes_reissue_batch audit write fails.
+	batchAuditFail bool
 	// failUserID: GetUser for this ID fails.
 	failUserID string
 	// uatReadErr: GetUserAccessToken fails.
 	uatReadErr bool
+}
+
+func (s *reissueFaultStore) CreateMutationAudit(ctx context.Context, r *store.MutationAuditRecord) error {
+	if s.fault.Active() && s.batchAuditFail && r.MutationType == mutationTypeAgentScopesReissueBatch {
+		return errors.New("injected batch audit write fault")
+	}
+	return s.Store.CreateMutationAudit(ctx, r)
 }
 
 func (s *reissueFaultStore) GetUser(ctx context.Context, id string) (*store.User, error) {
@@ -241,7 +250,7 @@ func TestScopeReissue_NilAgentInCommitRefuses(t *testing.T) {
 	f.faults.arm()
 	f.client.resetAuthCalled = false
 
-	resp, err := f.srv.runScopeReissue(context.Background(), child, f.operator, false)
+	resp, err := f.srv.runScopeReissue(context.Background(), child, f.operator, false, "")
 	require.ErrorIs(t, err, errReissueConflict)
 	assert.Nil(t, resp)
 	rec := httptest.NewRecorder()
@@ -264,7 +273,7 @@ func TestScopeReissue_NilAgentAfterCommitNotPushed(t *testing.T) {
 	f.faults.arm()
 	f.client.resetAuthCalled = false
 
-	resp, err := f.srv.runScopeReissue(context.Background(), child, f.operator, false)
+	resp, err := f.srv.runScopeReissue(context.Background(), child, f.operator, false, "")
 	require.NoError(t, err)
 	assert.NotEmpty(t, resp.EdgeNew, "the commit stands")
 	assert.False(t, resp.Dispatched)
@@ -306,7 +315,7 @@ func (f *reissueFixture) grant(t *testing.T, a *store.Agent) []AgentTokenScope {
 
 func (f *reissueFixture) run(t *testing.T, a *store.Agent, dryRun bool) *ScopeReissueResponse {
 	t.Helper()
-	resp, err := f.srv.runScopeReissue(context.Background(), f.reload(t, a), f.operator, dryRun)
+	resp, err := f.srv.runScopeReissue(context.Background(), f.reload(t, a), f.operator, dryRun, "")
 	require.NoError(t, err)
 	return resp
 }
@@ -564,7 +573,7 @@ func TestScopeReissue_T3_FailClosed(t *testing.T) {
 				f.faults.arm()
 			}
 
-			_, err := f.srv.runScopeReissue(context.Background(), child, f.operator, false)
+			_, err := f.srv.runScopeReissue(context.Background(), child, f.operator, false, "")
 			require.Error(t, err)
 
 			rec := httptest.NewRecorder()
@@ -622,7 +631,7 @@ func TestScopeReissue_T3a_ParentLookupErrorRefuses(t *testing.T) {
 
 	// The real run: the fault hits only the first parent read again.
 	w.failParentOnce.Store(true)
-	resp, err := f.srv.runScopeReissue(context.Background(), child, f.operator, false)
+	resp, err := f.srv.runScopeReissue(context.Background(), child, f.operator, false, "")
 	require.Equal(t, int32(2), w.parentFired.Load())
 	require.Error(t, err)
 	assert.Nil(t, resp, "no result: never a default-role computation")
@@ -679,7 +688,7 @@ func TestScopeReissue_AuditFailureRollsBack(t *testing.T) {
 	f.faults.auditFailInTx = true
 	f.faults.arm()
 	f.client.resetAuthCalled = false
-	resp, err := f.srv.runScopeReissue(ctx, child, f.operator, false)
+	resp, err := f.srv.runScopeReissue(ctx, child, f.operator, false, "")
 	require.Equal(t, int32(1), f.faults.auditFired.Load(), "the audit write inside the transaction was reached and failed")
 	require.ErrorContains(t, err, "injected audit write fault", "the run failed because of the audit write")
 	assert.Nil(t, resp)
