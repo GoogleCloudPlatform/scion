@@ -23,8 +23,6 @@
  * none. Each rule gets a test that fails when the rule is removed.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 const { playChimeThrottled } = vi.hoisted(() => ({ playChimeThrottled: vi.fn() }));

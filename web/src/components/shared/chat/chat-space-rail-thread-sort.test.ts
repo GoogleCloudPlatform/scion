@@ -26,8 +26,6 @@
  * order the instant anything elsewhere in the rail switches to custom.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { apiFetch } from '../../../client/api.js';
 import type { ChatSpace, ChatSpaceThread } from './chat-space-rail.js';

@@ -34,7 +34,7 @@ func provisionStatusFixture(t *testing.T, hookName, state, msg string) (*Lifecyc
 }
 
 func TestRunPreStart_HarnessProvisionFailureIncludesRecordedError(t *testing.T) {
-	m, _ := provisionStatusFixture(t, harnessProvisionHookFilename, ProvisionStatusFailed,
+	m, _ := provisionStatusFixture(t, HarnessProvisionHookFilename, ProvisionStatusFailed,
 		"harness provisioner failed: exit status 1: claude provision: no valid auth method found")
 	err := m.RunPreStart()
 	if err == nil {
@@ -49,9 +49,9 @@ func TestRunPreStart_HarnessProvisionFailureIncludesRecordedError(t *testing.T) 
 func TestRunPreStart_NoDetailUnlessProvisionHookFailedWithRecordedError(t *testing.T) {
 	for _, tc := range []struct{ name, hook, state string }{
 		{"other hook", "30-project-custom", ProvisionStatusFailed},
-		{"status ok", harnessProvisionHookFilename, ProvisionStatusOK},
-		{"status running", harnessProvisionHookFilename, ProvisionStatusRunning},
-		{"no status", harnessProvisionHookFilename, ""},
+		{"status ok", HarnessProvisionHookFilename, ProvisionStatusOK},
+		{"status running", HarnessProvisionHookFilename, ProvisionStatusRunning},
+		{"no status", HarnessProvisionHookFilename, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m, _ := provisionStatusFixture(t, tc.hook, tc.state, "recorded reason")

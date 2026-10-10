@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/cmd/internal/cliutil"
 	sciontoolhub "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 )
 
@@ -64,6 +65,8 @@ func TestWhoamiAgentContext(t *testing.T) {
 	t.Setenv("SCION_AGENT_NAME", "My Agent")
 	t.Setenv("SCION_AGENT_ID", "uuid-123")
 
+	withRootOptions(t, whoamiCmd, cliutil.RootOptions{})
+
 	cmd := whoamiCmd
 	out := captureStdout(t, func() {
 		err := cmd.RunE(cmd, nil)
@@ -77,9 +80,7 @@ func TestWhoamiAgentContextJSON(t *testing.T) {
 	t.Setenv("SCION_AGENT_NAME", "My Agent")
 	t.Setenv("SCION_AGENT_ID", "uuid-123")
 
-	oldFormat := outputFormat
-	outputFormat = "json"
-	defer func() { outputFormat = oldFormat }()
+	withRootOptions(t, whoamiCmd, cliutil.RootOptions{OutputFormat: "json"})
 
 	cmd := whoamiCmd
 	out := captureStdout(t, func() {
@@ -110,9 +111,7 @@ func TestWhoamiTier1FieldsJSON(t *testing.T) {
 	t.Setenv("SCION_CLI_MODE", "non-interactive")
 	t.Setenv("SCION_HUB_ENDPOINT", "https://hub.example.com")
 
-	oldFormat := outputFormat
-	outputFormat = "json"
-	defer func() { outputFormat = oldFormat }()
+	withRootOptions(t, whoamiCmd, cliutil.RootOptions{OutputFormat: "json"})
 
 	cmd := whoamiCmd
 	out := captureStdout(t, func() {
@@ -157,9 +156,7 @@ func TestWhoamiOmitEmpty(t *testing.T) {
 	t.Setenv("SCION_CLI_MODE", "")
 	t.Setenv("SCION_HUB_ENDPOINT", "")
 
-	oldFormat := outputFormat
-	outputFormat = "json"
-	defer func() { outputFormat = oldFormat }()
+	withRootOptions(t, whoamiCmd, cliutil.RootOptions{OutputFormat: "json"})
 
 	cmd := whoamiCmd
 	out := captureStdout(t, func() {
@@ -191,9 +188,7 @@ func TestWhoamiOmitEmpty(t *testing.T) {
 }
 
 func TestWhoamiHubURL(t *testing.T) {
-	oldFormat := outputFormat
-	outputFormat = "json"
-	defer func() { outputFormat = oldFormat }()
+	withRootOptions(t, whoamiCmd, cliutil.RootOptions{OutputFormat: "json"})
 
 	t.Run("present when both endpoint and ID set", func(t *testing.T) {
 		t.Setenv("SCION_AGENT_SLUG", "agent-a")
@@ -288,9 +283,7 @@ func TestWhoamiFull(t *testing.T) {
 	whoamiFull = true
 	defer func() { whoamiFull = oldFull }()
 
-	oldFormat := outputFormat
-	outputFormat = "json"
-	defer func() { outputFormat = oldFormat }()
+	withRootOptions(t, whoamiCmd, cliutil.RootOptions{OutputFormat: "json"})
 
 	cmd := whoamiCmd
 	out := captureStdout(t, func() {
@@ -334,9 +327,7 @@ func TestWhoamiFullNoHub(t *testing.T) {
 	whoamiFull = true
 	defer func() { whoamiFull = oldFull }()
 
-	oldFormat := outputFormat
-	outputFormat = "json"
-	defer func() { outputFormat = oldFormat }()
+	withRootOptions(t, whoamiCmd, cliutil.RootOptions{OutputFormat: "json"})
 
 	cmd := whoamiCmd
 
@@ -393,9 +384,7 @@ func TestWhoamiFullPlainText(t *testing.T) {
 	defer func() { whoamiFull = oldFull }()
 
 	// Plain text (not JSON).
-	oldFormat := outputFormat
-	outputFormat = ""
-	defer func() { outputFormat = oldFormat }()
+	withRootOptions(t, whoamiCmd, cliutil.RootOptions{})
 
 	cmd := whoamiCmd
 	out := captureStdout(t, func() {
@@ -424,6 +413,8 @@ func TestWhoamiNameOnly(t *testing.T) {
 	t.Setenv("SCION_AGENT_NAME", "fallback-agent")
 	t.Setenv("SCION_AGENT_ID", "")
 
+	withRootOptions(t, whoamiCmd, cliutil.RootOptions{})
+
 	cmd := whoamiCmd
 	out := captureStdout(t, func() {
 		err := cmd.RunE(cmd, nil)
@@ -436,6 +427,8 @@ func TestWhoamiNonAgent(t *testing.T) {
 	t.Setenv("SCION_AGENT_SLUG", "")
 	t.Setenv("SCION_AGENT_NAME", "")
 	t.Setenv("SCION_AGENT_ID", "")
+
+	withRootOptions(t, whoamiCmd, cliutil.RootOptions{})
 
 	cmd := whoamiCmd
 	err := cmd.RunE(cmd, nil)

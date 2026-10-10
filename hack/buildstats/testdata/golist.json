@@ -1,0 +1,47 @@
+{
+	"ImportPath": "fmt",
+	"Standard": true,
+	"DepOnly": true,
+	"Deps": [
+		"errors",
+		"internal/abi"
+	]
+}
+{
+	"ImportPath": "errors",
+	"Standard": true,
+	"DepOnly": true,
+	"Deps": [
+		"internal/abi"
+	]
+}
+{
+	"ImportPath": "internal/abi",
+	"Standard": true,
+	"DepOnly": true
+}
+{
+	"ImportPath": "example.com/m/dep",
+	"DepOnly": true,
+	"Deps": [
+		"fmt",
+		"errors",
+		"internal/abi"
+	]
+}
+{
+	"ImportPath": "example.com/m/a",
+	"Deps": [
+		"example.com/m/dep",
+		"fmt",
+		"errors",
+		"internal/abi"
+	]
+}
+{
+	"ImportPath": "example.com/m/b",
+	"Deps": [
+		"errors",
+		"internal/abi"
+	]
+}

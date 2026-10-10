@@ -247,6 +247,10 @@ type Server struct {
 	mu         sync.RWMutex
 	startTime  time.Time
 
+	// nfsCleanupWG tracks background NFS project tree removals started by
+	// project delete (startNFSProjectTreeCleanup), so tests can wait for them.
+	nfsCleanupWG sync.WaitGroup
+
 	// workspaceDownload replaces gcp.SyncFromGCS for the GCS workspace
 	// bootstrap (create-time and handleWorkspaceApply) when set (see
 	// SetWorkspaceDownloader).
@@ -307,6 +311,12 @@ type Server struct {
 	// (design §3.2's LaunchInstanceID / launch_owner), generated once here at
 	// startup.
 	launchInstanceID string
+
+	// launchTimingOverride replaces the launch sender's default retry
+	// backoffs (and, when its keepaliveInterval is positive, the per-launch
+	// keepalive interval) for every sender built on this server (see
+	// newLaunchSender). Nil in production; only tests set it.
+	launchTimingOverride *launchTimings
 
 	// syncStartSupersedeWait overrides defaultSyncStartSupersedeWait when
 	// positive (see beginSyncStart). Zero in production.
@@ -2563,8 +2573,10 @@ func (s *Server) logHubConnections() {
 			attrs = append(attrs, slog.Bool("colocated", true))
 		}
 
+		conn.mu.RLock()
 		hasHeartbeat := conn.Heartbeat != nil
 		hasControlChannel := conn.ControlChannel != nil
+		conn.mu.RUnlock()
 		attrs = append(attrs,
 			slog.Bool("heartbeat", hasHeartbeat),
 			slog.Bool("control_channel", hasControlChannel),

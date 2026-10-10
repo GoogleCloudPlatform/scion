@@ -21,8 +21,6 @@
  * inline.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('../../client/agent-delete.js', async (importOriginal) => {

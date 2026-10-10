@@ -28,8 +28,6 @@
  * on the beforeAll below, which warms the lazily imported modules first.
  */
 
-// @vitest-environment happy-dom
-
 import {
   describe,
   it,

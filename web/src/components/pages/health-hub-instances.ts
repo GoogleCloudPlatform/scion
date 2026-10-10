@@ -21,14 +21,19 @@
  * One row per hub instance (process) from the summary's hub_instances
  * section, which the hub reads from its registry table only. State is
  * computed by the hub when it builds the summary: live, stale (no write for
- * 45 s) or stopped. Uptime and "last seen" are computed from the section's
- * as_of, the database clock that also wrote started_at and last_seen, so
- * they use one clock, neither the browser's nor the serving hub's. A
- * section without as_of falls back to the summary's generated_at.
+ * 45 s) or stopped (a clean shutdown, ptone/scion#4137). A stopped
+ * instance stays listed, greyed, for the hub's 1 h display window. Uptime
+ * and "last seen" are computed from the section's as_of, the database clock
+ * that also wrote started_at and last_seen, so they use one clock, neither
+ * the browser's nor the serving hub's. A section without as_of falls back
+ * to the summary's generated_at.
  *
- * Each row shows the instance's own failing checks under its status, and
- * its own database connection pool (in use / limit) as last written to its
- * registry row; the hub that serves the summary reads no pool itself.
+ * Each row shows the instance's own failing checks under its status, its
+ * own database connection pool (in use / limit) and the counts of the
+ * integrations it runs, by health, as last written to its registry row;
+ * the hub that serves the summary reads no pool and queries no plugin
+ * itself. The counts are shown to every caller; integration names are not
+ * part of this table.
  *
  * The section is absent when an older hub replica served the summary
  * (during a rollout): the dashboard then hides this table. A null section
@@ -38,7 +43,10 @@
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { formatInstantWithZone } from '../../utils/time.js';
 import { healthPillStyles, healthTone, type HealthTone } from './health-status.js';
+import type { HealthSummaryIntegrationCounts } from './health-integrations.js';
 
 /** One hub instance of GET /api/v1/admin/health/summary. */
 export interface HealthHubInstance {
@@ -62,6 +70,10 @@ export interface HealthHubInstance {
   checks?: Record<string, string>;
   /** Last reported database connection pool; null when none was reported. */
   database?: HealthHubInstanceDB | null;
+  /** Counts of the integrations the instance last reported, by health. */
+  integration_counts?: HealthSummaryIntegrationCounts;
+  /** True when the instance cut its integration list to fit its row. */
+  integrations_truncated?: boolean;
 }
 
 /** One hub instance's database connection pool. */
@@ -127,6 +139,14 @@ export function instanceLastSeen(i: HealthHubInstance, referenceTime: string): s
   return d ? `${d} ago` : '';
 }
 
+/**
+ * The stop time in the display zone; the raw value when it cannot be
+ * parsed, so the tooltip never reads just "stopped".
+ */
+export function stoppedAtLabel(stoppedAt: string): string {
+  return formatInstantWithZone(stoppedAt) || stoppedAt;
+}
+
 /** Check values that count as passing. */
 const PASSING_CHECK_VALUES = new Set(['healthy', 'available']);
 
@@ -153,6 +173,43 @@ export function poolDetail(db: HealthHubInstanceDB): string {
   return `${db.pool_active} in use, ${db.pool_idle} idle, ${limit}, ${db.pool_wait_count_total} ${waits}`;
 }
 
+/**
+ * The Integrations cell: the total, then the non-healthy counts, e.g.
+ * "3 (1 unhealthy, 1 unknown)"; "2" when all are healthy; "+" after the
+ * total when the instance cut its list. Empty when the instance runs none.
+ */
+export function integrationCountsText(
+  c: HealthSummaryIntegrationCounts | null | undefined,
+  truncated = false
+): string {
+  if (!c || (c.total ?? 0) <= 0) return '';
+  const parts = (['unhealthy', 'degraded', 'unknown'] as const)
+    .filter((k) => (c[k] ?? 0) > 0)
+    .map((k) => `${c[k]} ${k}`);
+  const total = `${c.total}${truncated ? '+' : ''}`;
+  return parts.length > 0 ? `${total} (${parts.join(', ')})` : total;
+}
+
+/** The Integrations cell's tooltip: every count, healthy first. */
+export function integrationCountsDetail(
+  c: HealthSummaryIntegrationCounts | null | undefined
+): string {
+  if (!c || (c.total ?? 0) <= 0) return '';
+  return `${c.healthy} healthy, ${c.degraded} degraded, ${c.unhealthy} unhealthy, ${c.unknown} unknown`;
+}
+
+/**
+ * Instance labels by instance ID, for naming the instances that run an
+ * integration. An instance without a label maps to its ID.
+ */
+export function hubInstanceLabels(
+  list: HealthSummaryHubInstances | null | undefined
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const i of list?.items ?? []) out[i.id] = i.label || i.id;
+  return out;
+}
+
 /** The tone of an instance state: live ok, stale warn, stopped neutral. */
 export function instanceStateTone(state: string): HealthTone {
   switch (state) {
@@ -167,6 +224,9 @@ export function instanceStateTone(state: string): HealthTone {
 
 @customElement('scion-health-hub-instances')
 export class ScionHealthHubInstances extends LitElement {
+  /** Re-renders the stop-time tooltip when the display zone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   /** The summary's hub_instances; null when the hub could not read it. */
   @property({ attribute: false })
   instances: HealthSummaryHubInstances | null = null;
@@ -261,6 +321,15 @@ export class ScionHealthHubInstances extends LitElement {
         font-variant-numeric: tabular-nums;
       }
 
+      /* A cleanly stopped instance stays listed for an hour, greyed. */
+      tr.stopped td {
+        color: var(--scion-text-muted);
+      }
+
+      tr.stopped td.label {
+        font-weight: 400;
+      }
+
       td.status {
         white-space: normal;
       }
@@ -308,6 +377,7 @@ export class ScionHealthHubInstances extends LitElement {
                 <th scope="col">Uptime</th>
                 <th scope="col">Status</th>
                 <th scope="col">DB pool</th>
+                <th scope="col">Integrations</th>
                 <th scope="col">Last seen</th>
               </tr>
             </thead>
@@ -336,13 +406,20 @@ export class ScionHealthHubInstances extends LitElement {
     const failing = failingChecks(i.checks);
     const db = i.database;
     return html`
-      <tr data-instance-id=${i.id} data-state=${i.state}>
+      <tr
+        class=${i.state === 'stopped' ? 'stopped' : ''}
+        data-instance-id=${i.id}
+        data-state=${i.state}
+      >
         <td class="label" title=${i.id}>
           ${i.label || i.id}${i.serving
             ? html` <span class="serving">(this instance)</span>`
             : nothing}
         </td>
-        <td class="state">
+        <td
+          class="state"
+          title=${i.stopped_at ? `stopped ${stoppedAtLabel(i.stopped_at)}` : nothing}
+        >
           <span class="pill tone-${instanceStateTone(i.state)}">${i.state || 'unknown'}</span>
         </td>
         <td class="version">${i.version || html`<span class="muted">—</span>`}</td>
@@ -359,6 +436,14 @@ export class ScionHealthHubInstances extends LitElement {
         </td>
         <td class="pool num" data-role="pool" title=${db ? poolDetail(db) : ''}>
           ${db ? poolUsage(db) : html`<span class="muted">—</span>`}
+        </td>
+        <td
+          class="integrations num"
+          data-role="integrations"
+          title=${integrationCountsDetail(i.integration_counts)}
+        >
+          ${integrationCountsText(i.integration_counts, i.integrations_truncated === true) ||
+          html`<span class="muted">—</span>`}
         </td>
         <td class="last-seen num" title=${i.last_seen}>
           ${lastSeen || html`<span class="muted">—</span>`}

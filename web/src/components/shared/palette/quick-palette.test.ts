@@ -24,8 +24,6 @@
  * can observe directly.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, afterEach, beforeEach, vi, type Mock } from 'vitest';
 
 await import('./quick-palette.js');

@@ -450,6 +450,10 @@ func seedAgentProject(t *testing.T, ctx context.Context, s store.Store) {
 // a UUID column, so it must be a real UUID rather than an arbitrary label.
 const requestedOwnerFilterTestOwnerID = "e0000000-0000-0000-0000-0000000000e1"
 
+// gcpSAFilterTestID is the registered service account id the
+// ByGCPServiceAccountID filter case seeds and filters on.
+const gcpSAFilterTestID = "e0000000-0000-0000-0000-0000000000f4"
+
 // createdByFilterTestCreatorID is the created_by value the ByCreatedBy
 // filter case seeds and queries (created_by is a UUID column).
 const createdByFilterTestCreatorID = "e0000000-0000-0000-0000-0000000000e2"
@@ -597,6 +601,42 @@ func AgentDomain() Domain[store.Agent] {
 				},
 				List: func(ctx context.Context, s store.Store) (*store.ListResult[store.Agent], error) {
 					return s.ListAgents(ctx, store.AgentFilter{HarnessConfig: "claude"}, store.ListOptions{})
+				},
+				WantCount: 1,
+			},
+			{
+				// GCPServiceAccountID: matches the applied GCP identity's
+				// service account id inside applied_config; agents with
+				// another account, no GCP identity, or no applied config at
+				// all do not match (ptone/scion#4018).
+				Name: "ByGCPServiceAccountID",
+				Seed: func(t *testing.T, ctx context.Context, s store.Store) {
+					using := newOracleAgent("gcp-sa-using")
+					using.AppliedConfig = &store.AgentAppliedConfig{GCPIdentity: &store.GCPIdentityConfig{
+						MetadataMode: store.GCPMetadataModeAssign, ServiceAccountID: gcpSAFilterTestID,
+					}}
+					require.NoError(t, s.CreateAgent(ctx, using))
+
+					other := newOracleAgent("gcp-sa-other")
+					other.AppliedConfig = &store.AgentAppliedConfig{GCPIdentity: &store.GCPIdentityConfig{
+						MetadataMode: store.GCPMetadataModeAssign, ServiceAccountID: uuid.NewString(),
+					}}
+					require.NoError(t, s.CreateAgent(ctx, other))
+
+					block := newOracleAgent("gcp-sa-block")
+					block.AppliedConfig = &store.AgentAppliedConfig{GCPIdentity: &store.GCPIdentityConfig{
+						MetadataMode: store.GCPMetadataModeBlock,
+					}}
+					require.NoError(t, s.CreateAgent(ctx, block))
+
+					noIdentity := newOracleAgent("gcp-sa-none")
+					noIdentity.AppliedConfig = &store.AgentAppliedConfig{HarnessConfig: "claude"}
+					require.NoError(t, s.CreateAgent(ctx, noIdentity))
+
+					require.NoError(t, s.CreateAgent(ctx, newOracleAgent("gcp-sa-no-config")))
+				},
+				List: func(ctx context.Context, s store.Store) (*store.ListResult[store.Agent], error) {
+					return s.ListAgents(ctx, store.AgentFilter{GCPServiceAccountID: gcpSAFilterTestID}, store.ListOptions{})
 				},
 				WantCount: 1,
 			},

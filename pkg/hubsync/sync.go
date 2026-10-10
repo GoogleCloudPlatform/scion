@@ -174,7 +174,7 @@ const (
 	// path that records this (e.g. a test double), or the field predates
 	// this HubContext.
 	CredentialKindUnknown CredentialKind = ""
-	// CredentialKindOAuth is a human/assistant OAuth login
+	// CredentialKindOAuth is a human (user) OAuth login
 	// (`scion hub auth login`), via credentials.GetAccessToken.
 	CredentialKindOAuth CredentialKind = "oauth"
 	// CredentialKindAgentToken is an actual agent identity token — the

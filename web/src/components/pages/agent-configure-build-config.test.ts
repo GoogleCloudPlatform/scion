@@ -30,8 +30,6 @@
  * truthy-only guard and must keep being omitted when empty.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -536,5 +534,27 @@ describe('agent-configure — branch is read-only for a provisioned agent (ptone
     });
     c.branch = 'something-else';
     expect(c.buildConfig()).not.toHaveProperty('branch');
+  });
+});
+
+describe('agent-configure buildConfig — an unchanged auth type is not echoed (ptone/scion#4013)', () => {
+  it('omits auth_selectedType for an agent created with no harness credentials', async () => {
+    const c = await mountAgentConfigureWithLoadedAgent({
+      model: 'claude-opus',
+      harnessAuth: 'none',
+      inlineConfig: { auth_selectedType: 'none' },
+    });
+    expect(c.authMethod).toBe('none');
+    expect(c.buildConfig()).not.toHaveProperty('auth_selectedType');
+  });
+
+  it('sends auth_selectedType once the user changes it', async () => {
+    const c = await mountAgentConfigureWithLoadedAgent({
+      model: 'claude-opus',
+      harnessAuth: 'none',
+      inlineConfig: { auth_selectedType: 'none' },
+    });
+    c.authMethod = 'api-key';
+    expect(c.buildConfig().auth_selectedType).toBe('api-key');
   });
 });

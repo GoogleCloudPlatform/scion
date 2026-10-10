@@ -29,6 +29,7 @@ import (
 	"time"
 
 	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 )
 
 // fakeTmux is a stand-in tmux client: it prints its arguments, then for
@@ -265,5 +266,63 @@ func TestLocalPTYChownFailureFailsSpawn(t *testing.T) {
 	_, err := startLocalPTY(PTYUser{UID: 65534, GID: 65534}, PTYRequest{Cols: 80, Rows: 24, Session: "scion"}, "/bin/true")
 	if err == nil || !strings.Contains(err.Error(), "chown") {
 		t.Fatalf("startLocalPTY = %v, want a chown error", err)
+	}
+}
+
+// TestAgentNoPTYWithTmuxOnPath: NoPTY keeps New from installing the
+// default spawner even with tmux on PATH, so the Hello advertises tcp
+// only and a PTY stream with a valid pty grant is refused with 4400
+// unsupported_kind.
+func TestAgentNoPTYWithTmuxOnPath(t *testing.T) {
+	installFakeTmux(t)
+	if defaultPTYSpawner(PTYUser{}) == nil {
+		t.Fatal("default spawner unavailable with tmux on PATH")
+	}
+	key := newTestKey(t, "k1")
+	h := newFakeHub(t, key.public)
+	a, _ := startAgent(t, h, func(o *Options) { o.NoPTY = true })
+	if a.opts.SpawnPTY != nil {
+		t.Fatal("New installed a pty spawner despite NoPTY")
+	}
+	got := h.nextHello(t).GetCapabilities().GetStreamKinds()
+	if want := []string{grant.StreamKindTCP}; !slices.Equal(got, want) {
+		t.Fatalf("stream kinds = %v, want %v", got, want)
+	}
+	s := h.nextSession(t)
+	_, err := s.OpenStream(context.Background(), ptyOpen(t, key, s.Info(), ptyParams()))
+	wantRefusal(t, err, core.CloseProtocolError, reasonUnsupportedKind)
+}
+
+// TestAgentDefaultPTYWithTmuxOnPath: without NoPTY or SpawnPTY, New
+// still installs the default spawner when tmux is on PATH and the Hello
+// advertises pty.
+func TestAgentDefaultPTYWithTmuxOnPath(t *testing.T) {
+	installFakeTmux(t)
+	h := newFakeHub(t)
+	a, _ := startAgent(t, h, nil)
+	if a.opts.SpawnPTY == nil {
+		t.Fatal("New installed no default pty spawner with tmux on PATH")
+	}
+	got := h.nextHello(t).GetCapabilities().GetStreamKinds()
+	if want := []string{grant.StreamKindTCP, grant.StreamKindPTY}; !slices.Equal(got, want) {
+		t.Fatalf("stream kinds = %v, want %v", got, want)
+	}
+}
+
+// TestNewRejectsNoPTYWithSpawner: NoPTY together with a SpawnPTY is a
+// configuration error.
+func TestNewRejectsNoPTYWithSpawner(t *testing.T) {
+	installFakeTmux(t)
+	sp := newFakeSpawner()
+	_, err := New(Options{
+		HubURL:    "https://hub.example",
+		AgentID:   testAgentID,
+		ProjectID: testProjectID,
+		Token:     func() string { return "token-1" },
+		NoPTY:     true,
+		SpawnPTY:  sp.spawn,
+	})
+	if err == nil || !strings.Contains(err.Error(), "NoPTY") {
+		t.Fatalf("New = %v, want a NoPTY/SpawnPTY error", err)
 	}
 }

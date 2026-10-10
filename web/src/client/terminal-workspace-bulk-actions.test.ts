@@ -1,4 +1,3 @@
-// @vitest-environment happy-dom
 /**
  * Tests for the Open terminals bulk actions: "Reconnect all" and
  * "Remove all inactive". Covers which rows each action is eligible for,
