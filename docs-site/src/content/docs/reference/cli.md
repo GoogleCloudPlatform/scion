@@ -595,6 +595,17 @@ command line, so it does not appear in the host's process list.
 
 **Usage:** `scion reset-auth <agent-name>`
 
+- **Flags:**
+    - `--reissue-scopes`: Re-issue the agent's role scopes from its delegator's current authority
+      instead: the agent's delegation record is re-recorded, its credentials are revoked, and a new
+      token is pushed to a running agent. Hub super-admins only; audited.
+    - `--dry-run`: With `--reissue-scopes`, show the change without applying it.
+    - `--all`: With `--reissue-scopes`, re-issue every agent on the Hub, parents first (no agent
+      argument). A dry run unless `--apply` is given.
+    - `--apply`: With `--all --reissue-scopes`, apply the re-issue.
+
+See [Reset Auth and Scope Re-issue](/scion/reference/reset-auth/).
+
 ### `scion reincarnate`
 
 Migrates an agent to a fresh **generation**: it stops the agent, re-resolves its configuration

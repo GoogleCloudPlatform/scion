@@ -1495,7 +1495,7 @@ async function simulateDragDrop(
         if (el.dataset.railFocusId === `${key}:select`) {
           const item = el.closest('.terminal-rail-item');
           if (item) {
-            dragHandle = item.querySelector('.terminal-drag-handle') as HTMLElement;
+            dragHandle = item.querySelector<HTMLElement>('.terminal-drag-handle');
             break;
           }
         }
