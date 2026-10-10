@@ -553,14 +553,14 @@ func (c *ControlChannelClient) waitForConnected() error {
 func (c *ControlChannelClient) runMessageLoop() {
 	conn := c.conn
 
-	// Start the ping loop for this connection only. loopDone tells it to
-	// exit once this read loop is over; pingDone reports that it has.
 	// If Close has started, it would not wait for a new ping loop, so close
 	// the connection and return instead of starting one.
 	if !c.addTracked() {
 		_ = conn.Close()
 		return
 	}
+	// Start the ping loop for this connection only. loopDone tells it to
+	// exit once this read loop is over; pingDone reports that it has.
 	loopDone := make(chan struct{})
 	pingDone := make(chan struct{})
 	go func() {
