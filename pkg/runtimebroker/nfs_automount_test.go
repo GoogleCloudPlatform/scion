@@ -853,10 +853,15 @@ func TestExecRunCommand_DescendantHoldsPipe(t *testing.T) {
 // backstop: a descendant that moved to its own session survives the group
 // kill and keeps the output pipe open, and the call still returns shortly
 // after commandWaitDelay rather than when the descendant exits.
+// commandWaitDelay is shortened from its 3s default (pinned by
+// TestPTYShutdownDefaults) so the test does not wait it out.
 func TestExecRunCommand_DescendantOutsideGroup(t *testing.T) {
 	if _, err := exec.LookPath("setsid"); err != nil {
 		t.Skip("setsid not available")
 	}
+	oldWaitDelay := commandWaitDelay
+	commandWaitDelay = 300 * time.Millisecond
+	t.Cleanup(func() { commandWaitDelay = oldWaitDelay })
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	start := time.Now()

@@ -308,6 +308,12 @@ type Server struct {
 	// startup.
 	launchInstanceID string
 
+	// launchTimingOverride replaces the launch sender's default retry
+	// backoffs (and, when its keepaliveInterval is positive, the per-launch
+	// keepalive interval) for every sender built on this server (see
+	// newLaunchSender). Nil in production; only tests set it.
+	launchTimingOverride *launchTimings
+
 	// syncStartSupersedeWait overrides defaultSyncStartSupersedeWait when
 	// positive (see beginSyncStart). Zero in production.
 	syncStartSupersedeWait time.Duration
