@@ -463,15 +463,18 @@ type AgentStore interface {
 
 	// AdoptAgentRunID is CompareAndSwapAgentRunID (expectedRunID to
 	// newRunID, clearing PreviousRunIDs) for the hub's heartbeat adoption
-	// of a stranded run (ptone/scion#3661), and, like SetAgentRunID, it
-	// writes nothing while the row is soft-deleted or a delete holds it, so
-	// a delete's claim snapshot never misses the adopted run. It reports
-	// whether it swapped; a missing agent reports false with no error.
+	// of a stranded run (ptone/scion#3661). It swaps only while
+	// RunIDUpdatedAt is set and no later than unchangedSince, so a run_id
+	// that changed and changed back after the caller's read is not
+	// adopted. Like SetAgentRunID, it writes nothing while the row is
+	// soft-deleted or a delete holds it, so a delete's claim snapshot never
+	// misses the adopted run. It reports whether it swapped; a missing
+	// agent reports false with no error.
 	//
 	// Every run-ID write that changes run_id (SetAgentRunID and the swaps)
 	// also sets RunIDUpdatedAt in the same write; a write that leaves the
 	// value unchanged does not.
-	AdoptAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string) (bool, error)
+	AdoptAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string, unchangedSince time.Time) (bool, error)
 
 	// RecordBrokerReportedRuns records that brokerID, which is not the
 	// agent's assigned broker, reported a runtime entry of each listed

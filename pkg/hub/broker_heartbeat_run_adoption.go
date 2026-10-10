@@ -44,15 +44,19 @@ import (
 //	    the quiet period Q (broker_reported_runs, written by every hub
 //	    replica, so the answer does not depend on which replica handled
 //	    which heartbeat);
-//	(d) run_id has been unchanged for at least Q (run_id_updated_at; a row
-//	    whose run_id has not changed since the column was added is never
-//	    adopted);
+//	(d) run_id has been unchanged for at least Q: run_id_updated_at is set
+//	    and no later than now minus Q, checked on the read and again in the
+//	    swap's own WHERE clause, so a change and change back after the read
+//	    is not adopted (a row whose run_id has not changed since the column
+//	    was added is never adopted);
 //	(e) L is a run the hub issued a token for to A (an AgentCredential row
 //	    for A with run_id L); a missing row means no adoption.
 //
 // A has no lifecycle dispatch queued or in flight on this hub, and no
 // delete or reincarnation holds it. A concurrent run-ID write between the
-// read and the swap makes the swap match nothing, and nothing is written.
+// read and the swap, including one that changes run_id and back to R, makes
+// the swap match nothing (run_id, or run_id_updated_at, no longer
+// matches), and nothing is written.
 //
 // An entry with an empty label (created before run IDs, or an older
 // broker) is logged as agent_run_label_empty and never acted on. A label
@@ -240,7 +244,12 @@ func (s *Server) classifyReportedRuns(ctx context.Context, brokerID string, o *o
 		return
 	}
 	starts, err := report.pendingStarts(ctx, s, brokerID)
-	if err != nil || starts[a.ID] {
+	if err != nil {
+		log.Warn("heartbeat: run adoption: pending dispatch lookup failed",
+			"agent_id", a.ID, "broker_id", brokerID, "error", err)
+		return
+	}
+	if starts[a.ID] {
 		return
 	}
 	// (c): no other broker reported R within Q.
@@ -256,7 +265,7 @@ func (s *Server) classifyReportedRuns(ctx context.Context, brokerID string, o *o
 		}
 	}
 
-	swapped, err := s.store.AdoptAgentRunID(ctx, a.ID, current, candidate)
+	swapped, err := s.store.AdoptAgentRunID(ctx, a.ID, current, candidate, now.Add(-quiet))
 	if err != nil {
 		log.Warn("heartbeat: run adoption: swap failed",
 			"agent_id", a.ID, "broker_id", brokerID, "error", err)

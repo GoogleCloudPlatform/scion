@@ -2725,9 +2725,14 @@ func (s *AgentStore) RevertAgentRunID(ctx context.Context, agentID, mintedRunID,
 }
 
 // AdoptAgentRunID implements store.AgentStore.AdoptAgentRunID: the
-// settling swap, refused while a delete holds the row.
-func (s *AgentStore) AdoptAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string) (bool, error) {
-	return s.swapAgentRunID(ctx, agentID, expectedRunID, newRunID, true, runIDWritable(time.Now()))
+// settling swap, refused while a delete holds the row or when run_id
+// changed after unchangedSince (run_id_updated_at is checked in the same
+// statement as the write).
+func (s *AgentStore) AdoptAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string, unchangedSince time.Time) (bool, error) {
+	return s.swapAgentRunID(ctx, agentID, expectedRunID, newRunID, true,
+		runIDWritable(time.Now()),
+		agent.RunIDUpdatedAtNotNil(),
+		agent.RunIDUpdatedAtLTE(unchangedSince.UTC()))
 }
 
 // swapAgentRunID swaps run_id from expectedRunID to newRunID, under any

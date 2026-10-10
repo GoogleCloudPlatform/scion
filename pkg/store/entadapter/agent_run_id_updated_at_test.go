@@ -112,7 +112,7 @@ func TestRunIDUpdatedAt_MovesOnlyWhenRunIDChanges(t *testing.T) {
 
 	// Heartbeat adoption.
 	tick()
-	ok, err = s.AdoptAgentRunID(ctx, a.ID, "run-2", "run-1")
+	ok, err = s.AdoptAgentRunID(ctx, a.ID, "run-2", "run-1", time.Now())
 	require.NoError(t, err)
 	require.True(t, ok)
 	t5 := moved("heartbeat adoption", &t4)
@@ -144,7 +144,7 @@ func TestAdoptAgentRunID(t *testing.T) {
 		_, err = s.SetAgentRunID(ctx, a.ID, "run-r", nil)
 		require.NoError(t, err)
 
-		ok, err := s.AdoptAgentRunID(ctx, a.ID, "run-r", "run-l")
+		ok, err := s.AdoptAgentRunID(ctx, a.ID, "run-r", "run-l", time.Now())
 		require.NoError(t, err)
 		assert.True(t, ok)
 		got, err := s.GetAgent(ctx, a.ID)
@@ -161,7 +161,7 @@ func TestAdoptAgentRunID(t *testing.T) {
 		require.NoError(t, err)
 		before := runIDUpdatedAt(t, s, a.ID)
 
-		ok, err := s.AdoptAgentRunID(ctx, a.ID, "run-r", "run-l")
+		ok, err := s.AdoptAgentRunID(ctx, a.ID, "run-r", "run-l", time.Now())
 		require.NoError(t, err)
 		assert.False(t, ok)
 		got, err := s.GetAgent(ctx, a.ID)
@@ -170,9 +170,52 @@ func TestAdoptAgentRunID(t *testing.T) {
 		assert.True(t, got.RunIDUpdatedAt.Equal(*before))
 	})
 
+	t.Run("run_id changed and changed back after the read", func(t *testing.T) {
+		s, projectID := newTestAgentStore(t)
+		a := makeAgent(projectID, "adopt-run-aba")
+		require.NoError(t, s.CreateAgent(ctx, a))
+		_, err := s.SetAgentRunID(ctx, a.ID, "run-r", nil)
+		require.NoError(t, err)
+		cutoff := time.Now() // the caller's read: R, unchanged since before this
+		time.Sleep(2 * time.Millisecond)
+		_, err = s.SetAgentRunID(ctx, a.ID, "run-x", nil)
+		require.NoError(t, err)
+		ok, err := s.RevertAgentRunID(ctx, a.ID, "run-x", "run-r")
+		require.NoError(t, err)
+		require.True(t, ok)
+		before, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+
+		ok, err = s.AdoptAgentRunID(ctx, a.ID, "run-r", "run-l", cutoff)
+		require.NoError(t, err)
+		assert.False(t, ok, "run_id_updated_at is after the cutoff")
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "run-r", got.RunID)
+		assert.Equal(t, before.PreviousRunIDs, got.PreviousRunIDs, "nothing written")
+		assert.True(t, got.RunIDUpdatedAt.Equal(*before.RunIDUpdatedAt), "nothing written")
+
+		// With a cutoff after the revert, the same swap applies.
+		ok, err = s.AdoptAgentRunID(ctx, a.ID, "run-r", "run-l", time.Now())
+		require.NoError(t, err)
+		assert.True(t, ok)
+	})
+
+	t.Run("no run_id_updated_at", func(t *testing.T) {
+		s, projectID := newTestAgentStore(t)
+		a := makeAgent(projectID, "adopt-run-nil")
+		require.NoError(t, s.CreateAgent(ctx, a))
+		// A row whose run_id was set before the column existed: write
+		// run_id alone.
+		require.NoError(t, s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).SetRunID("run-r").Exec(ctx))
+		ok, err := s.AdoptAgentRunID(ctx, a.ID, "run-r", "run-l", time.Now())
+		require.NoError(t, err)
+		assert.False(t, ok)
+	})
+
 	t.Run("missing agent", func(t *testing.T) {
 		s, _ := newTestAgentStore(t)
-		ok, err := s.AdoptAgentRunID(ctx, uuid.NewString(), "a", "b")
+		ok, err := s.AdoptAgentRunID(ctx, uuid.NewString(), "a", "b", time.Now())
 		require.NoError(t, err)
 		assert.False(t, ok)
 	})
@@ -202,7 +245,7 @@ func TestAdoptAgentRunID(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, 1, n)
 
-			ok, err := s.AdoptAgentRunID(ctx, a.ID, "run-r", "run-l")
+			ok, err := s.AdoptAgentRunID(ctx, a.ID, "run-r", "run-l", time.Now())
 			require.NoError(t, err)
 			assert.False(t, ok)
 			got, err := s.client.Agent.Get(ctx, uuid.MustParse(a.ID))
