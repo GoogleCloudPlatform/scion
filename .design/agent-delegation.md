@@ -307,10 +307,10 @@ Rules, applied in order. Each one fails closed. §8.4 collects every error code.
       (`ExcludeFromManageAlias`, `registry.go:185`).
    5. Non-amplification uses the same normalized frozen-ceiling rule as UAT mint (the issuer's
       eligibility for each canonical permission), not identity-type caveat intersection.
-6. **Lifetime.** `expiresAt` is required, in the future, and at most 30 days ahead; the default is
-   7 days. `maxCredentialTtlSeconds` is at most 3600; the default is 900 (decided by ptone, §21).
-   A missing, past or too-distant expiry, or a TTL above the maximum, answers 400
-   `validation_error` naming the field.
+6. **Lifetime.** `expiresAt` is optional. When it is omitted, the grant expires 7 days after
+   issuance. When it is given, it must be in the future and at most 30 days ahead.
+   `maxCredentialTtlSeconds` is at most 3600; the default is 900 (decided by ptone, §21). A past or
+   too-distant expiry, or a TTL above the maximum, answers 400 `validation_error` naming the field.
 7. **No subdelegation.** `allowSubdelegation` is stored as `false`. A request that sets it, or sets
    `parentGrantId`, answers 400 `subdelegation_not_supported`.
 8. **Caps.** At most 10 active grants per agent and 50 per issuer, enforced inside the
@@ -463,7 +463,7 @@ external code, goes to the decision record (§14.2).
 
 | HTTP | Code | Where |
 | --- | --- | --- |
-| 400 | `validation_error` | malformed body; malformed boundary (`details.field = boundary`, `details.reason` = `boundary_invalid` or `boundary_required`); empty ceiling; unknown selector at exchange; expiry missing, past or beyond 30 days; TTL above 60 minutes; invalid name, purpose or labels (the value is never echoed) |
+| 400 | `validation_error` | malformed body; malformed boundary (`details.field = boundary`, `details.reason` = `boundary_invalid` or `boundary_required`); empty ceiling; unknown selector at exchange; expiry in the past or beyond 30 days; TTL above 60 minutes; invalid name, purpose or labels (the value is never echoed) |
 | 400 | `subdelegation_not_supported` | issuance sets `allowSubdelegation` or `parentGrantId` |
 | 400 | `invalid_audience` | exchange audience is not this hub's |
 | 401 | `agent_credential_invalid` | exchange or bound-agent management: agent credential row missing, revoked or expired, or its lookup failed |
