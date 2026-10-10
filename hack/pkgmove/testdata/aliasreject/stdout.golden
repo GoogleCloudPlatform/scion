@@ -1,0 +1,40 @@
+pkgmove plan: example.com/fx/hub -> example.com/fx/hub/sub (package sub)
+
+Files (1):
+  git mv hub/move.go hub/sub/move.go
+
+Renames (0):
+
+Alias entries (1):
+  var   Move = sub.Move
+
+Alias files (1):
+  hub/zz_alias_sub.go (13 lines)
+
+Reference rewrites in remaining files (vars and func values) (0):
+
+Remaining source files edited (0):
+
+ERRORS (6) - the move cannot be generated; see the safety report below.
+
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 1. Findings: 2. Errors: 6.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== ERRORS (the move was not generated) ==
+  - hub/move.go:10: moved file uses var callerAt, which stays in hub (hub/zz_alias_apierr.go:25); the target cannot import hub (the alias file makes hub import the target) - move it too, or invert the dependency first (not resolved as an alias: var alias callerAt is assigned or has its address taken at hub/stay_test.go:7, so it is not equivalent to example.com/fx/apierr.CallerAt)
+  - hub/move.go:11: moved file uses var hook, which stays in hub (hub/compat.go:13); the target cannot import hub (the alias file makes hub import the target) - move it too, or invert the dependency first (not resolved as an alias: var hook forwards to example.com/fx/apierr.WriteJSON but is not in a pkgmove-generated alias file (a hand-written var may be a hook))
+  - hub/move.go:12: moved file uses func writeJSON, which stays in hub (hub/compat.go:16); the target cannot import hub (the alias file makes hub import the target) - move it too, or invert the dependency first (not resolved as an alias: func writeJSON forwards to example.com/fx/apierr.WriteJSON but is not in a pkgmove-generated alias file (a hand-written wrapper is not resolved: the target may call recover() or inspect its call stack))
+  - hub/move.go:13: moved file uses var WriteJSON, which stays in hub (hub/zz_alias_apierr.go:24); the target cannot import hub (the alias file makes hub import the target) - move it too, or invert the dependency first (not resolved as an alias: var alias WriteJSON is assigned or has its address taken at importer/importer.go:11, so it is not equivalent to example.com/fx/apierr.WriteJSON)
+  - hub/move.go:14: moved file uses func notFound, which stays in hub (hub/compat.go:10); the target cannot import hub (the alias file makes hub import the target) - move it too, or invert the dependency first
+  - hub/move.go:6: moved file embeds the alias errBox (of example.com/fx/apierr.ErrBox); referring to the target directly renames the embedded field from errBox to ErrBox - rename the field by hand first
+
+== WARN: func name seen through its value changes (runtime.FuncForPC, stack traces) ==
+  hub/move.go:8: example.com/fx/hub.Move is now example.com/fx/hub/sub.Move for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+
+== WARN: reflect-visible type name changes (all users, not only moved files) ==
+  hub/move.go:6: hub.wrapped becomes sub.wrapped for %T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)

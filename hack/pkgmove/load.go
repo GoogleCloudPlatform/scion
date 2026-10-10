@@ -82,6 +82,7 @@ type listedPackage struct {
 	GoFiles, TestGoFiles, XTestGoFiles []string
 	IgnoredGoFiles                     []string
 	Imports, TestImports, XTestImports []string
+	Deps                               []string
 }
 
 // decodeList decodes the concatenated JSON objects that `go list -json` prints.
@@ -190,6 +191,7 @@ func buildContext(tags []string) *build.Context {
 // source by this tool).
 type exportImporter struct {
 	exports   map[string]string
+	deps      map[string][]string // transitive dependencies of each listed package
 	overrides map[string]*types.Package
 	gc        types.Importer
 }
@@ -207,9 +209,9 @@ func (imp *exportImporter) Import(path string) (*types.Package, error) {
 // newExportImporter compiles export data for the given import paths (and their
 // dependencies) and returns an importer that serves them.
 func newExportImporter(fset *token.FileSet, dir string, tags []string, paths []string) (*exportImporter, error) {
-	imp := &exportImporter{exports: map[string]string{}, overrides: map[string]*types.Package{}}
+	imp := &exportImporter{exports: map[string]string{}, deps: map[string][]string{}, overrides: map[string]*types.Package{}}
 	if len(paths) > 0 {
-		args := append([]string{"-e", "-export", "-deps", "-json=ImportPath,Export,Error"}, paths...)
+		args := append([]string{"-e", "-export", "-deps", "-json=ImportPath,Export,Error,Deps"}, paths...)
 		out, err := goList(dir, tags, args...)
 		if err != nil {
 			return nil, err
@@ -225,6 +227,7 @@ func newExportImporter(fset *token.FileSet, dir string, tags []string, paths []s
 			if p.Export != "" {
 				imp.exports[p.ImportPath] = p.Export
 			}
+			imp.deps[p.ImportPath] = p.Deps
 		}
 	}
 	imp.gc = importer.ForCompiler(fset, "gc", func(path string) (io.ReadCloser, error) {
@@ -266,6 +269,7 @@ func typeCheck(fset *token.FileSet, path string, files []*srcFile, imp types.Imp
 		Defs:       map[*ast.Ident]types.Object{},
 		Uses:       map[*ast.Ident]types.Object{},
 		Selections: map[*ast.SelectorExpr]*types.Selection{},
+		Implicits:  map[ast.Node]types.Object{},
 	}
 	var errs []string
 	conf := types.Config{
