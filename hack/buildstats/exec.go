@@ -39,9 +39,11 @@ type Rusage struct {
 	// `go build` / `go test -c` it is the RSS of the largest single process
 	// (normally the biggest compile or the link), not the sum of the tree.
 	PeakRSSBytes int64 `json:"peak_rss_bytes"`
-	// Cgroup memory.peak before and after the run (whole cgroup, monotonic
-	// on kernels that cannot reset it). Only meaningful when the "after"
-	// value is higher than "before"; 0 when not readable.
+	// Cgroup memory.peak before and after the run, for context only. It
+	// covers the WHOLE cgroup (page cache, the agent harness and anything
+	// else in the container), is monotonic on kernels that cannot reset it,
+	// and is NOT comparable to RSS. Do not use it for gates; use
+	// PeakRSSBytes. 0 when not readable.
 	CgroupPeakBefore int64 `json:"cgroup_peak_before_bytes,omitempty"`
 	CgroupPeakAfter  int64 `json:"cgroup_peak_after_bytes,omitempty"`
 }
@@ -143,7 +145,7 @@ func round1(f float64) float64 { return float64(int64(f*10+0.5)) / 10 }
 
 func printRusage(w io.Writer, r *Rusage) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "rc\twall\tuser\tsys\tpeak RSS (largest process)\tcgroup memory.peak")
+	fmt.Fprintln(tw, "rc\twall\tuser\tsys\tpeak RSS (largest process)\tcgroup memory.peak (whole cgroup incl. page cache; context only, not for gates)")
 	cg := "not captured"
 	switch {
 	case r.CgroupPeakAfter > r.CgroupPeakBefore && r.CgroupPeakBefore > 0:

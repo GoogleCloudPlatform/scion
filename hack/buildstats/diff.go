@@ -98,6 +98,14 @@ func diffRecords(w io.Writer, a, b *Record) {
 			}
 		}
 	}
+	if na, nb := a.Normalized, b.Normalized; na != nil && nb != nil {
+		add("lines "+nb.Package, float64(na.Lines), float64(nb.Lines), "")
+		add("funcs "+nb.Package, float64(na.Funcs), float64(nb.Funcs), "")
+		add("peak GiB per 100k lines", na.PeakRSSGiBPer100kLines, nb.PeakRSSGiBPer100kLines, "ratio")
+		add("peak GiB per 10k funcs", na.PeakRSSGiBPer10kFuncs, nb.PeakRSSGiBPer10kFuncs, "ratio")
+		add("compile s per 100k lines", na.CompileSecPer100kLines, nb.CompileSecPer100kLines, "s")
+		add("compile s per 10k funcs", na.CompileSecPer10kFuncs, nb.CompileSecPer10kFuncs, "s")
+	}
 	ot := map[string]TestSummary{}
 	for _, t := range a.Tests {
 		ot[t.Package] = t
@@ -148,6 +156,9 @@ func fmtNum(v float64, unit string) string {
 	if unit == "" {
 		return fmt.Sprintf("%.0f", v)
 	}
+	if unit == "ratio" {
+		return fmt.Sprintf("%.3f", v)
+	}
 	if unit == "GiB" {
 		return fmt.Sprintf("%.2f%s", v, unit)
 	}
@@ -189,16 +200,22 @@ func comparabilityWarnings(a, b *Record) []string {
 		return w
 	}
 	ha, hb := a.Host, b.Host
-	for _, k := range envKeys {
-		if k == "GOCACHE" {
-			continue
+	fa, fb := ha.Form, hb.Form
+	for _, c := range []struct{ k, a, b string }{
+		{"GOMAXPROCS", fa.GOMAXPROCS, fb.GOMAXPROCS},
+		{"GOGC", fa.GOGC, fb.GOGC},
+		{"GOMEMLIMIT", fa.GOMEMLIMIT, fb.GOMEMLIMIT},
+		{"GOFLAGS", fa.GOFLAGS, fb.GOFLAGS},
+		{"rlimit_as", fa.RlimitAS, fb.RlimitAS},
+	} {
+		if c.a != c.b {
+			w = append(w, fmt.Sprintf("%s differs: %q vs %q", c.k, c.a, c.b))
 		}
+	}
+	for _, k := range []string{"GOTOOLCHAIN", "CGO_ENABLED"} {
 		if ha.Env[k] != hb.Env[k] {
 			w = append(w, fmt.Sprintf("%s differs: %q vs %q", k, ha.Env[k], hb.Env[k]))
 		}
-	}
-	if ha.RlimitAS != hb.RlimitAS {
-		w = append(w, fmt.Sprintf("rlimit_as differs: %q vs %q", ha.RlimitAS, hb.RlimitAS))
 	}
 	if ha.CgroupCPU != hb.CgroupCPU || ha.NumCPU != hb.NumCPU {
 		w = append(w, fmt.Sprintf("CPU differs: %d cpus cgroup %q vs %d cpus cgroup %q", ha.NumCPU, ha.CgroupCPU, hb.NumCPU, hb.CgroupCPU))

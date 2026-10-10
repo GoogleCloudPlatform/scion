@@ -43,6 +43,7 @@ type Record struct {
 	Bench       []BenchRecord       `json:"compiler_bench,omitempty"`
 	Tests       []TestSummary       `json:"tests,omitempty"`
 	Deps        []DepCount          `json:"deps,omitempty"`
+	Normalized  *Normalized         `json:"normalized,omitempty"`
 
 	// Artifacts lists the raw files kept next to the record (actiongraph,
 	// bench, test2json output), so a later run can re-summarise them.
@@ -52,15 +53,41 @@ type Record struct {
 // HostInfo captures the settings that change compile cost, so two records
 // can be checked for comparability before their numbers are compared.
 type HostInfo struct {
-	Hostname   string            `json:"hostname,omitempty"`
-	GOOS       string            `json:"goos"`
-	GOARCH     string            `json:"goarch"`
-	NumCPU     int               `json:"num_cpu"`
-	CgroupCPU  string            `json:"cgroup_cpu_max,omitempty"`
-	RlimitAS   string            `json:"rlimit_as,omitempty"`
-	GitHead    string            `json:"git_head,omitempty"`
-	Env        map[string]string `json:"env,omitempty"`
-	ToolGoVers string            `json:"buildstats_go_version"`
+	Hostname  string            `json:"hostname,omitempty"`
+	GOOS      string            `json:"goos"`
+	GOARCH    string            `json:"goarch"`
+	NumCPU    int               `json:"num_cpu"`
+	CgroupCPU string            `json:"cgroup_cpu_max,omitempty"`
+	RlimitAS  string            `json:"rlimit_as,omitempty"`
+	GitHead   string            `json:"git_head,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+	// Form is the memory/concurrency form of the run, always populated
+	// ("unset" when a variable is not set) so gates can check that two
+	// records were taken the same way.
+	Form       RuntimeForm `json:"form"`
+	ToolGoVers string      `json:"buildstats_go_version"`
+}
+
+// RuntimeForm records the settings that change Go compile time and memory.
+// The measured go command inherits buildstats' environment, so these are the
+// values it ran with.
+type RuntimeForm struct {
+	GOMAXPROCS string `json:"GOMAXPROCS"`
+	GOGC       string `json:"GOGC"`
+	GOMEMLIMIT string `json:"GOMEMLIMIT"`
+	GOFLAGS    string `json:"GOFLAGS"`
+	RlimitAS   string `json:"rlimit_as"`
+}
+
+func (f RuntimeForm) String() string {
+	return fmt.Sprintf("GOMAXPROCS=%s GOGC=%s GOMEMLIMIT=%s GOFLAGS=%s rlimit_as=%s", f.GOMAXPROCS, f.GOGC, f.GOMEMLIMIT, f.GOFLAGS, f.RlimitAS)
+}
+
+func envOrUnset(k string) string {
+	if v, ok := os.LookupEnv(k); ok {
+		return v
+	}
+	return "unset"
 }
 
 // envKeys are recorded verbatim when set.
@@ -90,6 +117,13 @@ func collectHost() *HostInfo {
 		h.CgroupCPU = strings.TrimSpace(string(b))
 	}
 	h.RlimitAS = rlimitAS()
+	h.Form = RuntimeForm{
+		GOMAXPROCS: envOrUnset("GOMAXPROCS"),
+		GOGC:       envOrUnset("GOGC"),
+		GOMEMLIMIT: envOrUnset("GOMEMLIMIT"),
+		GOFLAGS:    envOrUnset("GOFLAGS"),
+		RlimitAS:   h.RlimitAS,
+	}
 	for _, k := range envKeys {
 		if v, ok := os.LookupEnv(k); ok {
 			h.Env[k] = v
@@ -140,17 +174,8 @@ func printRecord(w io.Writer, rec *Record) {
 	if len(rec.Command) > 0 {
 		fmt.Fprintf(w, "command: %s\n", truncate(shellJoin(rec.Command), maxCommandDisplay))
 	}
-	if rec.Host != nil && len(rec.Host.Env) > 0 {
-		var parts []string
-		for _, k := range envKeys {
-			if v, ok := rec.Host.Env[k]; ok {
-				parts = append(parts, k+"="+v)
-			}
-		}
-		if rec.Host.RlimitAS != "" {
-			parts = append(parts, "rlimit_as="+rec.Host.RlimitAS)
-		}
-		fmt.Fprintf(w, "env: %s\n", strings.Join(parts, " "))
+	if rec.Host != nil && rec.Host.Form != (RuntimeForm{}) {
+		fmt.Fprintf(w, "form: %s\n", rec.Host.Form)
 	}
 	if rec.Rusage != nil {
 		printRusage(w, rec.Rusage)
@@ -166,6 +191,9 @@ func printRecord(w io.Writer, rec *Record) {
 	}
 	if len(rec.Deps) > 0 {
 		printDeps(w, rec.Deps)
+	}
+	if rec.Normalized != nil {
+		printNormalized(w, rec.Normalized)
 	}
 }
 

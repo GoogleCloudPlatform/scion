@@ -8,10 +8,11 @@ Each run prints a human-readable table (to stderr for the measuring subcommands)
 
 | Measurement | How |
 |---|---|
-| Wall, user, sys time and **peak RSS** of a `go build` / `go test -c` (or any command) | buildstats starts the command as its **own direct child** and reads the child's rusage from `wait4`. `ru_maxrss` includes every descendant the child waited for, so for `go` it is the RSS of the largest single process, normally the biggest compile or the link. This does not need `/usr/bin/time`. The cgroup `memory.peak` is also read before and after the run when it is readable. It covers the whole cgroup and only goes up (it cannot be reset on older kernels), so it only tells you something when it rises during the run. |
+| Wall, user, sys time and **peak RSS** of a `go build` / `go test -c` (or any command) | buildstats starts the command as its **own direct child** and reads the child's rusage from `wait4`. `ru_maxrss` includes every descendant the child waited for, so for `go` it is the RSS of the largest single process, normally the biggest compile or the link. This does not need `/usr/bin/time`. The cgroup `memory.peak` is also read before and after the run, **for context only**: it covers the whole cgroup, including page cache, the agent harness and anything else in the container. It only goes up (older kernels cannot reset it) and it is **not comparable to RSS**. **Never use it for gates**; gates use the peak RSS. |
 | Per-action timings | `compile` adds `-debug-actiongraph=DIR/actiongraph.json`. The summary lists the top actions by wall time (with each compile's user and sys time), plus the summed build and link time. |
 | Compiler phase timings | `compile -bench-pkg PKG` adds `-gcflags=PKG=<inherited flags> -bench=DIR/bench.txt`. Unlike `-cpuprofile`, which the test-main compile overwrites, `-bench` **appends** one block per compiler invocation. You therefore get separate records for the package, its external `_test` package and `main` (the generated test main). buildstats deletes the file before each run. |
 | Test-slice timing | `test` captures test2json output from `go test -json` or `go tool test2json`. It reports, per package: the result, elapsed time, top-level counts (pass/fail/skip), number of subtests, the sum of test times, tests over 1s, the share of the top 20, and the N slowest tests. |
+| Normalised peak and compile time | When `-bench` data is present, `compile` divides the run's peak RSS and the package's `-bench` total by the measured package's size: lines from `fe:parse` and funcs from `be:compilefuncs`. The results are reported per 100k lines and per 10k funcs (the `normalized` section), so a package that grows between gates does not hide a real improvement. |
 | Dependency counts | `deps [-test] PKG...` makes one `go list -deps -json` call and reports total and non-std counts per package. The package itself is excluded, so the total equals `go list -f '{{len .Deps}}'`. With `-test` the count is the test binary's closure. |
 
 ### How `-gcflags` is handled
@@ -127,8 +128,10 @@ Each of these also accepts `-json FILE`.
 
 ## JSON record
 
-The top-level keys are: `schema` (currently 1), `kind`, `label`, `time`, `host`, `command`, `rusage`, `actiongraph`, `compiler_bench`, `tests`, `deps` and `artifacts`. A section that a subcommand does not produce is left out.
+The top-level keys are: `schema` (currently 1), `kind`, `label`, `time`, `host`, `command`, `rusage`, `actiongraph`, `compiler_bench`, `tests`, `deps`, `normalized` and `artifacts`. A section that a subcommand does not produce is left out.
 * `host` records the hostname, CPU count, cgroup `cpu.max`, `RLIMIT_AS`, git HEAD, and the relevant `GO*` environment variables.
+* `host.form` is always present. It records `GOMAXPROCS`, `GOGC`, `GOMEMLIMIT`, `GOFLAGS` (each `"unset"` when not set) and `rlimit_as`. Check it before comparing two gate records; `diff` warns when any of these differ.
+* `normalized` holds the size-normalised figures described above.
 * `artifacts` gives the paths of the raw actiongraph, bench and test2json files, so they can be summarised again later.
 * `schema` is bumped whenever a field changes meaning or is removed.
 

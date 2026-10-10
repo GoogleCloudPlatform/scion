@@ -142,6 +142,7 @@ func cmdCompile(args []string, stdout, stderr io.Writer) (int, error) {
 		if b, err := parseBenchFile(benchFile); err == nil && len(b) > 0 {
 			rec.Bench = b
 			rec.Artifacts["bench"] = benchFile
+			rec.Normalized = normalize(ru.PeakRSSBytes, b)
 		} else {
 			fmt.Fprintf(stderr, "buildstats: no compiler -bench output for %s (package cached or pattern did not match?) %v\n", *benchPkg, err)
 		}

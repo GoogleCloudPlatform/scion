@@ -311,6 +311,47 @@ func TestShellJoin(t *testing.T) {
 	}
 }
 
+func TestNormalize(t *testing.T) {
+	recs, err := parseBenchFile("testdata/bench.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// projectkeys: 811 lines, 68 funcs, 0.087s; main is smaller.
+	n := normalize(gib, recs)
+	if n == nil || n.Package != "github.com/GoogleCloudPlatform/scion/pkg/projectkeys" || n.Lines != 811 || n.Funcs != 68 {
+		t.Fatalf("normalize = %+v", n)
+	}
+	if n.PeakRSSGiBPer100kLines != 123.305 { // 1 GiB / 0.00811
+		t.Errorf("peak per 100k lines = %v", n.PeakRSSGiBPer100kLines)
+	}
+	if n.PeakRSSGiBPer10kFuncs != 147.059 { // 1 GiB / 0.0068
+		t.Errorf("peak per 10k funcs = %v", n.PeakRSSGiBPer10kFuncs)
+	}
+	if n.CompileSecPer100kLines != 10.727 || n.CompileSecPer10kFuncs != 12.794 {
+		t.Errorf("compile per size = %v, %v", n.CompileSecPer100kLines, n.CompileSecPer10kFuncs)
+	}
+	if normalize(gib, nil) != nil {
+		t.Error("no bench data should give nil")
+	}
+	if normalize(gib, []BenchRecord{{Package: "p", TotalSec: 1}}) != nil {
+		t.Error("no size data should give nil")
+	}
+	// Unknown peak still yields the compile-time ratios.
+	if n := normalize(0, recs); n.PeakRSSGiBPer100kLines != 0 || n.CompileSecPer100kLines == 0 {
+		t.Errorf("zero peak = %+v", n)
+	}
+}
+
+func TestCollectHostFormUnset(t *testing.T) {
+	t.Setenv("GOGC", "40")
+	t.Setenv("GOMEMLIMIT", "") // registers restore of the original value
+	os.Unsetenv("GOMEMLIMIT")
+	h := collectHost()
+	if h.Form.GOGC != "40" || h.Form.GOMEMLIMIT != "unset" {
+		t.Errorf("form = %+v", h.Form)
+	}
+}
+
 func TestTruncate(t *testing.T) {
 	if got := truncate("abc", 5); got != "abc" {
 		t.Errorf("short: %q", got)
@@ -323,7 +364,7 @@ func TestTruncate(t *testing.T) {
 func TestDiffRecords(t *testing.T) {
 	old := &Record{
 		Kind:   "compile",
-		Host:   &HostInfo{NumCPU: 32, Env: map[string]string{"GOGC": "40", "GOMEMLIMIT": "6GiB"}},
+		Host:   &HostInfo{NumCPU: 32, Form: RuntimeForm{GOGC: "40", GOMEMLIMIT: "6GiB"}},
 		Rusage: &Rusage{WallSec: 458, UserSec: 808, PeakRSSBytes: 11 * gib},
 		Bench: []BenchRecord{{Package: "p", TotalSec: 295, Phases: []BenchPhase{
 			{Phase: "be:compilefuncs", Seconds: 210, Count: 379120, Unit: "funcs"},
@@ -332,7 +373,7 @@ func TestDiffRecords(t *testing.T) {
 	}
 	nw := &Record{
 		Kind:   "compile",
-		Host:   &HostInfo{NumCPU: 32, Env: map[string]string{"GOGC": "40"}},
+		Host:   &HostInfo{NumCPU: 32, Form: RuntimeForm{GOGC: "40", GOMEMLIMIT: "unset"}},
 		Rusage: &Rusage{WallSec: 325, UserSec: 477, PeakRSSBytes: 11 * gib},
 		Bench: []BenchRecord{{Package: "p", TotalSec: 200, Phases: []BenchPhase{
 			{Phase: "be:compilefuncs", Seconds: 150, Count: 300000, Unit: "funcs"},
@@ -343,7 +384,7 @@ func TestDiffRecords(t *testing.T) {
 	diffRecords(&buf, old, nw)
 	out := buf.String()
 	for _, want := range []string{
-		`WARNING: GOMEMLIMIT differs: "6GiB" vs ""`,
+		`WARNING: GOMEMLIMIT differs: "6GiB" vs "unset"`,
 		"458.0s", "325.0s", "-133.0s", "-29.0%", "wall",
 		"compile total p", "be:compilefuncs funcs",
 		"1524", "1500", "deps p",
