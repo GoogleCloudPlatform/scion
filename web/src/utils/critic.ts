@@ -81,8 +81,8 @@ interface BacktickRun {
 
 /**
  * The Markdown code in src, in order and not overlapping: fenced code
- * blocks and inline code spans, following CommonMark for documents
- * without container blocks, as pkg/artifacts/critic does.
+ * blocks and inline code spans, with CommonMark's rules for those two
+ * constructs, as pkg/artifacts/critic does.
  *
  * - Lines end at LF, CRLF or a lone CR.
  * - A fence is a line of up to three spaces, then at least three backticks
@@ -95,11 +95,14 @@ interface BacktickRun {
  * - A code span opens at a run of n backticks and closes at the next run of
  *   exactly n backticks. A run with no partner is literal. A backslash
  *   escapes the first backtick of a run that would open (the run is one
- *   shorter); it does not escape a closing run. Spans may cross line ends
- *   but not a blank line or a fence.
+ *   shorter); it does not escape a closing run. Spans pair up within a run
+ *   of consecutive non-blank lines that are not fence lines, so they may
+ *   cross line ends but not a blank line or a fence.
  *
  * Indented code blocks, block quotes and list items are not recognised,
- * nor the precedence of HTML tags and autolinks over code spans.
+ * nor the precedence of HTML tags and autolinks over code spans. Other
+ * block boundaries, such as headings, list items and table rows, do not
+ * end a run of lines.
  */
 export function criticCodeRanges(src: string, steps: { n: number } = { n: 0 }): CriticRange[] {
   const out: CriticRange[] = [];
@@ -619,10 +622,10 @@ export function criticToolBlocked(
   // mark's opener (the mark then starts before the edit). Marks elsewhere
   // need no check: the selection does not touch a mark and the tool
   // inserts a balanced mark, so a mark outside the edit could only change
-  // by pairing with the new tokens, which (2) refuses. (3) The code of the
-  // text with every mark rejected must be the same code as before: a mark
-  // at the start of a fence line, for example, stops the line being a
-  // fence, which (1) and (2) do not see.
+  // by pairing with the new tokens, which (2) refuses. (3) The code ranges
+  // of the marked text, mapped into the text with every mark rejected,
+  // must be the same as before: a mark at the start of a fence line, for
+  // example, stops the line being a fence, which (1) and (2) do not see.
   const edit = criticToolEdit(tool, sel);
   if (!edit) return null;
   const result = doc.slice(0, edit.from) + edit.insert + doc.slice(edit.to);
@@ -635,10 +638,11 @@ export function criticToolBlocked(
 }
 
 /**
- * The code ranges of src that survive the clean projection, as offsets
- * into that projection, listed "start-end" and joined by commas. Code in
- * an insertion, a comment or a substitution's new side is dropped. A code
- * range never crosses a mark token, so each lies inside one segment.
+ * The code ranges of the marked text src that lie in text the clean
+ * projection keeps, mapped to offsets in that projection, listed
+ * "start-end" and joined by commas. Code in an insertion, a comment or a
+ * substitution's new side is dropped. A code range never crosses a mark
+ * token, so each lies inside one segment.
  */
 function cleanCode(src: string): string {
   const code = criticCodeRanges(src);

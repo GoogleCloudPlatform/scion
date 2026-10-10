@@ -59,4 +59,12 @@ describe('markdown renderer with CriticMarkup', () => {
     expect(input).not.toContain('<del');
     expect(input.match(/<ins/g)?.length).toBe(1);
   });
+  it('replaces sentinel characters inside code too, so code never renders as a mark', async () => {
+    const r = await getMarkdownRenderer();
+    r.render('a `x\uE000y\uE001z` b', { criticMarks: true });
+    const input = seen.inputs.at(-1) ?? '';
+    expect(input).toContain('<code>x\uFFFDy\uFFFDz</code>');
+    expect(input).not.toContain('<ins');
+    expect(input).not.toMatch(/[\uE000-\uE007]/);
+  });
 });

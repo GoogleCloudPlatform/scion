@@ -669,6 +669,15 @@
    ]
   },
   {
+   "name": "a heading does not end a run of lines",
+   "in": "# The ` key\nPress {++x++} then `",
+   "clean": "# The ` key\nPress {++x++} then `",
+   "accept": "# The ` key\nPress {++x++} then `",
+   "code": [
+    "` key\nPress {++x++} then `"
+   ]
+  },
+  {
    "name": "unicode in code",
    "in": "é `{++ü++}` {++日++}",
    "clean": "é `{++ü++}` ",

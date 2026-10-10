@@ -18,8 +18,8 @@ package critic
 type span struct{ start, end int }
 
 // codeSpans returns the Markdown code in src, in order and not
-// overlapping: fenced code blocks and inline code spans, following
-// CommonMark for documents without container blocks.
+// overlapping: fenced code blocks and inline code spans, with CommonMark's
+// rules for those two constructs.
 //
 //   - Lines end at LF, CRLF or a lone CR.
 //   - A fence is a line of up to three spaces, then at least three
@@ -32,11 +32,14 @@ type span struct{ start, end int }
 //   - A code span opens at a run of n backticks and closes at the next run
 //     of exactly n backticks. A run with no partner is literal. A backslash
 //     escapes the first backtick of a run that would open (the run is one
-//     shorter); it does not escape a closing run. Spans may cross line
-//     ends but not a blank line or a fence, since those end the paragraph.
+//     shorter); it does not escape a closing run. Spans pair up within a
+//     run of consecutive non-blank lines that are not fence lines, so they
+//     may cross line ends but not a blank line or a fence.
 //
 // Indented code blocks, block quotes and list items are not recognised,
-// nor the precedence of HTML tags and autolinks over code spans.
+// nor the precedence of HTML tags and autolinks over code spans. Other
+// block boundaries, such as headings, list items and table rows, do not
+// end a run of lines.
 //
 // One forward pass: each line is examined once, and each paragraph's
 // backtick runs are matched with forward-only pointers into per-length
