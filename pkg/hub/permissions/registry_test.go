@@ -88,6 +88,7 @@ var expectedSelectorRegistry = map[string][]string{
 	"hub_scheduler:read":          {"hub.scheduler.read"},
 	"hub_health:read":             {"hub.health.read"},
 	"hub_validate:execute":        {"hub.validate.execute"},
+	"test_identity:issue":         {"test_identity.issue"},
 	"hub_integrations:read":       {"hub.integrations.read"},
 	"hub_integrations:update":     {"hub.integrations.update"},
 	"hub_teams_manifest:read":     {"hub.teams_manifest.read"},

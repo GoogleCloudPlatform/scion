@@ -466,6 +466,13 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 			"invalid refresh token", nil)
 		return
 	}
+	// Test identities are never issued refresh tokens; refuse any refresh
+	// token for the reserved test-identity domain.
+	if isReservedTestIdentityEmail(claims.Email) {
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+			"invalid refresh token", nil)
+		return
+	}
 
 	// Re-evaluate admin status on token refresh. The stored role is the source
 	// of truth for UI-granted promotions; admin_emails can only add to it.
@@ -610,7 +617,15 @@ func (s *Server) handleAuthValidate(w http.ResponseWriter, r *http.Request) {
 		case u.Status == store.UserStatusSuspended:
 			writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
 			return
+		case testFixtureRejection(u, s.testIdentities.enabled, s.testIdentities.clock()) != "":
+			// Same test-identity rule as the middleware's row block.
+			writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
+			return
 		}
+	} else if isReservedTestIdentityEmail(claims.Email) {
+		// No row to check: a reserved-domain token is not reported valid.
+		writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
+		return
 	}
 
 	var expiresAt *time.Time
@@ -904,6 +919,9 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, "scope_violation", err.Error(), details)
 		case errors.Is(err, ErrUATProjectForbidden):
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "forbidden", nil)
+		case errors.Is(err, ErrUATTestIdentityDenied):
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(),
+				map[string]interface{}{"reason": "test_identity_cannot_create_tokens"})
 		case errors.As(err, &metadataErr):
 			// E.1: bounded metadata validation failure. The error message
 			// names the field/rule only; it never echoes the offending
@@ -1494,6 +1512,13 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 	// before find-or-create so this covers both a brand-new identity and an
 	// already-existing user row for that email.
 	if isReservedPlatformIdentity(info.Email, s.platformAuthSA) {
+		return nil, ErrAccessDenied
+	}
+	// The reserved test-identity domain is created only by the issuance
+	// endpoint and authenticates only through its own hub-issued token.
+	// Checked before find-or-create, like the check above, so it refuses
+	// both a new identity and an existing test-fixture row.
+	if isReservedTestIdentityEmail(info.Email) {
 		return nil, ErrAccessDenied
 	}
 

@@ -1038,6 +1038,31 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 
 	// -------------------------------------------------------------------------
+	// Hub test identities (ptone/scion#4240): test_identity.issue at hub
+	// scope, admitting a hub-boundary token carrying test_identity:issue.
+	// The handlers return 404 unless the hub runs with
+	// --enable-test-identities.
+	// -------------------------------------------------------------------------
+	"POST /api/v1/test-identities": {
+		Pattern: "POST /api/v1/test-identities", RouteID: "testIdentities.create",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+	},
+	"GET /api/v1/test-identities": {
+		Pattern: "GET /api/v1/test-identities", RouteID: "testIdentities.list",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+	},
+	"POST /api/v1/test-identities/{id}/token": {
+		Pattern: "POST /api/v1/test-identities/{id}/token", RouteID: "testIdentities.token",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+	},
+
+	// -------------------------------------------------------------------------
 	// Broker HMAC: Registration and lifecycle
 	//
 	// These routes are RouteBrokerHMAC (route-guard pass-through) because

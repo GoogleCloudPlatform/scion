@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 182
+**Operations:** 185
 
 ## Table of Contents
 
@@ -188,6 +188,9 @@
 - [gcp.identity.verify](#gcpidentityverify) — Verify a GCP service account's IAM configuration
 - [env.read](#envread) — Read project environment variables
 - [env.hub.list](#envhublist) — List hub-level environment variables (scope=hub), without secret entries
+- [testidentity.create](#testidentitycreate) — Issue a short-lived synthetic member or viewer test identity and one access token for it (no refresh token, no cookie)
+- [testidentity.list](#testidentitylist) — List test identities: the caller's own, or every identity for an unscoped platform admin session
+- [testidentity.token.issue](#testidentitytokenissue) — Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session
 
 ---
 
@@ -6857,6 +6860,128 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## testidentity.create
+
+**Domain:** testidentity
+
+**Description:** Issue a short-lived synthetic member or viewer test identity and one access token for it (no refresh token, no cookie)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/test-identities` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `test_identity.issue`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `create-resource`, `mint-credential`
+
+### Governance
+
+- **Kind:** issuer_credential
+- The role is member or viewer only; live identities are capped per issuer and per hub, and issuance is rate limited per issuer
+
+### Audit
+
+- **Event Type:** `test_identity_issue`
+- **Context Fields:** actor_id, credential_id, credential_kind
+- **After Fields:** user_id, role, issued_by, purpose, expires_at, token_ttl_seconds
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestTestIdentity_IssuerAuthorization`
+
+---
+
+## testidentity.list
+
+**Domain:** testidentity
+
+**Description:** List test identities: the caller's own, or every identity for an unscoped platform admin session
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/test-identities` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `test_identity.issue`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestTestIdentity_ListIsolation`
+
+---
+
+## testidentity.token.issue
+
+**Domain:** testidentity
+
+**Description:** Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/test-identities/{id}/token` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `test_identity.issue`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `mint-credential`
+
+### Governance
+
+- **Kind:** issuer_credential
+- Only the identity's issuer (or an unscoped platform admin session) re-issues; the token never outlives the identity
+
+### Audit
+
+- **Event Type:** `test_identity_token_issue`
+- **Context Fields:** actor_id, credential_id, credential_kind
+- **After Fields:** user_id, role, issued_by, token_ttl_seconds
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`, `conflict`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestTestIdentity_TokenReissue`
 
 ---
 

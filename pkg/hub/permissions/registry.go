@@ -52,6 +52,9 @@ const (
 	// (pkg/artifacts). Artifact permissions are checked in the hub's
 	// artifacts.Host adapter against the artifact's home project.
 	ResourceArtifact = "artifact"
+	// ResourceTestIdentity is the hub test identity collection
+	// (POST/GET /api/v1/test-identities).
+	ResourceTestIdentity = "test_identity"
 
 	// ResourceInbox and ResourceUserSkillInjection are self-scoped resource
 	// types: their records belong to one user and carry no project or hub
@@ -94,6 +97,8 @@ const (
 	// ActionWrite covers creating, changing and removing the holder's own
 	// self-scoped records.
 	ActionWrite = "write"
+	// ActionIssue covers issuing hub test identities.
+	ActionIssue = "issue"
 
 	// PermissionGCPServiceAccountUse is the gcp_service_account.use
 	// permission ID. Named so pkg/hub/authz.go's agent-scope handling for
@@ -307,6 +312,7 @@ var Registry = []Permission{
 	{ID: "hub.metrics.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, UATScope: "hub_metrics:read", Description: "Read metrics dashboard", Enforcement: []string{"pkg/hub/route_metadata.go:admin.metricsDashboard", "pkg/hub/route_metadata.go:admin.metricsDashboard.legacy"}},
 	{ID: "hub.env_vars.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "List hub-level environment variables (read only; excludes secrets)", Enforcement: []string{"pkg/hub/handlers_env_secrets.go:listEnvVars"}},
 	{ID: "hub.audit.read", Resource: ResourceHub, Action: ActionManage, CapabilityKind: CapabilityNone, Description: "Explain authorization decisions for other principals (super-admin only)", NonRouteUse: []string{"audit_authz.go explain-for-other-principal gate"}},
+	{ID: "test_identity.issue", Resource: ResourceTestIdentity, Action: ActionIssue, CapabilityKind: CapabilityScope, UATScope: "test_identity:issue", Description: "Issue short-lived synthetic member or viewer test identities (only when the hub runs with --enable-test-identities)", Enforcement: []string{"pkg/hub/route_metadata.go:testIdentities.create", "pkg/hub/route_metadata.go:testIdentities.list", "pkg/hub/route_metadata.go:testIdentities.token", "pkg/hub/handlers_test_identities.go:testIdentityCaller"}},
 
 	// Quota management (Phase 2B — Limits/Quotas)
 	{ID: "quota.read", Resource: ResourceQuota, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read limit definitions, entitlements, and usage", Enforcement: []string{"pkg/hub/handlers_quota.go"}},

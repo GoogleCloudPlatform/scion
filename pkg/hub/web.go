@@ -858,7 +858,10 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 		// token (both the overflow-mint branch and the refresh branches
 		// below). Clear it and continue with no Authorization header so the
 		// request falls through the normal auth flow instead.
-		if email, _ := session.Values[sessKeyUserEmail].(string); isReservedPlatformIdentity(email, ws.config.PlatformAuthSA) {
+		// The reserved test-identity domain never holds a web session
+		// either: test identities authenticate only with their own hub
+		// token.
+		if email, _ := session.Values[sessKeyUserEmail].(string); isReservedPlatformIdentity(email, ws.config.PlatformAuthSA) || isReservedTestIdentityEmail(email) {
 			for key := range session.Values {
 				delete(session.Values, key)
 			}
@@ -2403,8 +2406,8 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 					// See isReservedPlatformIdentity: every path that provisions a
 					// user or mints/re-mints a hub token checks this, including an
 					// existing session for the configured service account.
-					if isReservedPlatformIdentity(email, ws.config.PlatformAuthSA) {
-						ws.logger().Warn("Proxy auth: clearing stale session for the configured service account", "user_id", u.ID)
+					if isReservedPlatformIdentity(email, ws.config.PlatformAuthSA) || isReservedTestIdentityEmail(email) || u.IsTestFixture() {
+						ws.logger().Warn("Proxy auth: clearing stale session for a reserved identity", "user_id", u.ID)
 						ws.clearStaleSession(w, r)
 						return
 					}
@@ -2500,8 +2503,8 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 		// find-or-create (it does not go through Server.provisionUser), so it
 		// carries the same check independently. Checked before authorization,
 		// before find-or-create, and before any session/token is issued.
-		if isReservedPlatformIdentity(proxyUser.Email, ws.config.PlatformAuthSA) {
-			ws.logger().Warn("Proxy auth: rejecting configured service account identity", "email", proxyUser.Email)
+		if isReservedPlatformIdentity(proxyUser.Email, ws.config.PlatformAuthSA) || isReservedTestIdentityEmail(proxyUser.Email) {
+			ws.logger().Warn("Proxy auth: rejecting reserved identity", "email", proxyUser.Email)
 			http.Error(w, "access denied", http.StatusForbidden)
 			return
 		}
@@ -2912,8 +2915,8 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	// mints/re-mints a hub token checks this. A service account cannot
 	// complete interactive OAuth, so this is not reachable in practice; kept
 	// for consistency with the other find-or-create paths.
-	if isReservedPlatformIdentity(userInfo.Email, ws.config.PlatformAuthSA) {
-		ws.logger().Warn("OAuth callback: rejecting configured service account identity", "email", userInfo.Email)
+	if isReservedPlatformIdentity(userInfo.Email, ws.config.PlatformAuthSA) || isReservedTestIdentityEmail(userInfo.Email) {
+		ws.logger().Warn("OAuth callback: rejecting reserved identity", "email", userInfo.Email)
 		http.Redirect(w, r, "/login?error=unauthorized_domain", http.StatusFound)
 		return
 	}

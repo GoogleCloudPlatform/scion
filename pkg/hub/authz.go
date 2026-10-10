@@ -91,6 +91,10 @@ const (
 	// ActionWrite covers changes to the holder's own self-scoped records
 	// (permissions.ActionWrite).
 	ActionWrite Action = "write"
+
+	// ActionIssue covers issuing hub test identities
+	// (permissions.ActionIssue, test_identity.issue).
+	ActionIssue Action = "issue"
 )
 
 // Resource represents the target of an authorization check.

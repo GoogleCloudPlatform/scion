@@ -340,6 +340,12 @@ type ServerConfig struct {
 	// create or authenticate user accounts for this identity. Empty when no
 	// transport service account is configured.
 	PlatformAuthSA string
+	// EnableTestIdentities turns on hub-issued test identities
+	// (--enable-test-identities): POST/GET /api/v1/test-identities and POST
+	// /api/v1/test-identities/{id}/token. Off by default. While it is off
+	// those routes return 404 and every test-fixture user is refused at
+	// authentication. It is a startup-only switch, never a runtime setting.
+	EnableTestIdentities bool
 	// SchedulerIntervalSeconds is the root ticker interval for the background
 	// scheduler, in seconds. Default: 60. Increasing this reduces DB connection
 	// pressure on small deployments.
@@ -1626,6 +1632,10 @@ type Server struct {
 	// check inert.
 	platformAuthSA string
 
+	// testIdentities is the state of hub-issued test identities
+	// (handlers_test_identities.go).
+	testIdentities testIdentityState
+
 	// OIDC identity provider (nil = OIDC IdP disabled)
 	oidcKeyManager       *OIDCKeyManager
 	oidcIssuerURL        string
@@ -1954,6 +1964,11 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	if err := validateSessionOnlyRoutes(startupRouteMetadata()); err != nil {
 		return nil, err
 	}
+	// The test-identity expiry and feature checks run in the auth
+	// middleware's per-request user-row block, which needs a user store.
+	if cfg.EnableTestIdentities && s == nil {
+		return nil, fmt.Errorf("--enable-test-identities requires a user store; none is configured")
+	}
 	// Apply defaults for zero-value fields that have meaningful defaults.
 	defaults := DefaultServerConfig()
 	if cfg.StalledThreshold == 0 || cfg.StalledThreshold < 2*time.Minute {
@@ -2230,6 +2245,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// whether transport minting itself is active. Empty when unset, which
 	// isReservedPlatformIdentity treats as inert.
 	srv.platformAuthSA = cfg.PlatformAuthSA
+	srv.testIdentities = newTestIdentityState(cfg.EnableTestIdentities)
 
 	// Store transport token minter if configured
 	if cfg.TransportMinter != nil {
@@ -2570,6 +2586,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		// can never diverge.
 		PlatformAuthSA: srv.platformAuthSA,
 		AgentRunScope:  newAgentRunScopeChecker(cfg.AgentRunScope, s, srv.authLog),
+		// Test identities (ptone/scion#4240): the flag and clock the JWT
+		// row block's test-fixture checks use.
+		TestIdentitiesEnabled: srv.testIdentities.enabled,
+		Now:                   func() time.Time { return srv.testIdentities.clock() },
 	}
 	if rs := srv.authConfig.AgentRunScope; rs != nil {
 		rs.route = func(r *http.Request) string {
@@ -6251,6 +6271,14 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("DELETE /api/v1/github-app/installations/", s.guarded("DELETE /api/v1/github-app/installations/", s.handleGitHubAppInstallationByIDWrite))
 	s.mux.HandleFunc("POST /api/v1/github-app/installations/discover", s.guarded("POST /api/v1/github-app/installations/discover", s.handleGitHubAppDiscover))
 	s.mux.HandleFunc("POST /api/v1/github-app/sync-permissions", s.guarded("POST /api/v1/github-app/sync-permissions", s.handleGitHubAppSyncPermissions))
+
+	// Hub test identities (ptone/scion#4240). Always registered; each
+	// handler returns 404 unless --enable-test-identities is set.
+	// The gate runs before the route guard, so a hub without the flag
+	// answers 404 to every caller, whatever its permissions.
+	s.mux.HandleFunc("POST /api/v1/test-identities", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identities", s.handleCreateTestIdentity)))
+	s.mux.HandleFunc("GET /api/v1/test-identities", s.testIdentitiesGate(s.guarded("GET /api/v1/test-identities", s.handleListTestIdentities)))
+	s.mux.HandleFunc("POST /api/v1/test-identities/{id}/token", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identities/{id}/token", s.handleIssueTestIdentityToken)))
 
 	// Telegram account linking endpoints
 	s.mux.HandleFunc("/api/v1/telegram/link", s.guarded("/api/v1/telegram/link", s.handleTelegramLink))

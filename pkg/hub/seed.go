@@ -1628,6 +1628,12 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 		for i := range users.Items {
 			u := &users.Items[i]
 			inAdminList := adminSet[strings.ToLower(u.Email)]
+			// A hub test identity is never promoted, even if an operator
+			// lists its address in admin_emails.
+			if inAdminList && u.IsTestFixture() {
+				slog.Warn("skipping admin promotion of a test identity listed in admin_emails", "user_id", u.ID)
+				continue
+			}
 
 			if inAdminList {
 				// Forward: ensure admin role and super-admin binding.
