@@ -313,6 +313,9 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 				"Authentication required", nil)
 			return
 		}
+		if !requireProfileWriter(w, r) {
+			return
+		}
 		// projectID carries the user ID here. importFromRemote uses it for:
 		// 1. Auth token lookup in fetchRemoteForImport — will find no project,
 		//    so the fetch proceeds unauthenticated (correct for user scope).

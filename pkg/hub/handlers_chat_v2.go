@@ -4370,6 +4370,9 @@ func (s *Server) handleChatUserPrefs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, prefs)
 
 	case http.MethodPut:
+		if !requireProfileWriter(w, r) {
+			return
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, 1048576)
 		var body struct {
 			SpaceSortMode  string `json:"spaceSortMode"`
@@ -4541,6 +4544,9 @@ func (s *Server) handleChatPresence(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
 	if user == nil {
 		Forbidden(w)
+		return
+	}
+	if !requireProfileWriter(w, r) {
 		return
 	}
 
@@ -5502,8 +5508,8 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Authorize: user must have read access to the project (same as sending
-	// messages). A project-less upload has nothing to authorize against beyond
-	// the authenticated identity the handler already established.
+	// messages). A project-less upload is a profile write: it needs no
+	// project access, and it is refused to a federated caller.
 	if projectID != "" {
 		project, err := s.store.GetProject(ctx, projectID)
 		if err != nil {
@@ -5513,6 +5519,8 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 		if !s.authorize(w, r, projectResource(project), ActionRead) {
 			return
 		}
+	} else if !requireProfileWriter(w, r) {
+		return
 	}
 
 	// Parse multipart form (limit total to MaxAttachmentSize * MaxAttachmentsPerMessage).

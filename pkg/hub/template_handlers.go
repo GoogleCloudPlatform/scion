@@ -305,6 +305,9 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 			Unauthorized(w)
 			return
 		}
+		if !requireProfileWriter(w, r) {
+			return
+		}
 		scopeID = userIdent.ID()
 		if !s.authorize(w, r, templateUserScopeResource(userIdent), ActionCreate) {
 			return
@@ -522,6 +525,9 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 
+	if !requireTemplateProfileWriter(w, r, existing) {
+		return
+	}
 	// SECURITY-GATE: authorize update access to this specific template.
 	if !s.authorize(w, r, templateResource(existing), ActionUpdate) {
 		return
@@ -601,6 +607,9 @@ func (s *Server) patchTemplateV2(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 
+	if !requireTemplateProfileWriter(w, r, existing) {
+		return
+	}
 	// SECURITY-GATE: authorize update access to this specific template.
 	if !s.authorize(w, r, templateResource(existing), ActionUpdate) {
 		return
@@ -633,6 +642,10 @@ func (s *Server) deleteTemplateV2(w http.ResponseWriter, r *http.Request, id str
 	existing, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	if !requireTemplateProfileWriter(w, r, existing) {
 		return
 	}
 
@@ -715,6 +728,10 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	if !requireTemplateProfileWriter(w, r, template) {
+		return
+	}
+
 	// SECURITY-GATE: authorize update access to this template (upload mutates content).
 	if !s.authorize(w, r, templateResource(template), ActionUpdate) {
 		return
@@ -783,6 +800,10 @@ func (s *Server) handleTemplateFinalize(w http.ResponseWriter, r *http.Request, 
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
 		writeStoreErr(w, err, "Template")
+		return
+	}
+
+	if !requireTemplateProfileWriter(w, r, template) {
 		return
 	}
 
@@ -1012,6 +1033,9 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+			return
+		}
+		if !requireProfileWriter(w, r) {
 			return
 		}
 		// User scope: scopeID must match the authenticated user
