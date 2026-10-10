@@ -4097,18 +4097,26 @@ describe('open terminals rail: a click fills the next free slot (ptone/scion#432
     vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800);
     vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(500);
     reg = new TerminalSessionRegistry({ hubUrl: window.location.origin, accountId: 'r4324' });
+    sessions.clear();
+    navigationSelects = true;
+    mountRoot();
+  });
+
+  /** While false, the nav-click stand-in selects nothing. */
+  let navigationSelects = true;
+
+  function mountRoot(): void {
     root = new WorkspaceRoot();
     document.body.append(root.element);
     root.show(true);
-    sessions.clear();
     // Stands in for main.ts: a rail navigation to an open agent ends in
     // select(), as the coordinator does once the route settles.
     root.element.addEventListener('nav-click', (e) => {
       const agentId = (e as CustomEvent<{ path: string }>).detail.path.split('/').pop()!;
       const session = sessions.get(agentId);
-      if (session) queueMicrotask(() => root.select(session));
+      if (session && navigationSelects) queueMicrotask(() => root.select(session));
     });
-  });
+  }
 
   afterEach(() => {
     root.dispose();
@@ -4224,6 +4232,42 @@ describe('open terminals rail: a click fills the next free slot (ptone/scion#432
     await flush();
     expect(root.layoutManager.getState().active).toBe('four');
     expect(root.layoutManager.getVisibleSlots()).toEqual(full);
+  });
+
+  it('on a narrow viewport, a click in 4-up with free slots changes no slot', async () => {
+    root.dispose();
+    root.element.remove();
+    mockNarrowViewport();
+    mountRoot();
+    root.layoutManager.setLayout('four');
+    sessions.set(AGENT_A, root.create(reg, AGENT_A));
+    sessions.set(
+      AGENT_D,
+      root.withAutoSelectSuspended(() => root.create(reg, AGENT_D, { deferConnect: true }))
+    );
+    await flush();
+    expect(root.layoutManager.getVisibleSlots()).toEqual([key(AGENT_A), null, null, null]);
+
+    clickRail(AGENT_D);
+    await flush();
+    await flush();
+    expect(root.layoutManager.getState().active).toBe('four');
+    expect(root.layoutManager.getVisibleSlots()).toEqual([key(AGENT_A), null, null, null]);
+  });
+
+  it('with a pane zoomed in 4-up with free slots, a click changes no slot and keeps the zoom', async () => {
+    await fourUpWithTwoFilled();
+    root.layoutManager.zoom(key(AGENT_A));
+    await flush();
+    // Only the placement is under test here: the route's own select()
+    // (which ends any zoom, as today) is left out.
+    navigationSelects = false;
+
+    clickRail(AGENT_D);
+    await flush();
+    await flush();
+    expect(root.layoutManager.getZoomed()).toBe(key(AGENT_A));
+    expect(root.layoutManager.getState().four).toEqual([key(AGENT_A), key(AGENT_B), null, null]);
   });
 
   it('in the single layout, a click shows the entry in the one pane, as before', async () => {

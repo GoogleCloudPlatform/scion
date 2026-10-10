@@ -1870,7 +1870,8 @@ export class TerminalWorkspaceRoot {
    */
   private placeInNextFreeSlot(sessionKey: string): void {
     if (this.isSinglePaneView() || this.layoutManager.getZoomed() !== null) return;
-    const slots = this.layoutManager.getVisibleSlots();
+    // The preset's own slots, whatever is zoomed: the guards above decide.
+    const slots = this.getActivePresetSlots(this.layoutManager.getState().active);
     if (slots.includes(sessionKey) || !slots.includes(null)) return;
     this.layoutManager.open(sessionKey);
   }

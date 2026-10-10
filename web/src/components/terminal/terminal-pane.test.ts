@@ -1442,9 +1442,10 @@ describe('compact pane header (ptone/scion#4324)', () => {
         styles: { cssText: string };
       }
     ).styles.cssText.replace(/\s+/g, ' ');
-    // The name shrinks first, with an ellipsis, to a minimum width.
+    // The name shrinks first, with an ellipsis, to a minimum width: 4rem,
+    // or the name's own length when it is shorter.
     expect(styles).toMatch(
-      /\.agent-name \{[^}]*flex: 0 1 auto;[^}]*min-width: 4rem;[^}]*text-overflow: ellipsis;/
+      /\.agent-name \{[^}]*flex: 0 1 auto;[^}]*min-width: min\(4rem, calc\(var\(--agent-name-chars, 8\) \* 1ch\)\);[^}]*text-overflow: ellipsis;/
     );
     // The back links, separator, window toggle and action buttons do not shrink.
     expect(styles).toMatch(
@@ -1452,7 +1453,10 @@ describe('compact pane header (ptone/scion#4324)', () => {
     );
     // And those are the elements the compact header renders.
     const bar = toolbar();
-    expect(bar.querySelector('.agent-name')).not.toBeNull();
+    // The agent is named 'test': its 4 characters cap the minimum width.
+    const name = bar.querySelector<HTMLElement>('.agent-name')!;
+    expect(name.textContent).toBe('test');
+    expect(name.style.getPropertyValue('--agent-name-chars')).toBe('4');
     expect(bar.querySelector('.toggle-group')).not.toBeNull();
     expect(bar.querySelectorAll('a.back-link.compact')).toHaveLength(2);
     expect(bar.querySelector('.pane-action-btn')).not.toBeNull();

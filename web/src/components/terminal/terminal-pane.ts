@@ -318,10 +318,11 @@ export class ScionTerminalPane extends LitElement {
     }
 
     .agent-name {
-      /* Shrinks first, with an ellipsis, but never below a readable width
-         (about eight characters). */
+      /* Shrinks first, with an ellipsis, but never below a readable width:
+         4rem (about eight characters), or the whole name when it is shorter
+         (--agent-name-chars is its length, set in renderAgentName). */
       flex: 0 1 auto;
-      min-width: 4rem;
+      min-width: min(4rem, calc(var(--agent-name-chars, 8) * 1ch));
       font-size: 0.875rem;
       font-weight: 500;
       color: var(--scion-text, #1e293b);
@@ -2098,6 +2099,13 @@ export class ScionTerminalPane extends LitElement {
         : nothing} <a href=${agentHref} class="back-link"> &larr; Back to Agent </a>`;
   }
 
+  /** The agent name in the header, with its length for the .agent-name minimum width. */
+  private renderAgentName(name: string) {
+    return html`<span class="agent-name" style="--agent-name-chars: ${[...name].length}"
+      >${name}</span
+    >`;
+  }
+
   override render() {
     if (this.loading) {
       return html`
@@ -2117,7 +2125,7 @@ export class ScionTerminalPane extends LitElement {
           ${this.agentName
             ? html`
                 <div class="separator"></div>
-                <span class="agent-name">${this.agentName}</span>
+                ${this.renderAgentName(this.agentName)}
               `
             : ''}
         </div>
@@ -2136,7 +2144,7 @@ export class ScionTerminalPane extends LitElement {
       <div class="toolbar">
         ${this.renderBackLinks()}
         <div class="separator"></div>
-        <span class="agent-name">${this.agentName || this.agentId}</span>
+        ${this.renderAgentName(this.agentName || this.agentId)}
         <div class="toggle-group" title="Switch between agent and shell tmux windows">
           <button
             class=${this.activeWindow === 'agent' ? 'active' : ''}
