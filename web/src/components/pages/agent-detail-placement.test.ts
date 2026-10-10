@@ -46,7 +46,7 @@ function makeAgent(overrides: Partial<Agent>): Agent {
     runtimeBrokerName: 'flat-docker',
     appliedConfig: { profile: 'local' },
     ...overrides,
-  } as Agent;
+  };
 }
 
 const flatBroker = {

@@ -31,9 +31,12 @@ import type { ScionNav } from './nav.js';
 let adminStatusBody: AdminStatus | null = null;
 
 function adminStatusRequested(): boolean {
-  return vi
-    .mocked(fetch)
-    .mock.calls.some(([input]) => String(input).includes('/api/v1/auth/admin-status'));
+  return (
+    vi
+      .mocked(fetch)
+      // eslint-disable-next-line @typescript-eslint/no-base-to-string -- test reads the recorded fetch URL; tracked in ptone/scion#4126
+      .mock.calls.some(([input]) => String(input).includes('/api/v1/auth/admin-status'))
+  );
 }
 
 async function mount(user: Pick<User, 'id' | 'role'>): Promise<ScionNav> {
@@ -63,6 +66,7 @@ describe('sidebar Admin section permission gating', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo | URL) => {
+        // eslint-disable-next-line @typescript-eslint/no-base-to-string -- test fetch stub reads the request URL; tracked in ptone/scion#4126
         if (String(input).includes('/api/v1/auth/admin-status') && adminStatusBody) {
           return Promise.resolve(new Response(JSON.stringify(adminStatusBody), { status: 200 }));
         }

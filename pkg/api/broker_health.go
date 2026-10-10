@@ -98,22 +98,33 @@ func NormalizeBrokerHealthReport(r *BrokerHealthReport) *BrokerHealthReport {
 		return nil
 	}
 	out := &BrokerHealthReport{Status: leadingHealthWord(r.Status, brokerHealthStatuses)}
-	names := make([]string, 0, len(r.Checks))
-	for name := range r.Checks {
-		if validBrokerHealthCheckName(name) {
+	out.Checks = normalizeHealthChecks(r.Checks, validBrokerHealthCheckName)
+	return out
+}
+
+// normalizeHealthChecks is the check-map rule shared by broker self-health
+// (NormalizeBrokerHealthReport) and hub instance checks
+// (NormalizeHubInstanceChecks): names failing validName are dropped, at most
+// BrokerHealthMaxChecks names are kept (the first in sorted order), and each
+// value is reduced to its leading fixed word (leadingHealthWord), anything
+// else becoming unknown. An empty result is nil.
+func normalizeHealthChecks(checks map[string]string, validName func(string) bool) map[string]string {
+	names := make([]string, 0, len(checks))
+	for name := range checks {
+		if validName(name) {
 			names = append(names, name)
 		}
 	}
 	if len(names) == 0 {
-		return out
+		return nil
 	}
 	sort.Strings(names)
 	if len(names) > BrokerHealthMaxChecks {
 		names = names[:BrokerHealthMaxChecks]
 	}
-	out.Checks = make(map[string]string, len(names))
+	out := make(map[string]string, len(names))
 	for _, name := range names {
-		out.Checks[name] = leadingHealthWord(r.Checks[name], brokerHealthCheckValues)
+		out[name] = leadingHealthWord(checks[name], brokerHealthCheckValues)
 	}
 	return out
 }

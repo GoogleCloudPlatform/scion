@@ -155,6 +155,10 @@ jobs:
         working-directory: ./web
         run: npm run typecheck
 
+      - name: Lint Web Sources
+        working-directory: ./web
+        run: npm run lint
+
       # The eslint override and lint:e2e-perf script cover the e2e-perf
       # harness sources; wired into CI so they actually run on every change.
       - name: Lint browser perf benchmark (e2e-perf)

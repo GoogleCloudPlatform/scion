@@ -961,6 +961,7 @@ export class ScionAgentMessageViewer extends LitElement {
       const fromLabel = msg.sender || 'unknown';
       const toLabel = msg.recipient || 'unknown';
 
+      // prettier-ignore
       rows.push(html`
         <div class="message-row" @click=${() => this.toggleExpand(msg.insertId)}>
           <div class="msg-direction ${msg.direction}">
