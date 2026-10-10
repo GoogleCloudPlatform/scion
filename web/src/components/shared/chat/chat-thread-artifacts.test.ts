@@ -417,7 +417,7 @@ describe('scion-chat-thread artifact references', () => {
     expect(historyCalls()).toEqual([`/api/v1/chat/conversations/${KEY}/messages?limit=1`]);
   });
 
-  it('clears the notice when the only marked message is evicted by the buffer cap or deleted', async () => {
+  it('clears the notice when the only marked message is evicted by the buffer cap', async () => {
     apiFetch.mockResolvedValue(
       history({
         items: [message('m-old', 'old'), message('m-del', 'to delete')],
@@ -426,10 +426,7 @@ describe('scion-chat-thread artifact references', () => {
     );
     const el = await mount();
     await vi.waitFor(() => expect(refsNotice(el)).not.toBeNull());
-    const internals = el as unknown as {
-      mergeMessages(msgs: unknown[]): void;
-      applyArtifactRefsAvailability(ids: string[], unavailable: string[] | undefined): void;
-    };
+    const internals = el as unknown as { mergeMessages(msgs: unknown[]): void };
     // 500 newer messages push m-old (and m-del) out of the buffer.
     const newer = Array.from({ length: 500 }, (_, i) => ({
       ...message(`n${String(i).padStart(3, '0')}`, 'newer'),
@@ -439,16 +436,21 @@ describe('scion-chat-thread artifact references', () => {
     await el.updateComplete;
     expect(messageEl(el, 'm-old')).toBeNull();
     expect(refsNotice(el)).toBeNull();
+  });
 
-    // A live soft-delete of the only marked message clears it too.
-    internals.applyArtifactRefsAvailability(['n499'], ['n499']);
-    await el.updateComplete;
-    expect(refsNotice(el)).not.toBeNull();
+  it('clears the notice when the only marked message is deleted live', async () => {
+    apiFetch.mockResolvedValue(history({ items: [] }));
+    const el = await mount();
+    apiFetch.mockResolvedValue(
+      history({ messages: [message('m2', 'here it is')], messageArtifactsUnavailable: ['m2'] })
+    );
+    live('m2', 'here it is', [`scion://artifact/${A}`]);
+    await vi.waitFor(() => expect(refsNotice(el)).not.toBeNull());
     fakeStateManager.dispatchEvent(
       new CustomEvent('chat-message-deleted', {
         detail: {
           state: {},
-          data: { conversationKey: KEY, messageId: 'n499', deletedAt: '2026-10-08T11:00:00Z' },
+          data: { conversationKey: KEY, messageId: 'm2', deletedAt: '2026-10-08T11:00:00Z' },
         },
       })
     );
