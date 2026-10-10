@@ -17,7 +17,9 @@
 package artifacts
 
 import (
+	"context"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -164,5 +166,67 @@ func TestCanPublishUnreadableIsMissing(t *testing.T) {
 	got := f.do(&outside, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil)
 	if got.Code != http.StatusNotFound || response(got) != response(missing) || got.Body.String() != missing.Body.String() {
 		t.Errorf("unreadable GET %d %q differs from missing %d %q", got.Code, got.Body.String(), missing.Code, missing.Body.String())
+	}
+}
+
+// TestWriteRoutesGrantReadFailureIsLoud: a write route whose decision
+// needs the grants answers 500 when they cannot be read, never the 403 a
+// working read might not give. agentB reads through its home project, so
+// only the write decision reads the grants.
+func TestWriteRoutesGrantReadFailureIsLoud(t *testing.T) {
+	files := bundle{"doc.md": []byte("# v2")}
+	f, id := newLinkFixture(t)
+	versions := "/api/v1/artifacts/" + id + "/versions"
+	// With the grants readable, agentB may read but not write.
+	if rec := f.postJSON(&agentB, versions, files.manifest("doc.md")); rec.Code != http.StatusForbidden {
+		t.Fatalf("POST /versions with grants readable: %d, want 403", rec.Code)
+	}
+	f.svc.SetStore(failGrantsStore{f.store})
+	for _, tc := range []struct {
+		name string
+		do   func() *httptest.ResponseRecorder
+	}{
+		{"POST /versions", func() *httptest.ResponseRecorder {
+			return f.postJSON(&agentB, versions, files.manifest("doc.md"))
+		}},
+		{"PUT file", func() *httptest.ResponseRecorder {
+			return f.do(&agentB, http.MethodPut, versions+"/2/files/doc.md", files["doc.md"], nil)
+		}},
+		{"finalize", func() *httptest.ResponseRecorder {
+			return f.do(&agentB, http.MethodPost, versions+"/2/finalize", nil, nil)
+		}},
+	} {
+		if rec := tc.do(); rec.Code != http.StatusInternalServerError || errCode(t, rec) != "internal" {
+			t.Errorf("%s with grants unreadable: %d %s, want 500 internal", tc.name, rec.Code, rec.Body.String())
+		}
+	}
+	// The owner's decision needs no grants.
+	if rec := f.postJSON(&userU, versions, files.manifest("doc.md")); rec.Code != http.StatusCreated {
+		t.Errorf("owner POST /versions with grants unreadable: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAppendVersionGrantReadFailureIsLoud: appendVersion's own write check
+// (it runs again after writableArtifact, and alone on a keyed append)
+// answers 500 on a failed grant read, with and without a known Permits
+// answer.
+func TestAppendVersionGrantReadFailureIsLoud(t *testing.T) {
+	files := bundle{"doc.md": []byte("# v2")}
+	f, id := newLinkFixture(t)
+	a, err := f.store.GetArtifact(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.svc.SetStore(failGrantsStore{f.store})
+	b, _ := f.svc.backend()
+	permitted := true
+	for _, p := range []*bool{nil, &permitted} {
+		req := files.manifest("doc.md")
+		r := withPrincipal(httptest.NewRequest(http.MethodPost, "/api/v1/artifacts/"+id+"/versions", nil), agentB)
+		rec := httptest.NewRecorder()
+		f.svc.appendVersion(rec, r, b, a, &req, p)
+		if rec.Code != http.StatusInternalServerError || errCode(t, rec) != "internal" {
+			t.Errorf("appendVersion (permitted known: %v) with grants unreadable: %d %s, want 500 internal", p != nil, rec.Code, rec.Body.String())
+		}
 	}
 }

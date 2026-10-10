@@ -73,7 +73,7 @@ type ArtifactResponse struct {
 	CanManage bool `json:"canManage,omitempty"`
 	// CanPublish, on a GET of the artifact or of one of its versions, is
 	// true when the caller may publish new versions of it (edit, upload or
-	// review; see canWrite): the decision POST /{id}/versions makes for the
+	// review; see canWriteErr): the decision POST /{id}/versions makes for the
 	// same request.
 	CanPublish bool `json:"canPublish,omitempty"`
 }

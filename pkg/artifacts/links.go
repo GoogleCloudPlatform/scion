@@ -254,12 +254,17 @@ func (s *Service) capabilities(w http.ResponseWriter, r *http.Request, b backend
 	}
 	canPublish, err := s.canWriteErr(r.Context(), b, a)
 	if err != nil {
-		slog.ErrorContext(r.Context(), "artifacts: list grants failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "internal", "could not read the artifact's grants")
+		writeGrantsReadFailed(w, r, err)
 		return false
 	}
 	resp.CanPublish = canPublish
 	return true
+}
+
+// writeGrantsReadFailed logs a failed grant read and answers 500.
+func writeGrantsReadFailed(w http.ResponseWriter, r *http.Request, err error) {
+	slog.ErrorContext(r.Context(), "artifacts: list grants failed", "error", err)
+	writeError(w, http.StatusInternalServerError, "internal", "could not read the artifact's grants")
 }
 
 // handleCreateLink implements POST /{id}/links.
