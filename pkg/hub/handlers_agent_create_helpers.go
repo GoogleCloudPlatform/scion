@@ -1485,8 +1485,8 @@ func (s *Server) handleExistingAgent(
 				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 			case relayDispatchRefusal(w, err):
 				// Required-skill resolution failure relayed with the broker's status.
-			case relayHarnessConfigRefusal(w, err):
-				// Harness-config refusal relayed with the broker's status.
+			case relayBrokerRefusal(w, err):
+				// Broker refusal relayed with the broker's status.
 			case relayIdentityMappingError(w, err):
 				// Kubernetes identity mapping refusal relayed as a 400.
 			default:
@@ -1625,8 +1625,8 @@ func (s *Server) handleExistingAgent(
 					Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 				case relayDispatchRefusal(w, err):
 					// Required-skill resolution failure relayed with the broker's status.
-				case relayHarnessConfigRefusal(w, err):
-					// Harness-config refusal relayed with the broker's status.
+				case relayBrokerRefusal(w, err):
+					// Broker refusal relayed with the broker's status.
 				case relayIdentityMappingError(w, err):
 					// Kubernetes identity mapping refusal relayed as a 400.
 				default:
@@ -1823,8 +1823,8 @@ func (s *Server) handleExistingAgent(
 				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 			case relayDispatchRefusal(w, err):
 				// Required-skill resolution failure relayed with the broker's status.
-			case relayHarnessConfigRefusal(w, err):
-				// Harness-config refusal relayed with the broker's status.
+			case relayBrokerRefusal(w, err):
+				// Broker refusal relayed with the broker's status.
 			case relayIdentityMappingError(w, err):
 				// Kubernetes identity mapping refusal relayed as a 400.
 			default:
