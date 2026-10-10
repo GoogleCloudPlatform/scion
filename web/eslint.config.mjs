@@ -92,9 +92,8 @@ export default defineConfig([
   globalIgnores(['**/dist/', '**/node_modules/', '**/public/', '**/*.cjs']),
 
   {
-    // ESLint 9+ reports unused eslint-disable comments by default.
-    // Keep the ESLint 8 behaviour.
-    linterOptions: { reportUnusedDisableDirectives: 'off' },
+    // Fail on stale eslint-disable comments so they do not build up.
+    linterOptions: { reportUnusedDisableDirectives: 'error' },
   },
 
   {
