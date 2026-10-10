@@ -488,3 +488,143 @@ it('reports failed handshakes separately and scopes the auth probe to its Hub ba
   });
   client.disconnect();
 });
+
+describe('SSEClient stale connection detection', () => {
+  /** Deliver a named heartbeat event on the current connection. */
+  function heartbeat(): void {
+    latest().dispatchEvent(new MessageEvent('heartbeat', { data: String(Date.now()) }));
+  }
+
+  /** Deliver an update event on the current connection. */
+  function update(): void {
+    latest().dispatchEvent(
+      new MessageEvent('update', { data: JSON.stringify({ subject: 'x', data: {} }) })
+    );
+  }
+
+  it('replaces an open but silent connection when the tab resumes', () => {
+    const client = connectAndOpen();
+    const drops = vi.fn();
+    const opens = vi.fn();
+    client.addEventListener('disconnected', drops);
+    client.addEventListener('connected', opens);
+    setVisibility('hidden');
+    vi.advanceTimersByTime(120_000);
+
+    setVisibility('visible');
+
+    expect(FakeEventSource.instances).toHaveLength(2);
+    expect(FakeEventSource.instances[0]!.closed).toBe(true);
+    // Reported as a drop, so the reopen drives the usual resync.
+    expect(drops).toHaveBeenCalledTimes(1);
+    latest().simulateOpen();
+    expect(opens).toHaveBeenCalledTimes(1);
+    client.disconnect();
+  });
+
+  it('keeps a connection that delivered traffic while hidden', () => {
+    const client = connectAndOpen();
+    setVisibility('hidden');
+    vi.advanceTimersByTime(100_000);
+    update();
+    vi.advanceTimersByTime(20_000);
+
+    setVisibility('visible');
+
+    expect(FakeEventSource.instances).toHaveLength(1);
+    client.disconnect();
+  });
+
+  it('keeps a connection after a short absence', () => {
+    const client = connectAndOpen();
+    vi.advanceTimersByTime(100_000);
+    setVisibility('hidden');
+    vi.advanceTimersByTime(10_000);
+
+    setVisibility('visible');
+
+    // Silent, but idle streams are normal without heartbeat events and the
+    // tab was away too briefly to have been suspended.
+    expect(FakeEventSource.instances).toHaveLength(1);
+    client.disconnect();
+  });
+
+  it('checks on pageshow and online as well', () => {
+    const client = connectAndOpen();
+    window.dispatchEvent(new Event('offline'));
+    vi.advanceTimersByTime(80_000);
+    window.dispatchEvent(new Event('online'));
+    expect(FakeEventSource.instances).toHaveLength(2);
+    latest().simulateOpen();
+
+    window.dispatchEvent(new Event('pagehide'));
+    vi.advanceTimersByTime(80_000);
+    window.dispatchEvent(new Event('pageshow'));
+    expect(FakeEventSource.instances).toHaveLength(3);
+    client.disconnect();
+  });
+
+  it('does not reconnect idle visible streams without heartbeat events', () => {
+    const client = connectAndOpen();
+    vi.advanceTimersByTime(600_000);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    client.disconnect();
+  });
+
+  it('reconnects a visible stream once heartbeat events stop', () => {
+    const client = connectAndOpen();
+    for (let i = 0; i < 10; i++) {
+      vi.advanceTimersByTime(30_000);
+      heartbeat();
+    }
+    expect(FakeEventSource.instances).toHaveLength(1);
+
+    // Heartbeats stop; the next check past the window replaces the stream.
+    vi.advanceTimersByTime(75_000);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    vi.advanceTimersByTime(15_000);
+    expect(FakeEventSource.instances).toHaveLength(2);
+    client.disconnect();
+  });
+
+  it('keeps one reconnect in flight', () => {
+    const client = connectAndOpen();
+    setVisibility('hidden');
+    vi.advanceTimersByTime(120_000);
+
+    setVisibility('visible');
+    window.dispatchEvent(new Event('pageshow'));
+    window.dispatchEvent(new Event('online'));
+    setVisibility('visible');
+    vi.advanceTimersByTime(60_000);
+
+    // The replacement is still connecting; nothing else may replace it.
+    expect(FakeEventSource.instances).toHaveLength(2);
+    expect(latest().readyState).toBe(FakeEventSource.CONNECTING);
+    client.disconnect();
+  });
+
+  it('a new connection must earn heartbeat trust again', () => {
+    const client = connectAndOpen();
+    heartbeat();
+    vi.advanceTimersByTime(90_000);
+    expect(FakeEventSource.instances).toHaveLength(2);
+    latest().simulateOpen();
+
+    // The replacement has sent no heartbeat event yet, so silence while
+    // visible does not condemn it: no reconnect loop.
+    vi.advanceTimersByTime(600_000);
+    expect(FakeEventSource.instances).toHaveLength(2);
+    client.disconnect();
+  });
+
+  it('stops checking after disconnect', () => {
+    const client = connectAndOpen();
+    heartbeat();
+    client.disconnect();
+    vi.advanceTimersByTime(600_000);
+    setVisibility('visible');
+    window.dispatchEvent(new Event('online'));
+    expect(FakeEventSource.instances).toHaveLength(1);
+  });
+});
