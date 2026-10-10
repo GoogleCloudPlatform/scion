@@ -75,6 +75,12 @@ type EventPublisher interface {
 	// topic keys too: a self-notification has no "no peer, so no audience"
 	// case to exclude.
 	PublishChatOwnReadStateEvent(ctx context.Context, conversationKey, userID, messageID string)
+	// PublishChatOwnStateChanged tells the caller's own sessions, on
+	// user.<userID>.chat.read-state, that their read watermark advanced
+	// (messageID set) or that they muted or unmuted the conversation
+	// (muted set), so unread counts can refresh. The event's Unread field
+	// is always false.
+	PublishChatOwnStateChanged(ctx context.Context, conversationKey, userID, messageID string, muted *bool)
 	// PublishChatMemberMessage publishes a thread message to each user in
 	// userIDs on user.<id>.chat.message. Callers pass only current members
 	// of the thread's conversation who can read its project; see
@@ -130,6 +136,8 @@ func (noopEventPublisher) PublishChatTopicEvent(_ context.Context, _ string, _ s
 }
 func (noopEventPublisher) PublishChatReadStateEvent(_ context.Context, _, _, _ string)    {}
 func (noopEventPublisher) PublishChatOwnReadStateEvent(_ context.Context, _, _, _ string) {}
+func (noopEventPublisher) PublishChatOwnStateChanged(_ context.Context, _, _, _ string, _ *bool) {
+}
 func (noopEventPublisher) PublishChatMemberMessage(_ context.Context, _ *store.Message, _ []AttachmentRef, _ []string) {
 }
 func (noopEventPublisher) PublishChatMessageEdited(_ context.Context, _ string, _ string, _ ChatMessageEditedEvent) {
@@ -888,6 +896,24 @@ func (p *eventBuilder) PublishChatOwnReadStateEvent(_ context.Context, conversat
 		// add its own way to say "not unread" rather than let this default
 		// silently become ambiguous again.
 		Unread: true,
+	}
+	p.sink("user."+userID+".chat.read-state", evt)
+}
+
+// PublishChatOwnStateChanged publishes the caller's own read watermark
+// advance or mute change to their own sessions on
+// user.<userID>.chat.read-state. Unread stays false, so clients do not take
+// it for a mark-unread (see ChatReadStateEvent.Unread).
+func (p *eventBuilder) PublishChatOwnStateChanged(_ context.Context, conversationKey, userID, messageID string, muted *bool) {
+	if conversationKey == "" || userID == "" {
+		return
+	}
+	evt := ChatReadStateEvent{
+		ConversationKey: conversationKey,
+		UserID:          userID,
+		MessageID:       messageID,
+		ReadAt:          time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		Muted:           muted,
 	}
 	p.sink("user."+userID+".chat.read-state", evt)
 }

@@ -203,3 +203,59 @@ func TestThreadMessageFanOut_SendPath(t *testing.T) {
 	}
 	assert.Empty(t, collectEvents(others), "non-members, leavers and suspended users get nothing")
 }
+
+// Reading a conversation, and muting or unmuting it, tell the caller's own
+// sessions on their read-state subject, never as a mark-unread.
+func TestOwnStateEvents_ReadAndMute(t *testing.T) {
+	f := newMemberFanoutFixture(t)
+	rec := doRequestAsUser(t, f.srv, f.alice, http.MethodPost,
+		"/api/v1/chat/conversations/"+f.topicID+"/messages", map[string]string{"content": "first"})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	var sent struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &sent))
+	require.NotEmpty(t, sent.ID)
+
+	// carol is a member and reads alice's message.
+	own, unsubOwn := f.ep.Subscribe("user." + f.carol.ID + ".chat.read-state")
+	defer unsubOwn()
+	others, unsubOthers := f.ep.Subscribe("user." + f.alice.ID + ".chat.read-state")
+	defer unsubOthers()
+
+	rec = doRequestAsUser(t, f.srv, f.carol, http.MethodPost,
+		"/api/v1/chat/conversations/"+f.topicID+"/read", map[string]string{"messageId": sent.ID})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	rec = doRequestAsUser(t, f.srv, f.carol, http.MethodPut,
+		"/api/v1/chat/conversations/"+f.topicID+"/mute", map[string]bool{"muted": true})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	rec = doRequestAsUser(t, f.srv, f.carol, http.MethodPut,
+		"/api/v1/chat/conversations/"+f.topicID+"/mute", map[string]bool{"muted": false})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	// Pinning does not change the count and publishes nothing.
+	rec = doRequestAsUser(t, f.srv, f.carol, http.MethodPut,
+		"/api/v1/chat/conversations/"+f.topicID+"/pin", map[string]bool{"pinned": true})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	evts := collectEvents(own)
+	require.Len(t, evts, 3)
+	var got []ChatReadStateEvent
+	for _, e := range evts {
+		var rs ChatReadStateEvent
+		require.NoError(t, json.Unmarshal(e.Data, &rs))
+		assert.Equal(t, f.topicID, rs.ConversationKey)
+		assert.Equal(t, f.carol.ID, rs.UserID)
+		assert.False(t, rs.Unread, "own read and mute events are never a mark-unread")
+		got = append(got, rs)
+	}
+	assert.Equal(t, sent.ID, got[0].MessageID)
+	assert.Nil(t, got[0].Muted)
+	require.NotNil(t, got[1].Muted)
+	assert.True(t, *got[1].Muted)
+	require.NotNil(t, got[2].Muted)
+	assert.False(t, *got[2].Muted)
+
+	assert.Empty(t, collectEvents(others), "a thread read is not published to other users")
+}

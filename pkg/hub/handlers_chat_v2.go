@@ -3273,6 +3273,8 @@ func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, 
 	// Tell the DM peer their message has been seen. Best-effort: a dropped
 	// event only costs the sender a "seen" tick until their next reload.
 	s.events.PublishChatReadStateEvent(ctx, key, user.ID(), body.MessageID)
+	// Tell the reader's own sessions, so their unread count refreshes.
+	s.events.PublishChatOwnStateChanged(ctx, key, user.ID(), body.MessageID, nil)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -3493,7 +3495,8 @@ func (s *Server) authorizeConversationAccess(
 
 // handleConversationMute handles PUT /api/v1/chat/conversations/{key}/mute.
 // Body: {"muted": bool}. A muted conversation is left out of the unread
-// counts (the space rollups and GET /api/v1/chat/unread-count).
+// counts (the space rollups and GET /api/v1/chat/unread-count), and the
+// caller's own sessions are told of the change on their read-state subject.
 func (s *Server) handleConversationMute(w http.ResponseWriter, r *http.Request, key string) {
 	s.handleConversationFlag(w, r, key, "muted", "mute", WebChatStore.SetMuted)
 }
@@ -3556,6 +3559,10 @@ func (s *Server) handleConversationFlag(
 	if err := set(wcs, r.Context(), user.ID(), key, value); err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update "+action+" state", nil)
 		return
+	}
+	if field == "muted" {
+		// Muting changes what the caller's unread count includes.
+		s.events.PublishChatOwnStateChanged(r.Context(), key, user.ID(), "", &value)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]bool{field: value})

@@ -265,6 +265,9 @@ func (e *agentKeysEventSpy) PublishChatReadStateEvent(_ context.Context, _, _, _
 func (e *agentKeysEventSpy) PublishChatOwnReadStateEvent(_ context.Context, _, _, _ string) {
 	e.record("PublishChatOwnReadStateEvent")
 }
+func (e *agentKeysEventSpy) PublishChatOwnStateChanged(_ context.Context, _, _, _ string, _ *bool) {
+	e.record("PublishChatOwnStateChanged")
+}
 func (e *agentKeysEventSpy) PublishChatMemberMessage(_ context.Context, _ *store.Message, _ []AttachmentRef, _ []string) {
 	e.record("PublishChatMemberMessage")
 }
