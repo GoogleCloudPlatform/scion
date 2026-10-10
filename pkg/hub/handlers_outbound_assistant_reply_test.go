@@ -150,7 +150,6 @@ func newAssistantReplyFixture(t *testing.T, withBroker bool) *assistantReplyFixt
 		srv.SetMessageBrokerProxy(proxy)
 		srv.mu.RLock()
 		proxy.webChatStore = srv.webChatStore
-		proxy.chatNotifier = srv.chatNotifier
 		srv.mu.RUnlock()
 		proxy.subscribeProjectUserMessages(project.ID)
 	} else {
