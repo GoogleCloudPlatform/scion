@@ -1152,6 +1152,11 @@ type BrokerProfile struct {
 	// every few minutes). One timestamp for all entries: the report is
 	// always sent whole. Nil when never reported.
 	MappingsReportedAt *time.Time `json:"mappingsReportedAt,omitempty"`
+	// MappingsReportVersion is the broker's report version
+	// (api.BrokerSAReportVersion); zero from a broker that predates it.
+	// The Hub refuses a dispatch from the report only at that version or
+	// later (ptone/scion#3329 phase 4b).
+	MappingsReportVersion int `json:"mappingsReportVersion,omitempty"`
 }
 
 // BrokerProfileSAMapping is one GCP service account a broker profile can

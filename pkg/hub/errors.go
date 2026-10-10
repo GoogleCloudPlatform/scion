@@ -52,6 +52,7 @@ const (
 	ErrCodeNotFound             = "not_found"
 	ErrCodeConflict             = "conflict"
 	ErrCodeVersionConflict      = "version_conflict"
+	ErrCodeTemplateConflict     = "template_conflict" // 409: a template commit lost its compare-and-swap (ptone/scion#4221)
 	ErrCodeUnprocessable        = "unprocessable"
 	ErrCodeRateLimited          = "rate_limited"
 	ErrCodeInternalError        = "internal_error"

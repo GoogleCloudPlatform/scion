@@ -109,6 +109,13 @@ type UploadResponse struct {
 // FinalizeRequest is the request body for finalizing a template upload.
 type FinalizeRequest struct {
 	Manifest *TemplateManifest `json:"manifest"`
+	// ExpectedContentHash, when set, is the template content hash the
+	// client diffed its upload against. Finalize commits only if the
+	// template still has that hash and otherwise answers 409
+	// template_conflict (ptone/scion#4221). Clients that omit it get the
+	// same check against the hash the hub read when the finalize request
+	// arrived.
+	ExpectedContentHash string `json:"expectedContentHash,omitempty"`
 }
 
 // TemplateManifest is the manifest of uploaded template files.
@@ -296,6 +303,9 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
 			Unauthorized(w)
+			return
+		}
+		if !requireProfileWriter(w, r) {
 			return
 		}
 		scopeID = userIdent.ID()
@@ -515,6 +525,9 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 
+	if !requireTemplateProfileWriter(w, r, existing) {
+		return
+	}
 	// SECURITY-GATE: authorize update access to this specific template.
 	if !s.authorize(w, r, templateResource(existing), ActionUpdate) {
 		return
@@ -559,6 +572,11 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 	template.Files = existing.Files
 	template.ContentHash = existing.ContentHash
 	template.AgentConfig = existing.AgentConfig // derived; set only by the commit path
+	// Harness and DefaultHarnessConfig are derived from the files too. The
+	// store's UpdateTemplate does not write any content column
+	// (ptone/scion#4221); pinning them here keeps the response truthful.
+	template.Harness = existing.Harness
+	template.DefaultHarnessConfig = existing.DefaultHarnessConfig
 	template.Status = existing.Status
 	template.BaseTemplate = existing.BaseTemplate
 	template.SourceURL = existing.SourceURL
@@ -589,6 +607,9 @@ func (s *Server) patchTemplateV2(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 
+	if !requireTemplateProfileWriter(w, r, existing) {
+		return
+	}
 	// SECURITY-GATE: authorize update access to this specific template.
 	if !s.authorize(w, r, templateResource(existing), ActionUpdate) {
 		return
@@ -621,6 +642,10 @@ func (s *Server) deleteTemplateV2(w http.ResponseWriter, r *http.Request, id str
 	existing, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	if !requireTemplateProfileWriter(w, r, existing) {
 		return
 	}
 
@@ -703,6 +728,10 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	if !requireTemplateProfileWriter(w, r, template) {
+		return
+	}
+
 	// SECURITY-GATE: authorize update access to this template (upload mutates content).
 	if !s.authorize(w, r, templateResource(template), ActionUpdate) {
 		return
@@ -774,6 +803,10 @@ func (s *Server) handleTemplateFinalize(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	if !requireTemplateProfileWriter(w, r, template) {
+		return
+	}
+
 	// SECURITY-GATE: authorize update access to this template (finalize mutates state).
 	if !s.authorize(w, r, templateResource(template), ActionUpdate) {
 		return
@@ -803,7 +836,7 @@ func (s *Server) handleTemplateFinalize(w http.ResponseWriter, r *http.Request, 
 	// client (`scion templates sync/push`, its retry, and the agent-start
 	// updateHubTemplate path) sends the full manifest.
 	template.Status = store.TemplateStatusActive
-	if err := s.commitTemplateFiles(ctx, template, req.Manifest.Files, commitOpts{}); err != nil {
+	if err := s.commitTemplateFiles(ctx, template, req.Manifest.Files, commitOpts{expectedContentHash: req.ExpectedContentHash}); err != nil {
 		writeTemplateCommitError(w, err)
 		return
 	}
@@ -1000,6 +1033,9 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+			return
+		}
+		if !requireProfileWriter(w, r) {
 			return
 		}
 		// User scope: scopeID must match the authenticated user

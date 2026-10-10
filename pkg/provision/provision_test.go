@@ -37,57 +37,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// testLocker is a mock AdvisoryLocker for testing.
-type testLocker struct {
-	mu       sync.Mutex
-	held     map[lockKey]bool
-	acquires int64
-}
-
-type lockKey struct {
-	classID int64
-	objID   int32
-	single  bool
-}
-
-func newTestLocker() *testLocker {
-	return &testLocker{held: make(map[lockKey]bool)}
-}
-
-func (l *testLocker) TryAdvisoryLock(ctx context.Context, key store.AdvisoryLockKey) (bool, func() error, error) {
-	k := lockKey{classID: int64(key), single: true}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.held[k] {
-		return false, func() error { return nil }, nil
-	}
-	l.held[k] = true
-	atomic.AddInt64(&l.acquires, 1)
-	return true, func() error {
-		l.mu.Lock()
-		defer l.mu.Unlock()
-		delete(l.held, k)
-		return nil
-	}, nil
-}
-
-func (l *testLocker) TryAdvisoryLockObject(ctx context.Context, classID store.AdvisoryLockKey, objID int32) (bool, func() error, error) {
-	k := lockKey{classID: int64(classID), objID: objID}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.held[k] {
-		return false, func() error { return nil }, nil
-	}
-	l.held[k] = true
-	atomic.AddInt64(&l.acquires, 1)
-	return true, func() error {
-		l.mu.Lock()
-		defer l.mu.Unlock()
-		delete(l.held, k)
-		return nil
-	}, nil
-}
-
 // initBareGitRepo creates a bare git repo at a temporary path for cloning from.
 func initBareGitRepo(t *testing.T) string {
 	t.Helper()
@@ -882,31 +831,19 @@ func TestWriteSentinel_Atomic(t *testing.T) {
 
 // --- acquireProvisionLock context cancellation ---
 
-// alwaysLoseLocker is an AdvisoryLocker where TryAdvisoryLockObject always
-// returns acquired=false (another node holds the lock).
-type alwaysLoseLocker struct{}
-
-func (l *alwaysLoseLocker) TryAdvisoryLock(_ context.Context, _ store.AdvisoryLockKey) (bool, func() error, error) {
-	return false, func() error { return nil }, nil
-}
-
-func (l *alwaysLoseLocker) TryAdvisoryLockObject(_ context.Context, _ store.AdvisoryLockKey, _ int32) (bool, func() error, error) {
-	return false, func() error { return nil }, nil
-}
-
 func TestAcquireProvisionLock_ContextCancellation(t *testing.T) {
-	locker := &alwaysLoseLocker{}
+	dir := t.TempDir()
+	// Another holder has the file lock.
+	_, err := tryCreateFileLock(filepath.Join(dir, provisionFileLockName))
+	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	in := ProvisionInput{
-		ProjectID: "proj-cancel-test",
-		Locker:    locker,
-	}
+	in := ProvisionInput{ProjectID: "proj-cancel-test"}
 
 	start := time.Now()
-	_, err := acquireProvisionLock(ctx, in, t.TempDir())
+	_, err = acquireProvisionLock(ctx, in, dir)
 	elapsed := time.Since(start)
 
 	require.Error(t, err)
@@ -914,8 +851,8 @@ func TestAcquireProvisionLock_ContextCancellation(t *testing.T) {
 	assert.Less(t, elapsed, 2*time.Second, "should return promptly on context cancellation, not wait for all retries")
 }
 
-// --- acquireFileLock: fallback mutex used when no Locker is available
-// (the k8s init container's normal case — it has no Hub/DB connection). ---
+// --- acquireFileLock: the provisioning mutex for every caller (the k8s
+// init container has no Hub/DB connection). ---
 
 // makeLongHeldCrashedLock publishes a real generation, gives it a heartbeat
 // file, and back-dates both the way a lock that was held for a long time and
@@ -2972,11 +2909,11 @@ func TestGitCloneWorkspace_LostOwnershipBeforeMove_AbortsWithoutMoving(t *testin
 	}
 }
 
-// --- ProvisionShared end-to-end with no Locker: proves the filesystem
+// --- ProvisionShared end-to-end: proves the filesystem
 // fallback actually protects the clone/chown/sentinel sequence, not just
 // the lock primitive in isolation. ---
 
-func TestProvisionShared_NoLocker_ConcurrentSameProject_NoCorruption(t *testing.T) {
+func TestProvisionShared_ConcurrentSameProject_NoCorruption(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	bareRepo := initBareGitRepo(t)
 
@@ -2995,7 +2932,6 @@ func TestProvisionShared_NoLocker_ConcurrentSameProject_NoCorruption(t *testing.
 				Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "nfs"},
 				ProjectID: "proj-no-locker-1",
 				Mode:      store.SharingModeSharedPlain,
-				Locker:    nil,
 				GitClone: &api.GitCloneConfig{
 					URL:    bareRepo,
 					Branch: "main",
@@ -3023,7 +2959,7 @@ func TestProvisionShared_NoLocker_ConcurrentSameProject_NoCorruption(t *testing.
 	assert.NoDirExists(t, filepath.Join(projectDir, provisionFileLockName))
 }
 
-// TestProvisionShared_NoLocker_ConcurrentSameProject_SentinelInWorkspace
+// TestProvisionShared_ConcurrentSameProject_SentinelInWorkspace
 // reproduces the actual k8s init container configuration: SentinelDir is
 // set equal to the workspace dir itself (cmd/sciontool/commands/provision.go
 // sets SentinelDir: workspace, because only the workspace dir is mounted —
@@ -3035,7 +2971,7 @@ func TestProvisionShared_NoLocker_ConcurrentSameProject_NoCorruption(t *testing.
 // and is not an empty directory" refusal, and self-healing that by deleting
 // the lock out from under an in-progress holder is exactly the corruption
 // this mechanism exists to prevent.
-func TestProvisionShared_NoLocker_ConcurrentSameProject_SentinelInWorkspace(t *testing.T) {
+func TestProvisionShared_ConcurrentSameProject_SentinelInWorkspace(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	bareRepo := initBareGitRepo(t)
 
@@ -3053,7 +2989,6 @@ func TestProvisionShared_NoLocker_ConcurrentSameProject_SentinelInWorkspace(t *t
 				Resolved:    ResolvedWorkspace{HostPath: hostPath, Backend: "nfs"},
 				ProjectID:   "proj-no-locker-sentinel-in-ws",
 				Mode:        store.SharingModeSharedPlain,
-				Locker:      nil,
 				SentinelDir: hostPath, // k8s init container: only the workspace dir is mounted.
 				GitClone: &api.GitCloneConfig{
 					URL:    bareRepo,
@@ -3096,16 +3031,16 @@ func TestProvisionShared_NoLocker_ConcurrentSameProject_SentinelInWorkspace(t *t
 	assert.NotContains(t, string(out), provisionFileLockName, "git status: %s", out)
 }
 
-// TestGitCloneWorkspace_NoLocker_SentinelIsParent_ClonesDirect proves
+// TestGitCloneWorkspace_SentinelIsParent_ClonesDirect proves
 // the temp-dir clone workaround must apply only
 // when the fallback lock's own directory would actually sit inside the
 // clone target (SentinelDir == HostPath, the k8s init container's
 // configuration). When SentinelDir is the workspace's PARENT instead — the
 // broker's own host-side worktree-per-agent flow and Cloud Run both use
-// this shape even with Locker == nil — the clone must go directly into
+// this shape — the clone must go directly into
 // HostPath exactly as it did before this change, with no scratch
 // subdirectory ever created.
-func TestGitCloneWorkspace_NoLocker_SentinelIsParent_ClonesDirect(t *testing.T) {
+func TestGitCloneWorkspace_SentinelIsParent_ClonesDirect(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	bareRepo := initBareGitRepo(t)
 
@@ -3116,7 +3051,6 @@ func TestGitCloneWorkspace_NoLocker_SentinelIsParent_ClonesDirect(t *testing.T) 
 	err := gitCloneWorkspace(context.Background(), ProvisionInput{
 		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
 		ProjectID: "proj-direct-clone",
-		Locker:    nil,
 		// SentinelDir left empty -> defaults to filepath.Dir(hostPath), i.e.
 		// projectDir, NOT hostPath. This is the shape that must clone direct.
 		GitClone: &api.GitCloneConfig{URL: bareRepo, Branch: "main"},
@@ -3134,12 +3068,12 @@ func TestGitCloneWorkspace_NoLocker_SentinelIsParent_ClonesDirect(t *testing.T) 
 	}
 }
 
-// TestProvisionShared_NoLocker_SharedPlain_SentinelPresent_SkipsLockEntirely
+// TestProvisionShared_SharedPlain_SentinelPresent_SkipsLockEntirely
 // is the regression test proving that for SharedPlain mode, an
 // already-provisioned project must return without ever touching the lock —
 // including a lock some unrelated crashed holder elsewhere left stale and
 // present — not just "without waiting for it".
-func TestProvisionShared_NoLocker_SharedPlain_SentinelPresent_SkipsLockEntirely(t *testing.T) {
+func TestProvisionShared_SharedPlain_SentinelPresent_SkipsLockEntirely(t *testing.T) {
 	projectDir := t.TempDir()
 	hostPath := filepath.Join(projectDir, "workspace")
 	require.NoError(t, os.MkdirAll(hostPath, 0770))
@@ -3161,7 +3095,6 @@ func TestProvisionShared_NoLocker_SharedPlain_SentinelPresent_SkipsLockEntirely(
 		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "nfs"},
 		ProjectID: "proj-already-done",
 		Mode:      store.SharingModeSharedPlain,
-		Locker:    nil,
 	})
 	elapsed := time.Since(start)
 
@@ -3174,14 +3107,14 @@ func TestProvisionShared_NoLocker_SharedPlain_SentinelPresent_SkipsLockEntirely(
 	assert.Equal(t, "dead-owner", string(current))
 }
 
-// TestProvisionShared_NoLocker_WorktreePerAgent_SentinelPresent_CrashedLock_SelfHeals
+// TestProvisionShared_WorktreePerAgent_SentinelPresent_CrashedLock_SelfHeals
 // covers the "crashed holder on an already-provisioned workspace" case:
 // unlike SharedPlain,
 // WorktreePerAgent must still take the lock (for ensureWorktree) even when
 // the base clone's sentinel already exists — and if a stale, crashed lock
 // happens to be sitting there, it must self-heal (reclaim) rather than fail
 // the whole retry budget.
-func TestProvisionShared_NoLocker_WorktreePerAgent_SentinelPresent_CrashedLock_SelfHeals(t *testing.T) {
+func TestProvisionShared_WorktreePerAgent_SentinelPresent_CrashedLock_SelfHeals(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	bareRepo := initBareGitRepo(t)
 
@@ -3193,7 +3126,6 @@ func TestProvisionShared_NoLocker_WorktreePerAgent_SentinelPresent_CrashedLock_S
 		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "nfs"},
 		ProjectID: "proj-crashed-lock-wt",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    nil,
 		AgentID:   "agent-0",
 		AgentName: "agent-0",
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main"},
@@ -3213,7 +3145,6 @@ func TestProvisionShared_NoLocker_WorktreePerAgent_SentinelPresent_CrashedLock_S
 		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "nfs"},
 		ProjectID: "proj-crashed-lock-wt",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    nil,
 		AgentID:   "agent-1",
 		AgentName: "agent-1",
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main"},
@@ -3240,7 +3171,6 @@ func TestGitCloneWorkspace_RefusesWhenWorktreesNonEmpty(t *testing.T) {
 	err := gitCloneWorkspace(context.Background(), ProvisionInput{
 		Resolved:    ResolvedWorkspace{HostPath: hostPath, Backend: "nfs"},
 		ProjectID:   "proj-worktrees-nonempty",
-		Locker:      nil,
 		SentinelDir: hostPath, // forces the temp-dir clone path
 		GitClone:    &api.GitCloneConfig{URL: bareRepo, Branch: "main"},
 	}, func() bool { return true })
@@ -3271,7 +3201,6 @@ func TestGitCloneWorkspace_PreClearSurvivesConcurrentStagingDir(t *testing.T) {
 	err = gitCloneWorkspace(context.Background(), ProvisionInput{
 		Resolved:    ResolvedWorkspace{HostPath: hostPath, Backend: "nfs"},
 		ProjectID:   "proj-stage-survives-clear",
-		Locker:      nil,
 		SentinelDir: hostPath, // forces the temp-dir clone path
 		GitClone:    &api.GitCloneConfig{URL: bareRepo, Branch: "main"},
 	}, func() bool { return true })
@@ -3319,7 +3248,6 @@ func TestMoveDirContentsUp_RollsBackOnPartialFailure(t *testing.T) {
 
 func TestProvision_WorktreePerAgent(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
-	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
 
 	projectDir := t.TempDir()
@@ -3331,7 +3259,6 @@ func TestProvision_WorktreePerAgent(t *testing.T) {
 		AgentID:   "agent-wt-1",
 		AgentName: "test-agent",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone: &api.GitCloneConfig{
 			URL:    bareRepo,
 			Branch: "main",
@@ -3388,7 +3315,6 @@ func TestProvision_WorktreePerAgent(t *testing.T) {
 
 func TestProvision_WorktreePerAgent_TwoAgents(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
-	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
 
 	projectDir := t.TempDir()
@@ -3401,7 +3327,6 @@ func TestProvision_WorktreePerAgent_TwoAgents(t *testing.T) {
 		AgentID:   "agent-1",
 		AgentName: "first-agent",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone: &api.GitCloneConfig{
 			URL:    bareRepo,
 			Branch: "main",
@@ -3418,7 +3343,6 @@ func TestProvision_WorktreePerAgent_TwoAgents(t *testing.T) {
 		AgentID:   "agent-2",
 		AgentName: "second-agent",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone: &api.GitCloneConfig{
 			URL:    bareRepo,
 			Branch: "main",
@@ -3461,7 +3385,6 @@ func TestProvision_WorktreePerAgent_TwoAgents(t *testing.T) {
 
 func TestProvision_WorktreePerAgent_TwoProjects(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
-	locker := newTestLocker()
 	bareRepoA := initBareGitRepo(t)
 	bareRepoB := initBareGitRepo(t)
 
@@ -3485,7 +3408,6 @@ func TestProvision_WorktreePerAgent_TwoProjects(t *testing.T) {
 		AgentID:   "agent-a1",
 		AgentName: "alpha-agent",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepoA, Branch: "main"},
 	})
 	if err != nil {
@@ -3506,7 +3428,6 @@ func TestProvision_WorktreePerAgent_TwoProjects(t *testing.T) {
 		AgentID:   "agent-b1",
 		AgentName: "beta-agent",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepoB, Branch: "main"},
 	})
 	if err != nil {
@@ -3539,7 +3460,6 @@ func TestProvision_WorktreePerAgent_TwoProjects(t *testing.T) {
 
 func TestProvision_WorktreePerAgent_ConcurrentSameProject(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
-	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
 
 	projectDir := t.TempDir()
@@ -3559,7 +3479,6 @@ func TestProvision_WorktreePerAgent_ConcurrentSameProject(t *testing.T) {
 				AgentID:   agentID,
 				AgentName: fmt.Sprintf("concurrent-agent-%d", idx),
 				Mode:      store.SharingModeWorktreePerAgent,
-				Locker:    locker,
 				GitClone: &api.GitCloneConfig{
 					URL:    bareRepo,
 					Branch: "main",
@@ -3592,7 +3511,6 @@ func TestProvision_WorktreePerAgent_ConcurrentSameProject(t *testing.T) {
 
 func TestProvision_WorktreePerAgent_FullCloneDepth(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
-	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
 
 	projectDir := t.TempDir()
@@ -3605,7 +3523,6 @@ func TestProvision_WorktreePerAgent_FullCloneDepth(t *testing.T) {
 		AgentID:   "agent-depth-1",
 		AgentName: "depth-agent",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone: &api.GitCloneConfig{
 			URL:    bareRepo,
 			Branch: "main",
@@ -3630,7 +3547,6 @@ func TestProvision_WorktreePerAgent_FullCloneDepth(t *testing.T) {
 // agent's checkout, instead of silently wiping it.
 func TestProvision_SelfHealRefusesWhenSiblingWorktreePresent(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
-	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
 
 	projectDir := t.TempDir()
@@ -3643,7 +3559,6 @@ func TestProvision_SelfHealRefusesWhenSiblingWorktreePresent(t *testing.T) {
 		AgentID:   "agent-1",
 		AgentName: "agent-1",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main"},
 	}); err != nil {
 		t.Fatalf("initial provision: %v", err)
@@ -3675,7 +3590,6 @@ func TestProvision_SelfHealRefusesWhenSiblingWorktreePresent(t *testing.T) {
 		AgentID:   "agent-2",
 		AgentName: "agent-2",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main"},
 	})
 	if err == nil {
@@ -3701,7 +3615,6 @@ func TestProvision_SelfHealRefusesWhenSiblingWorktreePresent(t *testing.T) {
 // the check's own directory read return an error rather than "not found".
 func TestProvision_SelfHealRefusesWhenWorktreesCheckErrors(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
-	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
 
 	projectDir := t.TempDir()
@@ -3730,7 +3643,6 @@ func TestProvision_SelfHealRefusesWhenWorktreesCheckErrors(t *testing.T) {
 		AgentID:   "agent-1",
 		AgentName: "agent-1",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main"},
 	})
 	if err == nil {
@@ -3771,7 +3683,6 @@ func TestWorktreePath(t *testing.T) {
 
 func TestIsValidJoinWorktree(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
-	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
 
 	projectDir := t.TempDir()
@@ -3782,7 +3693,6 @@ func TestIsValidJoinWorktree(t *testing.T) {
 		AgentID:   "agent-1",
 		AgentName: "agent-1",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main"},
 	}); err != nil {
 		t.Fatalf("initial provision: %v", err)
@@ -4346,7 +4256,6 @@ func TestPrepareBaseForWorktrees_DocumentedWorkflowsWithConfigUnwritable(t *test
 
 func TestProvision_WorktreePerAgent_CreateAndJoin(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
-	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
 
 	projectDir := t.TempDir()
@@ -4359,7 +4268,6 @@ func TestProvision_WorktreePerAgent_CreateAndJoin(t *testing.T) {
 		AgentID:   "agent-a",
 		AgentName: "shared-branch",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
 	require.NoError(t, err)
@@ -4381,7 +4289,6 @@ func TestProvision_WorktreePerAgent_CreateAndJoin(t *testing.T) {
 		AgentID:   "agent-b",
 		AgentName: "shared-branch",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
 	require.NoError(t, err)
@@ -4407,7 +4314,6 @@ func TestProvision_WorktreePerAgent_CreateAndJoin(t *testing.T) {
 // check, so this refusal is pinned as its own, independent guarantee.
 func TestProvision_EnsureWorktree_OwnPathNotRealWorktree_Refused(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
-	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
 
 	projectDir := t.TempDir()
@@ -4420,7 +4326,6 @@ func TestProvision_EnsureWorktree_OwnPathNotRealWorktree_Refused(t *testing.T) {
 		AgentID:   "agent-a",
 		AgentName: "agent-a",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	}))
 
@@ -4435,7 +4340,6 @@ func TestProvision_EnsureWorktree_OwnPathNotRealWorktree_Refused(t *testing.T) {
 		AgentID:   "agent-b",
 		AgentName: "agent-b",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
 	require.Error(t, err, "expected ProvisionShared to refuse a non-worktree occupant of agent-b's own path")
@@ -4461,7 +4365,6 @@ func TestProvision_EnsureWorktree_OwnPathNotRealWorktree_Refused(t *testing.T) {
 // survives unchanged with no new agent added to it.
 func TestProvision_EnsureWorktree_RegistryNamesNonWorktree_Refused(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
-	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
 
 	projectDir := t.TempDir()
@@ -4473,7 +4376,6 @@ func TestProvision_EnsureWorktree_RegistryNamesNonWorktree_Refused(t *testing.T)
 		AgentID:   "agent-a",
 		AgentName: "agent-a",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	}))
 
@@ -4497,7 +4399,6 @@ func TestProvision_EnsureWorktree_RegistryNamesNonWorktree_Refused(t *testing.T)
 		AgentID:   "agent-c",
 		AgentName: "other-branch",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
 	require.Error(t, err, "expected ProvisionShared to refuse a registry entry that is not a valid worktree")
@@ -4529,7 +4430,6 @@ func TestProvision_EnsureWorktree_RegistryNamesNonWorktree_Refused(t *testing.T)
 // real worktree of this checkout.
 func TestProvision_EnsureWorktree_RegistryNamesDirectChildNonWorktree_Refused(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
-	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
 
 	projectDir := t.TempDir()
@@ -4541,7 +4441,6 @@ func TestProvision_EnsureWorktree_RegistryNamesDirectChildNonWorktree_Refused(t 
 		AgentID:   "agent-a",
 		AgentName: "agent-a",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	}))
 
@@ -4555,7 +4454,6 @@ func TestProvision_EnsureWorktree_RegistryNamesDirectChildNonWorktree_Refused(t 
 		AgentID:   "agent-c",
 		AgentName: "other-branch-2",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
 	require.Error(t, err, "expected ProvisionShared to refuse joining a direct-child registry entry with no .git")
@@ -4606,7 +4504,6 @@ func TestProvision_EnsureWorktree_RegistryNamesNonCanonicalPath_Refused(t *testi
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("SCION_HOST_UID", "")
-			locker := newTestLocker()
 			bareRepo := initBareGitRepo(t)
 
 			projectDir := t.TempDir()
@@ -4619,7 +4516,6 @@ func TestProvision_EnsureWorktree_RegistryNamesNonCanonicalPath_Refused(t *testi
 				AgentID:   "agent-a",
 				AgentName: "agent-a",
 				Mode:      store.SharingModeWorktreePerAgent,
-				Locker:    locker,
 				GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 			}))
 
@@ -4635,7 +4531,6 @@ func TestProvision_EnsureWorktree_RegistryNamesNonCanonicalPath_Refused(t *testi
 				AgentID:   "agent-c",
 				AgentName: branch,
 				Mode:      store.SharingModeWorktreePerAgent,
-				Locker:    locker,
 				GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 			})
 			require.Error(t, err, "expected ProvisionShared to refuse joining a non-canonical registry marker")
@@ -4668,7 +4563,6 @@ func TestProvision_EnsureWorktree_RegistryNamesNonCanonicalPath_Refused(t *testi
 // `git worktree add` to create one, not a hand-built fixture.
 func TestProvision_EnsureWorktree_CreateCollisionFallbackRefusesNonDirectChild(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
-	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
 
 	projectDir := t.TempDir()
@@ -4680,7 +4574,6 @@ func TestProvision_EnsureWorktree_CreateCollisionFallbackRefusesNonDirectChild(t
 		AgentID:   "agent-a",
 		AgentName: "agent-a",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	}))
 
@@ -4695,7 +4588,6 @@ func TestProvision_EnsureWorktree_CreateCollisionFallbackRefusesNonDirectChild(t
 		AgentID:   "agent-c",
 		AgentName: "nested-br",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
 	require.Error(t, err, "expected ProvisionShared to refuse the collision fallback joining a nested worktree")
@@ -4728,7 +4620,6 @@ func TestProvision_EnsureWorktree_FirstCollisionFallbackRefusesNonDirectChild(t 
 	}
 
 	t.Setenv("SCION_HOST_UID", "")
-	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
 
 	projectDir := t.TempDir()
@@ -4740,7 +4631,6 @@ func TestProvision_EnsureWorktree_FirstCollisionFallbackRefusesNonDirectChild(t 
 		AgentID:   "agent-a",
 		AgentName: "agent-a",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	}))
 
@@ -4761,7 +4651,6 @@ func TestProvision_EnsureWorktree_FirstCollisionFallbackRefusesNonDirectChild(t 
 		AgentID:   "agent-c",
 		AgentName: "nested-br",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
 	require.Error(t, err, "expected ProvisionShared to refuse the first collision fallback joining a nested worktree")
@@ -4776,11 +4665,10 @@ func TestProvision_EnsureWorktree_FirstCollisionFallbackRefusesNonDirectChild(t 
 // outOfTreeMarkerSetup establishes a shared base checkout and registers
 // agent-c on branch "shared-branch" with a recorded WorktreePath outside the
 // base's tree, for a branch with no real git worktree behind it. It returns
-// the base, the bare repo URL, the locker and the out-of-tree path.
-func outOfTreeMarkerSetup(t *testing.T, projectID string) (string, string, *testLocker, string) {
+// the base, the bare repo URL and the out-of-tree path.
+func outOfTreeMarkerSetup(t *testing.T, projectID string) (string, string, string) {
 	t.Helper()
 	t.Setenv("SCION_HOST_UID", "")
-	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
 	hostPath := filepath.Join(t.TempDir(), "workspace")
 
@@ -4790,7 +4678,6 @@ func outOfTreeMarkerSetup(t *testing.T, projectID string) (string, string, *test
 		AgentID:   "agent-setup",
 		AgentName: "setup-branch",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	}))
 
@@ -4806,7 +4693,7 @@ func outOfTreeMarkerSetup(t *testing.T, projectID string) (string, string, *test
 	_, joinPath, err := ListSharersForJoin(hostPath, "shared-branch")
 	require.NoError(t, err)
 	assert.Equal(t, outside, joinPath, "ListSharersForJoin must report the recorded out-of-tree path")
-	return hostPath, bareRepo, locker, outside
+	return hostPath, bareRepo, outside
 }
 
 // TestProvision_WorktreePerAgent_OutOfTreeMarker_Refused proves that a
@@ -4815,7 +4702,7 @@ func outOfTreeMarkerSetup(t *testing.T, projectID string) (string, string, *test
 // redirected to the out-of-tree directory nor given a fresh worktree, and
 // the registry and the out-of-tree directory are left unchanged.
 func TestProvision_WorktreePerAgent_OutOfTreeMarker_Refused(t *testing.T) {
-	hostPath, bareRepo, locker, outside := outOfTreeMarkerSetup(t, "proj-outoftree-1")
+	hostPath, bareRepo, outside := outOfTreeMarkerSetup(t, "proj-outoftree-1")
 	sentinel := filepath.Join(outside, "sentinel.txt")
 	require.NoError(t, os.WriteFile(sentinel, []byte("unchanged"), 0o644))
 
@@ -4825,7 +4712,6 @@ func TestProvision_WorktreePerAgent_OutOfTreeMarker_Refused(t *testing.T) {
 		AgentID:   "agent-b",
 		AgentName: "shared-branch",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
 	require.Error(t, err, "expected ProvisionShared to refuse a registry entry that is not a valid worktree")
@@ -4848,7 +4734,7 @@ func TestProvision_WorktreePerAgent_OutOfTreeMarker_Refused(t *testing.T) {
 // joining agent gets a fresh worktree at its own canonical path, and the
 // registry records that path.
 func TestProvision_WorktreePerAgent_OutOfTreeMarkerMissingPath_CreatesFreshWorktree(t *testing.T) {
-	hostPath, bareRepo, locker, outside := outOfTreeMarkerSetup(t, "proj-outoftree-2")
+	hostPath, bareRepo, outside := outOfTreeMarkerSetup(t, "proj-outoftree-2")
 	require.NoError(t, os.Remove(outside))
 
 	require.NoError(t, ProvisionShared(ProvisionInput{
@@ -4857,7 +4743,6 @@ func TestProvision_WorktreePerAgent_OutOfTreeMarkerMissingPath_CreatesFreshWorkt
 		AgentID:   "agent-b",
 		AgentName: "shared-branch",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	}))
 
@@ -4877,7 +4762,6 @@ func TestProvision_WorktreePerAgent_OutOfTreeMarkerMissingPath_CreatesFreshWorkt
 // shape is correct; the agent neither joins it nor gets a fresh worktree.
 func TestProvision_WorktreePerAgent_RegistryDecoy_Refused(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
-	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
 
 	projectDir := t.TempDir()
@@ -4890,7 +4774,6 @@ func TestProvision_WorktreePerAgent_RegistryDecoy_Refused(t *testing.T) {
 		AgentID:   "agent-setup",
 		AgentName: "setup-branch",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
 	require.NoError(t, err)
@@ -4922,7 +4805,6 @@ func TestProvision_WorktreePerAgent_RegistryDecoy_Refused(t *testing.T) {
 		AgentID:   "agent-b",
 		AgentName: branch,
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
 	require.Error(t, err, "expected ProvisionShared to refuse a registry entry that is not a valid worktree")
@@ -4949,7 +4831,6 @@ func TestProvision_WorktreePerAgent_RegistryDecoy_Refused(t *testing.T) {
 // (findWorktreeForBranch), which is the source this criterion targets.
 func TestProvision_WorktreePerAgent_FakeBackLink_RejectsGitDiscoveredPath(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
-	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
 
 	projectDir := t.TempDir()
@@ -4963,7 +4844,6 @@ func TestProvision_WorktreePerAgent_FakeBackLink_RejectsGitDiscoveredPath(t *tes
 		AgentID:   "agent-a",
 		AgentName: branch,
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
 	require.NoError(t, err)
@@ -5008,7 +4888,6 @@ func TestProvision_WorktreePerAgent_FakeBackLink_RejectsGitDiscoveredPath(t *tes
 		AgentID:   "agent-b",
 		AgentName: branch,
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
 	require.Error(t, err, "provisioning must fail loudly rather than join or redirect to the git-discovered external path")
@@ -5027,7 +4906,6 @@ func TestProvision_WorktreePerAgent_FakeBackLink_RejectsGitDiscoveredPath(t *tes
 
 func TestProvision_WorktreePerAgent_UniqueBranches_SoleSharers(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
-	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
 
 	projectDir := t.TempDir()
@@ -5040,7 +4918,6 @@ func TestProvision_WorktreePerAgent_UniqueBranches_SoleSharers(t *testing.T) {
 		AgentID:   "agent-a",
 		AgentName: "agent-alpha",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
 	require.NoError(t, err)
@@ -5052,7 +4929,6 @@ func TestProvision_WorktreePerAgent_UniqueBranches_SoleSharers(t *testing.T) {
 		AgentID:   "agent-b",
 		AgentName: "agent-beta",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
 	require.NoError(t, err)
@@ -5078,7 +4954,6 @@ func TestProvision_WorktreePerAgent_UniqueBranches_SoleSharers(t *testing.T) {
 
 func TestProvision_WorktreePerAgent_ExistingRegistration_Idempotent(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
-	locker := newTestLocker()
 	bareRepo := initBareGitRepo(t)
 
 	projectDir := t.TempDir()
@@ -5091,7 +4966,6 @@ func TestProvision_WorktreePerAgent_ExistingRegistration_Idempotent(t *testing.T
 		AgentID:   "agent-a",
 		AgentName: "idem-branch",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
 	require.NoError(t, err)
@@ -5103,7 +4977,6 @@ func TestProvision_WorktreePerAgent_ExistingRegistration_Idempotent(t *testing.T
 		AgentID:   "agent-a",
 		AgentName: "idem-branch",
 		Mode:      store.SharingModeWorktreePerAgent,
-		Locker:    locker,
 		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
 	})
 	require.NoError(t, err)

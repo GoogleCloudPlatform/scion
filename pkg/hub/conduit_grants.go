@@ -74,7 +74,10 @@ import (
 // or a target that has not yet learned the new key refuses its grants. It
 // must also be at least conduitGrantKeyRefresh, the interval at which nodes
 // reload the ring. Rotation is a compare-and-swap on the stored row, retried
-// a bounded number of times, so concurrent rotations never lose a key.
+// a bounded number of times, so concurrent rotations never lose a key. A
+// rotation is refused (errConduitGrantKeyPending, 409 at the admin route)
+// while a key rotated in earlier has not activated yet, so the published
+// key set grows by at most one pending key at a time.
 // Operators rotate with POST /api/v1/admin/conduit/grant-keys/rotate
 // (handleAdminConduitGrantKeyRotate), which is limited to hub admins.
 //
@@ -117,6 +120,10 @@ var (
 	// errConduitGrantRingUnreadable marks a persisted ring that exists but
 	// cannot be decrypted, decoded or validated.
 	errConduitGrantRingUnreadable = errors.New("stored conduit grant key ring is unreadable")
+
+	// errConduitGrantKeyPending refuses a rotation while a key rotated in
+	// earlier has not activated yet (the handler maps it to 409).
+	errConduitGrantKeyPending = errors.New("previous key not yet active")
 
 	errConduitDisabled  = errors.New("conduit experiment is disabled")
 	errConduitForbidden = errors.New("conduit stream forbidden")
@@ -366,7 +373,11 @@ type ConduitGrantKeyRetirement struct {
 // retirement time of every outgoing key. Each attempt rereads the stored
 // ring and writes it back with a compare-and-swap on its revision, so a
 // concurrent rotation (on this or another node) is never overwritten; after
-// conduitGrantKeyRotateAttempts lost races it gives up with an error.
+// conduitGrantKeyRotateAttempts lost races it gives up with an error. It
+// refuses with errConduitGrantKeyPending, leaving the ring unchanged, while
+// the stored ring holds a key whose activation is still in the future; the
+// check runs on each attempt's freshly loaded ring, so it also holds against
+// a rotation that landed concurrently.
 func (k *conduitGrantKeys) rotate(ctx context.Context, activateAfter, overlap time.Duration) (ConduitGrantKeyRotation, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -387,6 +398,9 @@ func (k *conduitGrantKeys) rotate(ctx context.Context, activateAfter, overlap ti
 		ring, rev, err := k.store.Load(ctx)
 		if err != nil {
 			return ConduitGrantKeyRotation{}, fmt.Errorf("load conduit grant key ring: %w", err)
+		}
+		if hasPendingConduitGrantKey(ring, now) {
+			return ConduitGrantKeyRotation{}, errConduitGrantKeyPending
 		}
 		next := cloneKeyRing(ring)
 		next.Prune(now)
@@ -412,6 +426,17 @@ func (k *conduitGrantKeys) rotate(ctx context.Context, activateAfter, overlap ti
 		}
 	}
 	return ConduitGrantKeyRotation{}, fmt.Errorf("conduit grant key rotation: ring changed concurrently %d times; retry", conduitGrantKeyRotateAttempts)
+}
+
+// hasPendingConduitGrantKey reports whether ring holds a key that has not
+// activated yet at now.
+func hasPendingConduitGrantKey(ring *grant.KeyRing, now time.Time) bool {
+	for _, k := range ring.Keys {
+		if k.ActivateAt.After(now) {
+			return true
+		}
+	}
+	return false
 }
 
 // conduitGrantKeySet returns this node's ring cache, creating it on first
@@ -522,6 +547,11 @@ func (s *Server) handleAdminConduitGrantKeyRotate(w http.ResponseWriter, r *http
 		return
 	}
 	out, err := s.RotateConduitGrantKey(r.Context())
+	if errors.Is(err, errConduitGrantKeyPending) {
+		slog.Info("Conduit grant key rotation refused: previous key not yet active")
+		writeError(w, http.StatusConflict, ErrCodeConflict, "previous key not yet active", nil)
+		return
+	}
 	if err != nil {
 		slog.Error("conduit grant key rotation failed", "error", err)
 		writeError(w, http.StatusServiceUnavailable, ErrCodeInternalError, "grant key rotation failed", nil)

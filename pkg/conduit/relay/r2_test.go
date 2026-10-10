@@ -119,7 +119,7 @@ func TestShutdownBoundedDuringRegistryOutage(t *testing.T) {
 	w := relaytest.NewWorld(t)
 	var outage atomic.Bool
 	w.Store.Fault = func(ctx context.Context, op string) error {
-		if outage.Load() && (op == registry.OpSetSessionDraining || op == registry.OpSetRelayDraining) {
+		if outage.Load() && (op == registry.OpSetRelaySessionsDraining || op == registry.OpSetRelayDraining) {
 			<-ctx.Done()
 			return ctx.Err()
 		}
@@ -356,34 +356,54 @@ func (f *fatalRecorder) Fatalf(format string, args ...any) {
 	runtime.Goexit()
 }
 
-// TestShutdownBoundsDrainWriteConcurrency (r3-F2): Shutdown never has more
-// than DrainWriteConcurrency session draining writes in flight, however
-// many sessions the relay holds, and still sends GoAway to every session.
-// Every write hangs until the shared drain deadline (a registry outage), so
-// all writes the relay would issue at once are in flight together: with
-// the bound exactly DrainWriteConcurrency, without it every session.
-func TestShutdownBoundsDrainWriteConcurrency(t *testing.T) {
-	const sessions = 3 * relay.DrainWriteConcurrency
+// TestShutdownBatchesSessionDraining (ptone/scion#2897): Shutdown marks
+// the sessions of its generation draining with one batched store write,
+// never one write per session, and every row is draining before the first
+// row is deleted (rows are deleted only after GoAway ends a session).
+func TestShutdownBatchesSessionDraining(t *testing.T) {
+	const sessions = 20
 	w := relaytest.NewWorld(t)
 	var (
-		armed    atomic.Bool
-		inflight atomic.Int32
-		maxSeen  atomic.Int32
+		armed   atomic.Bool
+		batched atomic.Int32
+		single  atomic.Int32
+		// checkOnce runs the row check at the first DeleteSessionCAS;
+		// concurrent deletes wait in Do until it is done.
+		checkOnce sync.Once
+		// drainingAtFirstDelete is the number of draining rows when the
+		// first DeleteSessionCAS runs (-1 until then).
+		drainingAtFirstDelete atomic.Int32
+		ids                   []string
 	)
-	w.Store.Fault = func(ctx context.Context, op string) error {
-		if !armed.Load() || op != registry.OpSetSessionDraining {
+	drainingAtFirstDelete.Store(-1)
+	w.Store.Fault = func(_ context.Context, op string) error {
+		if !armed.Load() {
 			return nil
 		}
-		cur := inflight.Add(1)
-		defer inflight.Add(-1)
-		for {
-			m := maxSeen.Load()
-			if cur <= m || maxSeen.CompareAndSwap(m, cur) {
-				break
-			}
+		switch op {
+		case registry.OpSetRelaySessionsDraining:
+			batched.Add(1)
+		case registry.OpSetSessionDraining:
+			single.Add(1)
+		case registry.OpDeleteSessionCAS:
+			checkOnce.Do(func() {
+				var n int32
+				for _, id := range ids {
+					ps, err := w.Inner.ListPrincipalSessions(context.Background(), registry.PrincipalUser, id)
+					if err != nil {
+						t.Errorf("list %s: %v", id, err)
+						return
+					}
+					for _, v := range ps.Sessions {
+						if v.Session.Draining {
+							n++
+						}
+					}
+				}
+				drainingAtFirstDelete.Store(n)
+			})
 		}
-		<-ctx.Done()
-		return ctx.Err()
+		return nil
 	}
 	n := w.StartNode("relay-a", nil)
 	var dialed []conduit.LocalSession
@@ -395,17 +415,25 @@ func TestShutdownBoundsDrainWriteConcurrency(t *testing.T) {
 		// Shutdown drains registered sessions only.
 		_ = n.Relay.SourceForTest(t, wel.GetSessionId())
 		dialed = append(dialed, s)
+		ids = append(ids, id)
 	}
 	armed.Store(true)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	result := make(chan error, 1)
 	go func() { result <- n.Relay.Shutdown(ctx) }()
 	for i, s := range dialed {
 		relaytest.WaitClosed(t, s.GoAwayReceived(), fmt.Sprintf("GoAway to session %d", i))
+		_ = s.Close()
 	}
 	_ = relaytest.Wait(t, result, "Shutdown")
-	if got := maxSeen.Load(); got != relay.DrainWriteConcurrency {
-		t.Fatalf("in-flight draining writes peaked at %d, want exactly the bound %d", got, relay.DrainWriteConcurrency)
+	if got := batched.Load(); got != 1 {
+		t.Fatalf("batched draining writes = %d, want 1", got)
+	}
+	if got := single.Load(); got != 0 {
+		t.Fatalf("per-session draining writes = %d, want 0", got)
+	}
+	if got := drainingAtFirstDelete.Load(); got != sessions {
+		t.Fatalf("draining rows at the first row delete = %d, want %d", got, sessions)
 	}
 }
