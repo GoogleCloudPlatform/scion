@@ -86,7 +86,7 @@ func finalizeBody(t *testing.T, files []store.TemplateFile, expected string) []b
 	return body
 }
 
-func errorCode(t *testing.T, rec *httptest.ResponseRecorder) string {
+func templateErrorCode(t *testing.T, rec *httptest.ResponseRecorder) string {
 	t.Helper()
 	var body struct {
 		Error struct {
@@ -194,7 +194,7 @@ func TestTemplateFinalize_ConcurrentFinalizesExactlyOneWins(t *testing.T) {
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("losing finalize: status %d, want 409: %s", rec.Code, rec.Body.String())
 		}
-		if code := errorCode(t, rec); code != templateConflictErrorCode {
+		if code := templateErrorCode(t, rec); code != templateConflictErrorCode {
 			t.Errorf("409 code = %q, want %q", code, templateConflictErrorCode)
 		}
 	}
@@ -247,7 +247,7 @@ func TestTemplateFinalize_ExpectedContentHash(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("stale expectedContentHash: status %d, want 409: %s", rec.Code, rec.Body.String())
 	}
-	if code := errorCode(t, rec); code != templateConflictErrorCode {
+	if code := templateErrorCode(t, rec); code != templateConflictErrorCode {
 		t.Errorf("409 code = %q, want %q", code, templateConflictErrorCode)
 	}
 	got, err := s.GetTemplate(ctx, tmpl.ID)
@@ -319,7 +319,7 @@ func TestCommitTemplateFiles_StaleReadConflicts(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	writeTemplateCommitError(rec, err)
-	if rec.Code != http.StatusConflict || errorCode(t, rec) != templateConflictErrorCode {
+	if rec.Code != http.StatusConflict || templateErrorCode(t, rec) != templateConflictErrorCode {
 		t.Errorf("writeTemplateCommitError: %d %s, want 409 %s", rec.Code, rec.Body.String(), templateConflictErrorCode)
 	}
 }
