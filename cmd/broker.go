@@ -2378,7 +2378,10 @@ func buildBrokerProfiles(settings *config.Settings) []hubclient.BrokerProfile {
 // returns runtimeKey unchanged, which is what brokers registered before the
 // type was resolved, when vs is nil, does not have the profile, or has it
 // referencing a different runtime entry than the settings the caller built
-// the profile from.
+// the profile from. Callers pass the global settings (plus the DB settings
+// overlay, when installed), the scope the broker's /info resolves from, so
+// the type comes from global settings even when the join profiles were
+// built from project-scoped settings.
 func resolveProfileRuntimeType(vs *config.VersionedSettings, name, runtimeKey string) string {
 	key, rtType, ok := vs.ProfileRuntimeType(name)
 	if !ok || key != runtimeKey {

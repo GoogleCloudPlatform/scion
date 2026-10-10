@@ -81,15 +81,6 @@ func runtimeTypeLegacySettings(names ...string) *config.Settings {
 	return &config.Settings{Profiles: out}
 }
 
-// stubEmbeddedBrokerProfileSettings substitutes the settings the embedded
-// broker resolves profile runtime types from.
-func stubEmbeddedBrokerProfileSettings(t *testing.T, vs *config.VersionedSettings, err error) {
-	t.Helper()
-	prev := loadEmbeddedBrokerProfileSettings
-	t.Cleanup(func() { loadEmbeddedBrokerProfileSettings = prev })
-	loadEmbeddedBrokerProfileSettings = func() (*config.VersionedSettings, error) { return vs, err }
-}
-
 func storeProfileByName(t *testing.T, profiles []store.BrokerProfile, name string) store.BrokerProfile {
 	t.Helper()
 	for _, p := range profiles {
@@ -131,9 +122,7 @@ func TestBuildBrokerProfiles_SettingsLoadErrorKeepsRuntimeKey(t *testing.T) {
 }
 
 func TestBuildStoreBrokerProfiles_RegistersResolvedRuntimeType(t *testing.T) {
-	stubEmbeddedBrokerProfileSettings(t, runtimeTypeSettings(), nil)
-
-	profiles := buildStoreBrokerProfiles(runtimeTypeLegacySettings(), "docker", nil)
+	profiles := buildStoreBrokerProfiles(runtimeTypeLegacySettings(), runtimeTypeSettings(), "docker", nil)
 
 	for name, want := range map[string]string{
 		"gke":          "kubernetes",
@@ -147,10 +136,10 @@ func TestBuildStoreBrokerProfiles_RegistersResolvedRuntimeType(t *testing.T) {
 	}
 }
 
-func TestBuildStoreBrokerProfiles_SettingsLoadErrorKeepsRuntimeKey(t *testing.T) {
-	stubEmbeddedBrokerProfileSettings(t, nil, errors.New("boom"))
-
-	profiles := buildStoreBrokerProfiles(runtimeTypeLegacySettings("gke", "docker-k8s"), "docker", nil)
+// With no settings to resolve from (nil: the caller could not load them),
+// profiles register their runtime key as Type, as before.
+func TestBuildStoreBrokerProfiles_NilSettingsKeepRuntimeKey(t *testing.T) {
+	profiles := buildStoreBrokerProfiles(runtimeTypeLegacySettings("gke", "docker-k8s"), nil, "docker", nil)
 
 	assert.Equal(t, "gke", storeProfileByName(t, profiles, "gke").Type)
 	assert.Equal(t, "docker", storeProfileByName(t, profiles, "docker-k8s").Type)
@@ -160,9 +149,7 @@ func TestBuildStoreBrokerProfiles_SettingsLoadErrorKeepsRuntimeKey(t *testing.T)
 // non-local default runtime, a docker-typed entry under a custom key is
 // filtered out, and a kubernetes-typed entry under a custom key is kept.
 func TestBuildStoreBrokerProfiles_LocalOnlyFilterUsesResolvedType(t *testing.T) {
-	stubEmbeddedBrokerProfileSettings(t, runtimeTypeSettings(), nil)
-
-	profiles := buildStoreBrokerProfiles(runtimeTypeLegacySettings("gke", "docker-local", "docker-k8s"), "kubernetes", nil)
+	profiles := buildStoreBrokerProfiles(runtimeTypeLegacySettings("gke", "docker-local", "docker-k8s"), runtimeTypeSettings(), "kubernetes", nil)
 
 	names := map[string]bool{}
 	for _, p := range profiles {
@@ -176,19 +163,33 @@ func TestBuildStoreBrokerProfiles_LocalOnlyFilterUsesResolvedType(t *testing.T) 
 // attachForType answers for a profile whose resolved type is the default
 // runtime's, whatever its key.
 func TestBuildStoreBrokerProfiles_AttachUsesResolvedType(t *testing.T) {
-	stubEmbeddedBrokerProfileSettings(t, runtimeTypeSettings(), nil)
-
 	k8sRT := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-	profiles := buildStoreBrokerProfiles(runtimeTypeLegacySettings("gke"), "kubernetes", k8sRT)
+	profiles := buildStoreBrokerProfiles(runtimeTypeLegacySettings("gke"), runtimeTypeSettings(), "kubernetes", k8sRT)
 	gke := storeProfileByName(t, profiles, "gke")
 	require.NotNil(t, gke.Attach, "key gke / type kubernetes must get the kubernetes default runtime's attach answer")
 	assert.Equal(t, runtime.HasAttachSupport(k8sRT), *gke.Attach)
 
 	dockerRT := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	profiles = buildStoreBrokerProfiles(runtimeTypeLegacySettings("docker-local"), "docker", dockerRT)
+	profiles = buildStoreBrokerProfiles(runtimeTypeLegacySettings("docker-local"), runtimeTypeSettings(), "docker", dockerRT)
 	local := storeProfileByName(t, profiles, "docker-local")
 	require.NotNil(t, local.Attach, "key docker-local / type docker must get the docker default runtime's attach answer")
 	assert.Equal(t, runtime.HasAttachSupport(dockerRT), *local.Attach)
+}
+
+// A profile with no runtime in the settings it is built from keeps the
+// default (docker at join, the default runtime type when embedded), even
+// when the versioned settings point that profile at a typed entry.
+func TestBrokerProfiles_EmptyRuntimeKeepsDefault(t *testing.T) {
+	vs := &config.VersionedSettings{
+		Profiles: map[string]config.V1ProfileConfig{"bare": {Runtime: "gke"}},
+		Runtimes: map[string]config.V1RuntimeConfig{"gke": {Type: "kubernetes"}},
+	}
+	legacy := &config.Settings{Profiles: map[string]config.ProfileConfig{"bare": {}}}
+
+	stubBrokerMappingSettings(t, vs, nil)
+	assert.Equal(t, "docker", profileByName(t, buildBrokerProfiles(legacy), "bare").Type, "join")
+
+	assert.Equal(t, "podman", storeProfileByName(t, buildStoreBrokerProfiles(legacy, vs, "podman", nil), "bare").Type, "embedded")
 }
 
 // --- End to end: embedded registration, then the hub's checks. ---
@@ -211,12 +212,11 @@ func newProfileTypeHub(t *testing.T, rtName string, legacy *config.Settings, def
 
 func newProfileTypeHubWith(t *testing.T, vs *config.VersionedSettings, rtName string, legacy *config.Settings, defaults opsettings.AgentDefaultsSettings) *profileTypeHub {
 	t.Helper()
-	stubEmbeddedBrokerProfileSettings(t, vs, nil)
 	ctx := context.Background()
 	s := newTestStore(t)
 	rt := &runtime.MockRuntime{NameFunc: func() string { return rtName }}
 	brokerID := tid("broker-profile-type")
-	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "profile-type-broker", "http://localhost:9800", rt, true, legacy, nil)
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "profile-type-broker", "http://localhost:9800", rt, true, legacy, nil, vs)
 	require.NoError(t, err)
 
 	cfg := hub.DefaultServerConfig()
