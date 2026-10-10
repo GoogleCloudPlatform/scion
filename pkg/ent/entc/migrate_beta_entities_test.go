@@ -14,21 +14,94 @@
 
 package entc
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+)
 
 // MigrateData bulk-inserts each listed entity into a destination that
-// AutoMigrate has already given every unique index. AgentSessionMetrics has
-// a unique (agent_id, session_id, started_at) index, and source databases
-// written by older Hubs can hold rows that collide on it, which would abort
-// the cutover. It is not copied today, so nothing collides. Adding it to
-// migrationEntities requires skipping colliding rows (keeping the earliest
-// by created_at, then id, as CompositeStore.deduplicateAgentSessionMetrics
-// does) and counting them in the row-count check; update this test then.
-func TestMigrationEntities_SessionMetricsNeedCollisionHandling(t *testing.T) {
+// AutoMigrate has already given every unique index. AgentSessionMetrics has a
+// unique (agent_id, session_id, started_at) index, and a source written by an
+// older Hub can hold rows that collide on it, which would abort the cutover.
+// It must therefore be copied, and copied through a row filter that drops the
+// colliding rows.
+func TestMigrationEntities_SessionMetricsCopiedWithCollisionHandling(t *testing.T) {
+	listed := false
 	for _, name := range migrationEntities {
 		if name == "AgentSessionMetrics" {
-			t.Fatal("AgentSessionMetrics is in migrationEntities: MigrateData must skip rows " +
-				"that collide on its unique (agent_id, session_id, started_at) index before it can be copied")
+			listed = true
 		}
 	}
+	if !listed {
+		t.Fatal("AgentSessionMetrics is not in migrationEntities: a cutover would drop every stored session metric")
+	}
+	if migrationRowFilters["AgentSessionMetrics"] == nil {
+		t.Fatal("AgentSessionMetrics has no entry in migrationRowFilters: source rows that collide on its " +
+			"unique (agent_id, session_id, started_at) index would abort the copy")
+	}
+	for name := range migrationRowFilters {
+		found := false
+		for _, n := range migrationEntities {
+			if n == name {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("migrationRowFilters has %q, which is not in migrationEntities", name)
+		}
+	}
+}
+
+// TestDedupAgentSessionMetricsRows pins the keep-earliest rule without a
+// database: per (agent, session, segment start) the row with the lowest
+// created_at wins, ties broken by the lower id; distinct segments and distinct
+// sessions are all kept.
+func TestDedupAgentSessionMetricsRows(t *testing.T) {
+	start := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	created := time.Date(2026, 1, 2, 4, 0, 0, 0, time.UTC)
+	lowID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	highID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
+
+	row := func(id uuid.UUID, session string, startedAt, createdAt time.Time) *ent.AgentSessionMetrics {
+		return &ent.AgentSessionMetrics{ID: id, AgentID: "agent-a", SessionID: session, StartedAt: startedAt, CreatedAt: createdAt}
+	}
+	later := row(uuid.New(), "s1", start, created.Add(time.Minute))
+	earliest := row(uuid.New(), "s1", start, created)
+	// Same instant as start, in another location: still the same key.
+	sameKeyOtherZone := row(uuid.New(), "s1", start.In(time.FixedZone("x", 3600)), created.Add(2*time.Minute))
+	tieHigh := row(highID, "s2", start, created)
+	tieLow := row(lowID, "s2", start, created)
+	otherSegment := row(uuid.New(), "s1", start.Add(time.Hour), created.Add(time.Hour))
+
+	in := []*ent.AgentSessionMetrics{later, earliest, sameKeyOtherZone, tieHigh, tieLow, otherSegment}
+	rows := make([]reflect.Value, len(in))
+	for i, m := range in {
+		rows[i] = reflect.ValueOf(m)
+	}
+
+	out, dropped := dedupAgentSessionMetricsRows(rows)
+	if dropped != 3 {
+		t.Errorf("dropped = %d, want 3", dropped)
+	}
+	var got []*ent.AgentSessionMetrics
+	for _, rv := range out {
+		got = append(got, rv.Interface().(*ent.AgentSessionMetrics))
+	}
+	want := []*ent.AgentSessionMetrics{earliest, tieLow, otherSegment}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("kept rows = %v, want %v", sessionMetricsIDs(got), sessionMetricsIDs(want))
+	}
+}
+
+func sessionMetricsIDs(ms []*ent.AgentSessionMetrics) []uuid.UUID {
+	out := make([]uuid.UUID, len(ms))
+	for i, m := range ms {
+		out[i] = m.ID
+	}
+	return out
 }

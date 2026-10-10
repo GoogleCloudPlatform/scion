@@ -15,9 +15,11 @@
 package entc
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"reflect"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 )
@@ -36,6 +38,9 @@ import (
 //
 // The remainder declare no Ent edges (no DB-level FK constraints), so their
 // relative order is irrelevant; they are listed alphabetically for readability.
+//
+// An entity whose source rows can collide on a destination unique index has an
+// entry in migrationRowFilters, which drops the colliding rows before insert.
 var migrationEntities = []string{
 	// FK-ordered core.
 	"User",
@@ -46,6 +51,7 @@ var migrationEntities = []string{
 	"GroupMembership",
 	"PolicyBinding",
 	// Independent entities (no Ent edges).
+	"AgentSessionMetrics",
 	"AllowListEntry",
 	"ApiKey",
 	"BrokerJoinToken",
@@ -72,6 +78,62 @@ var migrationEntities = []string{
 	"UserAccessToken",
 }
 
+// migrationRowFilters maps an entity name to a function that removes source
+// rows which would collide on a unique index the destination already has
+// (AutoMigrate creates every index before MigrateData runs). It returns the
+// rows to copy and the number of rows dropped. Entities without an entry are
+// copied unfiltered.
+var migrationRowFilters = map[string]func(rows []reflect.Value) ([]reflect.Value, int){
+	"AgentSessionMetrics": dedupAgentSessionMetricsRows,
+}
+
+// sessionMetricsKey is the unique (agent_id, session_id, started_at) key of
+// agent_session_metrics. started_at is held as UnixNano so that equal instants
+// read back in different locations compare equal.
+type sessionMetricsKey struct {
+	agentID   string
+	sessionID string
+	startedAt int64
+}
+
+// dedupAgentSessionMetricsRows keeps one row per (agent_id, session_id,
+// started_at). A source written by a Hub from before the unique index existed
+// can hold several rows for one key: a retried or resent report of the same
+// session segment was stored again. For each key the earliest stored row is
+// kept, ordered by created_at and then id, the same rule
+// CompositeStore.deduplicateAgentSessionMetrics applies before it adds the
+// index, and the same outcome the store gives a repeated report from then on:
+// the first one stored wins. Kept rows stay in source order.
+func dedupAgentSessionMetricsRows(rows []reflect.Value) ([]reflect.Value, int) {
+	keep := make(map[sessionMetricsKey]*ent.AgentSessionMetrics, len(rows))
+	for _, rv := range rows {
+		m := rv.Interface().(*ent.AgentSessionMetrics)
+		k := sessionMetricsKey{agentID: m.AgentID, sessionID: m.SessionID, startedAt: m.StartedAt.UnixNano()}
+		if cur, ok := keep[k]; !ok || storedBefore(m.CreatedAt, m.ID, cur.CreatedAt, cur.ID) {
+			keep[k] = m
+		}
+	}
+	out := make([]reflect.Value, 0, len(keep))
+	for _, rv := range rows {
+		m := rv.Interface().(*ent.AgentSessionMetrics)
+		k := sessionMetricsKey{agentID: m.AgentID, sessionID: m.SessionID, startedAt: m.StartedAt.UnixNano()}
+		if keep[k] == m {
+			out = append(out, rv)
+		}
+	}
+	return out, len(rows) - len(out)
+}
+
+// storedBefore orders rows by created_at, then id, like ORDER BY created_at
+// ASC, id ASC. UUIDs compare by their bytes, which matches both the Postgres
+// uuid ordering and the SQLite ordering of their canonical text form.
+func storedBefore(aCreated time.Time, aID [16]byte, bCreated time.Time, bID [16]byte) bool {
+	if !aCreated.Equal(bCreated) {
+		return aCreated.Before(bCreated)
+	}
+	return bytes.Compare(aID[:], bID[:]) < 0
+}
+
 // defaultBatchSize bounds how many rows a single CreateBulk statement inserts.
 // Postgres caps a statement at 65535 bind parameters; the widest entity (Agent)
 // has ~36 columns, so 500 rows stays comfortably under the limit while keeping
@@ -93,7 +155,11 @@ type EntityResult struct {
 	Source   int // rows present in the source
 	Inserted int // rows newly written to the destination this run
 	Skipped  int // rows already present in the destination (idempotent skips)
-	Dest     int // rows in the destination after migration
+	// Duplicates counts source rows not copied because they collide with an
+	// earlier source row on a destination unique index (see
+	// migrationRowFilters).
+	Duplicates int
+	Dest       int // rows in the destination after migration
 }
 
 // MigrateReport is the aggregate outcome of a migration run.
@@ -110,8 +176,11 @@ type MigrateReport struct {
 //   - Idempotent: rows whose primary key already exists in dst are skipped, so
 //     a partially completed run can be safely restarted.
 //   - Atomic per entity: each entity's inserts run inside a single transaction.
-//   - Verified: after each entity the source and destination row counts are
-//     compared and a mismatch aborts the migration.
+//   - Duplicate-tolerant: for entities in migrationRowFilters, source rows that
+//     collide on a destination unique index are skipped, keeping the earliest.
+//   - Verified: after each entity the destination row count is compared with
+//     the source count less skipped duplicates, and a mismatch aborts the
+//     migration.
 //
 // MigrateData never writes to src.
 func MigrateData(ctx context.Context, src, dst *ent.Client, opts MigrateOptions) (*MigrateReport, error) {
@@ -140,8 +209,13 @@ func MigrateData(ctx context.Context, src, dst *ent.Client, opts MigrateOptions)
 			return report, fmt.Errorf("migrating %s: %w", name, err)
 		}
 		report.Entities = append(report.Entities, res)
-		logf("migrated %-26s source=%d inserted=%d skipped=%d dest=%d",
-			res.Entity, res.Source, res.Inserted, res.Skipped, res.Dest)
+		if res.Duplicates > 0 {
+			logf("migrated %-26s source=%d inserted=%d skipped=%d duplicates=%d dest=%d",
+				res.Entity, res.Source, res.Inserted, res.Skipped, res.Duplicates, res.Dest)
+		} else {
+			logf("migrated %-26s source=%d inserted=%d skipped=%d dest=%d",
+				res.Entity, res.Source, res.Inserted, res.Skipped, res.Dest)
+		}
 	}
 
 	// Copy the one many-to-many edge (Group.child_groups) that lives in a join
@@ -168,6 +242,9 @@ func migrateEntity(ctx context.Context, name string, srcClient reflect.Value, ds
 		return res, fmt.Errorf("querying source: %w", err)
 	}
 	res.Source = len(rows)
+	if filter, ok := migrationRowFilters[name]; ok {
+		rows, res.Duplicates = filter(rows)
+	}
 
 	existing, err := queryIDSet(ctx, dstClient)
 	if err != nil {
@@ -221,14 +298,15 @@ func migrateEntity(ctx context.Context, name string, srcClient reflect.Value, ds
 		return res, fmt.Errorf("committing: %w", err)
 	}
 
-	// Verify: the destination must now hold exactly as many rows as the source.
+	// Verify: the destination must now hold exactly as many rows as the source,
+	// less the duplicates the filter dropped.
 	dstCount, err := queryCount(ctx, dstClient)
 	if err != nil {
 		return res, fmt.Errorf("counting destination: %w", err)
 	}
 	res.Dest = dstCount
-	if dstCount != res.Source {
-		return res, fmt.Errorf("row count mismatch: source=%d dest=%d", res.Source, dstCount)
+	if want := res.Source - res.Duplicates; dstCount != want {
+		return res, fmt.Errorf("row count mismatch: source=%d duplicates=%d dest=%d", res.Source, res.Duplicates, dstCount)
 	}
 	return res, nil
 }
