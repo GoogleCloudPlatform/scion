@@ -124,6 +124,7 @@ func init() {
 	saGlobalListCmd.Flags().BoolVar(&saOutputJSON, "json", false, "Output in JSON format")
 	saGlobalListCmd.Flags().BoolVar(&saGlobalListAssignable, "assignable", false,
 		"List the accounts assignable to an agent in this project: its own plus every hub-scoped account")
+	addSAAssignStatusFlags(saGlobalListCmd)
 
 	saGlobalAddCmd.Flags().StringVar(&saGlobalAddProjectID, "gcp-project", "", "GCP project ID (required)")
 	saGlobalAddCmd.Flags().StringVar(&saGlobalAddName, "name", "", "Display name for the service account")
@@ -150,7 +151,15 @@ Examples:
   scion service-accounts list --global
   scion service-accounts list
   scion service-accounts list --assignable
-  scion service-accounts list --global --json`,
+  scion service-accounts list --assignable --profile gke --broker my-broker
+  scion service-accounts list --global --json
+
+--profile and --broker add an ASSIGN column: whether each account is
+mapped to a Kubernetes service account on that broker profile, from the
+broker's latest report. Without --broker the broker is the one agent
+creation would pick. "mapped" does not mean ready: the Workload Identity
+IAM binding is not checked. Accounts whose state is unknown are listed
+with the reason, never hidden.`,
 	Args: cobra.NoArgs,
 	RunE: runSAScopedList,
 }
@@ -281,6 +290,11 @@ func runSAScopedList(cmd *cobra.Command, args []string) error {
 			"assigned; it has no meaning with --global, which already lists every hub-scoped account")
 	}
 
+	if saAssignStatusRequested() && saScopeFromGlobalFlag() == store.ScopeHub {
+		return newUsageError("--profile and --broker describe where an agent in a PROJECT would run; " +
+			"they have no meaning with --global")
+	}
+
 	sc, err := resolveSAScope()
 	if err != nil {
 		return err
@@ -298,6 +312,8 @@ func runSAScopedList(cmd *cobra.Command, args []string) error {
 	default:
 		opts = hubclient.ListForProject(sc.scopeID)
 	}
+
+	setSAAssignStatusOptions(opts)
 
 	sas, err := sc.client.GCPServiceAccounts().List(ctx, opts)
 	if err != nil {
@@ -327,13 +343,14 @@ func runSAScopedList(cmd *cobra.Command, args []string) error {
 	//
 	// GCP PROJECT is the project the account lives in on GCP's side. It is not
 	// the Scion project in the Hub's routes.
-	fmt.Printf("%-36s  %-45s  %-8s  %-20s  %s\n", "ID", "EMAIL", "SCOPE", "GCP PROJECT", "VERIFIED")
+	assign := saAssignStatusRequested()
+	fmt.Printf("%-36s  %-45s  %-8s  %-20s  %s\n", "ID", "EMAIL", "SCOPE", "GCP PROJECT", saAssignLast(assign, "VERIFIED", "ASSIGN"))
 	fmt.Printf("%-36s  %-45s  %-8s  %-20s  %s\n",
 		"------------------------------------",
 		"---------------------------------------------",
 		"--------",
 		"--------------------",
-		"--------")
+		saAssignLast(assign, "--------", "------"))
 	for _, sa := range sas {
 		verified := "no"
 		if sa.Verified {
@@ -344,8 +361,9 @@ func runSAScopedList(cmd *cobra.Command, args []string) error {
 			truncate(sa.Email, 45),
 			truncate(sa.Scope, 8),
 			truncate(sa.ProjectID, 20),
-			verified)
+			saAssignLast(assign, verified, saAssignColumn(sa.AssignStatus)))
 	}
+	printSAAssignFooter(assign, sas)
 
 	return nil
 }

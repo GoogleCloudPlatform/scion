@@ -476,6 +476,10 @@ type GCPServiceAccountWithCapabilities struct {
 	// Mapping summarizes the listed project's Kubernetes broker profiles
 	// that map this account. Set on project-scope lists only.
 	Mapping *GCPServiceAccountMappingSummary `json:"mapping,omitempty"`
+	// AssignStatus is the account's mapping state on the broker profile
+	// the caller chose (assignStatus, profile and broker query parameters).
+	// Set on project-scope lists only, and only when asked for.
+	AssignStatus *GCPServiceAccountAssignStatus `json:"assignStatus,omitempty"`
 }
 
 // GCPMintQuotaInfo provides quota information for minted service accounts.
@@ -588,6 +592,7 @@ func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, 
 		profiles = s.projectKubernetesProfileMappings(ctx, projectID)
 	}
 	annotateGCPSAMappings(items, profiles)
+	s.annotateGCPSAAssignStatus(ctx, items, projectID, parseAssignStatusRequest(r))
 
 	writeJSON(w, http.StatusOK, ListGCPServiceAccountsResponse{
 		Items:        items,

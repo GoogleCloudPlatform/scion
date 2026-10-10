@@ -173,6 +173,7 @@ func init() {
 	saMintCmd.Flags().StringVar(&saDisplayName, "name", "", "Display name for the service account")
 
 	saListCmd.Flags().BoolVar(&saOutputJSON, "json", false, "Output in JSON format")
+	addSAAssignStatusFlags(saListCmd)
 	saShowCmd.Flags().BoolVar(&saOutputJSON, "json", false, "Output in JSON format")
 }
 
@@ -258,7 +259,9 @@ func runSAList(cmd *cobra.Command, args []string) error {
 	// there would silently hide accounts the user may assign. This command is
 	// not that, and the root-level `scion service-accounts list --global`
 	// command is where hub-scoped accounts are listed.
-	sas, warnings, err := client.GCPServiceAccounts().ListWithWarnings(ctx, hubclient.ListForProject(projectID))
+	opts := hubclient.ListForProject(projectID)
+	setSAAssignStatusOptions(opts)
+	sas, warnings, err := client.GCPServiceAccounts().ListWithWarnings(ctx, opts)
 	if err != nil {
 		return fmt.Errorf("failed to list service accounts: %w", err)
 	}
@@ -280,13 +283,14 @@ func runSAList(cmd *cobra.Command, args []string) error {
 	// account lives in GCP. Every row here is registered to the Scion project
 	// this command was run in, so printing that would print one repeated value.
 	fmt.Printf("GCP Service Accounts (%d):\n", len(sas))
-	fmt.Printf("%-36s  %-45s  %-20s  %-8s  %s\n", "ID", "EMAIL", "GCP PROJECT", "VERIFIED", "MAPPED")
+	assign := saAssignStatusRequested()
+	fmt.Printf("%-36s  %-45s  %-20s  %-8s  %s\n", "ID", "EMAIL", "GCP PROJECT", "VERIFIED", saAssignLast(assign, "MAPPED", "ASSIGN"))
 	fmt.Printf("%-36s  %-45s  %-20s  %-8s  %s\n",
 		"------------------------------------",
 		"---------------------------------------------",
 		"--------------------",
 		"--------",
-		"------")
+		saAssignLast(assign, "------", "------"))
 	for _, sa := range sas {
 		verified := "no"
 		if sa.Verified {
@@ -297,8 +301,9 @@ func runSAList(cmd *cobra.Command, args []string) error {
 			truncate(sa.Email, 45),
 			truncate(sa.ProjectID, 20),
 			verified,
-			saMappedColumn(sa.Mapping))
+			saAssignLast(assign, saMappedColumn(sa.Mapping), saAssignColumn(sa.AssignStatus)))
 	}
+	printSAAssignFooter(assign, sas)
 
 	return nil
 }

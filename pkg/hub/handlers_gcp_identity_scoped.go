@@ -268,6 +268,7 @@ func (s *Server) listGCPServiceAccountsScoped(w http.ResponseWriter, r *http.Req
 			profiles = s.projectKubernetesProfileMappings(ctx, req.scopeID)
 		}
 		annotateGCPSAMappings(items, profiles)
+		s.annotateGCPSAAssignStatus(ctx, items, req.scopeID, parseAssignStatusRequest(r))
 		warnings = projectSAMappingWarningsFrom(req.scopeID,
 			func() projectSAMappingView { return projectSAMappingViewFrom(profiles) }, saPtrs...)
 	}

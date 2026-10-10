@@ -552,6 +552,15 @@ subjects:
 
 The message names the GSA, the profile and the broker, and gives the two fixes: add the GSA to `kubernetes_service_account_mappings` in that broker's settings, or annotate a KSA in the profile's namespace with `iam.gke.io/gcp-service-account`. In every other case the Hub dispatches and the broker decides: an agent whose profile the Hub has not recorded, a missing, stale or incomplete report, an ambiguous GSA, a broker with no report, a non-Kubernetes runtime, or no GSA. Discovery runs every 5 minutes, so a KSA annotated in the last few minutes can still be refused by the Hub until the broker reports it.
 
+**Mapping status in the service account picker.** The project service account lists can show, for each account, whether it is mapped on one broker profile. The Hub uses the same rules as the dispatch check above, so the picker and the dispatch give the same answer. In the API, add `profile=<name>` and optionally `broker=<id or name>` (or `assignStatus=true`) to `GET /api/v1/projects/<id>/gcp-service-accounts`; each item then carries `assignStatus` with a `state`, a `reason`, a `message`, and the `brokerId`, `brokerName`, `profile` and `namespace` it describes. On the CLI, pass `--profile` and optionally `--broker` to `scion service-accounts list --assignable` or `scion project service-accounts list` to add an ASSIGN column. Without `--broker` the broker is the one agent creation would pick: the project's default broker, or its only provider. The state is one of:
+
+- `mapped`: the latest report lists a KSA for the GSA. This does not mean the account is ready, because the Workload Identity IAM binding is not checked.
+- `not_mapped`: a recent, complete report does not list it. The dispatch check refuses this case.
+- `not_required`: the profile's runtime is `docker`, `podman` or `container`, so no mapping is needed.
+- `unknown`: the Hub cannot tell. The `reason` is one of `no_broker`, `no_profile`, `no_account`, `profile_not_on_broker`, `runtime_unrecognized` (a runtime key the Hub does not recognise as Kubernetes or local, such as a custom entry key), `report_missing`, `report_incomplete`, `report_old_version`, `report_stale` or `ambiguous_mapping`.
+
+Nothing is filtered out: accounts with an `unknown` state are still listed, with their reason.
+
 The check uses the report, which the broker builds from its global settings. A project whose own settings point a profile at a different runtime entry or runtime type should also map the GSA explicitly on that profile (the profile's `kubernetes_service_account_mappings` in the broker's global settings), so the report lists it.
 
 **Request-level values.** A `kubernetes.serviceAccountName` set on the create or start request must equal the mapped KSA, and a `kubernetes.namespace` on the request must equal the resolved namespace; otherwise the dispatch fails. A `serviceAccountName` set only in a template is overridden by the mapping.

@@ -81,35 +81,92 @@ func (e *identityNotMappedPrecheck) translate() identityMappingError {
 	return identityMappingError{Code: ErrCodeIdentityNotMapped, Message: msg, Details: details}
 }
 
-// kubernetesIdentityNotMapped decides, from the hub's stored copy of a
-// broker's per-profile service account report, whether a dispatch for an
-// agent with gcpID on profileName is certain to be refused by the broker
-// because the GCP service account is not mapped there. It returns nil,
-// meaning dispatch and let the broker decide, unless all of these hold:
+// SA mapping decision states (SAMappingDecision.State). "mapped" means the
+// broker's report lists a Kubernetes service account for the GCP service
+// account; it does not mean ready, because the Workload Identity IAM
+// binding is not visible to the broker or the hub.
+const (
+	SAMappingStateMapped      = "mapped"
+	SAMappingStateNotMapped   = "not_mapped"
+	SAMappingStateNotRequired = "not_required"
+	SAMappingStateUnknown     = "unknown"
+)
+
+// SA mapping decision reasons (SAMappingDecision.Reason), set only when the
+// state is unknown. These codes are shared by the dispatch refusal, the
+// assign picker and the per-account status view.
+const (
+	SAMappingReasonNoBroker            = "no_broker"
+	SAMappingReasonNoProfile           = "no_profile"
+	SAMappingReasonNoAccount           = "no_account"
+	SAMappingReasonProfileNotOnBroker  = "profile_not_on_broker"
+	SAMappingReasonRuntimeUnrecognized = "runtime_unrecognized"
+	SAMappingReasonReportMissing       = "report_missing"
+	SAMappingReasonReportIncomplete    = "report_incomplete"
+	SAMappingReasonReportOldVersion    = "report_old_version"
+	SAMappingReasonReportStale         = "report_stale"
+	SAMappingReasonAmbiguousMapping    = "ambiguous_mapping"
+)
+
+// SAMappingDecision is the hub's answer, from its stored copy of one broker
+// profile's service account report, to whether a GCP service account is
+// mapped on that profile.
+type SAMappingDecision struct {
+	State  string
+	Reason string
+	// Account is the normalized (lowercased) GCP service account.
+	Account string
+	// Profile and Broker name the profile and broker decided on, when known.
+	Profile string
+	Broker  string
+	// Namespace is the namespace the report's entries carry: the matched
+	// entry's for mapped, the first entry's for not_mapped.
+	Namespace string
+}
+
+// profileSAMappingDecision decides, from the hub's stored copy of broker's
+// per-profile service account report, whether account is mapped on
+// profileName. It is the one decision behind the dispatch refusal
+// (kubernetesIdentityNotMapped refuses only on not_mapped), the assign
+// picker's assignStatus and the per-account status view, so they agree for
+// the same inputs.
 //
-//   - the mode is "assign" with a service account email;
-//   - the hub has recorded the agent's profile (for an agent whose profile
-//     the hub has not recorded, the broker picks one from the project's
-//     settings, which the hub does not see) and the broker has a stored
-//     profile of that name;
-//   - the profile's Type is Kubernetes (gated on the type, not on whether
-//     a report exists: a profile switched away from Kubernetes can keep an
+// The state is unknown, never not_mapped, unless all of these hold:
+//
+//   - a broker, a profile name and an account are given;
+//   - the broker has a stored profile of that name (for a profile the hub
+//     has not recorded, the broker decides);
+//   - the profile's Type is Kubernetes (gated on the type, not on whether a
+//     report exists: a profile switched away from Kubernetes can keep an
 //     old report);
-//   - the report is complete, at most profileSAReportFreshFor old, and at
-//     api.BrokerSAReportVersion or later (an older broker's report may be
-//     complete for a profile dispatch would not use);
+//   - the report is complete, has a timestamp at most profileSAReportFreshFor
+//     old, and is at api.BrokerSAReportVersion or later (an older broker's
+//     report may be complete for a profile dispatch would not use);
 //   - the account is not ambiguous (more than one annotated KSA: the broker
-//     decides) and is in none of the report's entries.
+//     decides).
 //
-// The namespace is not resolved here: the report's entries carry the one
-// the broker resolved for dispatch (resolveAssignNamespace).
-func kubernetesIdentityNotMapped(broker *store.RuntimeBroker, profileName string, gcpID *store.GCPIdentityConfig, now time.Time) *identityNotMappedPrecheck {
-	if broker == nil || gcpID == nil || gcpID.MetadataMode != store.GCPMetadataModeAssign || profileName == "" {
-		return nil
+// A profile whose Type is a local runtime (docker, podman, container) needs
+// no mapping and gives not_required. Any other non-Kubernetes Type is
+// unknown: a custom runtime key can name a Kubernetes runtime the hub
+// cannot see.
+func profileSAMappingDecision(broker *store.RuntimeBroker, profileName, account string, now time.Time) SAMappingDecision {
+	d := SAMappingDecision{
+		State:   SAMappingStateUnknown,
+		Account: strings.ToLower(strings.TrimSpace(account)),
+		Profile: profileName,
 	}
-	account := strings.ToLower(strings.TrimSpace(gcpID.ServiceAccountEmail))
-	if account == "" {
-		return nil
+	if broker == nil {
+		d.Reason = SAMappingReasonNoBroker
+		return d
+	}
+	d.Broker = broker.Name
+	if profileName == "" {
+		d.Reason = SAMappingReasonNoProfile
+		return d
+	}
+	if d.Account == "" {
+		d.Reason = SAMappingReasonNoAccount
+		return d
 	}
 	var profile *store.BrokerProfile
 	for i := range broker.Profiles {
@@ -118,40 +175,77 @@ func kubernetesIdentityNotMapped(broker *store.RuntimeBroker, profileName string
 			break
 		}
 	}
-	if profile == nil || !isKubernetesRuntimeType(profile.Type) {
-		return nil
+	if profile == nil {
+		d.Reason = SAMappingReasonProfileNotOnBroker
+		return d
 	}
-	if !profile.MappingsReported || !profile.MappingsComplete || profile.MappingsReportedAt == nil {
-		return nil
+	if !isKubernetesRuntimeType(profile.Type) {
+		if localOnlyProfileTypes[profile.Type] {
+			d.State = SAMappingStateNotRequired
+			return d
+		}
+		d.Reason = SAMappingReasonRuntimeUnrecognized
+		return d
+	}
+	if !profile.MappingsReported {
+		d.Reason = SAMappingReasonReportMissing
+		return d
+	}
+	if !profile.MappingsComplete {
+		d.Reason = SAMappingReasonReportIncomplete
+		return d
 	}
 	// A report from a broker that predates api.BrokerSAReportVersion may
 	// be complete while dispatch would not use the profile's entries (for
 	// example under ForceRuntime), so it is unknown.
 	if profile.MappingsReportVersion < api.BrokerSAReportVersion {
-		return nil
+		d.Reason = SAMappingReasonReportOldVersion
+		return d
 	}
-	if now.Sub(*profile.MappingsReportedAt) > profileSAReportFreshFor {
-		return nil
+	if profile.MappingsReportedAt == nil || now.Sub(*profile.MappingsReportedAt) > profileSAReportFreshFor {
+		d.Reason = SAMappingReasonReportStale
+		return d
 	}
 	for _, gsa := range profile.AmbiguousGSAs {
-		if strings.EqualFold(gsa, account) {
-			return nil
+		if strings.EqualFold(gsa, d.Account) {
+			d.Reason = SAMappingReasonAmbiguousMapping
+			return d
 		}
 	}
-	namespace := ""
+	firstNamespace := ""
 	for _, m := range profile.ServiceAccountMappings {
-		if strings.EqualFold(m.GSA, account) {
-			return nil
+		if strings.EqualFold(m.GSA, d.Account) {
+			d.State = SAMappingStateMapped
+			d.Namespace = m.Namespace
+			return d
 		}
-		if namespace == "" {
-			namespace = m.Namespace
+		if firstNamespace == "" {
+			firstNamespace = m.Namespace
 		}
+	}
+	d.State = SAMappingStateNotMapped
+	d.Namespace = firstNamespace
+	return d
+}
+
+// kubernetesIdentityNotMapped decides whether a dispatch for an agent with
+// gcpID on profileName is certain to be refused by the broker because the
+// GCP service account is not mapped there. It returns nil, meaning dispatch
+// and let the broker decide, unless the mode is "assign" and
+// profileSAMappingDecision says not_mapped.
+func kubernetesIdentityNotMapped(broker *store.RuntimeBroker, profileName string, gcpID *store.GCPIdentityConfig, now time.Time) *identityNotMappedPrecheck {
+	if gcpID == nil || gcpID.MetadataMode != store.GCPMetadataModeAssign {
+		return nil
+	}
+	d := profileSAMappingDecision(broker, profileName, gcpID.ServiceAccountEmail, now)
+	if d.State != SAMappingStateNotMapped {
+		return nil
 	}
 	return &identityNotMappedPrecheck{
-		Account:   account,
-		Profile:   profile.Name,
-		Broker:    broker.Name,
-		Namespace: namespace,
+		Account:   d.Account,
+		Profile:   d.Profile,
+		Broker:    d.Broker,
+		Namespace: d.Namespace,
 	}
 }
 
