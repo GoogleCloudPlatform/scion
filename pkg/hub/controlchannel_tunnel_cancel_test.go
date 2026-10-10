@@ -16,7 +16,6 @@ package hub
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -68,17 +67,11 @@ func newHubWSPair(t *testing.T) (hubSide, brokerSide *wsprotocol.Connection, cle
 // the broker's create run to completion unwatched, which is exactly how the
 // leak in the issue occurred.
 func TestTunnelRequest_TimeoutSendsCancelToBroker(t *testing.T) {
-	hubSide, brokerSide, cleanup := newHubWSPair(t)
-	defer cleanup()
+	runOverSilentBrokers(t, testTunnelRequest_TimeoutSendsCancelToBroker)
+}
 
-	hc := &BrokerConnection{
-		brokerID:        "broker-1",
-		conn:            hubSide,
-		config:          ControlChannelConfig{RequestTimeout: 100 * time.Millisecond},
-		log:             slog.Default(),
-		pendingRequests: make(map[string]chan *wsprotocol.ResponseEnvelope),
-		ctx:             context.Background(),
-	}
+func testTunnelRequest_TimeoutSendsCancelToBroker(t *testing.T, tr silentBrokerTransport) {
+	b := tr.new(t, 100*time.Millisecond)
 
 	req := &wsprotocol.RequestEnvelope{
 		Type:      wsprotocol.TypeRequest,
@@ -87,48 +80,17 @@ func TestTunnelRequest_TimeoutSendsCancelToBroker(t *testing.T) {
 		Path:      "/api/v1/agents",
 	}
 
-	// Read (and discard) the request the "broker" side receives, simulating
-	// a broker that is still busy with a slow create and never responds.
-	readDone := make(chan error, 1)
-	go func() {
-		var got wsprotocol.RequestEnvelope
-		readDone <- brokerSide.ReadJSON(&got)
-	}()
-
-	resp, err := hc.TunnelRequest(context.Background(), req)
+	// The broker receives the request, simulating a broker that is still
+	// busy with a slow create and never responds.
+	resp, err := b.tunnel().TunnelRequest(context.Background(), "broker-1", req)
 	if err == nil {
 		t.Fatalf("expected TunnelRequest to time out, got response: %+v", resp)
 	}
-
-	select {
-	case err := <-readDone:
-		if err != nil {
-			t.Fatalf("broker side failed to read request: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("broker side never received the request")
-	}
+	b.received(t)
 
 	// The broker side must receive a cancel for the same RequestID.
-	var cancelMsg wsprotocol.CancelMessage
-	envDone := make(chan error, 1)
-	go func() {
-		envDone <- brokerSide.ReadJSON(&cancelMsg)
-	}()
-	select {
-	case err := <-envDone:
-		if err != nil {
-			t.Fatalf("broker side failed to read cancel message: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("broker side never received a cancel message after the Hub timed out")
-	}
-
-	if cancelMsg.Type != wsprotocol.TypeCancel {
-		t.Errorf("expected cancel message type %q, got %q", wsprotocol.TypeCancel, cancelMsg.Type)
-	}
-	if cancelMsg.RequestID != "create-req-1" {
-		t.Errorf("expected cancel for requestID 'create-req-1', got %q", cancelMsg.RequestID)
+	if got := b.cancelled(t); got != "create-req-1" {
+		t.Errorf("expected cancel for requestID 'create-req-1', got %q", got)
 	}
 }
 
@@ -137,17 +99,11 @@ func TestTunnelRequest_TimeoutSendsCancelToBroker(t *testing.T) {
 // (e.g. the inbound HTTP request was itself cancelled) before the broker
 // responds, TunnelRequest must also notify the broker.
 func TestTunnelRequest_CallerCtxCancelledSendsCancelToBroker(t *testing.T) {
-	hubSide, brokerSide, cleanup := newHubWSPair(t)
-	defer cleanup()
+	runOverSilentBrokers(t, testTunnelRequest_CallerCtxCancelledSendsCancelToBroker)
+}
 
-	hc := &BrokerConnection{
-		brokerID:        "broker-1",
-		conn:            hubSide,
-		config:          ControlChannelConfig{RequestTimeout: 30 * time.Second},
-		log:             slog.Default(),
-		pendingRequests: make(map[string]chan *wsprotocol.ResponseEnvelope),
-		ctx:             context.Background(),
-	}
+func testTunnelRequest_CallerCtxCancelledSendsCancelToBroker(t *testing.T, tr silentBrokerTransport) {
+	b := tr.new(t, 30*time.Second)
 
 	req := &wsprotocol.RequestEnvelope{
 		Type:      wsprotocol.TypeRequest,
@@ -156,27 +112,14 @@ func TestTunnelRequest_CallerCtxCancelledSendsCancelToBroker(t *testing.T) {
 		Path:      "/api/v1/agents",
 	}
 
-	readDone := make(chan error, 1)
-	go func() {
-		var got wsprotocol.RequestEnvelope
-		readDone <- brokerSide.ReadJSON(&got)
-	}()
-
 	ctx, cancel := context.WithCancel(context.Background())
 	resultCh := make(chan error, 1)
 	go func() {
-		_, err := hc.TunnelRequest(ctx, req)
+		_, err := b.tunnel().TunnelRequest(ctx, "broker-1", req)
 		resultCh <- err
 	}()
 
-	select {
-	case err := <-readDone:
-		if err != nil {
-			t.Fatalf("broker side failed to read request: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("broker side never received the request")
-	}
+	b.received(t)
 
 	// Give TunnelRequest a moment to reach its select before cancelling.
 	time.Sleep(50 * time.Millisecond)
@@ -191,24 +134,7 @@ func TestTunnelRequest_CallerCtxCancelledSendsCancelToBroker(t *testing.T) {
 		t.Fatal("TunnelRequest did not return after ctx cancellation")
 	}
 
-	var cancelMsg wsprotocol.CancelMessage
-	envDone := make(chan error, 1)
-	go func() {
-		envDone <- brokerSide.ReadJSON(&cancelMsg)
-	}()
-	select {
-	case err := <-envDone:
-		if err != nil {
-			t.Fatalf("broker side failed to read cancel message: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("broker side never received a cancel message after the caller's ctx was cancelled")
-	}
-
-	if cancelMsg.Type != wsprotocol.TypeCancel {
-		t.Errorf("expected cancel message type %q, got %q", wsprotocol.TypeCancel, cancelMsg.Type)
-	}
-	if cancelMsg.RequestID != "create-req-2" {
-		t.Errorf("expected cancel for requestID 'create-req-2', got %q", cancelMsg.RequestID)
+	if got := b.cancelled(t); got != "create-req-2" {
+		t.Errorf("expected cancel for requestID 'create-req-2', got %q", got)
 	}
 }
