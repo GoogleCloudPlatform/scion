@@ -307,7 +307,11 @@ describe('share dialog', () => {
 
     const input = $(el, '.created sl-input') as HTMLElement & { value: string };
     expect(input.value).toBe(`${window.location.origin}/api/v1/artifacts/shared/TOKEN123`);
-    expect($(el, '.created')!.textContent).toContain('the link is shown only once');
+    const once = $(el, '.created .once')!.textContent!.replace(/\s+/g, ' ').trim();
+    expect(once).toMatch(
+      /^Copy it now: the link is shown only once\. Anyone with it can view this artifact until .+ or until you revoke it\.$/
+    );
+    expect($(el, '.clamped')).toBeNull();
     expect($$(el, 'tbody tr')).toHaveLength(1);
 
     // Closing forgets the link at once, before any reopening.
@@ -367,7 +371,17 @@ describe('share dialog', () => {
     expect(el.shadowRoot!.textContent).toContain('This artifact expires');
     button(el, 'Create link').click();
     await settle(el);
-    expect($(el, '.created')!.textContent).toContain('when the artifact expires');
+    // As in the approved mock (state 1d): the success alert keeps only the
+    // shown-once line, and a separate notice gives the link's end.
+    const once = $(el, '.created .once')!.textContent!.replace(/\s+/g, ' ').trim();
+    expect(once).toBe('Copy it now: the link is shown only once.');
+    expect($(el, '.created')!.textContent).not.toContain('when the artifact expires');
+    const clamped = $(el, 'sl-alert.clamped')!;
+    expect(clamped.getAttribute('variant')).toBe('primary');
+    expect(clamped.textContent!.replace(/\s+/g, ' ').trim()).toMatch(
+      /^The link ends .+, when the artifact expires\.$/
+    );
+    expect(clamped.querySelector('strong')!.textContent).not.toBe('');
   });
 
   it('revokes a link', async () => {

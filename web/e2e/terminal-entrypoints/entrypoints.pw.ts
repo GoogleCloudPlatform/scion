@@ -65,7 +65,7 @@ const entryPoints: EntryPointRow[] = [
   {
     name: 'project detail (list/table view)',
     page: `/projects/${projectId}`,
-    before: (p) => switchView(p, 'scion-view-project', 'list'),
+    before: (p) => switchView(p, 'scion-view-project-agents', 'list'),
     locator: (p) => p.locator('sl-button[aria-label="Terminal"]').first(),
     hrefEnabled: `/terminals/${agentA}`,
     hrefDisabled: `/agents/${agentA}/terminal`,
