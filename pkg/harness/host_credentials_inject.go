@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 
 	harnessesEmbed "github.com/GoogleCloudPlatform/scion/harnesses"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -137,7 +138,7 @@ const maxHostCredentialFileSize = 1 << 20
 
 // ReadInjectableHostCredentialFile reads a file returned by
 // InjectableHostCredentialFiles while closing the gap between that check and
-// the read: it opens the file, then re-resolves the declared path under home
+// the read: it opens the file without blocking, then re-resolves the declared path under home
 // and requires that the resolved path is still strictly inside the resolved
 // home and names the very file that was opened (same device and inode), and
 // that it is a regular file no larger than 1 MiB. The content is read from
@@ -151,7 +152,9 @@ func ReadInjectableHostCredentialFile(f HostCredentialFile, home string) ([]byte
 	if err != nil {
 		return nil, err
 	}
-	file, err := os.Open(f.Path)
+	// O_NONBLOCK keeps a FIFO swapped in at the path from blocking the open
+	// (and with it the agent start); the fstat check below then rejects it.
+	file, err := os.OpenFile(f.Path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}

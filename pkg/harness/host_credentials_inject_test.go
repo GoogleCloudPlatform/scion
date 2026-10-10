@@ -17,7 +17,9 @@ package harness
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
@@ -263,4 +265,36 @@ func TestReadInjectableHostCredentialFile(t *testing.T) {
 			t.Fatal("expected an error for an escaping suffix")
 		}
 	})
+}
+
+// TestReadInjectableHostCredentialFile_FIFODoesNotBlock: a FIFO swapped in
+// at the path after the check is rejected without blocking the read (no
+// writer ever opens it).
+func TestReadInjectableHostCredentialFile_FIFODoesNotBlock(t *testing.T) {
+	home := t.TempDir()
+	p := writeHomeFile(t, home, "/.claude/.credentials.json")
+	files := InjectableHostCredentialFiles(shippedClaudeAuthMeta(t), home)
+	if len(files) != 1 {
+		t.Fatalf("files = %+v", files)
+	}
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(p, 0o600); err != nil {
+		t.Skipf("mkfifo not supported: %v", err)
+	}
+	files[0].Path = p
+	done := make(chan error, 1)
+	go func() {
+		_, err := ReadInjectableHostCredentialFile(files[0], home)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected a FIFO to be rejected")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reading a FIFO blocked")
+	}
 }
