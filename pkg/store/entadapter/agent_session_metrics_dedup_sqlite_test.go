@@ -41,10 +41,11 @@ func TestMigrate_DeduplicatesAgentSessionMetricsBeforeUniqueIndex(t *testing.T) 
 
 	raw, err := sql.Open("sqlite", dsn)
 	require.NoError(t, err)
+	// The frozen pre-index table (see agent_session_metrics_projectid_test.go);
+	// Migrate adds the project index and the unique index itself.
 	for _, stmt := range []string{
 		oldAgentSessionMetricsDDL,
 		oldAgentSessionMetricsAgentIDIndexDDL,
-		oldAgentSessionMetricsGroveIDIndexDDL,
 		oldAgentSessionMetricsStartedAtIndexDDL,
 	} {
 		_, err := raw.ExecContext(ctx, stmt)
@@ -56,9 +57,7 @@ func TestMigrate_DeduplicatesAgentSessionMetricsBeforeUniqueIndex(t *testing.T) 
 	for _, r := range []struct {
 		id, agent, session string
 		turns              int
-		created            time.Time
-
-		started time.Time
+		created, started   time.Time
 	}{
 		{uuid.NewString(), "agent-a", "session-1", 9, base.Add(2 * time.Minute), base},
 		{firstID, "agent-a", "session-1", 3, base, base},
@@ -67,9 +66,12 @@ func TestMigrate_DeduplicatesAgentSessionMetricsBeforeUniqueIndex(t *testing.T) 
 		{uuid.NewString(), "agent-a", "session-2", 1, base, base},
 		{uuid.NewString(), "agent-b", "session-1", 2, base, base},
 	} {
+		// Positional, in oldAgentSessionMetricsDDL's column order: id,
+		// agent, project, session, started_at, ended_at, status,
+		// turn_count, model, four token counts, tool_calls, languages,
+		// created_at.
 		_, err := raw.ExecContext(ctx, `INSERT INTO agent_session_metrics
-			(id, agent_id, grove_id, session_id, started_at, turn_count, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, NULL, 0, 0, 0, 0, NULL, NULL, ?)`,
 			r.id, r.agent, "project-1", r.session, r.started, r.turns, r.created)
 		require.NoError(t, err)
 	}
