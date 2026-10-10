@@ -494,7 +494,7 @@ func (s *adtFaultStore) inject(t *testing.T, faults adtFaults) {
 	t.Cleanup(s.clear)
 }
 
-// clear turns injection off; the wrapper is transparent again.
+// clear turns the faults off; the wrapper is transparent again.
 func (s *adtFaultStore) clear() { s.enabled.Store(false) }
 
 func (s *adtFaultStore) active() *adtFaults {
