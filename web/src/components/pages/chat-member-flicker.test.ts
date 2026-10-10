@@ -105,8 +105,8 @@ const liveMemberResponse = {
 };
 
 function mockMembersResponse(agents: unknown[]): void {
-  vi.mocked(apiFetch).mockImplementation(
-    async () => new Response(JSON.stringify({ humans: [], agents }), { status: 200 })
+  vi.mocked(apiFetch).mockImplementation(() =>
+    Promise.resolve(new Response(JSON.stringify({ humans: [], agents }), { status: 200 }))
   );
 }
 
