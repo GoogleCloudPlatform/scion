@@ -161,7 +161,9 @@ export class ScionArtifactMoveDialog extends LitElement {
         <p class="hint">
           ${!this.loading && this.projects.length === 0
             ? 'You are not a member of any other project.'
-            : 'Your projects are listed; you need permission to publish in the one you choose. Links and grants are kept.'}
+            : 'Your projects are listed; you need permission to publish in the one you choose. ' +
+              'Share links and grants to people and other projects are kept. ' +
+              'The old home project loses its access unless you grant it explicitly.'}
         </p>
         ${this.error
           ? html`<sl-alert variant="danger" open role="alert">
