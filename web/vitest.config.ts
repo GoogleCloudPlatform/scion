@@ -1,5 +1,6 @@
 import { defineConfig } from 'vitest/config';
 import { resolve } from 'path';
+import { vitestMaxWorkers } from './vitest-workers';
 
 export default defineConfig({
   resolve: {
@@ -14,6 +15,10 @@ export default defineConfig({
     environment: 'happy-dom',
     include: ['src/**/*.test.ts'],
     setupFiles: ['./vitest.setup.ts'],
+    // One worker per CPU the container's cgroup quota allows, not per host
+    // core (see vitest-workers.ts). --maxWorkers and VITEST_MAX_WORKERS
+    // still override this.
+    maxWorkers: vitestMaxWorkers(),
     // Pin the process timezone so tests are deterministic regardless of the
     // CI host's or developer's ambient TZ (tz-refactor task 11). Explicitly
     // overrides any `TZ` already set in the invoking shell, so running with
