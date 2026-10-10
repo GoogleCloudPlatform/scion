@@ -193,6 +193,9 @@ func (m *mockHubClient) Artifacts() hubclient.ArtifactService               { re
 func (m *mockHubClient) Health(ctx context.Context) (*hubclient.HealthResponse, error) {
 	return &hubclient.HealthResponse{}, nil
 }
+func (m *mockHubClient) HealthSummary(ctx context.Context) (*hubclient.HealthSummaryResponse, error) {
+	return &hubclient.HealthSummaryResponse{}, nil
+}
 func (m *mockHubClient) DiscoverSkillsDirectory(ctx context.Context, req hubclient.DiscoverSkillsDirectoryRequest) (*hubclient.DiscoverSkillsDirectoryResponse, error) {
 	return nil, nil
 }

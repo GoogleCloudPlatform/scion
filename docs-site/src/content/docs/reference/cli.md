@@ -965,6 +965,7 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
     - `revoke <token-id>`: Revoke a token (remains visible in listings as revoked).
     - `delete <token-id>`: Permanently delete a token.
 - `scion hub status`: Show the current Hub connection status.
+- `scion hub health [--json]`: Show Hub subsystem health: overall status, database pool counters, runtime brokers (runtime availability, healthy/total agents, last heartbeat), fleet-wide agent counts per lifecycle phase, and stalled/crashed/errored agents. Requires the Hub admin role (`hub.health.read`); otherwise falls back to the public `/healthz` status. JSON output carries a top-level `detailed` boolean indicating which shape was returned.
 - `scion hub notifications`: **Deprecated**. This command has been moved to the top-level `scion notifications` command group.
 - `scion hub link`: Link the current local project to the Hub.
 - `scion hub unlink`: Unlink the current project from the Hub locally.

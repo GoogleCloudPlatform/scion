@@ -248,31 +248,13 @@ func runProjectHealth(cmd *cobra.Command, args []string) error {
 			Agents:    allAgents,
 		}
 
-		report.Summary.Total = len(allAgents)
+		rawPhases := make(map[string]int)
 		for _, a := range allAgents {
-			switch state.Phase(a.Phase) {
-			case state.PhaseCreated:
-				report.Summary.Created++
-			case state.PhaseProvisioning:
-				report.Summary.Provisioning++
-			case state.PhaseCloning:
-				report.Summary.Cloning++
-			case state.PhaseStarting:
-				report.Summary.Starting++
-			case state.PhaseRunning:
-				report.Summary.Running++
-			case state.PhaseSuspended:
-				report.Summary.Suspended++
-			case state.PhaseStopping:
-				report.Summary.Stopping++
-			case state.PhaseStopped:
-				report.Summary.Stopped++
-			case state.PhaseError:
-				report.Summary.Error++
-			default:
-				report.Summary.OtherPhase++
-			}
+			rawPhases[a.Phase]++
+		}
+		report.Summary.setPhaseCounts(bucketPhases(rawPhases))
 
+		for _, a := range allAgents {
 			switch state.Activity(a.Activity) {
 			case "":
 				// No activity set (e.g., when agent is not running)
@@ -313,31 +295,44 @@ func runProjectHealth(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// setPhaseCounts copies a shared phaseCounts bucketing into the per-phase
+// JSON fields of the summary.
+func (s *ProjectHealthSummary) setPhaseCounts(pc phaseCounts) {
+	s.Total = pc.Total
+	s.Created = pc.ByPhase[state.PhaseCreated]
+	s.Provisioning = pc.ByPhase[state.PhaseProvisioning]
+	s.Cloning = pc.ByPhase[state.PhaseCloning]
+	s.Starting = pc.ByPhase[state.PhaseStarting]
+	s.Running = pc.ByPhase[state.PhaseRunning]
+	s.Suspended = pc.ByPhase[state.PhaseSuspended]
+	s.Stopping = pc.ByPhase[state.PhaseStopping]
+	s.Stopped = pc.ByPhase[state.PhaseStopped]
+	s.Error = pc.ByPhase[state.PhaseError]
+	s.OtherPhase = pc.Other
+}
+
+// phaseCounts is the inverse of setPhaseCounts, so rendering goes through the
+// same code path as 'scion hub health'.
+func (s ProjectHealthSummary) phaseCounts() phaseCounts {
+	return phaseCounts{
+		Total: s.Total,
+		ByPhase: map[state.Phase]int{
+			state.PhaseCreated:      s.Created,
+			state.PhaseProvisioning: s.Provisioning,
+			state.PhaseCloning:      s.Cloning,
+			state.PhaseStarting:     s.Starting,
+			state.PhaseRunning:      s.Running,
+			state.PhaseSuspended:    s.Suspended,
+			state.PhaseStopping:     s.Stopping,
+			state.PhaseStopped:      s.Stopped,
+			state.PhaseError:        s.Error,
+		},
+		Other: s.OtherPhase,
+	}
+}
+
 func formatPhaseSummary(s ProjectHealthSummary) string {
-	parts := []string{
-		fmt.Sprintf("Total=%d", s.Total),
-		fmt.Sprintf("Running=%d", s.Running),
-		fmt.Sprintf("Error=%d", s.Error),
-		fmt.Sprintf("Stopped=%d", s.Stopped),
-	}
-	extra := []struct {
-		label string
-		val   int
-	}{
-		{"Created", s.Created},
-		{"Provisioning", s.Provisioning},
-		{"Cloning", s.Cloning},
-		{"Starting", s.Starting},
-		{"Suspended", s.Suspended},
-		{"Stopping", s.Stopping},
-		{"Other", s.OtherPhase},
-	}
-	for _, b := range extra {
-		if b.val > 0 {
-			parts = append(parts, fmt.Sprintf("%s=%d", b.label, b.val))
-		}
-	}
-	return strings.Join(parts, " | ")
+	return s.phaseCounts().String()
 }
 
 func formatActivitySummary(s ProjectHealthSummary) string {
