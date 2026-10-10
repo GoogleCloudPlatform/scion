@@ -49,6 +49,8 @@ import {
 } from '../shared/chat/chat-scroll-anchor.js';
 import { PAGE_TITLE_EVENT } from '../../client/page-title.js';
 import { chatDMsLoad, chatSpacesLoad } from '../../client/chat-list-cache.js';
+import { chatUnread } from '../../client/chat-unread.js';
+import { chatNotifications } from '../../client/chat-notifications.js';
 import { FakeEventSource } from '../../client/__fixtures__/agent-store-harness.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -1383,6 +1385,36 @@ describe('chat page — DM mute toggle', () => {
     expect(el.v2Conversation.muted).toBe(false);
   });
 
+  it('refreshes the unread count and popup info after a saved DM mute', async () => {
+    const invalidate = vi.spyOn(chatNotifications, 'invalidateConversationInfo');
+    const refresh = vi.spyOn(chatUnread, 'scheduleRefresh').mockImplementation(() => {});
+    const el = pageOnDM(false);
+    vi.mocked(apiFetch).mockResolvedValue(
+      new Response(JSON.stringify({ muted: true }), { status: 200 })
+    );
+
+    await el.toggleDMMute();
+
+    expect(invalidate).toHaveBeenCalledOnce();
+    expect(refresh).toHaveBeenCalledOnce();
+    invalidate.mockRestore();
+    refresh.mockRestore();
+  });
+
+  it('refreshes neither when the server refuses the DM mute', async () => {
+    const invalidate = vi.spyOn(chatNotifications, 'invalidateConversationInfo');
+    const refresh = vi.spyOn(chatUnread, 'scheduleRefresh').mockImplementation(() => {});
+    const el = pageOnDM(false);
+    vi.mocked(apiFetch).mockResolvedValue(new Response('{}', { status: 403 }));
+
+    await el.toggleDMMute();
+
+    expect(invalidate).not.toHaveBeenCalled();
+    expect(refresh).not.toHaveBeenCalled();
+    invalidate.mockRestore();
+    refresh.mockRestore();
+  });
+
   it('does not reconcile onto a DM the user switched to mid-request', async () => {
     const el = pageOnDM(false);
     // The server disagrees with the optimistic value, so the success path wants
@@ -1464,6 +1496,20 @@ describe('chat page — muted DMs raise no unread dot', () => {
       );
       expect(el.v2UnreadFromIds).toEqual(['agent-2']);
       expect(refresh).toHaveBeenCalledOnce();
+    }
+  );
+
+  it.each(['dm:agent:agent-1:user:user-me', 'thread-1'])(
+    'asks the unread conversation count again after a read is saved (%s)',
+    (key) => {
+      const el = createPage();
+      vi.spyOn(el, 'loadUnreadDMPeers').mockResolvedValue(undefined);
+      const refresh = vi.spyOn(chatUnread, 'scheduleRefresh').mockImplementation(() => {});
+      el._handleReadStateUpdated(
+        new CustomEvent('read-state-updated', { detail: { conversationKey: key } })
+      );
+      expect(refresh).toHaveBeenCalledOnce();
+      refresh.mockRestore();
     }
   );
 
