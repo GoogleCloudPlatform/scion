@@ -7,7 +7,7 @@ files now run before every initialiser of the source package. Review each
 ERROR/HIGH/WARN item below before merging.
 
 == HIGH: source-scanning test does not cover the target ==
-  hub/guard_test.go: staying test parses Go sources and enumerates files (os.ReadDir); after the move it no longer scans the moved files in hub/sub (or scans the wrong set) and still passes - extend the scan to cover both directories (its pkgmove:scan-covers markers do not cover hub/sub: "pkgmove:scan-covers hub/other" at hub/guard_test.go:14, "pkgmove:scan-covers hub/su/..." at hub/guard_test.go:16, "pkgmove:scan-covers ../hub/sub" at hub/guard_test.go:18)
+  hub/guard_test.go: staying test parses Go sources and enumerates files (os.ReadDir); after the move it no longer scans the moved files in hub/sub (or scans the wrong set) and still passes - extend the scan to cover both directories (its pkgmove:scan-covers markers do not cover hub/sub (or are malformed): "// pkgmove:scan-covers hub/other" at hub/guard_test.go:14, "// pkgmove:scan-covers hub/su/..." at hub/guard_test.go:16, "// pkgmove:scan-covers ../hub/sub" at hub/guard_test.go:18)
 
 == WARN: func name seen through its value changes (runtime.FuncForPC, stack traces) ==
   hub/move.go:3: example.com/fx/hub.Handler is now example.com/fx/hub/sub.Handler for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces

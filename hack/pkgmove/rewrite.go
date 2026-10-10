@@ -1531,29 +1531,33 @@ func (a *analysis) sourceScanFindings() {
 		}
 		enum := strings.Join(dedupStrings(sortedCopy(calls)), ", ")
 		target := a.rel(a.cfg.DstDir)
-		var others []string
+		var others, notes []string
 		cleared := false
 		for _, m := range scanCoversMarkers(a.fset, f.AST, f.Src) {
 			pos := a.posOf(m.pos)
-			if m.covers(target) {
-				reason := "no reason line"
-				if m.reason != "" {
-					reason = fmt.Sprintf("reason: %q", m.reason)
-				}
-				a.plan.add(levelInfo, "source-scanning test declares coverage of the target", a.rel(f.Path),
-					"source-scanning test declares coverage of %s (marker at %s; %s); %s test enumerates files (%s) - the marker is a claim, not a proof: verify the test really scans %s",
-					target, pos, reason, side, enum, target)
-				cleared = true
-				break
+			if !m.covers(target) {
+				others = append(others, fmt.Sprintf("%q at %s", m.text, pos))
+				continue
 			}
-			others = append(others, fmt.Sprintf("%q at %s", m.text, pos))
+			if m.reason == "" {
+				notes = append(notes, fmt.Sprintf("marker at %s has no reason line", pos))
+				continue
+			}
+			a.plan.add(levelInfo, "source-scanning test declares coverage of the target", a.rel(f.Path),
+				"source-scanning test declares coverage of %s (marker at %s; reason: %q); %s test enumerates files (%s) - the marker is a claim, not a proof: verify the test really scans %s",
+				target, pos, m.reason, side, enum, target)
+			cleared = true
+			break
 		}
 		if cleared {
 			continue
 		}
-		note := ""
 		if len(others) > 0 {
-			note = fmt.Sprintf(" (its pkgmove:scan-covers markers do not cover %s: %s)", target, strings.Join(others, ", "))
+			notes = append(notes, fmt.Sprintf("its pkgmove:scan-covers markers do not cover %s (or are malformed): %s", target, strings.Join(others, ", ")))
+		}
+		note := ""
+		if len(notes) > 0 {
+			note = " (" + strings.Join(notes, "; ") + ")"
 		}
 		a.plan.add(levelHigh, "source-scanning test does not cover the target", a.rel(f.Path),
 			"%s test parses Go sources and enumerates files (%s); after the move it no longer scans the moved files in %s (or scans the wrong set) and still passes - extend the scan to cover both directories%s",
@@ -1567,23 +1571,25 @@ func (a *analysis) sourceScanFindings() {
 //	// pkgmove:scan-covers pkg/hub/sub
 //	// pkgmove:scan-covers pkg/hub/...
 //
-// The marker must be a whole comment line, with exactly one directory,
-// relative to the module root. A trailing "/..." covers the directory and
-// every directory below it. The next comment line states the reason; it is
-// echoed in the report but not interpreted.
+// The marker must be a whole comment line written exactly as above (one
+// space after the slashes; "//pkgmove:" is directive syntax, which gofmt
+// moves within doc comments), with one directory, relative to the module root. A trailing "/..." covers the directory and
+// every directory below it. The next comment line must state the reason; a
+// marker without one clears nothing. The reason is echoed in the report but
+// not interpreted.
 const scanCoversPrefix = "pkgmove:scan-covers"
 
 type scanCoversMarker struct {
 	pos       token.Pos
-	text      string // the marker as written, without the comment slashes
+	text      string // the marker comment as written
 	reason    string // the following comment line, "" when there is none
 	dir       string // cleaned module-relative directory, "" when malformed
 	recursive bool
 }
 
 // scanCoversMarkers returns the scan-covers markers of a file in source order.
-// A marker that does not start its line, or has a malformed directory, is
-// returned with dir "" so that it covers nothing.
+// A marker that does not start its line, lacks the space after "//", or has a
+// malformed directory, is returned with dir "" so that it covers nothing.
 func scanCoversMarkers(fset *token.FileSet, file *ast.File, src []byte) []scanCoversMarker {
 	var out []scanCoversMarker
 	for _, cg := range file.Comments {
@@ -1596,8 +1602,8 @@ func scanCoversMarkers(fset *token.FileSet, file *ast.File, src []byte) []scanCo
 			if len(fields) == 0 || fields[0] != scanCoversPrefix {
 				continue
 			}
-			m := scanCoversMarker{pos: c.Pos(), text: text}
-			if len(fields) == 2 && startsLine(src, fset.Position(c.Pos()).Offset) {
+			m := scanCoversMarker{pos: c.Pos(), text: c.Text}
+			if len(fields) == 2 && strings.HasPrefix(c.Text, "// "+scanCoversPrefix) && startsLine(src, fset.Position(c.Pos()).Offset) {
 				m.dir, m.recursive = parseScanCoversDir(fields[1])
 			}
 			if i+1 < len(cg.List) {

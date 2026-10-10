@@ -80,6 +80,8 @@ var goldenCases = []goldenCase{
 	{fixture: "sourcescan", files: []string{"move.go"}, env: "STRICT_GUARD=1", changes: "== HIGH: source-scanning test does not cover the target", afterPasses: true}, // the alias file replaces the moved file in the scan count
 	// scan-covers markers clear the HIGH (INFO instead); the guards really scan hub/sub.
 	{fixture: "sourcescancovered", files: []string{"move.go"}},
+	// A marker without a reason line, and the "//pkgmove:" directive form, clear nothing.
+	{fixture: "sourcescannoreason", files: []string{"move.go"}, env: "STRICT_GUARD=1", changes: "marker at hub/guard_test.go:14 has no reason line", afterPasses: true},
 	{fixture: "sourcescanwrongdir", files: []string{"move.go"}, env: "STRICT_GUARD=1", changes: "its pkgmove:scan-covers markers do not cover hub/sub", afterPasses: true},
 	// Rejections.
 	{fixture: "methods", files: []string{"move.go"}, wantErr: true},
@@ -422,6 +424,10 @@ func TestStrictRejectsHigh(t *testing.T) {
 			"-strict: init() in moved file", "-strict: package-level var initialiser calls package code"}},
 		{"sourcescan", []string{"move.go"}, []string{"-strict: source-scanning test does not cover the target"}},
 		{"sourcescanwrongdir", []string{"move.go"}, []string{"hub/guard_test.go: -strict: source-scanning test does not cover the target"}},
+		{"sourcescannoreason", []string{"move.go"}, []string{
+			"hub/guard_test.go: -strict: source-scanning test does not cover the target",
+			"marker at hub/guard_test.go:14 has no reason line",
+			"hub/nospace_test.go: -strict: source-scanning test does not cover the target"}},
 	} {
 		t.Run(tc.fixture, func(t *testing.T) {
 			dir := t.TempDir()
@@ -477,7 +483,8 @@ func TestScanCoversMarker(t *testing.T) {
 		want    bool
 	}{
 		{"// pkgmove:scan-covers pkg/hub/sub", "pkg/hub/sub", true},
-		{"//pkgmove:scan-covers pkg/hub/sub", "pkg/hub/sub", true},
+		{"//pkgmove:scan-covers pkg/hub/sub", "pkg/hub/sub", false}, // directive syntax
+		{"//  pkgmove:scan-covers pkg/hub/sub", "pkg/hub/sub", false},
 		{"// pkgmove:scan-covers ./pkg/hub/sub/", "pkg/hub/sub", true},
 		{"// pkgmove:scan-covers pkg/hub/...", "pkg/hub/sub", true},
 		{"// pkgmove:scan-covers pkg/hub/...", "pkg/hub", true},

@@ -248,13 +248,16 @@ marker, a whole comment line followed by a comment line that gives the reason:
 ```
 
 - **Format:** the marker line is exactly `// pkgmove:scan-covers <dir>`, alone
-  on its line (indentation is fine), with one directory. A marker after code
-  on the same line, with extra words, or with a malformed directory covers
-  nothing.
+  on its line (indentation is fine), with exactly one space after `//` and
+  one directory. A marker after code on the same line, with extra words, or
+  with a malformed directory covers nothing. So does the no-space form
+  `//pkgmove:scan-covers`: that is Go directive syntax, and gofmt moves
+  directives to the end of a doc comment, away from their reason line.
 - **Reason line (required):** the next comment line says why the claim holds,
   for example "recursive walk already includes ..." or "unaffected: guards X,
   which the moved files do not contain". The tool does not interpret it but
-  echoes it in the report; the reviewer rejects a marker without one.
+  echoes it in the report. A marker without one clears nothing; the HIGH
+  then says "marker at file:line has no reason line".
 - **Directory:** relative to the module root, slash-separated (`./` prefix
   and trailing `/` are allowed). `pkg/hub/...` covers `pkg/hub` and every
   directory below it, `./...` (or `...`) the whole module. Use a `/...`
@@ -265,11 +268,13 @@ marker, a whole comment line followed by a comment line that gives the reason:
   for example one per move it has been checked for.
 
 For each source-scanning test file, the HIGH is cleared only if one of its
-markers names the move's target directory, or a parent of it with `/...`.
+markers names the move's target directory, or a parent of it with `/...`,
+and has a reason line.
 The report then lists the file as INFO "source-scanning test declares
 coverage of <target> (marker at file:line; reason: ...)". Otherwise the HIGH
 stays (and fails `-strict`); when the file has markers for other
-directories, the HIGH lists them.
+directories, malformed markers or markers without a reason line, the HIGH
+lists them.
 
 ### What counts as a pure initialiser call
 
