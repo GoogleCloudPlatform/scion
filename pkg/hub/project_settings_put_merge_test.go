@@ -175,7 +175,7 @@ func TestMergeProjectSettingsPut_EveryField(t *testing.T) {
 	typ := reflect.TypeOf(hubclient.ProjectSettings{})
 	var structFields []string
 	for i := 0; i < typ.NumField(); i++ {
-		if name := jsonFieldName(typ.Field(i)); name != "" {
+		if name := serializedJSONFieldName(typ.Field(i)); name != "" {
 			structFields = append(structFields, name)
 		}
 	}
