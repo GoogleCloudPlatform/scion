@@ -112,6 +112,10 @@ type conduitBrokerRevoker struct {
 	// event publisher.
 	bindMu sync.Mutex
 	unbind func()
+
+	// testHookBeforeClose, when set, runs in a denying re-check's close
+	// just before the broker's registered sessions are closed. Tests only.
+	testHookBeforeClose atomic.Pointer[func(*conduitBrokerSession)]
 }
 
 // startConduitBrokerRevoke creates and starts this node's broker session
@@ -325,6 +329,9 @@ func (s *Server) trackConduitBrokerSession(ctx context.Context, brokerID string,
 			// sessions, and registration takes the relay's lock
 			// before the post-registration check reads the mark.
 			bs.denied.Store(true)
+			if h := v.testHookBeforeClose.Load(); h != nil {
+				(*h)(bs)
+			}
 			if rt := s.conduit.Load(); rt != nil {
 				rt.relay.CloseSessionsOf(registry.PrincipalBroker, brokerID, code, reason)
 			}
@@ -380,6 +387,13 @@ func (s *Server) conduitBrokerCredentialVerdict(ctx context.Context, brokerID st
 		return conduitAuthzDenied, "broker secret replaced"
 	}
 	return conduitAuthzAllowed, ""
+}
+
+// conduitBrokerSessionDenied reports whether ctx carries a broker session
+// a re-check has already denied. It reads no store.
+func conduitBrokerSessionDenied(ctx context.Context) bool {
+	bs, ok := ctx.Value(conduitBrokerSessionCtxKey{}).(*conduitBrokerSession)
+	return ok && bs != nil && bs.denied.Load()
 }
 
 // conduitRevalidateBrokerCredential runs once a broker session is admitted

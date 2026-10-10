@@ -136,11 +136,16 @@ func (s *Server) handleConduitBroker(w http.ResponseWriter, r *http.Request) {
 var errConduitBrokerGone = errors.New("runtime broker no longer exists")
 
 // conduitRevalidateBroker re-reads the broker row once a broker session is
-// admitted and registered: a broker deleted after handleConduitBroker's
-// read, or whose admitting secret is no longer current, is closed with
-// 4401. It only reads. A read error other than not-found keeps the session
-// (the broker session re-check and the reapers still cover it).
+// admitted and registered: a session a re-check has already denied, a
+// broker deleted after handleConduitBroker's read, or a broker whose
+// admitting secret is no longer current, is closed with 4401. It only
+// reads. A denied session closes before any store read; otherwise a read
+// error other than not-found keeps the session (the broker session
+// re-check and the reapers still cover it).
 func (s *Server) conduitRevalidateBroker(ctx context.Context, p relay.Principal) error {
+	if conduitBrokerSessionDenied(ctx) {
+		return errConduitBrokerCredentialChanged
+	}
 	_, err := s.store.GetRuntimeBroker(ctx, p.ID)
 	switch {
 	case errors.Is(err, store.ErrNotFound):

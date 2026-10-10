@@ -231,6 +231,29 @@ func brokerChanges() []brokerChange {
 			oldCredentialStatus: http.StatusUnauthorized,
 		},
 		{
+			// Re-join: the broker joins again with a fresh join token,
+			// which replaces its secret.
+			name: "re-join",
+			viaHub: func(t *testing.T, f *brokerConduitFixture, srv *Server) {
+				reg, err := srv.brokerAuthService.CreateBrokerRegistration(context.Background(),
+					CreateBrokerRegistrationRequest{Name: "conduit-broker"}, "test")
+				require.NoError(t, err)
+				require.Equal(t, f.brokerID, reg.BrokerID, "the registration matched the existing broker")
+				rec := joinWithToken(t, srv, f.brokerID, reg.JoinToken)
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			},
+			inStore: func(t *testing.T, f *brokerConduitFixture) {
+				ctx := context.Background()
+				sec, err := f.store.GetBrokerSecret(ctx, f.brokerID)
+				require.NoError(t, err)
+				require.NoError(t, f.store.DeleteBrokerSecret(ctx, f.brokerID))
+				sec.SecretKey = append([]byte("rejoined-"), sec.SecretKey...)
+				sec.CreatedAt = time.Now()
+				require.NoError(t, f.store.CreateBrokerSecret(ctx, sec))
+			},
+			oldCredentialStatus: http.StatusUnauthorized,
+		},
+		{
 			// Revocation: the broker's secret is no longer active. The
 			// hub announces the committed change with
 			// conduitBrokerCredentialChanged.
@@ -421,45 +444,74 @@ func TestConduitBrokerRevoke_ChangedDuringAdmission(t *testing.T) {
 // TestConduitBrokerRevoke_DeniedBeforeRegistrationCloses: a re-check that
 // denies the session while it is admitted but not yet registered (so the
 // close it issues finds no registered session) still closes it with 4401
-// once it registers, even when the post-registration check itself cannot
-// read the store and would keep the session.
+// once it registers, even when every store read of the post-registration
+// check fails and would keep the session.
 func TestConduitBrokerRevoke_DeniedBeforeRegistrationCloses(t *testing.T) {
-	var f *brokerRevokeFixture
-	var hooked atomic.Bool
-	f = newBrokerRevokeFixture(t, nil, func(o *ConduitRelayOptions) {
-		o.testHookAdmission = func() {
-			if !hooked.CompareAndSwap(false, true) {
+	for _, tc := range []struct {
+		name  string
+		fault func(*conduitBrokerFaultStore)
+	}{
+		{"broker read fails", func(s *conduitBrokerFaultStore) { s.failBroker.Store(true) }},
+		{"secret read fails", func(s *conduitBrokerFaultStore) { s.failSecret.Store(true) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var f *brokerRevokeFixture
+			var hooked atomic.Bool
+			f = newBrokerRevokeFixture(t, nil, func(o *ConduitRelayOptions) {
+				o.testHookAdmission = func() {
+					if !hooked.CompareAndSwap(false, true) {
+						return
+					}
+					revokeBrokerSecretInStore(t, f.brokerConduitFixture)
+					v := f.srv.conduitBrokerRevoke.Load()
+					v.authz.Recheck(context.Background(), conduitAuthzTriggerNotify, conduitBrokerMatch(f.brokerID))
+					assert.Equal(t, 0, v.authz.Len(), "the denied session is no longer tracked")
+					tc.fault(f.faults)
+				}
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			d := &ws.Dialer{
+				URL:    f.wsURL("/api/v1/conduit"),
+				Header: func(context.Context) (http.Header, error) { return f.signedHeader(t, "/api/v1/conduit", nil), nil },
+			}
+			hello := &conduitv1.Hello{
+				PrincipalKind: conduitv1.PrincipalKind_PRINCIPAL_KIND_BROKER,
+				PrincipalId:   f.brokerID,
+				Capabilities:  &conduitv1.Capabilities{EndpointIncarnation: "proc-1"},
+			}
+			s, _, err := conduit.Dial(ctx, d, conduit.Config{Clock: clock.Real()}, hello)
+			require.True(t, hooked.Load(), "admission hook ran")
+			f.metrics.wait(t, "notify/closed/broker", 1)
+			if err != nil {
+				// The close can reach the dialer before it has read the Welcome.
+				assert.Equal(t, conduit.CloseUnauthenticated, conduit.CodeOf(err, 0), "%v", err)
 				return
 			}
-			revokeBrokerSecretInStore(t, f.brokerConduitFixture)
-			v := f.srv.conduitBrokerRevoke.Load()
-			v.authz.Recheck(context.Background(), conduitAuthzTriggerNotify, conduitBrokerMatch(f.brokerID))
-			assert.Equal(t, 0, v.authz.Len(), "the denied session is no longer tracked")
-			f.faults.failSecret.Store(true)
-		}
-	})
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	d := &ws.Dialer{
-		URL:    f.wsURL("/api/v1/conduit"),
-		Header: func(context.Context) (http.Header, error) { return f.signedHeader(t, "/api/v1/conduit", nil), nil },
+			ls := s.(conduit.LocalSession)
+			t.Cleanup(func() { _ = ls.Close() })
+			assert.Equal(t, conduit.CloseUnauthenticated, waitSessionClosed(t, ls))
+		})
 	}
-	hello := &conduitv1.Hello{
-		PrincipalKind: conduitv1.PrincipalKind_PRINCIPAL_KIND_BROKER,
-		PrincipalId:   f.brokerID,
-		Capabilities:  &conduitv1.Capabilities{EndpointIncarnation: "proc-1"},
+}
+
+// TestConduitBrokerRevoke_MarkedBeforeClose: a denying re-check marks the
+// session denied before it closes the broker's registered sessions, so a
+// session that registers between the two still finds the mark.
+func TestConduitBrokerRevoke_MarkedBeforeClose(t *testing.T) {
+	f := newBrokerRevokeFixture(t, nil)
+	var calls atomic.Int32
+	hook := func(bs *conduitBrokerSession) {
+		calls.Add(1)
+		assert.True(t, bs.denied.Load(), "the session is marked denied before the close")
 	}
-	s, _, err := conduit.Dial(ctx, d, conduit.Config{Clock: clock.Real()}, hello)
-	require.True(t, hooked.Load(), "admission hook ran")
-	f.metrics.wait(t, "notify/closed/broker", 1)
-	if err != nil {
-		// The close can reach the dialer before it has read the Welcome.
-		assert.Equal(t, conduit.CloseUnauthenticated, conduit.CodeOf(err, 0), "%v", err)
-		return
-	}
-	ls := s.(conduit.LocalSession)
-	t.Cleanup(func() { _ = ls.Close() })
+	f.srv.conduitBrokerRevoke.Load().testHookBeforeClose.Store(&hook)
+	ls := f.dialSettled(t, f.brokerID, f.secret)
+	revokeBrokerSecretInStore(t, f.brokerConduitFixture)
+	f.srv.conduitBrokerCredentialChanged(f.brokerID)
 	assert.Equal(t, conduit.CloseUnauthenticated, waitSessionClosed(t, ls))
+	f.metrics.wait(t, "notify/closed/broker", 1)
+	assert.Equal(t, int32(1), calls.Load())
 }
 
 // TestConduitBrokerRevoke_CrossNode: the broker's session is held by hub
