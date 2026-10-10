@@ -832,7 +832,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
   private async handleAddSkill(e: Event): Promise<void> {
     e.preventDefault();
 
-    let uri = '';
+    let uri: string;
     if (this.dialogMode === 'search') {
       if (!this.dialogSelectedSkill) {
         this.dialogError = 'Please select a skill from the search results';

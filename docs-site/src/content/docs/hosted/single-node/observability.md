@@ -205,6 +205,8 @@ Where each part of Scion applies the level:
 | CLI | `[DEBUG]` lines on stderr appear when the default level is `debug`. Tagged lines such as `[hubsync]` also appear when that tag's component level is `debug`. |
 | `sciontool` (`agent.log`) | The default level filters DEBUG, INFO and WARN lines. A tag on a line, or a `subsystem` attribute on a structured log record, is matched against the per-component levels. |
 
+The log level only changes logging. It does not enable any HTTP routes; diagnostic endpoints are controlled separately by `scion server start --enable-debug-endpoints`.
+
 ### Precedence
 
 When more than one source sets a level, the one with the highest precedence wins:
@@ -354,6 +356,7 @@ Hub and Broker logs include a `subsystem` attribute that identifies the internal
 | `hub.templates` | Template CRUD, hydration, and bootstrap |
 | `hub.workspace` | Git worktree sync operations |
 | `hub.dispatcher` | HTTP agent dispatch to brokers |
+| `hub.web` | Web server requests and sessions. At `debug`, every web request is logged; requests that return an error status or are aborted are logged at info and more verbose levels. |
 | `broker.agent-lifecycle` | Container provisioning, environment resolution, template hydration |
 | `broker.control-channel` | Broker-side WebSocket connection to the hub |
 | `broker.messages` | Message injection into agent tmux sessions |

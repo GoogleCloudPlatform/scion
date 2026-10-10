@@ -385,6 +385,7 @@ export class ScionUnifiedLogViewer extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     this.severity = this.initialSeverity || 'INFO';
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises -- fire-and-forget by design; per-site decision tracked in ptone/scion#4126.
     this.loadInitialData();
   }
 
@@ -500,6 +501,7 @@ export class ScionUnifiedLogViewer extends LitElement {
     const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempt), 30000);
     this.reconnectAttempt++;
 
+    // eslint-disable-next-line @typescript-eslint/no-misused-promises -- async callback where a void return is expected, by design; per-site decision tracked in ptone/scion#4126.
     this.reconnectTimer = setTimeout(async () => {
       this.reconnectTimer = null;
       // Gap-fill: fetch entries since our last entry
@@ -576,6 +578,7 @@ export class ScionUnifiedLogViewer extends LitElement {
 
     // Auto-scroll after render
     if (this.autoScroll) {
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises -- fire-and-forget by design; per-site decision tracked in ptone/scion#4126.
       this.updateComplete.then(() => this.scrollToBottom());
     }
   }
@@ -613,6 +616,7 @@ export class ScionUnifiedLogViewer extends LitElement {
     this.entries = [];
     this.expandedIds.clear();
     this.newEntriesBelowCount = 0;
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises -- fire-and-forget by design; per-site decision tracked in ptone/scion#4126.
     this.loadInitialData();
   }
 

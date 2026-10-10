@@ -848,7 +848,7 @@ export class ScionPageAgents extends LitElement {
       return;
     }
     const viewEpoch = this.viewEpoch;
-    let adopted = false;
+    let adopted: boolean;
     this.beginLoadingIndicator();
     try {
       adopted =
