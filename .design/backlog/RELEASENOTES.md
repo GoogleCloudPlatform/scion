@@ -22,7 +22,7 @@
   older image to a newer one is safe. To avoid the loss, update all agent images together and avoid
   rolling an agent back across this change; otherwise expect a small loss of session metrics for
   agents that move between image versions. Nothing else in the state file, and no other metrics or
-  agent behaviour, is affected.
+  agent behavior, is affected.
 - **Eight broker authentication event types begin emitting.** `register`, `deregister`, `join`,
   `rotate`, `revoke`, `link`, `unlink` and **`auth_failure`** produce log records again. They have
   emitted **nothing at all** until now, so **plan for the added log volume** — anything consuming
