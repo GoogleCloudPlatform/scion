@@ -43,9 +43,7 @@ func hubTelemetryFixture(t *testing.T, settingsTelemetry string) string {
 		}
 	}
 	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	_ = os.Chdir(tmpDir)
-	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	t.Chdir(tmpDir)
 	t.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
@@ -141,7 +139,9 @@ func assertEnv(t *testing.T, env map[string]string, key, want string) {
 }
 
 // Acceptance 1: template fields win per field; hub fields fill the rest; and
-// the hub default sits above broker settings.
+// the hub default sits above the broker settings telemetry applied at Start.
+// (Settings telemetry that ProvisionAgent folds into scion-agent.json on
+// create ranks as agent config instead; that bake is TS-2c, not this test.)
 func TestStart_HubTelemetryDefault_TemplateWinsPerField(t *testing.T) {
 	project := hubTelemetryFixture(t, hubTierSettingsTelemetry)
 	writeHubTelemetryAgent(t, project, "tpl-block", `{
@@ -152,7 +152,7 @@ func TestStart_HubTelemetryDefault_TemplateWinsPerField(t *testing.T) {
 	env, _ := startWithHubTelemetry(t, project, "tpl-block", hubTelemetryDefault("hub:4317"), nil)
 
 	assertEnv(t, env, "SCION_OTEL_ENDPOINT", "template:4317")       // template wins
-	assertEnv(t, env, "SCION_OTEL_PROTOCOL", "grpc")                // hub beats settings
+	assertEnv(t, env, "SCION_OTEL_PROTOCOL", "grpc")                // hub beats settings applied at Start
 	assertEnv(t, env, "SCION_TELEMETRY_CLOUD_PROVIDER", "gcp")      // hub fills
 	assertEnv(t, env, "SCION_TELEMETRY_HUB_REPORT_INTERVAL", "45s") // hub fills
 	assertEnv(t, env, "SCION_TELEMETRY_CLOUD_BATCH_TIMEOUT", "9s")  // settings fills below hub
@@ -236,29 +236,49 @@ func TestStart_HubTelemetryDefault_PersistKeepsAgentTelemetry(t *testing.T) {
 }
 
 // Acceptance 4 (Start half): the override computed from TelemetryPolicy is
-// applied last and beats a config enabled: true and the hub default; the hub
-// default object on the context is never mutated by it (no aliasing).
+// applied last and beats a config enabled: true and the hub default, and
+// Start never writes into the hub default object on the context.
+//
+// The "no agent telemetry block" case is the one that can alias: with no
+// agent or settings telemetry, mergeTelemetryConfig hands back the base
+// (hub) pointer itself, and the TelemetryOverride write would land in the
+// context's HubAgentDefaults without the deep copy.
 func TestStart_TelemetryOverrideBeatsHubDefaultWithoutAliasing(t *testing.T) {
-	project := hubTelemetryFixture(t, "")
-	writeHubTelemetryAgent(t, project, "policy", `{
-		"harness": "gemini",
-		"telemetry": {"enabled": true}
-	}`)
-	hd := hubTelemetryDefault("hub:4317")
-	enabled := true
-	hd.Telemetry.Enabled = &enabled
-
 	off := false
-	env, rc := startWithHubTelemetry(t, project, "policy", hd, func(o *api.StartOptions) { o.TelemetryOverride = &off })
+	t.Run("agent has no telemetry block", func(t *testing.T) {
+		project := hubTelemetryFixture(t, "")
+		writeHubTelemetryAgent(t, project, "policy-noblock", `{"harness": "gemini"}`)
+		hd := hubTelemetryDefault("hub:4317")
 
-	if rc.TelemetryEnabled {
-		t.Error("TelemetryEnabled = true, want false (override is applied last)")
-	}
-	assertEnv(t, env, "SCION_TELEMETRY_ENABLED", "false")
-	if hd.Telemetry.Enabled == nil || !*hd.Telemetry.Enabled {
-		t.Error("hub default on the context was mutated by Start")
-	}
-	if hd.Telemetry.Cloud.Endpoint != "hub:4317" {
-		t.Error("hub default cloud config on the context was mutated by Start")
-	}
+		env, rc := startWithHubTelemetry(t, project, "policy-noblock", hd, func(o *api.StartOptions) { o.TelemetryOverride = &off })
+
+		if rc.TelemetryEnabled {
+			t.Error("TelemetryEnabled = true, want false (override is applied last)")
+		}
+		assertEnv(t, env, "SCION_TELEMETRY_ENABLED", "false")
+		assertEnv(t, env, "SCION_OTEL_ENDPOINT", "hub:4317")
+		if hd.Telemetry.Enabled != nil {
+			t.Errorf("hub default on the context was mutated by Start: Enabled=%v", *hd.Telemetry.Enabled)
+		}
+	})
+	t.Run("agent enables telemetry", func(t *testing.T) {
+		project := hubTelemetryFixture(t, "")
+		writeHubTelemetryAgent(t, project, "policy", `{
+			"harness": "gemini",
+			"telemetry": {"enabled": true}
+		}`)
+		hd := hubTelemetryDefault("hub:4317")
+		enabled := true
+		hd.Telemetry.Enabled = &enabled
+
+		env, rc := startWithHubTelemetry(t, project, "policy", hd, func(o *api.StartOptions) { o.TelemetryOverride = &off })
+
+		if rc.TelemetryEnabled {
+			t.Error("TelemetryEnabled = true, want false (override is applied last)")
+		}
+		assertEnv(t, env, "SCION_TELEMETRY_ENABLED", "false")
+		if hd.Telemetry.Enabled == nil || !*hd.Telemetry.Enabled {
+			t.Error("hub default on the context was mutated by Start")
+		}
+	})
 }

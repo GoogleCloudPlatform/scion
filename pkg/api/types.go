@@ -1177,9 +1177,11 @@ type HubAgentDefaults struct {
 	Experiments []string `json:"experiments,omitempty"`
 	// Telemetry is the hub's default telemetry config. It is a DEFAULT,
 	// not policy: the broker applies it at Start in base position, above
-	// broker settings telemetry and below the agent's own config (template
-	// chain, stored scion-agent.json and inline config), so a template's
-	// telemetry: block wins per field. It is applied per start and never
+	// the broker settings telemetry applied at Start and below the agent's
+	// own config (template chain, stored scion-agent.json and inline
+	// config), so a template's telemetry: block wins per field. Note that
+	// ProvisionAgent already folds broker settings telemetry into the
+	// stored config on create, so those fields rank as agent config here. It is applied per start and never
 	// persisted into scion-agent.json, so a later hub change reaches the
 	// agent at its next start (ptone/scion#4218).
 	Telemetry *TelemetryConfig `json:"telemetry,omitempty"`

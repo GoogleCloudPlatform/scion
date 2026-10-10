@@ -7619,21 +7619,21 @@ func preResolvedHubEndpoint(conn *HubConnection, advertised string) string {
 	return advertised
 }
 
-// envGatherTemplate returns the template whose declared secrets env-gather
-// lists. A hydrated hub template (hydratedTemplatePath, from hydrateTemplate)
-// is used whenever one was supplied, so a hub template is never looked up by
-// slug in the broker's local project path. Otherwise (local mode, or a hub
-// dispatch the broker could not hydrate) the template is resolved by slug
-// from the project path, as before. Nil when there is none.
+// envGatherTemplate returns the template env-gather reads (its declared
+// secrets and its auth_selectedType), or nil when there is none.
+//
+// Rule: env-gather reads the same template start will use. A hydrated hub
+// template (hydratedTemplatePath, from hydrateTemplate) is used whenever one
+// was supplied, so a hub template is never looked up by slug in the broker's
+// local project path. The slug fallback applies only when nothing was
+// hydrated: no hub connection, no TemplateID/hash, or hydration returned no
+// path. In each of those cases buildStartContext also leaves opts.Template
+// as the slug and provisioning resolves it locally. A hydration error fails
+// the create before this point.
 func envGatherTemplate(req CreateAgentRequest, hydratedTemplatePath string) *config.Template {
 	if hydratedTemplatePath != "" {
 		return &config.Template{Name: filepath.Base(hydratedTemplatePath), Path: hydratedTemplatePath}
 	}
-	// Rule: env-gather reads the same template start will use. When
-	// nothing was hydrated (no hub connection, or no TemplateID/hash),
-	// buildStartContext leaves opts.Template as the slug and provisioning
-	// resolves it from the local project, so the slug lookup here matches.
-	// A hydration error fails the create before this point.
 	if req.Config == nil || req.Config.Template == "" || req.ProjectPath == "" {
 		return nil
 	}
