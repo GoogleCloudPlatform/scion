@@ -204,7 +204,9 @@ func (s *TemplateStore) GetTemplateBySlug(ctx context.Context, slug, scope, scop
 	return entTemplateRowToStore(e), nil
 }
 
-// UpdateTemplate updates an existing template.
+// UpdateTemplate updates an existing template's metadata. It leaves the
+// content columns (files, content_hash, harness, default_harness_config,
+// agent_config) alone; see store.TemplateStore.UpdateTemplate.
 func (s *TemplateStore) UpdateTemplate(ctx context.Context, template *store.Template) error {
 	uid, err := parseUUID(template.ID)
 	if err != nil {
@@ -214,6 +216,50 @@ func (s *TemplateStore) UpdateTemplate(ctx context.Context, template *store.Temp
 	template.Updated = time.Now()
 
 	_, err = s.client.Template.UpdateOneID(uid).
+		SetName(template.Name).
+		SetSlug(template.Slug).
+		SetDisplayName(template.DisplayName).
+		SetDescription(template.Description).
+		SetImage(template.Image).
+		SetConfig(marshalJSONString(template.Config)).
+		SetScope(template.Scope).
+		SetScopeID(template.ScopeID).
+		SetProjectID(template.ProjectID).
+		SetStorageURI(template.StorageURI).
+		SetStorageBucket(template.StorageBucket).
+		SetStoragePath(template.StoragePath).
+		SetBaseTemplate(template.BaseTemplate).
+		SetSourceURL(template.SourceURL).
+		SetStatus(enttemplate.Status(template.Status)).
+		SetOwnerID(template.OwnerID).
+		SetUpdatedBy(template.UpdatedBy).
+		SetUpdated(template.Updated).
+		Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
+// UpdateTemplateContent writes every column of template, content columns
+// included, only if the stored row still matches expected. It is one
+// conditional UPDATE (UPDATE ... WHERE id = ? AND content_hash = ?), so two
+// concurrent commits that read the same row cannot both succeed.
+func (s *TemplateStore) UpdateTemplateContent(ctx context.Context, template *store.Template, expected store.TemplateContentPrecondition) error {
+	uid, err := parseUUID(template.ID)
+	if err != nil {
+		return err
+	}
+
+	updated := time.Now()
+
+	hashMatches := enttemplate.ContentHashEQ(expected.ContentHash)
+	if expected.ContentHash == "" {
+		hashMatches = enttemplate.Or(enttemplate.ContentHashEQ(""), enttemplate.ContentHashIsNil())
+	}
+
+	n, err := s.client.Template.Update().
+		Where(enttemplate.IDEQ(uid), hashMatches).
 		SetName(template.Name).
 		SetSlug(template.Slug).
 		SetDisplayName(template.DisplayName).
@@ -236,11 +282,22 @@ func (s *TemplateStore) UpdateTemplate(ctx context.Context, template *store.Temp
 		SetStatus(enttemplate.Status(template.Status)).
 		SetOwnerID(template.OwnerID).
 		SetUpdatedBy(template.UpdatedBy).
-		SetUpdated(template.Updated).
+		SetUpdated(updated).
 		Save(ctx)
 	if err != nil {
 		return mapError(err)
 	}
+	if n == 0 {
+		exists, err := s.client.Template.Query().Where(enttemplate.IDEQ(uid)).Exist(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		if !exists {
+			return store.ErrNotFound
+		}
+		return store.ErrTemplateConflict
+	}
+	template.Updated = updated
 	return nil
 }
 

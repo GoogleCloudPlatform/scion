@@ -295,6 +295,11 @@ func (s *Server) updateUserTemplate(w http.ResponseWriter, r *http.Request, id s
 	template.Files = existing.Files
 	template.ContentHash = existing.ContentHash
 	template.AgentConfig = existing.AgentConfig // derived; set only by the commit path
+	// Harness and DefaultHarnessConfig are derived from the files too. The
+	// store's UpdateTemplate does not write any content column
+	// (ptone/scion#4221); pinning them here keeps the response truthful.
+	template.Harness = existing.Harness
+	template.DefaultHarnessConfig = existing.DefaultHarnessConfig
 	template.Status = existing.Status
 	if template.Slug != "" {
 		template.Slug = api.Slugify(template.Slug)

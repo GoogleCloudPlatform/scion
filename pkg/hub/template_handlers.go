@@ -109,6 +109,13 @@ type UploadResponse struct {
 // FinalizeRequest is the request body for finalizing a template upload.
 type FinalizeRequest struct {
 	Manifest *TemplateManifest `json:"manifest"`
+	// ExpectedContentHash, when set, is the template content hash the
+	// client diffed its upload against. Finalize commits only if the
+	// template still has that hash and otherwise answers 409
+	// template_conflict (ptone/scion#4221). Clients that omit it get the
+	// same check against the hash the hub read when the finalize request
+	// arrived.
+	ExpectedContentHash string `json:"expectedContentHash,omitempty"`
 }
 
 // TemplateManifest is the manifest of uploaded template files.
@@ -559,6 +566,11 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 	template.Files = existing.Files
 	template.ContentHash = existing.ContentHash
 	template.AgentConfig = existing.AgentConfig // derived; set only by the commit path
+	// Harness and DefaultHarnessConfig are derived from the files too. The
+	// store's UpdateTemplate does not write any content column
+	// (ptone/scion#4221); pinning them here keeps the response truthful.
+	template.Harness = existing.Harness
+	template.DefaultHarnessConfig = existing.DefaultHarnessConfig
 	template.Status = existing.Status
 	template.BaseTemplate = existing.BaseTemplate
 	template.SourceURL = existing.SourceURL
@@ -803,7 +815,7 @@ func (s *Server) handleTemplateFinalize(w http.ResponseWriter, r *http.Request, 
 	// client (`scion templates sync/push`, its retry, and the agent-start
 	// updateHubTemplate path) sends the full manifest.
 	template.Status = store.TemplateStatusActive
-	if err := s.commitTemplateFiles(ctx, template, req.Manifest.Files, commitOpts{}); err != nil {
+	if err := s.commitTemplateFiles(ctx, template, req.Manifest.Files, commitOpts{expectedContentHash: req.ExpectedContentHash}); err != nil {
 		writeTemplateCommitError(w, err)
 		return
 	}
