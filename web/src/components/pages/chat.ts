@@ -4000,8 +4000,7 @@ export class ScionPageChat extends LitElement {
    * `popstate` to the page; on any other URL the router replaces the page.
    */
   private routeShowsCurrentUrl(): boolean {
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion -- tsc needs the cast to read currentPath on the parent element; per-site decision tracked in ptone/scion#4126.
-    const shell = this.parentElement as (HTMLElement & { currentPath?: unknown }) | null;
+    const shell: (HTMLElement & { currentPath?: unknown }) | null = this.parentElement;
     if (typeof shell?.currentPath !== 'string') return false;
     const appPath = stripBasePath(window.location.pathname) + window.location.search;
     return shell.currentPath.split('#')[0] === appPath;
