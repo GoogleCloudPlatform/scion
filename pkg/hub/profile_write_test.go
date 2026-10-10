@@ -36,7 +36,7 @@ import (
 )
 
 // profileWriteFixture is a server wired for every profile write route: a
-// member user (alice), a hub-boundary user access token for alice, and a
+// member user (alice), a hub-boundary user access credential for alice, and a
 // federated user identity.
 type profileWriteFixture struct {
 	srv      *Server
@@ -142,7 +142,7 @@ func (pr profileRequest) build() *http.Request {
 }
 
 // asBearer runs pr through the full middleware chain with a bearer
-// credential (a session access token or a user access token).
+// credential (a session access credential or a user access credential).
 func (f *profileWriteFixture) asBearer(pr profileRequest, key string) *httptest.ResponseRecorder {
 	req := pr.build()
 	req.Header.Set("Authorization", "Bearer "+key)
@@ -240,7 +240,7 @@ func TestUserTemplateWrites_FederatedUserRefused(t *testing.T) {
 }
 
 // TestUserTemplateWrites_SessionAndTokenUnchanged pins that a session and a
-// user access token keep their behaviour on the user template writes.
+// user access credential keep their behaviour on the user template writes.
 func TestUserTemplateWrites_SessionAndTokenUnchanged(t *testing.T) {
 	f := newProfileWriteFixture(t)
 
@@ -314,7 +314,7 @@ func TestUserEnvSecretWrites_FederatedUserRefused(t *testing.T) {
 }
 
 // TestUserEnvSecretWrites_SessionAndTokenUnchanged pins that a session and
-// a user access token keep their behaviour on the user-scope env var and
+// a user access credential keep their behaviour on the user-scope env var and
 // secret writes.
 func TestUserEnvSecretWrites_SessionAndTokenUnchanged(t *testing.T) {
 	want := []int{http.StatusOK, http.StatusOK, http.StatusOK, http.StatusOK, http.StatusNoContent, http.StatusNoContent}
@@ -371,7 +371,7 @@ func TestChatProfileWrites_FederatedUserRefused(t *testing.T) {
 }
 
 // TestChatProfileWrites_SessionAndTokenUnchanged pins that a session and a
-// user access token keep their behaviour on the chat preference, presence
+// user access credential keep their behaviour on the chat preference, presence
 // and project-less attachment writes.
 func TestChatProfileWrites_SessionAndTokenUnchanged(t *testing.T) {
 	f := newProfileWriteFixture(t)
@@ -386,7 +386,7 @@ func TestChatProfileWrites_SessionAndTokenUnchanged(t *testing.T) {
 
 // TestChatLinkVerification_FederatedUserRefused pins that a federated user
 // gets 403 on each chat link verify route and the code stays pending, while
-// a session and a user access token still link the account.
+// a session and a user access credential still link the account.
 func TestChatLinkVerification_FederatedUserRefused(t *testing.T) {
 	srv := &Server{
 		telegramLinkService: NewTelegramLinkService(),
@@ -471,7 +471,7 @@ func TestGenericUserTemplateWrites_FederatedUserRefused(t *testing.T) {
 }
 
 // TestGenericUserTemplateWrites_SessionAndTokenUnchanged pins that a
-// session and a user access token keep their behaviour on the
+// session and a user access credential keep their behaviour on the
 // /api/v1/templates user-scope create, patch and delete.
 func TestGenericUserTemplateWrites_SessionAndTokenUnchanged(t *testing.T) {
 	f := newProfileWriteFixture(t)

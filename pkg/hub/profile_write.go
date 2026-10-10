@@ -44,7 +44,7 @@ const profileWriteReasonFederated = "federated identity does not manage profile 
 // identity: the identity implements FederatedIdentity (a federated user,
 // agent or service account), a user access credential identity wraps one,
 // or the credential recorded by the authentication middleware is a
-// federation credential. Only the federation token path creates these; a
+// federation credential. Only the federation credential path creates these; a
 // user signed in through the hub's own login is never one. A request with
 // no identity is not a federated caller.
 func isFederatedCaller(ctx context.Context) bool {
