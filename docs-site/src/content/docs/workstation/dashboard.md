@@ -143,6 +143,8 @@ Centralized views for managing the Scion infrastructure and access control (avai
 
   One policy sets the overall status of the summary. It is the worst of: the Hub's own status (`unhealthy` when a critical check fails); `degraded` when a Runtime Broker is not online, reports itself `degraded` or `unhealthy`, or reports an unhealthy NFS workspace share; `degraded` when dispatch has stuck messages or stuck Runtime Broker dispatches; `degraded` when an integration reports unhealthy; `degraded` when at least 5% of agents are in `error` or `crashed`; and `degraded` when the service account assignment check cannot run. A section that could not be read adds a warning but does not change the status. The same policy produces `attention`, a ranked "Needs attention" list in the `GET /api/v1/admin/health/summary` response. Each entry has a `severity` (`critical` or `warning`), a `kind` (`hub_check`, `broker_offline`, `broker_degraded`, `broker_nfs`, `integration`, `dispatch` or `agents`), a `subject`, and a fixed, server-written `message`.
 
+  The Health page does not show stalled agents or stall settings: stalls are routine and are not a health signal, so the summary carries no stall data. To change the stall threshold or turn on auto-suspend of stalled agents, use **Admin > Server Config** (`server.hub.stalled_threshold`, `server.hub.auto_suspend_stalled`).
+
   For rates and per-replica history, see the [Hub monitoring dashboard](/scion/hosted/single-node/hub-monitoring-dashboard/).
 
   #### Hub instances in an HA deployment

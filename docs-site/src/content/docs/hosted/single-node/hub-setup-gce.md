@@ -65,6 +65,8 @@ Run these one at a time instead of `gce-demo-deploy.sh` when you need to skip or
 | 4 | `gce-certs.sh` | Creates the Cloud DNS managed zone if it is missing, points an A record for the Hub domain at the VM's external IP, and runs certbot on the VM to get a Let's Encrypt wildcard certificate (`*.<CERT_DOMAIN>`) through a DNS-01 challenge. It does not install or configure Caddy. |
 | 5 | `gce-start-hub.sh --full` | Uploads `hub.env`, writes `settings.yaml` and the systemd unit, installs Caddy, writes a Caddyfile that serves the certbot certificate from step 4 and proxies to the Hub on port 8080, builds the web assets and the `scion` binary on the VM, and starts the Hub. |
 
+The `settings.yaml` that step 5 writes turns on telemetry export and sets `telemetry.cloud.gcp_project_id` to the deployment project (`PROJECT_ID`), so the metrics dashboard in the web UI queries Cloud Monitoring in that project. Step 1 grants the VM's service account `roles/monitoring.viewer` so the Hub can read those metrics. A Hub deployed before this setting existed picks it up the next time you run `gce-start-hub.sh --full`. See [Metrics & OpenTelemetry](/scion/hosted/single-node/metrics/) for the `telemetry` settings.
+
 :::note[Internal or private deployments]
 If your VM has no external IP, or TLS is terminated upstream by a load balancer, reverse proxy, or similar appliance, skip step 4 and see [Internal Deployments (BYO TLS)](#internal-deployments-byo-tls) below.
 :::
