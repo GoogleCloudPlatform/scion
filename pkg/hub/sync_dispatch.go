@@ -71,6 +71,21 @@ func detachLaunchKeepDeadline(ctx context.Context) (context.Context, context.Can
 	return detached, func() {}
 }
 
+// detachStopFromClient returns a context for the rest of a lifecycle stop or
+// suspend, and its cancel func, which the caller must call. Like
+// detachLaunchFromClient, it keeps ctx's values (identity, trace, dispatch
+// warnings) but not its cancellation, so a client that disconnects or gives
+// up (the CLI hub client's 30s timeout) no longer cancels the stop part way
+// through, leaving the container stopped with no stopped status recorded,
+// or still running with its intent set to stopped (ptone/scion#4211,
+// ptone/scion#2661). Unlike a launch, which bounds each broker call with
+// syncDispatch and nothing else, the whole stop is bounded by timeout: the
+// stop's write budget for a single stop or suspend (stopWriteBudget), so the
+// stop's work ends no later than its response's write deadline.
+func detachStopFromClient(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(detachLaunchFromClient(ctx), timeout)
+}
+
 // syncDispatch runs one synchronous dispatcher call under
 // syncDispatchTimeout, derived from ctx (normally a detachLaunchFromClient
 // context). fn must use the ctx it is given, not the caller's.
@@ -118,9 +133,11 @@ func restartWriteBudget() time.Duration {
 // work, of a lifecycle stop or suspend: the workspace sync-back request to
 // the broker (syncWorkspaceOnStop, bounded like a dispatch by the
 // hub-to-broker request limit, syncDispatchTimeout), the ephemeral workspace
-// check, then the stop dispatch (bounded in practice by the hub-to-broker
-// request limit; the stop is not under syncDispatch), plus
-// syncDispatchWriteSlack.
+// check, then the stop dispatch (under syncDispatch), plus
+// syncDispatchWriteSlack. It is also the bound of the whole stop once it is
+// detached from the client (detachStopFromClient): the slack is then what
+// is left for the stopped status write and the other store writes after
+// the broker steps.
 func stopWriteBudget() time.Duration {
 	return syncDispatchTimeout + workspaceCheckTimeout + syncDispatchTimeout + syncDispatchWriteSlack
 }

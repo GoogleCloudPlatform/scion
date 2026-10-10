@@ -413,7 +413,8 @@ func (s *Server) harnessSupportsResume(agent *store.Agent) (bool, string) {
 // phase=suspended (container_status=stopped, activity cleared), and
 // publishes the resulting status event. It returns *errHarnessNoResume
 // when the harness cannot resume so callers can decline to suspend.
-// The run intent is set to stopped before the dispatch.
+// The run intent is set to stopped before the dispatch. The handler passes
+// a ctx detached from the client (detachStopFromClient).
 func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	if ok, reason := s.harnessSupportsResume(agent); !ok {
 		return &errHarnessNoResume{reason: reason}
@@ -436,7 +437,10 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 		// As for stop: warn about, and record, work in an ephemeral
 		// workspace that the suspend discards (ptone/scion#3819).
 		s.checkEphemeralWorkspaceBeforeStop(ctx, dispatcher, agent, true)
-		if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
+		// As for stop, the dispatch is bounded by syncDispatch.
+		if err := syncDispatch(ctx, func(dctx context.Context) error {
+			return dispatcher.DispatchAgentStop(dctx, agent)
+		}); err != nil {
 			s.logStopRunMismatch(agent, "suspend", err)
 			s.clearWorkspaceAtStop(ctx, agent)
 			return err
@@ -598,6 +602,15 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		// A stop is recorded before the broker check, so it holds even when
 		// the broker is offline: the stop is then queued for the broker's
 		// reconnect.
+		//
+		// From the intent write on, the stop no longer follows the client
+		// (ptone/scion#4211): a client that gives up must not cancel the
+		// stop dispatch or the stopped status write after it. The whole
+		// stop is bounded by its write budget; the response is still
+		// written on the request.
+		stopCtx, cancelStop := detachStopFromClient(ctx, stopWriteBudget())
+		defer cancelStop()
+		ctx = stopCtx
 		intentAt, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
@@ -728,7 +741,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// Warn (never block) when an ephemeral workspace holds work
 			// the stop is about to discard (ptone/scion#3819).
 			s.checkEphemeralWorkspaceBeforeStop(ctx, dispatcher, agent, true)
-			dispatchErr = dispatcher.DispatchAgentStop(ctx, agent)
+			// The dispatch is bounded by syncDispatch, so the stopped
+			// status write after it keeps its share of the stop's budget.
+			dispatchErr = syncDispatch(ctx, func(dctx context.Context) error {
+				return dispatcher.DispatchAgentStop(dctx, agent)
+			})
 			s.logStopRunMismatch(agent, "stop", dispatchErr)
 			if dispatchErr != nil {
 				s.clearWorkspaceAtStop(ctx, agent)
@@ -754,6 +771,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		// validates harness resume support, dispatches the stop, persists
 		// phase=suspended, and publishes the status event.
 		//
+		// As for stop, from here the suspend no longer follows the client
+		// (ptone/scion#4211), and is bounded by the stop's write budget.
+		suspendCtx, cancelSuspend := detachStopFromClient(ctx, stopWriteBudget())
+		defer cancelSuspend()
+		ctx = suspendCtx
 		// The response waits on the same broker work as a stop: extend
 		// this request's write deadline to cover it (ptone/scion#4178).
 		// Done here because suspendAgent has no ResponseWriter.
