@@ -148,7 +148,10 @@ func TestLaunchSender_KeepaliveRecordsAbortAnswer(t *testing.T) {
 }
 
 // TestLaunchSender_KeepaliveRetriesAfterBackoff covers a failed keepalive
-// attempt being retried only after a 2-5s jittered backoff, not immediately.
+// attempt being retried only after the jittered keepalive backoff, not
+// immediately. The backoff range is shortened to 200-300ms here so the test
+// does not wait out the production 2-5s (pinned by
+// TestLaunchSender_DefaultTimings).
 func TestLaunchSender_KeepaliveRetriesAfterBackoff(t *testing.T) {
 	var attempts int32
 	rtb := &mockRuntimeBrokerService{
@@ -160,6 +163,9 @@ func TestLaunchSender_KeepaliveRetriesAfterBackoff(t *testing.T) {
 		},
 	}
 	s := newTestLaunchSender(t, rtb, time.Hour) // long enough that only the retry drives the second attempt
+	const backoffFloor = 200 * time.Millisecond
+	s.timings.keepaliveMinBackoff = backoffFloor
+	s.timings.keepaliveMaxBackoff = 300 * time.Millisecond
 
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
@@ -170,8 +176,8 @@ func TestLaunchSender_KeepaliveRetriesAfterBackoff(t *testing.T) {
 	if got := atomic.LoadInt32(&attempts); got != 2 {
 		t.Fatalf("expected exactly 2 attempts (1 failure + 1 retry), got %d", got)
 	}
-	if elapsed < 2*time.Second {
-		t.Fatalf("retry landed after %v, want at least the 2s backoff floor", elapsed)
+	if elapsed < backoffFloor {
+		t.Fatalf("retry landed after %v, want at least the %v backoff floor", elapsed, backoffFloor)
 	}
 }
 
@@ -194,11 +200,13 @@ func TestLaunchSender_AttemptTimeoutConstants(t *testing.T) {
 	}
 }
 
-// TestLaunchSender_AttemptTimesOutAt5s confirms sendOnce (used by all three
-// report kinds) actually enforces a per-attempt bound in the first place,
-// using a generous outer margin so it is not timing-sensitive; the exact
-// value is TestLaunchSender_AttemptTimeoutConstants's job.
-func TestLaunchSender_AttemptTimesOutAt5s(t *testing.T) {
+// TestLaunchSender_AttemptTimesOut confirms sendOnce (used by all three
+// report kinds) actually enforces the per-attempt bound it is given, using a
+// short bound and a generous outer margin so it is neither slow nor
+// timing-sensitive; the production 5s values are
+// TestLaunchSender_AttemptTimeoutConstants's job, and each report kind
+// passing its own is TestLaunchSender_EachReportKindUsesItsOwnAttemptTimeout's.
+func TestLaunchSender_AttemptTimesOut(t *testing.T) {
 	block := make(chan struct{})
 	defer close(block)
 	rtb := &mockRuntimeBrokerService{
@@ -212,14 +220,18 @@ func TestLaunchSender_AttemptTimesOutAt5s(t *testing.T) {
 	// sendOnce makes exactly one attempt (no retry loop), so this isolates
 	// the per-attempt timeout itself rather than however long
 	// sendKeepaliveOnce's/sendReportBlocking's retry loop runs.
+	const attemptTimeout = 250 * time.Millisecond
 	start := time.Now()
-	_, err := s.sendOnce(context.Background(), &hubclient.AgentLaunchReport{LaunchID: "L1"}, claimAttemptTimeout)
+	_, err := s.sendOnce(context.Background(), &hubclient.AgentLaunchReport{LaunchID: "L1"}, attemptTimeout)
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("expected the attempt to time out (the mock never answers)")
 	}
-	if elapsed > 15*time.Second {
-		t.Fatalf("single attempt took %v, want roughly claimAttemptTimeout (5s)", elapsed)
+	if elapsed < attemptTimeout {
+		t.Fatalf("single attempt returned after %v, before its %v bound", elapsed, attemptTimeout)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("single attempt took %v, want roughly its %v bound", elapsed, attemptTimeout)
 	}
 }
 
@@ -550,9 +562,13 @@ func TestLaunchSender_TerminalNotEndedByAbortRecordedDuringIt(t *testing.T) {
 		},
 	}
 	s = newTestLaunchSender(t, rtb, time.Hour)
+	// Shorten the 1-10s retry backoff between the two attempts; the
+	// non-abortable retry path is the same.
+	s.timings = *fastLaunchTimings(0)
 
-	// reportMaxBackoff (10s) plus slack for the second attempt.
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	// A generous safety bound: with the shortened backoff both attempts
+	// finish in milliseconds.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	result, err := s.SendTerminal(ctx, false, "launching", "runtime_error", "boom", nil)
 	if err != nil {
