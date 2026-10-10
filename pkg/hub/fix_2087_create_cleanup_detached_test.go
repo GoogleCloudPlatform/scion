@@ -378,9 +378,11 @@ func TestCleanupFailedCreate_CanceledCtx_EveryStepRunsDetached(t *testing.T) {
 	assertNoReservations(t, s, agent.ID)
 }
 
-// cancelAfterDeleteStore cancels the request after DeleteAgent of targetID
-// succeeds: the exact "stranded reservation" window from ptone/scion#2087,
-// where the row is gone and only the quota release is left to run.
+// cancelAfterDeleteStore cancels the request once a FinalizeAgentDeletion
+// that removed targetID has committed (the env-gather recreate removes the
+// row this way): the exact "stranded reservation" window from
+// ptone/scion#2087, where the row is gone and only the quota release is
+// left to run.
 type cancelAfterDeleteStore struct {
 	store.Store
 	targetID      string
@@ -388,34 +390,6 @@ type cancelAfterDeleteStore struct {
 	deleted       bool
 }
 
-func (c *cancelAfterDeleteStore) DeleteAgent(ctx context.Context, id string) error {
-	err := c.Store.DeleteAgent(ctx, id)
-	if err == nil && id == c.targetID {
-		c.deleted = true
-		c.cancelRequest()
-	}
-	return err
-}
-
-// WithTx cancels the request once a transaction that deleted targetID has
-// committed: the row is gone only at commit.
-func (c *cancelAfterDeleteStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
-	tx := &deleteRecordingTx{targetID: c.targetID}
-	if err := c.Store.WithTx(ctx, func(inner store.Store) error {
-		tx.Store = inner
-		return fn(tx)
-	}); err != nil {
-		return err
-	}
-	if tx.deleted {
-		c.deleted = true
-		c.cancelRequest()
-	}
-	return nil
-}
-
-// FinalizeAgentDeletion cancels the request once a finalize that removed
-// targetID has committed: the env-gather recreate removes the row this way.
 func (c *cancelAfterDeleteStore) FinalizeAgentDeletion(ctx context.Context, id string, pred store.DeletionPredicate, mode store.DeletionFinalizeMode, set store.DeletionFields, hook store.DeletionFinalizeHook) (int, error) {
 	n, err := c.Store.FinalizeAgentDeletion(ctx, id, pred, mode, set, hook)
 	if err == nil && n > 0 && id == c.targetID {
@@ -423,21 +397,6 @@ func (c *cancelAfterDeleteStore) FinalizeAgentDeletion(ctx context.Context, id s
 		c.cancelRequest()
 	}
 	return n, err
-}
-
-// deleteRecordingTx records whether DeleteAgent of targetID succeeded.
-type deleteRecordingTx struct {
-	store.Store
-	targetID string
-	deleted  bool
-}
-
-func (d *deleteRecordingTx) DeleteAgent(ctx context.Context, id string) error {
-	err := d.Store.DeleteAgent(ctx, id)
-	if err == nil && id == d.targetID {
-		d.deleted = true
-	}
-	return err
 }
 
 // TestHandleExistingAgent_EnvGatherRecreate_CanceledAfterRowDelete_ReleasesQuota

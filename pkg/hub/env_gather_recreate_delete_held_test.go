@@ -259,6 +259,7 @@ func TestHandleExistingAgent_EnvGatherRecreate_DeleteHeld_NoNewCredential(t *tes
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &first))
 	oldID := first.Agent.ID
 	require.Len(t, gen.jtis, 1)
+	oldJTI := gen.lastJTI()
 
 	client.onDelete = func() { claimForTest(t, st, oldID, store.DeletionStateDeleting, time.Minute) }
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents", reqBody)
@@ -274,4 +275,10 @@ func TestHandleExistingAgent_EnvGatherRecreate_DeleteHeld_NoNewCredential(t *tes
 	require.Len(t, res.Items, 1, "no new agent row")
 	assert.Equal(t, oldID, res.Items[0].ID)
 	assert.Equal(t, store.DeletionStateDeleting, res.Items[0].DeletionState, "the row is left to the delete")
+
+	// The revoke runs before the row removal, as the delete's own does.
+	oldCred := getTestAgentCredential(t, st, oldJTI)
+	require.NotNil(t, oldCred.RevokedAt, "the old agent's credential is revoked")
+	require.NotNil(t, oldCred.RevokeReason)
+	assert.Equal(t, agentCredentialRevokeReasonDeleted, *oldCred.RevokeReason)
 }
