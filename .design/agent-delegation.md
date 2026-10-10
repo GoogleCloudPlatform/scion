@@ -379,7 +379,7 @@ Route: `POST /api/v1/agents/{agentId}/delegations/{grantId}/exchange`. Operation
 `agent.delegation.exchange`.
 
 ```json
-{ "audience": "<hub audience>", "permissions": ["agent:read"], "ttlSeconds": 600 }
+{ "audience": "scion-hub:<hub ID>", "permissions": ["agent:read"], "ttlSeconds": 600 }
 ```
 
 `permissions` (selectors) and `ttlSeconds` are optional. The default is the whole grant ceiling and
@@ -431,8 +431,8 @@ codes. The precise reason goes only to the decision record.
 10. **Policy:** every ceiling permission is still in the hub agent-delegation policy and the hub
     narrowing setting. If the policy was narrowed after issuance, the credential gets the
     intersection. An empty intersection answers 403 `permission_not_delegable`.
-11. **Audience:** `audience` equals this hub's configured delegated-credential audience. Otherwise
-    400 `invalid_audience`.
+11. **Audience:** `audience` equals this hub's delegated-credential audience, which is
+    `scion-hub:<hub ID>`, or `scion-hub` when the hub has no ID. Otherwise 400 `invalid_audience`.
 12. **Subset:** the requested permissions, resolved through `ResolveSelector`, are a subset of the
     grant ceiling (after step 10). An unknown selector answers 400 `validation_error`; a permission
     outside the ceiling answers 403 `outside_ceiling`.
@@ -503,8 +503,9 @@ unusable credential.
   for no benefit.
 - `last_seen_at` is updated best-effort and asynchronously, coalesced and never in the request's
   transaction. A failure to update it never affects the decision.
-- The audience is stored on the credential row and compared with the configured hub audience on
-  every use, so a row copied between hub instances that share a database but have different
+- The audience is this hub's delegated-credential audience: `scion-hub:<hub ID>`, or `scion-hub`
+  when the hub has no ID. It is stored on the credential row and compared with the hub's audience
+  on every use, so a row copied between hub instances that share a database but have different
   audiences is refused.
 
 ### 9.2 Presentation and detection
