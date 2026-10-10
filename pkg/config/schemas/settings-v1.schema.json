@@ -1231,6 +1231,14 @@
           "x-env-var": "SCION_SERVER_HUB_AGENTENDPOINT",
           "x-since": "1"
         },
+        "monitoring_dashboard_url": {
+          "type": "string",
+          "format": "uri",
+          "maxLength": 2048,
+          "pattern": "^$|^[hH][tT][tT][pP][sS]?://[^\\s/?#@]+([/?#][^\\s]*)?$",
+          "description": "Optional absolute http or https URL of an external monitoring dashboard for this Hub (for example a Cloud Monitoring or Grafana dashboard). When set, the Health page header shows an \"Open monitoring dashboard\" link that opens it in a new tab; when unset, no link is shown. User credentials in the URL are rejected. Not included in /api/v1/settings/public; only callers with hub.health.read receive it, in the health summary.",
+          "x-env-var": "SCION_SERVER_HUB_MONITORINGDASHBOARDURL"
+        },
         "read_timeout": { "type": "string", "default": "30s", "x-env-var": "SCION_SERVER_HUB_READTIMEOUT" },
         "write_timeout": { "type": "string", "default": "60s", "x-env-var": "SCION_SERVER_HUB_WRITETIMEOUT" },
         "cors": { "$ref": "#/$defs/corsConfig" },

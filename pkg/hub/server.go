@@ -279,6 +279,11 @@ type ServerConfig struct {
 	HubID string
 	// HubName is the human-readable hub display name for HA deployments.
 	HubName string
+	// MonitoringDashboardURL is the optional external monitoring dashboard
+	// link shown on the Health page. It is applied live from the endpoints
+	// settings section (ApplySnapshot); read it through
+	// monitoringDashboardURL, not directly.
+	MonitoringDashboardURL string
 	// DisableLegacyStorageFallback disables the legacy un-namespaced storage
 	// path fallback. When true, only hub-scoped paths are checked.
 	DisableLegacyStorageFallback bool

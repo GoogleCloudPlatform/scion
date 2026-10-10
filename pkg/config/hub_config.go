@@ -91,6 +91,11 @@ type HubServerConfig struct {
 	// Defaults to os.Hostname() if not set.
 	HubName string `json:"hubName,omitempty" yaml:"hubName,omitempty" koanf:"hubName"`
 
+	// MonitoringDashboardURL is an optional absolute http(s) URL of an
+	// external monitoring dashboard for this hub. The Health page links to
+	// it when set. See ValidateMonitoringDashboardURL.
+	MonitoringDashboardURL string `json:"monitoringDashboardUrl,omitempty" yaml:"monitoringDashboardUrl,omitempty" koanf:"monitoringDashboardUrl"`
+
 	// GCPProjectID is the GCP project ID used for minting service accounts.
 	// If empty, auto-detected from the metadata server when running on GCE/Cloud Run.
 	GCPProjectID string `json:"gcpProjectId,omitempty" yaml:"gcpProjectId,omitempty" koanf:"gcpProjectId"`
@@ -1506,6 +1511,7 @@ var snakeCaseFields = map[string]string{
 	"installationurl":            "installation_url",
 	"maxsize":                    "max_size",
 	"missingagentgrace":          "missing_agent_grace",
+	"monitoringdashboardurl":     "monitoring_dashboard_url",
 	"grantkeyactivation":         "grant_key_activation",
 	"tcpallowedports":            "tcp_allowed_ports",
 	"internallisten":             "internal_listen",
@@ -1617,6 +1623,7 @@ var camelCaseFields = map[string]string{
 	"launchkeepaliveseconds":        "launchKeepaliveSeconds",
 	"launchtimeout":                 "launchTimeout",
 	"localpath":                     "localPath",
+	"monitoringdashboardurl":        "monitoringDashboardUrl",
 	"loglevel":                      "logLevel",
 	"maintenancemessage":            "maintenanceMessage",
 	"missingagentgrace":             "missingAgentGrace",

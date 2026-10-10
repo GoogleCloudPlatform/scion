@@ -1494,11 +1494,15 @@ type V1ServerHubConfig struct {
 	// audience default). Must be scheme://host[:port] only when set — see
 	// config.ValidateAgentEndpoint for the exact rules and the normalized
 	// form this field should hold.
-	AgentEndpoint string        `json:"agent_endpoint,omitempty" yaml:"agent_endpoint,omitempty" koanf:"agent_endpoint"`
-	ReadTimeout   string        `json:"read_timeout,omitempty" yaml:"read_timeout,omitempty" koanf:"read_timeout"`
-	WriteTimeout  string        `json:"write_timeout,omitempty" yaml:"write_timeout,omitempty" koanf:"write_timeout"`
-	CORS          *V1CORSConfig `json:"cors,omitempty" yaml:"cors,omitempty" koanf:"cors"`
-	AdminEmails   []string      `json:"admin_emails,omitempty" yaml:"admin_emails,omitempty" koanf:"admin_emails"`
+	AgentEndpoint string `json:"agent_endpoint,omitempty" yaml:"agent_endpoint,omitempty" koanf:"agent_endpoint"`
+	// MonitoringDashboardURL is an optional absolute http(s) URL of an
+	// external monitoring dashboard; the Health page links to it when set.
+	// See ValidateMonitoringDashboardURL.
+	MonitoringDashboardURL string        `json:"monitoring_dashboard_url,omitempty" yaml:"monitoring_dashboard_url,omitempty" koanf:"monitoring_dashboard_url"`
+	ReadTimeout            string        `json:"read_timeout,omitempty" yaml:"read_timeout,omitempty" koanf:"read_timeout"`
+	WriteTimeout           string        `json:"write_timeout,omitempty" yaml:"write_timeout,omitempty" koanf:"write_timeout"`
+	CORS                   *V1CORSConfig `json:"cors,omitempty" yaml:"cors,omitempty" koanf:"cors"`
+	AdminEmails            []string      `json:"admin_emails,omitempty" yaml:"admin_emails,omitempty" koanf:"admin_emails"`
 
 	// SoftDeleteRetention is how long soft-deleted agents are retained (e.g., "72h").
 	SoftDeleteRetention string `json:"soft_delete_retention,omitempty" yaml:"soft_delete_retention,omitempty" koanf:"soft_delete_retention"`
@@ -3320,6 +3324,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.AgentEndpoint != "" {
 			gc.Hub.AgentEndpoint = v1.Hub.AgentEndpoint
 		}
+		if v1.Hub.MonitoringDashboardURL != "" {
+			gc.Hub.MonitoringDashboardURL = v1.Hub.MonitoringDashboardURL
+		}
 		if v1.Hub.ReadTimeout != "" {
 			if d, err := time.ParseDuration(v1.Hub.ReadTimeout); err == nil {
 				gc.Hub.ReadTimeout = d
@@ -3724,15 +3731,16 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 
 	// Hub server config
 	v1Hub := &V1ServerHubConfig{
-		Port:          gc.Hub.Port,
-		Host:          gc.Hub.Host,
-		HubID:         gc.Hub.HubID,
-		HubName:       gc.Hub.HubName,
-		PublicURL:     gc.Hub.Endpoint,
-		AgentEndpoint: gc.Hub.AgentEndpoint,
-		ReadTimeout:   gc.Hub.ReadTimeout.String(),
-		WriteTimeout:  gc.Hub.WriteTimeout.String(),
-		AdminEmails:   gc.Hub.AdminEmails,
+		Port:                   gc.Hub.Port,
+		Host:                   gc.Hub.Host,
+		HubID:                  gc.Hub.HubID,
+		HubName:                gc.Hub.HubName,
+		PublicURL:              gc.Hub.Endpoint,
+		AgentEndpoint:          gc.Hub.AgentEndpoint,
+		MonitoringDashboardURL: gc.Hub.MonitoringDashboardURL,
+		ReadTimeout:            gc.Hub.ReadTimeout.String(),
+		WriteTimeout:           gc.Hub.WriteTimeout.String(),
+		AdminEmails:            gc.Hub.AdminEmails,
 		CORS: &V1CORSConfig{
 			Enabled:        gc.Hub.CORSEnabled,
 			AllowedOrigins: gc.Hub.CORSAllowedOrigins,

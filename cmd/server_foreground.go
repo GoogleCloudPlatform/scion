@@ -2009,6 +2009,9 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		GCPIAMCheckMode:         cfg.Hub.GCPIAMCheckMode,
 		GCPIAMDenyUnknownPolicy: cfg.Hub.GCPIAMDenyUnknownPolicy,
 		GCPProjectID:            cfg.Hub.GCPProjectID,
+		// Startup value for a hub without OperationalSettings; with them,
+		// ApplySnapshot replaces it from the endpoints section.
+		MonitoringDashboardURL: config.MonitoringDashboardURLOrEmpty(cfg.Hub.MonitoringDashboardURL),
 		// Derive the agent/user JWT signing keys from the same shared session
 		// secret the web cookie store uses, so every replica behind the load
 		// balancer agrees on the signing key regardless of its host-derived
