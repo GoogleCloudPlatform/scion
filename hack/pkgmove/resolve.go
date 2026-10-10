@@ -439,6 +439,10 @@ func (a *analysis) checkAliasUses() {
 				"%s is a wrapper of %s used as a value; the moved file now uses %s itself, so its identity (reflect Pointer, runtime.FuncForPC name) differs from staying uses of the wrapper",
 				u.obj.Name(), al.target(), al.target())
 		}
+		if a.bareTarget(u.file, al) && a.shadowedAt(al.name, []token.Pos{u.id.Pos()}, false) {
+			a.plan.errorf("%s: %s (an alias of %s) would become the bare name %s, which a local declaration shadows here - rename the local first",
+				pos, u.obj.Name(), al.target(), al.name)
+		}
 		if a.intoExisting && !u.file.XTest && al.path != a.dstImport && a.dependsOnDst(al.path) {
 			a.plan.errorf("%s: %s resolves to %s, but %s imports %s, so the moved test would create an import cycle - move it as an external test (package %s_test) or keep it",
 				pos, u.obj.Name(), al.target(), al.path, a.dstImport, a.srcName)

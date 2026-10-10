@@ -248,7 +248,12 @@ refused with exit code 3, before anything is analysed.
   the same tokens once every identifier is replaced by what it denotes (type
   information on both sides; aliases of the source are seen through; helpers
   they use must be equivalent too; comments, layout and trailing commas are
-  ignored; `iota` is never equivalent). Then:
+  ignored; `iota` is never equivalent). Equivalence is decided in the one
+  analysis build configuration, so a name that either package declares more
+  than once (build-tag variants, such as `limit_unix_test.go` and
+  `limit_other_test.go`) or in a file the analysis tags exclude is **never**
+  equivalent: the other variants cannot be compared, and the error says so.
+  Then:
   - a moved test may use a staying helper whose target equivalent exists (the
     plan lists it under "Staying helpers reused from the target");
   - a moved declaration with a target equivalent is dropped from the moved
@@ -463,10 +468,16 @@ one.
 **Into an existing package** that already has a `TestMain`, nothing is
 generated (a second `TestMain` would not compile). Instead:
 - the target's `TestMain` is equivalent to the source's (same canonical
-  tokens, as for [helper reuse](#test-only-moves-into-an-existing-package)):
+  tokens, as for [helper reuse](#test-only-moves-into-an-existing-package),
+  **and** every test helper it calls, such as a `setup()`, equivalent too):
   INFO;
 - it is the delegating form for `-testmain-support`: WARN, as above;
-- otherwise: HIGH (ERROR under `-strict`);
+- otherwise: HIGH (ERROR under `-strict`). This includes **build-tag
+  variants**: INFO or WARN need exactly one `TestMain` on each side, in files
+  the analysis tags include, with the same build constraint. pkg/hub has two
+  (`main_test.go` for `!integration`, `main_integration_test.go` for
+  `integration`), so a test-only move out of it reports HIGH naming both; check
+  each configuration;
 - the source has no `TestMain` but the target does: WARN.
 
 If the target has none, the rules above apply (stub, or generated with
@@ -650,4 +661,7 @@ pkgmove itself from an earlier move.
 | `rewritealiases` | `-rewrite-aliases -to apierr` (git): staying and external-test references rewritten; unused unexported entries removed; exported, embedded, func-value and tag-excluded uses kept; a hand-written alias of another package untouched. The package's tests pass |
 | `intoexisting` | a test wave into the package of an earlier source move (git): aliases to the target become bare names, `sub.X` becomes `X`, an alias of another package is qualified, a staying helper is reused, a duplicate helper is dropped with its import, the external test is re-qualified, and the target's TestMain is equivalent. The moved tests pass |
 | `intoexistingtestmain` | the same wave into a target whose TestMain differs: HIGH, and the moved test (which needs the source harness) fails after the move |
-| `intoexistingreject` | refused: a test name collision, a staying helper whose target copy differs, and import cycles (directly and through an alias target) |
+| `intoexistingtestmaindeps` | the target's TestMain has the same text as the source's, but the `setup()` helper it calls differs: HIGH, and the moved test fails after the move |
+| `intoexistingtestmaintags` | the source has `!integration` and `integration` TestMains, the target only the first: HIGH naming the variants; under `-tags integration` the moved test fails after the move |
+| `intoexistinghelpertags` | refused: a staying helper with build-tag variants (`limit_unix_test.go`, `limit_other_test.go`) whose analysed variant matches the target's but whose other variant does not |
+| `intoexistingreject` | refused: a test name collision, a staying helper whose target copy differs, import cycles (directly and through an alias target), and an alias whose bare target name a local shadows |

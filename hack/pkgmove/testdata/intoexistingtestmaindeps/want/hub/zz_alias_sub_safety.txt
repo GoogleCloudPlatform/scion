@@ -7,4 +7,4 @@ files now run before every initialiser of the source package. Review each
 ERROR/HIGH/WARN item below before merging.
 
 == HIGH: TestMain separation ==
-  hub/sub/main_test.go:9: moved tests leave the TestMain of hub (hub/main_test.go:10) and run under the existing TestMain of sub, which differs from it, or calls helpers that are not equivalent - verify that it does everything the source TestMain does in every build configuration (both should call the same RunTestMain helper)
+  hub/sub/main_test.go:11: moved tests leave the TestMain of hub (hub/main_test.go:10) and run under the existing TestMain of sub, which differs from it, or calls helpers that are not equivalent - verify that it does everything the source TestMain does in every build configuration (both should call the same RunTestMain helper)

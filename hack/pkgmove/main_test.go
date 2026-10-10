@@ -82,6 +82,8 @@ var goldenCases = []goldenCase{
 	{fixture: "rewritealiases", rewrite: true, dst: "apierr", git: true},
 	{fixture: "intoexisting", files: []string{"policy_a_test.go", "policy_x_test.go"}, git: true},
 	{fixture: "intoexistingtestmain", files: []string{"policy_a_test.go"}, changes: "== HIGH: TestMain separation"},
+	{fixture: "intoexistingtestmaindeps", files: []string{"mode_test.go"}, changes: "or calls helpers that are not equivalent"},             // same TestMain text, different setup helper
+	{fixture: "intoexistingtestmaintags", files: []string{"mode_test.go"}, tags: "integration", changes: "TestMain has build-tag variants"}, // the integration TestMain has no target counterpart
 	// Rejections.
 	{fixture: "methods", files: []string{"move.go"}, wantErr: true},
 	{fixture: "backref", files: []string{"move.go"}, wantErr: true},
@@ -92,8 +94,9 @@ var goldenCases = []goldenCase{
 	{fixture: "embed", files: []string{"move.go"}, wantErr: true}, // embedded-field export needs -allow-field-export
 	{fixture: "asm", files: []string{"move.go"}, wantErr: true},
 	{fixture: "linkname", files: []string{"move.go"}, wantErr: true},
-	{fixture: "aliasreject", files: []string{"move.go"}, wantErr: true},                                     // hand-written wrapper and var, assigned var alias, embedded alias
-	{fixture: "intoexistingreject", files: []string{"policy_a_test.go", "policy_c_test.go"}, wantErr: true}, // collision, non-equivalent helper, import cycles
+	{fixture: "aliasreject", files: []string{"move.go"}, wantErr: true},                                                         // hand-written wrapper and var, assigned var alias, embedded alias
+	{fixture: "intoexistingreject", files: []string{"policy_a_test.go", "policy_c_test.go", "policy_d_test.go"}, wantErr: true}, // collision, non-equivalent helper, import cycles, shadowed bare name
+	{fixture: "intoexistinghelpertags", files: []string{"limit_test.go"}, wantErr: true},                                        // a helper with build-tag variants is never reused
 }
 
 func requireGo(t *testing.T) {

@@ -190,7 +190,7 @@ func (a *analysis) checkIntoExisting() {
 		}
 		why := "only funcs and consts of in-package tests can be reused"
 		if !d.file.XTest && (d.kind == "func" || d.kind == "const") {
-			why = "the declarations are not equivalent"
+			why = "the declarations are not equivalent" + a.equivalenceNote(d.name)
 		}
 		a.plan.errorf("%s: moved %s %s collides with the existing %s %s at %s (%s) - rename one of them first",
 			pos, d.kind, d.name, t.kind, t.name, where, why)
@@ -304,22 +304,55 @@ func (a *analysis) helperEquivalent(name string) bool {
 	return a.equiv[name]
 }
 
+// equivalenceNote explains why name can never be reused, or returns "".
+func (a *analysis) equivalenceNote(name string) string {
+	if a.equiv == nil {
+		a.computeEquivalence()
+	}
+	return a.equivNote[name]
+}
+
 // computeEquivalence decides helper equivalence for every name declared both
 // by an in-package test file of the source and by one of the target, as a
 // greatest fixpoint over the helpers they use.
 func (a *analysis) computeEquivalence() {
 	a.equiv = map[string]bool{}
-	src := map[string]declRef{}
-	for _, f := range a.files {
-		if f.IsTest && !f.XTest && f.Included {
-			for _, d := range pkgDecls(f) {
-				src[d.name] = d
+	// Every in-package declaration of each name, on each side, whatever its
+	// build tags. Equivalence is decided in the analysis configuration only,
+	// so a name declared more than once (build-tag variants such as
+	// limit_unix_test.go and limit_other_test.go) or in a file the analysis
+	// tags exclude is never equivalent: the other variants cannot be
+	// compared. Callers then report a collision or separation ERROR.
+	all := func(files []*srcFile) map[string][]declRef {
+		m := map[string][]declRef{}
+		for _, f := range files {
+			if !f.XTest {
+				for _, d := range pkgDecls(f) {
+					m[d.name] = append(m[d.name], d)
+				}
 			}
 		}
+		return m
 	}
+	srcAll, dstAll := all(a.files), all(a.dstFiles)
+	src := map[string]declRef{}
 	var cands []string
-	for name, t := range a.dstDecls {
-		if s, ok := src[name]; ok && t.file.IsTest && s.kind == t.kind && (s.kind == "func" || s.kind == "const") {
+	a.equivNote = map[string]string{}
+	for name, ts := range dstAll {
+		ss := srcAll[name]
+		if len(ss) == 0 {
+			continue
+		}
+		if len(ss) != 1 || len(ts) != 1 || !ss[0].file.Included || !ts[0].file.Included {
+			a.equivNote[name] = " (" + name + " has build-tag variants or is declared in a file the analysis tags exclude, so it is never reused)"
+			continue
+		}
+		s, t := ss[0], ts[0]
+		if !s.file.Included || !t.file.Included || !s.file.IsTest || !t.file.IsTest {
+			continue
+		}
+		if s.kind == t.kind && (s.kind == "func" || s.kind == "const") {
+			src[name] = s
 			cands = append(cands, name)
 		}
 	}
@@ -334,8 +367,8 @@ func (a *analysis) computeEquivalence() {
 	}
 	deps := map[string][]string{}
 	for _, name := range cands {
-		s, t := src[name], a.dstDecls[name]
-		if s.file.Constraint != t.file.Constraint || !t.file.Included {
+		s, t := src[name], dstAll[name][0]
+		if s.file.Constraint != t.file.Constraint {
 			continue
 		}
 		if vs, ok := s.node.(*ast.ValueSpec); ok && (len(vs.Names) != 1 || len(vs.Values) != 1) {
@@ -560,19 +593,27 @@ func (a *analysis) canonTokens(f *srcFile, node ast.Node, resolve resolver) ([]s
 
 // ---- TestMain ----
 
-// testMainDecl finds a TestMain function in files.
-func testMainDecl(files []*srcFile) (*srcFile, *ast.FuncDecl) {
+// testMainRef is one TestMain declaration.
+type testMainRef struct {
+	f  *srcFile
+	fd *ast.FuncDecl
+}
+
+// testMainDecls finds every TestMain function in files (whatever their build
+// tags), in file order.
+func testMainDecls(files []*srcFile) []testMainRef {
+	var out []testMainRef
 	for _, f := range files {
 		if !f.IsTest {
 			continue
 		}
 		for _, d := range f.AST.Decls {
 			if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv == nil && fd.Name.Name == "TestMain" {
-				return f, fd
+				out = append(out, testMainRef{f, fd})
 			}
 		}
 	}
-	return nil, nil
+	return out
 }
 
 // delegatingTestMain is the canonical token sequence of

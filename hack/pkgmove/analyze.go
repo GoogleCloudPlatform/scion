@@ -97,9 +97,10 @@ type analysis struct {
 	dstDecls     map[string]declRef // the same names, with their declarations
 	dstXDecls    map[string]declRef // package-level names of the target's external tests
 	dstSels      map[*srcFile][]*ast.SelectorExpr
-	equiv        map[string]bool // helper equivalence (helperEquivalent)
-	dstChecked   *dstCheck       // cached type-check of the target (typecheckDst)
-	drops        []declRef       // moved declarations dropped as equivalent duplicates
+	equiv        map[string]bool   // helper equivalence (helperEquivalent)
+	equivNote    map[string]string // why a name is never equivalent (build-tag variants)
+	dstChecked   *dstCheck         // cached type-check of the target (typecheckDst)
+	drops        []declRef         // moved declarations dropped as equivalent duplicates
 
 	// -rewrite-aliases mode (rewritealiases.go).
 	deletes []*srcFile // files removed by the run
@@ -563,6 +564,9 @@ func (a *analysis) checkReferences() {
 				extra := ""
 				if a.intoExisting {
 					extra = ", or give the target an equivalent func or const first (it is then reused)"
+					if !u.file.XTest {
+						extra += a.equivalenceNote(u.obj.Name())
+					}
 				}
 				a.plan.errorf("%s: moved test file uses %s %s declared in the staying test file %s; the move would separate the test from its helper - move %s too%s",
 					a.posOf(u.id.Pos()), kindOf(u.obj), u.obj.Name(), h.Name, h.Name, extra)
@@ -1215,26 +1219,49 @@ func (a *analysis) checkTestMain() {
 		}
 	}
 	if a.intoExisting && movedTests {
-		if tf, td := testMainDecl(a.dstFiles); td != nil {
-			there := a.posOf(td.Pos())
+		if tmains := testMainDecls(a.dstFiles); len(tmains) > 0 {
+			there := a.posOf(tmains[0].fd.Pos())
 			if len(staying) == 0 {
 				a.plan.add(levelWarn, "TestMain separation (the target has its own TestMain)", there,
 					"package %s has no TestMain, but the moved tests now run under the TestMain of %s - check that it does not change them", a.srcName, a.cfg.PkgName)
 				return
 			}
-			if a.cfg.TestMainSupport != "" && a.delegatesTo(tf, td, a.cfg.TestMainSupport) {
+			var srcMains []testMainRef
+			for _, m := range testMainDecls(a.files) {
+				if !m.f.Moved {
+					srcMains = append(srcMains, m)
+				}
+			}
+			// Build-tag variants: a TestMain per configuration (for example
+			// main_test.go for !integration and main_integration_test.go for
+			// integration) cannot be compared in one configuration.
+			variant := ""
+			switch {
+			case len(srcMains) != 1 || len(tmains) != 1:
+				variant = fmt.Sprintf("TestMain has build-tag variants (%s in %s, %s in %s), which one analysis configuration cannot compare",
+					a.testMainList(srcMains), a.srcName, a.testMainList(tmains), a.cfg.PkgName)
+			case !srcMains[0].f.Included || !tmains[0].f.Included:
+				variant = "a TestMain is in a file excluded by the analysis build tags"
+			case srcMains[0].f.Constraint != tmains[0].f.Constraint:
+				variant = fmt.Sprintf("their build constraints differ (%q and %q)", srcMains[0].f.Constraint, tmains[0].f.Constraint)
+			}
+			if variant == "" && a.cfg.TestMainSupport != "" && a.delegatesTo(tmains[0].f, tmains[0].fd, a.cfg.TestMainSupport) {
 				a.plan.add(levelWarn, "TestMain separation (the target's TestMain delegates to -testmain-support)", there,
 					"moved tests leave the TestMain of %s (%s); the target's TestMain calls %s.RunTestMain - check that it does everything the source TestMain does", a.srcName, strings.Join(staying, ", "), a.cfg.TestMainSupport)
 				return
 			}
-			if a.equivalentTestMain(tf, td) {
+			if variant == "" && a.equivalentTestMain(srcMains[0], tmains[0]) {
 				a.plan.add(levelInfo, "TestMain separation (the target's TestMain is equivalent)", there,
 					"the TestMain of %s is equivalent to the TestMain of %s (%s)", a.cfg.PkgName, a.srcName, strings.Join(staying, ", "))
 				return
 			}
+			why := "differs from it, or calls helpers that are not equivalent"
+			if variant != "" {
+				why = "cannot be shown equivalent: " + variant
+			}
 			a.plan.add(levelHigh, "TestMain separation", there,
-				"moved tests leave the TestMain of %s (%s) and run under the existing TestMain of %s, which differs from it - verify that it does everything the source TestMain does (both should call the same RunTestMain helper)",
-				a.srcName, strings.Join(staying, ", "), a.cfg.PkgName)
+				"moved tests leave the TestMain of %s (%s) and run under the existing TestMain of %s, which %s - verify that it does everything the source TestMain does in every build configuration (both should call the same RunTestMain helper)",
+				a.srcName, strings.Join(staying, ", "), a.cfg.PkgName, why)
 			return
 		}
 	}
@@ -1312,22 +1339,41 @@ func TestMain(m *testing.M) {
 
 func formatGo(src []byte) ([]byte, error) { return format.Source(src) }
 
-// equivalentTestMain reports whether the target's TestMain td is equivalent
-// to the source's (same canonical tokens), or is the delegating TestMain for
-// -testmain-support when the source's TestMain is too.
-func (a *analysis) equivalentTestMain(tf *srcFile, td *ast.FuncDecl) bool {
-	sf, sd := testMainDecl(a.checked)
-	if sd == nil || !tf.Included {
-		return false
-	}
+// equivalentTestMain reports whether the target's TestMain is equivalent to
+// the source's: the same canonical tokens, and every helper they call
+// equivalent.
+func (a *analysis) equivalentTestMain(src, dst testMainRef) bool {
 	tinfo, tpkg, err := a.typecheckDst()
 	if err != nil {
 		a.plan.errorf("type-checking the existing target package (for its TestMain): %v", err)
 		return false
 	}
-	st, _ := a.canonTokens(sf, sd, a.srcResolver())
-	tt, _ := a.canonTokens(tf, td, a.dstResolver(tinfo, tpkg))
-	return strings.Join(st, " ") == strings.Join(tt, " ")
+	st, deps := a.canonTokens(src.f, src.fd, a.srcResolver())
+	tt, _ := a.canonTokens(dst.f, dst.fd, a.dstResolver(tinfo, tpkg))
+	if strings.Join(st, " ") != strings.Join(tt, " ") {
+		return false
+	}
+	// Equal text calling helpers with different bodies is not equivalent:
+	// every test-level helper it uses must be equivalent too (vars and types
+	// never are).
+	for _, d := range deps {
+		if d != "TestMain" && !a.helperEquivalent(d) {
+			return false
+		}
+	}
+	return true
+}
+
+// testMainList renders TestMain positions for messages.
+func (a *analysis) testMainList(ms []testMainRef) string {
+	if len(ms) == 0 {
+		return "none"
+	}
+	var out []string
+	for _, m := range ms {
+		out = append(out, a.posOf(m.fd.Pos()))
+	}
+	return strings.Join(out, ", ")
 }
 
 // delegatesTo reports whether td is func TestMain(m *testing.M) {
