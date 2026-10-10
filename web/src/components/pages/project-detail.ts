@@ -104,6 +104,7 @@ import {
 import type { FileEditorDataSource } from '../shared/file-editor.js';
 import { showToast } from '../../utils/toast.js';
 import { stopAllNotices, type StopAllResult } from '../../utils/stop-all.js';
+import { pullLatestErrorMessage, type PullLatestResponse } from '../../utils/pull-latest.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { terminalHref } from '../../client/open-terminal.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
@@ -488,8 +489,8 @@ export class ScionPageProjectDetail extends LitElement {
   @state()
   private pullResult: {
     status: string;
-    updated?: boolean;
-    commits?: { hash: string; subject: string }[];
+    updated?: boolean | undefined;
+    commits?: { hash: string; subject: string }[] | undefined;
     error?: string;
   } | null = null;
 
@@ -2501,25 +2502,13 @@ export class ScionPageProjectDetail extends LitElement {
         method: 'POST',
       });
 
-      const result = await response.json();
-
       if (!response.ok) {
-        // Extract error message from structured APIError or legacy format
-        const apiErr = result?.error;
-        let errorMsg =
-          (typeof apiErr === 'object' ? apiErr?.message : null) ||
-          result?.detail ||
-          result?.error ||
-          'Pull failed';
-        // Append guidance hint if available
-        const guidance = apiErr?.details?.guidance;
-        if (guidance) {
-          errorMsg += ` — ${guidance}`;
-        }
-        this.pullResult = { status: 'error', error: errorMsg };
+        const body: unknown = await response.json();
+        this.pullResult = { status: 'error', error: pullLatestErrorMessage(body) };
         return;
       }
 
+      const result = (await response.json()) as PullLatestResponse;
       this.pullResult = { status: 'ok', updated: result.updated, commits: result.commits };
       // Refresh file list after pull
       this.refreshActiveFileBrowser();

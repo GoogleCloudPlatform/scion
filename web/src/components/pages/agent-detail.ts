@@ -2540,9 +2540,8 @@ export class ScionPageAgentDetail extends LitElement {
     const filter = telemetry.filter;
     const cloud = telemetry.cloud;
     const hub = telemetry.hub;
-    const local = telemetry.local;
 
-    const hasDestinations = cloud || hub || local;
+    const hasDestinations = cloud || hub;
     const hasFilter = filter?.events || filter?.attributes || filter?.sampling;
 
     return html`
@@ -2586,20 +2585,6 @@ export class ScionPageAgentDetail extends LitElement {
                           <span class="info-value"
                             >${hub.enabled === false ? 'Disabled' : 'Enabled'}${hub.report_interval
                               ? ` (${hub.report_interval})`
-                              : ''}</span
-                          >
-                        </div>
-                      `
-                    : ''}
-                  ${local
-                    ? html`
-                        <div class="info-item">
-                          <span class="info-label">Local</span>
-                          <span class="info-value"
-                            >${local.enabled === false ? 'Disabled' : 'Enabled'}${local.file
-                              ? html`<br /><span class="mono" style="font-size: 0.8rem"
-                                    >${local.file}</span
-                                  >`
                               : ''}</span
                           >
                         </div>

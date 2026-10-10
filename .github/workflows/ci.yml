@@ -48,6 +48,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       single_node_vm: ${{ steps.diff.outputs.single_node_vm }}
+      starter_hub: ${{ steps.diff.outputs.starter_hub }}
       web: ${{ steps.diff.outputs.web }}
     steps:
       - name: Checkout code
@@ -69,16 +70,22 @@ jobs:
         run: |
           if [ "$EVENT_NAME" != "pull_request" ]; then
             echo "Event is ${EVENT_NAME}, not pull_request: running every gated job."
-            echo "single_node_vm=true" >> "$GITHUB_OUTPUT"
-            echo "web=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "single_node_vm=true"
+              echo "starter_hub=true"
+              echo "web=true"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
           # --no-renames: list both sides of a rename, so a file moved out of
           # a gated directory still counts as a change to that directory.
           if ! changed=$(git diff --name-only --no-renames "${BASE_SHA}...${HEAD_SHA}"); then
             echo "::warning title=Path detection failed::git diff ${BASE_SHA}...${HEAD_SHA} failed; running every gated job."
-            echo "single_node_vm=true" >> "$GITHUB_OUTPUT"
-            echo "web=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "single_node_vm=true"
+              echo "starter_hub=true"
+              echo "web=true"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "Changed files:"
@@ -89,6 +96,11 @@ jobs:
             echo "single_node_vm=true" >> "$GITHUB_OUTPUT"
           else
             echo "single_node_vm=false" >> "$GITHUB_OUTPUT"
+          fi
+          if grep -qE '^(scripts/starter-hub/|\.github/workflows/ci\.yml$)' <<<"$changed"; then
+            echo "starter_hub=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "starter_hub=false" >> "$GITHUB_OUTPUT"
           fi
           if grep -qE '^(web/|\.github/workflows/ci\.yml$)' <<<"$changed"; then
             echo "web=true" >> "$GITHUB_OUTPUT"
@@ -319,6 +331,29 @@ jobs:
             0) ;;
             1) echo "::error title=Time literals::A server-side time is formatted without .UTC() or bound in the wrong form for its column. Fix the site or add a justified entry to hack/time-literals-allowlist.txt; details are in the step log above." ;;
             *) echo "::error title=Time literals NOT checked::check-time-literals.sh could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure, not a statement about the codebase." ;;
+          esac
+          exit "$rc"
+
+      - name: Check Debug Defaults
+        run: |
+          # Invoked directly rather than via `make check-debug-defaults`, for the
+          # same reason as Check Authorization Guards above: make would collapse
+          # the script's exit 1 (violations) and exit 4 (nothing was analysed).
+          set +e
+          ./hack/check-debug-defaults.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=Debug defaults NOT checked::check-debug-defaults --self-test failed (exit $rc) — the check itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
+          ./hack/check-debug-defaults.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=Debug defaults::A setup script, deploy template or hosted setup doc turns on debug logging by default. Remove it, or add a commented ALLOWLIST entry in hack/check-debug-defaults.sh for an intentional mention; details are in the step log above." ;;
+            *) echo "::error title=Debug defaults NOT checked::check-debug-defaults.sh could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure, not a statement about the codebase." ;;
           esac
           exit "$rc"
 
@@ -592,7 +627,8 @@ jobs:
     timeout-minutes: 90
     services:
       postgres:
-        image: postgres:16
+        # Pulled through the Google Docker Hub mirror to avoid the Docker Hub unauthenticated pull limit (ptone/scion#4147).
+        image: mirror.gcr.io/library/postgres:16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -737,10 +773,13 @@ jobs:
                 -not -path './vendor/*' \
                 -not -path '*/vendor/*' \
                 -not -path '*/node_modules/*'
-              # The stub gcloud has no extension (it stands in for a real
-              # `gcloud` on PATH, which has none either), so the *.sh find
-              # above never sees it.
+              # The test stubs have no extension (they stand in for real
+              # commands on PATH, which have none either), so the *.sh find
+              # above never sees them.
               echo './scripts/single-node-vm/tests/lib/gcloud'
+              echo './scripts/starter-hub/tests/lib/curl'
+              echo './scripts/starter-hub/tests/lib/gcloud'
+              echo './scripts/starter-hub/tests/lib/sleep'
             } | sort
           )
           echo "shellcheck: $((checked - failed))/${checked} file(s) passed"
@@ -856,6 +895,7 @@ jobs:
     # the harness runs anyway.
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.single_node_vm == 'true') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -867,6 +907,27 @@ jobs:
       # scripts/single-node-vm/tests/README.md for what this covers.
       - name: Run scripts/single-node-vm/tests/run.sh
         run: ./scripts/single-node-vm/tests/run.sh
+
+  starter-hub-tests:
+    name: starter-hub script tests
+    needs: changes
+    # Runs only when scripts/starter-hub/** or this workflow changed, and
+    # always on push to main. Fails open: if the changes job did not succeed,
+    # the tests run anyway.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.starter_hub == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      # Never contacts GCP or the network: stub gcloud, curl and sleep in
+      # scripts/starter-hub/tests/lib shadow any real ones on PATH. Needs
+      # only bash, which ubuntu-latest ships.
+      - name: Run scripts/starter-hub/tests/run.sh
+        run: ./scripts/starter-hub/tests/run.sh
 
   # Mobile-emulation Playwright suite for the web chat (web/e2e/chat-mobile).
   # Fully mocked with page.route: no hub, no credentials, no secrets. Runs

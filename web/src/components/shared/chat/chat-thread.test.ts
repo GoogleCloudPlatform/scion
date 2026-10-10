@@ -95,6 +95,7 @@ import { chatRecentFiles } from '../../../client/chat-recent-files.js';
 import { wakeConfirmBudgetMs } from './chat-wake.js';
 import { agentGraphHref, terminalHref } from '../../../client/open-terminal.js';
 import { setPreferredTimeZone } from '../../../utils/time.js';
+import { requestBodyText } from '../../../client/__fixtures__/request-url.js';
 
 const CONVERSATION_KEY = 'topic-1';
 
@@ -388,7 +389,7 @@ describe('scion-chat-thread reply send payload (nc-reply-recipient)', () => {
         String(c[0]).endsWith('/messages') && (c[1] as RequestInit | undefined)?.method === 'POST'
     );
     expect(sendCall).toBeDefined();
-    const body = JSON.parse(String((sendCall![1] as RequestInit).body));
+    const body = JSON.parse(requestBodyText((sendCall![1] as RequestInit).body));
     expect(body.reply_to_id).toBe('orig-msg-1');
     expect(body).not.toHaveProperty('reply_to_agent');
   });
@@ -436,7 +437,10 @@ describe('scion-chat-thread interrupt send payload', () => {
         String(c[0]).endsWith('/messages') && (c[1] as RequestInit | undefined)?.method === 'POST'
     );
     expect(sendCall).toBeDefined();
-    return JSON.parse(String((sendCall![1] as RequestInit).body)) as Record<string, unknown>;
+    return JSON.parse(requestBodyText((sendCall![1] as RequestInit).body)) as Record<
+      string,
+      unknown
+    >;
   }
 
   it('sends interrupt: true when the composer requests interruption', async () => {
@@ -499,7 +503,9 @@ describe('scion-chat-thread wake on send', () => {
         (c) =>
           String(c[0]).endsWith('/messages') && (c[1] as RequestInit | undefined)?.method === 'POST'
       )
-      .map((c) => JSON.parse(String((c[1] as RequestInit).body)) as Record<string, unknown>);
+      .map(
+        (c) => JSON.parse(requestBodyText((c[1] as RequestInit).body)) as Record<string, unknown>
+      );
   }
 
   function send(
@@ -1811,7 +1817,7 @@ describe('scion-chat-thread read watermark', () => {
     expect(readCall).toBeDefined();
     const init = readCall![1] as RequestInit;
     expect(init.method).toBe('POST');
-    expect(JSON.parse(String(init.body))).toEqual({ messageId: 'msg-7' });
+    expect(JSON.parse(requestBodyText(init.body))).toEqual({ messageId: 'msg-7' });
   });
 
   it('warns when the server rejects the watermark update', async () => {
@@ -1886,7 +1892,7 @@ describe('scion-chat-thread read watermark', () => {
     const readCall = apiFetch.mock.calls.find(
       (c) => String(c[0]).endsWith('/read') && (c[1] as RequestInit | undefined)?.method === 'POST'
     );
-    const body = JSON.parse(String((readCall![1] as RequestInit).body));
+    const body = JSON.parse(requestBodyText((readCall![1] as RequestInit).body));
     expect(body).toEqual({ messageId: 'm2' });
 
     vi.useRealTimers();
@@ -1937,7 +1943,7 @@ describe('scion-chat-thread read watermark', () => {
             String(c[0]).endsWith('/read') && (c[1] as RequestInit | undefined)?.method === 'POST'
         );
         expect(readCall).toBeDefined();
-        expect(JSON.parse(String((readCall![1] as RequestInit).body))).toEqual({
+        expect(JSON.parse(requestBodyText((readCall![1] as RequestInit).body))).toEqual({
           messageId: tailID,
         });
         const bubbles = el.shadowRoot!.querySelectorAll('scion-chat-message');
@@ -2073,7 +2079,7 @@ describe('scion-chat-thread read watermark', () => {
           String(c[0]).endsWith('/read') && (c[1] as RequestInit | undefined)?.method === 'POST'
       );
       expect(readCalls).toHaveLength(1);
-      expect(JSON.parse(String((readCalls[0][1] as RequestInit).body))).toEqual({
+      expect(JSON.parse(requestBodyText((readCalls[0][1] as RequestInit).body))).toEqual({
         messageId: 'real-msg-1',
       });
     } finally {
@@ -2934,7 +2940,7 @@ describe('scion-chat-thread initial scroll position', () => {
       disconnect(): void {}
     } as unknown as typeof ResizeObserver;
     try {
-      const el = await mountWithHistory();
+      await mountWithHistory();
       expect(observed.some((t) => t.classList.contains('messages-list'))).toBe(true);
       scrollWrites = [];
       for (const cb of callbacks) cb([], {} as ResizeObserver);
@@ -5196,7 +5202,7 @@ describe('scion-chat-thread path-link project context fallback', () => {
     el.projectId = '';
     const internals = el as unknown as Internals;
 
-    await internals.handlePathLinkClick(
+    internals.handlePathLinkClick(
       new CustomEvent('path-link-click', {
         detail: { path: '/scion-volumes/scratchpad/projects/visibility-removal/scoping.md' },
       }),
@@ -5223,7 +5229,7 @@ describe('scion-chat-thread path-link project context fallback', () => {
     } as unknown as Response);
     const internals = el as unknown as Internals;
 
-    await internals.handlePathLinkClick(
+    internals.handlePathLinkClick(
       new CustomEvent('path-link-click', {
         detail: { path: '/scion-volumes/scratchpad/projects/visibility-removal/scoping.md' },
       }),
@@ -5252,7 +5258,7 @@ describe('scion-chat-thread path-link project context fallback', () => {
     } as unknown as Response);
     const internals = el as unknown as Internals;
 
-    await internals.handlePathLinkClick(
+    internals.handlePathLinkClick(
       new CustomEvent('path-link-click', {
         detail: { path: '/scion-volumes/scratchpad/projects/visibility-removal/scoping.md' },
       }),
@@ -5277,7 +5283,7 @@ describe('scion-chat-thread path-link project context fallback', () => {
     } as unknown as Response);
     const internals = el as unknown as Internals;
 
-    await internals.handlePathLinkClick(
+    internals.handlePathLinkClick(
       new CustomEvent('path-link-click', {
         detail: { path: '/scion-volumes/scratchpad/projects/visibility-removal/scoping.md' },
       }),
@@ -5304,7 +5310,7 @@ describe('scion-chat-thread path-link project context fallback', () => {
 
     // handleAgentOutboundMessage stamps ProjectID on the message but never
     // sets SenderProjectID, so this is the real shape of an agent DM.
-    await internals.handlePathLinkClick(
+    internals.handlePathLinkClick(
       new CustomEvent('path-link-click', {
         detail: { path: '/scion-volumes/scratchpad/notes.md' },
       }),
@@ -5327,7 +5333,7 @@ describe('scion-chat-thread path-link project context fallback', () => {
     } as unknown as Response);
     const internals = el as unknown as Internals;
 
-    await internals.handlePathLinkClick(
+    internals.handlePathLinkClick(
       new CustomEvent('path-link-click', {
         detail: { path: '/scion-volumes/scratchpad/notes.md' },
       }),
@@ -5344,7 +5350,7 @@ describe('scion-chat-thread path-link project context fallback', () => {
     el.projectId = '';
     const internals = el as unknown as Internals;
 
-    await internals.handlePathLinkClick(
+    internals.handlePathLinkClick(
       new CustomEvent('path-link-click', { detail: { path: 'not-a-path' } }),
       makeMessage({ senderProjectId: 'proj-visibility-removal' })
     );
@@ -5367,7 +5373,7 @@ describe('scion-chat-thread path-link project context fallback', () => {
     } as unknown as Response);
     const internals = el as unknown as Internals;
 
-    await internals.handlePathLinkClick(
+    internals.handlePathLinkClick(
       new CustomEvent('path-link-click', {
         detail: { path: '/scion-volumes/scratchpad/projects/visibility-removal/scoping.md' },
       }),
@@ -5412,7 +5418,7 @@ describe('scion-chat-thread path-link project context fallback', () => {
     } as unknown as Response);
     const internals = el as unknown as Internals;
 
-    await internals.handlePathLinkClick(
+    internals.handlePathLinkClick(
       new CustomEvent('path-link-click', {
         detail: { path: '/scion-volumes/scratchpad/notes.md' },
       }),
@@ -5452,7 +5458,7 @@ describe('scion-chat-thread path-link project context fallback', () => {
     } as unknown as Response);
     const internals = el as unknown as Internals;
 
-    await internals.handlePathLinkClick(
+    internals.handlePathLinkClick(
       new CustomEvent('path-link-click', {
         detail: { path: '/scion-volumes/scratchpad/notes.md' },
       }),
@@ -5481,7 +5487,7 @@ describe('scion-chat-thread path-link project context fallback', () => {
     await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
     const internals = el as unknown as Internals;
 
-    await internals.handlePathLinkClick(
+    internals.handlePathLinkClick(
       new CustomEvent('path-link-click', {
         detail: { path: '/scion-volumes/scratchpad/notes.md' },
       }),
