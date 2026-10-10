@@ -21,7 +21,9 @@ import (
 	"log/slog"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -681,6 +683,10 @@ type brokerHeartbeatRequest struct {
 	// by an older broker, or when unchanged since the broker last sent it,
 	// in which case the stored mappings are left unchanged.
 	ProfileSAMappings []brokerProfileSAMappings `json:"profileSAMappings,omitempty"`
+	// ProfileSAMappingsHashes confirms the stored reports by hash (see
+	// hubclient.BrokerHeartbeat.ProfileSAMappingsHashes). Omitted by an
+	// older broker.
+	ProfileSAMappingsHashes []brokerProfileSAMappingsHash `json:"profileSAMappingsHashes,omitempty"`
 	// StartsInFlight lists the agent starts still running on the broker
 	// (see hubclient.BrokerHeartbeat.StartsInFlight). Trusted to be complete
 	// only when Capabilities.StartsInFlight is set.
@@ -739,51 +745,146 @@ func applyProfileAttach(profiles []store.BrokerProfile, reported []brokerProfile
 	return changed
 }
 
-// brokerProfileSAMappings is one profile's GSA mappings in a heartbeat.
+// brokerProfileSAMappings is one profile's GCP service account report in a
+// heartbeat (see hubclient.ProfileSAMappingsState).
 type brokerProfileSAMappings struct {
 	Name                   string                         `json:"name"`
 	ServiceAccountMappings []store.BrokerProfileSAMapping `json:"serviceAccountMappings"`
+	Complete               bool                           `json:"complete,omitempty"`
+	IncompleteReason       string                         `json:"incompleteReason,omitempty"`
+	AmbiguousGSAs          []string                       `json:"ambiguousGSAs,omitempty"`
 }
 
-// applyProfileSAMappings stores each reported profile's GSA mappings on the
-// stored profile of the same name and marks it MappingsReported, and
-// reports whether anything changed. The report lists every Kubernetes
-// profile of the broker, so a stored profile it omits (for example one
-// switched from Kubernetes to docker) has its report cleared. Like
-// applyProfileAttach, a reported name with no stored profile is ignored, a
-// broker with no stored profiles (a flat Runtime Broker row) gets nothing,
-// and an absent report (an older broker, or an empty list, which the wire
-// format omits) changes nothing.
-func applyProfileSAMappings(profiles []store.BrokerProfile, reported []brokerProfileSAMappings) bool {
-	if len(reported) == 0 || len(profiles) == 0 {
-		return false
+// brokerProfileSAMappingsHash is one profile's report hash in a heartbeat
+// (see hubclient.ProfileSAMappingsHash).
+type brokerProfileSAMappingsHash struct {
+	Name string `json:"name"`
+	Hash string `json:"hash"`
+}
+
+// brokerHeartbeatResponse is the heartbeat reply (see
+// hubclient.BrokerHeartbeatResponse).
+type brokerHeartbeatResponse struct {
+	ProfileSAMappingsHashes    bool `json:"profileSAMappingsHashes,omitempty"`
+	ProfileSAMappingsRequested bool `json:"profileSAMappingsRequested,omitempty"`
+}
+
+// profileSAReportConfirmInterval is the least time between two writes that
+// only move a profile's MappingsReportedAt forward because a heartbeat's
+// hash confirmed the stored report, so confirmations do not write the
+// broker row on every heartbeat.
+const profileSAReportConfirmInterval = 5 * time.Minute
+
+// applyProfileSAMappings applies a heartbeat's GCP service account reports
+// (full reports and per-profile hashes) to the broker's stored profiles. It
+// reports whether anything changed, and whether the Hub needs the full
+// report because a hash does not match the stored report.
+//
+//   - A profile with a full report gets it stored, with the profile's hash
+//     from the same heartbeat (empty from a broker that sends no hashes),
+//     and MappingsReportedAt set to now.
+//   - A profile with only a hash that matches the stored report has its
+//     MappingsReportedAt moved to now, at most every
+//     profileSAReportConfirmInterval. A hash that does not match (or no
+//     stored hash) leaves the stored report as is, to age, and asks for the
+//     full report.
+//   - The reports and hashes name every Kubernetes profile of the broker,
+//     so a stored profile named in neither (for example one switched from
+//     Kubernetes to docker) has its report cleared.
+//
+// Like applyProfileAttach, a reported name with no stored profile is
+// ignored, a broker with no stored profiles (a flat Runtime Broker row)
+// gets nothing, and a heartbeat with neither field (an older broker, or a
+// broker that could not read its settings) changes nothing.
+func applyProfileSAMappings(profiles []store.BrokerProfile, reported []brokerProfileSAMappings, hashes []brokerProfileSAMappingsHash, now time.Time) (changed, requested bool) {
+	if (len(reported) == 0 && len(hashes) == 0) || len(profiles) == 0 {
+		return false, false
 	}
-	byName := make(map[string][]store.BrokerProfileSAMapping, len(reported))
+	byName := make(map[string]brokerProfileSAMappings, len(reported))
 	for _, r := range reported {
-		byName[r.Name] = r.ServiceAccountMappings
+		byName[r.Name] = r
 	}
-	changed := false
+	hashByName := make(map[string]string, len(hashes))
+	for _, h := range hashes {
+		hashByName[h.Name] = h.Hash
+	}
+	confirm := func(p *store.BrokerProfile) {
+		if p.MappingsReportedAt == nil || now.Sub(*p.MappingsReportedAt) >= profileSAReportConfirmInterval {
+			p.MappingsReportedAt = timePtr(now)
+			changed = true
+		}
+	}
 	for i := range profiles {
-		mappings, ok := byName[profiles[i].Name]
-		if !ok {
-			if profiles[i].MappingsReported || len(profiles[i].ServiceAccountMappings) > 0 {
-				profiles[i].MappingsReported = false
-				profiles[i].ServiceAccountMappings = nil
+		p := &profiles[i]
+		r, inReport := byName[p.Name]
+		hash, inHashes := hashByName[p.Name]
+		switch {
+		case inReport:
+			if profileSAReportEqual(p, r, hash) {
+				confirm(p)
+				continue
+			}
+			p.ServiceAccountMappings = r.ServiceAccountMappings
+			if len(p.ServiceAccountMappings) == 0 {
+				p.ServiceAccountMappings = nil
+			}
+			p.MappingsReported = true
+			p.MappingsComplete = r.Complete
+			p.MappingsIncompleteReason = r.IncompleteReason
+			if r.Complete {
+				p.MappingsIncompleteReason = ""
+			}
+			p.AmbiguousGSAs = r.AmbiguousGSAs
+			if len(p.AmbiguousGSAs) == 0 {
+				p.AmbiguousGSAs = nil
+			}
+			p.MappingsHash = hash
+			p.MappingsReportedAt = timePtr(now)
+			changed = true
+		case inHashes:
+			if p.MappingsReported && p.MappingsHash != "" && p.MappingsHash == hash {
+				confirm(p)
+				continue
+			}
+			requested = true
+		default:
+			if p.MappingsReported || len(p.ServiceAccountMappings) > 0 || p.MappingsReportedAt != nil {
+				clearProfileSAReport(p)
 				changed = true
 			}
-			continue
 		}
-		if profiles[i].MappingsReported && reflect.DeepEqual(profiles[i].ServiceAccountMappings, mappings) {
-			continue
-		}
-		if len(mappings) == 0 && len(profiles[i].ServiceAccountMappings) == 0 && profiles[i].MappingsReported {
-			continue
-		}
-		profiles[i].ServiceAccountMappings = mappings
-		profiles[i].MappingsReported = true
-		changed = true
 	}
-	return changed
+	return changed, requested
+}
+
+// profileSAReportEqual reports whether p already stores report r with hash.
+func profileSAReportEqual(p *store.BrokerProfile, r brokerProfileSAMappings, hash string) bool {
+	reason := r.IncompleteReason
+	if r.Complete {
+		reason = ""
+	}
+	return p.MappingsReported &&
+		p.MappingsHash == hash &&
+		p.MappingsComplete == r.Complete &&
+		p.MappingsIncompleteReason == reason &&
+		slices.Equal(p.ServiceAccountMappings, r.ServiceAccountMappings) &&
+		slices.Equal(p.AmbiguousGSAs, r.AmbiguousGSAs)
+}
+
+// clearProfileSAReport removes a profile's stored report, back to unknown.
+func clearProfileSAReport(p *store.BrokerProfile) {
+	p.ServiceAccountMappings = nil
+	p.MappingsReported = false
+	p.MappingsComplete = false
+	p.MappingsIncompleteReason = ""
+	p.AmbiguousGSAs = nil
+	p.MappingsHash = ""
+	p.MappingsReportedAt = nil
+}
+
+// timePtr returns a pointer to a copy of t.
+func timePtr(t time.Time) *time.Time {
+	return &t
 }
 
 // boolPtr returns a pointer to a copy of b.
@@ -857,6 +958,9 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+	// This Hub reads the report hashes and asks for the full report when
+	// a hash does not match (applyProfileSAMappings).
+	heartbeatResp := brokerHeartbeatResponse{ProfileSAMappingsHashes: true}
 
 	// Snapshot the broker row before this heartbeat is stored: the
 	// missing-container reconcile needs to know whether the broker was
@@ -920,7 +1024,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// ProfileSAMappings likewise. Health (the broker's self-reported
 	// health) follows the same rule; it is stored next to Status and never
 	// changes it, so a degraded broker stays online and keeps reconciling.
-	if heartbeat.Capabilities != nil || heartbeat.WorkspaceStorage != nil || heartbeat.DefaultProfile != nil || heartbeat.Health != nil || len(heartbeat.ProfileAttach) > 0 || len(heartbeat.ProfileSAMappings) > 0 {
+	if heartbeat.Capabilities != nil || heartbeat.WorkspaceStorage != nil || heartbeat.DefaultProfile != nil || heartbeat.Health != nil || len(heartbeat.ProfileAttach) > 0 || len(heartbeat.ProfileSAMappings) > 0 || len(heartbeat.ProfileSAMappingsHashes) > 0 {
 		if broker, err := loadHeartbeatBroker(); err != nil {
 			s.agentLifecycleLog.Warn("heartbeat: failed to load broker to refresh broker state",
 				"broker_id", id, "error", err)
@@ -928,12 +1032,13 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			// A flat row never stores Runtime Broker Profiles: a reported
 			// default profile, profile attach or profile SA mappings are
 			// dropped before the write.
-			if broker.IsFlat() && (heartbeat.DefaultProfile != nil || len(heartbeat.ProfileAttach) > 0 || len(heartbeat.ProfileSAMappings) > 0) {
+			if broker.IsFlat() && (heartbeat.DefaultProfile != nil || len(heartbeat.ProfileAttach) > 0 || len(heartbeat.ProfileSAMappings) > 0 || len(heartbeat.ProfileSAMappingsHashes) > 0) {
 				s.agentLifecycleLog.Warn("heartbeat: ignoring Runtime Broker Profile fields reported for a flat Runtime Broker",
 					"broker_id", id)
 				heartbeat.DefaultProfile = nil
 				heartbeat.ProfileAttach = nil
 				heartbeat.ProfileSAMappings = nil
+				heartbeat.ProfileSAMappingsHashes = nil
 			}
 			changed := false
 			if heartbeat.Capabilities != nil && !reflect.DeepEqual(broker.Capabilities, heartbeat.Capabilities) {
@@ -966,9 +1071,11 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			if applyProfileAttach(broker.Profiles, heartbeat.ProfileAttach) {
 				changed = true
 			}
-			if applyProfileSAMappings(broker.Profiles, heartbeat.ProfileSAMappings) {
+			saChanged, saRequested := applyProfileSAMappings(broker.Profiles, heartbeat.ProfileSAMappings, heartbeat.ProfileSAMappingsHashes, time.Now())
+			if saChanged {
 				changed = true
 			}
+			heartbeatResp.ProfileSAMappingsRequested = saRequested
 			if changed {
 				if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {
 					s.agentLifecycleLog.Warn("heartbeat: failed to persist refreshed broker state",
@@ -1469,7 +1576,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	s.settleQueuedStops(ctx, id, prevBroker, &heartbeat, report)
 	s.drainQueuedStopsFromHeartbeat(ctx, id, prevBroker, &heartbeat, report)
 
-	w.WriteHeader(http.StatusOK)
+	writeJSON(w, http.StatusOK, heartbeatResp)
 }
 
 // BrokerProjectInfo describes a project from a broker's perspective.

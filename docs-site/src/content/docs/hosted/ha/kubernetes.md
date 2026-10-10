@@ -505,6 +505,43 @@ KSAs in other namespaces are never considered. Discovery is read-only. It uses t
 
 **Namespace.** The Workload Identity member is the (namespace, KSA) pair, so the namespace is also taken only from the broker's global settings: the selected runtime entry's `namespace`, or else the Kubernetes runtime's default namespace. Profiles have no namespace setting. A profile that needs another namespace selects its own runtime entry, with its own mapping if the KSA differs. Provision each KSA in the namespace its entry resolves to.
 
+**Granting discovery access.** A Role and RoleBinding like these, in each namespace agents run in, give the broker's Kubernetes identity the read-only access discovery needs. The names are examples. Replace the subject with the identity the runtime entry uses (here, a broker that runs in the cluster as the `scion-broker` ServiceAccount in the `scion-system` namespace):
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: scion-serviceaccount-reader
+  namespace: agents
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: scion-serviceaccount-reader
+  namespace: agents
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: scion-serviceaccount-reader
+subjects:
+  - kind: ServiceAccount
+    name: scion-broker
+    namespace: scion-system
+```
+
+**Report to the Hub (mapped, not ready).** For each Kubernetes profile, the broker reports to the Hub the GSAs the profile can serve. Each entry names the GSA, the KSA the pod would run as, the namespace, and whether the KSA comes from a mapping (`mapped`) or from an annotation (`discovered`). The Hub stores the report on the broker's profile (`serviceAccountMappings`) with the time it was last reported or confirmed (`mappingsReportedAt`).
+
+- An entry means the GSA is mapped on that profile, not that it is ready. The broker cannot see whether the Workload Identity IAM binding exists, so a mapped GSA can still fail to get credentials.
+- The report is complete (`mappingsComplete`) only when the broker read its mappings and listed the namespace's ServiceAccounts. Otherwise `mappingsIncompleteReason` says why: `pending` (the first lookup has not finished), `list_failed` (for example, the list is forbidden) or `unavailable` (no Kubernetes client for the profile). An incomplete report still lists the mapped GSAs.
+- GSAs with no mapping that more than one KSA is annotated with are listed in `ambiguousGSAs`, not as entries, because a dispatch for them fails.
+- The broker refreshes discovery in the background every 5 minutes, with a 15-second timeout for each namespace, so neither heartbeats nor dispatches wait on the API server. A failed list is logged at warning level at most every 30 minutes for each profile and namespace, or sooner when the failure changes.
+- Every heartbeat carries a hash of each profile's report. The full report is sent only when it changes, or when the Hub asks for it because its stored copy does not match. A Hub that predates hashes gets the report on change and every 10 minutes, as before.
+- A broker that predates the report sends none, and the Hub treats its profiles as unknown.
+
 **Request-level values.** A `kubernetes.serviceAccountName` set on the create or start request must equal the mapped KSA, and a `kubernetes.namespace` on the request must equal the resolved namespace; otherwise the dispatch fails. A `serviceAccountName` set only in a template is overridden by the mapping.
 
 **Dispatch errors.** Each of these fails the dispatch before any pod is created:

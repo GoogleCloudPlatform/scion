@@ -335,6 +335,16 @@ type Server struct {
 	// the API server.
 	resolveAuxiliaryRuntime func(projectPath, agentName, profileFlag string) scionrt.Runtime
 
+	// saDiscoveryCache holds the background ServiceAccount annotation
+	// discovery results behind the heartbeat's service account report
+	// (sa_mappings_report.go), created on first use by saDiscovery. Tests
+	// may set it before first use. saDiscoveryClients keeps the Kubernetes
+	// client resolved for a profile that has no live runtime.
+	saDiscoveryCache     *saDiscoveryCache
+	saDiscoveryOnce      sync.Once
+	saDiscoveryClients   map[string]kubernetes.Interface
+	saDiscoveryClientsMu sync.Mutex
+
 	// loadSettings, when non-nil, replaces config.LoadEffectiveSettings in
 	// resolveManagerForOptsStrict (handlers.go). nil, the default, uses the
 	// real loader; tests set it per fixture to exercise each settings
