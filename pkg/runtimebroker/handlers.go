@@ -390,41 +390,17 @@ func (s *Server) heartbeatProfileAttach() []hubclient.ProfileAttachState {
 
 // loadHeartbeatMappingSettings loads the broker's global settings plus the
 // DB-backed overlay, the source of kubernetes_service_account_mappings at
-// dispatch (resolveKubernetesAssignIdentity). A variable so tests can
-// substitute settings.
-var loadHeartbeatMappingSettings = func() (*config.VersionedSettings, error) {
+// dispatch (resolveKubernetesAssignIdentity), for the heartbeat's service
+// account report. s.loadMappingSettings replaces the loader when set
+// (tests). It is a per-server field, not a package variable, so a test
+// that substitutes settings never races with the heartbeat loop of
+// another server in the same test binary (ptone/scion#4313).
+func (s *Server) loadHeartbeatMappingSettings() (*config.VersionedSettings, error) {
+	if s.loadMappingSettings != nil {
+		return s.loadMappingSettings()
+	}
 	vs, _, err := config.LoadGlobalSettingsWithOverlay()
 	return vs, err
-}
-
-// heartbeatProfileSAMappings returns, sorted by profile name, the GSA
-// mappings of each Kubernetes profile (by resolved runtime type) in the
-// broker's global settings, for the heartbeat's ProfileSAMappings field.
-// Nil when the settings cannot be read, so the hub keeps what it has; an
-// empty result when there are no Kubernetes profiles.
-func (s *Server) heartbeatProfileSAMappings() []hubclient.ProfileSAMappingsState {
-	vs, err := loadHeartbeatMappingSettings()
-	if err != nil || vs == nil {
-		return nil
-	}
-	names := make([]string, 0, len(vs.Profiles))
-	for name := range vs.Profiles {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	out := []hubclient.ProfileSAMappingsState{}
-	for _, name := range names {
-		gsas, isKubernetes, _ := vs.ProfileKubernetesSAMappings(name)
-		if !isKubernetes {
-			continue
-		}
-		state := hubclient.ProfileSAMappingsState{Name: name, ServiceAccountMappings: []hubclient.BrokerProfileSAMapping{}}
-		for _, gsa := range gsas {
-			state.ServiceAccountMappings = append(state.ServiceAccountMappings, hubclient.BrokerProfileSAMapping{GSA: gsa})
-		}
-		out = append(out, state)
-	}
-	return out
 }
 
 // resolveLiveRuntimeInstance returns the already-built Runtime instance
@@ -573,7 +549,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 
 	// Dedup by name+projectID to prevent collision across projects while still
 	// deduplicating the same agent found on multiple runtimes.
-	agentKey := func(a api.AgentInfo) string {
+	dedupKey := func(a api.AgentInfo) string {
 		pid := a.ProjectID
 		if pid == "" {
 			pid = projectkeys.ProjectIDFromLabels(a.Labels)
@@ -582,7 +558,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	}
 	seen := make(map[string]bool)
 	for _, ag := range agents {
-		seen[agentKey(ag)] = true
+		seen[dedupKey(ag)] = true
 	}
 	for _, aux := range auxRuntimes {
 		auxAgents, auxErr := aux.Manager.List(ctx, filter)
@@ -590,7 +566,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		for _, ag := range auxAgents {
-			k := agentKey(ag)
+			k := dedupKey(ag)
 			if !seen[k] {
 				seen[k] = true
 				agents = append(agents, ag)
@@ -831,15 +807,15 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agentKey := req.ID
-	if agentKey == "" {
-		agentKey = req.Name
+	attemptKey := req.ID
+	if attemptKey == "" {
+		attemptKey = req.Name
 	}
 
 	var attempt *dispatchAttempt
 	if req.RequestID != "" {
 		s.dispatchAttemptsMu.Lock()
-		newAttempt, existingAttempt := s.beginCreateAttempt(req.RequestID, agentKey)
+		newAttempt, existingAttempt := s.beginCreateAttempt(req.RequestID, attemptKey)
 		if existingAttempt != nil {
 			switch existingAttempt.Status {
 			case dispatchAttemptSucceeded:
@@ -1123,7 +1099,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				}
 
 				resp := EnvRequirementsResponse{
-					AgentID:      agentKey,
+					AgentID:      attemptKey,
 					Required:     required,
 					HubHas:       hubHas,
 					Needs:        needs,
@@ -3142,29 +3118,6 @@ func dropHubManagedSkills(refs []api.SkillReference) []api.SkillReference {
 	return out
 }
 
-// skillBaseURI strips a trailing version specifier from a skill URI:
-// "scion://my-skill@1.0" becomes "scion://my-skill". It uses the rule
-// api.ParseSkillURI uses for skill:// URIs: the version is an "@" in the last
-// path segment, so an "@" in the authority ("skill://user@host/a") is not a
-// version specifier. A query or fragment ("?token=...") is not part of the
-// path: it is set aside before the version is found and kept in the result,
-// so "gh://o/r/s@v1?token=X" and "gh://o/r/s?token=X" share a key.
-func skillBaseURI(uri string) string {
-	prefix, rest := "", uri
-	if i := strings.Index(uri, "://"); i >= 0 {
-		prefix, rest = uri[:i+3], uri[i+3:]
-	}
-	suffix := ""
-	if i := strings.IndexAny(rest, "?#"); i >= 0 {
-		rest, suffix = rest[:i], rest[i:]
-	}
-	tailStart := strings.LastIndex(rest, "/") + 1
-	if i := strings.LastIndex(rest[tailStart:], "@"); i >= 0 {
-		rest = rest[:tailStart+i]
-	}
-	return prefix + rest + suffix
-}
-
 // dedupeSkillReferences keeps only the final occurrence of each skill
 // reference key (base URI plus As) and drops earlier ones, preserving the
 // relative order of the references that remain. The key ignores a version
@@ -3195,11 +3148,11 @@ func dedupeSkillReferences(refs []api.SkillReference) []api.SkillReference {
 	type key struct{ uri, as string }
 	last := make(map[key]int, len(refs))
 	for i, ref := range refs {
-		last[key{skillBaseURI(ref.URI), ref.As}] = i
+		last[key{api.SkillBaseURI(ref.URI), ref.As}] = i
 	}
 	out := make([]api.SkillReference, 0, len(last))
 	for i, ref := range refs {
-		if last[key{skillBaseURI(ref.URI), ref.As}] == i {
+		if last[key{api.SkillBaseURI(ref.URI), ref.As}] == i {
 			out = append(out, ref)
 		}
 	}
@@ -6463,10 +6416,33 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 		return
 	}
 
+	// Start removing the project's tree on the NFS workspace export
+	// (ptone/scion#2569) before the local-directory check below: the tree
+	// exists whether or not this broker has a local project directory, as
+	// for git projects whose agents run on Kubernetes. It runs in the
+	// background with its own context and timeout, so a large tree never
+	// holds up this response; every outcome is logged and none changes it.
+	s.startNFSProjectTreeCleanup(r.Context(), slug, r.URL.Query().Get("project_id"))
+
 	if _, err := os.Stat(projectPath); os.IsNotExist(err) {
 		// Already gone — idempotent success
 		w.WriteHeader(http.StatusNoContent)
 		return
+	}
+
+	// The slug may already belong to a different project: the hub frees it
+	// when its delete commits, before it asks brokers to clean up, so a
+	// project re-created with the same slug may already be here. When the
+	// directory's .scion entry or this broker's workspace record names
+	// another project, leave the directory (and its shared-dir storage)
+	// alone (ptone/scion#2569).
+	if requestedID := r.URL.Query().Get("project_id"); requestedID != "" {
+		if other := brokerProjectDirOwner(projectPath, slug, requestedID); other != "" {
+			s.agentLifecycleLog.Warn("project directory not removed: it belongs to a different project",
+				"slug", slug, "project_id", requestedID, "recorded_project_id", other)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 	}
 
 	// Remove the project's shared-dir storage first: it can live outside
@@ -6502,6 +6478,113 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 
 	s.agentLifecycleLog.Info("Removed hub-managed project directory", "slug", slug, "path", projectPath)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// nfsProjectCleanupRetryDelay is how long a failed NFS project tree removal
+// waits before its one retry (agent pods may still be terminating), and
+// nfsProjectCleanupTimeout bounds the whole background cleanup. Variables so
+// tests can shorten them.
+var (
+	nfsProjectCleanupRetryDelay = 30 * time.Second
+	nfsProjectCleanupTimeout    = 15 * time.Minute
+)
+
+// nfsCleanupAttemptHook, when set, is called with the attempt number (1 or
+// 2) just before each attempt's still-deleted check. Tests only.
+var nfsCleanupAttemptHook func(attempt int)
+
+// startNFSProjectTreeCleanup starts, in the background, the removal of the
+// deleted project's directory on the NFS workspace export,
+// <MountRoot>/<shareID>/<SubPathRoot>/<projectID>, with its workspace,
+// shared-dirs, provisioning state, worktrees and agent directories
+// (scionrt.CleanupNFSProjectRetry, which guards the path and retries a failed
+// removal once). It does nothing when this broker has no NFS workspace
+// storage or the request carries no project ID. The cleanup has its own
+// context with nfsProjectCleanupTimeout, not the request's.
+//
+// Project IDs can be reused (re-linking the same checkout brings the same ID
+// back), so immediately before each attempt the cleanup checks that no agent
+// of the project that this broker did not already know when the delete
+// arrived is in use (newProjectAgentsInUse; a listing error counts as in
+// use) and otherwise keeps the tree, logged at Info. The deleted project's
+// own agents, still terminating, do not block it; a removal that fails
+// because they are still writing is retried after nfsProjectCleanupRetryDelay. A
+// missing tree is success; a final failure is logged for an operator, never
+// returned.
+func (s *Server) startNFSProjectTreeCleanup(reqCtx context.Context, slug, projectID string) {
+	nfs := s.config.NFSConfig
+	if nfs == nil || len(nfs.Shares) == 0 {
+		return
+	}
+	if projectID == "" {
+		s.agentLifecycleLog.Warn("project delete without project_id: NFS workspace tree not removed", "slug", slug)
+		return
+	}
+	retryDelay, timeout, hook := nfsProjectCleanupRetryDelay, nfsProjectCleanupTimeout, nfsCleanupAttemptHook
+	// The project's agents known now belong to the project being deleted:
+	// the hub dispatched their deletes just before this cleanup, and on
+	// Kubernetes their pods keep listing as running until their grace
+	// period ends. Only agents not in this snapshot can belong to a project
+	// that came back with the same ID (the hub gives re-registered agents
+	// new IDs). A snapshot listing error leaves the snapshot empty, so every
+	// listed agent then counts.
+	deleting, err := s.projectAgentIDs(reqCtx, projectID)
+	if err != nil {
+		s.agentLifecycleLog.Info("NFS workspace tree cleanup: could not list the project's agents at delete time",
+			"slug", slug, "project_id", projectID, "error", err)
+	}
+	s.nfsCleanupWG.Add(1)
+	go func() {
+		defer s.nfsCleanupWG.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		stillDeleted := func(ctx context.Context, attempt int) bool {
+			if hook != nil {
+				hook(attempt)
+			}
+			inUse, err := s.newProjectAgentsInUse(ctx, projectID, deleting)
+			if err != nil {
+				s.agentLifecycleLog.Info("NFS workspace tree cleanup: could not list the project's agents; keeping the tree",
+					"slug", slug, "project_id", projectID, "attempt", attempt, "error", err)
+			}
+			return !inUse
+		}
+		err := scionrt.CleanupNFSProjectRetry(ctx, nfs, projectID, retryDelay, stillDeleted)
+		switch {
+		case errors.Is(err, scionrt.ErrNFSCleanupSkipped):
+			s.agentLifecycleLog.Info("NFS workspace tree kept: a new agent of the project is in use on this broker",
+				"slug", slug, "project_id", projectID)
+		case err != nil:
+			s.agentLifecycleLog.Error("project's NFS workspace tree was not removed after project delete; an operator must remove it",
+				"slug", slug, "project_id", projectID, "error", err)
+		default:
+			s.agentLifecycleLog.Info("Removed project's NFS workspace tree (if present)", "slug", slug, "project_id", projectID)
+		}
+	}()
+}
+
+// brokerProjectDirOwner returns the project ID recorded for the hub-managed
+// project directory projectPath (~/.scion/projects/<slug>) when it differs
+// from projectID, else "". When this broker has a workspace record for slug
+// (broker-workspaces/<slug>, written with the hub project ID when the copy
+// was populated), that record alone decides: a broker copy's .scion entry can
+// legitimately hold another ID when identity alignment was skipped
+// (recordHubProjectIdentity). Only without a record does the directory's
+// .scion entry (project-id file or marker) decide. An absent or unreadable
+// identity does not count as a different project.
+func brokerProjectDirOwner(projectPath, slug, projectID string) string {
+	if recordPath, err := config.BrokerWorkspaceRecordPath(slug); err == nil {
+		if recorded, err := config.ReadWorkspaceRecord(recordPath); err == nil && recorded != "" {
+			if recorded != projectID {
+				return recorded
+			}
+			return ""
+		}
+	}
+	if recorded := projectIDAtPath(filepath.Join(projectPath, config.DotScion)); recorded != "" && recorded != projectID {
+		return recorded
+	}
+	return ""
 }
 
 // hubManagedProjectSharedDirsBase returns the shared-dir storage directory

@@ -22,8 +22,6 @@
  * either way, never the raw ID.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */

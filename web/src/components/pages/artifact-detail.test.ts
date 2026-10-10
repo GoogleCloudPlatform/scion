@@ -54,6 +54,7 @@ function artifact(path: string, mediaType: string): ArtifactResponse {
       state: 'ready',
       files: [{ path, size: 5, sha256: 'ab', mediaType }],
     },
+    canPublish: true,
   };
 }
 
@@ -296,18 +297,24 @@ describe('artifact page', () => {
   });
 
   it("links back to the artifact's own project, not the one in the URL", async () => {
+    // The back link is the shared scion-back-link in the header's back slot.
+    const backHref = (page: Element): string | null => {
+      const link = page.shadowRoot!.querySelector(
+        'scion-detail-header > scion-back-link[slot="back"]'
+      );
+      expect(link?.textContent?.trim()).toBe('Project');
+      return link!.getAttribute('href');
+    };
     mockFetch(artifact('design.md', 'text/markdown'));
     const el = await mount(true); // URL project is p-1; scopeRef is p-1 too
-    expect(el.shadowRoot!.querySelector('a.back-link')!.getAttribute('href')).toBe('/projects/p-1');
+    expect(backHref(el)).toBe('/projects/p-1');
     document.body.innerHTML = '';
 
     const meta = artifact('design.md', 'text/markdown');
     meta.artifact.scopeRef = 'home-project';
     mockFetch(meta);
     const el2 = await mount(true);
-    expect(el2.shadowRoot!.querySelector('a.back-link')!.getAttribute('href')).toBe(
-      '/projects/home-project'
-    );
+    expect(backHref(el2)).toBe('/projects/home-project');
   });
 
   it('renders markdown in a sandboxed frame that loads images from the version only', async () => {
@@ -411,6 +418,54 @@ describe('artifact page', () => {
     expect(single.textContent).toContain('Only one version so far.');
     expect(single.textContent).toContain('Upload new version');
     expect(single.textContent).not.toContain('scion artifact');
+  });
+
+  it('hides Edit, Review and Upload new version for a reader who cannot publish', async () => {
+    for (const canPublish of [false, undefined]) {
+      const meta = { ...artifact('design.md', 'text/markdown'), canPublish };
+      mockFetch(meta, '# Doc');
+      const el = await mount(true);
+      const labels = Array.from(el.shadowRoot!.querySelectorAll('sl-button')).map((b) =>
+        b.textContent!.trim()
+      );
+      expect(labels.some((l) => l.includes('Version v1'))).toBe(true);
+      for (const hidden of ['Edit', 'Review', 'Upload new version']) {
+        expect(labels.some((l) => l.includes(hidden))).toBe(false);
+      }
+      const panel = el.shadowRoot!.querySelector('sl-tab-panel[name="history"]')!;
+      expect(panel.querySelector('.single-version')!.textContent).toContain(
+        'Only one version so far.'
+      );
+      document.body.innerHTML = '';
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('offers Upload new version below a longer history only to a publisher', async () => {
+    const versions: ArtifactVersion[] = [2, 1].map((seq) => ({
+      seq,
+      ref: `scion://artifact/${ID}@${seq}`,
+      kind: 'publish',
+      entryPath: 'design.md',
+      totalBytes: 5,
+      fileCount: 1,
+      createdAt: '2026-10-05T12:00:00Z',
+      state: 'ready',
+      files: [],
+    }));
+    for (const canPublish of [true, false]) {
+      const meta = { ...artifact('design.md', 'text/markdown'), canPublish };
+      meta.artifact.currentSeq = 2;
+      meta.version = { ...meta.version!, seq: 2, ref: `scion://artifact/${ID}@2` };
+      mockFetch(meta, '# Doc', { versions });
+      const el = await mount(true);
+      const panel = el.shadowRoot!.querySelector('sl-tab-panel[name="history"]')!;
+      expect(panel.querySelectorAll('tbody tr')).toHaveLength(2);
+      expect(panel.querySelector('.more') !== null).toBe(canPublish);
+      expect((panel.textContent ?? '').includes('Upload new version')).toBe(canPublish);
+      document.body.innerHTML = '';
+      vi.unstubAllGlobals();
+    }
   });
 
   it('shows the new version in place after publishing an edit from the current URL', async () => {
@@ -1069,6 +1124,44 @@ describe('artifact page', () => {
     // The discarded text stays readable, with Copy, outside Review mode.
     expect(el.shadowRoot!.querySelector('.discarded-review pre')!.textContent).toBe(MARKED);
     expect(button(el, '.discarded-review sl-button', 'Copy')).toBeDefined();
+  });
+
+  it('leaves Review mode saying so when the reload after a stale review shows the caller can no longer publish', async () => {
+    const meta = artifact('plan.md', 'text/markdown');
+    const creates: string[] = [];
+    mockFetch(meta, 'We ship in Q3.\n', {
+      write: reviewWrites(
+        meta,
+        () => {
+          // A newer version is current and the caller's write access is gone.
+          meta.artifact.currentSeq = 2;
+          meta.version = { ...meta.version!, seq: 2, ref: `scion://artifact/${ID}@2` };
+          meta.canPublish = false;
+          return new Response(
+            JSON.stringify({ error: { code: 'stale_review', message: 'stale' } }),
+            { status: 409 }
+          );
+        },
+        creates
+      ),
+    });
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: MARKED } })
+    );
+    await el.updateComplete;
+    button(el, '.edit-footer sl-button', 'Save review')!.click();
+    await settle(el);
+    expect(el.shadowRoot!.querySelector('.review-editor')).toBeNull();
+    const notice = el.shadowRoot!.querySelector('sl-alert.review-notice')!.textContent!;
+    expect(notice).toContain('you can no longer publish versions of this artifact');
+    expect(notice).not.toContain('newer version');
+    expect(el.shadowRoot!.querySelector('.discarded-review pre')!.textContent).toBe(MARKED);
+    // Edit and Review are gone with the right to publish.
+    expect(button(el, '.header-actions sl-button', 'Edit')).toBeUndefined();
+    expect(button(el, '.header-actions sl-button', 'Review')).toBeUndefined();
   });
 
   it('keeps the discarded text and says so when the reload after a stale review fails', async () => {

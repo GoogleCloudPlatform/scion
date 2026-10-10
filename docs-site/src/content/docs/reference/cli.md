@@ -28,6 +28,8 @@ Human-readable times use a 24-hour clock and always include a zone. `--tz` and `
 
 **Debug output.** `SCION_LOG_LEVEL` controls the CLI's `[DEBUG]` and tagged lines such as `[hubsync]`; see [Controlling the Log Level](/scion/hosted/single-node/observability/#controlling-the-log-level). Inside an agent container (agent CLI mode), the CLI ignores the deprecated `SCION_DEBUG`, which older brokers set in every agent, so use `SCION_LOG_LEVEL=debug` or `--debug` there. Best-effort Hub sync steps that fail without stopping the command are reported as `Warning:` lines on stderr whatever the log level.
 
+**CLI modes.** The CLI runs in `human` mode, with every command available, unless `SCION_CLI_MODE` (or the `cli.mode` setting) selects `agent` mode. Agent containers set `SCION_CLI_MODE=agent`, which limits the CLI to the commands an agent may use. An earlier `assistant` mode has been removed: if `SCION_CLI_MODE` or `cli.mode` is still set to `assistant`, the CLI prints one warning to stderr and runs in `human` mode.
+
 **Project resolution order.** The CLI picks the project in this order:
 
 1. The `-g` / `--project` or `--global` flag.
@@ -48,6 +50,14 @@ In a Hub-connected context, `--global` (or `-g global`) targets the Hub's Global
 `global`) when the local global directory is not linked to a Hub project. If the Hub has no Global
 project, or you do not have access to it, the command fails with an error that names
 `--project <slug|id>` as the alternative.
+
+**Commands that need no project.** Commands that act on the Hub connection, a login, this machine's
+Runtime Broker, or the server run outside a project without `--global` or `--project`:
+`scion hub status`, `scion hub enable`, `scion hub disable`, the `scion hub auth` commands,
+`scion runtime-broker register`, `deregister`, `start`, `stop`, `restart`, `status`, `hubs` and
+`join`, and the `server`, `admin` and `project` commands. Outside a project, the `scion hub`
+connection commands read and write the global settings, as with `--global`.
+`scion runtime-broker provide` and `withdraw` act on a project and still need one.
 
 :::note[Agents creating agents in other projects]
 Inside an agent container, `-g` / `--project` changes which project the CLI addresses, but the Hub
@@ -551,9 +561,9 @@ Lists all agents and their status.
     - `--harness <harness-config name>` (Hub mode only): Filter by harness-config name.
     - `--descendants[=<agent>]` (Hub mode only): List every agent descended from the reference. With no value, the reference is the calling agent in agent mode, or the calling user otherwise (a user's ID is recorded as the creator in its directly-created agents' ancestry, so this still works).
     - `--ancestors[=<agent>]` (Hub mode only): List the agents named in the reference's ancestry chain (entries that name a user rather than an agent are skipped). Same reference-resolution rule as `--descendants`. A user reference has no ancestry, so this returns an empty list when the reference defaults to the calling user.
-    - `--lineage[=<agent>]` (Hub mode only): List the reference's **creation-tree neighborhood** — the reference's direct parent agent, plus everything created (at any depth) from that parent — bounded to the reference's own project. The exact root rule: it roots at itself when it was created directly by a user, has no recorded parent at all, **or its only recorded parent is an agent you cannot list** (without `--all`, that includes a parent that is merely in a different project — the lookup for a length-one ancestry goes through the current project's endpoint, not the global one). For a deeper ancestry (two or more recorded ancestors), the direct parent is always used as the root even if you cannot see it yourself, so its other children (your siblings) that you *can* see are still listed — this is safe because the ancestry length alone already proves that entry is an agent, not a user. Same reference-resolution rule as `--descendants`. For a user reference (e.g. bare `--lineage` in human/assistant mode with no agent to infer), there is no project to bound to, so the result is identical to `--descendants` for that user: every agent they've created, at any depth, across whatever project scope is already in effect. **This is a creation-tree query, not a messaging-permission query** — it does not reflect who the reference agent is allowed to message under its message mode (`scion set-message-mode`), which can be a different and smaller set.
+    - `--lineage[=<agent>]` (Hub mode only): List the reference's **creation-tree neighborhood** — the reference's direct parent agent, plus everything created (at any depth) from that parent — bounded to the reference's own project. The exact root rule: it roots at itself when it was created directly by a user, has no recorded parent at all, **or its only recorded parent is an agent you cannot list** (without `--all`, that includes a parent that is merely in a different project — the lookup for a length-one ancestry goes through the current project's endpoint, not the global one). For a deeper ancestry (two or more recorded ancestors), the direct parent is always used as the root even if you cannot see it yourself, so its other children (your siblings) that you *can* see are still listed — this is safe because the ancestry length alone already proves that entry is an agent, not a user. Same reference-resolution rule as `--descendants`. For a user reference (e.g. bare `--lineage` in human mode with no agent to infer), there is no project to bound to, so the result is identical to `--descendants` for that user: every agent they've created, at any depth, across whatever project scope is already in effect. **This is a creation-tree query, not a messaging-permission query** — it does not reflect who the reference agent is allowed to message under its message mode (`scion set-message-mode`), which can be a different and smaller set.
     - `--descendants`, `--ancestors`, and `--lineage` are mutually exclusive with each other. All of the above combine with `--phase`/`--activity`/`--template`/`--label` using AND.
-    - Without `--all`, every Hub-mode filter above (including `--descendants`/`--ancestors`/`--lineage`) is scoped to the **current project** — a reference agent's ancestors/descendants/lineage in a different project will not appear. From a human or assistant shell, `--all` searches across every project you can see. **When authenticated with an agent token, `--all` cannot be combined with `--descendants`/`--ancestors`/`--lineage`**: an agent token can only list agents in its own project, so the command fails with a clear error instead of silently returning nothing. This is keyed on the credential actually in use, not on CLI mode — running inside an agent container while authenticated as a user (OAuth login, or dev auth against a localhost Hub) is not affected.
+    - Without `--all`, every Hub-mode filter above (including `--descendants`/`--ancestors`/`--lineage`) is scoped to the **current project** — a reference agent's ancestors/descendants/lineage in a different project will not appear. From a human shell, `--all` searches across every project you can see. **When authenticated with an agent token, `--all` cannot be combined with `--descendants`/`--ancestors`/`--lineage`**: an agent token can only list agents in its own project, so the command fails with a clear error instead of silently returning nothing. This is keyed on the credential actually in use, not on CLI mode — running inside an agent container while authenticated as a user (OAuth login, or dev auth against a localhost Hub) is not affected.
 
 ### `scion delete` (or `rm`)
 
@@ -593,7 +603,42 @@ restarting the agent. Use this to recover an agent whose token expired and canno
 as a **Reset Auth** button in the web UI. The token is passed to the container over stdin, not on the
 command line, so it does not appear in the host's process list.
 
-**Usage:** `scion reset-auth <agent-name>`
+**Usage:** `scion reset-auth <agent-name>` or `scion reset-auth --all --reissue-scopes [--apply]`
+
+- **Flags:**
+    - `--reissue-scopes`: Instead of only refreshing the token, re-issue the agent's role and scopes from
+      its delegating agent or user's current authority. The agent's delegation is re-recorded through the
+      same checks agent creation applies, scopes the delegator no longer holds are removed, the agent's
+      current credentials are revoked, and a running agent receives a new token. Requires a Hub
+      super-admin session; the operation is audited. Descendant agents are not changed: re-issue them
+      one by one, parents first, or use `--all`.
+    - `--dry-run`: With `--reissue-scopes` for one agent, show the change without applying it.
+    - `--all`: With `--reissue-scopes`, re-issue every agent on the Hub, parents before
+      children within each project. Takes no agent argument. A failure affects only that agent, and
+      re-running is safe: agents already re-issued are unchanged. This is a dry run that prints a summary
+      unless `--apply` is given.
+    - `--apply`: With `--all --reissue-scopes`, apply the re-issue instead of a dry run.
+
+```bash
+# Preview, then apply, a re-issue for one agent
+scion reset-auth my-agent --reissue-scopes --dry-run
+scion reset-auth my-agent --reissue-scopes
+
+# Review the Hub-wide summary first, then apply it
+scion reset-auth --all --reissue-scopes
+scion reset-auth --all --reissue-scopes --apply
+```
+
+- **Flags:**
+    - `--reissue-scopes`: Re-issue the agent's role scopes from its delegator's current authority
+      instead: the agent's delegation record is re-recorded, its credentials are revoked, and a new
+      token is pushed to a running agent. Hub super-admins only; audited.
+    - `--dry-run`: With `--reissue-scopes`, show the change without applying it.
+    - `--all`: With `--reissue-scopes`, re-issue every agent on the Hub, parents first (no agent
+      argument). A dry run unless `--apply` is given.
+    - `--apply`: With `--all --reissue-scopes`, apply the re-issue.
+
+See [Reset Auth and Scope Re-issue](/scion/reference/reset-auth/).
 
 ### `scion reincarnate`
 
@@ -618,6 +663,15 @@ flag is local and offline, so it works without a Hub connection and from inside 
 
 The new generation's preamble names who requested the migration. While a migration is in progress,
 the agent's status message reads "migrating to generation N".
+
+An interrupted migration is not resumed. For example, if the Hub restarts in the middle of a
+migration, the Hub marks it failed and puts the agent in the `error` phase with the reason in its
+status message. Run `scion reincarnate` again with the same flags: the Hub does not keep a failed
+migration's patch flags. A migration that had not started yet fails within about 10 minutes with
+"reincarnation failed: did not start, so no changes were applied; run reincarnate again". None of
+its patch flags are applied. A migration that had started fails after 30 minutes without progress.
+The Hub restores the previous configuration unless the new generation had already been provisioned.
+Until the migration fails, a new request for the agent is refused with `409`.
 
 Reincarnation works for agents in clone-per-agent, shared-workspace (shared-plain), and
 Hub-managed workspaces. For a shared-workspace agent, the agent record, identity, and shared
@@ -740,7 +794,8 @@ Manages the Scion workspace (Project).
     - `add <email>`: Register an existing GCP service account.
         - Flags: `--gcp-project <id>` (required, the GCP project ID), `--name <string>` (display name).
     - `mint`: Create a new service account in the Hub's GCP project (the account ID is prefixed with `scion-`). Flags: `--account-id`, `--name`.
-    - `list` (alias `ls`): List registered service accounts. Flags: `--json`.
+    - `list` (alias `ls`): List registered service accounts. The `MAPPED` column shows how many of the project's Kubernetes broker profiles map the account, out of those whose broker reported its mappings (for example `1/2`), or `-` when no profile reported. Flags: `--json`.
+    - `show <id|email|name>` (aliases `get`, `describe`, `status`): Show the account as seen from this project, in sections: identity, verification (with its age), mapping per Kubernetes broker profile (`mapped`, `not mapped` or `not reported`; mappings are owned by the broker and shown read-only), Workload Identity binding (always `unknown (not checked)`: the Hub does not read IAM policy here), the defaults that point at it (project, per-profile, Hub), the agents using it that you may see, and the next step (not verified, not mapped on a named profile, or nothing missing). The account is resolved as for `scion create --service-account`; use the id or the email for a name that contains `/`. Available in agent mode (the other `project service-accounts` subcommands are not). Flags: `--json`.
     - `verify <id>`: Verify that the Hub can impersonate the service account.
     - `remove <id>` (aliases `rm`, `delete`): Remove a service account registration.
     - `add`, `mint`, `verify` and `list` print the Hub's warnings to stderr, for example a service account that no Kubernetes broker profile of the project maps (see [early warning for unmapped service accounts](/scion/hosted/ha/kubernetes/#gcp-identity-mode-assign-workload-identity-mapping)). Warnings never change the exit status. With `--json`, `add`, `mint` and `verify` also include the warnings in the JSON document as `warnings`; `list --json` prints only the account list.
@@ -946,7 +1001,7 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
             - `--project <string>`: Project ID or name to scope the token to (required).
             - `--name <string>`: Token name/label (required).
             - `--scopes <scopes>`: Scopes to grant (required). This flag is **repeatable** and also accepts a **comma-separated list** of scopes (e.g., `--scopes agent:read,agent:create --scopes agent:lifecycle`). Strict empty-value validation is enforced.
-            - `--expires <duration>`: Expiry: a positive duration in minutes (90m), hours (2h), days (30d) or years (1y), or an RFC 3339 date (2026-12-31T00:00:00Z) (default: 90d). `m` means minutes; there is no month unit (use 30d or 1y for longer).
+            - `--expires <duration>`: Expiry: a positive duration in minutes (90m), hours (2h), days (30d) or years (1y, always 365 days), or an RFC 3339 date (2026-12-31T00:00:00Z) (default: 90d). `m` means minutes; there is no month unit (use 30d or 1y for longer).
             - `--purpose <text>`: Optional bounded description of what the token is for (≤128 bytes, single line, no control characters). Immutable after issuance — there is no update command.
             - `--label <key=value>`: Optional bounded label (repeatable). Keys are lowercase `[a-z][a-z0-9_.-]*` (≤32 bytes); values are ≤64 bytes from a restricted charset. A set of attribution-shaped keys (e.g. `user_id`, `agent`, `actor_binding`) are reserved and rejected. Immutable after issuance.
     - `scopes`: List every scope accepted by `create --scopes`. With `--project <string>`, also report which scopes you may currently select for a token scoped to that project and, for each one you cannot, why. Supports `--json`.

@@ -658,7 +658,7 @@ type AgentInfo struct {
 	Phase           string       `json:"phase,omitempty"`           // Lifecycle phase (created, provisioning, running, stopped, error)
 	Activity        string       `json:"activity,omitempty"`        // Runtime activity (working, thinking, executing, waiting_for_input, completed)
 	ExitCode        *int         `json:"exitCode,omitempty"`        // Structured exit code from runtime (nil = unknown)
-	ExitReason      string       `json:"exitReason,omitempty"`      // Terminal reason: "crashed" or "limits_exceeded"
+	ExitReason      string       `json:"exitReason,omitempty"`      // Terminal reason (see state.ExitReason), e.g. "crashed", "preempted", "oom_killed"
 	Detail          *AgentDetail `json:"detail,omitempty"`          // Freeform context about the current activity
 
 	// Runtime configuration
@@ -667,6 +667,11 @@ type AgentInfo struct {
 	Runtime    string            `json:"runtime,omitempty"`
 	Profile    string            `json:"profile,omitempty"`
 	Kubernetes *AgentK8sMetadata `json:"kubernetes,omitempty"`
+	// VanishedPodReport marks an entry a Kubernetes runtime List() reports
+	// for an agent pod already removed by a preemption or eviction, rather
+	// than for a pod that still exists (see runtime.IsVanishedPodReport).
+	// Never serialized.
+	VanishedPodReport bool `json:"-"`
 	// GCPIdentity is the GCP identity the Hub applied to the agent. Set
 	// only for agents listed through a Hub; nil when none is recorded.
 	GCPIdentity *AgentGCPIdentity `json:"gcpIdentity,omitempty"`

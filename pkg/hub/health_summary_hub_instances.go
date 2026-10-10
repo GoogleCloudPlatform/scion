@@ -15,10 +15,11 @@
 package hub
 
 import (
-	"context"
+	"encoding/json"
 	"sort"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -95,6 +96,87 @@ type HealthHubInstance struct {
 	// Checks is the instance's last reported check map; fixed values only
 	// (see api.NormalizeHubInstanceChecks).
 	Checks map[string]string `json:"checks"`
+	// Database is the instance's last reported database connection pool,
+	// from its own sql.DB.Stats(). Null when the instance reported no pool
+	// (its store exposes no *sql.DB) or its stats could not be read.
+	Database *HealthHubInstanceDB `json:"database"`
+	// IntegrationCounts aggregates, by health, the integrations the
+	// instance last reported running. Not identifying, so it is returned
+	// to every caller.
+	IntegrationCounts HealthSummaryIntegrationCounts `json:"integration_counts"`
+	// IntegrationsTruncated is true when the instance cut its reported
+	// integrations to fit its row's size cap.
+	IntegrationsTruncated bool `json:"integrations_truncated,omitempty"`
+	// Integrations lists the integrations the instance last reported,
+	// sorted by name. Identifying: present only for a caller with
+	// hub.integrations.read (see omitHealthSummaryIntegrationDetail).
+	Integrations []HealthHubInstanceIntegration `json:"integrations,omitempty"`
+}
+
+// HealthHubInstanceIntegration is one integration as a hub instance
+// reported it in its registry row: allow-listed fields only.
+type HealthHubInstanceIntegration struct {
+	Name string `json:"name"`
+	// Health is healthy, degraded, unhealthy or unknown.
+	Health    string `json:"health"`
+	Connected bool   `json:"connected"`
+	Version   string `json:"version"`
+}
+
+// HealthHubInstanceDB is one hub instance's database connection pool.
+type HealthHubInstanceDB struct {
+	// PoolActive is the number of connections in use.
+	PoolActive int `json:"pool_active"`
+	// PoolIdle is the number of idle connections.
+	PoolIdle int `json:"pool_idle"`
+	// PoolMax is the pool limit; 0 means no limit.
+	PoolMax int `json:"pool_max"`
+	// PoolWaitCountTotal is the cumulative number of waits for a
+	// connection since the instance started.
+	PoolWaitCountTotal int64 `json:"pool_wait_count_total"`
+}
+
+// decodeHubInstanceStats decodes a registry row's stats column and
+// normalises it again, since the row may have been written by another
+// version of the hub. ok is false when the column is empty or does not
+// decode; the row is then listed with no pool and no integrations.
+func decodeHubInstanceStats(raw json.RawMessage) (stats api.HubInstanceStats, ok bool) {
+	if len(raw) == 0 {
+		return api.HubInstanceStats{}, false
+	}
+	if err := json.Unmarshal(raw, &stats); err != nil {
+		return api.HubInstanceStats{}, false
+	}
+	return api.NormalizeHubInstanceStats(stats), true
+}
+
+// hubInstanceDatabase returns the pool block of decoded stats, or nil when
+// the row reported none.
+func hubInstanceDatabase(stats api.HubInstanceStats) *HealthHubInstanceDB {
+	if stats.DB == nil {
+		return nil
+	}
+	return &HealthHubInstanceDB{
+		PoolActive:         stats.DB.InUse,
+		PoolIdle:           stats.DB.Idle,
+		PoolMax:            stats.DB.MaxOpen,
+		PoolWaitCountTotal: stats.DB.WaitCount,
+	}
+}
+
+// hubInstanceIntegrationItems converts reported integrations for the
+// response; nil when there are none.
+func hubInstanceIntegrationItems(list []api.HubInstanceIntegration) []HealthHubInstanceIntegration {
+	if len(list) == 0 {
+		return nil
+	}
+	out := make([]HealthHubInstanceIntegration, 0, len(list))
+	for _, in := range list {
+		out = append(out, HealthHubInstanceIntegration{
+			Name: in.Name, Health: in.Health, Connected: in.Connected, Version: in.Version,
+		})
+	}
+	return out
 }
 
 // hubInstanceState applies the state rule: stopped when stopped_at is set,
@@ -123,18 +205,6 @@ func hubInstanceStateRank(state string) int {
 	}
 }
 
-// healthSummaryHubInstances reads the hub_instances section. The store cuts
-// the list at its own clock minus hubInstanceDisplayWindow. It returns nil
-// and the error when the registry cannot be read; the summary then reports
-// the section as null ("not reported").
-func (s *Server) healthSummaryHubInstances(ctx context.Context) (*HealthSummaryHubInstances, error) {
-	rows, storeNow, err := s.store.ListHubInstances(ctx, hubInstanceDisplayWindow)
-	if err != nil {
-		return nil, err
-	}
-	return buildHealthSummaryHubInstances(rows, storeNow, s.InstanceID()), nil
-}
-
 // buildHealthSummaryHubInstances computes each row's state against the
 // store clock now, marks the serving instance, orders the items and applies
 // the cap. A pure function of its inputs.
@@ -156,6 +226,12 @@ func buildHealthSummaryHubInstances(rows []store.HubInstance, now time.Time, ser
 			StoppedAt: r.StoppedAt,
 			Status:    r.Status,
 			Checks:    r.Checks,
+		}
+		if stats, ok := decodeHubInstanceStats(r.Stats); ok {
+			item.Database = hubInstanceDatabase(stats)
+			item.IntegrationCounts = hubInstanceIntegrationCounts(stats.Integrations)
+			item.IntegrationsTruncated = stats.IntegrationsTruncated
+			item.Integrations = hubInstanceIntegrationItems(stats.Integrations)
 		}
 		if item.Checks == nil {
 			item.Checks = map[string]string{}

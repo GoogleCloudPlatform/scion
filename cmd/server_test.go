@@ -47,7 +47,7 @@ func TestRegisterGlobalProjectAndBroker_DedupByName(t *testing.T) {
 	settings := &config.Settings{}
 
 	// First registration: creates broker with ID tid("broker-1") and name "test-broker"
-	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil)
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, tid("broker-1"), effectiveID)
 
@@ -59,7 +59,7 @@ func TestRegisterGlobalProjectAndBroker_DedupByName(t *testing.T) {
 
 	// Second registration with a DIFFERENT ID but SAME name.
 	// This simulates a restart where the broker ID was lost/regenerated.
-	effectiveID, err = registerGlobalProjectAndBroker(ctx, s, tid("broker-2"), "test-broker", "http://localhost:9800", nil, true, settings, nil)
+	effectiveID, err = registerGlobalProjectAndBroker(ctx, s, tid("broker-2"), "test-broker", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 
 	// Should return the original broker-1 ID (dedup by name)
@@ -82,12 +82,12 @@ func TestRegisterGlobalProjectAndBroker_SameIDNoDedup(t *testing.T) {
 	settings := &config.Settings{}
 
 	// First registration
-	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil)
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, tid("broker-1"), effectiveID)
 
 	// Second registration with the same ID (normal restart case)
-	effectiveID, err = registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, false, settings, nil)
+	effectiveID, err = registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, false, settings, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, tid("broker-1"), effectiveID)
 
@@ -104,12 +104,12 @@ func TestRegisterGlobalProjectAndBroker_NewBrokerNewName(t *testing.T) {
 	settings := &config.Settings{}
 
 	// Register first broker
-	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "broker-alpha", "http://localhost:9800", nil, true, settings, nil)
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "broker-alpha", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, tid("broker-1"), effectiveID)
 
 	// Register a genuinely different broker (different ID AND different name)
-	effectiveID, err = registerGlobalProjectAndBroker(ctx, s, tid("broker-2"), "broker-beta", "http://localhost:9801", nil, true, settings, nil)
+	effectiveID, err = registerGlobalProjectAndBroker(ctx, s, tid("broker-2"), "broker-beta", "http://localhost:9801", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, tid("broker-2"), effectiveID)
 
@@ -126,13 +126,13 @@ func TestRegisterGlobalProjectAndBroker_DedupCaseInsensitive(t *testing.T) {
 	settings := &config.Settings{}
 
 	// Register broker with lowercase name
-	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "scion-demo", "http://localhost:9800", nil, true, settings, nil)
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "scion-demo", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, tid("broker-1"), effectiveID)
 
 	// Register with different ID and mixed-case name
 	// GetRuntimeBrokerByName uses LOWER() for case-insensitive match
-	effectiveID, err = registerGlobalProjectAndBroker(ctx, s, tid("broker-2"), "Scion-Demo", "http://localhost:9800", nil, true, settings, nil)
+	effectiveID, err = registerGlobalProjectAndBroker(ctx, s, tid("broker-2"), "Scion-Demo", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, tid("broker-1"), effectiveID, "should match case-insensitively")
 }
@@ -143,7 +143,7 @@ func TestRegisterGlobalProjectAndBroker_SetsEmbeddedLabel(t *testing.T) {
 	settings := &config.Settings{}
 
 	// Register a new co-located broker
-	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil)
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, tid("broker-1"), effectiveID)
 
@@ -159,7 +159,7 @@ func TestRegisterGlobalProjectAndBroker_LabelsOnReregistration(t *testing.T) {
 	settings := &config.Settings{}
 
 	// First registration
-	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil)
+	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 
 	// Manually add a user-set label to simulate prior customization
@@ -169,7 +169,7 @@ func TestRegisterGlobalProjectAndBroker_LabelsOnReregistration(t *testing.T) {
 	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
 
 	// Re-register (same ID, same name)
-	_, err = registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil)
+	_, err = registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 
 	// Verify the embedded label is set AND the custom label is preserved
@@ -185,11 +185,11 @@ func TestRegisterGlobalProjectAndBroker_LabelsOnDedupByName(t *testing.T) {
 	settings := &config.Settings{}
 
 	// First registration
-	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil)
+	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 
 	// Second registration with different ID but same name (dedup path)
-	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-2"), "test-broker", "http://localhost:9800", nil, true, settings, nil)
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-2"), "test-broker", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, tid("broker-1"), effectiveID)
 
@@ -215,7 +215,7 @@ func TestRegisterGlobalProjectAndBroker_RecordsDefaultProfile(t *testing.T) {
 		},
 	}
 
-	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil)
+	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 
 	broker, err := s.GetRuntimeBroker(ctx, tid("broker-1"))
@@ -227,7 +227,7 @@ func TestRegisterGlobalProjectAndBroker_RecordsDefaultProfile(t *testing.T) {
 	// edited and the broker restarted) must update the stored value, not
 	// leave the stale one in place.
 	settings.ActiveProfile = "remote"
-	_, err = registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil)
+	_, err = registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 
 	broker, err = s.GetRuntimeBroker(ctx, tid("broker-1"))
@@ -247,7 +247,7 @@ func TestRegisterGlobalProjectAndBroker_NoActiveProfileLeavesDefaultProfileEmpty
 	s := newTestStore(t)
 	settings := &config.Settings{}
 
-	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil)
+	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 
 	broker, err := s.GetRuntimeBroker(ctx, tid("broker-1"))
@@ -264,7 +264,7 @@ func TestBuildStoreBrokerProfiles_CloudRunFiltersLocalRuntimes(t *testing.T) {
 		},
 	}
 
-	profiles := buildStoreBrokerProfiles(settings, "cloudrun", nil)
+	profiles := buildStoreBrokerProfiles(settings, nil, "cloudrun", nil)
 
 	assert.Len(t, profiles, 1, "Cloud Run should filter out docker profile")
 	assert.Equal(t, "kubernetes", profiles[0].Type)
@@ -279,7 +279,7 @@ func TestBuildStoreBrokerProfiles_DockerDefaultKeepsAllProfiles(t *testing.T) {
 		},
 	}
 
-	profiles := buildStoreBrokerProfiles(settings, "docker", nil)
+	profiles := buildStoreBrokerProfiles(settings, nil, "docker", nil)
 
 	assert.Len(t, profiles, 2, "docker default should keep all profiles")
 	types := map[string]bool{}
@@ -297,7 +297,7 @@ func TestBuildStoreBrokerProfiles_EmptyAfterFilterFallsBackToDefault(t *testing.
 		},
 	}
 
-	profiles := buildStoreBrokerProfiles(settings, "cloudrun", nil)
+	profiles := buildStoreBrokerProfiles(settings, nil, "cloudrun", nil)
 
 	assert.Len(t, profiles, 1, "should fall back to default profile when all are filtered")
 	assert.Equal(t, "default", profiles[0].Name)
@@ -313,7 +313,7 @@ func TestBuildStoreBrokerProfiles_StarterHubKeepsDockerProfiles(t *testing.T) {
 		},
 	}
 
-	profiles := buildStoreBrokerProfiles(settings, "docker", nil)
+	profiles := buildStoreBrokerProfiles(settings, nil, "docker", nil)
 
 	assert.Len(t, profiles, 2, "starter hub (docker default) should keep docker profiles")
 	types := map[string]bool{}
@@ -335,7 +335,7 @@ func TestRegisterGlobalProjectAndBroker_CloudRunSuppressesDockerProfile(t *testi
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "cloudrun" }}
 
-	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "hosted-broker", "http://localhost:9800", rt, true, settings, nil)
+	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "hosted-broker", "http://localhost:9800", rt, true, settings, nil, nil)
 	require.NoError(t, err)
 
 	broker, err := s.GetRuntimeBroker(ctx, tid("broker-1"))
@@ -359,7 +359,7 @@ func TestRegisterGlobalProjectAndBroker_StarterHubKeepsDockerProfile(t *testing.
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 
-	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "starter-hub", "http://localhost:9800", rt, true, settings, nil)
+	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "starter-hub", "http://localhost:9800", rt, true, settings, nil, nil)
 	require.NoError(t, err)
 
 	broker, err := s.GetRuntimeBroker(ctx, tid("broker-1"))
@@ -402,7 +402,7 @@ func TestRegisterGlobalProjectAndBroker_EmptyPerAgentFollowsDefaultRuntime(t *te
 	brokerID := tid("broker-no-empty")
 
 	for _, branch := range []string{"create", "re-register"} {
-		_, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "no-empty-broker", "http://localhost:9800", rt, true, settings, nil)
+		_, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "no-empty-broker", "http://localhost:9800", rt, true, settings, nil, nil)
 		require.NoError(t, err, branch)
 		broker, err := s.GetRuntimeBroker(ctx, brokerID)
 		require.NoError(t, err, branch)
@@ -426,7 +426,7 @@ func TestRegisterGlobalProjectAndBroker_AttachOptOut_PersistsFalse(t *testing.T)
 	rt := &optOutRuntime{MockRuntime: &runtime.MockRuntime{NameFunc: func() string { return "optout" }}}
 	brokerID := tid("broker-optout")
 
-	_, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "optout-broker", "http://localhost:9800", rt, true, settings, nil)
+	_, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "optout-broker", "http://localhost:9800", rt, true, settings, nil, nil)
 	require.NoError(t, err)
 
 	broker, err := s.GetRuntimeBroker(ctx, brokerID)
@@ -462,7 +462,7 @@ func TestRegisterGlobalProjectAndBroker_UpdateSetsReprovisionCapability(t *testi
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, pre))
 
-	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "pre-existing-broker", "http://localhost:9800", nil, true, settings, nil)
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "pre-existing-broker", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, brokerID, effectiveID)
 

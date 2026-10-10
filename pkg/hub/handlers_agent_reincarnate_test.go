@@ -4157,7 +4157,7 @@ func TestSweepStaleReincarnations_MarksNonTerminalFailed(t *testing.T) {
 		AgentID:        agent.ID,
 		FromGeneration: 1,
 		ToGeneration:   2,
-		State:          store.AgentReincarnationStatePending,
+		State:          store.AgentReincarnationStateProvisioning,
 	}))
 
 	// A future cutoff treats every existing row as stale, without needing an

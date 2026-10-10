@@ -36,6 +36,7 @@ import { chatUnread, startChatUnreadIfEligible } from './chat-unread.js';
 import { TerminalCoordinator } from './terminal-coordinator.js';
 import { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
 import { TerminalWorkspacePersistence, restoreUrlIntent } from './terminal-persistence.js';
+import { openLayoutSlots } from './terminal-layout-open.js';
 import { parseLayoutUrl } from './terminal-layout.js';
 import type { TerminalResources, TerminalSession } from './terminal-sessions.js';
 import {
@@ -901,13 +902,18 @@ async function init(): Promise<void> {
     void loadAdminStatus(currentUser.id);
   }
 
-  // Chat notifications are published on user.<id>.notification, so the state
-  // manager must know who we are before it opens the first SSE connection.
+  // DM messages and read-state changes are published on user.<id>.chat.*, so
+  // the state manager must know who we are before it opens the first SSE
+  // connection.
   if (currentUser?.id) {
     stateManager.setCurrentUserId(currentUser.id);
-    // Mention/DM popups are driven off those events. Started here rather than
-    // from the chat page because a mention has to reach you on any page.
-    chatNotifications.start(currentUser.id);
+    // Chat message popups are driven off those events. Started here rather
+    // than from the chat page because a DM has to reach you on any page.
+    chatNotifications.start({
+      id: currentUser.id,
+      email: currentUser.email,
+      name: currentUser.name,
+    });
     // The recent-files index (native chat quick palette "Documents") is
     // scoped to this identity + hub/base path; initialize only now that the
     // user is known.
@@ -955,11 +961,11 @@ async function init(): Promise<void> {
   terminalWorkspaceEnabled = isFeatureEnabled(TERMINAL_WORKSPACE_FLAG);
   ensureRoots();
 
-  // The tab-title unread badge is unread state, not notification state: it
-  // runs for every signed-in user regardless of the push preference, and on
-  // every page, because an unread mention is worth seeing from the dashboard.
-  // After the flags settle — with chat disabled the endpoints it reads are
-  // not even registered.
+  // The unread conversation count (the header's chat badge and the tab-title
+  // badge) is unread state, not notification state: it runs for every
+  // signed-in user regardless of the push preference, and on every page.
+  // After the flags settle — with chat disabled the endpoint it reads is not
+  // even registered.
   // On a chat first page the first refresh goes out now and the page shares
   // it; elsewhere it waits for idle (see startChatUnreadIfEligible).
   const initialPath = stripBasePath(window.location.pathname);
@@ -1133,31 +1139,15 @@ async function renderRoute(path: string): Promise<void> {
         try {
           // Restore the layout preset and open agents from URL slots.
           // Map agent IDs to session keys, opening new sessions as needed.
-          const sessionKeys: Array<string | null> = [];
-          for (const agentId of layoutUrl.slots) {
-            if (!agentId) {
-              sessionKeys.push(null);
-              continue;
-            }
-            // Check if a session for this agent already exists
-            let key = terminalWorkspace.findSessionKeyByAgentId(agentId);
-            if (!key) {
-              // Open a new session — coordinator.open validates auth/existence
-              const requestId = coordinator.supported ? crypto.randomUUID() : undefined;
-              if (requestId) terminalNavigations.set(requestId, thisNav);
-              if (thisNav !== navigationId) return;
-              try {
-                const result = await coordinator.open(agentId, requestId);
-                if (thisNav !== navigationId) return;
-                if (requestId && result.status !== 'pending') terminalNavigations.delete(requestId);
-                // After coordinator.open, the session should exist
-                key = terminalWorkspace.findSessionKeyByAgentId(agentId);
-              } catch {
-                // Agent unavailable/unauthorized/deleted — slot stays empty
-              }
-            }
-            sessionKeys.push(key);
-          }
+          const sessionKeys = await openLayoutSlots({
+            coordinator,
+            workspace: terminalWorkspace,
+            slots: layoutUrl.slots,
+            navigations: terminalNavigations,
+            navigationId: thisNav,
+            currentNavigationId: () => navigationId,
+          });
+          if (!sessionKeys) return;
           // Restore the layout manager state with the resolved session keys
           terminalWorkspace.layoutManager.restore(layoutUrl.preset, sessionKeys);
         } finally {

@@ -694,3 +694,54 @@ func TestGCPServiceAccounts_Mint_RequiresAProjectWithoutCalling(t *testing.T) {
 		t.Error("no request should have been sent for an unaddressable mint")
 	}
 }
+
+// saStatusBody is the shape pkg/hub's getGCPServiceAccountStatus writes.
+const saStatusBody = `{
+  "account":{"id":"sa-1","displayName":"Worker","scope":"project","email":"one@x.iam.gserviceaccount.com"},
+  "verification":{"status":"verified","verified":true,"verifiedAt":"2026-10-01T12:00:00Z"},
+  "mappings":[{"brokerId":"b1","brokerName":"b","profile":"gke","state":"mapped"}],
+  "workloadIdentityBinding":{"state":"unknown","reason":"not checked"},
+  "defaultFor":[{"kind":"profile","profile":"gke"}],
+  "agents":{"count":1,"names":["a1"]},
+  "nextStep":{"code":"none","message":"Nothing missing"}
+}`
+
+func TestGCPServiceAccounts_Status(t *testing.T) {
+	c, done := saTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		// An email or a name is a path segment, escaped.
+		want := "/api/v1/projects/proj-1/gcp-service-accounts/Worker%20SA/status"
+		if r.URL.EscapedPath() != want {
+			t.Errorf("expected path %s, got %s", want, r.URL.EscapedPath())
+		}
+		if r.Method != http.MethodGet {
+			t.Errorf("expected GET, got %s", r.Method)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(saStatusBody))
+	})
+	defer done()
+
+	st, err := c.GCPServiceAccounts().Status(context.Background(), "proj-1", "Worker SA")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if st.Account.ID != "sa-1" || !st.Verification.Verified || st.Verification.VerifiedAt == nil {
+		t.Errorf("identity/verification not decoded: %+v", st)
+	}
+	if len(st.Mappings) != 1 || st.Mappings[0].State != "mapped" || st.Mappings[0].Profile != "gke" {
+		t.Errorf("mappings not decoded: %+v", st.Mappings)
+	}
+	if st.WorkloadIdentityBinding.State != "unknown" || len(st.DefaultFor) != 1 || st.Agents.Count != 1 || st.NextStep.Code != "none" {
+		t.Errorf("sections not decoded: %+v", st)
+	}
+}
+
+func TestGCPServiceAccounts_Status_RequiresProject(t *testing.T) {
+	c, done := saTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("no request expected, got %s", r.URL.Path)
+	})
+	defer done()
+	if _, err := c.GCPServiceAccounts().Status(context.Background(), "", "sa-1"); err == nil {
+		t.Error("expected an error without a project")
+	}
+}

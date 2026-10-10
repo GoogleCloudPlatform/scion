@@ -15,9 +15,12 @@
 package runtime
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
@@ -216,5 +219,346 @@ func TestCleanupNFSProject_SubPathRootDefault(t *testing.T) {
 
 	if _, err := os.Stat(projectPath); !os.IsNotExist(err) {
 		t.Error("project subtree should be deleted")
+	}
+}
+
+// --- ptone/scion#2569: full project tree, path guard, missing dirs ---
+
+func TestCleanupNFSProject_RemovesProvisionWorktreesAndAgentDirs(t *testing.T) {
+	cfg, mountRoot := testNFSCleanupConfig(t)
+	projectPath := createProjectSubtree(t, mountRoot, "share1", "proj-full")
+	for _, d := range []string{"provision", "worktrees/agent-a", "agents/agent-b/workspace"} {
+		if err := os.MkdirAll(filepath.Join(projectPath, d), 0o770); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(projectPath, "provision", "lock"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := CleanupNFSProject(cfg, "proj-full"); err != nil {
+		t.Fatalf("CleanupNFSProject: %v", err)
+	}
+	if _, err := os.Lstat(projectPath); !os.IsNotExist(err) {
+		t.Fatalf("project tree should be gone, Lstat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(mountRoot, "share1", "projects")); err != nil {
+		t.Fatalf("subpath root should be kept: %v", err)
+	}
+}
+
+func TestCleanupNFSProject_MissingShareHostBaseIsSuccess(t *testing.T) {
+	cfg, _ := testNFSCleanupConfig(t)
+	cfg.MountRoot = filepath.Join(cfg.MountRoot, "not-mounted")
+	if err := CleanupNFSProject(cfg, "proj-1"); err != nil {
+		t.Fatalf("missing share host base should be success: %v", err)
+	}
+}
+
+func TestCleanupNFSProject_MissingSubPathRootIsSuccess(t *testing.T) {
+	cfg, mountRoot := testNFSCleanupConfig(t)
+	if err := os.MkdirAll(filepath.Join(mountRoot, "share1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := CleanupNFSProject(cfg, "proj-1"); err != nil {
+		t.Fatalf("missing subpath root should be success: %v", err)
+	}
+}
+
+func TestCleanupNFSProject_RefusesSymlinkedSubPathRootOutsideShare(t *testing.T) {
+	cfg, mountRoot := testNFSCleanupConfig(t)
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "proj-1")
+	if err := os.MkdirAll(victim, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(victim, "keep.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(mountRoot, "share1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(mountRoot, "share1", "projects")); err != nil {
+		t.Fatal(err)
+	}
+	if err := CleanupNFSProject(cfg, "proj-1"); err == nil {
+		t.Fatal("expected refusal for a subpath root that resolves outside the share")
+	}
+	if _, err := os.Stat(filepath.Join(victim, "keep.txt")); err != nil {
+		t.Fatalf("directory outside the share must be untouched: %v", err)
+	}
+}
+
+func TestCleanupNFSProject_RefusesSymlinkedProjectDir(t *testing.T) {
+	cfg, mountRoot := testNFSCleanupConfig(t)
+	other := createProjectSubtree(t, mountRoot, "share1", "proj-other")
+	link := filepath.Join(mountRoot, "share1", "projects", "proj-link")
+	if err := os.Symlink(other, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := CleanupNFSProject(cfg, "proj-link"); err == nil {
+		t.Fatal("expected refusal for a project directory that is a symlink")
+	}
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatalf("symlink should be left in place: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(other, "workspace", "test.txt")); err != nil {
+		t.Fatalf("symlink target must be untouched: %v", err)
+	}
+}
+
+func TestCleanupNFSProject_RefusesInvalidProjectIDs(t *testing.T) {
+	cfg, mountRoot := testNFSCleanupConfig(t)
+	createProjectSubtree(t, mountRoot, "share1", "proj-keep")
+	for _, id := range []string{".", "..", "a/b", "/abs", "../share1", ".hidden"} {
+		if err := CleanupNFSProject(cfg, id); err == nil {
+			t.Errorf("project ID %q: expected an error", id)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(mountRoot, "share1", "projects", "proj-keep", "workspace", "test.txt")); err != nil {
+		t.Fatalf("other project must be untouched: %v", err)
+	}
+}
+
+func TestCleanupNFSProject_RefusesRootHostBase(t *testing.T) {
+	cfg := &config.V1NFSConfig{
+		MountRoot: "/",
+		Shares:    []config.V1NFSShare{{ID: "", Server: "10.0.0.2", Export: "/ws"}},
+	}
+	if err := CleanupNFSProject(cfg, "proj-1"); err == nil {
+		t.Fatal("expected refusal when the share host base is the filesystem root")
+	}
+}
+
+func TestNFSProjectPathGuard(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "share1")
+	cases := []struct {
+		name                         string
+		dir, hostBase, subRoot, proj string
+		ok                           bool
+	}{
+		{"valid", filepath.Join(base, "projects", "p1"), base, "projects", "p1", true},
+		{"valid multi-segment root", filepath.Join(base, "a", "b", "p1"), base, "a/b", "p1", true},
+		{"relative host base", "share1/projects/p1", "share1", "projects", "p1", false},
+		{"empty host base", "/projects/p1", "", "projects", "p1", false},
+		{"root host base", "/projects/p1", "/", "projects", "p1", false},
+		{"empty project", filepath.Join(base, "projects"), base, "projects", "", false},
+		{"dot project", filepath.Join(base, "projects"), base, "projects", ".", false},
+		{"dotdot project", base, base, "projects", "..", false},
+		{"dotdot in subpath root", filepath.Join(base, "p1"), base, "x/..", "p1", false},
+		{"empty subpath root segment", filepath.Join(base, "a", "p1"), base, "a//", "p1", false},
+		{"sibling prefix", filepath.Join(base, "projects-other", "p1"), base, "projects", "p1", false},
+		{"dir equals share root", base, base, "projects", "p1", false},
+		{"dir is subpath root", filepath.Join(base, "projects"), base, "projects", "p1", false},
+		{"dir outside share", filepath.Join(filepath.Dir(base), "elsewhere", "p1"), base, "projects", "p1", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := nfsProjectPathGuard(tc.dir, tc.hostBase, tc.subRoot, tc.proj)
+			if tc.ok && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !tc.ok && err == nil {
+				t.Fatal("expected an error")
+			}
+		})
+	}
+}
+
+func TestNFSProjectHostPath_MatchesResolvedWorkspaceParent(t *testing.T) {
+	cfg, mountRoot := testNFSCleanupConfig(t)
+	dir, hostBase, err := NFSProjectHostPath(cfg, "proj-1")
+	if err != nil {
+		t.Fatalf("NFSProjectHostPath: %v", err)
+	}
+	if want := filepath.Join(mountRoot, "share1"); hostBase != want {
+		t.Fatalf("hostBase = %q, want %q", hostBase, want)
+	}
+	res, err := NewNFSBackend(cfg).Resolve(ResolveInput{ProjectID: "proj-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dir != filepath.Dir(res.HostPath) {
+		t.Fatalf("project dir %q is not the parent of the resolved workspace %q", dir, res.HostPath)
+	}
+	// The k8s provisioning state dir sits in that same project dir.
+	stateSub, err := NFSProvisionStateSubPath(res.ServerRelativePath, "proj-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := filepath.Join(hostBase, stateSub); filepath.Dir(got) != dir {
+		t.Fatalf("provision state dir %q is not inside project dir %q", got, dir)
+	}
+}
+
+func TestPathStrictlyUnder(t *testing.T) {
+	cases := []struct {
+		target, root string
+		want         bool
+	}{
+		{"/a/b/c", "/a/b", true},
+		{"/a/b", "/a/b", false},
+		{"/a/bc", "/a/b", false},
+		{"/a/b/../c", "/a/b", false},
+		{"/x", "/", true},
+		{"/", "/", false},
+	}
+	for _, tc := range cases {
+		if got := pathStrictlyUnder(tc.target, tc.root); got != tc.want {
+			t.Errorf("pathStrictlyUnder(%q, %q) = %v, want %v", tc.target, tc.root, got, tc.want)
+		}
+	}
+}
+
+func TestCleanupNFSProject_RefusesHostBaseNotUnderMountRoot(t *testing.T) {
+	cfg, mountRoot := testNFSCleanupConfig(t)
+	// A share ID of ".." would put the host base above the mount root.
+	cfg.Shares[0].ID = ".."
+	victim := filepath.Join(filepath.Dir(mountRoot), "projects", "proj-1")
+	if err := os.MkdirAll(victim, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := CleanupNFSProject(cfg, "proj-1"); err == nil {
+		t.Fatal("expected refusal for a share host base outside the mount root")
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatalf("directory outside the mount root must be untouched: %v", err)
+	}
+	cfg.Shares[0].ID = ""
+	if err := CleanupNFSProject(cfg, "proj-1"); err == nil {
+		t.Fatal("expected refusal for a share host base equal to the mount root")
+	}
+}
+
+func TestCleanupNFSProjectRetry(t *testing.T) {
+	cfg, mountRoot := testNFSCleanupConfig(t)
+	projectPath := createProjectSubtree(t, mountRoot, "share1", "proj-retry")
+	if err := CleanupNFSProjectRetry(context.Background(), cfg, "proj-retry", time.Hour, nil); err != nil {
+		t.Fatalf("CleanupNFSProjectRetry: %v", err)
+	}
+	if _, err := os.Lstat(projectPath); !os.IsNotExist(err) {
+		t.Fatalf("project tree should be gone, Lstat err = %v", err)
+	}
+	// A guard refusal is returned at once, without waiting to retry.
+	other := createProjectSubtree(t, mountRoot, "share1", "proj-other")
+	if err := os.Symlink(other, filepath.Join(mountRoot, "share1", "projects", "proj-link")); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	err := CleanupNFSProjectRetry(context.Background(), cfg, "proj-link", time.Hour, nil)
+	if !errors.Is(err, ErrNFSCleanupRefused) {
+		t.Fatalf("expected ErrNFSCleanupRefused, got %v", err)
+	}
+	if time.Since(start) > time.Minute {
+		t.Fatal("a refusal must not wait for the retry")
+	}
+}
+
+// setAttemptHook installs nfsCleanupAttemptHook for one test and returns
+// the attempts seen.
+func setAttemptHook(t *testing.T, fn func(attempt int)) *[]int {
+	t.Helper()
+	var seen []int
+	nfsCleanupAttemptHook = func(attempt int) {
+		seen = append(seen, attempt)
+		if fn != nil {
+			fn(attempt)
+		}
+	}
+	t.Cleanup(func() { nfsCleanupAttemptHook = nil })
+	return &seen
+}
+
+// makeTreeUnremovable makes the project's workspace dir read-only, so
+// removing its contents fails, and returns a func that undoes it.
+func makeTreeUnremovable(t *testing.T, projectPath string) func() {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	ws := filepath.Join(projectPath, "workspace")
+	if err := os.Chmod(ws, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	restore := func() { _ = os.Chmod(ws, 0o755) }
+	t.Cleanup(restore)
+	return restore
+}
+
+// A failed removal is retried: attempt 2 runs and succeeds once the tree is
+// removable again.
+func TestCleanupNFSProjectRetry_RetriesFailedRemoval(t *testing.T) {
+	cfg, mountRoot := testNFSCleanupConfig(t)
+	projectPath := createProjectSubtree(t, mountRoot, "share1", "proj-ro")
+	restore := makeTreeUnremovable(t, projectPath)
+	seen := setAttemptHook(t, func(attempt int) {
+		if attempt == 2 {
+			restore()
+		}
+	})
+	if err := CleanupNFSProjectRetry(context.Background(), cfg, "proj-ro", time.Millisecond, nil); err != nil {
+		t.Fatalf("retry should succeed: %v", err)
+	}
+	if len(*seen) != 2 || (*seen)[1] != 2 {
+		t.Fatalf("attempts = %v, want [1 2]", *seen)
+	}
+	if _, err := os.Lstat(projectPath); !os.IsNotExist(err) {
+		t.Fatalf("project tree should be gone after the retry, Lstat err = %v", err)
+	}
+}
+
+// A done context skips the retry instead of waiting for it.
+func TestCleanupNFSProjectRetry_ContextDoneSkipsRetry(t *testing.T) {
+	cfg, mountRoot := testNFSCleanupConfig(t)
+	projectPath := createProjectSubtree(t, mountRoot, "share1", "proj-ro")
+	makeTreeUnremovable(t, projectPath)
+	seen := setAttemptHook(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := CleanupNFSProjectRetry(ctx, cfg, "proj-ro", time.Hour, nil)
+	if err == nil || errors.Is(err, ErrNFSCleanupRefused) || errors.Is(err, ErrNFSCleanupSkipped) {
+		t.Fatalf("expected a removal error, got %v", err)
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("attempts = %v, want [1]", *seen)
+	}
+}
+
+// stillDeleted runs before every attempt: false before the first attempt
+// removes nothing, and false before the retry keeps the tree.
+func TestCleanupNFSProjectRetry_StillDeletedGuardsEveryAttempt(t *testing.T) {
+	cfg, mountRoot := testNFSCleanupConfig(t)
+	projectPath := createProjectSubtree(t, mountRoot, "share1", "proj-back")
+	var asked []int
+	err := CleanupNFSProjectRetry(context.Background(), cfg, "proj-back", time.Millisecond,
+		func(_ context.Context, attempt int) bool { asked = append(asked, attempt); return false })
+	if !errors.Is(err, ErrNFSCleanupSkipped) {
+		t.Fatalf("expected ErrNFSCleanupSkipped, got %v", err)
+	}
+	if len(asked) != 1 || asked[0] != 1 {
+		t.Fatalf("stillDeleted calls = %v, want [1]", asked)
+	}
+	if _, err := os.Stat(filepath.Join(projectPath, "workspace", "test.txt")); err != nil {
+		t.Fatalf("tree must be kept when the project is back before attempt 1: %v", err)
+	}
+
+	restore := makeTreeUnremovable(t, projectPath)
+	asked = nil
+	err = CleanupNFSProjectRetry(context.Background(), cfg, "proj-back", time.Millisecond,
+		func(_ context.Context, attempt int) bool {
+			asked = append(asked, attempt)
+			if attempt == 2 {
+				restore() // removable now, but the project is back
+				return false
+			}
+			return true
+		})
+	if !errors.Is(err, ErrNFSCleanupSkipped) {
+		t.Fatalf("expected ErrNFSCleanupSkipped, got %v", err)
+	}
+	if len(asked) != 2 {
+		t.Fatalf("stillDeleted calls = %v, want [1 2]", asked)
+	}
+	if _, err := os.Stat(filepath.Join(projectPath, "workspace", "test.txt")); err != nil {
+		t.Fatalf("tree must be kept when the project is back before the retry: %v", err)
 	}
 }

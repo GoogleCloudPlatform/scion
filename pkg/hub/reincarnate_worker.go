@@ -46,13 +46,11 @@ const reincarnationStepMaxAttempts = 2
 // Callers use this to suppress the agent's own status-reporting paths
 // (broker heartbeat, direct status POST) while the reincarnation worker owns
 // Phase/Activity/ExitCode/ExitReason/Message for the target agent.
+//
+// It delegates to store.ReincarnationInFlight, which owns the rule; this
+// wrapper stays for the hub callers that hold a *store.Agent.
 func reincarnationInFlight(agent *store.Agent) bool {
-	switch agent.ReincarnationState {
-	case store.ReincarnationStateNone, store.ReincarnationStateFailed:
-		return false
-	default:
-		return true
-	}
+	return store.ReincarnationInFlight(agent.ReincarnationState)
 }
 
 // reincarnationStepUpdate lists the only Agent fields the reincarnation
@@ -1522,6 +1520,30 @@ func reincarnateAbbreviateHash(s string) string {
 // touched by a sweep running concurrently on another.
 const reincarnationStaleAfter = 30 * time.Minute
 
+// reincarnationPendingStaleAfter is the much shorter staleness bound for a
+// reincarnation still in "pending" (ptone/scion#3986). The patched config
+// the request resolved lives only in the worker's memory, never in the
+// record, so a pending record whose worker is gone (the hub restarted
+// between the claim and the worker) can never be carried out; it can only
+// be failed so the user re-submits. A live worker leaves "pending" with its
+// first write (the pending->stopping CAS), and between the claim commit and
+// that write it does only store reads (the dispatcher check and, for a move,
+// recheckMoveEligibility) — no broker round trip — so it normally spends
+// milliseconds there. Two minutes is orders of magnitude of margin over that
+// even on a busy hub, while letting a restarted hub release the agent within
+// one or two periodic sweeps instead of after reincarnationStaleAfter. A
+// false positive is still safe: the sweep fails the record through the same
+// state+staleness CAS, so a worker that then reaches its pending->stopping
+// CAS loses it and returns before any side effect.
+const reincarnationPendingStaleAfter = 2 * time.Minute
+
+// reincarnationDidNotStartReason is the failure reason for a pending
+// reincarnation swept under reincarnationPendingStaleAfter. It must be true
+// whatever left the record pending — a hub restart, or (a false positive) a
+// worker too slow to take its first step — so it says what is known: the
+// worker never started, so nothing was changed.
+const reincarnationDidNotStartReason = "did not start, so no changes were applied; run reincarnate again"
+
 // sweepFailStaleRecord decides, per stale record, whether and how to fail it
 // (design §3.4 Amendment A6/A7). The restore decision comes from
 // rec.State — the value this sweep pass observed when it listed the record
@@ -1581,7 +1603,10 @@ func (s *Server) sweepFailStaleRecord(ctx context.Context, rec *store.AgentReinc
 // every non-terminal reincarnation record whose updated_at is older than
 // reincarnationStaleAfter as failed, plus — as a backstop — any agent whose
 // reincarnation_state is non-terminal and whose own row is equally stale but
-// has no matching non-terminal record for the first half to find. It runs at
+// has no matching non-terminal record for the first half to find. A record
+// (or orphaned agent state) still in "pending" uses the shorter
+// reincarnationPendingStaleAfter instead, with reason
+// reincarnationDidNotStartReason (ptone/scion#3986). It runs at
 // hub boot and periodically (server.go registers it with the scheduler as a
 // singleton job). The time bound is what makes both call sites safe to run
 // on every replica independently, with no distributed lock needed to decide
@@ -1596,40 +1621,78 @@ func (s *Server) sweepFailStaleRecord(ctx context.Context, rec *store.AgentReinc
 // is honest about what happened (the hub does not know how far the worker
 // got) and unblocks the agent for a fresh `scion reincarnate` retry.
 func (s *Server) sweepStaleReincarnations(ctx context.Context) (int, error) {
-	return s.sweepStaleReincarnationsOlderThan(ctx, time.Now().Add(-reincarnationStaleAfter))
+	now := time.Now()
+	return s.sweepStaleReincarnationsWithCutoffs(ctx, now.Add(-reincarnationStaleAfter), now.Add(-reincarnationPendingStaleAfter))
 }
 
-// sweepStaleReincarnationsOlderThan is sweepStaleReincarnations with the
-// cutoff exposed, so tests can exercise the marking logic without an actual
-// 30-minute-old row (e.g. a cutoff in the future treats every existing row as
-// stale). Production code should call sweepStaleReincarnations.
+// sweepStaleReincarnationsOlderThan is sweepStaleReincarnations with one
+// cutoff exposed for every state, pending included, so tests can exercise
+// the marking logic without an actual 30-minute-old row (e.g. a cutoff in
+// the future treats every existing row as stale). Production code should
+// call sweepStaleReincarnations.
 func (s *Server) sweepStaleReincarnationsOlderThan(ctx context.Context, cutoff time.Time) (int, error) {
-	stale, err := s.store.ListStaleNonTerminalAgentReincarnations(ctx, cutoff)
+	return s.sweepStaleReincarnationsWithCutoffs(ctx, cutoff, cutoff)
+}
+
+// sweepStaleReincarnationsWithCutoffs is the sweep body: cutoff applies to
+// records and orphaned agent states in stopping, provisioning or starting;
+// pendingCutoff to those still in pending.
+func (s *Server) sweepStaleReincarnationsWithCutoffs(ctx context.Context, cutoff, pendingCutoff time.Time) (int, error) {
+	// List with the later of the two cutoffs, then hold each row to the
+	// cutoff for its own state. The CAS in advanceListedRecord re-checks
+	// that same cutoff, so a row a live worker touched since the list is
+	// left alone either way.
+	listCutoff := cutoff
+	if pendingCutoff.After(listCutoff) {
+		listCutoff = pendingCutoff
+	}
+	stale, err := s.store.ListStaleNonTerminalAgentReincarnations(ctx, listCutoff)
 	if err != nil {
 		return 0, fmt.Errorf("list stale non-terminal reincarnations: %w", err)
 	}
 	const reason = "hub restarted during reincarnation"
 	swept := 0
 	for _, rec := range stale {
+		recCutoff, recReason := cutoff, reason
+		if rec.State == store.AgentReincarnationStatePending {
+			recCutoff, recReason = pendingCutoff, reincarnationDidNotStartReason
+		}
+		if !rec.UpdatedAt.Before(recCutoff) {
+			continue
+		}
 		// Design §3.4 Amendment A9 (FYI-4): count only CASes this sweep pass
 		// actually won — a record advanceListedRecord found already moved on
 		// (state or staleness) was not this pass's doing, and counting it
 		// anyway would overstate how much the sweep actually changed.
-		if s.sweepFailStaleRecord(ctx, rec, reason, cutoff) {
+		if s.sweepFailStaleRecord(ctx, rec, recReason, recCutoff) {
 			swept++
 		}
 	}
 
-	orphans, err := s.store.ListAgentsWithStaleNonTerminalReincarnationState(ctx, cutoff)
+	// An orphaned pending agent state (no non-terminal record) cannot
+	// normally exist — the claim and the record commit in one transaction —
+	// but can be left behind when a failed record's agent write did not
+	// land. No worker can act on it (a worker advances its record first),
+	// so the pending bound applies here too.
+	orphans, err := s.store.ListAgentsWithStaleNonTerminalReincarnationState(ctx, listCutoff)
 	if err != nil {
 		return swept, fmt.Errorf("list stale non-terminal agent reincarnation states: %w", err)
 	}
 	for _, orphan := range orphans {
+		orphanCutoff, orphanReason := cutoff, reason
+		if orphan.ReincarnationState == store.ReincarnationStatePending {
+			orphanCutoff, orphanReason = pendingCutoff, reincarnationDidNotStartReason
+		}
+		// A nil reincarnation_updated_at is always eligible (see
+		// ListAgentsWithStaleNonTerminalReincarnationState).
+		if orphan.ReincarnationUpdatedAt != nil && !orphan.ReincarnationUpdatedAt.Before(orphanCutoff) {
+			continue
+		}
 		if _, err := s.updateReincarnationStep(ctx, orphan.ID, reincarnationStepUpdate{
 			reincarnationState: store.ReincarnationStateFailed,
 			phase:              "error",
 			activity:           reincarnateStrPtr(""),
-			message:            reincarnateStrPtr("reincarnation failed: " + reason + " (no matching reincarnation record found)"),
+			message:            reincarnateStrPtr("reincarnation failed: " + orphanReason + " (no matching reincarnation record found)"),
 		}, reincarnationStepMaxAttempts); err != nil {
 			s.agentLifecycleLog.Warn("boot sweep: failed to reset orphaned agent reincarnation state",
 				"agent_id", orphan.ID, "error", err)

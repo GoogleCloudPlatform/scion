@@ -1,4 +1,3 @@
-// @vitest-environment happy-dom
 /**
  * Tests for the Open terminals bulk actions: "Reconnect all" and
  * "Remove all inactive". Covers which rows each action is eligible for,
@@ -426,6 +425,32 @@ describe('Open terminals bulk actions', () => {
     it('the reason reaches assistive tech through aria-describedby', () => {
       expect(describedBy(bulkReconnect())).toBe('No disconnected terminals to reconnect');
       expect(describedBy(bulkRemove())).toBe(mod.BULK_REMOVE_DISABLED_REASON);
+    });
+
+    it('the description spans use the visually hidden class, not the live region class', () => {
+      const cases: Array<[HTMLButtonElement, string, string]> = [
+        [
+          bulkReconnect(),
+          'terminal-bulk-reconnect-reason',
+          'No disconnected terminals to reconnect',
+        ],
+        [bulkRemove(), 'terminal-bulk-remove-reason', mod.BULK_REMOVE_DISABLED_REASON],
+      ];
+      for (const [button, idPrefix, text] of cases) {
+        const id = button.getAttribute('aria-describedby')!;
+        expect(id.startsWith(`${idPrefix}-`)).toBe(true);
+        const reason = document.getElementById(id)!;
+        expect(reason.parentElement).toBe(button.parentElement);
+        expect(reason.classList.contains('terminal-bulk-reason')).toBe(true);
+        expect(reason.classList.contains('terminal-visually-hidden')).toBe(true);
+        expect(reason.classList.contains('terminal-aria-live')).toBe(false);
+        expect(reason.textContent).toBe(text);
+      }
+      // The announcement region is the only live region element.
+      const live = root.element.querySelectorAll<HTMLElement>('.terminal-aria-live');
+      expect(live).toHaveLength(1);
+      expect(live[0].getAttribute('role')).toBe('status');
+      expect(live[0].getAttribute('aria-live')).toBe('polite');
     });
 
     it('a disabled button stays keyboard focusable so the reason can be reached', () => {

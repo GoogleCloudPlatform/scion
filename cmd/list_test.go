@@ -1267,12 +1267,6 @@ func TestResolveRelationshipReference(t *testing.T) {
 			cliMode:    "",
 			wantUserID: meID,
 		},
-		{
-			name:       "bare flag in assistant mode resolves to the calling user",
-			flagValue:  scopeInferSentinel,
-			cliMode:    "assistant",
-			wantUserID: meID,
-		},
 	}
 
 	for _, tt := range tests {
@@ -2194,16 +2188,16 @@ func TestListAgentsViaHub_AllMode_AgentModeWithDevAuthCredential_NotBlocked(t *t
 	assert.True(t, listCalled)
 }
 
-// TestListAgentsViaHub_AllMode_AssistantModeWithRelationshipFlag_NotBlocked
+// TestListAgentsViaHub_AllMode_NoAgentTokenWithRelationshipFlag_NotBlocked
 // covers: the --all guard must NOT fire for a HubContext with no agent-token
 // CredentialKind set (this test's HubContext leaves it at its zero value,
-// hubsync.CredentialKindUnknown). SCION_CLI_MODE=assistant is still set here
-// for realism, although the guard does not read it. Human mode is
+// hubsync.CredentialKindUnknown). SCION_CLI_MODE is left unset (human
+// mode); the guard does not read it. A human cross-project reference is
 // covered by TestListAgentsViaHub_AllMode_HumanCrossProjectReference;
 // agent mode with a non-agent-token credential is covered by
 // TestListAgentsViaHub_AllMode_AgentModeWithOAuthCredential_NotBlocked and
 // its dev-auth sibling, immediately above.
-func TestListAgentsViaHub_AllMode_AssistantModeWithRelationshipFlag_NotBlocked(t *testing.T) {
+func TestListAgentsViaHub_AllMode_NoAgentTokenWithRelationshipFlag_NotBlocked(t *testing.T) {
 	const refID = "77777777-8888-9999-aaaa-bbbbbbbbbbbb"
 	var listCalled bool
 
@@ -2228,7 +2222,7 @@ func TestListAgentsViaHub_AllMode_AssistantModeWithRelationshipFlag_NotBlocked(t
 	listAll = true
 	filterDescendants = refID
 	outputFormat = "json"
-	t.Setenv("SCION_CLI_MODE", "assistant")
+	t.Setenv("SCION_CLI_MODE", "")
 	defer func() {
 		listAll, filterDescendants, outputFormat = oldListAll, oldDescendants, oldOutputFormat
 	}()
@@ -2237,14 +2231,14 @@ func TestListAgentsViaHub_AllMode_AssistantModeWithRelationshipFlag_NotBlocked(t
 		err = listAgentsViaHub(hubCtx)
 	})
 
-	require.NoError(t, err, "assistant mode must not trip the agent-mode --all guard")
+	require.NoError(t, err, "a caller without an agent token must not trip the agent-mode --all guard")
 	assert.True(t, listCalled)
 }
 
 // TestListAgentsViaHub_AllMode_HumanCrossProjectReference covers: under
 // --all, a HUMAN caller must still be able to name a reference agent in a
 // *different* project than the one linked in the current directory.
-// Reference resolution for a human/assistant caller under --all goes
+// Reference resolution for a human caller under --all goes
 // through the same global endpoint the final listing uses, never the
 // current directory's project.
 func TestListAgentsViaHub_AllMode_HumanCrossProjectReference(t *testing.T) {
@@ -2299,8 +2293,8 @@ func TestListAgentsViaHub_AllMode_HumanCrossProjectReference(t *testing.T) {
 
 // TestListAgentsViaHub_BareRelationshipFlag_ModeDefaults covers
 // ptone/scion#2146 Q2: a bare relationship flag is never an error. In agent
-// mode it resolves to the calling agent (unchanged); in human/assistant mode
-// it resolves to the calling user, with --ancestors correctly reporting the
+// mode it resolves to the calling agent (unchanged); in human mode it
+// resolves to the calling user, with --ancestors correctly reporting the
 // user-has-no-ancestry case as an empty list rather than an error.
 func TestListAgentsViaHub_BareRelationshipFlag_ModeDefaults(t *testing.T) {
 	const callingUserID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
@@ -2388,15 +2382,6 @@ func TestListAgentsViaHub_BareRelationshipFlag_ModeDefaults(t *testing.T) {
 		require.NoError(t, run(hubCtx))
 		assert.Equal(t, callingUserID, gotAncestorID,
 			"Ancestry records the creator user directly, so ancestorId=<user> works unchanged")
-	})
-
-	t.Run("assistant mode: bare --descendants resolves to the calling user, not an error", func(t *testing.T) {
-		reset()
-		t.Setenv("SCION_CLI_MODE", "assistant")
-		filterDescendants = scopeInferSentinel
-
-		require.NoError(t, run(hubCtx))
-		assert.Equal(t, callingUserID, gotAncestorID)
 	})
 
 	t.Run("human mode: bare --ancestors returns an empty list (a user has no ancestry), not an error", func(t *testing.T) {

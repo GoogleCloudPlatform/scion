@@ -30,6 +30,7 @@ import {
   ScionHealthIntegrations,
   integrationHealthTone,
   integrationsSectionVisible,
+  managedByText,
   type HealthSummaryIntegration,
 } from './health-integrations.js';
 import { ScionPageHealthDashboard } from './health-dashboard.js';
@@ -164,7 +165,7 @@ describe('scion-health-integrations', () => {
         health: 'unknown',
         connected: false,
         version: '',
-        reason: 'not managed by this hub instance',
+        reason: 'not run by any running hub instance',
       }),
     ]);
     const row = root.querySelector('tbody tr');
@@ -172,10 +173,35 @@ describe('scion-health-integrations', () => {
     expect(pill?.textContent?.trim()).toBe('unknown');
     expect(pill?.classList.contains('tone-neutral')).toBe(true);
     expect(row?.querySelector('td.health .reason')?.textContent?.trim()).toBe(
-      'not managed by this hub instance'
+      'not run by any running hub instance'
     );
+    expect(cell(row, 'managed-by')).toBe('—');
     expect(cell(row, 'connected')).toBe('no');
     expect(cell(row, 'version')).toBe('—');
+  });
+
+  it('shows the instances that run each plugin by label, with IDs in the tooltip', async () => {
+    const el = document.createElement('scion-health-integrations') as ScionHealthIntegrations;
+    el.integrations = [integration({ managed_by: ['hub-b-0456', 'hub-gone-0789'] })];
+    el.instanceLabels = { 'hub-b-0456': 'hub-b' };
+    document.body.appendChild(el);
+    mounted.push(el);
+    await el.updateComplete;
+    const root = el.shadowRoot as ShadowRoot;
+    const headers = [...root.querySelectorAll('th')].map((th) => th.textContent?.trim());
+    expect(headers).toContain('Managed by');
+    const row = root.querySelector('tbody tr');
+    // An instance missing from the hub instances list shows by its ID.
+    expect(cell(row, 'managed-by')).toBe('hub-b, hub-gone-0789');
+    expect(row?.querySelector('td.managed-by')?.getAttribute('title')).toBe(
+      'hub-b-0456, hub-gone-0789'
+    );
+  });
+
+  it('formats managed by from labels', () => {
+    expect(managedByText(['a', 'b'], { a: 'hub-a' })).toBe('hub-a, b');
+    expect(managedByText(undefined, {})).toBe('');
+    expect(managedByText([], {})).toBe('');
   });
 
   it('maps health to theme tones', () => {
@@ -193,7 +219,6 @@ describe('scion-page-health-dashboard integrations', () => {
       JSON.stringify({
         status: 'healthy',
         hub: { status: 'healthy', version: 'v1', uptime: '1h', connected_brokers: 0 },
-        database: { status: 'healthy', pool_active: 0, pool_max: 10, pool_idle: 0 },
         runtime_brokers: { items: [], total: 0, truncated: false },
         integrations,
         integrations_detail: true,
@@ -277,7 +302,6 @@ describe('scion-page-health-dashboard integrations', () => {
               },
             ],
             hub: { status: 'healthy', version: 'v1', uptime: '1h', connected_brokers: 0 },
-            database: { status: 'healthy', pool_active: 0, pool_max: 10, pool_idle: 0 },
             runtime_brokers: { items: [], total: 0, truncated: false },
             integrations: [],
             integrations_detail: false,

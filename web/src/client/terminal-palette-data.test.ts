@@ -21,8 +21,6 @@
  * retain over the shared agent store's hub entry.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
 vi.mock('./api.js', async (importOriginal) => {

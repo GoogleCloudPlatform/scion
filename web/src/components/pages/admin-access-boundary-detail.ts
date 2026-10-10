@@ -107,27 +107,6 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
     }
 
     /* Header */
-    .header-top {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      margin-bottom: 0.25rem;
-    }
-
-    .back-link {
-      font-size: 0.875rem;
-      color: var(--sl-color-primary-600, #2563eb);
-      text-decoration: none;
-      display: flex;
-      align-items: center;
-      gap: 0.25rem;
-      cursor: pointer;
-    }
-
-    .back-link:hover {
-      text-decoration: underline;
-    }
-
     /* Long scope or subject labels (ids) break instead of spilling past the
        shared header's title column. */
     .header-meta {
@@ -915,21 +894,11 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
 
   private renderPageHeader(b: AccessBoundaryDetail) {
     return html`
-      <div class="header-top">
-        <a
-          class="back-link"
-          href="/admin/access-boundaries"
-          @click=${(e: Event) => {
-            e.preventDefault();
-            navigateTo('/admin/access-boundaries');
-          }}
-        >
-          <sl-icon name="arrow-left"></sl-icon>
-          Access Constraints
-        </a>
-      </div>
-
       <scion-detail-header heading=${b.name}>
+        <scion-back-link slot="back" href="/admin/access-boundaries"
+          >Access Constraints</scion-back-link
+        >
+        <sl-icon slot="icon" name="shield-check"></sl-icon>
         <scion-access-boundary-status
           status=${b.status}
           .risk=${b.risk}

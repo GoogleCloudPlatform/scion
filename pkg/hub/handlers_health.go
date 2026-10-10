@@ -178,7 +178,8 @@ func (s *Server) healthChecks(ctx context.Context) map[string]string {
 	// Check co-located broker registration when this Hub expects one
 	s.checkColocatedBrokerHealth(checks)
 
-	s.checkDecisionAuditHealth(checks)
+	// Audit log writer (non-critical: degraded, never unhealthy).
+	s.checkAuditWriterHealth(checks)
 
 	return checks
 }
@@ -317,12 +318,8 @@ type workspaceHealthStatResult struct {
 }
 
 // workspaceHealthProbeCall is one in-flight mount stat shared by every
-// checkWorkspaceStorageHealth call for the same key. res is written before
-// done is closed and read only after it is closed.
-type workspaceHealthProbeCall struct {
-	done chan struct{}
-	res  workspaceHealthStatResult
-}
+// checkWorkspaceStorageHealth call for the same key.
+type workspaceHealthProbeCall = inFlightCall[workspaceHealthStatResult]
 
 // workspaceHealthProbeKey identifies an in-flight mount stat. requireMount is
 // part of the key because it changes what the stat goroutine computes.
@@ -351,29 +348,25 @@ var workspaceHealthProbeBeforeDone func(key workspaceHealthProbeKey)
 // that joins an in-flight stat can return a result up to one stat old.
 func startWorkspaceHealthProbe(mountPath string, requireMount bool) *workspaceHealthProbeCall {
 	key := workspaceHealthProbeKey{path: mountPath, requireMount: requireMount}
-	call := &workspaceHealthProbeCall{done: make(chan struct{})}
-	if existing, loaded := workspaceHealthProbesInFlight.LoadOrStore(key, call); loaded {
-		return existing.(*workspaceHealthProbeCall)
-	}
-	stat, rootPath, beforeDone := workspaceHealthStat, containerRootPath, workspaceHealthProbeBeforeDone
-	go func(c *workspaceHealthProbeCall) {
-		fi, err := stat(mountPath)
-		if err != nil {
-			c.res = workspaceHealthStatResult{err: err}
-		} else {
+	return joinOrStartInFlight(&workspaceHealthProbesInFlight, key, func() (func() workspaceHealthStatResult, func()) {
+		stat, rootPath, hook := workspaceHealthStat, containerRootPath, workspaceHealthProbeBeforeDone
+		run := func() workspaceHealthStatResult {
+			fi, err := stat(mountPath)
+			if err != nil {
+				return workspaceHealthStatResult{err: err}
+			}
 			mounted, determinable := true, true
 			if requireMount {
 				mounted, determinable = isMountedVolume(fi, rootPath)
 			}
-			c.res = workspaceHealthStatResult{mounted: mounted, determinable: determinable}
+			return workspaceHealthStatResult{mounted: mounted, determinable: determinable}
 		}
-		workspaceHealthProbesInFlight.CompareAndDelete(key, c)
-		if beforeDone != nil {
-			beforeDone(key)
+		var beforeDone func()
+		if hook != nil {
+			beforeDone = func() { hook(key) }
 		}
-		close(c.done)
-	}(call)
-	return call
+		return run, beforeDone
+	})
 }
 
 // checkColocatedBrokerHealth reports on the co-located (embedded) runtime
@@ -509,16 +502,4 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, combined)
-}
-
-// A NEW fault is a CRITICAL audit/logging warning. Its effect on Hub service
-// availability is degraded-but-serving: these keys are outside the availability-
-// failure set, and readiness remains independent. No legacy writer health is
-// reported. No sink call or positive persistence proof is used here.
-func (s *Server) checkDecisionAuditHealth(checks map[string]string) {
-	if s.decisionAuditRouter == nil {
-		return
-	}
-	newHealth := s.decisionAuditRouter.healthProjection()
-	checks[decisionAuditNewHealthKey] = newHealth
 }
