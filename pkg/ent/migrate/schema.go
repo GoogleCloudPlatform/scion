@@ -483,6 +483,59 @@ var (
 			},
 		},
 	}
+	// AgentServiceAccountAssignmentsColumns holds the columns for the "agent_service_account_assignments" table.
+	AgentServiceAccountAssignmentsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "provenance_version", Type: field.TypeInt, Default: 0},
+		{Name: "source_principal_kind", Type: field.TypeString, Default: ""},
+		{Name: "source_principal_id", Type: field.TypeString, Default: ""},
+		{Name: "source_credential_kind", Type: field.TypeString, Default: ""},
+		{Name: "source_credential_id", Type: field.TypeString, Default: ""},
+		{Name: "source_event_id", Type: field.TypeString, Default: ""},
+		{Name: "source_schedule_id", Type: field.TypeString, Nullable: true},
+		{Name: "source_authorization_revision", Type: field.TypeInt, Default: 0},
+		{Name: "initiator_principal_kind", Type: field.TypeString, Default: ""},
+		{Name: "initiator_principal_id", Type: field.TypeString, Default: ""},
+		{Name: "initiator_credential_kind", Type: field.TypeString, Default: ""},
+		{Name: "initiator_credential_id", Type: field.TypeString, Default: ""},
+		{Name: "ceiling_kind", Type: field.TypeString, Default: ""},
+		{Name: "ceiling_version", Type: field.TypeInt32, Default: 0},
+		{Name: "ceiling_permission_ids", Type: field.TypeString, Nullable: true},
+		{Name: "ceiling_boundary_kind", Type: field.TypeString, Default: ""},
+		{Name: "ceiling_boundary_project_id", Type: field.TypeString, Default: ""},
+		{Name: "ceiling_source_expires_at", Type: field.TypeTime, Nullable: true},
+		{Name: "deactivation_cause", Type: field.TypeString, Default: ""},
+		{Name: "deactivated_at", Type: field.TypeTime, Nullable: true},
+		{Name: "deactivation_op_id", Type: field.TypeString, Default: ""},
+		{Name: "agent_id", Type: field.TypeString},
+		{Name: "project_id", Type: field.TypeString, Default: ""},
+		{Name: "service_account_id", Type: field.TypeString},
+		{Name: "origin", Type: field.TypeString, Default: ""},
+		{Name: "active", Type: field.TypeBool, Default: true},
+		{Name: "created", Type: field.TypeTime},
+		{Name: "updated", Type: field.TypeTime},
+	}
+	// AgentServiceAccountAssignmentsTable holds the schema information for the "agent_service_account_assignments" table.
+	AgentServiceAccountAssignmentsTable = &schema.Table{
+		Name:       "agent_service_account_assignments",
+		Columns:    AgentServiceAccountAssignmentsColumns,
+		PrimaryKey: []*schema.Column{AgentServiceAccountAssignmentsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "agentserviceaccountassignment_agent_id_active",
+				Unique:  false,
+				Columns: []*schema.Column{AgentServiceAccountAssignmentsColumns[22], AgentServiceAccountAssignmentsColumns[26]},
+			},
+			{
+				Name:    "agentserviceaccountassignment_agent_id",
+				Unique:  true,
+				Columns: []*schema.Column{AgentServiceAccountAssignmentsColumns[22]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "active = true",
+				},
+			},
+		},
+	}
 	// AgentSessionMetricsColumns holds the columns for the "agent_session_metrics" table.
 	AgentSessionMetricsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -2689,6 +2742,7 @@ var (
 		AgentIdentityKeysTable,
 		AgentRecoveriesTable,
 		AgentReincarnationsTable,
+		AgentServiceAccountAssignmentsTable,
 		AgentSessionMetricsTable,
 		AllowListTable,
 		APIKeysTable,

@@ -598,7 +598,7 @@ func TestEvaluateSAAssignment_ScopeSplit_PreSplitCreateOnlyAllowed(t *testing.T)
 	f := newScopeSplitGateFixture(t)
 	ctx := f.agentContext(t, tid("scopesplit-gate-presplit"), []AgentTokenScope{ScopeAgentCreate}, true)
 
-	denial := f.srv.evaluateSAAssignment(ctx, nil, f.sa, SurfaceAgentCreate)
+	denial := f.srv.evaluateSAAssignment(ctx, nil, f.sa, f.sa.ScopeID, SurfaceAgentCreate)
 	assert.Nil(t, denial, "a legacy pre-split token holding project:agent:create must still be allowed to assign")
 }
 
@@ -609,7 +609,7 @@ func TestEvaluateSAAssignment_ScopeSplit_PostSplitCreateOnlyDenied(t *testing.T)
 	f := newScopeSplitGateFixture(t)
 	ctx := f.agentContext(t, tid("scopesplit-gate-postsplit-create"), []AgentTokenScope{ScopeAgentCreate}, false)
 
-	denial := f.srv.evaluateSAAssignment(ctx, nil, f.sa, SurfaceAgentCreate)
+	denial := f.srv.evaluateSAAssignment(ctx, nil, f.sa, f.sa.ScopeID, SurfaceAgentCreate)
 	require.NotNil(t, denial, "a non-legacy token holding only project:agent:create must be denied")
 	assert.Equal(t, saAssignDenyForbiddenStructured, denial.kind)
 }
@@ -621,6 +621,6 @@ func TestEvaluateSAAssignment_ScopeSplit_PostSplitAssignScopeAllowed(t *testing.
 	f := newScopeSplitGateFixture(t)
 	ctx := f.agentContext(t, tid("scopesplit-gate-postsplit-assign"), []AgentTokenScope{ScopeAgentSAAssign}, false)
 
-	denial := f.srv.evaluateSAAssignment(ctx, nil, f.sa, SurfaceAgentCreate)
+	denial := f.srv.evaluateSAAssignment(ctx, nil, f.sa, f.sa.ScopeID, SurfaceAgentCreate)
 	assert.Nil(t, denial, "a non-legacy token holding project:agent:sa_assign must be allowed to assign")
 }

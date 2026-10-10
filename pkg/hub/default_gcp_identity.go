@@ -209,7 +209,7 @@ func (s *Server) resolveDefaultSAAssignmentCore(ctx context.Context, r *http.Req
 	//   2. Hub ActionAssign authorization.
 	//   3. GCP actAs check via callerPrincipal, using the identity on ctx.
 	//   4. Audit record via EvaluateActAs with the given surface.
-	if denial := s.evaluateSAAssignment(ctx, r, sa, surface); denial != nil {
+	if denial := s.evaluateSAAssignment(ctx, r, sa, projectID, surface); denial != nil {
 		slog.Warn(tier.name+"-default SA assignment denied by authorization gate",
 			"surface", surface,
 			"project_id", projectID,

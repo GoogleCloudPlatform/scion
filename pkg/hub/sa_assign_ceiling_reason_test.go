@@ -132,7 +132,7 @@ func TestEvaluateSAAssignment_CeilingOrphanedDelegator(t *testing.T) {
 	agent := dcAgentIdentity(agentID, projectID, AgentRoleFull)
 	agentCtx := contextWithIdentity(ctx, agent)
 
-	denial := srv.evaluateSAAssignment(agentCtx, nil, sa, SurfaceProjectDefault)
+	denial := srv.evaluateSAAssignment(agentCtx, nil, sa, sa.ScopeID, SurfaceProjectDefault)
 	require.NotNil(t, denial, "an orphaned delegator must deny the assignment")
 	assert.Equal(t, saAssignDenyForbiddenStructured, denial.kind)
 	assert.Equal(t,
@@ -172,7 +172,7 @@ func TestEvaluateSAAssignment_CeilingDelegatorLacksPermission(t *testing.T) {
 	agent := dcAgentIdentity(agentID, projectID, AgentRoleFull)
 	agentCtx := contextWithIdentity(ctx, agent)
 
-	denial := srv.evaluateSAAssignment(agentCtx, nil, sa, SurfaceProjectDefault)
+	denial := srv.evaluateSAAssignment(agentCtx, nil, sa, sa.ScopeID, SurfaceProjectDefault)
 	require.NotNil(t, denial, "a delegator that lost the permission must deny the assignment")
 	assert.Equal(t, saAssignDenyForbiddenStructured, denial.kind)
 	assert.Equal(t,
@@ -224,7 +224,7 @@ func TestEvaluateSAAssignment_CeilingAgentDelegatorLacksPermission(t *testing.T)
 	agentB := dcAgentIdentity(agentBID, projectID, AgentRoleFull)
 	agentBCtx := contextWithIdentity(ctx, agentB)
 
-	denial := srv.evaluateSAAssignment(agentBCtx, nil, sa, SurfaceProjectDefault)
+	denial := srv.evaluateSAAssignment(agentBCtx, nil, sa, sa.ScopeID, SurfaceProjectDefault)
 	require.NotNil(t, denial, "an agent delegator that lacks the permission must deny the assignment")
 	assert.Equal(t, saAssignDenyForbiddenStructured, denial.kind)
 	assert.Equal(t,
@@ -252,7 +252,7 @@ func TestEvaluateSAAssignment_OrdinaryDenialKeepsGenericMessage(t *testing.T) {
 		store.UserRoleMember, "test")
 	strangerCtx := contextWithIdentity(ctx, stranger)
 
-	denial := srv.evaluateSAAssignment(strangerCtx, nil, sa, SurfaceProjectDefault)
+	denial := srv.evaluateSAAssignment(strangerCtx, nil, sa, sa.ScopeID, SurfaceProjectDefault)
 	require.NotNil(t, denial, "a stranger with no role must be denied")
 	assert.Equal(t, saAssignDenyForbiddenStructured, denial.kind)
 	assert.Equal(t, scaGenericDenyMsg, denial.msg,
@@ -416,7 +416,7 @@ func TestEvaluateSAAssignment_CeilingOrphanedGrandparent(t *testing.T) {
 	agentB := dcAgentIdentity(agentBID, projectID, AgentRoleFull)
 	agentBCtx := contextWithIdentity(ctx, agentB)
 
-	denial := srv.evaluateSAAssignment(agentBCtx, nil, sa, SurfaceProjectDefault)
+	denial := srv.evaluateSAAssignment(agentBCtx, nil, sa, sa.ScopeID, SurfaceProjectDefault)
 	require.NotNil(t, denial, "an orphaned grandparent must deny the assignment")
 	assert.Equal(t, saAssignDenyForbiddenStructured, denial.kind)
 	assert.Equal(t,
@@ -586,7 +586,7 @@ func TestEvaluateSAAssignment_CeilingCauseByDelegatorState(t *testing.T) {
 			assert.Equal(t, DeniedByDelegationCeiling, d.DeniedBy, "reason %q", d.Reason)
 			assert.Equal(t, tc.cause, d.DenyCause, "reason %q", d.Reason)
 
-			denial := srv.evaluateSAAssignment(agentCtx, nil, sa, SurfaceProjectDefault)
+			denial := srv.evaluateSAAssignment(agentCtx, nil, sa, sa.ScopeID, SurfaceProjectDefault)
 			require.NotNil(t, denial, "the non-live chain denies the assignment")
 			assert.Equal(t, saAssignDenyForbiddenStructured, denial.kind)
 			assert.Equal(t, tc.msg, denial.msg)

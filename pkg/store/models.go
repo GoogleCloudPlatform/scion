@@ -3437,11 +3437,73 @@ func ValidEdgeDeactivationCause(c EdgeDeactivationCause) bool {
 	return false
 }
 
+// Deactivation causes recorded only on service-account assignments. The edge
+// store rejects them.
+const (
+	// EdgeDeactivationSAReplaced marks an assignment replaced by a later
+	// write that set a service account on the same agent.
+	EdgeDeactivationSAReplaced EdgeDeactivationCause = "sa_replaced"
+	// EdgeDeactivationSACleared marks an assignment ended by a write that
+	// removed the agent's assign-mode GCP identity.
+	EdgeDeactivationSACleared EdgeDeactivationCause = "sa_cleared"
+)
+
+// ValidAssignmentDeactivationCause reports whether c is a cause that may be
+// recorded on a service-account assignment.
+func ValidAssignmentDeactivationCause(c EdgeDeactivationCause) bool {
+	switch c {
+	case EdgeDeactivationAgentSoftDelete,
+		EdgeDeactivationAgentHardDelete,
+		EdgeDeactivationCreateCompensation,
+		EdgeDeactivationSAReplaced,
+		EdgeDeactivationSACleared:
+		return true
+	}
+	return false
+}
+
 // Deactivation is the deactivation record of an edge or assignment.
 type Deactivation struct {
 	Cause EdgeDeactivationCause `json:"-"`
 	At    *time.Time            `json:"-"`
 	OpID  string                `json:"-"` // one ID per deactivating operation
+}
+
+// SAAssignmentOrigin names the write that recorded a service-account
+// assignment. It is descriptive only and is never an authority input.
+type SAAssignmentOrigin string
+
+const (
+	SAAssignmentOriginCreateExplicit                 SAAssignmentOrigin = "create_explicit"
+	SAAssignmentOriginCreateProjectProfileDefault    SAAssignmentOrigin = "create_project_profile_default"
+	SAAssignmentOriginCreateProjectDefault           SAAssignmentOrigin = "create_project_default"
+	SAAssignmentOriginCreateHubDefault               SAAssignmentOrigin = "create_hub_default"
+	SAAssignmentOriginUpdate                         SAAssignmentOrigin = "update"
+	SAAssignmentOriginReincarnate                    SAAssignmentOrigin = "reincarnate"
+	SAAssignmentOriginScheduledProjectProfileDefault SAAssignmentOrigin = "scheduled_project_profile_default"
+	SAAssignmentOriginScheduledProjectDefault        SAAssignmentOrigin = "scheduled_project_default"
+	SAAssignmentOriginScheduledHubDefault            SAAssignmentOrigin = "scheduled_hub_default"
+	SAAssignmentOriginHostPassthroughTranslation     SAAssignmentOrigin = "host_passthrough_translation"
+)
+
+// AgentServiceAccountAssignment records who authorized an agent's
+// assign-mode GCP service account, and under which frozen effect ceiling.
+// At most one row per agent is active. Rows have no foreign key to the
+// agent, so the history survives a hard delete.
+type AgentServiceAccountAssignment struct {
+	ID               string             `json:"id"`
+	AgentID          string             `json:"agentId"`
+	ProjectID        string             `json:"projectId"`
+	ServiceAccountID string             `json:"serviceAccountId"`
+	Origin           SAAssignmentOrigin `json:"origin"`
+	Active           bool               `json:"active"`
+	CreatedAt        time.Time          `json:"createdAt"`
+
+	// AuthorityProvenance, EffectCeiling and Deactivation stay off public
+	// JSON. Their zero values mean "unrecorded".
+	AuthorityProvenance
+	EffectCeiling
+	Deactivation
 }
 
 // Delegation edge principal types

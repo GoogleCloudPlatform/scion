@@ -2334,6 +2334,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// all. See devLocalAuthorityEnabled's doc comment (devauth.go).
 	srv.authzService.setDevLocalAuthorityEnabled(cfg.DevAuthToken != "")
 	srv.authzService.mintDevAuthOverride = cfg.DevAuthToken != ""
+	srv.authzService.saIAMCheckMode = srv.saAssignCheckModeValue
 
 	// Wire decision logging (remaining-audit P1): an async, non-blocking
 	// writer over the process default handler captured here. Activation is
@@ -4682,7 +4683,12 @@ func (s *Server) scheduledCreatorIdentity(ctx context.Context, evt store.Schedul
 // configured default — is different from "nothing configured" and always
 // writes an explicit record, exactly as the create path does: an explicit
 // choice must not be silently turned into a runtime-dependent default.
-func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, agent *store.Agent, project *store.Project) error {
+//
+// The returned origin names the rung that set an assign-mode identity (or
+// the host passthrough translation), for the service-account assignment the
+// create records; it is "" when the result is not assign mode. It is a
+// description only and changes nothing about the ladder.
+func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, agent *store.Agent, project *store.Project) (origin store.SAAssignmentOrigin, err error) {
 	if agent.AppliedConfig == nil {
 		agent.AppliedConfig = &store.AgentAppliedConfig{}
 	}
@@ -4692,13 +4698,13 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 		cfg, err := s.resolveDefaultSAAssignmentCore(ctx, nil, agent.ProjectID,
 			profileSAID, SurfaceProjectDefault, profileDefaultTier(profileName))
 		if err != nil {
-			return err
+			return "", err
 		}
 		agent.AppliedConfig.GCPIdentity = cfg
 		pinResolvedProfile(agent.AppliedConfig, profileName)
 		slog.Debug("GCP identity chosen by default", "source", "project-profile-default",
 			"project_id", agent.ProjectID, "agent", agent.Name, "profile", profileName, "sa_id", cfg.ServiceAccountID)
-		return nil
+		return store.SAAssignmentOriginScheduledProjectProfileDefault, nil
 	}
 	projectSettings := projectSettingsFromAnnotations(project)
 	switch projectSettings.DefaultGCPIdentityMode {
@@ -4708,7 +4714,10 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 		}
 		if agent.RuntimeBrokerID != "" {
 			if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID); err != nil {
-				return fmt.Errorf("failed to configure GCP identity for sandbox runtime: %w", err)
+				return "", fmt.Errorf("failed to configure GCP identity for sandbox runtime: %w", err)
+			}
+			if agentHasAssignModeIdentity(agent) {
+				origin = store.SAAssignmentOriginHostPassthroughTranslation
 			}
 		}
 	case store.GCPMetadataModeAssign:
@@ -4716,14 +4725,15 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 				MetadataMode: store.GCPMetadataModeBlock,
 			}
-			return nil
+			return "", nil
 		}
 		cfg, err := s.resolveDefaultSAAssignmentCore(ctx, nil, agent.ProjectID,
 			projectSettings.DefaultGCPIdentityServiceAccountID, SurfaceProjectDefault, defaultTierProject)
 		if err != nil {
-			return err
+			return "", err
 		}
 		agent.AppliedConfig.GCPIdentity = cfg
+		origin = store.SAAssignmentOriginScheduledProjectDefault
 	case store.GCPMetadataModeBlock:
 		// Project explicitly set "block" — stop the ladder here, matching the
 		// create path's rule that explicit block does not fall through to
@@ -4778,7 +4788,10 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 				}
 				if agent.RuntimeBrokerID != "" {
 					if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID); err != nil {
-						return fmt.Errorf("failed to configure GCP identity for sandbox runtime: %w", err)
+						return "", fmt.Errorf("failed to configure GCP identity for sandbox runtime: %w", err)
+					}
+					if agentHasAssignModeIdentity(agent) {
+						origin = store.SAAssignmentOriginHostPassthroughTranslation
 					}
 				}
 			}
@@ -4787,14 +4800,15 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 				agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 					MetadataMode: store.GCPMetadataModeBlock,
 				}
-				return nil
+				return "", nil
 			}
 			cfg, err := s.resolveDefaultSAAssignmentCore(ctx, nil, agent.ProjectID,
 				hubDefaults.DefaultGCPIdentityServiceAccountID, SurfaceHubDefault, defaultTierHub)
 			if err != nil {
-				return err
+				return "", err
 			}
 			agent.AppliedConfig.GCPIdentity = cfg
+			origin = store.SAAssignmentOriginScheduledHubDefault
 		case store.GCPMetadataModeBlock:
 			// Hub explicitly configured "block" as its own default — an
 			// explicit choice, kept as an explicit record (rejected on the
@@ -4816,7 +4830,7 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 			// runtime-aware default (ptone/scion#2328 phase 1).
 		}
 	}
-	return nil
+	return origin, nil
 }
 
 // dispatchAgentEventHandler returns an EventHandler that creates and starts
@@ -5090,8 +5104,9 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		// the immediate agent creator — twin of the create path (#1797). It
 		// must run before deriveAgentConfig: populateAgentConfig reads
 		// AppliedConfig.GCPIdentity when checking auth credentials.
-		if err := s.applyScheduledProjectDefaultGCPIdentity(
-			contextWithIdentity(ctx, creatorIdentity), agent, project); err != nil {
+		saOrigin, err := s.applyScheduledProjectDefaultGCPIdentity(
+			contextWithIdentity(ctx, creatorIdentity), agent, project)
+		if err != nil {
 			return fmt.Errorf("scheduled dispatch of agent %q: %w", slug, err)
 		}
 
@@ -5164,6 +5179,11 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 				Active:        true,
 			},
 			Audit: scheduledDispatchAudit,
+			// The assignment, when the ladder chose an assign-mode
+			// account, records the revision principal under the same
+			// scheduledEffectCeiling pair as the edge; the administrator
+			// who configured the default is never its source.
+			SAOrigin: saOrigin,
 		}); err != nil {
 			return fmt.Errorf("failed to create agent %q: %w", slug, err)
 		}

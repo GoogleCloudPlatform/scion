@@ -117,6 +117,18 @@ func (f AgentReincarnationFunc) Mutate(ctx context.Context, m ent.Mutation) (ent
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AgentReincarnationMutation", m)
 }
 
+// The AgentServiceAccountAssignmentFunc type is an adapter to allow the use of ordinary
+// function as AgentServiceAccountAssignment mutator.
+type AgentServiceAccountAssignmentFunc func(context.Context, *ent.AgentServiceAccountAssignmentMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f AgentServiceAccountAssignmentFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.AgentServiceAccountAssignmentMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AgentServiceAccountAssignmentMutation", m)
+}
+
 // The AgentSessionMetricsFunc type is an adapter to allow the use of ordinary
 // function as AgentSessionMetrics mutator.
 type AgentSessionMetricsFunc func(context.Context, *ent.AgentSessionMetricsMutation) (ent.Value, error)

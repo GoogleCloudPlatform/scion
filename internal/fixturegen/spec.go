@@ -588,6 +588,16 @@ func Spec() []TableFixture {
 			},
 		}},
 
+		// ---- Agent service-account assignments ----
+		{Table: "agent_service_account_assignments", Rows: []row{
+			{
+				"id":       "da000000-0000-0000-0000-000000000001",
+				"agent_id": agentID, "project_id": projectID,
+				"service_account_id": "sa-fixture", "origin": "create_explicit",
+				"active": true,
+			},
+		}},
+
 		// ---- Delegation adoptions (recognized edge; NULL original edge) ----
 		{Table: "delegation_adoptions", Rows: []row{
 			{
