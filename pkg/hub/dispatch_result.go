@@ -47,7 +47,10 @@ type dispatchBrokerError struct {
 //   - EnvStillMissing is the requirements of an *ErrEnvStillMissing (a
 //     finalize that still lacks required env keys);
 //   - HubErrors names the hub sentinel errors in the executing node's error
-//     chain (see dispatchHubSentinels), such as a delete holding the row.
+//     chain (see dispatchHubSentinels), such as a delete holding the row;
+//   - AgentDeleted reports a queued start or restart refused because the
+//     agent is soft-deleted (errQueuedStartAgentDeleted, ptone/scion#4182);
+//     it is rebuilt alongside HubErrors.
 //
 // They are rebuilt in that order of precedence.
 type dispatchFailureEnvelope struct {
@@ -58,6 +61,9 @@ type dispatchFailureEnvelope struct {
 	// the executing node's dispatcher backstop, rebuilt as the typed
 	// *RuntimeTargetRefusal on the requesting node.
 	RuntimeTargetRefusal *dispatchRuntimeTargetRefusal `json:"runtimeTargetRefusal,omitempty"`
+	// AgentDeleted is set when errQueuedStartAgentDeleted is in the
+	// executing node's error chain.
+	AgentDeleted bool `json:"agentDeleted,omitempty"`
 }
 
 // dispatchRuntimeTargetRefusal is the wire form of a *RuntimeTargetRefusal.
@@ -122,7 +128,11 @@ func dispatchFailureResult(execErr error) string {
 			Code: refusal.Code, Status: refusal.Status, Message: refusal.Message, Details: refusal.Details,
 		}
 	}
-	if env.BrokerError == nil && env.EnvStillMissing == nil && len(env.HubErrors) == 0 && env.RuntimeTargetRefusal == nil {
+	if errors.Is(execErr, errQueuedStartAgentDeleted) {
+		env.AgentDeleted = true
+	}
+	if env.BrokerError == nil && env.EnvStillMissing == nil && len(env.HubErrors) == 0 && env.RuntimeTargetRefusal == nil &&
+		!env.AgentDeleted {
 		return ""
 	}
 	out, err := json.Marshal(env)
@@ -151,7 +161,11 @@ func dispatchFailureError(d *store.BrokerDispatch) error {
 	if env != nil && hasEnvNeeds(env.EnvStillMissing) {
 		return fmt.Errorf("dispatch %s failed: %w", d.Op, &ErrEnvStillMissing{Requirements: env.EnvStillMissing})
 	}
-	if sentinels := hubSentinelsFromEnvelope(env); len(sentinels) > 0 {
+	sentinels := hubSentinelsFromEnvelope(env)
+	if env != nil && env.AgentDeleted {
+		sentinels = append(sentinels, errQueuedStartAgentDeleted)
+	}
+	if len(sentinels) > 0 {
 		return fmt.Errorf("dispatch %s failed: %w", d.Op, &dispatchHubError{msg: d.Error, sentinels: sentinels})
 	}
 	return fmt.Errorf("dispatch %s failed: %s", d.Op, d.Error)

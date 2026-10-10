@@ -153,10 +153,12 @@ async function trackChatListFetches(page: Page): Promise<void> {
   await page.addInitScript(() => {
     const w = window as unknown as { __chatListFetches: ChatListFetch[] };
     w.__chatListFetches = [];
+    // Saved unbound on purpose and called later with original.call(this, ...)
+    // on the wrapper's receiver, so no binding is needed (ptone/scion#4126).
+    // eslint-disable-next-line @typescript-eslint/unbound-method
     const original = window.fetch;
     window.fetch = function (input: RequestInfo | URL, init?: RequestInit) {
-      const url =
-        typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
       const path = new URL(url, location.href).pathname;
       if (path === '/api/v1/chat/spaces' || path === '/api/v1/chat/dms') {
         w.__chatListFetches.push({

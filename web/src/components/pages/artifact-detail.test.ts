@@ -296,18 +296,24 @@ describe('artifact page', () => {
   });
 
   it("links back to the artifact's own project, not the one in the URL", async () => {
+    // The back link is the shared scion-back-link in the header's back slot.
+    const backHref = (page: Element): string | null => {
+      const link = page.shadowRoot!.querySelector(
+        'scion-detail-header > scion-back-link[slot="back"]'
+      );
+      expect(link?.textContent?.trim()).toBe('Project');
+      return link!.getAttribute('href');
+    };
     mockFetch(artifact('design.md', 'text/markdown'));
     const el = await mount(true); // URL project is p-1; scopeRef is p-1 too
-    expect(el.shadowRoot!.querySelector('a.back-link')!.getAttribute('href')).toBe('/projects/p-1');
+    expect(backHref(el)).toBe('/projects/p-1');
     document.body.innerHTML = '';
 
     const meta = artifact('design.md', 'text/markdown');
     meta.artifact.scopeRef = 'home-project';
     mockFetch(meta);
     const el2 = await mount(true);
-    expect(el2.shadowRoot!.querySelector('a.back-link')!.getAttribute('href')).toBe(
-      '/projects/home-project'
-    );
+    expect(backHref(el2)).toBe('/projects/home-project');
   });
 
   it('renders markdown in a sandboxed frame that loads images from the version only', async () => {
