@@ -67,8 +67,10 @@ import (
 // broker launch report and the revert worker; it only ever moves run_id to
 // a run the hub itself issued for the agent.
 //
-// Entries of A on a broker other than B are recorded in
-// broker_reported_runs (when labelled) and never adopted. R on an offline
+// Entries of A on a broker other than B are never adopted; an entry is
+// recorded in broker_reported_runs only when its label is A's current
+// run_id, and at most maxOffBrokerEntriesPerAgent of them are handled per
+// heartbeat. R on an offline
 // broker other than B is a superseded container, stopped when that broker
 // reconnects (§3.12); it cannot block adoption once its row is older than
 // Q.
@@ -86,13 +88,27 @@ func runAdoptionQuietPeriod() time.Duration {
 // agent is logged only once.
 const runAdoptionLogWindow = time.Hour
 
+// maxOffBrokerEntriesPerAgent caps the entries of one agent assigned to
+// another broker that one heartbeat handles. A broker normally lists one
+// entry per agent per runtime target (its default runtime plus a few
+// auxiliary ones), so more than this means a broker reporting abnormal
+// duplicates; the cap bounds the work one heartbeat can cause.
+const maxOffBrokerEntriesPerAgent = 8
+
 // heartbeatRunEntries collects, for one heartbeat, the labels of the
-// entries reported for each agent: the reporting broker's own agents, and
-// the labelled entries of agents assigned to another broker.
+// entries reported for each agent: the reporting broker's own agents, and,
+// for agents assigned to another broker, whether an entry carries the
+// agent's current run.
 type heartbeatRunEntries struct {
 	own      map[string]*ownRunEntries
 	ownOrder []string
 	offB     []store.BrokerReportedRun
+	// offCount counts the handled entries per off-broker agent, offOver
+	// holds the agents whose entries went over the cap, and offHeld the
+	// agents whose current run is already in offB.
+	offCount map[string]int
+	offOver  map[string]bool
+	offHeld  map[string]bool
 }
 
 // ownRunEntries are the labels of one own agent's entries.
@@ -102,7 +118,12 @@ type ownRunEntries struct {
 }
 
 func newHeartbeatRunEntries() *heartbeatRunEntries {
-	return &heartbeatRunEntries{own: map[string]*ownRunEntries{}}
+	return &heartbeatRunEntries{
+		own:      map[string]*ownRunEntries{},
+		offCount: map[string]int{},
+		offOver:  map[string]bool{},
+		offHeld:  map[string]bool{},
+	}
 }
 
 // addOwn records an entry of an agent assigned to the reporting broker,
@@ -120,22 +141,39 @@ func (e *heartbeatRunEntries) addOwn(a *store.Agent, hb brokerAgentHeartbeat) {
 	}
 }
 
-// addOffBroker records the labelled entries of an agent assigned to
-// another broker.
+// addOffBroker handles the entries of an agent assigned to another
+// broker. Only an entry carrying the agent's current run_id is recorded
+// (once per agent per heartbeat): that is the only run condition (c)
+// reads, and any later run_id change restarts the quiet period anyway.
+// Entries over maxOffBrokerEntriesPerAgent are skipped; the agent's
+// current run is then recorded as reported, so a skipped entry can only
+// delay an adoption, never allow one.
 func (e *heartbeatRunEntries) addOffBroker(a *store.Agent, hb brokerAgentHeartbeat) {
-	for _, run := range append([]string{hb.RunID}, otherEntryRuns(hb)...) {
-		if run != "" {
-			e.offB = append(e.offB, store.BrokerReportedRun{AgentID: a.ID, RunID: run})
+	runs := make([]string, 0, 1+len(hb.OtherEntries))
+	runs = append(runs, hb.RunID)
+	for _, more := range hb.OtherEntries {
+		runs = append(runs, more.RunID)
+	}
+	for _, run := range runs {
+		if e.offCount[a.ID] >= maxOffBrokerEntriesPerAgent {
+			e.offOver[a.ID] = true
+			e.holdCurrent(a)
+			continue
+		}
+		e.offCount[a.ID]++
+		if run != "" && run == a.RunID {
+			e.holdCurrent(a)
 		}
 	}
 }
 
-func otherEntryRuns(hb brokerAgentHeartbeat) []string {
-	out := make([]string, 0, len(hb.OtherEntries))
-	for _, more := range hb.OtherEntries {
-		out = append(out, more.RunID)
+// holdCurrent records the agent's current run as reported off its broker.
+func (e *heartbeatRunEntries) holdCurrent(a *store.Agent) {
+	if a.RunID == "" || e.offHeld[a.ID] {
+		return
 	}
-	return out
+	e.offHeld[a.ID] = true
+	e.offB = append(e.offB, store.BrokerReportedRun{AgentID: a.ID, RunID: a.RunID})
 }
 
 // runAdoptionState is the Server's adoption state: a clock hook and the
@@ -181,6 +219,10 @@ func (s *Server) adoptStrandedRuns(ctx context.Context, brokerID string, hb *bro
 	if err := s.store.RecordBrokerReportedRuns(ctx, brokerID, entries.offB, now, now.Add(-quiet)); err != nil {
 		s.agentLifecycleLog.Warn("heartbeat: run adoption: failed to record runs reported off the assigned broker",
 			"broker_id", brokerID, "error", err)
+	}
+	if len(entries.offOver) > 0 {
+		s.agentLifecycleLog.Warn("heartbeat: run adoption: entries over the per-agent cap skipped",
+			"broker_id", brokerID, "agents", len(entries.offOver), "cap", maxOffBrokerEntriesPerAgent)
 	}
 	complete := heartbeatReportsAllRuns(hb)
 	for _, id := range entries.ownOrder {

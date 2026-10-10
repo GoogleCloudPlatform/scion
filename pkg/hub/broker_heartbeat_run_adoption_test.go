@@ -451,27 +451,46 @@ func TestRunAdoption_TwoReplicas(t *testing.T) {
 }
 
 // TestRunAdoption_OffBrokerReportsRecordedAndPruned: an entry of an agent
-// assigned to another broker is recorded with its run; B's own entries are
-// not; rows older than the quiet period are pruned by a later heartbeat.
+// assigned to another broker is recorded only when it carries the agent's
+// current run; B's own entries are not recorded; entries over the per-agent
+// cap are skipped and the agent's current run is recorded instead; rows
+// older than the quiet period are pruned by a later heartbeat.
 func TestRunAdoption_OffBrokerReportsRecordedAndPruned(t *testing.T) {
 	ctx := context.Background()
 	f := newRunAdoptionFixture(t)
 	other := f.addBroker("ra-record-other")
 	a := f.addAgent("recorded", "running", "working")
 	f.mint(a, "run-r")
+	reported := func(agentID, run string, since time.Time) bool {
+		t.Helper()
+		got, err := f.s.AgentRunReportedSince(ctx, agentID, run, since)
+		require.NoError(t, err)
+		return got
+	}
 
-	f.beat(other, a.Slug, "run-off", brokerAgentRuntimeEntry{RuntimeTarget: "k8s", RunID: "run-off-aux"})
+	f.beat(other, a.Slug, "run-off", brokerAgentRuntimeEntry{RuntimeTarget: "k8s", RunID: "run-r"})
 	f.beat(f.brokerID, a.Slug, "run-own")
 	since := f.srv.runAdoption.now().Add(-time.Minute)
-	for run, want := range map[string]bool{"run-off": true, "run-off-aux": true, "run-own": false} {
-		got, err := f.s.AgentRunReportedSince(ctx, a.ID, run, since)
-		require.NoError(t, err)
-		assert.Equal(t, want, got, run)
+	assert.True(t, reported(a.ID, "run-r", since), "an off-broker entry carrying the current run is recorded")
+	assert.False(t, reported(a.ID, "run-off", since), "an off-broker entry carrying another run writes nothing")
+	assert.False(t, reported(a.ID, "run-own", since), "B's own entries are not recorded")
+
+	// Over the cap: none of the handled entries carries the current run,
+	// but the current run is recorded as reported, and the skip is logged
+	// once for the heartbeat.
+	b := f.addAgent("capped", "running", "working")
+	f.mint(b, "run-b")
+	var others []brokerAgentRuntimeEntry
+	for i := 0; i < maxOffBrokerEntriesPerAgent+2; i++ {
+		others = append(others, brokerAgentRuntimeEntry{RuntimeTarget: "k8s", RunID: "run-dup"})
 	}
+	f.beat(other, b.Slug, "run-dup", others...)
+	assert.True(t, reported(b.ID, "run-b", since), "over the cap, the current run is recorded")
+	assert.False(t, reported(b.ID, "run-dup", since))
+	assert.Len(t, f.logs.records("heartbeat: run adoption: entries over the per-agent cap skipped"), 1)
 
 	f.offset = 2*runAdoptionQuietPeriod() + time.Minute
 	f.beat(f.brokerID, a.Slug, "run-own")
-	got, err := f.s.AgentRunReportedSince(ctx, a.ID, "run-off", time.Time{})
-	require.NoError(t, err)
-	assert.False(t, got, "rows older than Q are pruned")
+	assert.False(t, reported(a.ID, "run-r", time.Time{}), "rows older than Q are pruned")
+	assert.False(t, reported(b.ID, "run-b", time.Time{}), "rows older than Q are pruned")
 }
