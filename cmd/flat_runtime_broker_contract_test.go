@@ -75,7 +75,7 @@ func TestLegacyRegistration_NameCollidingWithFlatRowRefused_Embedded(t *testing.
 	// the flat row (case-insensitively) is a startup error: no duplicate row
 	// is created next to the flat row.
 	for _, name := range []string{"test-broker", "Test-Broker"} {
-		_, err := registerGlobalProjectAndBroker(ctx, s, tid("legacy-new-"+name), name, "http://localhost:9800", nil, true, settings, nil)
+		_, err := registerGlobalProjectAndBroker(ctx, s, tid("legacy-new-"+name), name, "http://localhost:9800", nil, true, settings, nil, nil)
 		require.Error(t, err, "name %q collides with a flat row", name)
 		assert.Contains(t, err.Error(), "runtime_broker_name_conflict")
 		_, getErr := s.GetRuntimeBroker(ctx, tid("legacy-new-"+name))
@@ -86,7 +86,7 @@ func TestLegacyRegistration_NameCollidingWithFlatRowRefused_Embedded(t *testing.
 	// A slug-only collision is refused too (R4: name or slug): "test broker"
 	// differs from the flat row's name but slugifies to its slug.
 	require.Equal(t, flat.Slug, api.Slugify("test broker"))
-	_, err := registerGlobalProjectAndBroker(ctx, s, tid("legacy-new-slug"), "test broker", "http://localhost:9800", nil, true, settings, nil)
+	_, err := registerGlobalProjectAndBroker(ctx, s, tid("legacy-new-slug"), "test broker", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.Error(t, err, "slug collides with a flat row")
 	assert.Contains(t, err.Error(), "runtime_broker_name_conflict")
 	_, getErr := s.GetRuntimeBroker(ctx, tid("legacy-new-slug"))
@@ -94,7 +94,7 @@ func TestLegacyRegistration_NameCollidingWithFlatRowRefused_Embedded(t *testing.
 	assertFlatRowUntouched(t, s, flat)
 
 	// An ID match on the flat row is also a startup error (R4).
-	_, err = registerGlobalProjectAndBroker(ctx, s, flat.ID, "test-broker", "http://localhost:9800", nil, true, settings, nil)
+	_, err = registerGlobalProjectAndBroker(ctx, s, flat.ID, "test-broker", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "runtime_target_changed")
 	assertFlatRowUntouched(t, s, flat)
@@ -110,7 +110,7 @@ func TestLegacyEmbeddedRegistration_SkipsFlatRowByName(t *testing.T) {
 	require.NoError(t, s.CreateRuntimeBroker(ctx, legacy))
 
 	settings := &config.Settings{}
-	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("legacy-restart"), "shared-name", "http://localhost:9800", nil, true, settings, nil)
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("legacy-restart"), "shared-name", "http://localhost:9800", nil, true, settings, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, legacy.ID, effectiveID, "the legacy row is adopted by name exactly as today")
 
