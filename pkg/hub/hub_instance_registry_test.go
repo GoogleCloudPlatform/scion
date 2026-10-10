@@ -709,3 +709,48 @@ func TestHubInstanceSnapshot_TypicalPayloadKeepsAllIntegrations(t *testing.T) {
 	assert.Len(t, snap.Stats.Integrations, api.HubInstanceMaxIntegrations)
 	assert.False(t, snap.Stats.IntegrationsTruncated)
 }
+
+// A change in a reported integration is material: the next tick upserts
+// the full row. An unchanged list keeps the tick a Touch.
+func TestHubInstanceRegistry_IntegrationChangeUpserts(t *testing.T) {
+	st := newCountingHubInstanceStore()
+	snap := quietSnapshot()
+	snap.Stats.Integrations = []api.HubInstanceIntegration{{Name: "chat", Health: "healthy", Connected: true}}
+	reg := newTestHubInstanceRegistry(st, snap)
+	ctx := context.Background()
+
+	reg.tick(ctx) // first tick: upsert
+	reg.tick(ctx) // quiet: touch
+	snap.Stats.Integrations = []api.HubInstanceIntegration{{Name: "chat", Health: "unhealthy"}}
+	reg.tick(ctx) // changed: upsert
+	reg.tick(ctx) // quiet again: touch
+
+	upserts, touches := st.counts()
+	assert.Equal(t, 2, upserts)
+	assert.Equal(t, 2, touches)
+	assert.Contains(t, string(st.rows["hub-test-1"].Stats), `"health":"unhealthy"`)
+}
+
+// The server's tick writes the plugins it runs into stats.integrations:
+// allow-listed fields only, sorted by name, health normalised.
+func TestHubInstanceRegistry_TickWritesIntegrations(t *testing.T) {
+	srv, s := testServer(t)
+	mgr := newHealthSummaryPluginDouble("telegram", "slack")
+	mgr.health["slack"] = " Degraded "
+	mgr.message["slack"] = "token SECRETVALUE rejected"
+	srv.SetPluginManager(mgr)
+	ctx := context.Background()
+
+	srv.newHubInstanceRegistry().tick(ctx)
+
+	rows, _, err := s.ListHubInstances(ctx, time.Hour)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	var stats api.HubInstanceStats
+	require.NoError(t, json.Unmarshal(rows[0].Stats, &stats))
+	assert.Equal(t, []api.HubInstanceIntegration{
+		{Name: "slack", Health: "degraded", Connected: true, Version: "v1.2.3"},
+		{Name: "telegram", Health: "healthy", Connected: true, Version: "v1.2.3"},
+	}, stats.Integrations)
+	assert.NotContains(t, string(rows[0].Stats), "SECRETVALUE")
+}

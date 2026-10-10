@@ -162,12 +162,19 @@ func (s *Server) newHubInstanceRegistry() *hubInstanceRegistry {
 // hubInstanceSnapshot builds this process's registry snapshot. It runs only
 // healthChecks (one store Ping plus in-process checks) and reads the
 // connection pool counters in memory, never the agent, project or broker
-// count queries of GetHealthInfo. The status is derived from the raw checks
-// before normalising, so a check dropped by the normaliser still counts
-// toward it.
+// count queries of GetHealthInfo. It also reads the health of the plugins
+// this instance runs (hubInstanceIntegrations: shared per-plugin queries,
+// at most healthIntegrationQueryTimeout), which reaches every replica's
+// health summary through this row. The status is derived from the raw
+// checks before normalising, so a check dropped by the normaliser still
+// counts toward it.
 func (s *Server) hubInstanceSnapshot(ctx context.Context, label string) hubInstanceSnapshot {
-	return hubInstanceSnapshotFromChecks(label, version.Short(), s.healthChecks(ctx),
-		api.HubInstanceStats{DB: s.hubInstanceDBStats()})
+	checks := s.healthChecks(ctx)
+	stats := api.HubInstanceStats{
+		DB:           s.hubInstanceDBStats(),
+		Integrations: s.hubInstanceIntegrations(ctx),
+	}
+	return hubInstanceSnapshotFromChecks(label, version.Short(), checks, stats)
 }
 
 // hubInstanceDBStats returns this process's database connection pool
