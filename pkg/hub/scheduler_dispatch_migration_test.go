@@ -28,7 +28,8 @@ import (
 )
 
 func TestDispatchAgentEventHandler_UserAuthoredChildRoleSurvivesMigration(t *testing.T) {
-	t.Parallel()
+	// Not parallel: its store Migrate mutates ent's package-level schema
+	// tables (concurrent map writes in Atlas.setupTables).
 	srv, s, user, project := setupAgentRoleTest(t)
 	ctx := context.Background()
 

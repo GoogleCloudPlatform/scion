@@ -57,7 +57,8 @@ func setProjectDefaultSAAnnotations(t *testing.T, f *bypassAgentsFixture, saID s
 }
 
 func TestScheduledDispatch_UserCreatorSetsCreatorName(t *testing.T) {
-	t.Parallel()
+	// Not parallel: its store Migrate mutates ent's package-level schema
+	// tables (concurrent map writes in Atlas.setupTables).
 	f := bypassAgentsSetup(t)
 
 	require.NoError(t, fireScheduledDispatchAsOwner(t, f, "sched-creator-name"))
@@ -71,7 +72,8 @@ func TestScheduledDispatch_UserCreatorSetsCreatorName(t *testing.T) {
 }
 
 func TestScheduledDispatch_NoProjectDefaultLeavesGCPIdentityUnchanged(t *testing.T) {
-	t.Parallel()
+	// Not parallel: its store Migrate mutates ent's package-level schema
+	// tables (concurrent map writes in Atlas.setupTables).
 	f := bypassAgentsSetup(t)
 
 	require.NoError(t, fireScheduledDispatchAsOwner(t, f, "sched-no-sa"))
@@ -84,7 +86,8 @@ func TestScheduledDispatch_NoProjectDefaultLeavesGCPIdentityUnchanged(t *testing
 }
 
 func TestScheduledDispatch_ProjectDefaultSAAssigned(t *testing.T) {
-	t.Parallel()
+	// Not parallel: its store Migrate mutates ent's package-level schema
+	// tables (concurrent map writes in Atlas.setupTables).
 	f := bypassAgentsSetup(t)
 	sa := bypassAgentsCreateSA(t, f, f.proj.ID, true)
 	setProjectDefaultSAAnnotations(t, f, sa.ID)
@@ -103,7 +106,8 @@ func TestScheduledDispatch_ProjectDefaultSAAssigned(t *testing.T) {
 }
 
 func TestScheduledDispatch_ProjectDefaultSADeniedFailsDispatch(t *testing.T) {
-	t.Parallel()
+	// Not parallel: its store Migrate mutates ent's package-level schema
+	// tables (concurrent map writes in Atlas.setupTables).
 	f := bypassAgentsSetup(t)
 	sa := bypassAgentsCreateSA(t, f, f.proj.ID, true)
 	setProjectDefaultSAAnnotations(t, f, sa.ID)
@@ -118,7 +122,8 @@ func TestScheduledDispatch_ProjectDefaultSADeniedFailsDispatch(t *testing.T) {
 }
 
 func TestScheduledDispatch_UnverifiedProjectDefaultSAFailsDispatch(t *testing.T) {
-	t.Parallel()
+	// Not parallel: its store Migrate mutates ent's package-level schema
+	// tables (concurrent map writes in Atlas.setupTables).
 	f := bypassAgentsSetup(t)
 	sa := bypassAgentsCreateSA(t, f, f.proj.ID, false)
 	setProjectDefaultSAAnnotations(t, f, sa.ID)
@@ -141,7 +146,8 @@ func TestEvaluateSAAssignment_NilRequestLogAuthzDenial(t *testing.T) {
 }
 
 func TestEvaluateSAAssignment_NilRequestPolicyDenial(t *testing.T) {
-	t.Parallel()
+	// Not parallel: its store Migrate mutates ent's package-level schema
+	// tables (concurrent map writes in Atlas.setupTables).
 	f := bypassAgentsSetup(t)
 	sa := bypassAgentsCreateSA(t, f, f.proj.ID, true)
 
