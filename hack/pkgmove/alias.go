@@ -380,8 +380,13 @@ func (a *analysis) aliasFile(header, constraint string, imports map[string]bool,
 		paths = append(paths, p)
 	}
 	sort.Strings(paths)
+	// Standard-library imports first, then a blank line, then the rest.
+	sort.SliceStable(paths, func(i, j int) bool { return isStdPath(paths[i]) && !isStdPath(paths[j]) })
 	b.WriteString("import (\n")
-	for _, p := range paths {
+	for i, p := range paths {
+		if i > 0 && isStdPath(paths[i-1]) && !isStdPath(p) {
+			b.WriteString("\n")
+		}
 		if names[p] == realNames[p] && realNames[p] == p[strings.LastIndex(p, "/")+1:] {
 			fmt.Fprintf(&b, "\t%q\n", p)
 		} else {

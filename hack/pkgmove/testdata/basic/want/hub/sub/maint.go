@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
+	"time"
 )
 
 const MaxItems = 3
@@ -72,3 +73,6 @@ func where() string {
 
 // whereVia reaches where through another moved function.
 func WhereVia() string { return where() }
+
+// Timeout is aliased with a standard-library type in its signature.
+func Timeout(d time.Duration) time.Duration { return 2 * d }

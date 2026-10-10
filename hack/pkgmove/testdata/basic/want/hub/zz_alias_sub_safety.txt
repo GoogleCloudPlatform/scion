@@ -7,17 +7,17 @@ files now run before every initialiser of the source package. Review each
 ERROR/HIGH/WARN item below before merging.
 
 == HIGH: init() in moved file ==
-  hub/maint.go:56: init() now runs when package sub initialises, before every var initialiser and init() of hub
+  hub/maint.go:57: init() now runs when package sub initialises, before every var initialiser and init() of hub
 
 == HIGH: package-level var initialiser calls package code ==
-  hub/maint.go:16: computed = ... calls seed
+  hub/maint.go:17: computed = ... calls seed
 
 == WARN: exported method (may newly satisfy interfaces) ==
-  hub/maint.go:25: widget.count -> Count: check dynamic interface assertions that could now match
+  hub/maint.go:26: widget.count -> Count: check dynamic interface assertions that could now match
 
 == WARN: function alias declared as a var (a wrapper would change behaviour) ==
-  hub/maint.go:61: guard calls recover() directly (a wrapper would make it return nil under defer), so it is aliased as a var instead of a wrapper; the var is assignable and initialised at package init
-  hub/maint.go:74: whereVia calls where, which inspects its call stack (runtime.Caller; a wrapper adds a frame), so it is aliased as a var instead of a wrapper; the var is assignable and initialised at package init
+  hub/maint.go:62: guard calls recover() directly (a wrapper would make it return nil under defer), so it is aliased as a var instead of a wrapper; the var is assignable and initialised at package init
+  hub/maint.go:75: whereVia calls where, which inspects its call stack (runtime.Caller; a wrapper adds a frame), so it is aliased as a var instead of a wrapper; the var is assignable and initialised at package init
 
 == WARN: renamed method name appears in a template or reflection string ==
   hub/core.go:46: "{{.Count}} items" mentions Count (widget.count -> Count); templates call exported methods only
