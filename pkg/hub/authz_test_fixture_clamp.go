@@ -160,7 +160,8 @@ func (c *testFixtureGrantClamp) allowedRoles(ctx context.Context, ids []string) 
 		if !ok || rd == nil {
 			continue
 		}
-		v := rd.ScopeType == store.RoleScopeSystem && (rd.Name == store.SystemRoleHubMember || rd.Name == store.SystemRoleHubViewer)
+		// Only the seeded (System) hub-member and hub-viewer roles count.
+		v := rd.System && rd.ScopeType == store.RoleScopeSystem && (rd.Name == store.SystemRoleHubMember || rd.Name == store.SystemRoleHubViewer)
 		c.cache.roleAllowed[id] = v
 		out[id] = v
 	}

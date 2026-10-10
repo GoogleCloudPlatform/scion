@@ -317,6 +317,7 @@ func TestTestIdentity_ClampCachesShared(t *testing.T) {
 	failing := &countingKindStore{Store: s, failRoles: true}
 	fx := NewAuthzService(failing, srv.authzService.logger)
 	assert.False(t, fx.IsHubAdmin(ctx, fixture.ID))
+	assert.True(t, fx.IsHubAdmin(ctx, human.ID), "control: a failed role lookup leaves an ordinary user's grants unclamped")
 	c := fx.store.(*testFixtureGrantClamp)
 	assert.Empty(t, c.cache.roleAllowed, "a failed lookup is not cached")
 	failing.mu.Lock()
