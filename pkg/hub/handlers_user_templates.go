@@ -141,6 +141,9 @@ func (s *Server) createUserTemplate(w http.ResponseWriter, r *http.Request) {
 		Unauthorized(w)
 		return
 	}
+	if !requireProfileWriter(w, r) {
+		return
+	}
 
 	var req CreateTemplateRequest
 	if err := readJSON(r, &req); err != nil {
@@ -261,6 +264,9 @@ func (s *Server) updateUserTemplate(w http.ResponseWriter, r *http.Request, id s
 		Unauthorized(w)
 		return
 	}
+	if !requireProfileWriter(w, r) {
+		return
+	}
 
 	existing, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
@@ -320,6 +326,9 @@ func (s *Server) deleteUserTemplate(w http.ResponseWriter, r *http.Request, id s
 		Unauthorized(w)
 		return
 	}
+	if !requireProfileWriter(w, r) {
+		return
+	}
 
 	existing, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
@@ -363,6 +372,9 @@ func (s *Server) handleUserTemplateUpload(w http.ResponseWriter, r *http.Request
 		Unauthorized(w)
 		return
 	}
+	if !requireProfileWriter(w, r) {
+		return
+	}
 
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
@@ -392,6 +404,9 @@ func (s *Server) handleUserTemplateFinalize(w http.ResponseWriter, r *http.Reque
 	userIdent := GetUserIdentityFromContext(ctx)
 	if userIdent == nil {
 		Unauthorized(w)
+		return
+	}
+	if !requireProfileWriter(w, r) {
 		return
 	}
 
