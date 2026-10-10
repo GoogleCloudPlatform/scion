@@ -38,8 +38,8 @@ type span struct{ start, end int }
 //
 // Indented code blocks, block quotes and list items are not recognised,
 // nor the precedence of HTML tags and autolinks over code spans. Other
-// block boundaries, such as headings, list items and table rows, do not
-// end a run of lines.
+// block boundaries, such as headings and table rows, do not end a run of
+// lines.
 //
 // One forward pass: each line is examined once, and each paragraph's
 // backtick runs are matched with forward-only pointers into per-length

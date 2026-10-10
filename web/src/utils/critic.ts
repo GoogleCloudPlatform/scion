@@ -66,6 +66,32 @@ const MARKS: { kind: CriticKind; open: string; close: string }[] = [
 
 const SUB_SEP = '~>';
 
+/** The tokens the Review toolbar writes. */
+const TOK = {
+  insOpen: '{++',
+  insClose: '++}',
+  delOpen: '{--',
+  delClose: '--}',
+  subOpen: '{~~',
+  subClose: '~~}',
+  noteOpen: '{>>',
+  noteClose: '<<}',
+  hlOpen: '{==',
+  hlClose: '==}',
+} as const;
+
+/**
+ * The opening token a toolbar action puts before a non-empty selection,
+ * which moves the selected text (and any code in it) right by its length.
+ * Insert adds after the selection and moves nothing.
+ */
+const WRAP_OPEN: Record<CriticTool, string> = {
+  comment: TOK.hlOpen,
+  suggest: TOK.subOpen,
+  delete: TOK.delOpen,
+  insert: '',
+};
+
 /** A half-open range [start, end) of a text. */
 export interface CriticRange {
   start: number;
@@ -101,8 +127,8 @@ interface BacktickRun {
  *
  * Indented code blocks, block quotes and list items are not recognised,
  * nor the precedence of HTML tags and autolinks over code spans. Other
- * block boundaries, such as headings, list items and table rows, do not
- * end a run of lines.
+ * block boundaries, such as headings and table rows, do not end a run of
+ * lines.
  */
 export function criticCodeRanges(src: string, steps: { n: number } = { n: 0 }): CriticRange[] {
   const out: CriticRange[] = [];
@@ -568,24 +594,30 @@ export function criticToolEdit(
   switch (tool) {
     case 'comment':
       return text === ''
-        ? edit(from, to, '{>>', 'comment', '<<}')
-        : edit(from, to, `{==${text}==}{>>`, 'comment', '<<}');
+        ? edit(from, to, TOK.noteOpen, 'comment', TOK.noteClose)
+        : edit(
+            from,
+            to,
+            WRAP_OPEN.comment + text + TOK.hlClose + TOK.noteOpen,
+            'comment',
+            TOK.noteClose
+          );
     case 'suggest':
       return text === ''
-        ? edit(from, to, '{~~~>', 'replacement', '~~}')
-        : edit(from, to, `{~~${text}~>`, text, '~~}');
+        ? edit(from, to, TOK.subOpen + SUB_SEP, 'replacement', TOK.subClose)
+        : edit(from, to, WRAP_OPEN.suggest + text + SUB_SEP, text, TOK.subClose);
     case 'insert':
-      return edit(to, to, '{++', 'text', '++}');
+      return edit(to, to, TOK.insOpen, 'text', TOK.insClose);
     case 'delete': {
       if (text === '') return null;
-      const insert = `{--${text}--}`;
+      const insert = WRAP_OPEN.delete + text + TOK.delClose;
       return { from, to, insert, selectFrom: from + insert.length, selectTo: from + insert.length };
     }
   }
 }
 
 /** The CriticMarkup tokens a toolbar selection may not contain outside code. */
-const MARK_TOKENS = ['{++', '++}', '{--', '--}', '{~~', '~>', '~~}', '{>>', '<<}', '{==', '==}'];
+const MARK_TOKENS = [...Object.values(TOK), SUB_SEP];
 
 /**
  * Explains why a toolbar action cannot apply to a selection of doc, or
@@ -634,22 +666,24 @@ export function criticToolBlocked(
   const cuts = (p: number): boolean => code.some((r) => r.start < p && p < r.end);
   if (cuts(at.from) || cuts(at.to)) return INSIDE_CODE_HINT;
   // The new mark must read as intended in the whole document. Apply the
-  // edit, then require (1) that the text with every mark rejected is
-  // unchanged, and (2) that the result parses with exactly the inserted
-  // mark(s) over the inserted text. An unclosed opener could otherwise pair
-  // with the new tokens: one earlier in the text can be closed by the new
-  // closer (the clean text changes, and the mark no longer starts at the
-  // edit), and one directly before the selection can become the new
-  // mark's opener (the mark then starts before the edit). Marks elsewhere
-  // need no check: the selection does not touch a mark and the tool
-  // inserts a balanced mark, so a mark outside the edit could only change
-  // by pairing with the new tokens, which (2) refuses. Before both, (0)
-  // the code of the result must be the code of doc moved by the edit:
-  // code does not depend on marks, so this tells a change in code apart
-  // from an unclosed opener. New tokens can change code: a closing token
-  // between a backslash and the backtick it escaped makes a code span
-  // appear, and tildes the tool adds after tildes at a line start can open
-  // a fence.
+  // edit, then require:
+  // (1) that the code of the result is the code of doc moved by the edit.
+  //     New tokens can change code: a closing token between a backslash
+  //     and the backtick it escaped makes a code span appear, and tildes
+  //     the tool adds after tildes at a line start can open a fence. Code
+  //     does not depend on marks, so this check runs first and tells a
+  //     change in code apart from an unclosed opener;
+  // (2) that the text with every mark rejected is unchanged; and
+  // (3) that the result parses with exactly the inserted mark(s) over the
+  //     inserted text.
+  // An unclosed opener could otherwise pair with the new tokens: one
+  // earlier in the text can be closed by the new closer (the clean text
+  // changes, and the mark no longer starts at the edit), and one directly
+  // before the selection can become the new mark's opener (the mark then
+  // starts before the edit). Marks elsewhere need no check: the selection
+  // does not touch a mark and the tool inserts a balanced mark, so a mark
+  // outside the edit could only change by pairing with the new tokens,
+  // which (3) refuses.
   const edit = criticToolEdit(tool, sel);
   if (!edit) return null;
   const result = doc.slice(0, edit.from) + edit.insert + doc.slice(edit.to);
@@ -666,9 +700,10 @@ export function criticToolBlocked(
  * the code ranges of the text the edit applied to, moved by the edit.
  * Code before the edit stays; code after it moves by the edit's change in
  * length; code inside the edited range (a whole code span the selection
- * held) moves by the 3-character opening token, and a suggestion copies
- * it into the new side after the old side and "~>". The checks before
- * this one keep code ranges from crossing the edit's ends.
+ * held) moves by the opening token the tool wraps the selection in
+ * (WRAP_OPEN), and a suggestion copies it into the new side after the old
+ * side and SUB_SEP. The checks before this one keep code ranges from
+ * crossing the edit's ends.
  */
 function sameCode(
   before: CriticRange[],
@@ -678,14 +713,16 @@ function sameCode(
 ): boolean {
   const len = edit.to - edit.from;
   const delta = edit.insert.length - len;
+  const open = WRAP_OPEN[tool].length;
+  const copy = open + len + SUB_SEP.length;
   const moved: CriticRange[] = [];
   const copies: CriticRange[] = [];
   for (const r of before) {
     if (r.end <= edit.from) moved.push(r);
     else if (r.start >= edit.to) moved.push({ start: r.start + delta, end: r.end + delta });
     else {
-      moved.push({ start: r.start + 3, end: r.end + 3 });
-      if (tool === 'suggest') copies.push({ start: r.start + len + 5, end: r.end + len + 5 });
+      moved.push({ start: r.start + open, end: r.end + open });
+      if (tool === 'suggest') copies.push({ start: r.start + copy, end: r.end + copy });
     }
   }
   const want = [...moved, ...copies].sort((x, y) => x.start - y.start);

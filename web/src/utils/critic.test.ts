@@ -332,6 +332,36 @@ describe('criticToolBlocked and code', () => {
     for (const tool of tools) expect(criticToolBlocked(tool, done, doc), tool).toBeNull();
   });
 
+  it('moves the code a selection holds by the exact offsets', () => {
+    const cases: [string, string, Record<(typeof tools)[number], string[]>][] = [
+      // Two spans, the first not at the start of the selection's line.
+      [
+        'See `a` and `b` here.',
+        '`a` and `b`',
+        {
+          comment: ['`a`', '`b`'],
+          suggest: ['`a`', '`b`', '`a`', '`b`'],
+          delete: ['`a`', '`b`'],
+          insert: ['`a`', '`b`'],
+        },
+      ],
+      // A span ending right where the selection starts.
+      ['x `a`b', 'b', { comment: ['`a`'], suggest: ['`a`'], delete: ['`a`'], insert: ['`a`'] }],
+    ];
+    for (const [doc, word, want] of cases) {
+      const s = sel(doc, word);
+      for (const tool of tools) {
+        expect(criticToolBlocked(tool, s, doc), `${doc} ${tool}`).toBeNull();
+        const result = apply(doc, tool, s);
+        expect(onlyMarksChanged(result, doc), `${doc} ${tool}`).toBe(true);
+        expect(
+          criticCodeRanges(result).map((r) => result.slice(r.start, r.end)),
+          `${doc} ${tool}`
+        ).toEqual(want[tool]);
+      }
+    }
+  });
+
   it('still refuses mark tokens outside code in a selection that also holds code', () => {
     const doc = 'a `{++x++}` b++} c';
     expect(criticToolBlocked('comment', sel(doc, '`{++x++}` b++}'), doc)).toMatch(/CriticMarkup/);
@@ -398,8 +428,9 @@ describe('criticToolBlocked and code', () => {
       /^ {0,3}(`{3,}|~{3,})/.test(doc.slice(start));
     const FENCE = /touches a fenced code block/;
     const DELETE = /Select the text to delete/;
-    // Each document has one fenced block; `closed` is whether it has a
-    // closing fence followed by a line break, so the line after it exists.
+    // Each document's last code range is the fenced block under test;
+    // `closed` is whether it has a closing fence followed by a line break,
+    // so the line after it exists.
     const positions: { name: string; doc: string; closed: boolean }[] = [
       { name: 'document start', doc: '```sh\ngo test\n```\n\nEnd', closed: true },
       { name: 'middle', doc: 'Intro\n\n```sh\ngo test\n```\n\nEnd', closed: true },
