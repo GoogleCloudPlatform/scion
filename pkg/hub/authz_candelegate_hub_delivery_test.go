@@ -98,7 +98,7 @@ func (f canDelegateParityFixture) identities() map[string]Identity {
 			"parity-remote-project", "Parity Remote Agent", f.userID, []string{f.userID}, ScopesForRole(AgentRoleFull)),
 		"FederatedServiceIdentity": NewFederatedServiceIdentity("https://issuer.example", "parity-sa-sub",
 			"parity-sa@example.com", nil),
-		"DelegatedAgentIdentity": testDelegatedIdentity(tid("candelegate-parity-delegated-agent"), f.projectID),
+		"DelegatedAgentIdentity": adtTestIdentity(tid("candelegate-parity-delegated-agent"), f.projectID),
 	}
 }
 

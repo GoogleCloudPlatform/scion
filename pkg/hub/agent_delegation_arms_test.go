@@ -33,9 +33,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// testDelegatedIdentity returns a DelegatedAgentIdentity for unit tests,
+// adtTestIdentity returns a DelegatedAgentIdentity for unit tests,
 // with a hub boundary and an agent.read ceiling.
-func testDelegatedIdentity(agentID, projectID string) *DelegatedAgentIdentity {
+func adtTestIdentity(agentID, projectID string) *DelegatedAgentIdentity {
 	return &DelegatedAgentIdentity{
 		agentID:             agentID,
 		agentProjectID:      projectID,
@@ -48,18 +48,18 @@ func testDelegatedIdentity(agentID, projectID string) *DelegatedAgentIdentity {
 	}
 }
 
-// fakeDelegatedTypeIdentity reports the delegated Type() string without
+// adtFakeTypeIdentity reports the delegated Type() string without
 // being *DelegatedAgentIdentity.
-type fakeDelegatedTypeIdentity struct{}
+type adtFakeTypeIdentity struct{}
 
-func (fakeDelegatedTypeIdentity) ID() string   { return "fake-delegated" }
-func (fakeDelegatedTypeIdentity) Type() string { return "agent_delegated" }
+func (adtFakeTypeIdentity) ID() string   { return "fake-delegated" }
+func (adtFakeTypeIdentity) Type() string { return "agent_delegated" }
 
 // TestAgentDelegation_ClassificationIsByConcreteType: only the concrete type
 // classifies as the delegated pair; a look-alike Type() string classifies
 // to nothing and Decide denies it.
 func TestAgentDelegation_ClassificationIsByConcreteType(t *testing.T) {
-	id := testDelegatedIdentity("agent-x", "project-x")
+	id := adtTestIdentity("agent-x", "project-x")
 	pc := principalContextForIdentity(id)
 	cc := credentialContextForIdentity(id)
 	assert.Equal(t, PrincipalKindAgentDelegated, pc.Kind)
@@ -76,7 +76,7 @@ func TestAgentDelegation_ClassificationIsByConcreteType(t *testing.T) {
 	assert.Nil(t, GetAgentIdentityFromContext(ctx))
 	assert.Same(t, id, GetIdentityFromContext(ctx))
 
-	fake := fakeDelegatedTypeIdentity{}
+	fake := adtFakeTypeIdentity{}
 	assert.Empty(t, principalContextForIdentity(fake).Kind)
 	assert.Empty(t, credentialContextForIdentity(fake).Kind)
 	a := &AuthzService{}
@@ -90,7 +90,7 @@ func TestAgentDelegation_ClassificationIsByConcreteType(t *testing.T) {
 // for audit and attributed to agent delegation.
 func TestAgentDelegation_DecideWithoutRequestStateDenies(t *testing.T) {
 	a := &AuthzService{}
-	id := testDelegatedIdentity("agent-x", "project-x")
+	id := adtTestIdentity("agent-x", "project-x")
 	req := AuthzRequest{Principal: PrincipalContext{Identity: id}, Resource: Resource{Type: "agent", ID: "agent-y", ParentType: "project", ParentID: "project-x"}, Action: ActionRead}
 
 	d := a.Decide(context.Background(), req)
@@ -111,7 +111,7 @@ func TestAgentDelegation_DecideWithoutRequestStateDenies(t *testing.T) {
 	assert.Equal(t, agentDelegationCodeCredentialNotAdmitted, d.AgentDelegation.AgentDelegationCode)
 
 	// State for another identity object with the same values.
-	ctx = contextWithDelegatedState(context.Background(), &delegatedRequestState{identity: testDelegatedIdentity("agent-x", "project-x")})
+	ctx = contextWithDelegatedState(context.Background(), &delegatedRequestState{identity: adtTestIdentity("agent-x", "project-x")})
 	d = a.Decide(ctx, req)
 	assert.Equal(t, agentDelegationCodeStateMissing, d.AgentDelegation.AgentDelegationCode)
 
@@ -133,7 +133,7 @@ func TestAgentDelegation_SupplyingTheDelegatedKindToAnotherIdentityDenies(t *tes
 	})
 	assert.False(t, d.Allowed)
 	d = a.decide(context.Background(), AuthzRequest{
-		Principal: PrincipalContext{Identity: testDelegatedIdentity("a", "p")}, Credential: CredentialContext{Kind: CredentialKindInteractive},
+		Principal: PrincipalContext{Identity: adtTestIdentity("a", "p")}, Credential: CredentialContext{Kind: CredentialKindInteractive},
 		Resource: Resource{Type: "agent", ID: "a"}, Action: ActionRead,
 	})
 	assert.False(t, d.Allowed)
@@ -143,7 +143,7 @@ func TestAgentDelegation_SupplyingTheDelegatedKindToAnotherIdentityDenies(t *tes
 // the shared helpers that would otherwise treat an unknown identity
 // permissively (.design/agent-delegation.md §12.3).
 func TestAgentDelegation_PermissiveHelpersRefuse(t *testing.T) {
-	id := testDelegatedIdentity("agent-x", "project-x")
+	id := adtTestIdentity("agent-x", "project-x")
 	a := &AuthzService{}
 
 	d := a.CanDelegate(context.Background(), id, GrantDescriptor{Type: GrantTypeAgentDelegation, AgentRole: string(AgentRoleNone), ProjectID: "project-x"})
@@ -160,7 +160,7 @@ func TestAgentDelegation_PermissiveHelpersRefuse(t *testing.T) {
 	assert.Error(t, err)
 
 	binding := scopedCursorBinding("agents", map[string]string{}, id)
-	other := testDelegatedIdentity("agent-x", "project-x")
+	other := adtTestIdentity("agent-x", "project-x")
 	other.credentialID = "another-credential"
 	assert.NotEqual(t, binding, scopedCursorBinding("agents", map[string]string{}, other), "a cursor is bound to the credential")
 
@@ -191,7 +191,7 @@ func TestAgentDelegation_PermissiveHelpersRefuse(t *testing.T) {
 // the route's own target, and nothing elsewhere.
 func TestAgentDelegation_CapabilitiesArePrimaryActionOnly(t *testing.T) {
 	a := &AuthzService{}
-	id := testDelegatedIdentity("agent-x", "project-x")
+	id := adtTestIdentity("agent-x", "project-x")
 	target := &store.Agent{ID: "agent-y", ProjectID: "project-x"}
 
 	// No admission in the context: nothing.

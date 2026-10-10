@@ -33,10 +33,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setAgentDelegationExperiment turns hub.agent_delegation on or off on srv
+// adtSetExperiment turns hub.agent_delegation on or off on srv
 // by replacing its registry; every other experiment keeps its registered
 // default.
-func setAgentDelegationExperiment(t *testing.T, srv *Server, on bool) {
+func adtSetExperiment(t *testing.T, srv *Server, on bool) {
 	t.Helper()
 	var active []experiments.Experiment
 	for _, e := range experiments.Default().All() {
@@ -51,11 +51,11 @@ func setAgentDelegationExperiment(t *testing.T, srv *Server, on bool) {
 	require.Equal(t, on, srv.experimentEnabled(experiments.AgentDelegation))
 }
 
-// delegationFixture is the agent delegation world: Alice, a member of P1
+// adtFixture is the agent delegation world: Alice, a member of P1
 // and P2, owns agent A in P1 (created through the handler, so it has a
 // recorded chain). Agent B lives in P2 and is owned by Bob, a member of P2
 // only. Agent C in P1 is owned by Carol, a member of P1 only.
-type delegationFixture struct {
+type adtFixture struct {
 	*uatCreateFixture
 	alice, bob, carol *store.User
 	aliceP2Binding    string
@@ -64,18 +64,18 @@ type delegationFixture struct {
 	agentC            *store.Agent
 }
 
-func newDelegationFixture(t *testing.T, name string) *delegationFixture {
+func newADTFixture(t *testing.T, name string) *adtFixture {
 	t.Helper()
 	ctx := context.Background()
-	f := &delegationFixture{uatCreateFixture: newUATCreateFixture(t, name)}
-	setAgentDelegationExperiment(t, f.srv, true)
+	f := &adtFixture{uatCreateFixture: newUATCreateFixture(t, name)}
+	adtSetExperiment(t, f.srv, true)
 	f.alice = f.creator
-	f.aliceP2Binding = delegationGrantRole(t, f.store, f.alice.ID, f.other.ID, store.ProjectRoleMember)
+	f.aliceP2Binding = adtGrantRole(t, f.store, f.alice.ID, f.other.ID, store.ProjectRoleMember)
 
 	f.bob = hubMemberUser(t, f.store, name+"-bob")
-	delegationGrantRole(t, f.store, f.bob.ID, f.other.ID, store.ProjectRoleMember)
+	adtGrantRole(t, f.store, f.bob.ID, f.other.ID, store.ProjectRoleMember)
 	f.carol = hubMemberUser(t, f.store, name+"-carol")
-	delegationGrantRole(t, f.store, f.carol.ID, f.proj.ID, store.ProjectRoleMember)
+	adtGrantRole(t, f.store, f.carol.ID, f.proj.ID, store.ProjectRoleMember)
 
 	f.agentA, _ = f.createdAgent(t, f.create(t, authUser(f.alice), CreateAgentRequest{Name: name + "-a"}), name+"-a")
 
@@ -93,9 +93,9 @@ func newDelegationFixture(t *testing.T, name string) *delegationFixture {
 	return f
 }
 
-// delegationGrantRole binds userID to roleName in projectID and returns the
+// adtGrantRole binds userID to roleName in projectID and returns the
 // binding ID.
-func delegationGrantRole(t *testing.T, s store.Store, userID, projectID, roleName string) string {
+func adtGrantRole(t *testing.T, s store.Store, userID, projectID, roleName string) string {
 	t.Helper()
 	ctx := context.Background()
 	rd, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeProject)
@@ -113,7 +113,7 @@ func delegationGrantRole(t *testing.T, s store.Store, userID, projectID, roleNam
 }
 
 // session returns a session JWT for u.
-func (f *delegationFixture) session(t *testing.T, u *store.User) string {
+func (f *adtFixture) session(t *testing.T, u *store.User) string {
 	t.Helper()
 	token, _, _, err := f.srv.userTokenService.GenerateTokenPair(u.ID, u.Email, u.DisplayName, u.Role, ClientTypeWeb)
 	require.NoError(t, err)
@@ -121,7 +121,7 @@ func (f *delegationFixture) session(t *testing.T, u *store.User) string {
 }
 
 // agentJWT returns a production agent token for a, with its credential row.
-func (f *delegationFixture) agentJWT(t *testing.T, a *store.Agent) string {
+func (f *adtFixture) agentJWT(t *testing.T, a *store.Agent) string {
 	t.Helper()
 	stored, err := f.store.GetAgent(context.Background(), a.ID)
 	require.NoError(t, err)
@@ -132,7 +132,7 @@ func (f *delegationFixture) agentJWT(t *testing.T, a *store.Agent) string {
 
 // do sends a request through the full handler chain (middleware, route
 // guard, dispatch). headers are set as given.
-func (f *delegationFixture) do(t *testing.T, method, path string, body interface{}, headers map[string]string) *httptest.ResponseRecorder {
+func (f *adtFixture) do(t *testing.T, method, path string, body interface{}, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
 	var buf []byte
 	if body != nil {
@@ -152,22 +152,22 @@ func (f *delegationFixture) do(t *testing.T, method, path string, body interface
 	return rec
 }
 
-func bearer(token string) map[string]string {
+func adtBearer(token string) map[string]string {
 	return map[string]string{"Authorization": "Bearer " + token}
 }
 
-func (f *delegationFixture) issue(t *testing.T, token, agentID string, body map[string]interface{}) *httptest.ResponseRecorder {
+func (f *adtFixture) issue(t *testing.T, token, agentID string, body map[string]interface{}) *httptest.ResponseRecorder {
 	t.Helper()
-	return f.do(t, http.MethodPost, "/api/v1/agents/"+agentID+"/delegations", body, bearer(token))
+	return f.do(t, http.MethodPost, "/api/v1/agents/"+agentID+"/delegations", body, adtBearer(token))
 }
 
-func (f *delegationFixture) exchange(t *testing.T, agentToken, agentID, grantID string, body map[string]interface{}) *httptest.ResponseRecorder {
+func (f *adtFixture) exchange(t *testing.T, agentToken, agentID, grantID string, body map[string]interface{}) *httptest.ResponseRecorder {
 	t.Helper()
-	return f.do(t, http.MethodPost, "/api/v1/agents/"+agentID+"/delegations/"+grantID+"/exchange", body, bearer(agentToken))
+	return f.do(t, http.MethodPost, "/api/v1/agents/"+agentID+"/delegations/"+grantID+"/exchange", body, adtBearer(agentToken))
 }
 
 // hubGrant issues Alice's hub-bounded agent:read grant for agent A.
-func (f *delegationFixture) hubGrant(t *testing.T) AgentDelegationGrantResponse {
+func (f *adtFixture) hubGrant(t *testing.T) AgentDelegationGrantResponse {
 	t.Helper()
 	rec := f.issue(t, f.session(t, f.alice), f.agentA.ID, map[string]interface{}{
 		"boundary": map[string]string{"kind": "hub"}, "permissions": []string{"agent:read"}, "name": "hub-read",
@@ -180,7 +180,7 @@ func (f *delegationFixture) hubGrant(t *testing.T) AgentDelegationGrantResponse 
 
 // delegated exchanges grantID with A's agent token and returns the
 // delegated credential.
-func (f *delegationFixture) delegated(t *testing.T, grantID string) ExchangeAgentDelegationResponse {
+func (f *adtFixture) delegated(t *testing.T, grantID string) ExchangeAgentDelegationResponse {
 	t.Helper()
 	rec := f.exchange(t, f.agentJWT(t, f.agentA), f.agentA.ID, grantID, map[string]interface{}{"audience": f.srv.agentDelegationAudience()})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -189,12 +189,12 @@ func (f *delegationFixture) delegated(t *testing.T, grantID string) ExchangeAgen
 	return out
 }
 
-func (f *delegationFixture) getAgent(t *testing.T, token, agentID string) *httptest.ResponseRecorder {
+func (f *adtFixture) getAgent(t *testing.T, token, agentID string) *httptest.ResponseRecorder {
 	t.Helper()
-	return f.do(t, http.MethodGet, "/api/v1/agents/"+agentID, nil, bearer(token))
+	return f.do(t, http.MethodGet, "/api/v1/agents/"+agentID, nil, adtBearer(token))
 }
 
-func assertAPIError(t *testing.T, rec *httptest.ResponseRecorder, status int, code string) APIError {
+func adtAssertAPIError(t *testing.T, rec *httptest.ResponseRecorder, status int, code string) APIError {
 	t.Helper()
 	require.Equal(t, status, rec.Code, rec.Body.String())
 	apiErr := decodeTargetAPIError(t, rec)
@@ -202,7 +202,7 @@ func assertAPIError(t *testing.T, rec *httptest.ResponseRecorder, status int, co
 	return apiErr
 }
 
-func delegationAudits(t *testing.T, s store.Store, mutationType string) []*store.MutationAuditRecord {
+func adtAudits(t *testing.T, s store.Store, mutationType string) []*store.MutationAuditRecord {
 	t.Helper()
 	recs, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{MutationType: mutationType})
 	require.NoError(t, err)
@@ -214,7 +214,7 @@ func delegationAudits(t *testing.T, s store.Store, mutationType string) []*store
 // =============================================================================
 
 func TestAgentDelegationIssuance_IssuesGrantWithAudit(t *testing.T) {
-	f := newDelegationFixture(t, "adt-issue")
+	f := newADTFixture(t, "adt-issue")
 	before := time.Now()
 	rec := f.issue(t, f.session(t, f.alice), f.agentA.ID, map[string]interface{}{
 		"boundary": map[string]string{"kind": "hub"}, "permissions": []string{"agent:read"},
@@ -244,7 +244,7 @@ func TestAgentDelegationIssuance_IssuesGrantWithAudit(t *testing.T) {
 	assert.Zero(t, grant.Depth)
 	assert.Equal(t, map[string]string{"team": "reports"}, grant.Labels)
 
-	audits := delegationAudits(t, f.store, mutationAgentDelegationGrantCreate)
+	audits := adtAudits(t, f.store, mutationAgentDelegationGrantCreate)
 	require.Len(t, audits, 1)
 	a := audits[0]
 	assert.Equal(t, grant.IssuanceAuditID, a.ID)
@@ -259,38 +259,38 @@ func TestAgentDelegationIssuance_IssuesGrantWithAudit(t *testing.T) {
 }
 
 func TestAgentDelegationIssuance_RefusesNonSessionCredentials(t *testing.T) {
-	f := newDelegationFixture(t, "adt-cred")
+	f := newADTFixture(t, "adt-cred")
 	body := map[string]interface{}{"boundary": map[string]string{"kind": "hub"}, "permissions": []string{"agent:read"}, "name": "n"}
 
 	// A UAT: the session-only refusal with its reason details.
 	uat := scopedIdentityFor(f.alice, f.proj.ID, []string{"agent:read"})
-	rec := requestWithCredential(t, f.srv, uat, http.MethodPost, "/api/v1/agents/"+f.agentA.ID+"/delegations", body)
-	apiErr := assertAPIError(t, rec, http.StatusForbidden, ErrCodeForbidden)
+	rec := adtRequestWithCredential(t, f.srv, uat, http.MethodPost, "/api/v1/agents/"+f.agentA.ID+"/delegations", body)
+	apiErr := adtAssertAPIError(t, rec, http.StatusForbidden, ErrCodeForbidden)
 	assert.Equal(t, "CREDENTIAL_MANAGEMENT", apiErr.Details["reason"])
 	assert.Equal(t, "session_required", apiErr.Details["credential"])
 
 	// An agent JWT: the plain 403 for a non-user identity.
 	rec = f.issue(t, f.agentJWT(t, f.agentA), f.agentA.ID, body)
-	apiErr = assertAPIError(t, rec, http.StatusForbidden, ErrCodeForbidden)
+	apiErr = adtAssertAPIError(t, rec, http.StatusForbidden, ErrCodeForbidden)
 	assert.Empty(t, apiErr.Details)
 
 	// A dev session.
 	rec = f.issue(t, testDevToken, f.agentA.ID, body)
-	assertAPIError(t, rec, http.StatusForbidden, errCodeCredentialNotAdmitted)
+	adtAssertAPIError(t, rec, http.StatusForbidden, errCodeCredentialNotAdmitted)
 
 	// A delegated credential is refused at the route gate.
 	cred := f.delegated(t, f.hubGrant(t).ID)
 	rec = f.issue(t, cred.Token, f.agentA.ID, body)
-	assertAPIError(t, rec, http.StatusForbidden, errCodeCredentialNotAdmitted)
+	adtAssertAPIError(t, rec, http.StatusForbidden, errCodeCredentialNotAdmitted)
 
 	// Only the grant issued above exists.
-	assert.Len(t, delegationAudits(t, f.store, mutationAgentDelegationGrantCreate), 1)
+	assert.Len(t, adtAudits(t, f.store, mutationAgentDelegationGrantCreate), 1)
 }
 
-// requestWithCredential sends a request directly to the mux with identity
+// adtRequestWithCredential sends a request directly to the mux with identity
 // and its derived credential context, bypassing the authentication
 // middleware.
-func requestWithCredential(t *testing.T, srv *Server, identity Identity, method, path string, body interface{}) *httptest.ResponseRecorder {
+func adtRequestWithCredential(t *testing.T, srv *Server, identity Identity, method, path string, body interface{}) *httptest.ResponseRecorder {
 	t.Helper()
 	buf, err := json.Marshal(body)
 	require.NoError(t, err)
@@ -307,7 +307,7 @@ func requestWithCredential(t *testing.T, srv *Server, identity Identity, method,
 }
 
 func TestAgentDelegationIssuance_Refusals(t *testing.T) {
-	f := newDelegationFixture(t, "adt-refuse")
+	f := newADTFixture(t, "adt-refuse")
 	alice := f.session(t, f.alice)
 	hubRead := func() map[string]interface{} {
 		return map[string]interface{}{"boundary": map[string]string{"kind": "hub"}, "permissions": []string{"agent:read"}, "name": "n"}
@@ -315,18 +315,18 @@ func TestAgentDelegationIssuance_Refusals(t *testing.T) {
 
 	t.Run("not the controller", func(t *testing.T) {
 		rec := f.issue(t, f.session(t, f.carol), f.agentA.ID, hubRead())
-		assertAPIError(t, rec, http.StatusForbidden, errCodeIssuerNotController)
+		adtAssertAPIError(t, rec, http.StatusForbidden, errCodeIssuerNotController)
 	})
 	t.Run("unknown agent", func(t *testing.T) {
 		rec := f.issue(t, alice, tid("adt-refuse-missing"), hubRead())
-		assertAPIError(t, rec, http.StatusNotFound, errCodeAgentNotFound)
+		adtAssertAPIError(t, rec, http.StatusNotFound, errCodeAgentNotFound)
 	})
 	t.Run("selector the issuer cannot mint", func(t *testing.T) {
 		body := hubRead()
 		body["boundary"] = map[string]string{"kind": "project", "projectId": f.proj.ID}
 		body["permissions"] = []string{"project:manage"}
 		rec := f.issue(t, alice, f.agentA.ID, body)
-		apiErr := assertAPIError(t, rec, http.StatusForbidden, errCodeScopeViolation)
+		apiErr := adtAssertAPIError(t, rec, http.StatusForbidden, errCodeScopeViolation)
 		assert.Equal(t, "project:manage", apiErr.Details["selector"])
 		assert.NotEmpty(t, apiErr.Details["reason"])
 	})
@@ -334,20 +334,20 @@ func TestAgentDelegationIssuance_Refusals(t *testing.T) {
 		body := hubRead()
 		body["permissions"] = []string{"project:read"}
 		rec := f.issue(t, alice, f.agentA.ID, body)
-		assertAPIError(t, rec, http.StatusForbidden, errCodePermissionNotDelegable)
+		adtAssertAPIError(t, rec, http.StatusForbidden, errCodePermissionNotDelegable)
 	})
 	t.Run("project boundary on a project that does not exist", func(t *testing.T) {
 		body := hubRead()
 		body["boundary"] = map[string]string{"kind": "project", "projectId": tid("adt-refuse-no-project")}
 		rec := f.issue(t, alice, f.agentA.ID, body)
-		apiErr := assertAPIError(t, rec, http.StatusForbidden, ErrCodeForbidden)
+		apiErr := adtAssertAPIError(t, rec, http.StatusForbidden, ErrCodeForbidden)
 		assert.Empty(t, apiErr.Details)
 	})
 	t.Run("boundary missing", func(t *testing.T) {
 		body := hubRead()
 		delete(body, "boundary")
 		rec := f.issue(t, alice, f.agentA.ID, body)
-		apiErr := assertAPIError(t, rec, http.StatusBadRequest, ErrCodeValidationError)
+		apiErr := adtAssertAPIError(t, rec, http.StatusBadRequest, ErrCodeValidationError)
 		assert.Equal(t, "boundary", apiErr.Details["field"])
 		assert.Equal(t, "boundary_required", apiErr.Details["reason"])
 	})
@@ -355,40 +355,40 @@ func TestAgentDelegationIssuance_Refusals(t *testing.T) {
 		body := hubRead()
 		body["boundary"] = map[string]string{"kind": "hub", "projectId": f.proj.ID}
 		rec := f.issue(t, alice, f.agentA.ID, body)
-		apiErr := assertAPIError(t, rec, http.StatusBadRequest, ErrCodeValidationError)
+		apiErr := adtAssertAPIError(t, rec, http.StatusBadRequest, ErrCodeValidationError)
 		assert.Equal(t, "boundary_invalid", apiErr.Details["reason"])
 	})
 	t.Run("expiry beyond thirty days", func(t *testing.T) {
 		body := hubRead()
 		body["expiresAt"] = time.Now().Add(31 * 24 * time.Hour).UTC().Format(time.RFC3339)
 		rec := f.issue(t, alice, f.agentA.ID, body)
-		assertAPIError(t, rec, http.StatusBadRequest, ErrCodeValidationError)
+		adtAssertAPIError(t, rec, http.StatusBadRequest, ErrCodeValidationError)
 	})
 	t.Run("expiry in the past", func(t *testing.T) {
 		body := hubRead()
 		body["expiresAt"] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
 		rec := f.issue(t, alice, f.agentA.ID, body)
-		assertAPIError(t, rec, http.StatusBadRequest, ErrCodeValidationError)
+		adtAssertAPIError(t, rec, http.StatusBadRequest, ErrCodeValidationError)
 	})
 	t.Run("credential lifetime above the maximum", func(t *testing.T) {
 		body := hubRead()
 		body["maxCredentialTtlSeconds"] = 3601
 		rec := f.issue(t, alice, f.agentA.ID, body)
-		assertAPIError(t, rec, http.StatusBadRequest, ErrCodeValidationError)
+		adtAssertAPIError(t, rec, http.StatusBadRequest, ErrCodeValidationError)
 	})
 	t.Run("subdelegation", func(t *testing.T) {
 		body := hubRead()
 		body["allowSubdelegation"] = true
-		assertAPIError(t, f.issue(t, alice, f.agentA.ID, body), http.StatusBadRequest, errCodeSubdelegationNotSupported)
+		adtAssertAPIError(t, f.issue(t, alice, f.agentA.ID, body), http.StatusBadRequest, errCodeSubdelegationNotSupported)
 		body = hubRead()
 		body["parentGrantId"] = "g"
-		assertAPIError(t, f.issue(t, alice, f.agentA.ID, body), http.StatusBadRequest, errCodeSubdelegationNotSupported)
+		adtAssertAPIError(t, f.issue(t, alice, f.agentA.ID, body), http.StatusBadRequest, errCodeSubdelegationNotSupported)
 	})
 	t.Run("reserved label key", func(t *testing.T) {
 		body := hubRead()
 		body["labels"] = map[string]string{"actor": "agent:x"}
 		rec := f.issue(t, alice, f.agentA.ID, body)
-		assertAPIError(t, rec, http.StatusBadRequest, ErrCodeValidationError)
+		adtAssertAPIError(t, rec, http.StatusBadRequest, ErrCodeValidationError)
 		assert.NotContains(t, rec.Body.String(), "agent:x")
 	})
 	t.Run("suspended agent", func(t *testing.T) {
@@ -402,19 +402,19 @@ func TestAgentDelegationIssuance_Refusals(t *testing.T) {
 			again.Phase = f.agentA.Phase
 			require.NoError(t, f.store.UpdateAgent(context.Background(), again))
 		})
-		assertAPIError(t, f.issue(t, alice, f.agentA.ID, hubRead()), http.StatusConflict, errCodeAgentNotEligible)
+		adtAssertAPIError(t, f.issue(t, alice, f.agentA.ID, hubRead()), http.StatusConflict, errCodeAgentNotEligible)
 	})
 	t.Run("experiment off", func(t *testing.T) {
-		setAgentDelegationExperiment(t, f.srv, false)
-		t.Cleanup(func() { setAgentDelegationExperiment(t, f.srv, true) })
-		assertAPIError(t, f.issue(t, alice, f.agentA.ID, hubRead()), http.StatusNotFound, ErrCodeNotFound)
+		adtSetExperiment(t, f.srv, false)
+		t.Cleanup(func() { adtSetExperiment(t, f.srv, true) })
+		adtAssertAPIError(t, f.issue(t, alice, f.agentA.ID, hubRead()), http.StatusNotFound, ErrCodeNotFound)
 	})
 
-	assert.Empty(t, delegationAudits(t, f.store, mutationAgentDelegationGrantCreate), "no refused request wrote a grant")
+	assert.Empty(t, adtAudits(t, f.store, mutationAgentDelegationGrantCreate), "no refused request wrote a grant")
 }
 
 func TestAgentDelegationIssuance_AuditFailureRollsBack(t *testing.T) {
-	f := newDelegationFixture(t, "adt-issue-audit")
+	f := newADTFixture(t, "adt-issue-audit")
 	session := f.session(t, f.alice)
 	f.srv.store = &rs4FailingStore{Store: f.store, createMutationAuditErr: errors.New("audit write failed")}
 	t.Cleanup(func() { f.srv.store = f.store })
@@ -422,8 +422,8 @@ func TestAgentDelegationIssuance_AuditFailureRollsBack(t *testing.T) {
 	rec := f.issue(t, session, f.agentA.ID, map[string]interface{}{
 		"boundary": map[string]string{"kind": "hub"}, "permissions": []string{"agent:read"}, "name": "n",
 	})
-	assertAPIError(t, rec, http.StatusInternalServerError, errCodeAuditFailed)
-	assert.Empty(t, delegationAudits(t, f.store, mutationAgentDelegationGrantCreate))
+	adtAssertAPIError(t, rec, http.StatusInternalServerError, errCodeAuditFailed)
+	assert.Empty(t, adtAudits(t, f.store, mutationAgentDelegationGrantCreate))
 }
 
 // =============================================================================
@@ -431,7 +431,7 @@ func TestAgentDelegationIssuance_AuditFailureRollsBack(t *testing.T) {
 // =============================================================================
 
 func TestAgentDelegationExchange_IssuesCredentialWithAudit(t *testing.T) {
-	f := newDelegationFixture(t, "adt-exchange")
+	f := newADTFixture(t, "adt-exchange")
 	grant := f.hubGrant(t)
 	agentToken := f.agentJWT(t, f.agentA)
 	before := time.Now()
@@ -458,7 +458,7 @@ func TestAgentDelegationExchange_IssuesCredentialWithAudit(t *testing.T) {
 	assert.Equal(t, delegatedCredentialPrefix, cred.Prefix)
 	assert.NotContains(t, cred.Prefix+cred.KeyHash+cred.Audience, out.Token[len(delegatedCredentialPrefix):])
 
-	audits := delegationAudits(t, f.store, mutationAgentDelegationCredentialIssue)
+	audits := adtAudits(t, f.store, mutationAgentDelegationCredentialIssue)
 	require.Len(t, audits, 1)
 	a := audits[0]
 	assert.Equal(t, cred.ID, a.TargetID)
@@ -481,20 +481,20 @@ func TestAgentDelegationExchange_IssuesCredentialWithAudit(t *testing.T) {
 }
 
 func TestAgentDelegationExchange_RefusesUATAndSession(t *testing.T) {
-	f := newDelegationFixture(t, "adt-exch-cred")
+	f := newADTFixture(t, "adt-exch-cred")
 	grant := f.hubGrant(t)
 	body := map[string]interface{}{"audience": f.srv.agentDelegationAudience()}
 	path := "/api/v1/agents/" + f.agentA.ID + "/delegations/" + grant.ID + "/exchange"
 
-	assertAPIError(t, f.do(t, http.MethodPost, path, body, bearer(f.session(t, f.alice))), http.StatusForbidden, errCodeCredentialNotAdmitted)
-	assertAPIError(t, f.do(t, http.MethodPost, path, body, bearer(testDevToken)), http.StatusForbidden, errCodeCredentialNotAdmitted)
+	adtAssertAPIError(t, f.do(t, http.MethodPost, path, body, adtBearer(f.session(t, f.alice))), http.StatusForbidden, errCodeCredentialNotAdmitted)
+	adtAssertAPIError(t, f.do(t, http.MethodPost, path, body, adtBearer(testDevToken)), http.StatusForbidden, errCodeCredentialNotAdmitted)
 	uat := scopedIdentityFor(f.alice, f.proj.ID, []string{"agent:read"})
-	assertAPIError(t, requestWithCredential(t, f.srv, uat, http.MethodPost, path, body), http.StatusForbidden, errCodeCredentialNotAdmitted)
-	assert.Empty(t, delegationAudits(t, f.store, mutationAgentDelegationCredentialIssue), "no refused exchange issued a credential")
+	adtAssertAPIError(t, adtRequestWithCredential(t, f.srv, uat, http.MethodPost, path, body), http.StatusForbidden, errCodeCredentialNotAdmitted)
+	assert.Empty(t, adtAudits(t, f.store, mutationAgentDelegationCredentialIssue), "no refused exchange issued a credential")
 }
 
 func TestAgentDelegationExchange_Refusals(t *testing.T) {
-	f := newDelegationFixture(t, "adt-exch-refuse")
+	f := newADTFixture(t, "adt-exch-refuse")
 	grant := f.hubGrant(t)
 	aud := f.srv.agentDelegationAudience()
 	tokenA := f.agentJWT(t, f.agentA)
@@ -502,30 +502,30 @@ func TestAgentDelegationExchange_Refusals(t *testing.T) {
 	t.Run("another agent's token on its own path", func(t *testing.T) {
 		otherAgent, _ := f.createdAgent(t, f.create(t, authUser(f.alice), CreateAgentRequest{Name: "adt-exch-refuse-x"}), "adt-exch-refuse-x")
 		rec := f.exchange(t, f.agentJWT(t, otherAgent), otherAgent.ID, grant.ID, map[string]interface{}{"audience": aud})
-		assertAPIError(t, rec, http.StatusNotFound, errCodeGrantNotFound)
+		adtAssertAPIError(t, rec, http.StatusNotFound, errCodeGrantNotFound)
 		// Identical to a grant that does not exist.
 		rec = f.exchange(t, tokenA, f.agentA.ID, tid("adt-exch-refuse-nogrant"), map[string]interface{}{"audience": aud})
-		assertAPIError(t, rec, http.StatusNotFound, errCodeGrantNotFound)
+		adtAssertAPIError(t, rec, http.StatusNotFound, errCodeGrantNotFound)
 	})
 	t.Run("path agent is not the token subject", func(t *testing.T) {
 		rec := f.exchange(t, tokenA, f.agentC.ID, grant.ID, map[string]interface{}{"audience": aud})
-		assertAPIError(t, rec, http.StatusForbidden, errCodeCredentialNotAdmitted)
+		adtAssertAPIError(t, rec, http.StatusForbidden, errCodeCredentialNotAdmitted)
 	})
 	t.Run("wrong audience", func(t *testing.T) {
 		rec := f.exchange(t, tokenA, f.agentA.ID, grant.ID, map[string]interface{}{"audience": "scion-hub:elsewhere"})
-		assertAPIError(t, rec, http.StatusBadRequest, errCodeInvalidAudience)
+		adtAssertAPIError(t, rec, http.StatusBadRequest, errCodeInvalidAudience)
 	})
 	t.Run("permission outside the grant", func(t *testing.T) {
 		rec := f.exchange(t, tokenA, f.agentA.ID, grant.ID, map[string]interface{}{"audience": aud, "permissions": []string{"agent:delete"}})
-		assertAPIError(t, rec, http.StatusForbidden, errCodeOutsideCeiling)
+		adtAssertAPIError(t, rec, http.StatusForbidden, errCodeOutsideCeiling)
 	})
 	t.Run("unknown selector", func(t *testing.T) {
 		rec := f.exchange(t, tokenA, f.agentA.ID, grant.ID, map[string]interface{}{"audience": aud, "permissions": []string{"agent:nonsense"}})
-		assertAPIError(t, rec, http.StatusBadRequest, ErrCodeValidationError)
+		adtAssertAPIError(t, rec, http.StatusBadRequest, ErrCodeValidationError)
 	})
 	t.Run("lifetime above the maximum", func(t *testing.T) {
 		rec := f.exchange(t, tokenA, f.agentA.ID, grant.ID, map[string]interface{}{"audience": aud, "ttlSeconds": 3601})
-		assertAPIError(t, rec, http.StatusBadRequest, ErrCodeValidationError)
+		adtAssertAPIError(t, rec, http.StatusBadRequest, ErrCodeValidationError)
 	})
 	t.Run("revoked agent credential", func(t *testing.T) {
 		token := f.agentJWT(t, f.agentA)
@@ -543,12 +543,12 @@ func TestAgentDelegationExchange_Refusals(t *testing.T) {
 		_, err := f.store.RevokeAgentDelegationGrant(context.Background(), other.ID, "test", "test", "", time.Now())
 		require.NoError(t, err)
 		rec := f.exchange(t, tokenA, f.agentA.ID, other.ID, map[string]interface{}{"audience": aud})
-		assertAPIError(t, rec, http.StatusForbidden, errCodeGrantInactive)
+		adtAssertAPIError(t, rec, http.StatusForbidden, errCodeGrantInactive)
 	})
 	t.Run("issuer suspended", func(t *testing.T) {
 		other := f.hubGrant(t)
-		setUserStatus(t, f.store, f.alice.ID, store.UserStatusSuspended)
-		t.Cleanup(func() { setUserStatus(t, f.store, f.alice.ID, store.UserStatusActive) })
+		adtSetUserStatus(t, f.store, f.alice.ID, store.UserStatusSuspended)
+		t.Cleanup(func() { adtSetUserStatus(t, f.store, f.alice.ID, store.UserStatusActive) })
 		rec := f.exchange(t, tokenA, f.agentA.ID, other.ID, map[string]interface{}{"audience": aud})
 		// The agent's root user is the issuer, so the actor-state check
 		// (standing) refuses before the issuer-state check.
@@ -556,16 +556,16 @@ func TestAgentDelegationExchange_Refusals(t *testing.T) {
 		assert.Contains(t, []string{errCodeGrantAgentChanged, errCodeIssuerInvalid}, decodeTargetAPIError(t, rec).Code)
 	})
 	t.Run("experiment off", func(t *testing.T) {
-		setAgentDelegationExperiment(t, f.srv, false)
-		t.Cleanup(func() { setAgentDelegationExperiment(t, f.srv, true) })
+		adtSetExperiment(t, f.srv, false)
+		t.Cleanup(func() { adtSetExperiment(t, f.srv, true) })
 		rec := f.exchange(t, tokenA, f.agentA.ID, grant.ID, map[string]interface{}{"audience": aud})
-		assertAPIError(t, rec, http.StatusNotFound, ErrCodeNotFound)
+		adtAssertAPIError(t, rec, http.StatusNotFound, ErrCodeNotFound)
 	})
 
-	assert.Empty(t, delegationAudits(t, f.store, mutationAgentDelegationCredentialIssue), "no refused exchange issued a credential")
+	assert.Empty(t, adtAudits(t, f.store, mutationAgentDelegationCredentialIssue), "no refused exchange issued a credential")
 }
 
-func setUserStatus(t *testing.T, s store.Store, userID, status string) {
+func adtSetUserStatus(t *testing.T, s store.Store, userID, status string) {
 	t.Helper()
 	u, err := s.GetUser(context.Background(), userID)
 	require.NoError(t, err)
@@ -574,14 +574,14 @@ func setUserStatus(t *testing.T, s store.Store, userID, status string) {
 }
 
 func TestAgentDelegationExchange_AuditFailureRollsBack(t *testing.T) {
-	f := newDelegationFixture(t, "adt-exch-audit")
+	f := newADTFixture(t, "adt-exch-audit")
 	grant := f.hubGrant(t)
 	token := f.agentJWT(t, f.agentA)
 	f.srv.store = &rs4FailingStore{Store: f.store, createMutationAuditErr: errors.New("audit write failed")}
 	t.Cleanup(func() { f.srv.store = f.store })
 
 	rec := f.exchange(t, token, f.agentA.ID, grant.ID, map[string]interface{}{"audience": f.srv.agentDelegationAudience()})
-	assertAPIError(t, rec, http.StatusInternalServerError, errCodeAuditFailed)
+	adtAssertAPIError(t, rec, http.StatusInternalServerError, errCodeAuditFailed)
 	assert.NotContains(t, rec.Body.String(), delegatedCredentialPrefix)
 	stored, err := f.store.GetAgentDelegationGrant(context.Background(), grant.ID)
 	require.NoError(t, err)
@@ -593,7 +593,7 @@ func TestAgentDelegationExchange_AuditFailureRollsBack(t *testing.T) {
 // =============================================================================
 
 func TestAgentDelegation_DelegatedReadAcrossProjectsIsRedacted(t *testing.T) {
-	f := newDelegationFixture(t, "adt-read")
+	f := newADTFixture(t, "adt-read")
 	cred := f.delegated(t, f.hubGrant(t).ID)
 
 	rec := f.getAgent(t, cred.Token, f.agentB.ID)
@@ -624,7 +624,7 @@ func TestAgentDelegation_DelegatedReadAcrossProjectsIsRedacted(t *testing.T) {
 }
 
 func TestAgentDelegation_ProjectBoundaryDeniesOtherProject(t *testing.T) {
-	f := newDelegationFixture(t, "adt-boundary")
+	f := newADTFixture(t, "adt-boundary")
 	rec := f.issue(t, f.session(t, f.alice), f.agentA.ID, map[string]interface{}{
 		"boundary": map[string]string{"kind": "project", "projectId": f.proj.ID}, "permissions": []string{"agent:read"}, "name": "p1",
 	})
@@ -635,14 +635,14 @@ func TestAgentDelegation_ProjectBoundaryDeniesOtherProject(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, f.getAgent(t, cred.Token, f.agentC.ID).Code, "a P1 target is inside the boundary")
 	rec = f.getAgent(t, cred.Token, f.agentB.ID)
-	assertAPIError(t, rec, http.StatusForbidden, ErrCodeForbidden)
+	adtAssertAPIError(t, rec, http.StatusForbidden, ErrCodeForbidden)
 }
 
 func TestAgentDelegation_RouteGateDeniesEverythingElse(t *testing.T) {
-	f := newDelegationFixture(t, "adt-deny")
+	f := newADTFixture(t, "adt-deny")
 	grant := f.hubGrant(t)
 	cred := f.delegated(t, grant.ID)
-	rowsBefore := len(delegationAudits(t, f.store, mutationAgentDelegationCredentialIssue))
+	rowsBefore := len(adtAudits(t, f.store, mutationAgentDelegationCredentialIssue))
 
 	cases := []struct{ method, path string }{
 		{http.MethodPatch, "/api/v1/agents/" + f.agentB.ID},
@@ -665,23 +665,23 @@ func TestAgentDelegation_RouteGateDeniesEverythingElse(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
-			rec := f.do(t, tc.method, tc.path, map[string]interface{}{"audience": f.srv.agentDelegationAudience()}, bearer(cred.Token))
-			assertAPIError(t, rec, http.StatusForbidden, errCodeCredentialNotAdmitted)
+			rec := f.do(t, tc.method, tc.path, map[string]interface{}{"audience": f.srv.agentDelegationAudience()}, adtBearer(cred.Token))
+			adtAssertAPIError(t, rec, http.StatusForbidden, errCodeCredentialNotAdmitted)
 			assert.NotContains(t, rec.Body.String(), delegatedCredentialPrefix)
 		})
 	}
-	assert.Len(t, delegationAudits(t, f.store, mutationAgentDelegationCredentialIssue), rowsBefore, "no denied request issued a credential")
+	assert.Len(t, adtAudits(t, f.store, mutationAgentDelegationCredentialIssue), rowsBefore, "no denied request issued a credential")
 }
 
 func TestAgentDelegation_RevocationChainAndExperimentGate(t *testing.T) {
-	f := newDelegationFixture(t, "adt-chain")
+	f := newADTFixture(t, "adt-chain")
 	ctx := context.Background()
 
 	t.Run("experiment off refuses, back on works again", func(t *testing.T) {
 		cred := f.delegated(t, f.hubGrant(t).ID)
-		setAgentDelegationExperiment(t, f.srv, false)
+		adtSetExperiment(t, f.srv, false)
 		assert.Equal(t, http.StatusUnauthorized, f.getAgent(t, cred.Token, f.agentB.ID).Code)
-		setAgentDelegationExperiment(t, f.srv, true)
+		adtSetExperiment(t, f.srv, true)
 		assert.Equal(t, http.StatusOK, f.getAgent(t, cred.Token, f.agentB.ID).Code)
 	})
 	t.Run("revoked grant", func(t *testing.T) {
@@ -698,13 +698,13 @@ func TestAgentDelegation_RevocationChainAndExperimentGate(t *testing.T) {
 		row, err := f.store.GetAgentDelegatedCredentialByKeyHash(ctx, hashDelegatedCredential(cred.Token))
 		require.NoError(t, err)
 		require.NoError(t, f.store.RevokeAgentCredential(ctx, row.ExchangeAgentCredentialID, "test", "refresh"))
-		assertAPIError(t, f.getAgent(t, cred.Token, f.agentB.ID), http.StatusForbidden, ErrCodeForbidden)
+		adtAssertAPIError(t, f.getAgent(t, cred.Token, f.agentB.ID), http.StatusForbidden, ErrCodeForbidden)
 	})
 	t.Run("issuer suspended", func(t *testing.T) {
 		cred := f.delegated(t, f.hubGrant(t).ID)
-		setUserStatus(t, f.store, f.alice.ID, store.UserStatusSuspended)
-		defer setUserStatus(t, f.store, f.alice.ID, store.UserStatusActive)
-		assertAPIError(t, f.getAgent(t, cred.Token, f.agentB.ID), http.StatusForbidden, ErrCodeForbidden)
+		adtSetUserStatus(t, f.store, f.alice.ID, store.UserStatusSuspended)
+		defer adtSetUserStatus(t, f.store, f.alice.ID, store.UserStatusActive)
+		adtAssertAPIError(t, f.getAgent(t, cred.Token, f.agentB.ID), http.StatusForbidden, ErrCodeForbidden)
 	})
 	t.Run("agent suspended", func(t *testing.T) {
 		cred := f.delegated(t, f.hubGrant(t).ID)
@@ -719,20 +719,20 @@ func TestAgentDelegation_RevocationChainAndExperimentGate(t *testing.T) {
 			again.Phase = phase
 			require.NoError(t, f.store.UpdateAgent(ctx, again))
 		}()
-		assertAPIError(t, f.getAgent(t, cred.Token, f.agentB.ID), http.StatusForbidden, ErrCodeForbidden)
+		adtAssertAPIError(t, f.getAgent(t, cred.Token, f.agentB.ID), http.StatusForbidden, ErrCodeForbidden)
 	})
 	t.Run("issuer loses access to the target's project", func(t *testing.T) {
 		cred := f.delegated(t, f.hubGrant(t).ID)
 		require.Equal(t, http.StatusOK, f.getAgent(t, cred.Token, f.agentB.ID).Code)
 		require.NoError(t, f.store.DeleteRoleBinding(ctx, f.aliceP2Binding))
-		assertAPIError(t, f.getAgent(t, cred.Token, f.agentB.ID), http.StatusForbidden, ErrCodeForbidden)
+		adtAssertAPIError(t, f.getAgent(t, cred.Token, f.agentB.ID), http.StatusForbidden, ErrCodeForbidden)
 		// The P1 target is still readable.
 		assert.Equal(t, http.StatusOK, f.getAgent(t, cred.Token, f.agentC.ID).Code)
 	})
 }
 
 func TestAgentDelegation_HeaderRules(t *testing.T) {
-	f := newDelegationFixture(t, "adt-headers")
+	f := newADTFixture(t, "adt-headers")
 	cred := f.delegated(t, f.hubGrant(t).ID)
 	agentToken := f.agentJWT(t, f.agentA)
 
@@ -760,7 +760,7 @@ func TestAgentDelegation_HeaderRules(t *testing.T) {
 }
 
 func TestAgentDelegation_OrdinaryAgentTokenGainsNothing(t *testing.T) {
-	f := newDelegationFixture(t, "adt-golden")
+	f := newADTFixture(t, "adt-golden")
 	agentToken := f.agentJWT(t, f.agentA)
 	read := func() int {
 		return f.do(t, http.MethodGet, "/api/v1/agents/"+f.agentB.ID, nil, map[string]string{"X-Scion-Agent-Token": agentToken}).Code

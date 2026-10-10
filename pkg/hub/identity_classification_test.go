@@ -396,7 +396,7 @@ func TestIdentityClassification_EveryTypeHasExplicitOutcome(t *testing.T) {
 			},
 			{
 				name:               "DelegatedAgentIdentity",
-				identity:           testDelegatedIdentity(tid("classify-delegated-agent"), tid("classify-project")),
+				identity:           adtTestIdentity(tid("classify-delegated-agent"), tid("classify-project")),
 				wantPrincipalKind:  PrincipalKindAgentDelegated,
 				wantCredentialKind: CredentialKindDelegatedAgent,
 				wantAttested:       false,
@@ -935,7 +935,7 @@ func TestSessionGates_DenyNonSessionCredentials(t *testing.T) {
 	scopedUAT := NewScopedUserIdentityWithCredentialID(interactiveUser, tid("session-gate-project"), []string{"agent:read"}, tid("session-gate-cred"))
 	agentJWT := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: "agent-1"}}}
 	hubDelivery := &hubDeliveryIdentity{agentID: "session-gate-hub-delivery-agent", boundAgentID: "session-gate-hub-delivery-agent"}
-	delegated := testDelegatedIdentity("session-gate-delegated-agent", tid("session-gate-project"))
+	delegated := adtTestIdentity("session-gate-delegated-agent", tid("session-gate-project"))
 	unknown := &unclassifiedMockIdentity{id: tid("session-gate-unknown")}
 
 	svc := &UserAccessTokenService{}
