@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 )
 
@@ -202,7 +201,7 @@ func (s *Service) ResolveRefs(ctx context.Context, refs []MessageRef) ([]RefView
 
 // readableForRef returns artifact id when it exists and the caller may read
 // it, otherwise nil. Absent and unreadable are not told apart. A failed
-// lookup or grant read is an error.
+// lookup or grant read is an error, returned to the caller to log.
 func (s *Service) readableForRef(ctx context.Context, b backend, id string) (*Artifact, error) {
 	if !canonicalID(id) {
 		return nil, nil
@@ -212,12 +211,10 @@ func (s *Service) readableForRef(ctx context.Context, b backend, id string) (*Ar
 		return nil, nil
 	}
 	if err != nil {
-		slog.ErrorContext(ctx, "artifacts: resolve ref: get artifact failed", "error", err)
 		return nil, err
 	}
 	readable, err := s.canReadErr(ctx, b, a)
 	if err != nil {
-		slog.ErrorContext(ctx, "artifacts: resolve ref: list grants failed", "error", err)
 		return nil, err
 	}
 	if !readable {
@@ -247,7 +244,6 @@ func resolveVersion(ctx context.Context, b backend, a *Artifact, r MessageRef, v
 			return nil
 		}
 		if err != nil {
-			slog.ErrorContext(ctx, "artifacts: resolve ref: get version failed", "error", err)
 			return err
 		}
 		if ver.State != VersionStateReady {

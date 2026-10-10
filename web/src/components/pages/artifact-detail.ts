@@ -810,18 +810,29 @@ export class ScionPageArtifactDetail extends LitElement {
     // A failed reload leaves no text, so canReview is false then too.
     if (!this.canReview) {
       this.reviewing = false;
-      this.reviewNotice =
-        this.error || this.notFound
-          ? 'Your review was not saved and the current version could not be loaded; your text is below.'
-          : !this.canPublish
-            ? 'Your review was not saved: you can no longer publish versions of this artifact. Your text is below.'
-            : 'Your review was not saved: a newer version was published, and it cannot be reviewed here. Your text is below.';
+      this.reviewNotice = this.staleReviewNotice();
       this.discardedReview = discarded;
       return;
     }
     this.reviewText = lfText(this.text);
     this.reviewPreview = this.reviewText;
     this.discardedReview = discarded;
+  }
+
+  /**
+   * The notice when Review mode closes after a stale review because the
+   * reloaded current version cannot be reviewed here: it could not be
+   * loaded, the caller may no longer publish versions, or it is not a
+   * markdown entry the page can review.
+   */
+  private staleReviewNotice(): string {
+    if (this.error || this.notFound) {
+      return 'Your review was not saved and the current version could not be loaded; your text is below.';
+    }
+    if (!this.canPublish) {
+      return 'Your review was not saved: you can no longer publish versions of this artifact. Your text is below.';
+    }
+    return 'Your review was not saved: a newer version was published, and it cannot be reviewed here. Your text is below.';
   }
 
   private clearPreviewTimer(): void {

@@ -1126,6 +1126,44 @@ describe('artifact page', () => {
     expect(button(el, '.discarded-review sl-button', 'Copy')).toBeDefined();
   });
 
+  it('leaves Review mode saying so when the reload after a stale review shows the caller can no longer publish', async () => {
+    const meta = artifact('plan.md', 'text/markdown');
+    const creates: string[] = [];
+    mockFetch(meta, 'We ship in Q3.\n', {
+      write: reviewWrites(
+        meta,
+        () => {
+          // A newer version is current and the caller's write access is gone.
+          meta.artifact.currentSeq = 2;
+          meta.version = { ...meta.version!, seq: 2, ref: `scion://artifact/${ID}@2` };
+          meta.canPublish = false;
+          return new Response(
+            JSON.stringify({ error: { code: 'stale_review', message: 'stale' } }),
+            { status: 409 }
+          );
+        },
+        creates
+      ),
+    });
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: MARKED } })
+    );
+    await el.updateComplete;
+    button(el, '.edit-footer sl-button', 'Save review')!.click();
+    await settle(el);
+    expect(el.shadowRoot!.querySelector('.review-editor')).toBeNull();
+    const notice = el.shadowRoot!.querySelector('sl-alert.review-notice')!.textContent!;
+    expect(notice).toContain('you can no longer publish versions of this artifact');
+    expect(notice).not.toContain('newer version');
+    expect(el.shadowRoot!.querySelector('.discarded-review pre')!.textContent).toBe(MARKED);
+    // Edit, Review and Upload new version are gone with the right to publish.
+    expect(button(el, '.header-actions sl-button', 'Edit')).toBeUndefined();
+    expect(button(el, '.header-actions sl-button', 'Review')).toBeUndefined();
+  });
+
   it('keeps the discarded text and says so when the reload after a stale review fails', async () => {
     const meta = artifact('plan.md', 'text/markdown');
     const creates: string[] = [];
