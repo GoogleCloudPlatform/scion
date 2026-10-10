@@ -321,7 +321,18 @@ func isLocalOnlyRuntime(runtimeType string) bool {
 	return false
 }
 
+// loadEmbeddedBrokerProfileSettings loads the global settings (plus the DB
+// settings overlay, when installed) buildStoreBrokerProfiles resolves
+// profile runtime types from. A variable so tests can substitute settings.
+var loadEmbeddedBrokerProfileSettings = func() (*config.VersionedSettings, error) {
+	vs, _, err := config.LoadGlobalSettingsWithOverlay()
+	return vs, err
+}
+
 // buildStoreBrokerProfiles builds store.BrokerProfile objects from settings.Profiles.
+// Each profile's Type is its resolved runtime type (the runtime entry's
+// explicit type, else its key), so the local-only filter and the attach
+// answer below also use the resolved type.
 // If no profiles are defined in settings, returns a default profile with the detected runtime type.
 // When the detected default runtime is not local-only (e.g. cloudrun, kubernetes),
 // profiles referencing local-only runtimes (docker, podman, container) are
@@ -349,12 +360,24 @@ func buildStoreBrokerProfiles(settings *config.Settings, defaultRuntimeType stri
 		}
 	}
 
+	// Resolve each profile's runtime type the same way the broker's /info
+	// does. If the settings cannot be loaded, profiles report their runtime
+	// key as before rather than failing registration.
+	typeVS, typeErr := loadEmbeddedBrokerProfileSettings()
+	if typeErr != nil {
+		log.Printf("Warning: could not load settings to resolve broker profile runtime types; registering each profile's runtime key as its type: %v", typeErr)
+		typeVS = nil
+	}
+
 	var profiles []store.BrokerProfile
 	for name, profileCfg := range settings.Profiles {
-		// Determine runtime type from the profile's runtime reference
+		// Determine runtime type from the profile's runtime reference:
+		// the resolved type of the runtime entry it names, else the key.
 		runtimeType := profileCfg.Runtime
 		if runtimeType == "" {
 			runtimeType = defaultRuntimeType
+		} else {
+			runtimeType = resolveProfileRuntimeType(typeVS, name, profileCfg.Runtime)
 		}
 
 		if !isLocalOnlyRuntime(defaultRuntimeType) && isLocalOnlyRuntime(runtimeType) {
