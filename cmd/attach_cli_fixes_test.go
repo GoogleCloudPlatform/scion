@@ -520,7 +520,8 @@ func TestAttachViaHub_NoPath_ExitsWithReasonWithoutRetry(t *testing.T) {
 // TestDescribeAttachPreflight covers the CLI's wording for preflight
 // refusals: 401, 403 and 404 reuse the close-code hints, 422 says the
 // agent has no runtime broker, a no-path 503 is final (a managed runtime
-// gets the message/look hint), another 503 is presented as temporary, and the "status N" detail is always kept.
+// gets the message/look hint), another 503 is presented as temporary,
+// and the "status N" detail is always kept.
 func TestDescribeAttachPreflight(t *testing.T) {
 	tests := []struct {
 		name     string

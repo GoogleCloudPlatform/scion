@@ -188,13 +188,19 @@ func (s *Server) brokerPTYPath(ctx context.Context, agent *store.Agent, viaRoute
 // managedPTYPath decides the path for an agent on a managed runtime, which
 // has no terminal on any broker: the broker branch is skipped, with no
 // broker lookup. With hub.conduit on, an agent session that advertises pty
-// still takes the agent path. Otherwise the attach is refused with 503
-// runtime_attach_unsupported and reason managed_runtime, whatever stopped
-// the agent path.
+// still takes the agent path. When there is no agent pty path (hub.conduit
+// off, or agentPTYPath's agent_pty_unavailable) the attach is refused with
+// 503 runtime_attach_unsupported and reason managed_runtime. Any other
+// agent-path refusal (a temporary one, such as registry_unavailable) is
+// returned unchanged.
 func (s *Server) managedPTYPath(ctx context.Context, identity Identity, agent *store.Agent) ptyPathDecision {
 	if s.experimentEnabled(conduitExperiment) {
-		if d := s.agentPTYPath(ctx, identity, agent); d.Path == ptyPathAgent {
+		d := s.agentPTYPath(ctx, identity, agent)
+		if d.Path == ptyPathAgent {
 			d.reportPath = true
+			return d
+		}
+		if d.Reason != ptyReasonAgentPTYUnavailable {
 			return d
 		}
 	}

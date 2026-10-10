@@ -54,10 +54,12 @@ func (f *ptyConduitFixture) setAgentRuntime(t *testing.T, runtime string) {
 
 // TestPTYPath_ManagedRuntime: an agent on a managed runtime never takes the
 // broker path and the broker row is not read. With an agent session that
-// serves a PTY (hub.conduit on) it takes the agent path; otherwise the
-// preflight and the WebSocket open both answer 503
-// runtime_attach_unsupported with reason managed_runtime, and nothing is
-// upgraded. A non-managed agent on the same broker keeps the broker path.
+// serves a PTY (hub.conduit on) it takes the agent path. With no agent pty
+// path (hub.conduit off, or no session that serves a PTY) the preflight and
+// the WebSocket open both answer 503 runtime_attach_unsupported with reason
+// managed_runtime, and nothing is upgraded. A temporary agent-path refusal
+// keeps its own code and reason. A non-managed agent on the same broker
+// keeps the broker path.
 func TestPTYPath_ManagedRuntime(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
@@ -66,7 +68,10 @@ func TestPTYPath_ManagedRuntime(t *testing.T) {
 		brokerConnected bool
 		conduitOff      bool
 		agentPTY        bool
+		// apply runs after the agent session is up (a temporary refusal).
+		apply           func(t *testing.T, f *ptyConduitFixture)
 		wantPath        ptyPath
+		wantCode        string // the refusal's error code (default runtime_attach_unsupported)
 		wantReason      string
 		wantBrokerReads bool
 	}{
@@ -78,12 +83,36 @@ func TestPTYPath_ManagedRuntime(t *testing.T) {
 			wantPath: ptyPathNone, wantReason: ptyReasonManagedRuntime},
 		{name: "managed, agent pty session: agent path", runtime: ManagedRuntimePrefix + "test", brokerConnected: true, agentPTY: true,
 			wantPath: ptyPathAgent},
+		{name: "managed, registry unavailable: temporary refusal unchanged", runtime: ManagedRuntimePrefix + "test", brokerConnected: true, agentPTY: true,
+			apply: func(t *testing.T, f *ptyConduitFixture) {
+				f.regFault.Store(true)
+				t.Cleanup(func() { f.regFault.Store(false) })
+			},
+			wantPath: ptyPathNone, wantCode: ErrCodeUnavailable, wantReason: ptyReasonRegistryUnavailable},
+		{name: "managed, stream re-check not running: temporary refusal unchanged", runtime: ManagedRuntimePrefix + "test", brokerConnected: true, agentPTY: true,
+			apply: func(t *testing.T, f *ptyConduitFixture) {
+				a := f.srv.conduitAuthz.Swap(nil)
+				require.NotNil(t, a)
+				t.Cleanup(func() { f.srv.conduitAuthz.CompareAndSwap(nil, a) })
+			},
+			wantPath: ptyPathNone, wantCode: ErrCodeUnavailable, wantReason: ptyReasonStreamAuthzDown},
+		{name: "managed, conduit not serving on this node: temporary refusal unchanged", runtime: ManagedRuntimePrefix + "test", brokerConnected: true, agentPTY: true,
+			apply: func(t *testing.T, f *ptyConduitFixture) {
+				rt := f.srv.conduit.Swap(nil)
+				require.NotNil(t, rt)
+				t.Cleanup(func() { f.srv.conduit.CompareAndSwap(nil, rt) })
+			},
+			wantPath: ptyPathNone, wantCode: ErrCodeUnavailable, wantReason: ptyReasonConduitNotServing},
 		{name: "non-managed control: broker path", runtime: "docker", brokerConnected: true, agentPTY: true,
 			wantPath: ptyPathBroker, wantBrokerReads: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newPTYConduitFixture(t)
 			f.setAgentRuntime(t, tc.runtime)
+			reads := &atomic.Int32{}
+			prev := f.srv.store
+			f.srv.store = brokerReadCountingStore{Store: prev, reads: reads}
+			t.Cleanup(func() { f.srv.store = prev })
 			var b *fakeBroker
 			if tc.brokerConnected {
 				b = connectFakeBroker(t, f.srv, f.launched.RuntimeBrokerID)
@@ -97,11 +126,15 @@ func TestPTYPath_ManagedRuntime(t *testing.T) {
 			if tc.conduitOff {
 				setConduitExperiment(t, f.srv, false)
 			}
-			reads := &atomic.Int32{}
-			prev := f.srv.store
-			f.srv.store = brokerReadCountingStore{Store: prev, reads: reads}
-			t.Cleanup(func() { f.srv.store = prev })
+			if tc.apply != nil {
+				tc.apply(t, f)
+			}
+			wantCode := tc.wantCode
+			if wantCode == "" {
+				wantCode = wsprotocol.ErrCodeRuntimeAttachUnsupported
+			}
 
+			reads.Store(0)
 			status, path, reason := f.preflight(t)
 			if tc.wantPath == ptyPathNone {
 				assert.Equal(t, http.StatusServiceUnavailable, status)
@@ -119,7 +152,7 @@ func TestPTYPath_ManagedRuntime(t *testing.T) {
 				assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 				var er ErrorResponse
 				require.NoError(t, json.NewDecoder(resp.Body).Decode(&er))
-				assert.Equal(t, wsprotocol.ErrCodeRuntimeAttachUnsupported, er.Error.Code)
+				assert.Equal(t, wantCode, er.Error.Code)
 				assert.Equal(t, tc.wantReason, er.Error.Details["reason"])
 				assert.Empty(t, f.spawned, "the agent path was not used")
 				if b != nil {
