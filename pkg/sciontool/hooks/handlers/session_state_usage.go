@@ -15,8 +15,6 @@
 package handlers
 
 import (
-	"encoding/json"
-	"fmt"
 	"os"
 	"syscall"
 
@@ -50,12 +48,9 @@ func (s *FileSessionState) AddUsage(u telemetry.SessionUsage) (bool, error) {
 		agg := telemetry.NewAggregator()
 		agg.RestoreState(file.Aggregator)
 		agg.RecordUsage(u)
-		data, err := json.Marshal(sessionStateFile{Version: sessionStateVersion, Aggregator: agg.State()})
-		if err != nil {
-			return fmt.Errorf("encoding state: %w", err)
-		}
-		if err := writeSessionStateInPlace(f, data); err != nil {
-			return fmt.Errorf("writing state: %w", err)
+		file.Aggregator = agg.State() // pending reports are kept
+		if err := writeStateFileInPlace(f, file); err != nil {
+			return err
 		}
 		added = true
 		return nil

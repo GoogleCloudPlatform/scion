@@ -21,10 +21,12 @@
  * One row per hub instance (process) from the summary's hub_instances
  * section, which the hub reads from its registry table only. State is
  * computed by the hub when it builds the summary: live, stale (no write for
- * 45 s) or stopped. Uptime and "last seen" are computed from the section's
- * as_of, the database clock that also wrote started_at and last_seen, so
- * they use one clock, neither the browser's nor the serving hub's. A
- * section without as_of falls back to the summary's generated_at.
+ * 45 s) or stopped (a clean shutdown, ptone/scion#4137). A stopped
+ * instance stays listed, greyed, for the hub's 1 h display window. Uptime
+ * and "last seen" are computed from the section's as_of, the database clock
+ * that also wrote started_at and last_seen, so they use one clock, neither
+ * the browser's nor the serving hub's. A section without as_of falls back
+ * to the summary's generated_at.
  *
  * Each row shows the instance's own failing checks under its status, its
  * own database connection pool (in use / limit) and the counts of the
@@ -41,6 +43,8 @@
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { formatInstantWithZone } from '../../utils/time.js';
 import { healthPillStyles, healthTone, type HealthTone } from './health-status.js';
 import type { HealthSummaryIntegrationCounts } from './health-integrations.js';
 
@@ -135,6 +139,14 @@ export function instanceLastSeen(i: HealthHubInstance, referenceTime: string): s
   return d ? `${d} ago` : '';
 }
 
+/**
+ * The stop time in the display zone; the raw value when it cannot be
+ * parsed, so the tooltip never reads just "stopped".
+ */
+export function stoppedAtLabel(stoppedAt: string): string {
+  return formatInstantWithZone(stoppedAt) || stoppedAt;
+}
+
 /** Check values that count as passing. */
 const PASSING_CHECK_VALUES = new Set(['healthy', 'available']);
 
@@ -212,6 +224,9 @@ export function instanceStateTone(state: string): HealthTone {
 
 @customElement('scion-health-hub-instances')
 export class ScionHealthHubInstances extends LitElement {
+  /** Re-renders the stop-time tooltip when the display zone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   /** The summary's hub_instances; null when the hub could not read it. */
   @property({ attribute: false })
   instances: HealthSummaryHubInstances | null = null;
@@ -306,6 +321,15 @@ export class ScionHealthHubInstances extends LitElement {
         font-variant-numeric: tabular-nums;
       }
 
+      /* A cleanly stopped instance stays listed for an hour, greyed. */
+      tr.stopped td {
+        color: var(--scion-text-muted);
+      }
+
+      tr.stopped td.label {
+        font-weight: 400;
+      }
+
       td.status {
         white-space: normal;
       }
@@ -382,13 +406,20 @@ export class ScionHealthHubInstances extends LitElement {
     const failing = failingChecks(i.checks);
     const db = i.database;
     return html`
-      <tr data-instance-id=${i.id} data-state=${i.state}>
+      <tr
+        class=${i.state === 'stopped' ? 'stopped' : ''}
+        data-instance-id=${i.id}
+        data-state=${i.state}
+      >
         <td class="label" title=${i.id}>
           ${i.label || i.id}${i.serving
             ? html` <span class="serving">(this instance)</span>`
             : nothing}
         </td>
-        <td class="state">
+        <td
+          class="state"
+          title=${i.stopped_at ? `stopped ${stoppedAtLabel(i.stopped_at)}` : nothing}
+        >
           <span class="pill tone-${instanceStateTone(i.state)}">${i.state || 'unknown'}</span>
         </td>
         <td class="version">${i.version || html`<span class="muted">—</span>`}</td>

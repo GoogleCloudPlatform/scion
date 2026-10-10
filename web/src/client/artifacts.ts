@@ -75,6 +75,8 @@ export interface ArtifactResponse {
   warnings?: string[];
   /** On a GET: the caller may share and change the artifact. */
   canManage?: boolean;
+  /** On a GET: the caller may publish new versions (edit, upload, review). */
+  canPublish?: boolean;
 }
 
 /** GET /api/v1/artifacts/{id}/versions: ready versions, newest first, without files. */

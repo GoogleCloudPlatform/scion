@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -115,7 +116,7 @@ func TestResolveRefsReadCheck(t *testing.T) {
 		return context.WithValue(context.Background(), principalKey{}, p)
 	}
 
-	got := f.svc.ResolveRefs(ctxFor(agentB), refs)
+	got := mustResolve(t, f.svc, ctxFor(agentB), refs)
 	if len(got) != len(refs) {
 		t.Fatalf("got %d views", len(got))
 	}
@@ -130,26 +131,26 @@ func TestResolveRefsReadCheck(t *testing.T) {
 
 	// Another project's agent: everything unavailable, and indistinguishable
 	// from the missing artifact apart from ref/id.
-	other := f.svc.ResolveRefs(ctxFor(agentX), refs[:1])
-	missing := f.svc.ResolveRefs(ctxFor(agentX), refs[3:4])
+	other := mustResolve(t, f.svc, ctxFor(agentX), refs[:1])
+	missing := mustResolve(t, f.svc, ctxFor(agentX), refs[3:4])
 	strip := func(v RefView) RefView { v.Ref, v.ID = "", ""; return v }
 	if other[0].Available || strip(other[0]) != strip(missing[0]) {
 		t.Errorf("unreadable %+v differs from missing %+v", other[0], missing[0])
 	}
 
 	// No principal at all.
-	if v := f.svc.ResolveRefs(context.Background(), refs[:1]); v[0].Available {
+	if v := mustResolve(t, f.svc, context.Background(), refs[:1]); v[0].Available {
 		t.Errorf("anonymous view available: %+v", v[0])
 	}
 
 	// A credential that does not permit reads hides it even from the owner.
 	f.host.deny(agentA, "project-1", PermissionRead)
-	if v := f.svc.ResolveRefs(ctxFor(agentA), refs[:1]); v[0].Available {
+	if v := mustResolve(t, f.svc, ctxFor(agentA), refs[:1]); v[0].Available {
 		t.Errorf("denied owner view available: %+v", v[0])
 	}
 
 	// Unconfigured service: unavailable, no panic.
-	if v := NewService(f.host).ResolveRefs(ctxFor(agentB), refs[:1]); v[0].Available {
+	if v := mustResolve(t, NewService(f.host), ctxFor(agentB), refs[:1]); v[0].Available {
 		t.Errorf("unconfigured view available: %+v", v[0])
 	}
 }
@@ -218,7 +219,7 @@ func TestResolveRefsChecksEachArtifactOnce(t *testing.T) {
 	f.host.mu.Unlock()
 
 	ctx := context.WithValue(context.Background(), principalKey{}, agentB)
-	views := f.svc.ResolveRefs(ctx, []MessageRef{{ArtifactID: id}, {ArtifactID: id, Seq: 1}, {ArtifactID: id, Seq: 4}})
+	views := mustResolve(t, f.svc, ctx, []MessageRef{{ArtifactID: id}, {ArtifactID: id, Seq: 1}, {ArtifactID: id, Seq: 4}})
 	if !views[0].Available || !views[1].Available || views[2].Available {
 		t.Fatalf("views = %+v", views)
 	}
@@ -233,4 +234,97 @@ func TestResolveRefsChecksEachArtifactOnce(t *testing.T) {
 	if permits != 1 {
 		t.Errorf("read check ran %d times for one artifact; calls %v", permits, f.host.calls)
 	}
+}
+
+// mustResolve is ResolveRefs on a working store: it must not fail.
+func mustResolve(t *testing.T, s *Service, ctx context.Context, refs []MessageRef) []RefView {
+	t.Helper()
+	views, err := s.ResolveRefs(ctx, refs)
+	if err != nil {
+		t.Fatalf("ResolveRefs: %v", err)
+	}
+	return views
+}
+
+type failGetArtifactStore struct{ Store }
+
+func (failGetArtifactStore) GetArtifact(context.Context, string) (*Artifact, error) {
+	return nil, errors.New("artifacts unavailable")
+}
+
+type failGetVersionStore struct{ Store }
+
+func (failGetVersionStore) GetVersion(context.Context, string, int) (*Version, error) {
+	return nil, errors.New("versions unavailable")
+}
+
+// TestResolveRefsReportsStoreFailures: a failed grant read (or artifact or
+// version read) is reported as a *ResolveError counting the references it
+// left unchecked, never taken for "no access"; those views stay
+// unavailable. A missing id never reaches the grant read, so it stays on
+// the unavailable path with no error.
+func TestResolveRefsReportsStoreFailures(t *testing.T) {
+	f := newFixture(t, false)
+	id := f.publish(userU, "doc.md", []byte("# v1"), "scope=project-1").Artifact.ID
+	f.grantPrincipal(id, outside)
+	ctxFor := func(p principal) context.Context {
+		return context.WithValue(context.Background(), principalKey{}, p)
+	}
+	unavailable := func(t *testing.T, views []RefView) {
+		t.Helper()
+		for _, v := range views {
+			if v != (RefView{Ref: v.Ref, ID: v.ID, Seq: v.Seq}) {
+				t.Errorf("view carries more than the reference: %+v", v)
+			}
+		}
+	}
+	missing := MessageRef{ArtifactID: uuid.NewString()}
+
+	t.Run("grant read", func(t *testing.T) {
+		f.svc.SetStore(failGrantsStore{f.store})
+		t.Cleanup(func() { f.svc.SetStore(f.store) })
+		// The grantee needs the grants; both references to the artifact
+		// are unchecked, the missing one is just unavailable.
+		views, err := f.svc.ResolveRefs(ctxFor(outside), []MessageRef{{ArtifactID: id}, {ArtifactID: id, Seq: 1}, missing})
+		var re *ResolveError
+		if !errors.As(err, &re) || re.Unchecked != 2 {
+			t.Fatalf("ResolveRefs error = %v, want a ResolveError with 2 unchecked", err)
+		}
+		unavailable(t, views)
+		// A missing id alone: no grant read, no error.
+		if views, err := f.svc.ResolveRefs(ctxFor(outside), []MessageRef{missing}); err != nil || views[0].Available {
+			t.Errorf("missing id with grants unreadable: %+v, %v; want unavailable, no error", views, err)
+		}
+		// The owner and home-project readers never need the grants.
+		for _, p := range []principal{userU, agentB} {
+			if views, err := f.svc.ResolveRefs(ctxFor(p), []MessageRef{{ArtifactID: id}}); err != nil || !views[0].Available {
+				t.Errorf("%s with grants unreadable: %+v, %v", p.ref, views, err)
+			}
+		}
+	})
+
+	t.Run("artifact read", func(t *testing.T) {
+		f.svc.SetStore(failGetArtifactStore{f.store})
+		t.Cleanup(func() { f.svc.SetStore(f.store) })
+		views, err := f.svc.ResolveRefs(ctxFor(userU), []MessageRef{{ArtifactID: id}, missing})
+		var re *ResolveError
+		if !errors.As(err, &re) || re.Unchecked != 2 {
+			t.Fatalf("ResolveRefs error = %v, want a ResolveError with 2 unchecked", err)
+		}
+		unavailable(t, views)
+	})
+
+	t.Run("version read", func(t *testing.T) {
+		f.svc.SetStore(failGetVersionStore{f.store})
+		t.Cleanup(func() { f.svc.SetStore(f.store) })
+		views, err := f.svc.ResolveRefs(ctxFor(userU), []MessageRef{{ArtifactID: id, Seq: 1}, {ArtifactID: id}})
+		var re *ResolveError
+		if !errors.As(err, &re) || re.Unchecked != 1 {
+			t.Fatalf("ResolveRefs error = %v, want a ResolveError with 1 unchecked", err)
+		}
+		unavailable(t, views[:1])
+		if !views[1].Available {
+			t.Errorf("unpinned reference needs no version read: %+v", views[1])
+		}
+	})
 }
