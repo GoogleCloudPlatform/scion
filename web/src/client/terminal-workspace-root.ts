@@ -1238,12 +1238,13 @@ export class TerminalWorkspaceRoot {
       isMultiPane &&
       !(this.narrowQuery?.matches ?? false) &&
       this.layoutManager.getZoomed() === null;
-    this.empty.hidden = total > 0 || showsPlaceholders;
     const hasStatusMessage = this.status.textContent !== NO_TERMINAL_SELECTED;
     // A status with an action (the non-owner and moved-away screens) is
     // shown over the multi-pane placeholders too, whenever no terminal is
-    // selected: there is nothing in this window to drop.
+    // selected: there is nothing in this window to drop. It replaces the
+    // empty state: the terminals are open, only in another window.
     const hasStatusAction = this.statusAction.dataset.active === 'true';
+    this.empty.hidden = total > 0 || showsPlaceholders || (hasStatusAction && !hasSelected);
     this.status.hidden =
       hasStatusAction && !hasSelected
         ? false

@@ -50,7 +50,7 @@ import {
   offersMove,
   openPalettePickedAgent,
 } from './terminal-palette-open.js';
-import { moveTerminalsWithStatus } from './terminal-move.js';
+import { moveTerminalsWithStatus, terminalsOpenElsewhere } from './terminal-move.js';
 import { showToast } from '../utils/toast.js';
 import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../utils/feature-flags.js';
 import { applyServerFeatureFlags } from './server-feature-flags.js';
@@ -1170,6 +1170,18 @@ async function renderRoute(path: string): Promise<void> {
           terminalWorkspace?.setStatus(nonOwnerOpenStatus(result.status));
           if (offersMove(result.status) && !terminalMoveRunning) offerTerminalMove();
           else if (!terminalMoveRunning) terminalWorkspace?.setStatusAction(null);
+        }
+      } else if (!agentId && coordinator && terminalPersistence && !terminalMoveRunning) {
+        // A bare /terminals in a window that does not own the terminals
+        // (for example a new window): show the same "open in another
+        // window" state as the other non-owner screens, not the empty one.
+        const elsewhere = await terminalsOpenElsewhere({
+          coordinator,
+          persistence: terminalPersistence,
+        });
+        if (elsewhere && thisNav === navigationId && !terminalMoveRunning) {
+          terminalWorkspace?.setStatus(TERMINALS_MOVED_STATUS);
+          offerTerminalMove();
         }
       }
       return;

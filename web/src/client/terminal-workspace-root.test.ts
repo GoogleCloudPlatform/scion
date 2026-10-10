@@ -471,8 +471,32 @@ describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
       expect(button.disabled).toBe(false);
       button.click();
       expect(onClick).toHaveBeenCalledOnce();
-      // The status text itself is unchanged by the button.
-      expect(visibleOverlays()[1].textContent).toBe('Terminal selected in its owning tab.');
+      // The status text itself is unchanged by the button, and it replaces
+      // the empty state (ptone/scion#4324).
+      const overlays = visibleOverlays();
+      expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
+      expect(overlays[0].textContent).toBe('Terminal selected in its owning tab.');
+    });
+
+    it('a fresh window with terminals open elsewhere shows that state and the move button, not the empty state (ptone/scion#4324)', async () => {
+      // No pane in this window; main.ts found the terminals held by another
+      // window and set the non-owner state.
+      root.setStatus('Terminals moved to another window.');
+      root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
+      await flush();
+      const overlays = visibleOverlays();
+      expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
+      expect(overlays[0].textContent).toBe('Terminals moved to another window.');
+      expect(actionButton().hidden).toBe(false);
+      expect(actionButton().textContent).toBe('Move terminals to this window');
+    });
+
+    it('with no terminals anywhere, a fresh window still shows the empty state', async () => {
+      await flush();
+      const overlays = visibleOverlays();
+      expect(overlays.map((el) => el.className)).toEqual(['terminal-empty']);
+      expect(overlays[0].textContent).toBe('No terminals are open.');
+      expect(actionButton().hidden).toBe(true);
     });
 
     it('disables the button while a move runs and hides it when removed', async () => {
