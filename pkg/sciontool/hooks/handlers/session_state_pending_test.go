@@ -17,6 +17,7 @@ package handlers
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -375,7 +376,9 @@ func TestPendingReport_InMemoryStartTimeMatchesStoredReport(t *testing.T) {
 	if len(r) != 1 || r[0].SessionID != "s1" {
 		t.Fatalf("reports = %+v, want one for s1", r)
 	}
-	if r[0].StartedAt == r[0].StartedAt.Round(0) {
+	// time.Time.String appends "m=±<seconds>" only when the value carries
+	// a monotonic clock reading.
+	if !strings.Contains(r[0].StartedAt.String(), " m=") {
 		t.Fatal("setup: the in-memory StartedAt has no monotonic reading, so this test proves nothing")
 	}
 	if _, err := os.Lstat(store.Path); !os.IsNotExist(err) {
