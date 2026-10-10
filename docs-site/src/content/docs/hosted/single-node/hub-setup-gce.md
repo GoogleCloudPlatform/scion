@@ -62,7 +62,7 @@ Run these one at a time instead of `gce-demo-deploy.sh` when you need to skip or
 | 1 | `gce-demo-provision.sh` | Creates the GCE VM, its service account, a firewall rule for tcp:80 and tcp:443, and, when `ENABLE_GKE=true`, a GKE cluster. |
 | 2 | `gce-demo-telemetry-sa.sh` | Creates a service account for agent telemetry export. |
 | 3 | `gce-demo-setup-repo.sh` | Clones the Scion repository on the VM. |
-| 4 | `gce-certs.sh` | Creates the Cloud DNS managed zone if it is missing, points an A record for the Hub domain at the VM's external IP, and runs certbot on the VM to get a Let's Encrypt wildcard certificate (`*.<CERT_DOMAIN>`) through a DNS-01 challenge. It does not install or configure Caddy. |
+| 4 | `gce-certs.sh` | Creates the Cloud DNS managed zone if it is missing, points an A record for the Hub domain at the VM's external IP, and runs certbot on the VM to get a Let's Encrypt wildcard certificate (`*.<CERT_DOMAIN>`) through a DNS-01 challenge. It then runs `fix-tls-rotation.sh` on the VM so that renewed certificates reach Caddy (see [Certificate renewal](#certificate-renewal)). It does not install Caddy or write its configuration. |
 | 5 | `gce-start-hub.sh --full` | Uploads `hub.env`, writes `settings.yaml` and the systemd unit, installs Caddy, writes a Caddyfile that serves the certbot certificate from step 4 and proxies to the Hub on port 8080, builds the web assets and the `scion` binary on the VM, and starts the Hub. |
 
 :::note[Internal or private deployments]
@@ -78,6 +78,47 @@ If your VM has no external IP, or TLS is terminated upstream by a load balancer,
 Without `--full`, `gce-start-hub.sh` only pulls the latest code on the VM, rebuilds, restarts the Hub, and checks its health. Add `--full` again when you change `hub.env` or the generated configuration.
 
 The final health check requests `https://<HUB_DOMAIN>/healthz` and verifies the TLS certificate, so it fails if the certificate is missing or not valid. For a self-signed or test certificate only, add `--insecure-health-check` (or set `HEALTH_CHECK_INSECURE=true`); the script then prints a warning that the certificate was not verified.
+
+### Certificate renewal
+
+Caddy serves the certbot files in `/etc/letsencrypt/live/<CERT_DOMAIN>/` (the `tls` line of the Caddyfile that `gce-start-hub.sh --full` writes). It reads them only when it starts or reloads. certbot renews the files on disk twice a day through `certbot.timer`, from 30 days before expiry. Unless Caddy reloads afterwards, it keeps serving the old certificate until that certificate expires.
+
+`gce-certs.sh` therefore runs `scripts/starter-hub/fix-tls-rotation.sh` on the VM. That installs the certbot deploy hook `/etc/letsencrypt/renewal-hooks/deploy/scion-reload-caddy.sh`. certbot runs it only after a successful renewal. The hook gives group `caddy` read access to the new files and reloads Caddy. The Hub is not restarted. The script also enables `certbot.timer`.
+
+#### Repairing an existing Hub
+
+Hubs set up before this change may have no working hook. They then keep serving an expired certificate after a renewal. Copy the script to the VM, and look at what it would change before it changes anything. Replace `<INSTANCE_NAME>` and `<ZONE>` with your values from `hub-config.sh`:
+
+```bash
+gcloud compute scp scripts/starter-hub/fix-tls-rotation.sh <INSTANCE_NAME>:/tmp/ --zone=<ZONE>
+gcloud compute ssh <INSTANCE_NAME> --zone=<ZONE> --command='sudo bash /tmp/fix-tls-rotation.sh --check'
+gcloud compute ssh <INSTANCE_NAME> --zone=<ZONE> --command='sudo bash /tmp/fix-tls-rotation.sh --dry-run'
+gcloud compute ssh <INSTANCE_NAME> --zone=<ZONE> --command='sudo bash /tmp/fix-tls-rotation.sh'
+```
+
+- `--check` changes nothing. It reports the serial and expiry date (`notAfter`) of the certificate on disk and of the certificate Caddy serves, and whether the hook and the timer are in place. It exits 1 if something needs fixing.
+- `--dry-run` prints each change it would make and changes nothing.
+- Without a flag, the script does the following:
+  - Installs or updates the deploy hook.
+  - Removes the inline `renew_hook` that older `gce-certs.sh` versions stored in `/etc/letsencrypt/renewal/<CERT_DOMAIN>.conf`. That hook always failed before it reached the reload. The original file is kept as a `.bak-fix-tls-rotation` backup.
+  - Enables the timer.
+  - Fixes file permissions.
+  - Runs `certbot renew` only if the certificate on disk expires within 30 days (`--renew-days` changes that).
+  - Reloads Caddy only if Caddy serves a different certificate from the one on disk.
+  - Ends with the same report as `--check`.
+
+  A second run changes nothing. Re-running `gce-certs.sh` has the same effect.
+
+#### Checking the served certificate from outside
+
+Compare the serial and expiry date that clients see with the `--check` output. Replace `<HUB_DOMAIN>` with your Hub's domain:
+
+```bash
+openssl s_client -connect <HUB_DOMAIN>:443 -servername <HUB_DOMAIN> </dev/null 2>/dev/null \
+  | openssl x509 -noout -serial -enddate
+```
+
+If the serial differs from the one on disk, Caddy has not reloaded since the last renewal. Run the script to fix this.
 
 ## Post-Setup
 
