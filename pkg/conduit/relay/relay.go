@@ -964,8 +964,9 @@ func (r *Relay) Sessions() int {
 }
 
 // Shutdown drains the relay: it refuses new sessions, marks its relay row
-// draining, marks every session row draining (concurrently, bounded by
-// ctx and one store timeout), sends GoAway with the reconnect window to
+// draining, marks every session row of its generation draining in one
+// batched write, run alongside the relay row write (both bounded by ctx
+// and one store timeout), sends GoAway with the reconnect window to
 // every session and waits, until ctx is done, for every session to end and
 // every Serve call to finish deleting its row, so the caller may close the
 // registry store once Shutdown returns nil. Sessions still live at the

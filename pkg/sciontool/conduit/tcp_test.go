@@ -25,6 +25,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
 )
@@ -181,11 +182,17 @@ func TestAgentTCPFallbackRule(t *testing.T) {
 			h := newFakeHub(t, key.public)
 			var mu sync.Mutex
 			var dialed []string
+			var deadlines []time.Time
 			startAgent(t, h, func(o *Options) {
-				o.DialLocal = func(_ context.Context, network, addr string) (net.Conn, error) {
+				o.DialLocal = func(ctx context.Context, network, addr string) (net.Conn, error) {
 					mu.Lock()
 					defer mu.Unlock()
 					dialed = append(dialed, network+" "+addr)
+					d, ok := ctx.Deadline()
+					if !ok {
+						t.Errorf("dial %s: no deadline on ctx", addr)
+					}
+					deadlines = append(deadlines, d)
 					if len(dialed) == 1 {
 						return nil, tt.v4Err
 					}
@@ -201,6 +208,11 @@ func TestAgentTCPFallbackRule(t *testing.T) {
 			defer mu.Unlock()
 			if !slices.Equal(dialed, tt.wantDial) {
 				t.Fatalf("dialed %q, want %q", dialed, tt.wantDial)
+			}
+			// Both attempts share one dial deadline (the retry gets no
+			// fresh budget).
+			if len(deadlines) == 2 && !deadlines[0].Equal(deadlines[1]) {
+				t.Fatalf("dial deadlines differ: %v then %v", deadlines[0], deadlines[1])
 			}
 		})
 	}
