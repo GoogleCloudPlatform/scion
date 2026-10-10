@@ -133,6 +133,7 @@ export default defineConfig([
       'e2e/chat-palette/fixture.ts',
       'e2e/chat-palette/focus-and-guards.pw.ts',
       'e2e/chat-palette/group-navigation.pw.ts',
+      'e2e/chat-palette/mock-api.ts',
       'e2e/chat-palette/palette-button.pw.ts',
       'e2e/chat-palette/playwright.config.ts',
       'e2e/chat-palette/reopen-race.pw.ts',
@@ -144,6 +145,7 @@ export default defineConfig([
       'e2e/chat-palette/typography.pw.ts',
       'e2e/palette-typography.ts',
       'e2e/palette-focus.ts',
+      'e2e/client-main-stub.ts',
     ],
     './e2e/chat-palette/tsconfig.json'
   ),
