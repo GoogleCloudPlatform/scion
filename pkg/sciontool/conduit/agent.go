@@ -163,6 +163,11 @@ type Options struct {
 	Backoff *core.Backoff
 	Session core.Config
 
+	// RPCRoutes lists the routes Session.RPCHandler serves, advertised
+	// as Hello.capabilities.rpc. It must be empty when
+	// Session.RPCHandler is nil.
+	RPCRoutes []string
+
 	// ptyBeforeAccept, when set, runs after a PTY stream's client is
 	// spawned and before the stream is accepted (test hook).
 	ptyBeforeAccept func(ctx context.Context)
@@ -188,6 +193,9 @@ type Agent struct {
 func New(opts Options) (*Agent, error) {
 	if opts.AgentID == "" || opts.ProjectID == "" {
 		return nil, errors.New("conduit: agent and project ids are required")
+	}
+	if len(opts.RPCRoutes) > 0 && opts.Session.RPCHandler == nil {
+		return nil, errors.New("conduit: RPCRoutes set without Session.RPCHandler")
 	}
 	if opts.Token == nil {
 		return nil, errors.New("conduit: Token is required")
@@ -285,6 +293,7 @@ func (a *Agent) hello() *conduitv1.Hello {
 		ClientVersion: a.opts.ClientVersion,
 		Capabilities: &conduitv1.Capabilities{
 			StreamKinds:         a.streamKinds(),
+			Rpc:                 a.opts.RPCRoutes,
 			EndpointIncarnation: a.opts.LaunchID,
 		},
 	}
