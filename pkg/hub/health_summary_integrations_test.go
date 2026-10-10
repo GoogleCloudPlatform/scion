@@ -526,13 +526,18 @@ func TestHubInstanceIntegrations_SlowIntegrationNotReported(t *testing.T) {
 	}
 	assert.Equal(t, int32(1), mgr.calls.Load(), "a plugin whose query is still running is not queried again")
 
-	// Once the hung query returns, a later tick queries the plugin again
-	// and reports its real health.
+	// Once the hung query returns and drops its flight, the next call
+	// queries the plugin again and reports its real health. Waiting for
+	// the flight to go first keeps the call count exact: a call made while
+	// the old query is still finishing would share its result instead.
 	release()
 	require.Eventually(t, func() bool {
-		return findHubInstanceIntegration(t, srv.hubInstanceIntegrations(ctx), "slow").Health == "healthy"
-	}, 5*time.Second, 20*time.Millisecond)
-	assert.Equal(t, int32(2), mgr.calls.Load())
+		srv.healthIntegrationMu.Lock()
+		defer srv.healthIntegrationMu.Unlock()
+		return len(srv.healthIntegrationFlights) == 0
+	}, 5*time.Second, 5*time.Millisecond, "the finished query must drop its flight")
+	assert.Equal(t, "healthy", findHubInstanceIntegration(t, srv.hubInstanceIntegrations(ctx), "slow").Health)
+	assert.Equal(t, int32(2), mgr.calls.Load(), "the next call starts a fresh query")
 }
 
 // TestHubInstanceIntegrations_SlowIntegrationUnknownInSummary: a plugin
