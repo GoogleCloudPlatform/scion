@@ -417,6 +417,15 @@ func (s *Server) EvaluateAgentMessage(
 	if senderAgent == nil {
 		return MessageDecision{Reason: "sender agent record is nil"}
 	}
+	return s.evaluateAgentMessageForSender(ctx, agentIdent, senderAgent, targetAgent)
+}
+
+// evaluateAgentMessageForSender is EvaluateAgentMessage after the sender
+// row is read: the mode and project-policy evaluation, then the sender's
+// standing check for an allowed send. senderAgent must be the store's
+// current row for agentIdent. A caller that evaluates one sender against
+// many targets in a request reads the row once and calls this per target.
+func (s *Server) evaluateAgentMessageForSender(ctx context.Context, agentIdent AgentIdentity, senderAgent, targetAgent *store.Agent) MessageDecision {
 	decision := s.evaluateAgentMessageModes(ctx, agentIdent, senderAgent, targetAgent)
 	if !decision.Allowed {
 		return decision
