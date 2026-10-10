@@ -183,6 +183,23 @@ func TestConduitLifetimeCapSetting(t *testing.T) {
 	}
 }
 
+// TestConduitProxySessionMaxAgeSetting: the hub gets the configured cap,
+// and the 1h default when none is configured.
+func TestConduitProxySessionMaxAgeSetting(t *testing.T) {
+	for _, tt := range []struct {
+		configured string
+		want       time.Duration
+	}{
+		{configured: "", want: time.Hour},
+		{configured: "5m", want: 5 * time.Minute},
+		{configured: "45m", want: 45 * time.Minute},
+	} {
+		cfg := &config.GlobalConfig{}
+		cfg.Hub.Conduit.ProxySessionMaxAge = tt.configured
+		assert.Equal(t, tt.want, conduitProxySessionMaxAgeSetting(cfg), "proxy_session_max_age %q", tt.configured)
+	}
+}
+
 func TestValidateServerPreflight_Conduit(t *testing.T) {
 	t.Cleanup(resetServerFlags)
 	tests := []struct {
@@ -196,6 +213,7 @@ func TestValidateServerPreflight_Conduit(t *testing.T) {
 		{name: "bad activation", hub: true, conduit: config.HubConduitConfig{GrantKeyActivation: "10s"}, wantErr: "server.hub.conduit.grant_key_activation"},
 		{name: "bad port", hub: true, conduit: config.HubConduitConfig{TCPAllowedPorts: []int{0}}, wantErr: "server.hub.conduit.tcp_allowed_ports"},
 		{name: "lifetime cap below the minimum", hub: true, conduit: config.HubConduitConfig{LifetimeCap: "60s"}, wantErr: "server.hub.conduit.lifetime_cap"},
+		{name: "proxy session max age above the maximum", hub: true, conduit: config.HubConduitConfig{ProxySessionMaxAge: "2h"}, wantErr: "server.hub.conduit.proxy_session_max_age"},
 		{name: "lifetime cap malformed", hub: true, conduit: config.HubConduitConfig{LifetimeCap: "soon"}, wantErr: "server.hub.conduit.lifetime_cap"},
 		{name: "bad user stream authz max", hub: true, conduit: config.HubConduitConfig{StreamAuthzMax: config.HubConduitStreamAuthzMax{User: "30s"}}, wantErr: "server.hub.conduit.stream_authz_max.user"},
 		{name: "bad broker stream authz max (validated though not enforced)", hub: true, conduit: config.HubConduitConfig{StreamAuthzMax: config.HubConduitStreamAuthzMax{Broker: "200h"}}, wantErr: "server.hub.conduit.stream_authz_max.broker"},

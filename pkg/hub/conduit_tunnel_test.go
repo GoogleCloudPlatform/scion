@@ -26,6 +26,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
 	sconduit "github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -804,21 +806,25 @@ func TestConduitTunnel_CredentialExpiry(t *testing.T) {
 // TestConduitTunnel_ErrorTable: the refusal mapping is the closed set of
 // design §3.8 rule 7, and 404 goes only with agent_not_found.
 func TestConduitTunnel_ErrorTable(t *testing.T) {
-	want := map[conduitTunnelFailure][2]any{
-		tunnelInvalidRequest:     {http.StatusBadRequest, "invalid_request"},
-		tunnelUnauthorized:       {http.StatusUnauthorized, "unauthorized"},
-		tunnelForbidden:          {http.StatusForbidden, "forbidden"},
-		tunnelPrincipalInactive:  {http.StatusForbidden, "forbidden"},
-		tunnelAgentNotFound:      {http.StatusNotFound, "agent_not_found"},
-		tunnelAgentNotRunning:    {http.StatusConflict, "agent_not_running"},
-		tunnelRateLimited:        {http.StatusTooManyRequests, "rate_limited"},
-		tunnelBrokerUnavailable:  {http.StatusServiceUnavailable, "runtime_broker_unavailable"},
-		tunnelSessionUnavailable: {http.StatusServiceUnavailable, "agent_session_unavailable"},
-		tunnelInternal:           {http.StatusInternalServerError, "internal_error"},
+	want := map[conduitTunnelFailure][3]any{
+		tunnelInvalidRequest:         {http.StatusBadRequest, "invalid_request", ""},
+		tunnelUnauthorized:           {http.StatusUnauthorized, "unauthorized", ""},
+		tunnelForbidden:              {http.StatusForbidden, "forbidden", ""},
+		tunnelPrincipalInactive:      {http.StatusForbidden, "forbidden", ""},
+		tunnelAgentNotFound:          {http.StatusNotFound, "agent_not_found", ""},
+		tunnelAgentNotRunning:        {http.StatusConflict, "agent_not_running", ""},
+		tunnelRateLimited:            {http.StatusTooManyRequests, "rate_limited", ""},
+		tunnelBrokerUnavailable:      {http.StatusServiceUnavailable, "runtime_broker_unavailable", ""},
+		tunnelSessionUnavailable:     {http.StatusServiceUnavailable, "agent_session_unavailable", ""},
+		tunnelStreamAuthzUnavailable: {http.StatusServiceUnavailable, "unavailable", "stream_authz_unavailable"},
+		tunnelRegistryUnavailable:    {http.StatusServiceUnavailable, "unavailable", "registry_unavailable"},
+		tunnelGrantKeysUnavailable:   {http.StatusServiceUnavailable, "unavailable", "grant_keys_unavailable"},
+		tunnelConduitNotServing:      {http.StatusServiceUnavailable, "unavailable", "conduit_not_serving"},
+		tunnelInternal:               {http.StatusInternalServerError, "internal_error", ""},
 	}
 	require.Len(t, conduitTunnelFailures, len(want))
 	for f, m := range conduitTunnelFailures {
-		assert.Equal(t, want[f], [2]any{m.status, m.code}, "failure %d", f)
+		assert.Equal(t, want[f], [3]any{m.status, m.code, m.reason}, "failure %d", f)
 		if m.status == http.StatusNotFound {
 			assert.Equal(t, ErrCodeAgentNotFound, m.code)
 		}
@@ -1129,4 +1135,168 @@ func TestConduitTunnel_SessionLossEndsEveryTunnel(t *testing.T) {
 		}
 	}
 	require.Eventually(t, func() bool { return a.Len() == 0 }, 10*time.Second, 20*time.Millisecond, "the re-check tracks nothing")
+}
+
+// TestConduitTunnel_CredentialKinds: a user session is admitted for the
+// credential kinds with a defined expiry rule (hub user JWT, user access
+// token, external bearer, auth proxy) and the dev token; a kind with no
+// defined expiry rule is refused with 403 before any upgrade.
+func TestConduitTunnel_CredentialKinds(t *testing.T) {
+	tf := newTunnelFixture(t)
+	owner := NewAuthenticatedUser(tf.launched.OwnerID, "owner@conduit.test", "Owner", store.UserRoleMember, "cli")
+	call := func(ident Identity, authType string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/conduit", nil)
+		ctx := contextWithIdentity(req.Context(), ident)
+		ctx = context.WithValue(ctx, logging.AuthTypeKey{}, authType)
+		rec := httptest.NewRecorder()
+		tf.srv.handleConduit(rec, req.WithContext(ctx))
+		return rec
+	}
+	for _, tc := range []struct {
+		name     string
+		ident    Identity
+		authType string
+		want     int
+	}{
+		{"kind without an expiry rule", owner, AuthTypeSignedURL, http.StatusForbidden},
+		{"unknown auth type", owner, "mystery", http.StatusForbidden},
+		{"no auth type", owner, "", http.StatusForbidden},
+		// Admitted kinds pass the credential check; the plain GET then
+		// stops at the upgrade check.
+		{"auth proxy", owner, AuthTypeProxy, http.StatusBadRequest},
+		{"dev token", NewDevUser(DevUserConfig{Username: "dev"}), AuthTypeDevToken, http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := call(tc.ident, tc.authType)
+			assert.Equal(t, tc.want, rec.Code, rec.Body.String())
+		})
+	}
+}
+
+// TestConduitTunnel_ProxySessionCap: a session admitted through the auth
+// proxy records admission time plus proxy_session_max_age as its
+// credential expiry: before it a request opens a tunnel, after it a
+// request is 401 and the open tunnel keeps flowing.
+func TestConduitTunnel_ProxySessionCap(t *testing.T) {
+	tf := newTunnelFixture(t)
+	tf.srv.config.ConduitProxySessionMaxAge = 10 * time.Minute
+	tf.startAgent(t, tf.public.URL, tf.launched)
+	owner := NewAuthenticatedUser(tf.launched.OwnerID, "owner@conduit.test", "Owner", store.UserRoleMember, "cli")
+	// Stands in for the auth middleware's trusted-proxy branch.
+	proxied := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := contextWithIdentity(r.Context(), owner)
+		ctx = context.WithValue(ctx, logging.AuthTypeKey{}, AuthTypeProxy)
+		tf.srv.handleConduit(w, r.WithContext(ctx))
+	}))
+	t.Cleanup(proxied.Close)
+	public := tf.public
+	tf.public = proxied
+	c, err := tf.dialUser(t, "unused", tf.launched.OwnerID)
+	tf.public = public
+	require.NoError(t, err)
+
+	st := c.open(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))
+	roundTrip(t, st, "within the cap")
+	tf.clock.Advance(9 * time.Minute)
+	roundTrip(t, c.open(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000")), "still within the cap")
+
+	tf.clock.Advance(time.Minute + time.Second)
+	r := c.post(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))
+	assert.Equal(t, http.StatusUnauthorized, r.status, r.body)
+	assert.Equal(t, ErrCodeUnauthorized, r.err.Code)
+	roundTrip(t, st, "after the cap")
+	assert.Nil(t, c.ls.Err())
+}
+
+// TestConduitProxySessionMaxAge_Default: an unset setting is 1h.
+func TestConduitProxySessionMaxAge_Default(t *testing.T) {
+	s := &Server{}
+	assert.Equal(t, time.Hour, s.conduitProxySessionMaxAge())
+	s.config.ConduitProxySessionMaxAge = 5 * time.Minute
+	assert.Equal(t, 5*time.Minute, s.conduitProxySessionMaxAge())
+}
+
+// switchGrantKeyStore is an in-memory grant key store whose loads fail
+// while fail is set.
+type switchGrantKeyStore struct {
+	memoryConduitGrantKeyStore
+	fail atomic.Bool
+}
+
+func (s *switchGrantKeyStore) Load(ctx context.Context) (*grant.KeyRing, int, error) {
+	if s.fail.Load() {
+		return nil, 0, errors.New("injected grant key store fault")
+	}
+	return s.memoryConduitGrantKeyStore.Load(ctx)
+}
+
+// TestConduitTunnel_TransientFaults: a transient hub fault is 503
+// unavailable with a reason (never 403, and never agent_session_unavailable);
+// a missing stream re-check is 500.
+func TestConduitTunnel_TransientFaults(t *testing.T) {
+	want503 := func(t *testing.T, r tunnelResult, reason string) {
+		t.Helper()
+		assert.Equal(t, http.StatusServiceUnavailable, r.status, r.body)
+		assert.Equal(t, ErrCodeUnavailable, r.err.Code, r.body)
+		assert.Equal(t, reason, r.err.Details["reason"], r.body)
+	}
+
+	// The fault wrappers below are installed before any session starts
+	// (restored by t.Cleanup) and switched on with an atomic flag, so no
+	// running goroutine sees a field change.
+	t.Run("stream_authz_unavailable", func(t *testing.T) {
+		tf := newTunnelFixture(t)
+		fs := &conduitFaultStore{Store: tf.srv.authzService.store}
+		tf.srv.authzService.store = fs
+		t.Cleanup(func() { tf.srv.authzService.store = fs.Store })
+		tf.startAgent(t, tf.public.URL, tf.launched)
+		c := tf.ownerClient(t)
+		fs.failBindingsList.Store(true)
+		want503(t, c.post(t, tf.launched.ID, grant.StreamKindPTY, nil), "stream_authz_unavailable")
+		assert.Zero(t, tf.srv.conduitAuthz.Load().Len())
+	})
+	t.Run("registry_unavailable", func(t *testing.T) {
+		tf := newTunnelFixture(t)
+		tf.startAgent(t, tf.public.URL, tf.launched)
+		c := tf.ownerClient(t)
+		tf.regFault.Store(true)
+		t.Cleanup(func() { tf.regFault.Store(false) })
+		want503(t, c.post(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000")), "registry_unavailable")
+	})
+	t.Run("grant_keys_unavailable", func(t *testing.T) {
+		tf := newTunnelFixture(t)
+		ks := &switchGrantKeyStore{}
+		prev := tf.srv.conduitGrants
+		tf.srv.conduitGrants = newConduitGrantKeys(ks, tf.clock.Now)
+		t.Cleanup(func() { tf.srv.conduitGrants = prev })
+		tf.startAgent(t, tf.public.URL, tf.launched)
+		c := tf.ownerClient(t)
+		ks.fail.Store(true)
+		// Past the ring cache interval, the next grant reloads the ring.
+		tf.clock.Advance(conduitGrantKeyRefresh + time.Second)
+		want503(t, c.post(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000")), "grant_keys_unavailable")
+		select {
+		case <-tf.dials:
+			t.Fatal("the agent was dialed")
+		default:
+		}
+	})
+	t.Run("conduit_not_serving", func(t *testing.T) {
+		tf := newTunnelFixture(t)
+		tf.startAgent(t, tf.public.URL, tf.launched)
+		c := tf.ownerClient(t)
+		setConduitExperiment(t, tf.srv, false)
+		want503(t, c.post(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000")), "conduit_not_serving")
+	})
+	t.Run("missing re-check is 500", func(t *testing.T) {
+		tf := newTunnelFixture(t)
+		tf.startAgent(t, tf.public.URL, tf.launched)
+		c := tf.ownerClient(t)
+		a := tf.srv.conduitAuthz.Swap(nil)
+		t.Cleanup(func() { tf.srv.conduitAuthz.Store(a) })
+		r := c.post(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))
+		assert.Equal(t, http.StatusInternalServerError, r.status, r.body)
+		assert.Equal(t, ErrCodeInternalError, r.err.Code)
+		assert.Equal(t, "tunnel request failed", r.err.Message)
+	})
 }
