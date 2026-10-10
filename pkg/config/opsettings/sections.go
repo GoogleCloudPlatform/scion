@@ -96,6 +96,9 @@ type EndpointsSettings struct {
 	PublicURL     string `json:"public_url,omitempty"`
 	HubName       string `json:"hub_name,omitempty"`
 	ImageRegistry string `json:"image_registry,omitempty"`
+	// MonitoringDashboardURL is the optional link to an external monitoring
+	// dashboard shown on the Health page (config.ValidateMonitoringDashboardURL).
+	MonitoringDashboardURL string `json:"monitoring_dashboard_url,omitempty"`
 }
 
 // GitHubAppSettings holds the Layer-1 GitHub App configuration.

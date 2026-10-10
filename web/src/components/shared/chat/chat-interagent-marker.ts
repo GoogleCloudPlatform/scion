@@ -353,7 +353,7 @@ export class ScionChatInteragentMarker extends LitElement {
     // Await markdown rendering first, then set both expandedHtml and
     // expandedMessage in the same microtask so Lit batches into one render,
     // avoiding a content flash from plain text to rendered HTML.
-    let htmlContent = '';
+    let htmlContent: string;
     try {
       const renderer = await getMarkdownRenderer();
       htmlContent = renderer.render(msg.msg);

@@ -390,7 +390,6 @@ function withDispatchFailure(
   reason: string | undefined,
   code: string | undefined
 ): Message {
-  /* eslint-disable-next-line @typescript-eslint/no-unused-vars -- rest-omit idiom: bind and drop these two keys so `...rest` excludes them */
   const { dispatchFailureReason: _reason, dispatchFailureCode: _code, ...rest } = msg;
   return {
     ...rest,
@@ -3052,6 +3051,7 @@ export class ScionChatThread extends LitElement {
         mayHaveReachedHub = true;
       }
       if (Date.now() + this.wakeRetryDelayMs > giveUpAt) {
+        // eslint-disable-next-line @typescript-eslint/only-throw-error -- rethrows the last caught value unchanged; per-site decision tracked in ptone/scion#4126.
         throw lastError ?? new WakeOutcomeUnknownError();
       }
       await new Promise((resolve) => setTimeout(resolve, this.wakeRetryDelayMs));

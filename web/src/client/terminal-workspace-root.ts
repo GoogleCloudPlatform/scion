@@ -105,7 +105,7 @@ export function isInactiveEntry(entry: RailEntryStatus): boolean {
 }
 
 /** The colour of a rail row's status dot. */
-export type ConnectionDotColour = 'green' | 'amber' | 'red' | 'grey';
+export type ConnectionDotColour = 'green' | 'amber' | 'red' | 'grey' | 'neutral';
 
 /** A status dot's colour and its short meaning, shown as tooltip and spoken text. */
 export interface ConnectionDot {
@@ -116,14 +116,21 @@ export interface ConnectionDot {
 /**
  * The status dot for a rail row. The rail styles the dot from the colour
  * returned here (data-dot), so the colour and its meaning cannot drift.
- * Precedence: pending or connecting is amber; a dropped session or a
- * deleted agent, or metadata that could not be loaded, is red; connected is
- * green; anything else (idle, or a session that is unavailable because its
- * agent is stopped or offline) is grey, "Not connected".
+ * Precedence: a pending session whose pane has never been shown is
+ * neutral, "Not opened yet" (it attaches only once shown); otherwise pending
+ * or connecting is amber; a dropped session or a deleted agent, or metadata
+ * that could not be loaded, is red; connected is green; anything else (idle,
+ * or a session that is unavailable because its agent is stopped or offline)
+ * is grey, "Not connected".
+ *
+ * The neutral row is not grey on purpose: every grey row is inactive, while
+ * a never-shown pane is not (see {@link isInactiveEntry}).
  */
-export function connectionDot(entry: RailEntryStatus): ConnectionDot {
+export function connectionDot(entry: RailEntryStatus, neverShown = false): ConnectionDot {
   const { connection, disconnectReason } = entry.state;
   const { availability } = entry.metadata;
+  if (neverShown && connection === 'loading')
+    return { colour: 'neutral', meaning: 'Not opened yet' };
   if (connection === 'loading' || connection === 'connecting')
     return { colour: 'amber', meaning: 'Connecting' };
   if (availability === 'deleted' || disconnectReason === 'agent-deleted')
@@ -136,7 +143,9 @@ export function connectionDot(entry: RailEntryStatus): ConnectionDot {
 
 /** The dot text used as tooltip and in the row's accessible label. */
 export function connectionDotLabel(dot: ConnectionDot): string {
-  const colour = dot.colour.charAt(0).toUpperCase() + dot.colour.slice(1);
+  // The neutral dot is drawn as a hollow ring, so it is named by its shape.
+  const colour =
+    dot.colour === 'neutral' ? 'Hollow' : dot.colour.charAt(0).toUpperCase() + dot.colour.slice(1);
   return `${colour} dot: ${dot.meaning}`;
 }
 
@@ -219,6 +228,12 @@ export class TerminalWorkspaceRoot {
   /** Optional action shown with the status message (see setStatusAction). */
   private readonly statusAction = document.createElement('button');
   private readonly panes = new Map<string, ScionTerminalPane>();
+  /**
+   * Session keys whose pane this root has shown at least once. A pane
+   * attaches only once shown, so a pending entry not in this set is "Not
+   * opened yet" rather than "Connecting" (see connectionDot).
+   */
+  private readonly shownKeys = new Set<string>();
   private readonly entries = new Map<string, RailEntry>();
   private readonly placeholders = new Map<number, HTMLElement>();
   private readonly ariaLive = document.createElement('div');
@@ -1046,6 +1061,7 @@ export class TerminalWorkspaceRoot {
       const pane = this.panes.get(key);
       pane?.remove();
       this.panes.delete(key);
+      this.shownKeys.delete(key);
       // Close in layout manager to clear all preset references
       this.layoutManager.close(key);
       if (this.lastFocusedPaneSessionKey === key) this.lastFocusedPaneSessionKey = null;
@@ -1424,9 +1440,18 @@ export class TerminalWorkspaceRoot {
       }
     }
 
+    let newlyShown = false;
     for (const [key, pane] of this.panes) {
-      pane.setVisible(visibleKeys.has(key));
+      const visible = visibleKeys.has(key);
+      pane.setVisible(visible);
+      if (visible && !this.shownKeys.has(key)) {
+        this.shownKeys.add(key);
+        newlyShown = true;
+      }
     }
+    // The rail renders before pane visibility in refresh(), so re-render it
+    // once a pane is first shown: its row leaves "Not opened yet".
+    if (newlyShown) this.queueRefresh();
   }
 
   private restoreRailFocus(focusedId: string): void {
@@ -1667,7 +1692,7 @@ export class TerminalWorkspaceRoot {
     item.dataset.availability = metadata.availability;
     if (entry.state.disconnectReason) item.dataset.disconnectReason = entry.state.disconnectReason;
 
-    const dot = connectionDot(entry);
+    const dot = connectionDot(entry, !this.shownKeys.has(entry.state.key));
     item.dataset.dot = dot.colour;
     const dotLabel = connectionDotLabel(dot);
 
@@ -1678,7 +1703,8 @@ export class TerminalWorkspaceRoot {
     const connectionText = disconnectLabel(entry.state.connection, entry.state.disconnectReason);
     const statusParts = [
       dotLabel,
-      ...(connectionText === dot.meaning ? [] : [connectionText]),
+      // "Pending" would only restate a neutral "Not opened yet".
+      ...(connectionText === dot.meaning || dot.colour === 'neutral' ? [] : [connectionText]),
       availabilityLabel(metadata.availability),
     ];
     const statusLabel = statusParts.join(' · ');
@@ -2278,6 +2304,11 @@ export class TerminalWorkspaceRoot {
       }
       .terminal-rail-item[data-dot='amber'] .terminal-connection-dot {
         background: #f59e0b;
+      }
+      /* Not opened yet: a hollow neutral ring, distinct from solid grey. */
+      .terminal-rail-item[data-dot='neutral'] .terminal-connection-dot {
+        background: transparent;
+        box-shadow: inset 0 0 0 2px var(--scion-text-muted, #64748b);
       }
       .terminal-rail-text {
         min-width: 0;

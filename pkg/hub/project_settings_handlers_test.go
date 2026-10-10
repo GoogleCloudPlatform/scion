@@ -95,8 +95,8 @@ func TestProjectSettings_ClearValues(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings", putBody)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	// Clear by sending empty values
-	clearBody := hubclient.ProjectSettings{}
+	// Clear by sending explicit empty values
+	clearBody := json.RawMessage(`{"defaultTemplate":"","defaultHarnessConfig":"","telemetryEnabled":null}`)
 	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings", clearBody)
 	require.Equal(t, http.StatusOK, rec.Code)
 
@@ -165,8 +165,8 @@ func TestProjectSettings_ClearDefaultLimits(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings", putBody)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	// Clear by sending zero/empty values
-	clearBody := hubclient.ProjectSettings{}
+	// Clear by sending explicit zero/empty values
+	clearBody := json.RawMessage(`{"defaultMaxTurns":0,"defaultMaxModelCalls":0,"defaultMaxDuration":"","defaultResources":{}}`)
 	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings", clearBody)
 	require.Equal(t, http.StatusOK, rec.Code)
 
@@ -286,8 +286,8 @@ func TestProjectSettings_DefaultHarnessAuth_RoundTrip(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&getResp))
 	assert.Equal(t, "vertex-ai", getResp.DefaultHarnessAuth)
 
-	// Clear by sending empty value
-	clearBody := hubclient.ProjectSettings{}
+	// Clear by sending explicit empty value
+	clearBody := json.RawMessage(`{"defaultHarnessAuth":""}`)
 	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings", clearBody)
 	require.Equal(t, http.StatusOK, rec.Code)
 
@@ -401,8 +401,8 @@ func TestProjectSettings_DefaultModel(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&getResp))
 	assert.Equal(t, "claude-sonnet-5", getResp.DefaultModel)
 
-	// Clear by sending empty value
-	clearBody := hubclient.ProjectSettings{}
+	// Clear by sending explicit empty value
+	clearBody := json.RawMessage(`{"defaultModel":""}`)
 	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings", clearBody)
 	require.Equal(t, http.StatusOK, rec.Code)
 
@@ -678,8 +678,8 @@ func TestProjectSettings_ClearDefaultGCPIdentity(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings", putBody)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	// Clear by sending empty values
-	clearBody := hubclient.ProjectSettings{}
+	// Clear by sending explicit empty values
+	clearBody := json.RawMessage(`{"defaultGCPIdentityMode":"","defaultGCPIdentityServiceAccountID":""}`)
 	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings", clearBody)
 	require.Equal(t, http.StatusOK, rec.Code)
 
@@ -825,7 +825,7 @@ func TestProjectSettings_DefaultGCPIdentity_ClearingAlwaysAllowed(t *testing.T) 
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
 	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
-		hubclient.ProjectSettings{})
+		json.RawMessage(`{"defaultGCPIdentityMode":"","defaultGCPIdentityServiceAccountID":""}`))
 	require.Equal(t, http.StatusOK, rec.Code, "clearing must never be blocked; got: %s", rec.Body.String())
 
 	var got hubclient.ProjectSettings
@@ -996,7 +996,7 @@ func TestProjectSettings_DefaultGCPIdentity_ResavingStoredBlockSucceedsOnKuberne
 	// A genuinely NEW write of block is still refused once the project is
 	// Kubernetes-bound: clear it first, then try to set it again.
 	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
-		hubclient.ProjectSettings{})
+		json.RawMessage(`{"defaultGCPIdentityMode":""}`))
 	require.Equal(t, http.StatusOK, rec.Code, "clearing must always succeed; body: %s", rec.Body.String())
 
 	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
@@ -1323,9 +1323,9 @@ func TestProjectSettings_MaxAgentRole_ClearValue(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings", putBody)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	// Clear it
-	putBody = hubclient.ProjectSettings{MaxAgentRole: ""}
-	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings", putBody)
+	// Clear it with an explicit empty value (absent would keep it)
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		json.RawMessage(`{"maxAgentRole":""}`))
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	var getResp hubclient.ProjectSettings
@@ -1342,4 +1342,113 @@ func createTestProjectForSettings(t *testing.T, s store.Store) *store.Project {
 	}
 	require.NoError(t, s.CreateProject(t.Context(), project))
 	return project
+}
+
+// A PUT that carries only the per-profile map must leave the project-wide
+// default GCP identity alone. The handler used to treat the omitted mode and
+// service account as empty and delete both.
+func TestProjectSettings_PartialPutKeepsDefaultGCPIdentity(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+	sa := newSettingsTestSA(t, s, project.ID, "sa-wide")
+	profileSA := newSettingsTestSA(t, s, project.ID, "sa-profile")
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		hubclient.ProjectSettings{DefaultGCPIdentityMode: "assign", DefaultGCPIdentityServiceAccountID: sa.ID})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		map[string]any{"defaultGCPIdentityServiceAccountIDByProfile": map[string]string{"k8s": profileSA.ID}})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID+"/settings", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got hubclient.ProjectSettings
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
+	assert.Equal(t, "assign", got.DefaultGCPIdentityMode)
+	assert.Equal(t, sa.ID, got.DefaultGCPIdentityServiceAccountID)
+	assert.Equal(t, map[string]string{"k8s": profileSA.ID}, got.DefaultGCPIdentityServiceAccountIDByProfile)
+}
+
+// The mode/service account pair is validated on its merged value.
+func TestProjectSettings_DefaultGCPIdentity_ValidatesMergedPair(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+	sa := newSettingsTestSA(t, s, project.ID, "sa-merged")
+	put := func(body string) int {
+		t.Helper()
+		return doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+			json.RawMessage(body)).Code
+	}
+
+	// Storing the service account first, then the mode alone: the mode is
+	// checked against the stored service account and accepted.
+	require.Equal(t, http.StatusOK, put(`{"defaultGCPIdentityServiceAccountID":"`+sa.ID+`"}`))
+	require.Equal(t, http.StatusOK, put(`{"defaultGCPIdentityMode":"assign"}`))
+
+	// Clearing only the service account would leave assign with no
+	// service account, which is refused.
+	assert.Equal(t, http.StatusBadRequest, put(`{"defaultGCPIdentityServiceAccountID":""}`))
+
+	// Clearing both together is allowed.
+	assert.Equal(t, http.StatusOK, put(`{"defaultGCPIdentityMode":"","defaultGCPIdentityServiceAccountID":""}`))
+}
+
+// A stored service account that has gone unverified since it was saved does
+// not block a partial PUT that leaves the identity fields out.
+func TestProjectSettings_PartialPutDoesNotRevalidateStoredIdentity(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+	sa := newSettingsTestSA(t, s, project.ID, "sa-stale")
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		hubclient.ProjectSettings{DefaultGCPIdentityMode: "assign", DefaultGCPIdentityServiceAccountID: sa.ID})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	sa.Verified = false
+	sa.VerificationStatus = ""
+	require.NoError(t, s.UpdateGCPServiceAccount(t.Context(), sa))
+
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		json.RawMessage(`{"defaultTemplate":"tmpl"}`))
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var got hubclient.ProjectSettings
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
+	assert.Equal(t, "tmpl", got.DefaultTemplate)
+	assert.Equal(t, sa.ID, got.DefaultGCPIdentityServiceAccountID)
+
+	// Re-sending the identity does re-validate it.
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		json.RawMessage(`{"defaultGCPIdentityMode":"assign"}`))
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+}
+
+// Moving the mode away from assign, or clearing it, must not be blocked by a
+// stored service account that has gone unverified since it was saved: the
+// account no longer applies once the mode is not assign.
+func TestProjectSettings_ModeOnlyPutSkipsStaleStoredSA(t *testing.T) {
+	for _, mode := range []string{"passthrough", ""} {
+		t.Run("mode="+mode, func(t *testing.T) {
+			srv, s := testServer(t)
+			project := createTestProjectForSettings(t, s)
+			sa := newSettingsTestSA(t, s, project.ID, "sa-mode-only")
+
+			rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+				hubclient.ProjectSettings{DefaultGCPIdentityMode: "assign", DefaultGCPIdentityServiceAccountID: sa.ID})
+			require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+			sa.Verified = false
+			sa.VerificationStatus = ""
+			require.NoError(t, s.UpdateGCPServiceAccount(t.Context(), sa))
+
+			rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+				json.RawMessage(`{"defaultGCPIdentityMode":"`+mode+`"}`))
+			require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+			var got hubclient.ProjectSettings
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
+			assert.Equal(t, mode, got.DefaultGCPIdentityMode)
+		})
+	}
 }
