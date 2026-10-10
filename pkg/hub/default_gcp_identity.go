@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -142,11 +143,29 @@ func pinResolvedProfile(ac *store.AgentAppliedConfig, profile string) {
 // A default that names an unavailable, unverified, or unauthorized account
 // fails resolution rather than silently falling back to block (P10): the
 // operator set the default, so the operator needs to hear that it is broken.
-// The returned error is either a plain error (not available / not verified)
-// or a *saAssignDenial (authorization gate), so a caller with an HTTP
-// response can render either the same way resolveDefaultSAAssignment does.
+// The returned error is a *defaultSAUnusableError (not available / not
+// verified), a *saAssignDenial (authorization gate), an *errGCPSAAmbiguous
+// (the reference matched more than one account), or any other error, which
+// is an internal failure (for example the store) and not a statement about
+// the default. A caller with an HTTP response renders them the way
+// resolveDefaultSAAssignment does.
 func (s *Server) resolveDefaultSAAssignmentCore(ctx context.Context, r *http.Request, projectID, saID, surface string, tier defaultTier) (*store.GCPIdentityConfig, error) {
-	sa, err := s.store.GetGCPServiceAccount(ctx, saID)
+	sa, err := s.resolveGCPServiceAccountRef(ctx, projectID, saID)
+	var amb *errGCPSAAmbiguous
+	if errors.As(err, &amb) {
+		slog.Warn(tier.name+"-default SA assignment failed: service account reference is ambiguous",
+			"surface", surface,
+			"project_id", projectID,
+			"sa_ref", saID)
+		return nil, amb
+	}
+	// An internal failure is not "not available": reporting it as one would
+	// tell the operator to fix a default that is fine. Only ErrNotFound is
+	// folded into the not-available answer below, together with an
+	// unreachable account, so those two stay indistinguishable.
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, err
+	}
 	// Scope-aware admissibility (P4 item F), same predicate as the two
 	// caller-supplied assign sites. A default may legitimately nominate a
 	// hub-scoped account; a project-scoped one is only usable in its own
@@ -157,16 +176,16 @@ func (s *Server) resolveDefaultSAAssignmentCore(ctx context.Context, r *http.Req
 			"project_id", projectID,
 			"sa_id", saID,
 			"err", err)
-		return nil, fmt.Errorf("%s GCP service account is not available in this project; "+
-			"update %s", tier.subject(), tier.setting())
+		return nil, &defaultSAUnusableError{msg: fmt.Sprintf("%s GCP service account is not available in this project; "+
+			"update %s", tier.subject(), tier.setting())}
 	}
 	if !gcpServiceAccountVerified(sa) {
 		slog.Warn(tier.name+"-default SA assignment failed: service account not verified",
 			"surface", surface,
 			"project_id", projectID,
 			"sa_id", sa.ID, "sa_email", sa.Email)
-		return nil, fmt.Errorf("%s GCP service account is not verified; "+
-			"verify it before it can be assigned to agents", tier.subject())
+		return nil, &defaultSAUnusableError{msg: fmt.Sprintf("%s GCP service account is not verified; "+
+			"verify it before it can be assigned to agents", tier.subject())}
 	}
 
 	// P10: Authorization gate for default SA assignment.
@@ -206,11 +225,21 @@ func (s *Server) resolveDefaultSAAssignmentCore(ctx context.Context, r *http.Req
 	}, nil
 }
 
+// defaultSAUnusableError is resolveDefaultSAAssignmentCore's refusal of a
+// configured default that is not available or not verified: a 400 the
+// operator fixes by updating the default. It is a type rather than a plain
+// error so callers can tell it from an internal failure without matching
+// message text.
+type defaultSAUnusableError struct{ msg string }
+
+func (e *defaultSAUnusableError) Error() string { return e.msg }
+
 // resolveDefaultSAAssignment is the HTTP-transport wrapper around
 // resolveDefaultSAAssignmentCore for the interactive/API create path: on
-// failure it writes the appropriate HTTP error (the core's plain errors as a
-// 400 validation error, a *saAssignDenial through its own write method) and
-// returns ok=false.
+// failure it writes the appropriate HTTP error (a *defaultSAUnusableError as
+// a 400 validation error, a *saAssignDenial and an *errGCPSAAmbiguous through
+// their own writers, anything else as a plain 500 that does not echo the
+// error) and returns ok=false.
 func (s *Server) resolveDefaultSAAssignment(ctx context.Context, w http.ResponseWriter, r *http.Request, projectID, saID, surface string, tier defaultTier) (*store.GCPIdentityConfig, bool) {
 	cfg, err := s.resolveDefaultSAAssignmentCore(ctx, r, projectID, saID, surface, tier)
 	if err == nil {
@@ -220,7 +249,20 @@ func (s *Server) resolveDefaultSAAssignment(ctx context.Context, w http.Response
 		denial.write(w)
 		return nil, false
 	}
-	writeError(w, http.StatusBadRequest, ErrCodeValidationError, err.Error(), nil)
+	if writeGCPSAAmbiguous(w, err) {
+		return nil, false
+	}
+	var unusable *defaultSAUnusableError
+	if errors.As(err, &unusable) {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError, unusable.Error(), nil)
+		return nil, false
+	}
+	// An internal failure. Always a plain 500, never mapped through
+	// writeErrorFromErr: a wrapped store sentinel would come out as a 404 or
+	// 409, which would read as a statement about the default.
+	slog.ErrorContext(ctx, tier.name+"-default SA assignment failed: internal error",
+		"surface", surface, "project_id", projectID, "error", err)
+	InternalError(w)
 	return nil, false
 }
 
