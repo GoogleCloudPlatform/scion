@@ -1011,3 +1011,24 @@ func TestDeliveryToleratesOldTmux(t *testing.T) {
 		})
 	}
 }
+
+// TestDeleteBufferBestEffort_EmptyNameIsNoop: an empty buffer name must not
+// reach tmux as a delete-buffer with an empty -b argument.
+func TestDeleteBufferBestEffort_EmptyNameIsNoop(t *testing.T) {
+	var calls int
+	mockRT := &runtime.MockRuntime{}
+	mockRT.ExecFunc = func(ctx context.Context, id string, cmd []string) (string, error) {
+		calls++
+		return "", nil
+	}
+
+	mgr := &AgentManager{Runtime: mockRT}
+	mgr.deleteBufferBestEffort(context.Background(), "agent-1", "")
+	if calls != 0 {
+		t.Fatalf("expected no exec for an empty buffer name, got %d", calls)
+	}
+	mgr.deleteBufferBestEffort(context.Background(), "agent-1", "scion-msg-1")
+	if calls != 1 {
+		t.Fatalf("expected one exec for a named buffer, got %d", calls)
+	}
+}

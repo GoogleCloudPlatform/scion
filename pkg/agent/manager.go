@@ -1548,6 +1548,9 @@ func (m *AgentManager) submit(ctx context.Context, containerID, bufName string) 
 // runs when the caller's ctx is already cancelled, which may be why the
 // paste itself failed.
 func (m *AgentManager) deleteBufferBestEffort(ctx context.Context, containerID, bufName string) {
+	if bufName == "" {
+		return
+	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	_, _ = m.Runtime.Exec(cleanupCtx, containerID, []string{"tmux", "delete-buffer", "-b", bufName})
