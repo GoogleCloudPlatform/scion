@@ -48,8 +48,8 @@ func brokerHarnessConfigErr(status int, code, message string) error {
 	return &brokerStatusError{StatusCode: status, Body: string(body)}
 }
 
-// harnessConfigRefusals are the broker's harness-config 4xx answers.
-var harnessConfigRefusals = []struct {
+// brokerRefusals are the broker's 4xx refusals relayBrokerRefusal relays.
+var brokerRefusals = []struct {
 	name    string
 	status  int
 	code    string
@@ -62,9 +62,9 @@ var harnessConfigRefusals = []struct {
 	{name: "400 validation", status: http.StatusBadRequest, code: "validation_error", message: brokerValidationMessage},
 }
 
-// assertHarnessConfigRelayed asserts rec carries the broker's status, code
+// assertBrokerRefusalRelayed asserts rec carries the broker's status, code
 // and message, with no details.
-func assertHarnessConfigRelayed(t *testing.T, rec *httptest.ResponseRecorder, status int, code, message string) {
+func assertBrokerRefusalRelayed(t *testing.T, rec *httptest.ResponseRecorder, status int, code, message string) {
 	t.Helper()
 	require.Equal(t, status, rec.Code, rec.Body.String())
 	var resp ErrorResponse
@@ -75,11 +75,11 @@ func assertHarnessConfigRelayed(t *testing.T, rec *httptest.ResponseRecorder, st
 }
 
 func TestDispatchCreateErrorResponse_RelaysHarnessConfigRefusal(t *testing.T) {
-	for _, tc := range harnessConfigRefusals {
+	for _, tc := range brokerRefusals {
 		t.Run(tc.name, func(t *testing.T) {
 			w := httptest.NewRecorder()
 			dispatchCreateErrorResponse(w, brokerHarnessConfigErr(tc.status, tc.code, tc.message), "")
-			assertHarnessConfigRelayed(t, w, tc.status, tc.code, tc.message)
+			assertBrokerRefusalRelayed(t, w, tc.status, tc.code, tc.message)
 		})
 	}
 }
@@ -116,7 +116,7 @@ func TestDispatchCreateErrorResponse_OtherBrokerErrorsStay502(t *testing.T) {
 }
 
 func TestAgentLifecycle_StartRelaysHarnessConfigRefusal(t *testing.T) {
-	for _, tc := range harnessConfigRefusals {
+	for _, tc := range brokerRefusals {
 		for _, action := range []string{"start", "restart"} {
 			t.Run(tc.name+"/"+action, func(t *testing.T) {
 				disp := &skillFailDispatcher{startErr: brokerHarnessConfigErr(tc.status, tc.code, tc.message)}
@@ -125,7 +125,7 @@ func TestAgentLifecycle_StartRelaysHarnessConfigRefusal(t *testing.T) {
 
 				rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+action, nil)
 
-				assertHarnessConfigRelayed(t, rec, tc.status, tc.code, tc.message)
+				assertBrokerRefusalRelayed(t, rec, tc.status, tc.code, tc.message)
 			})
 		}
 	}
@@ -143,7 +143,7 @@ func TestCreateAgent_ExistingAgentStartRelaysHarnessConfigRefusal(t *testing.T) 
 		{name: "stopped resume", phase: state.PhaseStopped, resume: true},
 		{name: "created", phase: state.PhaseCreated},
 	}
-	for _, tc := range harnessConfigRefusals {
+	for _, tc := range brokerRefusals {
 		for _, ph := range phases {
 			t.Run(tc.name+"/"+ph.name, func(t *testing.T) {
 				disp := &skillFailDispatcher{startErr: brokerHarnessConfigErr(tc.status, tc.code, tc.message)}
@@ -158,14 +158,14 @@ func TestCreateAgent_ExistingAgentStartRelaysHarnessConfigRefusal(t *testing.T) 
 				})
 
 				require.True(t, disp.startCalled, "the existing agent must have been started")
-				assertHarnessConfigRelayed(t, rec, tc.status, tc.code, tc.message)
+				assertBrokerRefusalRelayed(t, rec, tc.status, tc.code, tc.message)
 			})
 		}
 	}
 }
 
 func TestWorkspaceSyncToFinalize_RelaysHarnessConfigRefusal(t *testing.T) {
-	for _, tc := range harnessConfigRefusals {
+	for _, tc := range brokerRefusals {
 		t.Run(tc.name, func(t *testing.T) {
 			disp := &skillFailDispatcher{createErr: brokerHarnessConfigErr(tc.status, tc.code, tc.message)}
 			srv, s, project := setupCreateAgentServer(t, disp)
@@ -175,7 +175,7 @@ func TestWorkspaceSyncToFinalize_RelaysHarnessConfigRefusal(t *testing.T) {
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/workspace/sync-to/finalize",
 				map[string]any{"manifest": map[string]any{"version": "1.0", "files": []any{}}})
 
-			assertHarnessConfigRelayed(t, rec, tc.status, tc.code, tc.message)
+			assertBrokerRefusalRelayed(t, rec, tc.status, tc.code, tc.message)
 		})
 	}
 }
@@ -220,10 +220,10 @@ func submitEnvWithFinalizeErrAgent(t *testing.T, name string, err error) (*httpt
 }
 
 func TestSubmitAgentEnv_RelaysHarnessConfigRefusal(t *testing.T) {
-	for _, tc := range harnessConfigRefusals {
+	for _, tc := range brokerRefusals {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := submitEnvWithFinalizeErr(t, "env-hc-fail", brokerHarnessConfigErr(tc.status, tc.code, tc.message))
-			assertHarnessConfigRelayed(t, rec, tc.status, tc.code, tc.message)
+			assertBrokerRefusalRelayed(t, rec, tc.status, tc.code, tc.message)
 		})
 	}
 }

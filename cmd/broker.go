@@ -1128,6 +1128,12 @@ func runBrokerStart(cmd *cobra.Command, args []string) error {
 			pid, pid, daemon.GetLogPath(globalDir))
 	}
 
+	// The daemon checks image_registry itself, but its error only reaches
+	// the log; check here so the user sees the actionable message.
+	if err := requireImageRegistryForBroker(); err != nil {
+		return err
+	}
+
 	// Find the scion executable
 	executable, err := os.Executable()
 	if err != nil {
@@ -1228,6 +1234,12 @@ func runBrokerRestart(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("broker server is running (status: %s) but not as a daemon, if running in foreground use Ctrl+C to stop it and then 'scion runtime-broker start' to restart", health.Status)
 		}
 		return fmt.Errorf("broker daemon is not running, use 'scion runtime-broker start' to start it")
+	}
+
+	// Check before stopping the running daemon: the new daemon would fail
+	// on a missing image_registry with the error only in its log.
+	if err := requireImageRegistryForBroker(); err != nil {
+		return err
 	}
 
 	// Flags given to restart win; anything else keeps the value the running

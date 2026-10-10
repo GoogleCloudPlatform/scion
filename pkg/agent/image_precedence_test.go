@@ -444,19 +444,19 @@ func TestWithProvisionedImage(t *testing.T) {
 	projectScionDir := imagePrecedenceFixture(t, "", profileOverrideSettings)
 	base := &api.ScionConfig{Image: "template-pinned:v2", HarnessConfig: "test-harness"}
 
-	got, _ := withProvisionedImage(api.StartOptions{Name: "a", ProjectPath: projectScionDir, Profile: "staging"}, "", base)
+	got, _ := withProvisionedImage(context.Background(), api.StartOptions{Name: "a", ProjectPath: projectScionDir, Profile: "staging"}, "", base)
 	if got.Image != "profile-pinned:v4" {
 		t.Errorf("profile pin: got %q", got.Image)
 	}
 	if base.Image != "template-pinned:v2" {
 		t.Errorf("input config was mutated: %q", base.Image)
 	}
-	got, _ = withProvisionedImage(api.StartOptions{Name: "a", ProjectPath: projectScionDir, Profile: "staging", Image: "request:v9"}, "", base)
+	got, _ = withProvisionedImage(context.Background(), api.StartOptions{Name: "a", ProjectPath: projectScionDir, Profile: "staging", Image: "request:v9"}, "", base)
 	if got.Image != "request:v9" {
 		t.Errorf("request image: got %q", got.Image)
 	}
 	writeSettings(t, noOverrideSettings)
-	got, _ = withProvisionedImage(api.StartOptions{Name: "a", ProjectPath: projectScionDir, Profile: "staging"}, "", base)
+	got, _ = withProvisionedImage(context.Background(), api.StartOptions{Name: "a", ProjectPath: projectScionDir, Profile: "staging"}, "", base)
 	if got.Image != "template-pinned:v2" {
 		t.Errorf("no pin: got %q", got.Image)
 	}
