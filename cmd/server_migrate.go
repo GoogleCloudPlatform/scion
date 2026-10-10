@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/spf13/cobra"
 )
 
@@ -120,6 +121,9 @@ func runServerMigrate(cmd *cobra.Command, _ []string) error {
 	defer func() { _ = dst.Close() }()
 
 	_, _ = fmt.Fprintln(out, "Ensuring destination schema (auto-migrate)")
+	if err := entadapter.PreMigrate(ctx, dst); err != nil {
+		return fmt.Errorf("destination pre-migration steps: %w", err)
+	}
 	if err := entc.AutoMigrate(ctx, dst); err != nil {
 		return fmt.Errorf("destination auto-migrate: %w", err)
 	}

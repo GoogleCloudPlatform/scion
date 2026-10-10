@@ -202,6 +202,10 @@ func openBackfillStore(ctx context.Context, readOnly ...bool) (*entadapter.Compo
 			return nil, fmt.Errorf("opening sqlite: %w", err)
 		}
 		if !skipMigrations {
+			if err := entadapter.PreMigrate(ctx, client); err != nil {
+				_ = client.Close()
+				return nil, fmt.Errorf("running pre-migration steps: %w", err)
+			}
 			if err := entc.AutoMigrate(ctx, client); err != nil {
 				_ = client.Close()
 				return nil, fmt.Errorf("running migrations: %w", err)
@@ -215,6 +219,10 @@ func openBackfillStore(ctx context.Context, readOnly ...bool) (*entadapter.Compo
 			return nil, fmt.Errorf("opening postgres (verify DSN and network connectivity): %w", err)
 		}
 		if !skipMigrations {
+			if err := entadapter.PreMigrate(ctx, client); err != nil {
+				_ = client.Close()
+				return nil, fmt.Errorf("running pre-migration steps: %w", err)
+			}
 			if err := entc.AutoMigrate(ctx, client); err != nil {
 				_ = client.Close()
 				return nil, fmt.Errorf("running migrations: %w", err)
