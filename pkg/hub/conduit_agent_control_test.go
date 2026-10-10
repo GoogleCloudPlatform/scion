@@ -58,7 +58,7 @@ func (f *ptyConduitFixture) startControlAgent(t *testing.T, hubURL string, adver
 	guardSciontoolLog()
 	ca := &controlAgent{paths: make(chan string, 16)}
 	ctl := control.New(control.Options{KickTokenRefresh: func() { ca.kicks.Add(1) }})
-	var h conduit.RPCHandler = control.RPCHandler(ctl)
+	h := control.RPCHandler(ctl)
 	if wrap != nil {
 		h = wrap(h)
 	}
