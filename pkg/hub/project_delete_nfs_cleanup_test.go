@@ -314,7 +314,10 @@ func TestDeleteProject_NFS_ProjectRecreatedBeforeRetryKeepsTree(t *testing.T) {
 		}
 	})
 
-	e.deleteProject(t)
+	// Not e.deleteProject: the project exists again by design.
+	rec := doRequest(t, e.srv, http.MethodDelete, "/api/v1/projects/"+e.project.ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+	e.srv.nfsCleanupWG.Wait()
 
 	assert.Equal(t, []int{1, 2}, *seen)
 	_, err := os.Stat(filepath.Join(tree, "workspace", "README.md"))
