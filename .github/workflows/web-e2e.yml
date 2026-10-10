@@ -147,8 +147,8 @@ jobs:
 
       # CHROMIUM_EXECUTABLE / TERMINAL_OWNER_CHROMIUM point every suite at
       # the Playwright full Chromium binary, from chromium.executablePath().
-      # Four configs otherwise default to /usr/bin/chromium:
-      # agent-store-count, terminal-entrypoints and terminal-workspace read
+      # Three configs otherwise default to /usr/bin/chromium:
+      # agent-store-count and terminal-entrypoints read
       # CHROMIUM_EXECUTABLE, while terminal-coordinator reads
       # TERMINAL_OWNER_CHROMIUM (as does terminal-owner, which has no such
       # default), so both variables are exported. The step stops with a
