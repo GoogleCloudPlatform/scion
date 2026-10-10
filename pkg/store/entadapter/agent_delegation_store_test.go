@@ -88,7 +88,7 @@ func TestAgentDelegationStore_GrantRoundTripAndValidation(t *testing.T) {
 	assert.True(t, at.Equal(*got.LastExchangedAt))
 
 	for name, mutate := range map[string]func(*store.AgentDelegationGrant){
-		"hub boundary with a project": func(g *store.AgentDelegationGrant) { g.BoundaryProjectID = uuid.NewString() },
+		"hub boundary with a project":  func(g *store.AgentDelegationGrant) { g.BoundaryProjectID = uuid.NewString() },
 		"project boundary without one": func(g *store.AgentDelegationGrant) { g.BoundaryKind = "project" },
 		"unknown boundary kind":        func(g *store.AgentDelegationGrant) { g.BoundaryKind = "galaxy" },
 		"ceiling version zero":         func(g *store.AgentDelegationGrant) { g.CeilingVersion = 0 },
