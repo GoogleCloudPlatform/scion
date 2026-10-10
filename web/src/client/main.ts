@@ -42,7 +42,14 @@ import {
   TERMINAL_PALETTE_NEW_AGENT_EVENT,
   type TerminalPaletteNewAgentDetail,
 } from './terminal-workspace-events.js';
-import { nonOwnerOpenStatus, openPalettePickedAgent } from './terminal-palette-open.js';
+import {
+  MOVE_TERMINALS_LABEL,
+  TERMINALS_MOVED_STATUS,
+  nonOwnerOpenStatus,
+  offersMove,
+  openPalettePickedAgent,
+} from './terminal-palette-open.js';
+import { moveTerminalsWithStatus } from './terminal-move.js';
 import { showToast } from '../utils/toast.js';
 import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../utils/feature-flags.js';
 import { applyServerFeatureFlags } from './server-feature-flags.js';
@@ -159,6 +166,10 @@ let terminalPersistence: TerminalWorkspacePersistence | null = null;
 let accountTornDown = false;
 let routeOutlet: HTMLElement | null = null;
 const terminalNavigations = new Map<string, number>();
+/** The agent in the most recent /terminals/<agentId> route, for a move to this window. */
+let terminalRouteAgentId: string | null = null;
+/** True while a move to this window is running. */
+let terminalMoveRunning = false;
 const uuidPath = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const terminalAgentRoute = new RegExp(`^/terminals/(${uuidPath})$`, 'i');
 const legacyTerminalRoute = new RegExp(`^/agents/(${uuidPath})/terminal$`, 'i');
@@ -173,6 +184,47 @@ function ensureRoots(): HTMLElement | null {
     app.replaceChildren(routeOutlet);
   }
   return routeOutlet;
+}
+
+/** Shows "Move terminals to this window" under the non-owner status message. */
+function offerTerminalMove(): void {
+  terminalWorkspace?.setStatusAction({
+    label: MOVE_TERMINALS_LABEL,
+    onClick: () => void runTerminalMove(),
+  });
+}
+
+/**
+ * Moves the terminals from the window that owns them to this one
+ * (ptone/scion#3328): this window opens its own streams first, and the
+ * owner closes its streams only after that. See moveTerminalsHere.
+ */
+async function runTerminalMove(): Promise<void> {
+  const coordinator = terminalCoordinator;
+  const persistence = terminalPersistence;
+  const workspace = terminalWorkspace;
+  if (!coordinator || !persistence || !workspace || terminalMoveRunning) return;
+  terminalMoveRunning = true;
+  try {
+    const result = await moveTerminalsWithStatus({
+      coordinator,
+      persistence,
+      workspace,
+      ui: workspace,
+      preferredAgentId: terminalRouteAgentId,
+      retry: () => void runTerminalMove(),
+    });
+    if (result.status !== 'moved' || coordinator !== terminalCoordinator || accountTornDown) return;
+    const path = result.agentId ? `/terminals/${result.agentId}` : '/terminals';
+    const current = stripBasePath(window.location.pathname);
+    if (!window.location.search && (current === '/terminals' || terminalAgentRoute.test(current))) {
+      window.history.replaceState(window.history.state, '', browserPath(path));
+      workspace.setCurrentPath(path);
+      terminalRouteAgentId = result.agentId;
+    }
+  } finally {
+    terminalMoveRunning = false;
+  }
 }
 
 function ensureTerminalCoordinator(): TerminalCoordinator | null {
@@ -213,6 +265,12 @@ function ensureTerminalCoordinator(): TerminalCoordinator | null {
       window.history.replaceState(window.history.state, '', browserPath(`/terminals/${agentId}`));
       terminalWorkspace!.setCurrentPath(`/terminals/${agentId}`);
     },
+  });
+  // After a move to another window, this window shows the "owned elsewhere"
+  // state, with the button to move the terminals back.
+  terminalCoordinator.onRelinquished(() => {
+    terminalWorkspace?.setStatus(TERMINALS_MOVED_STATUS);
+    offerTerminalMove();
   });
   // "Jump to agent" palette, new agent in a multi-pane layout only (the
   // workspace places an already-open agent itself, and navigates like a rail
@@ -1106,6 +1164,7 @@ async function renderRoute(path: string): Promise<void> {
 
       // Default behavior: single-agent from path
       const agentId = pathname.match(terminalAgentRoute)?.[1];
+      terminalRouteAgentId = agentId?.toLowerCase() ?? null;
       if (agentId && coordinator) {
         const requestId = coordinator.supported ? crypto.randomUUID() : undefined;
         if (requestId) terminalNavigations.set(requestId, thisNav);
@@ -1113,6 +1172,8 @@ async function renderRoute(path: string): Promise<void> {
         if (requestId && result.status !== 'pending') terminalNavigations.delete(requestId);
         if (thisNav === navigationId && !coordinator.isOwner) {
           terminalWorkspace?.setStatus(nonOwnerOpenStatus(result.status));
+          if (offersMove(result.status) && !terminalMoveRunning) offerTerminalMove();
+          else if (!terminalMoveRunning) terminalWorkspace?.setStatusAction(null);
         }
       }
       return;

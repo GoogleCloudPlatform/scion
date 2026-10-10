@@ -161,7 +161,7 @@ var messagingOperations = []OperationSpec{
 	{
 		ID:          "inbox.conversation.list",
 		Domain:      "inbox",
-		Description: "List the caller's conversations. A token lists only conversations inside its boundary, and a direct conversation with an agent only with agent:read on that agent; the project group union also needs project:read",
+		Description: "List the caller's conversations. A group conversation is listed only while the caller can read it (project:read on its project, or the participant rule for a group with no project; a token is checked as its user); a participant row alone does not list it. A token lists only conversations inside its boundary, and a direct conversation with an agent only with agent:read on that agent; the project group union also needs project:read",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/conversations", Method: "GET"},
 		},
@@ -175,6 +175,8 @@ var messagingOperations = []OperationSpec{
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestConversationListToken_FilteredToBoundary"},
+			{Package: "pkg/hub", Function: "TestConversationList_OmitsGroupsOfUnreadableProject"},
+			{Package: "pkg/hub", Function: "TestConversationList_GroupReadLookupErrorOmitsRow"},
 		},
 		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
@@ -266,7 +268,7 @@ var messagingOperations = []OperationSpec{
 	{
 		ID:          "inbox.conversation.participant.add",
 		Domain:      "inbox",
-		Description: "Add a participant to a group conversation. Every caller needs project:read on the conversation's project; an added agent must be in that project and an added user must be a member of it; a token also needs inbox:write for it",
+		Description: "Add a participant to a group conversation. Every caller needs project:read on the conversation's project; an added agent must be in that project and an added user must be a member of it; a token also needs inbox:write for it. A caller who is not a participant or cannot read the group gets the unknown-conversation answer, and an agent of another project the unknown-agent answer",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/conversations/{id}/participants", Method: "POST"},
 		},
@@ -277,9 +279,11 @@ var messagingOperations = []OperationSpec{
 		Effects:          []SecurityEffect{EffectUpdateResource},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
-		DenialCodes:      []DenialCode{DenialForbidden},
+		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestConversationAddParticipant_RequiresProjectReadAndMemberPrincipals"},
+			{Package: "pkg/hub", Function: "TestConversationAddParticipant_UnreadableGroupMatchesUnknownConversation"},
+			{Package: "pkg/hub", Function: "TestConversationAddParticipant_AgentOfOtherProjectMatchesUnknownAgent"},
 		},
 		Bearer: AdmitOn(BearerTargetConversationRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
@@ -327,7 +331,7 @@ var messagingOperations = []OperationSpec{
 	{
 		ID:          "agent.message.target.resolve",
 		Domain:      "agent.message",
-		Description: "Resolve a cross-project messaging target through the agent message authorization",
+		Description: "Resolve a messaging target in another project through the agent message authorization. Only a target the caller may message is answered; any other target gets the unknown-target answer",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/messaging/targets/resolve", Method: "GET"},
 		},
@@ -338,9 +342,10 @@ var messagingOperations = []OperationSpec{
 		Effects:          []SecurityEffect{EffectReadOne},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
-		DenialCodes:      []DenialCode{DenialForbidden},
+		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestMessagingTargetsResolve_TokenNeedsAgentMessage"},
+			{Package: "pkg/hub", Function: "TestMessagingTargetsResolve_ReplyOnlyTargetMatchesMissing"},
 		},
 		Bearer: AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},

@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // This file holds the checks for references carried inside chat content: a
@@ -48,6 +49,19 @@ func logReferenceRefused(ctx context.Context, route, reason string, caller Ident
 		"caller_type", callerType,
 		"caller", callerID,
 	)
+}
+
+// reasonExternalRefOfOtherProject is the logged reason when an external
+// chat reference already names a conversation of another project.
+const reasonExternalRefOfOtherProject = "external reference names a conversation of another project"
+
+// externalRefOfOtherProject reports whether a conversation resolution error
+// is the store keeping an existing conversation in the project it was created
+// with. Such a reference is never reused: the request is refused whatever the
+// write-deny setting, because continuing would deliver the message without
+// the conversation the reference names.
+func externalRefOfOtherProject(err error) bool {
+	return errors.Is(err, store.ErrConversationProjectMismatch)
 }
 
 // sameConversation reports whether msg belongs to the current conversation.
@@ -295,4 +309,66 @@ func (s *Server) senderCanReadGroup(ctx context.Context, projectID string) bool 
 		return agentIdent.ProjectID() != "" && agentIdent.ProjectID() == projectID
 	}
 	return false
+}
+
+// groupReadMemo answers "may identity read this group conversation now" for
+// one request. The answer for a group with a project is the project read
+// rule (canReadGroupConversation), looked up once per project; a group with
+// no project uses the participant rule and is checked on its own. A lookup
+// error answers no and is never cached.
+//
+// A group with no project runs its own participant query even when the row
+// came from the caller's own participant rows: the rule stays in one place
+// (canReadGroupConversation), and such groups are few, so the extra query
+// per row costs little.
+type groupReadMemo struct {
+	s         *Server
+	identity  Identity
+	byProject map[string]bool
+}
+
+func newGroupReadMemo(s *Server, identity Identity) *groupReadMemo {
+	return &groupReadMemo{s: s, identity: identity, byProject: map[string]bool{}}
+}
+
+func (m *groupReadMemo) canRead(ctx context.Context, conv *store.Conversation) bool {
+	projectID := ""
+	if conv.ProjectID != nil {
+		projectID = *conv.ProjectID
+	}
+	if projectID != "" {
+		if allowed, ok := m.byProject[projectID]; ok {
+			return allowed
+		}
+	}
+	allowed, err := m.s.canReadGroupConversation(ctx, m.identity, conv)
+	if err != nil {
+		slog.DebugContext(ctx, "group conversation read check failed; row omitted",
+			"conversation_id", conv.ID, "project_id", projectID, "error", err)
+		return false
+	}
+	if projectID != "" {
+		m.byProject[projectID] = allowed
+	}
+	return allowed
+}
+
+// authorizeGroupConversationReadAsNotFound reports whether the caller may
+// read conv (canReadGroupConversation). A caller who may not gets the same
+// answer as for an unknown conversation; the reason is logged. A store error
+// is written as that error and refuses.
+func (s *Server) authorizeGroupConversationReadAsNotFound(w http.ResponseWriter, r *http.Request, conv *store.Conversation) bool {
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	allowed, err := s.canReadGroupConversation(ctx, identity, conv)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+	if !allowed {
+		logReferenceRefused(ctx, logging.RequestPath(r), "caller cannot read the group conversation", identity)
+		NotFound(w, "Conversation")
+		return false
+	}
+	return true
 }

@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -414,6 +415,15 @@ func (s *BackfillService) persistGroup(ctx context.Context, g *conversationGroup
 	}
 
 	upserted, err := s.convStore.UpsertConversationByExternalRef(ctx, conv)
+	if errors.Is(err, store.ErrConversationProjectMismatch) {
+		// A conversation keeps the project it was created with. The key
+		// already names a conversation of another project, so these
+		// messages are left unstamped and counted as skipped.
+		slog.InfoContext(ctx, "backfill: conversation key belongs to another project; group skipped",
+			"external_ref", g.key, "project_id", g.projectID, "messages", len(g.messageIDs))
+		result.Skipped += len(g.messageIDs)
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("upserting conversation: %w", err)
 	}
