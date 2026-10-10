@@ -183,7 +183,7 @@
 - [gcp.identity.assign](#gcpidentityassign) — Assign a GCP service account to an agent
 - [gcp.identity.mint](#gcpidentitymint) — Mint a GCP access token for a service account
 - [secret.read](#secretread) — Read project secrets or environment variables containing secrets
-- [secret.write](#secretwrite) — Create or update project secrets
+- [secret.write](#secretwrite) — Create, update or delete secrets. At user scope, the default, the secrets are the caller's own and a federated user is refused (requireProfileWriter)
 - [gcp.identity.read](#gcpidentityread) — Read GCP service account details or list accounts
 - [gcp.identity.verify](#gcpidentityverify) — Verify a GCP service account's IAM configuration
 - [env.read](#envread) — Read project environment variables
@@ -3507,6 +3507,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestChatProfileWrites_FederatedUserRefused`
 
 ---
 
@@ -6697,7 +6698,7 @@
 
 **Domain:** secret
 
-**Description:** Create or update project secrets
+**Description:** Create, update or delete secrets. At user scope, the default, the secrets are the caller's own and a federated user is refused (requireProfileWriter)
 
 ### Entry Points
 
@@ -6728,6 +6729,8 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserEnvSecretWrites_FederatedUserRefused`
+- `pkg/hub:TestUserEnvSecretWrites_SessionAndTokenUnchanged`
 
 ---
 

@@ -162,7 +162,7 @@ var materialOperations = []OperationSpec{
 	{
 		ID:          "secret.write",
 		Domain:      "secret",
-		Description: "Create or update project secrets",
+		Description: "Create, update or delete secrets. At user scope, the default, the secrets are the caller's own and a federated user is refused (requireProfileWriter)",
 		EntryPoints: []EntryPoint{
 			// handleSecrets (handlers_env_secrets.go) is GET-only (list);
 			// create-or-update and delete are both on the by-key route.
@@ -183,7 +183,11 @@ var materialOperations = []OperationSpec{
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
-		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestUserEnvSecretWrites_FederatedUserRefused"},
+			{Package: "pkg/hub", Function: "TestUserEnvSecretWrites_SessionAndTokenUnchanged"},
+		},
 	},
 
 	// =====================================================================
