@@ -114,6 +114,25 @@ func restartWriteBudget() time.Duration {
 	return workspaceCheckTimeout + 2*syncDispatchTimeout + syncDispatchWriteSlack
 }
 
+// stopWriteBudget is the write deadline, from the start of the broker
+// work, of a lifecycle stop or suspend: the workspace sync-back request to
+// the broker (syncWorkspaceOnStop, bounded like a dispatch by the
+// hub-to-broker request limit, syncDispatchTimeout), the ephemeral workspace
+// check, then the stop dispatch (bounded by the same limit), plus
+// syncDispatchWriteSlack.
+func stopWriteBudget() time.Duration {
+	return syncDispatchTimeout + workspaceCheckTimeout + syncDispatchTimeout + syncDispatchWriteSlack
+}
+
+// dmWakeWriteBudget is the write deadline, from the start of the wake, of a
+// direct message that resumes a suspended agent before delivering
+// (wakeAgentForDM): the resume dispatch (bounded by syncDispatchTimeout),
+// then the wait for the resumed agent's first status (wakeReadyTimeout),
+// plus syncDispatchWriteSlack for the delivery and the response write.
+func dmWakeWriteBudget() time.Duration {
+	return syncDispatchTimeout + wakeReadyTimeout + syncDispatchWriteSlack
+}
+
 // hubWorkspaceUploadWriteBudget is the write deadline, from the start of the
 // upload, of a create that uploads its hub-managed project workspace: the
 // upload's own budget plus syncDispatchWriteSlack, for the failure answer
@@ -130,6 +149,13 @@ func hubWorkspaceUploadWriteBudget() time.Duration {
 // extendWriteDeadline.
 func extendWriteDeadlineForSyncDispatch(ctx context.Context, w http.ResponseWriter, configuredWriteTimeout time.Duration) {
 	extendWriteDeadline(ctx, w, configuredWriteTimeout, syncDispatchWriteBudget())
+}
+
+// extendWriteDeadlineForDMWake moves the connection's write deadline to
+// dmWakeWriteBudget from now, for a direct message that wakes its target
+// (ptone/scion#4178). See extendWriteDeadline.
+func (s *Server) extendWriteDeadlineForDMWake(ctx context.Context, w http.ResponseWriter) {
+	extendWriteDeadline(ctx, w, s.config.WriteTimeout, dmWakeWriteBudget())
 }
 
 // extendWriteDeadline moves the connection's write deadline to budget from

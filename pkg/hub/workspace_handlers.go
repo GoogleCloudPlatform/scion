@@ -612,6 +612,10 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 		Manifest:    req.Manifest,
 	}
 
+	// The response waits on the broker's apply, bounded by the hub-to-broker
+	// request limit (syncDispatchTimeout): extend this request's write
+	// deadline to cover it (ptone/scion#4178).
+	extendWriteDeadlineForSyncDispatch(ctx, w, s.config.WriteTimeout)
 	var applyResp RuntimeBrokerWorkspaceApplyResponse
 	if err := tunnelWorkspaceRequest(ctx, cc, agent.RuntimeBrokerID, "POST", "/api/v1/workspace/apply", applyReq, &applyResp); err != nil {
 		if strings.Contains(err.Error(), "timeout") {

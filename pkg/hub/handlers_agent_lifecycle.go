@@ -717,6 +717,10 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		s.clearExposedPortsForAgent(ctx, agent.ID)
 		stopRunID = agent.RunID
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
+			// The response waits on the workspace sync-back, the ephemeral
+			// workspace check and the stop dispatch: extend this request's
+			// write deadline to cover them (ptone/scion#4178).
+			extendWriteDeadline(ctx, w, s.config.WriteTimeout, stopWriteBudget())
 			// Before stopping, sync workspace back for hub-managed projects on remote brokers.
 			// This is best-effort: failures are logged but don't block the stop.
 			s.syncWorkspaceOnStop(ctx, agent)
@@ -748,6 +752,14 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		// Suspend is fully handled by the shared suspendAgent helper, which
 		// validates harness resume support, dispatches the stop, persists
 		// phase=suspended, and publishes the status event.
+		//
+		// The response waits on the same broker work as a stop: extend
+		// this request's write deadline to cover it (ptone/scion#4178).
+		// Done here rather than in suspendAgent, which the auto-suspend
+		// scheduler also calls without a request.
+		if dispatcher != nil && agent.RuntimeBrokerID != "" {
+			extendWriteDeadline(ctx, w, s.config.WriteTimeout, stopWriteBudget())
+		}
 		if err := s.suspendAgent(ctx, agent); err != nil {
 			var noResume *errHarnessNoResume
 			if errors.As(err, &noResume) {
