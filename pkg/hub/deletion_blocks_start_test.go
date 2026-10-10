@@ -116,10 +116,14 @@ func TestAgentGet_NoDeletionNoBlocksStart(t *testing.T) {
 // A failing check omits the field; the GET still answers 200.
 func TestAgentGet_DeletionBlocksStartCheckErrorOmits(t *testing.T) {
 	srv, s := testServer(t)
+	// The wrapper fails every dispatch lookup; setup below writes through
+	// the unwrapped store, so only the server's reads see the error.
+	installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *dispatchErrStore {
+		return &dispatchErrStore{Store: inner}
+	})
 	agent := setupBrokerAgentInPhase(t, s, "bs-err", state.PhaseStopped)
 	// Not held by the row itself, so the check has to read the dispatch table.
 	seedAgentDeletion(t, s, agent.ID, seedFreeFailed)
-	srv.store = &dispatchErrStore{Store: s}
 
 	view := getDeletionView(t, srv, s, agent.ID)
 	require.NotNil(t, view)
