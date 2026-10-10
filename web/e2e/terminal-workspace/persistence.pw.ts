@@ -427,17 +427,20 @@ test('owner only: PUTs come only from the owning page, never the non-owner', asy
   await owner.goto(`/terminals/${agentA}`);
   await ownerSocket.waitForAttach(1);
 
-  // The non-owner tab loads an agent path (the "owning tab" message only
-  // renders for that branch — a bare /terminals visit has nothing to say
-  // about a specific agent): it cannot become owner, so it never restores
+  // The non-owner tab loads an agent path, so the owner selects that agent
+  // and the non-owner shows "Terminals open in another window": it cannot
+  // become owner, so it never restores
   // or writes. The coordinator forwards this open to the owner tab
   // (unchanged, existing cross-tab behaviour), which the owner then
   // writes back — the state fake will already show a PUT or two by the
   // time the owner makes its own change below.
   await other.goto(`/terminals/${agentB}`);
-  await expect(other.locator('#terminal-workspace')).toContainText('owning tab', {
-    timeout: FIRST_RENDER_TIMEOUT,
-  });
+  await expect(other.locator('#terminal-workspace')).toContainText(
+    'Terminals open in another window',
+    {
+      timeout: FIRST_RENDER_TIMEOUT,
+    }
+  );
   expect(otherSocket.attaches).toBe(0);
 
   // A change made directly in the owner tab (agentC, not yet open, so this

@@ -513,7 +513,9 @@ test('a second tab selects through the owner without attaching locally', async (
   await owner.goto(`/terminals/${agent}`);
   await expect.poll(() => ownerSocket.attaches).toBe(1);
   await other.goto(`/terminals/${agent}`);
-  await expect(other.locator('#terminal-workspace')).toContainText('owning tab');
+  await expect(other.locator('#terminal-workspace')).toContainText(
+    'Terminals open in another window'
+  );
   expect(otherSocket.attaches).toBe(0);
   expect(await other.locator('#terminal-workspace scion-terminal-pane').count()).toBe(0);
   await expect
@@ -1856,7 +1858,9 @@ test('keyboard "Place in pane" action places session without drag gesture', asyn
   expect(socket.closes).toBe(0);
 });
 
-test('ordinary rail click preserves active preset, does not place (#1701)', async ({ page }) => {
+test('rail click keeps the active preset and fills the next free slot (#1701, ptone/scion#4324)', async ({
+  page,
+}) => {
   const socket = await setup(page);
 
   await page.goto(`/terminals/${agent}`);
@@ -1873,18 +1877,24 @@ test('ordinary rail click preserves active preset, does not place (#1701)', asyn
   // open() no longer clobbers the preset — stays in two-columns (#1701)
   await expect.poll(() => activePreset(page)).toBe('two-columns');
 
-  // Two-columns should still have empty slots (not affected by rail click)
-  const twoColSlots = await page.evaluate(() => {
+  // The rail click puts the terminal in the first free slot (ptone/scion#4324)
+  const slots = await page.evaluate((agentId) => {
     type WorkspaceEl = HTMLElement & {
       workspaceRoot?: {
         layoutManager: { getState: () => { twoColumns: (string | null)[] } };
+        findSessionKeyByAgentId: (id: string) => string | null;
       };
     };
     const host = document.querySelector('#terminal-workspace') as WorkspaceEl;
-    return host.workspaceRoot!.layoutManager.getState().twoColumns;
-  });
-  expect(twoColSlots).toEqual([null, null]);
+    return {
+      twoColumns: host.workspaceRoot!.layoutManager.getState().twoColumns,
+      key: host.workspaceRoot!.findSessionKeyByAgentId(agentId),
+    };
+  }, agent);
+  expect(slots.key).not.toBeNull();
+  expect(slots.twoColumns).toEqual([slots.key, null]);
 
+  // The same session: no new connection
   expect(socket.attaches).toBe(1);
 });
 
@@ -2190,7 +2200,9 @@ test('non-owner logout broadcasts teardown, owner disposes', async ({ context })
 
   // Other tab navigates to terminals (becomes non-owner)
   await other.goto(`/terminals/${agent}`);
-  await expect(other.locator('#terminal-workspace')).toContainText('owning tab');
+  await expect(other.locator('#terminal-workspace')).toContainText(
+    'Terminals open in another window'
+  );
 
   // Non-owner fires teardown
   await other.evaluate(() => {
