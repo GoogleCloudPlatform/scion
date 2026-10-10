@@ -857,7 +857,7 @@ var identityOperations = []OperationSpec{
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestUserInjectedSkillsWrite_TokenNeedsUpdateScope"},
 			{Package: "pkg/hub", Function: "TestUserInjectedSkillsWrite_ProjectBoundaryTokenDenied"},
-			{Package: "pkg/hub", Function: "TestUserInjectedSkillsWrite_SessionAndFederatedUnchanged"},
+			{Package: "pkg/hub", Function: "TestUserInjectedSkillsWrite_SessionDevAndFederatedUnchanged"},
 		},
 		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryHub),
 	},

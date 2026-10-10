@@ -189,10 +189,10 @@ func TestUserInjectedSkillsWrite_ProjectBoundaryTokenDenied(t *testing.T) {
 	assert.Equal(t, before, userInjectedSkillURIs(t, s, alice.ID))
 }
 
-// TestUserInjectedSkillsWrite_SessionAndFederatedUnchanged pins that an
-// interactive session and a federated user identity add, replace and
-// remove their own entries without a token scope.
-func TestUserInjectedSkillsWrite_SessionAndFederatedUnchanged(t *testing.T) {
+// TestUserInjectedSkillsWrite_SessionDevAndFederatedUnchanged pins that an
+// interactive session, a dev credential and a federated user identity add,
+// replace and remove their own entries without a token scope.
+func TestUserInjectedSkillsWrite_SessionDevAndFederatedUnchanged(t *testing.T) {
 	srv, s, _, alice, _ := setupInjectedSkillsTest(t)
 
 	seeded := seedUserInjectedSkill(t, s, alice.ID, "skill://scion/seeded@1.0")
@@ -204,6 +204,19 @@ func TestUserInjectedSkillsWrite_SessionAndFederatedUnchanged(t *testing.T) {
 	rec = doRequestAsUser(t, srv, alice, writes[1].method, writes[1].path, writes[1].body)
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Equal(t, []string{"skill://scion/replaced@1.0"}, userInjectedSkillURIs(t, s, alice.ID))
+
+	dev := NewDevUser(DevUserConfig{Username: "dev", DisplayName: "Dev", Email: "dev@localhost"})
+	devSeeded := seedUserInjectedSkill(t, s, dev.ID(), "skill://scion/seeded@1.0")
+	writes = userInjectedSkillWrites(devSeeded.ID)
+	rec = callUserInjectedSkillsAs(t, srv, dev, writes[2].method, writes[2].path, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	assert.Empty(t, userInjectedSkillURIs(t, s, dev.ID()))
+	rec = callUserInjectedSkillsAs(t, srv, dev, writes[0].method, writes[0].path, writes[0].body)
+	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Equal(t, []string{"skill://scion/added@1.0"}, userInjectedSkillURIs(t, s, dev.ID()))
+	rec = callUserInjectedSkillsAs(t, srv, dev, writes[1].method, writes[1].path, writes[1].body)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, []string{"skill://scion/replaced@1.0"}, userInjectedSkillURIs(t, s, dev.ID()))
 
 	fed := NewFederatedUserIdentity("https://issuer.si.test", "si-fed", "si-fed@test.com", "Fed", "member", nil)
 	fedSeeded := seedUserInjectedSkill(t, s, fed.ID(), "skill://scion/seeded@1.0")
