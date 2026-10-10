@@ -87,10 +87,11 @@ var knownInertServerEnvNames = map[string]string{
 	"SCION_SERVER_HUB_PUBLIC_URL":                       "SCION_SERVER_HUB_ENDPOINT",
 	// Named by an old storage-migration error message.
 	"SCION_SERVER_HUB_ID": "SCION_SERVER_HUB_HUBID",
-	// No SCION_SERVER_* spelling sets the boot log level or format; see
-	// knownInertServerEnvNotes.
+	// The server.log_level spelling is SCION_SERVER_LOGLEVEL; nothing sets
+	// the log format. See knownInertServerEnvNotes.
 	"SCION_SERVER_LOG_LEVEL":  "SCION_SERVER_LOGLEVEL",
 	"SCION_SERVER_LOG_FORMAT": "",
+	"SCION_SERVER_LOGFORMAT":  "",
 	// server.env binds in VersionedSettings, but nothing reads it.
 	"SCION_SERVER_ENV": "",
 }
@@ -98,8 +99,9 @@ var knownInertServerEnvNames = map[string]string{
 // knownInertServerEnvNotes adds a short explanation to the warning for
 // known-inert names whose suggestion alone would mislead.
 var knownInertServerEnvNotes = map[string]string{
-	"SCION_SERVER_LOG_LEVEL":  "no boot-time override: SCION_SERVER_LOGLEVEL only affects file-mode reload; at startup use --debug or SCION_LOG_LEVEL=debug",
+	"SCION_SERVER_LOG_LEVEL":  "SCION_SERVER_LOGLEVEL sets server.log_level, applied at startup and on file-mode reload; SCION_LOG_LEVEL and --debug take precedence over it",
 	"SCION_SERVER_LOG_FORMAT": "server.log_format is not read by the hub",
+	"SCION_SERVER_LOGFORMAT":  "server.log_format is not read by the hub",
 	"SCION_SERVER_ENV":        "server.env is informational and not read by the hub",
 }
 

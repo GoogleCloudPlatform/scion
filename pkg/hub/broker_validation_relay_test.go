@@ -93,7 +93,7 @@ func TestDispatchCreateErrorResponse_FakeBrokerValidationErrorBecomes400(t *test
 	w := httptest.NewRecorder()
 	dispatchCreateErrorResponse(w, err, "")
 
-	assertHarnessConfigRelayed(t, w, http.StatusBadRequest, ErrCodeValidationError, brokerValidationMessage)
+	assertBrokerRefusalRelayed(t, w, http.StatusBadRequest, ErrCodeValidationError, brokerValidationMessage)
 }
 
 // TestDispatchCreateErrorResponse_FakeBrokerOtherStatusesUnchanged pins the
@@ -141,7 +141,7 @@ func TestAgentLifecycle_StartFakeBrokerValidationErrorBecomes400(t *testing.T) {
 
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+action, nil)
 
-			assertHarnessConfigRelayed(t, rec, http.StatusBadRequest, ErrCodeValidationError, brokerValidationMessage)
+			assertBrokerRefusalRelayed(t, rec, http.StatusBadRequest, ErrCodeValidationError, brokerValidationMessage)
 		})
 	}
 }
@@ -169,7 +169,7 @@ func TestCreateAgent_FakeBrokerValidationErrorBecomes400(t *testing.T) {
 		Task:      "some task",
 	})
 
-	assertHarnessConfigRelayed(t, rec, http.StatusBadRequest, ErrCodeValidationError, brokerValidationMessage)
+	assertBrokerRefusalRelayed(t, rec, http.StatusBadRequest, ErrCodeValidationError, brokerValidationMessage)
 	assert.True(t, disp.deleteCalled, "the failed create is still cleaned up on the broker")
 	require.NotNil(t, disp.capturedAgent, "the dispatcher saw the create-time agent")
 	_, err := s.GetAgent(context.Background(), disp.capturedAgent.ID)

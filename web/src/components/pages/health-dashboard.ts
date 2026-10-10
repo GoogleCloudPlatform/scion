@@ -19,7 +19,8 @@
  *
  * Owns fetching, polling and state for GET /api/v1/admin/health/summary,
  * and lays out the section modules (design 5.1, 5.7):
- * - Header: overall status pill, "as of" time, the serving hub instance
+ * - Header: overall status pill, "as of" time, the serving hub instance,
+ *   and the operator's monitoring dashboard link when one is configured
  * - Needs attention (health-attention.ts), full width and first
  * - Hub (health-hub-card.ts, database and the service account check
  *   diagnostic folded in) | Dispatch (health-dispatch-card.ts)
@@ -37,6 +38,7 @@ import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { formatInstant, formatInstantWithZone } from '../../utils/time.js';
+import { isHttpUrl } from '../../utils/http-url.js';
 import type { HealthAttentionItem } from './health-attention.js';
 import './health-attention.js';
 import type {
@@ -97,6 +99,13 @@ export interface HealthSummary {
    * registry could not be read.
    */
   hub_instances?: HealthSummaryHubInstances | null;
+  /** Operator-configured links; absent when none is configured. */
+  links?: HealthSummaryLinks;
+}
+
+export interface HealthSummaryLinks {
+  /** server.hub.monitoring_dashboard_url; absent when unset. */
+  monitoring_dashboard?: string;
 }
 
 @customElement('scion-page-health-dashboard')
@@ -234,6 +243,19 @@ export class ScionPageHealthDashboard extends LitElement {
         background: var(--scion-bg-subtle);
       }
 
+      .monitoring-link {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+        font-size: 0.8125rem;
+        color: var(--scion-primary);
+        text-decoration: none;
+      }
+
+      .monitoring-link:hover {
+        text-decoration: underline;
+      }
+
       .toggle-label {
         display: flex;
         align-items: center;
@@ -349,6 +371,24 @@ export class ScionPageHealthDashboard extends LitElement {
     `;
   }
 
+  /**
+   * The "Open monitoring dashboard" link, only when the summary carries an
+   * http(s) links.monitoring_dashboard. The hub validates the URL when it
+   * is saved; any other value is not rendered here either.
+   */
+  private renderMonitoringLink(d: HealthSummary) {
+    const url = d.links?.monitoring_dashboard;
+    if (!isHttpUrl(url)) return nothing;
+    return html`<a
+      class="monitoring-link"
+      data-role="monitoring-dashboard"
+      href=${url}
+      target="_blank"
+      rel="noopener noreferrer"
+      >Open monitoring dashboard<sl-icon name="box-arrow-up-right" aria-hidden="true"></sl-icon
+    ></a>`;
+  }
+
   private renderHeader(d: HealthSummary) {
     const asOf = d.generated_at ? formatInstant(d.generated_at, 'time-seconds') : '';
     const instance = d.hub?.instance_id ?? '';
@@ -377,6 +417,7 @@ export class ScionPageHealthDashboard extends LitElement {
             : nothing}
         </div>
         <div class="header-right">
+          ${this.renderMonitoringLink(d)}
           <label class="toggle-label">
             <input
               type="checkbox"

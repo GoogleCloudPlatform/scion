@@ -49,6 +49,10 @@ A hook fires on exactly one of these authoritative phase transitions:
 Only *transitions* fire hooks. Repeated publications of the same phase (for
 example, heartbeats) are de-duplicated and do not re-fire.
 
+A failed delete can also fire `stopped`, because when the agent's launch or start
+ended while the delete was in progress, the failed delete restores the agent as
+stopped (a real transition) rather than to its earlier phase.
+
 ## Admin CRUD API
 
 All endpoints live under `/api/v1/admin/lifecycle-hooks` and require the

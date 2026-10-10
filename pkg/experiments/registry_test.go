@@ -336,6 +336,25 @@ func TestDefaultOnFlagsConsistency_DetectsMissingEntry(t *testing.T) {
 	}
 }
 
+func TestFlatRuntimeBrokersExperimentRegistered(t *testing.T) {
+	e, ok := Default().Lookup(FlatRuntimeBrokers)
+	if !ok {
+		t.Fatalf("%s is not registered", FlatRuntimeBrokers)
+	}
+	if FlatRuntimeBrokers != "hub.flat_runtime_brokers" {
+		t.Fatalf("frozen name changed: %q", FlatRuntimeBrokers)
+	}
+	if e.Default {
+		t.Fatal("flat Runtime Brokers must default to off")
+	}
+	if !e.HasLayer(LayerServer) || e.HasLayer(LayerWeb) {
+		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
+	}
+	if e.Title == "" || e.Description == "" || e.Issue != "ptone/scion#2926" || e.Owner == "" || e.Stage != StageAlpha {
+		t.Fatalf("incomplete registration: %+v", e)
+	}
+}
+
 // TestArtifactsExperiment_Registered pins the hub.artifacts entry: it gates
 // both the web surfaces and the hub routes, so it needs both layers, and it
 // ships off.

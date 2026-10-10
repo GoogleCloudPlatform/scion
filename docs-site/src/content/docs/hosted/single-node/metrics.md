@@ -60,14 +60,8 @@ telemetry:
     enabled: true
     report_interval: "30s"
 
-  local:
-    enabled: false
-    file: ""
-    console: false
-
   filter:
     enabled: true
-    respect_debug_mode: true
     events:
       include: []
       exclude:
@@ -101,7 +95,6 @@ Environment variables override any settings file value and are the most convenie
 | `SCION_OTEL_PROTOCOL` | `telemetry.cloud.protocol` | `grpc` | Protocol: `grpc` or `http` |
 | `SCION_OTEL_INSECURE` | `telemetry.cloud.tls.insecure_skip_verify` | `false` | Skip TLS verification (dev only) |
 | `SCION_TELEMETRY_HUB_ENABLED` | `telemetry.hub.enabled` | `true` | Enable Hub reporting |
-| `SCION_TELEMETRY_DEBUG` | `telemetry.local.enabled` | `false` | Enable local debug output |
 | `SCION_GCP_PROJECT_ID` | — | (auto) | GCP project ID for Google Cloud backends |
 | `SCION_OTEL_GCP_CREDENTIALS` | — | (auto) | Path to a GCP service account key JSON file; set automatically by the broker from the `scion-telemetry-gcp-credentials` secret |
 | `SCION_TELEMETRY_CLOUD_PROVIDER` | — | (auto) | Cloud backend: `gcp` for GCP-native export; auto-detected when credentials file is present |

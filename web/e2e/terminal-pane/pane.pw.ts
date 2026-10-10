@@ -62,6 +62,9 @@ async function setup(page: Page) {
     attaches++;
     socket.onMessage((message) => frames.push(JSON.parse(String(message)) as Frame));
     socket.onClose(() => closes++);
+    // tmux sends a redraw on attach — the client only reaches a connected
+    // state on its first inbound data frame (see client/terminal-sessions.ts).
+    socket.send(JSON.stringify({ type: 'data', data: Buffer.from('').toString('base64') }));
   });
   return {
     frames,
