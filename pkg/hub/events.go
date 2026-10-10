@@ -687,7 +687,8 @@ func (p *eventBuilder) PublishNotification(_ context.Context, notif *store.Notif
 // PublishUserNotification publishes a non-chat notification addressed to one
 // user on user.<subscriberID>.notification and on no other subject. It never
 // uses notification.* or project.*: the message names the user's agents and
-// schedules, and those subjects reach other sessions. A notification with no SubscriberID is dropped.
+// schedules, and those subjects reach other sessions. A notification with
+// no SubscriberID is dropped.
 func (p *eventBuilder) PublishUserNotification(_ context.Context, notif *store.Notification) {
 	if notif == nil || notif.SubscriberID == "" {
 		return
