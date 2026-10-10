@@ -323,9 +323,12 @@ func TestAgentGet_MessageabilityMatchesReference(t *testing.T) {
 			t.Run(string(who), func(t *testing.T) {
 				want := f.referenceDetail(t, f.identity(who), target)
 				// Over HTTP: the reachable counts are viewer-independent.
-				gotHTTP, _, _ := f.get(t, who, target.ID)
-				assert.Equal(t, want.ReachableAgentCount, gotHTTP.ReachableAgentCount)
-				assert.Equal(t, want.ReachableUserCount, gotHTTP.ReachableUserCount)
+				// The agent principal's token reads only its own agent.
+				if who != mdAgent || target.ID == f.aliceAgent.ID {
+					gotHTTP, _, _ := f.get(t, who, target.ID)
+					assert.Equal(t, want.ReachableAgentCount, gotHTTP.ReachableAgentCount)
+					assert.Equal(t, want.ReachableUserCount, gotHTTP.ReachableUserCount)
+				}
 				// Directly, with the same viewer identity: every field.
 				gotDirect := f.srv.ComputeMessageabilityDetail(context.Background(), f.identity(who), target, f.listProject(t))
 				assert.Equal(t, want, *gotDirect)
@@ -361,25 +364,37 @@ func (f *mdFixture) listProject(t *testing.T) []store.Agent {
 
 // The standing memo the detail installs never carries a result from one
 // request to the next: carol's agent reaches agents, then after her
-// removal the next request sees the suspension, for every principal.
+// removal the next request sees the suspension. Member and admin requests
+// go over HTTP; the agent principal's token cannot read carol's agent, so
+// its request contexts (which carry their own per-request memo from
+// auth) are reproduced directly.
 func TestAgentGet_MessageabilityMemoDoesNotCrossRequests(t *testing.T) {
 	const n = 6
 	f := newMDFixture(t, n)
+	httpPrincipals := []mdPrincipal{mdMember, mdAdmin}
+	agents := f.listProject(t)
 	before := map[mdPrincipal]int{}
-	for _, who := range mdPrincipals {
+	for _, who := range httpPrincipals {
 		md, _, _ := f.get(t, who, f.carolAgent.ID)
 		require.Positive(t, md.ReachableAgentCount, "%s before removal", who)
 		before[who] = md.ReachableAgentCount
 	}
+	req1 := withStandingMemo(context.Background())
+	agentBefore := f.srv.ComputeMessageabilityDetail(req1, f.identity(mdAgent), f.carolAgent, agents)
+	require.Positive(t, agentBefore.ReachableAgentCount, "agent request before removal")
+
 	f.suspendCarol(t)
-	for _, who := range mdPrincipals {
+	for _, who := range httpPrincipals {
 		md, _, _ := f.get(t, who, f.carolAgent.ID)
 		assert.Zero(t, md.ReachableAgentCount, "%s after removal (was %d)", who, before[who])
 	}
+	req2 := withStandingMemo(context.Background())
+	agentAfter := f.srv.ComputeMessageabilityDetail(req2, f.identity(mdAgent), f.carolAgent, agents)
+	assert.Zero(t, agentAfter.ReachableAgentCount, "agent request after removal (was %d)", agentBefore.ReachableAgentCount)
 
 	// The memo is scoped to the call: a caller's context never gains one.
 	ctx := context.Background()
-	f.srv.ComputeMessageabilityDetail(ctx, f.identity(mdMember), f.aliceAgent, f.listProject(t))
+	f.srv.ComputeMessageabilityDetail(ctx, f.identity(mdMember), f.aliceAgent, agents)
 	assert.Nil(t, standingMemoFrom(ctx))
 }
 
