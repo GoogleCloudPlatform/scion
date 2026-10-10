@@ -331,6 +331,83 @@ describe('scion-chat-thread artifact references', () => {
     expect(historyCalls()).toEqual([]);
   });
 
+  function refsNotice(el: ScionChatThread): HTMLElement | null {
+    return el.shadowRoot?.querySelector('.artifact-refs-notice') ?? null;
+  }
+
+  it('shows no could-not-load notice when the refs loaded', async () => {
+    apiFetch.mockResolvedValue(
+      history({ items: [message('m1', 'see')], messageArtifacts: { m1: [VIEW] } })
+    );
+    const el = await mount();
+    await vi.waitFor(() => expect(messageEl(el, 'm1')?.artifactRefs).toEqual([VIEW]));
+    expect(refsNotice(el)).toBeNull();
+  });
+
+  it('shows a thread notice, and no chips, for messages whose refs could not be loaded (ptone/scion#4295)', async () => {
+    apiFetch.mockResolvedValue(
+      history({
+        items: [message('m1', `see scion://artifact/${A}`), message('m2', 'plain')],
+        messageArtifactsUnavailable: ['m1', 'm2'],
+      })
+    );
+    const el = await mount();
+    await vi.waitFor(() => expect(refsNotice(el)).not.toBeNull());
+    expect(refsNotice(el)?.getAttribute('role')).toBe('status');
+    expect(refsNotice(el)?.textContent).toContain('Artifact references could not be loaded');
+    // No chips and no "no artifacts" entry: the message simply carries none.
+    expect(messageEl(el, 'm1')?.artifactRefs).toEqual([]);
+    expect((el as unknown as { v2ArtifactMap: Map<string, unknown> }).v2ArtifactMap.has('m1')).toBe(
+      false
+    );
+    // Exactly one notice for the thread, not one per message.
+    expect(el.shadowRoot?.querySelectorAll('.artifact-refs-notice')).toHaveLength(1);
+  });
+
+  it('does not cache a failed live refresh as no artifacts; the next load fills the chips and clears the notice', async () => {
+    apiFetch.mockResolvedValue(history({ items: [] }));
+    const el = await mount();
+    apiFetch.mockClear();
+    apiFetch.mockResolvedValue(
+      history({ messages: [message('m2', 'here it is')], messageArtifactsUnavailable: ['m2'] })
+    );
+    live('m2', 'here it is', [`scion://artifact/${A}`]);
+    await vi.waitFor(() => expect(refsNotice(el)).not.toBeNull());
+    // On the page but not loaded: not asked for again with a wider window,
+    // and not recorded as a message without refs.
+    expect(historyCalls()).toEqual([`/api/v1/chat/conversations/${KEY}/messages?limit=1`]);
+    const internals = el as unknown as { v2ArtifactMap: Map<string, unknown> };
+    expect(internals.v2ArtifactMap.has('m2')).toBe(false);
+    expect(messageEl(el, 'm2')?.artifactRefs).toEqual([]);
+
+    // The next event for it refreshes again; this time the refs load.
+    apiFetch.mockResolvedValue(
+      history({ messages: [message('m2', 'here it is')], messageArtifacts: { m2: [VIEW] } })
+    );
+    live('m2', 'here it is', [`scion://artifact/${A}`]);
+    await vi.waitFor(() => expect(messageEl(el, 'm2')?.artifactRefs).toEqual([VIEW]));
+    await vi.waitFor(() => expect(refsNotice(el)).toBeNull());
+  });
+
+  it('drops chips a message already had when a later page could not load its refs', async () => {
+    apiFetch.mockResolvedValue(history({ items: [] }));
+    const el = await mount();
+    const internals = el as unknown as {
+      v2ArtifactMap: Map<string, unknown>;
+      applyArtifactRefsAvailability(ids: string[], unavailable: string[] | undefined): void;
+    };
+    internals.v2ArtifactMap.set('m1', [VIEW]);
+    internals.v2ArtifactMap.set('m3', [VIEW]);
+    internals.applyArtifactRefsAvailability(['m1', 'm3'], ['m1']);
+    await el.updateComplete;
+    expect(internals.v2ArtifactMap.has('m1')).toBe(false);
+    expect(internals.v2ArtifactMap.get('m3')).toEqual([VIEW]);
+    expect(refsNotice(el)).not.toBeNull();
+    internals.applyArtifactRefsAvailability(['m1'], undefined);
+    await el.updateComplete;
+    expect(refsNotice(el)).toBeNull();
+  });
+
   it('does not refresh when the artifacts experiment is off', async () => {
     window.__SCION_FEATURES__ = {};
     apiFetch.mockResolvedValue(history({ items: [] }));

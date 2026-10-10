@@ -285,7 +285,8 @@ func TestMessageArtifacts_ViewsAreReadCheckedPerViewer(t *testing.T) {
 	ownerCtx := requestAuthCtx(ctx, NewAuthenticatedUser(owner.ID, owner.Email, owner.DisplayName, "member", "web"))
 	strangerCtx := requestAuthCtx(ctx, NewAuthenticatedUser(tid("msgart-stranger"), "s@test.example", "S", "member", "web"))
 
-	views := srv.messageArtifactViews(ownerCtx, []string{"msg-1", "msg-2", "msg-none"})
+	views, unavailable := srv.messageArtifactViews(ownerCtx, []string{"msg-1", "msg-2", "msg-none"})
+	require.False(t, unavailable)
 	require.Len(t, views, 2)
 	var readable, gone chatArtifactRef
 	for _, v := range views["msg-1"] {
@@ -302,7 +303,10 @@ func TestMessageArtifacts_ViewsAreReadCheckedPerViewer(t *testing.T) {
 	assert.False(t, gone.Available)
 	assert.Equal(t, chatArtifactRef{RefView: artifacts.RefView{Ref: artifacts.FormatRef(missing, 0), ID: missing}}, gone)
 
-	for msgID, list := range srv.messageArtifactViews(strangerCtx, []string{"msg-1", "msg-2"}) {
+	strangerViews, unavailable := srv.messageArtifactViews(strangerCtx, []string{"msg-1", "msg-2"})
+	require.False(t, unavailable)
+	require.Len(t, strangerViews, 2)
+	for msgID, list := range strangerViews {
 		for _, v := range list {
 			assert.False(t, v.Available, "%s: %+v", msgID, v)
 			assert.Empty(t, v.Title)
@@ -315,7 +319,8 @@ func TestMessageArtifacts_ViewsAreReadCheckedPerViewer(t *testing.T) {
 	// An in-process user identity (no credential context) sees no titles,
 	// even as the owner.
 	inProcOwner := contextWithIdentity(ctx, NewAuthenticatedUser(owner.ID, owner.Email, owner.DisplayName, "member", "dispatch"))
-	for _, list := range srv.messageArtifactViews(inProcOwner, []string{"msg-1", "msg-2"}) {
+	inProcViews, _ := srv.messageArtifactViews(inProcOwner, []string{"msg-1", "msg-2"})
+	for _, list := range inProcViews {
 		for _, v := range list {
 			assert.False(t, v.Available, "%+v", v)
 			assert.Empty(t, v.Title)
@@ -326,7 +331,63 @@ func TestMessageArtifacts_ViewsAreReadCheckedPerViewer(t *testing.T) {
 	reg, err := experiments.NewRegistry(experiments.Default().All(), nil)
 	require.NoError(t, err)
 	srv.experiments = reg
-	assert.Nil(t, srv.messageArtifactViews(ownerCtx, []string{"msg-1"}))
+	views, unavailable = srv.messageArtifactViews(ownerCtx, []string{"msg-1"})
+	assert.Nil(t, views)
+	assert.False(t, unavailable)
+}
+
+// failListRefsArtifactStore is an artifact store whose recorded message
+// reference reads fail.
+type failListRefsArtifactStore struct{ artifacts.Store }
+
+func (failListRefsArtifactStore) ListMessageRefs(context.Context, []string) (map[string][]artifacts.MessageRef, error) {
+	return nil, errors.New("message refs unavailable")
+}
+
+// TestMessageArtifacts_RefListReadFailure (ptone/scion#4295): when the
+// recorded references cannot be read, messageArtifactViews reports them
+// unavailable and returns no views, for a reader and a non-reader alike,
+// instead of "no references". Once the read works again each viewer sees
+// exactly what it saw before.
+func TestMessageArtifacts_RefListReadFailure(t *testing.T) {
+	srv, s := testServer(t)
+	st, _ := enableArtifactsForTest(t, srv)
+	ctx := context.Background()
+
+	owner := &store.User{ID: tid("msgart-fail-owner"), Email: "fail-owner@test.example", DisplayName: "Owner Person",
+		Role: store.UserRoleMember, Status: "active", Created: time.Now()}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	id := seedMessageArtifact(t, st, tid("msgart-fail-project"), artifacts.PrincipalKindUser, owner.ID, "Quarterly report")
+	require.NoError(t, st.AddMessageRefs(ctx, "msg-1", []artifacts.MessageRef{{ArtifactID: id}}))
+
+	ownerCtx := requestAuthCtx(ctx, NewAuthenticatedUser(owner.ID, owner.Email, owner.DisplayName, "member", "web"))
+	strangerCtx := requestAuthCtx(ctx, NewAuthenticatedUser(tid("msgart-fail-stranger"), "s@test.example", "S", "member", "web"))
+
+	beforeOwner, unavailable := srv.messageArtifactViews(ownerCtx, []string{"msg-1"})
+	require.False(t, unavailable)
+	require.True(t, beforeOwner["msg-1"][0].Available)
+	beforeStranger, unavailable := srv.messageArtifactViews(strangerCtx, []string{"msg-1"})
+	require.False(t, unavailable)
+	require.False(t, beforeStranger["msg-1"][0].Available)
+
+	srv.SetArtifactStore(failListRefsArtifactStore{st})
+	for name, vctx := range map[string]context.Context{"owner": ownerCtx, "stranger": strangerCtx} {
+		views, unavailable := srv.messageArtifactViews(vctx, []string{"msg-1", "msg-none"})
+		assert.True(t, unavailable, name)
+		assert.Nil(t, views, name)
+	}
+	// No message ids: nothing is read, nothing is unavailable.
+	views, unavailable := srv.messageArtifactViews(ownerCtx, nil)
+	assert.Nil(t, views)
+	assert.False(t, unavailable)
+
+	srv.SetArtifactStore(st)
+	afterOwner, unavailable := srv.messageArtifactViews(ownerCtx, []string{"msg-1"})
+	assert.False(t, unavailable)
+	assert.Equal(t, beforeOwner, afterOwner)
+	afterStranger, unavailable := srv.messageArtifactViews(strangerCtx, []string{"msg-1"})
+	assert.False(t, unavailable)
+	assert.Equal(t, beforeStranger, afterStranger)
 }
 
 // TestMessageArtifacts_UnreadableIsByteIdenticalToMissing: what a reader
@@ -349,7 +410,7 @@ func TestMessageArtifacts_UnreadableIsByteIdenticalToMissing(t *testing.T) {
 		uMsg, mMsg := fmt.Sprintf("u-%d", seq), fmt.Sprintf("m-%d", seq)
 		require.NoError(t, st.AddMessageRefs(context.Background(), uMsg, []artifacts.MessageRef{{ArtifactID: unreadable, Seq: seq}}))
 		require.NoError(t, st.AddMessageRefs(context.Background(), mMsg, []artifacts.MessageRef{{ArtifactID: missing, Seq: seq}}))
-		views := srv.messageArtifactViews(senderCtx, []string{uMsg, mMsg})
+		views, _ := srv.messageArtifactViews(senderCtx, []string{uMsg, mMsg})
 		u, err := json.Marshal(views[uMsg])
 		require.NoError(t, err)
 		m, err := json.Marshal(views[mMsg])

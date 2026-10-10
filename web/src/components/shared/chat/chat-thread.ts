@@ -641,6 +641,13 @@ export class ScionChatThread extends LitElement {
    * ptone/scion#3224). Not @state(): writers call requestUpdate().
    */
   private v2ArtifactMap = new Map<string, MessageArtifactRef[]>();
+  /**
+   * Messages whose artifact refs the hub could not load (history
+   * `messageArtifactsUnavailable`, ptone/scion#4295). They show no chips and
+   * the thread shows a notice; this is not the same as having no refs, so a
+   * later history page that loads them clears the entry.
+   */
+  private _artifactRefsUnavailable = new Set<string>();
   /** Live messages whose artifact chips wait for a refresh (scheduleArtifactRefresh). */
   private _artifactRefreshIds = new Set<string>();
   private _artifactRefreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1130,6 +1137,16 @@ export class ScionChatThread extends LitElement {
       }
 
       /* Send error toast */
+      .artifact-refs-notice {
+        display: flex;
+        align-items: center;
+        gap: 0.375rem;
+        padding: 0.25rem 1rem;
+        font-size: var(--chat-fs-base);
+        color: var(--scion-text-muted, #64748b);
+        border-top: 1px solid var(--scion-border, #e2e8f0);
+      }
+
       .send-error {
         padding: 0.375rem 1rem;
         font-size: var(--chat-fs-base);
@@ -1373,6 +1390,7 @@ export class ScionChatThread extends LitElement {
       .state-msg,
       .messages-scroll,
       .typing-indicator,
+      .artifact-refs-notice,
       .send-error {
         border-left: var(--chat-inset-left, 0px) solid transparent;
         border-right: var(--chat-inset-right, 0px) solid transparent;
@@ -1508,6 +1526,7 @@ export class ScionChatThread extends LitElement {
     // Clear message state
     this._pendingIdempotencyKeys.clear();
     this.messageMap.clear();
+    this._artifactRefsUnavailable.clear();
     this.messages = [];
     this.nextCursor = null;
     this.viewingAroundMessage = false;
@@ -1618,6 +1637,33 @@ export class ScionChatThread extends LitElement {
   /** Artifact refs for a message, as the hub resolved them for this viewer. */
   private getMessageArtifactRefs(messageId: string): MessageArtifactRef[] {
     return this.v2ArtifactMap.get(messageId) ?? EMPTY_ARTIFACT_REFS;
+  }
+
+  /**
+   * Records which of a history page's messages could not have their
+   * artifact refs loaded (`unavailable`, the page's
+   * messageArtifactsUnavailable). Those lose any chips they had and are
+   * marked; the page's other messages, `loadedIds`, are unmarked. Never
+   * records a failed load as "no artifacts".
+   */
+  private applyArtifactRefsAvailability(
+    loadedIds: Iterable<string>,
+    unavailable: string[] | undefined
+  ): void {
+    const failed = new Set(unavailable ?? []);
+    let changed = false;
+    for (const id of loadedIds) {
+      if (failed.has(id)) {
+        if (this.v2ArtifactMap.delete(id)) changed = true;
+        if (!this._artifactRefsUnavailable.has(id)) {
+          this._artifactRefsUnavailable.add(id);
+          changed = true;
+        }
+      } else if (this._artifactRefsUnavailable.delete(id)) {
+        changed = true;
+      }
+    }
+    if (changed) this.requestUpdate();
   }
 
   /** Merge a history page's messageArtifacts into the map; re-render when anything changed. */
@@ -1979,6 +2025,7 @@ export class ScionChatThread extends LitElement {
         nextCursor?: string;
         messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
         messageArtifacts?: Record<string, MessageArtifactRef[]>;
+        messageArtifactsUnavailable?: string[];
         messageExtensions?: Record<
           string,
           { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
@@ -1994,6 +2041,10 @@ export class ScionChatThread extends LitElement {
       const items = data?.items ?? data?.messages ?? [];
 
       this.mergeMessageArtifacts(data?.messageArtifacts);
+      this.applyArtifactRefsAvailability(
+        items.map((m) => m.id),
+        data?.messageArtifactsUnavailable
+      );
 
       // W7: Merge attachment refs from history response.
       if (data?.messageAttachments) {
@@ -2286,6 +2337,7 @@ export class ScionChatThread extends LitElement {
       const data = (await res.json()) as {
         messages?: { id: string }[];
         messageArtifacts?: Record<string, MessageArtifactRef[]>;
+        messageArtifactsUnavailable?: string[];
       };
       if (currentId !== this.fetchId || key !== this.conversationKey) return [];
       const onPage = new Set((data?.messages ?? []).map((m) => m.id));
@@ -2297,6 +2349,12 @@ export class ScionChatThread extends LitElement {
         else if (!onPage.has(id)) missing.push(id);
       }
       this.mergeMessageArtifacts(views);
+      // A queried message whose refs could not be loaded is marked, not
+      // taken for one with none; the next history load retries it.
+      this.applyArtifactRefsAvailability(
+        ids.filter((id) => onPage.has(id)),
+        data?.messageArtifactsUnavailable
+      );
       return missing;
     } catch {
       // The chips arrive with the next history load.
@@ -2406,6 +2464,7 @@ export class ScionChatThread extends LitElement {
       messages?: Message[];
       messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
       messageArtifacts?: Record<string, MessageArtifactRef[]>;
+        messageArtifactsUnavailable?: string[];
       messageExtensions?: Record<
         string,
         { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
@@ -2417,6 +2476,10 @@ export class ScionChatThread extends LitElement {
     const items = data?.items ?? data?.messages ?? [];
 
     this.mergeMessageArtifacts(data?.messageArtifacts);
+    this.applyArtifactRefsAvailability(
+      items.map((m) => m.id),
+      data?.messageArtifactsUnavailable
+    );
 
     // W7: Merge attachment refs from history response.
     if (data?.messageAttachments) {
@@ -3831,6 +3894,7 @@ export class ScionChatThread extends LitElement {
       this.messages = [];
       this.v2AttachmentMap.clear();
       this.v2ArtifactMap.clear();
+      this._artifactRefsUnavailable.clear();
       this.v2MessageExtMap.clear();
       this.v2ReplyPreviewMap.clear();
       this.nextCursor = null;
@@ -4188,6 +4252,7 @@ export class ScionChatThread extends LitElement {
         nextCursor?: string;
         messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
         messageArtifacts?: Record<string, MessageArtifactRef[]>;
+        messageArtifactsUnavailable?: string[];
         messageExtensions?: Record<
           string,
           { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
@@ -4206,7 +4271,12 @@ export class ScionChatThread extends LitElement {
         this.v2AttachmentMap.set(msgId, refs);
       }
       this.v2ArtifactMap.clear();
+      this._artifactRefsUnavailable.clear();
       this.mergeMessageArtifacts(data.messageArtifacts);
+      this.applyArtifactRefsAvailability(
+        items.map((m) => m.id),
+        data.messageArtifactsUnavailable
+      );
       for (const [msgId, ext] of Object.entries(data.messageExtensions ?? {})) {
         this.v2MessageExtMap.set(msgId, ext);
       }
@@ -5110,6 +5180,7 @@ export class ScionChatThread extends LitElement {
   /** /clear — Clear messages locally. */
   private handleSlashClear(): void {
     this.messageMap.clear();
+    this._artifactRefsUnavailable.clear();
     this.messages = [];
     this.interagentMessages = [];
     this.insertLocalSystemMessage('Conversation cleared.');
@@ -5346,6 +5417,19 @@ export class ScionChatThread extends LitElement {
   }
 
   /**
+   * The notice that some messages' artifact refs could not be loaded
+   * (ptone/scion#4295): one line for the thread, not one per message,
+   * since a failed load covers a whole history page.
+   */
+  private renderArtifactRefsNotice(): TemplateResult | typeof nothing {
+    if (this._artifactRefsUnavailable.size === 0) return nothing;
+    return html`<div class="artifact-refs-notice" role="status">
+      <sl-icon name="info-circle"></sl-icon>
+      <span>Artifact references could not be loaded. Reload to try again.</span>
+    </div>`;
+  }
+
+  /**
    * The send error. On a desktop layout, the full text, as it always was.
    * On a phone or tablet it is one line with an ellipsis, so its height
    * never changes with the frame; when the text is actually cut it is a
@@ -5430,7 +5514,7 @@ export class ScionChatThread extends LitElement {
           ?enabled=${this.scheduleSendAvailable}
           @chat-scheduled-restore=${this.handleScheduledRestore}
         ></scion-chat-scheduled-list>
-        ${this.renderSendError()}
+        ${this.renderArtifactRefsNotice()} ${this.renderSendError()}
         <scion-chat-composer
           .agents=${this.agents}
           .members=${this.members}
