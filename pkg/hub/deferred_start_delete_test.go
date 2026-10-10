@@ -18,7 +18,11 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -30,8 +34,10 @@ import (
 )
 
 // Queued start and restart intents drained for an agent that a delete holds,
-// or that is soft-deleted, fail with delete_in_progress and dispatch nothing
-// (ptone/scion#2882).
+// or that is soft-deleted, fail and dispatch nothing (ptone/scion#2882). The
+// requester answers what the synchronous start gate answers: 409
+// delete_in_progress while a delete holds the row, else 409 conflict "agent
+// is deleted; restore it first" for a soft-deleted row (ptone/scion#4182).
 
 // queuedStartCountingDispatcher counts start and restart dispatches.
 type queuedStartCountingDispatcher struct {
@@ -150,4 +156,85 @@ func TestExecDispatchStartRestart_DispatchesWithoutDelete(t *testing.T) {
 			})
 		}
 	}
+}
+
+// queuedRefusalAnswer runs a queued op intent for agent through the drain,
+// records the failure on the dispatch row as the executing node does,
+// rebuilds the error as the requesting node does and returns the answer the
+// requester writes for it.
+func queuedRefusalAnswer(t *testing.T, srv *Server, s store.Store, agent *store.Agent, d store.BrokerDispatch) (*httptest.ResponseRecorder, ErrorResponse) {
+	t.Helper()
+	_, err := srv.executeDispatch(context.Background(), d)
+	require.Error(t, err)
+	rebuilt := dispatchFailureError(&store.BrokerDispatch{Op: d.Op, Error: err.Error(), Result: dispatchFailureResult(err)})
+	rec := httptest.NewRecorder()
+	require.True(t, srv.writeStartClaimError(context.Background(), rec, rebuilt, agent.ID), "rebuilt error not answered: %v", rebuilt)
+	var body ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body), rec.Body.String())
+	return rec, body
+}
+
+// A queued start or restart of a soft-deleted agent gets the synchronous
+// start gate's answer (agentDeletedRefusal), not delete_in_progress
+// (ptone/scion#4182). A row a delete holds still answers
+// delete_in_progress, also when it is soft-deleted too (finalizing), as
+// the gate does: its delete check comes first.
+func TestExecDispatchStartRestart_SoftDeletedAnswersLikeStartGate(t *testing.T) {
+	want := agentDeletedRefusal("")
+	cases := []struct {
+		name     string
+		mark     func(t *testing.T, s store.Store, agentID string)
+		wantCode string
+		wantMsg  string
+	}{
+		{"soft-deleted", softDeleteAgentRow, want.Code, want.Message},
+		{"deleting", func(t *testing.T, s store.Store, id string) {
+			seedAgentDeletion(t, s, id, seedLiveDeleting)
+		}, ErrCodeDeleteInProgress, deleteInProgressRefusal("").Message},
+		{"soft-deleted and finalizing", func(t *testing.T, s store.Store, id string) {
+			softDeleteAgentRow(t, s, id)
+			seedAgentDeletion(t, s, id, seedExpiredFinalize)
+		}, ErrCodeDeleteInProgress, deleteInProgressRefusal("").Message},
+	}
+	for i, tc := range cases {
+		for _, op := range []string{"start", "restart"} {
+			t.Run(tc.name+"/"+op, func(t *testing.T) {
+				srv, s := testServer(t)
+				disp := &queuedStartCountingDispatcher{}
+				srv.SetDispatcher(disp)
+				agent := setupBrokerAgentInPhase(t, s, "qsg-"+op+"-"+string(rune('a'+i)), state.PhaseStopped)
+				d := queuedStartIntent(t, s, agent, op)
+				tc.mark(t, s, agent.ID)
+
+				rec, body := queuedRefusalAnswer(t, srv, s, agent, d)
+				assert.Equal(t, http.StatusConflict, rec.Code)
+				assert.Equal(t, tc.wantCode, body.Error.Code)
+				assert.Equal(t, tc.wantMsg, body.Error.Message)
+				assert.Equal(t, agent.ID, body.Error.Details["agentId"])
+				assert.Zero(t, disp.starts+disp.restarts, "nothing dispatched")
+			})
+		}
+	}
+}
+
+// The agent-deleted envelope field round-trips on its own and alongside the
+// hub sentinels, and an envelope without it rebuilds nothing new.
+func TestDispatchFailureResult_AgentDeleted(t *testing.T) {
+	execErr := fmt.Errorf("queued start not applied: %w: %w", errQueuedStartAgentDeleted, store.ErrDeleteInProgress)
+	result := dispatchFailureResult(execErr)
+	env := decodeDispatchFailure(result)
+	require.NotNil(t, env)
+	assert.True(t, env.AgentDeleted)
+	assert.Equal(t, []string{"delete_in_progress"}, env.HubErrors)
+	rebuilt := dispatchFailureError(&store.BrokerDispatch{Op: "start", Error: execErr.Error(), Result: result})
+	assert.ErrorIs(t, rebuilt, errQueuedStartAgentDeleted)
+	assert.ErrorIs(t, rebuilt, store.ErrDeleteInProgress)
+
+	alone := dispatchFailureResult(errQueuedStartAgentDeleted)
+	require.NotEmpty(t, alone, "the field alone makes the envelope non-empty")
+	assert.ErrorIs(t, dispatchFailureError(&store.BrokerDispatch{Op: "start", Result: alone}), errQueuedStartAgentDeleted)
+
+	held := dispatchFailureResult(fmt.Errorf("x: %w", store.ErrDeleteInProgress))
+	assert.NotContains(t, held, "agentDeleted")
+	assert.False(t, errors.Is(dispatchFailureError(&store.BrokerDispatch{Op: "start", Result: held}), errQueuedStartAgentDeleted))
 }
