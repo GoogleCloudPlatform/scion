@@ -25,6 +25,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -96,11 +97,13 @@ func def162Setup(t *testing.T) (srv *Server, s store.Store, project *store.Proje
 	})
 	require.NoError(t, err)
 
-	// Set up WebChatStore. The broker path reaches wcs from the eventbus
-	// delivery goroutine and the thread-membership goroutine at once, so
-	// the DB must be pinned to one connection (see openTestMemorySQLite).
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	// Set up WebChatStore on the hub store's own database, as in
+	// production: the topic's linked conversation is then the same row as
+	// the thread:<project>:<topic> conversation an agent resolves, which
+	// thread membership requires.
+	dbProvider, ok := s.(interface{ DB() *sql.DB })
+	require.True(t, ok, "store does not expose DB()")
+	wcs := NewWebChatStore(dbProvider.DB(), "sqlite3")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 
