@@ -82,6 +82,15 @@ func (a *analysis) renderAliases() error {
 				ok = true
 				break
 			}
+			if obj.Exported() && obj.Signature().TypeParams().Len() == 0 {
+				// Importers may use an exported func as a value; a var alias
+				// keeps its identity (reflect Pointer, FuncForPC) and caller
+				// frames. Dependency-ordered initialisation runs it before
+				// any initialiser of the source package that refers to it.
+				c.asVar = true
+				ok = true
+				break
+			}
 			ok = a.spellable(obj.Signature(), need)
 			if !ok && obj.Signature().TypeParams().Len() == 0 {
 				c.asVar = true

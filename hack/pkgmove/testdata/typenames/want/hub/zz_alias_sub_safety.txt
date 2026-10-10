@@ -1,5 +1,5 @@
 pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
-Files moved: 1. Findings: 6. Errors: 0.
+Files moved: 1. Findings: 7. Errors: 0.
 
 Why this matters: a moved package is initialised before the package that
 imports it, so init() functions and package-level var initialisers in the moved
@@ -9,6 +9,9 @@ ERROR/HIGH/WARN item below before merging.
 == HIGH: gob registration of a moved type ==
   hub/stay.go:9: gob.Register registers Token, whose gob name embeds the package path; encoded data and peers on the old name break
   hub/stay.go:10: gob.Register registers Token, whose gob name embeds the package path; encoded data and peers on the old name break
+
+== WARN: func name seen through its value changes (runtime.FuncForPC, stack traces) ==
+  hub/move.go:9: example.com/fx/hub.NewSecret is now example.com/fx/hub/sub.NewSecret for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
 
 == WARN: gob registration of a moved type ==
   hub/stay.go:11: gob.RegisterName registers secret under a fixed wire name (unchanged), but type identity checks and %T output now use package sub

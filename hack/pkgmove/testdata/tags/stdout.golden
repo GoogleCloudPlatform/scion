@@ -9,7 +9,7 @@ Renames (2):
   func   sqliteLimit -> SqliteLimit  (hub/move_sqlite.go:5)
 
 Alias entries (3):
-  func  Plain = sub.Plain
+  var   Plain = sub.Plain
   func  otherLimit = sub.OtherLimit
   func  sqliteLimit = sub.SqliteLimit [!no_sqlite]
 
@@ -22,7 +22,7 @@ Reference rewrites in remaining files (vars and func values) (0):
 Remaining source files edited (0):
 
 pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
-Files moved: 2. Findings: 3. Errors: 0.
+Files moved: 2. Findings: 4. Errors: 0.
 
 Why this matters: a moved package is initialised before the package that
 imports it, so init() functions and package-level var initialisers in the moved
@@ -31,6 +31,9 @@ ERROR/HIGH/WARN item below before merging.
 
 == WARN: file excluded by build constraints (not type-checked) ==
   hub/stay_nosqlite.go: references moved names by name (aliased conservatively, not type-checked): otherLimit - verify with -tags
+
+== WARN: func name seen through its value changes (runtime.FuncForPC, stack traces) ==
+  hub/move_plain.go:7: example.com/fx/hub.Plain is now example.com/fx/hub/sub.Plain for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
 
 == WARN: go:generate directive ==
   hub/move_plain.go:3: //go:generate echo hi (runs in the new directory)

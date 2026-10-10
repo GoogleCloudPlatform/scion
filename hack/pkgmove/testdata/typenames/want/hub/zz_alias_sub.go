@@ -13,6 +13,6 @@ type (
 	secret = sub.Secret
 )
 
-func NewSecret() any {
-	return sub.NewSecret()
-}
+var (
+	NewSecret = sub.NewSecret
+)

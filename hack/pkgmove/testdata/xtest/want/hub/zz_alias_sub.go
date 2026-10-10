@@ -8,6 +8,6 @@ import (
 	"example.com/fx/hub/sub"
 )
 
-func Data() string {
-	return sub.Data()
-}
+var (
+	Data = sub.Data
+)

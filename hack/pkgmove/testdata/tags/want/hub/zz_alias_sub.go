@@ -8,9 +8,9 @@ import (
 	"example.com/fx/hub/sub"
 )
 
-func Plain() string {
-	return sub.Plain()
-}
+var (
+	Plain = sub.Plain
+)
 
 func otherLimit() int {
 	return sub.OtherLimit()

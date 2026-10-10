@@ -83,22 +83,7 @@ func (a *analysis) checkXTests() {
 			continue
 		}
 		keepsSource := false
-		calls := map[*ast.SelectorExpr]bool{}
-		ast.Inspect(f.AST, func(n ast.Node) bool {
-			if call, ok := n.(*ast.CallExpr); ok {
-				fun := ast.Unparen(call.Fun)
-				if ix, ok := fun.(*ast.IndexExpr); ok {
-					fun = ix.X
-				}
-				if ix, ok := fun.(*ast.IndexListExpr); ok {
-					fun = ix.X
-				}
-				if sel, ok := fun.(*ast.SelectorExpr); ok {
-					calls[sel] = true
-				}
-			}
-			return true
-		})
+		calls := callSelectors(f.AST)
 		ast.Inspect(f.AST, func(n ast.Node) bool {
 			sel, ok := n.(*ast.SelectorExpr)
 			if !ok {
@@ -126,9 +111,8 @@ func (a *analysis) checkXTests() {
 				a.plan.errorf("%s: staying external test uses %s.%s, declared in the moved test file %s; test-only symbols cannot be aliased", pos, local, sel.Sel.Name, h.Name)
 			case h.Moved && kindOf(obj) == "var":
 				a.plan.errorf("%s: staying external test uses moved var %s.%s; vars cannot be aliased - rewrite the reference to the target package first", pos, local, sel.Sel.Name)
-			case h.Moved && kindOf(obj) == "func" && !calls[sel]:
-				a.plan.add(levelWarn, "moved func used as a value through a wrapper alias", pos,
-					"external test uses %s.%s as a func value; through the wrapper alias its identity (reflect Pointer, runtime.FuncForPC name) differs from %s.%s", local, sel.Sel.Name, a.cfg.PkgName, exportedForm(obj))
+			case h.Moved && isGenericFunc(obj) && !calls[sel]:
+				a.plan.errorf("%s: staying external test uses the moved generic func %s.%s as a value; generic funcs are aliased by wrappers, which have a different identity - rewrite the reference to the target package first", pos, local, sel.Sel.Name)
 			}
 			return true
 		})
@@ -142,24 +126,25 @@ func (a *analysis) checkXTests() {
 // scanModule reports references from other packages of the module to moved
 // exported vars, which cannot be aliased.
 func (a *analysis) scanModule() {
-	vars := map[string]bool{}
+	vars := map[string]bool{}     // moved exported vars: any use is an error
+	generics := map[string]bool{} // moved exported generic funcs: value uses are errors
 	for _, name := range a.pkg.Scope().Names() {
 		obj := a.pkg.Scope().Lookup(name)
-		if h := a.home(obj); h != nil && h.Moved && obj.Exported() && kindOf(obj) == "var" {
-			vars[name] = true
+		if h := a.home(obj); h != nil && h.Moved && obj.Exported() {
+			switch {
+			case kindOf(obj) == "var":
+				vars[name] = true
+			case isGenericFunc(obj):
+				generics[name] = true
+			}
 		}
 	}
-	if len(vars) == 0 {
+	if len(vars) == 0 && len(generics) == 0 {
 		return
 	}
-	out, err := goList(a.mod.ModDir, a.cfg.Tags, "-e", "-json=ImportPath,Dir,GoFiles,TestGoFiles,XTestGoFiles,IgnoredGoFiles,Imports,TestImports,XTestImports", "./...")
+	pkgs, err := a.modulePackages()
 	if err != nil {
 		a.plan.errorf("scanning the module for uses of moved exported vars: %v", err)
-		return
-	}
-	pkgs, err := decodeList(out)
-	if err != nil {
-		a.plan.errorf("scanning the module: %v", err)
 		return
 	}
 	fset := token.NewFileSet()
@@ -196,11 +181,20 @@ func (a *analysis) scanModule() {
 			if local == "" {
 				continue
 			}
+			calls := callSelectors(f)
 			ast.Inspect(f, func(n ast.Node) bool {
 				if sel, ok := n.(*ast.SelectorExpr); ok {
-					if x, ok := sel.X.(*ast.Ident); ok && x.Name == local && vars[sel.Sel.Name] {
-						pos := fset.Position(sel.Pos())
+					x, ok := sel.X.(*ast.Ident)
+					if !ok || x.Name != local {
+						return true
+					}
+					pos := fset.Position(sel.Pos())
+					switch {
+					case vars[sel.Sel.Name]:
 						a.plan.errorf("%s:%d: %s.%s refers to a moved exported var; vars cannot be aliased - rewrite the reference to the target package first",
+							a.rel(pos.Filename), pos.Line, local, sel.Sel.Name)
+					case generics[sel.Sel.Name] && !calls[sel]:
+						a.plan.errorf("%s:%d: %s.%s uses a moved generic func as a value; its wrapper alias has a different identity - rewrite the reference to the target package first",
 							a.rel(pos.Filename), pos.Line, local, sel.Sel.Name)
 					}
 				}
@@ -270,6 +264,9 @@ func (a *analysis) safetyFindings() {
 		a.stayingSideEffects()
 	}
 	a.typeNameFindings()
+	a.funcValueFindings()
+	a.testdataFindings()
+	a.scanLinknames()
 	a.reflectionFindings()
 	// Staying var initialisers that use moved code. Calls run moved code
 	// whose package-level state is now initialised before every initialiser
@@ -286,44 +283,38 @@ func (a *analysis) safetyFindings() {
 			}
 			for _, spec := range gd.Specs {
 				vs := spec.(*ast.ValueSpec)
-				var calls, vars []string
+				var calls, vars, dynamic []string
 				compileTime := false
-				callFuns := map[*ast.Ident]bool{}
 				for _, v := range vs.Values {
-					ast.Inspect(v, func(n ast.Node) bool {
+					runsAtInit(v, func(n ast.Node) {
 						switch n := n.(type) {
-						case *ast.FuncLit:
-							return false
 						case *ast.CallExpr:
-							switch fn := ast.Unparen(n.Fun).(type) {
-							case *ast.Ident:
-								callFuns[fn] = true
-							case *ast.SelectorExpr:
-								callFuns[fn.Sel] = true
-							case *ast.IndexExpr:
-								if id, ok := fn.X.(*ast.Ident); ok {
-									callFuns[id] = true
+							fn, dyn := a.calleeOf(n)
+							switch {
+							case dyn:
+								dynamic = append(dynamic, exprString(n.Fun))
+							case fn == nil || fn.Pkg() != a.pkg:
+							case a.home(fn) != nil && a.home(fn).Moved:
+								calls = append(calls, funcLabel(fn))
+							default:
+								r := a.reach(fn)
+								if r.moved != "" {
+									calls = append(calls, funcLabel(fn)+" (which reaches moved "+r.moved+")")
+								} else if r.dynamic {
+									dynamic = append(dynamic, funcLabel(fn)+" (which makes dynamic calls)")
 								}
 							}
 						case *ast.Ident:
 							obj := a.info.Uses[n]
 							if obj == nil {
-								return true
+								return
 							}
 							obj = origin(obj)
 							h := a.home(obj)
 							if h == nil || !h.Moved {
-								return true
+								return
 							}
 							switch o := obj.(type) {
-							case *types.Func:
-								if callFuns[n] {
-									name := o.Name()
-									if o.Signature().Recv() != nil {
-										name = ownerName(o) + "." + name
-									}
-									calls = append(calls, name)
-								}
 							case *types.Var:
 								if !o.IsField() && a.isPkgLevel(o) {
 									vars = append(vars, o.Name())
@@ -332,8 +323,12 @@ func (a *analysis) safetyFindings() {
 								compileTime = true
 							}
 						}
-						return true
 					})
+				}
+				if len(dynamic) > 0 && a.movedHasState() && len(calls) == 0 {
+					a.plan.add(levelWarn, "staying var initialiser makes dynamic calls (func values or interfaces)", a.posOf(vs.Pos()),
+						"%s = ... calls %s; the moved files have package-level state, and a dynamic call may reach moved code, which is now initialised before every initialiser of %s",
+						identNames(vs.Names), strings.Join(dedupStrings(sortedCopy(dynamic)), ", "), a.srcName)
 				}
 				names := identNames(vs.Names)
 				switch {
@@ -344,8 +339,8 @@ func (a *analysis) safetyFindings() {
 					a.plan.add(levelWarn, "staying var initialiser reads moved vars", a.posOf(vs.Pos()),
 						"%s = ... reads %s, now initialised in package %s before all of %s (values set by %s initialisers or init() are no longer visible)", names, strings.Join(dedupStrings(sortedCopy(vars)), ", "), a.cfg.PkgName, a.srcName, a.srcName)
 				case compileTime:
-					a.plan.add(levelInfo, "staying var initialiser uses moved consts or types only", a.posOf(vs.Pos()),
-						"%s = ... (compile-time references; order-independent)", names)
+					a.plan.add(levelInfo, "staying var initialiser uses moved consts, types or func values only", a.posOf(vs.Pos()),
+						"%s = ... (no moved code runs and no moved var is read at init)", names)
 				}
 			}
 		}
@@ -1135,4 +1130,324 @@ func (a *analysis) movedTypesIn(t types.Type) []*types.TypeName {
 	}
 	walk(t)
 	return out
+}
+
+// runsAtInit visits the nodes of expr that execute while the initialiser
+// runs: everything except the bodies of func literals that are not invoked
+// immediately (an immediately-invoked func literal's body is visited).
+func runsAtInit(expr ast.Node, visit func(ast.Node)) {
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if n == nil {
+			return false
+		}
+		if call, ok := n.(*ast.CallExpr); ok {
+			if fl, ok := ast.Unparen(call.Fun).(*ast.FuncLit); ok {
+				for _, arg := range call.Args {
+					runsAtInit(arg, visit)
+				}
+				runsAtInit(fl.Body, visit)
+				return false
+			}
+		}
+		if _, ok := n.(*ast.FuncLit); ok {
+			return false
+		}
+		visit(n)
+		return true
+	})
+}
+
+// calleeOf resolves the function a call invokes. dynamic is true for calls
+// through func values or interface methods (the callee is not static).
+// Conversions and builtins return (nil, false).
+func (a *analysis) calleeOf(call *ast.CallExpr) (fn *types.Func, dynamic bool) {
+	fun := ast.Unparen(call.Fun)
+	if tv, ok := a.info.Types[fun]; ok && tv.IsType() {
+		return nil, false
+	}
+	switch ix := fun.(type) {
+	case *ast.IndexExpr:
+		fun = ix.X
+	case *ast.IndexListExpr:
+		fun = ix.X
+	}
+	var obj types.Object
+	switch f := fun.(type) {
+	case *ast.Ident:
+		obj = a.info.Uses[f]
+	case *ast.SelectorExpr:
+		if sel, ok := a.info.Selections[f]; ok {
+			obj = sel.Obj()
+		} else {
+			obj = a.info.Uses[f.Sel]
+		}
+	case *ast.FuncLit:
+		return nil, false // handled by the caller (runsAtInit / body walk)
+	default:
+		return nil, true
+	}
+	switch o := obj.(type) {
+	case *types.Builtin:
+		return nil, false
+	case *types.Func:
+		if recv := o.Signature().Recv(); recv != nil {
+			if _, isIface := recv.Type().Underlying().(*types.Interface); isIface {
+				return nil, true
+			}
+		}
+		return origin(o).(*types.Func), false
+	}
+	return nil, true
+}
+
+type reachInfo struct {
+	moved   string // a moved function reachable from here ("" if none)
+	dynamic bool   // makes calls through func values or interfaces
+	done    bool
+}
+
+// reach reports what a function of the source package can reach through
+// static calls (its whole body, including closures, conservatively).
+func (a *analysis) reach(fn *types.Func) reachInfo {
+	if a.reachMemo == nil {
+		a.reachMemo = map[*types.Func]*reachInfo{}
+		a.funcDecls = map[*types.Func]*ast.FuncDecl{}
+		for _, f := range a.checked {
+			for _, d := range f.AST.Decls {
+				if fd, ok := d.(*ast.FuncDecl); ok && fd.Body != nil {
+					if o, ok := a.info.Defs[fd.Name].(*types.Func); ok {
+						a.funcDecls[o] = fd
+					}
+				}
+			}
+		}
+	}
+	if r, ok := a.reachMemo[fn]; ok {
+		return *r // done, or in progress (a cycle contributes nothing new)
+	}
+	r := &reachInfo{}
+	a.reachMemo[fn] = r
+	if h := a.home(fn); h != nil && h.Moved {
+		r.moved = funcLabel(fn)
+		r.done = true
+		return *r
+	}
+	fd := a.funcDecls[fn]
+	if fd == nil {
+		r.done = true
+		return *r
+	}
+	ast.Inspect(fd.Body, func(n ast.Node) bool {
+		if r.moved != "" {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		callee, dyn := a.calleeOf(call)
+		if dyn {
+			r.dynamic = true
+			return true
+		}
+		if callee == nil || callee.Pkg() != a.pkg {
+			return true
+		}
+		sub := a.reach(callee)
+		if sub.moved != "" {
+			r.moved = sub.moved
+		}
+		r.dynamic = r.dynamic || sub.dynamic
+		return true
+	})
+	r.done = true
+	return *r
+}
+
+// movedHasState reports whether the moved files declare package-level vars.
+func (a *analysis) movedHasState() bool {
+	for _, name := range a.pkg.Scope().Names() {
+		obj := a.pkg.Scope().Lookup(name)
+		if h := a.home(obj); h != nil && h.Moved && kindOf(obj) == "var" {
+			return true
+		}
+	}
+	return false
+}
+
+func funcLabel(fn *types.Func) string {
+	if fn.Signature().Recv() != nil {
+		return ownerName(fn) + "." + fn.Name()
+	}
+	return fn.Name()
+}
+
+func exprString(e ast.Expr) string {
+	var b bytes.Buffer
+	_ = format.Node(&b, token.NewFileSet(), e)
+	return b.String()
+}
+
+func isGenericFunc(obj types.Object) bool {
+	f, ok := obj.(*types.Func)
+	return ok && f.Signature().Recv() == nil && f.Signature().TypeParams().Len() > 0
+}
+
+// callSelectors returns the selector expressions used as the function of a
+// call (including explicit instantiations) in a file.
+func callSelectors(f *ast.File) map[*ast.SelectorExpr]bool {
+	calls := map[*ast.SelectorExpr]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			fun := ast.Unparen(call.Fun)
+			switch ix := fun.(type) {
+			case *ast.IndexExpr:
+				fun = ix.X
+			case *ast.IndexListExpr:
+				fun = ix.X
+			}
+			if sel, ok := fun.(*ast.SelectorExpr); ok {
+				calls[sel] = true
+			}
+		}
+		return true
+	})
+	return calls
+}
+
+// modulePackages lists every package of the module (cached).
+func (a *analysis) modulePackages() ([]listedPackage, error) {
+	if a.modPkgs != nil {
+		return a.modPkgs, nil
+	}
+	out, err := goList(a.mod.ModDir, a.cfg.Tags, "-e", "-json=ImportPath,Dir,GoFiles,TestGoFiles,XTestGoFiles,IgnoredGoFiles,Imports,TestImports,XTestImports", "./...")
+	if err != nil {
+		return nil, err
+	}
+	pkgs, err := decodeList(out)
+	if err != nil {
+		return nil, err
+	}
+	a.modPkgs = pkgs
+	return pkgs, nil
+}
+
+// scanLinknames reports //go:linkname directives anywhere in the module
+// (including test and build-excluded files) that target a moved symbol by
+// its old path: the linker symbol name changes with the package path.
+func (a *analysis) scanLinknames() {
+	pkgs, err := a.modulePackages()
+	if err != nil {
+		a.plan.errorf("scanning the module for go:linkname: %v", err)
+		return
+	}
+	prefix := a.mod.ImportPath + "."
+	for _, p := range pkgs {
+		var names []string
+		names = append(names, p.GoFiles...)
+		names = append(names, p.TestGoFiles...)
+		names = append(names, p.XTestGoFiles...)
+		names = append(names, p.IgnoredGoFiles...)
+		sort.Strings(names)
+		for _, name := range names {
+			path := filepath.Join(p.Dir, name)
+			b, err := os.ReadFile(path)
+			if err != nil || !bytes.Contains(b, []byte("go:linkname")) {
+				continue
+			}
+			for i, line := range strings.Split(string(b), "\n") {
+				fields := strings.Fields(strings.TrimSpace(line))
+				if len(fields) < 3 || fields[0] != "//go:linkname" || !strings.HasPrefix(fields[2], prefix) {
+					continue
+				}
+				sym := strings.TrimPrefix(fields[2], prefix)
+				sym = strings.TrimLeft(sym, "(*")
+				first := sym
+				if j := strings.IndexAny(sym, ".)"); j >= 0 {
+					first = sym[:j]
+				}
+				obj := a.pkg.Scope().Lookup(first)
+				if h := a.home(obj); h != nil && h.Moved {
+					a.plan.errorf("%s:%d: %s targets %s, which moves (its linker name becomes %s.%s) - update the directive first",
+						a.rel(path), i+1, strings.TrimSpace(line), fields[2], a.dstImport, strings.TrimPrefix(fields[2], prefix))
+				}
+			}
+		}
+	}
+}
+
+// funcValueFindings warns once per moved func whose value is observable:
+// taken as a value anywhere in the source package, or aliased as a var
+// (exported funcs, which importers may take as values). runtime.FuncForPC and
+// stack traces name it by its new package path.
+func (a *analysis) funcValueFindings() {
+	values := map[types.Object]bool{}
+	for _, u := range a.uses {
+		if u.def || a.callFuns[u.id] {
+			continue
+		}
+		if fn, ok := u.obj.(*types.Func); ok && (a.isPkgLevel(fn) || fn.Signature().Recv() != nil) {
+			if h := a.home(fn); h != nil && h.Moved {
+				values[fn] = true // funcs, method values and method expressions
+			}
+		}
+	}
+	for _, e := range a.plan.Aliases {
+		if e.Kind == "var" {
+			if obj := a.pkg.Scope().Lookup(e.Old); obj != nil {
+				values[obj] = true
+			}
+		}
+	}
+	var objs []types.Object
+	for o := range values {
+		objs = append(objs, o)
+	}
+	sort.Slice(objs, func(i, j int) bool { return objs[i].Pos() < objs[j].Pos() })
+	for _, o := range objs {
+		oldName, newName := o.Name(), a.newName(o)
+		if fn := o.(*types.Func); fn.Signature().Recv() != nil {
+			oldName = ownerName(fn) + "." + fn.Name()
+			newName = ownerName(fn) + "." + firstNonEmpty(a.memberRename[fn], fn.Name())
+		}
+		a.plan.add(levelWarn, "func name seen through its value changes (runtime.FuncForPC, stack traces)", a.posOf(o.Pos()),
+			"%s.%s is now %s.%s for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces", a.mod.ImportPath, oldName, a.dstImport, newName)
+	}
+}
+
+// testdataFindings warns when moved tests read files relative to the package
+// directory (testdata/..., ./...) that do not move with them.
+func (a *analysis) testdataFindings() {
+	moved := map[string]bool{}
+	for _, n := range a.assets {
+		moved[n] = true
+	}
+	movedTests := false
+	for _, f := range a.files {
+		if !f.Moved || !f.IsTest {
+			continue
+		}
+		movedTests = true
+		ast.Inspect(f.AST, func(n ast.Node) bool {
+			lit, ok := n.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				return true
+			}
+			text, err := strconv.Unquote(lit.Value)
+			if err != nil || (!strings.HasPrefix(text, "testdata/") && !strings.HasPrefix(text, "./")) {
+				return true
+			}
+			top := strings.Split(strings.TrimPrefix(text, "./"), "/")[0]
+			if moved[top] {
+				return true
+			}
+			a.plan.add(levelWarn, "moved test reads package-relative files", a.posOf(lit.Pos()),
+				"%q is resolved against the package directory, which changes to %s; move it as an asset (list %s in the file set) or adjust the path", text, a.rel(a.cfg.DstDir), top)
+			return true
+		})
+	}
+	if _, err := os.Stat(filepath.Join(a.cfg.SrcDir, "testdata")); err == nil && movedTests && !moved["testdata"] {
+		a.plan.add(levelWarn, "moved test reads package-relative files", a.rel(filepath.Join(a.cfg.SrcDir, "testdata")),
+			"tests move but the testdata directory stays; if the moved tests read it, list testdata (or its relevant files) in the file set")
+	}
 }

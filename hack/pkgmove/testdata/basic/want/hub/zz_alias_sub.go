@@ -8,8 +8,6 @@ package hub
 // by hack/pkgmove, so existing references in package hub keep compiling.
 
 import (
-	"time"
-
 	"example.com/fx/hub/sub"
 )
 
@@ -23,20 +21,14 @@ const (
 )
 
 var (
+	Exported = sub.Exported
+	Timeout  = sub.Timeout
 	guard    = sub.Guard
 	whereVia = sub.WhereVia
 )
 
-func Exported() *sub.Widget {
-	return sub.Exported()
-}
-
 func Map[T any](p0 []T, p1 func(T) T) []T {
 	return sub.Map[T](p0, p1)
-}
-
-func Timeout(p0 time.Duration) time.Duration {
-	return sub.Timeout(p0)
 }
 
 func helper(p0 int, p1 ...string) (int, error) {

@@ -8,8 +8,8 @@ import (
 //go:embed data.txt
 var data string
 
-//go:linkname nanotime runtime.nanotime
-func nanotime() int64
+//go:linkname helper
+func helper() int { return 1 }
 
 // Data returns the embedded data.
 func Data() string { return data }

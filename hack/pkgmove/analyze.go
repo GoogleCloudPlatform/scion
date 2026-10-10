@@ -17,6 +17,7 @@ package main
 import (
 	"fmt"
 	"go/ast"
+	"go/format"
 	"go/token"
 	"go/types"
 	"os"
@@ -65,6 +66,11 @@ type analysis struct {
 	// Staying uses of moved funcs outside call position are func values; they
 	// are rewritten to the target (like vars) so func identity is preserved.
 	callFuns map[*ast.Ident]bool
+	// reachMemo and funcDecls back the static call graph (reach).
+	reachMemo map[*types.Func]*reachInfo
+	funcDecls map[*types.Func]*ast.FuncDecl
+	// modPkgs caches the module package listing.
+	modPkgs []listedPackage
 	// hazards caches wrapperHazard results.
 	hazards map[*types.Func]string
 	// assets are non-Go files or directories (base names) moved verbatim.
@@ -301,6 +307,7 @@ func analyze(cfg *Config) (*analysis, error) {
 	a.checkEmbeddedExports()
 	a.checkPkgCollisions()
 	a.safetyFindings()
+	a.checkTestMain()
 	if cfg.Strict {
 		for _, f := range a.plan.Findings {
 			if f.Level == levelHigh {
@@ -348,6 +355,25 @@ func (a *analysis) selectFiles() error {
 			a.plan.errorf("%s uses cgo (import \"C\"); moving cgo files is not supported", a.rel(f.Path))
 		case !f.Included:
 			a.plan.errorf("%s is excluded by build constraints under the analysis tags %v; re-run with -tags that include it (moving files of other build configurations is not supported)", a.rel(f.Path), a.cfg.Tags)
+		}
+	}
+	// Assembly and precompiled objects implement Go declarations by package
+	// path; they cannot be moved or re-pointed by this tool.
+	if entries, err := os.ReadDir(a.cfg.SrcDir); err == nil {
+		for _, e := range entries {
+			if n := e.Name(); !e.IsDir() && (strings.HasSuffix(n, ".s") || strings.HasSuffix(n, ".syso")) {
+				a.plan.errorf("%s: the source package has assembly or object files; moves out of it are not supported (like cgo)", a.rel(filepath.Join(a.cfg.SrcDir, n)))
+			}
+		}
+	}
+	for _, f := range a.files {
+		if !f.Moved {
+			continue
+		}
+		for _, d := range f.AST.Decls {
+			if fd, ok := d.(*ast.FuncDecl); ok && fd.Body == nil {
+				a.plan.errorf("%s: func %s has no body (implemented in assembly or by go:linkname); moving it is not supported", a.posOf(fd.Pos()), fd.Name.Name)
+			}
 		}
 	}
 	// Point out source files whose test companion is left behind (and vice versa).
@@ -516,6 +542,24 @@ func (a *analysis) scanExcluded() {
 					"method %s matches an unexported method of a moved type or interface; interface satisfaction under these tags cannot be checked (an unexported method cannot satisfy an interface across packages) - verify with -tags", fd.Name.Name)
 			}
 		}
+		// Interface method specs (named or anonymous, e.g. in a type
+		// assertion v.(interface{ run() string })) that a moved type may have
+		// satisfied dynamically.
+		ast.Inspect(f.AST, func(n ast.Node) bool {
+			it, ok := n.(*ast.InterfaceType)
+			if !ok || it.Methods == nil {
+				return true
+			}
+			for _, field := range it.Methods.List {
+				for _, name := range field.Names {
+					if methods[name.Name] {
+						a.plan.add(levelWarn, "file excluded by build constraints (not type-checked)", a.posOf(name.Pos()),
+							"interface method %s matches an unexported method of a moved type or interface; a moved type can no longer satisfy it (unexported methods do not cross packages), and renames are not applied here - verify with -tags", name.Name)
+					}
+				}
+			}
+			return true
+		})
 		// Identifiers used as the function of a call (all others that name a
 		// moved func are func values, whose identity a wrapper alias changes).
 		a.excludedCallFuns = map[*ast.Ident]bool{}
@@ -578,7 +622,7 @@ func (a *analysis) excludedIdent(f *srcFile, n ast.Node, moved map[string]types.
 	case kindOf(obj) == "var":
 		a.plan.errorf("%s: excluded file (not type-checked) uses moved var %s; vars cannot be aliased and the reference cannot be rewritten safely - re-run with -tags covering this file", a.posOf(id.Pos()), id.Name)
 	default:
-		if _, isFunc := obj.(*types.Func); isFunc && !a.excludedCallFuns[id] {
+		if fn, isFunc := obj.(*types.Func); isFunc && !a.excludedCallFuns[id] && (!fn.Exported() || isGenericFunc(fn)) {
 			a.plan.add(levelWarn, "moved func used as a value through a wrapper alias", a.posOf(id.Pos()),
 				"%s is used as a func value in a file excluded by build constraints; through the wrapper alias its identity (reflect Pointer, runtime.FuncForPC name) differs from %s.%s - verify with -tags",
 				id.Name, a.cfg.PkgName, exportedForm(obj))
@@ -1064,3 +1108,101 @@ func guessPkgName(path string) string {
 		return r
 	}, base)
 }
+
+// checkTestMain handles TestMain separation. A package's TestMain wraps every
+// test in its binary (pkg/hub's isolates HOME, clears ambient cloud env,
+// installs hermetic git runners and runs memory and leak guards). Moved tests
+// run in the target's test binary, which has no TestMain unless one is
+// provided.
+func (a *analysis) checkTestMain() {
+	var staying []string
+	movedTests := false
+	for _, f := range a.files {
+		if !f.IsTest {
+			continue
+		}
+		if f.Moved {
+			movedTests = true
+		}
+		for _, d := range f.AST.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Recv != nil || fd.Name.Name != "TestMain" {
+				continue
+			}
+			if f.Moved {
+				a.plan.errorf("%s: TestMain moves; the source package's remaining tests would lose it - keep %s in %s and give the target its own TestMain (see -testmain-support)", a.posOf(fd.Pos()), f.Name, a.srcName)
+			} else {
+				staying = append(staying, a.posOf(fd.Pos()))
+			}
+		}
+	}
+	if !movedTests || len(staying) == 0 {
+		return
+	}
+	where := strings.Join(staying, ", ")
+	if a.cfg.TestMainSupport != "" {
+		a.plan.add(levelWarn, "TestMain separation (generated a delegating TestMain)", where,
+			"moved tests leave the TestMain of %s; the target gets a TestMain that calls %s.RunTestMain - check that it does everything the source TestMain does", a.srcName, a.cfg.TestMainSupport)
+		support := a.cfg.TestMainSupport
+		name := support[strings.LastIndex(support, "/")+1:]
+		content := fmt.Sprintf(`%spackage %s
+
+import (
+	"os"
+	"testing"
+
+	%s
+)
+
+// TestMain runs the target's tests under the same harness as package %s
+// (generated by hack/pkgmove; see %s for what it sets up).
+func TestMain(m *testing.M) {
+	os.Exit(%s.RunTestMain(m))
+}
+`, a.licenseHeader(), a.cfg.PkgName, strconv.Quote(support), a.srcName, staying[0], name)
+		out, err := formatGo([]byte(content))
+		if err != nil {
+			a.plan.errorf("generating the target TestMain: %v", err)
+			return
+		}
+		path := filepath.Join(a.cfg.DstDir, "zz_testmain_test.go")
+		a.plan.ExtraFiles = append(a.plan.ExtraFiles, generatedFile{Path: a.rel(path), Content: out})
+		return
+	}
+	stub := filepath.Join(filepath.Dir(a.cfg.ReportPath), strings.TrimSuffix(filepath.Base(a.cfg.ReportPath), ".txt")+"_testmain.go.txt")
+	a.plan.add(levelHigh, "TestMain separation", where,
+		"moved tests leave the TestMain of %s, so they would run without it (HOME isolation, env clearing, fakes, leak/memory guards, ...); generate the target's TestMain with -testmain-support <pkg> (a test-support package exporting RunTestMain(m *testing.M) int that the source TestMain also calls), or start from the stub %s",
+		a.srcName, a.rel(stub))
+	a.plan.StubFiles = append(a.plan.StubFiles, generatedFile{Path: a.rel(stub), Content: []byte(fmt.Sprintf(`// Reference stub generated by hack/pkgmove (not compiled; rename to
+// %s/zz_testmain_test.go once the helper exists).
+//
+// Package %s has a TestMain (%s). Its tests that moved to %s
+// need the same harness. Recommended layout, so the logic is not duplicated:
+//
+//   - a test-support package (for example <src>/internal/<name>testmain)
+//     exporting:
+//
+//       // RunTestMain sets up the package test harness, runs m and tears
+//       // it down, returning the exit code.
+//       func RunTestMain(m *testing.M) int
+//
+//   - %s's TestMain calls it:  func TestMain(m *testing.M) { os.Exit(x.RunTestMain(m)) }
+//   - re-run pkgmove with -testmain-support <that import path>, which
+//     generates the file below in the target.
+
+package %s
+
+import (
+	"os"
+	"testing"
+
+	x "<test-support import path>"
+)
+
+func TestMain(m *testing.M) {
+	os.Exit(x.RunTestMain(m))
+}
+`, a.rel(a.cfg.DstDir), a.srcName, where, a.dstImport, a.srcName, a.cfg.PkgName))})
+}
+
+func formatGo(src []byte) ([]byte, error) { return format.Source(src) }

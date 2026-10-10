@@ -104,9 +104,18 @@ the report, and the tree is untouched), `2` usage, `3` tool or post-check failur
    constraint get a separate `zz_alias_<area>_cN.go` that carries the same
    constraint.
 
-   **Some functions get a var alias instead of a wrapper**, because calling
-   them through a wrapper would change behaviour. Each one is reported as a
-   WARN:
+   **Exported non-generic functions are aliased as vars**
+   (`var Foo = target.Foo`). Importers may use them as values, and a var
+   keeps the func's identity (reflect `Pointer`) and its caller frames.
+   Dependency-ordered initialisation sets the var before any initialiser of
+   the source package that refers to it. The value can be taken from outside
+   only by a non-generic func, so for exported **generic** funcs (always
+   wrappers) a value use in another package or an external test is an
+   ERROR.
+
+   **Some unexported functions also get a var alias instead of a wrapper**,
+   because calling them through a wrapper would change behaviour. Each one is
+   reported as a WARN:
    - functions that call `recover()` directly: under `defer foo()`, recover
      only works when called by the deferred function itself;
    - functions that inspect their call stack, directly or through moved
@@ -128,8 +137,8 @@ the report, and the tree is untouched), `2` usage, `3` tool or post-check failur
    **Package-level vars are never aliased.** `var foo = target.Foo` would be a
    copy, which changes behaviour for assignments, hook overrides in tests and
    error identity. Instead, references to them in staying files are rewritten
-   to `target.Foo`, with an import added. Those staying files therefore appear
-   in the diff. The plan lists them under "Remaining source files edited"; copy
+   to `target.Foo`, with an import added. The same applies to funcs used as
+   values. Those staying files therefore appear in the diff. The plan lists them under "Remaining source files edited"; copy
    that list into the PR description as expected changes.
 4. **Rewrites imports.** It adds the target import where vars are rewritten.
    In moved external tests, it re-qualifies `hub.X` as `target.X` and drops
@@ -164,9 +173,14 @@ severity:
 | HIGH | `init()` in a moved file |
 | HIGH | a moved package-level var initialiser that calls code of the source package, or an immediately invoked func literal |
 | HIGH | `//go:linkname` and `//go:embed` directives |
-| HIGH | `gob.Register`/`RegisterName` of a moved type anywhere in the source package: the gob name embeds the package path, so encoded data and peers that use the old name break |
+| HIGH | `gob.Register` of a moved type anywhere in the source package (element types of pointers, slices, arrays, maps and chans included): the gob name embeds the package path, so encoded data and peers that use the old name break |
 | HIGH | exported struct fields (only with `-allow-field-export`). **This includes embedded fields:** exporting a moved type `inner` as `Inner` renames every field that embeds it (`Outer.inner` becomes `Outer.Inner`), which changes `%+v`, encoding/json, gob, cmp, templates and reflection |
-| HIGH | a staying var initialiser that calls a moved func or a method of a moved type. Moved package state is now initialised before every source initialiser; for example, a registry filled by a staying initialiser looks empty to a moved initialiser |
+| HIGH | a staying var initialiser that calls a moved func or a method of a moved type. This includes calls inside immediately-invoked func literals and calls through staying helpers that reach moved code (a static call graph over the package). Moved package state is now initialised before every source initialiser; for example, a registry filled by a staying initialiser looks empty to a moved initialiser |
+| HIGH | TestMain separation: moved tests leave a package that has a `TestMain` (see [TestMain](#testmain)) |
+| WARN | a staying var initialiser that makes dynamic calls (through func values or interfaces), directly or through helpers, when the moved files have package-level state |
+| WARN | each moved func or method whose value is taken, plus exported funcs (var aliases): `runtime.FuncForPC` names and panic traces show the new package path |
+| WARN | a moved test with a string literal starting with `testdata/` or `./`, or a `testdata` directory left behind while tests move: list it in the file set to move it as an asset |
+| WARN | an interface method spec (named or anonymous) in a tag-excluded file that matches an unexported method of a moved type |
 | WARN | a moved var initialiser that calls another package's functions (for example `os.Getenv` or `slog.Default`), unless the call is provably pure (see below). It now runs before all of the source package's initialisers, so state they set is no longer visible to it, and its own effects happen earlier |
 | WARN | a moved var initialiser that reads another package's vars (`os.Stderr`, `http.DefaultClient`) |
 | WARN | a staying var initialiser that reads moved vars |
@@ -183,9 +197,8 @@ severity:
 | WARN | the package doc comment moving |
 | WARN | `//go:generate` directives |
 | WARN | function aliases declared as vars (recover, stack inspection, or a signature that cannot be spelled) |
-| INFO | staying var initialisers that read moved symbols |
 | INFO | moved var initialisers whose calls are all provably pure (see below) |
-| INFO | staying var initialisers that use only moved consts or types (compile-time) |
+| INFO | staying var initialisers that use only moved consts, types or func values (no moved code runs and no moved var is read at init) |
 | INFO | moved external tests, and moved files with build constraints |
 | INFO | files excluded by the build tags that do not reference moved names |
 | INFO | test companions left behind |
@@ -211,6 +224,11 @@ severity:
   exclude (`IgnoredGoFiles`, such as `//go:build integration`), matched by
   name.
 - A moved file is excluded by the build tags, or uses cgo.
+- A moved func has no body (assembly or `go:linkname` pull), or the source
+  directory has `.s` or `.syso` files.
+- A `//go:linkname` anywhere in the module (test and build-excluded files
+  included) targets `<source import path>.<moved name>`.
+- `TestMain` itself is in the move set.
 - A `go:embed` pattern matches files that are not in the move set.
 - The target directory already has Go files, or an alias file already exists.
 
@@ -266,6 +284,41 @@ complete. Post-move sanity-check failures (`go list`, type-check, vet) leave the
 generated tree in place for inspection; use `git checkout`/`git reset` to
 discard it.
 
+## TestMain
+
+A package's `TestMain` wraps every test in its test binary. pkg/hub's
+`TestMain` isolates HOME, clears ambient GCP env, installs the hermetic git
+runners, and runs the memory guard and the leak guard. Tests that move run
+in the target's test binary, which has no `TestMain` unless the move adds
+one.
+
+- **TestMain moves:** ERROR.
+- **Moved tests leave a package with a TestMain, no flag:** HIGH (ERROR under
+  `-strict`). The tool also writes a reference stub
+  `zz_alias_<area>_safety_testmain.go.txt` next to the report; it is not
+  compiled and not staged.
+- **With `-testmain-support <import path>`:** the tool generates
+  `<target>/zz_testmain_test.go` and stages it:
+
+  ```go
+  func TestMain(m *testing.M) { os.Exit(<support>.RunTestMain(m)) }
+  ```
+
+  The report then carries a WARN to check the harness is equivalent.
+
+**Expected helper:** a small test-support package (for pkg/hub, created by the
+first real move, for example under `pkg/hub/internal/`) exporting:
+
+```go
+// RunTestMain sets up the package test harness (for pkg/hub: IsolateHome,
+// clearing the ambient GCP env, the hermetic git runners, the memory guard and
+// the leak guard), runs m, tears down, and returns the exit code.
+func RunTestMain(m *testing.M) int
+```
+
+The source package's own `TestMain` should call it too, so the logic exists
+once.
+
 ## Not supported (rejected, or out of scope)
 
 - Moving into a package that already has Go files: **planned, decision at
@@ -283,6 +336,42 @@ discard it.
   newly promoted members after a member export. This is noted in the WARN.
 - Typed `gob.Register` detection in importers. The unconditional
   type-name WARN covers them.
+
+## Known limitations: reviewer checks
+
+The tool is a generator, not a proof. Every generated move PR still gets its
+own independent review, the identical test-list check (`go test -list`
+before and after) and the area's tests. The tool cannot see the cases below.
+Each is phrased as a check for the reviewer of a generated PR.
+
+- **Cross-package embedding:** if a moved type has members that the move
+  exports, verify that no type in another package embeds it and relies on
+  member resolution (shadowing or newly promoted methods).
+- **Build configurations:** if the source package has tag-excluded files (the
+  report lists them), build and test the moved area under those tags too.
+  They are scanned by name only.
+- **Init order beyond static calls:** if a staying initialiser or `init()`
+  reaches moved code through another package (a callback registered
+  elsewhere, a plugin registry), verify the order still holds. The call graph
+  follows static calls inside the source package only.
+- **Reflection by computed name:** if code looks up methods or fields by
+  names built at run time (not string literals), verify that exported or
+  renamed members don't change the result.
+- **Importers' `%T`, reflect and gob:** if importers print, compare or
+  register moved types by name (`%T`, `reflect.Type.String`, `gob.Register`),
+  check the new package path is acceptable. The report lists every moved type
+  but scans only the source package for gob registration.
+- **Typed analysis of external tests:** if moved external tests (`package
+  x_test`) use the source package beyond plain selectors, run them; they are
+  rewritten syntactically.
+- **Assets read at run time:** if moved code reads files relative to the
+  working directory or the package directory (beyond `testdata/` and `./`
+  literals), move those files too.
+- **Other modules:** if modules outside this one (for example `extras/*`)
+  import the source package, check them for moved vars, linkname and func
+  values. Only this module is scanned.
+- **TestMain equivalence:** if `-testmain-support` was used, verify that the
+  helper does everything the source `TestMain` does.
 
 ## Workflow: regenerate, don't rebase
 
@@ -304,7 +393,10 @@ discard it.
 6. Branches that edited the moved files re-apply their diff to the new path.
    Git's rename detection usually does this automatically. New code in
    `pkg/hub` that calls a just-moved unexported helper fails to compile at
-   once, and the fix is one alias line or a `target.` qualifier.
+   once. For funcs, types and consts, the fix is one alias line or a
+   `target.` qualifier. **Vars and funcs used as values always need the
+   `target.` qualifier, never an alias line:** a var alias would be a copy,
+   and a wrapper has a different identity.
 
 ## Tests
 
@@ -317,7 +409,7 @@ Each fixture under `testdata/<case>/in` is a small module. A test copies it to
 a temp dir, moves files from `hub/` to `hub/sub/`, and compares the result with
 `want/` and `stdout.golden`. Failing cases must leave the tree untouched.
 
-`TestBehaviour` runs a fixture's own tests before and after the move:
+`TestBehaviour` runs the tests of every successful fixture before and after the move:
 - **Where the move changes behaviour:** the tests must fail afterwards, and
   the report must contain the finding that explains why.
 - **Where the tool preserves behaviour:** the tests must still pass.
@@ -345,3 +437,12 @@ a temp dir, moves files from `hub/` to `hub/sub/`, and compares the result with
 | `purity` | which initialiser calls count as pure |
 | `funcvalue` | func values rewritten to the target, so func identity is kept; the fixture's test passes after the move |
 | `excludedmethod` | a method in an integration-tagged file that matches a moved interface: WARN; the tagged test fails after the move |
+| `excludediface` | an anonymous interface spec in an integration-tagged file that a moved type satisfied: WARN; the tagged test fails after the move |
+| `iife`, `transitive` | a staying initialiser reaching moved code through an immediately-invoked func literal, or through a staying helper: HIGH; the test fails after the move |
+| `importervalue` | an importer uses an exported moved func as a value: it is aliased as a var, so identity is kept and the importer's test passes |
+| `funcname` | the FuncForPC name change of a func value: WARN; the test pinning the name fails after the move |
+| `testmain` | moved tests leave a TestMain: HIGH plus a reference stub; the HOME-isolation test fails after the move |
+| `testmainsupport` | the same move with `-testmain-support`: the generated TestMain keeps the test passing |
+| `testdatadir` | a moved test reads `testdata/`, which stays: WARN (the test silently skips after the move) |
+| `asm` | a body-less func with an assembly file: refused |
+| `linkname` | a linkname in another package targeting a moved var: refused |

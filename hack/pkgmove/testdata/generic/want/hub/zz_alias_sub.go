@@ -8,6 +8,6 @@ import (
 	"example.com/fx/hub/sub"
 )
 
-func NewBox() any {
-	return sub.NewBox()
-}
+var (
+	NewBox = sub.NewBox
+)

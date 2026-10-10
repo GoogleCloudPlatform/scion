@@ -8,6 +8,6 @@ import (
 	"example.com/fx/hub/sub"
 )
 
-func Start(p0 any) bool {
-	return sub.Start(p0)
-}
+var (
+	Start = sub.Start
+)

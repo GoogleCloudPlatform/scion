@@ -1,5 +1,5 @@
 pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
-Files moved: 2. Findings: 11. Errors: 0.
+Files moved: 2. Findings: 15. Errors: 0.
 
 Why this matters: a moved package is initialised before the package that
 imports it, so init() functions and package-level var initialisers in the moved
@@ -14,6 +14,12 @@ ERROR/HIGH/WARN item below before merging.
 
 == WARN: exported method (may newly satisfy interfaces) ==
   hub/maint.go:26: widget.count -> Count: check dynamic interface assertions that could now match; types in other packages that embed widget are not checked for shadowing or newly promoted methods
+
+== WARN: func name seen through its value changes (runtime.FuncForPC, stack traces) ==
+  hub/maint.go:38: example.com/fx/hub.Exported is now example.com/fx/hub/sub.Exported for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+  hub/maint.go:62: example.com/fx/hub.guard is now example.com/fx/hub/sub.Guard for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+  hub/maint.go:75: example.com/fx/hub.whereVia is now example.com/fx/hub/sub.WhereVia for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+  hub/maint.go:78: example.com/fx/hub.Timeout is now example.com/fx/hub/sub.Timeout for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
 
 == WARN: function alias declared as a var (a wrapper would change behaviour) ==
   hub/maint.go:62: guard calls recover() directly (a wrapper would make it return nil under defer), so it is aliased as a var instead of a wrapper; the var is assignable and initialised at package init

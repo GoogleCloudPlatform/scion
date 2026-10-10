@@ -67,6 +67,7 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&cfg.Typecheck, "typecheck", true, "re-type-check both packages (with tests) after the move")
 	fs.BoolVar(&cfg.AllowFieldExport, "allow-field-export", false, "allow exporting struct fields (reported as HIGH)")
 	fs.BoolVar(&cfg.Strict, "strict", false, "treat HIGH safety findings (init(), var initialisers calling package code, linkname/embed) as errors")
+	fs.StringVar(&cfg.TestMainSupport, "testmain-support", "", "import path of a test-support package with RunTestMain(m *testing.M) int; generates a TestMain in the target when moved tests leave a package that has one")
 	fs.StringVar(&cfg.ReportPath, "report", "", "safety report path (default: <from>/zz_alias_<area>_safety.txt)")
 	fs.Usage = func() {
 		printf(stderr, "usage: pkgmove -from <dir> -to <dir> [flags] file.go [file_test.go ...]\n\n")
@@ -132,6 +133,12 @@ func run(cfg *Config) error {
 	}
 	if err := os.WriteFile(cfg.ReportPath, []byte(report), 0o644); err != nil {
 		return err
+	}
+	for _, g := range p.StubFiles {
+		if err := os.WriteFile(filepath.Join(a.mod.ModDir, g.Path), g.Content, 0o644); err != nil {
+			return err
+		}
+		printf(cfg.Stdout, "reference stub written to %s\n", g.Path)
 	}
 	printf(cfg.Stdout, "\nsafety report written to %s\n", a.rel(cfg.ReportPath))
 	return a.verify()
@@ -283,6 +290,14 @@ func (a *analysis) execute() (err error) {
 		stage = append(stage, w.path)
 	}
 	for _, g := range a.plan.AliasFiles {
+		path := filepath.Join(a.mod.ModDir, g.Path)
+		aliases = append(aliases, path)
+		if err := os.WriteFile(path, g.Content, 0o644); err != nil {
+			return err
+		}
+		stage = append(stage, path)
+	}
+	for _, g := range a.plan.ExtraFiles {
 		path := filepath.Join(a.mod.ModDir, g.Path)
 		aliases = append(aliases, path)
 		if err := os.WriteFile(path, g.Content, 0o644); err != nil {

@@ -30,11 +30,12 @@ type Config struct {
 	Files            []string // files to move (base names or paths inside SrcDir)
 	Tags             []string // build tags for the analysis
 	DryRun           bool
-	Vet              bool // run go vet on both packages afterwards (off by default)
-	NoGit            bool // use os.Rename instead of git mv
-	Typecheck        bool // re-type-check both packages after the rewrite
-	AllowFieldExport bool // allow exporting struct fields (changes reflection/encoding visibility)
-	Strict           bool // treat HIGH findings (init order, directives) as errors
+	Vet              bool   // run go vet on both packages afterwards (off by default)
+	NoGit            bool   // use os.Rename instead of git mv
+	Typecheck        bool   // re-type-check both packages after the rewrite
+	AllowFieldExport bool   // allow exporting struct fields (changes reflection/encoding visibility)
+	Strict           bool   // treat HIGH findings (init order, directives) as errors
+	TestMainSupport  string // import path of a package providing RunTestMain(*testing.M) int
 	ReportPath       string
 	Stdout           io.Writer
 }
@@ -88,6 +89,8 @@ type Plan struct {
 	Renames              []renameEntry
 	Aliases              []aliasEntry
 	AliasFiles           []generatedFile
+	ExtraFiles           []generatedFile // generated Go files (e.g. the target TestMain), staged
+	StubFiles            []generatedFile // reference stubs written next to the report, not staged
 	VarRewrites          []varRewrite
 	TouchedFiles         []string // remaining source files edited (module-relative)
 	Findings             []finding
@@ -118,7 +121,10 @@ func (p *Plan) normalize() {
 		if a.Old != b.Old {
 			return a.Old < b.Old
 		}
-		return a.Kind < b.Kind
+		if a.Kind != b.Kind {
+			return a.Kind < b.Kind
+		}
+		return lessPos(a.Pos, b.Pos)
 	})
 	sort.Slice(p.Aliases, func(i, j int) bool {
 		a, b := p.Aliases[i], p.Aliases[j]
@@ -224,6 +230,12 @@ func writePlan(out io.Writer, p *Plan) {
 	fmt.Fprintf(&w, "\nAlias files (%d):\n", len(p.AliasFiles))
 	for _, f := range p.AliasFiles {
 		fmt.Fprintf(&w, "  %s (%d lines)\n", f.Path, strings.Count(string(f.Content), "\n"))
+	}
+	for _, f := range p.ExtraFiles {
+		fmt.Fprintf(&w, "  %s (generated, %d lines)\n", f.Path, strings.Count(string(f.Content), "\n"))
+	}
+	for _, f := range p.StubFiles {
+		fmt.Fprintf(&w, "  %s (reference stub, not staged)\n", f.Path)
 	}
 	fmt.Fprintf(&w, "\nReference rewrites in remaining files (vars and func values) (%d):\n", len(p.VarRewrites))
 	for _, v := range p.VarRewrites {

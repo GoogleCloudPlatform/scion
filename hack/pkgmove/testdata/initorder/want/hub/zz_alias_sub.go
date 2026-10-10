@@ -8,10 +8,7 @@ import (
 	"example.com/fx/hub/sub"
 )
 
-func ErrBad() error {
-	return sub.ErrBad()
-}
-
-func Home() string {
-	return sub.Home()
-}
+var (
+	ErrBad = sub.ErrBad
+	Home   = sub.Home
+)

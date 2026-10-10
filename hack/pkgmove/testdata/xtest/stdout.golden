@@ -9,7 +9,7 @@ Files (4):
 Renames (0):
 
 Alias entries (1):
-  func  Data = sub.Data
+  var   Data = sub.Data
 
 Alias files (1):
   hub/zz_alias_sub.go (13 lines)
@@ -19,7 +19,7 @@ Reference rewrites in remaining files (vars and func values) (0):
 Remaining source files edited (0):
 
 pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
-Files moved: 4. Findings: 5. Errors: 0.
+Files moved: 4. Findings: 6. Errors: 0.
 
 Why this matters: a moved package is initialised before the package that
 imports it, so init() functions and package-level var initialisers in the moved
@@ -30,7 +30,10 @@ ERROR/HIGH/WARN item below before merging.
   hub/move.go:8: //go:embed data.txt (patterns resolve relative to the package directory)
 
 == HIGH: go:linkname directive ==
-  hub/move.go:11: //go:linkname nanotime runtime.nanotime (symbol paths include the package path)
+  hub/move.go:11: //go:linkname helper (symbol paths include the package path)
+
+== WARN: func name seen through its value changes (runtime.FuncForPC, stack traces) ==
+  hub/move.go:15: example.com/fx/hub.Data is now example.com/fx/hub/sub.Data for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
 
 == INFO: moved external test package ==
   hub/move_test.go: package hub_test becomes sub_test

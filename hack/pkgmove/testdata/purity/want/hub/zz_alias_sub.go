@@ -8,6 +8,6 @@ import (
 	"example.com/fx/hub/sub"
 )
 
-func Values() []any {
-	return sub.Values()
-}
+var (
+	Values = sub.Values
+)
