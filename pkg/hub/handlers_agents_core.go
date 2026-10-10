@@ -1705,7 +1705,7 @@ func (s *Server) createAgentInProject(
 			return
 		}
 		if !gcpServiceAccountVerified(sa) {
-			ValidationError(w, "GCP service account is not verified; verify it before assigning to agents", nil)
+			writeIdentityNotVerified(w, sa)
 			return
 		}
 
@@ -4421,7 +4421,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 				return
 			}
 			if !gcpServiceAccountVerified(sa) {
-				ValidationError(w, "GCP service account is not verified; verify it before assigning to agents", nil)
+				writeIdentityNotVerified(w, sa)
 				return
 			}
 			// Parity with the create path, and now literally the same call.

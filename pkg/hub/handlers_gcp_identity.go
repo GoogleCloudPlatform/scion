@@ -346,8 +346,8 @@ type createGCPServiceAccountResponse struct {
 	store.GCPServiceAccount
 	VerificationFailed  bool                       `json:"verificationFailed,omitempty"`
 	VerificationDetails *verificationFailedDetails `json:"verificationDetails,omitempty"`
-	// Warnings are advisory only (see projectSAMappingWarnings); set on the
-	// project-scoped route, never on the hub-scoped one.
+	// Warnings are advisory only (see projectSAMappingWarnings and
+	// hubSAMappingWarnings).
 	Warnings []string `json:"warnings,omitempty"`
 }
 
@@ -485,14 +485,57 @@ type ListGCPServiceAccountsResponse struct {
 	Items        []GCPServiceAccountWithCapabilities `json:"items"`
 	Capabilities *Capabilities                       `json:"_capabilities,omitempty"`
 	MintQuota    *GCPMintQuotaInfo                   `json:"mint_quota,omitempty"`
-	// Warnings are advisory only: one per project-scoped account no
-	// Kubernetes broker profile of the project maps (see
-	// projectSAMappingWarnings). Hub-scoped items never get one.
+	// Warnings are advisory only: one per listed account no Kubernetes
+	// broker profile maps -- the project's profiles for a project list, every
+	// profile on the hub for the hub-scope list (see projectSAMappingWarnings
+	// and hubSAMappingWarnings).
 	Warnings []string `json:"warnings,omitempty"`
+}
+
+// authorizeProjectGCPServiceAccountList is the read check for a list of a
+// project's GCP service accounts, on the nested route and on the top-level
+// route with scope=project. It is project.read on the project: any project
+// member may list the project's accounts (and, with includeHubScoped, the
+// hub-scoped ones it may use), and an agent may list those of its own project
+// only, through its project-scoped read binding. A caller outside the project
+// is refused.
+//
+// This is the account-string visibility rule of ptone/scion#4004 (spec §9 Q1):
+// any project member, agents included, may see an account's email; a
+// non-member may not. The list returns emails, so it is the list that has to
+// enforce it.
+//
+// The project is loaded first, so an unknown project stays a 404 as it was.
+func (s *Server) authorizeProjectGCPServiceAccountList(w http.ResponseWriter, r *http.Request, projectID string) bool {
+	project, err := s.store.GetProject(r.Context(), projectID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			NotFound(w, "Project")
+			return false
+		}
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+	return s.authorize(w, r, projectResource(project), ActionRead)
+}
+
+// authorizeHubGCPServiceAccountList is the read check for the list of
+// hub-scoped GCP service accounts (top-level route, scope=hub): the hub-wide
+// collection permission gcp_service_account.list, which the hub-member and
+// hub-viewer roles carry. A user who is not a hub member, and an agent, is
+// refused; an agent reaches the hub-scoped accounts it may use through its
+// own project's list with includeHubScoped.
+func (s *Server) authorizeHubGCPServiceAccountList(w http.ResponseWriter, r *http.Request) bool {
+	return s.authorizeWithEvidence(w, r, Resource{Type: "gcp_service_account"}, ActionList,
+		hubCollectionEvidence("gcp_service_account.list"))
 }
 
 func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
+
+	if !s.authorizeProjectGCPServiceAccountList(w, r, projectID) {
+		return
+	}
 
 	// This one route serves two callers with opposite needs. The assign picker
 	// wants the project's accounts plus the hub-wide ones, because either can
@@ -695,8 +738,9 @@ func (s *Server) verifyGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 // verified after a verification that did not pass.
 //
 // warnProjectID is the project whose Kubernetes broker profiles a successful
-// response warns about (projectSAMappingWarnings), or "" for no warnings
-// (the parentless route).
+// response warns about (projectSAMappingWarnings), or "" on the parentless
+// route, where a hub-scoped account is checked against every broker on the
+// hub (hubSAMappingWarnings) and other scopes get no warning.
 func (s *Server) runGCPServiceAccountVerification(w http.ResponseWriter, r *http.Request, sa *store.GCPServiceAccount, warnProjectID string) {
 	// Fail-closed: if no token generator is configured, we cannot verify.
 	if s.gcpTokenGenerator == nil {
@@ -1299,10 +1343,33 @@ func (s *Server) gcpIdentityStartRefusal(ctx context.Context, w http.ResponseWri
 	}
 	slog.Info("agent start refused: GCP identity assignment is not admissible",
 		"agent_id", agent.ID, "action", action, "sa_id", gcpID.ServiceAccountID, "reason", err)
-	writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-		fmt.Sprintf("Cannot %s agent: %s. Verify the service account, or assign the agent a different GCP identity, then retry.",
-			action, err.Error()), nil)
+	code, msg := gcpIdentityStartRefusalText(action, err)
+	writeError(w, http.StatusBadRequest, code, msg, nil)
 	return true
+}
+
+// gcpIdentityStartRefusalText is the code and message for an inadmissible
+// assignment at start. A not-verified account and a hub-scoped account the
+// check mode no longer allows get their identity codes and a remedy naming
+// who acts. The other reasons keep the validation code: a vanished or
+// unreachable account must read the same as before, and the changed-email
+// case is fixed the same way.
+func gcpIdentityStartRefusalText(action string, err error) (string, string) {
+	switch {
+	case errors.Is(err, errGCPSANotVerified):
+		return ErrCodeIdentityNotVerified, fmt.Sprintf(
+			"Cannot %s agent: %s: the hub cannot obtain tokens for it. %s "+
+				"Or assign the agent a different GCP identity, then retry.",
+			action, err.Error(), identityVerifyRemedy(""))
+	case errors.Is(err, errGCPSAHubModeOff):
+		return ErrCodeIdentityAssignDenied, fmt.Sprintf(
+			"Cannot %s agent: %s. %s Or assign the agent a project-scoped GCP identity, then retry.",
+			action, err.Error(), saAssignHubModeRemedy)
+	default:
+		return ErrCodeValidationError, fmt.Sprintf(
+			"Cannot %s agent: %s. Verify the service account, or assign the agent a different GCP identity, then retry.",
+			action, err.Error())
+	}
 }
 
 // handleAgentGCPToken handles POST /api/v1/agent/gcp-token.

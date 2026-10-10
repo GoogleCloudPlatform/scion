@@ -518,13 +518,15 @@ There is no fallback: a failed mapping never runs the pod with the emulator or w
 
 **Per-profile default service account.** A project that runs agents on both Kubernetes and other profiles can set a default service account for each Kubernetes profile (`defaultGCPIdentityServiceAccountIDByProfile` in the project settings API). Pick a GSA that has a mapping on that profile. Agents created on that profile with no explicit identity then default to it, instead of a broader project default that has no Workload Identity binding. See [Per-Profile Default Service Accounts](/scion/hosted/ha/permissions/#per-profile-default-service-accounts).
 
-**Early warning for unmapped service accounts.** The Hub warns, before any dispatch, about a GSA registered in a project that no Kubernetes broker profile of the project maps. The warning appears on:
+**Early warning for unmapped service accounts.** The Hub warns, before any dispatch, about a GSA a project's agents can be assigned that no Kubernetes broker profile of the project maps. That covers the project's own service accounts and the hub-scoped ones. The warning appears on:
 
 - registering, minting, or verifying a project service account (the response's `warnings` field, printed to stderr by `scion project service-accounts add`, `mint`, and `verify`),
-- listing the project's service accounts (`warnings` in the list response, printed by `scion project service-accounts list`),
+- listing the project's service accounts (`warnings` in the list response, printed by `scion project service-accounts list`); with `includeHubScoped=true` the hub-scoped accounts in the list are checked against the project's profiles too,
 - the `gcp-sa-mappings` check of `scion doctor`.
 
-It is only a warning: it never fails a request, and an unmapped GSA is fine if it is never assigned on a Kubernetes profile. It is not shown for hub-scoped service accounts, for projects whose provider brokers have no Kubernetes profile, or when no Kubernetes profile has reported its mappings.
+Hub-scoped service accounts are also checked on the hub-scope routes, which have no project: registering or minting one, verifying it through `POST /api/v1/gcp-service-accounts/<id>/verify`, and listing with `scope=hub`. There the warning says the GSA is not mapped on any Kubernetes broker profile of the hub, checking every broker on the hub.
+
+It is only a warning: it never fails a request, and an unmapped GSA is fine if it is never assigned on a Kubernetes profile. It is not shown when the brokers checked have no Kubernetes profile, or when no Kubernetes profile has reported its mappings. For the other identity error codes (`identity_not_verified`, `identity_default_invalid`, `identity_assign_denied`, `identity_mode_unsupported`) see [Identity Error Codes](/scion/hosted/ha/permissions/#identity-error-codes).
 
 Where the Hub gets the mappings from:
 

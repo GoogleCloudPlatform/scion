@@ -183,7 +183,7 @@
 - [gcp.identity.mint](#gcpidentitymint) — Mint a GCP access token for a service account
 - [secret.read](#secretread) — Read project secrets or environment variables containing secrets
 - [secret.write](#secretwrite) — Create or update project secrets
-- [gcp.identity.read](#gcpidentityread) — Read GCP service account details or list accounts
+- [gcp.identity.read](#gcpidentityread) — Read GCP service account details or list accounts. A project's list requires project.read on it (members, and agents of that project only); the hub-scoped list requires gcp_service_account.list at hub scope (hub members)
 - [gcp.identity.verify](#gcpidentityverify) — Verify a GCP service account's IAM configuration
 - [env.read](#envread) — Read project environment variables
 - [env.hub.list](#envhublist) — List hub-level environment variables (scope=hub), without secret entries
@@ -6684,7 +6684,7 @@
 
 **Domain:** gcp.identity
 
-**Description:** Read GCP service account details or list accounts
+**Description:** Read GCP service account details or list accounts. A project's list requires project.read on it (members, and agents of that project only); the hub-scoped list requires gcp_service_account.list at hub scope (hub members)
 
 ### Entry Points
 
@@ -6692,10 +6692,11 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/gcp-service-accounts` |
 | http_route | GET | `/api/v1/gcp-service-accounts/{id}` |
+| http_route | GET | `/api/v1/projects/{id}/gcp-service-accounts` |
 
-**Principals:** `user`
+**Principals:** `user`, `agent`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
 
 **Base Permission:** `gcp_service_account.read`
 

@@ -43,9 +43,12 @@ var loadEmbeddedBrokerMappingSettings = func() (*config.VersionedSettings, error
 	return vs, err
 }
 
-// projectSAMappingView is what the project's providers report about their
-// Kubernetes profiles' GSA mappings.
+// projectSAMappingView is what a set of brokers (a project's providers, or
+// every broker on the hub) reports about their Kubernetes profiles' GSA
+// mappings.
 type projectSAMappingView struct {
+	// where names the broker set in warnings: "this project" or "this hub".
+	where string
 	// mapped is the union of GSAs mapped on reported Kubernetes profiles.
 	mapped map[string]bool
 	// reported names the Kubernetes profiles whose mappings are known, as
@@ -78,19 +81,62 @@ var localOnlyProfileTypes = map[string]bool{"docker": true, "podman": true, "con
 // Runtime Broker rows, which never persist profiles (see the flat Runtime
 // Brokers contract), so they are never read as "nothing mapped".
 func (s *Server) projectSAMappings(ctx context.Context, projectID string) projectSAMappingView {
-	view := projectSAMappingView{mapped: map[string]bool{}}
+	view := projectSAMappingView{where: "this project", mapped: map[string]bool{}}
 	providers, err := s.store.GetProjectProviders(ctx, projectID)
 	if err != nil {
 		slog.Debug("SA mapping warning: listing project providers failed", "project_id", projectID, "error", err)
 		return view
 	}
-	embeddedID := s.embeddedBrokerSnapshot().id
+	brokers := make([]*store.RuntimeBroker, 0, len(providers))
 	for _, provider := range providers {
 		broker, err := s.store.GetRuntimeBroker(ctx, provider.BrokerID)
 		if err != nil || broker == nil {
 			slog.Debug("SA mapping warning: provider broker unavailable", "project_id", projectID, "broker", provider.BrokerID, "error", err)
 			continue
 		}
+		brokers = append(brokers, broker)
+	}
+	s.addBrokerSAMappings(&view, brokers)
+	return view
+}
+
+// hubSAMappingBrokerPageSize bounds each page of the broker listing behind
+// hubSAMappings.
+const hubSAMappingBrokerPageSize = 200
+
+// hubSAMappings collects the Kubernetes profile mappings of every broker on
+// the hub. A hub-scoped account is assignable from every project, so the
+// question for it is whether any broker maps it, not one project's
+// providers. Listing errors are logged and end the walk: the result feeds
+// warnings only.
+func (s *Server) hubSAMappings(ctx context.Context) projectSAMappingView {
+	view := projectSAMappingView{where: "this hub", mapped: map[string]bool{}}
+	var brokers []*store.RuntimeBroker
+	cursor := ""
+	for {
+		page, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{},
+			store.ListOptions{Limit: hubSAMappingBrokerPageSize, Cursor: cursor, SkipTotalCount: true})
+		if err != nil {
+			slog.Debug("SA mapping warning: listing hub brokers failed", "error", err)
+			break
+		}
+		for i := range page.Items {
+			brokers = append(brokers, &page.Items[i])
+		}
+		if page.NextCursor == "" || len(page.Items) == 0 {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	s.addBrokerSAMappings(&view, brokers)
+	return view
+}
+
+// addBrokerSAMappings adds the Kubernetes profile mappings of brokers to
+// view.
+func (s *Server) addBrokerSAMappings(view *projectSAMappingView, brokers []*store.RuntimeBroker) {
+	embeddedID := s.embeddedBrokerSnapshot().id
+	for _, broker := range brokers {
 		embedded := embeddedID != "" && broker.ID == embeddedID
 		// The embedded broker's live settings, loaded at most once and only
 		// when a profile that could be Kubernetes is reached.
@@ -140,7 +186,6 @@ func (s *Server) projectSAMappings(ctx context.Context, projectID string) projec
 		}
 	}
 	sort.Strings(view.reported)
-	return view
 }
 
 // unmapped reports whether a warning applies to gsaEmail: at least one
@@ -154,9 +199,9 @@ func (v projectSAMappingView) unmapped(gsaEmail string) bool {
 // projectSAMappingWarnings includes only once per response.
 func (v projectSAMappingView) warningFor(gsaEmail string, withContext bool) string {
 	msg := fmt.Sprintf(
-		"GCP service account %s is not mapped to a Kubernetes ServiceAccount on any Kubernetes broker profile of this project; "+
+		"GCP service account %s is not mapped to a Kubernetes ServiceAccount on any Kubernetes broker profile of %s; "+
 			"agents assigned it on those profiles fail to start until a broker operator adds it to kubernetes_service_account_mappings",
-		strings.ToLower(gsaEmail))
+		strings.ToLower(gsaEmail), v.where)
 	if withContext {
 		msg += fmt.Sprintf(" (profiles checked: %s", strings.Join(v.reported, ", "))
 		if v.unreported > 0 {
@@ -167,36 +212,62 @@ func (v projectSAMappingView) warningFor(gsaEmail string, withContext bool) stri
 	return msg
 }
 
-// projectSAMappingWarnings returns one warning per project-scoped service
-// account in sas (of projectID) that no Kubernetes broker profile of the
+// projectSAMappingWarnings returns one warning per service account in sas
+// that projectID's agents can be assigned -- its own project-scoped accounts
+// and every hub-scoped one -- and that no Kubernetes broker profile of the
 // project maps. The first warning also lists the profiles checked, so the
-// set is not repeated per account. Hub-scoped accounts get no warning. Nil
-// when there is nothing to warn about.
+// set is not repeated per account. Nil when there is nothing to warn about.
 func (s *Server) projectSAMappingWarnings(ctx context.Context, projectID string, sas ...*store.GCPServiceAccount) []string {
 	var candidates []*store.GCPServiceAccount
 	for _, sa := range sas {
-		if sa != nil && sa.Scope == store.ScopeProject && sa.ScopeID == projectID {
+		if sa == nil {
+			continue
+		}
+		if (sa.Scope == store.ScopeProject && sa.ScopeID == projectID) || sa.Scope == store.ScopeHub {
 			candidates = append(candidates, sa)
 		}
 	}
 	if len(candidates) == 0 {
 		return nil
 	}
-	view := s.projectSAMappings(ctx, projectID)
-	var warnings []string
-	for _, sa := range candidates {
-		if view.unmapped(sa.Email) {
-			warnings = append(warnings, view.warningFor(sa.Email, len(warnings) == 0))
-		}
-	}
-	return warnings
+	return s.projectSAMappings(ctx, projectID).warnings(candidates)
 }
 
-// verificationWarnings is projectSAMappingWarnings for the verify routes:
-// none when projectID is "" (the parentless route).
+// hubSAMappingWarnings returns one warning per hub-scoped service account in
+// sas that no Kubernetes broker profile on the hub maps, for the hub-scope
+// routes, which have no project to narrow the brokers to. Project-scoped
+// accounts are skipped. Nil when there is nothing to warn about.
+func (s *Server) hubSAMappingWarnings(ctx context.Context, sas ...*store.GCPServiceAccount) []string {
+	var candidates []*store.GCPServiceAccount
+	for _, sa := range sas {
+		if sa != nil && sa.Scope == store.ScopeHub {
+			candidates = append(candidates, sa)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	return s.hubSAMappings(ctx).warnings(candidates)
+}
+
+// warnings returns the warning for each unmapped account in sas, the first
+// with the profiles checked.
+func (v projectSAMappingView) warnings(sas []*store.GCPServiceAccount) []string {
+	var out []string
+	for _, sa := range sas {
+		if v.unmapped(sa.Email) {
+			out = append(out, v.warningFor(sa.Email, len(out) == 0))
+		}
+	}
+	return out
+}
+
+// verificationWarnings is the mapping warning for the verify routes: the
+// project's when a project route verified sa, and for a hub-scoped account
+// verified through the parentless route (projectID ""), the hub's.
 func (s *Server) verificationWarnings(ctx context.Context, projectID string, sa *store.GCPServiceAccount) []string {
 	if projectID == "" {
-		return nil
+		return s.hubSAMappingWarnings(ctx, sa)
 	}
 	return s.projectSAMappingWarnings(ctx, projectID, sa)
 }

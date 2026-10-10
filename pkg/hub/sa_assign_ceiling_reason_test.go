@@ -21,6 +21,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -237,10 +238,12 @@ func TestEvaluateSAAssignment_CeilingAgentDelegatorLacksPermission(t *testing.T)
 	assert.NotContains(t, denial.msg, agentBID, "the 403 body must not name the requesting agent's ID")
 }
 
-// TestEvaluateSAAssignment_OrdinaryDenialKeepsGenericMessage pins that a
-// non-ceiling denial (here: a user with no role anywhere) is completely
-// unaffected by this change — byte-for-byte the same message as before.
-func TestEvaluateSAAssignment_OrdinaryDenialKeepsGenericMessage(t *testing.T) {
+// TestEvaluateSAAssignment_OrdinaryDenialNamesPermission pins that a
+// non-ceiling denial (here: a user with no role anywhere) keeps the generic
+// text as its prefix, then names the missing permission and who grants it
+// (ptone/scion#4019). It names no account: the caller is not a member of the
+// account's project.
+func TestEvaluateSAAssignment_OrdinaryDenialNamesPermission(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -255,8 +258,11 @@ func TestEvaluateSAAssignment_OrdinaryDenialKeepsGenericMessage(t *testing.T) {
 	denial := srv.evaluateSAAssignment(strangerCtx, nil, sa, SurfaceProjectDefault)
 	require.NotNil(t, denial, "a stranger with no role must be denied")
 	assert.Equal(t, saAssignDenyForbiddenStructured, denial.kind)
-	assert.Equal(t, scaGenericDenyMsg, denial.msg,
-		"an ordinary policy denial must keep the exact generic message, byte for byte")
+	assert.True(t, strings.HasPrefix(denial.msg, scaGenericDenyMsg+": "),
+		"an ordinary policy denial must start with the generic message: %q", denial.msg)
+	assert.Contains(t, denial.msg, "gcp_service_account.assign")
+	assert.Contains(t, denial.msg, "A project owner or admin grants it")
+	assert.NotContains(t, denial.msg, sa.Email, "a non-member must not see the account email")
 }
 
 // scaGetUserErrorStore wraps a real store and forces GetUser to fail with a
@@ -608,7 +614,7 @@ func TestSAAssignUnrecordedChainHTTPBody(t *testing.T) {
 	rec := f.createAsParent(t, f.agentToken(t, f.legacy.ID), f.assignBody("sca-unrec-c"))
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	apiErr := decodeTargetAPIError(t, rec)
-	assert.Equal(t, ErrCodeForbidden, apiErr.Code)
+	assert.Equal(t, ErrCodeIdentityAssignDenied, apiErr.Code)
 	assert.Equal(t, scaUnrecordedDenyMsg, apiErr.Message)
 	assert.NotEqual(t, scaGenericDenyMsg, apiErr.Message)
 	assert.Equal(t, gcpServiceAccountResource(f.sa).Type, apiErr.Details["resource_type"])

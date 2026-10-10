@@ -168,6 +168,30 @@ If any check fails, the start is refused with `400` and a message that says what
 
 If the Hub cannot save the result of a service account verification (on registration, minting or an explicit verify), the request fails with `500` instead of reporting success. On registration the account record already exists, so re-run verification on it (`scion project service-accounts verify <id>`, or `POST .../gcp-service-accounts/<id>/verify`) rather than registering it again.
 
+### Service Account Visibility
+
+Any project member, agents included, may see the email of a service account the project can use. A caller outside the project may not. The list endpoints apply this rule:
+
+- `GET /api/v1/projects/<project>/gcp-service-accounts` and `GET /api/v1/gcp-service-accounts?scope=project&scopeId=<project>` require read access to the project. Project members can list, and an agent can list only its own project's accounts. Anyone else gets `403`. With `includeHubScoped=true` the list also includes the hub-scoped accounts the project can use. An unknown project returns `404`.
+- `GET /api/v1/gcp-service-accounts?scope=hub` requires hub membership: the hub-member and hub-viewer roles carry `gcp_service_account.list`. Users who are not hub members, and agents, get `403`. An agent sees the hub-scoped accounts it can use through its own project's list with `includeHubScoped=true`.
+
+Error messages follow the same rule. A message names an account only when the caller already has access in the account's project (for example while creating an agent there), or is a hub member and the account is hub-scoped. The "not available" message is the same for an account that does not exist and one the caller cannot see, so it never names an account.
+
+### Identity Error Codes
+
+GCP identity failures carry a stable `code`. The message names the step that failed, the scope (project, profile or hub) and who can fix it.
+
+| Code | Status | When | Remedy in the message |
+| :--- | :--- | :--- | :--- |
+| `identity_not_verified` | 400 | An agent is created, patched, reincarnated or started with an account the Hub cannot obtain tokens for. Also returned when a project default or the hub default is set to an unverified account. | A project admin grants the Hub's service account `roles/iam.serviceAccountTokenCreator` on the account, then verifies it (`scion service-accounts verify <id>`). A hub admin does this for a hub-scoped account (`--global`). |
+| `identity_default_invalid` | 400 | A configured default (project, per-profile or hub) names an account that is not available in the project or not verified. | Names the default (`project default`, `project default for profile "<profile>"` or `hub default`), the setting to change (`defaultGCPIdentityServiceAccountID`, the profile's entry in `defaultGCPIdentityServiceAccountIDByProfile`, or `agent_defaults.default_gcp_identity_service_account_id`) and who changes it (a project admin, or a hub admin for the hub default). |
+| `identity_assign_denied` | 403 | The caller may not assign the account. | Names what is missing: `gcp_service_account.assign` (a project owner or admin grants it by adding the caller to the project; for a hub-scoped account, a hub admin adds the caller to the hub's members), `iam.serviceAccounts.actAs` on the account (an IAM admin of the account's GCP project grants it, for example with `roles/iam.serviceAccountUser`), or `gcp_iam_check_mode: enforce` for a hub-scoped account (a hub admin sets it). Delegation-chain denials for agents keep their own messages. |
+| `identity_mode_unsupported` | 400 | A project default of `block` is set on a project whose brokers are all Kubernetes. | Choose `passthrough` or `assign`. |
+| `identity_not_mapped`, `identity_ksa_mismatch` | 400 | Kubernetes Workload Identity mapping errors. | See [assign on Kubernetes](/scion/hosted/ha/kubernetes/#gcp-identity-mode-assign-workload-identity-mapping). |
+| `identity_ambiguous` | 400 | A service account reference matches more than one account. | Retry with one of the listed ids. |
+
+An account that does not exist, or that the caller cannot see from the project, is still refused with `400 validation_error` and the same "not available" message as before.
+
 ### Hub-Scoped Service Accounts
 
 Hub-scoped service accounts are defined globally at the Hub level rather than being restricted to a single project. This allows Platform Ops to make shared service accounts available for selection across multiple project-level workspaces.

@@ -318,7 +318,9 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 			return false
 		}
 		if k8sBound {
-			BadRequest(w, "default GCP identity mode 'block' is not available for a Kubernetes-bound project; choose 'passthrough' or 'assign' instead")
+			// Text unchanged; the stable code is ptone/scion#4019's.
+			writeError(w, http.StatusBadRequest, ErrCodeIdentityModeUnsupported,
+				"default GCP identity mode 'block' is not available for a Kubernetes-bound project; choose 'passthrough' or 'assign' instead", nil)
 			return false
 		}
 	}
@@ -411,7 +413,9 @@ func (s *Server) validateProjectDefaultSAID(w http.ResponseWriter, ctx context.C
 	// Safe to be specific: this service account is already readable by this
 	// caller, so naming its state discloses nothing they cannot already see.
 	if !gcpServiceAccountVerified(sa) {
-		BadRequest(w, "GCP service account is not verified; verify it before setting it as "+what)
+		writeError(w, http.StatusBadRequest, ErrCodeIdentityNotVerified,
+			"GCP service account is not verified; verify it before setting it as "+what+". "+
+				identityVerifyRemedy(sa.Scope), nil)
 		return false
 	}
 

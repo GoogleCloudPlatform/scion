@@ -291,7 +291,8 @@ func TestUATChildDefaultSAWithoutAssignDeniedAtCreate(t *testing.T) {
 	rec := f.create(t, f.uat(t, minimalSelectors(t)...), CreateAgentRequest{Name: "uat-default-sa"})
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	apiErr := decodeTargetAPIError(t, rec)
-	assert.Equal(t, saAssignGenericForbiddenMsg, apiErr.Message)
+	assert.Equal(t, ErrCodeIdentityAssignDenied, apiErr.Code)
+	assert.Equal(t, saAssignPolicyDeniedMessage(sa), apiErr.Message)
 	assert.NotContains(t, apiErr.Details, "denied_by", "the SA gate's response, not the ceiling's")
 	assertCreateWroteNothing(t, f.store, f.proj.ID, "uat-default-sa", f.creator.ID)
 }

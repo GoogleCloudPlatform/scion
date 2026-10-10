@@ -1375,8 +1375,9 @@ func (s *Server) validateHubDefaultGCPIdentity(w http.ResponseWriter, ctx contex
 	}
 
 	if !gcpServiceAccountVerified(sa) {
-		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-			"GCP service account is not verified; verify it before setting it as the hub default", nil)
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeIdentityNotVerified,
+			"GCP service account is not verified; verify it before setting it as the hub default. "+
+				identityVerifyRemedy(sa.Scope), nil)
 		return false
 	}
 
