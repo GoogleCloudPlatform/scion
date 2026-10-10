@@ -41,7 +41,6 @@ export interface LayoutOpenOptions {
   navigationId: number;
   /** Reads the current navigation, to drop a restore that was superseded. */
   currentNavigationId: () => number;
-  createRequestId?: () => string;
 }
 
 /**
@@ -63,7 +62,6 @@ export async function openLayoutSlots(
   options: LayoutOpenOptions
 ): Promise<Array<string | null> | null> {
   const { coordinator, workspace, slots, navigations, navigationId } = options;
-  const createRequestId = options.createRequestId ?? ((): string => crypto.randomUUID());
   const toOpen = [
     ...new Set(
       slots.filter(
@@ -76,7 +74,7 @@ export async function openLayoutSlots(
     if (options.currentNavigationId() !== navigationId) return null;
     await Promise.all(
       toOpen.map(async (agentId) => {
-        const requestId = coordinator.supported ? createRequestId() : undefined;
+        const requestId = coordinator.supported ? crypto.randomUUID() : undefined;
         if (requestId) navigations.set(requestId, navigationId);
         try {
           const result = await coordinator.open(agentId, requestId);

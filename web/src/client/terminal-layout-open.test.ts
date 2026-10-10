@@ -216,6 +216,10 @@ describe('openLayoutSlots (#4128)', () => {
     expect(keys[0]).not.toBeNull();
     expect(keys[1]).toBeNull();
     expect(keys[2]).not.toBeNull();
+    // The failed slot is never selected; the others are, in slot order.
+    expect(h.selected).toEqual([A, C]);
+    h.layout.restore('four', keys);
+    expect(h.layout.getState().single[0]).toBe(keys[0]);
   });
 
   it('returns null when the navigation is superseded during the opens', async () => {

@@ -168,7 +168,7 @@ describe('terminal connect smoke (#4124)', () => {
     expect(root().querySelector('.error-banner')).toBeNull();
   });
 
-  it('silent socket: an open socket that never sends a frame ends in the error state with Retry', async () => {
+  it('silent socket: an open socket that never sends a frame ends in the error state with Reconnect', async () => {
     mountPane();
     await until(() => hub.sockets.some((s) => s.accepted), 'the PTY socket to open');
     await settled();
@@ -186,7 +186,7 @@ describe('terminal connect smoke (#4124)', () => {
     await expectRetryDials();
   });
 
-  it('never-open socket: an upgrade that is never answered ends in the error state with Retry', async () => {
+  it('never-open socket: an upgrade that is never answered ends in the error state with Reconnect', async () => {
     hub.upgradeMode = 'hold';
     mountPane();
     await until(() => hub.sockets.length === 1, 'the PTY upgrade request');
