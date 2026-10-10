@@ -268,6 +268,11 @@ func (s *Server) syncTemplateFromStorageInner(ctx context.Context, id string) er
 		return nil
 	}
 
+	// syncResourceFromStorage read a legacy row without a storage path from
+	// the computed path; commit against, and record, that same path.
+	if tmpl.StoragePath == "" {
+		tmpl.StoragePath = storage.ResourceStoragePath(s.HubID(), storage.ResourceKindTemplate, tmpl.Scope, tmpl.ScopeID, tmpl.Slug)
+	}
 	// Commit the manifest rebuilt from storage. The commit re-derives the
 	// index from the stored scion-agent.yaml; a refused commit (an unusable
 	// bundled harness-config) leaves the row unchanged and is returned for

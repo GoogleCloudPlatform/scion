@@ -299,13 +299,19 @@ func (p *templatePersistence) Create(ctx context.Context, rec *ResourceRecord, d
 // the resource.
 func (p *templatePersistence) Update(ctx context.Context, rec *ResourceRecord, dir string) error {
 	t := p.model
-	prevStatus, prevSourceURL := t.Status, t.SourceURL
+	prevStatus, prevSourceURL, prevStoragePath := t.Status, t.SourceURL, t.StoragePath
 	t.Status = rec.Status
 	if rec.SourceURL != "" {
 		t.SourceURL = rec.SourceURL
 	}
+	// A legacy row without a storage path: the caller uploaded to the
+	// computed path (ResourceStore.Bootstrap and its siblings), so commit
+	// against, and record, that same path.
+	if t.StoragePath == "" {
+		t.StoragePath = storage.ResourceStoragePath(p.s.HubID(), p.Kind(), t.Scope, t.ScopeID, t.Slug)
+	}
 	if err := p.s.commitTemplateFiles(ctx, t, rec.Files, commitOpts{dir: dir}); err != nil {
-		t.Status, t.SourceURL = prevStatus, prevSourceURL
+		t.Status, t.SourceURL, t.StoragePath = prevStatus, prevSourceURL, prevStoragePath
 		return fmt.Errorf("%s: template %q not updated: %w", p.Label(), t.Name, err)
 	}
 	rec.Harness = t.Harness
