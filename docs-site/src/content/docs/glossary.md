@@ -170,11 +170,17 @@ The user-facing term and UI representation of an underlying **AccessConstraint**
 _Avoid_: access ceiling, permission boundary, role constraint
 _See also_: AccessConstraint, Group, RoleBinding, User Access Token (UAT)
 
+### Agent Authorization Role
+A named authority tier (one of `none`, `readonly`, `baseline`, or `full`) assigned to an agent that governs the API scopes granted in its Hub-issued JWT. At creation, the requested or default role is capped by the project maximum and, for sub-agents, the parent agent's role. Live delegation checks separately verify the caller's authority.
+
 ### Group
 A named collection of Hub users (and nested groups) used by the Hub permissions system to assign access. This is the primary meaning of "group" in Scion. Distinct from a **Message Group** (a set of message recipients) and from a **Project**.
 
 ### User Access Token (UAT)
 A scoped, revocable bearer token (prefixed with `scion_pat_`) linked to a user account and used for non-interactive Hub authentication (e.g., CLI, CI/CD pipelines, desktop app integration). Every UAT has a boundary, either a single project or (for a hub-bound token, minted through the API) the hub, and carries a specific list of action permissions (scopes). The token boundary is not an **Access Boundary**. Formerly known as a *Personal Access Token (PAT)*.
+
+### Owner-Based Access Control
+An authorization model where certain resources (such as scheduled events, recurring schedules, and individual agents) are strictly restricted so they can only be viewed, updated, deleted, or managed by their respective creator (the "owner") or system-wide administrators. Enforced via owner-ID validation at the API layer.
 
 ### Quota System
 An advisory-lock-based enforcement system that governs resource consumption at agent and project creation. It uses fail-closed semantics and prevents reservation leaks, operating on schemas including LimitDefinition, EntitlementBinding, and UsageReservation.
@@ -268,7 +274,7 @@ The phase an agent enters when its process or container exits non-zero (a crash,
 A platform-set activity for an agent whose heartbeat is still arriving (the process is alive) but that has produced no activity events within the stall threshold (default 5 minutes). Indicates a hung agent. Agents that have declared themselves `blocked` are excluded.
 
 ### Auto-Suspend
-A Hub behavior that automatically suspends an agent which has remained `stalled` past a grace period, reclaiming its container. The agent resumes automatically on the next message, provided its harness supports session resume and the container is still alive.
+A Hub behavior, off by default (`server.hub.auto_suspend_stalled`), that suspends an agent when it is marked `stalled`, reclaiming its container. The agent resumes automatically on the next message, provided its harness supports session resume and the container is still alive.
 
 
 ### Run intent
@@ -337,14 +343,3 @@ The in-container OTLP receiver and forwarding pipeline (`pkg/sciontool/telemetry
 
 ### Session metrics
 Database-backed summaries and aggregations computed on agent session-end (aggregated by `sciontool` and delivered as a `MetricsPayload` in the StatusUpdate protocol) and stored in the Hub's `agent_session_metrics` SQL table. They provide an IDOR-safe structural view of token usage (input, output, cached, reasoning), tool execution counts, session duration, and model usage, queried via dedicated summary API endpoints and displayed in the Web Dashboard. Contrast with raw OpenTelemetry time-series metrics.
-
-## Users & Access
-
-### Agent Authorization Role
-A named authority tier (one of `none`, `readonly`, `baseline`, or `full`) assigned to an agent that governs the API scopes granted in its Hub-issued JWT. At creation, the requested or default role is capped by the project maximum and, for sub-agents, the parent agent's role. Live delegation checks separately verify the caller's authority.
-
-### Group
-A named collection of Hub users (and nested groups) used by the Hub permissions system to assign access. This is the primary meaning of "group" in Scion.
-
-### Owner-Based Access Control
-An authorization model where certain resources (such as scheduled events, recurring schedules, and individual agents) are strictly restricted so they can only be viewed, updated, deleted, or managed by their respective creator (the "owner") or system-wide administrators. Enforced via owner-ID validation at the API layer.
