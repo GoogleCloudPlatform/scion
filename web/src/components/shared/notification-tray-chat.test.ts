@@ -15,18 +15,12 @@
  */
 
 /**
- * The tray's half of the exactly-once boundary for chat notifications.
+ * The tray carries agent events only: the hub no longer writes chat rows,
+ * and chat popups belong to chat-notifications.ts under their own toggle.
+ * The tray's popups follow the agent event alerts toggle alone.
  *
- * Two components can fire a browser notification for the same mention: this
- * tray (which re-fetches when a notification-created event arrives, then pops
- * for every ID it has not seen) and chat-notifications.ts (which pops straight
- * off the SSE payload). They are driven by the same event, so without an
- * explicit split every mention would appear twice.
- *
- * The split is by status, and it is asserted here rather than assumed.
- *
- * The second half of the file covers the master desktop-notification toggle
- * the tray carries. It lives here because the tray is the only notification
+ * The second half of the file covers the agent-alerts toggle the tray
+ * carries. It lives here because the tray is the only notification
  * surface present on every page including chat, and because the rule that
  * matters about it — permission is requested on click and never on load — is
  * invisible unless something asserts it.
@@ -38,7 +32,9 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 import { render } from 'lit';
 
 import { apiFetch } from '../../client/api.js';
-import { PUSH_PREFERENCE_EVENT, PUSH_STORAGE_KEY } from '../../client/push-preference.js';
+import { PUSH_PREFERENCE_EVENT, PUSH_STORAGE_KEYS } from '../../client/push-preference.js';
+
+const AGENT_KEY = PUSH_STORAGE_KEYS.agent;
 import { stateManager } from '../../client/state.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -47,7 +43,7 @@ vi.mock('../../client/api.js', () => ({
   apiFetch: vi.fn(() => Promise.resolve(new Response('[]', { status: 200 }))),
 }));
 
-/** The all-zero UUID the hub writes into chat notification rows. */
+/** The all-zero UUID some older rows carry in place of an agent. */
 const NIL_UUID = '00000000-0000-0000-0000-000000000000';
 
 let popups: Array<{ title: string; options: NotificationOptions }> = [];
@@ -79,7 +75,7 @@ function createTray(): any {
   return document.createElement('scion-notification-tray');
 }
 
-describe('notification tray: chat notifications', () => {
+describe('notification tray: agent event popups', () => {
   beforeAll(async () => {
     await import('./notification-tray.js');
   });
@@ -88,7 +84,7 @@ describe('notification tray: chat notifications', () => {
     popups = [];
     FakeNotification.permission = 'granted';
     (window as unknown as { Notification: unknown }).Notification = FakeNotification;
-    localStorage.setItem(PUSH_STORAGE_KEY, 'true');
+    localStorage.setItem(AGENT_KEY, 'true');
   });
 
   afterEach(() => {
@@ -96,16 +92,7 @@ describe('notification tray: chat notifications', () => {
     vi.restoreAllMocks();
   });
 
-  it('does not fire browser notifications for mentions or DMs', () => {
-    const tray = createTray();
-
-    tray.dispatchBrowserNotification(notification('MENTION'));
-    tray.dispatchBrowserNotification(notification('DM_RECEIVED'));
-
-    expect(popups).toHaveLength(0);
-  });
-
-  it('still fires browser notifications for agent statuses', () => {
+  it('fires browser notifications for agent statuses', () => {
     const tray = createTray();
 
     tray.dispatchBrowserNotification(notification('COMPLETED', 'agent-1'));
@@ -114,19 +101,20 @@ describe('notification tray: chat notifications', () => {
     expect(popups.map((p) => p.title)).toEqual(['Agent Completed', 'Agent Waiting on Parent']);
   });
 
-  it('honours the shared push preference for agent statuses', () => {
-    localStorage.setItem(PUSH_STORAGE_KEY, 'false');
+  it('honours the agent events toggle, not the chat messages one', () => {
+    localStorage.setItem(AGENT_KEY, 'false');
+    localStorage.setItem(PUSH_STORAGE_KEYS.chat, 'true');
     createTray().dispatchBrowserNotification(notification('COMPLETED', 'agent-1'));
     expect(popups).toHaveLength(0);
   });
 
-  it('omits the agent link on chat rows, which have no agent', () => {
+  it('omits the agent link on rows with no agent', () => {
     const host = document.createElement('div');
     const tray = createTray();
 
     render(tray.renderItem(notification('MENTION')), host);
-    const chatLinks = host.querySelectorAll('a[href^="/agents/"]');
-    expect(chatLinks).toHaveLength(0);
+    const noAgentLinks = host.querySelectorAll('a[href^="/agents/"]');
+    expect(noAgentLinks).toHaveLength(0);
     // The row itself still renders — only the broken link is gone.
     expect(host.textContent).toContain('MENTION happened');
 
@@ -137,7 +125,67 @@ describe('notification tray: chat notifications', () => {
   });
 });
 
-describe('notification tray: desktop notification toggle', () => {
+describe('notification tray: retired chat rows', () => {
+  beforeAll(async () => {
+    await import('./notification-tray.js');
+  });
+
+  beforeEach(() => {
+    popups = [];
+    FakeNotification.permission = 'granted';
+    (window as unknown as { Notification: unknown }).Notification = FakeNotification;
+    localStorage.setItem(AGENT_KEY, 'true');
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+    vi.mocked(apiFetch).mockImplementation(() =>
+      Promise.resolve(new Response('[]', { status: 200 }))
+    );
+  });
+
+  function serve(rows: unknown[]): void {
+    vi.mocked(apiFetch).mockImplementation(() =>
+      Promise.resolve(new Response(JSON.stringify(rows), { status: 200 }))
+    );
+  }
+
+  it('leaves old mention and DM rows out of the list and the bell count', async () => {
+    const tray = createTray();
+    tray.user = { id: 'u1', email: 'u1@example.com', name: 'u1' };
+    const counts: number[] = [];
+    tray.addEventListener('scion:tray-count', (e: Event) => {
+      counts.push((e as CustomEvent<{ count: number }>).detail.count);
+    });
+    document.body.appendChild(tray);
+    serve([
+      notification('MENTION'),
+      notification('DM_RECEIVED'),
+      notification('COMPLETED', 'agent-1'),
+    ]);
+
+    await tray.fetchNotifications();
+    await tray.updateComplete;
+
+    expect(tray.notifications.map((n: any) => n.status)).toEqual(['COMPLETED']);
+    expect(counts.at(-1)).toBe(1);
+    tray.remove();
+  });
+
+  it('never pops for a new mention or DM row', async () => {
+    const tray = createTray();
+    tray.user = { id: 'u1', email: 'u1@example.com', name: 'u1' };
+    serve([]);
+    await tray.fetchNotifications();
+
+    serve([notification('MENTION'), notification('WAITING_FOR_INPUT', 'agent-1')]);
+    await tray.fetchNotifications();
+
+    expect(popups.map((p) => p.title)).toEqual(['Agent Waiting on Parent']);
+  });
+});
+
+describe('notification tray: agent alerts toggle', () => {
   beforeAll(async () => {
     await import('./notification-tray.js');
   });
@@ -169,13 +217,15 @@ describe('notification tray: desktop notification toggle', () => {
     await tray.handlePushToggle();
 
     expect(FakeNotification.requestPermission).toHaveBeenCalledTimes(1);
-    expect(localStorage.getItem(PUSH_STORAGE_KEY)).toBe('true');
+    expect(localStorage.getItem(AGENT_KEY)).toBe('true');
+    // Chat message alerts have their own toggle.
+    expect(localStorage.getItem(PUSH_STORAGE_KEYS.chat)).toBeNull();
     expect(tray.pushEnabled).toBe(true);
   });
 
   it('turns off without touching the browser permission', async () => {
     FakeNotification.permission = 'granted';
-    localStorage.setItem(PUSH_STORAGE_KEY, 'true');
+    localStorage.setItem(AGENT_KEY, 'true');
     const tray = createTray();
     tray.syncPushState();
     expect(tray.pushEnabled).toBe(true);
@@ -183,14 +233,14 @@ describe('notification tray: desktop notification toggle', () => {
     await tray.handlePushToggle();
 
     expect(FakeNotification.requestPermission).not.toHaveBeenCalled();
-    expect(localStorage.getItem(PUSH_STORAGE_KEY)).toBe('false');
+    expect(localStorage.getItem(AGENT_KEY)).toBe('false');
     expect(tray.pushEnabled).toBe(false);
   });
 
   it('reports the preference change so other surfaces follow', async () => {
-    const heard: boolean[] = [];
+    const heard: unknown[] = [];
     const listener = (e: Event): void => {
-      heard.push((e as CustomEvent<{ enabled: boolean }>).detail.enabled);
+      heard.push((e as CustomEvent).detail);
     };
     window.addEventListener(PUSH_PREFERENCE_EVENT, listener);
     try {
@@ -199,7 +249,7 @@ describe('notification tray: desktop notification toggle', () => {
       window.removeEventListener(PUSH_PREFERENCE_EVENT, listener);
     }
 
-    expect(heard).toEqual([true]);
+    expect(heard).toEqual([{ category: 'agent', enabled: true }]);
   });
 
   it('shows the toggle as blocked, not as off, when the browser refused', () => {
@@ -221,7 +271,7 @@ describe('notification tray: desktop notification toggle', () => {
     // click could not re-prompt — it would just clear the flag, so the user
     // would spend a click to be told what the browser already knew.
     FakeNotification.permission = 'denied';
-    localStorage.setItem(PUSH_STORAGE_KEY, 'true');
+    localStorage.setItem(AGENT_KEY, 'true');
     const host = document.createElement('div');
     const tray = createTray();
     tray.syncPushState();
@@ -287,7 +337,7 @@ describe('notification tray: loading for the signed-in user', () => {
     popups = [];
     FakeNotification.permission = 'granted';
     (window as unknown as { Notification: unknown }).Notification = FakeNotification;
-    localStorage.setItem(PUSH_STORAGE_KEY, 'true');
+    localStorage.setItem(AGENT_KEY, 'true');
     fetchMock.mockReset();
     fetchMock.mockImplementation(() =>
       Promise.resolve(new Response(JSON.stringify(server), { status: 200 }))

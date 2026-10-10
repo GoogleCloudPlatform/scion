@@ -95,25 +95,6 @@ export class ScionPageTemplateDetail extends LitElement {
       margin: 0 auto;
     }
 
-    .back-links {
-      display: flex;
-      align-items: center;
-      gap: 1rem;
-      margin-bottom: 1rem;
-      flex-wrap: wrap;
-    }
-    .back-link {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
-      color: var(--sl-color-neutral-600);
-      text-decoration: none;
-      font-size: 0.875rem;
-    }
-    .back-link:hover {
-      color: var(--sl-color-primary-600);
-    }
-
     .harness-badge {
       display: inline-block;
       padding: 0.15rem 0.5rem;
@@ -289,8 +270,7 @@ export class ScionPageTemplateDetail extends LitElement {
     const browser = this.shadowRoot?.querySelector('scion-file-browser') as
       | import('../shared/file-browser.js').ScionFileBrowser
       | null;
-    // eslint-disable-next-line @typescript-eslint/no-floating-promises -- fire-and-forget by design; per-site decision tracked in ptone/scion#4126.
-    browser?.loadFiles();
+    void browser?.loadFiles();
   }
 
   // ── Rendering ──
@@ -310,26 +290,17 @@ export class ScionPageTemplateDetail extends LitElement {
     }
     if (!this.template) return nothing;
 
-    return html`
-      <div class="back-links">
-        ${this.backLinks().map(
-          (link) => html`
-            <a href=${link.href} class="back-link">
-              <sl-icon name="arrow-left"></sl-icon>
-              ${link.label}
-            </a>
-          `
-        )}
-      </div>
-
-      ${this.renderHeader()} ${this.renderFilesSection()}
-    `;
+    return html`${this.renderHeader()} ${this.renderFilesSection()}`;
   }
 
   private renderHeader() {
     const t = this.template!;
     return html`
       <scion-detail-header heading=${t.displayName || t.name}>
+        ${this.backLinks().map(
+          (link) =>
+            html`<scion-back-link slot="back" href=${link.href}>${link.label}</scion-back-link>`
+        )}
         <sl-icon slot="icon" name="file-earmark-code"></sl-icon>
         ${t.harness ? html`<span class="harness-badge">${t.harness}</span>` : ''}
         ${t.description

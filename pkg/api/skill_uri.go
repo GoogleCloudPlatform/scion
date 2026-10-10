@@ -243,6 +243,30 @@ func parseScopedPath(raw string, uri *SkillURI, segments []string, version strin
 	return uri, nil
 }
 
+// SkillBaseURI strips a trailing version specifier from a skill URI, giving
+// the key the Hub and the runtime broker both use to match references to the
+// same skill: "scion://my-skill@1.0" becomes "scion://my-skill". It follows
+// the rule ParseSkillURI uses for skill:// URIs: the version is an "@" in the
+// last path segment, so an "@" in the authority ("skill://user@host/a") is not
+// a version specifier. A query or fragment ("?token=...") is not part of the
+// path: it is set aside before the version is found and kept in the result,
+// so "gh://o/r/s@v1?token=X" and "gh://o/r/s?token=X" share a key.
+func SkillBaseURI(uri string) string {
+	prefix, rest := "", uri
+	if i := strings.Index(uri, "://"); i >= 0 {
+		prefix, rest = uri[:i+3], uri[i+3:]
+	}
+	suffix := ""
+	if i := strings.IndexAny(rest, "?#"); i >= 0 {
+		rest, suffix = rest[:i], rest[i:]
+	}
+	tailStart := strings.LastIndex(rest, "/") + 1
+	if i := strings.LastIndex(rest[tailStart:], "@"); i >= 0 {
+		rest = rest[:tailStart+i]
+	}
+	return prefix + rest + suffix
+}
+
 // SkillURIScheme returns the raw scheme prefix of a skill URI.
 // Note: This is NOT used for routing dispatch. The RoutingSkillResolver
 // uses detectScheme() which maps full GitHub URLs to the 'gh' scheme.

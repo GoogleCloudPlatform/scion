@@ -54,8 +54,9 @@ func TestDecisionAuditRemoval_NoPersistence(t *testing.T) {
 			request.Permission = "project.read"
 			delegated := srv.authzService.Decide(agentCtx, request)
 			require.True(t, delegated.Allowed, delegated.Reason)
-			require.IsType(t, inertDecisionAuditTarget, srv.decisionAuditRouter.legacy)
-			require.True(t, sameDecisionAuditReference(inertDecisionAuditTarget, srv.decisionAuditRouter.legacy))
+			// Decisions go only to the in-memory decision logger (default
+			// off), never to a store table.
+			require.Same(t, srv.decisionAuditLogger, srv.authzService.decisionAuditEmitter)
 			requireNoDecisionPersistenceTable(t, cs)
 			require.NoError(t, srv.Shutdown(ctx))
 			srv.authzService.Decide(ctx, AuthzRequest{})
@@ -65,24 +66,12 @@ func TestDecisionAuditRemoval_NoPersistence(t *testing.T) {
 	}
 }
 
-func TestDecisionAuditRemoval_InertTargetIdentity(t *testing.T) {
-	srv, s := testServer(t)
-	require.IsType(t, inertDecisionAuditTarget, srv.decisionAuditRouter.legacy)
-	require.True(t, sameDecisionAuditReference(inertDecisionAuditTarget, srv.decisionAuditRouter.legacy))
-	require.False(t, sameDecisionAuditReference(&noopDecisionAuditEmitter{}, srv.decisionAuditRouter.legacy))
-	require.Nil(t, srv.decisionAuditRouter.admission)
-	require.Equal(t, "healthy", srv.decisionAuditRouter.healthProjection())
-	requireNoDecisionPersistenceTable(t, s.(*entadapter.CompositeStore))
-	require.NoError(t, srv.CleanupResources(context.Background()))
-	require.NoError(t, srv.Shutdown(context.Background()))
-	requireNoDecisionPersistenceTable(t, s.(*entadapter.CompositeStore))
-}
-
 func TestDecisionAuditRemoval_HealthOmitsLegacyWriter(t *testing.T) {
 	srv, _ := testServer(t)
 	info := srv.GetHealthInfo(context.Background())
-	require.NotContains(t, info.Checks, decisionAuditLegacyHealthKey)
-	require.Equal(t, "healthy", info.Checks[decisionAuditNewHealthKey])
+	require.NotContains(t, info.Checks, "authorization_decision_audit_legacy")
+	require.NotContains(t, info.Checks, "authorization_decision_audit_new")
+	require.Equal(t, "healthy", info.Checks[auditLogWriterHealthKey])
 	require.Equal(t, "healthy", info.Checks["database"])
 	require.Equal(t, "healthy", info.Status)
 }

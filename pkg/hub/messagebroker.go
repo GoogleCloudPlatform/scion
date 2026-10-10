@@ -53,12 +53,15 @@ type MessageBrokerProxy struct {
 	getDispatcher func() AgentDispatcher
 	log           *slog.Logger
 	messageLog    *slog.Logger
-	chatNotifier  *ChatNotifier // W6: DM notification trigger for agent replies (nil-safe)
 	// webChatStore is used for the two things that need the store-assigned
 	// message ID: stamping the DM watermark and linking the message's
 	// attachments. Neither can happen in the web channel spoke, because the ID
 	// does not exist until deliverToUser runs. Nil-safe.
 	webChatStore WebChatStore
+	// memberFanout, when non-nil, fans a stored web thread message out to
+	// the thread's members on their user subjects (see
+	// Server.fanOutThreadMessageToMembersAsync).
+	memberFanout func(ctx context.Context, msg *store.Message, attachments []AttachmentRef)
 	// writeDenyEnabled returns whether the G2 write-deny switch is on.
 	// When nil or returning false, conversation resolution failures are non-fatal
 	// (B10 contract). When returning true, they deny the write (G2 contract).
@@ -880,20 +883,10 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	}
 
 	// Publish SSE event so connected browser clients receive real-time inbox updates.
-	p.events.PublishUserMessage(ctx, storeMsg, parseAttachmentRefs(msg.Metadata))
-
-	// W6: DM notification for agent → human replies via broker path.
-	if p.chatNotifier != nil && storeMsg.ThreadID != "" &&
-		strings.HasPrefix(storeMsg.ThreadID, "dm:") &&
-		storeMsg.RecipientID != "" && strings.HasPrefix(storeMsg.Sender, "agent:") {
-		senderName := strings.TrimPrefix(storeMsg.Sender, "agent:")
-		go p.chatNotifier.NotifyDMReceived(context.Background(), storeMsg.RecipientID, ChatMessageContext{
-			SenderID:        storeMsg.SenderID,
-			SenderName:      senderName,
-			ConversationKey: storeMsg.ThreadID,
-			Preview:         storeMsg.Msg,
-			ProjectID:       projectID,
-		})
+	refs := parseAttachmentRefs(msg.Metadata)
+	p.events.PublishUserMessage(ctx, storeMsg, refs)
+	if p.memberFanout != nil {
+		p.memberFanout(ctx, storeMsg, refs)
 	}
 
 	// Log to dedicated message audit log

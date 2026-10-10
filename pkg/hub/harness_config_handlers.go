@@ -1340,6 +1340,9 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 	var failures []ImportFailure
 	imported, err := run(failureCollector(&failures))
 	if err != nil {
+		if writeUnusableProvisionerImportError(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, "reimport_failed", err.Error(), nil)
 		return
 	}

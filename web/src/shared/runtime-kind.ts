@@ -19,30 +19,23 @@
  * used by every surface that hides or disables the "block" GCP identity mode
  * for a Kubernetes target (ptone/scion#2328 Phase 2).
  *
- * A `BrokerProfile.type` is the settings *runtime key* the profile's
- * `runtime:` field references (pkg/runtimebroker/handlers.go,
- * cmd/server_broker.go build it directly from that map), not a resolved
- * type. The runtime factory (pkg/runtime/factory.go) accepts "k8s" as an
- * alias for "kubernetes" and normalizes "remote" to "kubernetes" before
- * dispatch, so all three spellings must be treated as the same runtime here
- * — matching literally on "kubernetes" alone misses profiles registered
- * under either alias. Phase 1 (pkg/runtimebroker/start_context.go,
- * ptone/scion#2338) classifies by this same string set against the resolved
- * runtime's Name(), so the two cannot drift on which spellings count.
+ * A `BrokerProfile.type` is the profile's resolved runtime type: the
+ * explicit `type:` of the runtime entry the profile's `runtime:` field
+ * references, else that entry's key (cmd/broker.go, cmd/server_broker.go,
+ * the same rule as pkg/runtimebroker/handlers.go /info). The runtime factory
+ * (pkg/runtime/factory.go) accepts "k8s" as an alias for "kubernetes" and
+ * normalizes "remote" to "kubernetes" before dispatch, so all three
+ * spellings must be treated as the same runtime here — matching literally
+ * on "kubernetes" alone misses profiles registered under either alias.
+ * Phase 1 (pkg/runtimebroker/start_context.go, ptone/scion#2338) classifies
+ * by this same string set against the resolved runtime's Name(), so the two
+ * cannot drift on which spellings count.
  *
- * This matches the profile's runtime type exactly — profile names (e.g.
- * "my-cluster") are never inspected, only the runtime key the profile's
- * `runtime:` field references: a profile named "my-cluster" with
- * `runtime: kubernetes` correctly reports type "kubernetes", because
- * "kubernetes" is the runtime key, not the profile's own name. The gap is a
- * custom-named *runtime entry* —
- * `runtimes.gke-prod: {type: kubernetes}` referenced by `runtime: gke-prod`
- * reports type "gke-prod" and is missed here. The same gap runs in reverse: a
- * runtime key spelled "kubernetes"/"k8s"/"remote" with an explicit
- * `type: docker` (or any other non-Kubernetes type) is misclassified as
- * Kubernetes here, though it dispatches as that other type. Both need the
- * broker to report its resolved type instead of the profile's runtime key;
- * out of scope here.
+ * Profile names (e.g. "my-cluster") are never inspected. A custom-named
+ * runtime entry such as `runtimes.gke-prod: {type: kubernetes}` reports type
+ * "kubernetes". A profile registered by an older broker, which reported the
+ * runtime key instead, is classified by that key until the broker
+ * registers again.
  */
 const KUBERNETES_RUNTIME_TYPES = new Set(['kubernetes', 'k8s', 'remote']);
 
