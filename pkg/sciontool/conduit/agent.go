@@ -137,11 +137,17 @@ type Options struct {
 	// default net.Dialer). It is only ever called with a 127.0.0.1
 	// address.
 	DialLocal func(ctx context.Context, network, addr string) (net.Conn, error)
-	// SpawnPTY starts the tmux client for a PTY stream (test seam). By
-	// default it runs `tmux attach-session` on a local pty as PTYUser,
-	// when this build supports ptys and tmux is on PATH at New; when it
-	// is nil the agent neither advertises nor serves the pty kind.
+	// SpawnPTY starts the tmux client for a PTY stream (test seam). When
+	// it is nil and NoPTY is unset, New installs the default: it runs
+	// `tmux attach-session` on a local pty as PTYUser, when this build
+	// supports ptys and tmux is on PATH at New. When it is still nil
+	// after New (NoPTY set, or no default available) the agent neither
+	// advertises nor serves the pty kind.
 	SpawnPTY PTYSpawner
+	// NoPTY opts out of pty streams: New installs no default SpawnPTY,
+	// so the agent neither advertises nor serves the pty kind even when
+	// tmux is on PATH. SpawnPTY must be nil when NoPTY is set.
+	NoPTY bool
 	// PTYUser is who the default SpawnPTY runs the tmux client as.
 	PTYUser PTYUser
 	// OnSession is called after each admitted session's grant keys are
@@ -198,7 +204,10 @@ func New(opts Options) (*Agent, error) {
 		d := &net.Dialer{Timeout: localDialTimeout}
 		opts.DialLocal = d.DialContext
 	}
-	if opts.SpawnPTY == nil {
+	if opts.NoPTY && opts.SpawnPTY != nil {
+		return nil, errors.New("conduit: NoPTY and SpawnPTY are mutually exclusive")
+	}
+	if opts.SpawnPTY == nil && !opts.NoPTY {
 		opts.SpawnPTY = defaultPTYSpawner(opts.PTYUser)
 	}
 	clk := opts.Clock
