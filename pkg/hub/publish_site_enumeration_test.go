@@ -31,9 +31,10 @@ import (
 // site causes a hard failure.
 //
 // Effect categories in scope:
-//   - SSE publish: PublishUserMessage (arity 2 — the event publish signature).
-//     Broker proxy calls (arity 4) are excluded — persistence is handled by
-//     the deliverToUser callback, not by the caller.
+//   - SSE publish: the event publisher's PublishUserMessage (called on an
+//     `events` field). Broker proxy calls (on the proxy) are excluded —
+//     persistence is handled by the deliverToUser callback, not by the
+//     caller.
 //
 // Effect categories deliberately NOT enumerated:
 //   - Watermark updates (TouchDMActivity, TouchTopicActivity): currently
@@ -158,7 +159,7 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		}
 
 		// Walk the AST and find every CallExpr matching either
-		// PublishUserMessage (arity 2).
+		// PublishUserMessage on the event publisher (see isPublishUserMessageCall).
 		ast.Inspect(f, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
@@ -293,7 +294,7 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		for _, u := range unaccounted {
 			t.Errorf("  - %s", u)
 		}
-		t.Error("\nEvery PublishUserMessage site (event publish, arity 2) " +
+		t.Error("\nEvery PublishUserMessage site (event publish) " +
 			"must be in the guarded set " +
 			"(preceded by a successful CreateMessage). " +
 			"Add the new site to the guarded list in this test.")
@@ -312,16 +313,23 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 }
 
 // isPublishUserMessageCall returns true if the call expression is a call to
-// PublishUserMessage with exactly 3 arguments (the event publish signature:
-// ctx, msg, attachments). The broker proxy's PublishUserMessage takes 4
-// arguments and is excluded — persistence is handled by its deliverToUser
-// callback, not by the caller.
+// the event publisher's PublishUserMessage: a method call on an `events`
+// field or variable (s.events, p.events, nd.events, events) with the event
+// publish signature's 4 arguments (ctx, msg, attachments, artifactRefs).
+// The broker proxy's PublishUserMessage (ctx, projectID, userID, msg) also
+// takes 4 arguments, so arity alone no longer tells them apart; it is
+// called on the proxy (bp, p, nd.brokerProxy) and is excluded —
+// persistence is handled by its deliverToUser callback, not by the caller.
 func isPublishUserMessageCall(call *ast.CallExpr) bool {
-	switch fn := call.Fun.(type) {
+	fn, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || fn.Sel.Name != "PublishUserMessage" || len(call.Args) != 4 {
+		return false
+	}
+	switch recv := fn.X.(type) {
 	case *ast.SelectorExpr:
-		return fn.Sel.Name == "PublishUserMessage" && len(call.Args) == 3
+		return recv.Sel.Name == "events"
 	case *ast.Ident:
-		return fn.Name == "PublishUserMessage" && len(call.Args) == 3
+		return recv.Name == "events"
 	}
 	return false
 }
@@ -429,6 +437,39 @@ func TestMemberFanoutFollowsPublish(t *testing.T) {
 	for key := range allowed {
 		if !found[key] {
 			t.Errorf("listed member fan-out site %s no longer exists; update the list", key)
+		}
+	}
+}
+
+// TestIsPublishUserMessageCallMatcher pins which calls the persisted-row
+// scanners count as the event publish: a 4-argument PublishUserMessage on
+// an `events` field or variable. The broker proxy's PublishUserMessage has
+// 4 arguments too and must stay excluded, as must any other arity. A rename
+// of the events field would make TestPersistedRowEffectEnumeration fail
+// loudly, since every listed guarded site must then be found.
+func TestIsPublishUserMessageCallMatcher(t *testing.T) {
+	for src, want := range map[string]bool{
+		`s.events.PublishUserMessage(ctx, msg, attachments, refs)`:                     true,
+		`p.events.PublishUserMessage(ctx, msg, refs, artifactRefs)`:                    true,
+		`nd.events.PublishUserMessage(ctx, msg, nil, nil)`:                             true,
+		`events.PublishUserMessage(ctx, msg, nil, nil)`:                                true,
+		`bp.PublishUserMessage(ctx, agent.ProjectID, result.RecipientID, msg)`:         false,
+		`p.PublishUserMessage(ctx, projectID, r.Name, &recipMsg)`:                      false,
+		`nd.brokerProxy.PublishUserMessage(ctx, sub.ProjectID, sub.SubscriberID, msg)`: false,
+		`s.events.PublishUserMessage(ctx, msg, attachments)`:                           false,
+		`PublishUserMessage(ctx, msg, nil, nil)`:                                       false,
+		`s.events.PublishChatMemberMessage(ctx, msg, nil, nil)`:                        false,
+	} {
+		expr, err := parser.ParseExpr(src)
+		if err != nil {
+			t.Fatalf("%s: %v", src, err)
+		}
+		call, ok := expr.(*ast.CallExpr)
+		if !ok {
+			t.Fatalf("%s: not a call", src)
+		}
+		if got := isPublishUserMessageCall(call); got != want {
+			t.Errorf("isPublishUserMessageCall(%s) = %v, want %v", src, got, want)
 		}
 	}
 }
