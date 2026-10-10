@@ -171,16 +171,15 @@ stalled agents** in **Admin > Server Config**).
 An agent is marked `stalled` by the platform when it is `running`, its heartbeat
 arrived within the last 2 minutes (the process is alive), but no activity events
 have arrived within the stall threshold (`server.hub.stalled_threshold`, default
-**5 minutes**; a value under 2 minutes falls back to the default). The Hub checks
-every 5 minutes. With
-auto-suspend on, the Hub suspends an agent in the same check that marks it
-stalled, unless the agent's harness does not support session resume. Agents already
-`stalled` when you turn auto-suspend on are not suspended unless they become active
-and stall again.
+**5 minutes**; a value under 2 minutes falls back to the default). The Hub
+checks every 5 minutes. With auto-suspend on, the Hub suspends an agent in the
+same check that marks it stalled, unless the agent's harness does not support
+session resume. Agents already `stalled` when you turn auto-suspend on are not
+suspended unless they become active and stall again.
 
 Auto-suspend uses the same machinery as a manual `scion suspend`, so the agent's
-phase becomes `suspended` and its harness session is preserved. The agent resumes,
-continuing where it left off, when someone sends it a message with wake
+phase becomes `suspended` and its harness session is preserved. The agent
+resumes, continuing where it left off, when someone sends it a message with wake
 (`scion message --wake`, or the web UI's wake prompt) or starts it.
 
 :::tip
@@ -192,8 +191,8 @@ detection and therefore from auto-suspend.
 
 :::caution
 Auto-suspend is a Hub-driven behavior and depends on the Hub's scheduler being
-operational. See [`server.hub`](/scion/reference/server-config/#hub-settings-serverhub)
-for `auto_suspend_stalled` and `stalled_threshold`.
+operational. For `auto_suspend_stalled` and `stalled_threshold`, see
+[`server.hub`](/scion/reference/server-config/#hub-settings-serverhub).
 :::
 
 ---

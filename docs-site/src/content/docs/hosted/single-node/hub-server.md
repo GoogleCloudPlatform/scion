@@ -256,7 +256,7 @@ server:
     url: "postgres://user:password@localhost:5432/scion?sslmode=disable"
 ```
 
-Setting `driver: postgres` marks the Hub as an HA deployment. Events and Runtime Broker commands then reach every Hub replica through Postgres `LISTEN/NOTIFY`. With `--hosted`, startup also requires an explicit `server.hub.hub_id` and the other checks described in [HA hosted](/scion/hosted/ha/overview/). See [Database (`server.database`)](/scion/reference/server-config/#database-serverdatabase) for the fields.
+Setting `driver: postgres` marks the Hub as an HA deployment. Events and Runtime Broker commands then reach every Hub replica through Postgres `LISTEN/NOTIFY`. With `--hosted`, the Hub then runs the HA startup checks and refuses to start without an explicit `server.hub.hub_id`, a `server.database.url`, GCS storage (`server.storage.provider: gcs` with a bucket) and a durable session secret, plus the IAP settings when `server.auth.mode` is `proxy` (see [Deploy on GCP](/scion/hosted/ha/setup-gcp/)). See [Database (`server.database`)](/scion/reference/server-config/#database-serverdatabase) for the fields.
 
 To move an existing SQLite Hub to Postgres, run `scion server migrate`:
 

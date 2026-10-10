@@ -373,7 +373,7 @@ _Avoid_: stuck, hung (as a state name), offline
 _See also_: Activity, Blocked, Auto-Suspend
 
 **Auto-Suspend**:
-A Hub behavior, off by default (`server.hub.auto_suspend_stalled`), that suspends an agent when it is marked `stalled`, reclaiming its container. Agents whose harness does not support session resume are skipped. A message sent with wake (`scion message --wake`, or accepting the web UI's wake prompt) resumes the agent and then delivers it; a message without wake is refused.
+A Hub behavior, off by default (`server.hub.auto_suspend_stalled`), that suspends an agent when it is marked `stalled`, reclaiming its container. Agents whose harness does not support session resume are skipped. A message sent with wake (`scion message --wake`, or accepting the web UI's wake prompt) resumes the agent and then delivers it; a message without wake is not delivered (`scion message` gets `409 agent_not_running`).
 _Avoid_: idle timeout, auto-stop
 _See also_: Stalled, Phase
 
