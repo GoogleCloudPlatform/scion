@@ -401,19 +401,7 @@ func (s *projectService) GetAgent(ctx context.Context, projectID, agentID string
 
 // DeleteAgent removes an agent by ID or slug within a project.
 func (s *projectService) DeleteAgent(ctx context.Context, projectID, agentID string, opts *DeleteAgentOptions) error {
-	path := "/api/v1/projects/" + projectID + "/agents/" + agentID
-	if opts != nil {
-		query := url.Values{}
-		if opts.DeleteFiles {
-			query.Set("deleteFiles", "true")
-		}
-		if opts.RemoveBranch {
-			query.Set("removeBranch", "true")
-		}
-		if len(query) > 0 {
-			path += "?" + query.Encode()
-		}
-	}
+	path := withDeleteAgentQuery("/api/v1/projects/"+projectID+"/agents/"+agentID, opts)
 
 	resp, err := s.c.delete(ctx, path, nil)
 	if err != nil {

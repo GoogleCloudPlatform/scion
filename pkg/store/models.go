@@ -297,6 +297,18 @@ const (
 	ReincarnationStateFailed       = "failed"
 )
 
+// ReincarnationInFlight reports whether a reincarnation owns an agent with
+// the given ReincarnationState: any state other than none or failed. It
+// matches the hub's reincarnationInFlight (Guard 0b).
+func ReincarnationInFlight(reincarnationState string) bool {
+	switch reincarnationState {
+	case ReincarnationStateNone, ReincarnationStateFailed:
+		return false
+	default:
+		return true
+	}
+}
+
 // ExposedPort is a Hub-registered local port that may be reached through an
 // authenticated agent-held tunnel.
 type ExposedPort struct {
