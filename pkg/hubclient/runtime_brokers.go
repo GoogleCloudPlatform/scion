@@ -319,7 +319,7 @@ type AgentHeartbeat struct {
 	HarnessAuth     string `json:"harnessAuth,omitempty"` // Resolved auth method from container labels
 	Profile         string `json:"profile,omitempty"`     // Settings profile used
 	ExitCode        *int   `json:"exitCode,omitempty"`    // Structured exit code from runtime (nil = unknown)
-	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason: "crashed" or "limits_exceeded"
+	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason (see state.ExitReason), e.g. "crashed", "preempted", "oom_killed"
 	// RuntimeTarget is the ID of the inventory target whose listing reported
 	// this agent (see InventoryTarget.ID).
 	RuntimeTarget string `json:"runtimeTarget,omitempty"`

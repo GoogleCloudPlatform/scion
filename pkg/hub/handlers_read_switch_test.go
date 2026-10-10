@@ -219,9 +219,6 @@ func (s *rsWebChatStore) GetReadStates(context.Context, string, []string) ([]Web
 }
 func (s *rsWebChatStore) SetPinned(context.Context, string, string, bool) error { return nil }
 func (s *rsWebChatStore) SetMuted(context.Context, string, string, bool) error  { return nil }
-func (s *rsWebChatStore) IsConversationMuted(context.Context, string, string) (bool, error) {
-	return false, nil
-}
 func (s *rsWebChatStore) GetUserPrefs(context.Context, string) (*WebChatUserPrefs, error) {
 	return nil, nil
 }

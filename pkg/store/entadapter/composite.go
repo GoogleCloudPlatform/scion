@@ -648,6 +648,13 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 		return fmt.Errorf("pre-migration delegation edge dedup: %w", err)
 	}
 
+	// Deduplicate agent_session_metrics before migration adds the unique
+	// (agent_id, session_id, started_at) index. Before it, a repeated
+	// report of a session segment was stored again.
+	if err := c.deduplicateAgentSessionMetrics(ctx); err != nil {
+		return fmt.Errorf("pre-migration agent session metrics dedup: %w", err)
+	}
+
 	if err := entc.AutoMigrate(ctx, c.client); err != nil {
 		return err
 	}

@@ -406,12 +406,11 @@ func TestBrokerJoinToken_MintOnOneMachineJoinOnAnother(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestBrokerJoinTokenCommands_ModeAvailability pins the mode availability
-// of the two join-token verbs: available in human and assistant modes, not
-// in agent mode.
+// of the two join-token verbs: available in human mode, not in agent
+// mode.
 func TestBrokerJoinTokenCommands_ModeAvailability(t *testing.T) {
 	paths := []string{"hub.brokers.join-token.create", "runtime-broker.join"}
 	for _, p := range paths {
-		assert.False(t, assistantDenied[p], "%s should be available in assistant mode", p)
 		assert.False(t, agentAllowed[p], "%s should not be available in agent mode", p)
 	}
 
@@ -426,7 +425,7 @@ func TestBrokerJoinTokenCommands_ModeAvailability(t *testing.T) {
 		apply func(*cobra.Command)
 		want  bool
 	}{
-		{applyAssistantMode, true},
+		{func(*cobra.Command) {}, true}, // human mode removes nothing
 		{applyAgentMode, false},
 	} {
 		root := &cobra.Command{Use: "scion"}

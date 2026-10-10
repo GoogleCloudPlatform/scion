@@ -47,7 +47,7 @@ func TestRegisterGlobalProjectAndBroker_AttachOptOut_ConfiguredProfiles_PerProfi
 	rt := &optOutRuntime{MockRuntime: &runtime.MockRuntime{NameFunc: func() string { return "optout" }}}
 	brokerID := tid("broker-optout-profiles")
 
-	_, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "optout-profiles-broker", "http://localhost:9800", rt, true, settings, nil)
+	_, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "optout-profiles-broker", "http://localhost:9800", rt, true, settings, nil, nil)
 	require.NoError(t, err)
 
 	broker, err := s.GetRuntimeBroker(ctx, brokerID)
@@ -83,7 +83,7 @@ func TestRegisterGlobalProjectAndBroker_ReRegistration_RefreshesAttachFromLiveRu
 	brokerID := tid("broker-optout-rereg")
 
 	supporting := &runtime.MockRuntime{NameFunc: func() string { return "optout" }}
-	_, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "optout-rereg-broker", "http://localhost:9800", supporting, true, settings, nil)
+	_, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "optout-rereg-broker", "http://localhost:9800", supporting, true, settings, nil, nil)
 	require.NoError(t, err)
 	before, err := s.GetRuntimeBroker(ctx, brokerID)
 	require.NoError(t, err)
@@ -91,7 +91,7 @@ func TestRegisterGlobalProjectAndBroker_ReRegistration_RefreshesAttachFromLiveRu
 	require.True(t, before.Capabilities.Attach, "precondition: first registration with an attach-capable runtime records Attach=true")
 
 	optOut := &optOutRuntime{MockRuntime: &runtime.MockRuntime{NameFunc: func() string { return "optout" }}}
-	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "optout-rereg-broker", "http://localhost:9800", optOut, true, settings, nil)
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "optout-rereg-broker", "http://localhost:9800", optOut, true, settings, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, brokerID, effectiveID, "precondition: second registration must take the update branch for the same record")
 
@@ -121,7 +121,7 @@ func TestBuildStoreBrokerProfiles_AllProfilesFiltered_DefaultAsksLiveRuntime(t *
 	}
 	rt := &optOutRuntime{MockRuntime: &runtime.MockRuntime{NameFunc: func() string { return "optout" }}}
 
-	profiles := buildStoreBrokerProfiles(settings, "optout", rt)
+	profiles := buildStoreBrokerProfiles(settings, nil, "optout", rt)
 
 	require.Len(t, profiles, 1)
 	require.Equal(t, "default", profiles[0].Name, "precondition: the docker profile must be filtered out on a non-local default")

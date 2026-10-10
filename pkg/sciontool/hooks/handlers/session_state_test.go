@@ -196,7 +196,7 @@ func TestFileSessionState_LockUnavailableStillApplies(t *testing.T) {
 
 	agg := telemetry.NewAggregator()
 	applied := 0
-	err = store.Update(agg, toolEvent("s1", "Bash"), func() bool { applied++; return false })
+	err = store.Update(agg, toolEvent("s1", "Bash"), func() (telemetry.SessionSummary, bool) { applied++; return telemetry.SessionSummary{}, false })
 	if !errors.Is(err, ErrSessionStateUnavailable) {
 		t.Errorf("Update error = %v, want ErrSessionStateUnavailable", err)
 	}

@@ -200,7 +200,7 @@
         },
         "mode": {
           "type": "string",
-          "description": "CLI mode (human, assistant or agent); SCION_CLI_MODE takes precedence. Kept when a legacy settings file is migrated.",
+          "description": "CLI mode (human or agent); SCION_CLI_MODE takes precedence. The removed value assistant is ignored with a warning. Kept when a legacy settings file is migrated.",
           "x-since": "1"
         }
       },
