@@ -220,10 +220,12 @@ const hubSAMappingBrokerPageSize = 200
 // calls a walk over every broker each.
 const hubSAMappingCacheTTL = 30 * time.Second
 
-// hubSAMappingViewCache is the Server's single cached hub-wide view.
+// hubSAMappingViewCache is the Server's single cached hub-wide view. mu
+// guards the fields only; it is never held across the broker walk.
 type hubSAMappingViewCache struct {
 	mu      sync.Mutex
 	view    projectSAMappingView
+	loaded  bool // view holds a successfully loaded view
 	expires time.Time
 }
 
@@ -235,23 +237,38 @@ var hubSAMappingNow = time.Now
 // question for it is whether any broker maps it, not one project's
 // providers; the hub-scope routes have no project to narrow the brokers to.
 //
-// The view is cached on the Server for hubSAMappingCacheTTL, so at most one
-// walk over the brokers happens per window however many hub-scope requests
-// arrive, and a request computes it at most once (hubSAMappingWarnings
-// reads it once for all its accounts). Only the hub-scope routes (list,
-// register, mint, verify-by-id) read it, and only when the response holds a
-// hub-scoped account. A failed listing is not cached.
+// The view is cached on the Server for hubSAMappingCacheTTL, so the brokers
+// are walked about once per window however many hub-scope requests arrive,
+// and a request computes it at most once (hubSAMappingWarnings reads it
+// once for all its accounts). Only the hub-scope routes (list, register,
+// mint, verify-by-id) read it, and only when the response holds a
+// hub-scoped account.
+//
+// The cache lock is released during the walk, so a slow store does not
+// serialize concurrent requests behind it; requests that miss together may
+// each walk, which is harmless for an advisory view. A failed listing is
+// not cached: the last good view answers instead, or the partial view when
+// none has loaded yet.
 func (s *Server) hubSAMappings(ctx context.Context) projectSAMappingView {
 	c := &s.hubSAMappingCache
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	now := hubSAMappingNow()
-	if now.Before(c.expires) {
-		return c.view
+	if hubSAMappingNow().Before(c.expires) {
+		view := c.view
+		c.mu.Unlock()
+		return view
 	}
+	c.mu.Unlock()
+
 	view, ok := s.loadHubSAMappings(ctx)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if ok {
-		c.view, c.expires = view, now.Add(hubSAMappingCacheTTL)
+		c.view, c.loaded, c.expires = view, true, hubSAMappingNow().Add(hubSAMappingCacheTTL)
+		return view
+	}
+	if c.loaded {
+		return c.view
 	}
 	return view
 }

@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -265,6 +267,99 @@ func TestHubSAMappingWarnings_ViewCachedForTTL(t *testing.T) {
 	assert.Len(t, srv.hubSAMappingWarnings(context.Background(), hubSA), 1, "cached view reused within the TTL")
 	now = now.Add(2 * time.Second)
 	assert.Empty(t, srv.hubSAMappingWarnings(context.Background(), hubSA), "view reloaded after the TTL")
+}
+
+// hubBrokerListStore lets a test hold or fail the broker listing behind
+// hubSAMappings.
+type hubBrokerListStore struct {
+	store.Store
+	fail    atomic.Bool
+	started chan struct{} // closed-once signal that a listing began, if set
+	release chan struct{} // a listing waits on it, if set
+	once    sync.Once
+}
+
+func (h *hubBrokerListStore) ListRuntimeBrokers(ctx context.Context, f store.RuntimeBrokerFilter, o store.ListOptions) (*store.ListResult[store.RuntimeBroker], error) {
+	if h.started != nil {
+		h.once.Do(func() { close(h.started) })
+	}
+	if h.release != nil {
+		<-h.release
+	}
+	if h.fail.Load() {
+		return nil, errors.New("listing failed")
+	}
+	return h.Store.ListRuntimeBrokers(ctx, f, o)
+}
+
+// The cache lock is not held across the broker walk: while one request's
+// walk is stuck, another request can still read the cache.
+func TestHubSAMappings_LockNotHeldDuringLoad(t *testing.T) {
+	srv, s, projectID := newMappingProject(t)
+	addProviderBroker(t, s, projectID, "b1", k8sProfile("k8s", true))
+	hold := &hubBrokerListStore{Store: s, started: make(chan struct{}), release: make(chan struct{})}
+	srv.store = hold
+
+	done := make(chan projectSAMappingView, 1)
+	go func() { done <- srv.hubSAMappings(context.Background()) }()
+	<-hold.started
+
+	locked := make(chan struct{})
+	go func() {
+		srv.hubSAMappingCache.mu.Lock()
+		srv.hubSAMappingCache.mu.Unlock() //nolint:staticcheck // probing that the lock is free
+		close(locked)
+	}()
+	select {
+	case <-locked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cache lock held while the broker walk is in progress")
+	}
+
+	close(hold.release)
+	view := <-done
+	assert.Equal(t, []string{"b1/k8s"}, view.reported)
+}
+
+// A failed walk is not cached and does not replace the last good view: the
+// previous view answers until a walk succeeds again.
+func TestHubSAMappings_FailureReturnsLastGoodView(t *testing.T) {
+	srv, s, projectID := newMappingProject(t)
+	addProviderBroker(t, s, projectID, "b1", k8sProfile("k8s", true))
+	flaky := &hubBrokerListStore{Store: s}
+	srv.store = flaky
+	hubSA := &store.GCPServiceAccount{
+		ID: tid("hub-sa"), Scope: store.ScopeHub, ScopeID: "hub", Email: unmappedGSA, ProjectID: "p", Verified: true,
+	}
+
+	now := time.Now()
+	orig := hubSAMappingNow
+	hubSAMappingNow = func() time.Time { return now }
+	t.Cleanup(func() { hubSAMappingNow = orig })
+
+	require.Len(t, srv.hubSAMappingWarnings(context.Background(), hubSA), 1)
+
+	// Past the TTL the walk fails: the last good view still answers.
+	flaky.fail.Store(true)
+	now = now.Add(hubSAMappingCacheTTL + time.Second)
+	assert.Len(t, srv.hubSAMappingWarnings(context.Background(), hubSA), 1, "last good view used on failure")
+	assert.Equal(t, []string{"b1/k8s"}, srv.hubSAMappings(context.Background()).reported)
+
+	// The failure was not cached: the next walk succeeds and sees a new mapping.
+	flaky.fail.Store(false)
+	addProviderBroker(t, s, projectID, "b2", k8sProfile("k8s", true, unmappedGSA))
+	assert.Empty(t, srv.hubSAMappingWarnings(context.Background(), hubSA), "view reloaded once the walk succeeds")
+}
+
+// With no good view yet, a failed walk answers with its partial view.
+func TestHubSAMappings_FailureWithoutPriorViewReturnsPartial(t *testing.T) {
+	srv, s, projectID := newMappingProject(t)
+	addProviderBroker(t, s, projectID, "b1", k8sProfile("k8s", true))
+	flaky := &hubBrokerListStore{Store: s}
+	flaky.fail.Store(true)
+	srv.store = flaky
+	assert.Empty(t, srv.hubSAMappings(context.Background()).reported)
+	assert.False(t, srv.hubSAMappingCache.loaded, "failed walk not cached")
 }
 
 // No Kubernetes profile anywhere on the hub: nothing to warn about.
