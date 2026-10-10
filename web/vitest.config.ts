@@ -1,5 +1,6 @@
 import { configDefaults, defineConfig } from 'vitest/config';
 import { resolve } from 'path';
+import { vitestMaxWorkers } from './vitest-workers';
 
 export default defineConfig({
   resolve: {
@@ -17,6 +18,11 @@ export default defineConfig({
     // demand only, with `npm run test:terminal-smoke` (vitest.smoke.config.ts).
     exclude: [...configDefaults.exclude, 'src/**/*.smoke.test.ts'],
     setupFiles: ['./vitest.setup.ts'],
+    // One worker per CPU the container's cgroup quota allows, not per host
+    // core (see vitest-workers.ts). Undefined without a quota, which keeps
+    // vitest's default. --maxWorkers and VITEST_MAX_WORKERS still override
+    // this.
+    maxWorkers: vitestMaxWorkers(),
     // Pin the process timezone so tests are deterministic regardless of the
     // CI host's or developer's ambient TZ (tz-refactor task 11). Explicitly
     // overrides any `TZ` already set in the invoking shell, so running with
