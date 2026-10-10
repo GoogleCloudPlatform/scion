@@ -520,7 +520,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	}
 
 	// 8. (cont.) Record the admitted artifact references for the web chat.
-	s.recordMessageArtifacts(ctx, msgID, artifactRefs)
+	recordedRefs := s.recordMessageArtifacts(ctx, msgID, artifactRefs)
 
 	// 8a. Audit: body-free admission allow record (#1690).
 	// Logged after persistence so the message ID is available as correlation.
@@ -545,7 +545,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	}
 
 	// 9. Publish SSE event.
-	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs, artifactRefs)
+	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs, recordedRefs)
 
 	// 10. Render delivery text envelope. IsMention marks the envelope as a
 	// mention (not a message) for Type mention deliveries, matching how chat

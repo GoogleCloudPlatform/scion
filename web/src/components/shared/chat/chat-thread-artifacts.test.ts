@@ -211,7 +211,7 @@ describe('scion-chat-thread artifact references', () => {
     const unavailable = { ref: `scion://artifact/${A}`, id: A, available: false };
     apiFetch.mockResolvedValue(
       history({
-        items: [message('m9', 'other')],
+        messages: [message('m9', 'other'), message('m2', 'here it is')],
         messageArtifacts: { m2: [VIEW], m9: [unavailable] },
       })
     );
@@ -231,7 +231,10 @@ describe('scion-chat-thread artifact references', () => {
     const el = await mount();
     apiFetch.mockClear();
     apiFetch.mockResolvedValue(
-      history({ items: [], messageArtifacts: { m4: [VIEW], m6: [{ ...VIEW, title: 'Other' }] } })
+      history({
+        messages: [message('m6', 'second'), message('m5', 'plain'), message('m4', 'first')],
+        messageArtifacts: { m4: [VIEW], m6: [{ ...VIEW, title: 'Other' }] },
+      })
     );
     live('m4', 'first', [`scion://artifact/${A}`]);
     live('m5', 'plain in between');
@@ -244,6 +247,45 @@ describe('scion-chat-thread artifact references', () => {
     expect(messageEl(el, 'm4')?.artifactRefs).toEqual([VIEW]);
     await new Promise((r) => setTimeout(r, 200));
     expect(historyCalls()).toHaveLength(1);
+  });
+
+  it('asks once more with a wider window when a later message pushed the queued one off the page', async () => {
+    apiFetch.mockResolvedValue(history({ items: [] }));
+    const el = await mount();
+    apiFetch.mockClear();
+    apiFetch.mockImplementation((url: string) =>
+      Promise.resolve(
+        url.endsWith('limit=1')
+          ? // A reply stored between the event and the request fills the page.
+            history({ messages: [message('m-reply', 'quick reply')], messageArtifacts: {} })
+          : history({
+              messages: [message('m-reply', 'quick reply'), message('m11', 'with artifact')],
+              messageArtifacts: { m11: [VIEW] },
+            })
+      )
+    );
+    live('m11', 'with artifact', [`scion://artifact/${A}`]);
+    await vi.waitFor(() => expect(messageEl(el, 'm11')?.artifactRefs).toEqual([VIEW]));
+    expect(historyCalls()).toEqual([
+      `/api/v1/chat/conversations/${KEY}/messages?limit=1`,
+      `/api/v1/chat/conversations/${KEY}/messages?limit=20`,
+    ]);
+    // A message on the page with no views (none recorded) is not asked again.
+    apiFetch.mockClear();
+    apiFetch.mockResolvedValue(history({ messages: [message('m12', 'x')], messageArtifacts: {} }));
+    live('m12', 'x', [`scion://artifact/${A}`]);
+    await new Promise((r) => setTimeout(r, 250));
+    expect(historyCalls()).toHaveLength(1);
+  });
+
+  it('does not refetch for its own sent message, whose views came with the send response', async () => {
+    apiFetch.mockResolvedValue(history({ items: [] }));
+    const el = await mount();
+    apiFetch.mockClear();
+    (el as unknown as { v2ArtifactMap: Map<string, unknown> }).v2ArtifactMap.set('m-own', [VIEW]);
+    live('m-own', 'mine', [`scion://artifact/${A}`]);
+    await new Promise((r) => setTimeout(r, 250));
+    expect(historyCalls()).toEqual([]);
   });
 
   it('does not refetch for a live message without artifact metadata, even if its body names one', async () => {

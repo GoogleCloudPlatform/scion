@@ -15,8 +15,10 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -233,6 +235,11 @@ func TestLiveChatArtifacts_BrokerDeliveryCarriesRecordedRefsOnly(t *testing.T) {
 	t.Cleanup(events.Close)
 	proxy := NewMessageBrokerProxy(nil, f.s, events, func() AgentDispatcher { return f.dispatcher }, slog.Default())
 	proxy.recordArtifactRefs = f.srv.recordMessageArtifacts
+	// The member fan-out hook gets the same references as the event.
+	var fannedOut [][]artifacts.MessageRef
+	proxy.memberFanout = func(_ context.Context, _ *store.Message, _ []AttachmentRef, refs []artifacts.MessageRef) {
+		fannedOut = append(fannedOut, refs)
+	}
 
 	key, err := messages.DMConversationKey("agent", f.sender.ID, "user", f.owner.ID)
 	require.NoError(t, err)
@@ -259,6 +266,10 @@ func TestLiveChatArtifacts_BrokerDeliveryCarriesRecordedRefsOnly(t *testing.T) {
 
 	admitted := deliver(true)
 	assert.Equal(t, value, eventArtifacts(t, admitted.Data))
+
+	require.Len(t, fannedOut, 2)
+	assert.Empty(t, fannedOut[0], "no references to fan out without the admitted flag")
+	assert.Equal(t, []artifacts.MessageRef{{ArtifactID: f.agentOwned, Seq: 1}}, fannedOut[1])
 }
 
 // TestLiveChatArtifacts_MemberFanOutCarriesRefs: the background member
@@ -287,4 +298,140 @@ func TestLiveChatArtifacts_MemberFanOutCarriesRefs(t *testing.T) {
 			assert.Equal(t, want, eventArtifacts(t, evt.Data))
 		})
 	}
+}
+
+// TestLiveChatArtifacts_AgentOutboundToTopicThread: an agent's outbound
+// message to a web topic thread carries exactly its admitted references on
+// project.<id>.chat.message and on a member's user.<id>.chat.message (the
+// background member fan-out), and none on agent.<id>.message.
+func TestLiveChatArtifacts_AgentOutboundToTopicThread(t *testing.T) {
+	srv, s, project, agent, human, topicID := def162Setup(t)
+	st, _ := enableArtifactsForTest(t, srv)
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	srv.SetEventPublisher(events)
+
+	own := seedMessageArtifact(t, st, project.ID, artifacts.PrincipalKindAgent, agent.ID, "Agent report")
+	unreadable := seedMessageArtifact(t, st, tid("live-other-project"), artifacts.PrincipalKindUser, tid("live-stranger"), "Secret title")
+	convID := def162GroupConv(t, s, project.ID, topicID)
+
+	projectCh, unsubProject := events.Subscribe("project." + project.ID + ".chat.message")
+	t.Cleanup(unsubProject)
+	memberCh, unsubMember := events.Subscribe("user." + human.ID + ".chat.message")
+	t.Cleanup(unsubMember)
+	agentCh, unsubAgent := events.Subscribe("agent." + agent.ID + ".message")
+	t.Cleanup(unsubAgent)
+
+	// The @mention makes the human a thread member, so the fan-out reaches them.
+	body, err := json.Marshal(OutboundMessageRequest{
+		Msg:             "@UniqueHuman162 report attached",
+		ConversationRef: "conv:" + convID,
+		Metadata: map[string]string{artifacts.MessageMetadataKey: refsValue(
+			artifacts.MessageRef{ArtifactID: own}, artifacts.MessageRef{ArtifactID: unreadable})},
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(requestAuthCtx(req.Context(), tokenBackedSender(t, s, agent)))
+	rr := httptest.NewRecorder()
+	srv.handleAgentOutboundMessage(rr, req, agent.ID)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	want := refsValue(artifacts.MessageRef{ArtifactID: own})
+	projectEvt := receiveEvent(t, projectCh, "project chat")
+	assert.Equal(t, want, eventArtifacts(t, projectEvt.Data))
+	assert.NotContains(t, string(projectEvt.Data), unreadable)
+	select {
+	case evt := <-memberCh:
+		assert.Equal(t, want, eventArtifacts(t, evt.Data))
+	case <-time.After(def162MentionWaitTimeout):
+		t.Fatal("the member did not receive the message on their user chat subject")
+	}
+	agentEvt := receiveEvent(t, agentCh, "agent message")
+	assert.NotContains(t, string(agentEvt.Data), `"metadata"`)
+	assert.NotContains(t, string(agentEvt.Data), own)
+}
+
+// TestLiveChatArtifacts_AgentDM: an agent DM (ExecuteAgentDM) carries its
+// admitted references on user.<id>.chat.dm, and not on agent.<id>.message.
+func TestLiveChatArtifacts_AgentDM(t *testing.T) {
+	srv, s, project, sender, target, _, _, _ := paritySetup(t)
+	st, _ := enableArtifactsForTest(t, srv)
+	enableOffload(t, srv, 0, true)
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	srv.SetEventPublisher(events)
+
+	own := seedMessageArtifact(t, st, project.ID, artifacts.PrincipalKindAgent, sender.ID, "Design doc")
+	unreadable := seedMessageArtifact(t, st, tid("live-dm-other"), artifacts.PrincipalKindUser, tid("live-dm-stranger"), "Secret title")
+	key, err := messages.DMConversationKey("agent", sender.ID, "agent", target.ID)
+	require.NoError(t, err)
+	dmCh, unsubDM := events.Subscribe("user." + target.ID + ".chat.dm")
+	t.Cleanup(unsubDM)
+	agentCh, unsubAgent := events.Subscribe("agent." + target.ID + ".message")
+	t.Cleanup(unsubAgent)
+
+	sm := &messages.StructuredMessage{
+		Version: messages.Version, Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Type: messages.TypeInstruction, Sender: "agent:" + sender.Slug, SenderID: sender.ID,
+		Recipient: "agent:" + target.Slug, RecipientID: target.ID, Msg: "please review",
+		Channel: "web", ThreadID: key,
+		Metadata: map[string]string{artifacts.MessageMetadataKey: refsValue(
+			artifacts.MessageRef{ArtifactID: own}, artifacts.MessageRef{ArtifactID: unreadable})},
+	}
+	reqBody, err := json.Marshal(MessageRequest{StructuredMessage: sm})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+target.ProjectID+"/agents/"+target.ID+"/message", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(requestAuthCtx(req.Context(), tokenBackedSender(t, s, sender)))
+	rr := httptest.NewRecorder()
+	srv.handleAgentMessage(rr, req, target.ID)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	dmEvt := receiveEvent(t, dmCh, "chat.dm")
+	assert.Equal(t, refsValue(artifacts.MessageRef{ArtifactID: own}), eventArtifacts(t, dmEvt.Data))
+	agentEvt := receiveEvent(t, agentCh, "agent message")
+	assert.NotContains(t, string(agentEvt.Data), `"metadata"`)
+}
+
+// failingMessageRefsStore is an artifact store whose message reference
+// writes fail.
+type failingMessageRefsStore struct{ artifacts.Store }
+
+func (failingMessageRefsStore) AddMessageRefs(context.Context, string, []artifacts.MessageRef) error {
+	return errors.New("injected AddMessageRefs failure")
+}
+
+// TestLiveChatArtifacts_UnrecordedRefsAreNotPublished: when recording the
+// references fails, the live event carries none, since history would
+// return none. recordMessageArtifacts returns what it stored.
+func TestLiveChatArtifacts_UnrecordedRefsAreNotPublished(t *testing.T) {
+	f := newArtifactSiteFixture(t)
+	newChatV2WebChatStore(t, f.srv, f.s)
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	f.srv.events = pub
+
+	refs := []artifacts.MessageRef{{ArtifactID: f.userOwned}}
+	assert.Equal(t, refs, f.srv.recordMessageArtifacts(context.Background(), "msg-ok", refs))
+	assert.Nil(t, f.srv.recordMessageArtifacts(context.Background(), "", refs))
+	f.srv.SetArtifactStore(failingMessageRefsStore{f.st})
+	assert.Nil(t, f.srv.recordMessageArtifacts(context.Background(), "msg-fail", refs))
+
+	key, err := messages.DMConversationKey("agent", f.target.ID, "user", f.owner.ID)
+	require.NoError(t, err)
+	dmCh, unsub := pub.Subscribe("user." + f.owner.ID + ".chat.dm")
+	t.Cleanup(unsub)
+	user := f.ownerIdentity()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/conversations/"+key+"/messages", nil)
+	req = req.WithContext(requestAuthCtx(req.Context(), user))
+	rr := httptest.NewRecorder()
+	clientMD := map[string]string{artifacts.MessageMetadataKey: refsValue(refs...)}
+	msgID := writeChatSendOutcome(rr)(f.srv.sendAgentRouted(req.Context(), key, f.project.ID, user, "notes", f.owner.Email,
+		[]*store.Agent{f.target}, nil, nil, nil, time.Now(), "", clientMD, chatSendOptions{}))
+	require.NotEmpty(t, msgID, "%d: %s", rr.Code, rr.Body.String())
+
+	evt := receiveEvent(t, dmCh, "chat.dm")
+	assert.NotContains(t, string(evt.Data), `"metadata"`)
+	assert.NotContains(t, string(evt.Data), f.userOwned)
 }

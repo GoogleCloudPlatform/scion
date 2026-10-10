@@ -1385,9 +1385,9 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		wcs := s.webChatStore
 		s.mu.RUnlock()
 		linkAttachmentRefs(storeCtx, wcs, storeMsg.ID, attachmentRefs, s.messageLog)
-		s.recordMessageArtifacts(storeCtx, storeMsg.ID, outboundArtifactRefs)
-		s.events.PublishUserMessage(storeCtx, storeMsg, attachmentRefs, outboundArtifactRefs)
-		s.fanOutThreadMessageToMembersAsync(storeCtx, storeMsg, attachmentRefs, outboundArtifactRefs)
+		recordedRefs := s.recordMessageArtifacts(storeCtx, storeMsg.ID, outboundArtifactRefs)
+		s.events.PublishUserMessage(storeCtx, storeMsg, attachmentRefs, recordedRefs)
+		s.fanOutThreadMessageToMembersAsync(storeCtx, storeMsg, attachmentRefs, recordedRefs)
 		return nil
 	}
 
@@ -2680,7 +2680,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// admitMessageArtifacts performs that strip, then re-adds only the
 		// artifact references the sender can read under its own request
 		// credential (ptone/scion#3222).
-		var artifactRefs []artifacts.MessageRef
+		var artifactRefs, recordedRefs []artifacts.MessageRef
 		structuredMsg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata)
 		structuredMsg.ArtifactRefsAdmitted = len(artifactRefs) > 0
 
@@ -2688,7 +2688,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			s.messageLog.Error("Failed to persist message", "error", err)
 		} else {
 			persistedMsgID = storeMsg.ID
-			s.recordMessageArtifacts(ctx, storeMsg.ID, artifactRefs)
+			recordedRefs = s.recordMessageArtifacts(ctx, storeMsg.ID, artifactRefs)
 		}
 		messaging.RecordStep(ctx, "message_persisted")
 		// B11/B13: only publish when persistence succeeded — publishing an
@@ -2697,7 +2697,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			// Publish SSE event so connected browser clients can update the
 			// per-agent conversation view in real time — mirrors the agent→user
 			// publish path in handleAgentOutboundMessage.
-			s.events.PublishUserMessage(ctx, storeMsg, nil, artifactRefs)
+			s.events.PublishUserMessage(ctx, storeMsg, nil, recordedRefs)
 			messaging.RecordStep(ctx, "sse_published")
 		}
 

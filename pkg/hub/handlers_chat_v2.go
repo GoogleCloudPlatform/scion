@@ -1715,7 +1715,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	if opts.OnPersisted != nil {
 		opts.OnPersisted(storeMsg.ID)
 	}
-	s.recordMessageArtifacts(ctx, storeMsg.ID, artifactRefs)
+	recordedRefs := s.recordMessageArtifacts(ctx, storeMsg.ID, artifactRefs)
 
 	// Attachment files are copied to the agent's scratchpad only now: every
 	// check that can refuse the send (authorization, validation, wake,
@@ -1802,7 +1802,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		}
 	}
 
-	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs, artifactRefs)
+	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs, recordedRefs)
 
 	// Thread membership, then the member fan-out, in one background job:
 	// the sender and the human project members they @mentioned become
@@ -1819,7 +1819,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		if chatV2ConvResult != nil && chatV2ConvResult.Kind == "group" {
 			m.ConversationID = chatV2ConvResult.ConversationID
 		}
-		s.recordThreadMembersThenFanOutAsync(ctx, m, storeMsg, attachmentRefs, artifactRefs)
+		s.recordThreadMembersThenFanOutAsync(ctx, m, storeMsg, attachmentRefs, recordedRefs)
 	}
 
 	// Phase 9b(ii): render the delivery envelope from the persisted message

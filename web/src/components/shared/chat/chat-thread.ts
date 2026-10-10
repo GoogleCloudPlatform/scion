@@ -2208,7 +2208,12 @@ export class ScionChatThread extends LitElement {
       // The event names the message's artifact refs (ids and versions
       // only); what this viewer may see of each comes from history.
       if (this._artifactRefreshIds.size > 0) this._artifactRefreshWindow++;
-      if (isFeatureEnabled(ARTIFACTS_FLAG) && eventData.metadata?.artifacts) {
+      // The sender's own tab already has the views from its send response.
+      if (
+        isFeatureEnabled(ARTIFACTS_FLAG) &&
+        eventData.metadata?.artifacts &&
+        !this.v2ArtifactMap.has(msg.id)
+      ) {
         this.scheduleArtifactRefresh(msg.id);
       }
 
@@ -2241,7 +2246,9 @@ export class ScionChatThread extends LitElement {
    * chips show exactly what a reload would. It asks only for the newest
    * messages back to the oldest queued one (at most ARTIFACT_REFRESH_MAX),
    * and takes only the queued messages' views; the messages themselves are
-   * already merged from the live events.
+   * already merged from the live events. Messages stored between the event
+   * and the request can push a queued one off that page: those are asked
+   * for once more with ARTIFACT_REFRESH_MAX.
    */
   private async refreshLiveArtifacts(): Promise<void> {
     this._artifactRefreshTimer = null;
@@ -2249,26 +2256,43 @@ export class ScionChatThread extends LitElement {
     const limit = Math.min(ARTIFACT_REFRESH_MAX, Math.max(this._artifactRefreshWindow, ids.length));
     this._artifactRefreshIds = new Set();
     this._artifactRefreshWindow = 0;
+    const missing = await this.fetchLiveArtifacts(ids, limit);
+    if (missing.length > 0 && limit < ARTIFACT_REFRESH_MAX) {
+      await this.fetchLiveArtifacts(missing, ARTIFACT_REFRESH_MAX);
+    }
+  }
+
+  /**
+   * One history request for the newest `limit` messages; merges the views
+   * of `ids` found on the page and returns the ids that were not.
+   */
+  private async fetchLiveArtifacts(ids: string[], limit: number): Promise<string[]> {
     const key = this.conversationKey;
-    if (ids.length === 0 || !key) return;
+    if (ids.length === 0 || !key) return [];
     const currentId = this.fetchId;
     try {
       const res = await apiFetch(
         `/api/v1/chat/conversations/${encodeURIComponent(key)}/messages?limit=${limit}`
       );
-      if (currentId !== this.fetchId || key !== this.conversationKey || !res.ok) return;
+      if (currentId !== this.fetchId || key !== this.conversationKey || !res.ok) return [];
       const data = (await res.json()) as {
+        messages?: { id: string }[];
         messageArtifacts?: Record<string, MessageArtifactRef[]>;
       };
-      if (currentId !== this.fetchId || key !== this.conversationKey) return;
+      if (currentId !== this.fetchId || key !== this.conversationKey) return [];
+      const onPage = new Set((data?.messages ?? []).map((m) => m.id));
       const views: Record<string, MessageArtifactRef[]> = {};
+      const missing: string[] = [];
       for (const id of ids) {
         const refs = data?.messageArtifacts?.[id];
         if (refs) views[id] = refs;
+        else if (!onPage.has(id)) missing.push(id);
       }
       this.mergeMessageArtifacts(views);
+      return missing;
     } catch {
       // The chips arrive with the next history load.
+      return [];
     }
   }
 

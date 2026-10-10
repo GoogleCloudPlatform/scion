@@ -125,6 +125,29 @@ describe('composer — attach artifact', () => {
     expect(picker.remaining).toBe(10);
   });
 
+  it('opens the picker without New artifact in a DM with no project', async () => {
+    const el = document.createElement('scion-chat-composer') as any;
+    el.conversationMode = 'dm';
+    el.projectId = '';
+    el.currentUserId = 'u-self';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    el.handleAttachMenuSelect(
+      new CustomEvent('sl-select', { detail: { item: { value: 'artifact' } } })
+    );
+    await settle(el);
+    const picker = el.shadowRoot.querySelector('scion-artifact-picker');
+    await settle(picker);
+    expect(picker.open).toBe(true);
+    expect(picker.projectId).toBe('');
+    expect(picker.currentUserId).toBe('u-self');
+    expect(picker.shadowRoot.querySelector('.placeholder.empty')?.textContent).toContain(
+      'No artifacts yet'
+    );
+    expect(picker.shadowRoot.querySelector('.new-artifact')).toBeNull();
+    expect(picker.shadowRoot.querySelector('scion-artifact-publish-dialog')).toBeNull();
+  });
+
   it('shows picked artifacts as removable chips and sends their refs', async () => {
     const el = await mount();
     el.handleArtifactsPicked(

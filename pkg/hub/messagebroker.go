@@ -76,7 +76,7 @@ type MessageBrokerProxy struct {
 
 	// recordArtifactRefs, when non-nil, persists the admitted artifact
 	// references of a user message deliverToUser stored (ptone/scion#3222).
-	recordArtifactRefs func(ctx context.Context, messageID string, refs []artifacts.MessageRef)
+	recordArtifactRefs func(ctx context.Context, messageID string, refs []artifacts.MessageRef) []artifacts.MessageRef
 
 	mu                  sync.Mutex
 	subscriptions       map[string][]eventbus.Subscription // projectID -> active subscriptions
@@ -824,13 +824,12 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	// Artifact references are recorded only when the hub's admission step
 	// set them on this in-process message. Any other value is ignored: it
 	// is never recorded, and nothing below reads it. msg is shared with the
-	// bus's other subscribers, so it is not modified here.
-	// The live chat event carries exactly the references recorded here.
+	// bus's other subscribers, so it is not modified here. The live chat
+	// event carries exactly the references recorded here.
 	var artifactRefs []artifacts.MessageRef
 	if msg.ArtifactRefsAdmitted && p.recordArtifactRefs != nil {
 		if refs, _ := artifacts.ParseMessageRefs(msg.Metadata[artifacts.MessageMetadataKey]); len(refs) > 0 {
-			p.recordArtifactRefs(ctx, storeMsg.ID, refs)
-			artifactRefs = refs
+			artifactRefs = p.recordArtifactRefs(ctx, storeMsg.ID, refs)
 		}
 	}
 
