@@ -185,8 +185,12 @@ if systemctl is-active --quiet caddy 2>/dev/null; then
             reload_failed "caddy reload --force"
         fi
     elif systemctl reload caddy; then
+        # Neither the unit nor caddy can force the reload, so Caddy may have
+        # skipped it and kept the old certificate: exit 1 so that certbot
+        # logs a hook failure instead of a silent success.
         echo "scion-reload-caddy: reloaded Caddy (systemctl reload caddy, without --force)"
         echo "scion-reload-caddy: WARNING: caddy.service reloads without --force and this caddy has no 'reload --force'; with an unchanged Caddyfile it may keep serving the old certificate. Check the served certificate; restarting Caddy (not the hub) makes it re-read the files." >&2
+        rc=1
     else
         reload_failed "systemctl reload caddy"
     fi
@@ -194,7 +198,10 @@ elif systemctl cat caddy >/dev/null 2>&1; then
     echo "scion-reload-caddy: caddy.service is not running; it reads the new files when it starts"
 elif command -v caddy >/dev/null 2>&1; then
     # Caddy without systemd: reload it through its admin endpoint.
-    if caddy_has_force && caddy reload --config "$caddyfile" --force; then
+    if ! caddy_has_force; then
+        echo "scion-reload-caddy: ERROR: caddy has no 'reload --force'; cannot force a reload. Restart Caddy (not the hub) so it reads the new certificate." >&2
+        rc=1
+    elif caddy reload --config "$caddyfile" --force; then
         echo "scion-reload-caddy: reloaded Caddy (not under systemd)"
     else
         reload_failed "caddy reload --config $caddyfile --force"
@@ -706,8 +713,10 @@ case "$MODE" in
         else say "Result: ${CHANGES} change(s) planned; nothing was changed (dry run)."; fi
         ;;
     apply)
-        if [[ $CHANGES -eq 0 ]]; then say "Result: nothing to change."
-        else say "Result: ${CHANGES} change(s) applied."; fi
+        if [[ $CHANGES -eq 0 && $PROBLEMS -eq 0 ]]; then say "Result: nothing to change."
+        elif [[ $CHANGES -eq 0 ]]; then say "Result: nothing changed; ${PROBLEMS} problem(s) remain."
+        elif [[ $PROBLEMS -eq 0 ]]; then say "Result: ${CHANGES} change(s) applied."
+        else say "Result: ${CHANGES} change(s) applied; ${PROBLEMS} problem(s) remain."; fi
         ;;
 esac
 [[ $PROBLEMS -eq 0 ]]

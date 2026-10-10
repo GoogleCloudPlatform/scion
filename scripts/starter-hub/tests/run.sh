@@ -467,13 +467,19 @@ test_tls_fix_existing_reload_hook_is_kept() {
     tls_hook reload-caddy.sh 'systemctl reload caddy'
     local note="note:    existing hook reload-caddy.sh also appears to reload Caddy; Caddy will be reloaded twice per renewal, which is harmless; you may move it aside: sudo mv /etc/letsencrypt/renewal-hooks/deploy/reload-caddy.sh /root/reload-caddy.sh.bak"
 
+    local before
+    before="$(tls_snapshot)"
     run_fix --check
     assert_eq 1 "$RC" "--check fails while our hook is missing"
     assert_contains "$OUT" "${note}" "--check notes the existing hook"
     assert_contains "$OUT" "PROBLEM: the scion deploy hook is not installed" "our missing hook is always a problem"
+    assert_eq "$before" "$(tls_snapshot)" "--check changes no file"
+    assert_eq "" "$(mutating_calls)" "--check makes no mutating call"
 
     run_fix --dry-run
     assert_contains "$OUT" "[dry-run] would install the deploy hook" "--dry-run plans our hook anyway"
+    assert_eq "$before" "$(tls_snapshot)" "--dry-run changes no file"
+    assert_eq "" "$(mutating_calls)" "--dry-run makes no mutating call"
 
     run_fix
     assert_eq 0 "$RC" "run succeeds"
@@ -482,7 +488,6 @@ test_tls_fix_existing_reload_hook_is_kept() {
     assert_contains "$OUT" "${note}" "the run notes the existing hook"
 
     # Both hooks present: a plain run is a no-op and --check passes.
-    local before
     before="$(tls_snapshot)"
     : > "${STUB_LOG}"
     run_fix
@@ -733,8 +738,18 @@ test_tls_hook_failed_reload_exits_non_zero() {
     assert_not_contains "$OUT" "not running" "no systemd: does not fall through to 'not running'"
     assert_contains "$OUT" "ERROR: reload failed (caddy reload --config /etc/caddy/Caddyfile --force)" "no systemd: prints the error"
 
-    # Not under systemd and the reload works.
+    # Not under systemd, and caddy has no reload --force.
     rm -f "${STUB_TLS_STATE}/caddy-reload-fails"
+    : > "${STUB_TLS_STATE}/caddy-no-force"
+    : > "${STUB_LOG}"
+    tls_run_hook
+    assert_ne 0 "$RC" "no systemd, no --force: hook exits non-zero"
+    assert_not_contains "$OUT" "reloaded Caddy" "no systemd, no --force: does not claim a reload"
+    assert_contains "$OUT" "ERROR: caddy has no 'reload --force'; cannot force a reload" "no systemd, no --force: says why"
+    assert_not_contains "$(cat "${STUB_LOG}")" "caddy reload --config" "no systemd, no --force: does not run an unforced reload"
+    rm -f "${STUB_TLS_STATE}/caddy-no-force"
+
+    # Not under systemd and the reload works.
     tls_run_hook
     assert_eq 0 "$RC" "no systemd: hook exits 0 when the reload works"
     assert_contains "$OUT" "reloaded Caddy (not under systemd)" "no systemd: says it reloaded"
@@ -748,6 +763,37 @@ test_tls_fix_missing_timer_is_a_problem() {
     run_fix --check
     assert_eq 1 "$RC" "--check fails without a renewal timer"
     assert_contains "$OUT" "PROBLEM: no certbot.timer or snap.certbot.renew.timer" "names the missing timer"
+}
+
+test_tls_hook_unforceable_reload_exits_non_zero() {
+    EXTRA_ENV=()
+    tls_fake_root 60 false
+    tls_make_readable
+    run_fix
+    : > "${STUB_TLS_STATE}/execreload-no-force"
+    : > "${STUB_TLS_STATE}/caddy-no-force"
+
+    # Unit and caddy both without --force: the reload runs but is not forced.
+    tls_run_hook
+    assert_ne 0 "$RC" "unforceable reload: hook exits non-zero"
+    assert_contains "$OUT" "WARNING: caddy.service reloads without --force" "unforceable reload: warns"
+
+    # The same, and systemctl reload fails.
+    : > "${STUB_TLS_STATE}/reload-fails"
+    tls_run_hook
+    assert_ne 0 "$RC" "unforceable and failing reload: hook exits non-zero"
+    assert_not_contains "$OUT" "reloaded Caddy" "unforceable and failing reload: does not claim a reload"
+    assert_contains "$OUT" "ERROR: reload failed (systemctl reload caddy)" "unforceable and failing reload: prints the error"
+}
+
+test_tls_fix_result_line_counts_problems() {
+    EXTRA_ENV=()
+    tls_fake_root 60 true
+    tls_make_readable
+    : > "${STUB_TLS_STATE}/reload-fails"
+    run_fix
+    assert_contains "$OUT" "change(s) applied; " "result line mentions remaining problems"
+    assert_contains "$OUT" "problem(s) remain." "result line counts them"
 }
 
 test_tls_fix_failed_reload_is_a_problem() {
