@@ -158,7 +158,11 @@ server:
 
 or in the environment with `SCION_SERVER_HUB_MEMBERSHIPSWEEPREPORTONLY=true`.
 The setting is read at startup only. On a replicated Hub, set it on every
-replica: the sweep runs on whichever replica takes its lock. When it is on,
+replica. Each sweep runs on whichever replica takes the sweep's lock, and that
+replica's own value decides what the sweep does. If replicas disagree, one
+replica left enforcing holds and stops every agent on the list at its next
+sweep, including the sweep on its first tick after it starts during a rolling
+restart. When it is on,
 the Hub logs a warning at startup that the sweep is in report-only mode. Every
 sweep (once at startup and then hourly) then reports instead of holding: it
 places no hold, revokes no credential and stops no agent. Only the sweep
@@ -195,6 +199,16 @@ traced to, as described above) is not admitted to the agent's project, or no
 longer exists. `walk_incomplete: true` means that user's tree in that project
 is larger than one pass, so the user may root more agents than are listed.
 Agents that are already held are not listed again.
+
+The list is a lower bound. A pair whose descendant walk reaches its bound
+lists only the agents found (`walk_incomplete: true`). An agent or pair
+whose lookup or walk fails is left out entirely and counted in
+`lookups_failed` on the `measured before holding` line. The next sweep
+tries again.
+
+While report-only mode stays on, every hourly sweep records the list again:
+another `WARN` line and another `agent_hold_would_set` audit record for each
+agent still on it. Turn the mode off once the list is resolved (see below).
 
 For each listed agent, either admit its root user to the project again (the
 agent then drops off the list at the next sweep), or accept that it will be

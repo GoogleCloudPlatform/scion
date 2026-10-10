@@ -537,6 +537,44 @@ func TestMembershipSweep_ReportOnlyHoldsNothing(t *testing.T) {
 	assert.GreaterOrEqual(t, int(d.stops.Load()), 1)
 }
 
+// Report-only covers the sweep only: an event-driven trigger (member
+// removal) still holds the user's agents while it is on.
+func TestMembershipSweep_ReportOnlyEventTriggerStillHolds(t *testing.T) {
+	f := newMSFixture(t, "sweep-report-event")
+	f.srv.config.MembershipSweepReportOnly = true
+	ctx := mmrServiceCtx(f.ownerID, f.ownerID+"@test.com")
+	_, d := f.srv.membershipService.RemoveMember(ctx, MembershipRequest{
+		Op: MembershipOpRemove, ProjectID: f.projectID, Actor: f.ownerIdentity(), BindingID: f.userBinding(f.userID).ID,
+	})
+	require.Nil(t, d)
+	requireCheck(t, f.s, f.userID, store.MembershipLossTriggerMemberRemove)
+	f.requireTreeHeldAndRefused()
+	assert.Equal(t, 0, countAudits(t, f.s, mutationTypeAgentHoldWouldSet, ""))
+}
+
+// A check already pending in the outbox (written by an event-driven path) is
+// still drained, and so enforced, by a report-only sweep; the sweep itself
+// enqueues nothing.
+func TestMembershipSweep_ReportOnlyDrainsPendingCheck(t *testing.T) {
+	f := newMSFixture(t, "sweep-report-drain")
+	ctx := context.Background()
+	f.srv.config.MembershipSweepReportOnly = true
+	f.dropBindings(f.userID)
+	actor := AuditActor{PrincipalKind: membershipLossSystemActorKind, PrincipalID: membershipLossSystemActorID}
+	require.NoError(t, f.s.WithTx(ctx, func(tx store.Store) error {
+		return enqueueMembershipLossTx(ctx, tx, f.userID, f.projectID, store.MembershipLossTriggerMemberRemove, actor)
+	}))
+	requireCheck(t, f.s, f.userID, store.MembershipLossTriggerMemberRemove)
+
+	res, err := f.srv.membershipFullSweep(ctx)
+	require.NoError(t, err)
+	assert.True(t, res.ReportOnly)
+	assert.Equal(t, 0, res.Enqueued, "the report-only sweep enqueues nothing itself")
+	assert.True(t, f.held(f.agentA.ID), "the pending check is drained and holds A")
+	assert.True(t, f.held(f.childC.ID), "the pending check is drained and holds C")
+	assert.Empty(t, pendingChecks(t, f.s), "the pending check is completed")
+}
+
 // Enforcement is the default: the sweep holds and stops, and writes no
 // report-only record.
 func TestMembershipSweep_EnforcesByDefault(t *testing.T) {
