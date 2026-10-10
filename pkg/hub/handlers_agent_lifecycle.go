@@ -1526,6 +1526,10 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 	if dispatcher != nil {
 		extendWriteDeadline(ctx, w, s.config.WriteTimeout, stopAllWriteBudget())
 	}
+	// One deadline for every agent's broker work, taken with the detach: an
+	// agent whose pre-dispatch store writes are slow gets less broker time,
+	// not less of the slack its status write needs.
+	opDeadline := time.Now().Add(stopAllAgentOpTimeout)
 
 	var (
 		mu      sync.Mutex
@@ -1587,7 +1591,7 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 			var dispatchErr error
 			stopRunID := agent.RunID
 			if dispatcher != nil && agent.RuntimeBrokerID != "" {
-				opCtx, cancel := context.WithTimeout(ctx, stopAllAgentOpTimeout)
+				opCtx, cancel := context.WithDeadline(ctx, opDeadline)
 				defer cancel()
 				s.syncWorkspaceOnStop(opCtx, agent)
 				dispatchErr = dispatcher.DispatchAgentStop(opCtx, agent)

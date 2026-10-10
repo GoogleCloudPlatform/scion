@@ -150,3 +150,113 @@ func TestStopAll_DispatchHonoursPerAgentOpTimeout(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, n, resp.Failed, rec.Body.String())
 }
+
+// slowAgentStopDispatcher holds the stop dispatch of one agent until its
+// ctx is done and stops every other agent at once.
+type slowAgentStopDispatcher struct {
+	createAgentDispatcher
+	slowID string
+}
+
+func (d *slowAgentStopDispatcher) DispatchAgentStop(ctx context.Context, agent *store.Agent) error {
+	if agent.ID != d.slowID {
+		return nil
+	}
+	if !awaitCanceled(ctx) {
+		return errProbeNeverDone
+	}
+	return ctx.Err()
+}
+
+// One agent's stop outlasts the per-agent op timeout while the others stop:
+// the slow one is reported as failed and left as it was, and the others are
+// reported and recorded as stopped.
+func TestStopAll_OneAgentTimesOut_OthersStop(t *testing.T) {
+	disp := &slowAgentStopDispatcher{}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	setStopAllAgentOpTimeout(t, 150*time.Millisecond)
+	setAgentQuotaLimits(t, s)
+	slow := createSiteAgent(t, s, project, "mixed-stop-all-slow", state.PhaseRunning, store.RunIntentRunning)
+	disp.slowID = slow.ID
+	fast1 := createSiteAgent(t, s, project, "mixed-stop-all-fast-1", state.PhaseRunning, store.RunIntentRunning)
+	fast2 := createSiteAgent(t, s, project, "mixed-stop-all-fast-2", state.PhaseRunning, store.RunIntentRunning)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents/stop-all", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp StopAllAgentsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, 3, resp.Total, rec.Body.String())
+	assert.Equal(t, 2, resp.Stopped, rec.Body.String())
+	assert.Equal(t, 1, resp.Failed, rec.Body.String())
+
+	byID := map[string]stopAllResult{}
+	for _, r := range resp.Results {
+		byID[r.ID] = r
+	}
+	require.Contains(t, byID, slow.ID)
+	assert.Equal(t, "error", byID[slow.ID].Status)
+	assert.Contains(t, byID[slow.ID].Error, context.DeadlineExceeded.Error())
+	for _, id := range []string{fast1.ID, fast2.ID} {
+		require.Contains(t, byID, id)
+		assert.Equal(t, "stopped", byID[id].Status)
+		got, err := s.GetAgent(context.Background(), id)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseStopped), got.Phase, "a stopped agent records stopped")
+		assert.Equal(t, "stopped", got.ContainerStatus)
+	}
+	got, err := s.GetAgent(context.Background(), slow.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), got.Phase, "the timed-out agent keeps its phase")
+}
+
+// slowStopIntentStore delays the stop intent write, a pre-dispatch store
+// write of each stop-all stop.
+type slowStopIntentStore struct {
+	store.Store
+	delay time.Duration
+}
+
+func (s *slowStopIntentStore) SwapRunIntent(ctx context.Context, agentID string, intent store.RunIntent) (store.RunIntent, time.Time, error) {
+	if intent == store.RunIntentStopped {
+		time.Sleep(s.delay)
+	}
+	return s.Store.SwapRunIntent(ctx, agentID, intent)
+}
+
+// deadlineProbeDispatcher records the deadline of each stop dispatch.
+type deadlineProbeDispatcher struct {
+	createAgentDispatcher
+	mu        sync.Mutex
+	deadlines []time.Time
+}
+
+func (d *deadlineProbeDispatcher) DispatchAgentStop(ctx context.Context, _ *store.Agent) error {
+	deadline, _ := ctx.Deadline()
+	d.mu.Lock()
+	d.deadlines = append(d.deadlines, deadline)
+	d.mu.Unlock()
+	return nil
+}
+
+// Every agent's broker work shares one deadline, stopAllAgentOpTimeout after
+// the stops begin: a slow pre-dispatch store write takes broker time, not
+// the slack the status write needs.
+func TestStopAll_SharedOpDeadline_SlowPreDispatchWrite(t *testing.T) {
+	const writeDelay = 300 * time.Millisecond
+	disp := &deadlineProbeDispatcher{}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	setStopAllAgentOpTimeout(t, 2*time.Second)
+	createSiteAgent(t, s, project, "shared-deadline-a", state.PhaseRunning, store.RunIntentRunning)
+	createSiteAgent(t, s, project, "shared-deadline-b", state.PhaseRunning, store.RunIntentRunning)
+	srv.store = &slowStopIntentStore{Store: srv.store, delay: writeDelay}
+
+	start := time.Now()
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents/stop-all", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Len(t, disp.deadlines, 2)
+	for i, d := range disp.deadlines {
+		require.False(t, d.IsZero(), "stop %d must run under the op deadline", i)
+		assert.False(t, d.After(start.Add(stopAllAgentOpTimeout)),
+			"stop %d deadline %v is past the shared op deadline: the pre-dispatch write took slack time", i, d.Sub(start))
+	}
+}
