@@ -134,7 +134,8 @@ func TestConduitProxyTransportBounds(t *testing.T) {
 	assert.False(t, isResponseHeaderTimeout(errors.New("conduit: stream reset")))
 	assert.False(t, isResponseHeaderTimeout(io.ErrUnexpectedEOF))
 	assert.False(t, isResponseHeaderTimeout(nil))
-	assert.True(t, isResponseHeaderTimeout(timeoutNetError{}), "a bare net.Error timeout")
+	require.ErrorIs(t, timeoutNetError{}, context.DeadlineExceeded, "the stub mirrors net/http's timeout error")
+	assert.True(t, isResponseHeaderTimeout(timeoutNetError{}), "a bare net.Error timeout that wraps context.DeadlineExceeded")
 	assert.False(t, isResponseHeaderTimeout(fmt.Errorf("%w: %w", conduit.ErrSessionClosed, timeoutNetError{})),
 		"a session closed on a deadline is a lost upstream")
 	assert.False(t, isResponseHeaderTimeout(fmt.Errorf("conduit stream: %w", timeoutNetError{})),
@@ -143,13 +144,14 @@ func TestConduitProxyTransportBounds(t *testing.T) {
 	assert.False(t, isResponseHeaderTimeout(context.DeadlineExceeded))
 }
 
-// timeoutNetError is a bare net.Error timeout, like the transport's
-// response header timeout.
+// timeoutNetError mirrors net/http's response header timeout error: a
+// net.Error timeout that also matches context.DeadlineExceeded.
 type timeoutNetError struct{}
 
-func (timeoutNetError) Error() string   { return "timeout awaiting response headers" }
-func (timeoutNetError) Timeout() bool   { return true }
-func (timeoutNetError) Temporary() bool { return true }
+func (timeoutNetError) Error() string        { return "timeout awaiting response headers" }
+func (timeoutNetError) Timeout() bool        { return true }
+func (timeoutNetError) Temporary() bool      { return true }
+func (timeoutNetError) Is(target error) bool { return target == context.DeadlineExceeded }
 
 // TestConduitProxyHeaderTimeout: a service that accepts and never answers
 // gets a 504 runtime_error within the bound plus 2s; the hub-side stream

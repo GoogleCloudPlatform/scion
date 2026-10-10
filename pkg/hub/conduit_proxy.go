@@ -187,11 +187,13 @@ func (s *Server) portProxyResponseHeaderTimeout() time.Duration {
 // err itself is checked: a timeout wrapped inside a conduit stream or
 // session error (for example a session that failed on a write deadline
 // or a link read timeout) is a lost upstream, answered with 502 as before.
-// A context deadline (which also reports Timeout) is not it either.
+// A bare context.DeadlineExceeded (which also reports Timeout) is not it
+// either; it is compared by identity, because the transport's timeout
+// error itself matches errors.Is(err, context.DeadlineExceeded).
 func isResponseHeaderTimeout(err error) bool {
 	ne, ok := err.(net.Error)
-	return ok && ne.Timeout() &&
-		!errors.Is(err, conduit.ErrSessionClosed) && !errors.Is(err, context.DeadlineExceeded)
+	return ok && ne.Timeout() && err != context.DeadlineExceeded &&
+		!errors.Is(err, conduit.ErrSessionClosed)
 }
 
 // serveConduitProxy proxies r to the agent port over conn (a conduit
