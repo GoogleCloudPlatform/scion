@@ -269,7 +269,7 @@ func deleteInProgressRefusal(agentID string) *startRefusal {
 	return &startRefusal{
 		HTTPStatus: http.StatusConflict,
 		Code:       ErrCodeDeleteInProgress,
-		Message:    "a delete is in progress for this agent; wait for it to finish, or force the delete",
+		Message:    deleteInProgressMessage,
 		Details: map[string]interface{}{
 			"agentId": agentID,
 		},
