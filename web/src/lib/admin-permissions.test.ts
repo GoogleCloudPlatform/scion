@@ -275,9 +275,9 @@ describe('admin-permissions: federation page', () => {
   it('opens the federation page to a holder of hub.config.read', () => {
     const hubAdmin = adminWithPermissions('hub.config.read', 'hub.config.update');
     expect(hasAnyPermission(hubAdmin, NAV_PERMISSION_MAP['/admin/federation'])).toBe(true);
-    expect(
-      hasAnyPermission(hubAdmin, ROUTE_PERMISSION_MAP['scion-page-admin-federation'])
-    ).toBe(true);
+    expect(hasAnyPermission(hubAdmin, ROUTE_PERMISSION_MAP['scion-page-admin-federation'])).toBe(
+      true
+    );
   });
 
   it('keeps the federation page closed without hub.config.read', () => {
