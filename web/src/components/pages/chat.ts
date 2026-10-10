@@ -4347,7 +4347,7 @@ export class ScionPageChat extends LitElement {
         // Fall through to the manual walk below (e.g. not implemented in this environment).
       }
     }
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion -- cast through unknown keeps no-this-alias from reporting the loop variable; per-site decision tracked in ptone/scion#4126.
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion -- cast through unknown keeps no-this-alias from reporting the loop variable that starts at this element.
     let node: Node | null = this as unknown as Node;
     while (node) {
       const el = node as HTMLElement;
