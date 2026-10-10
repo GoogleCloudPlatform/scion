@@ -49,6 +49,14 @@ In a Hub-connected context, `--global` (or `-g global`) targets the Hub's Global
 project, or you do not have access to it, the command fails with an error that names
 `--project <slug|id>` as the alternative.
 
+**Commands that need no project.** Commands that act on the Hub connection, a login, this machine's
+Runtime Broker, or the server run outside a project without `--global` or `--project`:
+`scion hub status`, `scion hub enable`, `scion hub disable`, the `scion hub auth` commands,
+`scion runtime-broker register`, `deregister`, `start`, `stop`, `restart`, `status`, `hubs` and
+`join`, and the `server`, `admin` and `project` commands. Outside a project, the `scion hub`
+connection commands read and write the global settings, as with `--global`.
+`scion runtime-broker provide` and `withdraw` act on a project and still need one.
+
 :::note[Agents creating agents in other projects]
 Inside an agent container, `-g` / `--project` changes which project the CLI addresses, but the Hub
 refuses an agent-created agent outside the calling agent's own project. This is intended: an
@@ -593,7 +601,31 @@ restarting the agent. Use this to recover an agent whose token expired and canno
 as a **Reset Auth** button in the web UI. The token is passed to the container over stdin, not on the
 command line, so it does not appear in the host's process list.
 
-**Usage:** `scion reset-auth <agent-name>`
+**Usage:** `scion reset-auth <agent-name>` or `scion reset-auth --all --reissue-scopes [--apply]`
+
+- **Flags:**
+    - `--reissue-scopes`: Instead of only refreshing the token, re-issue the agent's role and scopes from
+      its delegating agent or user's current authority. The agent's delegation is re-recorded through the
+      same checks agent creation applies, scopes the delegator no longer holds are removed, the agent's
+      current credentials are revoked, and a running agent receives a new token. Requires a Hub
+      super-admin session; the operation is audited. Descendant agents are not changed: re-issue them
+      one by one, parents first, or use `--all`.
+    - `--dry-run`: With `--reissue-scopes` for one agent, show the change without applying it.
+    - `--all`: With `--reissue-scopes`, re-issue every agent on the Hub, parents before
+      children within each project. Takes no agent argument. A failure affects only that agent, and
+      re-running is safe: agents already re-issued are unchanged. This is a dry run that prints a summary
+      unless `--apply` is given.
+    - `--apply`: With `--all --reissue-scopes`, apply the re-issue instead of a dry run.
+
+```bash
+# Preview, then apply, a re-issue for one agent
+scion reset-auth my-agent --reissue-scopes --dry-run
+scion reset-auth my-agent --reissue-scopes
+
+# Review the Hub-wide summary first, then apply it
+scion reset-auth --all --reissue-scopes
+scion reset-auth --all --reissue-scopes --apply
+```
 
 ### `scion reincarnate`
 
@@ -946,7 +978,7 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
             - `--project <string>`: Project ID or name to scope the token to (required).
             - `--name <string>`: Token name/label (required).
             - `--scopes <scopes>`: Scopes to grant (required). This flag is **repeatable** and also accepts a **comma-separated list** of scopes (e.g., `--scopes agent:read,agent:create --scopes agent:lifecycle`). Strict empty-value validation is enforced.
-            - `--expires <duration>`: Expiry: a positive duration in minutes (90m), hours (2h), days (30d) or years (1y), or an RFC 3339 date (2026-12-31T00:00:00Z) (default: 90d). `m` means minutes; there is no month unit (use 30d or 1y for longer).
+            - `--expires <duration>`: Expiry: a positive duration in minutes (90m), hours (2h), days (30d) or years (1y, always 365 days), or an RFC 3339 date (2026-12-31T00:00:00Z) (default: 90d). `m` means minutes; there is no month unit (use 30d or 1y for longer).
             - `--purpose <text>`: Optional bounded description of what the token is for (≤128 bytes, single line, no control characters). Immutable after issuance — there is no update command.
             - `--label <key=value>`: Optional bounded label (repeatable). Keys are lowercase `[a-z][a-z0-9_.-]*` (≤32 bytes); values are ≤64 bytes from a restricted charset. A set of attribution-shaped keys (e.g. `user_id`, `agent`, `actor_binding`) are reserved and rejected. Immutable after issuance.
     - `scopes`: List every scope accepted by `create --scopes`. With `--project <string>`, also report which scopes you may currently select for a token scoped to that project and, for each one you cannot, why. Supports `--json`.

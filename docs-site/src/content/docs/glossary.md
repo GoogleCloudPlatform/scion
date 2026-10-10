@@ -78,7 +78,7 @@ A workspace sharing mode where one workspace directory is mounted into every age
 A workspace sharing mode where each agent gets its own git worktree over a shared checkout, isolating working trees while sharing one clone's history. Supported in local mode and on Hub-managed git projects; requires git 2.48 or later on the broker, and on Kubernetes it requires NFS workspace storage.
 
 ### Clone-per-agent
-A workspace sharing mode where each agent gets its own full git clone of the repository.
+A workspace sharing mode where each agent gets its own full git clone of the repository. It is also what a Hub git project resolves to when it has no workspace mode set: only `shared` selects the shared checkout.
 
 ### Empty-per-agent
 A workspace sharing mode for Hub-managed projects without git, where each agent gets its own private directory that starts empty and is not a git repository. It is kept across suspend/resume where storage allows and deleted with the agent. Selected with workspace mode `per-agent` on a project without a git remote.
@@ -180,6 +180,14 @@ A seeded system or custom limit configuration that defines a quota boundary with
 ### Runtime Broker Settings
 A settings document on the Hub for one Runtime Broker (`/api/v1/runtime-brokers/{id}/settings`). Its first key, `maxAgents`, overrides the `max_agents_per_broker` limit for that Runtime Broker. The effective cap resolves from the Runtime Broker's setting, then an entitlement binding, then the hub default.
 _Avoid_: Broker Settings (bare "broker"); an entitlement binding scoped to a Runtime Broker (the retired way to set a cap for one Runtime Broker)
+
+### Flat Runtime Broker
+A Runtime Broker identity that serves exactly one runtime target, recorded as its runtime target ID; placement selects the Runtime Broker, not a profile, and agents placed on it stay pinned to that target. Gated by the `hub.flat_runtime_brokers` experiment. See [Flat Runtime Brokers](/scion/hosted/ha/multi-broker/#flat-runtime-brokers-experimental).
+_See also_: Runtime target ID, Runtime Broker, Profile
+
+### Runtime target ID
+The opaque, stable identifier of a flat Runtime Broker's single runtime target, carried in the `runtimeTarget` descriptor (`{id, type, displayName}`) on Runtime Broker API objects and in an agent's pinned placement.
+_Avoid_: target name, context, inventory target
 
 ## Messaging
 
