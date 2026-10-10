@@ -274,6 +274,25 @@ var hubOperations = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
+		// The route guard checks hub.admin_mode.read for every method;
+		// PUT also needs hub.admin_mode.update (hub.adminmode.update).
+		ID:          "hub.adminmode.read",
+		Domain:      "hub",
+		Description: "Read admin/maintenance mode state",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.admin_mode.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestHubAdminReadUpdateRoutePermissions"}},
+	},
+	{
 		ID:          "hub.adminmode.update",
 		Domain:      "hub",
 		Description: "Toggle admin/maintenance mode",
@@ -291,15 +310,36 @@ var hubOperations = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
+		// The allow-list route guards check hub.allow_list.read for every
+		// method; writes also need hub.allow_list.update
+		// (hub.allowlist.update).
+		ID:          "hub.allowlist.read",
+		Domain:      "hub",
+		Description: "Read the platform email allow list and its domains",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/allow-list", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/allow-list/domains", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.allow_list.read",
+		Effects:          []SecurityEffect{EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestHubAdminReadUpdateRoutePermissions"}},
+	},
+	{
 		ID:          "hub.allowlist.update",
 		Domain:      "hub",
 		Description: "Manage the platform email allow list",
 		EntryPoints: []EntryPoint{
-			// handleAdminAllowList (admin_allow_list.go) accepts GET and
-			// POST (add), not PUT. handleAdminAllowListByEmail is
-			// DELETE-only; there is no PUT on the by-email route.
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/allow-list", Method: "GET"},
+			// handleAdminAllowList (admin_allow_list.go) accepts POST
+			// (add); handleAdminAllowListByEmail accepts POST on import
+			// and DELETE on {email}. There is no PUT on either route.
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/allow-list", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/allow-list/import", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/allow-list/{email}", Method: "DELETE"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
