@@ -23,12 +23,13 @@
 #   show -p User --value caddy -> $STUB_CADDY_USER
 #   show -p ExecReload caddy   -> a Caddy ExecReload line, with --force
 #                                 unless $STUB_TLS_STATE/execreload-no-force
-#   reload caddy            -> "serves" $STUB_TLS_LIVE (copies it to served.pem)
+#   reload caddy            -> "serves" $STUB_TLS_LIVE (copies it to served.pem);
+#                              exits 1 instead if $STUB_TLS_STATE/reload-fails
 set -u
 printf 'systemctl %s\n' "$*" >> "${STUB_LOG:?}"
 st="${STUB_TLS_STATE:?}"
 case "${1:-}" in
-  cat) [ -f "$st/unit-$2" ] ;;
+  cat) [ -f "$st/unit-$2" ] || exit 1 ;;
   is-enabled)
     if [ -f "$st/enabled-$2" ]; then echo enabled; else echo disabled; exit 1; fi ;;
   is-active)
@@ -50,6 +51,9 @@ case "${1:-}" in
         fi ;;
     esac ;;
   reload)
-    [ "$2" = "caddy" ] && cp "${STUB_TLS_LIVE:?}" "$st/served.pem" ;;
+    if [ "$2" = "caddy" ]; then
+      [ ! -f "$st/reload-fails" ] || exit 1
+      cp "${STUB_TLS_LIVE:?}" "$st/served.pem"
+    fi ;;
 esac
 exit 0

@@ -28,8 +28,8 @@
 #      /etc/letsencrypt/renewal-hooks/deploy/scion-reload-caddy.sh, which
 #      certbot runs once after each successful renewal: it gives Caddy's
 #      group read access to the new files and reloads Caddy (never the hub).
-#      If an existing deploy hook or inline renew_hook already reloads Caddy,
-#      it reports that hook and installs nothing, unless --replace-hook;
+#      It is always installed. Other hooks that appear to reload Caddy are
+#      reported, never removed: Caddy is then reloaded twice (harmless);
 #   2. removes the inline renew_hook that older gce-certs.sh versions stored
 #      in /etc/letsencrypt/renewal/<domain>.conf (it failed before reaching
 #      the reload, see ptone/scion#4207);
@@ -51,7 +51,7 @@ usage() {
     cat <<'USAGE'
 Usage:
   sudo scripts/starter-hub/fix-tls-rotation.sh [--dry-run | --check]
-      [--replace-hook] [--domain <cert-domain>] [--host <served-host>]
+      [--domain <cert-domain>] [--host <served-host>]
       [--connect <addr:port>] [--renew-days <n>]
 
   --dry-run          Print every action without changing anything.
@@ -59,9 +59,6 @@ Usage:
                      disk and as served), reload hooks, renewal timer, and
                      whether Caddy's user can read the certificate and key.
                      Exits 1 if something needs fixing.
-  --replace-hook     Install this script's deploy hook even when an existing
-                     hook already reloads Caddy. The existing hook is not
-                     removed; the script says how to move it aside.
   --domain NAME      Certificate name, the directory under
                      /etc/letsencrypt/live/. Default: taken from the tls
                      line of /etc/caddy/Caddyfile, else the only directory
@@ -78,7 +75,6 @@ USAGE
 }
 
 MODE=apply
-REPLACE_HOOK=false
 DOMAIN=""
 SERVED_HOST=""
 CONNECT="127.0.0.1:443"
@@ -90,7 +86,6 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry-run) MODE=dry-run ;;
         --check) MODE=check ;;
-        --replace-hook) REPLACE_HOOK=true ;;
         --domain) DOMAIN="${2:?--domain needs a value}"; shift ;;
         --host) SERVED_HOST="${2:?--host needs a value}"; shift ;;
         --connect) CONNECT="${2:?--connect needs a value}"; shift ;;
@@ -114,15 +109,17 @@ HOOK_DIR="${LE_DIR}/renewal-hooks/deploy"
 HOOK_PATH="${HOOK_DIR}/${HOOK_NAME}"
 CADDYFILE="${ROOT}/etc/caddy/Caddyfile"
 
-# Hook classification runs on hook_code output only (comments, quoted
-# strings and echo/printf removed). A hook reloads Caddy if its code matches
-# SYSTEMCTL_RELOAD_RE, or CADDY_RELOAD_RE together with --force; a bare
-# `caddy reload` is skipped by Caddy when the Caddyfile is unchanged. It sets
-# permissions for Caddy if it matches PERM_RE.
+# Other hooks are classified for the report only; the result never decides
+# whether the scion hook is installed (it always is). Classification looks
+# at hook_code output (comments, quoted strings and echo/printf removed): a
+# hook "appears to reload Caddy" if that matches SYSTEMCTL_RELOAD_RE, or a
+# `caddy reload` command segment (up to the next ; & or |) contains --force.
+# A bare `caddy reload` is reported separately: Caddy skips it when the
+# Caddyfile is unchanged.
 SYSTEMCTL_RELOAD_RE='systemctl[[:space:]]+(reload|restart|reload-or-restart|try-reload-or-restart)[[:space:]]+caddy(\.service)?([[:space:];&|)]|$)'
 CADDY_RELOAD_RE='caddy[[:space:]]+reload([[:space:]]|$)'
-FORCE_RE='(^|[[:space:]])(--force|-f)([[:space:];&|)]|$)'
-PERM_RE='(chgrp|chown)[^;&|]*caddy'
+CADDY_RELOAD_SEGMENT_RE='caddy[[:space:]]+reload([[:space:]][^;&|]*)?'
+FORCE_RE='(^|[[:space:]])(--force|-f)([[:space:])]|$)'
 # The inline hook older gce-certs.sh runs stored (plain or configobj-quoted).
 BROKEN_INLINE_RE='^renew_hook[[:space:]]*=.*RENEWED_DOMAINS%%,\*'
 INLINE_RE='^renew_hook[[:space:]]*='
@@ -165,26 +162,47 @@ act() {
 reload_snippet() {
     cat <<'RELOAD'
 caddyfile=/etc/caddy/Caddyfile
+rc=0
 caddy_has_force() { caddy reload --help 2>&1 | grep -q -- '--force'; }
+reload_failed() {
+    echo "scion-reload-caddy: ERROR: reload failed ($1); Caddy may still serve the old certificate" >&2
+    rc=1
+}
 if systemctl is-active --quiet caddy 2>/dev/null; then
     # Caddy skips a reload whose configuration is unchanged unless it is
     # forced (caddy reload --force). Some packaged caddy.service files reload
     # without --force; then the new certificate files would not be read.
     if systemctl show -p ExecReload caddy 2>/dev/null | grep -q -- '--force'; then
-        systemctl reload caddy
-        echo "scion-reload-caddy: reloaded Caddy (systemctl reload caddy)"
+        if systemctl reload caddy; then
+            echo "scion-reload-caddy: reloaded Caddy (systemctl reload caddy)"
+        else
+            reload_failed "systemctl reload caddy"
+        fi
     elif caddy_has_force; then
-        caddy reload --config "$caddyfile" --force
-        echo "scion-reload-caddy: reloaded Caddy (caddy reload --force)"
-    else
-        systemctl reload caddy
+        if caddy reload --config "$caddyfile" --force; then
+            echo "scion-reload-caddy: reloaded Caddy (caddy reload --force)"
+        else
+            reload_failed "caddy reload --force"
+        fi
+    elif systemctl reload caddy; then
+        echo "scion-reload-caddy: reloaded Caddy (systemctl reload caddy, without --force)"
         echo "scion-reload-caddy: WARNING: caddy.service reloads without --force and this caddy has no 'reload --force'; with an unchanged Caddyfile it may keep serving the old certificate. Check the served certificate; restarting Caddy (not the hub) makes it re-read the files." >&2
+    else
+        reload_failed "systemctl reload caddy"
     fi
-elif command -v caddy >/dev/null 2>&1 && caddy_has_force && caddy reload --config "$caddyfile" --force 2>/dev/null; then
-    echo "scion-reload-caddy: reloaded Caddy (not under systemd)"
+elif systemctl cat caddy >/dev/null 2>&1; then
+    echo "scion-reload-caddy: caddy.service is not running; it reads the new files when it starts"
+elif command -v caddy >/dev/null 2>&1; then
+    # Caddy without systemd: reload it through its admin endpoint.
+    if caddy_has_force && caddy reload --config "$caddyfile" --force; then
+        echo "scion-reload-caddy: reloaded Caddy (not under systemd)"
+    else
+        reload_failed "caddy reload --config $caddyfile --force"
+    fi
 else
-    echo "scion-reload-caddy: Caddy is not running, nothing to reload"
+    echo "scion-reload-caddy: Caddy is not installed, nothing to reload"
 fi
+exit "$rc"
 RELOAD
 }
 
@@ -236,7 +254,15 @@ HOOK
 }
 
 reload_caddy() {
-    bash -c "$(reload_snippet)"
+    if ! bash -c "$(reload_snippet)"; then
+        problem "reloading Caddy failed (see the ERROR above); the hub was not touched"
+    fi
+}
+
+renew_cert() {
+    if ! certbot renew --cert-name "$DOMAIN" --no-random-sleep-on-renew; then
+        problem "certbot renew failed or a renewal hook failed; see /var/log/letsencrypt/letsencrypt.log"
+    fi
 }
 
 # cert_field FILE FIELD -- prints serial or notAfter of the first cert in FILE.
@@ -292,10 +318,11 @@ can_read_as_caddy() {
     runuser -u "$CADDY_USER" -- test -r "$1"
 }
 
-# hook_code -- the code of a hook read on stdin, without anything that only
-# looks like a reload: full-line and trailing # comments, quoted strings,
-# and echo/printf commands. Errs towards "no reload" (then the scion hook is
-# installed too, which at worst reloads Caddy twice).
+# hook_code -- the code of a hook read on stdin, with full-line and trailing
+# # comments, quoted strings and echo/printf commands removed, so that text
+# which only mentions a reload is not reported as one. It is a heuristic
+# (here-documents, for example, are not understood) and is used only for
+# the report about other hooks; the scion hook is installed regardless.
 hook_code() {
     sed -E \
         -e 's/^[[:space:]]*#.*//' \
@@ -319,7 +346,7 @@ reload_kind() {
     code="$(cat)"
     if grep -Eq "$SYSTEMCTL_RELOAD_RE" <<<"$code"; then
         echo yes
-    elif grep -E "$CADDY_RELOAD_RE" <<<"$code" | grep -Eq -- "$FORCE_RE"; then
+    elif grep -Eo "$CADDY_RELOAD_SEGMENT_RE" <<<"$code" | grep -Eq -- "$FORCE_RE"; then
         echo yes
     elif grep -Eq "$CADDY_RELOAD_RE" <<<"$code"; then
         echo noforce
@@ -434,10 +461,9 @@ fi
 # --- Reload hooks ---
 say ""
 say "certbot reload hooks:"
-# Existing hooks that reload Caddy, other than ours: names only, never content.
-existing_reload=()
-existing_reload_perms=() # "yes" or "no", parallel to existing_reload
-NOFORCE_NOTE="runs 'caddy reload' without --force, which Caddy skips when the Caddyfile is unchanged, so it is not counted as reloading Caddy"
+# Other hooks are reported by name only, never by content, and never decide
+# whether the scion hook is installed.
+MOVE_ASIDE="Caddy will be reloaded twice per renewal, which is harmless; you may move it aside"
 if [[ -d "$HOOK_DIR" ]]; then
     while IFS= read -r -d '' f; do
         base="$(basename "$f")"
@@ -449,16 +475,15 @@ if [[ -d "$HOOK_DIR" ]]; then
         code="$(hook_code < "$f" 2>/dev/null || true)"
         case "$(reload_kind <<<"$code")" in
             yes)
-                found "existing reload hook: ${base}"
-                existing_reload+=("${base}")
-                if grep -Eq "$PERM_RE" <<<"$code"; then existing_reload_perms+=(yes); else existing_reload_perms+=(no); fi
+                found "deploy hook ${base}; left alone"
+                note "existing hook ${base} also appears to reload Caddy; ${MOVE_ASIDE}: sudo mv $(show "$HOOK_DIR")/${base} /root/${base}.bak"
                 ;;
             noforce)
-                found "deploy hook ${base} does not reload Caddy reliably; left alone"
-                note "${base} ${NOFORCE_NOTE}"
+                found "deploy hook ${base}; left alone"
+                note "existing hook ${base} runs 'caddy reload' without --force, which Caddy skips when the Caddyfile is unchanged"
                 ;;
             *)
-                found "deploy hook ${base} does not reload Caddy; left alone"
+                found "deploy hook ${base} does not appear to reload Caddy; left alone"
                 ;;
         esac
     done < <(find "$HOOK_DIR" -mindepth 1 -maxdepth 1 \( -type f -o -type l \) -print0 | sort -z)
@@ -470,56 +495,27 @@ if $has_lineage; then
         if [[ "$MODE" == "check" ]]; then problem "broken inline renew_hook present"
         else act "remove it (backup $(show "$RENEWAL_CONF").bak-fix-tls-rotation)" remove_inline_hook "$RENEWAL_CONF"; fi
     elif grep -Eq "$INLINE_RE" "$RENEWAL_CONF"; then
-        # Inline hooks can carry credentials: say only whether it matches.
-        code="$(inline_hook_code "$RENEWAL_CONF")"
-        case "$(reload_kind <<<"$code")" in
-            yes)
-                found "an inline renew_hook is present (content not shown); it reloads Caddy: matched"
-                found "existing reload hook: inline renew_hook in $(show "$RENEWAL_CONF")"
-                existing_reload+=("inline renew_hook in $(show "$RENEWAL_CONF")")
-                if grep -Eq "$PERM_RE" <<<"$code"; then existing_reload_perms+=(yes); else existing_reload_perms+=(no); fi
-                ;;
-            noforce)
-                found "an inline renew_hook is present (content not shown); it reloads Caddy: not matched (no --force); left alone"
-                note "the inline renew_hook ${NOFORCE_NOTE}"
-                ;;
-            *)
-                found "an inline renew_hook is present (content not shown); it reloads Caddy: not matched; left alone"
-                ;;
+        # Inline hooks can carry credentials: never print their content.
+        found "an inline renew_hook is present (content not shown); left alone"
+        case "$(reload_kind <<<"$(inline_hook_code "$RENEWAL_CONF")")" in
+            yes) note "the inline renew_hook also appears to reload Caddy; ${MOVE_ASIDE} by removing the renew_hook line from $(show "$RENEWAL_CONF") after copying the file" ;;
+            noforce) note "the inline renew_hook runs 'caddy reload' without --force, which Caddy skips when the Caddyfile is unchanged" ;;
         esac
     else
         ok "no inline renew_hook in $(show "$RENEWAL_CONF")"
     fi
 fi
 
-ours_current=false
 if [[ -f "$HOOK_PATH" ]] && cmp -s "$HOOK_PATH" <(hook_content) && [[ -x "$HOOK_PATH" ]]; then
-    ours_current=true
-fi
-if $ours_current; then
     ok "$(show "$HOOK_PATH") is installed and current"
 elif [[ -f "$HOOK_PATH" ]]; then
     found "$(show "$HOOK_PATH") is out of date or not executable"
     if [[ "$MODE" == "check" ]]; then problem "deploy hook $(show "$HOOK_PATH") out of date"
     else act "update the deploy hook $(show "$HOOK_PATH")" install_hook; fi
-elif [[ ${#existing_reload[@]} -gt 0 ]] && ! $REPLACE_HOOK; then
-    ok "an existing hook reloads Caddy, so $(show "$HOOK_PATH") is not installed (pass --replace-hook to install it anyway)"
 else
     found "$(show "$HOOK_PATH") is missing"
-    if [[ "$MODE" == "check" ]]; then problem "no deploy hook reloads Caddy after a renewal"
+    if [[ "$MODE" == "check" ]]; then problem "the scion deploy hook is not installed, so nothing is known to reload Caddy after a renewal"
     else act "install the deploy hook $(show "$HOOK_PATH")" install_hook; fi
-fi
-
-if [[ ${#existing_reload[@]} -gt 0 ]]; then
-    for i in "${!existing_reload[@]}"; do
-        h="${existing_reload[$i]}"
-        if [[ "${existing_reload_perms[$i]}" == "no" ]]; then
-            note "${h} reloads Caddy but does not set group or owner caddy. That is usually fine: certbot gives a renewed private key the previous key's group and mode, and the permission check below confirms Caddy can read the files."
-        fi
-    done
-    if [[ -f "$HOOK_PATH" || ( "$MODE" != "check" && "$REPLACE_HOOK" == "true" ) ]]; then
-        note "Caddy is then reloaded more than once per renewal (harmless). This script does not remove other hooks. To keep only $(show "$HOOK_PATH"), move each deploy hook listed above out of $(show "$HOOK_DIR") with a backup, for example: sudo mv $(show "$HOOK_DIR")/<name> /root/<name>.bak (certbot runs every executable in that directory, so renaming it in place is not enough). Remove a reloading inline renew_hook by editing $(show "$RENEWAL_CONF") after copying it."
-    fi
 fi
 
 # --- Renewal timer ---
@@ -648,7 +644,7 @@ if ! openssl x509 -in "${LIVE}/fullchain.pem" -noout -checkend $((RENEW_DAYS * 8
     elif ! $has_lineage; then
         problem "cannot renew: certbot does not manage ${DOMAIN}"
     else
-        act "renew it (a deploy hook reloads Caddy)" certbot renew --cert-name "$DOMAIN" --no-random-sleep-on-renew
+        act "renew it (the deploy hook reloads Caddy): certbot renew --cert-name ${DOMAIN} --no-random-sleep-on-renew" renew_cert
         if [[ "$MODE" == "apply" ]]; then
             before_serial="$disk_serial"
             disk_serial="$(cert_field "${LIVE}/fullchain.pem" serial)"

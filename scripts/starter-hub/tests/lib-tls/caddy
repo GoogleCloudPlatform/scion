@@ -16,7 +16,8 @@
 # Stub caddy for the fix-tls-rotation.sh tests. Logs to $STUB_LOG.
 #   caddy reload --help -> usage text, listing --force unless
 #                          $STUB_TLS_STATE/caddy-no-force exists
-#   caddy reload ...    -> the stub server serves $STUB_TLS_LIVE
+#   caddy reload ...    -> the stub server serves $STUB_TLS_LIVE; exits 1
+#                          instead if $STUB_TLS_STATE/caddy-reload-fails
 set -u
 printf 'caddy %s\n' "$*" >> "${STUB_LOG:?}"
 if [ "${1:-}" = "reload" ]; then
@@ -25,6 +26,7 @@ if [ "${1:-}" = "reload" ]; then
     [ -f "${STUB_TLS_STATE:?}/caddy-no-force" ] || echo "  -f, --force   Force config reload, even if it is unchanged"
     exit 0
   fi
+  [ ! -f "${STUB_TLS_STATE:?}/caddy-reload-fails" ] || exit 1
   cp "${STUB_TLS_LIVE:?}" "${STUB_TLS_STATE:?}/served.pem"
 fi
 exit 0

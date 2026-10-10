@@ -370,7 +370,7 @@ test_tls_fix_check_reports_problems_read_only() {
     assert_eq 1 "$RC" "--check exits 1 on a broken hub"
     assert_contains "$OUT" "on disk: serial $(tls_serial "${TLS_LE}/archive/${TLS_DOMAIN}/cert2.pem")" "reports the disk serial"
     assert_contains "$OUT" "notAfter" "reports notAfter"
-    assert_contains "$OUT" "PROBLEM: no deploy hook reloads Caddy after a renewal" "reports the missing hook"
+    assert_contains "$OUT" "PROBLEM: the scion deploy hook is not installed" "reports the missing hook"
     assert_contains "$OUT" "certbot.timer: disabled" "reports the timer state"
     assert_contains "$OUT" "broken inline renew_hook present" "reports the broken inline hook"
     assert_contains "$OUT" "Caddy runs as user ${TLS_CADDY_USER}" "finds the Caddy user"
@@ -464,42 +464,38 @@ test_tls_fix_existing_reload_hook_is_kept() {
     EXTRA_ENV=()
     tls_fake_root 60 false
     tls_make_readable
-    printf '%s\n' '#!/bin/bash' 'systemctl reload caddy' > "${TLS_HOOKS}/reload-caddy.sh"
-    chmod 0755 "${TLS_HOOKS}/reload-caddy.sh"
+    tls_hook reload-caddy.sh 'systemctl reload caddy'
+    local note="note:    existing hook reload-caddy.sh also appears to reload Caddy; Caddy will be reloaded twice per renewal, which is harmless; you may move it aside: sudo mv /etc/letsencrypt/renewal-hooks/deploy/reload-caddy.sh /root/reload-caddy.sh.bak"
 
     run_fix --check
-    assert_contains "$OUT" "existing reload hook: reload-caddy.sh" "--check names the existing hook"
-    assert_not_contains "$OUT" "no deploy hook reloads Caddy" "our missing hook is not a problem"
-    assert_contains "$OUT" "does not set group or owner caddy. That is usually fine" "notes the hook sets no group"
+    assert_eq 1 "$RC" "--check fails while our hook is missing"
+    assert_contains "$OUT" "${note}" "--check notes the existing hook"
+    assert_contains "$OUT" "PROBLEM: the scion deploy hook is not installed" "our missing hook is always a problem"
+
+    run_fix --dry-run
+    assert_contains "$OUT" "[dry-run] would install the deploy hook" "--dry-run plans our hook anyway"
 
     run_fix
     assert_eq 0 "$RC" "run succeeds"
-    if [[ -e "${TLS_HOOKS}/scion-reload-caddy.sh" ]]; then fail "no second hook installed"; else pass; fi
+    if [[ -x "${TLS_HOOKS}/scion-reload-caddy.sh" ]]; then pass; else fail "our hook is installed anyway"; fi
     if [[ -x "${TLS_HOOKS}/reload-caddy.sh" ]]; then pass; else fail "existing hook left in place"; fi
+    assert_contains "$OUT" "${note}" "the run notes the existing hook"
+
+    # Both hooks present: a plain run is a no-op and --check passes.
     local before
     before="$(tls_snapshot)"
     : > "${STUB_LOG}"
     run_fix
+    assert_eq 0 "$RC" "second run succeeds"
     assert_contains "$OUT" "Result: nothing to change." "second run changes nothing"
     assert_eq "$before" "$(tls_snapshot)" "second run leaves every file alone"
-
-    run_fix --replace-hook
-    assert_eq 0 "$RC" "--replace-hook succeeds"
-    if [[ -x "${TLS_HOOKS}/scion-reload-caddy.sh" ]]; then pass; else fail "--replace-hook installs ours"; fi
-    if [[ -x "${TLS_HOOKS}/reload-caddy.sh" ]]; then pass; else fail "--replace-hook does not delete theirs"; fi
-    assert_contains "$OUT" "move each deploy hook listed above out of /etc/letsencrypt/renewal-hooks/deploy with a backup" "tells the operator how to move theirs aside"
-
-    # Both hooks present: a plain run is a no-op and --check passes.
-    before="$(tls_snapshot)"
-    : > "${STUB_LOG}"
-    run_fix
-    assert_eq 0 "$RC" "plain run after --replace-hook succeeds"
-    assert_contains "$OUT" "Result: nothing to change." "plain run after --replace-hook changes nothing"
-    assert_eq "$before" "$(tls_snapshot)" "plain run after --replace-hook leaves every file alone"
-    assert_eq "" "$(mutating_calls)" "plain run after --replace-hook makes no mutating call"
+    assert_eq "" "$(mutating_calls)" "second run makes no mutating call"
     run_fix --check
     assert_eq 0 "$RC" "--check passes with both hooks present"
-    assert_contains "$OUT" "existing reload hook: reload-caddy.sh" "still reports their hook"
+    assert_contains "$OUT" "${note}" "--check still notes their hook"
+
+    run_fix --replace-hook
+    assert_eq 2 "$RC" "--replace-hook is gone (always the default now)"
 }
 
 test_tls_fix_inline_hook_content_is_not_printed() {
@@ -513,7 +509,8 @@ test_tls_fix_inline_hook_content_is_not_printed() {
     for mode in --check --dry-run ""; do
         run_fix ${mode:+"$mode"}
         assert_not_contains "$OUT" "TOPSECRET" "${mode:-apply}: inline hook content not shown"
-        assert_contains "$OUT" "an inline renew_hook is present (content not shown); it reloads Caddy: not matched" "${mode:-apply}: says only whether it matched"
+        assert_contains "$OUT" "an inline renew_hook is present (content not shown); left alone" "${mode:-apply}: names it without content"
+        assert_not_contains "$OUT" "inline renew_hook also appears to reload" "${mode:-apply}: not taken for a reload"
     done
     assert_contains "$(cat "${TLS_CONF}")" "TOPSECRET-TOKEN-123" "the unrelated inline hook is left alone"
 }
@@ -624,7 +621,7 @@ test_tls_fix_help_hides_test_root() {
     EXTRA_ENV=()
     tls_fake_root 60 false
     run_fix --help
-    assert_contains "$OUT" "--replace-hook" "documents --replace-hook"
+    assert_not_contains "$OUT" "--replace-hook" "--replace-hook is gone"
     assert_not_contains "$OUT" "--root" "--root is not in the usage"
     assert_not_contains "$OUT" "FIX_TLS_ROOT" "FIX_TLS_ROOT is not in the usage"
 }
@@ -648,29 +645,38 @@ test_tls_fix_commented_or_echoed_reload_is_not_a_hook() {
         tls_hook reload-caddy.sh "$body"
         run_fix --check
         assert_eq 1 "$RC" "[${body}] --check fails"
-        assert_contains "$OUT" "PROBLEM: no deploy hook reloads Caddy after a renewal" "[${body}] reported as a problem"
-        assert_not_contains "$OUT" "existing reload hook" "[${body}] not counted as a reload hook"
+        assert_contains "$OUT" "PROBLEM: the scion deploy hook is not installed" "[${body}] our missing hook is a problem"
+        assert_contains "$OUT" "deploy hook reload-caddy.sh does not appear to reload Caddy" "[${body}] reported as not reloading"
+        assert_not_contains "$OUT" "also appears to reload Caddy" "[${body}] no double-reload note"
         run_fix
         if [[ -x "${TLS_HOOKS}/scion-reload-caddy.sh" ]]; then pass; else fail "[${body}] our hook is installed"; fi
     done
 }
 
-test_tls_fix_caddy_reload_without_force_is_not_a_hook() {
-    EXTRA_ENV=()
-    tls_fake_root 60 false
-    tls_make_readable
-    tls_hook reload-caddy.sh 'caddy reload --config /etc/caddy/Caddyfile'
-    run_fix --check
-    assert_contains "$OUT" "PROBLEM: no deploy hook reloads Caddy after a renewal" "unforced caddy reload does not count"
-    assert_contains "$OUT" "reload-caddy.sh runs 'caddy reload' without --force" "notes the missing --force"
-    run_fix
-    if [[ -x "${TLS_HOOKS}/scion-reload-caddy.sh" ]]; then pass; else fail "our hook is installed"; fi
+test_tls_fix_caddy_reload_force_only_in_its_segment() {
+    local body
+    # --force (or -f) of another command does not make `caddy reload` forced.
+    for body in 'caddy reload --config /etc/caddy/Caddyfile; rm --force /tmp/stale' \
+        'caddy reload --config /etc/caddy/Caddyfile && cp -f /tmp/a /tmp/b' \
+        'caddy reload --config /etc/caddy/Caddyfile'; do
+        EXTRA_ENV=()
+        tls_fake_root 60 false
+        tls_make_readable
+        tls_hook reload-caddy.sh "$body"
+        run_fix --check
+        assert_contains "$OUT" "existing hook reload-caddy.sh runs 'caddy reload' without --force" "[${body}] reported as unforced"
+        assert_not_contains "$OUT" "also appears to reload Caddy" "[${body}] not reported as a reload"
+        assert_contains "$OUT" "PROBLEM: the scion deploy hook is not installed" "[${body}] our missing hook is a problem"
+        run_fix
+        if [[ -x "${TLS_HOOKS}/scion-reload-caddy.sh" ]]; then pass; else fail "[${body}] our hook is installed"; fi
+    done
 
     tls_fake_root 60 false
     tls_make_readable
-    tls_hook reload-caddy.sh 'caddy reload --config /etc/caddy/Caddyfile --force'
+    tls_hook reload-caddy.sh 'caddy reload --config /etc/caddy/Caddyfile --force; logger done'
     run_fix --check
-    assert_contains "$OUT" "existing reload hook: reload-caddy.sh" "caddy reload --force counts"
+    assert_contains "$OUT" "existing hook reload-caddy.sh also appears to reload Caddy" "caddy reload --force is reported as a reload"
+    assert_contains "$OUT" "PROBLEM: the scion deploy hook is not installed" "and our hook is still required"
 }
 
 test_tls_fix_symlinked_hook_is_detected() {
@@ -682,8 +688,75 @@ test_tls_fix_symlinked_hook_is_detected() {
     chmod 0755 "${TLS_ROOT}/usr/local/bin/reload-caddy"
     ln -s ../../../../usr/local/bin/reload-caddy "${TLS_HOOKS}/reload-caddy"
     run_fix --check
-    assert_contains "$OUT" "existing reload hook: reload-caddy" "a symlinked hook is detected"
-    assert_not_contains "$OUT" "no deploy hook reloads Caddy" "and covers the reload"
+    assert_contains "$OUT" "existing hook reload-caddy also appears to reload Caddy" "a symlinked hook is detected"
+}
+
+# tls_run_hook -- runs the installed hook as certbot would; sets OUT and RC.
+tls_run_hook() {
+    OUT="$(env PATH="${TESTS_DIR}/lib-tls:${PATH}" STUB_REAL_OPENSSL="$(command -v openssl)" \
+        FIX_TLS_ROOT="${TLS_ROOT}" STUB_CADDY_USER="${TLS_CADDY_USER}" \
+        STUB_CADDY_GROUP="${TLS_CADDY_GROUP}" \
+        STUB_TLS_LIVE="${TLS_LE}/live/${TLS_DOMAIN}/fullchain.pem" \
+        RENEWED_LINEAGE="${TLS_LE}/live/${TLS_DOMAIN}" "${TLS_HOOKS}/scion-reload-caddy.sh" 2>&1)"
+    RC=$?
+}
+
+test_tls_hook_failed_reload_exits_non_zero() {
+    EXTRA_ENV=()
+    tls_fake_root 60 false
+    tls_make_readable
+    run_fix
+
+    # systemd branch: systemctl reload caddy fails.
+    : > "${STUB_TLS_STATE}/reload-fails"
+    tls_run_hook
+    assert_ne 0 "$RC" "systemd: hook exits non-zero when the reload fails"
+    assert_not_contains "$OUT" "reloaded Caddy" "systemd: does not claim a reload"
+    assert_contains "$OUT" "scion-reload-caddy: ERROR: reload failed (systemctl reload caddy)" "systemd: prints the error"
+    rm -f "${STUB_TLS_STATE}/reload-fails"
+
+    # systemd branch, unit without --force: caddy reload --force fails.
+    : > "${STUB_TLS_STATE}/execreload-no-force"
+    : > "${STUB_TLS_STATE}/caddy-reload-fails"
+    tls_run_hook
+    assert_ne 0 "$RC" "systemd, no --force unit: hook exits non-zero"
+    assert_not_contains "$OUT" "reloaded Caddy" "systemd, no --force unit: does not claim a reload"
+    assert_contains "$OUT" "ERROR: reload failed (caddy reload --force)" "systemd, no --force unit: prints the error"
+
+    # Not under systemd: caddy reload --force fails.
+    rm -f "${STUB_TLS_STATE}/active-caddy" "${STUB_TLS_STATE}/unit-caddy"
+    tls_run_hook
+    assert_ne 0 "$RC" "no systemd: hook exits non-zero when the reload fails"
+    assert_not_contains "$OUT" "reloaded Caddy" "no systemd: does not claim a reload"
+    assert_not_contains "$OUT" "not running" "no systemd: does not fall through to 'not running'"
+    assert_contains "$OUT" "ERROR: reload failed (caddy reload --config /etc/caddy/Caddyfile --force)" "no systemd: prints the error"
+
+    # Not under systemd and the reload works.
+    rm -f "${STUB_TLS_STATE}/caddy-reload-fails"
+    tls_run_hook
+    assert_eq 0 "$RC" "no systemd: hook exits 0 when the reload works"
+    assert_contains "$OUT" "reloaded Caddy (not under systemd)" "no systemd: says it reloaded"
+}
+
+test_tls_fix_missing_timer_is_a_problem() {
+    EXTRA_ENV=()
+    tls_fake_root 60 false
+    tls_make_readable
+    rm -f "${STUB_TLS_STATE}/unit-certbot.timer"
+    run_fix --check
+    assert_eq 1 "$RC" "--check fails without a renewal timer"
+    assert_contains "$OUT" "PROBLEM: no certbot.timer or snap.certbot.renew.timer" "names the missing timer"
+}
+
+test_tls_fix_failed_reload_is_a_problem() {
+    EXTRA_ENV=()
+    tls_fake_root 60 true
+    tls_make_readable
+    : > "${STUB_TLS_STATE}/reload-fails"
+    run_fix
+    assert_eq 1 "$RC" "the run exits 1 when the reload fails"
+    assert_contains "$OUT" "PROBLEM: reloading Caddy failed" "reports the failed reload"
+    assert_not_contains "$OUT" "reloaded Caddy (" "does not claim a reload"
 }
 
 test_tls_hook_reloads_even_when_permissions_fail() {
