@@ -302,10 +302,30 @@ describe('PullToRefreshController', () => {
     const pinch = touch(scroller, 'touchmove', [{ y: PAST + 10 }, { y: 300, id: 1 }]);
     expect(pinch.defaultPrevented).toBe(false);
     expect(ctl.state.distance).toBe(0);
+    // The first finger lifts; the second (id 1) stays down and moves on.
     touch(scroller, 'touchend', [{ y: 300, id: 1 }]);
-    const after = touch(scroller, 'touchmove', [{ y: PAST + 40 }]);
+    const after = touch(scroller, 'touchmove', [{ y: PAST + 40, id: 1 }]);
     touch(scroller, 'touchend', []);
     expect(after.defaultPrevented).toBe(false);
+    expect(onRefresh).not.toHaveBeenCalled();
+    expect(ctl.state).toEqual({ distance: 0, armed: false, refreshing: false });
+  });
+
+  it('a second finger seen only in touchmove gives up a dropped pull too', () => {
+    touch(scroller, 'touchstart', [{ y: 0 }]);
+    touch(scroller, 'touchmove', [{ y: PAST / 2 }]);
+    touch(scroller, 'touchmove', [{ y: PAST }]);
+    expect(ctl.state.armed).toBe(true);
+    // Turned sideways: dropped, still claimed.
+    touch(scroller, 'touchmove', [{ x: PAST + 150, y: PAST }]);
+    expect(ctl.state.distance).toBe(0);
+    // A second finger whose touchstart went elsewhere.
+    const pinch = touch(scroller, 'touchmove', [
+      { x: PAST + 150, y: PAST },
+      { y: 300, id: 1 },
+    ]);
+    touch(scroller, 'touchend', []);
+    expect(pinch.defaultPrevented).toBe(false);
     expect(onRefresh).not.toHaveBeenCalled();
     expect(ctl.state).toEqual({ distance: 0, armed: false, refreshing: false });
   });

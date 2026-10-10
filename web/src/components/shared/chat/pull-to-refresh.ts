@@ -31,6 +31,8 @@
  * its moves stop propagating past the listening element, so an ancestor's
  * horizontal swipe (the chat page's panel swipe) never latches on to it. A
  * pull that turns sideways is dropped, not refreshed, and stays claimed.
+ * The one exception is a second finger: it gives up the touch entirely
+ * (pull or dropped), leaving the pinch to the browser.
  */
 
 /** What the indicator should show. */
@@ -76,8 +78,8 @@ export class PullToRefreshController {
   private start: { x: number; y: number; id: number } | null = null;
   /**
    * 'pull' once the touch is a downward pull at the top; 'dropped' once a
-   * pull turned sideways (still claimed, never fires); 'ignore' once it is
-   * anything else.
+   * pull turned sideways (still claimed, never fires, until a second finger
+   * gives the touch up); 'ignore' once it is anything else.
    */
   private mode: 'pending' | 'pull' | 'dropped' | 'ignore' = 'pending';
   private distance = 0;
@@ -197,6 +199,9 @@ export class PullToRefreshController {
     const touches = (e as TouchEvent).touches;
     // A second finger that landed outside the listening element sent its
     // touchstart elsewhere; it shows up here first. Give up as on touchstart.
+    // Moves then propagate again, even for a pull that was dropped, so
+    // keeping the page's panel swipe from firing relies on chat.ts
+    // abandoning multi-touch gestures itself (abandonTouchForPinch).
     if (touches.length > 1) {
       this.start = null;
       this.mode = 'ignore';
