@@ -41,7 +41,7 @@ func (r *readStateBatchRecorder) GetReadStates(_ context.Context, _ string, keys
 // looping without advancing.
 func TestChatUnreadCount_ReadStatesBatchNonPositive(t *testing.T) {
 	keys := []string{"a", "b", "c"}
-	for _, batch := range []int{0, -1} {
+	for _, batch := range []int{-1, 0} {
 		rec := &readStateBatchRecorder{}
 		got, err := chatReadStatesBatched(context.Background(), rec, "u1", keys, batch)
 		require.NoError(t, err)
