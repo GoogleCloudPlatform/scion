@@ -2,7 +2,7 @@
 
 ## Status
 
-**Decided** (2026-10-10). Implementation in progress; invariants I2-I5 are targets, not current behaviour. Implementation children are tracked on the epic ptone/scion#4215.
+**Decided** (2026-10-10). Implementation in progress; invariants I1-I5 are targets, not current behaviour. Implementation children are tracked on the epic ptone/scion#4215.
 
 This document supersedes the template `config` field described in [`hosted/hosted-templates.md`](hosted/hosted-templates.md) (sections 4.1, 5.1, 7.4 and 10.1).
 
@@ -67,6 +67,6 @@ The model-precedence, harness-config-key and telemetry-policy outcomes are user-
 ## 6. References
 
 - Epic: ptone/scion#4215 (implementation children are tracked on the epic)
-- Earlier per-path fixes: ptone/scion#2093, ptone/scion#4125
+- Earlier per-path work: ptone/scion#2093, ptone/scion#4125
 - Superseded sections: [`hosted/hosted-templates.md`](hosted/hosted-templates.md)
 - Broker harness-config resolution: `pkg/config/resolve_harness_config.go`
