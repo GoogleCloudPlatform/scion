@@ -1329,17 +1329,31 @@ export class ScionPageChat extends LitElement {
        * The compact row holds at most four buttons, so each gets a full
        * 44px visible box, kept apart by the actions row's gap, in place of
        * the hit-area extension above, which would overlap a neighbour at
-       * this size. The row's inline padding shrinks to match: the 44px
-       * boxes already keep the icons clear of the screen edge. The full
-       * row is not touched: HEADER_ACTION_PX still sizes it.
+       * this size.
+       *
+       * The header's inline padding is 0.25rem in the mobile layout in
+       * BOTH states, full and compact, never per state: the ResizeObserver
+       * in observeConversationHeader measures the content box, which
+       * excludes padding, and isCompactHeaderWidth folds from that width.
+       * Padding or a border that differed between the states would make
+       * the measured width jump on every fold, and at some widths flip
+       * the row back and forth. The compact rule only changes block
+       * padding, which the width does not see. HEADER_ACTION_PX and the
+       * fold logic are unchanged; the full mobile row gets the smaller
+       * inline padding too.
        *
        * Nothing here depends on the keyboard (--scion-kb-open,
        * --scion-chat-tight): the header stays the same height when the
        * keyboard opens, so the thread below it and the composer's field
        * cap (composer-room.ts) see no jump at the tight threshold.
        */
+      .v2-thread-header {
+        padding-inline: 0.25rem;
+      }
+
+      /* Block padding only: the 44px boxes give the row its height. */
       .v2-thread-header.compact {
-        padding: 0.25rem;
+        padding-block: 0.25rem;
         gap: 0.25rem;
       }
 

@@ -17,12 +17,13 @@
 /**
  * The phone conversation header (the compact row in the mobile layout):
  * the conversation name leads with the project beneath it, a long name
- * wraps instead of being cut at one line, every action keeps a separate
- * 44px touch target, and nothing in the header depends on the keyboard,
- * so opening it never changes the header's height under the thread's
- * composer sizing (composer-room.ts). Layout itself needs a real browser
- * and device; these tests check the markup and style contracts that
- * produce it.
+ * wraps to a bounded number of lines instead of being cut at one, every
+ * action keeps a separate 44px touch target, the fold between the full
+ * and compact rows measures the same inline box in both states, and
+ * nothing in the header depends on the keyboard, so opening it never
+ * changes the header's height under the thread's composer sizing
+ * (composer-room.ts). These are static markup and style contracts; they
+ * are not geometry, rendering or device evidence.
  */
 
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
@@ -100,7 +101,7 @@ function phonePageWithAgentDM(peerName: string): any {
 }
 
 describe('phone conversation header — markup', () => {
-  it('keeps the full name and project as visible text, and every row action labelled', () => {
+  it('keeps the full name and project in the DOM text (visual is clamped) and labels every row action', () => {
     const name = '会話のとても長いエージェント名 with-a-very-long-unbroken-identifier-0123456789';
     const page = phonePageWithAgentDM(name);
     const header = renderToFragment(page.renderV2Conversation()).querySelector(
@@ -108,8 +109,10 @@ describe('phone conversation header — markup', () => {
     );
 
     expect(header?.classList.contains('compact')).toBe(true);
-    // The whole name and project are in the text, not only in a title
-    // attribute that a touch screen cannot hover.
+    // The complete name and project strings are present in the DOM text,
+    // not only in a title attribute that a touch screen cannot hover. This
+    // checks text presence only: the visible name is clamped to two lines
+    // and the crumb to one, which a static test cannot measure.
     expect(header?.querySelector('.conv-name .conv-text')?.textContent?.trim()).toBe(name);
     expect(header?.querySelector('.conv-crumb .conv-text')?.textContent?.trim()).toBe(
       'a-project-with-a-long-slug'
@@ -143,6 +146,12 @@ describe('phone conversation header — style contract', () => {
   it('lets a long or CJK name wrap to a bounded number of lines instead of one cut line', () => {
     const body = mobileRule('.v2-thread-header.compact .conv-name .conv-text');
     expect(decl(body, 'white-space')).toBe('normal');
+    // The clamp only takes effect on a vertical -webkit-box that clips its
+    // overflow; without any of these the name would wrap without limit.
+    expect(decl(body, 'display')).toBe('-webkit-box');
+    expect(decl(body, '-webkit-box-orient')).toBe('vertical');
+    const overflow = decl(body, 'overflow') ?? decl(rules.get('.conv-text'), 'overflow');
+    expect(overflow).toBe('hidden');
     // Unspaced identifiers and CJK runs can break anywhere rather than overflow.
     expect(decl(body, 'overflow-wrap')).toBe('anywhere');
     const lines = Number(decl(body, '-webkit-line-clamp'));
@@ -158,6 +167,44 @@ describe('phone conversation header — style contract', () => {
     expect(
       decl(mobileRule('.v2-thread-header.compact sl-icon-button::part(base)::before'), 'inset')
     ).toBe('0');
+  });
+
+  it('measures the same inline box for the fold in the full and compact states', () => {
+    // observeConversationHeader folds from the header's content-box width,
+    // which excludes padding and borders. Any inline padding, border or
+    // box-sizing that applies to one state only would make that width jump
+    // on each fold and could flip the row back and forth. Block padding
+    // does not affect the width and is allowed per state.
+    const inlineBox = new Set([
+      'padding',
+      'padding-left',
+      'padding-right',
+      'padding-inline',
+      'padding-inline-start',
+      'padding-inline-end',
+      'border',
+      'border-left',
+      'border-right',
+      'border-inline',
+      'border-inline-start',
+      'border-inline-end',
+      'border-width',
+      'border-style',
+      'border-left-width',
+      'border-right-width',
+      'box-sizing',
+    ]);
+    const perState = /\.v2-thread-header(\.compact|:not\(\.compact\))$/;
+    for (const [key, body] of rules) {
+      if (!perState.test(key)) continue;
+      for (const part of body.split(';')) {
+        const prop = part.slice(0, part.indexOf(':')).trim();
+        expect(inlineBox.has(prop), `${key} sets ${prop}`).toBe(false);
+      }
+    }
+    // The phone padding is set once for the header, so both states share it
+    // and it replaces the base rule's inline padding in each.
+    expect(decl(mobileRule('.v2-thread-header'), 'padding-inline')).toBeTruthy();
   });
 
   it('makes no header rule depend on the keyboard state', () => {
