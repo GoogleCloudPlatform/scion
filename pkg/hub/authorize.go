@@ -569,7 +569,13 @@ func (s *Server) agentLifecycleAllowed(ctx context.Context, identity Identity, t
 // through Decide. A caller without it sees only history it participates in,
 // subject to agent.read.
 func (s *Server) agentFullHistoryDecision(ctx context.Context, identity Identity, agent *store.Agent) Decision {
-	return s.authzService.Decide(ctx, AuthzRequest{
+	return agentFullHistoryDecide(ctx, s.authzService, identity, agent)
+}
+
+// agentFullHistoryDecide is agentFullHistoryDecision for callers that hold
+// an AuthzService but not a Server (the web events stream).
+func agentFullHistoryDecide(ctx context.Context, authz *AuthzService, identity Identity, agent *store.Agent) Decision {
+	return authz.Decide(ctx, AuthzRequest{
 		Principal:  principalContextForIdentity(identity),
 		Credential: credentialContextForIdentity(identity),
 		Resource:   agentResource(agent),

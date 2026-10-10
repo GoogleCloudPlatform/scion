@@ -63,9 +63,15 @@ type Options struct {
 
 // DefaultExcludePatterns are always excluded from project sync.
 // These match the patterns used by the hub's WebDAV endpoint.
+//
+// The patterns use rclone filter syntax. ".scion/**" only matches paths
+// under a .scion directory, so a bare .scion marker file at the project
+// root (used by non-git projects) needs its own rule. "/.scion" is anchored
+// to the root, matching the hub, which hides only a top-level .scion entry.
 var DefaultExcludePatterns = []string{
 	".git/**",
 	".scion/**",
+	"/.scion",
 	"node_modules/**",
 	"*.env",
 }
@@ -107,15 +113,8 @@ func Sync(ctx context.Context, opts Options) (*Result, error) {
 
 	// Set up file exclusion filters
 	ctx, fi := filter.AddConfig(ctx)
-	for _, pattern := range DefaultExcludePatterns {
-		if err := fi.Add(false, pattern); err != nil {
-			return nil, fmt.Errorf("failed to add default exclude pattern %q: %w", pattern, err)
-		}
-	}
-	for _, pattern := range opts.ExcludePatterns {
-		if err := fi.Add(false, pattern); err != nil {
-			return nil, fmt.Errorf("failed to add exclude pattern %q: %w", pattern, err)
-		}
+	if err := addExcludeRules(fi, opts.ExcludePatterns); err != nil {
+		return nil, err
 	}
 
 	// Create filesystems
@@ -164,4 +163,20 @@ func Sync(ctx context.Context, opts Options) (*Result, error) {
 func buildWebDAVURL(hubEndpoint, projectID string) string {
 	base := strings.TrimRight(hubEndpoint, "/")
 	return fmt.Sprintf("%s/api/v1/projects/%s/dav", base, projectID)
+}
+
+// addExcludeRules adds the default exclude patterns, followed by any extra
+// patterns, to fi as rclone exclude rules.
+func addExcludeRules(fi *filter.Filter, extra []string) error {
+	for _, pattern := range DefaultExcludePatterns {
+		if err := fi.Add(false, pattern); err != nil {
+			return fmt.Errorf("failed to add default exclude pattern %q: %w", pattern, err)
+		}
+	}
+	for _, pattern := range extra {
+		if err := fi.Add(false, pattern); err != nil {
+			return fmt.Errorf("failed to add exclude pattern %q: %w", pattern, err)
+		}
+	}
+	return nil
 }

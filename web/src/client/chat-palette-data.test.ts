@@ -508,7 +508,7 @@ describe('ChatPaletteDataController: Agents group from the agent store', () => {
     expect(apiFetchMock.mock.calls.map((c) => c[0])).toEqual(['/api/v1/chat/dms']);
   });
 
-  it('asks the store for the hub entry with its own abort signal', async () => {
+  it('asks the store for the hub entry with its own abort signal', () => {
     const ensure = vi.fn<PaletteAgentSource['ensure']>(() => new Promise(() => {}));
     const controller = new ChatPaletteDataController({ ensure, peek: () => undefined });
     void controller.loadAgentsGroup();
@@ -595,7 +595,7 @@ describe('ChatPaletteDataController: Agents group from the agent store', () => {
     expect(pending[0]?.signal?.aborted).toBe(true);
   });
 
-  it("starting a new load aborts the previous load's signal", async () => {
+  it("starting a new load aborts the previous load's signal", () => {
     const { source, pending } = fakeAgentSource();
     const controller = new ChatPaletteDataController(source);
     controller.loadAgentsGroup().catch(() => {});

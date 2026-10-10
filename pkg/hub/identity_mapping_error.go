@@ -53,7 +53,9 @@ type identityMappingError struct {
 // written for its operator and is not passed on.
 func identityMappingDispatchError(err error) (identityMappingError, bool) {
 	var se *brokerStatusError
-	if !errors.As(err, &se) || se.StatusCode != http.StatusBadRequest {
+	// se == nil covers a typed nil (*brokerStatusError)(nil) wrapped in a
+	// non-nil error, which errors.As accepts.
+	if !errors.As(err, &se) || se == nil || se.StatusCode != http.StatusBadRequest {
 		return identityMappingError{}, false
 	}
 	code := se.brokerErrorCode()
@@ -157,4 +159,27 @@ func identityMappingFailureText(err error) (string, bool) {
 		return "", false
 	}
 	return ime.Code + ": " + ime.Message, true
+}
+
+// dispatchFailureText is the text recorded or warned for a failed broker
+// dispatch, wherever the failure is reported as text rather than as an HTTP
+// response: a reincarnation record, and the warning of a provision-only
+// create. It is the hub's identity_not_mapped or identity_ksa_mismatch
+// message for a Kubernetes identity mapping refusal (ptone/scion#4024),
+// otherwise err's own text, and "" for a nil err or a typed nil
+// *brokerStatusError.
+func dispatchFailureText(err error) string {
+	if err == nil {
+		return ""
+	}
+	// A typed nil *brokerStatusError, direct or wrapped, is a non-nil error
+	// whose Error method would dereference the nil pointer.
+	var se *brokerStatusError
+	if errors.As(err, &se) && se == nil {
+		return ""
+	}
+	if text, ok := identityMappingFailureText(err); ok {
+		return text
+	}
+	return err.Error()
 }

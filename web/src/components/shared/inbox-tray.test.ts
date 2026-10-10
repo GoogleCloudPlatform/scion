@@ -35,7 +35,7 @@ vi.mock('../../client/api.js', () => ({
 
 const POLL_MS = 5 * 60_000;
 const LIST_URL = '/api/v1/messages?unread=true';
-const fetchMock = apiFetch as unknown as ReturnType<typeof vi.fn>;
+const fetchMock = vi.mocked(apiFetch);
 
 let server: any[] = [];
 let trays: any[] = [];

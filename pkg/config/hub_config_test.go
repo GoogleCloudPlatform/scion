@@ -102,7 +102,7 @@ database:
   url: "postgres://localhost:5432/scion"
 
 logLevel: debug
-logFormat: json
+logFormat: json # ignored
 `
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
 		t.Fatalf("failed to write config file: %v", err)
@@ -137,9 +137,8 @@ logFormat: json
 		t.Errorf("expected log level 'debug', got %q", cfg.LogLevel)
 	}
 
-	if cfg.LogFormat != "json" {
-		t.Errorf("expected log format 'json', got %q", cfg.LogFormat)
-	}
+	// logFormat is no longer a GlobalConfig field (ptone/scion#4103); a
+	// legacy file that still sets it must load without error.
 }
 
 func TestLoadGlobalConfigFromDirectory(t *testing.T) {
@@ -321,7 +320,6 @@ func TestEnvKeyToConfigKey(t *testing.T) {
 		{"AUTH_PROXY_REQUIRETRUSTEDPROXYIP", "auth.proxy.requireTrustedProxyIP"},
 		{"AUTH_PROXY_IAP_JWKSURL", "auth.proxy.iap.jwksURL"},
 		{"LOGLEVEL", "logLevel"},
-		{"LOGFORMAT", "logFormat"},
 		{"SECRETS_BACKEND", "secrets.backend"},
 		{"SECRETS_GCPPROJECTID", "secrets.gcpProjectId"},
 		{"SECRETS_GCPCREDENTIALS", "secrets.gcpCredentials"},

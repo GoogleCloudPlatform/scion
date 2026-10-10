@@ -163,7 +163,7 @@ describe('resource list: Refresh All from Source', () => {
     });
     expect(out).toEqual([10, 20, 30, 40, 50, 60, 70]);
     expect(maxInFlight).toBe(3);
-    expect(await runWithConcurrency([], 4, async (n: number) => n)).toEqual([]);
+    expect(await runWithConcurrency([], 4, (n: number) => Promise.resolve(n))).toEqual([]);
   });
 
   it('still offers it for harness configs with any source', async () => {

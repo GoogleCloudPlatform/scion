@@ -296,7 +296,7 @@ When managing `tmux` or similar session managers:
 | `SCION_HUB_ENDPOINT` | URL for the centralized hub | — |
 | `SCION_AGENT_ID` | Unique agent identifier (required for hosted mode) | — |
 | `SCION_HEARTBEAT_INTERVAL` | Hub heartbeat interval (hosted mode) | `30s` |
-| `SCION_LOG_LEVEL` | Logging verbosity: `debug`, `info`, `warn`, `error` | `info` |
+| `SCION_DEBUG` | Any non-empty value enables debug logging (`--log-level debug` does the same). `SCION_LOG_LEVEL` is not read by sciontool. | unset |
 | `SCION_OTEL_ENDPOINT` | OTel backend endpoint | — |
 | `SCION_GRACE_PERIOD` | Shutdown grace period | `10s` |
 
