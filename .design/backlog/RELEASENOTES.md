@@ -11,6 +11,18 @@
 - All container images built and published to Artifact Registry (core-base, scion-base, scion-claude, scion-gemini, scion-opencode, scion-codex)
 
 ### Changed
+- **Session-end metrics are kept until sent; mixed agent images can drop unsent ones.** A finished
+  session's summary now stays in the agent's session state file (`~/.scion/session-metrics.json`)
+  until a send has been attempted, so a report survives the hook or init process being killed and
+  is sent later by another hook or by the init daemon. Agent images built before this change do not
+  know about these unsent reports: if an agent home last used by a newer image is started on an
+  older one (an image rollback, or a staged rollout where some templates or brokers still use older
+  images), the older `sciontool` rewrites or deletes the state file without them, and those reports
+  are lost. They are never sent twice, because older images never send them. Upgrading from an
+  older image to a newer one is safe. To avoid the loss, update all agent images together and avoid
+  rolling an agent back across this change; otherwise expect a small loss of session metrics for
+  agents that move between image versions. Nothing else in the state file, and no other metrics or
+  agent behaviour, is affected.
 - **Eight broker authentication event types begin emitting.** `register`, `deregister`, `join`,
   `rotate`, `revoke`, `link`, `unlink` and **`auth_failure`** produce log records again. They have
   emitted **nothing at all** until now, so **plan for the added log volume** — anything consuming
