@@ -475,40 +475,61 @@ func refuseUnusableProvisionerYAML(w http.ResponseWriter, name string, configYAM
 	return false
 }
 
-// unusableProvisionerImportError is returned by the import driver when a
-// discovered harness-config declares an unusable provisioner block. The
+// unusableProvisionerImportError is returned by the import driver when one or
+// more discovered harness-configs declare an unusable provisioner block. The
 // import is refused before anything is persisted.
 type unusableProvisionerImportError struct {
-	perr *harness.UnusableProvisionerError
+	// perrs holds one refusal per unusable harness-config, ordered by name.
+	perrs []*harness.UnusableProvisionerError
 }
 
 // Error returns the public message, which carries no filesystem paths, since
 // the streaming import endpoints send it to the client as-is.
-func (e *unusableProvisionerImportError) Error() string { return e.perr.PublicMessage() }
+func (e *unusableProvisionerImportError) Error() string { return e.publicMessage() }
+
+// publicMessage joins the public message of every refused harness-config.
+func (e *unusableProvisionerImportError) publicMessage() string {
+	msgs := make([]string, 0, len(e.perrs))
+	for _, perr := range e.perrs {
+		msgs = append(msgs, perr.PublicMessage())
+	}
+	return strings.Join(msgs, " ")
+}
 
 // writeUnusableProvisionerImportError writes the finalize-equivalent 422 and
 // returns true when err is an unusableProvisionerImportError.
 func writeUnusableProvisionerImportError(w http.ResponseWriter, err error) bool {
 	var ierr *unusableProvisionerImportError
 	if errors.As(err, &ierr) {
-		writeUnusableProvisioner(w, ierr.perr)
+		writeError(w, http.StatusUnprocessableEntity, harnessConfigUnusableErrorCode, ierr.publicMessage(), nil)
 		return true
 	}
 	return false
 }
 
-// checkHarnessConfigDirProvisioner applies unusableProvisionerInYAML to the
-// config.yaml of a discovered harness-config directory. A config.yaml that
-// cannot be read is left to the existing import handling.
-func checkHarnessConfigDirProvisioner(name, dir string) error {
-	data, err := os.ReadFile(filepath.Join(dir, "config.yaml"))
-	if err != nil {
+// checkHarnessConfigDirsProvisioner applies unusableProvisionerInYAML to the
+// config.yaml of every discovered harness-config directory and returns one
+// unusableProvisionerImportError naming all refused configs, ordered by name,
+// or nil when none is refused. A config.yaml that cannot be read is left to
+// the existing import handling.
+func checkHarnessConfigDirsProvisioner(dirs []resourceDir) error {
+	var perrs []*harness.UnusableProvisionerError
+	for _, rd := range dirs {
+		data, err := os.ReadFile(filepath.Join(rd.path, "config.yaml"))
+		if err != nil {
+			continue
+		}
+		if perr := unusableProvisionerInYAML(rd.name, data); perr != nil {
+			perrs = append(perrs, perr)
+		}
+	}
+	if len(perrs) == 0 {
 		return nil
 	}
-	if perr := unusableProvisionerInYAML(name, data); perr != nil {
-		return &unusableProvisionerImportError{perr: perr}
-	}
-	return nil
+	slices.SortStableFunc(perrs, func(a, b *harness.UnusableProvisionerError) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+	return &unusableProvisionerImportError{perrs: perrs}
 }
 
 // isHarnessConfigYAMLPath reports whether a harness-config file path names

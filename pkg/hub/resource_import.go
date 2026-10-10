@@ -136,10 +136,11 @@ type resourceImportKind struct {
 	// For harness-configs this loads config.yaml to resolve the harness type, so
 	// it can fail; failures cause that directory to be skipped.
 	newStore func(dir string) (*ResourceStore, error)
-	// checkContent, when set, validates a discovered directory's content before
-	// any directory is persisted. A non-nil error refuses the whole import, so
-	// a refused import or reimport writes nothing.
-	checkContent func(name, dir string) error
+	// checkContent, when set, validates the content of every directory
+	// selected for import before any directory is persisted. A non-nil error
+	// refuses the whole import, so a refused import or reimport writes
+	// nothing. It reports every refused directory, not just the first.
+	checkContent func(dirs []resourceDir) error
 }
 
 // templateImportKind returns the import knobs for templates.
@@ -165,7 +166,7 @@ func (s *Server) harnessConfigImportKind() resourceImportKind {
 			}
 			return s.harnessConfigStore(hcDir.Config.Harness), nil
 		},
-		checkContent: checkHarnessConfigDirProvisioner,
+		checkContent: checkHarnessConfigDirsProvisioner,
 	}
 }
 
@@ -271,18 +272,13 @@ func (s *Server) importFromWorkspace(ctx context.Context, project *store.Project
 }
 
 // checkResourceDirsContent runs the kind's content check over every directory
-// selected for import, returning the first refusal. It runs before
-// importResourceDirs so that a refusal persists nothing.
+// selected for import. It runs before importResourceDirs so that a refusal
+// persists nothing.
 func checkResourceDirsContent(dirs []resourceDir, kind resourceImportKind) error {
 	if kind.checkContent == nil {
 		return nil
 	}
-	for _, rd := range dirs {
-		if err := kind.checkContent(rd.name, rd.path); err != nil {
-			return err
-		}
-	}
-	return nil
+	return kind.checkContent(dirs)
 }
 
 // fetchRemoteForImport fetches a remote source URL to a local cache directory,

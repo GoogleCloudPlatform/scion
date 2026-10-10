@@ -22,9 +22,12 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -164,4 +167,131 @@ func TestHarnessConfigReimport_RejectsUnusableProvisioner(t *testing.T) {
 				"a refused reimport must not change stored files")
 		})
 	}
+}
+
+// multiConfigSource is a source holding one usable harness-config and two
+// unusable ones. An import of it must refuse all three, name both unusable
+// configs in name order, and persist nothing.
+var multiConfigSource = map[string]string{
+	"aaa-good/config.yaml": "name: aaa-good\nharness: claude\n",
+	"mmm-bad/config.yaml":  "name: mmm-bad\nharness: claude\n" + unusableProvisionerCases[0].block,
+	"zzz-bad/config.yaml":  "name: zzz-bad\nharness: claude\n" + unusableProvisionerCases[1].block,
+}
+
+// assertNamesBothUnusable checks that msg names both unusable configs, in name
+// order, with their reasons, and does not name the usable one.
+func assertNamesBothUnusable(t *testing.T, msg string) {
+	t.Helper()
+	mmm := strings.Index(msg, `harness-config "mmm-bad"`)
+	zzz := strings.Index(msg, `harness-config "zzz-bad"`)
+	require.GreaterOrEqual(t, mmm, 0, "message must name mmm-bad: %s", msg)
+	require.GreaterOrEqual(t, zzz, 0, "message must name zzz-bad: %s", msg)
+	assert.Less(t, mmm, zzz, "refusals must be reported in name order: %s", msg)
+	assert.Contains(t, msg, unusableProvisionerCases[0].wantReason)
+	assert.Contains(t, msg, unusableProvisionerCases[1].wantReason)
+	assert.NotContains(t, msg, "aaa-good")
+}
+
+func writeWorkspaceFiles(t *testing.T, root string, files map[string]string) {
+	t.Helper()
+	for name, body := range files {
+		p := filepath.Join(root, name)
+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+		require.NoError(t, os.WriteFile(p, []byte(body), 0o644))
+	}
+}
+
+func projectHarnessConfigCount(t *testing.T, s store.Store, projectID string) int {
+	t.Helper()
+	result, err := s.ListHarnessConfigs(context.Background(), store.HarnessConfigFilter{
+		Scope:     store.HarnessConfigScopeProject,
+		ProjectID: projectID,
+	}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	return result.TotalCount
+}
+
+// A workspace import holding usable and unusable harness-configs is refused
+// as a whole: every unusable config is named and nothing is persisted, not
+// even the usable config.
+func TestImportHarnessConfigsFromWorkspace_RejectsUnusableProvisionerAllOrNothing(t *testing.T) {
+	srv, s, project, wsRoot := setupWorkspaceProject(t, "hc-import-unusable")
+	writeWorkspaceFiles(t, filepath.Join(wsRoot, ".scion", "harness-configs"), multiConfigSource)
+	stor := srv.GetStorage().(*mockStorage)
+	before := storageSnapshot(stor)
+
+	imported, err := srv.importHarnessConfigsFromWorkspace(context.Background(), project, "/.scion/harness-configs")
+	require.Error(t, err)
+	assert.Empty(t, imported)
+	var ierr *unusableProvisionerImportError
+	require.True(t, errors.As(err, &ierr), "want *unusableProvisionerImportError, got %T: %v", err, err)
+	assertNamesBothUnusable(t, err.Error())
+
+	assert.Equal(t, 0, projectHarnessConfigCount(t, s, project.ID), "a refused import must not create any record")
+	assert.True(t, maps.EqualFunc(before, storageSnapshot(stor), bytes.Equal),
+		"a refused import must not write to storage")
+}
+
+// The per-project import endpoint answers a refused workspace import with the
+// finalize 422 and persists nothing.
+func TestHandleProjectImportHarnessConfigs_RejectsUnusableProvisioner(t *testing.T) {
+	srv, s, project, wsRoot := setupWorkspaceProject(t, "hc-project-import-unusable")
+	ctx := context.Background()
+	writeWorkspaceFiles(t, filepath.Join(wsRoot, ".scion", "harness-configs"), multiConfigSource)
+	stor := srv.GetStorage().(*mockStorage)
+	before := storageSnapshot(stor)
+
+	admin := &store.User{
+		ID:          tid("user-admin-hc-project-import-unusable"),
+		Email:       "hc-project-import-unusable@test.com",
+		DisplayName: "Admin",
+		Role:        store.UserRoleAdmin,
+	}
+	require.NoError(t, s.CreateUser(ctx, admin))
+	ensureHubMembership(ctx, s, admin.ID)
+	ensureAdminRoleBinding(t, s, admin.ID)
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost,
+		"/api/v1/projects/"+project.ID+"/import-harness-configs",
+		ImportHarnessConfigsRequest{WorkspacePath: "/.scion/harness-configs"})
+	assertUnusableProvisionerAnswer(t, rec, `harness-config "mmm-bad"`)
+	var resp struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assertNamesBothUnusable(t, resp.Error.Message)
+
+	assert.Equal(t, 0, projectHarnessConfigCount(t, s, project.ID), "a refused import must not create any record")
+	assert.True(t, maps.EqualFunc(before, storageSnapshot(stor), bytes.Equal),
+		"a refused import must not write to storage")
+}
+
+// A remote import holding usable and unusable harness-configs is refused as a
+// whole through POST /api/v1/resources/import.
+func TestHarnessConfigImport_RejectsUnusableProvisionerAllOrNothing(t *testing.T) {
+	srv, s := testInstallSourceServer(t)
+	stor := srv.GetStorage().(*mockStorage)
+	before := storageSnapshot(stor)
+
+	src := tarGzFilesServer(t, multiConfigSource)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/resources/import", ImportResourcesRequest{
+		Kind: "harness-config", Scope: "global", SourceURL: src.URL + "/configs/multi.tar.gz",
+	})
+	assertUnusableProvisionerAnswer(t, rec, `harness-config "zzz-bad"`)
+	var resp struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assertNamesBothUnusable(t, resp.Error.Message)
+
+	for _, slug := range []string{"aaa-good", "mmm-bad", "zzz-bad"} {
+		_, err := s.GetHarnessConfigBySlug(context.Background(), slug, store.HarnessConfigScopeGlobal, "")
+		assert.ErrorIs(t, err, store.ErrNotFound, "a refused import must not create %s", slug)
+	}
+	assert.True(t, maps.EqualFunc(before, storageSnapshot(stor), bytes.Equal),
+		"a refused import must not write to storage")
 }
