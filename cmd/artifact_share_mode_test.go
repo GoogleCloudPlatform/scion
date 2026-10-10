@@ -59,13 +59,11 @@ func TestParseShareTTL(t *testing.T) {
 	}
 }
 
-// TestArtifactShareModes: share is available to users in human and
-// assistant mode and removed in agent mode, while the other artifact verbs
+// TestArtifactShareModes: share is available to users in human mode
+// and removed in agent mode, while the other artifact verbs
 // stay available to agents.
 func TestArtifactShareModes(t *testing.T) {
 	assert.False(t, agentAllowed["artifact.share"])
-	assert.False(t, assistantDenied["artifact.share"])
-	assert.False(t, assistantDenied["artifact"])
 	assert.True(t, agentAllowed["artifact.get"])
 
 	build := func() *cobra.Command {
@@ -77,7 +75,7 @@ func TestArtifactShareModes(t *testing.T) {
 		root.AddCommand(art)
 		return root
 	}
-	for mode, wantShare := range map[string]bool{"human": true, "assistant": true, "agent": false} {
+	for mode, wantShare := range map[string]bool{"human": true, "agent": false} {
 		t.Run(mode, func(t *testing.T) {
 			t.Setenv("SCION_CLI_MODE", mode)
 			root := build()

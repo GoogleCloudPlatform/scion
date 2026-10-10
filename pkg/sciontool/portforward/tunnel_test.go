@@ -16,11 +16,14 @@ package portforward
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	wire "github.com/GoogleCloudPlatform/scion/pkg/portforward"
 	scionhub "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/gorilla/websocket"
@@ -48,6 +51,40 @@ func TestIsLoopbackHost(t *testing.T) {
 		t.Run(tt.host, func(t *testing.T) {
 			if got := isLoopbackHost(tt.host); got != tt.want {
 				t.Errorf("isLoopbackHost(%q) = %v, want %v", tt.host, got, tt.want)
+			}
+		})
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestDoLocalRequest_HostPort: the local request address is built with
+// net.JoinHostPort, so an IPv6 loopback host is bracketed.
+func TestDoLocalRequest_HostPort(t *testing.T) {
+	tests := []struct {
+		host string
+		want string
+	}{
+		{"127.0.0.1", "127.0.0.1:8080"},
+		{"::1", "[::1]:8080"},
+		{"localhost", "localhost:8080"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.host, func(t *testing.T) {
+			var got string
+			m := NewManager(nil)
+			m.http = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				got = r.URL.Host
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("ok")), Header: http.Header{}}, nil
+			})}
+			resp := m.doLocalRequest(&wire.Request{StreamID: "s1", Host: tt.host, Port: 8080, Method: http.MethodGet, Path: "/"})
+			if resp.Error != "" || resp.Status != http.StatusOK {
+				t.Fatalf("doLocalRequest = %+v", resp)
+			}
+			if got != tt.want {
+				t.Fatalf("dialed host %q, want %q", got, tt.want)
 			}
 		})
 	}

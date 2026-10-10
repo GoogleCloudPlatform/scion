@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -103,7 +104,7 @@ func TestAdmitMessageArtifacts(t *testing.T) {
 	out, admitted, warning := srv.admitMessageArtifacts(ctx, md)
 	assert.Equal(t, before, md, "input metadata must not be mutated")
 	assert.Equal(t, []artifacts.MessageRef{{ArtifactID: own, Seq: 1}}, admitted)
-	assert.Equal(t, artifactRefsWarning(3), warning, "unreadable, missing and malformed refs are all dropped")
+	assert.Equal(t, artifactRefsWarning(3, 0), warning, "unreadable, missing and malformed refs are all dropped")
 	assert.Equal(t, refsValue(artifacts.MessageRef{ArtifactID: own, Seq: 1}), out[artifacts.MessageMetadataKey])
 	assert.Equal(t, "me", out["keep"])
 	assert.NotContains(t, out, messaging.MetaBodyOffloaded)
@@ -111,12 +112,12 @@ func TestAdmitMessageArtifacts(t *testing.T) {
 	// The warning names no reference and no reason.
 	assert.NotContains(t, warning, elsewhere)
 	assert.NotContains(t, warning, missing)
-	assert.Empty(t, artifactRefsWarning(0))
+	assert.Empty(t, artifactRefsWarning(0, 0))
 
 	// Nothing admitted: the key is absent, not empty.
 	out, admitted, warning = srv.admitMessageArtifacts(ctx, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: elsewhere})})
 	assert.Empty(t, admitted)
-	assert.Equal(t, artifactRefsWarning(1), warning)
+	assert.Equal(t, artifactRefsWarning(1, 0), warning)
 	assert.NotContains(t, out, artifacts.MessageMetadataKey)
 
 	// A sender identity the artifact service does not serve (no token id,
@@ -124,7 +125,7 @@ func TestAdmitMessageArtifacts(t *testing.T) {
 	inProc := requestAuthCtx(context.Background(), agentCtxIdentity(sender))
 	_, admitted, warning = srv.admitMessageArtifacts(inProc, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: own})})
 	assert.Empty(t, admitted)
-	assert.Equal(t, artifactRefsWarning(1), warning)
+	assert.Equal(t, artifactRefsWarning(1, 0), warning)
 
 	// A context the hub built in process (identity only, no credential
 	// context from the authentication middleware) resolves nothing, even
@@ -132,8 +133,9 @@ func TestAdmitMessageArtifacts(t *testing.T) {
 	identityOnly := contextWithIdentity(context.Background(), ident)
 	_, admitted, warning = srv.admitMessageArtifacts(identityOnly, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: own})})
 	assert.Empty(t, admitted)
-	assert.Equal(t, artifactRefsWarning(1), warning)
-	views := srv.resolveArtifactRefs(identityOnly, []artifacts.MessageRef{{ArtifactID: own}})
+	assert.Equal(t, artifactRefsWarning(1, 0), warning)
+	views, unchecked := srv.resolveArtifactRefs(identityOnly, []artifacts.MessageRef{{ArtifactID: own}})
+	assert.Zero(t, unchecked)
 	assert.Equal(t, []artifacts.RefView{{Ref: artifacts.FormatRef(own, 0), ID: own}}, views)
 
 	// Feature off: nothing admitted, and the warning says the feature is off.
@@ -146,6 +148,50 @@ func TestAdmitMessageArtifacts(t *testing.T) {
 	assert.Equal(t, artifactRefsDisabled(1), warning)
 	assert.Contains(t, warning, "not enabled on this hub")
 	assert.NotContains(t, out, artifacts.MessageMetadataKey)
+}
+
+// failGrantsArtifactStore is an artifact store whose grant reads fail.
+type failGrantsArtifactStore struct{ artifacts.Store }
+
+func (failGrantsArtifactStore) ListGrants(context.Context, string) ([]artifacts.Grant, error) {
+	return nil, errors.New("grants unavailable")
+}
+
+// TestAdmitMessageArtifacts_GrantReadFailure: a reference whose check needs
+// the artifact's grants, when they cannot be read, is not attached and is
+// reported to the sender with the server-error warning (a count only),
+// not taken for "you cannot read it". A missing id never reaches the grant
+// read and keeps the ordinary dropped-reference warning; the sender's own
+// artifact needs no grants and is still admitted.
+func TestAdmitMessageArtifacts_GrantReadFailure(t *testing.T) {
+	srv, s, project, sender, _, _, _, _ := paritySetup(t)
+	st, _ := enableArtifactsForTest(t, srv)
+	ident := tokenBackedSender(t, s, sender)
+	ctx := requestAuthCtx(context.Background(), ident)
+
+	own := seedMessageArtifact(t, st, project.ID, artifacts.PrincipalKindAgent, sender.ID, "Mine")
+	elsewhere := seedMessageArtifact(t, st, tid("msgart-other-project"), artifacts.PrincipalKindUser, tid("msgart-stranger"), "Not yours")
+	missing := uuid.NewString()
+	srv.SetArtifactStore(failGrantsArtifactStore{st})
+
+	refs := []artifacts.MessageRef{{ArtifactID: own}, {ArtifactID: elsewhere}, {ArtifactID: missing}}
+	out, admitted, warning := srv.admitMessageArtifacts(ctx, map[string]string{artifacts.MessageMetadataKey: refsValue(refs...)})
+	assert.Equal(t, []artifacts.MessageRef{{ArtifactID: own}}, admitted)
+	assert.Equal(t, refsValue(artifacts.MessageRef{ArtifactID: own}), out[artifacts.MessageMetadataKey])
+	assert.Equal(t, artifactRefsWarning(1, 1), warning, "missing is dropped, the grant read failure is unchecked")
+	assert.Contains(t, warning, "server error")
+	assert.NotContains(t, warning, elsewhere)
+	assert.NotContains(t, warning, missing)
+
+	// Only the failing reference: the server-error warning alone.
+	_, admitted, warning = srv.admitMessageArtifacts(ctx, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: elsewhere})})
+	assert.Empty(t, admitted)
+	assert.Equal(t, artifactRefsWarning(0, 1), warning)
+
+	// A view of it is unavailable, carrying only the reference.
+	views, unchecked := srv.resolveArtifactRefs(ctx, []artifacts.MessageRef{{ArtifactID: elsewhere}})
+	assert.Equal(t, 1, unchecked)
+	assert.Equal(t, []artifacts.RefView{{Ref: artifacts.FormatRef(elsewhere, 0), ID: elsewhere}}, views)
 }
 
 // agentCtxIdentity is the in-process agent identity shape other tests use:
@@ -191,7 +237,7 @@ func TestMessageArtifacts_AgentDMDeliveryAndRecord(t *testing.T) {
 
 	var resp MessageDeliveryResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-	assert.Equal(t, artifactRefsWarning(1), resp.ArtifactWarning)
+	assert.Equal(t, artifactRefsWarning(1, 0), resp.ArtifactWarning)
 	assert.NotContains(t, rr.Body.String(), "Secret title")
 
 	calls := dispatchesTo(dispatcher, target.ID)

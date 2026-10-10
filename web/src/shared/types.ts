@@ -919,6 +919,8 @@ export interface TemplateConfig {
   commandArgs?: string[];
   model?: string;
   messageMode?: MessageMode;
+  telemetry?: TelemetryConfig;
+  kubernetes?: Record<string, unknown>;
 }
 
 /**
@@ -932,6 +934,7 @@ export interface Template {
   description?: string;
   harness: string;
   defaultHarnessConfig?: string;
+  image?: string;
   status: string;
   scope: string;
   scopeId?: string;

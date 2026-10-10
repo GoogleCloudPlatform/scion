@@ -96,6 +96,7 @@ test.describe('Experiments tab', () => {
       `${EXPERIMENT_NAME} must have no stored override before this spec runs`
     ).toBeNull();
 
+    // eslint-disable-next-line no-useless-assignment -- the initial value is never read (finally uses latest.revision); kept so this lint-only change leaves the emitted code unchanged
     let currentRevision = before.revision;
 
     try {

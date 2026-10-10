@@ -217,6 +217,13 @@ type ServerConfig struct {
 	// returned in X-Scion-Perf-* headers to admin requests that opt in. Off by
 	// default; observe only. See perftrace.go.
 	PerfTrace bool
+	// MembershipSweepReportOnly (server.hub.membership_sweep_report_only)
+	// puts the membership-standing sweep in report-only mode: it logs and
+	// audits each agent it would hold (mutation type
+	// agent_hold_would_set) and places no hold, revokes no credential and
+	// dispatches no stop. Off by default: the sweep enforces. Event-driven
+	// membership loss checks still enforce. See membership_loss.go.
+	MembershipSweepReportOnly bool
 	// LaunchTimeout is the whole-launch budget for an opted-in launch
 	// (design §3.10). Default 5 minutes. Below minLaunchTimeout the broker's
 	// fixed 20s abort margin (§3.10) would leave no time for a launch to
@@ -1421,6 +1428,10 @@ type Server struct {
 	// open) logs later failures at Debug. Cleared on success.
 	generalTopicWarned sync.Map
 
+	// nfsCleanupWG tracks background NFS project tree removals started by
+	// project delete (startHubNFSProjectTreeCleanup), so tests can wait.
+	nfsCleanupWG sync.WaitGroup
+
 	config ServerConfig
 	// startupHubName is the name resolved at startup (ServerConfig.HubName,
 	// from LoadGlobalConfig(serverConfigPath), else the hostname).
@@ -1521,6 +1532,11 @@ type Server struct {
 	cleanupOnce sync.Once          // Ensures CleanupResources runs only once
 	ctx         context.Context    // Server-lifetime context; cancelled on Shutdown
 	ctxCancel   context.CancelFunc // Cancels ctx
+
+	// hubInstanceRegistryStop stops this process's hub-instance registry
+	// loop and records its clean stop; set by startHubInstanceRegistry,
+	// taken (and cleared) by stopHubInstanceRegistry. Guarded by mu.
+	hubInstanceRegistryStop *hubInstanceRegistryStop
 
 	// userScopedDataSweepDone is closed when the startup sweep of deleted
 	// users' user-scope data ends (startUserScopedDataSweep).
@@ -5438,6 +5454,8 @@ func (s *Server) registerSchedulerHandlers() {
 	s.scheduler.RegisterRecurringSingleton("exposed-ports-sweep", 5, store.LockExposedPortsSweep, s.exposedPortsSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("notification-dispatch-sweep", 5, store.LockNotificationDispatchSweep, s.notificationDispatchSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("notification-orphan-gc", 60, store.LockNotificationOrphanGC, s.notificationOrphanGCHandler())
+	// Hourly: delete hub-instance registry rows 24 h after their last write.
+	s.registerHubInstancePrune(s.scheduler)
 	// Reconcile stale max_agents_per_broker reservations (ptone/scion#1963):
 	// runs immediately at tick 0 (startup) and then hourly, fixing rows left
 	// with released_at IS NULL by the pre-fix stop/suspend paths (or any
@@ -5630,8 +5648,8 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	if registryCtx == nil {
 		registryCtx = ctx
 	}
-	// The returned done channel is not joined yet: nothing runs after the
-	// loop on shutdown until a clean-stop write is added.
+	// startHubInstanceRegistry records the loop's stop handle on s;
+	// CleanupResources uses it to join the loop and mark the row stopped.
 	_ = s.startHubInstanceRegistry(registryCtx)
 }
 
@@ -5761,6 +5779,12 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		// server context are still up: the relay row goes draining, every
 		// session gets GoAway and the relay deletes its rows (bounded by ctx).
 		s.shutdownConduitRelay(ctx)
+
+		// Stop the hub-instance registry loop, join it, then mark this
+		// instance's row stopped (bounded by hubInstanceStopBudget), so the
+		// health summary shows a clean stop as stopped rather than stale.
+		// Runs while the store is still open.
+		s.stopHubInstanceRegistry(ctx)
 
 		// Stop the DB pool-stats sampler. Safe to call more than once: it
 		// wraps either a context.CancelFunc or a no-op from
@@ -6637,49 +6661,19 @@ func (s *Server) handleRuntimeBrokerConnect(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Get broker identity from context (set by BrokerAuthMiddleware)
-	broker := GetBrokerIdentityFromContext(r.Context())
-	if broker == nil {
-		// Try to get broker ID from header if not authenticated yet
-		brokerID := r.Header.Get("X-Scion-Broker-ID")
-		if brokerID == "" {
-			writeError(w, 401, ErrCodeUnauthorized, "Broker authentication required", nil)
-			return
-		}
-
-		// Validate broker exists and is authorized
-		if s.brokerAuthService == nil {
-			writeError(w, 401, ErrCodeUnauthorized, "Broker authentication not enabled", nil)
-			return
-		}
-
-		// For WebSocket, we need to verify HMAC on the upgrade request
-		_, err := s.brokerAuthService.ValidateBrokerSignature(r.Context(), r)
-		if err != nil {
-			slog.Error("HMAC validation failed for broker", "brokerID", brokerID, "error", err)
-			writeError(w, 401, ErrCodeBrokerAuthFailed, "Invalid broker signature", nil)
-			return
-		}
-
-		// Use the broker ID from header
-		sessionID, err := s.controlChannel.HandleUpgrade(w, r, brokerID)
-		if err != nil {
-			slog.Error("Upgrade failed for broker", "brokerID", brokerID, "error", err)
-			// Error already written by upgrader
-			return
-		}
-		s.markBrokerOnline(brokerID, sessionID)
+	// One broker authentication step, shared with the conduit endpoint
+	// (conduit_broker_admit.go).
+	brokerID, ok := s.authenticateBrokerUpgrade(w, r)
+	if !ok {
 		return
 	}
-
-	// Use authenticated broker identity
-	sessionID, err := s.controlChannel.HandleUpgrade(w, r, broker.ID())
+	sessionID, err := s.controlChannel.HandleUpgrade(w, r, brokerID)
 	if err != nil {
-		slog.Error("Upgrade failed for broker", "brokerID", broker.ID(), "error", err)
+		slog.Error("Upgrade failed for broker", "brokerID", brokerID, "error", err)
 		// Error already written by upgrader
 		return
 	}
-	s.markBrokerOnline(broker.ID(), sessionID)
+	s.markBrokerOnline(brokerID, sessionID)
 }
 
 // stampProvidersOnline sets status=online on every project-provider row linked

@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, afterEach, vi } from 'vitest';
 
 import {

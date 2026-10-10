@@ -41,6 +41,7 @@ import (
 // closes the PTY master before attempting to kill the process, giving the
 // container runtime a chance to propagate the terminal hangup.
 func TestGracefulShutdownExec_ClosePTYBeforeKill(t *testing.T) {
+	useFastPTYTimings(t)
 	// Start a long-running process with a PTY
 	cmd := exec.Command("sleep", "60")
 	ptmx, err := os.CreateTemp(t.TempDir(), "pty-stub-*")
@@ -112,6 +113,7 @@ func TestGracefulShutdownExec_ProcessExitsOnPTYClose(t *testing.T) {
 // explicit close releases the stream and attach process/PTY descriptors;
 // the agent remains running and attachable.
 func TestPTYCleanup_ExplicitCloseReleasesAttach(t *testing.T) {
+	useFastPTYTimings(t)
 	tmux, err := exec.LookPath("tmux")
 	if err != nil {
 		t.Skip("requires tmux in PATH")
@@ -262,6 +264,7 @@ exec "$TW_CLEANUP_TMUX" -S "$TW_CLEANUP_SOCKET" "$@"
 // socket loss reaches terminal disconnected state and cleans up orphaned
 // stream resources.
 func TestPTYCleanup_SocketLossReleasesResources(t *testing.T) {
+	useFastPTYTimings(t)
 	tmux, err := exec.LookPath("tmux")
 	if err != nil {
 		t.Skip("requires tmux in PATH")
@@ -413,6 +416,7 @@ func TestPTYCleanup_BrokerDisconnectCleansUpAllStreams(t *testing.T) {
 // TestPTYCleanup_CLIClientsSurviveBrowserClose tests acceptance criterion 5:
 // other CLI clients remain usable after browser session close.
 func TestPTYCleanup_CLIClientsSurviveBrowserClose(t *testing.T) {
+	useFastPTYTimings(t)
 	tmux, err := exec.LookPath("tmux")
 	if err != nil {
 		t.Skip("requires tmux in PATH")
@@ -551,6 +555,7 @@ exec "$TW_CLEANUP_TMUX" -S "$TW_CLEANUP_SOCKET" "$@"
 //
 // Test fixture: real local tmux via shell adapter (not Docker containers).
 func TestPTYCleanup_ConcurrentClientSurvivesCleanup(t *testing.T) {
+	useFastPTYTimings(t)
 	tmux, err := exec.LookPath("tmux")
 	if err != nil {
 		t.Skip("requires tmux in PATH")
@@ -677,6 +682,7 @@ exec "$TW_CLEANUP_TMUX" -S "$TW_CLEANUP_SOCKET" "$@"
 // one browser session produces one broker attach; warm reopen/navigation
 // produces no extra PTY upgrade.
 func TestPTYCleanup_SingleAttachOnReopen(t *testing.T) {
+	useFastPTYTimings(t)
 	tmux, err := exec.LookPath("tmux")
 	if err != nil {
 		t.Skip("requires tmux in PATH")
@@ -837,6 +843,7 @@ func TestPTYCleanup_CloseIdempotent(t *testing.T) {
 // are properly applied during an active PTY session and don't interfere
 // with cleanup.
 func TestPTYCleanup_ResizePreservedDuringSession(t *testing.T) {
+	useFastPTYTimings(t)
 	tmux, err := exec.LookPath("tmux")
 	if err != nil {
 		t.Skip("requires tmux in PATH")
@@ -944,6 +951,7 @@ exec "%s" -S "%s" "$@"
 //
 // Test fixture: real local tmux via shell adapter (not Docker containers).
 func TestPTYCleanup_IdleSessionContextCancel(t *testing.T) {
+	useFastPTYTimings(t)
 	tmux, err := exec.LookPath("tmux")
 	if err != nil {
 		t.Skip("requires tmux in PATH")
@@ -1076,6 +1084,7 @@ exec "$TW_CLEANUP_TMUX" -S "$TW_CLEANUP_SOCKET" "$@"
 //
 // Test fixture: real local tmux via shell adapter (not Docker containers).
 func TestPTYCleanup_IdleLocalSessionContextCancel(t *testing.T) {
+	useFastPTYTimings(t)
 	tmux, err := exec.LookPath("tmux")
 	if err != nil {
 		t.Skip("requires tmux in PATH")
@@ -1199,6 +1208,7 @@ exec "$TW_CLEANUP_TMUX" -S "$TW_CLEANUP_SOCKET" "$@"
 //
 // Test fixture: real local tmux via shell adapter (not Docker containers).
 func TestPTYCleanup_LocalSessionCancelDuringResize(t *testing.T) {
+	useFastPTYTimings(t)
 	tmux, err := exec.LookPath("tmux")
 	if err != nil {
 		t.Skip("requires tmux in PATH")
@@ -2037,6 +2047,7 @@ func TestPTYCleanup_NonceFailurePaths(t *testing.T) {
 // TestPTYCleanup_NonceFullLifecycle tests the complete attach → cancel →
 // cleanupContainerAttach → gracefulShutdownExec flow for StreamPTYHandler.
 func TestPTYCleanup_NonceFullLifecycle(t *testing.T) {
+	useFastPTYTimings(t)
 	tmux, err := exec.LookPath("tmux")
 	if err != nil {
 		t.Skip("requires tmux in PATH")
@@ -2150,6 +2161,7 @@ func TestPTYCleanup_NonceFullLifecycle(t *testing.T) {
 //  3. The nonce-owned client IS signaled on cleanup
 //  4. A protected peer client survives
 func TestPTYCleanup_EmptyRuntimeNonceCleanup(t *testing.T) {
+	useFastPTYTimings(t)
 	tmux, err := exec.LookPath("tmux")
 	if err != nil {
 		t.Skip("requires tmux in PATH")

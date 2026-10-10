@@ -166,7 +166,7 @@ func parseListParams(q url.Values) (listParams, string) {
 // handleList serves GET /api/v1/artifacts?mine=1: the artifacts the caller
 // owns, or that a grant to the caller or to one of its projects lets it
 // read. Each candidate passes the same check a GET of that artifact runs
-// (canRead), so the list never shows an artifact the caller could not open,
+// (canReadErr), so the list never shows an artifact the caller could not open,
 // and a caller the host does not serve gets an empty list.
 func (s *Service) handleList(w http.ResponseWriter, r *http.Request) {
 	p, msg := parseListParams(r.URL.Query())

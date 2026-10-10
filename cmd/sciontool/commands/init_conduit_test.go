@@ -26,6 +26,7 @@ import (
 	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/control"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
@@ -40,10 +41,14 @@ type pfHub struct {
 	tunnelHits   atomic.Int64
 	tunnel       chan struct{}
 	conduitAdmit chan struct{}
+	hellos       chan *conduitv1.Hello
+	sessions     chan core.Session
+	refreshes    chan struct{}
 }
 
 func newPFHub(t *testing.T, servesConduit bool) *pfHub {
-	h := &pfHub{tunnel: make(chan struct{}, 16), conduitAdmit: make(chan struct{}, 16)}
+	h := &pfHub{tunnel: make(chan struct{}, 16), conduitAdmit: make(chan struct{}, 16),
+		hellos: make(chan *conduitv1.Hello, 16), sessions: make(chan core.Session, 16), refreshes: make(chan struct{}, 16)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/conduit", func(w http.ResponseWriter, r *http.Request) {
 		h.conduitHits.Add(1)
@@ -56,6 +61,7 @@ func newPFHub(t *testing.T, servesConduit bool) *pfHub {
 			return
 		}
 		s, err := core.Accept(r.Context(), conn, core.Config{}, pfAdmit(func(hello *conduitv1.Hello) *conduitv1.Welcome {
+			h.hellos <- hello
 			h.conduitAdmit <- struct{}{}
 			return &conduitv1.Welcome{SessionId: "s1", RelayInstanceId: "r1", ConnectionEpoch: 1,
 				EndpointIncarnation: hello.GetCapabilities().GetEndpointIncarnation()}
@@ -63,12 +69,20 @@ func newPFHub(t *testing.T, servesConduit bool) *pfHub {
 		if err != nil {
 			return
 		}
+		h.sessions <- s
 		<-s.(core.LocalSession).Done()
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/ports/tunnel") {
 			h.tunnelHits.Add(1)
 			h.tunnel <- struct{}{}
+		}
+		if strings.HasSuffix(r.URL.Path, "/token/refresh") {
+			h.refreshes <- struct{}{}
+			exp := time.Now().Add(10 * time.Hour).UTC().Format(time.RFC3339)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"token":"token-2","expires_at":"` + exp + `"}`))
+			return
 		}
 		http.Error(w, "no", http.StatusServiceUnavailable)
 	})
@@ -155,6 +169,66 @@ func TestPortForwardingConduitGate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPortForwardingConduitControl: with conduit on, the agent session
+// advertises exactly the control routes, a hub-side rotate-token call is
+// answered 202 and wakes the token refresh loop, and paths outside
+// /v1/control/ are 404.
+func TestPortForwardingConduitControl(t *testing.T) {
+	t.Cleanup(hub.SetTokenHome(t.TempDir()))
+	h := newPFHub(t, true)
+	client := hub.NewClientWithConfig(h.srv.URL, "token-1", "agent-1")
+	env := map[string]string{
+		conduit.EnvHubExperiments: conduit.ExperimentConduit,
+		envProjectID:              "project-1",
+		conduit.EnvLaunchID:       "launch-1",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	refreshDone := client.StartTokenRefresh(ctx, &hub.TokenRefreshConfig{RefreshAt: time.Now().Add(5 * time.Hour)})
+	p := newPortForwarding(client, false, conduit.PTYUser{}, func(k string) string { return env[k] })
+	done := make(chan struct{})
+	go func() { p.run(ctx); close(done) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+		<-refreshDone
+	})
+
+	var hello *conduitv1.Hello
+	select {
+	case hello = <-h.hellos:
+	case <-time.After(pfWait):
+		t.Fatal("no conduit Hello")
+	}
+	if got := hello.GetCapabilities().GetRpc(); len(got) != 1 || got[0] != control.RouteRotateToken {
+		t.Fatalf("Hello rpc = %v, want [%s]", got, control.RouteRotateToken)
+	}
+	var s core.Session
+	select {
+	case s = <-h.sessions:
+	case <-time.After(pfWait):
+		t.Fatal("no conduit session")
+	}
+
+	for _, tt := range []struct {
+		method, path string
+		want         int32
+	}{
+		{"GET", "/v1/control/rotate-token", 405},
+		{"POST", "/v1/control/wake", 404},
+		{"POST", "/scion/v1/exec", 404},
+		{"POST", "/v1/control/rotate-token", 202},
+	} {
+		resp, err := s.Call(ctx, &conduitv1.RpcRequest{Method: tt.method, Path: tt.path})
+		if err != nil {
+			t.Fatalf("%s %s: %v", tt.method, tt.path, err)
+		}
+		if resp.GetStatus() != tt.want || (tt.want == 202 && len(resp.GetBody()) != 0) {
+			t.Fatalf("%s %s: status %d body %q, want %d", tt.method, tt.path, resp.GetStatus(), resp.GetBody(), tt.want)
+		}
+	}
+	waitSignal(t, h.refreshes, "the token refresh woken by rotate-token")
 }
 
 // TestConduitPTYUser: PTY tmux clients run as the harness identity.

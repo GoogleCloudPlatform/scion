@@ -20,7 +20,6 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
@@ -50,16 +49,14 @@ func paths(files []transfer.FileInfo) []string {
 // workspace-root .scion entry in both layouts (marker file and directory)
 // while keeping nested .scion entries and look-alike names.
 func TestDefaultExcludes_RootDotScion(t *testing.T) {
-	// The default pattern is written as a literal; keep it in step with the
-	// config package's name for the entry.
-	if config.DotScion != ".scion" {
-		t.Fatalf("config.DotScion = %q; update transfer.DefaultExcludePatterns", config.DotScion)
+	// The default pattern is written as a literal. pkg/config's
+	// TestTransferDefaultExcludes_DotScion keeps it in step with
+	// config.DotScion; these checks pin the literal itself.
+	if !slices.Contains(transfer.DefaultExcludePatterns, ".scion/**") {
+		t.Errorf("DefaultExcludePatterns %v lacks %q", transfer.DefaultExcludePatterns, ".scion/**")
 	}
-	if !slices.Contains(transfer.DefaultExcludePatterns, config.DotScion+"/**") {
-		t.Errorf("DefaultExcludePatterns %v lacks %q", transfer.DefaultExcludePatterns, config.DotScion+"/**")
-	}
-	if slices.Contains(transfer.DefaultExcludePatterns, config.DotScion) {
-		t.Errorf("DefaultExcludePatterns contains bare %q, which also matches nested entries", config.DotScion)
+	if slices.Contains(transfer.DefaultExcludePatterns, ".scion") {
+		t.Errorf("DefaultExcludePatterns contains bare %q, which also matches nested entries", ".scion")
 	}
 
 	kept := []string{

@@ -332,3 +332,10 @@ func TruncateCloseReason(reason string) string {
 	}
 	return reason[:cut]
 }
+
+// PTYReasonManagedRuntime is the details.reason the Hub reports with its
+// 503 ErrCodeRuntimeAttachUnsupported PTY refusal when the agent runs on a
+// managed runtime (no terminal on any broker) and has no session that
+// serves a PTY. Clients map it to the "use scion message and scion look"
+// hint.
+const PTYReasonManagedRuntime = "managed_runtime"

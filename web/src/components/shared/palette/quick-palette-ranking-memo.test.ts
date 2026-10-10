@@ -24,8 +24,6 @@
  * quick-palette.test.ts so that mock doesn't affect any other test.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi } from 'vitest';
 
 vi.mock('../../../utils/palette-match.js', async (importOriginal) => {

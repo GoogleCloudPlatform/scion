@@ -19,8 +19,6 @@
  * not an agent delta, so they must never be merged into the Agent object.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { StateManager, type AgentsChangedDetail } from './state.js';
 
