@@ -15,15 +15,21 @@
 package runtimebroker
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -105,6 +111,7 @@ type discoveryResult struct {
 	err       error
 	listCalls int
 	hookCalls int
+	logs      string
 }
 
 func (r discoveryRun) run(t *testing.T) discoveryResult {
@@ -115,6 +122,8 @@ func (r discoveryRun) run(t *testing.T) discoveryResult {
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 	projectDir := newTestProjectSettings(t, testKubernetesProjectSettingsYAML)
 	newTestGlobalSettings(t, r.globalYAML)
+	var logBuf bytes.Buffer
+	srv.agentLifecycleLog = slog.New(slog.NewTextHandler(&logBuf, nil))
 
 	client := fake.NewClientset(r.objects...)
 	var res discoveryResult
@@ -153,6 +162,7 @@ func (r discoveryRun) run(t *testing.T) discoveryResult {
 	})
 	res.sc = sc
 	res.err = err
+	res.logs = logBuf.String()
 	if err != nil {
 		var sce *startContextError
 		if errors.As(err, &sce) {
@@ -226,7 +236,7 @@ func TestKSADiscovery_NoMatchKeepsNotMapped(t *testing.T) {
 		globalYAML: discoveryGlobalSettingsNoMapping,
 		objects:    []k8sruntime.Object{annotatedKSA(discoveryTestNamespace, "other-ksa", "other@my-project.iam.gserviceaccount.com")},
 	}.run(t)
-	assertNotMappedWith(t, res, "annotation discovery found no ServiceAccount in namespace \"agents-ns\"")
+	assertNotMappedWith(t, res, api.BrokerKSADiscoveryNoMatch, "annotation discovery found no ServiceAccount in namespace \"agents-ns\"")
 	if res.listCalls != 1 {
 		t.Errorf("list calls = %d, want 1", res.listCalls)
 	}
@@ -239,7 +249,10 @@ func TestKSADiscovery_ListErrorAddsRBACHint(t *testing.T) {
 		objects:    []k8sruntime.Object{annotatedKSA(discoveryTestNamespace, "worker-ksa", discoveryTestGSA)},
 		listErr:    forbidden,
 	}.run(t)
-	assertNotMappedWith(t, res, "forbidden")
+	assertNotMappedWith(t, res, api.BrokerKSADiscoveryListFailed, "forbidden")
+	if !strings.Contains(res.logs, "RBAC: access denied") {
+		t.Errorf("broker log lacks the list error:\n%s", res.logs)
+	}
 	if !strings.Contains(res.sce.Message, `discovery needs list (read-only) access to serviceaccounts in namespace "agents-ns"`) {
 		t.Errorf("message lacks the RBAC hint: %q", res.sce.Message)
 	}
@@ -250,7 +263,7 @@ func TestKSADiscovery_OtherNamespaceIgnored(t *testing.T) {
 		globalYAML: discoveryGlobalSettingsNoMapping,
 		objects:    []k8sruntime.Object{annotatedKSA("other-ns", "worker-ksa", discoveryTestGSA)},
 	}.run(t)
-	assertNotMappedWith(t, res, "found no ServiceAccount in namespace \"agents-ns\"")
+	assertNotMappedWith(t, res, api.BrokerKSADiscoveryNoMatch, "found no ServiceAccount in namespace \"agents-ns\"")
 }
 
 func TestKSADiscovery_ExplicitServiceAccountConflict(t *testing.T) {
@@ -270,6 +283,9 @@ func TestKSADiscovery_ExplicitServiceAccountConflict(t *testing.T) {
 	}
 	if got := res.sce.Details[api.BrokerErrDetailMappedKSA]; got != "worker-ksa" {
 		t.Errorf("mapped KSA detail = %v, want worker-ksa", got)
+	}
+	if got := res.sce.Details[api.BrokerErrDetailKSASource]; got != api.BrokerKSASourceDiscovered {
+		t.Errorf("KSA source detail = %v, want %q", got, api.BrokerKSASourceDiscovered)
 	}
 
 	// A matching explicit name is accepted.
@@ -304,7 +320,7 @@ func TestKSADiscovery_BlockModeUnchanged(t *testing.T) {
 	}
 }
 
-func assertNotMappedWith(t *testing.T, res discoveryResult, reason string) {
+func assertNotMappedWith(t *testing.T, res discoveryResult, result, reason string) {
 	t.Helper()
 	if res.sce == nil {
 		t.Fatalf("expected a *startContextError, got %v", res.err)
@@ -320,5 +336,177 @@ func assertNotMappedWith(t *testing.T, res discoveryResult, reason string) {
 	}
 	if !strings.Contains(res.sce.Message, reason) {
 		t.Errorf("message %q does not contain %q", res.sce.Message, reason)
+	}
+	if got := res.sce.Details[api.BrokerErrDetailDiscovery]; got != result {
+		t.Errorf("discovery detail = %v, want %q", got, result)
+	}
+	if got := res.sce.Details[api.BrokerErrDetailNamespace]; got != discoveryTestNamespace {
+		t.Errorf("namespace detail = %v, want %q", got, discoveryTestNamespace)
+	}
+	// The refusal is logged at Warn with the agent, account, namespace
+	// and result.
+	for _, want := range []string{"level=WARN", "agent=agent-ksa-discovery", "service_account=" + discoveryTestGSA, "namespace=" + discoveryTestNamespace, "discovery=" + result} {
+		if !strings.Contains(res.logs, want) {
+			t.Errorf("broker log lacks %q:\n%s", want, res.logs)
+		}
+	}
+}
+
+// A mapped name in a mismatch carries the mapped source.
+func TestKSADiscovery_MappedMismatchSource(t *testing.T) {
+	res := discoveryRun{
+		globalYAML:  discoveryGlobalSettingsWithMapping,
+		explicitKSA: "someone-else",
+	}.run(t)
+	if res.sce == nil || res.sce.Code != ErrCodeIdentityKSAMismatch {
+		t.Fatalf("expected an identity_ksa_mismatch refusal, got %v", res.err)
+	}
+	if got := res.sce.Details[api.BrokerErrDetailKSASource]; got != api.BrokerKSASourceMapped {
+		t.Errorf("KSA source detail = %v, want %q", got, api.BrokerKSASourceMapped)
+	}
+}
+
+// A client that cannot be obtained keeps identity_not_mapped, with the
+// unavailable result.
+func TestKSADiscovery_ClientUnavailable(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
+	projectDir := newTestProjectSettings(t, testKubernetesProjectSettingsYAML)
+	newTestGlobalSettings(t, discoveryGlobalSettingsNoMapping)
+	_, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "agent-ksa-discovery",
+		ProjectPath: projectDir,
+		Config: &CreateAgentConfig{
+			GCPIdentity: &GCPIdentityConfig{MetadataMode: "assign", SAEmail: discoveryTestGSA},
+		},
+		HTTPRequest: httptest.NewRequest(http.MethodPost, "/api/v1/agents", nil),
+		Operation:   opCreate,
+	})
+	var sce *startContextError
+	if !errors.As(err, &sce) || sce.Code != ErrCodeIdentityNotMapped {
+		t.Fatalf("expected an identity_not_mapped refusal, got %v", err)
+	}
+	if got := sce.Details[api.BrokerErrDetailDiscovery]; got != api.BrokerKSADiscoveryUnavailable {
+		t.Errorf("discovery detail = %v, want %q", got, api.BrokerKSADiscoveryUnavailable)
+	}
+}
+
+// The placement check runs before discovery: a project override of the
+// runtime entry's namespace or context, with no mapping, is refused with
+// the placement error and never lists ServiceAccounts.
+func TestKSADiscovery_PlacementCheckedBeforeDiscovery(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		override string
+		want     string
+	}{
+		{name: "namespace override", override: "namespace: ns-project", want: `resolves namespace "ns-project" in the project's settings but "ns-team"`},
+		{name: "context override", override: "context: ctx-project", want: `sets context "ctx-project" in the project's settings but "ctx-team"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultServerConfig()
+			cfg.StateDir = t.TempDir()
+			srv, dotScion := newTestServerForStartContextMultiProfile(t, cfg, "kubernetes", "team", "kubernetes")
+			projectSettingsYAML := `schema_version: "1"
+active_profile: local
+profiles:
+    local:
+        runtime: k8s-default
+    team:
+        runtime: k8s-team
+runtimes:
+    k8s-default:
+        type: kubernetes
+    k8s-team:
+        type: kubernetes
+        ` + tc.override + "\n"
+			if err := os.WriteFile(filepath.Join(dotScion, "settings.yaml"), []byte(projectSettingsYAML), 0644); err != nil {
+				t.Fatal(err)
+			}
+			newTestGlobalSettings(t, `schema_version: "1"
+runtimes:
+    k8s-team:
+        namespace: ns-team
+        context: ctx-team
+`)
+			client := fake.NewClientset(annotatedKSA("ns-team", "worker-ksa", discoveryTestGSA), annotatedKSA("ns-project", "worker-ksa", discoveryTestGSA))
+			var hookCalls, listCalls int
+			client.PrependReactor("list", "serviceaccounts", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+				listCalls++
+				return false, nil, nil
+			})
+			srv.assignKSAClientset = func(agent.Manager) (kubernetes.Interface, error) {
+				hookCalls++
+				return client, nil
+			}
+
+			_, err := srv.buildStartContext(context.Background(), startContextInputs{
+				Name: "agent-ksa-discovery-placement",
+				Config: &CreateAgentConfig{
+					Profile:     "team",
+					GCPIdentity: &GCPIdentityConfig{MetadataMode: "assign", SAEmail: discoveryTestGSA},
+				},
+				HTTPRequest: httptest.NewRequest(http.MethodPost, "/api/v1/agents", nil),
+				Operation:   opCreate,
+			})
+			var sce *startContextError
+			if !errors.As(err, &sce) || sce.Status != http.StatusBadRequest {
+				t.Fatalf("expected a 400 startContextError, got %v", err)
+			}
+			if sce.Code == ErrCodeIdentityNotMapped {
+				t.Errorf("got identity_not_mapped, want the placement error: %q", sce.Message)
+			}
+			if !strings.Contains(sce.Message, tc.want) {
+				t.Errorf("message %q does not contain %q", sce.Message, tc.want)
+			}
+			if hookCalls != 0 || listCalls != 0 {
+				t.Errorf("discovery ran before the placement check: client lookups %d, list calls %d", hookCalls, listCalls)
+			}
+		})
+	}
+}
+
+// fakeMockManager is an agent.Manager that is not an *agent.AgentManager.
+type fakeMockManager struct{ agent.Manager }
+
+func TestAssignDiscoveryClientset(t *testing.T) {
+	cs := fake.NewClientset()
+	srv := &Server{}
+	for _, tc := range []struct {
+		name    string
+		mgr     agent.Manager
+		wantErr bool
+	}{
+		{name: "nil manager", mgr: nil, wantErr: true},
+		{name: "non-Kubernetes runtime", mgr: &agent.AgentManager{Runtime: &scionrt.MockRuntime{}}, wantErr: true},
+		{name: "nil runtime", mgr: &agent.AgentManager{}, wantErr: true},
+		{name: "nil client", mgr: &agent.AgentManager{Runtime: &scionrt.KubernetesRuntime{}}, wantErr: true},
+		{name: "nil clientset", mgr: &agent.AgentManager{Runtime: &scionrt.KubernetesRuntime{Client: &k8s.Client{}}}, wantErr: true},
+		{name: "other manager type", mgr: fakeMockManager{}, wantErr: true},
+		{name: "Kubernetes runtime", mgr: &agent.AgentManager{Runtime: &scionrt.KubernetesRuntime{Client: &k8s.Client{Clientset: cs}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := srv.assignDiscoveryClientset(tc.mgr)
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("expected an error, got clientset %v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != cs {
+				t.Errorf("got clientset %v, want the runtime's", got)
+			}
+		})
+	}
+
+	// The broker's own default manager falls back to the default runtime.
+	defaultMgr := fakeMockManager{}
+	srvDefault := &Server{manager: &defaultMgr, runtime: &scionrt.KubernetesRuntime{Client: &k8s.Client{Clientset: cs}}}
+	if got, err := srvDefault.assignDiscoveryClientset(&defaultMgr); err != nil || got != cs {
+		t.Errorf("default manager: got %v, %v; want the default runtime's clientset", got, err)
 	}
 }

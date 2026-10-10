@@ -200,7 +200,7 @@ func (s *Server) resolveKubernetesAssignIdentity(ctx context.Context, in startCo
 		}
 		placementChecked = true
 		var sce *startContextError
-		ksaName, sce = s.discoverAssignKSA(ctx, mgr, operatorNamespace, saEmail, sel)
+		ksaName, sce = s.discoverAssignKSA(ctx, mgr, in.Name, operatorNamespace, saEmail, sel)
 		if sce != nil {
 			return kubernetesAssignIdentity{}, sce
 		}
@@ -222,6 +222,7 @@ func (s *Server) resolveKubernetesAssignIdentity(ctx context.Context, in startCo
 		details := s.identityMappingErrorDetails(saEmail, sel)
 		details[api.BrokerErrDetailRequestedKSA] = explicitKSA
 		details[api.BrokerErrDetailMappedKSA] = ksaName
+		details[api.BrokerErrDetailKSASource] = api.BrokerKSASourceMapped
 		msg := fmt.Sprintf(
 			"explicit Kubernetes ServiceAccount %q does not match the ServiceAccount %q mapped to %q; remove the explicit serviceAccountName or update kubernetes_service_account_mappings",
 			explicitKSA, ksaName, saEmail)
@@ -229,6 +230,8 @@ func (s *Server) resolveKubernetesAssignIdentity(ctx context.Context, in startCo
 			msg = fmt.Sprintf(
 				"explicit Kubernetes ServiceAccount %q does not match the ServiceAccount %q discovered for %q by its %s annotation in namespace %q; remove the explicit serviceAccountName, or add a kubernetes_service_account_mappings entry",
 				explicitKSA, ksaName, saEmail, k8s.WorkloadIdentityGSAAnnotation, operatorNamespace)
+			details[api.BrokerErrDetailKSASource] = api.BrokerKSASourceDiscovered
+			details[api.BrokerErrDetailNamespace] = operatorNamespace
 		}
 		return kubernetesAssignIdentity{}, &startContextError{
 			Status:  http.StatusBadRequest,
@@ -273,15 +276,25 @@ const assignDiscoveryTimeout = 15 * time.Second
 // Kubernetes client keep the identity_not_mapped refusal, with the reason
 // added; more than one match is refused with the matching names, since the
 // broker cannot choose between them.
-func (s *Server) discoverAssignKSA(ctx context.Context, mgr agent.Manager, namespace, saEmail string, sel dispatchProfileSelection) (string, *startContextError) {
-	notMapped := func(reason string) *startContextError {
+//
+// Each identity_not_mapped refusal is logged at Warn with its cause and
+// carries the result as a fixed detail value (api.BrokerErrDetailDiscovery)
+// and the namespace, so the hub can explain it without relaying API server
+// text.
+func (s *Server) discoverAssignKSA(ctx context.Context, mgr agent.Manager, agentName, namespace, saEmail string, sel dispatchProfileSelection) (string, *startContextError) {
+	notMapped := func(result, reason string, cause error) *startContextError {
+		s.agentLifecycleLog.Warn("GCP identity mode assign: no Kubernetes ServiceAccount mapped or discovered by annotation",
+			"agent", agentName, "service_account", saEmail, "namespace", namespace, "discovery", result, "error", cause)
+		details := s.identityMappingErrorDetails(saEmail, sel)
+		details[api.BrokerErrDetailDiscovery] = result
+		details[api.BrokerErrDetailNamespace] = namespace
 		return &startContextError{
 			Status: http.StatusBadRequest,
 			Message: fmt.Sprintf(
 				"GCP identity mode %q on the Kubernetes runtime has no Kubernetes ServiceAccount mapped for %q; add it to kubernetes_service_account_mappings in the broker's kubernetes runtime or profile settings (%s)",
 				store.GCPMetadataModeAssign, saEmail, reason),
 			Code:    ErrCodeIdentityNotMapped,
-			Details: s.identityMappingErrorDetails(saEmail, sel),
+			Details: details,
 		}
 	}
 	rbacHint := fmt.Sprintf("discovery needs list (read-only) access to serviceaccounts in namespace %q", namespace)
@@ -292,7 +305,7 @@ func (s *Server) discoverAssignKSA(ctx context.Context, mgr agent.Manager, names
 	}
 	client, err := clientFor(mgr)
 	if err != nil {
-		return "", notMapped(fmt.Sprintf("ServiceAccount annotation discovery could not run: %v", err))
+		return "", notMapped(api.BrokerKSADiscoveryUnavailable, fmt.Sprintf("ServiceAccount annotation discovery could not run: %v", err), err)
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -301,11 +314,11 @@ func (s *Server) discoverAssignKSA(ctx context.Context, mgr agent.Manager, names
 	defer cancel()
 	names, err := k8s.FindServiceAccountsForGSA(listCtx, client, namespace, saEmail)
 	if err != nil {
-		return "", notMapped(fmt.Sprintf("ServiceAccount annotation discovery failed to list serviceaccounts in namespace %q: %v; %s", namespace, err, rbacHint))
+		return "", notMapped(api.BrokerKSADiscoveryListFailed, fmt.Sprintf("ServiceAccount annotation discovery failed to list serviceaccounts in namespace %q: %v; %s", namespace, err, rbacHint), err)
 	}
 	switch len(names) {
 	case 0:
-		return "", notMapped(fmt.Sprintf("annotation discovery found no ServiceAccount in namespace %q with %s: %s", namespace, k8s.WorkloadIdentityGSAAnnotation, saEmail))
+		return "", notMapped(api.BrokerKSADiscoveryNoMatch, fmt.Sprintf("annotation discovery found no ServiceAccount in namespace %q with %s: %s", namespace, k8s.WorkloadIdentityGSAAnnotation, saEmail), nil)
 	case 1:
 		return names[0], nil
 	default:
