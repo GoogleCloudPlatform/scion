@@ -132,6 +132,17 @@ describe('pushInPageFragment', () => {
     expect(replace).toHaveBeenCalledWith({ keep: 1, [IN_PAGE_STATE_KEY]: { row: null } }, '');
     const shell = { currentPath: '/health?x=1' } as RouteShell;
     expect(isInPagePop(window.history.state, '/health?x=1', shell, false)).toBe(true);
+    // The marker is only honoured for the path the shell shows: a pop to
+    // another route still renders.
+    expect(isInPagePop(window.history.state, '/agents', shell, false)).toBe(false);
+    expect(
+      isInPagePop(
+        window.history.state,
+        '/health?x=1',
+        { currentPath: '/agents' } as RouteShell,
+        false
+      )
+    ).toBe(false);
     replace.mockRestore();
   });
 
