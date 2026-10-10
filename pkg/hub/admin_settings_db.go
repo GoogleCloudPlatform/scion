@@ -830,20 +830,6 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			return
 		}
 	}
-	// telemetry.cloud.headers values are masked in GET too: a masked echo
-	// keeps the stored header (the snapshot value GET showed).
-	if len(maskedTelemetryHeaderNames(req.Telemetry)) > 0 {
-		unchanged, err := telemetryCloudUnchangedDB(r.Context(), ops, req.Telemetry, rawBody)
-		if err != nil {
-			slog.Error("PUT server-config: failed to build telemetry document for masked headers", "error", err)
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
-			return
-		}
-		if err := restoreMaskedTelemetryHeaders(req.Telemetry, ops.Snapshot().TelemetryConfig, unchanged); err != nil {
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
-			return
-		}
-	}
 
 	// Top-level presence of the body; nil (omitted semantics) on a parse
 	// error, which the typed decode above has already ruled out.
@@ -911,12 +897,23 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	}
 	// telemetry is deep-merged: a nested key the body omits (cloud.headers,
 	// filter, resource, ...) keeps its stored value (ptone/scion#3717).
+	// telemetry.cloud.headers values are masked in GET too: a masked echo
+	// keeps the stored header. The check and the values restored use the
+	// row this merge read, whose revision is the write's CAS base.
 	if doc, ok := sectionDocs["telemetry"]; ok {
-		merged, rev, err := mergeSectionOnCurrent(r.Context(), ops, "telemetry", doc, telemetryPresence(rawBody))
+		var cur json.RawMessage
+		merged, rev, err := mergeSectionOnCurrentWith(r.Context(), ops, "telemetry", doc, telemetryPresence(rawBody), sectionMergeOptions{baseOut: &cur})
 		if err != nil {
 			slog.Error("PUT server-config: failed to build telemetry document", "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
 			return
+		}
+		if len(maskedTelemetryHeaderNames(req.Telemetry)) > 0 {
+			merged, err = restoreMaskedTelemetryHeadersInDoc(merged, cur)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+				return
+			}
 		}
 		sectionDocs["telemetry"] = merged
 		mergedBaseRevs["telemetry"] = rev

@@ -15,7 +15,6 @@
 package hub
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -337,7 +336,8 @@ func maskedTelemetryHeaderNames(t *config.V1TelemetryConfig) []string {
 }
 
 // restoreMaskedTelemetryHeaders is the inverse of maskedTelemetry for the
-// PUT path, the counterpart of restoreMaskedServerSecrets: a
+// file-mode PUT path (the DB-backed path uses
+// restoreMaskedTelemetryHeadersInDoc), the counterpart of restoreMaskedServerSecrets: a
 // telemetry.cloud.headers value in incoming that still holds maskedValue
 // (an echo of GET) is replaced with the stored value of the same header,
 // so a form round trip keeps the stored headers. A real value is left
@@ -387,7 +387,10 @@ func restoreMaskedTelemetryHeaders(incoming, stored *config.V1TelemetryConfig, c
 // JSON with members that carry no value (null, "" and objects left empty
 // by that rule) removed, so key order, key spelling in the request and an
 // empty value for an absent member do not matter. A document that cannot
-// be decoded is never equal.
+// be decoded is never equal. Treating "", null and {} as no value is valid
+// while every telemetry.cloud member reads them as unset;
+// TestTelemetryCloudFields_Known fails when a member is added, so the
+// rule is checked again for it.
 func telemetryCloudUnchanged(next, cur json.RawMessage) bool {
 	a, ok1 := cloudWithoutHeaders(next)
 	b, ok2 := cloudWithoutHeaders(cur)
@@ -414,8 +417,10 @@ func cloudWithoutHeaders(doc json.RawMessage) (map[string]any, bool) {
 	return out, true
 }
 
-// pruneNoValue removes from m, at every depth, the members that hold null
-// or "", and then the objects left empty.
+// pruneNoValue removes from m, at every depth of nested objects, the
+// members that hold null or "", and then the objects left empty. It does
+// not recurse into arrays: an array is kept and compared verbatim, so an
+// empty value inside one still counts as a change (fail-closed).
 func pruneNoValue(m map[string]any) {
 	for k, v := range m {
 		switch t := v.(type) {
@@ -434,25 +439,61 @@ func pruneNoValue(m map[string]any) {
 	}
 }
 
-// telemetryCloudUnchangedDB reports, for a DB-backed save, whether the
-// telemetry.cloud object the save would store after the merge on the
-// current row (mergeSectionOnCurrent, with the presence of the request's
-// telemetry object) equals, apart from headers, the one the current row
-// holds after the same base rules.
-func telemetryCloudUnchangedDB(ctx context.Context, ops *OperationalSettings, req *config.V1TelemetryConfig, rawBody []byte) (bool, error) {
-	reqDoc, err := json.Marshal(req)
-	if err != nil {
-		return false, err
+// restoreMaskedTelemetryHeadersInDoc is restoreMaskedTelemetryHeaders for
+// the DB-backed save, applied to the documents of one row read: next is
+// the telemetry document the write will store (the request merged on the
+// row) and cur is that row's document before the request was applied
+// (sectionMergeOptions.baseOut). Each telemetry.cloud.headers value in
+// next that holds maskedValue is replaced with the same header's value in
+// cur, only when next and cur hold the same telemetry.cloud object apart
+// from headers (telemetryCloudUnchanged); otherwise, or when cur holds no
+// usable value for a masked header, it returns an error (400). The write
+// is a CAS on the revision of the same row read, so a concurrent change to
+// the row yields a 409 rather than a restored header beside it.
+//
+// The values restored come from the row, never from the snapshot GET was
+// built from: on a replica whose snapshot is stale, the row wins. With no
+// row, cur is empty, so a masked header (which GET can show from bootstrap
+// settings) has no stored value and the save is rejected.
+func restoreMaskedTelemetryHeadersInDoc(next, cur json.RawMessage) (json.RawMessage, error) {
+	var doc map[string]any
+	if err := json.Unmarshal(next, &doc); err != nil {
+		return nil, err
 	}
-	next, _, err := mergeSectionOnCurrent(ctx, ops, "telemetry", reqDoc, telemetryPresence(rawBody))
-	if err != nil {
-		return false, err
+	cloud, _ := doc["cloud"].(map[string]any)
+	headers, _ := cloud["headers"].(map[string]any)
+	var names []string
+	for k, v := range headers {
+		if v == maskedValue {
+			names = append(names, k)
+		}
 	}
-	cur, _, err := mergeSectionOnCurrent(ctx, ops, "telemetry", nil, nil)
-	if err != nil {
-		return false, err
+	if len(names) == 0 {
+		return next, nil
 	}
-	return telemetryCloudUnchanged(next, cur), nil
+	sort.Strings(names)
+	if !telemetryCloudUnchanged(next, cur) {
+		return nil, fmt.Errorf("telemetry.cloud.headers.%s is the masked placeholder %q but other fields of telemetry.cloud changed; send the real value", names[0], maskedValue)
+	}
+	var curDoc map[string]any
+	if len(cur) > 0 {
+		if err := json.Unmarshal(cur, &curDoc); err != nil {
+			return nil, err
+		}
+	}
+	curCloud, _ := curDoc["cloud"].(map[string]any)
+	curHeaders, _ := curCloud["headers"].(map[string]any)
+	for _, k := range names {
+		var sp *string
+		if sv, ok := curHeaders[k].(string); ok {
+			sp = &sv
+		}
+		if err := checkStoredSecret("telemetry.cloud.headers."+k, sp); err != nil {
+			return nil, err
+		}
+		headers[k] = *sp
+	}
+	return json.Marshal(doc)
 }
 
 // telemetryCloudUnchangedFile reports, for a file-mode save, whether the

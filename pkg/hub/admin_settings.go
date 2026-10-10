@@ -632,7 +632,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	// telemetry.cloud.headers values are masked in GET too: a masked echo
 	// keeps the stored header.
-	if req.Telemetry != nil {
+	if len(maskedTelemetryHeaderNames(req.Telemetry)) > 0 {
 		stored, err := telemetryConfigFromRaw(raw)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to parse existing settings", nil)

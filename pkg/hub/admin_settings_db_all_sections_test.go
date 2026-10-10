@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -783,6 +784,122 @@ func TestPutServerConfigDB_TelemetryMaskedHeaderNoOpMembers(t *testing.T) {
 	}
 }
 
+// The masked-header check and restore use the row the write merges onto,
+// and the write is a CAS on that row's revision: a concurrent change to
+// the telemetry row between the read and the write yields 409, and the
+// other writer's row stands.
+func TestPutServerConfigDB_TelemetryMaskedHeaderConcurrentWrite409(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	fake := newFakeHubSettingStore()
+	fake.seedWithOrigin("telemetry", json.RawMessage(storedTelemetryWithHeaders), "managed")
+	const other = `{"cloud":{"endpoint":"other.example.com:4317","headers":{"x-api-key":"dummy"}}}`
+	race := &raceSectionStore{fakeHubSettingStore: fake, section: "telemetry", other: json.RawMessage(other)}
+	ops := NewOperationalSettings(race, emptyKoanf(), emptyKoanf())
+	srv := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	srv.SetOperationalSettings(ops)
+
+	rr := putServerConfigDB(t, srv, ops, `{"telemetry":{"cloud":{"headers":{"x-api-key":"********"}}}}`)
+	require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+	assert.Equal(t, decodeJSONValue(t, []byte(other)), decodeJSONValue(t, storedRow(fake, "telemetry").Value))
+}
+
+// On a replica whose snapshot is stale, the row wins: the check compares
+// with the row, and the restored value is the row's header, not the
+// snapshot's.
+func TestPutServerConfigDB_TelemetryMaskedHeaderStaleSnapshotRowWins(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv, fake, ops := newTestDBServer(t)
+	fake.seedWithOrigin("telemetry", json.RawMessage(storedTelemetryWithHeaders), "managed")
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+	// Another replica changed the row; this replica's snapshot still holds
+	// the old endpoint and header.
+	const row = `{"cloud":{"endpoint":"new.example.com:4317","headers":{"x-api-key":"row-key"}}}`
+	fake.seedWithOrigin("telemetry", json.RawMessage(row), "managed")
+	require.Equal(t, "real-key", ops.Snapshot().TelemetryConfig.Cloud.Headers["x-api-key"])
+
+	// The endpoint GET showed (the stale one) is a change against the row.
+	rr := putServerConfigDB(t, srv, ops, `{"telemetry":{"cloud":{"endpoint":"otel.example.com:4317","headers":{"x-api-key":"********"}}}}`)
+	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+
+	rr = putServerConfigDB(t, srv, ops, `{"telemetry":{"cloud":{"endpoint":"new.example.com:4317","headers":{"x-api-key":"********","x-extra":"e"}}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	headers, _ := valueAtPath(decodeJSONValue(t, storedRow(fake, "telemetry").Value), []string{"cloud", "headers"})
+	assert.Equal(t, map[string]any{"x-api-key": "row-key", "x-extra": "e"}, headers)
+}
+
+// A seeded row with an env-pinned cloud member: the pinned member is not
+// carried from the row on either side, so a masked header alone keeps the
+// stored header, and a body that also sends the pinned member is rejected
+// (fail-closed).
+func TestPutServerConfigDB_TelemetryMaskedHeaderSeededEnvPinnedRow(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv, fake, ops := newTestDBServer(t)
+	ops.envOverrides = map[string]bool{"telemetry.cloud.endpoint": true}
+	fake.seedWithOrigin("telemetry", json.RawMessage(storedTelemetryWithHeaders), "seeded")
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+
+	rr := putServerConfigDB(t, srv, ops, `{"telemetry":{"cloud":{"endpoint":"otel.example.com:4317","headers":{"x-api-key":"********"}}}}`)
+	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+
+	rr = putServerConfigDB(t, srv, ops, `{"telemetry":{"cloud":{"headers":{"x-api-key":"********"}}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	headers, _ := valueAtPath(decodeJSONValue(t, storedRow(fake, "telemetry").Value), []string{"cloud", "headers"})
+	assert.Equal(t, map[string]any{"x-api-key": "real-key", "x-tenant": "t1"}, headers)
+}
+
+// With no telemetry row there is no stored header to restore, so a masked
+// header is rejected even when GET showed one from bootstrap settings.
+func TestPutServerConfigDB_TelemetryMaskedHeaderNoRowRejected(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv, fake, ops := newTestDBServer(t)
+	for _, body := range []string{
+		`{"telemetry":{"cloud":{"headers":{"x-api-key":"********"}}}}`,
+		`{"telemetry":{"cloud":{"endpoint":"otel.example.com:4317","headers":{"x-api-key":"********"}}}}`,
+	} {
+		rr := putServerConfigDB(t, srv, ops, body)
+		require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+	}
+	assert.Nil(t, storedRow(fake, "telemetry"), "nothing is written")
+}
+
+// telemetryCloudUnchanged treats "", null and {} as no value. That holds
+// for every telemetry.cloud member listed here; a member added to the
+// config type fails this test until the rule is checked for it and the
+// list is updated.
+func TestTelemetryCloudFields_Known(t *testing.T) {
+	known := map[string]string{
+		"enabled":                  "*bool",
+		"endpoint":                 "string",
+		"protocol":                 "string",
+		"headers":                  "map[string]string",
+		"tls":                      "*config.V1TelemetryTLSConfig",
+		"tls.enabled":              "*bool",
+		"tls.insecure_skip_verify": "*bool",
+		"tls.ca_file":              "string",
+		"batch":                    "*config.V1TelemetryBatchConfig",
+		"batch.max_size":           "int",
+		"batch.timeout":            "string",
+		"provider":                 "string",
+		"gcp_project_id":           "*string",
+		"cloud_logging":            "*bool",
+	}
+	got := map[string]string{}
+	var walk func(prefix string, rt reflect.Type)
+	walk = func(prefix string, rt reflect.Type) {
+		for _, f := range reflect.VisibleFields(rt) {
+			name := prefix + jsonFieldName(f)
+			got[name] = f.Type.String()
+			if st, ok := structTypeOf(f.Type); ok {
+				walk(name+".", st)
+			}
+		}
+	}
+	walk("", reflect.TypeOf(config.V1TelemetryCloudConfig{}))
+	assert.Equal(t, known, got, "telemetry.cloud members changed: check that \"\", null and {} still mean unset for each new member (telemetryCloudUnchanged), then update this list")
+}
+
 // File mode replaces the telemetry object whole, so a masked header is
 // kept only when the cloud object written, apart from headers, equals the
 // stored one: an exact echo keeps; a partial or empty tls, a case-variant
@@ -849,6 +966,9 @@ func TestTelemetryCloudUnchanged(t *testing.T) {
 		{"false is a value", `{"cloud":{"cloud_logging":false}}`, `{"cloud":{}}`, false},
 		{"scalar over object", `{"cloud":{"tls":"x"}}`, `{"cloud":{"tls":{"enabled":true}}}`, false},
 		{"undecodable", `{`, `{}`, false},
+		{"arrays compared verbatim", `{"cloud":{"x":["",null,{}]}}`, `{"cloud":{"x":[]}}`, false},
+		{"empty array is a value", `{"cloud":{"x":[]}}`, `{"cloud":{}}`, false},
+		{"equal arrays", `{"cloud":{"x":["a",{"b":""}]}}`, `{"cloud":{"x":["a",{"b":""}]}}`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, telemetryCloudUnchanged(json.RawMessage(tc.next), json.RawMessage(tc.cur)))

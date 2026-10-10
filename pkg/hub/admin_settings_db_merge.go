@@ -129,6 +129,11 @@ type sectionMergeOptions struct {
 	// (seeded) row after env-overridden keys are dropped (endpoints drops
 	// the bootstrap hub_name, which applies without being written).
 	seededBase func(base map[string]json.RawMessage)
+	// baseOut, when set, receives the base document from the same row
+	// read the merge uses, after the base rules above and before the
+	// request is applied (telemetry compares it with the merged result;
+	// see restoreMaskedTelemetryHeadersInDoc).
+	baseOut *json.RawMessage
 }
 
 // mergeSectionOnCurrentWith is mergeSectionOnCurrent with the base rules
@@ -170,6 +175,14 @@ func mergeSectionOnCurrentWith(ctx context.Context, ops *OperationalSettings, se
 		}
 	default:
 		return nil, 0, fmt.Errorf("reading current %s row: %w", section, err)
+	}
+
+	if opts.baseOut != nil {
+		b, err := json.Marshal(base)
+		if err != nil {
+			return nil, 0, fmt.Errorf("marshalling %s base: %w", section, err)
+		}
+		*opts.baseOut = b
 	}
 
 	tree := patchSection(section, base, next, fp)
