@@ -181,7 +181,7 @@ describe('notification tray: retired chat rows', () => {
     serve([notification('MENTION'), notification('WAITING_FOR_INPUT', 'agent-1')]);
     await tray.fetchNotifications();
 
-    expect(popups.map((p) => p.title)).toEqual(['Agent Needs Input']);
+    expect(popups.map((p) => p.title)).toEqual(['Agent Waiting on Parent']);
   });
 });
 
