@@ -88,16 +88,48 @@ func TestHandleHealthSummary_NoPingPluginOrPoolCall(t *testing.T) {
 	assert.Equal(t, 1, resp.Hub.Instances.Live)
 }
 
-// pinnedClockStore wraps a store and returns its registry rows with a
-// fixed store clock, so two requests read the rows at the same instant.
+// storeClockPin is a store-clock instant shared by several replicas'
+// pinnedClockStore wrappers; unset until the test pins it.
+type storeClockPin struct{ now atomic.Pointer[time.Time] }
+
+// pinnedClockStore wraps a store and, once the shared pin is set, returns
+// its registry rows with the pinned store clock, so two replicas read the
+// rows at the same instant. Until then it is transparent. It forwards DB()
+// so the registry tick still reads the pool through the wrapper.
 type pinnedClockStore struct {
 	store.Store
-	now time.Time
+	pin *storeClockPin
 }
 
 func (p *pinnedClockStore) ListHubInstances(ctx context.Context, window time.Duration) ([]store.HubInstance, time.Time, error) {
-	rows, _, err := p.Store.ListHubInstances(ctx, window)
-	return rows, p.now, err
+	rows, now, err := p.Store.ListHubInstances(ctx, window)
+	if pinned := p.pin.now.Load(); pinned != nil {
+		now = *pinned
+	}
+	return rows, now, err
+}
+
+func (p *pinnedClockStore) DB() *sql.DB {
+	if d, ok := p.Store.(interface{ DB() *sql.DB }); ok {
+		return d.DB()
+	}
+	return nil
+}
+
+// newPinnedClockReplicas returns two hub replicas on one store, each with a
+// pinnedClockStore installed right after it is built (the store fault
+// helper, never a later srv.store write), sharing one clock pin.
+func newPinnedClockReplicas(t *testing.T) (a, b *Server, pin *storeClockPin) {
+	t.Helper()
+	pin = &storeClockPin{}
+	wrap := func(inner store.Store, _ *storeFaultSwitch) *pinnedClockStore {
+		return &pinnedClockStore{Store: inner, pin: pin}
+	}
+	a, s, _, _ := testServerWithStoreFault(t, wrap)
+	b = newHubReplica(t, s)
+	waitUserScopedDataSweep(t, b)
+	installStoreFault(t, b, wrap)
+	return a, b, pin
 }
 
 // normalizeServingFields removes the fields that name the serving replica
@@ -129,8 +161,7 @@ func normalizeServingFields(t *testing.T, body []byte) map[string]any {
 // degraded (a failed co-located broker check), so the fleet section and the
 // attention list are not empty.
 func TestHandleHealthSummary_TwoReplicasSameResponse(t *testing.T) {
-	a, s := testServer(t)
-	b := newHubReplica(t, s)
+	a, b, pin := newPinnedClockReplicas(t)
 	require.NotEqual(t, a.InstanceID(), b.InstanceID())
 	b.ExpectEmbeddedBroker()
 	b.EmbeddedBrokerRegistrationFailed(errors.New("registration failed"))
@@ -139,8 +170,7 @@ func TestHandleHealthSummary_TwoReplicasSameResponse(t *testing.T) {
 	tickHubInstance(t, b)
 	// One store-clock instant for both reads; as_of is that instant.
 	pinned := time.Now().UTC()
-	a.store = &pinnedClockStore{Store: a.store, now: pinned}
-	b.store = &pinnedClockStore{Store: b.store, now: pinned}
+	pin.now.Store(&pinned)
 
 	bodies := map[string][]byte{}
 	for _, serving := range []*Server{a, b} {
@@ -172,35 +202,56 @@ func TestHandleHealthSummary_TwoReplicasSameResponse(t *testing.T) {
 var errDBUnreachable = errors.New("dial tcp 10.0.0.9:5432: connection refused")
 
 // dbUnreachableStore fails every store read of the health summary, as a
-// replica that cannot reach the database at all would.
-type dbUnreachableStore struct{ store.Store }
+// replica that cannot reach the database at all would, once its switch is
+// armed. Until then it delegates.
+type dbUnreachableStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
 
-func (dbUnreachableStore) AggregateAgentHealth(context.Context) (*store.AgentHealthAggregate, error) {
+func (d *dbUnreachableStore) AggregateAgentHealth(ctx context.Context) (*store.AgentHealthAggregate, error) {
+	if !d.fault.Active() {
+		return d.Store.AggregateAgentHealth(ctx)
+	}
 	return nil, errDBUnreachable
 }
 
-func (dbUnreachableStore) ListRuntimeBrokers(context.Context, store.RuntimeBrokerFilter, store.ListOptions) (*store.ListResult[store.RuntimeBroker], error) {
+func (d *dbUnreachableStore) ListRuntimeBrokers(ctx context.Context, f store.RuntimeBrokerFilter, o store.ListOptions) (*store.ListResult[store.RuntimeBroker], error) {
+	if !d.fault.Active() {
+		return d.Store.ListRuntimeBrokers(ctx, f, o)
+	}
 	return nil, errDBUnreachable
 }
 
-func (dbUnreachableStore) CountStuckPendingMessages(context.Context, time.Time) (int, error) {
+func (d *dbUnreachableStore) CountStuckPendingMessages(ctx context.Context, before time.Time) (int, error) {
+	if !d.fault.Active() {
+		return d.Store.CountStuckPendingMessages(ctx, before)
+	}
 	return 0, errDBUnreachable
 }
 
-func (dbUnreachableStore) CountBrokerDispatchHealth(context.Context, time.Time, time.Time) (int, int, error) {
+func (d *dbUnreachableStore) CountBrokerDispatchHealth(ctx context.Context, stuckBefore, failedSince time.Time) (int, int, error) {
+	if !d.fault.Active() {
+		return d.Store.CountBrokerDispatchHealth(ctx, stuckBefore, failedSince)
+	}
 	return 0, 0, errDBUnreachable
 }
 
-func (dbUnreachableStore) ListHubInstances(context.Context, time.Duration) ([]store.HubInstance, time.Time, error) {
+func (d *dbUnreachableStore) ListHubInstances(ctx context.Context, window time.Duration) ([]store.HubInstance, time.Time, error) {
+	if !d.fault.Active() {
+		return d.Store.ListHubInstances(ctx, window)
+	}
 	return nil, time.Time{}, errDBUnreachable
 }
 
 // When the serving replica cannot read the database at all, the summary is
 // a 503 with a fixed body: no partial data and no store error text.
 func TestHandleHealthSummary_DatabaseUnreadableIs503(t *testing.T) {
-	srv, _ := testServer(t)
+	srv, _, _, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *dbUnreachableStore {
+		return &dbUnreachableStore{Store: inner, fault: f}
+	})
 	tickHubInstance(t, srv)
-	srv.store = dbUnreachableStore{srv.store}
+	fault.Arm()
 
 	rr := httptest.NewRecorder()
 	srv.handleHealthSummary(rr, httptest.NewRequest(http.MethodGet, "/api/v1/admin/health/summary", nil))
@@ -256,8 +307,7 @@ func TestHandleHealthSummary_NoLiveInstanceIsUnhealthy(t *testing.T) {
 // marker and generated_at), the section names B, and the status follows
 // the fleet rule: one of two live instances degraded is degraded.
 func TestHandleHealthSummary_SACheckOnOneReplicaSameResponse(t *testing.T) {
-	a, s := testServer(t)
-	b := newHubReplica(t, s)
+	a, b, pin := newPinnedClockReplicas(t)
 	b.mu.Lock()
 	b.saAssignCheckMode = SAAssignCheckEnforce
 	b.mu.Unlock()
@@ -268,8 +318,7 @@ func TestHandleHealthSummary_SACheckOnOneReplicaSameResponse(t *testing.T) {
 	tickHubInstance(t, a)
 	tickHubInstance(t, b)
 	pinned := time.Now().UTC()
-	a.store = &pinnedClockStore{Store: a.store, now: pinned}
-	b.store = &pinnedClockStore{Store: b.store, now: pinned}
+	pin.now.Store(&pinned)
 
 	bodies := map[string][]byte{}
 	for _, serving := range []*Server{a, b} {
