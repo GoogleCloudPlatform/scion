@@ -218,7 +218,7 @@ If both `SCION_LOG_LEVEL` and `SCION_DEBUG` are set, `SCION_LOG_LEVEL` wins.
 
 ### `SCION_DEBUG` (deprecated)
 
-`SCION_DEBUG` is deprecated and is planned for removal one release after its deprecation. It still works: any non-empty value means the same as `SCION_LOG_LEVEL=debug`, for the server, the CLI and `sciontool`. When it is used, each process prints this warning to stderr once:
+`SCION_DEBUG` is deprecated and is planned for removal one release after its deprecation. It still works: any non-empty value means the same as `SCION_LOG_LEVEL=debug`, for the server, the CLI and `sciontool`. The one exception is `scion` commands run inside an agent, which ignore it (see [Debugging an agent](#debugging-an-agent)). When it is used, each process prints this warning to stderr once:
 
 ```text
 Warning: SCION_DEBUG is deprecated and will be removed in a future release; use SCION_LOG_LEVEL=debug instead.
@@ -230,7 +230,7 @@ Switch scripts and environment files from `SCION_DEBUG=1` to `SCION_LOG_LEVEL=de
 
 ### Debugging an agent
 
-Agents do not inherit debug settings. A Hub or Broker running with `--debug` (or with a debug level in its own environment) and `scion --debug` on the command line no longer set `SCION_DEBUG` or `SCION_LOG_LEVEL` in the agents they start. Earlier releases set `SCION_DEBUG=1` in every agent in those cases, which made `scion` commands inside agents print debug output.
+Agents do not inherit debug settings. A Hub or Broker running with `--debug` (or with a debug level in its own environment) and `scion --debug` on the command line no longer set `SCION_DEBUG` or `SCION_LOG_LEVEL` in the agents they start. Earlier releases set `SCION_DEBUG=1` in every agent in those cases, which made `scion` commands inside agents print debug output. Agents started by an older Hub or Broker may still have `SCION_DEBUG=1` in their environment, so `scion` commands inside an agent (agent CLI mode) ignore `SCION_DEBUG` and print no deprecation warning for it. They still honour `SCION_LOG_LEVEL` and `--debug`. `sciontool` in the agent still treats `SCION_DEBUG` as the deprecated alias.
 
 To debug an agent, set `SCION_LOG_LEVEL` for it explicitly. The value uses the same syntax as above, and `scion` commands and `sciontool` inside the agent apply it.
 
