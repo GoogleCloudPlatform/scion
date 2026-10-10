@@ -53,8 +53,6 @@
  *     its body is read, not merely after its headers.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
 import { apiFetch } from '../../client/api.js';
 

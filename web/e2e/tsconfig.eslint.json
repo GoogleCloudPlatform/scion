@@ -1,0 +1,34 @@
+{
+  // Lint-only TS project for the e2e suites whose own tsconfig is the
+  // shared shape (extends ../../tsconfig.json, includes ../../src). One
+  // program for all of them keeps typed ESLint memory flat instead of
+  // loading src once per suite. Not a typecheck config: each suite's
+  // tsconfig.json still owns its typecheck.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "noEmit": true
+  },
+  "include": [
+    "./agent-store-count/*.ts",
+    "./chat/*.ts",
+    "./chat-file-preview/*.ts",
+    "./chat-mobile/*.ts",
+    "./chat-palette/*.ts",
+    "./project-files-tabs/*.ts",
+    "./terminal-entrypoints/*.ts",
+    "./terminal-hidden/*.ts",
+    "./terminal-pane/*.ts",
+    "./terminal-workspace/*.ts",
+    "./client-main-stub.ts",
+    "./palette-focus.ts",
+    "./palette-typography.ts",
+    "./*.spec.ts",
+    "./groups/*.ts",
+    "./harness/*.ts",
+    "./roles/*.ts",
+    "./terminal-coordinator/*.ts",
+    "../src/**/*.ts"
+  ],
+  "exclude": ["../src/**/*.test.ts"]
+}

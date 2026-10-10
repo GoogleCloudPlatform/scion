@@ -64,6 +64,11 @@ func (s *Server) handleProjectGCPServiceAccountByID(w http.ResponseWriter, r *ht
 		return
 	}
 
+	if action == "status" && r.Method == http.MethodGet {
+		s.getGCPServiceAccountStatus(w, r, projectID, saID)
+		return
+	}
+
 	if action != "" {
 		NotFound(w, "GCP Service Account action")
 		return
@@ -468,6 +473,9 @@ func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 type GCPServiceAccountWithCapabilities struct {
 	store.GCPServiceAccount
 	Cap *Capabilities `json:"_capabilities,omitempty"`
+	// Mapping summarizes the listed project's Kubernetes broker profiles
+	// that map this account. Set on project-scope lists only.
+	Mapping *GCPServiceAccountMappingSummary `json:"mapping,omitempty"`
 }
 
 // GCPMintQuotaInfo provides quota information for minted service accounts.
@@ -617,11 +625,19 @@ func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, 
 		saPtrs[i] = &sas[i]
 	}
 
+	// Brokers are read only when there is an account to describe.
+	var profiles []kubernetesProfileMappings
+	if len(items) > 0 {
+		profiles = s.projectKubernetesProfileMappings(ctx, projectID)
+	}
+	annotateGCPSAMappings(items, profiles)
+
 	writeJSON(w, http.StatusOK, ListGCPServiceAccountsResponse{
 		Items:        items,
 		Capabilities: scopeCap,
 		MintQuota:    mintQuota,
-		Warnings:     s.projectSAMappingWarnings(ctx, projectID, saPtrs...),
+		Warnings: projectSAMappingWarningsFrom(projectID,
+			func() projectSAMappingView { return projectSAMappingViewFrom(profiles) }, saPtrs...),
 	})
 }
 

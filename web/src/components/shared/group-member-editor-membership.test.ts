@@ -19,8 +19,6 @@
  * window-level membership-changed event, and stays silent on failure.
  */
 
-// @vitest-environment happy-dom
-
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { addMember, removeMember, listMembers, GroupsApiError } from '../../client/groups-api.js';
 import { showConfirm } from './confirm-dialog.js';

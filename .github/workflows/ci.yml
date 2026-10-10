@@ -34,7 +34,8 @@ permissions:
 
 jobs:
   # Path detection for jobs that only matter when specific files change
-  # (ptone/scion#2845). Gating uses this job plus a job-level `if:`, never
+  # (ptone/scion#2845). Gating uses this job plus a job-level `if:` (or a
+  # step-level `if:` inside an always-run job, see Build & Test), never
   # `on.paths`: a skipped job still reports its check, whereas a workflow
   # filtered out by on.paths reports nothing at all.
   #
@@ -50,6 +51,7 @@ jobs:
       single_node_vm: ${{ steps.diff.outputs.single_node_vm }}
       starter_hub: ${{ steps.diff.outputs.starter_hub }}
       web: ${{ steps.diff.outputs.web }}
+      web_checks: ${{ steps.diff.outputs.web_checks }}
     steps:
       - name: Checkout code
         if: github.event_name == 'pull_request'
@@ -74,6 +76,7 @@ jobs:
               echo "single_node_vm=true"
               echo "starter_hub=true"
               echo "web=true"
+              echo "web_checks=true"
             } >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -85,6 +88,7 @@ jobs:
               echo "single_node_vm=true"
               echo "starter_hub=true"
               echo "web=true"
+              echo "web_checks=true"
             } >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -107,6 +111,24 @@ jobs:
           else
             echo "web=false" >> "$GITHUB_OUTPUT"
           fi
+          # web_checks gates the web checks inside Build & Test (typecheck,
+          # e2e-perf lint/test, Vitest; ptone/scion#4256). It is wider than
+          # `web` because those checks read inputs from outside web/:
+          #   - Vitest parity tests read fixtures from pkg/**/testdata
+          #     (pkg/wsprotocol/testdata/pty_close_codes.json,
+          #     pkg/artifacts/testdata/remote_image_urls.json,
+          #     pkg/artifacts/critic/testdata/corpus.json,
+          #     pkg/hub/testdata/*-body.json); tsc type-checks the JSON
+          #     imports among them.
+          #   - web/src/shared/harness-utils.test.ts compares against the
+          #     harnesses/ directory (harnesses/*/config.yaml).
+          # Keep this regex in sync when web/ starts reading anything else
+          # outside web/.
+          if grep -qE '^(web/|harnesses/|pkg/(.+/)?testdata/|\.github/workflows/ci\.yml$)' <<<"$changed"; then
+            echo "web_checks=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "web_checks=false" >> "$GITHUB_OUTPUT"
+          fi
 
   build-and-test:
     name: Build & Test
@@ -123,6 +145,29 @@ jobs:
     # ~13.9m (max 9.8m today). Keep timeout > pre-test max + ~17m: raise it
     # if steps are added before Run Tests or they grow.
     timeout-minutes: 30
+    # needs: changes gates the web checks below (typecheck, e2e-perf
+    # lint/test, Vitest) on changes.outputs.web_checks (ptone/scion#4256):
+    # true when a PR touches web/, harnesses/, any pkg/**/testdata/ or this
+    # workflow (the out-of-tree inputs those checks read; see the regex in
+    # the changes job). The job itself always runs, so the "Build & Test"
+    # check is always reported: !cancelled() keeps it running even when the
+    # changes job fails.
+    #
+    # Each gated step uses
+    #   needs.changes.result != 'success' ||
+    #   needs.changes.outputs.web_checks != 'false'
+    # which fails open: the step is skipped only when path detection
+    # succeeded AND reported exactly 'false'. A failed or skipped changes
+    # job, a missing/empty output, or any non-pull_request event (push to
+    # main, where changes emits web_checks=true) runs the steps. A custom
+    # step `if:` without a status function is implicitly ANDed with
+    # success(), so the steps still skip after an earlier step fails, as
+    # before.
+    #
+    # Build Web UI is NOT gated: web/embed.go embeds web/dist/client into
+    # the Go build, and the Go tests and Build Binary below need it.
+    needs: changes
+    if: ${{ !cancelled() }}
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -152,6 +197,7 @@ jobs:
         run: ls -la web/dist
 
       - name: Verify Web Types
+        if: ${{ needs.changes.result != 'success' || needs.changes.outputs.web_checks != 'false' }}
         working-directory: ./web
         run: npm run typecheck
 
@@ -159,20 +205,31 @@ jobs:
         working-directory: ./web
         run: npm run lint
 
+      - name: Lint Web E2E Specs
+        working-directory: ./web
+        run: npm run lint:e2e
+
       # The eslint override and lint:e2e-perf script cover the e2e-perf
-      # harness sources; wired into CI so they actually run on every change.
+      # harness sources; wired into CI so they run on every PR that touches
+      # web/, harnesses/, pkg/**/testdata/ or this workflow, and on every
+      # push to main (gated on changes.outputs.web_checks, see the job
+      # comment).
       - name: Lint browser perf benchmark (e2e-perf)
+        if: ${{ needs.changes.result != 'success' || needs.changes.outputs.web_checks != 'false' }}
         working-directory: ./web
         run: npm run lint:e2e-perf
 
       # lib.mjs's pure functions (network-outcome classification, stats,
       # burst-target selection) have node:test coverage; wire it in so it
-      # actually runs on every change.
+      # runs on every PR that touches web/, harnesses/, pkg/**/testdata/ or
+      # this workflow, and on every push to main (gated as above).
       - name: Test browser perf benchmark (e2e-perf)
+        if: ${{ needs.changes.result != 'success' || needs.changes.outputs.web_checks != 'false' }}
         working-directory: ./web
         run: npm run test:e2e-perf
 
       - name: Run Web Tests
+        if: ${{ needs.changes.result != 'success' || needs.changes.outputs.web_checks != 'false' }}
         working-directory: ./web
         run: npm test
 
@@ -721,6 +778,12 @@ jobs:
           cache: true
 
       - name: golangci-lint
+        # Bound golangci-lint memory so type-checking the module (pkg/hub in
+        # particular) cannot exhaust the ~16 GB runner, which shows up as
+        # "The runner has received a shutdown signal" (ptone/scion#4208).
+        env:
+          GOGC: '50'
+          GOMEMLIMIT: 8GiB
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
           args: '--new-from-merge-base=origin/main'
@@ -1027,3 +1090,43 @@ jobs:
             echo "::error title=Chat mobile E2E failed::One or more chat-mobile shards did not succeed (result: ${RESULT})."
             exit 1
           fi
+
+  # Browser counter budgets for the project agent page (grid, list and
+  # graph): DOM element count and long-task count at 100 seeded agents,
+  # against mocked API responses recorded from the hub's own fixture
+  # (web/e2e-perf/budgets; baselines and margins are in budgets.pw.ts). The
+  # hub-side counter budgets (store calls, decisions, response bytes) run in
+  # pkg/hub SQLite Tests (TestPerfBudget_AgentEndpoints). Chromium only, one
+  # worker, no Go build. Path-gated on web/ like the chat-mobile suite.
+  perf-budgets-web:
+    name: Web perf budgets
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.web == 'true') }}
+    runs-on: ubuntu-latest
+    # Above the config's CI globalTimeout (15m) plus setup (npm ci and the
+    # Chromium install), so a slow run stops inside Playwright with a report.
+    timeout-minutes: 25
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24' # Node.js 24 (LTS)
+          cache: 'npm'
+          cache-dependency-path: 'web/package-lock.json'
+
+      - name: Install web dependencies
+        working-directory: ./web
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        working-directory: ./web
+        run: npx playwright install --with-deps --only-shell chromium
+
+      - name: Run web perf budgets
+        working-directory: ./web
+        run: npm run test:e2e:perf-budgets

@@ -88,7 +88,7 @@ For Hub projects, the mode is set **when the project is created** and cannot be 
 
 | Workspace mode value | Project with git remote | Project without git remote |
 |---|---|---|
-| *(not set)* | Clone-based provisioning (the existing default) | Shared-plain |
+| *(not set)* | Clone-per-agent | Shared-plain |
 | `shared` | Shared-plain | Shared-plain |
 | `per-agent` | Clone-per-agent | Empty-per-agent |
 | `worktree-per-agent` | Worktree-per-agent | Rejected (`400`): requires a git remote |
@@ -100,6 +100,12 @@ scion hub projects create --name scratch --workspace-mode per-agent
 # Git project with one worktree per agent
 scion hub projects create https://github.com/acme/widgets.git --workspace-mode worktree-per-agent
 ```
+
+For a git project, only `shared` selects the shared checkout. A git project with no workspace-mode label, or with any other stored value (including a raw `shared-plain` label), resolves as Clone-per-agent and each agent gets its own clone on node-local storage.
+
+:::caution[Unlabeled git projects on an NFS export]
+Earlier releases treated an unlabeled git project as a shared checkout. After upgrading, an existing agent in such a project starts in a new clone on a Runtime Broker that does not have the NFS export mounted. Push any work in the shared checkout before you restart its agents.
+:::
 
 The Hub rejects unknown values with `400`. The mode is stored in the server-owned `scion.dev/workspace-mode` label: you cannot set or change that label directly, on create or later with an update. Creating or starting an Empty-per-agent agent on a Runtime Broker that does not support this mode fails with `412 Precondition Failed` (`unsupported_capability`). The error names the Runtime Broker and says which ones work: Docker, Podman, Apple, and Kubernetes Runtime Brokers. Upgrade an older Runtime Broker, or pick one of those; upgrading does not help a Cloud Run or Substrate Runtime Broker. See [`scion hub projects create`](/scion/reference/cli/#scion-hub) and the [Projects API](/scion/reference/api/#projects-apiv1projects).
 

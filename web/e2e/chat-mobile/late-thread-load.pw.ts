@@ -70,6 +70,7 @@ async function holdThreadABody(page: Page): Promise<void> {
   await page.addInitScript((threadId) => {
     const w = window as unknown as { __bodyHeld?: boolean; __releaseBody?: () => void };
     const released = new Promise<void>((resolve) => (w.__releaseBody = resolve));
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- saved unbound on purpose and invoked with json.call(this) on the original receiver
     const json = Response.prototype.json;
     Response.prototype.json = async function (this: Response): Promise<unknown> {
       if (this.url.includes(`/conversations/${threadId}/messages`)) {

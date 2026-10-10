@@ -19,8 +19,6 @@
  * changes SSE does not carry.
  */
 
-// @vitest-environment happy-dom
-
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { agent, createHarness, settle, type Harness } from './__fixtures__/agent-store-harness.js';
 import {

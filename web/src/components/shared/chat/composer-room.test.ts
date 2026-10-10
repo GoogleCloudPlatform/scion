@@ -19,8 +19,6 @@
  * flex column where the message list gives up exactly what the field takes.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { ReactiveController, ReactiveControllerHost } from 'lit';
 

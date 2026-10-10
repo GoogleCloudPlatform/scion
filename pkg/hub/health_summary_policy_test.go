@@ -269,11 +269,11 @@ func TestDeriveHealthSummaryStatus_Rules(t *testing.T) {
 			}},
 		},
 		{
-			name: "integration not reported or not managed is neutral",
+			name: "integration not reported or not run is neutral",
 			mutate: func(r *HealthSummaryResponse) {
 				r.Integrations = []HealthSummaryIntegration{
-					{Name: "a", Health: healthIntegrationUnknown, Reason: healthIntegrationTimedOutReason},
-					{Name: "b", Health: healthIntegrationUnknown, Reason: healthIntegrationNotManagedReason},
+					{Name: "a", Health: healthIntegrationUnknown, Reason: healthIntegrationRegistryUnavailableReason},
+					{Name: "b", Health: healthIntegrationUnknown, Reason: healthIntegrationNotRunReason},
 					{Name: "c", Health: HealthStatusHealthy},
 				}
 			},

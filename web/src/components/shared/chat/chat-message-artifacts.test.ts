@@ -20,8 +20,6 @@
  * linkified scion://artifact/ URLs, and both opening the in-place preview.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { MessageArtifactRef } from '../../../client/artifacts.js';
 

@@ -645,6 +645,19 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// telemetry.cloud.headers values are masked in GET too: a masked echo
+	// keeps the stored header.
+	if len(maskedTelemetryHeaderNames(req.Telemetry)) > 0 {
+		stored, err := telemetryConfigFromRaw(raw)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to parse existing settings", nil)
+			return
+		}
+		if err := restoreMaskedTelemetryHeaders(req.Telemetry, stored, telemetryCloudUnchangedFile(req.Telemetry, stored)); err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			return
+		}
+	}
 
 	// Apply updates by marshaling the request fields and merging. The raw
 	// server object tells the merge which server fields were sent.

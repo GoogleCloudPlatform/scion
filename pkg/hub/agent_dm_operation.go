@@ -132,6 +132,11 @@ type AgentDMInput struct {
 	// denied requests cannot resume an agent (#1691 AC-2).
 	Wake bool
 
+	// BeforeWake, when set, runs once the admission checks have passed and
+	// right before the wake, so an HTTP adapter can extend its response
+	// write deadline over the resume and readiness wait (ptone/scion#4178).
+	BeforeWake func()
+
 	// SkipPhaseGate bypasses the target-phase admission check (Phase 1b)
 	// that otherwise rejects delivery to a non-running target when Wake is
 	// false. It has effect ONLY when Type is messages.TypeMention and Wake
@@ -378,6 +383,9 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			if denial := s.wakeResumeDenial(ctx, input.SenderIdentity, input.TargetAgent); denial != nil {
 				LogDMAdmission(DMAuditEntryForDenial(input, denial.Code, denial.Message))
 				return nil, denial
+			}
+			if input.BeforeWake != nil {
+				input.BeforeWake()
 			}
 			wakeResult, wakeErr := s.wakeAgentForDM(ctx, input.TargetAgent)
 			if wakeErr != nil {

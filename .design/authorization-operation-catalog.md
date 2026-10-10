@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 181
+**Operations:** 182
 
 ## Table of Contents
 
@@ -126,6 +126,7 @@
 - [user.session.logout](#usersessionlogout) — Sign-in flow logout step; the hub holds no server-side session state for it to change
 - [user.session.revoke](#usersessionrevoke) — Revoke every cookie session of a user (platform admin only)
 - [user.terminalworkspace](#userterminalworkspace) — Read or replace the caller's own terminal workspace
+- [user.skillinjection.update](#userskillinjectionupdate) — Add, replace or remove the skills injected into the caller's own agents. A user access token needs user_skill_injection:update on a hub boundary
 - [hub.authreset](#hubauthreset) — Reset all agent authentication credentials (emergency action)
 - [hub.authreset.reissue](#hubauthresetreissue) — Re-issue an agent's role scopes from its delegator's current authority (dispatched from POST .../agents/{id}/reset-auth when reissue_scopes is set; hub super-admin only)
 - [hub.authreset.reissueall](#hubauthresetreissueall) — Re-issue every agent's role scopes from its delegator's current authority (dispatched from POST /api/v1/admin/agents/reset-auth-all when reissue_scopes is set; dry run by default; hub super-admin only)
@@ -3486,6 +3487,7 @@
 | http_route | GET | `/api/v1/chat/conversations/{id}/messages` |
 | http_route | GET | `/api/v1/chat/topics/{id}` |
 | http_route | GET | `/api/v1/chat/dms` |
+| http_route | GET | `/api/v1/chat/unread-count` |
 | http_route | GET | `/api/v1/chat/search` |
 | http_route | POST | `/api/v1/chat/attachments` |
 | http_route | GET | `/api/v1/chat/attachments/{id}` |
@@ -4671,6 +4673,50 @@
 
 ---
 
+## user.skillinjection.update
+
+**Domain:** user.skillinjection
+
+**Description:** Add, replace or remove the skills injected into the caller's own agents. A user access token needs user_skill_injection:update on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/users/me/injected-skills/{id}` |
+| http_route | POST | `/api/v1/users/me/injected-skills` |
+| http_route | PUT | `/api/v1/users/me/injected-skills` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `hub`)
+
+**Base Permission:** `user_skill_injection.update`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`, `update-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `user.skillinjection.update`
+- **Context Fields:** actor_id
+- **Before Fields:** skill_injection_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserInjectedSkillsWrite_TokenNeedsUpdateScope`
+- `pkg/hub:TestUserInjectedSkillsWrite_ProjectBoundaryTokenDenied`
+- `pkg/hub:TestUserInjectedSkillsWrite_SessionAndDevUnchanged`
+- `pkg/hub:TestUserInjectedSkillsWrite_FederatedUserDenied`
+
+---
+
 ## hub.authreset
 
 **Domain:** hub
@@ -4686,6 +4732,8 @@
 **Principals:** `user`
 
 **Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `SESSION_RECOVERY`)
 
 **Base Permission:** `hub.auth_reset.execute`
 
@@ -4710,6 +4758,9 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestAdminResetAuthAll_TokenRefused`
+- `pkg/hub:TestAdminResetAuthAll_SessionPassesGuard`
+- `pkg/hub:TestAdminResetAuthAll_DevCredentialPassesGuard`
 
 ---
 

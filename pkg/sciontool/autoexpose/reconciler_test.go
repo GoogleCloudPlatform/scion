@@ -17,6 +17,8 @@ package autoexpose
 import (
 	"context"
 	"fmt"
+	"net"
+	"os"
 	"sort"
 	"sync"
 	"testing"
@@ -507,5 +509,40 @@ func TestIsConflictError(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("isConflictError(%v) = %v, want %v", tt.err, got, tt.want)
 		}
+	}
+}
+
+// TestReconciler_IPv6OnlyListenerRegisteredAsLoopback: a listener bound
+// only to ::1 is found by the real /proc scan and registered with the
+// logical loopback host 127.0.0.1. The conduit TCP target reaches it
+// through its refused-on-127.0.0.1 retry on ::1 (see
+// TestAgentTCPLoopbackFallback in pkg/sciontool/conduit), so no
+// bind-address-specific registration is needed.
+func TestReconciler_IPv6OnlyListenerRegisteredAsLoopback(t *testing.T) {
+	if _, err := os.Stat("/proc/net/tcp6"); err != nil {
+		t.Skip("no /proc/net/tcp6 on this host")
+	}
+	l, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		t.Skipf("no IPv6 loopback on this host: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+	port := l.Addr().(*net.TCPAddr).Port
+
+	client := newMockHubClient()
+	cfg := defaultTestConfig()
+	cfg.FilterMode = FilterModeAllowlist
+	cfg.FilterPorts = []int{port}
+	r := NewReconciler(client, cfg) // real ScanListeners
+	r.reconcileOnce(context.Background())
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	ep, ok := client.ports[port]
+	if !ok {
+		t.Fatalf("::1-only port %d not registered; registered %v", port, client.ports)
+	}
+	if ep.Host != "127.0.0.1" {
+		t.Fatalf("registered host = %q, want 127.0.0.1", ep.Host)
 	}
 }

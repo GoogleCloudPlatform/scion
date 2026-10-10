@@ -19,8 +19,6 @@
  * tz-refactor task 11, review round 2 R2-1/R2-3).
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, afterEach } from 'vitest';
 import { setPreferredTimeZone } from '../../../utils/time.js';
 

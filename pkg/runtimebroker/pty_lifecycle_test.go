@@ -33,6 +33,7 @@ import (
 // PTY. Only runtime exec is adapted to a private local socket; this is NOT a
 // Docker, Apple container, Kubernetes or sandbox integration test.
 func TestPTYLifecycle_PrivateTmuxSurvivesDetachAndStreamClose(t *testing.T) {
+	useFastPTYTimings(t)
 	tmux, err := exec.LookPath("tmux")
 	if err != nil {
 		t.Skip("isolated tmux lifecycle requires tmux in PATH")
