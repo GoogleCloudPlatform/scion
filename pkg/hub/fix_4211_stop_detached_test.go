@@ -107,3 +107,51 @@ func TestDetachStopFromClient_KeepsValuesDropsCancelBounded(t *testing.T) {
 	require.True(t, ok, "the stop is bounded")
 	assert.WithinDuration(t, time.Now().Add(time.Minute), deadline, 5*time.Second)
 }
+
+// cancelOnDispatchInsertStore cancels the client's request when the
+// offline-broker stop queues its durable dispatch, then answers as a
+// ctx-aware store does: a canceled ctx fails the write.
+type cancelOnDispatchInsertStore struct {
+	store.Store
+	cancelRequest context.CancelFunc
+	insertCtxErr  error
+}
+
+func (c *cancelOnDispatchInsertStore) InsertBrokerDispatch(ctx context.Context, d *store.BrokerDispatch) error {
+	c.cancelRequest()
+	c.insertCtxErr = ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.Store.InsertBrokerDispatch(ctx, d)
+}
+
+// The broker is offline: the stop is queued for its reconnect. A client
+// that gives up while the stop is being queued must not cancel the durable
+// dispatch or the stop_queued status write.
+func TestLifecycleStop_OfflineBroker_ClientCancelWhileQueueing_StopQueued(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	srv.SetDispatcher(&runIntentDispatcher{})
+	srv.commandBus = &recordingCommandBus{}
+	_, broker, agent := setupOfflineBrokerAgent(t, s, "cancel-q")
+	_, err := s.SetRunIntent(ctx, agent.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+
+	cancel, serve := newCancelableRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/stop", nil)
+	hook := &cancelOnDispatchInsertStore{Store: srv.store, cancelRequest: cancel}
+	srv.store = hook
+	rec := serve()
+
+	assert.NoError(t, hook.insertCtxErr, "the queued dispatch must not follow the canceled request")
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	pending, err := s.ListPendingDispatch(ctx, broker.ID)
+	require.NoError(t, err)
+	require.Len(t, pending, 1, "the stop is queued for the broker's reconnect")
+	assert.Equal(t, "stop", pending[0].Op)
+	got, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseStopped), got.Phase, "the stop_queued status write must land despite the cancel")
+	assert.Equal(t, containerStatusStopQueued, got.ContainerStatus)
+	assert.Equal(t, store.RunIntentStopped, got.RunIntent)
+}

@@ -618,7 +618,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		}
 		stopIntentAt = intentAt
 		if !s.brokerReachable(ctx, agent) {
-			s.queueOfflineStop(w, r, agent, intentAt)
+			s.queueOfflineStop(ctx, w, agent, intentAt)
 			return
 		}
 	} else if !s.checkBrokerAvailability(w, r, agent) {
@@ -1191,8 +1191,11 @@ const (
 // if no newer start or stop has been recorded since (see execDispatchStop),
 // marks the agent stopped with container status stop_queued, and responds
 // 202 Accepted with a warning.
-func (s *Server) queueOfflineStop(w http.ResponseWriter, r *http.Request, agent *store.Agent, intentAt time.Time) {
-	ctx := r.Context()
+//
+// ctx is the stop's ctx, detached from the client (detachStopFromClient), so
+// a client that gives up does not cancel the queued dispatch or the
+// stop_queued status write (ptone/scion#4211).
+func (s *Server) queueOfflineStop(ctx context.Context, w http.ResponseWriter, agent *store.Agent, intentAt time.Time) {
 	at := intentAt
 	argsJSON, err := MarshalDispatchArgs(StopDispatchArgs{IntentAt: &at, SupersedesClaim: agent.StartClaimID, RunID: agent.RunID})
 	if err != nil {
