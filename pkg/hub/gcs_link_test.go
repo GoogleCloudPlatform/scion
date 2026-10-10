@@ -2479,6 +2479,7 @@ func TestGCSLink_MethodNotAllowed(t *testing.T) {
 	viewer, msg := gcsHappyPathFixture(t, f, "method", "gs://bkt/o.txt")
 	rec := doRequestAsUser(t, f.srv, viewer, http.MethodPost, gcsRequestPath(msg.ID, "bkt", "o.txt"), nil)
 	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+	require.Equal(t, "GET", rec.Header().Get("Allow"))
 
 	// Exactly one audit event is emitted per request, including a
 	// wrong-method call — it has no reason enum value of its own, so it is

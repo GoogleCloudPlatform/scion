@@ -23,6 +23,17 @@
 
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+// Type-only imports: erased at build time, so CodeMirror stays in its own
+// lazily loaded chunk.
+import type * as CMView from '@codemirror/view';
+import type { EditorView } from '@codemirror/view';
+import type * as CMState from '@codemirror/state';
+import type { Extension } from '@codemirror/state';
+import type * as CMCommands from '@codemirror/commands';
+import type * as CMLanguage from '@codemirror/language';
+import type * as CMSearch from '@codemirror/search';
+import type * as CMAutocomplete from '@codemirror/autocomplete';
+import type * as CMLangJavascript from '@codemirror/lang-javascript';
 
 // ────────────────────────────────────────────────────────────
 // Language mode mapping
@@ -63,12 +74,28 @@ export function getLanguageFromPath(filePath: string): string {
 // Lazy-loaded CodeMirror setup
 // ────────────────────────────────────────────────────────────
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type CMModule = any;
+/** The CodeMirror modules loadCodeMirror resolves to. Types only. */
+interface CMModules {
+  view: typeof CMView;
+  state: typeof CMState;
+  commands: typeof CMCommands;
+  language: typeof CMLanguage;
+  search: typeof CMSearch;
+  autocomplete: typeof CMAutocomplete;
+}
 
-let cmPromise: Promise<CMModule> | null = null;
+/**
+ * A language support module. Modules export a function named after the
+ * language (javascript, json, ...), so members are looked up by name.
+ */
+type LanguageModule = Record<string, unknown>;
 
-async function loadCodeMirror(): Promise<CMModule> {
+/** A language module's main export, such as json() or markdown(). */
+type LanguageSupportFn = () => Extension;
+
+let cmPromise: Promise<CMModules> | null = null;
+
+async function loadCodeMirror(): Promise<CMModules> {
   if (!cmPromise) {
     cmPromise = (async () => {
       const [view, state, commands, language, search, autocomplete] = await Promise.all([
@@ -85,7 +112,7 @@ async function loadCodeMirror(): Promise<CMModule> {
   return cmPromise;
 }
 
-async function loadLanguageSupport(lang: string): Promise<CMModule | null> {
+async function loadLanguageSupport(lang: string): Promise<LanguageModule | null> {
   switch (lang) {
     case 'javascript':
     case 'typescript':
@@ -146,8 +173,7 @@ export class ScionCodeEditor extends LitElement {
   @state() private loading = true;
   @state() private error: string | null = null;
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private editorView: any = null;
+  private editorView: EditorView | null = null;
   private contentInitialized = false;
 
   static override styles = css`
@@ -234,7 +260,7 @@ export class ScionCodeEditor extends LitElement {
     }
     if (changed.has('readonly') && this.editorView) {
       this.editorView.dispatch({
-        effects: this.editorView.state.facet ? [] : [], // readOnly is set via reconfigure
+        effects: (this.editorView.state.facet as unknown) ? [] : [], // readOnly is set via reconfigure
       });
       // Rebuild the editor if readonly changes — simpler than dynamic reconfiguration
       void this.initEditor();
@@ -438,12 +464,16 @@ export class ScionCodeEditor extends LitElement {
       const langMod = await loadLanguageSupport(this.language);
       if (langMod) {
         if (this.language === 'javascript') {
-          extensions.push(langMod.javascript({ jsx: true }));
+          extensions.push((langMod as typeof CMLangJavascript).javascript({ jsx: true }));
         } else if (this.language === 'typescript') {
-          extensions.push(langMod.javascript({ jsx: true, typescript: true }));
+          extensions.push(
+            (langMod as typeof CMLangJavascript).javascript({ jsx: true, typescript: true })
+          );
         } else {
           // Most language modules export a function named after the language
-          const langFn = langMod[this.language] || langMod.default;
+          const langFn = (langMod[this.language] || langMod.default) as
+            | LanguageSupportFn
+            | undefined;
           if (typeof langFn === 'function') {
             extensions.push(langFn());
           }

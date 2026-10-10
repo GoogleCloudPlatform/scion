@@ -104,6 +104,7 @@ import {
 import type { FileEditorDataSource } from '../shared/file-editor.js';
 import { showToast } from '../../utils/toast.js';
 import { stopAllNotices, type StopAllResult } from '../../utils/stop-all.js';
+import { pullLatestErrorMessage, type PullLatestResponse } from '../../utils/pull-latest.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { terminalHref } from '../../client/open-terminal.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
@@ -157,6 +158,15 @@ function isProjectShaped(value: unknown): value is { id: string; name: string } 
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   const record = value as { id?: unknown; name?: unknown };
   return typeof record.id === 'string' && typeof record.name === 'string';
+}
+
+/** Project metrics from GET /api/v1/projects/{id}/metrics-summary. */
+interface ProjectMetricsSummary {
+  sessionsCount24h: number;
+  apiCalls24h: number;
+  tokenUsage24h: number;
+  activeAgents24h: number;
+  periodLabel: string;
 }
 
 @customElement('scion-page-project-detail')
@@ -479,8 +489,8 @@ export class ScionPageProjectDetail extends LitElement {
   @state()
   private pullResult: {
     status: string;
-    updated?: boolean;
-    commits?: { hash: string; subject: string }[];
+    updated?: boolean | undefined;
+    commits?: { hash: string; subject: string }[] | undefined;
     error?: string;
   } | null = null;
 
@@ -488,13 +498,7 @@ export class ScionPageProjectDetail extends LitElement {
    * Metrics summary for the project (null = not loaded or unavailable)
    */
   @state()
-  private metricsSummary: {
-    sessionsCount24h: number;
-    apiCalls24h: number;
-    tokenUsage24h: number;
-    activeAgents24h: number;
-    periodLabel: string;
-  } | null = null;
+  private metricsSummary: ProjectMetricsSummary | null = null;
 
   /**
    * DB-backed session metrics summary for the project.
@@ -1221,7 +1225,7 @@ export class ScionPageProjectDetail extends LitElement {
     const storedSort = localStorage.getItem(`scion-sort-project-agents-${this.projectId}`);
     if (storedSort) {
       try {
-        const parsed = JSON.parse(storedSort);
+        const parsed = JSON.parse(storedSort) as { field?: unknown; dir?: unknown } | null;
         if (
           parsed &&
           (parsed.field === 'name' ||
@@ -1271,20 +1275,17 @@ export class ScionPageProjectDetail extends LitElement {
     void this.loadHubProjectCapabilities();
 
     // Listen for real-time updates
-    stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated as EventListener);
-    stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
-    stateManager.addEventListener('agents-resync', this.boundOnAgentsResync as EventListener);
+    stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated);
+    stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged);
+    stateManager.addEventListener('agents-resync', this.boundOnAgentsResync);
     this.agentWindow.addEventListener('change', this.boundOnWindowChange);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    stateManager.removeEventListener(
-      'projects-updated',
-      this.boundOnProjectsUpdated as EventListener
-    );
-    stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
-    stateManager.removeEventListener('agents-resync', this.boundOnAgentsResync as EventListener);
+    stateManager.removeEventListener('projects-updated', this.boundOnProjectsUpdated);
+    stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged);
+    stateManager.removeEventListener('agents-resync', this.boundOnAgentsResync);
     this.agentWindow.removeEventListener('change', this.boundOnWindowChange);
     this.cancelAgentsLoad();
     this.filesSectionObserver?.disconnect();
@@ -1626,7 +1627,10 @@ export class ScionPageProjectDetail extends LitElement {
         this.metricsSummary = null;
         return;
       }
-      const data = await res.json();
+      const data = (await res.json()) as
+        | (ProjectMetricsSummary & { available?: undefined })
+        | { available: false }
+        | null;
       // If metrics service is unavailable, the backend returns {available: false}
       if (data && data.available === false) {
         this.metricsSummary = null;
@@ -2498,26 +2502,13 @@ export class ScionPageProjectDetail extends LitElement {
         method: 'POST',
       });
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const result = (await response.json()) as any;
-
       if (!response.ok) {
-        // Extract error message from structured APIError or legacy format
-        const apiErr = result?.error;
-        let errorMsg =
-          (typeof apiErr === 'object' ? apiErr?.message : null) ||
-          result?.detail ||
-          result?.error ||
-          'Pull failed';
-        // Append guidance hint if available
-        const guidance = apiErr?.details?.guidance;
-        if (guidance) {
-          errorMsg += ` — ${guidance}`;
-        }
-        this.pullResult = { status: 'error', error: errorMsg };
+        const body: unknown = await response.json();
+        this.pullResult = { status: 'error', error: pullLatestErrorMessage(body) };
         return;
       }
 
+      const result = (await response.json()) as PullLatestResponse;
       this.pullResult = { status: 'ok', updated: result.updated, commits: result.commits };
       // Refresh file list after pull
       this.refreshActiveFileBrowser();

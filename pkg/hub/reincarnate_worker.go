@@ -665,7 +665,7 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 			return
 		}
 		if err := md.DispatchAgentProvisionForMove(ctx, agent, move.expectedNFSWorkspace()); err != nil {
-			failAfterProvision(store.AgentReincarnationStateProvisioning, "provision on the target broker failed: "+err.Error())
+			failAfterProvision(store.AgentReincarnationStateProvisioning, "provision on the target broker failed: "+dispatchFailureText(err))
 			return
 		}
 	}
@@ -685,7 +685,7 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		// is restored whatever its outcome, as before. The failed
 		// reprovision has already revoked the agent's credentials if it
 		// minted one, so a refused re-render changes nothing there.
-		errMsg := "reprovision failed: " + err.Error()
+		errMsg := "reprovision failed: " + dispatchFailureText(err)
 		s.rerenderPreviousConfig(ctx, dispatcher, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, errMsg, previous)
 		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, errMsg, previous)
 		return
@@ -764,7 +764,7 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		return
 	}
 	if err := dispatcher.DispatchAgentStart(ctx, agent, preamble, false); err != nil {
-		errMsg := "start failed: " + err.Error()
+		errMsg := "start failed: " + dispatchFailureText(err)
 		// A move follows the same rule: on an ambiguous outcome the agent
 		// stays assigned to the target at gen N+1, with its reservation
 		// there (a container may be running there), and the source is

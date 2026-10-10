@@ -131,9 +131,9 @@ func newTestStoreAt(t testing.TB, dsn string) (store.Store, error) {
 }
 
 // newTestHubServer builds a Server with New and registers srv.Shutdown in
-// t.Cleanup, so the background goroutines New starts (decision audit
-// worker, link-service and preview cleanup loops, broker-auth nonce cache,
-// OIDC key loops, ...) stop when the test ends instead of keeping the whole
+// t.Cleanup, so the background goroutines New starts (link-service and preview
+// cleanup loops, broker-auth nonce cache, OIDC key loops, ...) stop when the
+// test ends instead of keeping the whole
 // server graph reachable for the rest of the package run (ptone/scion#3641;
 // the package-exit leak guard in leak_guard_helpers_test.go enforces it).
 // Use it instead of calling New directly in tests.

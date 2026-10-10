@@ -483,23 +483,31 @@ func (s *agentService) Delete(ctx context.Context, agentID string, opts *DeleteA
 
 // deletePath builds the DELETE URL, with the query parameters for opts.
 func (s *agentService) deletePath(agentID string, opts *DeleteAgentOptions) string {
-	path := s.agentPath(agentID)
-	if opts != nil {
-		query := url.Values{}
-		// Server defaults deleteFiles/removeBranch to true, so only send
-		// the parameter when the caller explicitly wants to preserve them.
-		if !opts.DeleteFiles {
-			query.Set("deleteFiles", "false")
-		}
-		if !opts.RemoveBranch {
-			query.Set("removeBranch", "false")
-		}
-		if opts.Force {
-			query.Set("force", "true")
-		}
-		if len(query) > 0 {
-			path += "?" + query.Encode()
-		}
+	return withDeleteAgentQuery(s.agentPath(agentID), opts)
+}
+
+// withDeleteAgentQuery appends the DELETE query parameters for opts to path.
+// It is shared by the agent-scoped and project-scoped delete calls so both
+// encode the options identically. A nil opts sends no parameters, leaving the
+// server defaults in place.
+func withDeleteAgentQuery(path string, opts *DeleteAgentOptions) string {
+	if opts == nil {
+		return path
+	}
+	query := url.Values{}
+	// Server defaults deleteFiles/removeBranch to true, so only send
+	// the parameter when the caller explicitly wants to preserve them.
+	if !opts.DeleteFiles {
+		query.Set("deleteFiles", "false")
+	}
+	if !opts.RemoveBranch {
+		query.Set("removeBranch", "false")
+	}
+	if opts.Force {
+		query.Set("force", "true")
+	}
+	if len(query) > 0 {
+		path += "?" + query.Encode()
 	}
 	return path
 }
@@ -580,6 +588,129 @@ func (s *agentService) ResetAuth(ctx context.Context, agentID string) error {
 		return err
 	}
 	return apiclient.CheckResponse(resp)
+}
+
+// ScopeReissuer re-issues an agent's role scopes from its delegator's
+// current authority (hub super-admin only). It is a separate interface so
+// AgentService implementations outside this package are not affected;
+// the client's agent service implements it.
+type ScopeReissuer interface {
+	ReissueScopes(ctx context.Context, agentID string, dryRun bool) (*ScopeReissueResult, error)
+}
+
+// ScopeReissueWithheld is one candidate scope left out of the re-issued set.
+type ScopeReissueWithheld struct {
+	Scope string `json:"scope"`
+	Cause string `json:"cause"`
+}
+
+// ScopeReissueCeilingSource names where the re-issued ceiling came from.
+type ScopeReissueCeilingSource struct {
+	DelegatorKind        string `json:"delegator_kind"`
+	DelegatorID          string `json:"delegator_id"`
+	SourceCredentialKind string `json:"source_credential_kind"`
+	SourceCredentialID   string `json:"source_credential_id,omitempty"`
+	CeilingKind          string `json:"ceiling_kind"`
+}
+
+// ScopeReissueResult is the hub's answer to a scope re-issue.
+type ScopeReissueResult struct {
+	OpID               string                    `json:"op_id"`
+	AgentID            string                    `json:"agent_id"`
+	DryRun             bool                      `json:"dry_run"`
+	Noop               bool                      `json:"noop"`
+	Added              []string                  `json:"added"`
+	Removed            []string                  `json:"removed"`
+	Kept               []string                  `json:"kept"`
+	Withheld           []ScopeReissueWithheld    `json:"withheld"`
+	RoleBefore         string                    `json:"role_before"`
+	RoleAfter          string                    `json:"role_after"`
+	CeilingSource      ScopeReissueCeilingSource `json:"ceiling_source"`
+	EdgeReplaced       string                    `json:"edge_replaced,omitempty"`
+	EdgeNew            string                    `json:"edge_new,omitempty"`
+	CredentialsRevoked int                       `json:"credentials_revoked"`
+	Dispatched         bool                      `json:"dispatched"`
+	DispatchError      string                    `json:"dispatch_error,omitempty"`
+	Message            string                    `json:"message"`
+}
+
+// ReissueScopes posts {"reissue_scopes": true, "dry_run": dryRun} to the
+// agent's reset-auth route. It is not retried: a request that may have
+// committed is re-run by the operator, where it is a no-op.
+func (s *agentService) ReissueScopes(ctx context.Context, agentID string, dryRun bool) (*ScopeReissueResult, error) {
+	body := map[string]bool{"reissue_scopes": true, "dry_run": dryRun}
+	resp, err := s.c.postNoRetry(ctx, s.agentPath(agentID)+"/reset-auth", body, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ScopeReissueResult](resp)
+}
+
+// BulkScopeReissuer runs the hub-wide scope re-issue (hub super-admin
+// only). Dry run unless apply is true. The client's agent service
+// implements it.
+type BulkScopeReissuer interface {
+	ReissueScopesAll(ctx context.Context, apply bool) (*ScopeReissueBulkResult, error)
+}
+
+// ScopeReissueBulkAgent is one agent's outcome in a bulk re-issue.
+type ScopeReissueBulkAgent struct {
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	ProjectID     string   `json:"project_id"`
+	Depth         int      `json:"depth"`
+	Outcome       string   `json:"outcome"`
+	Cause         string   `json:"cause,omitempty"`
+	Added         []string `json:"added,omitempty"`
+	Removed       []string `json:"removed,omitempty"`
+	RoleBefore    string   `json:"role_before,omitempty"`
+	RoleAfter     string   `json:"role_after,omitempty"`
+	OpID          string   `json:"op_id,omitempty"`
+	DispatchError string   `json:"dispatch_error,omitempty"`
+}
+
+// ScopeReissueBulkRef names an agent in a bulk result list.
+type ScopeReissueBulkRef struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Cause string `json:"cause,omitempty"`
+}
+
+// ScopeReissueBulkResult is the hub's answer to a bulk re-issue.
+type ScopeReissueBulkResult struct {
+	BatchOpID  string                  `json:"batch_op_id"`
+	DryRun     bool                    `json:"dry_run"`
+	Total      int                     `json:"total"`
+	Succeeded  []ScopeReissueBulkRef   `json:"succeeded"`
+	Noop       []ScopeReissueBulkRef   `json:"noop"`
+	Refused    []ScopeReissueBulkRef   `json:"refused"`
+	PushFailed []ScopeReissueBulkRef   `json:"push_failed"`
+	Agents     []ScopeReissueBulkAgent `json:"agents"`
+	// DepthUnresolved lists agents whose delegation edge could not be read
+	// when ordering the run.
+	DepthUnresolved []string `json:"depth_unresolved"`
+	// BatchAuditRecorded is false when the hub could not write the batch
+	// audit row.
+	BatchAuditRecorded bool `json:"batch_audit_recorded"`
+}
+
+// ReissueScopesAll posts the bulk re-issue to the admin reset-auth-all
+// route. It is not retried. The run can take much longer than the client's
+// default request timeout, so this one call waits until ctx's deadline
+// instead (callers must set one).
+func (s *agentService) ReissueScopesAll(ctx context.Context, apply bool) (*ScopeReissueBulkResult, error) {
+	body := map[string]bool{"reissue_scopes": true, "dry_run": !apply}
+	tr := *s.c.transport
+	if deadline, ok := ctx.Deadline(); ok && tr.HTTPClient != nil {
+		hc := *tr.HTTPClient
+		hc.Timeout = time.Until(deadline)
+		tr.HTTPClient = &hc
+	}
+	resp, err := tr.PostNoRetry(ctx, "/api/v1/admin/agents/reset-auth-all", body, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ScopeReissueBulkResult](resp)
 }
 
 // StopAll stops all running agents in scope.

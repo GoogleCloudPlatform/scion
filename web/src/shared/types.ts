@@ -50,6 +50,22 @@ export interface User {
 }
 
 /**
+ * The current user as returned by GET /auth/me. The client maps it to
+ * {@link User}. name and avatar are legacy fallbacks that the client still
+ * reads when displayName or avatarUrl is empty.
+ */
+export interface AuthMeResponse {
+  id: string;
+  email: string;
+  displayName: string;
+  name?: string;
+  avatarUrl?: string;
+  avatar?: string;
+  role?: UserRole;
+  preferences?: UserPreferences;
+}
+
+/**
  * Admin user information from the Hub API (GET /api/v1/users)
  */
 export interface AdminUser {
@@ -222,13 +238,12 @@ export function isWorktreeWorkspace(project: Project): boolean {
 
 /**
  * Check whether a git project gives each agent its own clone. Matches the
- * hub's ResolveProjectSharingMode: only a per-agent (or clone-per-agent)
- * label means clone per agent; an unlabelled or unknown git project is
- * shared.
+ * hub's ResolveProjectSharingMode: every git project that is neither shared
+ * nor worktree per agent, including an unlabelled or unknown one, gets a
+ * clone per agent.
  */
 export function isClonePerAgentWorkspace(project: Project): boolean {
-  const mode = project.labels?.['scion.dev/workspace-mode'];
-  return !!project.gitRemote && (mode === 'per-agent' || mode === 'clone-per-agent');
+  return !!project.gitRemote && !isSharedWorkspace(project) && !isWorktreeWorkspace(project);
 }
 
 /**
@@ -243,14 +258,14 @@ export interface ProjectWorkspaceModeIcon {
 
 export function projectWorkspaceModeIcon(project: Project): ProjectWorkspaceModeIcon {
   if (project.gitRemote) {
-    if (isClonePerAgentWorkspace(project)) {
-      return { icon: 'git', label: 'Git repository, clone per agent' };
+    if (isSharedWorkspace(project)) {
+      return { icon: 'git', label: 'Git repository, shared workspace' };
     }
     if (isWorktreeWorkspace(project)) {
       return { icon: 'git', label: 'Git repository, worktree per agent' };
     }
-    // Unlabelled or unknown git modes are shared, as on the hub.
-    return { icon: 'git', label: 'Git repository, shared workspace' };
+    // Unlabelled or unknown git modes get a clone per agent, as on the hub.
+    return { icon: 'git', label: 'Git repository, clone per agent' };
   }
   if (isEmptyPerAgentWorkspace(project)) {
     return { icon: 'folder-plus', label: 'Empty directory per agent' };
@@ -536,7 +551,8 @@ export interface TelemetryHubConfig {
 }
 
 /**
- * Local debug telemetry output configuration.
+ * Local debug telemetry output configuration. Accepted but ignored: no
+ * component reads these keys today (ptone/scion#4103).
  */
 export interface TelemetryLocalConfig {
   enabled?: boolean;
@@ -551,6 +567,7 @@ export interface TelemetryConfig {
   enabled?: boolean;
   cloud?: TelemetryCloudConfig;
   hub?: TelemetryHubConfig;
+  /** Accepted but ignored: no component reads telemetry.local (ptone/scion#4103). */
   local?: TelemetryLocalConfig;
   filter?: TelemetryFilterConfig;
 }

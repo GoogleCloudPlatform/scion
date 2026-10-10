@@ -376,6 +376,44 @@ func attachHubSession(ctx context.Context, hubCtx *HubContext, target hubAttachT
 	return nil
 }
 
+// preflightRefusalMessage is what the CLI says for a Hub preflight refusal,
+// on the first attach and on an automatic reconnect alike. The summaries
+// are the preflight's own (the Hub answered, not the broker); the hints
+// are the close-code ones. ok is false for a status with no specific
+// message.
+func preflightRefusalMessage(pe *wsclient.PTYPreflightError) (msg ptyCloseMessage, ok bool) {
+	switch pe.Status {
+	case http.StatusUnauthorized:
+		return ptyCloseMessage{Summary: "your Hub credentials are not valid",
+			Hint: ptyCloseMessages[wsprotocol.ClosePTYAuthRequired].Hint}, true
+	case http.StatusForbidden:
+		return ptyCloseMessage{Summary: "you do not have permission to attach to this agent",
+			Hint: ptyCloseMessages[wsprotocol.ClosePTYForbidden].Hint}, true
+	case http.StatusNotFound:
+		return ptyCloseMessage{Summary: "the Hub cannot find the agent",
+			Hint: ptyCloseMessages[wsprotocol.ClosePTYAgentNotFound].Hint}, true
+	case http.StatusUnprocessableEntity:
+		return ptyCloseMessage{
+			Summary: "the agent has no runtime broker",
+			Hint:    "Check the agent with: scion list",
+		}, true
+	case http.StatusServiceUnavailable:
+		if pe.NoPath() {
+			return ptyCloseMessage{
+				Summary: wsclient.AttachUnsupportedMessage + ", and the agent has no session that serves a terminal",
+				Hint:    ptyCloseTerminalHint,
+			}, true
+		}
+		msg = ptyCloseMessage{Summary: pe.Message, Hint: ptyCloseRetryHint}
+		if msg.Summary == "" {
+			msg.Summary = "the Hub cannot attach to this agent right now"
+		}
+		return msg, true
+	default:
+		return ptyCloseMessage{}, false
+	}
+}
+
 // describeAttachPreflight turns a *wsclient.PTYPreflightError into an
 // actionable message for agentName: what the Hub said and what to do next.
 // 401, 403 and 404 have their own summaries and reuse the hints of the
@@ -389,38 +427,14 @@ func describeAttachPreflight(err error, agentName string) error {
 	if !errors.As(err, &pe) {
 		return err
 	}
-	// The summaries are the preflight's own (this is often the first
-	// attach, and the Hub answered, not the broker); the hints are the
-	// close-code ones.
-	var msg ptyCloseMessage
-	switch pe.Status {
-	case http.StatusUnauthorized:
-		msg = ptyCloseMessage{Summary: "your Hub credentials are not valid",
-			Hint: ptyCloseMessages[wsprotocol.ClosePTYAuthRequired].Hint}
-	case http.StatusForbidden:
-		msg = ptyCloseMessage{Summary: "you do not have permission to attach to this agent",
-			Hint: ptyCloseMessages[wsprotocol.ClosePTYForbidden].Hint}
-	case http.StatusNotFound:
-		msg = ptyCloseMessage{Summary: "the Hub cannot find the agent",
-			Hint: ptyCloseMessages[wsprotocol.ClosePTYAgentNotFound].Hint}
-	case http.StatusUnprocessableEntity:
-		msg = ptyCloseMessage{
-			Summary: "the agent has no runtime broker",
-			Hint:    "Check the agent with: scion list",
-		}
-	case http.StatusServiceUnavailable:
-		if pe.NoPath() {
-			msg = ptyCloseMessage{
-				Summary: wsclient.AttachUnsupportedMessage + ", and the agent has no session that serves a terminal",
-				Hint:    ptyCloseTerminalHint,
-			}
-		} else {
-			msg = ptyCloseMessage{Summary: pe.Message, Hint: ptyCloseRetryHint}
-			if msg.Summary == "" {
-				msg.Summary = "the Hub cannot attach to this agent right now"
-			}
-		}
-	default:
+	// A refusal at a reconnect is described with the close that led to it,
+	// by describeAttachClose.
+	var reconnectErr *wsclient.PTYReconnectError
+	if errors.As(err, &reconnectErr) {
+		return err
+	}
+	msg, ok := preflightRefusalMessage(pe)
+	if !ok {
 		return err
 	}
 	return &attachPreflightError{
@@ -536,11 +550,25 @@ func describeAttachClose(err error, agentName string) error {
 	// code if it has one (its hint is the one that applies now), otherwise by
 	// the reconnect error.
 	note := ""
+	hintOverride := ""
 	var reconnectErr *wsclient.PTYReconnectError
 	if errors.As(err, &reconnectErr) && reconnectErr.Err != nil {
 		var second *wsclient.PTYCloseError
-		if errors.Is(reconnectErr.Err, wsclient.ErrPTYReconnectLimit) {
-			note = "\nscion attach " + wsclient.ErrPTYReconnectLimit.Error() + "."
+		var refusal *wsclient.PTYPreflightError
+		if errors.As(reconnectErr.Err, &refusal) {
+			// The Hub refused the reconnect at its preflight: the same text
+			// and next step as a refusal on the first attach.
+			msg, ok := preflightRefusalMessage(refusal)
+			if !ok {
+				msg = ptyCloseMessage{Summary: refusal.Message, Hint: ptyCloseRetryHint}
+				if msg.Summary == "" {
+					msg.Summary = "the Hub refused the attach"
+				}
+			}
+			note = fmt.Sprintf("\nThe Hub refused the automatic reconnect: %s (%s).", msg.Summary, refusal.Detail())
+			hintOverride = msg.Hint
+		} else if errors.Is(reconnectErr.Err, wsclient.ErrPTYReconnectLimit) {
+			note = "\nscion attach " + reconnectErr.Err.Error() + "."
 		} else if errors.As(reconnectErr.Err, &second) {
 			note = "\nThis close came on the automatic reconnect after " + ptyCloseCodeText(closeErr) + "."
 			closeErr = second
@@ -560,6 +588,9 @@ func describeAttachClose(err error, agentName string) error {
 		} else {
 			hint = ptyCloseTerminalHint
 		}
+	}
+	if hintOverride != "" {
+		hint = hintOverride
 	}
 	return &attachCloseError{
 		msg: fmt.Sprintf("attach to agent '%s' ended: %s (%s)%s\n\n%s",

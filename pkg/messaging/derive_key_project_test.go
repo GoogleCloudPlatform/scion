@@ -17,6 +17,7 @@ package messaging
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
 
@@ -77,5 +78,33 @@ func TestResolveThreadConversationForRead_TopicOfOtherProjectNotReturned(t *test
 	if got := ResolveThreadConversationForRead(context.Background(), reader, logger, "topicB", "projA",
 		WithReadTopicLookup(lookup)); got != nil && got.ConversationID == "conv-of-project-b" {
 		t.Fatalf("a key of project A must not resolve to project B's conversation, got %+v", got)
+	}
+}
+
+// A thread key that names another project than the conversation being
+// resolved is refused like a conversation of another project, with or
+// without a topic lookup, and nothing is written.
+func TestResolveConversationByKey_ThreadKeyOfOtherProjectRefused(t *testing.T) {
+	lookup := &mockTopicLookup{
+		topics:   map[string]string{"topicB": "conv-of-project-b"},
+		projects: map[string]string{"topicB": "projB"},
+	}
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	pidA := "projA"
+	for name, opts := range map[string][]ConversationByKeyOption{
+		"with topic lookup":    {WithKeyTopicLookup(lookup)},
+		"without topic lookup": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			up := &mockConversationUpserter{returnConv: &store.Conversation{ID: "should-not-be-written"}}
+			got, err := ResolveOrCreateConversationByKey(context.Background(), up, logger,
+				"thread:projB:topicB", "group", &pidA, opts...)
+			if !errors.Is(err, store.ErrConversationProjectMismatch) {
+				t.Fatalf("want ErrConversationProjectMismatch, got %+v, %v", got, err)
+			}
+			if up.lastConv != nil {
+				t.Fatalf("nothing may be written, got upsert of %+v", up.lastConv)
+			}
+		})
 	}
 }

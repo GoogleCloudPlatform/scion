@@ -62,12 +62,18 @@ const (
 	// unsupported_version, frame_too_large). Retrying with the same software
 	// will not help. Terminal.
 	ClosePTYProtocolError = 4400
-	// ClosePTYAuthRequired (4401): credentials no longer valid. Reserved;
-	// auth failures surface as HTTP 401 on the handshake or preflight today.
-	// Terminal.
+	// ClosePTYAuthRequired (4401): credentials or authorization no longer
+	// valid. Sent on the Conduit agent path when the stream authorization
+	// re-check closes a user's PTY stream (authz_expired, from
+	// pkg/hub/conduit_stream_authz.go), passed through by ptyLeafCloseCode
+	// in pkg/hub/pty_conduit.go. A failure before the stream opens surfaces
+	// as HTTP 401 on the handshake or preflight instead. Terminal.
 	ClosePTYAuthRequired = 4401
-	// ClosePTYForbidden (4403): attach permission revoked. Reserved; surfaces
-	// as HTTP 403 today. Terminal.
+	// ClosePTYForbidden (4403): attach not permitted. Sent on the Conduit
+	// agent path when the Hub refuses the stream open (forbidden, in
+	// ptyAgentOpenError, pkg/hub/pty_conduit.go) or the relay refuses it
+	// (conduit CloseForbidden, passed through by ptyLeafCloseCode). A refusal
+	// before the upgrade surfaces as HTTP 403 instead. Terminal.
 	ClosePTYForbidden = 4403
 	// ClosePTYAgentNotFound (4404): the broker cannot find the agent or its
 	// container. The Hub maps the legacy broker code 404 to this. Terminal.
@@ -95,9 +101,12 @@ const (
 	// Retry once, promptly, with full jitter (see PTYReconnectTiming).
 	ClosePTYUpstreamUnavailable = 4503
 	// ClosePTYUpstreamTimeout (4504): transient failure (registry_unavailable,
-	// grant_keys_unavailable, open_timeout, upstream_unreachable), or the
-	// broker did not produce first output within the open deadline. Retry
-	// once with normal backoff and full jitter (see PTYReconnectTiming).
+	// grant_keys_unavailable, open_timeout, upstream_unreachable). Sent on
+	// the Conduit agent path: a PTY stream whose session is lost
+	// (upstream_unreachable, ptyLeafCloseForStream in pkg/hub/pty_conduit.go)
+	// or a conduit CloseRelayTimeout from the relay or target, passed through
+	// by ptyLeafCloseCode. The broker path does not send it. Retry once with
+	// normal backoff and full jitter (see PTYReconnectTiming).
 	ClosePTYUpstreamTimeout = 4504
 )
 

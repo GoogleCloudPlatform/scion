@@ -804,8 +804,14 @@ REV_CREATED=$(echo "$REV_JSON" | jq -r '.metadata.creationTimestamp')
 printf 'newest settings version created: %s\nserving revision created:        %s\n' "$SECRET_CREATED" "$REV_CREATED"
 if [ -z "$SECRET_CREATED" ] || [ -z "$REV_CREATED" ] || [ "$REV_CREATED" = null ]; then
   echo "STOP: could not read one of the timestamps" >&2
-elif [ "$(date -d "$SECRET_CREATED" +%s)" -gt "$(date -d "$REV_CREATED" +%s)" ]; then
-  echo "STOP: the newest settings secret version is newer than the serving revision" >&2
+else
+  # Both timestamps are UTC. Strip fractional seconds and the trailing Z so
+  # both read YYYY-MM-DDTHH:MM:SS, which compares correctly as a string.
+  SEC_NORM="${SECRET_CREATED%%.*}"; SEC_NORM="${SEC_NORM%Z}"
+  REV_NORM="${REV_CREATED%%.*}"; REV_NORM="${REV_NORM%Z}"
+  if [[ "$SEC_NORM" > "$REV_NORM" ]]; then
+    echo "STOP: the newest settings secret version is newer than the serving revision" >&2
+  fi
 fi
 ```
 
@@ -814,7 +820,7 @@ revision picks up the current settings version (guide §7a), or find out why the
 version exists. Then restart from §9.2. Run this check again immediately before
 pass 1 if time has passed since §9.2. If `SETTINGS_VERSION` is a pinned version
 number rather than `latest`, the job and the hub read the same version and this
-check is not needed. `date -d` is GNU `date`; on macOS use `gdate` from coreutils.
+check is not needed.
 
 **Check before you continue.** None of these values is a secret:
 

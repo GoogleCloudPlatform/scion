@@ -658,6 +658,74 @@ func (vs *VersionedSettings) ProfileKubernetesSAMappings(profileName string) (gs
 	}
 }
 
+// ResolveKubernetesBlockServiceAccountForSelection returns the Kubernetes
+// ServiceAccount a GCP identity "block" pod runs as for an explicit runtime
+// selection, and whether one is configured. profileName (if non-empty) is
+// checked first, then runtimeEntryName (the `runtimes:` map key), the same
+// order as ResolveKubernetesServiceAccountMappingForSelection. An empty
+// value is treated as unset. When this returns false, the pod runs as the
+// namespace's default ServiceAccount.
+func (vs *VersionedSettings) ResolveKubernetesBlockServiceAccountForSelection(profileName, runtimeEntryName string) (string, bool) {
+	if vs == nil {
+		return "", false
+	}
+	if profileName != "" {
+		if profile, ok := vs.Profiles[profileName]; ok && profile.KubernetesBlockServiceAccount != "" {
+			return profile.KubernetesBlockServiceAccount, true
+		}
+	}
+	if runtimeEntryName != "" {
+		if rtConfig, ok := vs.Runtimes[runtimeEntryName]; ok && rtConfig.KubernetesBlockServiceAccount != "" {
+			return rtConfig.KubernetesBlockServiceAccount, true
+		}
+	}
+	return "", false
+}
+
+// KubernetesProfilesWithoutBlockServiceAccount returns, sorted, the names of
+// the profiles whose runtime entry is Kubernetes and for which
+// ResolveKubernetesBlockServiceAccountForSelection finds no block
+// ServiceAccount. A GCP identity "block" pod under such a profile runs as
+// the namespace's default ServiceAccount. The runtime type is the entry's
+// Type, or the entry key when Type is unset, as in
+// ProfileKubernetesSAMappings.
+func (vs *VersionedSettings) KubernetesProfilesWithoutBlockServiceAccount() []string {
+	if vs == nil {
+		return nil
+	}
+	var out []string
+	for name, profile := range vs.Profiles {
+		if profile.Runtime == "" {
+			continue
+		}
+		runtimeType := profile.Runtime
+		if rt, ok := vs.Runtimes[profile.Runtime]; ok && rt.Type != "" {
+			runtimeType = rt.Type
+		}
+		switch runtimeType {
+		case "kubernetes", "k8s", "remote":
+		default:
+			continue
+		}
+		if _, ok := vs.ResolveKubernetesBlockServiceAccountForSelection(name, profile.Runtime); !ok {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ValidateKubernetesBlockServiceAccount checks that name is a valid
+// Kubernetes ServiceAccount name (a DNS-1123 subdomain). The schema enforces
+// the same pattern; this is the point-of-use check for settings that did not
+// pass through the schema validator, such as a hand-edited settings.yaml.
+func ValidateKubernetesBlockServiceAccount(name string) error {
+	if errs := validation.IsDNS1123Subdomain(name); len(errs) > 0 {
+		return fmt.Errorf("kubernetes_block_service_account: %q is not a valid Kubernetes ServiceAccount name: %s", name, strings.Join(errs, "; "))
+	}
+	return nil
+}
+
 // ResolveKubernetesNamespace returns the namespace configured on the
 // runtimeEntryName entry of the runtimes: map, and whether one is set.
 // Profiles carry no namespace of their own: a profile that needs a
@@ -1214,7 +1282,9 @@ type V1ServerConfig struct {
 	HomeStorage *V1HomeStorageConfig `json:"home_storage,omitempty" yaml:"home_storage,omitempty" koanf:"home_storage"`
 	Secrets     *V1SecretsConfig     `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
 	LogLevel    string               `json:"log_level,omitempty" yaml:"log_level,omitempty" koanf:"log_level"`
-	LogFormat   string               `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
+	// LogFormat is accepted so existing settings files still load, but nothing
+	// reads it (ptone/scion#4103). It is not carried into GlobalConfig.
+	LogFormat string `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
 
 	// Maintenance holds binary auto-update and deployment tier settings.
 	Maintenance *V1MaintenanceConfig `json:"maintenance,omitempty" yaml:"maintenance,omitempty" koanf:"maintenance"`
@@ -1572,8 +1642,12 @@ type V1DatabaseConfig struct {
 
 // V1AuthConfig holds authentication settings.
 type V1AuthConfig struct {
-	// Mode selects the exclusive human auth mode: "oauth" (default), "proxy", or "dev".
-	// In proxy mode, OAuth handlers are disabled; in dev mode, dev token auth is used.
+	// Mode selects the human auth mode. "proxy" is the only value the code
+	// checks: the server then uses the proxy authenticator configured under
+	// Proxy and offers no OAuth providers. Any other value, including ""
+	// (the default), "oauth" and "dev", leaves the hub handling
+	// authentication itself. Dev auth is enabled by the --dev-auth flag or
+	// the server.auth.dev_mode setting (DevMode), not by Mode.
 	Mode              string   `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
 	DevMode           bool     `json:"dev_mode,omitempty" yaml:"dev_mode,omitempty" koanf:"dev_mode"`
 	DevToken          string   `json:"dev_token,omitempty" yaml:"dev_token,omitempty" koanf:"dev_token"`
@@ -2202,7 +2276,9 @@ type V1TelemetryHubConfig struct {
 	ReportInterval string `json:"report_interval,omitempty" yaml:"report_interval,omitempty" koanf:"report_interval"`
 }
 
-// V1TelemetryLocalConfig holds local debug telemetry output settings.
+// V1TelemetryLocalConfig holds local debug telemetry output settings. The
+// keys are accepted so existing settings files still load, but no component
+// reads them (ptone/scion#4103).
 type V1TelemetryLocalConfig struct {
 	Enabled *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
 	File    string `json:"file,omitempty" yaml:"file,omitempty" koanf:"file"`
@@ -2210,6 +2286,7 @@ type V1TelemetryLocalConfig struct {
 }
 
 // V1TelemetryFilterConfig holds event filtering and sampling settings.
+// RespectDebugMode is accepted but not read (ptone/scion#4103).
 type V1TelemetryFilterConfig struct {
 	Enabled          *bool                        `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
 	RespectDebugMode *bool                        `json:"respect_debug_mode,omitempty" yaml:"respect_debug_mode,omitempty" koanf:"respect_debug_mode"`
@@ -2440,6 +2517,15 @@ type V1RuntimeConfig struct {
 	// KubernetesServiceAccountMappings overrides this one; see
 	// VersionedSettings.ResolveKubernetesServiceAccountMapping.
 	KubernetesServiceAccountMappings map[string]string `json:"kubernetes_service_account_mappings,omitempty" yaml:"kubernetes_service_account_mappings,omitempty" koanf:"kubernetes_service_account_mappings"`
+	// KubernetesBlockServiceAccount names the Kubernetes ServiceAccount a
+	// pod runs as when its GCP identity mode resolves to "block" on the
+	// Kubernetes runtime (ptone/scion#4034). It must be a dedicated KSA the
+	// operator provisions, with no Workload Identity annotation and no IAM
+	// grants, so it is zero-privilege. Scion never creates or checks it.
+	// When unset, a block pod runs as the namespace's default
+	// ServiceAccount. A profile's own value wins over this one; see
+	// VersionedSettings.ResolveKubernetesBlockServiceAccountForSelection.
+	KubernetesBlockServiceAccount string `json:"kubernetes_block_service_account,omitempty" yaml:"kubernetes_block_service_account,omitempty" koanf:"kubernetes_block_service_account"`
 }
 
 // V1RuntimeDefaultsConfig holds runtime-wide behaviour that is not specific to
@@ -2680,6 +2766,10 @@ type V1ProfileConfig struct {
 	// VersionedSettings.ResolveKubernetesServiceAccountMapping for the
 	// precedence and full contract.
 	KubernetesServiceAccountMappings map[string]string `json:"kubernetes_service_account_mappings,omitempty" yaml:"kubernetes_service_account_mappings,omitempty" koanf:"kubernetes_service_account_mappings"`
+	// KubernetesBlockServiceAccount overrides the runtime entry's value of
+	// the same name for agents created under this profile. See
+	// V1RuntimeConfig.KubernetesBlockServiceAccount.
+	KubernetesBlockServiceAccount string `json:"kubernetes_block_service_account,omitempty" yaml:"kubernetes_block_service_account,omitempty" koanf:"kubernetes_block_service_account"`
 }
 
 // resolveEffectiveProjectPath resolves the effective project path for settings loading.
@@ -3181,9 +3271,6 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 	if v1.LogLevel != "" {
 		gc.LogLevel = v1.LogLevel
 	}
-	if v1.LogFormat != "" {
-		gc.LogFormat = v1.LogFormat
-	}
 
 	// Hub server config
 	if v1.Hub != nil {
@@ -3602,9 +3689,8 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 
 	v1 := &V1ServerConfig{
-		Mode:      gc.Mode,
-		LogLevel:  gc.LogLevel,
-		LogFormat: gc.LogFormat,
+		Mode:     gc.Mode,
+		LogLevel: gc.LogLevel,
 	}
 
 	// Hub server config

@@ -258,15 +258,21 @@ func TestResolveProjectSharingMode(t *testing.T) {
 		isGit bool
 		want  WorkspaceSharingMode
 	}{
-		// Git projects: identical to label-only resolution.
-		{"", true, SharingModeSharedPlain},
+		// Git projects: only "shared" selects the shared checkout; no
+		// label or an unknown one gets a per-agent clone, as agent create
+		// does (ptone/scion#3998).
+		{"", true, SharingModeClonePerAgent},
 		{"shared", true, SharingModeSharedPlain},
+		// Only the "shared" label selects the shared checkout, as in
+		// Project.IsSharedWorkspace.
+		{"shared-plain", true, SharingModeClonePerAgent},
 		{"per-agent", true, SharingModeClonePerAgent},
+		{"clone-per-agent", true, SharingModeClonePerAgent},
 		{"worktree-per-agent", true, SharingModeWorktreePerAgent},
-		{"bogus", true, SharingModeSharedPlain},
+		{"bogus", true, SharingModeClonePerAgent},
 		// empty-per-agent is non-git only: a legacy raw label on a git
-		// project must not resolve to a mode without git env.
-		{"empty-per-agent", true, SharingModeSharedPlain},
+		// project is treated like any unknown value.
+		{"empty-per-agent", true, SharingModeClonePerAgent},
 
 		// Non-git projects: per-agent means an empty private dir.
 		{"", false, SharingModeSharedPlain},
@@ -300,12 +306,15 @@ func TestProjectSharingModeHelpers(t *testing.T) {
 		{"non-git no label", Project{}, SharingModeSharedPlain, false},
 		{"non-git shared", Project{Labels: map[string]string{LabelWorkspaceMode: "shared"}}, SharingModeSharedPlain, false},
 		{"non-git per-agent", Project{Labels: map[string]string{LabelWorkspaceMode: "per-agent"}}, SharingModeEmptyPerAgent, true},
+		{"git no label", Project{GitRemote: "github.com/a/b"}, SharingModeClonePerAgent, false},
+		{"git unknown label", Project{GitRemote: "github.com/a/b", Labels: map[string]string{LabelWorkspaceMode: "bogus"}}, SharingModeClonePerAgent, false},
+		{"git shared", Project{GitRemote: "github.com/a/b", Labels: map[string]string{LabelWorkspaceMode: "shared"}}, SharingModeSharedPlain, false},
 		{"git per-agent", Project{GitRemote: "github.com/a/b", Labels: map[string]string{LabelWorkspaceMode: "per-agent"}}, SharingModeClonePerAgent, false},
 		{"git worktree", Project{GitRemote: "github.com/a/b", Labels: map[string]string{LabelWorkspaceMode: "worktree-per-agent"}}, SharingModeWorktreePerAgent, false},
 		// Legacy raw canonical label (accepted verbatim before #2703): the
 		// helpers must agree with each other.
 		{"non-git legacy empty-per-agent label", Project{Labels: map[string]string{LabelWorkspaceMode: "empty-per-agent"}}, SharingModeEmptyPerAgent, true},
-		{"git legacy empty-per-agent label", Project{GitRemote: "github.com/a/b", Labels: map[string]string{LabelWorkspaceMode: "empty-per-agent"}}, SharingModeSharedPlain, false},
+		{"git legacy empty-per-agent label", Project{GitRemote: "github.com/a/b", Labels: map[string]string{LabelWorkspaceMode: "empty-per-agent"}}, SharingModeClonePerAgent, false},
 	}
 	var nilProject *Project
 	if nilProject.IsEmptyPerAgent() {
@@ -378,5 +387,20 @@ func TestIsProjectMembersGroup(t *testing.T) {
 				t.Errorf("IsProjectMembersGroup() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestReincarnationInFlight(t *testing.T) {
+	for state, want := range map[string]bool{
+		ReincarnationStateNone:         false,
+		ReincarnationStateFailed:       false,
+		ReincarnationStatePending:      true,
+		ReincarnationStateStopping:     true,
+		ReincarnationStateProvisioning: true,
+		ReincarnationStateStarting:     true,
+	} {
+		if got := ReincarnationInFlight(state); got != want {
+			t.Errorf("ReincarnationInFlight(%q) = %v, want %v", state, got, want)
+		}
 	}
 }

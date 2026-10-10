@@ -146,6 +146,21 @@ type Permission struct {
 	Description    string
 	Enforcement    []string
 	NonRouteUse    []string
+	// Reserved marks a row that is part of the published vocabulary but
+	// that no code checks yet. It holds the reason. Every row must either
+	// declare a use (Enforcement or NonRouteUse) or be Reserved, never
+	// both, and nothing may grant a reserved permission: it carries no
+	// AgentScopes, no role holds it (custom role definitions are rejected
+	// by pkg/hub validateRolePermissionIDs), and it is left out of manage aliases
+	// and the scope options offered to users (UATScopeOptions). Its
+	// UATScope stays valid (UATValidScopes) so existing tokens that carry
+	// it keep working. TestPermissionRegistryRowsEnforcedOrReserved in
+	// pkg/hub enforces all of this. When code starts checking a reserved
+	// permission, clear Reserved and record the check in Enforcement. The
+	// permission then reaches super-admin automatically (allPermissionIDs
+	// takes every non-reserved row); granting it to any other role, agent
+	// scope bundle or picker is a separate, deliberate change.
+	Reserved string
 	// ExcludeFromManageAlias keeps this permission's UAT scope out of the
 	// resource's "<resource>:manage" convenience alias. Used for observation
 	// permissions (agent.attach, agent.port_access) that some project roles
@@ -159,7 +174,8 @@ type Permission struct {
 //
 // Phase 1A keeps existing handler-local enforcement; the Enforcement and
 // NonRouteUse fields record where each permission is currently consumed so drift
-// tests can fail when a public scope has no corresponding use.
+// tests can fail when a public scope has no corresponding use. A row nothing
+// consumes yet carries Reserved instead.
 var Registry = []Permission{
 	{ID: "agent.create", Resource: ResourceAgent, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "agent:create", AgentScopes: []string{"project:agent:create"}, Description: "Create agents", Enforcement: []string{"pkg/hub/authorize.go:authorizeAgentCreate", "pkg/hub/handlers_agents_core.go"}},
 	{ID: "agent.read", Resource: ResourceAgent, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "agent:read", Description: "Read agent status and metadata", Enforcement: []string{"pkg/hub/handlers_agents_core.go", "pkg/hub/authz.go"}},
@@ -182,11 +198,11 @@ var Registry = []Permission{
 	{ID: "project.register", Resource: ResourceProject, Action: ActionRegister, CapabilityKind: CapabilityResource, Description: "Register projects", Enforcement: []string{"pkg/hub/handlers_projects_core.go"}},
 	{ID: "project.set_messaging_policy", Resource: ResourceProject, Action: "set_messaging_policy", CapabilityKind: CapabilityResource, UATScope: "project:set_messaging_policy", Description: "Set project cross-project messaging policy (owner/admin only)", Enforcement: []string{"pkg/hub/project_messaging_policy.go"}},
 
-	{ID: "artifact.read", Resource: ResourceArtifact, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "artifact:read", AgentScopes: []string{"project:artifact:read"}, Description: "Read artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize"}},
-	{ID: "artifact.create", Resource: ResourceArtifact, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "artifact:create", AgentScopes: []string{"project:artifact:write"}, Description: "Publish artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize"}},
-	{ID: "artifact.update", Resource: ResourceArtifact, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "artifact:update", AgentScopes: []string{"project:artifact:write"}, Description: "Edit artifact metadata (title, key, expiry)", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize"}},
-	{ID: "artifact.delete", Resource: ResourceArtifact, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "artifact:delete", Description: "Delete artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize"}},
-	{ID: "artifact.manage", Resource: ResourceArtifact, Action: ActionManage, CapabilityKind: CapabilityResource, UATScope: "artifact:manage", Description: "Manage artifact grants and share links", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize"}},
+	{ID: "artifact.read", Resource: ResourceArtifact, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "artifact:read", AgentScopes: []string{"project:artifact:read"}, Description: "Read artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/read.go:PermissionRead"}},
+	{ID: "artifact.create", Resource: ResourceArtifact, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "artifact:create", AgentScopes: []string{"project:artifact:write"}, Description: "Publish artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/publish.go:PermissionCreate", "pkg/artifacts/versions.go:PermissionCreate"}},
+	{ID: "artifact.update", Resource: ResourceArtifact, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "artifact:update", Description: "Edit artifact metadata (title, key, expiry)", Reserved: "no artifact route checks artifact.update; PATCH on an artifact is gated by artifact.manage (canAdminister)"},
+	{ID: "artifact.delete", Resource: ResourceArtifact, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "artifact:delete", Description: "Delete artifacts", Reserved: "no artifact route checks artifact.delete; the service has no artifact delete route"},
+	{ID: "artifact.manage", Resource: ResourceArtifact, Action: ActionManage, CapabilityKind: CapabilityResource, UATScope: "artifact:manage", Description: "Manage artifact grants and share links", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/links.go:func (s *Service) canAdminister"}},
 
 	{ID: "skill.create", Resource: ResourceSkill, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "skill:create", Description: "Create skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
 	{ID: "skill.create_global", Resource: ResourceSkill, Action: ActionCreateGlobal, CapabilityKind: CapabilityScope, Description: "Create skills in the global (hub) catalog", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
@@ -365,6 +381,24 @@ var Registry = []Permission{
 	{ID: "user_skill_injection.update", Resource: ResourceUserSkillInjection, Action: ActionUpdate, UATScope: "user_skill_injection:update", Description: "Change the skills injected into your own agents", NonRouteUse: []string{"pkg/hub/authorize.go:authorizeSelfScoped"}},
 }
 
+// IsReserved reports whether p is a reserved row (see Permission.Reserved).
+// A blank or whitespace-only Reserved does not count.
+func (p Permission) IsReserved() bool {
+	return strings.TrimSpace(p.Reserved) != ""
+}
+
+// ReservedIDs returns the IDs of the Reserved registry rows, in registry
+// order.
+func ReservedIDs() []string {
+	var out []string
+	for _, p := range Registry {
+		if p.IsReserved() {
+			out = append(out, p.ID)
+		}
+	}
+	return out
+}
+
 // ResourceActions returns item-level capability actions keyed by resource type.
 func ResourceActions() map[string][]string {
 	return actionsByKind(CapabilityResource)
@@ -415,10 +449,12 @@ func UATManageScopesFor(resource string) []string {
 }
 
 // UATScopeOptions returns UAT scopes with display metadata for CLI/UI surfaces.
+// Reserved permissions are left out: their scopes stay valid for existing
+// tokens (UATValidScopes) but are not offered.
 func UATScopeOptions(includeAliases bool) []Permission {
 	var out []Permission
 	for _, permission := range Registry {
-		if permission.UATScope != "" {
+		if permission.UATScope != "" && !permission.IsReserved() {
 			out = append(out, permission)
 		}
 	}
@@ -466,7 +502,7 @@ func UATScopeHelp() string {
 func uatScopesForResource(resource string) []string {
 	var out []string
 	for _, permission := range Registry {
-		if permission.Resource == resource && permission.UATScope != "" && !permission.ExcludeFromManageAlias {
+		if permission.Resource == resource && permission.UATScope != "" && !permission.ExcludeFromManageAlias && !permission.IsReserved() {
 			out = append(out, permission.UATScope)
 		}
 	}

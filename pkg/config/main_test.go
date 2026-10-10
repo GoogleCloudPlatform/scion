@@ -30,6 +30,9 @@ import (
 //   - SCION_PROJECT_ID: overlaid onto project_id.
 //   - SCION_HUB_PROJECT_ID: overlaid onto project_id (legacy loader) and
 //     hub.project_id (versioned loader).
+//   - SCION_PROJECT_TYPE: overlaid onto project_type by the generic SCION_
+//     environment provider, which overrides the project type that a test's
+//     settings fixtures provide (for example a shadow project's).
 //
 // Keep this set minimal: add a variable only when its ambient value changes
 // a test's outcome. Tests that need one of these variables set it themselves
@@ -38,6 +41,9 @@ import (
 var ambientTestEnvVars = []string{
 	projectkeys.EnvProjectID,
 	projectkeys.EnvHubProjectID,
+	// No pkg/projectkeys constant exists for this one: it is not a project
+	// identity alias, only a plain settings key reached through the env provider.
+	"SCION_PROJECT_TYPE",
 }
 
 func TestMain(m *testing.M) {
