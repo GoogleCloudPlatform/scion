@@ -673,6 +673,64 @@ func TestSAParentCeiling_ReincarnateWithServiceAccountReplacesAssignment(t *test
 	assert.ErrorIs(t, err, errAgentCreateWriteInvalid)
 }
 
+// TestSAParentCeiling_ReincarnateClaimRefusedWritesNoAssignment: a
+// reincarnation claim that is refused, because a reincarnation is already
+// in flight (store.ErrClaimPredicate) or the row moved on
+// (store.ErrVersionConflict), records no assignment for its service
+// account. The previous assignment stays the agent's only active row.
+func TestSAParentCeiling_ReincarnateClaimRefusedWritesNoAssignment(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// refuse makes the claim on the agent fail and returns the agent
+		// as the claim reads it.
+		refuse func(t *testing.T, s store.Store, agent *store.Agent) *store.Agent
+		want   error
+	}{
+		{
+			name: "reincarnation in flight",
+			refuse: func(t *testing.T, s store.Store, agent *store.Agent) *store.Agent {
+				cur := mustGetAgent(t, s, agent.ID)
+				cur.ReincarnationState = store.ReincarnationStateStopping
+				require.NoError(t, s.UpdateAgent(context.Background(), cur))
+				cur = mustGetAgent(t, s, agent.ID)
+				require.Equal(t, store.ReincarnationStateStopping, cur.ReincarnationState)
+				return cur
+			},
+			want: store.ErrClaimPredicate,
+		},
+		{
+			name: "stale state version",
+			refuse: func(t *testing.T, s store.Store, agent *store.Agent) *store.Agent {
+				cur := mustGetAgent(t, s, agent.ID)
+				cur.StateVersion--
+				return cur
+			},
+			want: store.ErrVersionConflict,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, project, broker := setupReincarnateTestServer(t, newReincarnateTestDispatcher())
+			agent := newReincarnateTestAgent(t, s, project, broker, nil)
+			seedAgentEdge(t, s, tid("delegator"), agent)
+			old := seedAssignment(t, s, agent, tid("delegator"), "sa-reinc-refused-old")
+			agent = tc.refuse(t, s, agent)
+
+			next := &store.AgentServiceAccountAssignment{
+				ServiceAccountID:    "sa-reinc-refused-new",
+				Origin:              store.SAAssignmentOriginReincarnate,
+				AuthorityProvenance: recordedProv(store.DelegationPrincipalUser, tid("requester"), store.SourceCredentialSession),
+				EffectCeiling:       store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+			}
+			require.ErrorIs(t, reincarnateClaimFor(t, srv, agent, next), tc.want)
+
+			rows := activeAssignments(t, s, agent.ID)
+			require.Len(t, rows, 1, "no new assignment row")
+			assert.Equal(t, old.ID, rows[0].ID, "the previous assignment stays active")
+			assert.Equal(t, "sa-reinc-refused-old", rows[0].ServiceAccountID)
+		})
+	}
+}
+
 // TestSAParentCeiling_ReincarnateRequestRecordsRequester drives a
 // reincarnation with a service account through the HTTP handler. The
 // requester, not the agent's creator, is recorded as the source of the new
