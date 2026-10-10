@@ -145,7 +145,7 @@ func (c *testFixtureGrantClamp) allowedRoleIDs(ctx context.Context) map[string]b
 	ids := map[string]bool{}
 	complete := true
 	for _, name := range []string{store.SystemRoleHubMember, store.SystemRoleHubViewer} {
-		rd, err := c.Store.GetRoleDefinitionByName(ctx, name, store.RoleScopeSystem)
+		rd, err := c.GetRoleDefinitionByName(ctx, name, store.RoleScopeSystem)
 		if err != nil || rd == nil {
 			complete = false
 			continue
