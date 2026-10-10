@@ -402,27 +402,22 @@ func (s *Server) removeProjectInjectedSkill(w http.ResponseWriter, r *http.Reque
 const permUserSkillInjectionUpdate = "user_skill_injection.update"
 
 // authorizeUserSkillInjectionWrite checks a user-scope injected-skills write
-// by the caller. A user access token is checked with authorizeSelfScoped: it
-// needs the user_skill_injection:update scope and a hub boundary, because a
-// user's injected skills belong to no project. A request is treated as a
-// token request when its identity is a token identity or its credential
-// record names a user access token; a token credential without a token
-// identity is denied. Other user identities act on their own list as
-// before. It writes 403 on denial.
+// by the caller with authorizeSelfScoped. An interactive session or a dev
+// credential passes. A user access token needs the
+// user_skill_injection:update scope and a hub boundary, because a user's
+// injected skills belong to no project. Every other identity, including a
+// federated user, is refused, as on the inbox routes. A request whose
+// credential record names a user access token but whose identity is not a
+// token identity is refused too. It writes 403 on denial.
 func (s *Server) authorizeUserSkillInjectionWrite(w http.ResponseWriter, r *http.Request, userIdent UserIdentity) bool {
 	_, isToken := userIdent.(*ScopedUserIdentity)
-	tokenCredential := GetCredentialContextFromContext(r.Context()).Kind == CredentialKindUAT
-	switch {
-	case isToken:
-		return s.authorizeSelfScoped(w, r, permUserSkillInjectionUpdate, "")
-	case tokenCredential:
+	if !isToken && GetCredentialContextFromContext(r.Context()).Kind == CredentialKindUAT {
 		resourceType, action := selfPermissionResourceAction(permUserSkillInjectionUpdate)
 		logAuthzDenial(r, userIdent, Resource{Type: resourceType}, action, selfScopeReasonCredential)
 		writeForbiddenStructured(w, "", resourceType, action)
 		return false
-	default:
-		return true
 	}
+	return s.authorizeSelfScoped(w, r, permUserSkillInjectionUpdate, "")
 }
 
 // handleUserMeInjectedSkills routes GET/POST/PUT on

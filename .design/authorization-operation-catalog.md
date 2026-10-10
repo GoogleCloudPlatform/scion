@@ -4711,7 +4711,8 @@
 
 - `pkg/hub:TestUserInjectedSkillsWrite_TokenNeedsUpdateScope`
 - `pkg/hub:TestUserInjectedSkillsWrite_ProjectBoundaryTokenDenied`
-- `pkg/hub:TestUserInjectedSkillsWrite_SessionDevAndFederatedUnchanged`
+- `pkg/hub:TestUserInjectedSkillsWrite_SessionAndDevUnchanged`
+- `pkg/hub:TestUserInjectedSkillsWrite_FederatedUserDenied`
 
 ---
 

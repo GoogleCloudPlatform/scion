@@ -189,10 +189,10 @@ func TestUserInjectedSkillsWrite_ProjectBoundaryTokenDenied(t *testing.T) {
 	assert.Equal(t, before, userInjectedSkillURIs(t, s, alice.ID))
 }
 
-// TestUserInjectedSkillsWrite_SessionDevAndFederatedUnchanged pins that an
-// interactive session, a dev credential and a federated user identity add,
-// replace and remove their own entries without a token scope.
-func TestUserInjectedSkillsWrite_SessionDevAndFederatedUnchanged(t *testing.T) {
+// TestUserInjectedSkillsWrite_SessionAndDevUnchanged pins that an
+// interactive session and a dev credential add, replace and remove their
+// own entries without a token scope.
+func TestUserInjectedSkillsWrite_SessionAndDevUnchanged(t *testing.T) {
 	srv, s, _, alice, _ := setupInjectedSkillsTest(t)
 
 	seeded := seedUserInjectedSkill(t, s, alice.ID, "skill://scion/seeded@1.0")
@@ -217,17 +217,28 @@ func TestUserInjectedSkillsWrite_SessionDevAndFederatedUnchanged(t *testing.T) {
 	rec = callUserInjectedSkillsAs(t, srv, dev, writes[1].method, writes[1].path, writes[1].body)
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Equal(t, []string{"skill://scion/replaced@1.0"}, userInjectedSkillURIs(t, s, dev.ID()))
+}
 
+// TestUserInjectedSkillsWrite_FederatedUserDenied pins that a federated
+// user identity gets 403 on each write route and changes nothing, as on the
+// inbox routes, and still reads its list.
+func TestUserInjectedSkillsWrite_FederatedUserDenied(t *testing.T) {
+	srv, s, _, _, _ := setupInjectedSkillsTest(t)
 	fed := NewFederatedUserIdentity("https://issuer.si.test", "si-fed", "si-fed@test.com", "Fed", "member", nil)
-	fedSeeded := seedUserInjectedSkill(t, s, fed.ID(), "skill://scion/seeded@1.0")
-	writes = userInjectedSkillWrites(fedSeeded.ID)
-	rec = callUserInjectedSkillsAs(t, srv, fed, writes[2].method, writes[2].path, nil)
-	assert.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
-	rec = callUserInjectedSkillsAs(t, srv, fed, writes[0].method, writes[0].path, writes[0].body)
-	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-	rec = callUserInjectedSkillsAs(t, srv, fed, writes[1].method, writes[1].path, writes[1].body)
-	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Equal(t, []string{"skill://scion/replaced@1.0"}, userInjectedSkillURIs(t, s, fed.ID()))
+	seeded := seedUserInjectedSkill(t, s, fed.ID(), "skill://scion/seeded@1.0")
+	before := userInjectedSkillURIs(t, s, fed.ID())
+	for _, w := range userInjectedSkillWrites(seeded.ID) {
+		rec := callUserInjectedSkillsAs(t, srv, fed, w.method, w.path, w.body)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "%s %s as a federated user: %s", w.method, w.path, rec.Body.String())
+	}
+	assert.Equal(t, before, userInjectedSkillURIs(t, s, fed.ID()), "a refused write changes nothing")
+
+	rec := callUserInjectedSkillsAs(t, srv, fed, http.MethodGet, userInjectedSkillsPath, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var list api.SkillInjectionList
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
+	require.Len(t, list.Entries, 1)
+	assert.Equal(t, seeded.SkillURI, list.Entries[0].SkillURI)
 }
 
 // TestProjectInjectedSkillsWrite_TokenNeedsProjectUpdate records that the
