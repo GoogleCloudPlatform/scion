@@ -23,3 +23,18 @@ func TestModuleRoot(t *testing.T) {
 		t.Skip("module root not found")
 	}
 }
+
+// findRepoDir walks up from the working directory to the module root.
+func findRepoDir() string {
+	dir := ".."
+	if _, err := os.Stat(dir + "/go.mod"); err == nil {
+		return dir
+	}
+	return ""
+}
+
+func TestRepoDir(t *testing.T) {
+	if findRepoDir() == "" {
+		t.Skip("module root not found")
+	}
+}

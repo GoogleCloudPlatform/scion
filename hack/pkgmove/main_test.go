@@ -408,17 +408,33 @@ func TestGitStaging(t *testing.T) {
 // a var initialiser calling package code in the basic fixture) into errors.
 func TestStrictRejectsHigh(t *testing.T) {
 	requireGo(t)
-	dir := t.TempDir()
-	copyTree(t, filepath.Join("testdata", "basic", "in"), dir)
-	var buf bytes.Buffer
-	err := run(&Config{
-		SrcDir: filepath.Join(dir, "hub"), DstDir: filepath.Join(dir, "hub", "sub"),
-		Files: []string{"maint.go", "maint_test.go"}, NoGit: true, DryRun: true, Strict: true, Stdout: &buf,
-	})
-	out := buf.String()
-	if !errors.Is(err, errPlan) || !strings.Contains(out, "-strict: init() in moved file") ||
-		!strings.Contains(out, "-strict: package-level var initialiser calls package code") {
-		t.Fatalf("want strict errors, got %v\n%s", err, out)
+	for _, tc := range []struct {
+		fixture string
+		files   []string
+		want    []string
+	}{
+		{"basic", []string{"maint.go", "maint_test.go"}, []string{
+			"-strict: init() in moved file", "-strict: package-level var initialiser calls package code"}},
+		{"sourcescan", []string{"move.go"}, []string{"-strict: source-scanning test does not cover the target"}},
+	} {
+		t.Run(tc.fixture, func(t *testing.T) {
+			dir := t.TempDir()
+			copyTree(t, filepath.Join("testdata", tc.fixture, "in"), dir)
+			var buf bytes.Buffer
+			err := run(&Config{
+				SrcDir: filepath.Join(dir, "hub"), DstDir: filepath.Join(dir, "hub", "sub"),
+				Files: tc.files, NoGit: true, DryRun: true, Strict: true, Stdout: &buf,
+			})
+			out := buf.String()
+			if !errors.Is(err, errPlan) {
+				t.Fatalf("want errPlan, got %v\n%s", err, out)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(out, w) {
+					t.Errorf("missing %q:\n%s", w, out)
+				}
+			}
+		})
 	}
 }
 
