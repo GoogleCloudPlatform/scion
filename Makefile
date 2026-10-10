@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-launch-store-postgres test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-launch-store-postgres test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-custom golangci-lint web web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -626,6 +626,12 @@ web-typecheck:
 	@cd web && npm run typecheck
 	@echo "Type check passed."
 
+## web-lint: Run ESLint on the web frontend sources
+web-lint:
+	@echo "Linting web frontend..."
+	@cd web && npm run lint
+	@echo "Web lint passed."
+
 ## web-test: Run the web frontend unit tests (vitest)
 web-test:
 	@echo "Running web frontend tests..."
@@ -669,7 +675,7 @@ ci: fmt-check lint check-custom test-fast build
 	@echo "CI passed."
 
 ## ci-full: Run the full CI pipeline locally (mirrors GitHub Actions, includes web + golangci-lint)
-ci-full: fmt-check web web-typecheck web-test lint vet-integration vet-integration-extras check-custom golangci-lint test-fast test-fixture-coverage build
+ci-full: fmt-check web web-typecheck web-lint web-test lint vet-integration vet-integration-extras check-custom golangci-lint test-fast test-fixture-coverage build
 	@echo ""
 	@echo "CI (full) passed."
 

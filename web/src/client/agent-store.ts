@@ -1274,7 +1274,7 @@ export class AgentStore {
     const listed = new Set(entry.agents.map((a) => a.id));
     let total: number | undefined;
     let caughtUp = false;
-    let fresh: Agent[] = [];
+    let fresh: Agent[];
     try {
       let cursor: string | undefined;
       for (let page = 0; page <= extraPages; page++) {

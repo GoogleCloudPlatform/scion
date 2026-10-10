@@ -29,8 +29,12 @@ const tsconfigRootDir = import.meta.dirname;
 const sharedRules = {
   '@typescript-eslint/explicit-function-return-type': 'warn',
   // caughtErrors: 'none' keeps the typescript-eslint v7 default; v8
-  // changed the default to 'all'.
-  '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_', caughtErrors: 'none' }],
+  // changed the default to 'all'. ignoreRestSiblings allows the
+  // `const { omitted, ...rest } = obj` pattern for dropping keys.
+  '@typescript-eslint/no-unused-vars': [
+    'error',
+    { argsIgnorePattern: '^_', caughtErrors: 'none', ignoreRestSiblings: true },
+  ],
   '@typescript-eslint/no-explicit-any': 'warn',
   'no-console': ['warn', { allow: ['warn', 'error', 'info'] }],
   'prettier/prettier': 'error',

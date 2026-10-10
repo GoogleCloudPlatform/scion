@@ -102,6 +102,7 @@ export class ScionQuickMessageDialog extends LitElement {
       this.sendError = null;
       this.sending = false;
       // Auto-focus the textarea after the dialog animation completes
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises -- fire-and-forget by design; per-site decision tracked in ptone/scion#4126.
       this.updateComplete.then(() => {
         const textarea = this.shadowRoot?.querySelector('sl-textarea');
         if (textarea) {
