@@ -115,7 +115,7 @@ func newBrokerTestStore(t *testing.T) store.Store {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
+	if err := migrateTestStore(context.Background(), s); err != nil {
 		t.Fatalf("failed to migrate test store: %v", err)
 	}
 	return s

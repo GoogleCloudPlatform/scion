@@ -57,7 +57,7 @@ func TestNew_WiresPlatformAuthSAToBothGuards(t *testing.T) {
 		}
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(ctx); err != nil {
+	if err := migrateTestStore(ctx, s); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 
