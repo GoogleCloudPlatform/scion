@@ -262,11 +262,10 @@ func TestHubInstanceRegistry_TickRunsNoCountQueries(t *testing.T) {
 	assert.Equal(t, "healthy", rows[0].Checks["database"])
 	assert.Equal(t, deriveHealthStatus(srv.healthChecks(ctx)), rows[0].Status)
 
-	// The row carries this process's own pool counters in stats.db.
-	var stats api.HubInstanceStats
-	require.NoError(t, json.Unmarshal(rows[0].Stats, &stats))
-	require.NotNil(t, stats.DB, "stats.db is written when the store exposes a *sql.DB")
-	assert.Equal(t, srv.hubInstanceDBStats().MaxOpen, stats.DB.MaxOpen)
+	// The counting wrapper exposes no *sql.DB, so no pool is written; see
+	// TestHandleHealthSummary_NoPoolStatsRead for a row with stats.db.
+	assert.Nil(t, srv.hubInstanceDBStats())
+	assert.Empty(t, rows[0].Stats, "no stats.db without a *sql.DB")
 }
 
 // The stored status comes from the raw checks; the stored checks are

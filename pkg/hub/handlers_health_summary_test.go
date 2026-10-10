@@ -99,8 +99,6 @@ func TestHandleHealthSummary_ResponseShape(t *testing.T) {
 
 	// Stall settings are configuration, not health: they are edited on the
 	// Server Config page and are not part of the health summary.
-	var raw map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &raw))
 	assert.NotContains(t, raw, "stall_config", "health summary must not carry stall settings")
 }
 
