@@ -527,8 +527,12 @@ func (r *templateBlobResolver) copyLegacy(ctx context.Context, e *store.Template
 	}
 	actual := transfer.HashBytes(data)
 	if actual != e.Hash {
+		// On a legacy path shared by two rows (a rename, then a new
+		// template with the old name), this can be the other row's
+		// content: the entry is corrected to what is really stored, which
+		// is what a hydration of the legacy row would have served.
 		r.s.templateLog.Warn("template commit: legacy object does not match its manifest hash; storing its actual content",
-			"path", e.Path, "manifestHash", e.Hash, "actualHash", actual)
+			"source", r.src.ID, "sourcePath", r.src.StoragePath, "path", e.Path, "manifestHash", e.Hash, "actualHash", actual)
 		e.Hash = actual
 		e.Size = int64(len(data))
 	}
@@ -560,29 +564,38 @@ func blobFileReader(stor storage.Storage, base string, files []store.TemplateFil
 }
 
 // removeLegacyTemplateTree removes a migrated row's legacy tree
-// (<oldPath>/), unless another row still has that storage path: renamed and
-// re-created templates can share a legacy path, and the other row may still
-// be legacy and reading from it. DeletePrefix removes the directory itself
-// on local storage, so a co-located broker's direct read of the old path
-// misses instead of finding an empty directory.
+// (<oldPath>/), unless another row still uses it: a row with the same
+// storage path (renamed and re-created templates can share a legacy path),
+// or a row whose storage path is nested under it (clones made before the
+// blob layout live at <slug path>/<clone id>, so DeletePrefix of the
+// parent's path would remove them too). DeletePrefix removes the directory
+// itself on local storage, so a co-located broker's direct read of the old
+// path misses instead of finding an empty directory.
 func (s *Server) removeLegacyTemplateTree(ctx context.Context, stor storage.Storage, tmpl *store.Template, oldPath string) {
 	if oldPath == "" || oldPath == tmpl.StoragePath || storage.DirPrefix(oldPath) == "" {
 		return
 	}
-	others, err := s.store.ListTemplates(ctx, store.TemplateFilter{StoragePath: oldPath}, store.ListOptions{Limit: 10, SkipTotalCount: true})
-	if err != nil {
-		s.templateLog.Warn("template migration: cannot check for rows sharing the legacy path; keeping it",
-			"template", tmpl.Name, "id", tmpl.ID, "error", err)
-		return
-	}
-	if others == nil {
-		return
-	}
-	for _, o := range others.Items {
-		if o.ID != tmpl.ID {
-			s.templateLog.Info("template migration: legacy path is shared with another template; keeping it",
-				"template", tmpl.Name, "id", tmpl.ID, "other", o.ID)
+	for _, filter := range []store.TemplateFilter{
+		{StoragePath: oldPath},
+		{StoragePathPrefix: storage.DirPrefix(oldPath)},
+	} {
+		others, err := s.store.ListTemplates(ctx, filter, store.ListOptions{Limit: 10, SkipTotalCount: true})
+		if err != nil {
+			s.templateLog.Warn("template migration: cannot check for rows using the legacy path; keeping it",
+				"template", tmpl.Name, "id", tmpl.ID, "error", err)
 			return
+		}
+		if others == nil {
+			s.templateLog.Warn("template migration: no result checking for rows using the legacy path; keeping it",
+				"template", tmpl.Name, "id", tmpl.ID)
+			return
+		}
+		for _, o := range others.Items {
+			if o.ID != tmpl.ID {
+				s.templateLog.Info("template migration: legacy path is still used by another template; keeping it",
+					"template", tmpl.Name, "id", tmpl.ID, "other", o.ID, "otherPath", o.StoragePath)
+				return
+			}
 		}
 	}
 	if err := stor.DeletePrefix(ctx, storage.DirPrefix(oldPath)); err != nil {

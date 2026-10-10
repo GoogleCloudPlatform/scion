@@ -242,10 +242,10 @@ func (s *TemplateStore) UpdateTemplate(ctx context.Context, template *store.Temp
 }
 
 // UpdateTemplateContent writes the content columns of template (see the
-// column list below) only if the stored row still matches expected. It is one
-// conditional UPDATE (UPDATE ... WHERE id = ? AND content_hash = ? AND
-// layout = ?), so two
-// concurrent commits that read the same row cannot both succeed.
+// column list below) only if the stored row still matches expected. It is
+// one conditional UPDATE (UPDATE ... WHERE id = ? AND content_hash = ? AND
+// layout = ?), so two concurrent commits that read the same row cannot both
+// succeed.
 func (s *TemplateStore) UpdateTemplateContent(ctx context.Context, template *store.Template, expected store.TemplateContentPrecondition) error {
 	uid, err := parseUUID(template.ID)
 	if err != nil {
@@ -397,6 +397,9 @@ func (s *TemplateStore) ListTemplates(ctx context.Context, filter store.Template
 	}
 	if filter.StoragePath != "" {
 		query.Where(enttemplate.StoragePathEQ(filter.StoragePath))
+	}
+	if filter.StoragePathPrefix != "" {
+		query.Where(enttemplate.StoragePathHasPrefix(filter.StoragePathPrefix))
 	}
 
 	totalCount := 0

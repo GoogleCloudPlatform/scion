@@ -1547,6 +1547,10 @@ type TemplateFilter struct {
 	// StoragePath, when set, matches templates whose storage path is
 	// exactly this value (used to find rows sharing a legacy path).
 	StoragePath string
+	// StoragePathPrefix, when set, matches templates whose storage path
+	// starts with this value (used to find legacy rows nested under a
+	// legacy path, such as pre-blob clones at <slug path>/<clone id>).
+	StoragePathPrefix string
 }
 
 // HarnessConfigStore defines harness config persistence operations.

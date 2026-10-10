@@ -119,7 +119,7 @@ var defaultSeedOperations = []store.MaintenanceOperation{
 	{
 		Key:         TemplateBlobGCKey,
 		Title:       "Template Blob Garbage Collection",
-		Description: "Deletes stored template file blobs that no template version references any more, and abandoned staged uploads, once they are older than the grace period (default 24h; set the grace parameter, e.g. 48h, to change it for one run). Blobs a template references are never deleted. The hub also runs this every hour. Safe to re-run.",
+		Description: "Deletes stored template file blobs that no template version references any more, and abandoned staged uploads, once they are older than the grace period (default 24h, minimum 1h; set the grace parameter, e.g. 48h, to change it for one run). Blobs a template references are never deleted. The hub also runs this every hour. Safe to re-run.",
 		Category:    store.MaintenanceCategoryOperation,
 	},
 	{

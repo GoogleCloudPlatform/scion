@@ -32,6 +32,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -126,7 +127,6 @@ func notExistOnDisk(t *testing.T, stor storage.Storage, objectPath string) bool 
 // broker uses as its cache key. Mutant (c), signing path URLs for blob rows,
 // fails both subtests.
 func TestTemplateBlob_HydrationDuringPushSeesOneVersion(t *testing.T) {
-	ctx := context.Background()
 	v1 := map[string]string{"scion-agent.yaml": commitCfgOld, "a.md": "a, version one", "b.md": "b, version one"}
 	v2 := map[string]string{"scion-agent.yaml": commitCfgBoth, "a.md": "a, version two", "b.md": "b, version two"}
 
@@ -210,7 +210,6 @@ func TestTemplateBlob_HydrationDuringPushSeesOneVersion(t *testing.T) {
 		mustStatus(t, w, http.StatusNotFound)
 		w = doTemplateRequest(t, srv, http.MethodGet, "/api/v1/templates/"+tmpl.ID+"/files/a.md?raw=1&hash=sha256:..%2F..%2Fx", "", nil)
 		mustStatus(t, w, http.StatusBadRequest)
-		_ = ctx
 	})
 }
 
@@ -631,8 +630,8 @@ func TestTemplateBlob_SharedLegacyPathIsolation(t *testing.T) {
 		}
 	}
 
-	// Collection with no grace touches neither B's tree nor A's blobs.
-	if _, err := srv.collectTemplateBlobGarbage(ctx, 0, time.Now().Add(time.Hour)); err != nil {
+	// Collection two days later, at the minimum grace, touches neither B's tree nor A's blobs.
+	if _, err := srv.collectTemplateBlobGarbage(ctx, 0, time.Now().Add(48*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if !objectExists(t, stor, shared+"/y.md") {
@@ -719,5 +718,172 @@ func TestCommitTemplateFiles_LayoutABAConflicts(t *testing.T) {
 	got := getTemplate(t, s, legacy.ID)
 	if got.Layout != store.TemplateLayoutBlobs || !reflect.DeepEqual(got.Files, migrator.Files) {
 		t.Errorf("row = layout %q files %+v, want the migration's", got.Layout, got.Files)
+	}
+}
+
+// A legacy clone made before the blob layout lives at <slug path>/<clone id>,
+// under its source's legacy path. When the source (renamed or not) migrates,
+// its legacy tree is kept, because removing it would remove the clone's
+// files too.
+func TestTemplateBlob_NestedLegacyCloneSurvivesParentMigration(t *testing.T) {
+	ctx := context.Background()
+	stor := newCommitTestStorage(t)
+	srv, s := newCommitTestServer(t, stor)
+
+	parent := seedUncommittedTemplate(t, srv, s, "", "foo", store.TemplateScopeGlobal, "", map[string]string{"x.md": "parent"})
+	parent.Name, parent.Slug = "bar", "bar"
+	if err := s.UpdateTemplate(ctx, parent); err != nil {
+		t.Fatal(err)
+	}
+	cloneFiles := map[string]string{"y.md": "nested clone"}
+	clone := &store.Template{
+		ID: api.NewUUID(), Name: "foo-clone", Slug: "foo-clone", Harness: "claude",
+		Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive,
+		Files: commitManifest(cloneFiles),
+	}
+	clone.StoragePath = parent.StoragePath + "/" + clone.ID
+	clone.ContentHash = computeContentHash(clone.Files)
+	putObjects(t, stor, clone.StoragePath, cloneFiles)
+	if err := s.CreateTemplate(ctx, clone); err != nil {
+		t.Fatal(err)
+	}
+
+	writeTemplateFileJSON(t, srv, parent.ID, "z.md", "parent again")
+	if got := getTemplate(t, s, parent.ID); got.Layout != store.TemplateLayoutBlobs {
+		t.Fatalf("parent did not migrate: layout %q", got.Layout)
+	}
+	if !objectExists(t, stor, clone.StoragePath+"/y.md") {
+		t.Fatal("the parent's migration removed a nested legacy clone's files")
+	}
+	for _, f := range downloadTemplate(t, srv, clone.ID).Files {
+		if string(fetchHubURL(t, srv, f.URL)) != cloneFiles[f.Path] {
+			t.Errorf("nested clone's %s no longer hydrates", f.Path)
+		}
+	}
+}
+
+// The grace period has a floor (1h): a pass asked for less, the maintenance
+// operation given less, and a configured value below it all use or refuse
+// the minimum, so a blob written for a commit that has not landed yet is
+// never collected.
+func TestTemplateBlobGC_GraceHasFloor(t *testing.T) {
+	ctx := context.Background()
+	stor := newCommitTestStorage(t)
+	srv, s := newCommitTestServer(t, stor)
+	tmpl := seedCommittedTemplate(t, srv, "floor", store.TemplateScopeGlobal, "", map[string]string{"scion-agent.yaml": commitCfgOld})
+	got := getTemplate(t, s, tmpl.ID)
+	putBlobs(t, srv, got, map[string]string{"pending.md": "written for a commit that has not landed"})
+	pending := blobObjectPath(got, "written for a commit that has not landed")
+	ageObject(t, stor, pending, 10*time.Minute)
+
+	if _, err := srv.collectTemplateBlobGarbage(ctx, 0, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if !objectExists(t, stor, pending) {
+		t.Fatal("a pass with a zero grace deleted a 10-minute-old blob; the 1h floor was not applied")
+	}
+
+	exec := &TemplateBlobGCExecutor{srv: srv}
+	var log bytes.Buffer
+	if err := exec.Run(ctx, &log, map[string]string{"grace": "30m"}); err == nil {
+		t.Error("the maintenance operation accepted a grace below the minimum")
+	}
+	if !objectExists(t, stor, pending) {
+		t.Fatal("a refused run deleted a blob")
+	}
+
+	srv.config.TemplateBlobGCGrace = time.Minute
+	if g := srv.templateBlobGCGrace(); g != minTemplateBlobGCGrace {
+		t.Errorf("configured 1m grace = %s, want the minimum %s", g, minTemplateBlobGCGrace)
+	}
+	srv.config.TemplateBlobGCGrace = 0
+	if g := srv.templateBlobGCGrace(); g != defaultTemplateBlobGCGrace {
+		t.Errorf("unset grace = %s, want the default %s", g, defaultTemplateBlobGCGrace)
+	}
+}
+
+// migrationConflictStore commits a concurrent change to one template right
+// before the storage migration's own update of it.
+type migrationConflictStore struct {
+	store.Store
+	id string
+}
+
+func (c *migrationConflictStore) UpdateTemplateContent(ctx context.Context, t *store.Template, expected store.TemplateContentPrecondition) error {
+	if t.ID == c.id {
+		c.id = ""
+		cur, err := c.Store.GetTemplate(ctx, t.ID)
+		if err != nil {
+			return err
+		}
+		cur.ContentHash = "sha256:concurrent"
+		if err := c.Store.UpdateTemplateContent(ctx, cur, store.TemplateContentPrecondition{ContentHash: expected.ContentHash, Layout: expected.Layout}); err != nil {
+			return err
+		}
+	}
+	return c.Store.UpdateTemplateContent(ctx, t, expected)
+}
+
+// The hub-namespacing storage migration moves a legacy template's path
+// through the compare-and-swap (hash, files and layout unchanged), skips
+// blob-layout rows, and leaves a row a concurrent commit changed as that
+// commit wrote it, counted as skipped and without cleaning up its objects.
+func TestStorageMigration_TemplateLayouts(t *testing.T) {
+	ctx := context.Background()
+	stor := newCommitTestStorage(t)
+	srv, s := newCommitTestServer(t, stor)
+	srv.SetHubID("mig-hub")
+
+	newRow := func(name, path, layout string, files map[string]string) *store.Template {
+		t.Helper()
+		row := &store.Template{
+			ID: api.NewUUID(), Name: name, Slug: name, Harness: "claude",
+			Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive,
+			StoragePath: path, Layout: layout, Files: commitManifest(files),
+		}
+		row.ContentHash = computeContentHash(row.Files)
+		if layout == store.TemplateLayoutBlobs {
+			putBlobs(t, srv, row, files)
+		} else {
+			putObjects(t, stor, path, files)
+		}
+		if err := s.CreateTemplate(ctx, row); err != nil {
+			t.Fatal(err)
+		}
+		return row
+	}
+	legacy := newRow("mig-legacy", "templates/global/mig-legacy", "", map[string]string{"a.md": "a"})
+	blob := newRow("mig-blob", "templates/global/mig-blob.x", store.TemplateLayoutBlobs, map[string]string{"b.md": "b"})
+	conflict := newRow("mig-conflict", "templates/global/mig-conflict", "", map[string]string{"c.md": "c"})
+
+	srv.store = &migrationConflictStore{Store: s, id: conflict.ID}
+	report := srv.MigrateStorage(ctx, false, true)
+	srv.store = s
+	if report.Migrated != 1 || report.Skipped != 2 || report.Failed != 0 {
+		t.Errorf("report = %+v, want 1 migrated, 2 skipped, 0 failed", report)
+	}
+
+	got := getTemplate(t, s, legacy.ID)
+	wantPath := storage.ResourceStoragePath("mig-hub", storage.ResourceKindTemplate, store.TemplateScopeGlobal, "", "mig-legacy")
+	if got.StoragePath != wantPath || got.StorageURI != storage.ResourceStorageURI("mig-hub", stor.Bucket(), storage.ResourceKindTemplate, store.TemplateScopeGlobal, "", "mig-legacy") {
+		t.Errorf("legacy row path %q uri %q, want %q", got.StoragePath, got.StorageURI, wantPath)
+	}
+	if got.Layout != "" || got.ContentHash != legacy.ContentHash || !reflect.DeepEqual(got.Files, legacy.Files) {
+		t.Errorf("migration changed content: layout %q hash %q files %+v", got.Layout, got.ContentHash, got.Files)
+	}
+	if !objectExists(t, stor, wantPath+"/a.md") || objectExists(t, stor, legacy.StoragePath+"/a.md") {
+		t.Error("legacy objects were not moved to the namespaced path")
+	}
+
+	if gotBlob := getTemplate(t, s, blob.ID); gotBlob.StoragePath != blob.StoragePath || gotBlob.Layout != store.TemplateLayoutBlobs {
+		t.Errorf("blob row was migrated: path %q layout %q", gotBlob.StoragePath, gotBlob.Layout)
+	}
+
+	gotConflict := getTemplate(t, s, conflict.ID)
+	if gotConflict.ContentHash != "sha256:concurrent" || gotConflict.StoragePath != conflict.StoragePath {
+		t.Errorf("conflicting row = hash %q path %q, want the concurrent commit's row", gotConflict.ContentHash, gotConflict.StoragePath)
+	}
+	if !objectExists(t, stor, conflict.StoragePath+"/c.md") {
+		t.Error("the legacy objects of a row left as committed were cleaned up")
 	}
 }

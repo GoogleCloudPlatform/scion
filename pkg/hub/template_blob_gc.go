@@ -44,6 +44,12 @@ const (
 	// that started from an older manifest finishes long before its blobs
 	// can be collected.
 	defaultTemplateBlobGCGrace = 24 * time.Hour
+	// minTemplateBlobGCGrace is the shortest grace period the collector
+	// accepts. A commit writes its blobs before its compare-and-swap; a
+	// grace shorter than the time between the two could delete a blob
+	// that the commit then references. It is also well above
+	// SignedURLExpiry, so a download in flight keeps its blobs.
+	minTemplateBlobGCGrace = time.Hour
 	// templateBlobGCInterval is how often the hub runs the collector.
 	templateBlobGCInterval = time.Hour
 	// templateBlobGCPageSize is the template list page size of one pass.
@@ -59,17 +65,31 @@ type templateBlobGCReport struct {
 	Errors        int `json:"errors"`
 }
 
-// templateBlobGCGrace returns the configured grace period.
+// templateBlobGCGrace returns the configured grace period, at least
+// minTemplateBlobGCGrace.
 func (s *Server) templateBlobGCGrace() time.Duration {
 	if g := s.config.TemplateBlobGCGrace; g > 0 {
-		return g
+		return clampTemplateBlobGCGrace(g)
 	}
 	return defaultTemplateBlobGCGrace
+}
+
+// clampTemplateBlobGCGrace raises a grace period below the minimum to the
+// minimum. Every collection pass goes through it.
+func clampTemplateBlobGCGrace(grace time.Duration) time.Duration {
+	if grace < minTemplateBlobGCGrace {
+		return minTemplateBlobGCGrace
+	}
+	return grace
 }
 
 // startTemplateBlobGC runs the collector every templateBlobGCInterval until
 // ctx ends.
 func (s *Server) startTemplateBlobGC(ctx context.Context) {
+	if g := s.config.TemplateBlobGCGrace; g > 0 && g < minTemplateBlobGCGrace {
+		s.templateLog.Warn("template blob gc: configured grace period is below the minimum; using the minimum",
+			"configured", g, "minimum", minTemplateBlobGCGrace)
+	}
 	go func() {
 		ticker := time.NewTicker(templateBlobGCInterval)
 		defer ticker.Stop()
@@ -123,6 +143,7 @@ func templateBlobRefs(t *store.Template) map[string]bool {
 // manifest does not reference and that are older than grace, and staged
 // uploads older than grace.
 func (s *Server) collectTemplateBlobGarbage(ctx context.Context, grace time.Duration, now time.Time) (templateBlobGCReport, error) {
+	grace = clampTemplateBlobGCGrace(grace)
 	var report templateBlobGCReport
 	stor := s.GetStorage()
 	if stor == nil {
@@ -231,8 +252,13 @@ func (s *Server) collectTemplateGarbage(ctx context.Context, stor storage.Storag
 // deleteAgedTemplateObject deletes obj only if it is still the object the
 // list saw and still older than grace. On providers with object generations
 // the delete is conditional on the listed generation, so a rewrite since the
-// list (an F5b refresh) wins. Otherwise the object is re-read just before
-// the delete and kept if it has been rewritten within the grace period.
+// list (an F5b refresh) wins. Otherwise (local storage) the object is
+// re-read just before the delete and kept if it has been rewritten within
+// the grace period. Local storage has no conditional delete, so a refresh
+// that lands between that re-read and the delete is not seen: the blob is
+// deleted and the refreshing commit's row references a missing blob until
+// the file is pushed again. The window is the few microseconds between two
+// filesystem calls, on a hub with local storage.
 func (s *Server) deleteAgedTemplateObject(ctx context.Context, stor storage.Storage, obj storage.Object, grace time.Duration, now time.Time, report *templateBlobGCReport) bool {
 	if gd, ok := stor.(storage.GenerationDeleter); ok && obj.Generation != 0 {
 		err := gd.DeleteIfGeneration(ctx, obj.Name, obj.Generation)
@@ -281,8 +307,8 @@ func (e *TemplateBlobGCExecutor) Run(ctx context.Context, logger io.Writer, para
 	grace := e.srv.templateBlobGCGrace()
 	if v := params["grace"]; v != "" {
 		d, err := time.ParseDuration(v)
-		if err != nil || d < 0 {
-			return fmt.Errorf("invalid grace %q: want a non-negative duration such as 24h", v)
+		if err != nil || d < minTemplateBlobGCGrace {
+			return fmt.Errorf("invalid grace %q: want a duration of at least %s, such as 24h", v, minTemplateBlobGCGrace)
 		}
 		grace = d
 	}

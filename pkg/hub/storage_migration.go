@@ -247,7 +247,14 @@ func (s *Server) migrateResourceKind(ctx context.Context, kind storage.ResourceK
 			continue
 		}
 
-		if err := s.updateResourceStoragePath(ctx, res, namespacedPath, namespacedURI); err != nil {
+		if err := s.updateResourceStoragePath(ctx, res, namespacedPath, namespacedURI); errors.Is(err, errStorageMigrationConflict) {
+			// A commit changed the row since it was listed; it keeps what
+			// that commit wrote and its legacy objects are not cleaned up.
+			s.resourceLog.Warn(label+" migration: resource changed during migration; leaving it as committed",
+				"resource", res.name)
+			report.Skipped++
+			continue
+		} else if err != nil {
 			s.resourceLog.Error(label+" migration: DB update failed",
 				"resource", res.name,
 				"error", err)
@@ -316,6 +323,10 @@ func (s *Server) countStorageObjects(ctx context.Context, stor storage.Storage, 
 	return len(objects.Objects)
 }
 
+// errStorageMigrationConflict reports a template that a commit changed (or
+// moved to the blob layout) between the migration's list and its update.
+var errStorageMigrationConflict = errors.New("resource changed during storage migration")
+
 // updateResourceStoragePath updates the DB record for a resource with the new namespaced path.
 func (s *Server) updateResourceStoragePath(ctx context.Context, res migratableResource, newPath, newURI string) error {
 	switch res.kind {
@@ -328,7 +339,7 @@ func (s *Server) updateResourceStoragePath(ctx context.Context, res migratableRe
 			return nil
 		}
 		if isBlobLayout(tmpl) {
-			return nil
+			return errStorageMigrationConflict
 		}
 		// The storage path is content state (ptone/scion#4221): it is
 		// written through the compare-and-swap, so a concurrent commit
@@ -338,9 +349,7 @@ func (s *Server) updateResourceStoragePath(ctx context.Context, res migratableRe
 		tmpl.StorageURI = newURI
 		err = s.store.UpdateTemplateContent(ctx, tmpl, store.TemplateContentPrecondition{ContentHash: tmpl.ContentHash, Layout: tmpl.Layout})
 		if errors.Is(err, store.ErrTemplateConflict) {
-			s.resourceLog.Warn("template migration: template changed during migration; leaving it as committed",
-				"template", tmpl.Name, "id", tmpl.ID)
-			return nil
+			return errStorageMigrationConflict
 		}
 		return err
 
