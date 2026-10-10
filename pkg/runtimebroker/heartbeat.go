@@ -526,7 +526,10 @@ func (s *HeartbeatService) listTargets(ctx context.Context, targets []listTarget
 // the result and removes l from the listings in progress.
 func (s *HeartbeatService) runListing(ctx context.Context, key string, mgr agent.Manager, l *targetListing) {
 	listCtx, cancel := context.WithDeadline(ctx, l.deadline)
-	agents, err := mgr.List(listCtx, nil)
+	// The heartbeat is the one caller that also gets entries for
+	// Kubernetes agent pods removed by a preemption or eviction before any
+	// listing saw them terminal, so the hub can record that reason.
+	agents, err := mgr.List(scionrt.WithVanishedPodReports(listCtx), nil)
 	if err == nil {
 		// Returned only after its deadline passed (or ctx ended): too old
 		// to report. Check the clock too: listCtx's own timer may not have

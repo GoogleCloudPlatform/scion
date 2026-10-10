@@ -3758,6 +3758,9 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 		selector = "scion.name"
 	}
 
+	// Taken before listing: pods a concurrent Run() tracks after this point
+	// are not treated as vanished by this List() (k8s_pod_tombstones.go).
+	trackSnap := r.podTrack.snapshot()
 	pods, err := r.Client.Clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: selector,
 	})
@@ -3766,6 +3769,9 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 	}
 
 	var agents []api.AgentInfo
+	// reportedPods marks the pods this List() reports terminal or with a
+	// disruption reason; they never get a tombstone once gone.
+	reportedPods := make(map[types.UID]bool)
 	for _, p := range pods.Items {
 		// We already filtered by selector, but we still double check if scion.name is present
 		// just in case the selector logic changes or is broader.
@@ -3858,12 +3864,15 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 		info.ExitReason = exitReason
 		info.Runtime = r.Name()
 		agents = append(agents, info)
+		if agentStatus == string(state.PhaseStopped) || agentStatus == string(state.PhaseError) || exitReason != "" {
+			reportedPods[p.UID] = true
+		}
 	}
 
 	// Pods removed by a preemption or eviction since the last List(),
-	// before any List() saw them terminal, are reported as tombstones
-	// (see k8s_pod_tombstones.go).
-	agents = append(agents, r.reconcilePodTombstones(ctx, namespace, labelFilter, pods.Items)...)
+	// before any List() saw them terminal, are reported as tombstones to
+	// the heartbeat (see k8s_pod_tombstones.go).
+	agents = append(agents, r.reconcilePodTombstones(ctx, trackSnap, namespace, labelFilter, pods.Items, reportedPods)...)
 	return agents, nil
 }
 

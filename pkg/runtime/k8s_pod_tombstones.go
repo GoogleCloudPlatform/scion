@@ -17,6 +17,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
@@ -39,23 +41,47 @@ import (
 // that reason, the runtime remembers the agent pods it has seen (in List()
 // or created in Run()). When a remembered pod is missing from a later List()
 // in the same scope, the runtime lists the pod's Events once; if they show
-// that the pod was Preempted or Evicted, List() reports a tombstone entry
-// for the agent (phase stopped or error, exit reason preempted or evicted)
-// for podTombstoneTTL, so the hub can record the reason. Without such event
-// evidence nothing is reported: a pod removed by an explicit stop or delete
-// never reads as a disruption.
+// that the pod was Preempted or Evicted, a tombstone entry for the agent
+// (phase stopped or error, exit reason preempted or evicted) is kept for
+// podTombstoneTTL so the hub can record the reason. Tombstones are returned
+// only by a List() whose context carries WithVanishedPodReports (the broker
+// heartbeat); every other caller sees live pods only.
 //
-// A tombstone never overrides a newer pod: it is dropped as soon as any pod
-// for the same agent is listed or created, or a start for the agent begins.
+// No tombstone is made:
+//   - without such event evidence, so a pod removed by an explicit stop or
+//     delete never reads as a disruption;
+//   - for a pod a List() already reported as terminal (stopped or error) or
+//     with a disruption reason: that state has been reported, and scion
+//     itself may remove such a pod (a stop, or a start's pre-clean);
+//   - when a newer pod for the agent is listed or created, or a start for
+//     the agent began, after the List() snapshot that found the pod missing.
 //
-// The tracker is in-memory only and bounded: entries not refreshed within
-// podTombstoneTTL are pruned. It is lost on broker restart; a pod that
-// vanishes while the broker is down is then not reported (the previous
-// behaviour).
+// Ordering against concurrent Run() calls uses a sequence number rather than
+// the clock: a List() takes a snapshot of the sequence before listing pods,
+// and a pod tracked or a start noted after that snapshot is never treated as
+// vanished by that List() and suppresses its tombstones.
+//
+// The tracker is in-memory only and bounded: remembered pods, pending
+// lookups and tombstones not refreshed within podTombstoneTTL are pruned. A
+// List() performs at most podEventLookupsPerList Events lookups, each bounded
+// by podEventLookupTimeout, and none that would run past its context
+// deadline; further vanished pods are carried over to the next List(). The tracker is lost on broker restart; a pod that vanishes
+// while the broker is down is then not reported (the previous behaviour).
 
 // podTombstoneTTL bounds how long a tombstone is reported and how long a
-// remembered pod that no List() refreshes is kept.
+// remembered pod or pending lookup that no List() refreshes is kept.
 const podTombstoneTTL = 5 * time.Minute
+
+// podEventLookupTimeout bounds one Events list for a vanished pod.
+const podEventLookupTimeout = 2 * time.Second
+
+// podEventLookupsPerList caps the Events lookups one List() performs, so
+// lookups stay well inside the heartbeat's listing deadline.
+const podEventLookupsPerList = 3
+
+// podEventWarnInterval rate-limits the warning logged for failed lookups
+// other than Forbidden (which is logged once per process).
+const podEventWarnInterval = 10 * time.Minute
 
 // podEventReasonPreempted and podEventReasonEvicted are the Event reasons the
 // scheduler (preemption) and the kubelet (node-pressure eviction) record on
@@ -64,6 +90,21 @@ const (
 	podEventReasonPreempted = "Preempted"
 	podEventReasonEvicted   = "Evicted"
 )
+
+type vanishedPodReportsKey struct{}
+
+// WithVanishedPodReports marks ctx so that a Kubernetes runtime List() made
+// with it also returns tombstone entries for agent pods removed by a
+// preemption or eviction before any List() reported them terminal. Only the
+// broker heartbeat should use it.
+func WithVanishedPodReports(ctx context.Context) context.Context {
+	return context.WithValue(ctx, vanishedPodReportsKey{}, true)
+}
+
+func vanishedPodReportsRequested(ctx context.Context) bool {
+	v, _ := ctx.Value(vanishedPodReportsKey{}).(bool)
+	return v
+}
 
 // trackedPod is a remembered agent pod.
 type trackedPod struct {
@@ -74,7 +115,13 @@ type trackedPod struct {
 	labels      map[string]string
 	base        api.AgentInfo // identity fields as List() reports them
 	recoverable bool          // k8sPodWorkspaceRecoverable
-	seen        time.Time
+	// reported is set once a List() reported the pod terminal or with a
+	// disruption reason; such a pod never gets a tombstone.
+	reported bool
+	seen     time.Time
+	seenSeq  uint64
+	// vanishSnap is the snapshot of the List() that found the pod missing.
+	vanishSnap uint64
 }
 
 // podTombstone is the entry List() reports for a vanished, disrupted pod.
@@ -85,24 +132,48 @@ type podTombstone struct {
 	created   time.Time
 }
 
-// podTracker holds the remembered pods and the tombstones. The zero value is
-// ready to use; all methods are safe for concurrent use.
+// startMark records when a start for an agent began.
+type startMark struct {
+	at  time.Time
+	seq uint64
+}
+
+// podTracker holds the remembered pods, the pending Events lookups and the
+// tombstones. The zero value is ready to use; all methods are safe for
+// concurrent use.
 type podTracker struct {
 	mu         sync.Mutex
+	seq        uint64
 	pods       map[types.UID]*trackedPod
-	tombstones map[string]*podTombstone // by agentKey
-	// starts records, per namespace and agent name, when a start last
-	// began, so a tombstone found by a List() that raced the start is
-	// not added after it.
-	starts map[string]time.Time
+	pending    map[types.UID]*trackedPod // vanished, lookup not done yet
+	tombstones map[string]*podTombstone  // by agentKey
+	starts     map[string]startMark      // by namespace/agent name
+
+	forbiddenLogged bool
+	lastWarn        time.Time
 }
 
 func (t *podTracker) init() {
 	if t.pods == nil {
 		t.pods = make(map[types.UID]*trackedPod)
+		t.pending = make(map[types.UID]*trackedPod)
 		t.tombstones = make(map[string]*podTombstone)
-		t.starts = make(map[string]time.Time)
+		t.starts = make(map[string]startMark)
 	}
+}
+
+// next returns a new sequence number. Caller holds t.mu.
+func (t *podTracker) next() uint64 {
+	t.seq++
+	return t.seq
+}
+
+// snapshot returns the current sequence number; a List() takes it before it
+// lists pods.
+func (t *podTracker) snapshot() uint64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.seq
 }
 
 // podAgentKey identifies the agent a pod belongs to: namespace, scion.name
@@ -122,23 +193,32 @@ func (t *podTracker) prune(now time.Time) {
 			delete(t.pods, uid)
 		}
 	}
+	for uid, p := range t.pending {
+		if now.Sub(p.seen) > podTombstoneTTL {
+			delete(t.pending, uid)
+		}
+	}
 	for k, ts := range t.tombstones {
 		if now.Sub(ts.created) > podTombstoneTTL {
 			delete(t.tombstones, k)
 		}
 	}
-	for k, at := range t.starts {
-		if now.Sub(at) > podTombstoneTTL {
+	for k, m := range t.starts {
+		if now.Sub(m.at) > podTombstoneTTL {
 			delete(t.starts, k)
 		}
 	}
 }
 
 // track remembers pod (or refreshes it) and drops any tombstone for its
-// agent. Caller holds t.mu.
-func (t *podTracker) track(pod *corev1.Pod, now time.Time) {
+// agent. reported marks a pod a List() reported terminal or with a
+// disruption reason; it is sticky. Caller holds t.mu.
+func (t *podTracker) track(pod *corev1.Pod, now time.Time, reported bool) {
 	if pod == nil || pod.UID == "" || pod.Labels["scion.name"] == "" {
 		return
+	}
+	if prev, ok := t.pods[pod.UID]; ok && prev.reported {
+		reported = true
 	}
 	key := podAgentKey(pod.Namespace, pod.Labels)
 	t.pods[pod.UID] = &trackedPod{
@@ -149,20 +229,23 @@ func (t *podTracker) track(pod *corev1.Pod, now time.Time) {
 		labels:      pod.Labels,
 		base:        k8sPodBaseAgentInfo(pod),
 		recoverable: k8sPodWorkspaceRecoverable(pod),
+		reported:    reported,
 		seen:        now,
+		seenSeq:     t.next(),
 	}
+	delete(t.pending, pod.UID)
 	delete(t.tombstones, key)
 }
 
-// noteAgentStart records that a start for the agent named agentName in namespace
-// began, and drops any tombstone for that agent.
+// noteAgentStart records that a start for the agent named agentName in
+// namespace began, and drops any tombstone for that agent.
 func (r *KubernetesRuntime) noteAgentStart(namespace, agentName string) {
 	t := &r.podTrack
 	now := r.now()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.init()
-	t.starts[startKey(namespace, agentName)] = now
+	t.starts[startKey(namespace, agentName)] = startMark{at: now, seq: t.next()}
 	prefix := startKey(namespace, agentName) + "/"
 	for k := range t.tombstones {
 		if strings.HasPrefix(k, prefix) {
@@ -179,7 +262,7 @@ func (r *KubernetesRuntime) trackCreatedPod(pod *corev1.Pod) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.init()
-	t.track(pod, now)
+	t.track(pod, now, false)
 }
 
 // listScopeMatches reports whether a pod with namespace and labels is within
@@ -194,7 +277,7 @@ func listScopeMatches(listNamespace string, labelFilter map[string]string, names
 		return ok
 	}
 	for k, v := range labelFilter {
-		if labels[k] != v {
+		if got, ok := labels[k]; !ok || got != v {
 			return false
 		}
 	}
@@ -202,38 +285,63 @@ func listScopeMatches(listNamespace string, labelFilter map[string]string, names
 }
 
 // reconcilePodTombstones updates the tracker with the pods one List() over
-// listNamespace and labelFilter returned and returns the tombstone entries
-// that List() should report in addition to them.
-func (r *KubernetesRuntime) reconcilePodTombstones(ctx context.Context, listNamespace string, labelFilter map[string]string, pods []corev1.Pod) []api.AgentInfo {
+// listNamespace and labelFilter returned (reported marks the pods it
+// reported terminal or with a disruption reason; snap is the sequence
+// snapshot taken before the pods were listed) and returns the tombstone
+// entries to report in addition to them, if ctx requests them.
+func (r *KubernetesRuntime) reconcilePodTombstones(ctx context.Context, snap uint64, listNamespace string, labelFilter map[string]string, pods []corev1.Pod, reported map[types.UID]bool) []api.AgentInfo {
 	t := &r.podTrack
-	detectedAt := r.now()
 
 	t.mu.Lock()
 	t.init()
-	t.prune(detectedAt)
+	t.prune(r.now())
 	listed := make(map[types.UID]bool, len(pods))
 	for i := range pods {
 		listed[pods[i].UID] = true
-		t.track(&pods[i], detectedAt)
+		t.track(&pods[i], r.now(), reported[pods[i].UID])
 	}
-	var vanished []*trackedPod
 	for uid, p := range t.pods {
-		if listed[uid] || !listScopeMatches(listNamespace, labelFilter, p.namespace, p.labels) {
+		// A pod tracked after the snapshot (created by a concurrent
+		// start) cannot be in this listing; it has not vanished.
+		if listed[uid] || p.seenSeq > snap || !listScopeMatches(listNamespace, labelFilter, p.namespace, p.labels) {
 			continue
 		}
 		delete(t.pods, uid)
-		vanished = append(vanished, p)
+		if p.reported {
+			continue
+		}
+		p.vanishSnap = snap
+		t.pending[uid] = p
+	}
+	// At most podEventLookupsPerList lookups, oldest first; the rest wait
+	// for the next List().
+	lookups := make([]*trackedPod, 0, len(t.pending))
+	for _, p := range t.pending {
+		lookups = append(lookups, p)
+	}
+	sort.Slice(lookups, func(i, j int) bool { return lookups[i].seenSeq < lookups[j].seenSeq })
+	if len(lookups) > podEventLookupsPerList {
+		lookups = lookups[:podEventLookupsPerList]
+	}
+	for _, p := range lookups {
+		delete(t.pending, p.uid)
 	}
 	t.mu.Unlock()
 
-	// One Events list per vanished pod, outside the lock.
 	type found struct {
 		pod    *trackedPod
 		reason state.ExitReason
 		event  string
 	}
 	var disrupted []found
-	for _, p := range vanished {
+	var deferred []*trackedPod
+	for i, p := range lookups {
+		// Leave the rest for the next List() rather than run past the
+		// caller's deadline.
+		if dl, ok := ctx.Deadline(); ok && time.Until(dl) < podEventLookupTimeout {
+			deferred = lookups[i:]
+			break
+		}
 		if reason, ev := r.podDisruptionFromEvents(ctx, p); reason != "" {
 			disrupted = append(disrupted, found{pod: p, reason: reason, event: ev})
 		}
@@ -241,16 +349,18 @@ func (r *KubernetesRuntime) reconcilePodTombstones(ctx context.Context, listName
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	for _, p := range deferred {
+		t.pending[p.uid] = p
+	}
 	now := r.now()
 	for _, d := range disrupted {
 		p := d.pod
-		// A newer pod for the agent (listed now, or created by a start
-		// since) or a start that began after the pod was found missing
-		// wins over the tombstone.
+		// A newer pod for the agent, or a start that began after the
+		// snapshot that found the pod missing, wins over the tombstone.
 		if t.hasPodFor(p.agentKey) {
 			continue
 		}
-		if at, ok := t.starts[startKey(p.namespace, p.labels["scion.name"])]; ok && !at.Before(detectedAt) {
+		if m, ok := t.starts[startKey(p.namespace, p.labels["scion.name"])]; ok && m.seq > p.vanishSnap {
 			continue
 		}
 		info := p.base
@@ -272,6 +382,9 @@ func (r *KubernetesRuntime) reconcilePodTombstones(ctx context.Context, listName
 			"pod", p.name, "namespace", p.namespace, "exit_reason", d.reason)
 	}
 
+	if !vanishedPodReportsRequested(ctx) {
+		return nil
+	}
 	var out []api.AgentInfo
 	for key, ts := range t.tombstones {
 		if t.hasPodFor(key) || !listScopeMatches(listNamespace, labelFilter, ts.namespace, ts.labels) {
@@ -296,19 +409,21 @@ func (t *podTracker) hasPodFor(agentKey string) bool {
 // podDisruptionFromEvents lists the Events recorded on the vanished pod and
 // returns preempted or evicted when one shows the pod was Preempted or
 // Evicted, with the Event reason; "" otherwise (including when the list
-// fails).
+// fails or times out).
 func (r *KubernetesRuntime) podDisruptionFromEvents(ctx context.Context, p *trackedPod) (state.ExitReason, string) {
 	if r.Client == nil || r.Client.Clientset == nil {
 		return "", ""
 	}
+	lookupCtx, cancel := context.WithTimeout(ctx, podEventLookupTimeout)
+	defer cancel()
 	sel := fields.Set{
 		"involvedObject.kind": "Pod",
 		"involvedObject.name": p.name,
 		"involvedObject.uid":  string(p.uid),
 	}.AsSelector().String()
-	events, err := r.Client.Clientset.CoreV1().Events(p.namespace).List(ctx, metav1.ListOptions{FieldSelector: sel})
+	events, err := r.Client.Clientset.CoreV1().Events(p.namespace).List(lookupCtx, metav1.ListOptions{FieldSelector: sel})
 	if err != nil {
-		runtimeLog.Debug("Failed to list events for a vanished agent pod", "pod", p.name, "namespace", p.namespace, "error", err)
+		r.warnEventLookupFailed(p, err)
 		return "", ""
 	}
 	var reason state.ExitReason
@@ -327,6 +442,29 @@ func (r *KubernetesRuntime) podDisruptionFromEvents(ctx context.Context, p *trac
 		}
 	}
 	return reason, eventReason
+}
+
+// warnEventLookupFailed logs a failed Events lookup at Warn: a Forbidden
+// error once per process (missing RBAC will not fix itself), any other error
+// at most once per podEventWarnInterval.
+func (r *KubernetesRuntime) warnEventLookupFailed(p *trackedPod, err error) {
+	t := &r.podTrack
+	t.mu.Lock()
+	log := false
+	if k8serrors.IsForbidden(err) {
+		if !t.forbiddenLogged {
+			t.forbiddenLogged = true
+			log = true
+		}
+	} else if now := r.now(); t.lastWarn.IsZero() || now.Sub(t.lastWarn) >= podEventWarnInterval {
+		t.lastWarn = now
+		log = true
+	}
+	t.mu.Unlock()
+	if log {
+		runtimeLog.Warn("Failed to list events for a vanished agent pod; a preemption or eviction may not be reported",
+			"pod", p.name, "namespace", p.namespace, "error", err)
+	}
 }
 
 // k8sPodBaseAgentInfo returns the identity fields List() reports for pod,
