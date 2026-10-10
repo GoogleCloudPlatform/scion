@@ -1417,6 +1417,10 @@ type Server struct {
 	// open) logs later failures at Debug. Cleared on success.
 	generalTopicWarned sync.Map
 
+	// nfsCleanupWG tracks background NFS project tree removals started by
+	// project delete (startHubNFSProjectTreeCleanup), so tests can wait.
+	nfsCleanupWG sync.WaitGroup
+
 	config ServerConfig
 	// startupHubName is the name resolved at startup (ServerConfig.HubName,
 	// from LoadGlobalConfig(serverConfigPath), else the hostname).

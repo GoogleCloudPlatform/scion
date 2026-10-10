@@ -15,12 +15,14 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
@@ -46,6 +48,12 @@ func NFSProjectHostPath(cfg *config.V1NFSConfig, projectID string) (projectDir, 
 	res, err := NewNFSBackend(cfg).Resolve(ResolveInput{ProjectID: projectID})
 	if err != nil {
 		return "", "", err
+	}
+	// The share host base must be a proper subdirectory of the mount root
+	// (a share ID such as ".." or "" would otherwise move it to or above
+	// the mount root).
+	if !filepath.IsAbs(cfg.MountRoot) || !pathStrictlyUnder(res.HostBase, cfg.MountRoot) {
+		return "", "", fmt.Errorf("NFS share host base %q is not strictly under mount root %q", res.HostBase, cfg.MountRoot)
 	}
 	subPathRoot, err := config.ResolveSubPathRoot(cfg.SubPathRoot)
 	if err != nil {
@@ -116,17 +124,17 @@ func pathStrictlyUnder(target, root string) bool {
 // is success (nothing to remove).
 func CleanupNFSProject(cfg *config.V1NFSConfig, projectID string) error {
 	if cfg == nil {
-		return fmt.Errorf("CleanupNFSProject: NFS config is nil")
+		return fmt.Errorf("CleanupNFSProject: %w: NFS config is nil", ErrNFSCleanupRefused)
 	}
 	if projectID == "" {
-		return fmt.Errorf("CleanupNFSProject: projectID is required")
+		return fmt.Errorf("CleanupNFSProject: %w: projectID is required", ErrNFSCleanupRefused)
 	}
 	if len(cfg.Shares) == 0 {
-		return fmt.Errorf("CleanupNFSProject: no NFS shares configured")
+		return fmt.Errorf("CleanupNFSProject: %w: no NFS shares configured", ErrNFSCleanupRefused)
 	}
 	projectDir, hostBase, err := NFSProjectHostPath(cfg, projectID)
 	if err != nil {
-		return fmt.Errorf("CleanupNFSProject: %w", err)
+		return fmt.Errorf("CleanupNFSProject: %w: %w", ErrNFSCleanupRefused, err)
 	}
 
 	// Resolve symlinks on the share base and the project's parent so a
@@ -148,11 +156,11 @@ func CleanupNFSProject(cfg *config.V1NFSConfig, projectID string) error {
 		return fmt.Errorf("CleanupNFSProject: resolve subpath root: %w", err)
 	}
 	if !pathStrictlyUnder(realParent, realBase) {
-		return fmt.Errorf("CleanupNFSProject: subpath root resolves to %q, outside the share %q", realParent, realBase)
+		return fmt.Errorf("CleanupNFSProject: %w: subpath root resolves to %q, outside the share %q", ErrNFSCleanupRefused, realParent, realBase)
 	}
 	target := filepath.Join(realParent, filepath.Base(projectDir))
 	if !pathStrictlyUnder(target, realBase) {
-		return fmt.Errorf("CleanupNFSProject: %q is not under the share %q", target, realBase)
+		return fmt.Errorf("CleanupNFSProject: %w: %q is not under the share %q", ErrNFSCleanupRefused, target, realBase)
 	}
 
 	info, err := os.Lstat(target)
@@ -165,7 +173,7 @@ func CleanupNFSProject(cfg *config.V1NFSConfig, projectID string) error {
 		return fmt.Errorf("CleanupNFSProject: stat %s: %w", target, err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return fmt.Errorf("CleanupNFSProject: %s is not a directory (mode %s); refusing to remove it", target, info.Mode().Type())
+		return fmt.Errorf("CleanupNFSProject: %w: %s is not a directory (mode %s)", ErrNFSCleanupRefused, target, info.Mode().Type())
 	}
 
 	slog.Info("CleanupNFSProject: removing project subtree",
@@ -177,4 +185,34 @@ func CleanupNFSProject(cfg *config.V1NFSConfig, projectID string) error {
 	slog.Info("CleanupNFSProject: project subtree removed",
 		"project_id", projectID, "path", target)
 	return nil
+}
+
+// ErrNFSCleanupRefused marks a CleanupNFSProject error where a guard refused
+// the removal (bad config, invalid ID, symlink, path outside the share).
+// Retrying cannot help with such errors.
+var ErrNFSCleanupRefused = errors.New("NFS project cleanup refused")
+
+// CleanupNFSProjectRetry runs CleanupNFSProject and, if the removal itself
+// fails (for example ENOTEMPTY because an agent pod was still terminating and
+// writing into the tree), runs it once more after retryDelay. A guard refusal
+// (ErrNFSCleanupRefused) is not retried. The wait ends early when ctx is
+// done, and then the retry is skipped. It returns the last error; callers log
+// it and never fail anything on it. It can block for retryDelay plus two
+// removals, so callers on a request path run it in the background with a
+// context of its own.
+func CleanupNFSProjectRetry(ctx context.Context, cfg *config.V1NFSConfig, projectID string, retryDelay time.Duration) error {
+	err := CleanupNFSProject(cfg, projectID)
+	if err == nil || errors.Is(err, ErrNFSCleanupRefused) {
+		return err
+	}
+	slog.Warn("CleanupNFSProject: removal failed; retrying once",
+		"project_id", projectID, "retry_in", retryDelay, "error", err)
+	t := time.NewTimer(retryDelay)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("%w (retry skipped: %v)", err, ctx.Err())
+	case <-t.C:
+	}
+	return CleanupNFSProject(cfg, projectID)
 }

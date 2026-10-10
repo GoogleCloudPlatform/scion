@@ -108,6 +108,8 @@ func (e *nfsDeleteTestEnv) deleteProject(t *testing.T) {
 	t.Helper()
 	rec := doRequest(t, e.srv, http.MethodDelete, "/api/v1/projects/"+e.project.ID, nil)
 	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+	// Wait for the background NFS tree removal the delete started.
+	e.srv.nfsCleanupWG.Wait()
 	_, err := e.s.GetProject(context.Background(), e.project.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
@@ -127,6 +129,8 @@ func TestDeleteProject_GitBacked_SlugProvider_DispatchesCleanup(t *testing.T) {
 	assert.Equal(t, 1, mockClient.cleanupCalls, "only the broker without a local path is asked to clean up")
 	assert.Equal(t, slugBroker.ID, mockClient.lastBrokerID)
 	assert.Equal(t, []string{"git-slug-cleanup"}, mockClient.cleanupSlugs)
+	assert.Equal(t, []string{e.project.ID}, mockClient.cleanupProjectIDs,
+		"the broker needs the project ID to find the NFS tree")
 }
 
 // A failing broker cleanup is logged and does not fail the delete.
@@ -177,14 +181,45 @@ func TestDeleteProject_EmbeddedBroker_NFS_CleanupErrorDoesNotFailDelete(t *testi
 	assert.NoError(t, err, "symlink target must be untouched")
 }
 
-// Without an embedded broker the hub leaves the export to the remote
-// brokers' own cleanup.
-func TestDeleteProject_NoEmbeddedBroker_NFS_LeavesExportToBrokers(t *testing.T) {
+// Without an embedded broker the hub still removes the ID-keyed tree from
+// its own mount of the export, whatever provider rows exist: here the only
+// provider has the project linked at a local path, so no broker is asked.
+func TestDeleteProject_NoEmbeddedBroker_NFS_HubRemovesExportTree(t *testing.T) {
 	e := newNFSDeleteTestEnv(t, "remote-nfs")
+	e.addBroker(t, "linked", "/srv/checkouts/remote-nfs")
+	mockClient := &mockRuntimeBrokerClient{}
+	e.srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(e.s, mockClient, false, slog.Default()))
 	tree := e.seedTree(t, e.project.ID)
+
 	e.deleteProject(t)
-	_, err := os.Stat(filepath.Join(tree, "workspace", "README.md"))
-	assert.NoError(t, err)
+
+	assert.Equal(t, 0, mockClient.cleanupCalls)
+	_, err := os.Lstat(tree)
+	assert.True(t, os.IsNotExist(err), "deleted project's NFS tree must be removed (err=%v)", err)
+}
+
+// A share that is not mounted on the hub is nothing to remove.
+func TestDeleteProject_NFS_ShareNotMountedOnHubIsSuccess(t *testing.T) {
+	e := newNFSDeleteTestEnv(t, "unmounted-nfs")
+	e.srv.config.WorkspaceStorageConfig.NFS.MountRoot = filepath.Join(e.home, "absent")
+	e.deleteProject(t)
+}
+
+// The hub's workspace storage config is not validated like a broker's, so
+// the guard must keep the share host base strictly under the mount root: a
+// share ID of ".." must not reach a tree beside the mount root.
+func TestDeleteProject_NFS_HostBaseOutsideMountRootRefused(t *testing.T) {
+	e := newNFSDeleteTestEnv(t, "dotdot-share")
+	nfs := e.srv.config.WorkspaceStorageConfig.NFS
+	nfs.Shares[0].ID = ".."
+	victim := filepath.Join(filepath.Dir(nfs.MountRoot), "projects", e.project.ID)
+	require.NoError(t, os.MkdirAll(victim, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(victim, "keep.txt"), []byte("x"), 0o644))
+
+	e.deleteProject(t)
+
+	_, err := os.Stat(filepath.Join(victim, "keep.txt"))
+	assert.NoError(t, err, "a tree outside the mount root must be untouched")
 }
 
 func TestDeleteProject_EmbeddedBroker_GitSlugProvider_RemovesLocalDir(t *testing.T) {

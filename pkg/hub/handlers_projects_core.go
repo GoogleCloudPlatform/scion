@@ -3458,15 +3458,16 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 	// Effect 2: Delete template storage files (GCS/local).
 	s.deleteStorageFiles(ctx, projectID, inputs.templates, inputs.harnesses)
 
+	// Effect 4 (runs before Effect 3, so slow broker calls cannot affect
+	// it): Release quota reservation.
+	if s.quotaService != nil {
+		s.quotaService.Release(ctx, "max_projects_per_user", projectID)
+	}
+
 	// Effect 3: Notify provider brokers to clean up local project
 	// directories and the project's NFS workspace tree, if any. Each
 	// provider is filtered by brokerUsesSlugProjectDir.
 	s.cleanupBrokerProjectDirectoriesFromInputs(ctx, project, inputs.providers)
-
-	// Effect 4: Release quota reservation.
-	if s.quotaService != nil {
-		s.quotaService.Release(ctx, "max_projects_per_user", projectID)
-	}
 
 	// Effect 5: Filesystem cleanup (hub-managed projects).
 	if (project.GitRemote == "" || project.IsSharedWorkspace()) && project.Slug != "" {
@@ -3477,9 +3478,11 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 		// lives at ~/.scion/projects/<slug> on it (ptone/scion#2569).
 		s.removeEmbeddedBrokerProjectDir(project.Slug, "")
 	}
-	// The embedded broker is skipped by Effect 3, so its NFS workspace
-	// tree is removed here.
-	s.cleanupEmbeddedBrokerNFSProjectTree(projectID)
+	// Remove the project's ID-keyed NFS workspace tree from the hub's own
+	// mount of the export, in the background. This covers the embedded
+	// broker (skipped by Effect 3), linked-path providers and brokers
+	// without a provider row.
+	s.startHubNFSProjectTreeCleanup(projectID)
 	s.webdavLocks.Delete(projectID)
 
 	// Effect 6: Clear ephemeral project warning suppression.
@@ -3730,9 +3733,11 @@ func (s *Server) cleanupBrokerProjectDirectoriesFromInputs(ctx context.Context, 
 // NFS workspace tree) applies to it. That holds for hub-managed projects (no
 // git remote, or a shared-workspace git project) on every provider, and for
 // any other git project on a provider with no registered local path: the
-// hub then dispatches by slug and the broker resolves that directory
-// (resolveProjectDispatchInfo). A git project linked at a local path on the
-// broker is left alone there.
+// hub then dispatches by slug (projectDispatchInfo.projectSlug in
+// httpdispatcher.go) and the broker resolves that directory
+// (pkg/runtimebroker: createAgent in handlers.go and buildStartContext in
+// start_context.go). A git project linked at a local path on the broker is
+// left alone there.
 func brokerUsesSlugProjectDir(project *store.Project, provider store.ProjectProvider) bool {
 	return project.GitRemote == "" || project.IsSharedWorkspace() || provider.LocalPath == ""
 }
@@ -3749,24 +3754,44 @@ func (s *Server) embeddedBrokerUsesSlugProjectDir(project *store.Project, provid
 	return false
 }
 
-// cleanupEmbeddedBrokerNFSProjectTree removes the deleted project's tree on
-// the NFS workspace export when this hub runs an embedded broker with NFS
-// workspace storage (ptone/scion#2569). Remote brokers remove it in their
-// own project cleanup (Effect 3), which skips the embedded broker. Removal
-// is guarded by runtime.CleanupNFSProject; a missing tree is success and any
-// failure is logged, never returned.
-func (s *Server) cleanupEmbeddedBrokerNFSProjectTree(projectID string) {
-	if s.GetEmbeddedBrokerID() == "" {
-		return
-	}
+// hubNFSProjectCleanupRetryDelay is how long a failed NFS project tree
+// removal waits before its one retry (agent pods may still be terminating),
+// and hubNFSProjectCleanupTimeout bounds the whole background cleanup.
+// Variables so tests can shorten them.
+var (
+	hubNFSProjectCleanupRetryDelay = 30 * time.Second
+	hubNFSProjectCleanupTimeout    = 15 * time.Minute
+)
+
+// startHubNFSProjectTreeCleanup starts, in the background, the removal of
+// the deleted project's tree <MountRoot>/<shareID>/<SubPathRoot>/<projectID>
+// on the NFS workspace export when this hub's workspace storage is nfs
+// (ptone/scion#2569). The tree is keyed by project ID, so removing it is safe
+// whatever provider rows exist; brokers remove it from their own mounts too,
+// and whichever runs second finds nothing to do. A share not mounted on the
+// hub counts as nothing to remove. The removal is guarded by
+// runtime.CleanupNFSProjectRetry, which retries a failed removal once. It
+// runs with its own context and timeout, not the request's; a final failure
+// is logged for an operator, never returned.
+func (s *Server) startHubNFSProjectTreeCleanup(projectID string) {
 	wsCfg := s.config.WorkspaceStorageConfig
 	if wsCfg == nil || wsCfg.Backend != "nfs" || wsCfg.NFS == nil || len(wsCfg.NFS.Shares) == 0 {
 		return
 	}
-	if err := runtime.CleanupNFSProject(wsCfg.NFS, projectID); err != nil {
-		s.projectsLogger().Error("failed to remove project's NFS workspace tree on delete",
-			"project_id", projectID, "error", err)
-	}
+	nfs := wsCfg.NFS
+	log := s.projectsLogger()
+	s.nfsCleanupWG.Add(1)
+	go func() {
+		defer s.nfsCleanupWG.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), hubNFSProjectCleanupTimeout)
+		defer cancel()
+		if err := runtime.CleanupNFSProjectRetry(ctx, nfs, projectID, hubNFSProjectCleanupRetryDelay); err != nil {
+			log.Error("project's NFS workspace tree was not removed after project delete; an operator must remove it",
+				"project_id", projectID, "error", err)
+			return
+		}
+		log.Info("removed project's NFS workspace tree (if present)", "project_id", projectID)
+	}()
 }
 
 // NOTE: deleteProjectAgents was replaced by dispatchAgentDeletions in RS3 R1,

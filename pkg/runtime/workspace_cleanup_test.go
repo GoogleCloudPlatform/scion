@@ -15,9 +15,12 @@
 package runtime
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
@@ -403,5 +406,84 @@ func TestPathStrictlyUnder(t *testing.T) {
 		if got := pathStrictlyUnder(tc.target, tc.root); got != tc.want {
 			t.Errorf("pathStrictlyUnder(%q, %q) = %v, want %v", tc.target, tc.root, got, tc.want)
 		}
+	}
+}
+
+func TestCleanupNFSProject_RefusesHostBaseNotUnderMountRoot(t *testing.T) {
+	cfg, mountRoot := testNFSCleanupConfig(t)
+	// A share ID of ".." would put the host base above the mount root.
+	cfg.Shares[0].ID = ".."
+	victim := filepath.Join(filepath.Dir(mountRoot), "projects", "proj-1")
+	if err := os.MkdirAll(victim, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := CleanupNFSProject(cfg, "proj-1"); err == nil {
+		t.Fatal("expected refusal for a share host base outside the mount root")
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatalf("directory outside the mount root must be untouched: %v", err)
+	}
+	cfg.Shares[0].ID = ""
+	if err := CleanupNFSProject(cfg, "proj-1"); err == nil {
+		t.Fatal("expected refusal for a share host base equal to the mount root")
+	}
+}
+
+func TestCleanupNFSProjectRetry(t *testing.T) {
+	cfg, mountRoot := testNFSCleanupConfig(t)
+	projectPath := createProjectSubtree(t, mountRoot, "share1", "proj-retry")
+	if err := CleanupNFSProjectRetry(context.Background(), cfg, "proj-retry", time.Hour); err != nil {
+		t.Fatalf("CleanupNFSProjectRetry: %v", err)
+	}
+	if _, err := os.Lstat(projectPath); !os.IsNotExist(err) {
+		t.Fatalf("project tree should be gone, Lstat err = %v", err)
+	}
+	// A guard refusal is returned at once, without waiting to retry.
+	other := createProjectSubtree(t, mountRoot, "share1", "proj-other")
+	if err := os.Symlink(other, filepath.Join(mountRoot, "share1", "projects", "proj-link")); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	err := CleanupNFSProjectRetry(context.Background(), cfg, "proj-link", time.Hour)
+	if !errors.Is(err, ErrNFSCleanupRefused) {
+		t.Fatalf("expected ErrNFSCleanupRefused, got %v", err)
+	}
+	if time.Since(start) > time.Minute {
+		t.Fatal("a refusal must not wait for the retry")
+	}
+}
+
+// A removal error is retried after the delay; a done context skips the
+// retry instead of waiting.
+func TestCleanupNFSProjectRetry_RemovalErrorRetriesUntilContextDone(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	cfg, mountRoot := testNFSCleanupConfig(t)
+	projectPath := createProjectSubtree(t, mountRoot, "share1", "proj-ro")
+	ws := filepath.Join(projectPath, "workspace")
+	if err := os.Chmod(ws, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(ws, 0o755) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := CleanupNFSProjectRetry(ctx, cfg, "proj-ro", time.Hour)
+	if err == nil || errors.Is(err, ErrNFSCleanupRefused) {
+		t.Fatalf("expected a removal error, got %v", err)
+	}
+
+	// With a short delay the retry runs and succeeds once the tree is
+	// removable again.
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		_ = os.Chmod(ws, 0o755)
+	}()
+	if err := CleanupNFSProjectRetry(context.Background(), cfg, "proj-ro", 200*time.Millisecond); err != nil {
+		t.Fatalf("retry should succeed: %v", err)
+	}
+	if _, err := os.Lstat(projectPath); !os.IsNotExist(err) {
+		t.Fatalf("project tree should be gone after the retry, Lstat err = %v", err)
 	}
 }

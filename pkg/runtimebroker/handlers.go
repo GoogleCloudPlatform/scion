@@ -6440,17 +6440,33 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 		return
 	}
 
-	// Remove the project's tree on the NFS workspace export
+	// Start removing the project's tree on the NFS workspace export
 	// (ptone/scion#2569) before the local-directory check below: the tree
 	// exists whether or not this broker has a local project directory, as
-	// for git projects whose agents run on Kubernetes. Best-effort: a
-	// failure is logged and never fails the delete.
-	s.cleanupNFSProjectTree(slug, r.URL.Query().Get("project_id"))
+	// for git projects whose agents run on Kubernetes. It runs in the
+	// background with its own context and timeout, so a large tree never
+	// holds up this response; every outcome is logged and none changes it.
+	s.startNFSProjectTreeCleanup(slug, r.URL.Query().Get("project_id"))
 
 	if _, err := os.Stat(projectPath); os.IsNotExist(err) {
 		// Already gone — idempotent success
 		w.WriteHeader(http.StatusNoContent)
 		return
+	}
+
+	// The slug may already belong to a different project: the hub frees it
+	// when its delete commits, before it asks brokers to clean up, so a
+	// project re-created with the same slug may already be here. When the
+	// directory's .scion entry or this broker's workspace record names
+	// another project, leave the directory (and its shared-dir storage)
+	// alone (ptone/scion#2569).
+	if requestedID := r.URL.Query().Get("project_id"); requestedID != "" {
+		if other := brokerProjectDirOwner(projectPath, slug, requestedID); other != "" {
+			s.agentLifecycleLog.Warn("project directory not removed: it belongs to a different project",
+				"slug", slug, "project_id", requestedID, "recorded_project_id", other)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 	}
 
 	// Remove the project's shared-dir storage first: it can live outside
@@ -6488,14 +6504,25 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// cleanupNFSProjectTree removes the deleted project's directory on the NFS
-// workspace export, <MountRoot>/<shareID>/<SubPathRoot>/<projectID>, with its
-// workspace, shared-dirs, provisioning state, worktrees and agent
-// directories (scionrt.CleanupNFSProject, which guards the path). It does
-// nothing when this broker has no NFS workspace storage or the request
-// carries no project ID. A missing tree is success; any other failure is
-// logged and left for an operator, never returned.
-func (s *Server) cleanupNFSProjectTree(slug, projectID string) {
+// nfsProjectCleanupRetryDelay is how long a failed NFS project tree removal
+// waits before its one retry (agent pods may still be terminating), and
+// nfsProjectCleanupTimeout bounds the whole background cleanup. Variables so
+// tests can shorten them.
+var (
+	nfsProjectCleanupRetryDelay = 30 * time.Second
+	nfsProjectCleanupTimeout    = 15 * time.Minute
+)
+
+// startNFSProjectTreeCleanup starts, in the background, the removal of the
+// deleted project's directory on the NFS workspace export,
+// <MountRoot>/<shareID>/<SubPathRoot>/<projectID>, with its workspace,
+// shared-dirs, provisioning state, worktrees and agent directories
+// (scionrt.CleanupNFSProjectRetry, which guards the path and retries a failed
+// removal once). It does nothing when this broker has no NFS workspace
+// storage or the request carries no project ID. The cleanup has its own
+// context with nfsProjectCleanupTimeout, not the request's. A missing tree
+// is success; a final failure is logged for an operator, never returned.
+func (s *Server) startNFSProjectTreeCleanup(slug, projectID string) {
 	nfs := s.config.NFSConfig
 	if nfs == nil || len(nfs.Shares) == 0 {
 		return
@@ -6504,12 +6531,35 @@ func (s *Server) cleanupNFSProjectTree(slug, projectID string) {
 		s.agentLifecycleLog.Warn("project delete without project_id: NFS workspace tree not removed", "slug", slug)
 		return
 	}
-	if err := scionrt.CleanupNFSProject(nfs, projectID); err != nil {
-		s.agentLifecycleLog.Error("failed to remove project's NFS workspace tree on delete",
-			"slug", slug, "project_id", projectID, "error", err)
-		return
+	s.nfsCleanupWG.Add(1)
+	go func() {
+		defer s.nfsCleanupWG.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), nfsProjectCleanupTimeout)
+		defer cancel()
+		if err := scionrt.CleanupNFSProjectRetry(ctx, nfs, projectID, nfsProjectCleanupRetryDelay); err != nil {
+			s.agentLifecycleLog.Error("project's NFS workspace tree was not removed after project delete; an operator must remove it",
+				"slug", slug, "project_id", projectID, "error", err)
+			return
+		}
+		s.agentLifecycleLog.Info("Removed project's NFS workspace tree (if present)", "slug", slug, "project_id", projectID)
+	}()
+}
+
+// brokerProjectDirOwner returns the project ID recorded for the hub-managed
+// project directory projectPath (~/.scion/projects/<slug>) when it differs
+// from projectID, else "". It checks the directory's .scion entry (project-id
+// file or marker) and this broker's workspace record for slug; an absent or
+// unreadable identity does not count as a different project.
+func brokerProjectDirOwner(projectPath, slug, projectID string) string {
+	if recorded := projectIDAtPath(filepath.Join(projectPath, config.DotScion)); recorded != "" && recorded != projectID {
+		return recorded
 	}
-	s.agentLifecycleLog.Info("Removed project's NFS workspace tree (if present)", "slug", slug, "project_id", projectID)
+	if recordPath, err := config.BrokerWorkspaceRecordPath(slug); err == nil {
+		if recorded, err := config.ReadWorkspaceRecord(recordPath); err == nil && recorded != "" && recorded != projectID {
+			return recorded
+		}
+	}
+	return ""
 }
 
 // hubManagedProjectSharedDirsBase returns the shared-dir storage directory

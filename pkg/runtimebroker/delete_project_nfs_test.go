@@ -16,9 +16,11 @@ package runtimebroker
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
@@ -159,4 +161,136 @@ func TestDeleteProject_NoNFSConfigLeavesExportAlone(t *testing.T) {
 	}
 	assertPresent(t, filepath.Join(treeA, "workspace", "README.md"))
 	assertGone(t, filepath.Join(home, ".scion", "projects", "proj-a"))
+}
+
+// The slug directory is left alone when its .scion entry names a different
+// project than the one being deleted (a re-created project with the same
+// slug); the deleted project's ID-keyed NFS tree is still removed.
+func TestDeleteProject_SlugDirOfOtherProject_Kept(t *testing.T) {
+	srv, home, subRoot := newNFSDeleteTestServer(t)
+	makeHubProject(t, home, "proj-a", scopeProjB, "dev")
+	treeA := seedNFSProjectTree(t, subRoot, scopeProjA)
+
+	rec := doDeleteProject(t, srv, "proj-a", scopeProjA)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertPresent(t, filepath.Join(home, ".scion", "projects", "proj-a", ".scion"))
+	assertGone(t, treeA)
+}
+
+// The same holds when only the broker's workspace record names the other
+// project.
+func TestDeleteProject_SlugDirRecordedForOtherProject_Kept(t *testing.T) {
+	srv, home, _ := newNFSDeleteTestServer(t)
+	dir := filepath.Join(home, ".scion", "projects", "proj-a")
+	if err := os.MkdirAll(filepath.Join(dir, "work"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	record, err := config.BrokerWorkspaceRecordPath("proj-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.WriteWorkspaceRecord(record, scopeProjB); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := doDeleteProject(t, srv, "proj-a", scopeProjA)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertPresent(t, filepath.Join(dir, "work"))
+}
+
+// A matching workspace record does not block removal.
+func TestDeleteProject_SlugDirRecordedForSameProject_Removed(t *testing.T) {
+	srv, home, _ := newNFSDeleteTestServer(t)
+	dir := filepath.Join(home, ".scion", "projects", "proj-a")
+	if err := os.MkdirAll(filepath.Join(dir, "work"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	record, err := config.BrokerWorkspaceRecordPath("proj-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.WriteWorkspaceRecord(record, scopeProjA); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := doDeleteProject(t, srv, "proj-a", scopeProjA)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertGone(t, dir)
+}
+
+// The NFS removal runs in the background: the response does not wait for a
+// failed removal's retry, and the cleanup's own timeout ends the wait.
+func TestDeleteProject_NFS_ResponseDoesNotWaitForRetry(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	srv, home, subRoot := newNFSDeleteTestServer(t)
+	makeHubProject(t, home, "proj-a", scopeProjA, "dev")
+	treeA := seedNFSProjectTree(t, subRoot, scopeProjA)
+	ws := filepath.Join(treeA, "workspace")
+	if err := os.Chmod(ws, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(ws, 0o755) })
+
+	origDelay, origTimeout := nfsProjectCleanupRetryDelay, nfsProjectCleanupTimeout
+	const cleanupTimeout = 3 * time.Second
+	nfsProjectCleanupRetryDelay, nfsProjectCleanupTimeout = time.Hour, cleanupTimeout
+	t.Cleanup(func() { nfsProjectCleanupRetryDelay, nfsProjectCleanupTimeout = origDelay, origTimeout })
+
+	start := time.Now()
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/v1/projects/proj-a?project_id="+scopeProjA, nil))
+	responded := time.Since(start)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if responded >= cleanupTimeout/2 {
+		t.Fatalf("response took %v: it waited for the NFS cleanup's retry", responded)
+	}
+	assertGone(t, filepath.Join(home, ".scion", "projects", "proj-a"))
+	srv.nfsCleanupWG.Wait()
+	if elapsed := time.Since(start); elapsed > time.Minute {
+		t.Fatalf("background cleanup should end at its own timeout, took %v", elapsed)
+	}
+	assertPresent(t, filepath.Join(ws, "README.md"))
+}
+
+// A failed removal is retried once in the background and succeeds once the
+// tree is removable.
+func TestDeleteProject_NFS_RetriesFailedRemoval(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	srv, _, subRoot := newNFSDeleteTestServer(t)
+	treeA := seedNFSProjectTree(t, subRoot, scopeProjA)
+	ws := filepath.Join(treeA, "workspace")
+	if err := os.Chmod(ws, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(ws, 0o755) })
+
+	origDelay := nfsProjectCleanupRetryDelay
+	nfsProjectCleanupRetryDelay = 300 * time.Millisecond
+	t.Cleanup(func() { nfsProjectCleanupRetryDelay = origDelay })
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/v1/projects/proj-a?project_id="+scopeProjA, nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// Make the tree removable after the first attempt has failed, before
+	// the retry.
+	time.Sleep(100 * time.Millisecond)
+	if err := os.Chmod(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srv.nfsCleanupWG.Wait()
+	assertGone(t, treeA)
 }
