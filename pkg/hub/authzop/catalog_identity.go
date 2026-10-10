@@ -827,4 +827,38 @@ var identityOperations = []OperationSpec{
 		}},
 		Bearer: SessionOnly(ReasonInteractiveState),
 	},
+	{
+		ID:          "user.skillinjection.update",
+		Domain:      "user.skillinjection",
+		Description: "Add, replace or remove the skills injected into the caller's own agents. A user access token needs user_skill_injection:update on a hub boundary",
+		EntryPoints: []EntryPoint{
+			// DELETE is listed first: the live-inventory and bearer matrix
+			// tests run entry points in this order, and the PUT probe
+			// replaces the caller's list, including the seeded entry the
+			// DELETE probe removes.
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/injected-skills/{id}", Method: "DELETE"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/injected-skills", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/injected-skills", Method: "PUT"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "self-principal",
+		BasePermission:   "user_skill_injection.update",
+		Effects:          []SecurityEffect{EffectCreateResource, EffectUpdateResource, EffectDeleteResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "user.skillinjection.update",
+			ContextFields: []string{"actor_id"},
+			BeforeFields:  []string{"skill_injection_id"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestUserInjectedSkillsWrite_TokenNeedsUpdateScope"},
+			{Package: "pkg/hub", Function: "TestUserInjectedSkillsWrite_ProjectBoundaryTokenDenied"},
+			{Package: "pkg/hub", Function: "TestUserInjectedSkillsWrite_SessionAndFederatedUnchanged"},
+		},
+		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryHub),
+	},
 }
