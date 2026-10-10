@@ -194,7 +194,16 @@ export class PullToRefreshController {
   private readonly onTouchMove = (e: Event): void => {
     const start = this.start;
     if (!start || this.mode === 'ignore') return;
-    const touch = Array.from((e as TouchEvent).touches).find((t) => t.identifier === start.id);
+    const touches = (e as TouchEvent).touches;
+    // A second finger that landed outside the listening element sent its
+    // touchstart elsewhere; it shows up here first. Give up as on touchstart.
+    if (touches.length > 1) {
+      this.start = null;
+      this.mode = 'ignore';
+      this.cancelPull();
+      return;
+    }
+    const touch = Array.from(touches).find((t) => t.identifier === start.id);
     if (!touch) return;
     const dx = touch.clientX - start.x;
     const dy = touch.clientY - start.y;

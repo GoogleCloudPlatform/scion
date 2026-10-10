@@ -293,6 +293,40 @@ describe('PullToRefreshController', () => {
     expect(ctl.state).toEqual({ distance: 0, armed: false, refreshing: false });
   });
 
+  it('a second finger whose touchstart went elsewhere still ends the pull', () => {
+    touch(scroller, 'touchstart', [{ y: 0 }]);
+    touch(scroller, 'touchmove', [{ y: PAST / 2 }]);
+    touch(scroller, 'touchmove', [{ y: PAST }]);
+    expect(ctl.state.armed).toBe(true);
+    // No two-finger touchstart reaches the scroller; the move carries both.
+    const pinch = touch(scroller, 'touchmove', [{ y: PAST + 10 }, { y: 300, id: 1 }]);
+    expect(pinch.defaultPrevented).toBe(false);
+    expect(ctl.state.distance).toBe(0);
+    touch(scroller, 'touchend', [{ y: 300, id: 1 }]);
+    const after = touch(scroller, 'touchmove', [{ y: PAST + 40 }]);
+    touch(scroller, 'touchend', []);
+    expect(after.defaultPrevented).toBe(false);
+    expect(onRefresh).not.toHaveBeenCalled();
+    expect(ctl.state).toEqual({ distance: 0, armed: false, refreshing: false });
+  });
+
+  it('a second finger inside the slop, then a long pull, does not refresh', () => {
+    touch(scroller, 'touchstart', [{ y: 0 }]);
+    const inSlop = touch(scroller, 'touchmove', [{ y: 2 }]);
+    touch(scroller, 'touchstart', [{ y: 2 }, { y: 50, id: 1 }]);
+    const moves = [
+      touch(scroller, 'touchmove', [{ y: PAST / 2 }, { y: 50, id: 1 }]),
+      touch(scroller, 'touchmove', [{ y: PAST }, { y: 50, id: 1 }]),
+    ];
+    touch(scroller, 'touchend', [{ y: PAST }]);
+    moves.push(touch(scroller, 'touchmove', [{ y: PAST + 40 }]));
+    touch(scroller, 'touchend', []);
+    expect(inSlop.defaultPrevented).toBe(false);
+    for (const m of moves) expect(m.defaultPrevented).toBe(false);
+    expect(onRefresh).not.toHaveBeenCalled();
+    expect(ctl.state).toEqual({ distance: 0, armed: false, refreshing: false });
+  });
+
   it('a pull that comes back up above its start resets and does not fire', () => {
     touch(scroller, 'touchstart', [{ y: 100 }]);
     touch(scroller, 'touchmove', [{ y: 100 + PAST }]);
