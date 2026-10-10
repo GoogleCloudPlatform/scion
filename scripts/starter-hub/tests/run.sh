@@ -658,6 +658,8 @@ test_tls_fix_caddy_reload_force_only_in_its_segment() {
     # --force (or -f) of another command does not make `caddy reload` forced.
     for body in 'caddy reload --config /etc/caddy/Caddyfile; rm --force /tmp/stale' \
         'caddy reload --config /etc/caddy/Caddyfile && cp -f /tmp/a /tmp/b' \
+        'caddy reload --config /etc/caddy/Caddyfile && rm -f /tmp/x' \
+        'caddy reload --config /etc/caddy/Caddyfile; tar -f x' \
         'caddy reload --config /etc/caddy/Caddyfile'; do
         EXTRA_ENV=()
         tls_fake_root 60 false
