@@ -100,6 +100,22 @@ func manifestFiles(paths ...string) []store.TemplateFile {
 	return files
 }
 
+// stagedTemplateManifest stages "x\n" for each path in tmpl's staging
+// directory for uploadID, as a client's upload URLs would, and returns the
+// matching finalize manifest with real content hashes. Finalize of a
+// blob-layout template hashes and moves staged files (ptone/scion#4221).
+func stagedTemplateManifest(t *testing.T, stor storage.Storage, tmpl *store.Template, uploadID string, paths ...string) []store.TemplateFile {
+	t.Helper()
+	files := make([]store.TemplateFile, 0, len(paths))
+	for _, p := range paths {
+		_, err := stor.Upload(context.Background(), templateStagedObjectPath(tmpl.StoragePath, uploadID, p),
+			strings.NewReader("x\n"), storage.UploadOptions{})
+		require.NoError(t, err, "stage %s", p)
+		files = append(files, store.TemplateFile{Path: p, Size: 2, Hash: commitHash("x\n")})
+	}
+	return files
+}
+
 // assertPathRejected checks for a 400 validation_error whose body does not
 // contain the submitted path.
 func assertPathRejected(t *testing.T, rec *httptest.ResponseRecorder, submitted string) {
@@ -257,9 +273,10 @@ func TestTemplateFinalize_RequiresCanonicalManifest(t *testing.T) {
 		srv, s := testServer(t)
 		stor := useLocalStorage(t, srv)
 		tmpl := createLocalTemplate(t, srv, stor)
+		manifest := stagedTemplateManifest(t, stor, tmpl, "test-upload-1", "SKILL.md", "dir/f.txt")
 
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/finalize",
-			FinalizeRequest{Manifest: &TemplateManifest{Files: manifestFiles("SKILL.md", "dir/f.txt")}})
+			FinalizeRequest{Manifest: &TemplateManifest{Files: manifest}, UploadID: "test-upload-1"})
 		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 		got, err := s.GetTemplate(context.Background(), tmpl.ID)
 		require.NoError(t, err)
@@ -340,9 +357,10 @@ func TestUserTemplateFinalize_RequiresCanonicalManifest(t *testing.T) {
 		srv, s, alice, _ := setupUserTemplateTest(t)
 		stor := useLocalStorage(t, srv)
 		tmpl := createLocalUserTemplate(t, srv, stor, alice)
+		manifest := stagedTemplateManifest(t, stor, tmpl, "test-upload-1", "SKILL.md", "dir/f.txt")
 
 		rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/users/me/templates/"+tmpl.ID+"/finalize",
-			FinalizeRequest{Manifest: &TemplateManifest{Files: manifestFiles("SKILL.md", "dir/f.txt")}})
+			FinalizeRequest{Manifest: &TemplateManifest{Files: manifest}, UploadID: "test-upload-1"})
 		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 		got, err := s.GetTemplate(context.Background(), tmpl.ID)
 		require.NoError(t, err)

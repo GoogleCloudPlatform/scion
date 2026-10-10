@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -207,6 +208,20 @@ func (m *cloneMockStorage) Copy(ctx context.Context, srcPath, dstPath string) (*
 		m.content[dstPath] = data
 	}
 	return dstObj, nil
+}
+
+// Upload arrives at raceBarrier, like Copy: a template clone copies a
+// legacy-layout source by reading each file and writing it as a blob
+// (ptone/scion#4221), so its first storage write is an Upload, not a Copy.
+// A request that already arrived through Copy (or an earlier Upload) does
+// not arrive again (see copyBarrier).
+func (m *cloneMockStorage) Upload(ctx context.Context, objectPath string, r io.Reader, opts storage.UploadOptions) (*storage.Object, error) {
+	if m.raceBarrier != nil {
+		if id, ok := raceRequestIDFromContext(ctx); ok {
+			m.raceBarrier.arrive(id)
+		}
+	}
+	return m.mockStorage.Upload(ctx, objectPath, r, opts)
 }
 
 // DeletePrefix actually removes matching keys, unlike the embedded

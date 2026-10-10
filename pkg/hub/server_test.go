@@ -39,10 +39,6 @@ func TestServer_PersistentSigningKeys(t *testing.T) {
 		t.Fatalf("failed to create test store: %v", err)
 	}
 
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
-
 	cfg := DefaultServerConfig()
 
 	// Create first server
@@ -88,9 +84,6 @@ func TestServer_PersistentSigningKeys_WithHubID(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
 	cfg := DefaultServerConfig()
@@ -153,9 +146,6 @@ func TestServer_SigningKeysExcludedFromResolve(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	cfg := DefaultServerConfig()
 	cfg.HubID = "test-hub-resolve"
@@ -185,9 +175,6 @@ func TestServer_UserTokenSurvivesRestart(t *testing.T) {
 	s, err := newTestStore(t, dbPath)
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
 	cfg := DefaultServerConfig()
@@ -221,9 +208,6 @@ func TestServer_UserTokenSurvivesRestart(t *testing.T) {
 	s2, err := newTestStore(t, dbPath)
 	if err != nil {
 		t.Fatalf("failed to reopen test store: %v", err)
-	}
-	if err := migrateTestStore(context.Background(), s2); err != nil {
-		t.Fatalf("failed to migrate reopened store: %v", err)
 	}
 
 	// Run 2: create a NEW server with the reopened store
@@ -259,9 +243,6 @@ func TestServer_SigningKeyMigration_LegacyHubScopeID(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
 	ctx := context.Background()
@@ -341,9 +322,6 @@ func TestServer_SigningKeyMigration_DeletesLegacyFromBackend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	ctx := context.Background()
 	newHubID := "new-hub-id-abc123"
@@ -419,9 +397,6 @@ func TestServer_SigningKeyBootstrapWithSecretBackend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	hubID := "test-backend-hub"
 	backend := secret.NewLocalBackend(s, hubID, "test-secret")
@@ -487,9 +462,6 @@ func TestServer_SigningKeySyncFromStoreToBackend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	hubID := "test-sync-hub"
 
@@ -538,9 +510,6 @@ func TestServer_SigningKeyEmptyValueFromStore(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
 	hubID := "test-empty-value-hub"
@@ -603,9 +572,6 @@ func TestServer_SigningKeyBackupAfterBackendSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	hubID := "test-backup-hub"
 	backend := secret.NewLocalBackend(s, hubID, "test-secret")
@@ -645,9 +611,6 @@ func TestServer_GenerateAgentToken_DevAuthAutoGrantsScopes(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
 	cfg := DefaultServerConfig()
@@ -692,9 +655,6 @@ func TestServer_GenerateAgentToken_DevAuthDeduplicatesScopes(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
 	cfg := DefaultServerConfig()
@@ -743,9 +703,6 @@ func TestServer_GenerateAgentToken_NoDevAuthDoesNotAutoGrant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	cfg := DefaultServerConfig()
 	// DevAuthToken is empty - not dev-auth mode
@@ -787,9 +744,6 @@ func TestServer_GenerateAgentToken_RoleBaseline(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
 	cfg := DefaultServerConfig()
@@ -835,9 +789,6 @@ func TestServer_GenerateAgentToken_RoleFull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	cfg := DefaultServerConfig()
 	cfg.AgentTokenConfig = AgentTokenConfig{
@@ -879,9 +830,6 @@ func TestServer_GenerateAgentToken_RoleReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	cfg := DefaultServerConfig()
 	cfg.AgentTokenConfig = AgentTokenConfig{
@@ -919,9 +867,6 @@ func TestServer_GenerateAgentToken_DevAuthUpgradesRole(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
 	cfg := DefaultServerConfig()
@@ -990,9 +935,6 @@ func TestServer_GCPBackendFailureIsFatal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	hubID := "test-gcpfail-hub"
 	backend := secret.NewGCPBackendWithClient(s, &failingSMClient{}, "test-project", hubID)
@@ -1017,9 +959,6 @@ func TestServer_SigningKeyBackupPreservesSecretRef(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
 	hubID := "test-ref-hub"
@@ -1059,9 +998,6 @@ func TestServer_SigningKeyBackupIsEncrypted(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
 	hubID := "test-encrypt-hub"
@@ -1124,9 +1060,6 @@ func TestServer_SigningKeyBackupLegacyPlaintextMigration(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := migrateTestStore(context.Background(), s); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
 	hubID := "test-legacy-hub"

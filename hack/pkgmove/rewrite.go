@@ -23,6 +23,7 @@ import (
 	"go/token"
 	"go/types"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -36,7 +37,17 @@ type edit struct {
 
 type fileEdits struct {
 	edits []edit
+	// imports are added by flushImports, in one block per file.
+	imports []newImport
+	// cleanImports drops imports that the edited file no longer uses;
+	// importNames maps each import path of the file to its package name.
+	cleanImports bool
+	importNames  map[string]string
+	// drops remove whole declarations; edits inside them are discarded.
+	drops []edit
 }
+
+type newImport struct{ name, path, realName string }
 
 func (a *analysis) editsFor(f *srcFile) *fileEdits {
 	fe := a.edits[f]
@@ -84,6 +95,7 @@ func (a *analysis) checkXTests() {
 		}
 		keepsSource := false
 		calls := callSelectors(f.AST)
+		embeddedSels := embeddedSelectors(f.AST)
 		ast.Inspect(f.AST, func(n ast.Node) bool {
 			sel, ok := n.(*ast.SelectorExpr)
 			if !ok {
@@ -97,6 +109,17 @@ func (a *analysis) checkXTests() {
 			h := a.home(obj)
 			if h == nil {
 				keepsSource = true
+				return true
+			}
+			if al := a.aliases[obj]; al != nil && f.Moved && !h.Moved {
+				// A moved external test that names a staying alias refers to
+				// its target directly, unless that would change a func value's
+				// identity (a wrapper) or an embedded field's name.
+				if (al.kind == "func" && !calls[sel]) || (al.name != obj.Name() && embeddedSels[sel]) {
+					keepsSource = true
+				} else {
+					a.xtestAliasSels[f] = append(a.xtestAliasSels[f], sel)
+				}
 				return true
 			}
 			pos := a.posOf(sel.Pos())
@@ -627,6 +650,11 @@ func (a *analysis) varInitCalls(vs *ast.ValueSpec) *initCalls {
 // not collide with package-level names, the file's imports, or (at the given
 // positions) any local declaration.
 func (a *analysis) chooseImportName(f *srcFile, at []token.Pos, extraReserved map[string]bool) string {
+	return a.chooseImportNameBase(f, a.cfg.PkgName, at, extraReserved)
+}
+
+// chooseImportNameBase is chooseImportName for an arbitrary base name.
+func (a *analysis) chooseImportNameBase(f *srcFile, base string, at []token.Pos, extraReserved map[string]bool) string {
 	reserved := map[string]bool{}
 	for k := range extraReserved {
 		reserved[k] = true
@@ -635,7 +663,7 @@ func (a *analysis) chooseImportName(f *srcFile, at []token.Pos, extraReserved ma
 		reserved[importName(spec)] = true
 	}
 	for i := 1; ; i++ {
-		name := a.cfg.PkgName
+		name := base
 		if i > 1 {
 			name += strconv.Itoa(i)
 		}
@@ -730,13 +758,40 @@ func (a *analysis) buildEdits() error {
 		}
 		a.addImport(f, q, a.dstImport, a.cfg.PkgName)
 	}
-	// Moved external tests: re-qualify references to moved symbols.
-	var xfiles []*srcFile
-	for f := range a.xtestSels {
-		xfiles = append(xfiles, f)
+	// References from moved files to staying aliases: the alias targets.
+	aliasByFile := map[*srcFile][]identUse{}
+	for _, u := range a.aliasUses {
+		aliasByFile[u.file] = append(aliasByFile[u.file], u)
 	}
-	sort.Slice(xfiles, func(i, j int) bool { return xfiles[i].Name < xfiles[j].Name })
-	for _, f := range xfiles {
+	for _, f := range sortedFileKeys(aliasByFile) {
+		a.rewriteAliasUses(f, aliasByFile[f])
+	}
+	// Moved in-package tests joining an existing target: target.X becomes X.
+	for _, f := range sortedFileKeys(a.dstSels) {
+		for _, sel := range a.dstSels[f] {
+			if a.inDropped(f, sel.Pos()) {
+				continue
+			}
+			fe := a.editsFor(f)
+			fe.edits = append(fe.edits, edit{a.offset(sel.Pos()), a.offset(sel.End()), sel.Sel.Name})
+			a.plan.AliasRewrites = append(a.plan.AliasRewrites, varRewrite{Pos: a.posOf(sel.Pos()), Old: exprString(sel), New: sel.Sel.Name})
+		}
+		a.removeImport(f, a.dstImport)
+	}
+	// Equivalent duplicates of target declarations.
+	for _, d := range a.drops {
+		a.removeDecl(d)
+	}
+	// Moved external tests: re-qualify references to moved symbols, and
+	// refer to alias targets directly.
+	xset := map[*srcFile]bool{}
+	for f := range a.xtestSels {
+		xset[f] = true
+	}
+	for f := range a.xtestAliasSels {
+		xset[f] = true
+	}
+	for _, f := range sortedFileKeys(xset) {
 		sels := a.xtestSels[f]
 		reserved := map[string]bool{}
 		for _, g := range a.files {
@@ -754,7 +809,6 @@ func (a *analysis) buildEdits() error {
 			}
 			return true
 		})
-		q := a.chooseImportName(f, nil, reserved)
 		local := a.srcImportName(f)
 		total := 0
 		ast.Inspect(f.AST, func(n ast.Node) bool {
@@ -763,14 +817,45 @@ func (a *analysis) buildEdits() error {
 			}
 			return true
 		})
-		for _, sel := range sels {
-			a.replaceIdent(f, sel.X.(*ast.Ident), q)
+		names := map[string]string{} // import path -> name in this file
+		qualifier := func(path, base string) string {
+			if q, ok := names[path]; ok {
+				return q
+			}
+			q := ""
+			for _, spec := range f.AST.Imports {
+				if importPath(spec) == path && spec.Name == nil && guessPkgName(path) == base {
+					q = base
+				} else if importPath(spec) == path && spec.Name != nil && spec.Name.Name != "_" && spec.Name.Name != "." {
+					q = spec.Name.Name
+				}
+			}
+			if q == "" {
+				q = a.chooseImportNameBase(f, base, nil, reserved)
+				a.addImport(f, q, path, base)
+			}
+			reserved[q] = true
+			names[path] = q
+			return q
 		}
-		a.addImport(f, q, a.dstImport, a.cfg.PkgName)
-		if total == len(sels) {
+		if len(sels) > 0 {
+			q := qualifier(a.dstImport, a.cfg.PkgName)
+			for _, sel := range sels {
+				a.replaceIdent(f, sel.X.(*ast.Ident), q)
+			}
+		}
+		for _, sel := range a.xtestAliasSels[f] {
+			al := a.aliases[a.pkg.Scope().Lookup(sel.Sel.Name)]
+			text := qualifier(al.path, al.pkgName) + "." + al.name
+			fe := a.editsFor(f)
+			fe.edits = append(fe.edits, edit{a.offset(sel.Pos()), a.offset(sel.End()), text})
+			a.plan.AliasRewrites = append(a.plan.AliasRewrites, varRewrite{Pos: a.posOf(sel.Pos()), Old: exprString(sel), New: text})
+		}
+		if total == len(sels)+len(a.xtestAliasSels[f]) {
 			a.removeImport(f, a.mod.ImportPath)
 		}
 	}
+	a.flushImports()
 	for f := range a.edits {
 		if !f.Moved {
 			a.plan.TouchedFiles = append(a.plan.TouchedFiles, a.rel(f.Path))
@@ -809,8 +894,45 @@ func importSpecText(name, path, realName string) string {
 }
 
 func (a *analysis) addImport(f *srcFile, name, path, realName string) {
-	spec := importSpecText(name, path, realName)
 	fe := a.editsFor(f)
+	for _, imp := range fe.imports {
+		if imp.path == path && imp.name == name {
+			return
+		}
+	}
+	fe.imports = append(fe.imports, newImport{name, path, realName})
+}
+
+// flushImports turns the queued imports of every file into one edit each.
+func (a *analysis) flushImports() {
+	for f, fe := range a.edits {
+		if len(fe.imports) == 0 {
+			continue
+		}
+		imps := append([]newImport(nil), fe.imports...)
+		sort.Slice(imps, func(i, j int) bool {
+			if isStdPath(imps[i].path) != isStdPath(imps[j].path) {
+				return isStdPath(imps[i].path)
+			}
+			return imps[i].path < imps[j].path
+		})
+		fe.imports = nil
+		a.insertImports(f, fe, imps)
+	}
+}
+
+func (a *analysis) insertImports(f *srcFile, fe *fileEdits, imps []newImport) {
+	specs := func(prevStd bool, indent string) string {
+		var b strings.Builder
+		for i, imp := range imps {
+			std := isStdPath(imp.path)
+			if (i == 0 && prevStd && !std) || (i > 0 && isStdPath(imps[i-1].path) && !std) {
+				b.WriteString("\n")
+			}
+			b.WriteString(indent + importSpecText(imp.name, imp.path, imp.realName) + "\n")
+		}
+		return b.String()
+	}
 	var last *ast.GenDecl
 	for _, d := range f.AST.Decls {
 		if gd, ok := d.(*ast.GenDecl); ok && gd.Tok == token.IMPORT {
@@ -818,20 +940,24 @@ func (a *analysis) addImport(f *srcFile, name, path, realName string) {
 		}
 	}
 	switch {
+	case last == nil && len(imps) == 1:
+		off := a.offset(f.AST.Name.End())
+		fe.edits = append(fe.edits, edit{off, off, "\n\nimport " + importSpecText(imps[0].name, imps[0].path, imps[0].realName) + "\n"})
 	case last == nil:
 		off := a.offset(f.AST.Name.End())
-		fe.edits = append(fe.edits, edit{off, off, "\n\nimport " + spec + "\n"})
+		fe.edits = append(fe.edits, edit{off, off, "\n\nimport (\n" + specs(true, "\t") + ")\n"})
 	case last.Rparen.IsValid():
 		off := a.offset(last.Rparen)
 		i := off - 1
 		for i >= 0 && (f.Src[i] == ' ' || f.Src[i] == '\t') {
 			i--
 		}
-		text := "\t" + spec + "\n"
-		lastSpec := last.Specs[len(last.Specs)-1].(*ast.ImportSpec)
-		if p, _ := strconv.Unquote(lastSpec.Path.Value); isStdPath(p) && !isStdPath(path) {
-			text = "\n" + text // start a new (non-standard) group
+		prevStd := true
+		if len(last.Specs) > 0 {
+			p, _ := strconv.Unquote(last.Specs[len(last.Specs)-1].(*ast.ImportSpec).Path.Value)
+			prevStd = isStdPath(p)
 		}
+		text := specs(prevStd, "\t")
 		if i < 0 || f.Src[i] != '\n' {
 			text = "\n" + text
 		}
@@ -843,11 +969,185 @@ func (a *analysis) addImport(f *srcFile, name, path, realName string) {
 		if old.Comment != nil {
 			end = a.offset(old.Comment.End())
 		}
-		sep := "\n\t"
-		if p, _ := strconv.Unquote(old.Path.Value); isStdPath(p) && !isStdPath(path) {
-			sep = "\n\n\t"
+		p, _ := strconv.Unquote(old.Path.Value)
+		fe.edits = append(fe.edits, edit{start, end, "(\n\t" + string(f.Src[start:end]) + "\n" + specs(isStdPath(p), "\t") + ")"})
+	}
+}
+
+// sortedFileKeys returns the keys of a map keyed by file, sorted by name.
+func sortedFileKeys[V any](m map[*srcFile]V) []*srcFile {
+	var out []*srcFile
+	for f := range m {
+		out = append(out, f)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out
+}
+
+// embeddedSelectors returns the selector expressions that are the type of an
+// embedded struct field (their name is the field name).
+func embeddedSelectors(f *ast.File) map[*ast.SelectorExpr]bool {
+	out := map[*ast.SelectorExpr]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		st, ok := n.(*ast.StructType)
+		if !ok {
+			return true
 		}
-		fe.edits = append(fe.edits, edit{start, end, "(\n\t" + string(f.Src[start:end]) + sep + spec + "\n)"})
+		for _, fld := range st.Fields.List {
+			if len(fld.Names) > 0 {
+				continue
+			}
+			t := fld.Type
+			if star, ok := t.(*ast.StarExpr); ok {
+				t = star.X
+			}
+			switch ix := t.(type) {
+			case *ast.IndexExpr:
+				t = ix.X
+			case *ast.IndexListExpr:
+				t = ix.X
+			}
+			if sel, ok := t.(*ast.SelectorExpr); ok {
+				out[sel] = true
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// rewriteAliasUses replaces the uses of aliases in f with direct references
+// to their targets, adding imports as needed.
+func (a *analysis) rewriteAliasUses(f *srcFile, uses []identUse) {
+	at := map[string][]token.Pos{}
+	base := map[string]string{}
+	var paths []string
+	var kept []identUse
+	for _, u := range uses {
+		if !a.inDropped(f, u.id.Pos()) {
+			kept = append(kept, u)
+		}
+	}
+	uses = kept
+	for _, u := range uses {
+		al := a.aliases[u.obj]
+		if a.bareTarget(f, al) {
+			continue
+		}
+		if _, ok := at[al.path]; !ok {
+			paths = append(paths, al.path)
+			base[al.path] = al.pkgName
+		}
+		at[al.path] = append(at[al.path], u.id.Pos())
+	}
+	sort.Strings(paths)
+	names := map[string]string{}
+	taken := map[string]bool{}
+	for _, p := range paths {
+		name, add := a.importNameFor(f, p, base[p], at[p], taken)
+		taken[name] = true
+		names[p] = name
+		if add {
+			a.addImport(f, name, p, base[p])
+		}
+	}
+	for _, u := range uses {
+		al := a.aliases[u.obj]
+		q := ""
+		if !a.bareTarget(f, al) {
+			q = names[al.path]
+		}
+		text := aliasText(al, q)
+		if text != u.id.Name {
+			a.replaceIdent(f, u.id, text)
+		}
+		a.plan.AliasRewrites = append(a.plan.AliasRewrites, varRewrite{Pos: a.posOf(u.id.Pos()), Old: u.id.Name, New: text})
+	}
+}
+
+// inDropped reports whether pos lies in a declaration of f that is dropped.
+func (a *analysis) inDropped(f *srcFile, pos token.Pos) bool {
+	for _, d := range a.drops {
+		if d.file != f {
+			continue
+		}
+		n := d.node
+		if d.gen != nil && len(d.gen.Specs) == 1 {
+			n = d.gen
+		}
+		if n.Pos() <= pos && pos < n.End() {
+			return true
+		}
+	}
+	return false
+}
+
+// bareTarget reports whether a reference to al in f becomes a bare
+// identifier: f is an in-package test moving into al's package.
+func (a *analysis) bareTarget(f *srcFile, al *aliasInfo) bool {
+	return a.intoExisting && f.Moved && !f.XTest && al.path == a.dstImport
+}
+
+// removeDecl deletes a package-level declaration (a func, or a spec of a
+// GenDecl, or the whole GenDecl when it is its only spec) and marks the file
+// for unused-import cleanup.
+func (a *analysis) removeDecl(d declRef) {
+	f := d.file
+	fe := a.editsFor(f)
+	var start, end int
+	switch n := d.node.(type) {
+	case *ast.FuncDecl:
+		start, end = a.offset(n.Pos()), a.offset(n.End())
+		if n.Doc != nil {
+			start = a.offset(n.Doc.Pos())
+		}
+	default:
+		if d.gen != nil && len(d.gen.Specs) == 1 {
+			start, end = a.offset(d.gen.Pos()), a.offset(d.gen.End())
+			if d.gen.Doc != nil {
+				start = a.offset(d.gen.Doc.Pos())
+			}
+		} else {
+			start, end = a.offset(n.Pos()), a.offset(n.End())
+			var doc, comment *ast.CommentGroup
+			switch s := n.(type) {
+			case *ast.ValueSpec:
+				doc, comment = s.Doc, s.Comment
+			case *ast.TypeSpec:
+				doc, comment = s.Doc, s.Comment
+			}
+			if doc != nil {
+				start = a.offset(doc.Pos())
+			}
+			if comment != nil {
+				end = a.offset(comment.End())
+			}
+		}
+	}
+	for start > 0 && (f.Src[start-1] == ' ' || f.Src[start-1] == '\t') {
+		start--
+	}
+	if end < len(f.Src) && f.Src[end] == '\n' {
+		end++
+	}
+	fe.drops = append(fe.drops, edit{start, end, ""})
+	a.markCleanImports(f)
+}
+
+// markCleanImports records the package names of f's imports and asks
+// applyEdits to drop the ones the edited file no longer uses.
+func (a *analysis) markCleanImports(f *srcFile) {
+	fe := a.editsFor(f)
+	fe.cleanImports = true
+	if fe.importNames == nil {
+		fe.importNames = map[string]string{}
+	}
+	for _, spec := range f.AST.Imports {
+		name := importName(spec)
+		if a.info != nil && f.Included && !f.XTest {
+			name = a.fileImportName(spec)
+		}
+		fe.importNames[importPath(spec)] = name
 	}
 }
 
@@ -898,7 +1198,20 @@ func (a *analysis) removeImport(f *srcFile, path string) {
 
 // applyEdits returns the gofmt-formatted content of f after its edits.
 func applyEdits(f *srcFile, fe *fileEdits) ([]byte, error) {
-	edits := append([]edit(nil), fe.edits...)
+	// Declaration removals discard the edits inside them.
+	edits := append([]edit(nil), fe.drops...)
+	for _, e := range fe.edits {
+		inside := false
+		for _, d := range fe.drops {
+			if d.start <= e.start && e.end <= d.end {
+				inside = true
+				break
+			}
+		}
+		if !inside {
+			edits = append(edits, e)
+		}
+	}
 	sort.SliceStable(edits, func(i, j int) bool {
 		if edits[i].start != edits[j].start {
 			return edits[i].start < edits[j].start
@@ -922,11 +1235,85 @@ func applyEdits(f *srcFile, fe *fileEdits) ([]byte, error) {
 		prev = e
 	}
 	out = append(out, f.Src[pos:]...)
+	if fe.cleanImports {
+		var err error
+		if out, err = dropUnusedImports(out, fe.importNames); err != nil {
+			return nil, fmt.Errorf("%s: %v", f.Path, err)
+		}
+	}
 	formatted, err := format.Source(out)
 	if err != nil {
 		return nil, fmt.Errorf("%s: rewritten file does not parse: %v", f.Path, err)
 	}
 	return formatted, nil
+}
+
+// dropUnusedImports removes the imports of src that no selector uses any
+// more (blank and dot imports are kept). names maps import paths to package
+// names (paths missing from it use guessPkgName).
+func dropUnusedImports(src []byte, names map[string]string) ([]byte, error) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "", src, parser.ParseComments|parser.SkipObjectResolution)
+	if err != nil {
+		return nil, fmt.Errorf("edited file does not parse: %v", err)
+	}
+	used := map[string]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		if sel, ok := n.(*ast.SelectorExpr); ok {
+			if x, ok := sel.X.(*ast.Ident); ok {
+				used[x.Name] = true
+			}
+		}
+		return true
+	})
+	off := func(p token.Pos) int { return fset.Position(p).Offset }
+	var edits []edit
+	for _, d := range f.Decls {
+		gd, ok := d.(*ast.GenDecl)
+		if !ok || gd.Tok != token.IMPORT {
+			continue
+		}
+		var drop []*ast.ImportSpec
+		for _, s := range gd.Specs {
+			spec := s.(*ast.ImportSpec)
+			path := importPath(spec)
+			name := names[path]
+			if name == "" {
+				name = guessPkgName(path)
+			}
+			if spec.Name != nil {
+				name = spec.Name.Name
+			}
+			if name != "_" && name != "." && !used[name] {
+				drop = append(drop, spec)
+			}
+		}
+		if len(drop) == 0 {
+			continue
+		}
+		if len(drop) == len(gd.Specs) {
+			edits = append(edits, edit{off(gd.Pos()), off(gd.End()), ""})
+			continue
+		}
+		for _, spec := range drop {
+			start, end := off(spec.Pos()), off(spec.End())
+			if spec.Doc != nil {
+				start = off(spec.Doc.Pos())
+			}
+			if spec.Comment != nil {
+				end = off(spec.Comment.End())
+			}
+			edits = append(edits, edit{start, end, ""})
+		}
+	}
+	sort.Slice(edits, func(i, j int) bool { return edits[i].start < edits[j].start })
+	var out []byte
+	pos := 0
+	for _, e := range edits {
+		out = append(out, src[pos:e.start]...)
+		pos = e.end
+	}
+	return append(out, src[pos:]...), nil
 }
 
 // reflectionFindings warns when a renamed method's old or new name appears
@@ -1528,8 +1915,143 @@ func (a *analysis) sourceScanFindings() {
 		if f.Moved {
 			side = "moved"
 		}
+		enum := strings.Join(dedupStrings(sortedCopy(calls)), ", ")
+		target := a.rel(a.cfg.DstDir)
+		var others, notes []string
+		cleared := false
+		for _, m := range scanCoversMarkers(a.fset, f.AST, f.Src) {
+			pos := a.posOf(m.pos)
+			if !m.covers(target) {
+				others = append(others, fmt.Sprintf("%q at %s", m.text, pos))
+				continue
+			}
+			if m.reason == "" {
+				notes = append(notes, fmt.Sprintf("marker at %s has no reason line", pos))
+				continue
+			}
+			a.plan.add(levelInfo, "source-scanning test declares coverage of the target", a.rel(f.Path),
+				"source-scanning test declares coverage of %s (marker at %s; reason: %q); %s test enumerates files (%s) - the marker is a claim, not a proof: verify the test really scans %s",
+				target, pos, m.reason, side, enum, target)
+			cleared = true
+			break
+		}
+		if cleared {
+			continue
+		}
+		if len(others) > 0 {
+			notes = append(notes, fmt.Sprintf("its pkgmove:scan-covers markers do not cover %s (or are malformed): %s", target, strings.Join(others, ", ")))
+		}
+		note := ""
+		if len(notes) > 0 {
+			note = " (" + strings.Join(notes, "; ") + ")"
+		}
 		a.plan.add(levelHigh, "source-scanning test does not cover the target", a.rel(f.Path),
-			"%s test parses Go sources and enumerates files (%s); after the move it no longer scans the moved files in %s (or scans the wrong set) and still passes - extend the scan to cover both directories",
-			side, strings.Join(dedupStrings(sortedCopy(calls)), ", "), a.rel(a.cfg.DstDir))
+			"%s test parses Go sources and enumerates files (%s); after the move it no longer scans the moved files in %s (or scans the wrong set) and still passes - extend the scan to cover both directories%s",
+			side, enum, target, note)
+	}
+}
+
+// scanCoversPrefix starts a marker comment by which a source-scanning test
+// declares the directories it scans:
+//
+//	// pkgmove:scan-covers pkg/hub/sub
+//	// pkgmove:scan-covers pkg/hub/...
+//
+// The marker must be a whole comment line written exactly as above (one
+// space after the slashes; "//pkgmove:" is directive syntax, which gofmt
+// moves within doc comments), with one directory, relative to the module root. A trailing "/..." covers the directory and
+// every directory below it. The next comment line must state the reason; a
+// marker without one clears nothing. The reason is echoed in the report but
+// not interpreted.
+const scanCoversPrefix = "pkgmove:scan-covers"
+
+type scanCoversMarker struct {
+	pos       token.Pos
+	text      string // the marker comment as written
+	reason    string // the following comment line, "" when there is none
+	dir       string // cleaned module-relative directory, "" when malformed
+	recursive bool
+}
+
+// scanCoversMarkers returns the scan-covers markers of a file in source order.
+// A marker that does not start its line, lacks the space after "//", or has a
+// malformed directory, is returned with dir "" so that it covers nothing.
+func scanCoversMarkers(fset *token.FileSet, file *ast.File, src []byte) []scanCoversMarker {
+	var out []scanCoversMarker
+	for _, cg := range file.Comments {
+		for i, c := range cg.List {
+			if !strings.HasPrefix(c.Text, "//") {
+				continue
+			}
+			text := strings.TrimSpace(strings.TrimPrefix(c.Text, "//"))
+			fields := strings.Fields(text)
+			if len(fields) == 0 || fields[0] != scanCoversPrefix {
+				continue
+			}
+			m := scanCoversMarker{pos: c.Pos(), text: c.Text}
+			if len(fields) == 2 && strings.HasPrefix(c.Text, "// "+scanCoversPrefix) && startsLine(src, fset.Position(c.Pos()).Offset) {
+				m.dir, m.recursive = parseScanCoversDir(fields[1])
+			}
+			if i+1 < len(cg.List) {
+				next := cg.List[i+1]
+				if strings.HasPrefix(next.Text, "//") && fset.Position(next.Pos()).Line == fset.Position(c.Pos()).Line+1 {
+					if r := strings.TrimSpace(strings.TrimPrefix(next.Text, "//")); !strings.HasPrefix(r, scanCoversPrefix) {
+						m.reason = r
+					}
+				}
+			}
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// startsLine reports whether only blanks precede offset on its line of src.
+func startsLine(src []byte, offset int) bool {
+	if offset < 0 || offset > len(src) {
+		return false
+	}
+	for i := offset - 1; i >= 0 && src[i] != '\n'; i-- {
+		if src[i] != ' ' && src[i] != '\t' {
+			return false
+		}
+	}
+	return true
+}
+
+// parseScanCoversDir validates a marker directory: module-relative, slash
+// separated, no ".." element and no glob characters other than a trailing
+// "/...". It returns "" for a malformed directory, which covers nothing.
+func parseScanCoversDir(d string) (dir string, recursive bool) {
+	if rest, ok := strings.CutSuffix(d, "/..."); ok {
+		d, recursive = rest, true
+	} else if d == "..." {
+		d, recursive = ".", true
+	}
+	if d == "" || strings.HasPrefix(d, "/") || strings.ContainsAny(d, "*?[]\\") {
+		return "", false
+	}
+	for _, el := range strings.Split(d, "/") {
+		if el == ".." || el == "..." {
+			return "", false
+		}
+	}
+	return path.Clean(d), recursive
+}
+
+// covers reports whether the marker names target (a module-relative
+// directory), or a directory above it with "/...".
+func (m scanCoversMarker) covers(target string) bool {
+	switch {
+	case m.dir == "":
+		return false
+	case m.dir == target:
+		return true
+	case !m.recursive:
+		return false
+	case m.dir == ".":
+		return true
+	default:
+		return strings.HasPrefix(target, m.dir+"/")
 	}
 }

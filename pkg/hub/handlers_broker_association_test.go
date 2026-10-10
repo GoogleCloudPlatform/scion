@@ -95,6 +95,7 @@ func assertDefaultBroker(t *testing.T, s store.Store, projectID, want string) {
 }
 
 func TestBrokerAssociation_ProjectOwnerCannotLinkOtherUsersBroker(t *testing.T) {
+	t.Parallel()
 	f := brokerAssocSetup(t, "assoc-other")
 
 	rec := doRequestAsUser(t, f.srv, f.projectOwner, http.MethodPost, f.providersPath(),
@@ -107,6 +108,7 @@ func TestBrokerAssociation_ProjectOwnerCannotLinkOtherUsersBroker(t *testing.T) 
 }
 
 func TestBrokerAssociation_OwnerOfBothLinks(t *testing.T) {
+	t.Parallel()
 	f := brokerAssocSetup(t, "assoc-both")
 
 	rec := doRequestAsUser(t, f.srv, f.projectOwner, http.MethodPost, f.providersPath(),
@@ -120,6 +122,7 @@ func TestBrokerAssociation_OwnerOfBothLinks(t *testing.T) {
 }
 
 func TestBrokerAssociation_SuperAdminLinksUsersBroker(t *testing.T) {
+	t.Parallel()
 	f := brokerAssocSetup(t, "assoc-admin")
 	admin := newSuperAdminUser(t, f.store, "assoc-admin-super")
 
@@ -133,6 +136,7 @@ func TestBrokerAssociation_SuperAdminLinksUsersBroker(t *testing.T) {
 }
 
 func TestBrokerAssociation_BrokerOwnerWithoutProjectUpdateDenied(t *testing.T) {
+	t.Parallel()
 	f := brokerAssocSetup(t, "assoc-noproj")
 
 	rec := doRequestAsUser(t, f.srv, f.brokerOwner, http.MethodPost, f.providersPath(),
@@ -144,6 +148,7 @@ func TestBrokerAssociation_BrokerOwnerWithoutProjectUpdateDenied(t *testing.T) {
 }
 
 func TestBrokerAssociation_ProjectTokenCannotLink(t *testing.T) {
+	t.Parallel()
 	f := brokerAssocSetup(t, "assoc-ptoken")
 	key, _, err := f.srv.uatService.CreateTokenWithParams(rs4MintContext(f.projectOwner.ID), CreateTokenParams{
 		UserID: f.projectOwner.ID, Name: "assoc-ptoken", ProjectID: f.project.ID, Scopes: []string{"project:update"},
@@ -158,6 +163,7 @@ func TestBrokerAssociation_ProjectTokenCannotLink(t *testing.T) {
 }
 
 func TestBrokerAssociation_RegisterExistingProjectWithOtherUsersBrokerDenied(t *testing.T) {
+	t.Parallel()
 	f := brokerAssocSetup(t, "assoc-reg-existing")
 
 	rec := doRequestAsUser(t, f.srv, f.projectOwner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
@@ -175,6 +181,7 @@ func TestBrokerAssociation_RegisterExistingProjectWithOtherUsersBrokerDenied(t *
 // provider still needs broker.update on that broker, so the provider row's
 // LinkedBy is written only by a caller who may associate the broker.
 func TestBrokerAssociation_RegisterExistingProviderCannotRewriteLinkedBy(t *testing.T) {
+	t.Parallel()
 	f := brokerAssocSetup(t, "assoc-reg-linkedby")
 	ctx := context.Background()
 	require.NoError(t, f.store.AddProjectProvider(ctx, &store.ProjectProvider{
@@ -197,6 +204,7 @@ func TestBrokerAssociation_RegisterExistingProviderCannotRewriteLinkedBy(t *test
 }
 
 func TestBrokerAssociation_RegisterNewProjectWithOtherUsersBrokerCreatesNothing(t *testing.T) {
+	t.Parallel()
 	f := brokerAssocSetup(t, "assoc-reg-new")
 	ctx := context.Background()
 	const name = "Assoc Register New Project"
@@ -220,6 +228,7 @@ func TestBrokerAssociation_RegisterNewProjectWithOtherUsersBrokerCreatesNothing(
 }
 
 func TestBrokerAssociation_RegisterNewProjectWithOwnBrokerLinks(t *testing.T) {
+	t.Parallel()
 	f := brokerAssocSetup(t, "assoc-reg-own")
 	ctx := context.Background()
 
@@ -236,6 +245,7 @@ func TestBrokerAssociation_RegisterNewProjectWithOwnBrokerLinks(t *testing.T) {
 }
 
 func TestBrokerAssociation_RegisterUnknownBrokerCreatesNoProject(t *testing.T) {
+	t.Parallel()
 	f := brokerAssocSetup(t, "assoc-reg-unknown")
 	const name = "Assoc Register Unknown Broker"
 
@@ -250,6 +260,7 @@ func TestBrokerAssociation_RegisterUnknownBrokerCreatesNoProject(t *testing.T) {
 }
 
 func TestBrokerAssociation_AgentCreateCannotLinkOtherUsersBroker(t *testing.T) {
+	t.Parallel()
 	f := brokerLinkAuthzSetup(t)
 	ctx := context.Background()
 	other := newHubMemberUser(t, f.store, "assoc-agent-broker-owner")
@@ -270,6 +281,7 @@ func TestBrokerAssociation_AgentCreateCannotLinkOtherUsersBroker(t *testing.T) {
 }
 
 func TestBrokerAssociation_AgentCreateLinkRecordsLinkingUser(t *testing.T) {
+	t.Parallel()
 	f := brokerLinkAuthzSetup(t)
 
 	rec := createAgentAsOwner(t, f.bypassAgentsFixture, CreateAgentRequest{
@@ -284,6 +296,7 @@ func TestBrokerAssociation_AgentCreateLinkRecordsLinkingUser(t *testing.T) {
 }
 
 func TestBrokerAssociation_DefaultMustBeProvider(t *testing.T) {
+	t.Parallel()
 	f := brokerAssocSetup(t, "assoc-default-np")
 
 	rec := doRequestAsUser(t, f.srv, f.projectOwner, http.MethodPatch, "/api/v1/projects/"+f.project.ID,
@@ -294,6 +307,7 @@ func TestBrokerAssociation_DefaultMustBeProvider(t *testing.T) {
 }
 
 func TestBrokerAssociation_DefaultProviderAccepted(t *testing.T) {
+	t.Parallel()
 	f := brokerAssocSetup(t, "assoc-default-p")
 	f.link(t, f.otherBroker)
 
@@ -305,6 +319,7 @@ func TestBrokerAssociation_DefaultProviderAccepted(t *testing.T) {
 }
 
 func TestBrokerAssociation_RegistrationCreatesNoAssociation(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	member := newHubMemberUser(t, s, "assoc-reg-none-member")
@@ -331,6 +346,7 @@ func TestBrokerAssociation_RegistrationCreatesNoAssociation(t *testing.T) {
 }
 
 func TestBrokerAssociation_BrokerOwnerUnlinksOwnBroker(t *testing.T) {
+	t.Parallel()
 	f := brokerAssocSetup(t, "assoc-unlink-own")
 	f.link(t, f.otherBroker)
 
@@ -341,6 +357,7 @@ func TestBrokerAssociation_BrokerOwnerUnlinksOwnBroker(t *testing.T) {
 }
 
 func TestBrokerAssociation_BrokerOwnerCannotUnlinkAnotherBroker(t *testing.T) {
+	t.Parallel()
 	f := brokerAssocSetup(t, "assoc-unlink-another")
 	f.link(t, f.ownBroker)
 
@@ -352,6 +369,7 @@ func TestBrokerAssociation_BrokerOwnerCannotUnlinkAnotherBroker(t *testing.T) {
 }
 
 func TestBrokerAssociation_UnrelatedMemberCannotUnlink(t *testing.T) {
+	t.Parallel()
 	f := brokerAssocSetup(t, "assoc-unlink-member")
 	f.link(t, f.otherBroker)
 	member := newHubMemberUser(t, f.store, "assoc-unlink-member-user")
@@ -364,6 +382,7 @@ func TestBrokerAssociation_UnrelatedMemberCannotUnlink(t *testing.T) {
 }
 
 func TestBrokerAssociation_BrokerOwnerHubTokenCannotUnlink(t *testing.T) {
+	t.Parallel()
 	f := brokerAssocSetup(t, "assoc-unlink-token")
 	f.link(t, f.otherBroker)
 	key := mintHubBrokerUAT(t, f.srv, f.brokerOwner.ID, "broker:create")
@@ -376,6 +395,7 @@ func TestBrokerAssociation_BrokerOwnerHubTokenCannotUnlink(t *testing.T) {
 }
 
 func TestBrokerAssociation_ProjectOwnerUnlinksOtherUsersBroker(t *testing.T) {
+	t.Parallel()
 	f := brokerAssocSetup(t, "assoc-unlink-proj")
 	f.link(t, f.otherBroker)
 

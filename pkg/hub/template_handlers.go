@@ -71,6 +71,9 @@ type CreateTemplateResponse struct {
 	Template    *store.Template `json:"template"`
 	UploadURLs  []UploadURLInfo `json:"uploadUrls,omitempty"`
 	ManifestURL string          `json:"manifestUrl,omitempty"`
+	// UploadID names the staging directory the upload URLs write to. A
+	// client may send it back in the finalize request (ptone/scion#4221).
+	UploadID string `json:"uploadId,omitempty"`
 }
 
 type ListTemplatesResponse struct {
@@ -104,6 +107,10 @@ type UploadRequest struct {
 type UploadResponse struct {
 	UploadURLs  []UploadURLInfo `json:"uploadUrls"`
 	ManifestURL string          `json:"manifestUrl,omitempty"`
+	// UploadID names the staging directory a template's upload URLs write
+	// to; a client may send it back in the finalize request
+	// (ptone/scion#4221). Empty for resources that do not stage uploads.
+	UploadID string `json:"uploadId,omitempty"`
 }
 
 // FinalizeRequest is the request body for finalizing a template upload.
@@ -116,6 +123,10 @@ type FinalizeRequest struct {
 	// same check against the hash the hub read when the finalize request
 	// arrived.
 	ExpectedContentHash string `json:"expectedContentHash,omitempty"`
+	// UploadID, when set, is the uploadId of the upload response whose
+	// staged files this finalize commits. Clients that omit it are served
+	// by matching staged files to the manifest by hash (ptone/scion#4221).
+	UploadID string `json:"uploadId,omitempty"`
 }
 
 // TemplateManifest is the manifest of uploaded template files.
@@ -136,6 +147,10 @@ type DownloadResponse struct {
 	ManifestURL string            `json:"manifestUrl,omitempty"`
 	Files       []DownloadURLInfo `json:"files"`
 	Expires     time.Time         `json:"expires"`
+	// ContentHash is the content hash of the template row the URLs were
+	// signed from, so a client can cache the files under the hash they
+	// really have (ptone/scion#4221). Set for templates only.
+	ContentHash string `json:"contentHash,omitempty"`
 }
 
 // DownloadURLInfo contains info for downloading a file.
@@ -386,15 +401,17 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 	// Templates with files are also created as 'pending' and promoted to
 	// 'active' during finalize (handleTemplateFinalize).
 
-	// Generate storage path and URI
-	storagePath := storage.TemplateStoragePath(s.HubID(), template.Scope, template.ScopeID, template.Slug)
+	// New templates start in the blob layout, with a row-unique storage
+	// path (ptone/scion#4221).
+	storagePath := s.templateBlobStoragePath(template)
 	template.StoragePath = storagePath
+	template.Layout = store.TemplateLayoutBlobs
 
 	// Get storage client if available
 	stor := s.GetStorage()
 	if stor != nil {
 		template.StorageBucket = stor.Bucket()
-		template.StorageURI = storage.TemplateStorageURI(s.HubID(), stor.Bucket(), template.Scope, template.ScopeID, template.Slug)
+		template.StorageURI = storage.StorageURIForPath(stor.Bucket(), storagePath)
 	}
 
 	// Create the template record
@@ -407,17 +424,14 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		Template: template,
 	}
 
-	// Generate upload URLs if files were specified and storage is available
+	// Generate staging upload URLs if files were specified and storage is
+	// available. Finalize commits them.
 	if len(req.Files) > 0 && stor != nil {
-		uploadURLs, manifestURL, err := generateUploadURLs(ctx, stor, storagePath, req.Files)
-		if err == nil || len(uploadURLs) > 0 {
-			// For local storage, rewrite file:// URLs to HTTP proxy URLs
-			if stor.Provider() == storage.ProviderLocal {
-				hubURL := requestBaseURL(r)
-				uploadURLs = rewriteLocalUploadURLs(uploadURLs, hubURL, "templates", template.ID)
-			}
+		uploadID := api.NewUUID()
+		uploadURLs, err := s.generateTemplateUploadURLs(ctx, stor, template, req.Files, uploadID, requestBaseURL(r))
+		if err == nil {
 			response.UploadURLs = uploadURLs
-			response.ManifestURL = manifestURL
+			response.UploadID = uploadID
 		}
 	}
 
@@ -569,6 +583,7 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 	template.StoragePath = existing.StoragePath
 	template.StorageBucket = existing.StorageBucket
 	template.StorageURI = existing.StorageURI
+	template.Layout = existing.Layout
 	template.Files = existing.Files
 	template.ContentHash = existing.ContentHash
 	template.AgentConfig = existing.AgentConfig // derived; set only by the commit path
@@ -698,7 +713,7 @@ func (s *Server) deleteTemplateV2(w http.ResponseWriter, r *http.Request, id str
 	// If deleteFiles is true and we have storage, delete the files
 	if deleteFiles && existing.StoragePath != "" {
 		if stor := s.GetStorage(); stor != nil {
-			if err := stor.DeletePrefix(ctx, storage.DirPrefix(existing.StoragePath)); err != nil {
+			if err := s.deleteTemplateStorage(ctx, stor, existing); err != nil {
 				slog.Warn("failed to delete template files", "template_id", id, "storage_path", existing.StoragePath, "error", err)
 			}
 		}
@@ -760,8 +775,11 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	// Generate upload URLs using shared helper
-	uploadURLs, manifestURL, err := generateUploadURLs(ctx, stor, template.StoragePath, req.Files)
+	// Upload URLs stage the files under a fresh upload ID; finalize hashes
+	// them and commits (ptone/scion#4221). Local-storage URLs point at the
+	// hub's raw file endpoint with ?uploadId=, which stages only.
+	uploadID := api.NewUUID()
+	uploadURLs, err := s.generateTemplateUploadURLs(ctx, stor, template, req.Files, uploadID, requestBaseURL(r))
 	if err != nil {
 		if writeInvalidFilePathError(w, err) {
 			return
@@ -774,15 +792,9 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	// For local storage, rewrite file:// URLs to HTTP proxy URLs
-	if stor.Provider() == storage.ProviderLocal {
-		hubURL := requestBaseURL(r)
-		uploadURLs = rewriteLocalUploadURLs(uploadURLs, hubURL, "templates", id)
-	}
-
 	response := UploadResponse{
-		UploadURLs:  uploadURLs,
-		ManifestURL: manifestURL,
+		UploadURLs: uploadURLs,
+		UploadID:   uploadID,
 	}
 
 	writeJSON(w, http.StatusOK, response)
@@ -829,14 +841,24 @@ func (s *Server) handleTemplateFinalize(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Commit the manifest and mark the template active. The commit verifies
-	// the objects exist, re-derives the index from the new scion-agent.yaml,
-	// refuses an unusable bundled harness-config (422) before the row is
-	// updated, and deletes objects dropped from the manifest. Every finalize
-	// client (`scion templates sync/push`, its retry, and the agent-start
-	// updateHubTemplate path) sends the full manifest.
+	if req.UploadID != "" && !validTemplateUploadID(req.UploadID) {
+		ValidationError(w, "uploadId is invalid", map[string]interface{}{"field": "uploadId"})
+		return
+	}
+
+	// Commit the manifest and mark the template active. The commit hashes
+	// the staged uploads and moves them into blobs (400 on a hash mismatch,
+	// "file not found" when a file was neither staged nor already stored),
+	// re-derives the index from the new scion-agent.yaml and refuses an
+	// unusable bundled harness-config (422) before the row is updated.
+	// Every finalize client (`scion templates sync/push`, its retry, and the
+	// agent-start updateHubTemplate path) sends the full manifest.
 	template.Status = store.TemplateStatusActive
-	if err := s.commitTemplateFiles(ctx, template, req.Manifest.Files, commitOpts{expectedContentHash: req.ExpectedContentHash}); err != nil {
+	if err := s.commitTemplateFiles(ctx, template, req.Manifest.Files, commitOpts{
+		expectedContentHash: req.ExpectedContentHash,
+		fromStaging:         true,
+		uploadID:            req.UploadID,
+	}); err != nil {
 		writeTemplateCommitError(w, err)
 		return
 	}
@@ -880,8 +902,10 @@ func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Generate download URLs using shared helper
-	downloadURLs, manifestURL, expires, err := generateDownloadURLs(ctx, stor, template.StoragePath, s.legacyFallbackPath(template.StoragePath), template.Files)
+	// Every URL comes from this one row read: a blob row's URLs name
+	// immutable blobs, so they keep returning this version even if a commit
+	// lands while the client downloads.
+	downloadURLs, manifestURL, expires, err := s.generateTemplateDownloadURLs(ctx, stor, template)
 	if err != nil {
 		RuntimeError(w, fmt.Sprintf("template %q: %s — run 'scion template validate %s' to diagnose", template.Name, err, template.Name))
 		return
@@ -890,13 +914,14 @@ func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, 
 	// For local storage, rewrite file:// URLs to HTTP proxy URLs
 	if stor.Provider() == storage.ProviderLocal {
 		hubURL := requestBaseURL(r)
-		downloadURLs = rewriteLocalDownloadURLs(downloadURLs, hubURL, "templates", id)
+		downloadURLs = rewriteLocalTemplateDownloadURLs(downloadURLs, hubURL, id, isBlobLayout(template))
 	}
 
 	response := DownloadResponse{
 		Files:       downloadURLs,
 		ManifestURL: manifestURL,
 		Expires:     expires,
+		ContentHash: template.ContentHash,
 	}
 
 	writeJSON(w, http.StatusOK, response)
@@ -1098,7 +1123,12 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 	// DeletePrefix, it would delete the files the other just copied. A
 	// request-unique path means the failure cleanup below can only ever
 	// remove a subtree this request itself created.
-	storagePath := storage.TemplateStoragePath(s.HubID(), clone.Scope, clone.ScopeID, clone.Slug) + "/" + clone.ID
+	//
+	// The clone is always created in the blob layout (ptone/scion#4221):
+	// its path is the row-unique <slug>.<id>, and the commit copies each
+	// file the source references into the clone's own blobs.
+	clone.Layout = store.TemplateLayoutBlobs
+	storagePath := s.templateBlobStoragePath(clone)
 	clone.StoragePath = storagePath
 
 	stor := s.GetStorage()
@@ -1107,23 +1137,13 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		clone.StorageURI = storage.StorageURIForPath(stor.Bucket(), storagePath)
 	}
 
-	// Copy files from source to clone location, then create the clone
-	// through the commit path, which re-derives Harness,
-	// DefaultHarnessConfig and AgentConfig from the copied files instead of
-	// copying the source's derived fields (ptone/scion#4217).
+	// Create the clone through the commit path, which copies the files and
+	// re-derives Harness, DefaultHarnessConfig and AgentConfig from them
+	// instead of copying the source's derived fields (ptone/scion#4217).
 	var createErr error
 	if stor != nil && len(source.Files) > 0 && source.StoragePath != "" {
-		for _, file := range source.Files {
-			srcPath := source.StoragePath + "/" + file.Path
-			dstPath := storagePath + "/" + file.Path
-			if _, err := stor.Copy(ctx, srcPath, dstPath); err != nil {
-				_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
-				RuntimeError(w, "Failed to copy files: "+err.Error())
-				return
-			}
-		}
 		clone.Status = store.TemplateStatusActive
-		createErr = s.commitTemplateFiles(ctx, clone, source.Files, commitOpts{create: true})
+		createErr = s.commitTemplateFiles(ctx, clone, source.Files, commitOpts{create: true, copyFrom: source})
 	} else {
 		clone.Harness = deriveTemplateIndex(nil, "", clone.Name).Harness
 		createErr = s.store.CreateTemplate(ctx, clone)
@@ -1131,7 +1151,7 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 
 	if err := createErr; err != nil {
 		if stor != nil {
-			_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
+			_ = stor.DeletePrefix(ctx, templateBlobPrefix(storagePath))
 		}
 		if errors.Is(err, store.ErrAlreadyExists) {
 			writeError(w, http.StatusConflict, "conflict", "A resource with this slug already exists in the target scope. Choose a different name.", nil)

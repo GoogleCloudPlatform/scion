@@ -97,7 +97,7 @@ As the platform evolves, specific agents may be granted broader capabilities:
 
 - **`grove:agent:create`**: Allows an agent to provision "sub-agents" or peer agents within the same grove.
 - **`grove:secret:read`**: Allows an agent to retrieve specific grove-scoped secrets (e.g., API keys for external services).
-- **`agent:log:append`**: Explicit scope for streaming logs back to the Hub (if not handled by the Runtime Broker).
+- **`agent:log:append`**: Still parses for existing tokens, but grants nothing: the `agent.log_append` permission is reserved and no handler checks it.
 
 ---
 

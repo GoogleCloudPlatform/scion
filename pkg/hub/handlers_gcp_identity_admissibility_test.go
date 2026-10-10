@@ -65,7 +65,7 @@ func newFailingSAUpdateServer(t *testing.T) (*Server, *failingSAUpdateStore) {
 	base, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	wrapped := &failingSAUpdateStore{Store: base}
-	srv, _ := testServerWithStore(t, wrapped)
+	srv, _ := testServerOnMigratedStore(t, wrapped)
 	return srv, wrapped
 }
 
@@ -386,7 +386,7 @@ func TestAgentLifecycle_StartAdmissibilityStoreErrorIs500(t *testing.T) {
 	base, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	wrapped := &failingSAGetStore{Store: base}
-	srv, s := testServerWithStore(t, wrapped)
+	srv, s := testServerOnMigratedStore(t, wrapped)
 	disp := &deleteGuardDispatcher{}
 	srv.SetDispatcher(disp)
 	agent := setupBrokerAgentInPhase(t, s, "gcp-store-err", state.PhaseStopped)
