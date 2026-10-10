@@ -423,8 +423,9 @@ func (s *Server) streamImport(w http.ResponseWriter, run func(progress importPro
 }
 
 // importErrorEvent builds the in-band error event for a failed streaming
-// import. A refused harness-config carries the same error code and public
-// message as the non-streaming 422 answer (ptone/scion#4214).
+// import. A refused harness-config event also carries the error code of the
+// non-streaming 422 answer (ptone/scion#4214); its Reason is the same public
+// message err.Error() already gave.
 func importErrorEvent(err error) ResourceImportEvent {
 	var ierr *unusableProvisionerImportError
 	if errors.As(err, &ierr) {

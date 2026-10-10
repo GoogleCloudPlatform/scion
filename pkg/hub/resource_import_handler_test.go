@@ -144,9 +144,17 @@ func doStreamRequestAsUser(t *testing.T, srv *Server, user *store.User, method, 
 	if err != nil {
 		t.Fatal(err)
 	}
+	return doStreamRequestWithToken(t, srv, token, method, path, body)
+}
+
+// doStreamRequestWithToken issues a request authenticated with token and
+// Accept: application/x-ndjson so the import endpoint streams progress events.
+func doStreamRequestWithToken(t *testing.T, srv *Server, token, method, path string, body interface{}) *httptest.ResponseRecorder {
+	t.Helper()
 
 	var bodyBytes []byte
 	if body != nil {
+		var err error
 		bodyBytes, err = json.Marshal(body)
 		if err != nil {
 			t.Fatal(err)

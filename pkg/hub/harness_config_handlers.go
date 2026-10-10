@@ -1328,9 +1328,12 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 	}
 
 	kind := s.harnessConfigImportKind()
-	names := reimportNameFilter(hc)
+	slug := reimportTargetSlug(hc)
 	run := func(progress importProgressFunc) ([]string, error) {
-		return s.importFromRemote(ctx, hc.ScopeID, sourceURL, hc.Scope, kind, progress, names)
+		return s.importFromRemoteSelected(ctx, hc.ScopeID, sourceURL, hc.Scope, kind, progress,
+			func(dirs []resourceDir, skipped []skippedDir) ([]resourceDir, []skippedDir) {
+				return applySlugFilter(dirs, skipped, slug)
+			})
 	}
 
 	if importAcceptsNDJSON(r) {
@@ -1365,19 +1368,17 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 	})
 }
 
-// reimportNameFilter returns the import name filter for reimporting hc: its
-// slug, plus its name when that differs, so a source holding several
-// harness-configs validates and imports only the target (ptone/scion#4213).
-// Imported names are slugified, so either form selects the same record.
-func reimportNameFilter(hc *store.HarnessConfig) []string {
-	var names []string
+// reimportTargetSlug returns the slug that selects hc's entry when
+// reimporting it, so a source holding several harness-configs validates and
+// imports only the target (ptone/scion#4213). Discovered entries are persisted
+// under Slugify(name), so selection compares that against the record's slug;
+// matching the record's Name instead could pick another config, since Name and
+// Slug can be changed independently.
+func reimportTargetSlug(hc *store.HarnessConfig) string {
 	if hc.Slug != "" {
-		names = append(names, hc.Slug)
+		return hc.Slug
 	}
-	if hc.Name != "" && hc.Name != hc.Slug {
-		names = append(names, hc.Name)
-	}
-	return names
+	return api.Slugify(hc.Name)
 }
 
 // handleHarnessConfigImageStatus returns per-broker aggregated image status.

@@ -371,19 +371,42 @@ func TestHarnessConfigReimport_RejectsUnusableTargetWithSiblings(t *testing.T) {
 	}
 }
 
-// doStreamRequest issues an authenticated request that opts into the NDJSON
-// import stream.
-func doStreamRequest(t *testing.T, srv *Server, method, path string, body interface{}) *httptest.ResponseRecorder {
-	t.Helper()
-	bodyBytes, err := json.Marshal(body)
-	require.NoError(t, err)
-	req := httptest.NewRequest(method, path, bytes.NewReader(bodyBytes))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/x-ndjson")
-	req.Header.Set("Authorization", "Bearer "+testDevToken)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	return rec
+// Reimport selects the target by its slug, not its display name: after the
+// target is renamed so its Name equals a sibling's name, the sibling is neither
+// validated nor imported (ptone/scion#4213).
+func TestHarnessConfigReimport_RenamedTargetIgnoresNameSibling(t *testing.T) {
+	for _, tc := range []struct{ name, siblingBlock string }{
+		{"usable sibling", ""},
+		{"unusable sibling", unusableProvisionerCases[0].block},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testInstallSourceServer(t)
+			ctx := context.Background()
+			hc := installClaudeViaHub(t, srv, s, installPinnedClaudeURL)
+			hc.Name = "renamed-target"
+			require.NoError(t, s.UpdateHarnessConfig(ctx, hc))
+
+			src := tarGzFilesServer(t, map[string]string{
+				"claude/config.yaml":         "name: claude\nharness: claude\n",
+				"claude/README.md":           "replacement",
+				"renamed-target/config.yaml": "name: renamed-target\nharness: claude\n" + tc.siblingBlock,
+			})
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/reimport",
+				map[string]interface{}{"sourceUrl": src.URL + "/configs/multi.tar.gz"})
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var resp ImportHarnessConfigsResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			assert.Equal(t, []string{"claude"}, resp.HarnessConfigs)
+
+			after := globalClaude(t, s)
+			require.NotNil(t, after)
+			assert.Equal(t, hc.ID, after.ID, "reimport must update the existing config")
+			assert.NotEqual(t, hc.ContentHash, after.ContentHash, "reimport must replace the files")
+
+			_, err := s.GetHarnessConfigBySlug(ctx, "renamed-target", store.HarnessConfigScopeGlobal, "")
+			assert.ErrorIs(t, err, store.ErrNotFound, "reimport must not import the sibling named like the target")
+		})
+	}
 }
 
 // A refused config in the import stream yields an error event carrying the
@@ -414,7 +437,7 @@ func TestHarnessConfigImportStream_RefusalCarriesCode(t *testing.T) {
 			map[string]interface{}{"sourceUrl": badClaude.URL + "/configs/claude.tar.gz"}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			rec := doStreamRequest(t, srv, http.MethodPost, tc.path, tc.body)
+			rec := doStreamRequestWithToken(t, srv, testDevToken, http.MethodPost, tc.path, tc.body)
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 			events := parseImportEvents(t, rec.Body.String())
 			require.NotEmpty(t, events)
