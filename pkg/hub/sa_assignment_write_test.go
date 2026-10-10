@@ -826,7 +826,7 @@ func TestCompensateAgentCreate_HookErrorRollsBack(t *testing.T) {
 	assert.NotEmpty(t, activeEdgeIDs(t, s, agent.ID), "the edge stays active")
 }
 
-func TestCompensateAgentCreate_IdempotentSkipsHooks(t *testing.T) {
+func TestCompensateAgentCreate_RepeatRunsNoHook(t *testing.T) {
 	srv, s := testServer(t)
 	agent := compensationAgent(t, s)
 	var log hookLog
