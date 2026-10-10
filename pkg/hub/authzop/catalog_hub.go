@@ -44,8 +44,13 @@ var hubOperations = []OperationSpec{
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
-		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
-		Bearer:      SessionOnly(ReasonSessionRecovery),
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestAdminResetAuthAll_TokenRefused"},
+			{Package: "pkg/hub", Function: "TestAdminResetAuthAll_SessionPassesGuard"},
+			{Package: "pkg/hub", Function: "TestAdminResetAuthAll_DevCredentialPassesGuard"},
+		},
+		Bearer: SessionOnly(ReasonSessionRecovery),
 	},
 
 	{
