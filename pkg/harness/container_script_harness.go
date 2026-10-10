@@ -1125,11 +1125,11 @@ func parseLibVersion(src string) string {
 
 // HarnessProvisionHookFilename is the fixed name this file always stages the
 // wrapper under. pkg/sciontool/hooks recognizes this one script by this exact
-// name (its own harnessProvisionHookFilename, kept in sync with this constant
-// by TestHarnessProvisionHookFilenameMatchesWriter) to run it under the
-// workload's own identity instead of root, even though the wrapper itself is
-// trusted, broker-delivered, root-owned content: that trust proves the
-// wrapper is genuine, not that what it execs is safe to run as root. Not
+// name (its own HarnessProvisionHookFilename, kept in sync with this constant
+// by this package's TestHarnessProvisionHookFilenameMatchesWriter) to run it
+// under the workload's own identity instead of root, even though the wrapper
+// itself is trusted, broker-delivered, root-owned content: that trust proves
+// the wrapper is genuine, not that what it execs is safe to run as root. Not
 // imported directly from that package: pkg/harness's own test package
 // already imports pkg/sciontool/hooks, so the reverse import would be a
 // cycle — see that package's own copy of this name for the full reasoning.

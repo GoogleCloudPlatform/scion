@@ -23,6 +23,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -357,6 +359,80 @@ func TestReconcileBuiltInRoles_DoesNotDowngrade(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, len(extraPerms), len(rd.Permissions),
 		"permissions should not be modified when stored revision >= code revision")
+}
+
+// captureRoleWarnLogs routes slog output to a goroutine-safe buffer
+// (lockedBuffer) for the role revision warning tests.
+func captureRoleWarnLogs(t *testing.T) *lockedBuffer {
+	t.Helper()
+	buf := &lockedBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return buf
+}
+
+func builtInRoleByName(t *testing.T, name string) BuiltInRole {
+	t.Helper()
+	for _, r := range BuiltInRoles() {
+		if r.Name == name {
+			return r
+		}
+	}
+	t.Fatalf("no built-in role %q", name)
+	return BuiltInRole{}
+}
+
+// A stored revision newer than the build's (a newer build started on this
+// database) logs one warning naming the role, its stored revision and the
+// build's revision, and that a binary rollback is unsupported
+// (ptone/scion#4233).
+func TestReconcileBuiltInRoles_WarnsWhenStoredRevisionNewer(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+	member := builtInRoleByName(t, store.SystemRoleHubMember)
+	admin := builtInRoleByName(t, store.SystemRoleHubAdmin)
+	recordBuiltInRoleMarker(ctx, s, member.Name, builtInRoleMarker{Revision: member.Revision + 5, PermHash: "newer"})
+	recordBuiltInRoleMarker(ctx, s, admin.Name, builtInRoleMarker{Revision: admin.Revision + 1, PermHash: "newer"})
+
+	logs := captureRoleWarnLogs(t)
+	reconcileBuiltInRoles(ctx, s)
+
+	out := logs.String()
+	assert.Equal(t, 1, strings.Count(out, storedRoleRevisionsNewerMessage), "exactly one warning per reconcile:\n%s", out)
+	assert.Contains(t, out, "level=WARN")
+	assert.Contains(t, out, "a binary rollback")
+	assert.Contains(t, out, "unsupported")
+	assert.Contains(t, out, fmt.Sprintf("%s (stored revision %d, this build's revision %d)", member.Name, member.Revision+5, member.Revision))
+	assert.Contains(t, out, fmt.Sprintf("%s (stored revision %d, this build's revision %d)", admin.Name, admin.Revision+1, admin.Revision))
+	assert.Contains(t, out, "count=2")
+	for _, r := range BuiltInRoles() {
+		if r.Name != member.Name && r.Name != admin.Name {
+			assert.NotContains(t, out, r.Name+" (stored revision", "role %s is not newer", r.Name)
+		}
+	}
+}
+
+// Equal or older stored revisions log no warning.
+func TestReconcileBuiltInRoles_NoWarningWhenStoredRevisionEqualOrOlder(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+	member := builtInRoleByName(t, store.SystemRoleHubMember)
+
+	t.Run("equal", func(t *testing.T) {
+		// testServer already reconciled: every stored revision equals the build's.
+		logs := captureRoleWarnLogs(t)
+		reconcileBuiltInRoles(ctx, s)
+		assert.NotContains(t, logs.String(), storedRoleRevisionsNewerMessage)
+	})
+
+	t.Run("older", func(t *testing.T) {
+		recordBuiltInRoleMarker(ctx, s, member.Name, builtInRoleMarker{Revision: member.Revision - 1, PermHash: "older"})
+		logs := captureRoleWarnLogs(t)
+		reconcileBuiltInRoles(ctx, s)
+		assert.NotContains(t, logs.String(), storedRoleRevisionsNewerMessage)
+		assert.Equal(t, member.Revision, getAppliedBuiltInRoleMarker(ctx, s, member.Name).Revision, "an older stored revision is reconciled up")
+	})
 }
 
 // TestReconcileBuiltInRoles_RevisionTracking verifies that revision tracking

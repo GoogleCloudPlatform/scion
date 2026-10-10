@@ -58,6 +58,13 @@ var (
 	// dispatched its operation. It wraps ErrVersionConflict.
 	ErrRunChanged = fmt.Errorf("agent run changed: %w", ErrVersionConflict)
 
+	// ErrTemplateConflict is returned by UpdateTemplateContent when the
+	// stored template no longer matches the caller's
+	// TemplateContentPrecondition: another commit changed the template's
+	// files since the caller read it (ptone/scion#4221). It wraps
+	// ErrVersionConflict.
+	ErrTemplateConflict = fmt.Errorf("template content changed: %w", ErrVersionConflict)
+
 	// ErrSuperAdminBindingRestricted is returned when a non-reconciler caller
 	// attempts to create a role binding for the super-admin role definition.
 	// Super-admin authority is conferred exclusively via User.Role (out-of-band)
@@ -873,6 +880,16 @@ type AgentFilter struct {
 	// pattern-matching AppliedConfig's JSON at query time (ptone/scion#2146).
 	HarnessConfig string
 
+	// GCPServiceAccountID, when non-empty, restricts results to agents whose
+	// applied GCP identity (AppliedConfig.GCPIdentity.ServiceAccountID) names
+	// this registered service account. Always ANDed with every other filter.
+	// It backs the per-account "agents using it" view (ptone/scion#4018).
+	// Unlike HarnessConfig there is no shadow column: the predicate reads the
+	// applied_config JSON, which is acceptable for a read-only view that is
+	// always combined with a project filter. omitempty keeps list cursor
+	// bindings unchanged when it is unset.
+	GCPServiceAccountID string `json:",omitempty"`
+
 	// IDs, when non-nil, restricts results to agents whose ID is in this set.
 	// Always combined with every other filter (including AuthorizedProjectIDs)
 	// using AND — it narrows, it never substitutes for authorization. A nil
@@ -1473,9 +1490,22 @@ type TemplateStore interface {
 	// Returns ErrNotFound if the template doesn't exist.
 	GetTemplateBySlug(ctx context.Context, slug, scope, projectID string) (*Template, error)
 
-	// UpdateTemplate updates an existing template.
+	// UpdateTemplate updates an existing template's metadata.
 	// Returns ErrNotFound if the template doesn't exist.
+	//
+	// It does not write the content columns: Files, ContentHash and the
+	// fields derived from the files (Harness, DefaultHarnessConfig,
+	// AgentConfig). Those are written only by CreateTemplate and
+	// UpdateTemplateContent, so a metadata edit can never revert a
+	// concurrent commit (ptone/scion#4221). The hub's template commit path
+	// (commitTemplateFiles) is the only caller of UpdateTemplateContent.
 	UpdateTemplate(ctx context.Context, template *Template) error
+
+	// UpdateTemplateContent writes every column of template, including the
+	// content columns, only if the stored row still matches expected
+	// (compare-and-swap). Returns ErrTemplateConflict when the row exists
+	// but no longer matches, and ErrNotFound when it does not exist.
+	UpdateTemplateContent(ctx context.Context, template *Template, expected TemplateContentPrecondition) error
 
 	// DeleteTemplate removes a template by ID.
 	// Returns ErrNotFound if the template doesn't exist.
@@ -1487,6 +1517,21 @@ type TemplateStore interface {
 
 	// ListTemplates returns templates matching the filter criteria.
 	ListTemplates(ctx context.Context, filter TemplateFilter, opts ListOptions) (*ListResult[Template], error)
+}
+
+// TemplateContentPrecondition is the state a template commit expects the
+// stored row to be in (UpdateTemplateContent).
+//
+// ContentHash is the content hash the caller read before computing its new
+// manifest. An empty ContentHash matches a row that has never been
+// committed (no content hash yet).
+//
+// Further fields join the predicate as the stored state grows; the storage
+// layout of ptone/scion#4221 part 2 adds the row's layout here, so a commit
+// that read a legacy-layout row cannot overwrite a row that has since moved
+// to blobs with the same content hash.
+type TemplateContentPrecondition struct {
+	ContentHash string
 }
 
 // TemplateFilter defines criteria for filtering templates.
@@ -2746,7 +2791,11 @@ type BrokerSettingStore interface {
 
 // AgentSessionMetricsStore defines operations for agent session metrics.
 type AgentSessionMetricsStore interface {
-	// CreateAgentSessionMetrics creates a new session metrics record.
+	// CreateAgentSessionMetrics creates a new session metrics record. The
+	// store keeps one record per agent, session ID and StartedAt (one
+	// segment of a session; a session resumed with the same ID starts a new
+	// segment): when one exists, it is left unchanged, m.ID and m.CreatedAt
+	// are set from it, and ErrAlreadyExists is returned.
 	CreateAgentSessionMetrics(ctx context.Context, m *AgentSessionMetrics) error
 
 	// GetAgentSessionMetrics retrieves a session metrics record by ID.

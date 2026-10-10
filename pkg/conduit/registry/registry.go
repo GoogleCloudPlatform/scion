@@ -202,6 +202,16 @@ func (r *Registry) SetSessionDraining(ctx context.Context, sessionID string) err
 	return r.store.SetSessionDraining(ctx, sessionID)
 }
 
+// SetRelaySessionsDraining marks every session of this relay generation
+// draining in one write (planned relay drain). Generation-fenced: a stale
+// generation updates nothing and returns ErrRelaySuperseded.
+func (r *Registry) SetRelaySessionsDraining(ctx context.Context, instanceID string, gen int64) (int, error) {
+	if instanceID == "" || gen <= 0 {
+		return 0, fmt.Errorf("%w: relay session drain needs instance_id and a positive generation", ErrInvalidInput)
+	}
+	return r.store.SetRelaySessionsDraining(ctx, instanceID, gen)
+}
+
 // DeleteSessionCAS deletes a session row only if it was created by
 // relayInstanceID in generation relayGen. A stale generation (e.g. an old
 // disconnect arriving after replacement) deletes nothing.
@@ -330,8 +340,9 @@ func checkWant(principalKind string, w Want) (Reason, error) {
 // only ranked after sessions on non-draining relays, so draining a relay
 // never makes a principal unreachable before it has reconnected elsewhere.
 // Exclusion during a drain happens at the session level: the relay marks
-// each session draining (SetSessionDraining) when it sends GoAway, and
-// draining sessions are filtered out.
+// a session draining (SetSessionDraining, or SetRelaySessionsDraining for
+// every session of its generation on shutdown) before it sends GoAway,
+// and draining sessions are filtered out.
 func (r *Registry) Eligible(ctx context.Context, principalKind, principalID string, w Want, now time.Time) ([]SessionRecord, error) {
 	switch principalKind {
 	case PrincipalAgent, PrincipalBroker:

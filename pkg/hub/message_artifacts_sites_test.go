@@ -107,7 +107,7 @@ func TestMessageArtifactsSite_HandleAgentMessageUserSender(t *testing.T) {
 
 	var resp MessageDeliveryResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-	assert.Equal(t, artifactRefsWarning(1), resp.ArtifactWarning)
+	assert.Equal(t, artifactRefsWarning(1, 0), resp.ArtifactWarning)
 	require.NotEmpty(t, resp.MessageID)
 
 	calls := dispatchesTo(f.dispatcher, f.target.ID)
@@ -149,7 +149,7 @@ func TestMessageArtifactsSite_OutboundToUserDirect(t *testing.T) {
 	f.srv.SetMessageBrokerProxy(nil)
 
 	resp := outboundToOwner(t, f, artifacts.MessageRef{ArtifactID: f.agentOwned, Seq: 1}, artifacts.MessageRef{ArtifactID: f.unreadable})
-	assert.Equal(t, artifactRefsWarning(1), resp["artifact_warning"])
+	assert.Equal(t, artifactRefsWarning(1, 0), resp["artifact_warning"])
 	msgID, _ := resp["message_id"].(string)
 	require.NotEmpty(t, msgID)
 	assert.Equal(t, []artifacts.MessageRef{{ArtifactID: f.agentOwned, Seq: 1}}, f.recorded(t, msgID))
@@ -164,7 +164,7 @@ func TestMessageArtifactsSite_OutboundToUserBroker(t *testing.T) {
 	f.srv.GetMessageBrokerProxy().recordArtifactRefs = f.srv.recordMessageArtifacts
 
 	resp := outboundToOwner(t, f, artifacts.MessageRef{ArtifactID: f.agentOwned}, artifacts.MessageRef{ArtifactID: f.unreadable})
-	assert.Equal(t, artifactRefsWarning(1), resp["artifact_warning"])
+	assert.Equal(t, artifactRefsWarning(1, 0), resp["artifact_warning"])
 
 	var rowID string
 	require.Eventually(t, func() bool {
@@ -188,10 +188,11 @@ func TestMessageArtifactsSite_DeliverToUserRequiresAdmittedFlag(t *testing.T) {
 	proxy := NewMessageBrokerProxy(nil, f.s, events, func() AgentDispatcher { return f.dispatcher }, slog.Default())
 	var mu sync.Mutex
 	var recordedFor []string
-	proxy.recordArtifactRefs = func(_ context.Context, messageID string, refs []artifacts.MessageRef) {
+	proxy.recordArtifactRefs = func(_ context.Context, messageID string, refs []artifacts.MessageRef) []artifacts.MessageRef {
 		mu.Lock()
 		defer mu.Unlock()
 		recordedFor = append(recordedFor, messageID)
+		return refs
 	}
 
 	value := refsValue(artifacts.MessageRef{ArtifactID: f.unreadable})
@@ -256,7 +257,7 @@ func TestMessageArtifactsSite_ChatV2SendAndHistory(t *testing.T) {
 
 	var resp chatMessageResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-	assert.Equal(t, artifactRefsWarning(1), resp.ArtifactWarning)
+	assert.Equal(t, artifactRefsWarning(1, 0), resp.ArtifactWarning)
 	require.Len(t, resp.Artifacts, 1)
 	assert.True(t, resp.Artifacts[0].Available)
 	assert.Equal(t, "Owner notes", resp.Artifacts[0].Title)

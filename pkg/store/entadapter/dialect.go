@@ -184,3 +184,37 @@ func ancestryContains(principalID string) predicate.Agent {
 		}
 	}
 }
+
+// appliedGCPServiceAccountIDEQ returns an Ent predicate restricting results to
+// agents whose applied_config JSON document names saID as its GCP identity
+// service account (gcpIdentity.serviceAccountId). applied_config is a text
+// column, so Postgres casts it; the CASE keeps a NULL or empty document from
+// reaching the cast, because Postgres does not promise to evaluate an AND
+// guard first.
+func appliedGCPServiceAccountIDEQ(saID string) predicate.Agent {
+	return func(s *entsql.Selector) {
+		col := s.C(agent.FieldAppliedConfig)
+		switch s.Dialect() {
+		case dialect.Postgres:
+			s.Where(entsql.P(func(b *entsql.Builder) {
+				b.WriteString("(CASE WHEN ").
+					WriteString(col).
+					WriteString(" IS NULL OR ").
+					WriteString(col).
+					WriteString(" = '' THEN NULL ELSE ").
+					WriteString(col).
+					WriteString("::jsonb #>> '{gcpIdentity,serviceAccountId}' END) = ").
+					Arg(saID)
+			}))
+		default: // SQLite
+			s.Where(entsql.P(func(b *entsql.Builder) {
+				b.WriteString("(CASE WHEN json_valid(").
+					WriteString(col).
+					WriteString(") THEN json_extract(").
+					WriteString(col).
+					WriteString(", '$.gcpIdentity.serviceAccountId') END) = ").
+					Arg(saID)
+			}))
+		}
+	}
+}

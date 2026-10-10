@@ -445,7 +445,7 @@ func resolveOwnerID(ctx context.Context, client hubclient.Client, ownerRef strin
 // A bare flag infers the reference (ptone/scion#2146 Q2):
 //   - Agent mode: the calling agent, via SCION_AGENT_ID (the same env var
 //     `scion whoami` treats as canonical) — returned as agentRef.
-//   - Human or assistant mode: the calling user, resolved via the Hub's
+//   - Human mode: the calling user, resolved via the Hub's
 //     current-session identity (`client.Auth().Me()`) — returned as userID.
 //     There is no error case for "no calling principal" here: outside an
 //     agent container the CLI is always driven by some authenticated user.

@@ -621,10 +621,45 @@ func ensureDevUserRoleBinding(ctx context.Context, s store.Store) {
 //
 // Reconciliation is idempotent: running twice with the same code produces the
 // same result.
+//
+// A role whose stored revision is higher than this build's is left alone. That
+// happens when a newer build has already started on this database; one
+// warning names every such role (ptone/scion#4233).
 func reconcileBuiltInRoles(ctx context.Context, s store.Store) {
+	var newer []storedNewerRole
 	for _, role := range BuiltInRoles() {
-		reconcileBuiltInRole(ctx, s, role)
+		if stored, isNewer := reconcileBuiltInRole(ctx, s, role); isNewer {
+			newer = append(newer, storedNewerRole{Name: role.Name, StoredRevision: stored, BuildRevision: role.Revision})
+		}
 	}
+	warnStoredRoleRevisionsNewer(newer)
+}
+
+// storedNewerRole is a built-in role whose stored revision is higher than
+// the running build's.
+type storedNewerRole struct {
+	Name           string
+	StoredRevision int
+	BuildRevision  int
+}
+
+// storedRoleRevisionsNewerMessage is the startup warning logged when stored
+// built-in role revisions are newer than the running build's.
+const storedRoleRevisionsNewerMessage = "Stored built-in role revisions are newer than this Hub build's. " +
+	"A newer Hub build has started on this database; this build does not lower the roles, so it runs with the newer build's permission lists. " +
+	"Running an older Hub binary after a newer build has started (a binary rollback) is unsupported."
+
+// warnStoredRoleRevisionsNewer logs one warning naming each role, its stored
+// revision and this build's revision. It logs nothing for an empty list.
+func warnStoredRoleRevisionsNewer(roles []storedNewerRole) {
+	if len(roles) == 0 {
+		return
+	}
+	names := make([]string, 0, len(roles))
+	for _, r := range roles {
+		names = append(names, fmt.Sprintf("%s (stored revision %d, this build's revision %d)", r.Name, r.StoredRevision, r.BuildRevision))
+	}
+	slog.Warn(storedRoleRevisionsNewerMessage, "roles", strings.Join(names, "; "), "count", len(roles))
 }
 
 // reconcileBuiltInRole creates or updates a single built-in role definition.
@@ -632,7 +667,10 @@ func reconcileBuiltInRoles(ctx context.Context, s store.Store) {
 // permission list. This ensures reconciliation fires when the dynamic
 // permission list changes (e.g., a new permission added to the registry
 // expands the super-admin set), even if the code revision is unchanged.
-func reconcileBuiltInRole(ctx context.Context, s store.Store, role BuiltInRole) {
+//
+// It returns the stored revision and true when the stored revision is higher
+// than role.Revision (the role is then left unchanged); otherwise 0 and false.
+func reconcileBuiltInRole(ctx context.Context, s store.Store, role BuiltInRole) (storedRevision int, storedNewer bool) {
 	codeMarker := builtInRoleMarker{
 		Revision: role.Revision,
 		PermHash: permListHash(role.Permissions),
@@ -643,7 +681,7 @@ func reconcileBuiltInRole(ctx context.Context, s store.Store, role BuiltInRole) 
 		if !errors.Is(err, store.ErrNotFound) {
 			slog.Warn("failed to check for existing role definition",
 				"name", role.Name, "error", err)
-			return
+			return 0, false
 		}
 		// Role does not exist — create it.
 		rd := &store.RoleDefinition{
@@ -656,23 +694,25 @@ func reconcileBuiltInRole(ctx context.Context, s store.Store, role BuiltInRole) 
 		if _, err := s.CreateRoleDefinition(ctx, rd); err != nil {
 			slog.Warn("failed to seed role definition",
 				"name", role.Name, "error", err)
-			return
+			return 0, false
 		}
 		// Record the applied revision marker.
 		recordBuiltInRoleMarker(ctx, s, role.Name, codeMarker)
 		slog.Info("seeded role definition",
 			"name", role.Name, "scope_type", role.ScopeType,
 			"revision", role.Revision, "perm_hash", codeMarker.PermHash)
-		return
+		return 0, false
 	}
 
 	// Role exists — check if reconciliation is needed.
 	applied := getAppliedBuiltInRoleMarker(ctx, s, role.Name)
 	if applied.Revision > role.Revision {
-		return // stored revision is higher — operator override, do not downgrade
+		// Stored revision is higher (a newer build re-revisioned the role):
+		// do not downgrade. reconcileBuiltInRoles warns.
+		return applied.Revision, true
 	}
 	if applied.Revision == role.Revision && applied.PermHash == codeMarker.PermHash {
-		return // same revision with matching permission hash — no changes needed
+		return 0, false // same revision with matching permission hash — no changes needed
 	}
 	// Reconcile: either the code revision is higher, or the permission list
 	// changed at the same revision (R-6: dynamic lists like allPermissionIDs).
@@ -682,7 +722,7 @@ func reconcileBuiltInRole(ctx context.Context, s store.Store, role BuiltInRole) 
 		slog.Warn("failed to reconcile role definition permissions",
 			"name", role.Name, "from_revision", applied.Revision,
 			"to_revision", role.Revision, "error", err)
-		return
+		return 0, false
 	}
 	recordBuiltInRoleMarker(ctx, s, role.Name, codeMarker)
 	slog.Info("reconciled role definition permissions",
@@ -690,6 +730,7 @@ func reconcileBuiltInRole(ctx context.Context, s store.Store, role BuiltInRole) 
 		"to_revision", role.Revision,
 		"perm_hash", codeMarker.PermHash,
 		"permissions_count", len(role.Permissions))
+	return 0, false
 }
 
 // getAppliedBuiltInRoleMarker reads the last-applied revision marker for a

@@ -24,12 +24,7 @@
  */
 
 import { test, expect } from '@playwright/test';
-import {
-  getE2EEnv,
-  createGroup,
-  uniqueSlug,
-  fillSlInput,
-} from './groups-setup.js';
+import { getE2EEnv, createGroup, uniqueSlug, fillSlInput } from './groups-setup.js';
 
 test.describe('Constraint-bearing delete (AC16)', () => {
   const env = getE2EEnv();
@@ -45,9 +40,9 @@ test.describe('Constraint-bearing delete (AC16)', () => {
     await page.goto(`/admin/groups/${group.id}`, {
       waitUntil: 'domcontentloaded',
     });
-    await expect(
-      page.getByRole('heading', { name: 'Constraint Dialog Test' }),
-    ).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('heading', { name: 'Constraint Dialog Test' })).toBeVisible({
+      timeout: 15_000,
+    });
 
     // Open overflow menu and click Delete group
     const overflowBtn = page.locator('sl-dropdown sl-button[caret]');
@@ -82,9 +77,9 @@ test.describe('Constraint-bearing delete (AC16)', () => {
     await page.goto(`/admin/groups/${group.id}`, {
       waitUntil: 'domcontentloaded',
     });
-    await expect(
-      page.getByRole('heading', { name: 'Unconstrained Delete' }),
-    ).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('heading', { name: 'Unconstrained Delete' })).toBeVisible({
+      timeout: 15_000,
+    });
 
     // Open overflow menu → Delete group
     const overflowBtn = page.locator('sl-dropdown sl-button[caret]');

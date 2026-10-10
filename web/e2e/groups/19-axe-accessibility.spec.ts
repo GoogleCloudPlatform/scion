@@ -17,7 +17,7 @@
  */
 
 import { test, expect } from '@playwright/test';
-import AxeBuilder from '@axe-core/playwright';
+import { AxeBuilder } from '@axe-core/playwright';
 import { getE2EEnv, createGroup, uniqueSlug } from './groups-setup.js';
 
 /**
@@ -27,7 +27,7 @@ import { getE2EEnv, createGroup, uniqueSlug } from './groups-setup.js';
  */
 async function assertAxeClean(
   page: import('@playwright/test').Page,
-  disableRules: string[] = [],
+  disableRules: string[] = []
 ): Promise<void> {
   // Always disable color-contrast (theme-dependent, tested visually).
   // Additional rules (e.g. button-name for Shoelace overflow buttons) are
@@ -38,15 +38,12 @@ async function assertAxeClean(
     .analyze();
 
   const serious = results.violations.filter(
-    (v) => v.impact === 'serious' || v.impact === 'critical',
+    (v) => v.impact === 'serious' || v.impact === 'critical'
   );
 
   if (serious.length > 0) {
     const summary = serious
-      .map(
-        (v) =>
-          `[${v.impact}] ${v.id}: ${v.description} (${v.nodes.length} instance(s))`,
-      )
+      .map((v) => `[${v.impact}] ${v.id}: ${v.description} (${v.nodes.length} instance(s))`)
       .join('\n');
     console.log('axe violations:', JSON.stringify(results.violations, null, 2));
     expect(serious, `Accessibility violations:\n${summary}`).toHaveLength(0);
@@ -88,9 +85,9 @@ test.describe('axe accessibility checks (AC20)', () => {
     await page.goto(`/admin/groups/${group.id}`, {
       waitUntil: 'domcontentloaded',
     });
-    await expect(
-      page.getByRole('heading', { name: 'Axe Detail Test' }),
-    ).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('heading', { name: 'Axe Detail Test' })).toBeVisible({
+      timeout: 15_000,
+    });
 
     await assertAxeClean(page);
   });
@@ -133,9 +130,9 @@ test.describe('axe accessibility checks (AC20)', () => {
     await page.goto(`/admin/groups/${group.id}`, {
       waitUntil: 'domcontentloaded',
     });
-    await expect(
-      page.getByRole('heading', { name: 'Axe Dark Detail' }),
-    ).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('heading', { name: 'Axe Dark Detail' })).toBeVisible({
+      timeout: 15_000,
+    });
 
     // Toggle dark theme
     await page.evaluate(() => {

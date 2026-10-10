@@ -24,8 +24,6 @@
  * order, and either one switches the rail to custom sort.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { apiFetch } from '../../../client/api.js';
 import { requestBodyText } from '../../../client/__fixtures__/request-url.js';
