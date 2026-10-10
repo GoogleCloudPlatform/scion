@@ -1541,7 +1541,7 @@
       "properties": {
         "mode": {
           "type": "string",
-          "description": "Exclusive human auth mode: 'oauth' (default), 'proxy' or 'dev'. In proxy mode the OAuth handlers are disabled and proxy settings apply; in dev mode dev token auth is used."
+          "description": "Human auth mode. 'proxy' is the only value the server checks: it then uses the proxy authenticator configured under proxy and offers no OAuth providers. Any other value, including unset (the default), 'oauth' and 'dev', leaves the hub handling authentication itself. Dev auth is enabled by dev_mode or the --dev-auth flag, not by mode."
         },
         "dev_mode": { "type": "boolean", "default": false, "x-env-var": "SCION_SERVER_AUTH_DEVMODE" },
         "dev_token": {

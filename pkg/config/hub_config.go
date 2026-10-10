@@ -585,7 +585,12 @@ func (d DatabaseConfig) ConnMaxIdleTimeDuration() (time.Duration, error) {
 
 // DevAuthConfig holds authentication settings.
 type DevAuthConfig struct {
-	// Mode selects the exclusive human auth mode: "oauth" (default), "proxy", or "dev".
+	// Mode selects the human auth mode. "proxy" is the only value the code
+	// checks: the server then uses the configured proxy authenticator and
+	// offers no OAuth providers. Any other value, including "" (the
+	// default), "oauth" and "dev", leaves the hub handling authentication
+	// itself. Dev auth is enabled by Enabled (the --dev-auth flag or the
+	// server.auth.dev_mode setting), not by Mode.
 	Mode string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
 	// Enabled indicates whether development authentication is enabled.
 	// WARNING: Not for production use.
