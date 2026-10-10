@@ -47,7 +47,7 @@ import (
 
 // permissionCallSite names one function that checks a permission. File is
 // relative to pkg/hub. Func is a function name, or "Recv.Name" for a method
-// (Recv without the pointer star).
+// (Recv without the pointer star or type parameters).
 type permissionCallSite struct {
 	File string
 	Func string
@@ -310,6 +310,10 @@ func findFuncDecl(f *ast.File, name string) *ast.FuncDecl {
 	return nil
 }
 
+// recvTypeName returns the receiver's type name without the pointer star
+// or type parameters (T, *T, T[K] and *T[K, V] all give "T"), or "" for a
+// plain function. A receiver shape it does not know gives "?", which no
+// call site names, so such a method is never taken for a plain function.
 func recvTypeName(fd *ast.FuncDecl) string {
 	if fd.Recv == nil || len(fd.Recv.List) == 0 {
 		return ""
@@ -318,10 +322,16 @@ func recvTypeName(fd *ast.FuncDecl) string {
 	if star, ok := t.(*ast.StarExpr); ok {
 		t = star.X
 	}
+	switch x := t.(type) {
+	case *ast.IndexExpr:
+		t = x.X
+	case *ast.IndexListExpr:
+		t = x.X
+	}
 	if id, ok := t.(*ast.Ident); ok {
 		return id.Name
 	}
-	return ""
+	return "?"
 }
 
 // bodyReferences reports whether body contains a string literal or a known
@@ -397,13 +407,19 @@ func scope()                { check("x:read") }
 func agentScope()           { check(ScopeX) }
 func none()                 { check("x.update") }
 func check(string)          {}
+
+type page[T any] struct{}
+type pair[K, V any] struct{}
+
+func (p page[T]) generic()        { check("x.read") }
+func (p *pair[K, V]) genericList() { check("x.read") }
 `
 	if err := os.WriteFile(filepath.Join(dir, "x.go"), []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	registry := []permissions.Permission{{ID: "x.read", UATScope: "x:read", AgentScopes: []string{"project:x:read"}}}
 	consts := referenceConstants{"permX": "x.read", "permissions.PermX": "x.read", "ScopeX": "project:x:read"}
-	for _, fn := range []string{"Server.literal", "Server.constant", "Server.selector", "scope", "agentScope"} {
+	for _, fn := range []string{"Server.literal", "Server.constant", "Server.selector", "scope", "agentScope", "page.generic", "pair.genericList"} {
 		got, problems := verifyCallSites(dir, registry, map[string][]permissionCallSite{"x.read": {{"x.go", fn}}}, consts)
 		if !got["x.read"] || len(problems) > 0 {
 			t.Errorf("%s: want verified, got %v %v", fn, got, problems)
@@ -418,6 +434,7 @@ func check(string)          {}
 		{"one of several sites lacks it", map[string][]permissionCallSite{"x.read": {{"x.go", "scope"}, {"x.go", "none"}}}, "x.go:none does not reference"},
 		{"function renamed", map[string][]permissionCallSite{"x.read": {{"x.go", "Server.gone"}}}, "not found"},
 		{"method named as func", map[string][]permissionCallSite{"x.read": {{"x.go", "literal"}}}, "not found"},
+		{"generic method named as func", map[string][]permissionCallSite{"x.read": {{"x.go", "generic"}}}, "not found"},
 		{"file missing", map[string][]permissionCallSite{"x.read": {{"y.go", "scope"}}}, "call site y.go"},
 		{"unknown permission", map[string][]permissionCallSite{"x.delete": {{"x.go", "scope"}}}, "not in the registry"},
 		{"no function", map[string][]permissionCallSite{"x.read": {}}, "names no function"},
