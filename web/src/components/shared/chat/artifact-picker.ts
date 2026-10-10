@@ -18,9 +18,12 @@
  * "Attach artifact" picker for the chat composer (ptone/scion#3224).
  *
  * Lists the artifacts the viewer can read (GET /api/v1/artifacts?mine=1),
- * with search and All / Owned by me / This project filters, and lets the
- * user pick up to the remaining per-message limit. Picking attaches the
- * current version. The hub checks every picked reference again at send.
+ * with search and All / Owned by me / This project filters (all applied by
+ * the hub), and lets the user pick up to the remaining per-message limit.
+ * Picking attaches the current version. The hub checks every picked
+ * reference again at send. With nothing to list, the empty state offers
+ * New artifact, which opens the artifact publish dialog for the
+ * conversation's project (ptone/scion#3761).
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -31,7 +34,9 @@ import {
   formatArtifactRef,
   type ArtifactListItem,
   type ArtifactListResponse,
+  type ArtifactResponse,
 } from '../../../client/artifacts.js';
+import '../artifact-publish-dialog.js';
 import { principalLabel, principalName, projectName } from '../../../client/principal-names.js';
 import { formatInstant, formatRelative } from '../../../utils/time.js';
 
@@ -87,6 +92,8 @@ export class ScionArtifactPicker extends LitElement {
   @state() private error = '';
   @state() private selected = new Map<string, PendingArtifact>();
   @state() private names = new Map<string, string>();
+  /** Whether the New artifact publish dialog is open. */
+  @state() private publishOpen = false;
 
   private generation = 0;
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -96,6 +103,7 @@ export class ScionArtifactPicker extends LitElement {
       this.selected = new Map();
       this.query = '';
       this.filter = 'all';
+      this.publishOpen = false;
       void this.load(false);
     }
   }
@@ -112,7 +120,11 @@ export class ScionArtifactPicker extends LitElement {
     try {
       const res = await apiFetch(
         artifactListUrl(
-          { q: this.query, ownedOnly: this.filter === 'owned' },
+          {
+            q: this.query,
+            ownedOnly: this.filter === 'owned',
+            ...(this.filter === 'project' ? { scope: this.projectId } : {}),
+          },
           more && this.nextCursor ? this.nextCursor : undefined
         )
       );
@@ -181,9 +193,8 @@ export class ScionArtifactPicker extends LitElement {
 
   private setFilter(filter: PickerFilter): void {
     if (this.filter === filter) return;
-    const reload = filter === 'owned' || this.filter === 'owned';
     this.filter = filter;
-    if (reload) void this.load(false);
+    void this.load(false);
   }
 
   private toggle(a: ArtifactListItem): void {
@@ -202,11 +213,6 @@ export class ScionArtifactPicker extends LitElement {
     this.selected = next;
   }
 
-  private visibleItems(): ArtifactListItem[] {
-    if (this.filter !== 'project') return this.items;
-    return this.items.filter((a) => a.scopeRef === this.projectId);
-  }
-
   private attach(): void {
     if (this.selected.size === 0) return;
     this.dispatchEvent(
@@ -219,30 +225,57 @@ export class ScionArtifactPicker extends LitElement {
     this.close();
   }
 
+  /**
+   * A new artifact was published from the empty state: list it and pick
+   * it, so Attach sends it.
+   */
+  private onPublished(e: CustomEvent<ArtifactResponse>): void {
+    this.publishOpen = false;
+    const a = e.detail?.artifact;
+    if (a && this.selected.size < this.remaining) {
+      this.selected = new Map(this.selected).set(a.id, {
+        id: a.id,
+        ref: formatArtifactRef(a.id),
+        title: a.title,
+        version: a.currentSeq,
+      });
+    }
+    void this.load(false);
+  }
+
   private close(): void {
     this.dispatchEvent(new CustomEvent('artifact-picker-close', { bubbles: true, composed: true }));
   }
 
   private renderRows() {
-    const rows = this.visibleItems();
+    const rows = this.items;
     if (this.loading && this.items.length === 0) {
       return html`<div class="placeholder"><sl-spinner></sl-spinner></div>`;
     }
     if (this.error) {
       return html`<div class="placeholder error">${this.error}</div>`;
     }
-    if (rows.length === 0 && this.nextCursor) {
-      // "This project" filters the pages loaded so far (the list has no
-      // scope parameter), so more pages may still hold matches.
-      return html`<div class="placeholder">No matches in the loaded artifacts.</div>
-        ${this.renderLoadMore()}`;
-    }
     if (rows.length === 0) {
       return this.query.trim() || this.filter !== 'all'
         ? html`<div class="placeholder">No artifacts match.</div>`
         : html`<div class="placeholder empty">
             <div class="empty-title">No artifacts yet</div>
-            Artifacts you can read appear here. Agents publish them as they work.
+            Artifacts you can read appear here. Agents publish them as they
+            work${this.projectId ? ', and you can create one.' : '.'}
+            ${this.projectId
+              ? html`<div class="empty-action">
+                  <sl-button
+                    size="small"
+                    class="new-artifact"
+                    @click=${() => {
+                      this.publishOpen = true;
+                    }}
+                  >
+                    <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+                    New artifact
+                  </sl-button>
+                </div>`
+              : nothing}
           </div>`;
     }
     const attached = new Set(this.attachedIds);
@@ -362,6 +395,16 @@ export class ScionArtifactPicker extends LitElement {
           </sl-button>
         </div>
       </sl-dialog>
+      ${this.projectId
+        ? html`<scion-artifact-publish-dialog
+            .projectId=${this.projectId}
+            ?open=${this.publishOpen}
+            @artifact-published=${(e: CustomEvent<ArtifactResponse>) => this.onPublished(e)}
+            @artifact-publish-closed=${() => {
+              this.publishOpen = false;
+            }}
+          ></scion-artifact-publish-dialog>`
+        : nothing}
     `;
   }
 
@@ -440,6 +483,9 @@ export class ScionArtifactPicker extends LitElement {
       font-size: 1rem;
       color: var(--scion-text, #0f172a);
       margin-bottom: 0.375rem;
+    }
+    .empty-action {
+      margin-top: 0.75rem;
     }
     .more {
       display: flex;

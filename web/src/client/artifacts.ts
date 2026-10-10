@@ -560,6 +560,11 @@ export interface ArtifactListFilters {
   ownedOnly?: boolean;
   /** Only artifacts a grant shares with the caller. */
   sharedOnly?: boolean;
+  /**
+   * Only artifacts homed in this project, plus those shared with it when
+   * the caller may read there (the list endpoint's scope filter).
+   */
+  scope?: string;
 }
 
 /**
@@ -573,6 +578,7 @@ export function artifactListUrl(filters: ArtifactListFilters, cursor?: string): 
   if (filters.reviewPending) params.set('review_pending', '1');
   if (filters.ownedOnly) params.set('owner', 'me');
   if (filters.sharedOnly) params.set('shared', '1');
+  if (filters.scope) params.set('scope', filters.scope);
   if (cursor) params.set('cursor', cursor);
   return `/api/v1/artifacts?${params.toString()}`;
 }
