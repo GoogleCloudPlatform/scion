@@ -727,6 +727,17 @@ describe('SSEClient stale connection detection', () => {
     client.disconnect();
   });
 
+  it('treats an absence of exactly the minimum as long enough', () => {
+    const client = connectAndOpen();
+    vi.advanceTimersByTime(100_000);
+    setVisibility('hidden');
+    vi.advanceTimersByTime(15_000);
+    setVisibility('visible');
+
+    expect(FakeEventSource.instances).toHaveLength(2);
+    client.disconnect();
+  });
+
   it('reports a stream closed silently during a bfcache stay', () => {
     const client = connectAndOpen();
     const drops = vi.fn();
@@ -741,6 +752,13 @@ describe('SSEClient stale connection detection', () => {
 
     expect(drops).toHaveBeenCalledTimes(1);
     expect(FakeEventSource.instances).toHaveLength(2);
+
+    // A late error from the superseded stream must not report the drop again
+    // or open another connection.
+    FakeEventSource.instances[0]!.onerror?.(new Event('error'));
+    expect(drops).toHaveBeenCalledTimes(1);
+    expect(FakeEventSource.instances).toHaveLength(2);
+
     latest().simulateOpen();
     expect(opens).toHaveBeenCalledTimes(1);
     client.disconnect();

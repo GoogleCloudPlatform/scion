@@ -125,8 +125,9 @@ export class SSEClient extends EventTarget {
   private heartbeatSeen = false;
   /**
    * When the tab was last hidden or the device went offline, cleared once a
-   * resume has been checked. Being away longer than staleAfterMs with no
-   * traffic since is the resume-time signal that the stream may be dead.
+   * resume has been checked. An absence of minSuspendMs or more marks the
+   * stream as suspect on resume, to be replaced if silent past staleAfterMs
+   * (see onResume).
    */
   private suspendedAt: number | null = null;
 
