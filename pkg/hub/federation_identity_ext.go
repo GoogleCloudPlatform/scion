@@ -36,13 +36,6 @@ const (
 	IssuerTypeUser IssuerType = "user"
 )
 
-// FederatedIdentity is implemented by all identity types that originate from
-// an external OIDC issuer. It provides the common federation metadata.
-type FederatedIdentity interface {
-	Identity
-	IssuerURL() string
-}
-
 // GetFederatedIdentityFromContext returns the identity if it implements FederatedIdentity.
 func GetFederatedIdentityFromContext(ctx context.Context) (FederatedIdentity, bool) {
 	id := GetIdentityFromContext(ctx)
