@@ -15,6 +15,7 @@
 package agent
 
 import (
+	"context"
 	"log/slog"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -114,7 +115,8 @@ func templateChainImage(chain []*config.Template) (image, pullPolicy string) {
 // The profile override is looked up with the profile recorded in the
 // broker-side image provenance ProvisionAgent just wrote (falling back to
 // opts.Profile only if it is missing), the same profile Start will use.
-func withProvisionedImage(opts api.StartOptions, agentDir string, cfg *api.ScionConfig) (*api.ScionConfig, error) {
+// Settings are read in the request's profile-resolution mode (ctx).
+func withProvisionedImage(ctx context.Context, opts api.StartOptions, agentDir string, cfg *api.ScionConfig) (*api.ScionConfig, error) {
 	if cfg == nil {
 		return nil, nil
 	}
@@ -128,7 +130,10 @@ func withProvisionedImage(opts api.StartOptions, agentDir string, cfg *api.Scion
 	}
 	profileImage := ""
 	if projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath); err == nil {
-		if settings, _, _ := config.LoadEffectiveSettings(projectDir); settings != nil {
+		// The request's profile-resolution mode applies: a flat Runtime Broker
+		// instance skips the profile tier, including the active_profile
+		// fallback (ProfileHarnessOverrideImage with an empty profile).
+		if settings, _, _ := config.LoadEffectiveSettingsFor(ctx, projectDir); settings != nil {
 			profileImage = settings.ProfileHarnessOverrideImage(profile, cfg.HarnessConfig)
 		}
 	}

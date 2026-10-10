@@ -219,8 +219,8 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS brokerdispatch_state_updated_at ON broke
 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `mode` | string | `"oauth"` | Selects the exclusive human auth mode: `"oauth"` (default), `"proxy"`, or `"dev"`. |
-| `dev_mode` | bool | `false` | Enable insecure development authentication (used in `"dev"` mode). |
+| `mode` | string | | Human auth mode. `"proxy"` is the only value the server checks: it then uses the proxy authenticator configured under `proxy` and offers no OAuth providers. Any other value, including unset (the default), `"oauth"` and `"dev"`, leaves the hub handling authentication itself. |
+| `dev_mode` | bool | `false` | Enable insecure development authentication. This (or the `--dev-auth` flag) is the dev auth switch; `mode` does not enable it. |
 | `dev_token` | string | | Static token for dev mode. |
 | `authorized_domains` | list | `[]` | Limit access to specific email domains. |
 | `user_access_mode` | string | `"open"` | Who may sign in: `"open"` (any verified email, subject to `authorized_domains` if set), `"domain_restricted"` (email domain must be in `authorized_domains`), or `"invite_only"` (the email must belong to an invited, allow-listed or existing user). Users in `admin_emails` are always allowed. |
@@ -355,7 +355,7 @@ Configures the backend and mount settings for storing and managing agent workspa
 | `nfs.storage_class` | string | | The Kubernetes StorageClass name used to dynamically allocate volumes on GKE. |
 | `nfs.subpath_root` | string | `"projects"` | The base folder within the share for project workspaces. See [subpath_root](#subpath_root). |
 | `nfs.shares` | list of objects | `[]` | List of NFS share objects. Each share requires: `id` (stable ID), `server` (IP address or hostname), `export` (exported path, e.g., `/scion-workspaces`), and optional `pv_name` (for GKE). |
-| `cloudrun_volume.volume_name` | string | | **Required** when `backend` is `"cloudrun-volume"` (the settings schema checks this only for the selected backend). The name of the platform volume declared in the Cloud Run service specification. The Hub resolves workspaces under `/mnt/<volume_name>`, which is where Cloud Run mounts a declared volume. If it is missing or empty, the Hub refuses to start. |
+| `cloudrun_volume.volume_name` | string | | **Required** when `backend` is `"cloudrun-volume"` (the settings schema checks this only for the selected backend). The name of the platform volume declared in the Cloud Run service specification. The Hub resolves workspaces under `/mnt/<volume_name>`, so the service must mount the volume at exactly that path; see the [Cloud Run volume example](/scion/hosted/ha/setup-gcp/#3d-deploy-the-hub-to-cloud-run) in the GCP HA setup guide. If it is missing or empty, the Hub refuses to start. |
 | `cloudrun_volume.subpath_root` | string | `"projects"` | Sub-directory prefix within the Cloud Run volume. See [subpath_root](#subpath_root). |
 | `gke_shared_volume.volume_name` | string | | **Required** when `backend` is `"gke-shared-volume"`; if it is missing or empty, the Hub refuses to start. The K8s volume name referencing the persistent volume claim (PVC). **The pod spec must mount that volume at `/mnt/<volume_name>`**: the Hub derives every workspace path from it, and a pod that mounts the PVC elsewhere fails readiness (`GET /readyz` returns `503`) rather than writing workspaces to ephemeral container storage. |
 | `gke_shared_volume.pv_claim_name` | string | | The name of the GKE-managed PVC bound to the shared storage backend (e.g. Filestore). |

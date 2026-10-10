@@ -485,7 +485,7 @@ func init() {
 		"Agent message mode: none, lineage, branch, project")
 
 	// GCP service account assignment flag
-	createCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account ID to assign to this agent (requires Hub mode)")
+	createCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account to assign to this agent: its id, email or display name (requires Hub mode)")
 }
 
 // skillResolverHubOptions returns the EnsureHubReady options for the hub

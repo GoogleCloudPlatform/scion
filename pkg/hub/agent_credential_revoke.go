@@ -258,6 +258,11 @@ func isConfirmedStartNotActedOnError(err error) bool {
 	if errors.Is(err, errStartBrokerNotConnected) || errors.Is(err, errStartRequestNotSent) {
 		return true
 	}
+	// A flat Runtime Broker refusal is raised before anything is sent.
+	var refusal *RuntimeTargetRefusal
+	if errors.As(err, &refusal) {
+		return true
+	}
 	var statusErr *brokerStatusError
 	if errors.As(err, &statusErr) {
 		return isConfirmedBrokerRejection(statusErr)

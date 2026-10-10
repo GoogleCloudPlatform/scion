@@ -531,6 +531,27 @@ type RuntimeBrokerConfig struct {
 	// dispatches whose harness-config declares a provisioner block. Defaults
 	// to true; set false to block provisioner-based dispatches on this broker.
 	AllowContainerScriptHarnesses bool `json:"allowContainerScriptHarnesses" yaml:"allowContainerScriptHarnesses" koanf:"allowContainerScriptHarnesses"`
+
+	// Instances mirrors settings server.broker.instances (flat Runtime Broker
+	// instances). Only settings.yaml may set it; a legacy server.yaml that
+	// does is rejected by LoadGlobalConfig.
+	Instances []RuntimeBrokerInstanceConfig `json:"instances,omitempty" yaml:"instances,omitempty" koanf:"instances"`
+}
+
+// RuntimeBrokerInstanceConfig is the server-config form of
+// V1RuntimeBrokerInstanceConfig.
+type RuntimeBrokerInstanceConfig struct {
+	Key           string               `json:"key" yaml:"key" koanf:"key"`
+	Name          string               `json:"name" yaml:"name" koanf:"name"`
+	RuntimeTarget *RuntimeTargetConfig `json:"runtimeTarget,omitempty" yaml:"runtimeTarget,omitempty" koanf:"runtimeTarget"`
+}
+
+// RuntimeTargetConfig is the server-config form of V1RuntimeTargetConfig.
+type RuntimeTargetConfig struct {
+	Type        string `json:"type" yaml:"type" koanf:"type"`
+	DisplayName string `json:"displayName,omitempty" yaml:"displayName,omitempty" koanf:"displayName"`
+	Context     string `json:"context,omitempty" yaml:"context,omitempty" koanf:"context"`
+	Namespace   string `json:"namespace,omitempty" yaml:"namespace,omitempty" koanf:"namespace"`
 }
 
 // DatabaseConfig holds database connection settings.
@@ -585,7 +606,12 @@ func (d DatabaseConfig) ConnMaxIdleTimeDuration() (time.Duration, error) {
 
 // DevAuthConfig holds authentication settings.
 type DevAuthConfig struct {
-	// Mode selects the exclusive human auth mode: "oauth" (default), "proxy", or "dev".
+	// Mode selects the human auth mode. "proxy" is the only value the code
+	// checks: the server then uses the configured proxy authenticator and
+	// offers no OAuth providers. Any other value, including "" (the
+	// default), "oauth" and "dev", leaves the hub handling authentication
+	// itself. Dev auth is enabled by Enabled (the --dev-auth flag or the
+	// server.auth.dev_mode setting), not by Mode.
 	Mode string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
 	// Enabled indicates whether development authentication is enabled.
 	// WARNING: Not for production use.
@@ -1370,6 +1396,12 @@ func loadGlobalConfigLegacy(configPath string, topLevel map[string]interface{}) 
 
 	if err := k.Unmarshal("", config); err != nil {
 		return nil, err
+	}
+
+	// Flat Runtime Broker instances are configured only under
+	// server.broker.instances in settings.yaml, never in legacy server.yaml.
+	if len(config.RuntimeBroker.Instances) > 0 {
+		return nil, ErrRuntimeBrokerInstancesInServerYAML
 	}
 
 	if topLevel != nil {

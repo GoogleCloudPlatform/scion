@@ -855,6 +855,15 @@ func leafEdits(t *testing.T, typ reflect.Type, path []string, skip map[string]bo
 			apply = func(obj map[string]any) { objectAt(obj, p)[k] = []any{maskedValue} }
 		case base.Kind() == reflect.Map && base.Key().Kind() == reflect.String && base.Elem().Kind() == reflect.String:
 			apply = func(obj map[string]any) { objectAt(obj, p)[k] = map[string]any{"k": maskedValue} }
+		case base == reflect.TypeOf([]config.V1RuntimeBrokerInstanceConfig{}):
+			// server.broker.instances: one valid flat Runtime Broker
+			// instance entry.
+			apply = func(obj map[string]any) {
+				objectAt(obj, p)[k] = []any{map[string]any{
+					"key": "matrix-edit", "name": "matrix-edit",
+					"runtime_target": map[string]any{"type": "docker"},
+				}}
+			}
 		default:
 			t.Fatalf("leafEdits: unsupported field %s of type %s; add an edit for it", name, ft)
 		}
