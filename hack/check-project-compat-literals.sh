@@ -169,6 +169,10 @@ allowed_paths=(
   # legacy_scope_migration.go rewrites them; the literal is the point of the
   # test.
   "^pkg/store/entadapter/legacy_scope_migration_test.go$"
+  # Seeds duplicate agent_session_metrics rows for the pre-migration dedup
+  # test. grove_id is the table's physical column (StorageKey in the ent
+  # schema), so the literal is required.
+  "^pkg/store/enttest/premigrate_fixture.go$"
   "^pkg/store/models_json_test.go$"
   # Asserts ConnectMessage/StreamOpenMessage no longer emit or decode the
   # removed "groves"/"groveId" names. The literal is the point of the
