@@ -96,6 +96,8 @@ func NewOTelHandler(component string, lp log.LoggerProvider) slog.Handler {
 // If lp is nil, falls back to standard Setup behavior.
 // Extra handlers (e.g., CloudHandler) are appended to the handler chain.
 func SetupWithOTel(component, hubName string, debug bool, useGCP bool, lp log.LoggerProvider, extraHandlers ...slog.Handler) {
+	ApplyDebugFlag(debug)
+
 	// Collect all handlers
 	var handlers []slog.Handler
 
@@ -106,7 +108,7 @@ func SetupWithOTel(component, hubName string, debug bool, useGCP bool, lp log.Lo
 	onCloudRun := os.Getenv("K_SERVICE") != ""
 	cloudHandlerPresent := hasCloudHandler(extraHandlers)
 	if !onCloudRun || !cloudHandlerPresent {
-		baseHandler := createBaseHandler(component, debug, useGCP, hubName)
+		baseHandler := createBaseHandler(component, useGCP, hubName)
 		handlers = append(handlers, baseHandler)
 	}
 
@@ -123,7 +125,9 @@ func SetupWithOTel(component, hubName string, debug bool, useGCP bool, lp log.Lo
 		handler = newMultiHandler(handlers...)
 	}
 
-	logger := slog.New(handler)
+	// Gate the whole chain with the shared level state so every sink
+	// honours SCION_LOG_LEVEL, including per-component levels.
+	logger := slog.New(newLevelFilter(handler))
 	slog.SetDefault(logger)
 }
 

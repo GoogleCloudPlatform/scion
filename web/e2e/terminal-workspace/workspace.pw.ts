@@ -1844,13 +1844,12 @@ test('keyboard "Place in pane" action places session without drag gesture', asyn
   expect(pos!.visible).toBe(true);
   expect(pos!.col).toBe('1');
 
-  // Aria-live should announce the placement
-  const announcement = await page.evaluate(() => {
-    return document.querySelector('.terminal-aria-live')?.textContent ?? '';
-  });
-  expect(announcement).toContain('Placed');
-  expect(announcement).toContain('alpha');
-  expect(announcement).toContain('slot 1');
+  // Aria-live should announce the placement. Scope to the polite status
+  // region: the bulk-action reason spans reuse the visually-hidden
+  // .terminal-aria-live class and come first in DOM order.
+  await expect(page.locator('#terminal-workspace .terminal-aria-live[role="status"]')).toHaveText(
+    'Placed alpha in slot 1'
+  );
 
   // No new sockets
   expect(socket.attaches).toBe(2);

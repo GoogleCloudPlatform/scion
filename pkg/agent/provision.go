@@ -752,7 +752,7 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 			// (§3.7), same as every other precondition here; the
 			// reincarnation is recorded failed with this error as the
 			// reason, and the agent stays stopped until a retry.
-			settings, _, err := config.LoadEffectiveSettings(projectDir)
+			settings, _, err := config.LoadEffectiveSettingsFor(ctx, projectDir)
 			if err != nil {
 				return nil, fmt.Errorf("reprovision: load effective settings: %w", err)
 			}
@@ -829,7 +829,7 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 		}
 	}
 
-	return withProvisionedImage(opts, agentDir, cfg)
+	return withProvisionedImage(ctx, opts, agentDir, cfg)
 }
 
 // writeReprovisionPrompt replaces prompt.md in agentDir with task, or
@@ -915,7 +915,7 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 		}
 	}
 
-	return withProvisionedImage(opts, agentDir, cfg)
+	return withProvisionedImage(ctx, opts, agentDir, cfg)
 }
 
 // resolveHarnessConfigDir returns the harness-config directory for an agent,
@@ -1083,7 +1083,7 @@ func PreflightResolve(ctx context.Context, opts api.StartOptions) error {
 		return err
 	}
 
-	settings, warnings, _ := config.LoadEffectiveSettings(projectDir)
+	settings, warnings, _ := config.LoadEffectiveSettingsFor(ctx, projectDir)
 	config.PrintDeprecationWarnings(warnings)
 
 	profileName := opts.Profile
@@ -1290,7 +1290,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		return "", "", nil, err
 	}
 
-	settings, warnings, _ := config.LoadEffectiveSettings(projectDir)
+	settings, warnings, _ := config.LoadEffectiveSettingsFor(ctx, projectDir)
 	config.PrintDeprecationWarnings(warnings)
 	if profileName == "" && settings != nil {
 		profileName = settings.ActiveProfile
@@ -1368,6 +1368,41 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
+	// 2a-inline. Capture the inline config (if provided) for the merge below.
+	var inlineCfg *api.ScionConfig
+	if len(inlineConfig) > 0 && inlineConfig[0] != nil {
+		inlineCfg = inlineConfig[0]
+	}
+
+	// Capture the inline config's own image/pull-policy — if any — before
+	// harness-config resolution. Deliberately NOT finalScionCfg.Image: that
+	// already includes the template's contribution, and a template is
+	// re-read live on every Start (see run.go), so persisting it here would
+	// let a create-time template snapshot outrank the CURRENT template on a
+	// later restart. Only the inline config has no live source to re-derive
+	// from at Start time — a local restart's request has no --config unless
+	// the caller repeats it — so only its contribution needs to survive via
+	// agent-info.json (AgentInfo.ExplicitImage / .ExplicitImagePullPolicy),
+	// as the explicit tier's fallback when the current Start request has no
+	// inline image/pull-policy of its own (ptone/scion#2156).
+	explicitImage := ""
+	explicitPullPolicy := ""
+	if inlineCfg != nil {
+		explicitImage = inlineCfg.Image
+		if inlineCfg.Kubernetes != nil {
+			explicitPullPolicy = inlineCfg.Kubernetes.ImagePullPolicy
+		}
+	}
+
+	// 2, 2b, 2c. Load the template chain, merge configs and resolve the
+	// harness-config, through the same resolution Preflight uses. This runs
+	// before the agent directory and workspace are created, so a resolution
+	// failure (unknown template or harness-config) leaves nothing behind:
+	// no agent dir, no worktree and no branch (ptone/scion#3135).
+	rt, err := resolveTemplateAndHarnessConfig(ctx, templateName, harnessConfig, projectPath, projectDir, profileName, settings, inlineCfg)
+	if err != nil {
+		return "", "", nil, err
+	}
 	_, agentDirStatErr := os.Lstat(agentDir)
 	newAgentDir := errors.Is(agentDirStatErr, fs.ErrNotExist)
 	if err := os.MkdirAll(agentDir, 0755); err != nil {
@@ -1595,38 +1630,6 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
-	// 2a-inline. Capture the inline config (if provided) for the merge below.
-	var inlineCfg *api.ScionConfig
-	if len(inlineConfig) > 0 && inlineConfig[0] != nil {
-		inlineCfg = inlineConfig[0]
-	}
-
-	// Capture the inline config's own image/pull-policy — if any — before
-	// harness-config resolution. Deliberately NOT finalScionCfg.Image: that
-	// already includes the template's contribution, and a template is
-	// re-read live on every Start (see run.go), so persisting it here would
-	// let a create-time template snapshot outrank the CURRENT template on a
-	// later restart. Only the inline config has no live source to re-derive
-	// from at Start time — a local restart's request has no --config unless
-	// the caller repeats it — so only its contribution needs to survive via
-	// agent-info.json (AgentInfo.ExplicitImage / .ExplicitImagePullPolicy),
-	// as the explicit tier's fallback when the current Start request has no
-	// inline image/pull-policy of its own (ptone/scion#2156).
-	explicitImage := ""
-	explicitPullPolicy := ""
-	if inlineCfg != nil {
-		explicitImage = inlineCfg.Image
-		if inlineCfg.Kubernetes != nil {
-			explicitPullPolicy = inlineCfg.Kubernetes.ImagePullPolicy
-		}
-	}
-
-	// 2, 2b, 2c. Load the template chain, merge configs and resolve the
-	// harness-config, through the same resolution Preflight uses.
-	rt, err := resolveTemplateAndHarnessConfig(ctx, templateName, harnessConfig, projectPath, projectDir, profileName, settings, inlineCfg)
-	if err != nil {
-		return "", "", nil, err
-	}
 	chain := rt.Chain
 	finalScionCfg := rt.Config
 	harnessConfigName := rt.HarnessConfigName
@@ -3062,7 +3065,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	}
 
 	// Load settings for default template
-	vs, vsWarnings, err := config.LoadEffectiveSettings(projectDir)
+	vs, vsWarnings, err := config.LoadEffectiveSettingsFor(ctx, projectDir)
 	if err != nil {
 		util.Debugf("failed to load effective settings: %v", err)
 	}

@@ -157,7 +157,7 @@ function membersBody(tag: string) {
 }
 
 describe('members sidebar stale-response guard', () => {
-  it("aborts the previous view's members request when another view claims the sidebar", async () => {
+  it("aborts the previous view's members request when another view claims the sidebar", () => {
     const page = createPage();
     const signalFor = (projectId: string): AbortSignal | undefined => {
       const call = vi.mocked(apiFetch).mock.calls.find((c) => String(c[0]).includes(projectId)) as

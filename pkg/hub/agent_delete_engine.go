@@ -198,11 +198,23 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 				}
 			}
 			post := *cur
-			post.DeletionState = store.DeletionStateDeleting
-			if deleteClaimStopping(cur) {
-				stopping := string(state.PhaseStopping)
-				f.Phase = &stopping
-				post.Phase = stopping
+			if cur.DeletionState == store.DeletionStateFinalizing {
+				// A re-claim of an abandoned finalizing row: teardown
+				// already ran (skipDispatch). Keep it finalizing so it
+				// keeps holding the row (DeletionHoldsRow) even if this
+				// engine dies too, and leave the phase alone
+				// (ptone/scion#2890).
+				finalizing := store.DeletionStateFinalizing
+				f.State = &finalizing
+				post.DeletionState = store.DeletionStateFinalizing
+			} else {
+				f.State = &deleting
+				post.DeletionState = store.DeletionStateDeleting
+				if deleteClaimStopping(cur) {
+					stopping := string(state.PhaseStopping)
+					f.Phase = &stopping
+					post.Phase = stopping
+				}
 			}
 			// Soft unless force, no retention, or an incomplete async create
 			// (T1 §0c, evaluated on the post-claim row): those are always
@@ -485,6 +497,10 @@ func (e *deletionEngine) abandonOutcome() deletionOutcome {
 // (or the executing hub node) refused the dispatch as stale.
 const staleDispatchMessage = "the broker received the delete after its deadline and did nothing; retry the delete"
 
+// managedDeleteFailedPrefix starts the runtime_error message of a managed
+// delete whose cloud cleanup failed; the backend error follows.
+const managedDeleteFailedPrefix = "Failed to delete managed agent cloud resources: "
+
 // abandonWith abandons the claim (see abandon) and returns failed{abandoned}
 // with msg.
 func (e *deletionEngine) abandonWith(msg string) deletionOutcome {
@@ -623,16 +639,24 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 	}()
 
 	// Managed agent: clean up cloud resources directly, skip the broker.
-	// Errors are logged, as before (follow-up 4).
+	// A failure (including no managed backend on this hub) fails the delete
+	// and restores the prior phase, as a broker error does; force=true logs
+	// it and continues (ptone/scion#2883).
 	if isManagedAgentRuntime(agent.Runtime) {
-		if err := s.managedAgentDelete(ctx, agent); err != nil {
-			s.agentLifecycleLog.Warn("Failed to delete managed agent cloud resources",
-				"agent_id", agent.ID, "error", err)
-		}
+		err := s.managedAgentDelete(ctx, agent)
 		if e.isLost() {
 			return e.lost(), false
 		}
-		return deletionOutcome{}, true
+		if err == nil {
+			return deletionOutcome{}, true
+		}
+		if req.Force {
+			s.agentLifecycleLog.Warn("Failed to delete managed agent cloud resources (force=true, continuing)",
+				"agent_id", agent.ID, "error", err)
+			return deletionOutcome{}, true
+		}
+		s.agentLifecycleLog.Error("Failed to delete managed agent cloud resources", "agent_id", agent.ID, "error", err)
+		return e.rollback(store.DeletionCodeRuntimeError, managedDeleteFailedPrefix+err.Error()), false
 	}
 
 	dispatcher := s.GetDispatcher()
@@ -825,6 +849,10 @@ func (e *deletionEngine) rollback(code, msg string) deletionOutcome {
 		Error:    &msg,
 		Derive: func(cur *store.Agent, f *store.DeletionFields) {
 			if prior.LaunchID != "" && (cur.LaunchState != store.LaunchStateActive || cur.LaunchID != prior.LaunchID) {
+				// C2: the launch has ended, so the phase=stopped this
+				// restores is published as a real transition, and a stopped
+				// lifecycle hook firing on this failed delete is intended
+				// (ptone/scion#2891).
 				stopped := string(state.PhaseStopped)
 				noActivity := ""
 				f.Phase = &stopped
@@ -907,6 +935,8 @@ const deleteInDoubtMessage = "teardown may still complete on the broker; retry o
 // failInDoubt fails the delete with in_doubt without restoring a live phase:
 // the hub does not know whether the container still exists. Start stays
 // blocked while the intent is outstanding (deleteBlocksStart).
+// If the intent completed meanwhile, recheckInDoubt deletes again and its
+// outcome is returned instead.
 func (e *deletionEngine) failInDoubt() deletionOutcome {
 	e.stopRenewal()
 	ctx, cancel := context.WithTimeout(e.base, deleteStepTimeout)
@@ -925,7 +955,16 @@ func (e *deletionEngine) failInDoubt() deletionOutcome {
 	if n == 0 {
 		return e.lost()
 	}
-	e.publishStatus(ctx)
+	if h := inDoubtWrittenHook; h != nil {
+		h(e.agentID())
+	}
+	if out, ok := e.recheckInDoubt(); ok {
+		// No in_doubt status: watchers see the re-claim's delete instead.
+		return out
+	}
+	pctx, pcancel := context.WithTimeout(e.base, deleteStepTimeout)
+	defer pcancel()
+	e.publishStatus(pctx)
 	return deletionOutcome{kind: deletionOutcomeFailed, code: code, message: msg}
 }
 

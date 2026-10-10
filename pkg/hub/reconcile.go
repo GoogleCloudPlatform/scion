@@ -177,6 +177,9 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 	if err != nil {
 		return "", err
 	}
+	if err := s.refuseQueuedStartForDelete(ctx, agent, "start"); err != nil {
+		return "", err
+	}
 	defer s.beginLifecycleOp(agent.ID)()
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
@@ -331,6 +334,9 @@ func (s *Server) execDispatchRestart(ctx context.Context, d store.BrokerDispatch
 	if err != nil {
 		return "", err
 	}
+	if err := s.refuseQueuedStartForDelete(ctx, agent, "restart"); err != nil {
+		return "", err
+	}
 	defer s.beginLifecycleOp(agent.ID)()
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
@@ -423,6 +429,9 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 		}
 		return "", fmt.Errorf("dispatch delete: %w", err)
 	}
+	// The intent ran. If its delete ended in_doubt, finish it now, before
+	// the drain marks the intent done (ptone/scion#2882).
+	s.finalizeInDoubtDelete(ctx, agent.ID, args)
 	return "", nil
 }
 

@@ -450,7 +450,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		gcpIdentityProfile = in.Config.Profile
 	}
 	profileMode := profileLenient
-	if gcpIdentityProfile == "" && in.Operation != opCreate {
+	// A flat instance does no profile-based runtime classification here: it
+	// serves exactly one runtime target (resolveManagerForOptsStrict bypasses
+	// profile resolution for it), so profileMode stays lenient. The start and
+	// restart handlers' image-provenance integrity read
+	// (runtimeSelectionOpts) still runs for it.
+	if gcpIdentityProfile == "" && in.Operation != opCreate && !s.isFlat() {
 		profile, provisioned, err := classificationProfile(in)
 		if err != nil {
 			var pe *agent.ImageProvenanceError
@@ -727,11 +732,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		classifyBrokerEnv("SCION_CREATOR", api.EnvKindPlain)
 	}
 
-	// 7. Debug
-	if s.config.Debug {
-		env["SCION_DEBUG"] = "1"
-		classifyBrokerEnv("SCION_DEBUG", api.EnvKindPlain)
-	}
+	// 7. Debug: the broker's own debug setting is not propagated into agent
+	// environments (ptone/scion#4098). To debug an agent, set SCION_LOG_LEVEL
+	// explicitly (scion start --agent-log-level, hub env at user or project
+	// scope, or the agent's config env); it arrives through the request env
+	// merged above.
 
 	// 8. GCP identity metadata server configuration: write env vars for the
 	// mode resolved and validated earlier in this function, after the

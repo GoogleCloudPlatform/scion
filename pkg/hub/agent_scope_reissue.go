@@ -62,8 +62,9 @@ import (
 // The re-issue never runs from refresh, start, restart, startup, the
 // scheduler or reconcile.
 //
-// Phase 1 covers agents whose edge names an agent delegator. A user
-// delegator is refused with errReissueUnsupportedDelegator.
+// Both delegator kinds are covered: a live parent agent, and a live user
+// through the source credential recorded on the edge (session, user
+// access token, or local development).
 
 // mintSiteReissue is the mint site of a scope re-issue.
 const mintSiteReissue mintSite = "reissue"
@@ -93,9 +94,6 @@ const (
 )
 
 var (
-	// errReissueUnsupportedDelegator: the agent's edge names a delegator
-	// kind the re-issue does not handle yet.
-	errReissueUnsupportedDelegator = errors.New("scope re-issue: delegator kind not supported")
 	// errReissueConflict: the agent or its edge changed while the re-issue
 	// ran.
 	errReissueConflict = errors.New("scope re-issue: agent or delegation edge changed concurrently")
@@ -164,6 +162,7 @@ type ScopeReissueResponse struct {
 // reissueAuditSummary is the AfterSummary of agent_scopes_reissued.
 type reissueAuditSummary struct {
 	OpID               string                 `json:"op_id"`
+	BatchOpID          string                 `json:"batch_op_id,omitempty"`
 	DryRun             bool                   `json:"dry_run"`
 	ScopesAdded        []string               `json:"scopes_added"`
 	ScopesRemoved      []string               `json:"scopes_removed"`
@@ -180,6 +179,7 @@ type reissueAuditSummary struct {
 // agent_scopes_reissue_dispatch. It names no scopes.
 type reissueDispatchSummary struct {
 	OpID               string `json:"op_id"`
+	BatchOpID          string `json:"batch_op_id,omitempty"`
 	CredentialsRevoked int    `json:"credentials_revoked"`
 	Dispatched         bool   `json:"dispatched"`
 	Skipped            string `json:"skipped,omitempty"`
@@ -287,7 +287,7 @@ func reissueErrorFromChain(err error) error {
 // the dry-run diff is the real one.
 //
 // Errors are *agentTokenIssueError (Cause for a refusal, Lookup for a
-// fault, Standing for a held agent), or errReissueUnsupportedDelegator.
+// fault, Standing for a held agent).
 func (s *Server) computeScopeReissue(ctx context.Context, agent *store.Agent) (*scopeReissuePlan, error) {
 	a := s.authzService
 	if a == nil {
@@ -296,7 +296,10 @@ func (s *Server) computeScopeReissue(ctx context.Context, agent *store.Agent) (*
 	if agent == nil || !agent.DeletedAt.IsZero() {
 		return nil, reissueRefusal(DenyCauseCeilingOrphaned, fmt.Errorf("%w: agent deleted", ErrProvenanceChain))
 	}
-	ctx = contextWithDelegationCeilingCache(ctx)
+	// Fresh per computation: no edge or principal memo from the caller's
+	// request carries over, so in a bulk run a child always sees its
+	// parent's committed (or, in a dry run, overlaid) edge.
+	ctx = contextWithDelegationCeilingCache(maskAllAuthzMemo(ctx))
 
 	// The single active project edge E.
 	active, err := a.activeProjectEdges(ctx, agent.ID, agent.ProjectID)
@@ -344,7 +347,9 @@ func (s *Server) computeScopeReissue(ctx context.Context, agent *store.Agent) (*
 			return nil, err
 		}
 	case store.DelegationPrincipalUser:
-		return nil, errReissueUnsupportedDelegator
+		if err := s.planUserDelegatorReissue(ctx, plan, storedRole, projectMax); err != nil {
+			return nil, err
+		}
 	default:
 		return nil, reissueRefusal(DenyCauseCeilingOrphaned, fmt.Errorf("%w: edge %s has delegator type %q", ErrProvenanceChain, edge.ID, edge.DelegatorType))
 	}
@@ -383,6 +388,7 @@ func (s *Server) planAgentDelegatorReissue(ctx context.Context, plan *scopeReiss
 	if parent == nil || !parent.DeletedAt.IsZero() {
 		return reissueRefusal(DenyCauseCeilingOrphaned, fmt.Errorf("%w: delegator agent %s deleted", ErrProvenanceChain, edge.DelegatorID))
 	}
+	parent = reissueOverlayFrom(ctx).agent(parent)
 	if parent.ProjectID != agent.ProjectID {
 		return reissueRefusal(DenyCauseCeilingOrphaned, fmt.Errorf("%w: delegator agent %s is in another project", ErrProvenanceChain, parent.ID))
 	}
@@ -491,6 +497,210 @@ func (s *Server) planAgentDelegatorReissue(ctx context.Context, plan *scopeReiss
 		CeilingKind:          string(ceiling.Kind),
 	}
 	return nil
+}
+
+// planUserDelegatorReissue fills plan for an edge whose delegator is the
+// live user U. The source credential recorded on E selects the identity
+// the creation path would see: the user's session (principal ceiling), the
+// recorded user access token (its frozen ceiling, never re-derived), or the
+// local development user (principal, when local development authority is
+// enabled). The ceiling then comes from sourceEffectCeiling, the function
+// agent creation uses.
+func (s *Server) planUserDelegatorReissue(ctx context.Context, plan *scopeReissuePlan, storedRole, projectMax AgentRole) error {
+	a := s.authzService
+	agent, edge := plan.agent, plan.edge
+
+	user, err := s.store.GetUser(ctx, edge.DelegatorID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return reissueRefusal(DenyCauseCeilingOrphaned, fmt.Errorf("%w: delegator user %s not found", ErrProvenanceChain, edge.DelegatorID))
+		}
+		return reissueLookupFault(fmt.Errorf("delegator user lookup: %w", err))
+	}
+	if user == nil || user.Status != store.UserStatusActive {
+		return reissueRefusal(DenyCauseCeilingDelegatorLacksPermission, fmt.Errorf("delegator user %s is not active", edge.DelegatorID))
+	}
+
+	var actor Identity
+	switch edge.SourceCredentialKind {
+	case store.SourceCredentialSession:
+		actor = NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "")
+	case store.SourceCredentialUAT:
+		scoped, err := s.reissueUATIdentity(ctx, edge, user)
+		if err != nil {
+			return err
+		}
+		actor = scoped
+	case store.SourceCredentialDevLocal:
+		var devUserActive bool
+		if err := a.devLocalHopUsable(ctx, edge, &devUserActive); err != nil {
+			return reissueErrorFromChain(err)
+		}
+		actor = NewDevUser(DevUserConfig{})
+	default:
+		return reissueRefusal(DenyCauseCeilingSourceNotAllowed, fmt.Errorf("%w: edge %s source credential %q", errSourceNotAllowed, edge.ID, edge.SourceCredentialKind))
+	}
+
+	role := minRole(storedRole, projectMax)
+	// The delegator is evaluated on its own: the operator's memoized
+	// request inputs are masked.
+	ctx = maskAuthzInputs(ctx)
+	decision := a.CanDelegate(ctx, actor, GrantDescriptor{
+		Type:      GrantTypeAgentDelegation,
+		AgentRole: string(role),
+		ProjectID: agent.ProjectID,
+		ScopeType: store.RoleScopeProject,
+		ScopeID:   agent.ProjectID,
+	})
+	if !decision.Allowed {
+		return reissueRefusal(DenyCauseCeilingDelegatorLacksPermission, fmt.Errorf("delegator user %s cannot delegate role %q: %s", user.ID, role, decision.Reason))
+	}
+	ceiling, _, err := a.sourceEffectCeiling(ctx, actor)
+	if err != nil {
+		return reissueErrorFromChain(err)
+	}
+	capped, cause, ok := childRoleWithinCeiling(ceiling, role, false)
+	if !ok {
+		return reissueRefusal(cause, fmt.Errorf("no agent role fits the delegator's current ceiling"))
+	}
+	role = capped
+	candidates := reissueCandidateScopes(a, agent, role)
+
+	// Condition 2, as for an agent delegator: a lookup fault while
+	// evaluating the user's live authority for a covered permission
+	// withholds the scope. Under a principal ceiling the fault is
+	// recorded by narrowing to a bounded ceiling that leaves the
+	// permission out.
+	faulted := map[string]bool{}
+	for _, scope := range candidates {
+		for _, perm := range scopeCeilingPermissions(scope) {
+			if selfOperationSet[perm] || faulted[perm] {
+				continue
+			}
+			if ceiling.Kind == store.EffectCeilingBounded && !containsString(ceiling.PermissionIDs, perm) {
+				continue
+			}
+			if s.reissueUserDelegatorFault(ctx, agent, user.ID, perm) {
+				faulted[perm] = true
+			}
+		}
+	}
+	if len(faulted) > 0 {
+		ceiling = ceilingWithout(ceiling, faulted)
+	}
+
+	after, err := a.reissueFilteredScopes(ctx, candidates, ceiling, nil)
+	if err != nil {
+		return reissueErrorFromChain(err)
+	}
+	afterSet := scopeSet(after)
+	var withheld []reissueWithheldScope
+	for _, scope := range candidates {
+		if afterSet[scope] {
+			continue
+		}
+		cause := reissueWithheldCeiling
+		for _, perm := range scopeCeilingPermissions(scope) {
+			if faulted[perm] {
+				cause = reissueWithheldLookup
+				break
+			}
+		}
+		withheld = append(withheld, reissueWithheldScope{Scope: string(scope), Cause: cause})
+	}
+
+	plan.roleAfter = role
+	plan.ceiling = ceiling
+	plan.after = after
+	plan.withheld = withheld
+	plan.source = reissueCeilingSource{
+		DelegatorKind:        store.DelegationPrincipalUser,
+		DelegatorID:          user.ID,
+		SourceCredentialKind: string(edge.SourceCredentialKind),
+		SourceCredentialID:   edge.SourceCredentialID,
+		CeilingKind:          string(ceiling.Kind),
+	}
+	return nil
+}
+
+// reissueUATIdentity rebuilds the scoped identity of the user access token
+// recorded on edge. A missing, revoked or expired token, one of another
+// user, or one with an invalid stored boundary refuses the re-issue: the
+// agent must be re-created from a current credential.
+func (s *Server) reissueUATIdentity(ctx context.Context, edge *store.DelegationEdge, user *store.User) (*ScopedUserIdentity, error) {
+	refuse := func(why string) error {
+		return reissueRefusal(DenyCauseCeilingSourceNotAllowed, fmt.Errorf("%w: source access token %s", errSourceNotAllowed, why))
+	}
+	if edge.SourceCredentialID == "" {
+		return nil, refuse("not recorded")
+	}
+	tok, err := s.store.GetUserAccessToken(ctx, edge.SourceCredentialID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, refuse("not found")
+		}
+		return nil, reissueLookupFault(fmt.Errorf("access token lookup: %w", err))
+	}
+	switch {
+	case tok == nil:
+		return nil, refuse("not found")
+	case tok.Revoked:
+		return nil, refuse("revoked")
+	case tok.ExpiresAt != nil && time.Now().After(*tok.ExpiresAt):
+		return nil, refuse("expired")
+	case tok.UserID != user.ID:
+		return nil, refuse("belongs to another user")
+	}
+	if err := tok.ValidateBoundary(); err != nil {
+		return nil, refuse("has an invalid boundary")
+	}
+	boundary := TokenBoundary{Kind: BoundaryKind(tok.BoundaryKind), ProjectID: tok.ProjectID}
+	return NewScopedUserIdentityWithBoundary(
+		NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, string(ClientTypeAPI)),
+		boundary, tok.Scopes, tok.ID, tok.NormalizedCeiling(),
+	), nil
+}
+
+// reissueUserDelegatorFault reports whether evaluating the user's live
+// authority for perm hits a lookup fault. A denial is not a fault.
+func (s *Server) reissueUserDelegatorFault(ctx context.Context, agent *store.Agent, userID, perm string) bool {
+	if reissueLiveCheckFault != nil {
+		if err := reissueLiveCheckFault(perm); err != nil {
+			return true
+		}
+	}
+	resource, action, ok := reissuePermissionTarget(agent, perm)
+	if !ok {
+		return true
+	}
+	_, _, err := s.authzService.resolveUserDelegatorAuthority(maskAuthzInputs(ctx), userID, resource, action, perm,
+		store.RoleScopeProject, agent.ProjectID)
+	return err != nil
+}
+
+// ceilingWithout returns c less the permissions in drop. A principal
+// ceiling becomes bounded over every registry permission not in drop.
+func ceilingWithout(c store.EffectCeiling, drop map[string]bool) store.EffectCeiling {
+	var base []string
+	switch c.Kind {
+	case store.EffectCeilingPrincipal:
+		for _, p := range permissions.Registry {
+			base = append(base, p.ID)
+		}
+		c = store.EffectCeiling{Kind: store.EffectCeilingBounded, Version: permissions.CeilingVersionV1}
+	case store.EffectCeilingBounded:
+		base = c.PermissionIDs
+	default:
+		return c
+	}
+	var ids []string
+	for _, id := range base {
+		if !drop[id] {
+			ids = append(ids, id)
+		}
+	}
+	c.PermissionIDs = sortedUniqueIDs(ids)
+	return c
 }
 
 // reissueAgentDelegatorLive probes permission perm against the live chain
@@ -707,13 +917,14 @@ func removeString(list []string, v string) []string {
 }
 
 // reissueAuditRecord builds the agent_scopes_reissued record for plan.
-func reissueAuditRecord(plan *scopeReissuePlan, opID string, dryRun bool, edgeNew string, revoked int, actor AuditActor, now time.Time) (*store.MutationAuditRecord, error) {
+func reissueAuditRecord(plan *scopeReissuePlan, opID, batchOpID string, dryRun bool, edgeNew string, revoked int, actor AuditActor, now time.Time) (*store.MutationAuditRecord, error) {
 	withheld := plan.withheld
 	if withheld == nil {
 		withheld = []reissueWithheldScope{}
 	}
 	return lifecycleAudit(mutationTypeAgentScopesReissued, plan.agent.ID, actor, now, reissueAuditSummary{
 		OpID:               opID,
+		BatchOpID:          batchOpID,
 		DryRun:             dryRun,
 		ScopesAdded:        scopeStrings(plan.added),
 		ScopesRemoved:      scopeStrings(plan.removed),
@@ -727,16 +938,13 @@ func reissueAuditRecord(plan *scopeReissuePlan, opID string, dryRun bool, edgeNe
 	})
 }
 
-// commitScopeReissue writes the re-issue in one transaction: deactivate E
-// (guarded on its updated time, so a concurrent change refuses), create E',
-// lower the stored role when it went down, revoke every active credential
-// of the agent, and write the agent_scopes_reissued record. Nothing is
-// written when any step fails. It returns E' and the revoked count.
-func (s *Server) commitScopeReissue(ctx context.Context, plan *scopeReissuePlan, operator reissueOperator, opID string) (*store.DelegationEdge, int, error) {
-	actor := auditActorFromContext(ctx)
-	now := time.Now()
+// replacementEdge returns E', the edge that replaces plan.edge: the same
+// delegator and source, the re-issued role and ceiling, and the operator as
+// initiator. The commit writes it; a bulk dry run hands it to descendants
+// through the overlay instead (reissueOverlay).
+func (plan *scopeReissuePlan) replacementEdge(operator reissueOperator) *store.DelegationEdge {
 	old := plan.edge
-	newEdge := &store.DelegationEdge{
+	return &store.DelegationEdge{
 		DelegatorType: old.DelegatorType,
 		DelegatorID:   old.DelegatorID,
 		DelegateType:  store.DelegationPrincipalAgent,
@@ -760,6 +968,18 @@ func (s *Server) commitScopeReissue(ctx context.Context, plan *scopeReissuePlan,
 		},
 		EffectCeiling: plan.ceiling,
 	}
+}
+
+// commitScopeReissue writes the re-issue in one transaction: deactivate E
+// (guarded on its updated time, so a concurrent change refuses), create E',
+// lower the stored role when it went down, revoke every active credential
+// of the agent, and write the agent_scopes_reissued record. Nothing is
+// written when any step fails. It returns E' and the revoked count.
+func (s *Server) commitScopeReissue(ctx context.Context, plan *scopeReissuePlan, operator reissueOperator, opID, batchOpID string) (*store.DelegationEdge, int, error) {
+	actor := auditActorFromContext(ctx)
+	now := time.Now()
+	old := plan.edge
+	newEdge := plan.replacementEdge(operator)
 	revoked := 0
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
 		updatedAt := old.UpdatedAt
@@ -809,7 +1029,7 @@ func (s *Server) commitScopeReissue(ctx context.Context, plan *scopeReissuePlan,
 			return fmt.Errorf("scope re-issue: revoke credentials: %w", err)
 		}
 		revoked = n
-		record, err := reissueAuditRecord(plan, opID, false, newEdge.ID, revoked, actor, now)
+		record, err := reissueAuditRecord(plan, opID, batchOpID, false, newEdge.ID, revoked, actor, now)
 		if err != nil {
 			return err
 		}
@@ -857,7 +1077,9 @@ func reissueDispatchErrorClass(err error) string {
 // runScopeReissue runs a re-issue for agent: compute, then for a dry run
 // write the dry-run record; for a no-op write nothing; otherwise commit and
 // dispatch the new token to a running agent.
-func (s *Server) runScopeReissue(ctx context.Context, agent *store.Agent, operator reissueOperator, dryRun bool) (*ScopeReissueResponse, error) {
+//
+// batchOpID, when set, is recorded on every row the run writes (bulk mode).
+func (s *Server) runScopeReissue(ctx context.Context, agent *store.Agent, operator reissueOperator, dryRun bool, batchOpID string) (*ScopeReissueResponse, error) {
 	opID := api.NewUUID()
 	plan, err := s.computeScopeReissue(ctx, agent)
 	if err != nil {
@@ -868,31 +1090,22 @@ func (s *Server) runScopeReissue(ctx context.Context, agent *store.Agent, operat
 		}
 		return nil, err
 	}
-	resp := &ScopeReissueResponse{
-		OpID:          opID,
-		AgentID:       agent.ID,
-		DryRun:        dryRun,
-		Noop:          plan.noop,
-		Added:         scopeStrings(plan.added),
-		Removed:       scopeStrings(plan.removed),
-		Kept:          scopeStrings(plan.kept),
-		Withheld:      plan.withheld,
-		RoleBefore:    string(plan.roleBefore),
-		RoleAfter:     string(plan.roleAfter),
-		CeilingSource: plan.source,
-		EdgeReplaced:  plan.edge.ID,
-	}
-	if resp.Withheld == nil {
-		resp.Withheld = []reissueWithheldScope{}
-	}
+	resp := reissueResponseFromPlan(plan, opID, dryRun)
 
 	if dryRun {
-		record, err := reissueAuditRecord(plan, opID, true, "", 0, auditActorFromContext(ctx), time.Now())
+		record, err := reissueAuditRecord(plan, opID, batchOpID, true, "", 0, auditActorFromContext(ctx), time.Now())
 		if err == nil {
 			err = s.store.CreateMutationAudit(ctx, record)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("scope re-issue dry-run audit: %w", err)
+		}
+		// In a bulk dry run the would-be record and role go to the agents
+		// processed after this one (reissueOverlay); nil otherwise.
+		if !plan.noop {
+			if o := reissueOverlayFrom(ctx); o != nil {
+				o.record(agent.ID, plan.replacementEdge(operator), plan.roleAfter)
+			}
 		}
 		resp.Message = "Dry run: nothing was changed"
 		return resp, nil
@@ -902,14 +1115,14 @@ func (s *Server) runScopeReissue(ctx context.Context, agent *store.Agent, operat
 		return resp, nil
 	}
 
-	newEdge, revoked, err := s.commitScopeReissue(ctx, plan, operator, opID)
+	newEdge, revoked, err := s.commitScopeReissue(ctx, plan, operator, opID, batchOpID)
 	if err != nil {
 		return nil, err
 	}
 	resp.EdgeNew = newEdge.ID
 	resp.CredentialsRevoked = revoked
 
-	summary := reissueDispatchSummary{OpID: opID, CredentialsRevoked: revoked}
+	summary := reissueDispatchSummary{OpID: opID, BatchOpID: batchOpID, CredentialsRevoked: revoked}
 	fresh, err := s.store.GetAgent(ctx, agent.ID)
 	if err != nil || fresh == nil {
 		summary.ErrorClass = mintErrorClassLookup
@@ -948,6 +1161,28 @@ func (s *Server) runScopeReissue(ctx context.Context, agent *store.Agent, operat
 	return resp, nil
 }
 
+// reissueResponseFromPlan builds the operator response for plan.
+func reissueResponseFromPlan(plan *scopeReissuePlan, opID string, dryRun bool) *ScopeReissueResponse {
+	resp := &ScopeReissueResponse{
+		OpID:          opID,
+		AgentID:       plan.agent.ID,
+		DryRun:        dryRun,
+		Noop:          plan.noop,
+		Added:         scopeStrings(plan.added),
+		Removed:       scopeStrings(plan.removed),
+		Kept:          scopeStrings(plan.kept),
+		Withheld:      plan.withheld,
+		RoleBefore:    string(plan.roleBefore),
+		RoleAfter:     string(plan.roleAfter),
+		CeilingSource: plan.source,
+		EdgeReplaced:  plan.edge.ID,
+	}
+	if resp.Withheld == nil {
+		resp.Withheld = []reissueWithheldScope{}
+	}
+	return resp
+}
+
 // handleAgentScopeReissue handles POST .../reset-auth with
 // {"reissue_scopes": true}.
 func (s *Server) handleAgentScopeReissue(w http.ResponseWriter, r *http.Request, id string, req ScopeReissueRequest) {
@@ -961,7 +1196,7 @@ func (s *Server) handleAgentScopeReissue(w http.ResponseWriter, r *http.Request,
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	resp, err := s.runScopeReissue(ctx, agent, operator, req.DryRun)
+	resp, err := s.runScopeReissue(ctx, agent, operator, req.DryRun, "")
 	if err != nil {
 		writeScopeReissueError(w, err)
 		return
@@ -972,9 +1207,6 @@ func (s *Server) handleAgentScopeReissue(w http.ResponseWriter, r *http.Request,
 // writeScopeReissueError answers a failed re-issue.
 func writeScopeReissueError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, errReissueUnsupportedDelegator):
-		writeError(w, http.StatusUnprocessableEntity, ErrCodeInvalidRequest,
-			"Scope re-issue currently supports only agents created by another agent", nil)
 	case errors.Is(err, errReissueConflict), errors.Is(err, store.ErrVersionConflict), errors.Is(err, store.ErrAlreadyExists):
 		writeError(w, http.StatusConflict, ErrCodeConflict,
 			"The agent or its delegation record changed during the re-issue; retry", nil)
