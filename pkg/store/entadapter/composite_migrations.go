@@ -122,13 +122,8 @@ func (c *CompositeStore) tableExists(ctx context.Context, db *sql.DB, tableName 
 		return false, nil
 	}
 
-	var query string
-	switch drv.Dialect() {
-	case dialect.Postgres:
-		query = `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = '` + tableName + `'`
-	case dialect.SQLite:
-		query = `SELECT name FROM sqlite_master WHERE type='table' AND name='` + tableName + `'`
-	default:
+	query := tableExistsQuery(drv.Dialect(), tableName)
+	if query == "" {
 		return false, nil
 	}
 
@@ -143,31 +138,26 @@ func (c *CompositeStore) tableExists(ctx context.Context, db *sql.DB, tableName 
 	return true, nil
 }
 
-// accessPoliciesTableExists checks whether the access_policies table exists
-// in the database. SQLite and Postgres use different system catalogs.
-func (c *CompositeStore) accessPoliciesTableExists(ctx context.Context, db *sql.DB) (bool, error) {
-	drv, ok := c.client.Driver().(*entsql.Driver)
-	if !ok {
-		return false, nil
-	}
-
-	var query string
-	switch drv.Dialect() {
+// tableExistsQuery returns the catalog query tableExists runs for the given
+// dialect, or "" for an unsupported dialect.
+//
+// On Postgres the lookup is scoped to current_schema(), the first existing
+// schema on the connection's search_path, which is where unqualified table
+// names (and so the Ent migration) resolve. A literal 'public' would miss the
+// tables whenever the hub runs with a non-default search_path.
+func tableExistsQuery(d, tableName string) string {
+	switch d {
 	case dialect.Postgres:
-		query = `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'access_policies'`
+		return `SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = '` + tableName + `'`
 	case dialect.SQLite:
-		query = `SELECT name FROM sqlite_master WHERE type='table' AND name='access_policies'`
+		return `SELECT name FROM sqlite_master WHERE type='table' AND name='` + tableName + `'`
 	default:
-		return false, nil
+		return ""
 	}
+}
 
-	var name string
-	err := db.QueryRowContext(ctx, query).Scan(&name)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return true, nil
+// accessPoliciesTableExists checks whether the access_policies table exists
+// in the database.
+func (c *CompositeStore) accessPoliciesTableExists(ctx context.Context, db *sql.DB) (bool, error) {
+	return c.tableExists(ctx, db, "access_policies")
 }
