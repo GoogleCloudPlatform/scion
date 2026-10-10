@@ -176,7 +176,8 @@ export function buildFixture() {
     '/api/v1/auth/admin-status': {
       status: 200,
       body: {
-        isAdmin: true,
+        // A plain hub member: isAdmin is true only for hub and super admins.
+        isAdmin: false,
         isSuperAdmin: false,
         permissions: [
           'broker.create',
