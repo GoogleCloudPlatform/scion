@@ -1361,3 +1361,100 @@ describe('pane navigation', () => {
     expect(paths).toEqual([`/agents/graph?project=proj%201&focus=${agentId}`]);
   });
 });
+
+describe('compact pane header (ptone/scion#4324)', () => {
+  function toolbar(): HTMLElement {
+    return page.shadowRoot!.querySelector<HTMLElement>('.toolbar')!;
+  }
+
+  function backLink(label: 'Back to Project' | 'Back to Agent'): HTMLAnchorElement | undefined {
+    return [...toolbar().querySelectorAll<HTMLAnchorElement>('a.back-link')].find(
+      (a) => (a.getAttribute('aria-label') ?? a.textContent!.replace('←', '').trim()) === label
+    );
+  }
+
+  async function withProject(compact: boolean): Promise<void> {
+    await mountConnected();
+    (page as unknown as { projectId: string }).projectId = 'proj-1';
+    page.compactHeader = compact;
+    page.requestUpdate();
+    await page.updateComplete;
+  }
+
+  /** The path main.ts's document-level link interception would navigate to. */
+  function clickedHref(anchor: HTMLAnchorElement): string | null {
+    let href: string | null = null;
+    const onClick = (e: MouseEvent): void => {
+      const a = e.composedPath().find((el) => el instanceof HTMLAnchorElement) as
+        | HTMLAnchorElement
+        | undefined;
+      href = a?.getAttribute('href') ?? null;
+      e.preventDefault();
+    };
+    document.addEventListener('click', onClick);
+    try {
+      anchor.click();
+    } finally {
+      document.removeEventListener('click', onClick);
+    }
+    return href;
+  }
+
+  it('shows a folder icon and a robot emoji, labelled, with tooltips and the same destinations', async () => {
+    await withProject(true);
+
+    const project = backLink('Back to Project')!;
+    expect(project.classList.contains('compact')).toBe(true);
+    expect(project.getAttribute('href')).toBe('/projects/proj-1');
+    expect(project.querySelector('sl-icon')!.getAttribute('name')).toBe('folder');
+    expect(project.textContent!.trim()).toBe('');
+    expect(project.closest('sl-tooltip')!.getAttribute('content')).toBe('Back to Project');
+    expect(clickedHref(project)).toBe('/projects/proj-1');
+
+    const agent = backLink('Back to Agent')!;
+    expect(agent.classList.contains('compact')).toBe(true);
+    expect(agent.getAttribute('href')).toBe(`/agents/${agentId}`);
+    expect(agent.textContent!.trim()).toBe('\u{1F916}');
+    expect(agent.querySelector('[aria-hidden="true"]')).not.toBeNull();
+    expect(agent.closest('sl-tooltip')!.getAttribute('content')).toBe('Back to Agent');
+    expect(clickedHref(agent)).toBe(`/agents/${agentId}`);
+
+    expect(toolbar().textContent).not.toContain('Back to Project');
+    expect(toolbar().textContent).not.toContain('Back to Agent');
+  });
+
+  it('keeps the full text labels when there is room', async () => {
+    await withProject(false);
+
+    const project = backLink('Back to Project')!;
+    expect(project.classList.contains('compact')).toBe(false);
+    expect(project.textContent!.trim()).toBe('← Back to Project');
+    expect(project.getAttribute('href')).toBe('/projects/proj-1');
+    const agent = backLink('Back to Agent')!;
+    expect(agent.textContent!.trim()).toBe('← Back to Agent');
+    expect(toolbar().querySelector('sl-tooltip > a.back-link')).toBeNull();
+  });
+
+  it('keeps the agent name readable and the header buttons full size', async () => {
+    await withProject(true);
+    const styles = (
+      customElements.get('scion-terminal-pane') as unknown as {
+        styles: { cssText: string };
+      }
+    ).styles.cssText.replace(/\s+/g, ' ');
+    // The name shrinks first, with an ellipsis, to a minimum width.
+    expect(styles).toMatch(
+      /\.agent-name \{[^}]*flex: 0 1 auto;[^}]*min-width: 4rem;[^}]*text-overflow: ellipsis;/
+    );
+    // The back links, separator, window toggle and action buttons do not shrink.
+    expect(styles).toMatch(
+      /\.back-link, \.separator, \.toggle-group, \.pane-action-btn \{ flex-shrink: 0; \}/
+    );
+    // And those are the elements the compact header renders.
+    const bar = toolbar();
+    expect(bar.querySelector('.agent-name')).not.toBeNull();
+    expect(bar.querySelector('.toggle-group')).not.toBeNull();
+    expect(bar.querySelectorAll('a.back-link.compact')).toHaveLength(2);
+    expect(bar.querySelector('.pane-action-btn')).not.toBeNull();
+  });
+});

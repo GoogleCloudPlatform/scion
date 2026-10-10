@@ -279,6 +279,75 @@ describe('data-effective-layout attribute (#1716)', () => {
   });
 });
 
+describe('compact pane headers in 4-up and narrow layouts (ptone/scion#4324)', () => {
+  let root: TerminalWorkspaceRoot;
+  let registry: TerminalSessionRegistry;
+  const AGENT_ID = '11111111-1111-4111-8111-111111111111';
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ id: AGENT_ID, name: 'test', phase: 'running' }), {
+            status: 200,
+          })
+        )
+      )
+    );
+    stubWebSocketAndEventSource();
+    registry = new TerminalSessionRegistry({ hubUrl: window.location.origin, accountId: 'c' });
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function mount(): ScionTerminalPane {
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+    root.create(registry, AGENT_ID);
+    return paneFor(root, AGENT_ID);
+  }
+
+  it('compacts the header in the 4-up layout, and not in a wide single pane', async () => {
+    const pane = mount();
+    await flush();
+    expect(pane.compactHeader).toBe(false);
+    root.layoutManager.setLayout('four');
+    await flush();
+    expect(pane.compactHeader).toBe(true);
+    root.layoutManager.setLayout('two-columns');
+    await flush();
+    expect(pane.compactHeader).toBe(false);
+  });
+
+  it('compacts the header on a narrow viewport, in any preset', async () => {
+    mockNarrowViewport();
+    const pane = mount();
+    await flush();
+    expect(pane.compactHeader).toBe(true);
+  });
+
+  it('a pane zoomed from 4-up fills the host and gets its full header back', async () => {
+    const pane = mount();
+    root.layoutManager.setLayout('four');
+    await flush();
+    expect(pane.compactHeader).toBe(true);
+    root.layoutManager.zoom(pane.session!.state.key);
+    await flush();
+    expect(pane.compactHeader).toBe(false);
+  });
+});
+
 describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
   let root: TerminalWorkspaceRoot;
   const AGENT_ID = '11111111-1111-4111-8111-111111111111';

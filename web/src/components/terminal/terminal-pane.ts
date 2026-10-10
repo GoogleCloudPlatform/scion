@@ -48,6 +48,9 @@ import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import { TERMINAL_DRAG_MIME } from '../../client/terminal-workspace-events.js';
 import { navigateTo } from '../../client/navigation.js';
 
+/** Back to Agent in a compact pane header (U+1F916 ROBOT FACE). */
+const ROBOT_EMOJI = '\u{1F916}';
+
 // xterm.js imports are client-side only — guarded by typeof check in lifecycle
 // These will be imported dynamically in firstUpdated() since they require DOM APIs
 type Terminal = import('@xterm/xterm').Terminal;
@@ -79,6 +82,13 @@ export class ScionTerminalPane extends LitElement {
 
   /** User ID for building chat DM keys. Set by workspace root. */
   @state() userId: string = '';
+
+  /**
+   * Set by the workspace root when the pane header has little room (a
+   * narrow viewport or the 4-up layout): Back to Project and Back to Agent
+   * show as a folder icon and a robot emoji (ptone/scion#4324).
+   */
+  @state() compactHeader = false;
 
   private registry: TerminalSessionRegistry | null = null;
   private disposed = false;
@@ -276,6 +286,31 @@ export class ScionTerminalPane extends LitElement {
       color: var(--scion-primary, #3b82f6);
     }
 
+    /* Compact header (ptone/scion#4324): icon-only back links, the size of
+       the other header buttons. */
+    .back-link.compact {
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      border-radius: 4px;
+      font-size: 1rem;
+      line-height: 1;
+    }
+
+    .back-link.compact:hover,
+    .back-link.compact:focus-visible {
+      background: var(--scion-badge-primary-bg, #dbeafe);
+    }
+
+    /* Header controls keep their full size when the header is crowded; only
+       the agent name gives way (see .agent-name). */
+    .back-link,
+    .separator,
+    .toggle-group,
+    .pane-action-btn {
+      flex-shrink: 0;
+    }
+
     .separator {
       width: 1px;
       height: 20px;
@@ -283,6 +318,10 @@ export class ScionTerminalPane extends LitElement {
     }
 
     .agent-name {
+      /* Shrinks first, with an ellipsis, but never below a readable width
+         (about eight characters). */
+      flex: 0 1 auto;
+      min-width: 4rem;
       font-size: 0.875rem;
       font-weight: 500;
       color: var(--scion-text, #1e293b);
@@ -2032,17 +2071,37 @@ export class ScionTerminalPane extends LitElement {
     </svg>`;
   }
 
+  /**
+   * Back to Project (when the agent has a project) and Back to Agent. With
+   * a compact header they show as a folder icon and a robot emoji, with
+   * the same destinations, the full text as accessible name and tooltip.
+   */
+  private renderBackLinks() {
+    const projectHref = `/projects/${this.projectId}`;
+    const agentHref = `/agents/${this.agentId}`;
+    if (this.compactHeader) {
+      return html`${this.projectId
+          ? html`<sl-tooltip content="Back to Project">
+              <a href=${projectHref} class="back-link compact" aria-label="Back to Project"
+                ><sl-icon name="folder" aria-hidden="true"></sl-icon
+              ></a>
+            </sl-tooltip>`
+          : nothing}
+        <sl-tooltip content="Back to Agent">
+          <a href=${agentHref} class="back-link compact" aria-label="Back to Agent"
+            ><span aria-hidden="true">${ROBOT_EMOJI}</span></a
+          >
+        </sl-tooltip>`;
+    }
+    return html`${this.projectId
+        ? html`<a href=${projectHref} class="back-link">&larr; Back to Project</a>`
+        : nothing} <a href=${agentHref} class="back-link"> &larr; Back to Agent </a>`;
+  }
+
   override render() {
     if (this.loading) {
       return html`
-        <div class="toolbar">
-          ${this.projectId
-            ? html`<a href="/projects/${this.projectId}" class="back-link"
-                >&larr; Back to Project</a
-              >`
-            : ''}
-          <a href="/agents/${this.agentId}" class="back-link"> &larr; Back to Agent </a>
-        </div>
+        <div class="toolbar">${this.renderBackLinks()}</div>
         <div class="loading-state">
           <div class="spinner"></div>
           <p>Connecting to agent...</p>
@@ -2054,12 +2113,7 @@ export class ScionTerminalPane extends LitElement {
     if (this.session?.state.error && !this.terminal) {
       return html`
         <div class="toolbar">
-          ${this.projectId
-            ? html`<a href="/projects/${this.projectId}" class="back-link"
-                >&larr; Back to Project</a
-              >`
-            : ''}
-          <a href="/agents/${this.agentId}" class="back-link"> &larr; Back to Agent </a>
+          ${this.renderBackLinks()}
           ${this.agentName
             ? html`
                 <div class="separator"></div>
@@ -2080,10 +2134,7 @@ export class ScionTerminalPane extends LitElement {
     // prettier-ignore
     return html`
       <div class="toolbar">
-        ${this.projectId
-          ? html`<a href="/projects/${this.projectId}" class="back-link">&larr; Back to Project</a>`
-          : ''}
-        <a href="/agents/${this.agentId}" class="back-link"> &larr; Back to Agent </a>
+        ${this.renderBackLinks()}
         <div class="separator"></div>
         <span class="agent-name">${this.agentName || this.agentId}</span>
         <div class="toggle-group" title="Switch between agent and shell tmux windows">

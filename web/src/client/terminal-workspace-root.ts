@@ -1335,6 +1335,11 @@ export class TerminalWorkspaceRoot {
 
     // Expose effective layout so CSS can scope focus-outline to multi-pane modes.
     this.paneHost.dataset.effectiveLayout = effectivePreset;
+
+    // Pane headers are crowded on a narrow viewport and in the 4-up layout:
+    // there, the back links show as icons (ptone/scion#4324).
+    const compactHeader = isNarrow || effectivePreset === 'four';
+    for (const pane of this.panes.values()) pane.compactHeader = compactHeader;
   }
 
   /** Position each pane in the grid and manage empty slot placeholders. */
