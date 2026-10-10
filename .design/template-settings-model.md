@@ -2,13 +2,13 @@
 
 ## Status
 
-**Decided** (2026-10-10). Implementation children are listed on the epic, ptone/scion#4215.
+**Decided** (2026-10-10). Implementation in progress; invariants I2-I5 are targets, not current behaviour. Implementation children are tracked on the epic ptone/scion#4215.
 
 This document supersedes the template `config` field described in [`hosted/hosted-templates.md`](hosted/hosted-templates.md) (sections 4.1, 5.1, 7.4 and 10.1).
 
 ## 1. Context
 
-A hosted template's agent config currently lives in two places: the template's files (`scion-agent.yaml` / `scion-agent.json`) and a writable `config` field on the hub's template row. The two can drift apart, and different code paths have read from different places. Earlier fixes (ptone/scion#2093, ptone/scion#4125) corrected individual paths one at a time without removing the second source. In the same way, hub and project settings have been merged into the requester's inline config, which makes their precedence relative to the template unclear.
+A hosted template's agent config currently lives in two places: the template's files (`scion-agent.yaml` / `scion-agent.json`) and a writable `config` field on the hub's template row. The two can drift apart, and different code paths have read from different places. ptone/scion#2093 fixed one upload path; ptone/scion#4125 proposed a per-field source marker to extend that, which this model makes unnecessary. In the same way, hub and project settings have been merged into the requester's inline config, which makes their precedence relative to the template unclear.
 
 This document records the model that removes both problems.
 
@@ -62,9 +62,11 @@ For example, a project telemetry policy beats a requester's explicit `--enable-t
 | Project telemetry policy vs a requester's explicit `--enable-telemetry` / `--disable-telemetry` | Policy wins. | Policy sits above everything for the keys it controls (I4). |
 | Storage layout for immutable versions | Hash-keyed blobs: `<StoragePath>/blobs/<sha256>`, with the manifest mapping each path to its hash. | Unchanged files are shared across versions without copies. The alternative was a per-version prefix with a server-side copy of unchanged files. The first step is a short spike to confirm that co-located brokers that read the storage directory directly still work. |
 
+The model-precedence, harness-config-key and telemetry-policy outcomes are user-visible behaviour changes; the release notes cover them (ptone/scion#4225).
+
 ## 6. References
 
-- Epic: ptone/scion#4215 (implementation children are listed on the epic)
+- Epic: ptone/scion#4215 (implementation children are tracked on the epic)
 - Earlier per-path fixes: ptone/scion#2093, ptone/scion#4125
 - Superseded sections: [`hosted/hosted-templates.md`](hosted/hosted-templates.md)
 - Broker harness-config resolution: `pkg/config/resolve_harness_config.go`
