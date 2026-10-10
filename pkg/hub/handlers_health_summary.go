@@ -67,7 +67,8 @@ type HealthSummaryResponse struct {
 	IntegrationCounts HealthSummaryIntegrationCounts `json:"integration_counts"`
 
 	// ServiceAccountCheck is set while the service account assignment check
-	// cannot run because the hub's identity lacks the access it needs.
+	// cannot run on a live hub instance because the hub's identity lacks
+	// the access it needs. Built from the registry rows.
 	ServiceAccountCheck *HealthSummarySACheck `json:"service_account_check,omitempty"`
 	// HubInstances lists the hub instances (processes) from the
 	// hub-instance registry, read from the database only. Nil when the
@@ -342,7 +343,7 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 		IntegrationsDetail: true,
 		IntegrationCounts:  healthSummaryIntegrationCounts(integrations),
 
-		ServiceAccountCheck: s.healthSummarySACheck(),
+		ServiceAccountCheck: healthSummarySACheck(hubInstances),
 		HubInstances:        hubInstances,
 		Links:               s.healthSummaryLinks(),
 	}

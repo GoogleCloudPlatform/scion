@@ -249,3 +249,55 @@ func TestHandleHealthSummary_NoLiveInstanceIsUnhealthy(t *testing.T) {
 		Message: "No hub instance is reporting",
 	}}, resp.Attention)
 }
+
+// Only replica B has recorded that the service account assignment check
+// cannot run. The diagnostic reaches the summary through B's registry row,
+// so both replicas return the same response (apart from the serving
+// marker and generated_at), the section names B, and the status follows
+// the fleet rule: one of two live instances degraded is degraded.
+func TestHandleHealthSummary_SACheckOnOneReplicaSameResponse(t *testing.T) {
+	a, s := testServer(t)
+	b := newHubReplica(t, s)
+	b.mu.Lock()
+	b.saAssignCheckMode = SAAssignCheckEnforce
+	b.mu.Unlock()
+	b.saAssignCheckDiag.Store(&saAssignCheckDiagnostic{since: time.Now().UTC()})
+	require.True(t, b.saAssignCheckCannotRun())
+	require.False(t, a.saAssignCheckCannotRun())
+
+	tickHubInstance(t, a)
+	tickHubInstance(t, b)
+	pinned := time.Now().UTC()
+	a.store = &pinnedClockStore{Store: a.store, now: pinned}
+	b.store = &pinnedClockStore{Store: b.store, now: pinned}
+
+	bodies := map[string][]byte{}
+	for _, serving := range []*Server{a, b} {
+		rr := doRequest(t, serving, http.MethodGet, "/api/v1/admin/health/summary", nil)
+		require.Equal(t, http.StatusOK, rr.Code)
+		var resp HealthSummaryResponse
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+		require.NotNil(t, resp.HubInstances)
+		var bLabel string
+		for _, it := range resp.HubInstances.Items {
+			if it.ID == b.InstanceID() {
+				bLabel = it.Label
+			}
+		}
+		require.NotNil(t, resp.ServiceAccountCheck, "the section is present whichever replica serves")
+		assert.Equal(t, []string{bLabel}, resp.ServiceAccountCheck.Instances)
+		assert.Equal(t, HealthStatusDegraded, resp.Status)
+		assert.Equal(t, HealthStatusDegraded, resp.Hub.Status)
+		require.NotNil(t, resp.Hub.Instances)
+		assert.Equal(t, HealthSummaryHubFleet{Live: 2, Healthy: 1, Degraded: 1}, *resp.Hub.Instances)
+		assert.Equal(t, []HealthSummaryHubCheck{{
+			InstanceID: b.InstanceID(), InstanceLabel: bLabel, Name: saAssignCheckName, Value: "degraded",
+		}}, resp.Hub.UnhealthyChecks)
+		bodies[serving.InstanceID()] = rr.Body.Bytes()
+	}
+
+	assert.Equal(t,
+		normalizeServingFields(t, bodies[a.InstanceID()]),
+		normalizeServingFields(t, bodies[b.InstanceID()]),
+		"the responses differ only in the serving marker and generated_at")
+}

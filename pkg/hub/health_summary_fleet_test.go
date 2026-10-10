@@ -251,3 +251,29 @@ func TestBuildHealthSummaryFleetHub(t *testing.T) {
 		assert.Equal(t, "x", hub.UnhealthyChecks[0].InstanceLabel)
 	})
 }
+
+// The service account check section comes from the live rows' check
+// sa_assign_check: present when a live instance reports it, naming those
+// instances; a stale or stopped instance's report does not count.
+func TestHealthSummarySACheckFromRows(t *testing.T) {
+	sa := map[string]string{"database": "healthy", saAssignCheckName: "degraded"}
+	staleSA := policyRow("3", HealthStatusDegraded, time.Minute, sa)
+	got := healthSummarySACheck(buildHealthSummaryHubInstances([]store.HubInstance{
+		policyRow("2", HealthStatusDegraded, time.Second, sa),
+		policyRow("1", HealthStatusHealthy, time.Second, map[string]string{"database": "healthy"}),
+		policyRow("0", HealthStatusDegraded, time.Second, sa),
+		staleSA,
+	}, policyNow, "1"))
+	require.NotNil(t, got)
+	assert.Equal(t, HealthStatusDegraded, got.Status)
+	assert.Equal(t, saAssignCheckDiagCause, got.Cause)
+	assert.Equal(t, saAssignCheckDiagRemedy, got.Remedy)
+	assert.Equal(t, saAssignCheckDiagDocsURL, got.DocsURL)
+	assert.Equal(t, []string{"hub-0", "hub-2"}, got.Instances)
+
+	assert.Nil(t, healthSummarySACheck(nil), "registry read failed")
+	assert.Nil(t, healthSummarySACheck(buildHealthSummaryHubInstances([]store.HubInstance{
+		policyRow("1", HealthStatusHealthy, time.Second, map[string]string{"database": "healthy"}),
+		staleSA,
+	}, policyNow, "1")), "only a stale instance reports it")
+}

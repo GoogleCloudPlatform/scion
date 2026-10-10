@@ -116,8 +116,7 @@ describe('scion-page-health-dashboard cards', () => {
         cause: 'hub_identity_missing_access',
         remedy: "Grant the hub's identity that access.",
         docs_url: 'https://example.com/docs#check',
-        since: '2026-10-08T12:00:00Z',
-        last_seen: '2026-10-08T12:05:00Z',
+        instances: ['hub-a'],
       },
     };
     el = new ScionPageHealthDashboard();

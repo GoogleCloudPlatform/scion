@@ -362,15 +362,20 @@ func TestDeriveHealthSummaryStatus_Rules(t *testing.T) {
 			}},
 		},
 		{
-			name: "service account assignment check that cannot run degrades",
+			name: "service account assignment check that cannot run on the only instance degrades",
 			mutate: func(r *HealthSummaryResponse) {
-				r.ServiceAccountCheck = &HealthSummarySACheck{Status: HealthStatusDegraded}
+				setPolicyFleet(r, policyRow("1", HealthStatusDegraded, time.Second,
+					map[string]string{"database": "healthy", saAssignCheckName: "degraded"}))
 			},
 			wantStatus: HealthStatusDegraded,
 			wantItems: []HealthAttentionItem{{
+				Severity: HealthAttentionWarning, Kind: HealthAttentionHubInstance,
+				Subject: HealthAttentionSubject{Type: HealthSubjectHub},
+				Message: "0 of 1 hub instances healthy",
+			}, {
 				Severity: HealthAttentionWarning, Kind: HealthAttentionHubCheck,
-				Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: "1"},
-				Message: "Service account assignment check cannot run",
+				Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: "1", Name: "hub-1"},
+				Message: "Service account assignment check cannot run on instance hub-1",
 			}},
 		},
 	}

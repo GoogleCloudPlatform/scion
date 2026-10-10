@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"sort"
 	"time"
 
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
@@ -39,23 +40,31 @@ const saAssignCheckDiagRemedy = "The service account assignment check cannot run
 const saAssignCheckDiagDocsURL = "https://googlecloudplatform.github.io/scion/" +
 	"hosted/ha/permissions/#hub-identity-access-for-the-assignment-check"
 
-// saAssignCheckDiagnostic is the admin-only record of why the assignment
-// check cannot run.
+// saAssignCheckDiagnostic is the admin-only record that the assignment
+// check cannot run on this process. since is when it was first recorded;
+// a repeat keeps it.
 type saAssignCheckDiagnostic struct {
 	since time.Time
-	last  time.Time
 }
 
+// saAssignCheckName is the check this process writes to its hub-instance
+// registry row while the assignment check cannot run (value degraded), so
+// every replica's health summary sees it through that row.
+const saAssignCheckName = "sa_assign_check"
+
 // HealthSummarySACheck is the admin health summary section reporting that
-// the service account assignment check cannot run because of the hub's own
-// access. Present only while that is the case.
+// the service account assignment check cannot run on at least one live hub
+// instance because of the hub's own access. It is built from the
+// instances' registry rows (check saAssignCheckName), so every replica
+// returns the same section. Present only while that is the case.
 type HealthSummarySACheck struct {
-	Status   string    `json:"status"`
-	Cause    string    `json:"cause"`
-	Remedy   string    `json:"remedy"`
-	DocsURL  string    `json:"docs_url"`
-	Since    time.Time `json:"since"`
-	LastSeen time.Time `json:"last_seen"`
+	Status  string `json:"status"`
+	Cause   string `json:"cause"`
+	Remedy  string `json:"remedy"`
+	DocsURL string `json:"docs_url"`
+	// Instances lists the labels of the live instances that report it,
+	// sorted.
+	Instances []string `json:"instances"`
 }
 
 // NoteSAAssignCheckCall updates the admin diagnostic from one Policy
@@ -82,7 +91,7 @@ func (s *Server) NoteSAAssignCheckCall(err error) {
 		now := time.Now().UTC()
 		for {
 			prev := s.saAssignCheckDiag.Load()
-			next := &saAssignCheckDiagnostic{since: now, last: now}
+			next := &saAssignCheckDiagnostic{since: now}
 			if prev != nil {
 				next.since = prev.since
 			}
@@ -109,25 +118,42 @@ func apiServiceDisabled(err error) bool {
 	return false
 }
 
-// healthSummarySACheck returns the diagnostic section for the admin health
-// summary, or nil when the check is not enforced or has no recorded cause.
-func (s *Server) healthSummarySACheck() *HealthSummarySACheck {
+// saAssignCheckCannotRun reports whether this process has recorded that
+// the assignment check cannot run while it is enforced. The registry tick
+// writes it to this instance's row as check saAssignCheckName.
+func (s *Server) saAssignCheckCannotRun() bool {
 	s.mu.RLock()
 	mode := s.saAssignCheckMode
 	s.mu.RUnlock()
-	if mode != SAAssignCheckEnforce {
+	return mode == SAAssignCheckEnforce && s.saAssignCheckDiag.Load() != nil
+}
+
+// healthSummarySACheck builds the summary's service account check section
+// from the live instances of the hub-instance registry: present when at
+// least one live instance reports check saAssignCheckName as not healthy,
+// nil otherwise (or when the registry could not be read).
+func healthSummarySACheck(list *HealthSummaryHubInstances) *HealthSummarySACheck {
+	if list == nil {
 		return nil
 	}
-	d := s.saAssignCheckDiag.Load()
-	if d == nil {
+	var labels []string
+	for _, it := range list.Items {
+		if it.State != HubInstanceStateLive {
+			continue
+		}
+		if v, ok := it.Checks[saAssignCheckName]; ok && v != HealthStatusHealthy {
+			labels = append(labels, hubInstanceDisplayLabel(it.Label, it.ID))
+		}
+	}
+	if len(labels) == 0 {
 		return nil
 	}
+	sort.Strings(labels)
 	return &HealthSummarySACheck{
-		Status:   HealthStatusDegraded,
-		Cause:    saAssignCheckDiagCause,
-		Remedy:   saAssignCheckDiagRemedy,
-		DocsURL:  saAssignCheckDiagDocsURL,
-		Since:    d.since,
-		LastSeen: d.last,
+		Status:    HealthStatusDegraded,
+		Cause:     saAssignCheckDiagCause,
+		Remedy:    saAssignCheckDiagRemedy,
+		DocsURL:   saAssignCheckDiagDocsURL,
+		Instances: labels,
 	}
 }

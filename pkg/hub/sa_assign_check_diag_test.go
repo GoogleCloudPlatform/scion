@@ -96,9 +96,12 @@ func createWithSA(t *testing.T, srv *Server, projectID, name string, sa *store.G
 	})
 }
 
-// adminHealthSummary fetches the admin health summary as an admin.
+// adminHealthSummary runs one registry tick, as the registry loop does
+// every 15 s, so the instance's row carries its current diagnostic, then
+// fetches the admin health summary as an admin.
 func adminHealthSummary(t *testing.T, srv *Server) HealthSummaryResponse {
 	t.Helper()
+	srv.newHubInstanceRegistry().tick(context.Background())
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/health/summary", nil)
 	req = req.WithContext(contextWithIdentity(req.Context(), admin))
@@ -137,8 +140,20 @@ func TestSACheckDiag_HubIdentityRefused_ShownToAdminAndAssignmentDenied(t *testi
 	assert.Equal(t, saAssignCheckDiagCause, d.Cause)
 	assert.Contains(t, d.Remedy, "Grant the hub's identity")
 	assert.Equal(t, saAssignCheckDiagDocsURL, d.DocsURL)
-	assert.False(t, d.Since.IsZero())
+	require.NotNil(t, resp.HubInstances)
+	require.Len(t, resp.HubInstances.Items, 1)
+	label := resp.HubInstances.Items[0].Label
+	assert.Equal(t, []string{label}, d.Instances, "the instance whose row reports it")
 	assert.Equal(t, HealthStatusDegraded, resp.Status)
+	// The diagnostic reaches the summary through the instance's row, as
+	// check sa_assign_check, and counts through the fleet rule.
+	assert.Equal(t, "degraded", resp.HubInstances.Items[0].Checks[saAssignCheckName])
+	assert.Equal(t, HealthStatusDegraded, resp.Hub.Status)
+	assert.Contains(t, resp.Attention, HealthAttentionItem{
+		Severity: HealthAttentionWarning, Kind: HealthAttentionHubCheck,
+		Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: srv.InstanceID(), Name: label},
+		Message: "Service account assignment check cannot run on instance " + label,
+	})
 }
 
 func TestSACheckDiag_EndUserTextUnchanged(t *testing.T) {
@@ -290,6 +305,17 @@ func TestSACheckDiag_NotRecordedWhenNotEnforced(t *testing.T) {
 
 // Concurrent records must agree on one first-seen time: a record that
 // raced another must not replace the time the first one set.
+// /healthz does not carry the diagnostic: it is a check of this process
+// for the registry row only.
+func TestSACheckDiag_NotInHealthz(t *testing.T) {
+	pt := &fakePTClient{err: status.Error(codes.PermissionDenied, "caller lacks access")}
+	srv, sa, projectID := saCheckDiagServer(t, pt)
+	require.Equal(t, http.StatusForbidden, createWithSA(t, srv, projectID, "diag-healthz", sa).Code)
+	require.True(t, srv.saAssignCheckCannotRun())
+	_, ok := srv.GetHealthInfo(context.Background()).Checks[saAssignCheckName]
+	assert.False(t, ok)
+}
+
 func TestSACheckDiag_ConcurrentRecordsKeepFirstSeen(t *testing.T) {
 	pt := &fakePTClient{}
 	srv, _, _ := saCheckDiagServer(t, pt)

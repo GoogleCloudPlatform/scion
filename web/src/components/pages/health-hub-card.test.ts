@@ -132,8 +132,7 @@ describe('scion-health-hub-card', () => {
       cause: 'hub_identity_missing_access',
       remedy: "Grant the hub's identity that access.",
       docs_url: 'https://example.com/docs#check',
-      since: '2026-10-08T12:00:00Z',
-      last_seen: '2026-10-08T12:05:00Z',
+      instances: ['hub-a', 'hub-b'],
     };
     document.body.appendChild(el);
     await el.updateComplete;
@@ -143,6 +142,9 @@ describe('scion-health-hub-card', () => {
     expect(block.querySelector('.pill')?.classList.contains('tone-warn')).toBe(true);
     expect(block.querySelector('.sa-check-remedy')?.textContent?.trim()).toBe(
       "Grant the hub's identity that access."
+    );
+    expect(block.querySelector('[data-role="sa-check-instances"]')?.textContent?.trim()).toBe(
+      'On hub-a, hub-b'
     );
     const link = block.querySelector('a')!;
     expect(link.getAttribute('href')).toBe('https://example.com/docs#check');

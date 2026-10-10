@@ -25,9 +25,10 @@
  * instance's row in the Hub instances table (health-hub-instances.ts).
  * Uptime, per-instance checks and the database pool are in that table.
  *
- * While the service account assignment check cannot run (the summary's
- * service_account_check section is present), the card also shows that
- * hub-level diagnostic: the server's remedy and its docs link.
+ * While the service account assignment check cannot run on a live
+ * instance (the summary's service_account_check section is present), the
+ * card also shows that diagnostic: the server's remedy, the instances that
+ * report it and its docs link.
  */
 
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
@@ -75,8 +76,8 @@ export interface HealthSummaryServiceAccountCheck {
   cause: string;
   remedy: string;
   docs_url: string;
-  since: string;
-  last_seen: string;
+  /** Labels of the live hub instances that report it, sorted. */
+  instances?: string[];
 }
 
 /**
@@ -229,6 +230,12 @@ export class ScionHealthHubCard extends LitElement {
         overflow-wrap: anywhere;
       }
 
+      .sa-check-instances {
+        margin: 0 0 0.5rem 0;
+        color: var(--scion-text-muted);
+        overflow-wrap: anywhere;
+      }
+
       .sa-check a {
         color: var(--scion-text);
         text-decoration: underline;
@@ -291,6 +298,11 @@ export class ScionHealthHubCard extends LitElement {
         <span class="pill tone-${healthTone(c.status)}">Cannot run</span>
       </div>
       <p class="sa-check-remedy">${c.remedy}</p>
+      ${(c.instances ?? []).length > 0
+        ? html`<p class="sa-check-instances" data-role="sa-check-instances">
+            On ${(c.instances ?? []).join(', ')}
+          </p>`
+        : nothing}
       ${(c.docs_url ?? '').startsWith('https://')
         ? html`<a href=${c.docs_url} target="_blank" rel="noopener noreferrer"
             >Access the hub's identity needs</a

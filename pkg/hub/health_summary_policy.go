@@ -99,9 +99,11 @@ type HealthAttentionSubject struct {
 //   - degraded when dispatch has stuck messages or stuck broker dispatches;
 //   - degraded when a managed integration reports unhealthy;
 //   - degraded when at least agentErrorDegradedRatio of the considered
-//     agents are in error or crashed;
-//   - degraded when the service account assignment check cannot run
-//     (ServiceAccountCheck is set).
+//     agents are in error or crashed.
+//
+// The service account assignment check that cannot run on an instance is
+// that instance's check saAssignCheckName, so it counts through the fleet
+// rule like any other check.
 //
 // A section that could not be read (hub instances, agents or dispatch
 // null, broker list not reported) adds a warning item and does not change
@@ -116,8 +118,7 @@ type HealthAttentionSubject struct {
 //
 // Order: the fleet item ("N of M hub instances healthy", "No hub instance
 // is reporting" or "Hub instance data not available"), hub check items
-// (critical checks first), the service account assignment check item, then
-// broker warnings, "stopped reporting" hub instance warnings, integration
+// (critical checks first), then broker warnings, "stopped reporting" hub instance warnings, integration
 // and dispatch warnings, then the agent error ratio item, then agent items
 // (errored, crashed, offline).
 func deriveHealthSummaryStatus(resp *HealthSummaryResponse) (string, []HealthAttentionItem) {
@@ -131,17 +132,6 @@ func deriveHealthSummaryStatus(resp *HealthSummaryResponse) (string, []HealthAtt
 		status = worseHealthStatus(status, fleetHubStatus(*resp.Hub.Instances))
 	}
 	items = append(items, hubFleetAttention(resp)...)
-
-	// Service account assignment check. A hub-level condition, so it is a
-	// hub_check item about this hub instance.
-	if resp.ServiceAccountCheck != nil {
-		degrade()
-		items = append(items, HealthAttentionItem{
-			Severity: HealthAttentionWarning, Kind: HealthAttentionHubCheck,
-			Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: resp.Hub.InstanceID},
-			Message: "Service account assignment check cannot run",
-		})
-	}
 
 	// Runtime brokers.
 	if resp.Brokers.NotReported {
@@ -325,10 +315,14 @@ func hubFleetAttention(resp *HealthSummaryResponse) []HealthAttentionItem {
 	explained := map[string]bool{}
 	for _, c := range resp.Hub.UnhealthyChecks {
 		explained[c.InstanceID] = true
+		msg := "Hub check " + c.Name + " is not healthy on instance " + c.InstanceLabel
+		if c.Name == saAssignCheckName {
+			msg = "Service account assignment check cannot run on instance " + c.InstanceLabel
+		}
 		out = append(out, HealthAttentionItem{
 			Severity: sev, Kind: HealthAttentionHubCheck,
 			Subject: HealthAttentionSubject{Type: HealthSubjectHub, ID: c.InstanceID, Name: c.InstanceLabel},
-			Message: "Hub check " + c.Name + " is not healthy on instance " + c.InstanceLabel,
+			Message: msg,
 		})
 	}
 	for _, it := range resp.HubInstances.Items {

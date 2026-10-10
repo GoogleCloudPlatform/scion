@@ -154,7 +154,7 @@ For Policy Troubleshooter to evaluate a caller's IAM permission across the organ
 
 The Hub's identity needs access to run the Policy Troubleshooter check against the project or organization that holds each target service account. Until it has that access, service account assignment is denied.
 
-If the check cannot run because of the Hub's identity, the admin health summary (`GET /api/v1/admin/health/summary`) reports it in a `service_account_check` section.
+If the check cannot run because of the Hub's identity, that Hub instance reports the check `sa_assign_check` as `degraded` in its health row, and the admin health summary (`GET /api/v1/admin/health/summary`) reports it in a `service_account_check` section that lists the instances reporting it. Every Hub replica returns the same section.
 
 ### Start-Time Admissibility Check
 
