@@ -32,7 +32,8 @@
  * name or signature is a typecheck error here rather than a silent drift.
  * The browser receives each declaration's own source text (`toString()`),
  * so the stub bodies must use only browser globals: no imports, no closures
- * over module values, and no class fields (methods and accessors only).
+ * over module values, and no class fields (methods and accessors only), so a
+ * transform has no reason to inject helpers into them.
  */
 
 import type { Page } from '@playwright/test';
@@ -105,13 +106,19 @@ const ROUTE_STUBS: Pick<typeof RealMain, 'navigateTo' | 'replaceRoute' | 'pushRo
   pushRoute,
 };
 
-/** The stub module's source, as served in place of `src/client/main.ts`. */
+/**
+ * The stub module's source, as served in place of `src/client/main.ts`.
+ *
+ * Each declaration's source is wrapped in parentheses, so it is evaluated as
+ * a class or function expression and bound to a fixed export name. Nothing
+ * here refers to the declarations' own names, so the module still works if a
+ * transform renames them.
+ */
 const STUB_MODULE_SOURCE = `
-${FixtureStateManager.toString()}
-export const stateManager = new FixtureStateManager();
-export ${ROUTE_STUBS.navigateTo.toString()}
-export ${ROUTE_STUBS.replaceRoute.toString()}
-export ${ROUTE_STUBS.pushRoute.toString()}
+export const stateManager = new (${FixtureStateManager.toString()})();
+export const navigateTo = (${ROUTE_STUBS.navigateTo.toString()});
+export const replaceRoute = (${ROUTE_STUBS.replaceRoute.toString()});
+export const pushRoute = (${ROUTE_STUBS.pushRoute.toString()});
 `;
 
 /** Serves the stub module in place of the app's real `src/client/main.ts`. */
