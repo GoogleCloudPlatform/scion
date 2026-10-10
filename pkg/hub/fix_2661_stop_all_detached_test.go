@@ -210,9 +210,10 @@ func TestStopAll_OneAgentTimesOut_OthersStop(t *testing.T) {
 }
 
 // slowStopIntentStore delays the stop intent write, a pre-dispatch store
-// write of each stop-all stop.
+// write of each stop-all stop, once its fault switch is armed.
 type slowStopIntentStore struct {
 	store.Store
+	fault *storeFaultSwitch
 	delay time.Duration
 
 	mu sync.Mutex
@@ -221,7 +222,7 @@ type slowStopIntentStore struct {
 }
 
 func (s *slowStopIntentStore) SwapRunIntent(ctx context.Context, agentID string, intent store.RunIntent) (store.RunIntent, time.Time, error) {
-	if intent == store.RunIntentStopped {
+	if intent == store.RunIntentStopped && s.fault.Active() {
 		now := time.Now()
 		s.mu.Lock()
 		if s.firstEntry.IsZero() || now.Before(s.firstEntry) {
@@ -254,12 +255,15 @@ func (d *deadlineProbeDispatcher) DispatchAgentStop(ctx context.Context, _ *stor
 func TestStopAll_SharedOpDeadline_SlowPreDispatchWrite(t *testing.T) {
 	const writeDelay = 300 * time.Millisecond
 	disp := &deadlineProbeDispatcher{}
-	srv, s, project := setupCreateAgentServer(t, disp)
+	srv, s, slow, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *slowStopIntentStore {
+		return &slowStopIntentStore{Store: inner, fault: f, delay: writeDelay}
+	})
+	project := setupCreateAgentProject(t, s)
+	srv.SetDispatcher(disp)
 	setStopAllAgentOpTimeout(t, 2*time.Second)
 	createSiteAgent(t, s, project, "shared-deadline-a", state.PhaseRunning, store.RunIntentRunning)
 	createSiteAgent(t, s, project, "shared-deadline-b", state.PhaseRunning, store.RunIntentRunning)
-	slow := &slowStopIntentStore{Store: srv.store, delay: writeDelay}
-	srv.store = slow
+	fault.Arm()
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents/stop-all", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())

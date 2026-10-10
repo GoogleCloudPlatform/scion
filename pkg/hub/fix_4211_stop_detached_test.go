@@ -108,16 +108,21 @@ func TestDetachStopFromClient_KeepsValuesDropsCancelBounded(t *testing.T) {
 	assert.WithinDuration(t, time.Now().Add(time.Minute), deadline, 5*time.Second)
 }
 
-// cancelOnDispatchInsertStore cancels the client's request when the
-// offline-broker stop queues its durable dispatch, then answers as a
-// ctx-aware store does: a canceled ctx fails the write.
+// cancelOnDispatchInsertStore, once its fault switch is armed, cancels the
+// client's request when the offline-broker stop queues its durable
+// dispatch, then answers as a ctx-aware store does: a canceled ctx fails
+// the write.
 type cancelOnDispatchInsertStore struct {
 	store.Store
+	fault         *storeFaultSwitch
 	cancelRequest context.CancelFunc
 	insertCtxErr  error
 }
 
 func (c *cancelOnDispatchInsertStore) InsertBrokerDispatch(ctx context.Context, d *store.BrokerDispatch) error {
+	if !c.fault.Active() {
+		return c.Store.InsertBrokerDispatch(ctx, d)
+	}
 	c.cancelRequest()
 	c.insertCtxErr = ctx.Err()
 	if err := ctx.Err(); err != nil {
@@ -131,7 +136,9 @@ func (c *cancelOnDispatchInsertStore) InsertBrokerDispatch(ctx context.Context, 
 // dispatch or the stop_queued status write.
 func TestLifecycleStop_OfflineBroker_ClientCancelWhileQueueing_StopQueued(t *testing.T) {
 	ctx := context.Background()
-	srv, s := testServer(t)
+	srv, s, hook, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *cancelOnDispatchInsertStore {
+		return &cancelOnDispatchInsertStore{Store: inner, fault: f}
+	})
 	srv.SetDispatcher(&runIntentDispatcher{})
 	srv.commandBus = &recordingCommandBus{}
 	_, broker, agent := setupOfflineBrokerAgent(t, s, "cancel-q")
@@ -139,8 +146,8 @@ func TestLifecycleStop_OfflineBroker_ClientCancelWhileQueueing_StopQueued(t *tes
 	require.NoError(t, err)
 
 	cancel, serve := newCancelableRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/stop", nil)
-	hook := &cancelOnDispatchInsertStore{Store: srv.store, cancelRequest: cancel}
-	srv.store = hook
+	hook.cancelRequest = cancel
+	fault.Arm()
 	rec := serve()
 
 	assert.NoError(t, hook.insertCtxErr, "the queued dispatch must not follow the canceled request")
