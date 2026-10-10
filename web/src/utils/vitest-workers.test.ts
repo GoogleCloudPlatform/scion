@@ -21,7 +21,6 @@
 
 import { describe, it, expect } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
-import { availableParallelism } from 'node:os';
 
 import { CGROUP_CPU_MAX, parseCpuMax, vitestMaxWorkers } from '../../vitest-workers.js';
 
@@ -57,10 +56,8 @@ describe('parseCpuMax', () => {
 });
 
 describe('vitestMaxWorkers', () => {
-  const cores = (): number => 32;
-
   it('uses the quota when cpu.max sets one', () => {
-    expect(vitestMaxWorkers(() => '200000 100000\n', cores)).toBe(2);
+    expect(vitestMaxWorkers(() => '200000 100000\n')).toBe(2);
   });
 
   it('reads the cgroup v2 cpu.max file', () => {
@@ -68,43 +65,35 @@ describe('vitestMaxWorkers', () => {
     vitestMaxWorkers((path) => {
       paths.push(path);
       return undefined;
-    }, cores);
+    });
     expect(paths).toEqual(['/sys/fs/cgroup/cpu.max']);
   });
 
-  it('falls back to the core count when the file is missing', () => {
-    expect(vitestMaxWorkers(() => undefined, cores)).toBe(32);
+  // Undefined leaves maxWorkers unset, so vitest keeps its own default.
+  it('returns undefined when the file is missing', () => {
+    expect(vitestMaxWorkers(() => undefined)).toBeUndefined();
   });
 
-  it('falls back to the core count when there is no quota', () => {
-    expect(vitestMaxWorkers(() => 'max 100000\n', cores)).toBe(32);
+  it('returns undefined when there is no quota', () => {
+    expect(vitestMaxWorkers(() => 'max 100000\n')).toBeUndefined();
   });
 
-  it('falls back to the core count when the file cannot be parsed', () => {
-    expect(vitestMaxWorkers(() => 'garbage', cores)).toBe(32);
-  });
-
-  it('returns at least 1 when the core count is 0', () => {
-    expect(
-      vitestMaxWorkers(
-        () => undefined,
-        () => 0
-      )
-    ).toBe(1);
+  it('returns undefined when the file cannot be parsed', () => {
+    expect(vitestMaxWorkers(() => 'garbage')).toBeUndefined();
   });
 
   // Not an assertion about any particular host: prints what the
   // derivation computes on the machine running the tests, with and
   // without its cpu.max file.
   it('reports the value on this host', () => {
-    const present = existsSync(CGROUP_CPU_MAX);
-    const contents = present ? readFileSync(CGROUP_CPU_MAX, 'utf8').trim() : '(absent)';
+    const contents = existsSync(CGROUP_CPU_MAX) ? readFileSync(CGROUP_CPU_MAX, 'utf8') : undefined;
     const withFile = vitestMaxWorkers();
     const withoutFile = vitestMaxWorkers(() => undefined);
     console.info(
-      `cpu.max=${contents} maxWorkers=${withFile}; cpu.max absent: maxWorkers=${withoutFile} (availableParallelism=${availableParallelism()})`
+      `cpu.max=${contents?.trim() ?? '(absent)'} maxWorkers=${withFile ?? 'unset (vitest default)'}; ` +
+        `cpu.max absent: maxWorkers=${withoutFile ?? 'unset (vitest default)'}`
     );
-    expect(withFile).toBeGreaterThanOrEqual(1);
-    expect(withoutFile).toBe(Math.max(1, availableParallelism()));
+    expect(withFile).toBe(contents === undefined ? undefined : parseCpuMax(contents));
+    expect(withoutFile).toBeUndefined();
   });
 });

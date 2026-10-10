@@ -20,7 +20,8 @@
  * A container can report every host core (os.cpus()) while a cgroup v2
  * quota allows it far fewer, so a worker count taken from the core count
  * oversubscribes the CPUs the container may actually use. This module
- * reads the quota from cpu.max and uses it as maxWorkers.
+ * reads the quota from cpu.max and uses it as maxWorkers. Without a quota
+ * it leaves maxWorkers unset, so vitest keeps its own default.
  *
  * An explicit override still wins: vitest applies the --maxWorkers CLI
  * flag and the VITEST_MAX_WORKERS environment variable over the config
@@ -28,7 +29,6 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { availableParallelism, cpus } from 'node:os';
 
 /** The cgroup v2 CPU bandwidth file for the current cgroup. */
 export const CGROUP_CPU_MAX = '/sys/fs/cgroup/cpu.max';
@@ -48,11 +48,6 @@ export function parseCpuMax(contents: string): number | undefined {
   return Math.max(1, Math.ceil(quota / period));
 }
 
-/** The core count Node reports for this process. */
-function coreCount(): number {
-  return typeof availableParallelism === 'function' ? availableParallelism() : cpus().length;
-}
-
 /** Reads a file, or returns undefined when it cannot be read. */
 function readOptional(path: string): string | undefined {
   try {
@@ -63,15 +58,14 @@ function readOptional(path: string): string | undefined {
 }
 
 /**
- * The maxWorkers value for vitest: the cgroup CPU quota when one is set,
- * otherwise the core count. The file reader and core count are injectable
- * for tests.
+ * The maxWorkers value for vitest: the cgroup CPU quota when one is set.
+ * Returns undefined when the file is missing, has no quota, or cannot be
+ * parsed, which leaves vitest on its default worker count. The file
+ * reader is injectable for tests.
  */
 export function vitestMaxWorkers(
-  read: (path: string) => string | undefined = readOptional,
-  cores: () => number = coreCount
-): number {
+  read: (path: string) => string | undefined = readOptional
+): number | undefined {
   const contents = read(CGROUP_CPU_MAX);
-  const quota = contents === undefined ? undefined : parseCpuMax(contents);
-  return quota ?? Math.max(1, cores());
+  return contents === undefined ? undefined : parseCpuMax(contents);
 }
