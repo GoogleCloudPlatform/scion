@@ -771,7 +771,9 @@ export class ScionChatFilePreview extends LitElement {
   private artifactFooterText(info: ArtifactInfo): string {
     const parts = [info.entry];
     if (info.ownerRef) {
-      parts.push(`owner ${principalLabel(info.ownerKind, info.ownerRef, this.artifactNames.owner)}`);
+      parts.push(
+        `owner ${principalLabel(info.ownerKind, info.ownerRef, this.artifactNames.owner)}`
+      );
     }
     if (this.artifactNames.project) parts.push(this.artifactNames.project);
     return parts.join(' · ');

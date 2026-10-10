@@ -40,13 +40,15 @@ const { resetPrincipalNames } = await import('../../../client/principal-names.js
 
 /** The artifact requests made, without the owner and project name lookups. */
 function artifactCalls(): string[] {
-  return apiFetchMock.mock.calls.map((c) => c[0] as string).filter((p) => p.startsWith('/api/v1/artifacts/'));
+  return apiFetchMock.mock.calls
+    .map((c) => c[0] as string)
+    .filter((p) => p.startsWith('/api/v1/artifacts/'));
 }
 
-const { ScionArtifactMarkdownFrame: ScionArtifactMarkdownFrameCtor } = await import(
-  '../artifact-markdown-frame.js'
-);
-type ScionArtifactMarkdownFrame = import('../artifact-markdown-frame.js').ScionArtifactMarkdownFrame;
+const { ScionArtifactMarkdownFrame: ScionArtifactMarkdownFrameCtor } =
+  await import('../artifact-markdown-frame.js');
+type ScionArtifactMarkdownFrame =
+  import('../artifact-markdown-frame.js').ScionArtifactMarkdownFrame;
 
 const ID = '5f1c2d3e-0000-4000-8000-0000000000aa';
 
@@ -147,10 +149,11 @@ describe('scion-chat-file-preview artifact target', () => {
     expect(viewer?.querySelector('sl-icon')?.getAttribute('name')).toBe('box-arrow-up-right');
   });
 
-  it('names the owner and home project in the footer through the viewer\'s own lookups', async () => {
+  it("names the owner and home project in the footer through the viewer's own lookups", async () => {
     apiFetchMock.mockImplementation((path: string) => {
       if (path === '/api/v1/agents/agent-1') return Promise.resolve(json({ name: 'docs-writer' }));
-      if (path === '/api/v1/projects/proj-1') return Promise.resolve(json({ name: 'web-frontend' }));
+      if (path === '/api/v1/projects/proj-1')
+        return Promise.resolve(json({ name: 'web-frontend' }));
       return Promise.resolve(path.includes('/files/') ? text('# T') : json(meta(3)));
     });
     const el = await open();
@@ -177,7 +180,9 @@ describe('scion-chat-file-preview artifact target', () => {
       await el.updateComplete;
     }
     expect(q(el, '.footer .path')?.textContent).toBe('');
-    expect(apiFetchMock.mock.calls.map((c) => c[0])).toEqual([`/api/v1/artifacts/${ID}/versions/2`]);
+    expect(apiFetchMock.mock.calls.map((c) => c[0])).toEqual([
+      `/api/v1/artifacts/${ID}/versions/2`,
+    ]);
   });
 
   it('loads the pinned version for a reference with a seq', async () => {

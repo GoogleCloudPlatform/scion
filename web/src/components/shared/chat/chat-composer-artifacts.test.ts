@@ -320,7 +320,7 @@ describe('scion-artifact-picker', () => {
     );
   });
 
-  it('names user owners and home projects through the viewer\'s own lookups', async () => {
+  it("names user owners and home projects through the viewer's own lookups", async () => {
     const SELF = '11111111-0000-4000-8000-000000000001';
     const PEER = '22222222-0000-4000-8000-000000000002';
     const HIDDEN = '33333333-0000-4000-8000-000000000003';
@@ -338,7 +338,9 @@ describe('scion-artifact-picker', () => {
         );
       }
       if (url === '/api/v1/projects/proj-2') {
-        return Promise.resolve(new Response(JSON.stringify({ name: 'web-frontend' }), { status: 200 }));
+        return Promise.resolve(
+          new Response(JSON.stringify({ name: 'web-frontend' }), { status: 200 })
+        );
       }
       // A user or project the viewer may not read.
       return Promise.resolve(new Response('{}', { status: 403 }));
@@ -382,7 +384,9 @@ describe('scion-artifact-picker', () => {
     expect(dialog.open).toBe(true);
 
     // Publishing lists the new artifact and picks it.
-    apiFetch.mockImplementation(() => Promise.resolve(listResponse([item(A, 'Fresh', 'proj-1', 1)])));
+    apiFetch.mockImplementation(() =>
+      Promise.resolve(listResponse([item(A, 'Fresh', 'proj-1', 1)]))
+    );
     dialog.dispatchEvent(
       new CustomEvent('artifact-published', {
         detail: { artifact: item(A, 'Fresh', 'proj-1', 1), version: { seq: 1 } },
