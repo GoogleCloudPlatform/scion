@@ -118,7 +118,14 @@ func (r *Resolver) Resolve(ctx context.Context, ref string) (string, error) {
 		files[fileInfo.Path] = content
 	}
 
-	// Step 5: store in cache keyed by content hash.
+	// Step 5: store in cache keyed by content hash. The download response
+	// names the hash of the version its URLs were signed for; when present
+	// it is the key, because the metadata read in step 1 may be from a
+	// different version if a commit landed in between (ptone/scion#4221).
+	// Hubs that do not send it keep the previous behaviour.
+	if transfer.IsContentHash(downloadResp.ContentHash) {
+		contentHash = downloadResp.ContentHash
+	}
 	if contentHash == "" {
 		contentHash = computeContentHash(files)
 	}

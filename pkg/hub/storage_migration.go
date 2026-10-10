@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -96,6 +97,9 @@ type migratableResource struct {
 	slug          string
 	files         []store.TemplateFile
 	kind          storage.ResourceKind
+	// layout is the template storage layout; blob-layout templates are
+	// never migrated (their path is already row-unique and hub-namespaced).
+	layout string
 }
 
 func (s *Server) migrateResourceKind(ctx context.Context, kind storage.ResourceKind, hubID string, dryRun, cleanupLegacy bool) MigrateStorageReport {
@@ -132,6 +136,7 @@ func (s *Server) migrateResourceKind(ctx context.Context, kind storage.ResourceK
 					slug:          t.Slug,
 					files:         t.Files,
 					kind:          kind,
+					layout:        t.Layout,
 				})
 			}
 			if result.NextCursor == "" {
@@ -210,6 +215,10 @@ func (s *Server) migrateResourceKind(ctx context.Context, kind storage.ResourceK
 			continue
 		}
 		if strings.HasPrefix(res.storagePath, "hubs/") {
+			report.Skipped++
+			continue
+		}
+		if res.layout == store.TemplateLayoutBlobs {
 			report.Skipped++
 			continue
 		}
@@ -318,9 +327,22 @@ func (s *Server) updateResourceStoragePath(ctx context.Context, res migratableRe
 		if tmpl == nil {
 			return nil
 		}
+		if isBlobLayout(tmpl) {
+			return nil
+		}
+		// The storage path is content state (ptone/scion#4221): it is
+		// written through the compare-and-swap, so a concurrent commit
+		// that migrated the row to blobs is not pointed back at a legacy
+		// path. A lost race leaves the row as the commit wrote it.
 		tmpl.StoragePath = newPath
 		tmpl.StorageURI = newURI
-		return s.store.UpdateTemplate(ctx, tmpl)
+		err = s.store.UpdateTemplateContent(ctx, tmpl, store.TemplateContentPrecondition{ContentHash: tmpl.ContentHash, Layout: tmpl.Layout})
+		if errors.Is(err, store.ErrTemplateConflict) {
+			s.resourceLog.Warn("template migration: template changed during migration; leaving it as committed",
+				"template", tmpl.Name, "id", tmpl.ID)
+			return nil
+		}
+		return err
 
 	case storage.ResourceKindHarnessConfig:
 		hc, err := s.store.GetHarnessConfig(ctx, res.id)

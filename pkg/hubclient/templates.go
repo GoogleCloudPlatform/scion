@@ -161,6 +161,10 @@ type UploadURLInfo struct {
 type UploadResponse struct {
 	UploadURLs  []UploadURLInfo `json:"uploadUrls"`
 	ManifestURL string          `json:"manifestUrl,omitempty"`
+	// UploadID names the staging directory a template's upload URLs write
+	// to. The Hub accepts it back in FinalizeRequest.UploadID
+	// (ptone/scion#4221).
+	UploadID string `json:"uploadId,omitempty"`
 }
 
 // FinalizeRequest is the request body for finalizing a template upload.
@@ -170,6 +174,10 @@ type FinalizeRequest struct {
 	// its upload against. When set, the Hub refuses the finalize with 409
 	// template_conflict if the template has changed since (ptone/scion#4221).
 	ExpectedContentHash string `json:"expectedContentHash,omitempty"`
+	// UploadID, when set, is the UploadResponse.UploadID whose staged files
+	// this finalize commits. Without it the Hub matches staged files to the
+	// manifest by hash (ptone/scion#4221).
+	UploadID string `json:"uploadId,omitempty"`
 }
 
 // TemplateManifest is the manifest of uploaded template files.
@@ -184,6 +192,9 @@ type DownloadResponse struct {
 	ManifestURL string            `json:"manifestUrl,omitempty"`
 	Files       []DownloadURLInfo `json:"files"`
 	Expires     time.Time         `json:"expires"`
+	// ContentHash is the content hash of the template version the URLs
+	// were signed for. Hubs before ptone/scion#4221 do not send it.
+	ContentHash string `json:"contentHash,omitempty"`
 }
 
 // DownloadURLInfo contains info for downloading a file.
