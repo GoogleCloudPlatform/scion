@@ -17,6 +17,7 @@ package commands
 import (
 	"context"
 	"errors"
+	"time"
 
 	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
@@ -82,7 +83,7 @@ func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUs
 			// hub-originated RpcRequest reaches /v1/control/* and nothing
 			// else in sciontool.
 			ctl := control.New(control.Options{KickTokenRefresh: c.KickTokenRefresh})
-			return conduit.New(conduit.Options{
+			a, err := conduit.New(conduit.Options{
 				HubURL:                c.HubURL(),
 				AgentID:               c.AgentID(),
 				ProjectID:             getenv(envProjectID),
@@ -91,19 +92,55 @@ func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUs
 				ApplyTransportHeaders: c.ApplyTransportHeaders,
 				HTTPClient:            c.HTTPClient(),
 				PTYUser:               ptyUser,
+				// After a 4401 the reconnect waits for the refresh loop's
+				// next result instead of refreshing itself, so refreshes
+				// stay single-flight; the redial then presents the token
+				// the loop produced.
 				RefreshCredential: func(ctx context.Context) error {
-					_, _, err := c.RefreshToken(ctx)
-					return err
+					return c.KickTokenRefreshWait(ctx, conduitCredentialRefreshBound)
 				},
 				Session:   core.Config{RPCHandler: control.RPCHandler(ctl)},
 				RPCRoutes: ctl.Routes(),
 			})
+			if err != nil {
+				return nil, err
+			}
+			return authRefreshingAgent{agent: a, client: c}, nil
 		},
 		legacy: func(ctx context.Context) {
 			log.Info("Started port-forward tunnel manager")
 			scionportforward.NewManager(c).Run(ctx)
 		},
 	}
+}
+
+// conduitCredentialRefreshBound bounds how long a reconnect after a 4401
+// waits for the refresh loop: one refresh request's timeout plus margin.
+const conduitCredentialRefreshBound = hub.DefaultTokenRefreshTimeout + 15*time.Second
+
+// authRefreshingAgent runs the conduit agent and, while it runs, sends
+// each token the refresh loop obtains to the hub as AuthRefresh on the
+// live session. A failed refresh sends nothing.
+type authRefreshingAgent struct {
+	agent  *conduit.Agent
+	client *hub.Client
+}
+
+func (r authRefreshingAgent) Run(ctx context.Context) error {
+	unsubscribe := r.client.SubscribeTokenRefresh(func(res hub.TokenRefreshResult) {
+		if res.Err != nil || res.Token == "" {
+			return
+		}
+		// Off the refresh loop's goroutine: the send may wait for room
+		// on the session. RefreshAuth sends the newest token last.
+		go func() {
+			if err := r.agent.RefreshAuth(res.Token); err != nil && !errors.Is(err, conduit.ErrNoLiveSession) {
+				log.Debug("Conduit: sending the refreshed credential failed: %v", err)
+			}
+		}()
+	})
+	defer unsubscribe()
+	return r.agent.Run(ctx)
 }
 
 // conduitPTYUser is the identity PTY streams' tmux clients run as: the

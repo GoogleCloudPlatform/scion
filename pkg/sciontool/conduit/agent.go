@@ -187,6 +187,14 @@ type Agent struct {
 	// refusedSince is when the current run of 4409 refusals began (zero
 	// while none is in progress); an admitted session resets it.
 	refusedSince time.Time
+	// live is the most recently admitted session (nil before the first).
+	live core.LocalSession
+	// authToken is a refreshed token not yet sent as AuthRefresh.
+	authToken string
+
+	// authSendMu serializes AuthRefresh sends, so the newest token is
+	// always the last one sent.
+	authSendMu sync.Mutex
 }
 
 // New validates opts and returns an Agent.
@@ -264,6 +272,11 @@ func (a *Agent) Run(ctx context.Context) error {
 		Config: cfg,
 		Hello:  a.hello,
 		OnSession: func(_ context.Context, s core.Session, w *conduitv1.Welcome) {
+			if ls, ok := s.(core.LocalSession); ok {
+				a.mu.Lock()
+				a.live = ls
+				a.mu.Unlock()
+			}
 			a.admitted()
 			a.applyWelcomeKeys(w)
 			log.Info("Conduit session established (session %s, relay %s, incarnation %q)",
@@ -431,6 +444,40 @@ func (a *Agent) refused(end core.End, cause string) (time.Duration, error) {
 	}
 	log.Warn("Conduit: refused (%v); retrying in %v", cause, core.BackoffMax)
 	return core.BackoffMax, nil
+}
+
+// ErrNoLiveSession is returned by RefreshAuth when no session is live:
+// the next session is admitted with the current token anyway.
+var ErrNoLiveSession = errors.New("conduit: no live session")
+
+// RefreshAuth sends token to the hub as AuthRefresh on the live session,
+// so the hub re-validates the session's credential in band (design §3.3)
+// without disturbing its streams. Call it after each successful token
+// refresh. Concurrent calls send the newest token last; a call whose
+// token a concurrent call already sent returns nil.
+func (a *Agent) RefreshAuth(token string) error {
+	a.mu.Lock()
+	a.authToken = token
+	a.mu.Unlock()
+
+	a.authSendMu.Lock()
+	defer a.authSendMu.Unlock()
+	a.mu.Lock()
+	s, tok := a.live, a.authToken
+	a.authToken = ""
+	a.mu.Unlock()
+	if tok == "" {
+		return nil
+	}
+	if s == nil {
+		return ErrNoLiveSession
+	}
+	select {
+	case <-s.Done():
+		return ErrNoLiveSession
+	default:
+	}
+	return s.RefreshAuth([]byte(tok), 0)
 }
 
 // refreshCredential refreshes the agent token, at most once per
