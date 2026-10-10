@@ -421,7 +421,7 @@ export async function pollPreviewJobUntilDone(
       if (signal) {
         onAbort = () => {
           clearTimeout(timer);
-          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the AbortSignal reason unchanged; per-site decision tracked in ptone/scion#4126.
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the AbortSignal reason unchanged, as signal.throwIfAborted() does, so callers can still match it.
           reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
         };
         signal.addEventListener('abort', onAbort, { once: true });

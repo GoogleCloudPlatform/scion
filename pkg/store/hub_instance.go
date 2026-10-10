@@ -18,6 +18,8 @@ import (
 	"context"
 	"encoding/json"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // HubInstance is one hub process's row in the hub-instance registry (table
@@ -43,8 +45,9 @@ type HubInstance struct {
 	Status string
 	// Checks is the instance's normalised check map (fixed values only).
 	Checks map[string]string
-	// Stats holds bounded per-instance figures as JSON. Empty (nil) until a
-	// writer fills it.
+	// Stats holds bounded per-instance figures as JSON: an encoded
+	// api.HubInstanceStats, normalised and size-capped by the writer (see
+	// api.CapHubInstanceStats). Empty (nil) until a writer fills it.
 	Stats json.RawMessage
 }
 
@@ -59,10 +62,12 @@ type HubInstanceStore interface {
 	// cleared. in.StartedAt, in.LastSeen and in.StoppedAt are ignored.
 	UpsertHubInstance(ctx context.Context, in HubInstance) error
 
-	// TouchHubInstance sets last_seen to the store clock on the row for id.
-	// found is false (with a nil error) when the row does not exist, so the
-	// caller can upsert instead.
-	TouchHubInstance(ctx context.Context, id string) (found bool, err error)
+	// TouchHubInstance sets last_seen to the store clock on the row for id
+	// and replaces stats.db with db (removing it when db is nil); every
+	// other stats key is kept as stored. It carries the volatile pool
+	// gauges between full upserts. found is false (with a nil error) when
+	// the row does not exist, so the caller can upsert instead.
+	TouchHubInstance(ctx context.Context, id string, db *api.HubInstanceDBStats) (found bool, err error)
 
 	// ListHubInstances reads the store clock once and returns the rows
 	// whose last write (stopped_at when set, otherwise last_seen) is at or
@@ -71,4 +76,16 @@ type HubInstanceStore interface {
 	// the ages never mix the database clock with a hub's local clock. Rows
 	// are returned in ID order.
 	ListHubInstances(ctx context.Context, window time.Duration) (rows []HubInstance, now time.Time, err error)
+
+	// MarkHubInstanceStopped records a clean stop of the row for id: it
+	// sets stopped_at and last_seen to the store clock. A missing row is
+	// not an error (there is nothing to mark). Best effort on shutdown: the
+	// caller must have stopped its registry writer first, since a later
+	// UpsertHubInstance clears stopped_at.
+	MarkHubInstanceStopped(ctx context.Context, id string) error
+
+	// PruneHubInstances deletes the rows whose last write (stopped_at when
+	// set, otherwise last_seen) is before now - retention, with now the
+	// store clock, and returns how many rows it deleted.
+	PruneHubInstances(ctx context.Context, retention time.Duration) (int, error)
 }

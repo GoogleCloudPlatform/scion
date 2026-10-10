@@ -49,4 +49,22 @@ describe('markdown renderer with CriticMarkup', () => {
     expect(input).not.toMatch(/[\uE000-\uE007]/);
     expect(out.startsWith('<!--sanitized-->')).toBe(true);
   });
+  it('shows CriticMarkup inside code literally and renders marks outside it', async () => {
+    const r = await getMarkdownRenderer();
+    r.render('Use `{++x++}` and {++y++}.\n\n```\n{--z--}\n```\n', { criticMarks: true });
+    const input = seen.inputs.at(-1) ?? '';
+    expect(input).toContain('<code>{++x++}</code>');
+    expect(input).toContain('<ins class=critic-ins>y</ins>');
+    expect(input).toContain('<pre><code>{--z--}\n</code></pre>');
+    expect(input).not.toContain('<del');
+    expect(input.match(/<ins/g)?.length).toBe(1);
+  });
+  it('replaces sentinel characters inside code too, so code never renders as a mark', async () => {
+    const r = await getMarkdownRenderer();
+    r.render('a `x\uE000y\uE001z` b', { criticMarks: true });
+    const input = seen.inputs.at(-1) ?? '';
+    expect(input).toContain('<code>x\uFFFDy\uFFFDz</code>');
+    expect(input).not.toContain('<ins');
+    expect(input).not.toMatch(/[\uE000-\uE007]/);
+  });
 });

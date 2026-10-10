@@ -629,7 +629,7 @@ func TestDecisionLog_P1_7_HealthReportsWriterFailures(t *testing.T) {
 	assert.Equal(t, HealthStatusDegraded, summary.Status)
 	assert.Equal(t, "degraded: recent write failures", summary.Hub.Checks[auditLogWriterHealthKey])
 	assert.Contains(t, summary.Hub.UnhealthyChecks, auditLogWriterHealthKey+": degraded: recent write failures")
-	assert.Equal(t, "healthy", summary.Database.Status)
+	assert.Equal(t, "healthy", summary.Hub.Checks["database"])
 
 	// Closed while still serving.
 	require.NoError(t, srv.CloseAuditWriter(context.Background()))

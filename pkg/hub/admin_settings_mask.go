@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	yamlv3 "gopkg.in/yaml.v3"
@@ -164,6 +165,7 @@ var maskedServerFields = []maskedServerField{
 // client. Its inverse for the PUT path is restoreMaskedServerSecrets; both are
 // driven by maskedServerFields.
 func maskSensitiveFields(resp *ServerConfigResponse) {
+	resp.Telemetry = maskedTelemetry(resp.Telemetry)
 	if resp.Server == nil {
 		return
 	}
@@ -282,6 +284,231 @@ func restoreMaskedServerSecrets(incoming, stored *config.V1ServerConfig) error {
 		*r.dst = r.val
 	}
 	return nil
+}
+
+// maskedTelemetry returns t with every non-empty telemetry.cloud.headers
+// value replaced by maskedValue, to match the other secret fields. t
+// itself is never modified (the DB-mode GET passes the snapshot's own
+// config): when a value is masked, the result is a copy holding a new
+// headers map; otherwise it is t.
+func maskedTelemetry(t *config.V1TelemetryConfig) *config.V1TelemetryConfig {
+	if t == nil || t.Cloud == nil {
+		return t
+	}
+	masked := false
+	for _, v := range t.Cloud.Headers {
+		if v != "" {
+			masked = true
+			break
+		}
+	}
+	if !masked {
+		return t
+	}
+	headers := make(map[string]string, len(t.Cloud.Headers))
+	for k, v := range t.Cloud.Headers {
+		if v != "" {
+			v = maskedValue
+		}
+		headers[k] = v
+	}
+	cloud := *t.Cloud
+	cloud.Headers = headers
+	out := *t
+	out.Cloud = &cloud
+	return &out
+}
+
+// maskedTelemetryHeaderNames returns the names of the telemetry.cloud
+// headers in t that hold maskedValue, sorted.
+func maskedTelemetryHeaderNames(t *config.V1TelemetryConfig) []string {
+	if t == nil || t.Cloud == nil {
+		return nil
+	}
+	var names []string
+	for k, v := range t.Cloud.Headers {
+		if v == maskedValue {
+			names = append(names, k)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// restoreMaskedTelemetryHeaders is the inverse of maskedTelemetry for the
+// file-mode PUT path (the DB-backed path uses
+// restoreMaskedTelemetryHeadersInDoc), the counterpart of restoreMaskedServerSecrets: a
+// telemetry.cloud.headers value in incoming that still holds maskedValue
+// (an echo of GET) is replaced with the stored value of the same header,
+// so a form round trip keeps the stored headers. A real value is left
+// alone and replaces the stored one as usual.
+//
+// A masked value is restored only when cloudUnchanged is true: the caller
+// reports whether the telemetry.cloud object this save would store, apart
+// from headers, equals the one stored now (telemetryCloudUnchanged), each
+// computed with the write's own semantics (the DB-mode merge, or the
+// file-mode replace). A masked header with no stored value, or with a
+// stored value that is itself the placeholder, is an error too. The caller
+// answers 400 to an error.
+func restoreMaskedTelemetryHeaders(incoming, stored *config.V1TelemetryConfig, cloudUnchanged bool) error {
+	names := maskedTelemetryHeaderNames(incoming)
+	if len(names) == 0 {
+		return nil
+	}
+	if !cloudUnchanged {
+		return fmt.Errorf("telemetry.cloud.headers.%s is the masked placeholder %q but other fields of telemetry.cloud changed; send the real value", names[0], maskedValue)
+	}
+	var storedHeaders map[string]string
+	if stored != nil && stored.Cloud != nil {
+		storedHeaders = stored.Cloud.Headers
+	}
+	headers := make(map[string]string, len(incoming.Cloud.Headers))
+	for k, v := range incoming.Cloud.Headers {
+		if v == maskedValue {
+			sv, ok := storedHeaders[k]
+			var sp *string
+			if ok {
+				sp = &sv
+			}
+			if err := checkStoredSecret("telemetry.cloud.headers."+k, sp); err != nil {
+				return err
+			}
+			v = sv
+		}
+		headers[k] = v
+	}
+	incoming.Cloud.Headers = headers
+	return nil
+}
+
+// telemetryCloudUnchanged reports whether the telemetry documents next
+// (what a save would store) and cur (what is stored now) hold the same
+// telemetry.cloud object apart from headers. Both are compared as decoded
+// JSON with members that carry no value (null, "" and objects left empty
+// by that rule) removed, so key order, key spelling in the request and an
+// empty value for an absent member do not matter. A document that cannot
+// be decoded is never equal. Treating "", null and {} as no value is valid
+// while every telemetry.cloud member reads them as unset;
+// TestTelemetryCloudFields_Known fails when a member is added, so the
+// rule is checked again for it.
+func telemetryCloudUnchanged(next, cur json.RawMessage) bool {
+	a, ok1 := cloudWithoutHeaders(next)
+	b, ok2 := cloudWithoutHeaders(cur)
+	return ok1 && ok2 && reflect.DeepEqual(a, b)
+}
+
+// cloudWithoutHeaders returns the cloud member of a telemetry document
+// without headers and without members that carry no value.
+func cloudWithoutHeaders(doc json.RawMessage) (map[string]any, bool) {
+	var t map[string]any
+	if len(doc) > 0 {
+		if err := json.Unmarshal(doc, &t); err != nil {
+			return nil, false
+		}
+	}
+	cloud, _ := t["cloud"].(map[string]any)
+	out := make(map[string]any, len(cloud))
+	for k, v := range cloud {
+		if k != "headers" {
+			out[k] = v
+		}
+	}
+	pruneNoValue(out)
+	return out, true
+}
+
+// pruneNoValue removes from m, at every depth of nested objects, the
+// members that hold null or "", and then the objects left empty. It does
+// not recurse into arrays: an array is kept and compared verbatim, so an
+// empty value inside one still counts as a change (fail-closed).
+func pruneNoValue(m map[string]any) {
+	for k, v := range m {
+		switch t := v.(type) {
+		case nil:
+			delete(m, k)
+		case string:
+			if t == "" {
+				delete(m, k)
+			}
+		case map[string]any:
+			pruneNoValue(t)
+			if len(t) == 0 {
+				delete(m, k)
+			}
+		}
+	}
+}
+
+// restoreMaskedTelemetryHeadersInDoc is restoreMaskedTelemetryHeaders for
+// the DB-backed save, applied to the documents of one row read: next is
+// the telemetry document the write will store (the request merged on the
+// row) and cur is that row's document before the request was applied
+// (sectionMergeOptions.baseOut). Each telemetry.cloud.headers value in
+// next that holds maskedValue is replaced with the same header's value in
+// cur, only when next and cur hold the same telemetry.cloud object apart
+// from headers (telemetryCloudUnchanged); otherwise, or when cur holds no
+// usable value for a masked header, it returns an error (400). The write
+// is a CAS on the revision of the same row read, so a concurrent change to
+// the row yields a 409 rather than a restored header beside it.
+//
+// The values restored come from the row, never from the snapshot GET was
+// built from: on a replica whose snapshot is stale, the row wins. With no
+// row, cur is empty, so a masked header (which GET can show from bootstrap
+// settings) has no stored value and the save is rejected. It returns the
+// number of values restored.
+func restoreMaskedTelemetryHeadersInDoc(next, cur json.RawMessage) (json.RawMessage, int, error) {
+	var doc map[string]any
+	if err := json.Unmarshal(next, &doc); err != nil {
+		return nil, 0, err
+	}
+	cloud, _ := doc["cloud"].(map[string]any)
+	headers, _ := cloud["headers"].(map[string]any)
+	var names []string
+	for k, v := range headers {
+		if v == maskedValue {
+			names = append(names, k)
+		}
+	}
+	if len(names) == 0 {
+		return next, 0, nil
+	}
+	sort.Strings(names)
+	if !telemetryCloudUnchanged(next, cur) {
+		return nil, 0, fmt.Errorf("telemetry.cloud.headers.%s is the masked placeholder %q but other fields of telemetry.cloud changed; send the real value", names[0], maskedValue)
+	}
+	var curDoc map[string]any
+	if len(cur) > 0 {
+		if err := json.Unmarshal(cur, &curDoc); err != nil {
+			return nil, 0, err
+		}
+	}
+	curCloud, _ := curDoc["cloud"].(map[string]any)
+	curHeaders, _ := curCloud["headers"].(map[string]any)
+	for _, k := range names {
+		var sp *string
+		if sv, ok := curHeaders[k].(string); ok {
+			sp = &sv
+		}
+		if err := checkStoredSecret("telemetry.cloud.headers."+k, sp); err != nil {
+			return nil, 0, err
+		}
+		headers[k] = *sp
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return nil, 0, err
+	}
+	return out, len(names), nil
+}
+
+// telemetryCloudUnchangedFile reports, for a file-mode save, whether the
+// telemetry.cloud object the save would write (the request's telemetry
+// replaces the stored one whole) equals, apart from headers, the stored
+// one.
+func telemetryCloudUnchangedFile(req, stored *config.V1TelemetryConfig) bool {
+	next, err1 := json.Marshal(req)
+	cur, err2 := json.Marshal(stored)
+	return err1 == nil && err2 == nil && telemetryCloudUnchanged(next, cur)
 }
 
 // maskedCopy returns a deep copy of s with GET's masking applied.
@@ -436,6 +663,24 @@ func serverConfigFromRaw(raw map[string]interface{}) (*config.V1ServerConfig, er
 		return nil, err
 	}
 	var out config.V1ServerConfig
+	if err := yamlv3.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// telemetryConfigFromRaw decodes the telemetry section of an already-parsed
+// settings.yaml map, the way GET decodes it (nil when absent).
+func telemetryConfigFromRaw(raw map[string]interface{}) (*config.V1TelemetryConfig, error) {
+	t, ok := raw["telemetry"]
+	if !ok || t == nil {
+		return nil, nil
+	}
+	data, err := yamlv3.Marshal(t)
+	if err != nil {
+		return nil, err
+	}
+	var out config.V1TelemetryConfig
 	if err := yamlv3.Unmarshal(data, &out); err != nil {
 		return nil, err
 	}
