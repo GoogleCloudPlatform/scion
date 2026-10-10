@@ -282,6 +282,10 @@ export class ScionChatFilePreview extends LitElement {
 
   @state() private copied = false;
 
+  /** The signed-in user's id; an artifact they own shows "You" as owner. */
+  @property()
+  currentUserId = '';
+
   /** Display names of the open artifact's owner and home project, once looked up. */
   @state() private artifactNames = { owner: '', project: '' };
 
@@ -757,9 +761,12 @@ export class ScionChatFilePreview extends LitElement {
    */
   private loadArtifactNames(info: ArtifactInfo, gen: number): void {
     this.artifactNames = { owner: '', project: '' };
-    void principalName(info.ownerKind, info.ownerRef).then((owner) => {
-      if (gen === this.generation && owner) this.artifactNames = { ...this.artifactNames, owner };
-    });
+    // The signed-in user is shown as "You"; no lookup is needed.
+    if (!(info.ownerKind === 'user' && info.ownerRef === this.currentUserId)) {
+      void principalName(info.ownerKind, info.ownerRef).then((owner) => {
+        if (gen === this.generation && owner) this.artifactNames = { ...this.artifactNames, owner };
+      });
+    }
     void projectName(info.homeProject).then((project) => {
       if (gen === this.generation && project) {
         this.artifactNames = { ...this.artifactNames, project };
@@ -772,7 +779,7 @@ export class ScionChatFilePreview extends LitElement {
     const parts = [info.entry];
     if (info.ownerRef) {
       parts.push(
-        `owner ${principalLabel(info.ownerKind, info.ownerRef, this.artifactNames.owner)}`
+        `owner ${principalLabel(info.ownerKind, info.ownerRef, this.artifactNames.owner, this.currentUserId)}`
       );
     }
     if (this.artifactNames.project) parts.push(this.artifactNames.project);

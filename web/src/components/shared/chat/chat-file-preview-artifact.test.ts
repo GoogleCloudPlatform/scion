@@ -162,6 +162,32 @@ describe('scion-chat-file-preview artifact target', () => {
     );
   });
 
+  it('shows "You" for an artifact the signed-in user owns, without looking them up', async () => {
+    const self = '11111111-0000-4000-8000-000000000001';
+    apiFetchMock.mockImplementation((path: string) => {
+      if (path === '/api/v1/projects/proj-1')
+        return Promise.resolve(json({ name: 'web-frontend' }));
+      if (path.includes('/files/')) return Promise.resolve(text('# T'));
+      if (path.startsWith('/api/v1/artifacts/')) {
+        const m = meta(3);
+        return Promise.resolve(
+          json({ ...m, artifact: { ...m.artifact, ownerKind: 'user', ownerRef: self } })
+        );
+      }
+      return Promise.resolve(json({ displayName: 'Should not be used' }));
+    });
+    const el = document.createElement('scion-chat-file-preview') as ScionChatFilePreview;
+    el.currentUserId = self;
+    document.body.appendChild(el);
+    el.target = { kind: 'artifact', id: ID, seq: 0, name: 'Artifact' };
+    for (let i = 0; i < 8; i++) {
+      await Promise.resolve();
+      await el.updateComplete;
+    }
+    expect(q(el, '.footer .path')?.textContent).toBe('design.md · owner You · web-frontend');
+    expect(apiFetchMock.mock.calls.map((c) => c[0])).not.toContain(`/api/v1/users/${self}`);
+  });
+
   it('leaves out a home project the viewer cannot read and looks nothing up when unavailable', async () => {
     apiFetchMock.mockImplementation((path: string) => {
       if (path.startsWith('/api/v1/projects/')) return Promise.resolve(json({}, 403));

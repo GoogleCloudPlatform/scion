@@ -5005,6 +5005,7 @@ export class ScionChatThread extends LitElement {
     return html`
       <scion-chat-file-preview
         .target=${this.filePreview}
+        .currentUserId=${this.currentUserId}
         @chat-file-preview-close=${() => this.closeFilePreview()}
       ></scion-chat-file-preview>
     `;
@@ -5806,6 +5807,7 @@ export class ScionChatThread extends LitElement {
             .attachments=${msg.attachments || EMPTY_ATTACHMENTS}
             .attachmentRefs=${this.getMessageAttachmentRefs(msg.id)}
             .artifactRefs=${this.getMessageArtifactRefs(msg.id)}
+            .currentUserId=${this.currentUserId}
             routedTo=${msgRoutedTo}
             .replyPreview=${replyPreview}
             editedAt=${ext?.editedAt || ''}
