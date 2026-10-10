@@ -244,6 +244,13 @@ const (
 	// LockNotificationOrphanGC guards the periodic removal of acknowledged
 	// notifications whose agent and subscription are both gone.
 	LockNotificationOrphanGC AdvisoryLockKey = 0x5C10002A
+
+	// LockTestIdentityIssuance serializes test identity issuance
+	// (UserStore.LockTestFixtureIssuance) so the per-issuer and hub-wide
+	// live-identity caps are checked and applied atomically. Like
+	// LockAgentLaunchDeadline it is a transaction-scoped
+	// pg_advisory_xact_lock, not taken through AdvisoryLocker.
+	LockTestIdentityIssuance AdvisoryLockKey = 0x5C10002B
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide

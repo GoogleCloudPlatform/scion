@@ -2573,6 +2573,10 @@ var (
 		{Name: "last_login", Type: field.TypeTime, Nullable: true},
 		{Name: "last_seen", Type: field.TypeTime, Nullable: true},
 		{Name: "session_generation", Type: field.TypeInt64, Default: 0},
+		{Name: "kind", Type: field.TypeEnum, Enums: []string{"human", "test_fixture"}, Default: "human"},
+		{Name: "expires_at", Type: field.TypeTime, Nullable: true},
+		{Name: "issued_by", Type: field.TypeString, Nullable: true},
+		{Name: "purpose", Type: field.TypeString, Nullable: true},
 	}
 	// UsersTable holds the schema information for the "users" table.
 	UsersTable = &schema.Table{
@@ -2584,6 +2588,11 @@ var (
 				Name:    "user_last_seen",
 				Unique:  false,
 				Columns: []*schema.Column{UsersColumns[11]},
+			},
+			{
+				Name:    "user_kind_issued_by",
+				Unique:  false,
+				Columns: []*schema.Column{UsersColumns[13], UsersColumns[15]},
 			},
 		},
 	}
@@ -2913,6 +2922,12 @@ func init() {
 		Table: "templates",
 	}
 	UsageReservationsTable.ForeignKeys[0].RefTable = LimitDefinitionsTable
+	UsersTable.Annotation = &entsql.Annotation{
+		Table: "users",
+	}
+	UsersTable.Annotation.Checks = map[string]string{
+		"users_test_fixture_expiry_check": "(kind <> 'test_fixture' OR expires_at IS NOT NULL)",
+	}
 	UserAccessTokensTable.Annotation = &entsql.Annotation{
 		Table: "user_access_tokens",
 	}

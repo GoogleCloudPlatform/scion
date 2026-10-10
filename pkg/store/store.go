@@ -1602,6 +1602,30 @@ type UserStore interface {
 	// IncrementSessionGeneration atomically increments the user's
 	// session_generation counter, invalidating all existing sessions.
 	IncrementSessionGeneration(ctx context.Context, userID string) error
+
+	// CreateTestFixtureUser creates a hub-issued test fixture user. It is
+	// the only store path that writes Kind=UserKindTestFixture. It requires
+	// Kind=UserKindTestFixture, a non-nil ExpiresAt, a non-empty IssuedBy,
+	// an email in TestFixtureEmailDomain and the member or viewer role, and
+	// returns ErrInvalidInput otherwise. CreateUser refuses all of these
+	// rows with ErrTestFixtureKindRefused.
+	CreateTestFixtureUser(ctx context.Context, user *User) error
+
+	// CountLiveTestFixtureUsers counts test fixture users whose expiry is
+	// after now. A non-empty issuedBy restricts the count to that issuer.
+	CountLiveTestFixtureUsers(ctx context.Context, issuedBy string, now time.Time) (int, error)
+
+	// ListTestFixtureUsers returns test fixture users, newest first. A
+	// non-empty issuedBy restricts the list to that issuer.
+	ListTestFixtureUsers(ctx context.Context, issuedBy string) ([]User, error)
+
+	// LockTestFixtureIssuance serializes test fixture issuance until the
+	// surrounding transaction ends, so that a live-count check and the
+	// following insert are atomic across concurrent requests and hub
+	// replicas. On PostgreSQL it takes the transaction-scoped advisory
+	// lock LockTestIdentityIssuance; on SQLite, which serializes writers,
+	// it is a no-op. Must be called inside WithTx.
+	LockTestFixtureIssuance(ctx context.Context) error
 }
 
 // UserFilter defines criteria for filtering users.
