@@ -134,6 +134,28 @@ describe('scion-chat-thread artifact references', () => {
     await vi.waitFor(() => expect(messageEl(el, 'm1')?.artifactRefs).toEqual([VIEW]));
   });
 
+  it('hands the signed-in user to each message and to its own preview', async () => {
+    apiFetch.mockResolvedValue(history({ messages: [message('m1', 'hello')] }));
+    const el = await mount();
+    el.currentUserId = 'u-self';
+    await el.updateComplete;
+    expect((messageEl(el, 'm1') as unknown as { currentUserId: string }).currentUserId).toBe(
+      'u-self'
+    );
+    apiFetch.mockImplementation(() => new Promise(() => {}));
+    (el as unknown as { filePreview: unknown }).filePreview = {
+      kind: 'artifact',
+      id: A,
+      seq: 0,
+      name: 'Artifact',
+    };
+    await el.updateComplete;
+    const preview = el.shadowRoot?.querySelector('scion-chat-file-preview') as
+      | (HTMLElement & { currentUserId: string })
+      | null;
+    expect(preview?.currentUserId).toBe('u-self');
+  });
+
   it('sends picked refs in metadata next to RE-to, and uses the response views and warning', async () => {
     apiFetch.mockResolvedValue(history({ items: [] }));
     const el = await mount();

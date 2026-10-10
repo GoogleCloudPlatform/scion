@@ -120,6 +120,19 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		"message_delivery_failures.go:applyBrokerMessageFailure": "Acts on an already-persisted row (confirmed via GetMessage) after markFailed has already committed; publish mirrors the committed write, not a pending one",
 	}
 
+	// -------------------------------------------------------------------
+	// Broker proxy calls: MessageBrokerProxy.PublishUserMessage hands the
+	// message to the bus; persistence happens later in its deliverToUser
+	// callback, not at the caller. Every PublishUserMessage call that is
+	// not the event publish (see classifyPublishUserMessageCall) must be
+	// one of these, keyed by file:enclosing function.
+	// -------------------------------------------------------------------
+	proxyExcluded := map[string]string{
+		"handlers_agent_messaging.go:handleAgentOutboundMessage": "bp.PublishUserMessage: broker path to a user",
+		"notifications.go:publishToBroker":                       "nd.brokerProxy.PublishUserMessage: notification delivery",
+		"messagebroker.go:PublishToGroup":                        "p.PublishUserMessage: group fan-out to user recipients",
+	}
+
 	// Build accounted set from guarded entries.
 	accounted := make(map[string]bool, len(guarded))
 	for k := range guarded {
@@ -145,6 +158,8 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		target   string // "publish" or "notify"
 	}
 	var sites []callSite
+	// proxySites holds every other PublishUserMessage call, by file:func.
+	proxySites := map[string]int{}
 
 	for _, entry := range entries {
 		name := entry.Name()
@@ -166,9 +181,13 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 				return true
 			}
 			var target string
-			switch {
-			case isPublishUserMessageCall(call):
+			switch classifyPublishUserMessageCall(call) {
+			case publishCallEvent:
 				target = "publish"
+			case publishCallOther:
+				pos := fset.Position(call.Pos())
+				proxySites[name+":"+enclosingFuncName(fset, f, pos.Offset)] = pos.Line
+				return true
 			default:
 				return true
 			}
@@ -308,30 +327,80 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		}
 	}
 
-	t.Logf("Verified %d persisted-row effect call sites: %d guarded",
-		len(sites), len(guarded))
+	// Every other PublishUserMessage call must be a listed broker proxy
+	// call, and every listed one must still exist.
+	for key, line := range proxySites {
+		if _, ok := proxyExcluded[key]; !ok {
+			t.Errorf("unclassified PublishUserMessage call at %s (line %d): neither the event publish "+
+				"(a 4-argument call on an `events` field or variable) nor a listed broker proxy call. "+
+				"Add it to guarded (as an event publish) or to proxyExcluded.", key, line)
+		}
+	}
+	for key := range proxyExcluded {
+		if _, ok := proxySites[key]; !ok {
+			t.Errorf("Broker proxy call site %q is listed in proxyExcluded but was not found in source. "+
+				"The function may have been renamed, moved, or deleted.", key)
+		}
+	}
+
+	t.Logf("Verified %d persisted-row effect call sites: %d guarded, %d broker proxy calls excluded",
+		len(sites), len(guarded), len(proxySites))
 }
 
-// isPublishUserMessageCall returns true if the call expression is a call to
-// the event publisher's PublishUserMessage: a method call on an `events`
+// publishCallKind classifies a call for the persisted-row scanners.
+type publishCallKind int
+
+const (
+	// publishCallNone: not a PublishUserMessage call.
+	publishCallNone publishCallKind = iota
+	// publishCallEvent: the event publisher's PublishUserMessage.
+	publishCallEvent
+	// publishCallOther: any other PublishUserMessage call. The scanner
+	// requires each to be a listed broker proxy call (proxyExcluded).
+	publishCallOther
+)
+
+// classifyPublishUserMessageCall classifies every call named
+// PublishUserMessage. The event publish is a method call on an `events`
 // field or variable (s.events, p.events, nd.events, events) with the event
 // publish signature's 4 arguments (ctx, msg, attachments, artifactRefs).
-// The broker proxy's PublishUserMessage (ctx, projectID, userID, msg) also
-// takes 4 arguments, so arity alone no longer tells them apart; it is
-// called on the proxy (bp, p, nd.brokerProxy) and is excluded —
-// persistence is handled by its deliverToUser callback, not by the caller.
-func isPublishUserMessageCall(call *ast.CallExpr) bool {
-	fn, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || fn.Sel.Name != "PublishUserMessage" || len(call.Args) != 4 {
-		return false
-	}
-	switch recv := fn.X.(type) {
-	case *ast.SelectorExpr:
-		return recv.Sel.Name == "events"
+// Every other PublishUserMessage call, whatever its receiver or arity, is
+// publishCallOther: the broker proxy's PublishUserMessage (ctx, projectID,
+// userID, msg) on bp, p or nd.brokerProxy, but equally an event publisher
+// held under another name (ep), which the scanner then reports as
+// unclassified rather than ignoring.
+func classifyPublishUserMessageCall(call *ast.CallExpr) publishCallKind {
+	switch fn := call.Fun.(type) {
 	case *ast.Ident:
-		return recv.Name == "events"
+		if fn.Name == "PublishUserMessage" {
+			return publishCallOther
+		}
+		return publishCallNone
+	case *ast.SelectorExpr:
+		if fn.Sel.Name != "PublishUserMessage" {
+			return publishCallNone
+		}
+		if len(call.Args) == 4 {
+			switch recv := fn.X.(type) {
+			case *ast.SelectorExpr:
+				if recv.Sel.Name == "events" {
+					return publishCallEvent
+				}
+			case *ast.Ident:
+				if recv.Name == "events" {
+					return publishCallEvent
+				}
+			}
+		}
+		return publishCallOther
 	}
-	return false
+	return publishCallNone
+}
+
+// isPublishUserMessageCall reports whether call is the event publisher's
+// PublishUserMessage (see classifyPublishUserMessageCall).
+func isPublishUserMessageCall(call *ast.CallExpr) bool {
+	return classifyPublishUserMessageCall(call) == publishCallEvent
 }
 
 // persistedRowDisambiguationSuffixes returns candidate suffixes for multi-call
@@ -441,24 +510,29 @@ func TestMemberFanoutFollowsPublish(t *testing.T) {
 	}
 }
 
-// TestIsPublishUserMessageCallMatcher pins which calls the persisted-row
-// scanners count as the event publish: a 4-argument PublishUserMessage on
-// an `events` field or variable. The broker proxy's PublishUserMessage has
-// 4 arguments too and must stay excluded, as must any other arity. A rename
-// of the events field would make TestPersistedRowEffectEnumeration fail
-// loudly, since every listed guarded site must then be found.
-func TestIsPublishUserMessageCallMatcher(t *testing.T) {
-	for src, want := range map[string]bool{
-		`s.events.PublishUserMessage(ctx, msg, attachments, refs)`:                     true,
-		`p.events.PublishUserMessage(ctx, msg, refs, artifactRefs)`:                    true,
-		`nd.events.PublishUserMessage(ctx, msg, nil, nil)`:                             true,
-		`events.PublishUserMessage(ctx, msg, nil, nil)`:                                true,
-		`bp.PublishUserMessage(ctx, agent.ProjectID, result.RecipientID, msg)`:         false,
-		`p.PublishUserMessage(ctx, projectID, r.Name, &recipMsg)`:                      false,
-		`nd.brokerProxy.PublishUserMessage(ctx, sub.ProjectID, sub.SubscriberID, msg)`: false,
-		`s.events.PublishUserMessage(ctx, msg, attachments)`:                           false,
-		`PublishUserMessage(ctx, msg, nil, nil)`:                                       false,
-		`s.events.PublishChatMemberMessage(ctx, msg, nil, nil)`:                        false,
+// TestClassifyPublishUserMessageCall pins how the persisted-row scanners
+// classify PublishUserMessage calls: only a 4-argument call on an `events`
+// field or variable is the event publish. Every other PublishUserMessage
+// call, the broker proxy's 4-argument calls included, is "other", which
+// TestPersistedRowEffectEnumeration accepts only for a listed broker proxy
+// call (proxyExcluded); an event publisher held under another name (ep) is
+// therefore reported as unclassified, not ignored. A rename of the events
+// field would also fail loudly, since every listed guarded site must then
+// be found.
+func TestClassifyPublishUserMessageCall(t *testing.T) {
+	for src, want := range map[string]publishCallKind{
+		`s.events.PublishUserMessage(ctx, msg, attachments, refs)`:                     publishCallEvent,
+		`p.events.PublishUserMessage(ctx, msg, refs, artifactRefs)`:                    publishCallEvent,
+		`nd.events.PublishUserMessage(ctx, msg, nil, nil)`:                             publishCallEvent,
+		`events.PublishUserMessage(ctx, msg, nil, nil)`:                                publishCallEvent,
+		`bp.PublishUserMessage(ctx, agent.ProjectID, result.RecipientID, msg)`:         publishCallOther,
+		`p.PublishUserMessage(ctx, projectID, r.Name, &recipMsg)`:                      publishCallOther,
+		`nd.brokerProxy.PublishUserMessage(ctx, sub.ProjectID, sub.SubscriberID, msg)`: publishCallOther,
+		`ep.PublishUserMessage(ctx, msg, nil, nil)`:                                    publishCallOther,
+		`s.events.PublishUserMessage(ctx, msg, attachments)`:                           publishCallOther,
+		`PublishUserMessage(ctx, msg, nil, nil)`:                                       publishCallOther,
+		`s.events.PublishChatMemberMessage(ctx, msg, nil, nil, ids)`:                   publishCallNone,
+		`s.events.PublishUserNotification(ctx, n)`:                                     publishCallNone,
 	} {
 		expr, err := parser.ParseExpr(src)
 		if err != nil {
@@ -468,8 +542,8 @@ func TestIsPublishUserMessageCallMatcher(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s: not a call", src)
 		}
-		if got := isPublishUserMessageCall(call); got != want {
-			t.Errorf("isPublishUserMessageCall(%s) = %v, want %v", src, got, want)
+		if got := classifyPublishUserMessageCall(call); got != want {
+			t.Errorf("classifyPublishUserMessageCall(%s) = %v, want %v", src, got, want)
 		}
 	}
 }
