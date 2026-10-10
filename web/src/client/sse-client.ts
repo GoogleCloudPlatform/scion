@@ -27,6 +27,12 @@
  *
  * Reconnection retries indefinitely; a tab that becomes visible reconnects
  * immediately.
+ *
+ * A stream can also die without the browser noticing: after a mobile PWA
+ * returns from the background, EventSource may still report OPEN although
+ * nothing will ever arrive on it. The client therefore tracks when it last
+ * heard from the server and replaces a connection that has gone silent for
+ * longer than staleAfterMs (see onResume and isStale).
  */
 
 import { dispatchTeardown } from '../utils/auth.js';
@@ -73,6 +79,57 @@ export class SSEClient extends EventTarget {
    */
   private connectionOpen = false;
   private onVisibilityChange: (() => void) | null = null;
+  private onPageShow: (() => void) | null = null;
+  private onOnline: (() => void) | null = null;
+  private onOffline: (() => void) | null = null;
+  private onPageHide: (() => void) | null = null;
+
+  /**
+   * How long a connection may stay silent before it is presumed dead. The
+   * hub writes a heartbeat every 30s, so this allows two missed heartbeats
+   * plus slack.
+   */
+  private staleAfterMs = 75_000;
+  /**
+   * The shortest absence after which a resume treats the stream as suspect.
+   * Quick app switches (glancing at a notification, copying a code) last a
+   * few seconds and the browser keeps the socket; past this, a mobile OS
+   * may already have suspended the page and silently lost the stream.
+   * Gating on the trip, not on when traffic last arrived, keeps a brief
+   * switch from ever reconnecting a healthy idle feed.
+   */
+  private minSuspendMs = 15_000;
+  /**
+   * How often a visible tab checks the current connection for staleness.
+   * The check only acts on a connection that has delivered a named
+   * 'heartbeat' event, so it stays inert until the hub sends its heartbeat
+   * as an event rather than a comment.
+   */
+  private staleCheckIntervalMs = 15_000;
+  private staleCheckTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * One deferred check, armed on a resume that came too soon to judge: the
+   * connection was suspended but had not yet been silent for staleAfterMs.
+   * It fires when that much silence would have passed, and is cancelled by
+   * any new activity, by hiding again, and by disconnect().
+   */
+  private resumeCheckTimer: ReturnType<typeof setTimeout> | null = null;
+  /** When anything last arrived from the server (open, event or heartbeat). */
+  private lastActivityAt = 0;
+  /**
+   * Whether the current connection has delivered a 'heartbeat' event. The
+   * hub's heartbeat is an SSE comment, which EventSource does not expose, so
+   * silence on its own may just mean an idle stream. Only a server known to
+   * send heartbeat events lets silence alone, while visible, condemn it.
+   */
+  private heartbeatSeen = false;
+  /**
+   * When the tab was last hidden or the device went offline, cleared once a
+   * resume has been checked. An absence of minSuspendMs or more marks the
+   * stream as suspect on resume, to be replaced if silent past staleAfterMs
+   * (see onResume).
+   */
+  private suspendedAt: number | null = null;
 
   constructor(private readonly endpoint = '/events') {
     super();
@@ -123,6 +180,8 @@ export class SSEClient extends EventTarget {
     const url = this.buildUrl(this.subjects);
     const es = new EventSource(url);
     this.eventSource = es;
+    this.heartbeatSeen = false;
+    this.startStaleCheck();
 
     // Each handler bails unless es is still the client's current connection,
     // so a superseded connection cannot mutate state it no longer owns.
@@ -130,6 +189,7 @@ export class SSEClient extends EventTarget {
       if (es !== this.eventSource) return;
       this.reconnectAttempts = 0;
       this.connectionOpen = true;
+      this.markActivity();
       console.info('[SSE] Connected');
       // The browser's own open signal. The server-sent "connected" event this
       // client also listens for is never emitted by the hub, so consumers that
@@ -171,6 +231,7 @@ export class SSEClient extends EventTarget {
     // Handle state update events from the server
     this.eventSource.addEventListener('update', (event) => {
       if (es !== this.eventSource) return;
+      this.markActivity();
       try {
         const data = JSON.parse(event.data as string) as SSEUpdateEvent;
         this.dispatchEvent(new CustomEvent('update', { detail: data }));
@@ -193,9 +254,18 @@ export class SSEClient extends EventTarget {
       this.openConnection();
     });
 
+    // A heartbeat sent as a named event (not a comment) is visible here and
+    // proves the stream is alive while idle.
+    this.eventSource.addEventListener('heartbeat', () => {
+      if (es !== this.eventSource) return;
+      this.heartbeatSeen = true;
+      this.markActivity();
+    });
+
     // Handle initial connection acknowledgement
     this.eventSource.addEventListener('connected', (event) => {
       if (es !== this.eventSource) return;
+      this.markActivity();
       try {
         const data = JSON.parse(event.data as string) as {
           connectionId: string;
@@ -312,31 +382,157 @@ export class SSEClient extends EventTarget {
     this.openConnection();
   }
 
+  private markActivity(): void {
+    this.lastActivityAt = Date.now();
+    this.clearResumeCheck();
+  }
+
+  private clearResumeCheck(): void {
+    if (this.resumeCheckTimer !== null) {
+      clearTimeout(this.resumeCheckTimer);
+      this.resumeCheckTimer = null;
+    }
+  }
+
+  /**
+   * Re-check a resumed connection once it has been silent for staleAfterMs.
+   * The suspension already makes it suspect, so silence alone then condemns
+   * it; any traffic before then clears this check (markActivity).
+   */
+  private scheduleResumeCheck(): void {
+    this.clearResumeCheck();
+    const delay = Math.max(0, this.lastActivityAt + this.staleAfterMs - Date.now()) + 1;
+    this.resumeCheckTimer = setTimeout(() => {
+      this.resumeCheckTimer = null;
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      if (this.isSilent()) this.reconnectStale();
+    }, delay);
+  }
+
+  /** Whether nothing has arrived for longer than staleAfterMs. */
+  private isSilent(): boolean {
+    return Date.now() - this.lastActivityAt > this.staleAfterMs;
+  }
+
+  /**
+   * Whether silence alone condemns the open connection: only once it is
+   * known to send heartbeat events, so an idle stream in a tab that stayed
+   * in view is left alone.
+   */
+  private isStale(): boolean {
+    return this.heartbeatSeen && this.isSilent();
+  }
+
+  /**
+   * Replace a connection the browser still reports as open but that has
+   * gone silent. Reported as a drop so listeners resync once it reopens.
+   * The replacement starts CONNECTING, which every trigger here skips, so
+   * at most one reconnect is in flight; a failed handshake falls back to
+   * the normal auth probe and backoff.
+   */
+  private reconnectStale(): void {
+    if (!this.connected || this.reconnectTimer !== null) return;
+    console.info('[SSE] Connection silent, reconnecting');
+    if (this.connectionOpen) {
+      this.connectionOpen = false;
+      this.dispatchEvent(new CustomEvent('disconnected'));
+    }
+    this.clearResumeCheck();
+    this.closeEventSource();
+    this.openConnection();
+  }
+
+  /**
+   * Called when the tab is shown, the page is restored, or the network
+   * returns. A dead connection reconnects immediately, not after whatever
+   * backoff was pending. An open one is replaced if it has gone stale, or,
+   * after an absence long enough that the page may have been suspended, if
+   * it has been silent for staleAfterMs - now, or once that much silence
+   * has passed.
+   */
+  private onResume(): void {
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+    if (this.subjects.length === 0) return;
+    const tripMs = this.suspendedAt === null ? 0 : Date.now() - this.suspendedAt;
+    this.suspendedAt = null;
+    if (this.connected) {
+      if (this.isStale()) {
+        this.reconnectStale();
+      } else if (tripMs >= this.minSuspendMs) {
+        if (this.isSilent()) {
+          this.reconnectStale();
+        } else {
+          // Too soon to tell: traffic arrived shortly before or during the
+          // absence. Look again once the silence would count as stale.
+          this.scheduleResumeCheck();
+        }
+      }
+    } else {
+      // A stream the browser closed while the page was frozen (a bfcache
+      // restore) never fired an error, so the drop was never reported.
+      // Report it, as onerror would have, so listeners resync on reopen.
+      if (this.connectionOpen) {
+        this.connectionOpen = false;
+        this.dispatchEvent(new CustomEvent('disconnected'));
+      }
+      // Restart the backoff from the shortest delay.
+      this.reconnectAttempts = 0;
+      this.reconnectNow();
+    }
+  }
+
+  private markSuspended(): void {
+    this.clearResumeCheck();
+    if (this.suspendedAt === null) this.suspendedAt = Date.now();
+  }
+
+  /** Check a visible tab's connection for staleness every so often. */
+  private startStaleCheck(): void {
+    if (this.staleCheckTimer !== null) return;
+    this.staleCheckTimer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      if (this.isStale()) this.reconnectStale();
+    }, this.staleCheckIntervalMs);
+  }
+
   /**
    * Reconnect as soon as the tab is shown, not after whatever backoff was
    * pending when it was hidden. Mobile browsers suspend a backgrounded tab and
-   * close its connections, so the feed is usually dead on return.
+   * close its connections, so the feed is usually dead on return - or, worse,
+   * still reports OPEN while nothing arrives, which onResume catches.
    */
   private watchVisibility(): void {
     if (this.onVisibilityChange || typeof document === 'undefined') {
       return;
     }
     this.onVisibilityChange = (): void => {
-      if (document.visibilityState !== 'visible') return;
-      if (this.connected || this.subjects.length === 0) return;
-      // Restart the backoff from the shortest delay.
-      this.reconnectAttempts = 0;
-      this.reconnectNow();
+      if (document.visibilityState === 'visible') {
+        this.onResume();
+      } else {
+        this.markSuspended();
+      }
     };
+    this.onPageShow = (): void => this.onResume();
+    this.onOnline = (): void => this.onResume();
+    this.onOffline = (): void => this.markSuspended();
+    this.onPageHide = (): void => this.markSuspended();
     document.addEventListener('visibilitychange', this.onVisibilityChange);
+    if (typeof window !== 'undefined') {
+      window.addEventListener('pageshow', this.onPageShow);
+      window.addEventListener('pagehide', this.onPageHide);
+      window.addEventListener('online', this.onOnline);
+      window.addEventListener('offline', this.onOffline);
+    }
   }
 
   /**
    * Close the SSE connection and cancel any pending reconnection.
    *
-   * Also drops the visibility listener: it holds a reference to this client,
-   * and left behind it would reopen a connection the caller just tore down.
-   * connect() re-registers it, so a disconnected client stays reusable.
+   * Also drops the resume listeners (visibilitychange, pageshow, pagehide,
+   * online, offline) and the staleness timers: they hold a reference to this
+   * client, and left behind they would reopen a connection the caller just
+   * tore down. connect() re-registers them, so a disconnected client stays
+   * reusable.
    */
   disconnect(): void {
     // Supersede any in-flight auth probe, which would otherwise schedule a
@@ -352,6 +548,24 @@ export class SSEClient extends EventTarget {
       document.removeEventListener('visibilitychange', this.onVisibilityChange);
       this.onVisibilityChange = null;
     }
+    if (typeof window !== 'undefined') {
+      if (this.onPageShow) window.removeEventListener('pageshow', this.onPageShow);
+      if (this.onPageHide) window.removeEventListener('pagehide', this.onPageHide);
+      if (this.onOnline) window.removeEventListener('online', this.onOnline);
+      if (this.onOffline) window.removeEventListener('offline', this.onOffline);
+    }
+    this.onPageShow = null;
+    this.onPageHide = null;
+    this.onOnline = null;
+    this.onOffline = null;
+
+    if (this.staleCheckTimer !== null) {
+      clearInterval(this.staleCheckTimer);
+      this.staleCheckTimer = null;
+    }
+    this.clearResumeCheck();
+    this.heartbeatSeen = false;
+    this.suspendedAt = null;
 
     this.closeEventSource();
 
