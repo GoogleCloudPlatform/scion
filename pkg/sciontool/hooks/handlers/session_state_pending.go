@@ -51,6 +51,11 @@ import (
 // A sender killed after the Hub stored its report but before removing it
 // leads to one resend; the Hub stores one row per agent and session ID, so
 // the resend is absorbed there.
+//
+// The paths that already gave up the whole file on a write failure (the
+// tombstone write in CloseOpenSession, the save in Update) still remove it,
+// and any pending reports with it: losing a report stays preferred to
+// reporting a session twice.
 
 const (
 	// maxPendingReports bounds the pending list. Reports pile up only when
