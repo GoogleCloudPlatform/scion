@@ -155,6 +155,19 @@ func stopWriteBudget() time.Duration {
 	return stopSyncBackTimeout() + workspaceCheckTimeout + syncDispatchTimeout + syncDispatchWriteSlack
 }
 
+// stopAllAgentOpTimeout bounds each agent's broker work in a stop-all: the
+// workspace sync-back and the stop dispatch together. A variable so tests
+// can shorten it.
+var stopAllAgentOpTimeout = 60 * time.Second
+
+// stopAllWriteBudget is the write deadline, from the start of the stops, of
+// a stop-all: the agents are stopped in parallel, so one agent's broker
+// work (stopAllAgentOpTimeout), plus syncDispatchWriteSlack for each
+// agent's status write and the response write (ptone/scion#4212).
+func stopAllWriteBudget() time.Duration {
+	return stopAllAgentOpTimeout + syncDispatchWriteSlack
+}
+
 // dmWakeWriteBudget is the write deadline, from the start of the wake, of a
 // direct message that resumes a suspended agent before delivering
 // (wakeAgentForDM): the resume dispatch (bounded by syncDispatchTimeout),

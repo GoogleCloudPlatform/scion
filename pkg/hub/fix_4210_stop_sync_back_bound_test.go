@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -38,8 +39,8 @@ import (
 // goes on and answers within the response's write deadline.
 
 // answerBrokerUploads answers the next n workspace upload requests tunneled
-// to broker, each after delay, and sends each request's path on the
-// returned channel.
+// to broker, each after delay, with an empty manifest, and sends each
+// request's path on the returned channel.
 func answerBrokerUploads(t *testing.T, broker *fakeBroker, delay time.Duration, n int) <-chan string {
 	t.Helper()
 	paths := make(chan string, n)
@@ -54,7 +55,7 @@ func answerBrokerUploads(t *testing.T, broker *fakeBroker, delay time.Duration, 
 			}
 			paths <- env.Path
 			time.Sleep(delay)
-			body, _ := json.Marshal(RuntimeBrokerWorkspaceUploadResponse{})
+			body, _ := json.Marshal(RuntimeBrokerWorkspaceUploadResponse{Manifest: &transfer.Manifest{Version: "1.0"}})
 			_ = broker.ws.WriteJSON(wsprotocol.NewResponseEnvelope(env.RequestID, http.StatusOK,
 				map[string]string{"Content-Type": "application/json"}, body))
 			answered++

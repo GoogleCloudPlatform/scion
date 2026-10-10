@@ -1506,6 +1506,13 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 
 	dispatcher := s.GetDispatcher()
 
+	// The agents are stopped in parallel, each one's broker work bounded by
+	// stopAllAgentOpTimeout, and the response waits for them all: extend
+	// this request's write deadline to cover them (ptone/scion#4212).
+	if dispatcher != nil {
+		extendWriteDeadline(ctx, w, s.config.WriteTimeout, stopAllWriteBudget())
+	}
+
 	var (
 		mu      sync.Mutex
 		wg      sync.WaitGroup
@@ -1566,7 +1573,7 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 			var dispatchErr error
 			stopRunID := agent.RunID
 			if dispatcher != nil && agent.RuntimeBrokerID != "" {
-				opCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+				opCtx, cancel := context.WithTimeout(ctx, stopAllAgentOpTimeout)
 				defer cancel()
 				s.syncWorkspaceOnStop(opCtx, agent)
 				dispatchErr = dispatcher.DispatchAgentStop(opCtx, agent)
