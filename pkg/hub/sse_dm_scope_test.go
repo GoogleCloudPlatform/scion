@@ -99,7 +99,7 @@ func TestSSEHandler_DMMessagesScopedToParticipants(t *testing.T) {
 
 					for _, msg := range messages {
 						msg.CreatedAt = time.Unix(0, 0)
-						pub.PublishUserMessage(ctx, msg, nil)
+						pub.PublishUserMessage(ctx, msg, nil, nil)
 					}
 					synctest.Wait()
 					cancel()
@@ -203,7 +203,7 @@ func TestPublishUserMessage_DMSubjectsScoped(t *testing.T) {
 				payloads = append(payloads, data)
 			}}
 			msg.CreatedAt = time.Unix(0, 0)
-			b.PublishUserMessage(context.Background(), msg, nil)
+			b.PublishUserMessage(context.Background(), msg, nil, nil)
 			require.NotEmpty(t, subjects)
 
 			participants := dmUserParticipants(msg.ThreadID)

@@ -754,6 +754,7 @@ type brokerProfileSAMappings struct {
 	Complete               bool                           `json:"complete,omitempty"`
 	IncompleteReason       string                         `json:"incompleteReason,omitempty"`
 	AmbiguousGSAs          []string                       `json:"ambiguousGSAs,omitempty"`
+	ReportVersion          int                            `json:"reportVersion,omitempty"`
 }
 
 // brokerProfileSAMappingsHash is one profile's report hash in a heartbeat
@@ -840,6 +841,7 @@ func applyProfileSAMappings(profiles []store.BrokerProfile, reported []brokerPro
 				p.AmbiguousGSAs = nil
 			}
 			p.MappingsHash = hash
+			p.MappingsReportVersion = r.ReportVersion
 			p.MappingsReportedAt = timePtr(now)
 			changed = true
 		case inHashes:
@@ -868,6 +870,7 @@ func profileSAReportEqual(p *store.BrokerProfile, r brokerProfileSAMappings, has
 		p.MappingsHash == hash &&
 		p.MappingsComplete == r.Complete &&
 		p.MappingsIncompleteReason == reason &&
+		p.MappingsReportVersion == r.ReportVersion &&
 		slices.Equal(p.ServiceAccountMappings, r.ServiceAccountMappings) &&
 		slices.Equal(p.AmbiguousGSAs, r.AmbiguousGSAs)
 }
@@ -881,6 +884,7 @@ func clearProfileSAReport(p *store.BrokerProfile) {
 	p.AmbiguousGSAs = nil
 	p.MappingsHash = ""
 	p.MappingsReportedAt = nil
+	p.MappingsReportVersion = 0
 }
 
 // timePtr returns a pointer to a copy of t.

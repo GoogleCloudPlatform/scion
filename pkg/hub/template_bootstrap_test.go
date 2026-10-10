@@ -1135,7 +1135,7 @@ func TestBootstrapTemplatesFromDir_BackfillsDefaultHarnessConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	tmpl.DefaultHarnessConfig = ""
-	if err := s.UpdateTemplate(ctx, tmpl); err != nil {
+	if err := setTemplateContentForTest(ctx, s, tmpl); err != nil {
 		t.Fatal(err)
 	}
 
