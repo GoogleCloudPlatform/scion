@@ -480,7 +480,8 @@ func TestUATScopesAreRegistryDerived(t *testing.T) {
 func TestAgentTokenScopesMapToRegistry(t *testing.T) {
 	want := map[AgentTokenScope][]string{
 		ScopeAgentStatusUpdate: {"agent.status_update"},
-		ScopeAgentLogAppend:    {"agent.log_append"},
+		// agent.log_append is Reserved, so it carries no agent scope.
+		ScopeAgentLogAppend: nil,
 		// ptone/scion#2129 gives secret.use the same explicit AgentScopes
 		// mapping as project.secret_read, so a runtime read and a project
 		// secret-read decision share one token capability. No other

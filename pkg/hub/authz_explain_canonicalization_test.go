@@ -182,14 +182,18 @@ func TestExplainAPI_PermissionCanonicalization(t *testing.T) {
 		wantAllowed  bool
 		wantPermID   string // Expected canonical permission in provenance.
 	}{
-		// Canonical inputs — hub-member has user.read.
+		// Canonical inputs — hub-member has user.read and group.list.
+		// user.list is Reserved, so it is granted by nothing; the request
+		// still resolves to the canonical user.list.
 		{"canonical user+read", "user", "read", true, "user.read"},
-		{"canonical user+list", "user", "list", true, "user.list"},
+		{"canonical user+list", "user", "list", false, "user.list"},
+		{"canonical group+list", "group", "list", true, "group.list"},
 
 		// Non-canonical: action is a full permission ID.
 		{"hub+user.read canonicalizes", "hub", "user.read", true, "user.read"},
-		{"hub+user.list canonicalizes", "hub", "user.list", true, "user.list"},
+		{"hub+user.list canonicalizes", "hub", "user.list", false, "user.list"},
 		{"hub+group.read canonicalizes", "hub", "group.read", true, "group.read"},
+		{"hub+group.list canonicalizes", "hub", "group.list", true, "group.list"},
 
 		// Non-canonical: dotted resource type.
 		{"hub.user+read canonicalizes", "hub.user", "read", true, "user.read"},
@@ -222,10 +226,10 @@ func TestExplainAPI_PermissionCanonicalization(t *testing.T) {
 			assert.Equal(t, tt.wantAllowed, resp.Allowed,
 				"allowed mismatch for resource.type=%q action=%q", tt.resourceType, tt.action)
 
-			if resp.Provenance != nil {
-				assert.Equal(t, tt.wantPermID, resp.Provenance.Permission,
-					"permission ID mismatch for resource.type=%q action=%q", tt.resourceType, tt.action)
-			}
+			require.NotNil(t, resp.Provenance,
+				"provenance missing for resource.type=%q action=%q", tt.resourceType, tt.action)
+			assert.Equal(t, tt.wantPermID, resp.Provenance.Permission,
+				"permission ID mismatch for resource.type=%q action=%q", tt.resourceType, tt.action)
 		})
 	}
 }

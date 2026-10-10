@@ -176,6 +176,15 @@ func (s *Server) listGCPServiceAccountsScoped(w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
+	// The assign status is opt-in, project scope only, and gated like the
+	// status view.
+	var assignReq *assignStatusRequest
+	if req.scope == store.ScopeProject {
+		assignReq = parseAssignStatusRequest(r)
+		if assignReq != nil && !s.authorizeAssignStatus(w, r, req.scopeID) {
+			return
+		}
+	}
 	// Note what is NOT set for hub scope: ScopeID stays empty, so the filter
 	// matches on Scope alone. This is deliberate and matches the OR arm of
 	// IncludeHubScoped, so the hub list and the hub half of a project union
@@ -268,6 +277,7 @@ func (s *Server) listGCPServiceAccountsScoped(w http.ResponseWriter, r *http.Req
 			profiles = s.projectKubernetesProfileMappings(ctx, req.scopeID)
 		}
 		annotateGCPSAMappings(items, profiles)
+		s.annotateGCPSAAssignStatus(ctx, items, req.scopeID, assignReq)
 		warnings = projectSAMappingWarningsFrom(req.scopeID,
 			func() projectSAMappingView { return projectSAMappingViewFrom(profiles) }, saPtrs...)
 	}
