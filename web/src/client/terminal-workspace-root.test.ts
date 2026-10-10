@@ -456,6 +456,88 @@ describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
     expect(overlays[1].textContent).toBe('Terminal selected in its owning tab.');
   });
 
+  describe('status action button (ptone/scion#3328)', () => {
+    function actionButton(): HTMLButtonElement {
+      return getPaneHost(root).querySelector<HTMLButtonElement>('.terminal-status-action')!;
+    }
+
+    it('shows the action with the status message and runs it on click', async () => {
+      const onClick = vi.fn();
+      root.setStatus('Terminal selected in its owning tab.');
+      root.setStatusAction({ label: 'Move terminals to this window', onClick });
+      await flush();
+      const button = actionButton();
+      expect(button.hidden).toBe(false);
+      expect(button.textContent).toBe('Move terminals to this window');
+      expect(button.disabled).toBe(false);
+      button.click();
+      expect(onClick).toHaveBeenCalledOnce();
+      // The status text itself is unchanged by the button.
+      expect(visibleOverlays()[1].textContent).toBe('Terminal selected in its owning tab.');
+    });
+
+    it('disables the button while a move runs and hides it when removed', async () => {
+      root.setStatus('Terminal selected in its owning tab.');
+      root.setStatusAction({ label: 'Moving terminals…', disabled: true, onClick: () => {} });
+      await flush();
+      expect(actionButton().disabled).toBe(true);
+      expect(actionButton().textContent).toBe('Moving terminals…');
+      root.setStatusAction(null);
+      await flush();
+      expect(actionButton().hidden).toBe(true);
+    });
+
+    it.each(['two-columns', 'four'] as const)(
+      'shows the status and its action over %s placeholders',
+      async (preset) => {
+        root.layoutManager.setLayout(preset);
+        root.setStatus('Terminals moved to another window.');
+        root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
+        await flush();
+        const overlays = visibleOverlays();
+        expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
+        expect(overlays[0].textContent).toBe('Terminals moved to another window.');
+        expect(actionButton().hidden).toBe(false);
+        // Without an action, the placeholders show as before.
+        root.setStatusAction(null);
+        await flush();
+        expect(visibleOverlays()).toEqual([]);
+        expect(actionButton().hidden).toBe(true);
+      }
+    );
+
+    it('clearStatus returns to the normal empty viewer without an action', async () => {
+      root.setStatus('Terminals moved to another window.');
+      root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
+      await flush();
+      root.clearStatus();
+      await flush();
+      const overlays = visibleOverlays();
+      expect(overlays.map((el) => el.className)).toEqual(['terminal-empty']);
+      expect(actionButton().hidden).toBe(true);
+    });
+
+    it('is hidden by default and cleared once a terminal is selected', async () => {
+      await flush();
+      expect(actionButton().hidden).toBe(true);
+      const registry = new TerminalSessionRegistry({
+        hubUrl: window.location.origin,
+        accountId: 'test',
+      });
+      root.setStatus('Terminal selected in its owning tab.');
+      root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
+      await flush();
+      expect(actionButton().hidden).toBe(false);
+      root.select(root.create(registry, AGENT_ID));
+      await flush();
+      expect(actionButton().hidden).toBe(true);
+      // Closing the selected terminal brings back the default status, without the action.
+      root.withAutoSelectSuspended(() => registry.list()[0].close());
+      await flush();
+      expect(actionButton().hidden).toBe(true);
+    });
+  });
+
   it.each(presets)(
     'shows %s placeholders that accept a drop when no slot is filled',
     async (preset, count) => {

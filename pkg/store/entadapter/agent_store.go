@@ -1498,6 +1498,19 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		su.ClearTerminalRemnants = false
 	}
 
+	// The reincarnation guard (the hub's Guard 0b), repeated on the locked
+	// row for a status report (GuardReincarnation): a reincarnation that
+	// started after the hub read the agent owns Phase/Activity/ExitCode/
+	// ExitReason/Message, so the report must not move them. The other
+	// fields (ContainerStatus, heartbeat, ...) still apply, as in the hub.
+	if su.GuardReincarnation && store.ReincarnationInFlight(current.ReincarnationState) {
+		su.Phase = ""
+		su.Activity = ""
+		su.ExitCode = nil
+		su.ExitReason = ""
+		su.Message = ""
+	}
+
 	upd := tx.Agent.UpdateOneID(uid).
 		SetUpdated(now).
 		SetLastSeen(now)

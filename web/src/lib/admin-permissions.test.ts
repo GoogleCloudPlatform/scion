@@ -27,6 +27,7 @@ import {
   ROUTE_PERMISSION_MAP,
   canEditHubEnvVars,
   hasAnyPermission,
+  TAB_PERMISSION_MAP,
   isSettingsTabVisible,
   type AdminStatus,
 } from './admin-permissions.js';
@@ -191,8 +192,72 @@ describe('admin-permissions: settings environment variables and hub settings tab
     expect(hasAnyPermission(readOnly, ROUTE_PERMISSION_MAP['scion-page-settings']!)).toBe(true);
   });
 
+  // The Settings nav item (nav.ts) and the settings route guard (main.ts)
+  // both check hasAnyPermission against these entries. A permission that
+  // shows no settings tab must not show the nav item either.
+  const settingsNav = NAV_PERMISSION_MAP['/settings']!;
+  const settingsRoute = ROUTE_PERMISSION_MAP['scion-page-settings']!;
+
+  it('hides the Settings nav item and route from a holder of hub.settings.read only', () => {
+    expect(hasAnyPermission(hubViewer, settingsNav)).toBe(false);
+    expect(hasAnyPermission(hubViewer, settingsRoute)).toBe(false);
+  });
+
+  it('shows the Settings nav item and route to a hub member with a tab permission', () => {
+    expect(hasAnyPermission(hubMember, settingsNav)).toBe(true);
+    expect(hasAnyPermission(hubMember, settingsRoute)).toBe(true);
+  });
+
+  it('shows the Settings nav item and route to a super-admin', () => {
+    expect(hasAnyPermission(superAdmin, settingsNav)).toBe(true);
+    expect(hasAnyPermission(superAdmin, settingsRoute)).toBe(true);
+  });
+
+  it('shows the Settings nav item for exactly the permissions that show a tab', () => {
+    const tabPerms = [...new Set(Object.values(TAB_PERMISSION_MAP).flat())].sort();
+    expect([...settingsNav].sort()).toEqual(tabPerms);
+    expect([...settingsRoute].sort()).toEqual(tabPerms);
+  });
+
   it('denies everything for a null admin status', () => {
     expect(isSettingsTabVisible(null, 'env-vars')).toBe(false);
     expect(canEditHubEnvVars(null)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Gating reads permissions, not isAdmin
+// ---------------------------------------------------------------------------
+
+describe('hasAnyPermission: members with system permissions', () => {
+  // isAdmin is true only for hub admins and super admins; a member can hold
+  // system-scoped permissions with isAdmin false.
+  const member = (...perms: string[]): AdminStatus => ({
+    isAdmin: false,
+    isSuperAdmin: false,
+    permissions: perms,
+  });
+
+  it('opens the admin page a member holds a permission for', () => {
+    expect(hasAnyPermission(member('quota.read'), NAV_PERMISSION_MAP['/admin/quotas'])).toBe(true);
+    expect(
+      hasAnyPermission(member('quota.read'), ROUTE_PERMISSION_MAP['scion-page-admin-quotas'])
+    ).toBe(true);
+  });
+
+  it('keeps other admin pages closed for that member', () => {
+    expect(hasAnyPermission(member('quota.read'), NAV_PERMISSION_MAP['/admin/users'])).toBe(false);
+    expect(isSettingsTabVisible(member('quota.read'), 'secrets')).toBe(false);
+  });
+
+  it('does not open an admin page from isAdmin alone', () => {
+    const adminWithoutPermissions: AdminStatus = {
+      isAdmin: true,
+      isSuperAdmin: false,
+      permissions: [],
+    };
+    expect(hasAnyPermission(adminWithoutPermissions, NAV_PERMISSION_MAP['/admin/quotas'])).toBe(
+      false
+    );
   });
 });

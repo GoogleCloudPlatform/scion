@@ -32,6 +32,7 @@ import type {
   AgentInlineConfig,
   TelemetryConfig,
   GCPIdentityConfig,
+  GCPServiceAccount,
   Project,
   Notification,
   Subscription,
@@ -56,6 +57,12 @@ interface AgentNotificationsResponse {
 import { agentStatusBadge, stateLabel } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { agentPlacementView } from './agent-placement.js';
+import {
+  gcpModeLabel,
+  gcpModeVariant,
+  gcpVerificationDisplay,
+  matchingAccount,
+} from '../../shared/gcp-identity-display.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
 import { AgentSeedEpoch } from '../../client/agent-seed-epoch.js';
@@ -250,6 +257,21 @@ export class ScionPageAgentDetail extends LitElement {
   @state()
   private metricsSummary: AgentMetricsSummary | null = null;
 
+  /**
+   * Registered record of the agent's assigned GCP service account, for the
+   * GCP Identity card's display name and verification status
+   * (ptone/scion#4017). Null until loaded, or when it cannot be loaded.
+   */
+  @state()
+  private gcpServiceAccount: GCPServiceAccount | null = null;
+
+  /** True while the record above is being fetched. */
+  @state()
+  private gcpServiceAccountLoading = false;
+
+  /** `projectId/serviceAccountId` the record above was requested for; '' for none. */
+  private gcpServiceAccountKey = '';
+
   static override styles = css`
     :host {
       display: block;
@@ -413,6 +435,15 @@ export class ScionPageAgentDetail extends LitElement {
     .info-value.mono {
       font-family: var(--scion-font-mono, monospace);
       font-size: 0.875rem;
+    }
+    .info-subvalue {
+      font-size: 0.8125rem;
+      color: var(--scion-text-muted, #64748b);
+      margin-top: 0.125rem;
+      word-break: break-all;
+    }
+    .info-subvalue.mono {
+      font-family: var(--scion-font-mono, monospace);
     }
     /* Messaging: the mode select needs more room than an info-grid column
        gives it, so this card wraps instead of letting the select overlap the
@@ -854,6 +885,53 @@ export class ScionPageAgentDetail extends LitElement {
       if (updatedProject && this.project) {
         this.project = { ...this.project, ...updatedProject };
       }
+    }
+  }
+
+  override willUpdate(changed: Map<PropertyKey, unknown>): void {
+    super.willUpdate(changed);
+    if (changed.has('agent')) this.syncGCPServiceAccount();
+  }
+
+  /**
+   * Keeps `gcpServiceAccount` in step with the agent's applied identity.
+   * Fetches only when the assigned account changes, so live agent updates
+   * do not refetch it.
+   */
+  private syncGCPServiceAccount(): void {
+    const identity = this.agent?.appliedConfig?.gcpIdentity;
+    const saId = identity?.metadataMode === 'assign' ? identity.serviceAccountId || '' : '';
+    const projectId = this.agent?.projectId || '';
+    const key = saId && projectId ? `${projectId}/${saId}` : '';
+    if (key === this.gcpServiceAccountKey) return;
+    this.gcpServiceAccountKey = key;
+    this.gcpServiceAccount = null;
+    this.gcpServiceAccountLoading = Boolean(key);
+    if (key) void this.loadGCPServiceAccount(projectId, saId, key);
+  }
+
+  /**
+   * Loads the assigned account through the agent's project. The nested
+   * by-id route answers for both project-scoped accounts and hub-scoped
+   * accounts usable from the project, which are the accounts an agent can be
+   * assigned. Any failure leaves the record null, which the card shows as
+   * verification unknown.
+   */
+  private async loadGCPServiceAccount(projectId: string, saId: string, key: string): Promise<void> {
+    try {
+      // A refused lookup is shown inline as Unknown, so it must not also
+      // raise the global access-denied toast.
+      const res = await apiFetch(
+        `/api/v1/projects/${encodeURIComponent(projectId)}/gcp-service-accounts/${encodeURIComponent(saId)}`,
+        { suppressAccessDeniedToast: true }
+      );
+      if (!res.ok) return;
+      const account = (await res.json()) as GCPServiceAccount;
+      if (key === this.gcpServiceAccountKey) this.gcpServiceAccount = account;
+    } catch {
+      // Optional: the card shows verification as unknown.
+    } finally {
+      if (key === this.gcpServiceAccountKey) this.gcpServiceAccountLoading = false;
     }
   }
 
@@ -2071,8 +2149,13 @@ export class ScionPageAgentDetail extends LitElement {
       ></scion-effective-access-boundary-notice>
       ${this.renderMessagingCard()} ${this.renderLabelsCard(agent)}
       ${this.renderHarnessModelCard(agent, cfg, inline)} ${this.renderRuntimeCard(agent, inline)}
-      ${this.renderGCPIdentityCard(cfg?.gcpIdentity)} ${this.renderConfigLimitsCard(inline)}
-      ${this.renderTelemetryCard(inline?.telemetry)} ${this.renderInitialTaskCard(cfg)}
+      ${this.renderGCPIdentityCard(
+        cfg?.gcpIdentity,
+        this.gcpServiceAccount,
+        this.gcpServiceAccountLoading
+      )}
+      ${this.renderConfigLimitsCard(inline)} ${this.renderTelemetryCard(inline?.telemetry)}
+      ${this.renderInitialTaskCard(cfg)}
     `;
   }
 
@@ -2565,15 +2648,32 @@ export class ScionPageAgentDetail extends LitElement {
     `;
   }
 
-  private renderGCPIdentityCard(gcpIdentity: GCPIdentityConfig | undefined) {
+  /**
+   * GCP Identity card. `account` is the registered record of the assigned
+   * service account, when it could be loaded; it supplies the display name
+   * and the verification status (ptone/scion#4017). Without it the card
+   * falls back to the email from the agent payload and shows verification
+   * as unknown; `accountLoading` says the record is still being fetched.
+   */
+  private renderGCPIdentityCard(
+    gcpIdentity: GCPIdentityConfig | undefined,
+    account: GCPServiceAccount | null = null,
+    accountLoading = false
+  ) {
     if (!gcpIdentity) return nothing;
 
-    const modeVariant =
-      gcpIdentity.metadataMode === 'assign'
-        ? 'primary'
-        : gcpIdentity.metadataMode === 'passthrough'
-          ? 'warning'
-          : 'neutral';
+    const mode = gcpIdentity.metadataMode;
+    const record = matchingAccount(gcpIdentity, account);
+    const email = gcpIdentity.serviceAccountEmail || record?.email || '';
+    const displayName = record?.displayName?.trim() || '';
+    const hasAccount = mode === 'assign' && Boolean(gcpIdentity.serviceAccountId || email);
+    const verification = gcpVerificationDisplay(record, accountLoading);
+    const verificationBadge = html`<sl-badge
+      class="gcp-verification"
+      data-state=${verification.state}
+      variant=${verification.variant}
+      >${verification.label}</sl-badge
+    >`;
 
     return html`
       <div class="card">
@@ -2582,17 +2682,40 @@ export class ScionPageAgentDetail extends LitElement {
           <div class="info-item">
             <span class="info-label">Metadata Mode</span>
             <span class="info-value">
-              <sl-badge variant=${modeVariant}>${gcpIdentity.metadataMode}</sl-badge>
+              <sl-badge class="gcp-mode" variant=${gcpModeVariant(mode)}
+                >${gcpModeLabel(mode)}</sl-badge
+              >
             </span>
           </div>
-          ${gcpIdentity.serviceAccountEmail
+          ${email || displayName
             ? html`
                 <div class="info-item">
                   <span class="info-label">Service Account</span>
-                  <span class="info-value mono">${gcpIdentity.serviceAccountEmail}</span>
+                  ${displayName
+                    ? html`
+                        <span class="info-value gcp-sa-name">${displayName}</span>
+                        ${email
+                          ? html`<span class="info-subvalue mono gcp-sa-email">${email}</span>`
+                          : nothing}
+                      `
+                    : html`<span class="info-value mono gcp-sa-email">${email}</span>`}
                 </div>
               `
-            : ''}
+            : nothing}
+          ${hasAccount
+            ? html`
+                <div class="info-item">
+                  <span class="info-label">Verification</span>
+                  <span class="info-value">
+                    ${verification.detail
+                      ? html`<sl-tooltip content=${verification.detail}
+                          >${verificationBadge}</sl-tooltip
+                        >`
+                      : verificationBadge}
+                  </span>
+                </div>
+              `
+            : nothing}
           ${gcpIdentity.projectId
             ? html`
                 <div class="info-item">
@@ -2600,7 +2723,7 @@ export class ScionPageAgentDetail extends LitElement {
                   <span class="info-value mono">${gcpIdentity.projectId}</span>
                 </div>
               `
-            : ''}
+            : nothing}
         </div>
       </div>
     `;
@@ -2641,9 +2764,8 @@ export class ScionPageAgentDetail extends LitElement {
     const filter = telemetry.filter;
     const cloud = telemetry.cloud;
     const hub = telemetry.hub;
-    const local = telemetry.local;
 
-    const hasDestinations = cloud || hub || local;
+    const hasDestinations = cloud || hub;
     const hasFilter = filter?.events || filter?.attributes || filter?.sampling;
 
     return html`
@@ -2687,20 +2809,6 @@ export class ScionPageAgentDetail extends LitElement {
                           <span class="info-value"
                             >${hub.enabled === false ? 'Disabled' : 'Enabled'}${hub.report_interval
                               ? ` (${hub.report_interval})`
-                              : ''}</span
-                          >
-                        </div>
-                      `
-                    : ''}
-                  ${local
-                    ? html`
-                        <div class="info-item">
-                          <span class="info-label">Local</span>
-                          <span class="info-value"
-                            >${local.enabled === false ? 'Disabled' : 'Enabled'}${local.file
-                              ? html`<br /><span class="mono" style="font-size: 0.8rem"
-                                    >${local.file}</span
-                                  >`
                               : ''}</span
                           >
                         </div>

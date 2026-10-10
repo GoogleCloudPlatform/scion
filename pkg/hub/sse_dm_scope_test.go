@@ -33,11 +33,12 @@ import (
 // TestSSEHandler_DMMessagesScopedToParticipants checks that DM messages,
 // which PublishUserMessage also fans out to agent.<id>.message and
 // project.<id>.user.message, reach only DM participants on the web events
-// stream, for direct and wildcard subscriptions alike, while non-DM agent
-// messages still reach every reader of the agent or project.
+// stream, for direct and wildcard subscriptions alike, even for a caller
+// with attach on the agent. A non-DM agent message to another user reaches
+// only attach holders (see TestSSEHandler_AgentMessagesFollowHistoryRule).
 func TestSSEHandler_DMMessagesScopedToParticipants(t *testing.T) {
 	agentID, projectID := tid("sse-dm-agent"), tid("sse-dm-project")
-	const participant, member, other = "user-dm-participant", "user-dm-member", "user-dm-other"
+	const participant, member, other, owner = "user-dm-participant", "user-dm-member", "user-dm-other", "user-owner"
 	dmKey := "dm:agent:" + agentID + ":user:" + participant
 
 	messages := []*store.Message{
@@ -60,10 +61,12 @@ func TestSSEHandler_DMMessagesScopedToParticipants(t *testing.T) {
 		subjects []string
 		want     []string
 	}{
-		{participant, agentSubjects, []string{"dm-reply", "dm-prompt", "plain"}},
-		{participant, projectSubjects, []string{"dm-reply", "plain"}},
-		{member, agentSubjects, []string{"plain"}},
-		{member, projectSubjects, []string{"plain"}},
+		{participant, agentSubjects, []string{"dm-reply", "dm-prompt"}},
+		{participant, projectSubjects, []string{"dm-reply"}},
+		{member, agentSubjects, []string{}},
+		{member, projectSubjects, []string{}},
+		{owner, agentSubjects, []string{"plain"}},
+		{owner, projectSubjects, []string{"plain"}},
 	} {
 		for _, subject := range tc.subjects {
 			t.Run(tc.user+"/"+subject, func(t *testing.T) {
@@ -73,6 +76,7 @@ func TestSSEHandler_DMMessagesScopedToParticipants(t *testing.T) {
 						projectMemberships: map[string]*store.ProjectMembership{
 							projectID + ":" + participant: {ProjectID: projectID, UserID: participant, Role: store.ProjectRoleMember},
 							projectID + ":" + member:      {ProjectID: projectID, UserID: member, Role: store.ProjectRoleMember},
+							projectID + ":" + owner:       {ProjectID: projectID, UserID: owner, Role: store.ProjectRoleMember},
 						},
 					}
 					s := &sseAgentStore{mockAuthzStore: ms, agents: map[string]*store.Agent{

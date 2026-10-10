@@ -141,7 +141,11 @@ type ServerConfig struct {
 	// it, the hub re-checks the user and renews or closes the stream.
 	// Only used behind the hub.conduit experiment.
 	ConduitUserStreamAuthzMax time.Duration
-	// AuthMode is the exclusive human auth mode: "oauth" (default), "proxy", "dev".
+	// AuthMode is the configured human auth mode (server.auth.mode). "proxy"
+	// is the only value the code checks: the auth handlers then list no
+	// OAuth providers and treat logout as a no-op. Any other value,
+	// including "" (the default), "oauth" and "dev", leaves the hub handling
+	// authentication itself. Dev auth is enabled separately (--dev-auth).
 	AuthMode string
 	// ProxyAuthenticator is the configured proxy authenticator (when AuthMode == "proxy").
 	ProxyAuth ProxyAuthenticator

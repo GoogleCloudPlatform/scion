@@ -606,7 +606,12 @@ func (d DatabaseConfig) ConnMaxIdleTimeDuration() (time.Duration, error) {
 
 // DevAuthConfig holds authentication settings.
 type DevAuthConfig struct {
-	// Mode selects the exclusive human auth mode: "oauth" (default), "proxy", or "dev".
+	// Mode selects the human auth mode. "proxy" is the only value the code
+	// checks: the server then uses the configured proxy authenticator and
+	// offers no OAuth providers. Any other value, including "" (the
+	// default), "oauth" and "dev", leaves the hub handling authentication
+	// itself. Dev auth is enabled by Enabled (the --dev-auth flag or the
+	// server.auth.dev_mode setting), not by Mode.
 	Mode string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
 	// Enabled indicates whether development authentication is enabled.
 	// WARNING: Not for production use.
@@ -834,8 +839,7 @@ type GlobalConfig struct {
 	Secrets SecretsConfig `json:"secrets" yaml:"secrets" koanf:"secrets"`
 
 	// Logging settings
-	LogLevel  string `json:"logLevel" yaml:"logLevel" koanf:"logLevel"`
-	LogFormat string `json:"logFormat" yaml:"logFormat" koanf:"logFormat"` // text, json
+	LogLevel string `json:"logLevel" yaml:"logLevel" koanf:"logLevel"`
 
 	// Admin mode settings
 	AdminMode          bool   `json:"adminMode" yaml:"adminMode" koanf:"adminMode"`
@@ -1006,8 +1010,7 @@ func DefaultGlobalConfig() GlobalConfig {
 		Secrets: SecretsConfig{
 			Backend: "local",
 		},
-		LogLevel:  "info",
-		LogFormat: "text",
+		LogLevel: "info",
 	}
 }
 
@@ -1325,7 +1328,6 @@ func loadGlobalConfigLegacy(configPath string, topLevel map[string]interface{}) 
 		"secrets.gcpProjectId":   defaults.Secrets.GCPProjectID,
 		"secrets.gcpCredentials": defaults.Secrets.GCPCredentials,
 		"logLevel":               defaults.LogLevel,
-		"logFormat":              defaults.LogFormat,
 		"adminMode":              defaults.AdminMode,
 		"maintenanceMessage":     defaults.MaintenanceMessage,
 	}, "."), nil); err != nil {
@@ -1615,7 +1617,6 @@ var camelCaseFields = map[string]string{
 	"launchkeepaliveseconds":        "launchKeepaliveSeconds",
 	"launchtimeout":                 "launchTimeout",
 	"localpath":                     "localPath",
-	"logformat":                     "logFormat",
 	"loglevel":                      "logLevel",
 	"maintenancemessage":            "maintenanceMessage",
 	"missingagentgrace":             "missingAgentGrace",
@@ -1822,7 +1823,6 @@ func LoadBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
 		"server.storage.provider": defaults.Storage.Provider,
 		"server.secrets.backend":  defaults.Secrets.Backend,
 		"server.log_level":        defaults.LogLevel,
-		"server.log_format":       defaults.LogFormat,
 	}, "."), nil)
 
 	// 1b. Embedded agent-defaults (embeds/default_settings.yaml, or the

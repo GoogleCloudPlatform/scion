@@ -864,6 +864,7 @@ describe('home agent counts and the shared completeness flag', { timeout: 30_000
       expect(stateManager.getAgent(id)?.taskSummary).toBe('old task');
 
       fake.agents = fake.agents.map((a) => {
+        /* eslint-disable-next-line @typescript-eslint/no-unused-vars -- rest-omit idiom: bind and drop the key so `...rest` excludes it */
         const { taskSummary: _dropped, ...rest } = a;
         return rest as Agent;
       });

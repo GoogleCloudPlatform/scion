@@ -83,8 +83,7 @@
         "log_format": {
           "type": "string",
           "enum": ["text", "json"],
-          "default": "text",
-          "description": "Reserved: the hub does not read this key today; the log output format is chosen by the logging setup at startup. There is no environment-variable override.",
+          "description": "Deprecated and ignored: accepted so existing settings files still load, but nothing reads it. The log output format is chosen by the logging setup at startup (SCION_LOG_GCP selects Cloud Logging JSON). There is no environment-variable override.",
           "x-since": "1"
         },
         "scheduler": { "$ref": "#/$defs/serverScheduler" },
@@ -1589,7 +1588,7 @@
       "properties": {
         "mode": {
           "type": "string",
-          "description": "Exclusive human auth mode: 'oauth' (default), 'proxy' or 'dev'. In proxy mode the OAuth handlers are disabled and proxy settings apply; in dev mode dev token auth is used."
+          "description": "Human auth mode. 'proxy' is the only value the server checks: it then uses the proxy authenticator configured under proxy and offers no OAuth providers. Any other value, including unset (the default), 'oauth' and 'dev', leaves the hub handling authentication itself. Dev auth is enabled by dev_mode or the --dev-auth flag, not by mode."
         },
         "dev_mode": { "type": "boolean", "default": false, "x-env-var": "SCION_SERVER_AUTH_DEVMODE" },
         "dev_token": {
@@ -2015,24 +2014,23 @@
     },
     "telemetryLocal": {
       "type": "object",
-      "description": "Local debug telemetry output settings.",
+      "description": "Local debug telemetry output settings. Accepted but ignored: no component reads these keys today.",
       "properties": {
         "enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Enable local debug telemetry output.",
-          "x-env-var": "SCION_TELEMETRY_DEBUG",
+          "description": "Accepted but ignored: no component reads this key today.",
           "x-since": "1"
         },
         "file": {
           "type": "string",
-          "description": "File path for JSONL telemetry output. If empty, no file output.",
+          "description": "Accepted but ignored: no component reads this key today.",
           "x-since": "1"
         },
         "console": {
           "type": "boolean",
           "default": false,
-          "description": "Write telemetry debug output to stderr.",
+          "description": "Accepted but ignored: no component reads this key today.",
           "x-since": "1"
         }
       },
@@ -2051,7 +2049,7 @@
         "respect_debug_mode": {
           "type": "boolean",
           "default": true,
-          "description": "Bypass filters when debug mode is active.",
+          "description": "Accepted but ignored: no component reads this key today.",
           "x-since": "1"
         },
         "events": { "$ref": "#/$defs/telemetryFilterEvents" },

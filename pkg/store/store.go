@@ -33,6 +33,11 @@ var (
 	ErrInvalidInput     = errors.New("invalid input")
 	ErrRevisionConflict = errors.New("revision conflict")
 	ErrQuotaExceeded    = errors.New("quota exceeded")
+	// ErrConversationProjectMismatch is returned when a write names a project
+	// other than the one an existing conversation was created with, or names
+	// a project for a group conversation created without one. A conversation
+	// keeps the project it was created with; nothing is written.
+	ErrConversationProjectMismatch = errors.New("conversation project cannot change")
 	// ErrDeleteInProgress is returned by SetAgentRunID when a delete holds
 	// the agent's row (see AgentStore.SetAgentRunID).
 	ErrDeleteInProgress = errors.New("agent delete in progress")
@@ -1108,6 +1113,16 @@ type AgentStatusUpdate struct {
 	// the hub's deleteWonAfterLanding check answers. A status report
 	// (heartbeat) keeps the lease-aware rule. Internal to the hub — json:"-".
 	StartWrite bool `json:"-"`
+	// GuardReincarnation marks an agent's own status report. When set, the
+	// store re-checks the reincarnation guard (the hub's Guard 0b) on the
+	// row read inside the update's transaction: while a reincarnation is in
+	// flight (ReincarnationState is not none or failed), Phase, Activity,
+	// ExitCode, ExitReason and Message are dropped, and the other fields
+	// (ContainerStatus, heartbeat, ...) still apply. This covers a
+	// reincarnation that starts after the hub read the agent. It is opt-in
+	// because hub-internal writers, including the reincarnation worker,
+	// must keep writing the phase. Internal to the hub — json:"-".
+	GuardReincarnation bool `json:"-"`
 }
 
 // ProjectStore defines project-related persistence operations.
@@ -2770,6 +2785,13 @@ type ConversationStore interface {
 
 	// UpdateConversation updates an existing conversation.
 	// Returns ErrNotFound if the conversation doesn't exist.
+	//
+	// A conversation keeps the project it was created with. The row is
+	// written only when the requested ProjectID equals the stored one; a nil
+	// ProjectID clears the project of a direct conversation (direct
+	// conversations carry no project) and otherwise matches only a row with
+	// no project. Any other combination returns
+	// ErrConversationProjectMismatch and writes nothing.
 	UpdateConversation(ctx context.Context, conv *Conversation) error
 
 	// DeleteConversation soft-deletes a conversation by setting DeletedAt.
@@ -2792,6 +2814,10 @@ type ConversationStore interface {
 
 	// UpsertConversationByExternalRef creates or updates a conversation keyed on (surface, external_ref).
 	// This is the idempotent broker-edge operation. Returns the conversation (created or existing).
+	// The project is set only when the conversation is created. Updating an
+	// existing conversation never writes its project: a different non-nil
+	// ProjectID returns ErrConversationProjectMismatch with no write, and a
+	// conversation created without a project stays without one.
 	// CRITICAL: this must be safe under concurrent calls — the UNIQUE partial index is the guard.
 	UpsertConversationByExternalRef(ctx context.Context, conv *Conversation) (*Conversation, error)
 

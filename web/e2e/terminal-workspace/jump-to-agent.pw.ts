@@ -488,8 +488,8 @@ test('Meta+K opens the palette even with a terminal pane focused', async ({ page
 
 /**
  * After `open`, types `bob` without waiting for the palette and checks it all
- * became the query: the input has focus right after the open, the results
- * are filtered, and nothing reached the focused pane's PTY.
+ * became the query: the input takes focus once the palette shows, the
+ * results are filtered, and nothing reached the focused pane's PTY.
  */
 async function expectTypingRightAfterOpenFilters(
   page: Page,
@@ -500,7 +500,9 @@ async function expectTypingRightAfterOpenFilters(
   await page.keyboard.type('bob');
 
   await expect(paletteDialog(page)).toBeVisible();
-  expect(await paletteInputHasFocus(page)).toBe(true);
+  // The input takes focus a frame after the dialog shows (Shoelace's
+  // sl-initial-focus, then the palette's next render), so wait for it.
+  await expect.poll(() => paletteInputHasFocus(page)).toBe(true);
   await expect(page.locator('scion-quick-palette #palette-query-input')).toHaveValue('bob');
   await expect(page.locator('scion-quick-palette .palette-option')).toHaveText([/Bob-bot/]);
   expect(ptyInput()).toBe('');

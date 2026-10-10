@@ -42,7 +42,9 @@ interface PageCase {
   /** Private state that lets the page render its header. */
   state: Record<string, unknown>;
   /** Page method that returns the header template. */
-  method: 'render' | 'renderHeader';
+  method: 'render' | 'renderHeader' | 'renderDetail' | 'renderPageHeader';
+  /** Arguments for `method`, if it takes any. */
+  args?: unknown[];
   /** The slotted icon, as tag.class[name]; null for a page with no icon. */
   icon: string | null;
   /** Tags of the badges (unslotted children), in order. */
@@ -54,6 +56,30 @@ interface PageCase {
 }
 
 const CAPS = { _capabilities: { actions: ['read', 'update', 'delete'] } };
+
+const ROLE = {
+  id: 'role-1',
+  name: LONG_NAME,
+  description: 'Edits things',
+  scopeType: 'hub',
+  permissions: [],
+  system: false,
+  createdAt: '2026-01-01T00:00:00Z',
+  updatedAt: '2026-01-01T00:00:00Z',
+};
+
+// Only the fields the access constraint header reads.
+const BOUNDARY = {
+  id: 'ab-1',
+  name: LONG_NAME,
+  status: 'active',
+  risk: ['tightening'],
+  scope: { type: 'system' },
+  subject: { kind: 'all_principals' },
+  updatedAt: '2026-01-01T00:00:00Z',
+  updatedBy: { id: 'u-1', type: 'user', displayName: 'Ada' },
+  _capabilities: { actions: ['read', 'previewTighten', 'delete'] },
+};
 
 const cases: Array<[string, PageCase]> = [
   [
@@ -303,6 +329,32 @@ const cases: Array<[string, PageCase]> = [
       },
     },
   ],
+  [
+    'role',
+    {
+      module: './admin-role-detail.js',
+      tag: 'scion-page-admin-role-detail',
+      state: { loading: false, roleData: ROLE },
+      method: 'renderDetail',
+      icon: null,
+      badges: ['span', 'span'],
+      meta: ['header-description', 'metadata-row'],
+    },
+  ],
+  [
+    'access constraint',
+    {
+      module: './admin-access-boundary-detail.js',
+      tag: 'scion-page-admin-access-boundary-detail',
+      state: { phase: 'ready', boundary: BOUNDARY },
+      method: 'renderPageHeader',
+      args: [BOUNDARY],
+      icon: null,
+      badges: ['scion-access-boundary-status'],
+      meta: ['header-meta'],
+      noActions: { boundary: { ...BOUNDARY, _capabilities: { actions: ['read'] } } },
+    },
+  ],
 ];
 
 /** Header layout selectors the pages used to define for themselves. */
@@ -325,6 +377,11 @@ const LAYOUT_SELECTORS = [
   '.title h1',
   '.title sl-icon',
   '.actions',
+  '.badges',
+  '.page-header',
+  '.header-main',
+  '.header-badges',
+  '.boundary-name',
 ];
 
 const loaded = new Map<string, Map<string, string>>();
@@ -342,7 +399,9 @@ beforeAll(async () => {
 function renderHeader(c: PageCase): HTMLElement & { heading: string } {
   const el = document.createElement(c.tag);
   Object.assign(el, c.state);
-  const tpl = (el as unknown as Record<string, () => TemplateResult>)[c.method]();
+  const tpl = (el as unknown as Record<string, (...a: unknown[]) => TemplateResult>)[c.method](
+    ...(c.args ?? [])
+  );
   const host = document.createElement('div');
   render(tpl, host);
   const headers = host.querySelectorAll('scion-detail-header');
@@ -424,68 +483,5 @@ describe('project detail linked badge', () => {
       state: { ...c.state, project: { id: 'p-2', name: LONG_NAME, slug: 'p', ...CAPS } },
     });
     expect(header.querySelector('sl-tooltip')).toBeNull();
-  });
-});
-
-// The role page keeps its own header (badges above the name, description
-// under it): a long name breaks inside the h1 instead of pushing the
-// actions off the page.
-interface AdminCase {
-  module: string;
-  tag: string;
-  state: Record<string, unknown>;
-  method: 'renderHeader' | 'renderDetail';
-}
-
-const adminCases: Array<[string, AdminCase]> = [
-  [
-    'role',
-    {
-      module: './admin-role-detail.js',
-      tag: 'scion-page-admin-role-detail',
-      state: {
-        loading: false,
-        roleData: {
-          id: 'role-1',
-          name: LONG_NAME,
-          description: '',
-          scopeType: 'hub',
-          permissions: [],
-          system: false,
-          createdAt: '2026-01-01T00:00:00Z',
-          updatedAt: '2026-01-01T00:00:00Z',
-        },
-      },
-      method: 'renderDetail',
-    },
-  ],
-];
-
-describe.each(adminCases)('%s detail header', (_label, c) => {
-  let rules: Map<string, string>;
-
-  beforeAll(async () => {
-    await import(/* @vite-ignore */ c.module);
-    const ctor = customElements.get(c.tag) as unknown as { elementStyles: CSSResult[] };
-    rules = styleRules(ctor.elementStyles.map((s) => s.cssText).join('\n'));
-  }, 60_000);
-
-  it('breaks a long name inside the title beside the actions', () => {
-    // The h1 is not a flex item here; overflow-wrap does the work.
-    expect(rules.get('.header h1') ?? '').toMatch(/overflow-wrap:\s*anywhere/);
-    expect(rules.get('.header-info') ?? '').toMatch(/(^|;)\s*min-width:\s*0/);
-  });
-
-  it('renders the long name in the header h1 with no inline width', () => {
-    const el = document.createElement(c.tag);
-    Object.assign(el, c.state);
-    const host = document.createElement('div');
-    render((el as unknown as Record<string, () => TemplateResult>)[c.method](), host);
-    const header = host.querySelector('.header')!;
-    expect(header.querySelector('h1')!.textContent).toContain(LONG_NAME);
-    expect(header.querySelector('.header-actions')).not.toBeNull();
-    for (const node of [header, ...Array.from(header.querySelectorAll('[style]'))]) {
-      expect(node.getAttribute('style') ?? '').not.toMatch(/(min-|max-)?width/);
-    }
   });
 });
