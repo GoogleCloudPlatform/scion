@@ -19,6 +19,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -450,4 +453,97 @@ func TestSADiscoveryCache_PruneAndStop(t *testing.T) {
 	mu.Lock()
 	assert.Equal(t, 2, calls, "no refresh after stop")
 	mu.Unlock()
+}
+
+// The default builder checks the client with k8s.Client.Verify (the
+// /version call, where the ADC fallback lives), bounded by the timeout,
+// and a client that fails it is not used. Runs against httptest API
+// servers; the GCE fallback itself needs a GCE metadata server and is not
+// exercised here.
+func TestNewKubernetesDiscoveryClient_Verifies(t *testing.T) {
+	kubeconfigFor := func(server string) string {
+		path := t.TempDir() + "/kubeconfig"
+		require.NoError(t, os.WriteFile(path, []byte(`apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    server: `+server+`
+  name: c
+contexts:
+- context:
+    cluster: c
+    user: u
+  name: example-context
+current-context: example-context
+users:
+- name: u
+  user:
+    token: fake-token
+`), 0o600))
+		return path
+	}
+	var mu sync.Mutex
+	versionCalls := 0
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/version" {
+			mu.Lock()
+			versionCalls++
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"major":"1","minor":"30","gitVersion":"v1.30.0"}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer ok.Close()
+	c, err := newKubernetesDiscoveryClient(kubeconfigFor(ok.URL), "example-context", 3*time.Second)
+	require.NoError(t, err)
+	require.NotNil(t, c)
+	mu.Lock()
+	assert.Equal(t, 1, versionCalls, "the client is verified once")
+	mu.Unlock()
+
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer failing.Close()
+	_, err = newKubernetesDiscoveryClient(kubeconfigFor(failing.URL), "", 3*time.Second)
+	assert.Error(t, err, "a client that fails Verify is not used")
+
+	release := make(chan struct{})
+	hung := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-release }))
+	defer hung.Close()
+	defer close(release)
+	start := time.Now()
+	_, err = newKubernetesDiscoveryClient(kubeconfigFor(hung.URL), "", 200*time.Millisecond)
+	assert.Error(t, err)
+	assert.Less(t, time.Since(start), 5*time.Second, "Verify is bounded by the timeout")
+}
+
+// A refresh cut short by stop (server shutdown) records nothing and logs
+// nothing.
+func TestSADiscoveryCache_StopDuringRefreshIsQuiet(t *testing.T) {
+	client := fake.NewClientset()
+	client.PrependReactor("list", "serviceaccounts", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, errors.New("context canceled")
+	})
+	entered, release := make(chan struct{}), make(chan struct{})
+	var logs syncBuffer
+	d := newSADiscoveryCache(func(string) (kubernetes.Interface, error) {
+		close(entered)
+		<-release
+		return client, nil
+	}, slog.New(slog.NewTextHandler(&logs, nil)))
+	_, ok := d.lookup("gke", "agents")
+	require.False(t, ok)
+	<-entered
+	d.stop()
+	close(release)
+	d.wait()
+	_, ok = d.lookup("gke", "agents")
+	assert.False(t, ok, "no result recorded for a refresh stopped mid-way")
+	d.mu.Lock()
+	assert.False(t, d.entries["gke\x00agents"].running)
+	d.mu.Unlock()
+	assert.NotContains(t, logs.String(), "level=WARN", "no warning at shutdown")
 }

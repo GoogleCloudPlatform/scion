@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -255,6 +254,13 @@ func (d *saDiscoveryCache) refresh(key, profile, namespace string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	e := d.entries[key]
+	if d.ctx.Err() != nil {
+		// Stopped (server shutdown) while this refresh ran: its failure,
+		// if any, is the cancellation, not the cluster's. Exit quietly,
+		// keeping the previous result and logging nothing.
+		e.running = false
+		return
+	}
 	e.result, e.has, e.running = result, true, false
 	if result.failure == "" {
 		e.lastFailure = ""
@@ -376,27 +382,23 @@ func (s *Server) saDiscoveryClientset(profile string) (kubernetes.Interface, err
 
 // newKubernetesDiscoveryClient builds a Kubernetes client for kubeconfig
 // and context (the current context when empty, or the in-cluster config),
-// as runtime.GetRuntime does, and verifies it reaches the cluster. Every
-// request of the client, the verification included, is bounded by
-// timeout, so a hung API server cannot hold a refresh open.
+// as runtime.GetRuntime does, and checks it with k8s.Client.Verify, so the
+// same Application Default Credentials fallback applies when an exec
+// credential plugin fails. Every request of the client, the verification
+// and the fallback included, is bounded by timeout, so a hung API server
+// cannot hold a refresh open.
 func newKubernetesDiscoveryClient(kubeconfig, context string, timeout time.Duration) (kubernetes.Interface, error) {
-	c, err := k8s.NewClientWithContext(kubeconfig, context)
+	c, err := k8s.NewClientWithContextTimeout(kubeconfig, context, timeout)
 	if err != nil {
 		return nil, err
 	}
-	if c.Config == nil {
-		return nil, errors.New("the Kubernetes client has no REST config")
-	}
-	cfg := rest.CopyConfig(c.Config)
-	cfg.Timeout = timeout
-	cs, err := kubernetes.NewForConfig(cfg)
-	if err != nil {
+	if err := c.Verify(); err != nil {
 		return nil, err
 	}
-	if _, err := cs.Discovery().ServerVersion(); err != nil {
-		return nil, fmt.Errorf("failed to connect to Kubernetes cluster: %w", err)
+	if c.Clientset == nil {
+		return nil, errors.New("the Kubernetes client has no clientset")
 	}
-	return cs, nil
+	return c.Clientset, nil
 }
 
 // kubernetesClientset returns rt's Kubernetes client, or nil when rt is not
