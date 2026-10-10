@@ -22,11 +22,7 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 
-import {
-  fleetHealthyText,
-  hubInstanceAnchor,
-  type HealthSummaryHub,
-} from './health-hub-card.js';
+import { fleetHealthyText, hubInstanceAnchor, type HealthSummaryHub } from './health-hub-card.js';
 import './health-hub-card.js';
 import { elementStyleRules } from './__fixtures__/css-rules.js';
 
@@ -78,7 +74,12 @@ describe('scion-health-hub-card', () => {
         unhealthy_checks: [
           { instance_id: 'hub-b-1', instance_label: 'hub-b', name: 'database', value: 'unhealthy' },
           { instance_id: 'hub-c-1', instance_label: '', name: 'database', value: 'unhealthy' },
-          { instance_id: 'hub-b-1', instance_label: 'hub-b', name: 'audit_log_writer', value: 'degraded' },
+          {
+            instance_id: 'hub-b-1',
+            instance_label: 'hub-b',
+            name: 'audit_log_writer',
+            value: 'degraded',
+          },
         ],
       })
     );

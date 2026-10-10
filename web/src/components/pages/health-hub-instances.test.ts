@@ -440,7 +440,10 @@ describe('scion-health-hub-instances', () => {
   it('highlights the row named by the location hash', async () => {
     history.replaceState(null, '', '#' + hubInstanceAnchor('hub-b-1'));
     const root = await mount(
-      list([instance({ id: 'hub-a-1', label: 'hub-a' }), instance({ id: 'hub-b-1', label: 'hub-b' })])
+      list([
+        instance({ id: 'hub-a-1', label: 'hub-a' }),
+        instance({ id: 'hub-b-1', label: 'hub-b' }),
+      ])
     );
     const byId = (id: string) => rows(root).find((r) => r.dataset.instanceId === id)!;
     expect(byId('hub-b-1').classList.contains('target')).toBe(true);

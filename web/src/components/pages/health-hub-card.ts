@@ -260,9 +260,7 @@ export class ScionHealthHubCard extends LitElement {
             >${hub.status || 'unknown'}</span
           >
         </div>
-        <div class="fleet" data-role="fleet">
-          ${fleet || 'Hub instance data not available'}
-        </div>
+        <div class="fleet" data-role="fleet">${fleet || 'Hub instance data not available'}</div>
         ${checks.length > 0
           ? html`<ul class="checks" data-role="failing-checks">
               ${checks.map((c) => this.renderCheck(c))}
