@@ -40,7 +40,7 @@ import {
 } from 'vitest';
 import { html, nothing, render, type TemplateResult } from 'lit';
 import { apiFetch } from '../../client/api.js';
-import { navigateTo, pushRoute, replaceRoute } from '../../client/main.js';
+import { navigateTo, pushRoute, replaceRoute, stateManager } from '../../client/main.js';
 import {
   rememberChatScrollAnchor,
   takeChatScrollAnchor,
@@ -50,6 +50,7 @@ import { chatDMsLoad, chatSpacesLoad } from '../../client/chat-list-cache.js';
 import { chatUnread } from '../../client/chat-unread.js';
 import { chatNotifications } from '../../client/chat-notifications.js';
 import { FakeEventSource } from '../../client/__fixtures__/agent-store-harness.js';
+import { RESUME_REFRESH_AFTER_MS } from '../../client/resume-refresh.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -2791,6 +2792,85 @@ describe('chat page — startup after the page is removed', () => {
     } finally {
       el.remove();
     }
+  });
+
+  describe('rail catch-up and pull-to-refresh', () => {
+    /** A started (unrendered) page with its rail refresh stubbed. */
+    async function startedPage(): Promise<any> {
+      await loadLazyModules();
+      const el = createUnrenderedPage();
+      const startups = trackStartups(el);
+      window.history.replaceState({}, '', '/chat');
+      document.body.appendChild(el);
+      await startups.settled();
+      // Deliberately shadows the private method on this instance only.
+      el.refreshRail = vi.fn();
+      return el;
+    }
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('refreshes the rail when the SSE feed reconnects after a drop, until removed', async () => {
+      const el = await startedPage();
+      try {
+        stateManager.dispatchEvent(new CustomEvent('agents-resync'));
+        expect(el.refreshRail).toHaveBeenCalledTimes(1);
+        el.remove();
+        stateManager.dispatchEvent(new CustomEvent('agents-resync'));
+        expect(el.refreshRail).toHaveBeenCalledTimes(1);
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('refreshes the rail when the page returns from a long time in the background', async () => {
+      let visibility: DocumentVisibilityState = 'visible';
+      vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibility);
+      let now = 5_000_000;
+      vi.spyOn(Date, 'now').mockImplementation(() => now);
+      const el = await startedPage();
+      try {
+        visibility = 'hidden';
+        document.dispatchEvent(new Event('visibilitychange'));
+        now += RESUME_REFRESH_AFTER_MS;
+        visibility = 'visible';
+        document.dispatchEvent(new Event('visibilitychange'));
+        expect(el.refreshRail).toHaveBeenCalledTimes(1);
+
+        el.remove();
+        visibility = 'hidden';
+        document.dispatchEvent(new Event('visibilitychange'));
+        now += RESUME_REFRESH_AFTER_MS;
+        visibility = 'visible';
+        document.dispatchEvent(new Event('visibilitychange'));
+        expect(el.refreshRail).toHaveBeenCalledTimes(1);
+      } finally {
+        el.remove();
+      }
+    });
+
+    it("a rail refresh reloads the DM list fresh and the nav badge's count", async () => {
+      const el = await startedPage();
+      try {
+        const scheduled = vi.spyOn(chatUnread, 'scheduleRefresh').mockImplementation(() => {});
+        const before = dmListLoads();
+        const waited: Promise<unknown>[] = [];
+        el.dispatchEvent(
+          new CustomEvent('rail-refresh', {
+            detail: { waitUntil: (p: Promise<unknown>) => waited.push(p) },
+          })
+        );
+        // The startup load moments ago is not reused.
+        expect(dmListLoads()).toBe(before + 1);
+        expect(waited).toHaveLength(1);
+        await Promise.all(waited);
+        expect(scheduled).toHaveBeenCalledTimes(1);
+      } finally {
+        el.remove();
+      }
+    });
   });
 
   describe('when a lazy import fails', () => {
