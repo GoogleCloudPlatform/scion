@@ -935,6 +935,8 @@ const deleteInDoubtMessage = "teardown may still complete on the broker; retry o
 // failInDoubt fails the delete with in_doubt without restoring a live phase:
 // the hub does not know whether the container still exists. Start stays
 // blocked while the intent is outstanding (deleteBlocksStart).
+// If the intent completed meanwhile, recheckInDoubt deletes again and its
+// outcome is returned instead.
 func (e *deletionEngine) failInDoubt() deletionOutcome {
 	e.stopRenewal()
 	ctx, cancel := context.WithTimeout(e.base, deleteStepTimeout)
@@ -953,7 +955,16 @@ func (e *deletionEngine) failInDoubt() deletionOutcome {
 	if n == 0 {
 		return e.lost()
 	}
-	e.publishStatus(ctx)
+	if h := inDoubtWrittenHook; h != nil {
+		h(e.agentID())
+	}
+	if out, ok := e.recheckInDoubt(); ok {
+		// No in_doubt status: watchers see the re-claim's delete instead.
+		return out
+	}
+	pctx, pcancel := context.WithTimeout(e.base, deleteStepTimeout)
+	defer pcancel()
+	e.publishStatus(pctx)
 	return deletionOutcome{kind: deletionOutcomeFailed, code: code, message: msg}
 }
 
