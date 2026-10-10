@@ -58,10 +58,12 @@ import {
   artifactPagePath,
   formatArtifactRef,
   rendererFor,
+  type ArtifactFile,
   type ArtifactResponse,
 } from '../../../client/artifacts.js';
 import '../code-editor.js';
 import '../markdown-preview.js';
+import '../artifact-markdown-frame.js';
 
 /** An attachment target, addressed by its opaque attachment ID. */
 export interface AttachmentPreviewTarget {
@@ -131,11 +133,11 @@ interface ArtifactInfo {
   /** Whether version is the artifact's current version. */
   current: boolean;
   /**
-   * A Markdown entry shown as source text. Rendered artifact Markdown is
-   * only ever shown in the artifact viewer's sandboxed frame, which keeps
-   * every image on the hub; the chat preview does not render it.
+   * Set for a Markdown entry. Artifact Markdown is rendered only through
+   * the artifact viewer's sandboxed frame (`<scion-artifact-markdown-frame>`),
+   * which keeps every image on the hub; these are the frame's inputs.
    */
-  markdownSource?: boolean;
+  markdown?: { id: string; seq: number; files: ArtifactFile[] };
 }
 
 /** Image MIME types rendered inline (mirrors chat-message.ts's IMAGE_MIMES). */
@@ -709,12 +711,18 @@ export class ScionChatFilePreview extends LitElement {
       }
       const content = await fileRes.text();
       if (gen !== this.generation) return;
-      // Markdown is shown as source, never rendered here: see markdownSource.
+      // Markdown renders only in the artifact viewer's sandboxed frame: see markdown.
       this.loadState = {
         ...base,
         status: 'ready',
         content,
-        artifact: renderer === 'markdown' ? { ...artifact, markdownSource: true } : artifact,
+        artifact:
+          renderer === 'markdown'
+            ? {
+                ...artifact,
+                markdown: { id: data.artifact.id, seq: version.seq, files: version.files },
+              }
+            : artifact,
       };
     } catch {
       if (gen !== this.generation || controller.signal.aborted) return;
@@ -851,12 +859,17 @@ export class ScionChatFilePreview extends LitElement {
         .content=${state.content ?? ''}
       ></scion-markdown-preview>`;
     }
+    const md = state.artifact?.markdown;
+    if (md) {
+      return html`<scion-artifact-markdown-frame
+        .content=${state.content ?? ''}
+        .artifactId=${md.id}
+        .seq=${md.seq}
+        .entryPath=${state.artifact?.entry ?? ''}
+        .files=${md.files}
+      ></scion-artifact-markdown-frame>`;
+    }
     return html`
-      ${state.artifact?.markdownSource
-        ? html`<div class="artifact-source-note">
-            Markdown source. Open in artifact viewer for the rendered view.
-          </div>`
-        : nothing}
       <scion-code-editor
         .content=${state.content ?? ''}
         language=${getLanguageFromPath(state.artifact?.entry ?? target.name)}
@@ -1038,12 +1051,6 @@ export class ScionChatFilePreview extends LitElement {
       border-radius: 999px;
       background: var(--scion-bg-subtle, #f1f5f9);
       color: var(--scion-text-muted, #475569);
-    }
-    .artifact-source-note {
-      padding: 0.5rem 1rem;
-      font-size: var(--chat-fs-sm, 0.8125rem);
-      color: var(--scion-text-muted, #64748b);
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
     }
     .footer {
       display: flex;

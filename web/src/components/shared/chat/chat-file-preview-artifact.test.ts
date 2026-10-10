@@ -37,6 +37,11 @@ await import('./chat-file-preview.js');
 type ScionChatFilePreview = import('./chat-file-preview.js').ScionChatFilePreview;
 const { ARTIFACT_UNAVAILABLE_MESSAGE } = await import('./chat-file-preview.js');
 
+const { ScionArtifactMarkdownFrame: ScionArtifactMarkdownFrameCtor } = await import(
+  '../artifact-markdown-frame.js'
+);
+type ScionArtifactMarkdownFrame = import('../artifact-markdown-frame.js').ScionArtifactMarkdownFrame;
+
 const ID = '5f1c2d3e-0000-4000-8000-0000000000aa';
 
 function meta(seq: number, mediaType = 'text/markdown', size = 12) {
@@ -95,7 +100,7 @@ describe('scion-chat-file-preview artifact target', () => {
     document.body.innerHTML = '';
   });
 
-  it('loads the current version and shows Markdown as source only, with the artifact actions', async () => {
+  it('loads the current version and renders Markdown in the sandboxed artifact frame, with the artifact actions', async () => {
     apiFetchMock.mockImplementation((path: string) =>
       Promise.resolve(
         path.includes('/files/')
@@ -110,12 +115,20 @@ describe('scion-chat-file-preview artifact target', () => {
       `/api/v1/artifacts/${ID}/versions/3/files/design.md?stream=1`,
     ]);
     expect(q(el, 'sl-dialog')?.getAttribute('label')).toBe('Design notes');
-    // Artifact Markdown is never rendered in the page: no markdown preview,
-    // no <img>, only the read-only source and a pointer to the viewer.
+    // Artifact Markdown renders only through the artifact viewer's own
+    // sandboxed frame component, fed the version's files for its images;
+    // never the chat's markdown preview, an <img> in the page, or source.
     expect(q(el, 'scion-markdown-preview')).toBeNull();
     expect(el.shadowRoot?.querySelectorAll('img')).toHaveLength(0);
-    expect(q(el, 'scion-code-editor')).toBeTruthy();
-    expect(q(el, '.artifact-source-note')?.textContent).toContain('Open in artifact viewer');
+    expect(q(el, 'scion-code-editor')).toBeNull();
+    const frame = q<ScionArtifactMarkdownFrame>(el, 'scion-artifact-markdown-frame');
+    expect(frame).toBeInstanceOf(ScionArtifactMarkdownFrameCtor);
+    expect(frame?.content).toBe('# Title\n\n![x](https://example.com/x.png)');
+    expect(frame?.artifactId).toBe(ID);
+    expect(frame?.seq).toBe(3);
+    expect(frame?.entryPath).toBe('design.md');
+    expect(frame?.files.map((f) => f.path)).toEqual(['design.md']);
+    expect(frame?.critic).toBe('off');
     expect(q(el, '.footer .path')?.textContent).toBe('design.md');
     expect(q(el, '.version-badge')?.textContent?.trim()).toBe('v3 · current');
     expect(buttons(el)).toEqual(['Copy link', 'Open in artifact viewer']);
@@ -133,7 +146,9 @@ describe('scion-chat-file-preview artifact target', () => {
       `/api/v1/artifacts/${ID}/versions/1`,
       `/api/v1/artifacts/${ID}/versions/1/files/design.md?stream=1`,
     ]);
+    // Non-Markdown text is unchanged: read-only text, no Markdown frame.
     expect(q(el, 'scion-code-editor')).toBeTruthy();
+    expect(q(el, 'scion-artifact-markdown-frame')).toBeNull();
     expect(q(el, '.version-badge')?.textContent?.trim()).toBe('v1');
     expect(buttons(el)).toEqual(['Copy link', 'Open in artifact viewer']);
   });
