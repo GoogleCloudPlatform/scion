@@ -67,6 +67,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/asyncwrite"
 	gcputil "github.com/GoogleCloudPlatform/scion/pkg/util/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/web"
@@ -364,6 +365,21 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		// Flush telemetry providers before the store closes on exit.
 		exit := &hubExitSequence{}
 		defer exit.run()
+
+		// Close the decision-log audit writer on EVERY return from here on
+		// (architect ruling R5), including the startup-failure returns in
+		// steps 11-14 that can happen after the Hub API (step 11) or the
+		// web server (step 12) is already serving. Bounded by the writer's
+		// own drain timeout; idempotent with the step-16 close in
+		// awaitServerExit and with Server.Shutdown's close. Defers run LIFO:
+		// this runs before exit.run (registered just above, so telemetry
+		// flushes after the writer's final counts) and before the log
+		// cleanups deferred at step 1.
+		defer func() {
+			closeCtx, cancelClose := context.WithTimeout(context.Background(), asyncwrite.DefaultDrainTimeout)
+			defer cancelClose()
+			_ = hubSrv.CloseAuditWriter(closeCtx)
+		}()
 
 		// The co-located broker registers (startRuntimeBroker, step 13)
 		// only after the Hub API is serving. Mark it as expected now, under
