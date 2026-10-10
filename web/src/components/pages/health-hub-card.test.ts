@@ -15,26 +15,31 @@
  */
 
 /**
- * Hub card: every check as a row. The database pool is per instance, in
- * the Hub instances table.
+ * Hub card: the fleet of hub instances. Status, "N of M instances
+ * healthy", version and the failing checks of live instances, each linked
+ * to its instance row. Per-instance figures are in the Hub instances table.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
 
-import { hubCheckRows, type HealthSummaryHub } from './health-hub-card.js';
+import {
+  fleetHealthyText,
+  hubInstanceAnchor,
+  type HealthSummaryHub,
+} from './health-hub-card.js';
 import './health-hub-card.js';
 import { elementStyleRules } from './__fixtures__/css-rules.js';
 
 function hub(over: Partial<HealthSummaryHub> = {}): HealthSummaryHub {
   return {
     status: 'healthy',
-    instance_id: 'hub-a',
+    instance_id: 'hub-a-1',
     version: 'v1',
-    uptime: '1h',
     connected_brokers: 1,
     active_agents: 2,
     projects: 3,
-    checks: { workspace_storage: 'healthy', database: 'healthy', colocated_broker: 'healthy' },
+    instances: { live: 3, healthy: 3, degraded: 0, unhealthy: 0 },
+    unhealthy_checks: [],
     ...over,
   };
 }
@@ -52,41 +57,66 @@ describe('scion-health-hub-card', () => {
     document.body.innerHTML = '';
   });
 
-  it('lists every check as a row sorted by name, with its status', async () => {
+  it('shows the fleet status and N of M instances healthy', async () => {
     const root = await mount(
-      hub({
-        checks: {
-          workspace_storage: 'unhealthy: mount not available',
-          database: 'healthy',
-          colocated_broker: 'healthy',
-        },
-      })
+      hub({ status: 'degraded', instances: { live: 3, healthy: 2, degraded: 0, unhealthy: 1 } })
     );
-    const rows = [...root.querySelectorAll('li[data-check]')] as HTMLElement[];
-    expect(rows.map((r) => r.dataset.check)).toEqual([
-      'colocated_broker',
-      'database',
-      'workspace_storage',
-    ]);
-    const ws = rows[2]!.querySelector('.pill')!;
-    expect(ws.textContent?.trim()).toBe('unhealthy: mount not available');
-    expect(ws.classList.contains('tone-bad')).toBe(true);
-    expect(rows[0]!.querySelector('.pill')!.classList.contains('tone-ok')).toBe(true);
-  });
-
-  it('has no pool sub-block: the pool is per instance, in the Hub instances table', async () => {
-    const root = await mount(hub());
-    expect(root.querySelector('li[data-check="database"]')).not.toBeNull();
-    expect(root.querySelector('[data-role="pool"]')).toBeNull();
-    expect(root.textContent).not.toContain('Pool');
-  });
-
-  it('shows the hub status and that the figures are from this instance', async () => {
-    const root = await mount(hub({ status: 'degraded' }));
     const pill = root.querySelector('[data-role="hub-status"]')!;
     expect(pill.textContent?.trim()).toBe('degraded');
     expect(pill.classList.contains('tone-warn')).toBe(true);
-    expect(root.textContent).toContain('this instance');
+    expect(root.querySelector('[data-role="fleet"]')?.textContent?.trim()).toBe(
+      '2 of 3 instances healthy'
+    );
+    expect(root.textContent).not.toContain('Checks and figures from this instance');
+  });
+
+  it('lists the failing checks with their instance labels, linked to the instance rows', async () => {
+    const root = await mount(
+      hub({
+        status: 'unhealthy',
+        instances: { live: 3, healthy: 1, degraded: 0, unhealthy: 2 },
+        unhealthy_checks: [
+          { instance_id: 'hub-b-1', instance_label: 'hub-b', name: 'database', value: 'unhealthy' },
+          { instance_id: 'hub-c-1', instance_label: '', name: 'database', value: 'unhealthy' },
+          { instance_id: 'hub-b-1', instance_label: 'hub-b', name: 'audit_log_writer', value: 'degraded' },
+        ],
+      })
+    );
+    const rows = [...root.querySelectorAll('[data-role="failing-checks"] li')] as HTMLElement[];
+    expect(rows.map((r) => r.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
+      'database on hub-b unhealthy',
+      'database on hub-c-1 unhealthy',
+      'audit_log_writer on hub-b degraded',
+    ]);
+    const link = rows[0]!.querySelector('a')!;
+    expect(link.getAttribute('href')).toBe('#' + hubInstanceAnchor('hub-b-1'));
+    expect(link.getAttribute('title')).toBe('hub-b-1');
+    expect(rows[0]!.querySelector('.pill')!.classList.contains('tone-bad')).toBe(true);
+    expect(rows[2]!.querySelector('.pill')!.classList.contains('tone-warn')).toBe(true);
+  });
+
+  it('shows no check list, uptime or pool when the fleet is healthy', async () => {
+    const root = await mount(hub());
+    expect(root.querySelector('[data-role="failing-checks"]')).toBeNull();
+    expect(root.querySelector('[data-role="pool"]')).toBeNull();
+    expect(root.textContent).not.toContain('Uptime');
+    expect(root.querySelector('[data-role="version"]')?.textContent?.trim()).toBe('v1');
+  });
+
+  it('shows a mixed version as sent', async () => {
+    const root = await mount(hub({ version: 'mixed' }));
+    expect(root.querySelector('[data-role="version"]')?.textContent?.trim()).toBe('mixed');
+  });
+
+  it('says the instance data is not available when the fleet counts are missing', async () => {
+    const root = await mount(hub({ status: 'unknown', instances: null, version: '' }));
+    expect(root.querySelector('[data-role="fleet"]')?.textContent?.trim()).toBe(
+      'Hub instance data not available'
+    );
+    expect(root.querySelector('[data-role="hub-status"]')?.classList.contains('tone-neutral')).toBe(
+      true
+    );
+    expect(root.querySelector('[data-role="version"]')?.textContent?.trim()).toBe('—');
   });
 
   it('shows the service account check diagnostic only when the section is present', async () => {
@@ -138,16 +168,27 @@ describe('scion-health-hub-card', () => {
   });
 });
 
-describe('hubCheckRows', () => {
-  it('lists the checks sorted by name', () => {
-    expect(hubCheckRows(hub()).map((r) => r.name)).toEqual([
-      'colocated_broker',
-      'database',
-      'workspace_storage',
-    ]);
+describe('fleetHealthyText', () => {
+  it('counts healthy of live instances', () => {
+    expect(fleetHealthyText({ live: 3, healthy: 2, degraded: 1, unhealthy: 0 })).toBe(
+      '2 of 3 instances healthy'
+    );
+    expect(fleetHealthyText({ live: 1, healthy: 1, degraded: 0, unhealthy: 0 })).toBe(
+      '1 of 1 instance healthy'
+    );
+    expect(fleetHealthyText({ live: 0, healthy: 0, degraded: 0, unhealthy: 0 })).toBe(
+      'No hub instance is reporting'
+    );
   });
 
-  it('is empty without checks', () => {
-    expect(hubCheckRows(hub({ checks: undefined }))).toEqual([]);
+  it('is empty when the counts were not reported', () => {
+    expect(fleetHealthyText(null)).toBe('');
+    expect(fleetHealthyText(undefined)).toBe('');
+  });
+});
+
+describe('hubInstanceAnchor', () => {
+  it('encodes the instance ID', () => {
+    expect(hubInstanceAnchor('pod-1 x/y')).toBe('hub-instance-pod-1%20x%2Fy');
   });
 });

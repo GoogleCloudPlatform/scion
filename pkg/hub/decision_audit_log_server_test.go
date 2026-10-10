@@ -622,14 +622,19 @@ func TestDecisionLog_P1_7_HealthReportsWriterFailures(t *testing.T) {
 	srv.handleReadyz(ready, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	assert.Equal(t, http.StatusOK, ready.Code)
 	assert.GreaterOrEqual(t, srv.auditWriter.Snapshot().WriteErrors, uint64(1))
+	// The summary reads the instance's registry row, which its tick
+	// writes from the same checks.
+	srv.newHubInstanceRegistry().tick(context.Background())
 	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	var summary HealthSummaryResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &summary))
 	assert.Equal(t, HealthStatusDegraded, summary.Status)
-	assert.Equal(t, "degraded: recent write failures", summary.Hub.Checks[auditLogWriterHealthKey])
-	assert.Contains(t, summary.Hub.UnhealthyChecks, auditLogWriterHealthKey+": degraded: recent write failures")
-	assert.Equal(t, "healthy", summary.Hub.Checks["database"])
+	assert.Equal(t, HealthStatusDegraded, summary.Hub.Status)
+	require.Len(t, summary.Hub.UnhealthyChecks, 1, "the database check is healthy; only the writer is not")
+	assert.Equal(t, auditLogWriterHealthKey, summary.Hub.UnhealthyChecks[0].Name)
+	assert.Equal(t, "degraded", summary.Hub.UnhealthyChecks[0].Value)
+	assert.Equal(t, srv.InstanceID(), summary.Hub.UnhealthyChecks[0].InstanceID)
 
 	// Closed while still serving.
 	require.NoError(t, srv.CloseAuditWriter(context.Background()))

@@ -218,7 +218,7 @@ describe('scion-page-health-dashboard integrations', () => {
     return new Response(
       JSON.stringify({
         status: 'healthy',
-        hub: { status: 'healthy', version: 'v1', uptime: '1h', connected_brokers: 0 },
+        hub: { status: 'healthy', version: 'v1', connected_brokers: 0 },
         runtime_brokers: { items: [], total: 0, truncated: false },
         integrations,
         integrations_detail: true,
@@ -301,7 +301,7 @@ describe('scion-page-health-dashboard integrations', () => {
                 message: '1 integration unhealthy',
               },
             ],
-            hub: { status: 'healthy', version: 'v1', uptime: '1h', connected_brokers: 0 },
+            hub: { status: 'healthy', version: 'v1', connected_brokers: 0 },
             runtime_brokers: { items: [], total: 0, truncated: false },
             integrations: [],
             integrations_detail: false,

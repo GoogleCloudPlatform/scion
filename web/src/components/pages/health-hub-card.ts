@@ -15,12 +15,15 @@
  */
 
 /**
- * Hub card for the health dashboard (ptone/scion#3595).
+ * Hub card for the health dashboard (ptone/scion#3595, fleet view
+ * ptone/scion#4140).
  *
- * Lists every hub check as a row (name, status). The checks and figures
- * are those of the hub instance that served the summary ("this
- * instance"). The database connection pool is per instance and shown in
- * the Hub instances table (health-hub-instances.ts), not here.
+ * Describes the whole fleet of hub instances, as the hub computes it from
+ * its registry rows: the fleet status, "N of M instances healthy" (live
+ * instances only), the version (or "mixed") and every non-healthy check of
+ * a live instance, each labelled with its instance and linked to that
+ * instance's row in the Hub instances table (health-hub-instances.ts).
+ * Uptime, per-instance checks and the database pool are in that table.
  *
  * While the service account assignment check cannot run (the summary's
  * service_account_check section is present), the card also shows that
@@ -32,20 +35,38 @@ import { customElement, property } from 'lit/decorators.js';
 
 import { healthPillStyles, healthTone } from './health-status.js';
 
-/** The summary's hub block. */
+/** Live hub instances counted by their last reported status. */
+export interface HealthSummaryHubFleet {
+  live: number;
+  healthy: number;
+  degraded: number;
+  unhealthy: number;
+}
+
+/** One non-healthy check of one live hub instance. */
+export interface HealthSummaryHubCheck {
+  instance_id: string;
+  instance_label: string;
+  name: string;
+  /** Fixed word: unhealthy, degraded, unavailable or unknown. */
+  value: string;
+}
+
+/** The summary's hub block: the whole fleet of hub instances. */
 export interface HealthSummaryHub {
+  /** Fleet status: healthy, degraded or unhealthy; unknown when not reported. */
   status: string;
   /** The hub instance that served this summary ("this instance"). */
   instance_id: string;
+  /** The live instances' version, "mixed" when they differ, empty when none is live. */
   version: string;
-  uptime: string;
   connected_brokers: number;
   active_agents: number;
   projects: number;
-  /** The hub's /healthz check map. */
-  checks?: Record<string, string>;
-  /** Non-healthy checks as "key: value" — the cause of a degraded/unhealthy hub. */
-  unhealthy_checks?: string[];
+  /** Null when the hub instance data could not be read. */
+  instances?: HealthSummaryHubFleet | null;
+  /** Non-healthy checks of live instances, critical checks first. */
+  unhealthy_checks?: HealthSummaryHubCheck[];
 }
 
 /** The service_account_check section of GET /api/v1/admin/health/summary. */
@@ -58,16 +79,23 @@ export interface HealthSummaryServiceAccountCheck {
   last_seen: string;
 }
 
-/** One check row of the card. */
-export interface HubCheckRow {
-  name: string;
-  status: string;
+/**
+ * The fragment ID of a hub instance's row in the Hub instances table, so
+ * an item about the instance can link to it.
+ */
+export function hubInstanceAnchor(instanceId: string): string {
+  return `hub-instance-${encodeURIComponent(instanceId)}`;
 }
 
-/** Every hub check as a row, sorted by name. */
-export function hubCheckRows(hub: HealthSummaryHub): HubCheckRow[] {
-  const rows = Object.entries(hub.checks ?? {}).map(([name, status]) => ({ name, status }));
-  return rows.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+/**
+ * "2 of 3 instances healthy" from the fleet counts (live instances only);
+ * "No hub instance is reporting" when none is live; empty when the counts
+ * were not reported.
+ */
+export function fleetHealthyText(fleet: HealthSummaryHubFleet | null | undefined): string {
+  if (!fleet) return '';
+  if (fleet.live <= 0) return 'No hub instance is reporting';
+  return `${fleet.healthy} of ${fleet.live} ${fleet.live === 1 ? 'instance' : 'instances'} healthy`;
 }
 
 @customElement('scion-health-hub-card')
@@ -111,9 +139,21 @@ export class ScionHealthHubCard extends LitElement {
         letter-spacing: 0.05em;
       }
 
-      .scope {
-        font-size: 0.75rem;
-        color: var(--scion-text-muted);
+      .fleet {
+        font-size: 0.875rem;
+        color: var(--scion-text);
+        margin: 0 0 0.75rem 0;
+      }
+
+      .check a {
+        color: var(--scion-text);
+        text-decoration: underline;
+        text-decoration-color: var(--scion-border-hover);
+        text-underline-offset: 2px;
+      }
+
+      .check a:hover {
+        text-decoration-color: currentColor;
       }
 
       ul.checks {
@@ -210,7 +250,8 @@ export class ScionHealthHubCard extends LitElement {
         <div class="empty">Hub data not available</div>
       </div>`;
     }
-    const rows = hubCheckRows(hub);
+    const checks = hub.unhealthy_checks ?? [];
+    const fleet = fleetHealthyText(hub.instances);
     return html`
       <section class="card" aria-labelledby="hub-title">
         <div class="card-head">
@@ -219,14 +260,18 @@ export class ScionHealthHubCard extends LitElement {
             >${hub.status || 'unknown'}</span
           >
         </div>
-        ${rows.length > 0
-          ? html`<ul class="checks">
-              ${rows.map((r) => this.renderCheck(r))}
+        <div class="fleet" data-role="fleet">
+          ${fleet || 'Hub instance data not available'}
+        </div>
+        ${checks.length > 0
+          ? html`<ul class="checks" data-role="failing-checks">
+              ${checks.map((c) => this.renderCheck(c))}
             </ul>`
-          : html`<div class="empty">No checks reported</div>`}
+          : nothing}
         ${this.renderServiceAccountCheck()}
-        <div class="stat-row"><span class="label">Uptime</span><span>${hub.uptime}</span></div>
-        <div class="stat-row"><span class="label">Version</span><span>${hub.version}</span></div>
+        <div class="stat-row">
+          <span class="label">Version</span><span data-role="version">${hub.version || '—'}</span>
+        </div>
         <div class="stat-row">
           <span class="label">Connected brokers</span><span>${hub.connected_brokers}</span>
         </div>
@@ -234,7 +279,6 @@ export class ScionHealthHubCard extends LitElement {
           <span class="label">Active agents</span><span>${hub.active_agents}</span>
         </div>
         <div class="stat-row"><span class="label">Projects</span><span>${hub.projects}</span></div>
-        <div class="scope">Checks and figures from this instance</div>
       </section>
     `;
   }
@@ -257,11 +301,15 @@ export class ScionHealthHubCard extends LitElement {
     </div>`;
   }
 
-  private renderCheck(r: HubCheckRow): TemplateResult {
-    return html`<li data-check=${r.name}>
+  private renderCheck(c: HealthSummaryHubCheck): TemplateResult {
+    const label = c.instance_label || c.instance_id;
+    return html`<li data-check=${c.name} data-instance-id=${c.instance_id}>
       <div class="check">
-        <span class="name">${r.name}</span>
-        <span class="pill tone-${healthTone(r.status)}">${r.status || 'unknown'}</span>
+        <span class="name"
+          >${c.name} on
+          <a href="#${hubInstanceAnchor(c.instance_id)}" title=${c.instance_id}>${label}</a></span
+        >
+        <span class="pill tone-${healthTone(c.value)}">${c.value || 'unknown'}</span>
       </div>
     </li>`;
   }

@@ -41,8 +41,8 @@ const items: HealthAttentionItem[] = [
   {
     severity: 'critical',
     kind: 'hub_check',
-    subject: { type: 'hub', id: 'hub-a' },
-    message: 'Hub check database is not healthy on this instance',
+    subject: { type: 'hub', id: 'hub-a 1', name: 'hub-a' },
+    message: 'Hub check database is not healthy on instance hub-a',
   },
   {
     severity: 'warning',
@@ -109,13 +109,14 @@ describe('scion-health-attention', () => {
     expect(icons[2]!.getAttribute('label')).toBe('Warning');
   });
 
-  it('links only items whose subject is a broker, agent or integration with an ID', async () => {
+  it('links only items whose subject is a hub instance, broker, agent or integration with an ID', async () => {
     const root = await mount(items);
     const hrefs = [...root.querySelectorAll('li')].map(
       (li) => li.querySelector('a')?.getAttribute('href') ?? null
     );
     expect(hrefs).toEqual([
-      null,
+      // An item about one hub instance links to its row on this page.
+      '#hub-instance-hub-a%201',
       // The broker list item is about the hub: no broker link.
       null,
       '/brokers/b%201',
@@ -166,12 +167,19 @@ describe('attentionHref', () => {
       { type: 'runtime_broker' },
       { type: 'agent' },
       { type: 'integration' },
+      { type: 'hub' },
       { type: 'hub', id: 'x' },
       { type: 'dispatch', id: 'x' },
       { type: 'agents', id: 'x' },
     ]) {
       expect(attentionHref({ ...items[2]!, subject }, true)).toBeNull();
     }
+  });
+
+  it('links a hub instance item to the instance row anchor', () => {
+    expect(
+      attentionHref({ ...items[0]!, subject: { type: 'hub', id: 'hub/a', name: 'a' } }, false)
+    ).toBe('#hub-instance-hub%2Fa');
   });
 
   it('links an integration only when the summary carries integration identity', () => {

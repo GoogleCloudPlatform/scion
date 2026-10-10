@@ -61,9 +61,10 @@ type HealthSummaryHubInstances struct {
 	// AsOf is the store clock the section was computed at (UTC). State,
 	// the display window and the dashboard's uptime and age all use it.
 	AsOf time.Time `json:"as_of"`
-	// Items lists live instances first (the serving one first), then
-	// stale, then stopped; each group ordered by label, then ID. Capped at
-	// healthSummaryHubInstanceLimit.
+	// Items lists live instances first, then stale, then stopped; each
+	// group ordered by label, then ID, so the order is the same whichever
+	// replica serves the request (the serving one is marked, not moved).
+	// Capped at healthSummaryHubInstanceLimit.
 	Items []HealthHubInstance `json:"items"`
 	// Live is the number of live instances, including any cut from Items.
 	Live int `json:"live"`
@@ -225,7 +226,9 @@ func buildHealthSummaryHubInstances(rows []store.HubInstance, now time.Time, ser
 			LastSeen:  r.LastSeen,
 			StoppedAt: r.StoppedAt,
 			Status:    r.Status,
-			Checks:    r.Checks,
+			// Normalised again, like stats: the row may have been
+			// written by another version of the hub.
+			Checks: api.NormalizeHubInstanceChecks(r.Checks),
 		}
 		if stats, ok := decodeHubInstanceStats(r.Stats); ok {
 			item.Database = hubInstanceDatabase(stats)
@@ -245,9 +248,6 @@ func buildHealthSummaryHubInstances(rows []store.HubInstance, now time.Time, ser
 		a, b := out.Items[i], out.Items[j]
 		if ra, rb := hubInstanceStateRank(a.State), hubInstanceStateRank(b.State); ra != rb {
 			return ra < rb
-		}
-		if a.Serving != b.Serving {
-			return a.Serving
 		}
 		if a.Label != b.Label {
 			return a.Label < b.Label

@@ -20,7 +20,9 @@
  * Renders the summary's attention list exactly as the server sends it: in
  * server order, with the server's sentence. An item links to its subject
  * only when the subject carries what the link needs (a broker, agent or
- * integration ID). Hub, dispatch and aggregate agent items are not linked.
+ * integration ID, or a hub instance ID). A hub item about one instance
+ * links to that instance's row in the Hub instances table, on this page.
+ * Fleet-wide hub items, dispatch and aggregate agent items are not linked.
  * Integration items are linked only when the summary says it carries
  * integration identity (integrations_detail true) and the item has an ID;
  * the server already omits the ID otherwise, this is a second check.
@@ -30,11 +32,12 @@ import { LitElement, html, css, type TemplateResult } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
 import { INTEGRATIONS_PAGE } from './health-integrations.js';
+import { hubInstanceAnchor } from './health-hub-card.js';
 
 /** One entry of the summary's ranked "Needs attention" list (server-composed). */
 export interface HealthAttentionItem {
   severity: 'critical' | 'warning';
-  /** hub_check | broker_offline | broker_degraded | broker_nfs | integration | dispatch | agents */
+  /** hub_check | hub_instance | broker_offline | broker_degraded | broker_nfs | integration | dispatch | agents */
   kind: string;
   /** What the item is about; fields that do not apply are omitted. */
   subject: { type: string; id?: string; name?: string; project_id?: string };
@@ -58,6 +61,12 @@ export function attentionHref(
       return `/brokers/${encodeURIComponent(id)}`;
     case 'agent':
       return `/agents/${encodeURIComponent(id)}`;
+    case 'hub':
+      // An item about one hub instance carries its ID and label. Hub items
+      // with an ID alone (the serving instance's own conditions) and
+      // fleet-wide items are not linked.
+      if (!item.subject.name) return null;
+      return `#${hubInstanceAnchor(id)}`;
     case 'integration':
       if (!integrationsDetail) return null;
       return `${INTEGRATIONS_PAGE}/${encodeURIComponent(id)}`;

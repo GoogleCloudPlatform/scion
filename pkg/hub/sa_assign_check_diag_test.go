@@ -77,6 +77,9 @@ func saCheckDiagServerCounting(t *testing.T, pt *fakePTClient) (*Server, *store.
 	checker.SetCallObserver(srv.NoteSAAssignCheckCall)
 	enforceSAAssign(srv, NewCachedCallerPermissionChecker(checker, time.Minute, time.Minute))
 	sa := wiringSA(t, s, store.ScopeProject, project.ID, "diag-target@p.iam.gserviceaccount.com")
+	// Write this instance's registry row, so the summary's fleet hub
+	// status is healthy and only the diagnostic changes the status.
+	srv.newHubInstanceRegistry().tick(context.Background())
 	return srv, sa, project.ID, counting
 }
 
