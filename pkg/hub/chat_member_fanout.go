@@ -24,28 +24,57 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// chatMemberFanoutTimeout bounds one background member fan-out.
-const chatMemberFanoutTimeout = 10 * time.Second
+// Default limits for one member fan-out; see chatMemberFanoutLimits.
+const (
+	defaultChatMemberFanoutTimeout       = 10 * time.Second
+	defaultChatMemberFanoutMaxRecipients = 500
+)
 
-// chatMemberFanoutMaxRecipients bounds how many members one thread message
-// is fanned out to. Members past the bound still receive the message on the
-// project subject; hitting it is logged.
-const chatMemberFanoutMaxRecipients = 500
+// chatMemberFanoutLimits bounds one member fan-out. The zero value uses the
+// defaults; tests set smaller values on the server.
+//
+// Members past maxRecipients get no copy on their user subject. They still
+// see the message on project.<id>.chat.message while one of their clients is
+// subscribed to it, and their unread count catches up on its next refresh.
+type chatMemberFanoutLimits struct {
+	// timeout bounds one fan-out; a membership write before it has its
+	// own bound (threadMembershipTimeout).
+	timeout time.Duration
+	// maxRecipients bounds how many members receive a copy.
+	maxRecipients int
+}
+
+// withDefaults returns l with every zero field replaced by its default.
+func (l chatMemberFanoutLimits) withDefaults() chatMemberFanoutLimits {
+	if l.timeout <= 0 {
+		l.timeout = defaultChatMemberFanoutTimeout
+	}
+	if l.maxRecipients <= 0 {
+		l.maxRecipients = defaultChatMemberFanoutMaxRecipients
+	}
+	return l
+}
+
+// snapshotThreadMessage copies msg and attachments for a background job:
+// callers keep updating their copy (for example its dispatch state) after
+// publishing it.
+func snapshotThreadMessage(msg *store.Message, attachments []AttachmentRef) (*store.Message, []AttachmentRef) {
+	snapshot := *msg
+	return &snapshot, append([]AttachmentRef(nil), attachments...)
+}
 
 // fanOutThreadMessageToMembersAsync runs fanOutThreadMessageToMembers in the
 // background, detached from the request's cancellation. Publish paths call
 // it after the message is stored and its project-subject event is
-// published; it never blocks or fails them.
+// published; it never blocks or fails them. Paths that also record thread
+// membership for the message use recordThreadMembersThenFanOutAsync, or
+// record membership before publishing, so new members are recipients.
 func (s *Server) fanOutThreadMessageToMembersAsync(ctx context.Context, msg *store.Message, attachments []AttachmentRef) {
 	if !isWebThreadMessage(msg) {
 		return
 	}
 	ctx = context.WithoutCancel(ctx)
-	// Snapshot the message: callers keep updating their copy (for example
-	// its dispatch state) after publishing it.
-	snapshot := *msg
-	msg = &snapshot
-	attachments = append([]AttachmentRef(nil), attachments...)
+	msg, attachments = snapshotThreadMessage(msg, attachments)
 	go func() {
 		defer func() {
 			if rec := recover(); rec != nil {
@@ -53,9 +82,45 @@ func (s *Server) fanOutThreadMessageToMembersAsync(ctx context.Context, msg *sto
 					"thread", msg.ThreadID, "panic", fmt.Sprint(rec))
 			}
 		}()
-		ctx, cancel := context.WithTimeout(ctx, chatMemberFanoutTimeout)
+		ctx, cancel := context.WithTimeout(ctx, s.chatMemberFanout.withDefaults().timeout)
 		defer cancel()
 		s.fanOutThreadMessageToMembers(ctx, msg, attachments)
+	}()
+}
+
+// recordThreadMembersThenFanOutAsync records m's thread membership and then
+// fans msg out to the thread's members, in that order, in one background
+// job. A user who becomes a member through this message (its sender, or a
+// human it @mentions) is then among its recipients: for a mentioned user
+// who is not watching the project, that copy is the real-time signal that
+// replaced the MENTION notification.
+func (s *Server) recordThreadMembersThenFanOutAsync(m threadMembership, msg *store.Message, attachments []AttachmentRef) {
+	record := m.ThreadKey != "" && !strings.HasPrefix(m.ThreadKey, "dm:") && m.ProjectID != "" &&
+		(m.UserID != "" || len(m.MentionedUserIDs) > 0)
+	fanOut := isWebThreadMessage(msg)
+	if !record && !fanOut {
+		return
+	}
+	if fanOut {
+		msg, attachments = snapshotThreadMessage(msg, attachments)
+	}
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				s.messageLog.Error("thread membership and fan-out: panic",
+					"thread", m.ThreadKey, "panic", fmt.Sprint(rec))
+			}
+		}()
+		if record {
+			ctx, cancel := context.WithTimeout(context.Background(), threadMembershipTimeout)
+			s.recordThreadMembers(ctx, m)
+			cancel()
+		}
+		if fanOut {
+			ctx, cancel := context.WithTimeout(context.Background(), s.chatMemberFanout.withDefaults().timeout)
+			defer cancel()
+			s.fanOutThreadMessageToMembers(ctx, msg, attachments)
+		}
 	}()
 }
 
@@ -133,6 +198,7 @@ func (s *Server) fanOutThreadMessageToMembers(ctx context.Context, msg *store.Me
 	}
 	resource := projectResource(project)
 
+	bound := s.chatMemberFanout.withDefaults().maxRecipients
 	var recipients []string
 	seen := make(map[string]bool, len(participants))
 	for _, p := range participants {
@@ -140,9 +206,11 @@ func (s *Server) fanOutThreadMessageToMembers(ctx context.Context, msg *store.Me
 			continue
 		}
 		seen[p.PrincipalID] = true
-		if len(recipients) >= chatMemberFanoutMaxRecipients {
-			s.messageLog.Warn("chat member fan-out: members over bound; truncating",
-				"thread", msg.ThreadID, "bound", chatMemberFanoutMaxRecipients)
+		// Once the deadline passes every lookup below fails, so stop and
+		// say so rather than silently skipping the remaining members.
+		if err := ctx.Err(); err != nil {
+			s.messageLog.Warn("chat member fan-out: ran out of time; publishing to members found so far",
+				"thread", msg.ThreadID, "recipients", len(recipients), "error", err)
 			break
 		}
 		u, err := s.store.GetUser(ctx, p.PrincipalID)
@@ -152,6 +220,11 @@ func (s *Server) fanOutThreadMessageToMembers(ctx context.Context, msg *store.Me
 		identity := NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, "")
 		if !s.authzService.CheckAccess(ctx, identity, resource, ActionRead).Allowed {
 			continue
+		}
+		if len(recipients) >= bound {
+			s.messageLog.Warn("chat member fan-out: members over bound; truncating",
+				"thread", msg.ThreadID, "bound", bound)
+			break
 		}
 		recipients = append(recipients, u.ID)
 	}

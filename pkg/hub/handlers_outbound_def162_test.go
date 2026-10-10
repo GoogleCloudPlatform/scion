@@ -426,3 +426,74 @@ func TestDEF162_AC9_AgentPrefixThreadID_NoMember(t *testing.T) {
 		"AC-9: an agent:-prefixed ThreadID must not record membership")
 	requireNoNotifications(t, s, human.ID)
 }
+
+// expectMemberMessage waits for a thread message on user.<userID>.chat.message.
+func expectMemberMessage(t *testing.T, events <-chan Event, userID, topicID string) {
+	t.Helper()
+	select {
+	case evt := <-events:
+		var payload UserMessageEvent
+		require.NoError(t, json.Unmarshal(evt.Data, &payload))
+		assert.Equal(t, "user."+userID+".chat.message", evt.Subject)
+		assert.Equal(t, topicID, payload.ThreadID)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the mentioned human did not receive the agent's message on their user subject")
+	}
+}
+
+// A human an agent @mentions into a thread receives that message on their
+// user subject (non-broker path): membership is written before the
+// message is published and fanned out.
+func TestDEF162_AgentMention_NonBroker_FannedOutToMentioned(t *testing.T) {
+	srv, s, project, agent, human, topicID := def162Setup(t)
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	srv.SetEventPublisher(events)
+	sub, unsub := events.Subscribe("user." + human.ID + ".chat.message")
+	defer unsub()
+
+	convID := def162GroupConv(t, s, project.ID, topicID)
+	rr := postOutboundConvRef(t, srv, project.ID, agent.ID,
+		"Hey @UniqueHuman162 fan-out", "conv:"+convID)
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	expectMemberMessage(t, sub, human.ID, topicID)
+}
+
+// The same on the broker path, where deliverToUser stores the message and
+// runs the member fan-out wired as StartMessageBroker wires it.
+func TestDEF162_AgentMention_Broker_FannedOutToMentioned(t *testing.T) {
+	srv, s, project, agent, human, topicID := def162Setup(t)
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	srv.SetEventPublisher(events)
+	bus := eventbus.NewInProcessEventBus(slog.Default())
+	t.Cleanup(func() { _ = bus.Close() })
+
+	proxy := NewMessageBrokerProxy(bus, s, events,
+		func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
+	srv.mu.RLock()
+	proxy.webChatStore = srv.webChatStore
+	srv.mu.RUnlock()
+	proxy.memberFanout = srv.fanOutThreadMessageToMembersAsync
+	proxy.Start()
+	t.Cleanup(proxy.Stop)
+	srv.SetMessageBrokerProxy(proxy)
+
+	busSub, err := bus.Subscribe(
+		eventbus.TopicAllUserMessages(project.ID),
+		func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
+			proxy.deliverToUser(ctx, project.ID, topic, msg)
+		},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = busSub.Unsubscribe() })
+
+	sub, unsub := events.Subscribe("user." + human.ID + ".chat.message")
+	defer unsub()
+
+	convID := def162GroupConv(t, s, project.ID, topicID)
+	rr := postOutboundConvRef(t, srv, project.ID, agent.ID,
+		"Hey @UniqueHuman162 broker fan-out", "conv:"+convID)
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	expectMemberMessage(t, sub, human.ID, topicID)
+}

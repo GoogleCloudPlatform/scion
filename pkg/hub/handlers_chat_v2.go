@@ -1803,7 +1803,24 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	}
 
 	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
-	s.fanOutThreadMessageToMembersAsync(ctx, storeMsg, attachmentRefs)
+
+	// Thread membership, then the member fan-out, in one background job:
+	// the sender and the human project members they @mentioned become
+	// members of the thread before the message is fanned out, so they
+	// receive it. Started here, not after agent dispatch, so dispatch
+	// retries do not delay it. Best effort.
+	if !strings.HasPrefix(key, "dm:") {
+		m := threadMembership{
+			ProjectID:        projectID,
+			ThreadKey:        key,
+			UserID:           user.ID(),
+			MentionedUserIDs: mentionedHumans,
+		}
+		if chatV2ConvResult != nil && chatV2ConvResult.Kind == "group" {
+			m.ConversationID = chatV2ConvResult.ConversationID
+		}
+		s.recordThreadMembersThenFanOutAsync(m, storeMsg, attachmentRefs)
+	}
 
 	// Phase 9b(ii): render the delivery envelope from the persisted message
 	// row and conversation result when the envelope switch is ON.
@@ -2084,21 +2101,6 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		s.ensureGroupParticipants(ctx, chatV2ConvResult.ConversationID, dispatchedAgents)
 	}
 
-	// Thread membership: the sender and the human project members they
-	// @mentioned become members of the thread. Background and best effort.
-	if !strings.HasPrefix(key, "dm:") {
-		m := threadMembership{
-			ProjectID:        projectID,
-			ThreadKey:        key,
-			UserID:           user.ID(),
-			MentionedUserIDs: mentionedHumans,
-		}
-		if chatV2ConvResult != nil && chatV2ConvResult.Kind == "group" {
-			m.ConversationID = chatV2ConvResult.ConversationID
-		}
-		s.recordThreadMembersAsync(m)
-	}
-
 	resp := chatMessageResponse{
 		ID:                  storeMsg.ID,
 		Content:             content,
@@ -2348,21 +2350,22 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 	// the row's actual failed state so other open tabs see "Agent
 	// unreachable" too, not a false "Delivered".
 	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
-	s.fanOutThreadMessageToMembersAsync(ctx, storeMsg, attachmentRefs)
 
-	// Thread membership. Shared unconditionally with the unreachable-default
-	// override (R1): posting in, or being @mentioned in, a topic whose
-	// default agent was deleted makes members exactly as an ordinary
-	// human-to-human message in that topic does. DMs need no membership
-	// row: the DM key names its members.
+	// Thread membership, then the member fan-out, in one background job, so
+	// new members (the sender, mentioned humans) receive the message.
+	// Shared unconditionally with the unreachable-default override (R1):
+	// posting in, or being @mentioned in, a topic whose default agent was
+	// deleted makes members exactly as an ordinary human-to-human message
+	// in that topic does. DMs need no membership row (the DM key names its
+	// members) and are not fanned out.
 	if !isDM {
-		s.recordThreadMembersAsync(threadMembership{
+		s.recordThreadMembersThenFanOutAsync(threadMembership{
 			ProjectID:        projectID,
 			ThreadKey:        key,
 			ConversationID:   storeMsg.ConversationID,
 			UserID:           user.ID(),
 			MentionedUserIDs: mentionedHumans,
-		})
+		}, storeMsg, attachmentRefs)
 	}
 
 	resp := chatMessageResponse{

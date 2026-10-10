@@ -1390,6 +1390,25 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		return nil
 	}
 
+	// Thread membership: human project members an agent @mentions in a
+	// thread become members of it. Written before the message is stored
+	// and published on either path (the broker path stores and fans out in
+	// deliverToUser, after this), so the member fan-out includes them.
+	// Best effort, bounded, and not cut short by the request ending.
+	if len(mentionedHumans) > 0 {
+		m := threadMembership{
+			ProjectID:        agent.ProjectID,
+			ThreadKey:        req.ThreadID,
+			MentionedUserIDs: mentionedHumans,
+		}
+		if result.ConvResult != nil && result.ConvResult.Kind == "group" {
+			m.ConversationID = result.ConversationID
+		}
+		memberCtx, cancelMembers := context.WithTimeout(context.WithoutCancel(ctx), threadMembershipTimeout)
+		s.recordThreadMembers(memberCtx, m)
+		cancelMembers()
+	}
+
 	// Dispatch based on delivery path.
 	switch result.DeliveryPath {
 	case deliveryUserBroker:
@@ -1504,20 +1523,6 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		Channel:            result.Channel,
 		HumanMembers:       humanMembers,
 	})
-
-	// Thread membership: human project members an agent @mentions in a
-	// thread become members of it (both broker and non-broker paths).
-	if len(mentionedHumans) > 0 {
-		m := threadMembership{
-			ProjectID:        agent.ProjectID,
-			ThreadKey:        req.ThreadID,
-			MentionedUserIDs: mentionedHumans,
-		}
-		if result.ConvResult != nil && result.ConvResult.Kind == "group" {
-			m.ConversationID = result.ConversationID
-		}
-		s.recordThreadMembersAsync(m)
-	}
 
 	outboundLogAttrs := []any{
 		"agent_id", agent.ID,

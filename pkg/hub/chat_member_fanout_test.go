@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -258,4 +259,65 @@ func TestOwnStateEvents_ReadAndMute(t *testing.T) {
 	assert.False(t, *got[2].Muted)
 
 	assert.Empty(t, collectEvents(others), "a thread read is not published to other users")
+}
+
+// A project member @mentioned into a thread they are not in receives the
+// message on their user subject: membership is written before the fan-out
+// reads the participants. Repeated to catch an ordering race.
+func TestThreadMessageFanOut_MentionedNonParticipantReceives(t *testing.T) {
+	f := newMemberFanoutFixture(t)
+	for i := 0; i < 5; i++ {
+		mia := addProjectHuman(t, f.s, f.proj, fmt.Sprintf("mia%d@test.com", i), fmt.Sprintf("Mia%d", i))
+		require.False(t, isUserParticipant(t, f.s, f.convID, mia.ID))
+		events, unsub := f.ep.Subscribe("user." + mia.ID + ".chat.message")
+
+		rec := doRequestAsUser(t, f.srv, f.alice, http.MethodPost,
+			"/api/v1/chat/conversations/"+f.topicID+"/messages",
+			map[string]string{"content": fmt.Sprintf("hi @mia%d", i)})
+		require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+		select {
+		case evt := <-events:
+			var payload UserMessageEvent
+			require.NoError(t, json.Unmarshal(evt.Data, &payload))
+			assert.Equal(t, f.topicID, payload.ThreadID)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("round %d: the mentioned user did not receive the message", i)
+		}
+		unsub()
+		assert.True(t, isUserParticipant(t, f.s, f.convID, mia.ID))
+	}
+}
+
+// The recipient bound counts accepted recipients only.
+func TestThreadMessageFanOut_RecipientBound(t *testing.T) {
+	f := newMemberFanoutFixture(t)
+	ctx := context.Background()
+	// Two more eligible members besides carol.
+	for _, email := range []string{"uma@test.com", "vic@test.com"} {
+		u := addProjectHuman(t, f.s, f.proj, email, strings.TrimSuffix(email, "@test.com"))
+		require.NoError(t, f.s.EnsureParticipant(ctx, &store.ConversationParticipant{
+			ConversationID: f.convID, PrincipalKind: "user", PrincipalID: u.ID, Role: "member",
+		}))
+	}
+	events, unsub := f.ep.Subscribe("user.*.chat.message")
+	defer unsub()
+
+	f.srv.fanOutThreadMessageToMembers(ctx, f.threadMessage("all"), nil)
+	assert.Len(t, memberMessageRecipients(collectEvents(events)), 3, "default bound")
+
+	f.srv.chatMemberFanout = chatMemberFanoutLimits{maxRecipients: 1}
+	f.srv.fanOutThreadMessageToMembers(ctx, f.threadMessage("one"), nil)
+	assert.Len(t, memberMessageRecipients(collectEvents(events)), 1, "bound of 1")
+}
+
+// An expired deadline stops the fan-out before any member is accepted.
+func TestThreadMessageFanOut_ExpiredContextPublishesNothing(t *testing.T) {
+	f := newMemberFanoutFixture(t)
+	events, unsub := f.ep.Subscribe("user.*.chat.message")
+	defer unsub()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	f.srv.fanOutThreadMessageToMembers(ctx, f.threadMessage("late"), nil)
+	assert.Empty(t, memberMessageRecipients(collectEvents(events)))
 }
