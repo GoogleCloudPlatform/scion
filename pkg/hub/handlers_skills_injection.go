@@ -854,7 +854,12 @@ func (s *Server) enrichSkillInjections(ctx context.Context, sis []store.SkillInj
 
 // skillSlugFromURI extracts a slug from the last path segment of a skill URI.
 // "scion://my-skill" → "my-skill"; "https://example.com/skills/my-skill" → "my-skill".
+// Any query or fragment is dropped first: api.SkillBaseURI keeps them in the
+// key, but they are not part of the slug.
 func skillSlugFromURI(uri string) string {
+	if idx := strings.IndexAny(uri, "?#"); idx >= 0 {
+		uri = uri[:idx]
+	}
 	// Strip scheme.
 	if idx := strings.Index(uri, "://"); idx >= 0 {
 		uri = uri[idx+3:]

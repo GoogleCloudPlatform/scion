@@ -1066,8 +1066,8 @@ func mergeSkillRefs(scopes ...[]api.SkillReference) []api.SkillReference {
 				"base_uri", base, "winner", winner.URI, "original", orig.URI)
 		}
 	}
-	// Build result slice using the already-computed keys from `seen` for the sort
-	// to avoid re-calling api.SkillBaseURI O(n log n) times.
+	// Build the result slice from the keys already stored in `seen`, so the sort
+	// does not recompute the key on every comparison.
 	type entry struct {
 		base string
 		ref  api.SkillReference
