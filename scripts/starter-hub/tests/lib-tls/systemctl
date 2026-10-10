@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Stub systemctl for the fix-tls-rotation.sh tests in
+# scripts/starter-hub/tests/run.sh. Never touches the real system. Every call
+# is appended to $STUB_LOG; state lives in $STUB_TLS_STATE:
+#   cat UNIT                -> exit 0 if $STUB_TLS_STATE/unit-UNIT exists
+#   is-enabled UNIT         -> "enabled" if enabled-UNIT exists, else "disabled"
+#   is-active [--quiet] U   -> "active" if active-U exists, else "inactive"
+#   enable --now UNIT       -> creates enabled-UNIT and active-UNIT
+#   show -p ExecReload U    -> a Caddy ExecReload line with --force
+#   reload caddy            -> "serves" $STUB_TLS_LIVE (copies it to served.pem)
+set -u
+printf 'systemctl %s\n' "$*" >> "${STUB_LOG:?}"
+st="${STUB_TLS_STATE:?}"
+case "${1:-}" in
+  cat) [ -f "$st/unit-$2" ] ;;
+  is-enabled)
+    if [ -f "$st/enabled-$2" ]; then echo enabled; else echo disabled; exit 1; fi ;;
+  is-active)
+    quiet=false
+    if [ "$2" = "--quiet" ]; then quiet=true; shift; fi
+    if [ -f "$st/active-$2" ]; then $quiet || echo active
+    else $quiet || echo inactive; exit 3; fi ;;
+  enable)
+    [ "$2" = "--now" ] && shift
+    : > "$st/enabled-$2"; : > "$st/active-$2" ;;
+  show)
+    echo "ExecReload={ path=/usr/bin/caddy ; argv[]=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force ; }" ;;
+  reload)
+    [ "$2" = "caddy" ] && cp "${STUB_TLS_LIVE:?}" "$st/served.pem" ;;
+esac
+exit 0

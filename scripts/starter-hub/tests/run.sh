@@ -18,7 +18,10 @@
 # This never contacts GCP. It puts tests/lib (stub gcloud, curl and sleep)
 # first on PATH, runs each script as a real subprocess from the repository
 # root, and asserts on its exit code, its output, and what it asked gcloud
-# and curl to do. Needs only bash.
+# and curl to do. The fix-tls-rotation.sh tests also put tests/lib-tls
+# (stub systemctl, certbot, caddy, and an openssl that only fakes s_client)
+# first on PATH and run against a fake root in a temp directory. Needs bash
+# and openssl.
 #
 # Usage:
 #   scripts/starter-hub/tests/run.sh
@@ -242,6 +245,166 @@ test_start_hub_help_mentions_new_flags() {
     assert_eq 0 "$RC" "--help exits 0"
     assert_contains "$OUT" "--no-tls" "help documents --no-tls"
     assert_contains "$OUT" "--insecure-health-check" "help documents --insecure-health-check"
+}
+
+# --- fix-tls-rotation.sh (ptone/scion#4207) ---
+#
+# Runs fix-tls-rotation.sh against a fake root in a temp directory, with the
+# stub systemctl, certbot, caddy and openssl from tests/lib-tls first on
+# PATH. Certificates are throwaway self-signed ones made here.
+
+TLS_DOMAIN="example.com"
+
+# tls_cert DIR N DAYS -- writes archive version N, valid for DAYS days.
+tls_cert() {
+    openssl req -x509 -newkey rsa:2048 -nodes -days "$3" -subj "/CN=${TLS_DOMAIN}" \
+        -keyout "$1/privkey$2.pem" -out "$1/cert$2.pem" 2>/dev/null
+    cp "$1/cert$2.pem" "$1/fullchain$2.pem"
+    cp "$1/cert$2.pem" "$1/chain$2.pem"
+}
+
+# tls_fake_root DAYS STALE -- a hub as an older gce-certs.sh left it: the
+# live certificate is valid for DAYS days, the broken inline renew_hook is in
+# the renewal config, no deploy hook, certbot.timer disabled, private keys
+# not group-readable. STALE=true: Caddy still serves an older certificate.
+tls_fake_root() {
+    fresh_state
+    TLS_ROOT="${STATE_DIR}/root"
+    export STUB_TLS_STATE="${STATE_DIR}/tls"
+    local le="${TLS_ROOT}/etc/letsencrypt" arch
+    arch="${le}/archive/${TLS_DOMAIN}"
+    mkdir -p "${arch}" "${le}/live/${TLS_DOMAIN}" "${le}/renewal" \
+        "${le}/renewal-hooks/deploy" "${TLS_ROOT}/etc/caddy" "${STUB_TLS_STATE}"
+    tls_cert "${arch}" 1 1
+    tls_cert "${arch}" 2 "$1"
+    for f in cert chain fullchain privkey; do
+        ln -s "../../archive/${TLS_DOMAIN}/${f}2.pem" "${le}/live/${TLS_DOMAIN}/${f}.pem"
+    done
+    chmod 0700 "${le}/live" "${le}/archive"
+    # shellcheck disable=SC2016 # literal text as certbot stores it
+    printf '%s\n' '[renewalparams]' 'authenticator = dns-google' \
+        'renew_hook = chown root:caddy /etc/letsencrypt/live /etc/letsencrypt/archive && chown -R root:caddy /etc/letsencrypt/live/${RENEWED_DOMAINS%%,*} && (systemctl reload caddy)' \
+        > "${le}/renewal/${TLS_DOMAIN}.conf"
+    printf '%s\n' "hub.${TLS_DOMAIN} {" '    reverse_proxy localhost:8080' \
+        "    tls /etc/letsencrypt/live/${TLS_DOMAIN}/fullchain.pem /etc/letsencrypt/live/${TLS_DOMAIN}/privkey.pem" \
+        '}' > "${TLS_ROOT}/etc/caddy/Caddyfile"
+    : > "${STUB_TLS_STATE}/unit-certbot.timer"
+    : > "${STUB_TLS_STATE}/active-caddy"
+    if [[ "$2" == "true" ]]; then
+        cp "${arch}/fullchain1.pem" "${STUB_TLS_STATE}/served.pem"
+    else
+        cp "${arch}/fullchain2.pem" "${STUB_TLS_STATE}/served.pem"
+    fi
+}
+
+# run_fix [ARGS...] -- sets OUT, RC, CALLS.
+run_fix() {
+    OUT="$(env PATH="${TESTS_DIR}/lib-tls:${PATH}" STUB_REAL_OPENSSL="$(command -v openssl)" \
+        FIX_TLS_ROOT="${TLS_ROOT}" CADDY_GROUP="$(id -gn)" \
+        STUB_TLS_LIVE="${TLS_ROOT}/etc/letsencrypt/live/${TLS_DOMAIN}/fullchain.pem" \
+        bash "${STARTER_DIR}/fix-tls-rotation.sh" --root "${TLS_ROOT}" "$@" 2>&1)"
+    RC=$?
+    CALLS="$(cat "${STUB_LOG}")"
+}
+
+# tls_snapshot -- every path, mode, group, link target and content hash
+# under the fake root, plus the served certificate.
+tls_snapshot() {
+    (cd "${TLS_ROOT}" && find . -printf '%p %m %g %l\n' | sort
+     find . -type f -exec sha256sum {} + | sort
+     sha256sum "${STUB_TLS_STATE}/served.pem" 2>/dev/null; ls "${STUB_TLS_STATE}")
+}
+
+# mutating_calls -- stub calls that would change the VM.
+mutating_calls() {
+    grep -E '^(systemctl (enable|reload|restart)|certbot renew|caddy reload)' "${STUB_LOG}"
+}
+
+tls_serial() {
+    openssl x509 -noout -serial -in "$1" | sed 's/^serial=//'
+}
+
+test_tls_fix_check_reports_problems_read_only() {
+    tls_fake_root 60 true
+    local before
+    before="$(tls_snapshot)"
+    run_fix --check
+    assert_eq 1 "$RC" "--check exits 1 on a broken hub"
+    assert_contains "$OUT" "on disk: serial $(tls_serial "${TLS_ROOT}/etc/letsencrypt/archive/${TLS_DOMAIN}/cert2.pem")" "reports the disk serial"
+    assert_contains "$OUT" "notAfter" "reports notAfter"
+    assert_contains "$OUT" "renewal-hooks/deploy/scion-reload-caddy.sh is missing" "reports the missing hook"
+    assert_contains "$OUT" "certbot.timer: disabled" "reports the timer state"
+    assert_contains "$OUT" "broken inline renew_hook present" "reports the broken inline hook"
+    assert_contains "$OUT" "Caddy serves an older certificate" "reports the stale served certificate"
+    assert_eq "$before" "$(tls_snapshot)" "--check changes no file"
+    assert_eq "" "$(mutating_calls)" "--check makes no mutating call"
+}
+
+test_tls_fix_dry_run_changes_nothing() {
+    tls_fake_root 60 true
+    local before
+    before="$(tls_snapshot)"
+    run_fix --dry-run
+    assert_eq 0 "$RC" "--dry-run exits 0"
+    assert_contains "$OUT" "[dry-run] would install the deploy hook" "plans the hook"
+    assert_contains "$OUT" "[dry-run] would remove it" "plans removing the inline hook"
+    assert_contains "$OUT" "[dry-run] would enable and start certbot.timer" "plans the timer"
+    assert_contains "$OUT" "[dry-run] would give group" "plans the permission fix"
+    assert_contains "$OUT" "[dry-run] would reload Caddy" "plans the reload"
+    assert_not_contains "$OUT" "would renew" "no renewal for a certificate with 60 days left"
+    assert_contains "$OUT" "nothing was changed (dry run)" "says nothing changed"
+    assert_eq "$before" "$(tls_snapshot)" "--dry-run changes no file"
+    assert_eq "" "$(mutating_calls)" "--dry-run makes no mutating call"
+}
+
+test_tls_fix_repairs_stale_hub_and_is_idempotent() {
+    tls_fake_root 60 true
+    local le="${TLS_ROOT}/etc/letsencrypt" hook
+    hook="${le}/renewal-hooks/deploy/scion-reload-caddy.sh"
+    run_fix
+    assert_eq 0 "$RC" "first run succeeds"
+    if [[ -x "${hook}" ]]; then pass; else fail "deploy hook installed and executable"; fi
+    assert_eq "" "$(grep '^renew_hook' "${le}/renewal/${TLS_DOMAIN}.conf")" "inline renew_hook removed"
+    if [[ -f "${le}/renewal/${TLS_DOMAIN}.conf.bak-fix-tls-rotation" ]]; then pass; else fail "renewal config backed up"; fi
+    if [[ -f "${STUB_TLS_STATE}/enabled-certbot.timer" ]]; then pass; else fail "timer enabled"; fi
+    assert_contains "$CALLS" "systemctl reload caddy" "Caddy reloaded"
+    assert_not_contains "$CALLS" "restart" "nothing restarted"
+    assert_not_contains "$CALLS" "certbot renew" "no renewal needed"
+    assert_eq "$(tls_serial "${le}/live/${TLS_DOMAIN}/fullchain.pem")" \
+        "$(tls_serial "${STUB_TLS_STATE}/served.pem")" "Caddy now serves the disk certificate"
+    assert_contains "$OUT" "Result: OK, nothing to fix." "final check passes"
+
+    local before
+    before="$(tls_snapshot)"
+    : > "${STUB_LOG}"
+    run_fix
+    assert_eq 0 "$RC" "second run succeeds"
+    assert_contains "$OUT" "Result: nothing to change." "second run changes nothing"
+    assert_eq "$before" "$(tls_snapshot)" "second run leaves every file alone"
+    assert_eq "" "$(mutating_calls)" "second run makes no mutating call"
+
+    run_fix --check
+    assert_eq 0 "$RC" "--check passes after the fix"
+}
+
+test_tls_fix_renews_near_expiry_and_hook_reloads() {
+    tls_fake_root 10 false
+    local le="${TLS_ROOT}/etc/letsencrypt" old
+    old="$(tls_serial "${STUB_TLS_STATE}/served.pem")"
+    run_fix
+    assert_eq 0 "$RC" "run succeeds"
+    assert_contains "$CALLS" "certbot renew --cert-name ${TLS_DOMAIN}" "renews a certificate with 10 days left"
+    assert_contains "$OUT" "scion-reload-caddy: reloaded Caddy for ${TLS_DOMAIN}" "the deploy hook ran and reloaded Caddy"
+    assert_ne "$old" "$(tls_serial "${STUB_TLS_STATE}/served.pem")" "Caddy serves a new serial"
+    assert_eq "$(tls_serial "${le}/live/${TLS_DOMAIN}/fullchain.pem")" \
+        "$(tls_serial "${STUB_TLS_STATE}/served.pem")" "served serial matches the renewed certificate"
+    if [[ -n "$(find "${le}/archive/${TLS_DOMAIN}/privkey3.pem" -perm -g=r)" ]]; then pass
+    else fail "the hook made the renewed key group-readable"; fi
+
+    : > "${STUB_LOG}"
+    run_fix
+    assert_contains "$OUT" "Result: nothing to change." "second run changes nothing"
+    assert_eq "" "$(mutating_calls)" "second run makes no mutating call"
 }
 
 mapfile -t TESTS < <(declare -F | awk '{print $3}' | grep '^test_' | sort)

@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Stub certbot for the fix-tls-rotation.sh tests. Never contacts an ACME
+# server. Logs to $STUB_LOG. "certbot renew --cert-name NAME ..." issues a
+# throwaway self-signed certificate (90 days) as the next archive version
+# under $FIX_TLS_ROOT/etc/letsencrypt, repoints the live symlinks like
+# certbot does, then runs each executable in renewal-hooks/deploy/ with
+# RENEWED_LINEAGE and RENEWED_DOMAINS set, as certbot does after a renewal.
+set -eu
+printf 'certbot %s\n' "$*" >> "${STUB_LOG:?}"
+[ "${1:-}" = "renew" ] || exit 0
+name=""
+prev=""
+for a in "$@"; do
+  [ "$prev" = "--cert-name" ] && name="$a"
+  prev="$a"
+done
+le="${FIX_TLS_ROOT:?}/etc/letsencrypt"
+arch="$le/archive/$name"
+n=1
+while [ -e "$arch/cert$n.pem" ]; do n=$((n + 1)); done
+"${STUB_REAL_OPENSSL:?}" req -x509 -newkey rsa:2048 -nodes -days 90 -subj "/CN=$name" \
+  -keyout "$arch/privkey$n.pem" -out "$arch/cert$n.pem" 2>/dev/null
+cp "$arch/cert$n.pem" "$arch/fullchain$n.pem"
+cp "$arch/cert$n.pem" "$arch/chain$n.pem"
+for f in cert chain fullchain privkey; do
+  ln -sfn "../../archive/$name/$f$n.pem" "$le/live/$name/$f.pem"
+done
+for h in "$le"/renewal-hooks/deploy/*; do
+  [ -x "$h" ] || continue
+  RENEWED_LINEAGE="$le/live/$name" RENEWED_DOMAINS="$name *.$name" "$h"
+done
