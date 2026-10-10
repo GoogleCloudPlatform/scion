@@ -23,7 +23,9 @@ import (
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 )
 
@@ -209,8 +211,25 @@ func (s *Server) otherProjectAgentsInUse(ctx context.Context, projectID, agentID
 	return false, nil
 }
 
-// projectAgentIDs returns the IDs of the agents of projectID known to this
-// broker, in any phase. Without a manager it returns an empty set.
+// agentKey identifies a listed agent across lists for the NFS tree
+// cleanup: the hub agent ID from the "agent_id" label (new for every agent a
+// re-registered project creates, even with a reused name), else the
+// runtime's operation ID (scionrt.AgentOperationID, from the container or
+// pod name), else AgentInfo.ID. Runtimes do not fill AgentInfo.ID, so it is
+// only a last resort. It returns "" when none is set.
+func agentKey(a api.AgentInfo) string {
+	if id := a.Labels["agent_id"]; id != "" {
+		return id
+	}
+	if id := scionrt.AgentOperationID(a); id != "" {
+		return id
+	}
+	return a.ID
+}
+
+// projectAgentIDs returns the keys (agentKey) of the agents of
+// projectID known to this broker, in any phase. Agents without a key are
+// left out. Without a manager it returns an empty set.
 func (s *Server) projectAgentIDs(ctx context.Context, projectID string) (map[string]bool, error) {
 	ids := map[string]bool{}
 	if s.manager == nil {
@@ -224,16 +243,19 @@ func (s *Server) projectAgentIDs(ctx context.Context, projectID string) (map[str
 		if label, ok := a.Labels["scion.project_id"]; ok && label != projectID {
 			continue
 		}
-		ids[a.ID] = true
+		if key := agentKey(a); key != "" {
+			ids[key] = true
+		}
 	}
 	return ids, nil
 }
 
-// newProjectAgentsInUse reports whether an agent of projectID whose ID is not
-// in known is known to this broker in any phase other than stopped or error.
-// It is otherProjectAgentsInUse with a set of excluded agents. A listing
-// failure counts as in use. Without a manager no agents are known, so it
-// reports false.
+// newProjectAgentsInUse reports whether an agent of projectID whose key
+// (agentKey) is not in known is known to this broker in any phase
+// other than stopped or error. An agent without a key counts as new (fail
+// closed). It is otherProjectAgentsInUse with a set of excluded agents. A
+// listing failure counts as in use. Without a manager no agents are known,
+// so it reports false.
 func (s *Server) newProjectAgentsInUse(ctx context.Context, projectID string, known map[string]bool) (bool, error) {
 	if s.manager == nil {
 		// A broker without a manager runs no agents, so none can be in use.
@@ -247,7 +269,7 @@ func (s *Server) newProjectAgentsInUse(ctx context.Context, projectID string, kn
 		if label, ok := a.Labels["scion.project_id"]; ok && label != projectID {
 			continue
 		}
-		if known[a.ID] {
+		if key := agentKey(a); key != "" && known[key] {
 			continue
 		}
 		switch state.Phase(a.Phase) {

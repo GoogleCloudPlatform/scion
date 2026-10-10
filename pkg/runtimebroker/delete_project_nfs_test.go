@@ -299,12 +299,16 @@ func makeWorkspaceUnremovable(t *testing.T, tree string) func() {
 	return restore
 }
 
-func liveAgent(id, projectID string) api.AgentInfo {
+// liveAgent returns a running agent of projectID as a runtime lists it:
+// AgentInfo.ID is empty (runtimes do not fill it), the hub agent ID is the
+// agent_id label, and the pod is named after the agent.
+func liveAgent(agentID, projectID string) api.AgentInfo {
 	return api.AgentInfo{
-		ID:     id,
-		Name:   "dev",
-		Phase:  string(state.PhaseRunning),
-		Labels: map[string]string{"scion.agent": "true", "scion.project_id": projectID},
+		Name:        "dev",
+		ContainerID: "scion-dev",
+		Phase:       string(state.PhaseRunning),
+		Labels:      map[string]string{"scion.agent": "true", "scion.project_id": projectID, "agent_id": agentID},
+		Kubernetes:  &api.AgentK8sMetadata{Namespace: "scion", PodName: "scion-dev"},
 	}
 }
 
@@ -413,13 +417,32 @@ func TestNewProjectAgentsInUse(t *testing.T) {
 	if err != nil || len(known) != 2 || !known["agent-known"] || !known["agent-stopped"] {
 		t.Fatalf("projectAgentIDs = %v, %v; want agent-known and agent-stopped", known, err)
 	}
+	if known[""] {
+		t.Fatal("the snapshot must never hold an empty key")
+	}
 	if inUse, err := srv.newProjectAgentsInUse(ctx, scopeProjA, known); inUse || err != nil {
 		t.Fatalf("known agents only: inUse=%v err=%v, want false", inUse, err)
 	}
+	// Same empty AgentInfo.ID and the same pod name as a known agent (a
+	// re-created agent with the same name), but a new agent_id: in use.
 	mgr.agents = append(mgr.agents, liveAgent("agent-new", scopeProjA))
 	if inUse, _ := srv.newProjectAgentsInUse(ctx, scopeProjA, known); !inUse {
 		t.Fatal("a new running agent of the project must count as in use")
 	}
+	mgr.agents = mgr.agents[:len(mgr.agents)-1]
+
+	// A running agent with no key at all (no agent_id, no container, no ID)
+	// counts as in use: fail closed.
+	keyless := api.AgentInfo{Phase: string(state.PhaseRunning),
+		Labels: map[string]string{"scion.agent": "true", "scion.project_id": scopeProjA}}
+	mgr.agents = append(mgr.agents, keyless)
+	if inUse, _ := srv.newProjectAgentsInUse(ctx, scopeProjA, known); !inUse {
+		t.Fatal("a running agent without a key must count as in use")
+	}
+	if ids, _ := srv.projectAgentIDs(ctx, scopeProjA); ids[""] {
+		t.Fatal("a keyless agent must not put an empty key in the snapshot")
+	}
+	mgr.agents = mgr.agents[:len(mgr.agents)-1]
 	mgr.listErr = errors.New("list failed")
 	if inUse, err := srv.newProjectAgentsInUse(ctx, scopeProjA, known); !inUse || err == nil {
 		t.Fatalf("listing error: inUse=%v err=%v, want true with error", inUse, err)
@@ -479,4 +502,23 @@ func TestDeleteProject_RecordMatchesDespiteOtherScionEntry_Removed(t *testing.T)
 		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
 	assertGone(t, filepath.Join(home, ".scion", "projects", "proj-a"))
+}
+
+func TestAgentKey(t *testing.T) {
+	cases := []struct {
+		name string
+		a    api.AgentInfo
+		want string
+	}{
+		{"agent_id label first", api.AgentInfo{ID: "x", ContainerID: "c", Labels: map[string]string{"agent_id": "hub-1"}}, "hub-1"},
+		{"k8s operation id", api.AgentInfo{ID: "x", ContainerID: "pod", Kubernetes: &api.AgentK8sMetadata{Namespace: "ns"}}, "ns/pod"},
+		{"container id", api.AgentInfo{ID: "x", ContainerID: "c1"}, "c1"},
+		{"AgentInfo.ID last", api.AgentInfo{ID: "x"}, "x"},
+		{"none", api.AgentInfo{}, ""},
+	}
+	for _, tc := range cases {
+		if got := agentKey(tc.a); got != tc.want {
+			t.Errorf("%s: agentKey = %q, want %q", tc.name, got, tc.want)
+		}
+	}
 }
