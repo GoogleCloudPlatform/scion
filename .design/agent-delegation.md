@@ -273,8 +273,12 @@ Rules, applied in order. Each one fails closed. §8.4 collects every error code.
 3. **Access to the agent's project.** For every boundary kind,
    `ProjectTargetAdmission(ctx, issuerPC, agent.ProjectID, "agent.delegation.create",
    agentResource, nil)` returns `Admitted=true` with no error. Retained ancestry alone is not
-   enough, and a system role that holds an unrelated permission does not qualify. 403
-   `issuer_project_access`. The same check repeats at every exchange and every use.
+   enough, and a system role that holds an unrelated permission does not qualify. The same
+   check repeats at every exchange (403 `issuer_project_access`) and every use. At issuance an
+   issuer who is not admitted to the agent's project is already refused at rule 2 with 403
+   `issuer_not_controller`, because the owner and ancestor relationships that grant
+   `agent.delegation.create` themselves require project access; this rule stays as a second
+   check.
 4. **Boundary.** A valid `TokenBoundary` (`Valid()`, `authz_boundary.go:58`). Boundary admission is
    mint eligibility, which stays target-free: `CanMintSelector(ctx, issuerPC, boundary,
    selectors)` must return `OK` for every selector. For a hub boundary this applies D.1's hub
@@ -429,8 +433,8 @@ codes. The precise reason goes only to the decision record.
    version denies), and `parent_grant_id` is null. Otherwise 403 `grant_inactive`.
 9. **Issuer state:** the user row exists, is active, is a local (non-federated) user, and
    `isReservedPlatformIdentity` is false for the issuer's email. A lookup error denies. External
-   code: 403 `issuer_invalid`; the decision record carries `issuer_suspended`, `issuer_federated`
-   or `reserved_identity`. A suspended local issuer does not reach this step: project admission
+   code: 403 `issuer_invalid`; the decision record carries `issuer_missing`, `issuer_suspended`,
+   `issuer_federated` or `reserved_identity`. A suspended local issuer does not reach this step: project admission
    (step 7) refuses an account that is not active, with 403 `issuer_project_access`. So at
    exchange, `issuer_invalid` covers a missing issuer row, a federated issuer and a reserved
    platform identity. A reserved-identity hit **denies and revokes** the grant and its
@@ -481,8 +485,8 @@ external code, goes to the decision record (§14.2).
 | 403 | `forbidden` with `details.reason = CREDENTIAL_MANAGEMENT`, `details.credential = session_required` | a UAT on a session-only G route (`requireSessionCredentialFor`, `session_only_gate.go:93`) |
 | 403 | `forbidden` (no reason) | a non-user identity (an agent JWT other than the bound agent's own management paths) on a session-only G route |
 | 403 | `reserved_identity` | issuance by a reserved platform identity |
-| 403 | `issuer_not_controller` | issuer is not the agent's owner or recorded ancestor, or lacks `agent.delegation.create` |
-| 403 | `issuer_project_access` | issuer not admitted to the agent's project (issuance, exchange), including a suspended local issuer at exchange (step 7 refuses an account that is not active) |
+| 403 | `issuer_not_controller` | issuer is not the agent's owner or recorded ancestor, or lacks `agent.delegation.create` (at issuance this includes an issuer not admitted to the agent's project) |
+| 403 | `issuer_project_access` | exchange: issuer not admitted to the agent's project, including a suspended local issuer (step 7 refuses an account that is not active). At issuance the same condition answers `issuer_not_controller` (§6 rules 2-3) |
 | 403 | `issuer_invalid` | exchange: issuer deleted, federated or a reserved platform identity |
 | 403 | `scope_violation` | issuance: `CanMintSelector` refused a selector; `details.selector` names it and `details.reason` carries the `MintDenialReason` (`unknown_selector`, `boundary_not_allowed`, `flat_role_insufficient`, `no_relationship_candidacy`) |
 | 403 | `forbidden` (no reason) | issuance: a project boundary naming a project that does not exist or that the issuer cannot access (the uniform response UAT mint gives, so existence is not confirmed) |
