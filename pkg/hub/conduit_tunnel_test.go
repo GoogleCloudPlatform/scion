@@ -558,7 +558,8 @@ func TestConduitTunnel_CrossNode(t *testing.T) {
 	agentConn := <-tf.dials
 	roundTrip(t, st, "across nodes")
 	require.NoError(t, agentConn.Close())
-	streamEnd(t, st)
+	err := streamEnd(t, st)
+	assert.True(t, errors.Is(err, io.EOF) || errors.As(err, new(*conduit.CloseError)), "agent close reached the user across nodes: %v", err)
 
 	pty := c.open(t, tf.launched.ID, grant.StreamKindPTY, nil)
 	p := waitSpawn(t, tf.spawned)
@@ -852,12 +853,12 @@ type tunnelAgentFaultStore struct {
 	agentID string
 }
 
-// tunnelInjectedFault carries detail that must never reach the client.
-var tunnelInjectedFault = errors.New("injected agent read fault: pg host db-internal-7, table agents")
+// errTunnelInjectedFault carries detail that must never reach the client.
+var errTunnelInjectedFault = errors.New("injected agent read fault: pg host db-internal-7, table agents")
 
 func (s *tunnelAgentFaultStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
 	if id == s.agentID && s.fault.Active() {
-		return nil, tunnelInjectedFault
+		return nil, errTunnelInjectedFault
 	}
 	return s.Store.GetAgent(ctx, id)
 }
